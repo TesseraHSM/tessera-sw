@@ -1,0 +1,1777 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include "sd_provision.hpp"
+
+#if !defined(TSRA_FEATURE_MOCK)
+
+#include <array>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <scope_guard.hpp>
+
+#ifdef _WIN32
+#define NOMINMAX
+// clang-format off
+#include <windows.h>
+#include <bcrypt.h>
+// clang-format on
+#else
+#include <openssl/ec.h>
+#include <openssl/evp.h>
+#include <openssl/obj_mac.h>
+#endif
+
+namespace
+{
+using Bytes = std::vector<uint8_t>;
+
+// ── Wire-schema constants (mirrors tsra_ddi_tbor_types) ────────────────────
+constexpr size_t kMachSeedLen = 32;   // MACH_SEED_LEN
+constexpr size_t kThumbprintLen = 48; // POTA/SATA_THUMBPRINT_LEN
+constexpr size_t kPolicyLen = 584;    // PART_POLICY_LEN
+constexpr size_t kPskLen = 32;        // PSK_LEN
+constexpr size_t kRawPubLen = 96;     // raw P-384 X‖Y
+constexpr size_t kSec1PubLen = 97;    // 0x04‖X‖Y
+
+// A fixed non-default CO PSK used to clear the default-PSK gate. Any value
+// works; it only has to be consistent between the rotate and the reopen.
+constexpr std::array<uint8_t, kPskLen> kRotatedCoPsk = { {
+    0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0,
+    0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0,
+} };
+
+// ── Minimal portable DER encoder ─────────────────────────────────────────────
+// The PTA chain is standard RFC 5280 DER (the firmware validator is a general
+// parser), so the encoding is platform-independent; only the crypto
+// primitives (keygen / ECDSA sign / SHA-1) are platform-specific.
+
+void append(Bytes &dst, const Bytes &src)
+{
+    dst.insert(dst.end(), src.begin(), src.end());
+}
+
+Bytes concat(std::initializer_list<Bytes> parts)
+{
+    Bytes out;
+    for (const auto &p : parts)
+    {
+        append(out, p);
+    }
+    return out;
+}
+
+/// DER definite-length octets for a content length.
+Bytes der_len(size_t n)
+{
+    Bytes out;
+    if (n < 0x80)
+    {
+        out.push_back(static_cast<uint8_t>(n));
+        return out;
+    }
+    Bytes tmp;
+    for (size_t v = n; v > 0; v >>= 8)
+    {
+        tmp.push_back(static_cast<uint8_t>(v & 0xFF));
+    }
+    out.push_back(static_cast<uint8_t>(0x80 | tmp.size()));
+    out.insert(out.end(), tmp.rbegin(), tmp.rend());
+    return out;
+}
+
+/// A DER TLV: tag ‖ length ‖ content.
+Bytes tlv(uint8_t tag, const Bytes &content)
+{
+    Bytes out;
+    out.push_back(tag);
+    append(out, der_len(content.size()));
+    append(out, content);
+    return out;
+}
+
+/// A DER INTEGER from a big-endian magnitude (strips leading zeros, adds a
+/// 0x00 pad when the high bit is set so the value stays positive).
+Bytes der_int(const uint8_t *be, size_t n)
+{
+    size_t i = 0;
+    while (i + 1 < n && be[i] == 0)
+    {
+        ++i;
+    }
+    Bytes v(be + i, be + n);
+    if ((v[0] & 0x80) != 0)
+    {
+        v.insert(v.begin(), 0x00);
+    }
+    return tlv(0x02, v);
+}
+
+Bytes der_small_int(uint32_t value)
+{
+    const uint8_t be[4] = {
+        static_cast<uint8_t>(value >> 24),
+        static_cast<uint8_t>(value >> 16),
+        static_cast<uint8_t>(value >> 8),
+        static_cast<uint8_t>(value),
+    };
+    return der_int(be, sizeof(be));
+}
+
+// Encoded OID contents (without the 0x06 tag/length).
+const Bytes kOidEcPublicKey = { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01 };
+const Bytes kOidSecp384r1 = { 0x2B, 0x81, 0x04, 0x00, 0x22 };
+const Bytes kOidEcdsaSha384 = { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03 };
+const Bytes kOidCn = { 0x55, 0x04, 0x03 };
+const Bytes kOidSn = { 0x55, 0x04, 0x05 }; // serialNumber
+const Bytes kOidBasicConstraints = { 0x55, 0x1D, 0x13 };
+const Bytes kOidKeyUsage = { 0x55, 0x1D, 0x0F };
+const Bytes kOidSki = { 0x55, 0x1D, 0x0E };
+const Bytes kOidAki = { 0x55, 0x1D, 0x23 };
+
+Bytes der_oid(const Bytes &content)
+{
+    return tlv(0x06, content);
+}
+
+/// One `RelativeDistinguishedName` with a single `type = value` attribute
+/// (value encoded as a PrintableString).
+Bytes der_rdn(const Bytes &type_oid, const char *value)
+{
+    Bytes value_bytes(value, value + std::strlen(value));
+    Bytes atv = tlv(0x30, concat({ der_oid(type_oid), tlv(0x13, value_bytes) }));
+    return tlv(0x31, atv);
+}
+
+/// A `Name` with a CN + serialNumber, matching the Rust x509 fixture.
+Bytes der_name(const char *cn, const char *sn)
+{
+    return tlv(0x30, concat({ der_rdn(kOidCn, cn), der_rdn(kOidSn, sn) }));
+}
+
+Bytes der_gtime(const char *ts)
+{
+    Bytes bytes(ts, ts + std::strlen(ts));
+    return tlv(0x18 /* GeneralizedTime */, bytes);
+}
+
+/// SubjectPublicKeyInfo for a P-384 SEC1 point.
+Bytes der_spki(const uint8_t sec1[kSec1PubLen])
+{
+    Bytes alg = tlv(0x30, concat({ der_oid(kOidEcPublicKey), der_oid(kOidSecp384r1) }));
+    Bytes point(sec1, sec1 + kSec1PubLen);
+    Bytes bit_string = tlv(0x03, concat({ Bytes{ 0x00 }, point }));
+    return tlv(0x30, concat({ alg, bit_string }));
+}
+
+/// One X.509v3 extension: `SEQUENCE { OID, [critical BOOLEAN], OCTETSTRING }`.
+Bytes der_ext(const Bytes &oid, bool critical, const Bytes &value)
+{
+    Bytes body = der_oid(oid);
+    if (critical)
+    {
+        append(body, tlv(0x01, Bytes{ 0xFF }));
+    }
+    append(body, tlv(0x04, value));
+    return tlv(0x30, body);
+}
+
+/// The `[3] EXPLICIT` extensions block for a CA certificate: BasicConstraints
+/// (cA=TRUE), KeyUsage (keyCertSign|cRLSign), SubjectKeyIdentifier, and (for a
+/// non-self-signed cert) an AuthorityKeyIdentifier referencing the issuer SKI.
+Bytes der_ca_extensions(const uint8_t ski[20], const uint8_t *aki)
+{
+    Bytes list;
+    // BasicConstraints: SEQUENCE { cA BOOLEAN TRUE }.
+    append(list, der_ext(kOidBasicConstraints, true, tlv(0x30, tlv(0x01, Bytes{ 0xFF }))));
+    // KeyUsage: BIT STRING with keyCertSign (bit 5) + cRLSign (bit 6) → 0x06,
+    // one unused trailing bit.
+    append(list, der_ext(kOidKeyUsage, true, tlv(0x03, Bytes{ 0x01, 0x06 })));
+    // SubjectKeyIdentifier: OCTET STRING of the 20-byte key id.
+    append(list, der_ext(kOidSki, false, tlv(0x04, Bytes(ski, ski + 20))));
+    if (aki != nullptr)
+    {
+        // AuthorityKeyIdentifier: SEQUENCE { [0] keyIdentifier }.
+        Bytes akid = tlv(0x30, tlv(0x80, Bytes(aki, aki + 20)));
+        append(list, der_ext(kOidAki, false, akid));
+    }
+    return tlv(0xA3, tlv(0x30, list));
+}
+
+/// The `[3] EXPLICIT` extensions block for an **end-entity** leaf
+/// certificate: BasicConstraints (empty SEQUENCE, so `cA` defaults FALSE),
+/// KeyUsage (`digitalSignature` only), SubjectKeyIdentifier, and (for a
+/// non-self-signed cert) an AuthorityKeyIdentifier referencing the issuer
+/// SKI.
+Bytes der_leaf_extensions(const uint8_t ski[20], const uint8_t *aki)
+{
+    Bytes list;
+    // BasicConstraints: empty SEQUENCE (cA defaults to FALSE).
+    append(list, der_ext(kOidBasicConstraints, true, tlv(0x30, Bytes{})));
+    // KeyUsage: BIT STRING with digitalSignature (bit 0) → { 0x07, 0x80 }
+    // (7 unused trailing bits, bit 0 set).
+    append(list, der_ext(kOidKeyUsage, true, tlv(0x03, Bytes{ 0x07, 0x80 })));
+    // SubjectKeyIdentifier: OCTET STRING of the 20-byte key id.
+    append(list, der_ext(kOidSki, false, tlv(0x04, Bytes(ski, ski + 20))));
+    if (aki != nullptr)
+    {
+        // AuthorityKeyIdentifier: SEQUENCE { [0] keyIdentifier }.
+        Bytes akid = tlv(0x30, tlv(0x80, Bytes(aki, aki + 20)));
+        append(list, der_ext(kOidAki, false, akid));
+    }
+    return tlv(0xA3, tlv(0x30, list));
+}
+
+} // namespace
+
+// ── Platform crypto backend (keygen / ECDSA sign / SHA-1) ────────────────────
+// The only platform-specific code: OpenSSL on Linux, BCrypt on Windows.
+//
+// `CaKey` is defined in the **global** namespace (not the anonymous one
+// above) so it matches the `class CaKey;` forward declaration in the
+// header: the public API hands the SATA anchor back through an opaque
+// `std::shared_ptr<CaKey>`. Its members are still only referenced from
+// this file.
+#ifdef _WIN32
+
+/// SHA-1 of `data` (RFC 5280 key-identifier method 1).
+std::array<uint8_t, 20> sha1(const uint8_t *data, size_t len)
+{
+    std::array<uint8_t, 20> out{};
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA1_ALGORITHM, nullptr, 0) != 0)
+    {
+        ADD_FAILURE() << "BCryptOpenAlgorithmProvider(SHA1) failed";
+        return out;
+    }
+    NTSTATUS status = BCryptHash(
+        alg,
+        nullptr,
+        0,
+        const_cast<PUCHAR>(data),
+        static_cast<ULONG>(len),
+        out.data(),
+        static_cast<ULONG>(out.size())
+    );
+    BCryptCloseAlgorithmProvider(alg, 0);
+    if (status != 0)
+    {
+        ADD_FAILURE() << "BCryptHash(SHA1) failed: " << status;
+    }
+    return out;
+}
+
+/// SHA-384 of `data` (used for the deterministic PTAID digest).
+std::array<uint8_t, 48> sha384(const uint8_t *data, size_t len)
+{
+    std::array<uint8_t, 48> out{};
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA384_ALGORITHM, nullptr, 0) != 0)
+    {
+        ADD_FAILURE() << "BCryptOpenAlgorithmProvider(SHA384) failed";
+        return out;
+    }
+    NTSTATUS status = BCryptHash(
+        alg,
+        nullptr,
+        0,
+        const_cast<PUCHAR>(data),
+        static_cast<ULONG>(len),
+        out.data(),
+        static_cast<ULONG>(out.size())
+    );
+    BCryptCloseAlgorithmProvider(alg, 0);
+    if (status != 0)
+    {
+        ADD_FAILURE() << "BCryptHash(SHA384) failed: " << status;
+    }
+    return out;
+}
+
+/// A synthetic P-384 CA key backed by BCrypt.
+class CaKey
+{
+  public:
+    static std::unique_ptr<CaKey> generate()
+    {
+        auto key = std::unique_ptr<CaKey>(new CaKey());
+        if (BCryptOpenAlgorithmProvider(&key->alg_, BCRYPT_ECDSA_P384_ALGORITHM, nullptr, 0) != 0)
+        {
+            return nullptr;
+        }
+        if (BCryptGenerateKeyPair(key->alg_, &key->key_, 384, 0) != 0 ||
+            BCryptFinalizeKeyPair(key->key_, 0) != 0)
+        {
+            return nullptr;
+        }
+        return key->export_sec1() ? std::move(key) : nullptr;
+    }
+
+    const std::array<uint8_t, kSec1PubLen> &sec1() const
+    {
+        return sec1_;
+    }
+
+    /// ECDSA-P384 / SHA-384 signature over `tbs`, DER-encoded as
+    /// `SEQUENCE { INTEGER r, INTEGER s }`.
+    Bytes sign(const Bytes &tbs) const
+    {
+        uint8_t hash[48] = {};
+        BCRYPT_ALG_HANDLE hash_alg = nullptr;
+        if (BCryptOpenAlgorithmProvider(&hash_alg, BCRYPT_SHA384_ALGORITHM, nullptr, 0) != 0)
+        {
+            return {};
+        }
+        NTSTATUS hs = BCryptHash(
+            hash_alg,
+            nullptr,
+            0,
+            const_cast<PUCHAR>(tbs.data()),
+            static_cast<ULONG>(tbs.size()),
+            hash,
+            sizeof(hash)
+        );
+        BCryptCloseAlgorithmProvider(hash_alg, 0);
+        if (hs != 0)
+        {
+            return {};
+        }
+        ULONG sig_len = 0;
+        if (BCryptSignHash(key_, nullptr, hash, sizeof(hash), nullptr, 0, &sig_len, 0) != 0)
+        {
+            return {};
+        }
+        std::vector<uint8_t> raw(sig_len);
+        if (BCryptSignHash(key_, nullptr, hash, sizeof(hash), raw.data(), sig_len, &sig_len, 0) !=
+            0)
+        {
+            return {};
+        }
+        raw.resize(sig_len);
+        // A P-384 ECDSA signature is raw r‖s, 48 bytes each.
+        if (raw.size() < 96)
+        {
+            ADD_FAILURE() << "BCryptSignHash returned " << raw.size() << " bytes, expected 96";
+            return {};
+        }
+        // Raw r‖s (48 bytes each) → DER SEQUENCE { INTEGER r, INTEGER s }.
+        Bytes r = der_int(raw.data(), 48);
+        Bytes s = der_int(raw.data() + 48, 48);
+        return tlv(0x30, concat({ r, s }));
+    }
+
+    ~CaKey()
+    {
+        if (key_ != nullptr)
+        {
+            BCryptDestroyKey(key_);
+        }
+        if (alg_ != nullptr)
+        {
+            BCryptCloseAlgorithmProvider(alg_, 0);
+        }
+    }
+
+  private:
+    CaKey() = default;
+
+    bool export_sec1()
+    {
+        ULONG size = 0;
+        if (BCryptExportKey(key_, nullptr, BCRYPT_ECCPUBLIC_BLOB, nullptr, 0, &size, 0) != 0)
+        {
+            return false;
+        }
+        std::vector<uint8_t> blob(size);
+        if (BCryptExportKey(key_, nullptr, BCRYPT_ECCPUBLIC_BLOB, blob.data(), size, &size, 0) != 0)
+        {
+            return false;
+        }
+        // BCRYPT_ECCKEY_BLOB header (magic + cbKey), then X‖Y (48 bytes each).
+        const size_t header = sizeof(BCRYPT_ECCKEY_BLOB);
+        if (size < header + kRawPubLen)
+        {
+            return false;
+        }
+        sec1_[0] = 0x04;
+        std::memcpy(sec1_.data() + 1, blob.data() + header, kRawPubLen);
+        return true;
+    }
+
+    BCRYPT_ALG_HANDLE alg_ = nullptr;
+    BCRYPT_KEY_HANDLE key_ = nullptr;
+    std::array<uint8_t, kSec1PubLen> sec1_{};
+};
+
+#else // OpenSSL
+
+std::array<uint8_t, 20> sha1(const uint8_t *data, size_t len)
+{
+    std::array<uint8_t, 20> out{};
+    unsigned int out_len = 0;
+    if (EVP_Digest(data, len, out.data(), &out_len, EVP_sha1(), nullptr) != 1 ||
+        out_len != out.size())
+    {
+        ADD_FAILURE() << "EVP_Digest(SHA1) failed";
+    }
+    return out;
+}
+
+/// SHA-384 of `data` (used for the deterministic PTAID digest).
+std::array<uint8_t, 48> sha384(const uint8_t *data, size_t len)
+{
+    std::array<uint8_t, 48> out{};
+    unsigned int out_len = 0;
+    if (EVP_Digest(data, len, out.data(), &out_len, EVP_sha384(), nullptr) != 1 ||
+        out_len != out.size())
+    {
+        ADD_FAILURE() << "EVP_Digest(SHA384) failed";
+    }
+    return out;
+}
+
+/// A synthetic P-384 CA key backed by OpenSSL.
+class CaKey
+{
+  public:
+    static std::unique_ptr<CaKey> generate()
+    {
+        auto key = std::unique_ptr<CaKey>(new CaKey());
+        std::unique_ptr<EVP_PKEY_CTX, void (*)(EVP_PKEY_CTX *)> ctx(
+            EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr),
+            EVP_PKEY_CTX_free
+        );
+        if (!ctx || EVP_PKEY_keygen_init(ctx.get()) <= 0 ||
+            EVP_PKEY_CTX_set_ec_paramgen_curve_nid(ctx.get(), NID_secp384r1) <= 0 ||
+            EVP_PKEY_keygen(ctx.get(), &key->pkey_) <= 0)
+        {
+            return nullptr;
+        }
+        return key->export_sec1() ? std::move(key) : nullptr;
+    }
+
+    const std::array<uint8_t, kSec1PubLen> &sec1() const
+    {
+        return sec1_;
+    }
+
+    /// ECDSA-P384 / SHA-384 signature over `tbs`; OpenSSL already emits the
+    /// DER `SEQUENCE { INTEGER r, INTEGER s }` form.
+    Bytes sign(const Bytes &tbs) const
+    {
+        std::unique_ptr<EVP_MD_CTX, void (*)(EVP_MD_CTX *)> md(EVP_MD_CTX_new(), EVP_MD_CTX_free);
+        if (!md || EVP_DigestSignInit(md.get(), nullptr, EVP_sha384(), nullptr, pkey_) <= 0)
+        {
+            return {};
+        }
+        size_t sig_len = 0;
+        if (EVP_DigestSign(md.get(), nullptr, &sig_len, tbs.data(), tbs.size()) <= 0)
+        {
+            return {};
+        }
+        Bytes sig(sig_len);
+        if (EVP_DigestSign(md.get(), sig.data(), &sig_len, tbs.data(), tbs.size()) <= 0)
+        {
+            return {};
+        }
+        sig.resize(sig_len);
+        return sig;
+    }
+
+    ~CaKey()
+    {
+        if (pkey_ != nullptr)
+        {
+            EVP_PKEY_free(pkey_);
+        }
+    }
+
+  private:
+    CaKey() = default;
+
+    bool export_sec1()
+    {
+        unsigned char *raw = nullptr;
+        size_t len = EVP_PKEY_get1_encoded_public_key(pkey_, &raw);
+        bool ok = (raw != nullptr && len == kSec1PubLen && raw[0] == 0x04);
+        if (ok)
+        {
+            std::memcpy(sec1_.data(), raw, kSec1PubLen);
+        }
+        if (raw != nullptr)
+        {
+            OPENSSL_free(raw);
+        }
+        return ok;
+    }
+
+    EVP_PKEY *pkey_ = nullptr;
+    std::array<uint8_t, kSec1PubLen> sec1_{};
+};
+
+#endif // _WIN32
+
+namespace
+{
+
+// ── Portable X.509 assembly + CSR parsing ────────────────────────────────────
+// Structure and identity mirror the Rust
+// `ddi/tbor/types/tests/harness/x509_fixture.rs` (which itself hand-assembles
+// DER via `tsra_crypto::x509_builder`); only the crypto primitives differ.
+
+constexpr const char *kNotBefore = "20250101000000Z";
+constexpr const char *kNotAfter = "20350101000000Z";
+constexpr const char *kRootCn = "TSRA POTA Root CA";
+constexpr const char *kRootSn = "POTAROOT1";
+constexpr const char *kLeafCn = "TSRA Evidence Leaf";
+constexpr const char *kLeafSn = "EVLEAF001";
+
+/// Fixed PTA `commonName` prefix (mirrors the firmware `PTA_SUBJECT_CN`).
+constexpr const char *kPtaSubjectCnPrefix = "Tessera Integrated HSM PTA";
+/// Domain-separation label for the PTAID digest (mirrors firmware `PTAID_LABEL`).
+constexpr const char *kPtaidLabel = "TSRA-PTAID-v1";
+
+/// A 20-byte positive DER serial number seeded from `tag`.
+Bytes serial(uint8_t tag)
+{
+    uint8_t bytes[20];
+    bytes[0] = tag & 0x7F; // positive INTEGER (high bit clear)
+    for (size_t i = 1; i < sizeof(bytes); ++i)
+    {
+        bytes[i] = static_cast<uint8_t>(tag + i);
+    }
+    return der_int(bytes, sizeof(bytes));
+}
+
+/// SHA-1 of a SEC1 public key — the Subject / Authority Key Identifier.
+std::array<uint8_t, 20> sha1_ski(const uint8_t sec1[kSec1PubLen])
+{
+    return sha1(sec1, kSec1PubLen);
+}
+
+/// Build the deterministic PTA subject `Name` DER from the SEC1 PTA public
+/// key, mirroring the firmware's PTAID derivation
+/// (`fw/core/lib/src/ddi/tbor/pta.rs`): a single `commonName(64)` RDN
+/// (encoded as a `UTF8String`) holding the fixed PTA name, a separating
+/// space, and the lowercase-hex PTAID (`SHA-384(kPtaidLabel ‖ SEC1 key)[..16]`),
+/// space-padded. This is the subject a conformant CA preserves from the
+/// `PartInit` CSR and the issuer the firmware stamps on its PID leaf.
+Bytes der_pta_subject(const uint8_t sec1[kSec1PubLen])
+{
+    Bytes input(kPtaidLabel, kPtaidLabel + std::strlen(kPtaidLabel));
+    input.insert(input.end(), sec1, sec1 + kSec1PubLen);
+    std::array<uint8_t, 48> digest = sha384(input.data(), input.size());
+
+    Bytes cn(64, ' ');
+    const size_t prefix_len = std::strlen(kPtaSubjectCnPrefix);
+    std::memcpy(cn.data(), kPtaSubjectCnPrefix, prefix_len);
+    const char *hex = "0123456789abcdef";
+    const size_t base = prefix_len + 1;
+    for (size_t i = 0; i < 16; ++i)
+    {
+        cn[base + 2 * i] = static_cast<uint8_t>(hex[digest[i] >> 4]);
+        cn[base + 2 * i + 1] = static_cast<uint8_t>(hex[digest[i] & 0x0f]);
+    }
+
+    // UTF8String (0x0C) commonName, a single RDN → Name SEQUENCE.
+    Bytes atv = tlv(0x30, concat({ der_oid(kOidCn), tlv(0x0C, cn) }));
+    return tlv(0x30, tlv(0x31, atv));
+}
+
+/// Assemble and sign a certificate from its parts and a ready-made
+/// `[3] EXPLICIT` extensions block (`extensions`), returning the DER
+/// `Certificate`. Shared by the CA and leaf builders.
+Bytes build_cert_der(
+    const CaKey &ca,
+    const uint8_t subject_sec1[kSec1PubLen],
+    const char *subject_cn,
+    const char *subject_sn,
+    const char *issuer_cn,
+    const char *issuer_sn,
+    uint8_t serial_tag,
+    const Bytes &extensions
+)
+{
+    Bytes sig_alg = tlv(0x30, der_oid(kOidEcdsaSha384));
+    Bytes tbs =
+        tlv(0x30,
+            concat({
+                tlv(0xA0, der_small_int(2)), // version v3
+                serial(serial_tag),
+                sig_alg,
+                der_name(issuer_cn, issuer_sn),
+                tlv(0x30, concat({ der_gtime(kNotBefore), der_gtime(kNotAfter) })),
+                der_name(subject_cn, subject_sn),
+                der_spki(subject_sec1),
+                extensions,
+            }));
+
+    Bytes sig = ca.sign(tbs);
+    if (sig.empty())
+    {
+        return {};
+    }
+    Bytes sig_value = tlv(0x03, concat({ Bytes{ 0x00 }, sig }));
+    return tlv(0x30, concat({ tbs, sig_alg, sig_value }));
+}
+
+/// Like [`build_cert_der`], but takes a ready-made subject `Name` DER
+/// (`subject_name`) rather than a CN/serialNumber pair. Used for the PTA
+/// intermediate, whose subject is the deterministic single-`commonName(64)`
+/// PTA profile the firmware enforces.
+Bytes build_cert_der_subject(
+    const CaKey &ca,
+    const uint8_t subject_sec1[kSec1PubLen],
+    const Bytes &subject_name,
+    const char *issuer_cn,
+    const char *issuer_sn,
+    uint8_t serial_tag,
+    const Bytes &extensions
+)
+{
+    Bytes sig_alg = tlv(0x30, der_oid(kOidEcdsaSha384));
+    Bytes tbs =
+        tlv(0x30,
+            concat({
+                tlv(0xA0, der_small_int(2)), // version v3
+                serial(serial_tag),
+                sig_alg,
+                der_name(issuer_cn, issuer_sn),
+                tlv(0x30, concat({ der_gtime(kNotBefore), der_gtime(kNotAfter) })),
+                subject_name,
+                der_spki(subject_sec1),
+                extensions,
+            }));
+
+    Bytes sig = ca.sign(tbs);
+    if (sig.empty())
+    {
+        return {};
+    }
+    Bytes sig_value = tlv(0x03, concat({ Bytes{ 0x00 }, sig }));
+    return tlv(0x30, concat({ tbs, sig_alg, sig_value }));
+}
+/// Assemble a signed CA certificate (`cA=TRUE`, `keyCertSign`) from its parts.
+/// `aki` is the issuer's SKI for a non-self-signed cert, or null for a root.
+Bytes build_ca_cert(
+    const CaKey &ca,
+    const uint8_t subject_sec1[kSec1PubLen],
+    const char *subject_cn,
+    const char *subject_sn,
+    const char *issuer_cn,
+    const char *issuer_sn,
+    const uint8_t *aki,
+    uint8_t serial_tag
+)
+{
+    std::array<uint8_t, 20> ski = sha1_ski(subject_sec1);
+    return build_cert_der(
+        ca,
+        subject_sec1,
+        subject_cn,
+        subject_sn,
+        issuer_cn,
+        issuer_sn,
+        serial_tag,
+        der_ca_extensions(ski.data(), aki)
+    );
+}
+
+/// Assemble a signed **end-entity** leaf certificate (`cA=false`,
+/// `digitalSignature`) carrying `subject_sec1`, subject `kLeafCn/kLeafSn`,
+/// issued by `kRootCn/kRootSn`. `aki` references the issuer's SKI.
+Bytes build_leaf_cert(
+    const CaKey &ca,
+    const uint8_t subject_sec1[kSec1PubLen],
+    const uint8_t *aki,
+    uint8_t serial_tag
+)
+{
+    std::array<uint8_t, 20> ski = sha1_ski(subject_sec1);
+    return build_cert_der(
+        ca,
+        subject_sec1,
+        kLeafCn,
+        kLeafSn,
+        kRootCn,
+        kRootSn,
+        serial_tag,
+        der_leaf_extensions(ski.data(), aki)
+    );
+}
+
+/// Build a self-signed POTA Root CA certificate (DER).
+Bytes build_root(const CaKey &ca)
+{
+    return build_ca_cert(ca, ca.sec1().data(), kRootCn, kRootSn, kRootCn, kRootSn, nullptr, 1);
+}
+
+/// Build the PTA intermediate CA certificate carrying the partition PTA key
+/// (`pta_sec1`), signed by `issuer` (the POTA CA), with an AKID referencing the
+/// issuer's SKID.
+///
+/// The subject is the deterministic single-`commonName(64)` PTA profile the
+/// firmware stamps (derived from `pta_sec1`) and the SKID is SHA-1(SEC1 PTA
+/// key), so the issued PTA certificate satisfies the profile `PartFinal`
+/// enforces before finalization.
+Bytes build_pta_intermediate(const uint8_t pta_sec1[kSec1PubLen], const CaKey &issuer)
+{
+    std::array<uint8_t, 20> aki = sha1_ski(issuer.sec1().data());
+    std::array<uint8_t, 20> ski = sha1_ski(pta_sec1);
+    return build_cert_der_subject(
+        issuer,
+        pta_sec1,
+        der_pta_subject(pta_sec1),
+        kRootCn,
+        kRootSn,
+        2,
+        der_ca_extensions(ski.data(), aki.data())
+    );
+}
+
+/// A generated PTA chain (root -> PTA), DER-encoded, root-first for `PartFinal`.
+struct PtaChain
+{
+    Bytes root_der;
+    Bytes pta_der;
+};
+
+/// Build a POTA-anchored root -> PTA chain from the partition PTA key.
+PtaChain make_pta_chain(const CaKey &pota_ca, const uint8_t pta_sec1[kSec1PubLen])
+{
+    return PtaChain{ build_root(pota_ca), build_pta_intermediate(pta_sec1, pota_ca) };
+}
+
+/// A generated root -> leaf attestation-evidence chain, DER-encoded.
+/// `root_der` is a self-signed CA certificate; `leaf_der` is the
+/// end-entity certificate signed by that root whose subject public key is
+/// the report signer.
+struct GeneratedChain
+{
+    Bytes root_der;
+    Bytes leaf_der;
+};
+
+/// Build a root -> leaf chain: a self-signed root CA (`ca`) certifying an
+/// end-entity leaf carrying `leaf_pub_raw` (raw `X ‖ Y`, the report signer).
+/// Pass a caller-controlled `ca` (e.g. the SATA anchor key) to anchor the
+/// chain to a known public key; otherwise pass a fresh `CaKey::generate()`.
+GeneratedChain make_chain(const CaKey &ca, const uint8_t leaf_pub_raw[kRawPubLen])
+{
+    uint8_t leaf_sec1[kSec1PubLen];
+    leaf_sec1[0] = 0x04;
+    std::memcpy(leaf_sec1 + 1, leaf_pub_raw, kRawPubLen);
+    std::array<uint8_t, 20> aki = sha1_ski(ca.sec1().data());
+    return GeneratedChain{ build_root(ca), build_leaf_cert(ca, leaf_sec1, aki.data(), 3) };
+}
+
+/// Read one DER TLV: on success advances `pos` past it and yields the tag +
+/// content span.
+bool der_read(
+    const uint8_t *&pos,
+    const uint8_t *end,
+    uint8_t &tag,
+    const uint8_t *&content,
+    size_t &content_len
+)
+{
+    if (pos + 2 > end)
+    {
+        return false;
+    }
+    tag = *pos++;
+    size_t len = *pos++;
+    if ((len & 0x80) != 0)
+    {
+        size_t n = len & 0x7F;
+        if (pos + n > end)
+        {
+            return false;
+        }
+        len = 0;
+        for (size_t i = 0; i < n; ++i)
+        {
+            len = (len << 8) | *pos++;
+        }
+    }
+    if (pos + len > end)
+    {
+        return false;
+    }
+    content = pos;
+    content_len = len;
+    pos += len;
+    return true;
+}
+
+/// Extract the SEC1 uncompressed public key (`0x04‖X‖Y`) from a DER PKCS#10
+/// CSR by walking the structure to `certificationRequestInfo.subjectPKInfo`.
+bool pta_pub_from_csr(const uint8_t *csr, size_t len, uint8_t out[kSec1PubLen])
+{
+    const uint8_t *pos = csr;
+    const uint8_t *end = csr + len;
+    uint8_t tag = 0;
+    const uint8_t *body = nullptr;
+    size_t body_len = 0;
+
+    if (!der_read(pos, end, tag, body, body_len))
+    {
+        return false; // CertificationRequest SEQUENCE
+    }
+    const uint8_t *cri = body;
+    const uint8_t *cri_end = body + body_len;
+    if (!der_read(cri, cri_end, tag, body, body_len))
+    {
+        return false; // certificationRequestInfo SEQUENCE
+    }
+    const uint8_t *fields = body;
+    const uint8_t *fields_end = body + body_len;
+    if (!der_read(fields, fields_end, tag, body, body_len)     // version
+        || !der_read(fields, fields_end, tag, body, body_len)) // subject
+    {
+        return false;
+    }
+    if (!der_read(fields, fields_end, tag, body, body_len))
+    {
+        return false; // subjectPKInfo SEQUENCE
+    }
+    const uint8_t *spki = body;
+    const uint8_t *spki_end = body + body_len;
+    if (!der_read(spki, spki_end, tag, body, body_len)) // algorithm
+    {
+        return false;
+    }
+    if (!der_read(spki, spki_end, tag, body, body_len) || tag != 0x03 || body_len < 1)
+    {
+        return false; // subjectPublicKey BIT STRING
+    }
+    // Skip the leading unused-bits octet; the rest is the SEC1 point.
+    const uint8_t *point = body + 1;
+    size_t point_len = body_len - 1;
+    if (point_len != kSec1PubLen || point[0] != 0x04)
+    {
+        return false;
+    }
+    std::memcpy(out, point, kSec1PubLen);
+    return true;
+}
+
+// ── Policy image ─────────────────────────────────────────────────────────────
+
+/// Write an `Ecc384` policy key slot (`kind(2) ‖ len(2) ‖ data(96)`, LE) at
+/// `off`.
+void write_key_slot(std::vector<uint8_t> &policy, size_t off, const uint8_t data[kRawPubLen])
+{
+    policy[off] = 0; // kind = Ecc384 = 0 (LE u16)
+    policy[off + 1] = 0;
+    policy[off + 2] = static_cast<uint8_t>(kRawPubLen); // len = 96 (LE u16)
+    policy[off + 3] = 0;
+    std::memcpy(&policy[off + 4], data, kRawPubLen);
+}
+
+/// Build a 584-byte unified `PartPolicy` image binding the real POTA public
+/// key, mirroring the Rust `part_policy_with_pota` fixture so `PartFinal` can
+/// validate a chain anchored to it.
+std::vector<uint8_t> build_part_policy(
+    const uint8_t pota_raw[kRawPubLen],
+    bool allow_peer_cloning = true
+)
+{
+    constexpr size_t kOffPota = 2;
+    constexpr size_t kOffSata = 102;
+    constexpr size_t kOffFlags = 418;
+    constexpr size_t kOffInfo = 419;
+
+    std::vector<uint8_t> policy(kPolicyLen, 0);
+    policy[0] = 1; // version major
+    policy[1] = 0; // version minor
+
+    write_key_slot(policy, kOffPota, pota_raw);
+
+    // SATA slot: a filler Ecc384 key (not chain-validated in this flow).
+    uint8_t sata_fill[kRawPubLen];
+    for (size_t i = 0; i < kRawPubLen; ++i)
+    {
+        sata_fill[i] = static_cast<uint8_t>((0x20 + i) | 0x80);
+    }
+    write_key_slot(policy, kOffSata, sata_fill);
+
+    // `allow_peer_cloning` (bit 2) gates the peer commands
+    // (SdCreatePeerBackup / SdRestorePeerBackup); it is inert for the
+    // non-peer commands (create/reseal/restore-remote and restore-local),
+    // which don't gate on it.
+    constexpr uint8_t kAllowPeerCloning = 1 << 2;
+    policy[kOffFlags] = allow_peer_cloning ? kAllowPeerCloning : 0;
+    for (size_t i = 0; i < 64; ++i)
+    {
+        policy[kOffInfo + i] = 0xAB;
+    }
+    return policy;
+}
+
+/// Build a 584-byte backing-partition `PartPolicy` image: start from the
+/// unified POTA-anchored policy, then overwrite the SATA slot with the real
+/// anchor key and record this partition (`pid` / `pid_pub`) as the backup
+/// backing partition. Mirrors the Rust `backing_part_policy` fixture.
+std::vector<uint8_t> build_backing_part_policy(
+    const uint8_t pid[16],
+    const uint8_t pid_pub[kRawPubLen],
+    const uint8_t sata_raw[kRawPubLen],
+    const uint8_t pota_raw[kRawPubLen],
+    bool allow_peer_cloning = true
+)
+{
+    constexpr size_t kOffSata = 102;
+    constexpr size_t kOffBackupPartId = 302;
+    constexpr size_t kOffBackupPartPubKey = 318;
+    constexpr size_t kBackupPartIdLen = 16;
+
+    std::vector<uint8_t> policy = build_part_policy(pota_raw, allow_peer_cloning);
+
+    // Overwrite the placeholder SATA key with the anchor's real P-384 key.
+    write_key_slot(policy, kOffSata, sata_raw);
+
+    // Name this partition as the backup backing partition.
+    std::memcpy(&policy[kOffBackupPartId], pid, kBackupPartIdLen);
+    write_key_slot(policy, kOffBackupPartPubKey, pid_pub);
+
+    return policy;
+}
+
+// ── Session helpers ──────────────────────────────────────────────────────────
+
+tsra_handle open_co_session(tsra_handle part_handle, const tsra_buffer *psk_buf)
+{
+    tsra_handle sess = 0;
+    tsra_session_psk psk{ 0 /* CO */, psk_buf };
+    auto err = tsra_sess_ex_open(part_handle, &psk, TSRA_SESSION_EX_TYPE_AUTHENTICATED, &sess);
+    if (err != TSRA_STATUS_SUCCESS || sess == 0)
+    {
+        ADD_FAILURE() << "tsra_sess_ex_open failed: " << err;
+        return 0;
+    }
+    return sess;
+}
+} // namespace
+
+tsra_handle provision_sd_co_session(tsra_handle part_handle)
+{
+    // 1. Bootstrap a CO session under the default PSK and rotate it.
+    tsra_handle bootstrap = open_co_session(part_handle, nullptr);
+    if (bootstrap == 0)
+    {
+        return 0;
+    }
+    tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
+                         static_cast<uint32_t>(kRotatedCoPsk.size()) };
+    auto rotate_err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
+    tsra_sess_close(bootstrap);
+    if (rotate_err != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << rotate_err;
+        return 0;
+    }
+
+    // 2. Reopen the CO session under the rotated PSK for provisioning.
+    tsra_handle session = open_co_session(part_handle, &psk_buf);
+    if (session == 0)
+    {
+        return 0;
+    }
+    auto fail = [&session](const char *msg, tsra_status err) -> tsra_handle {
+        ADD_FAILURE() << msg << ": " << err;
+        tsra_sess_close(session);
+        return 0;
+    };
+
+    // 3. Mint the POTA CA and bind its public key into the policy.
+    std::unique_ptr<CaKey> pota_ca = CaKey::generate();
+    if (!pota_ca)
+    {
+        return fail("POTA CA key generation failed", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    uint8_t pota_raw[kRawPubLen];
+    std::memcpy(pota_raw, pota_ca->sec1().data() + 1, kRawPubLen);
+    std::vector<uint8_t> policy = build_part_policy(pota_raw);
+
+    // Deterministic provisioning fixtures (thumbprints are stored, not
+    // chain-validated in this flow).
+    std::array<uint8_t, kMachSeedLen> mach_seed{};
+    for (size_t i = 0; i < mach_seed.size(); ++i)
+    {
+        mach_seed[i] = static_cast<uint8_t>(0x40 + i);
+    }
+    std::array<uint8_t, kThumbprintLen> pota_tp{};
+    std::array<uint8_t, kThumbprintLen> sata_tp{};
+    for (size_t i = 0; i < kThumbprintLen; ++i)
+    {
+        pota_tp[i] = static_cast<uint8_t>(0x80 ^ i);
+        sata_tp[i] = static_cast<uint8_t>(0x40 ^ i);
+    }
+
+    tsra_buffer mach_buf{ mach_seed.data(), static_cast<uint32_t>(mach_seed.size()) };
+    tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
+    tsra_buffer pota_buf{ pota_tp.data(), static_cast<uint32_t>(pota_tp.size()) };
+    tsra_buffer sata_buf{ sata_tp.data(), static_cast<uint32_t>(sata_tp.size()) };
+    tsra_sess_ex_part_init_params init_params{};
+    init_params.mach_seed = &mach_buf;
+    init_params.part_policy = &policy_buf;
+    init_params.pota_thumbprint = &pota_buf;
+    init_params.sata_thumbprint = &sata_buf;
+    init_params.sapota_thumbprint = nullptr;
+
+    // 4. PartInit: probe for the CSR/report sizes, then retrieve them.
+    tsra_buffer csr{ nullptr, 0 };
+    tsra_buffer report{ nullptr, 0 };
+    auto probe = tsra_sess_ex_part_init(session, &init_params, &csr, &report);
+    if (probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        return fail("PartInit size probe unexpected status", probe);
+    }
+    std::vector<uint8_t> csr_bytes(csr.len);
+    std::vector<uint8_t> report_bytes(report.len);
+    csr = { csr_bytes.data(), static_cast<uint32_t>(csr_bytes.size()) };
+    report = { report_bytes.data(), static_cast<uint32_t>(report_bytes.size()) };
+    auto init_err = tsra_sess_ex_part_init(session, &init_params, &csr, &report);
+    if (init_err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartInit failed", init_err);
+    }
+    csr_bytes.resize(csr.len); // shrink to the bytes actually written
+
+    // 5. Build the POTA-anchored root -> PTA chain from the CSR public key.
+    uint8_t pta_sec1[kSec1PubLen];
+    if (!pta_pub_from_csr(csr_bytes.data(), csr_bytes.size(), pta_sec1))
+    {
+        return fail("failed to parse PTA public key from CSR", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    PtaChain chain = make_pta_chain(*pota_ca, pta_sec1);
+    if (chain.root_der.empty() || chain.pta_der.empty())
+    {
+        return fail("failed to build PTA certificate chain", TSRA_STATUS_INTERNAL_ERROR);
+    }
+
+    // 6. PartFinal: re-supply the policy + chain (root -> PTA) out of band.
+    tsra_buffer chain_bufs[2] = {
+        { chain.root_der.data(), static_cast<uint32_t>(chain.root_der.size()) },
+        { chain.pta_der.data(), static_cast<uint32_t>(chain.pta_der.size()) },
+    };
+    tsra_sess_ex_part_final_params final_params{};
+    final_params.part_policy = &policy_buf;
+    final_params.pta_cert_chain = chain_bufs;
+    final_params.pta_cert_chain_len = 2;
+    final_params.prev_local_mk_backup = nullptr;
+
+    tsra_buffer mk_backup{ nullptr, 0 };
+    auto fin_probe = tsra_sess_ex_part_final(session, &final_params, &mk_backup);
+    if (fin_probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        return fail("PartFinal size probe unexpected status", fin_probe);
+    }
+    std::vector<uint8_t> mk_bytes(mk_backup.len);
+    mk_backup = { mk_bytes.data(), static_cast<uint32_t>(mk_bytes.size()) };
+    auto final_err = tsra_sess_ex_part_final(session, &final_params, &mk_backup);
+    if (final_err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartFinal failed", final_err);
+    }
+
+    return session;
+}
+
+// Core backing-partition provisioning. When `reuse` is null a fresh policy
+// and SATA/POTA anchors are minted (the create / device-1 side). When
+// non-null the policy and anchors are reused and `reuse->local_mk_backup`
+// is supplied to `PartFinal`, re-provisioning the same partition as a
+// restore target (the device-2 side).
+static SdBackingContext provision_backing_impl(
+    tsra_handle part_handle,
+    const SdBackingContext *reuse,
+    bool allow_peer_cloning = true
+)
+{
+    // 1. Bootstrap a CO session under the default PSK and rotate it.
+    tsra_handle bootstrap = open_co_session(part_handle, nullptr);
+    if (bootstrap == 0)
+    {
+        return {};
+    }
+    tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
+                         static_cast<uint32_t>(kRotatedCoPsk.size()) };
+    auto rotate_err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
+    tsra_sess_close(bootstrap);
+    if (rotate_err != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << rotate_err;
+        return {};
+    }
+
+    // 2. Reopen the CO session under the rotated PSK for provisioning.
+    tsra_handle session = open_co_session(part_handle, &psk_buf);
+    if (session == 0)
+    {
+        return {};
+    }
+    auto fail = [&session](const char *msg, tsra_status err) -> SdBackingContext {
+        ADD_FAILURE() << msg << ": " << err;
+        tsra_sess_close(session);
+        return {};
+    };
+
+    // 3. Materialize the partition identity (PID + raw public key) before
+    // PartInit; the backing policy names this partition as the backup
+    // backing partition. Both properties use the standard size probe.
+    auto read_part_prop =
+        [part_handle](tsra_part_prop_id id, std::vector<uint8_t> &out) -> tsra_status {
+        tsra_part_prop prop{ id, nullptr, 0 };
+        auto err = tsra_part_get_prop(part_handle, &prop);
+        if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
+        {
+            return err;
+        }
+        out.resize(prop.len);
+        prop.val = out.data();
+        return tsra_part_get_prop(part_handle, &prop);
+    };
+    std::vector<uint8_t> pid;
+    std::vector<uint8_t> pid_pub;
+    if (auto err = read_part_prop(TSRA_PART_PROP_ID_PART_EX_PID, pid); err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartInfo PID query failed", err);
+    }
+    if (pid.size() != 16)
+    {
+        return fail("PartInfo PID has unexpected length", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    if (auto err = read_part_prop(TSRA_PART_PROP_ID_PART_EX_PUB_KEY, pid_pub);
+        err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartInfo PID public key query failed", err);
+    }
+    if (pid_pub.size() != kRawPubLen)
+    {
+        return fail("PartInfo PID public key has unexpected length", TSRA_STATUS_INTERNAL_ERROR);
+    }
+
+    // 4. Mint (or reuse) the POTA anchor (for the PTA chain) and the SATA
+    // anchor (which roots the partition-owner evidence chain), then build
+    // (or reuse) the backing policy. A restore target must re-provision
+    // under the exact same policy and anchors as the original.
+    std::shared_ptr<CaKey> pota_ca;
+    std::shared_ptr<CaKey> sata_key;
+    std::vector<uint8_t> policy;
+    if (reuse != nullptr)
+    {
+        pota_ca = reuse->pota_key;
+        sata_key = reuse->sata_key;
+        policy = reuse->policy;
+        if (!pota_ca || !sata_key || policy.empty())
+        {
+            return fail("restore target reuse context is incomplete", TSRA_STATUS_INVALID_ARGUMENT);
+        }
+    }
+    else
+    {
+        pota_ca = CaKey::generate();
+        if (!pota_ca)
+        {
+            return fail("POTA CA key generation failed", TSRA_STATUS_INTERNAL_ERROR);
+        }
+        sata_key = CaKey::generate();
+        if (!sata_key)
+        {
+            return fail("SATA CA key generation failed", TSRA_STATUS_INTERNAL_ERROR);
+        }
+        uint8_t pota_raw[kRawPubLen];
+        std::memcpy(pota_raw, pota_ca->sec1().data() + 1, kRawPubLen);
+        uint8_t sata_raw[kRawPubLen];
+        std::memcpy(sata_raw, sata_key->sec1().data() + 1, kRawPubLen);
+        policy = build_backing_part_policy(
+            pid.data(),
+            pid_pub.data(),
+            sata_raw,
+            pota_raw,
+            allow_peer_cloning
+        );
+    }
+
+    // Deterministic provisioning fixtures (thumbprints are stored, not
+    // chain-validated in this flow).
+    std::array<uint8_t, kMachSeedLen> mach_seed{};
+    for (size_t i = 0; i < mach_seed.size(); ++i)
+    {
+        mach_seed[i] = static_cast<uint8_t>(0x40 + i);
+    }
+    std::array<uint8_t, kThumbprintLen> pota_tp{};
+    std::array<uint8_t, kThumbprintLen> sata_tp{};
+    for (size_t i = 0; i < kThumbprintLen; ++i)
+    {
+        pota_tp[i] = static_cast<uint8_t>(0x80 ^ i);
+        sata_tp[i] = static_cast<uint8_t>(0x40 ^ i);
+    }
+
+    tsra_buffer mach_buf{ mach_seed.data(), static_cast<uint32_t>(mach_seed.size()) };
+    tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
+    tsra_buffer pota_buf{ pota_tp.data(), static_cast<uint32_t>(pota_tp.size()) };
+    tsra_buffer sata_buf{ sata_tp.data(), static_cast<uint32_t>(sata_tp.size()) };
+    tsra_sess_ex_part_init_params init_params{};
+    init_params.mach_seed = &mach_buf;
+    init_params.part_policy = &policy_buf;
+    init_params.pota_thumbprint = &pota_buf;
+    init_params.sata_thumbprint = &sata_buf;
+    init_params.sapota_thumbprint = nullptr;
+
+    // 5. PartInit: probe for the CSR/report sizes, then retrieve them.
+    tsra_buffer csr{ nullptr, 0 };
+    tsra_buffer report{ nullptr, 0 };
+    auto probe = tsra_sess_ex_part_init(session, &init_params, &csr, &report);
+    if (probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        return fail("PartInit size probe unexpected status", probe);
+    }
+    std::vector<uint8_t> csr_bytes(csr.len);
+    std::vector<uint8_t> report_bytes(report.len);
+    csr = { csr_bytes.data(), static_cast<uint32_t>(csr_bytes.size()) };
+    report = { report_bytes.data(), static_cast<uint32_t>(report_bytes.size()) };
+    auto init_err = tsra_sess_ex_part_init(session, &init_params, &csr, &report);
+    if (init_err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartInit failed", init_err);
+    }
+    csr_bytes.resize(csr.len); // shrink to the bytes actually written
+
+    // 6. Build the POTA-anchored root -> PTA chain from the CSR public key.
+    uint8_t pta_sec1[kSec1PubLen];
+    if (!pta_pub_from_csr(csr_bytes.data(), csr_bytes.size(), pta_sec1))
+    {
+        return fail("failed to parse PTA public key from CSR", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    PtaChain chain = make_pta_chain(*pota_ca, pta_sec1);
+    if (chain.root_der.empty() || chain.pta_der.empty())
+    {
+        return fail("failed to build PTA certificate chain", TSRA_STATUS_INTERNAL_ERROR);
+    }
+
+    // 7. PartFinal: re-supply the policy + chain (root -> PTA) out of band.
+    tsra_buffer chain_bufs[2] = {
+        { chain.root_der.data(), static_cast<uint32_t>(chain.root_der.size()) },
+        { chain.pta_der.data(), static_cast<uint32_t>(chain.pta_der.size()) },
+    };
+    tsra_buffer prev_mk_buf{};
+    tsra_sess_ex_part_final_params final_params{};
+    final_params.part_policy = &policy_buf;
+    final_params.pta_cert_chain = chain_bufs;
+    final_params.pta_cert_chain_len = 2;
+    if (reuse != nullptr && !reuse->local_mk_backup.empty())
+    {
+        prev_mk_buf = { const_cast<uint8_t *>(reuse->local_mk_backup.data()),
+                        static_cast<uint32_t>(reuse->local_mk_backup.size()) };
+        final_params.prev_local_mk_backup = &prev_mk_buf;
+    }
+    else
+    {
+        final_params.prev_local_mk_backup = nullptr;
+    }
+
+    tsra_buffer mk_backup{ nullptr, 0 };
+    auto fin_probe = tsra_sess_ex_part_final(session, &final_params, &mk_backup);
+    if (fin_probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        return fail("PartFinal size probe unexpected status", fin_probe);
+    }
+    std::vector<uint8_t> mk_bytes(mk_backup.len);
+    mk_backup = { mk_bytes.data(), static_cast<uint32_t>(mk_bytes.size()) };
+    auto final_err = tsra_sess_ex_part_final(session, &final_params, &mk_backup);
+    if (final_err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartFinal failed", final_err);
+    }
+
+    SdBackingContext ctx;
+    ctx.session = session;
+    ctx.policy = std::move(policy);
+    ctx.pid_pub = std::move(pid_pub);
+    ctx.sata_key = std::move(sata_key);
+    ctx.pota_key = std::move(pota_ca);
+    ctx.local_mk_backup = std::move(mk_bytes);
+    return ctx;
+}
+
+SdBackingContext provision_sd_backing_co_session(tsra_handle part_handle, bool allow_peer_cloning)
+{
+    return provision_backing_impl(part_handle, nullptr, allow_peer_cloning);
+}
+
+SdBackingContext provision_sd_restore_target(tsra_handle part_handle, const SdBackingContext &prev)
+{
+    return provision_backing_impl(part_handle, &prev);
+}
+
+SealingKeyMaterial sealing_key_and_report(tsra_handle session)
+{
+    // Sealing-key props: a `Sealing`-kind P-384 secret key permitted for
+    // derivation only, matching the wire contract.
+    tsra_key_kind kind = TSRA_KEY_KIND_SEALING;
+    tsra_key_class key_class = TSRA_KEY_CLASS_SECRET;
+    uint32_t bits = 384;
+    uint8_t derive_val = 1;
+    tsra_key_prop props[] = {
+        { TSRA_KEY_PROP_ID_KIND, &kind, sizeof(kind) },
+        { TSRA_KEY_PROP_ID_CLASS, &key_class, sizeof(key_class) },
+        { TSRA_KEY_PROP_ID_BIT_LEN, &bits, sizeof(bits) },
+        { TSRA_KEY_PROP_ID_DERIVE, &derive_val, sizeof(derive_val) },
+    };
+    tsra_key_prop_list prop_list{ props, static_cast<uint32_t>(sizeof(props) / sizeof(props[0])) };
+    tsra_algo algo{};
+    algo.id = TSRA_ALGO_ID_SD_SEALING_KEY_GEN;
+    algo.params = nullptr;
+    algo.len = 0;
+
+    tsra_handle key = 0;
+    auto err = tsra_key_gen(session, &algo, &prop_list, &key);
+    if (err != TSRA_STATUS_SUCCESS || key == 0)
+    {
+        ADD_FAILURE() << "tsra_key_gen(sealing) failed: " << err;
+        return {};
+    }
+    auto key_guard = scope_guard::make_scope_exit([&key] { tsra_key_delete(key); });
+
+    SealingKeyMaterial material;
+
+    // Masked private-key blob (standard size probe/fill).
+    tsra_key_prop masked_prop{ TSRA_KEY_PROP_ID_MASKED_KEY, nullptr, 0 };
+    auto masked_probe = tsra_key_get_prop(key, &masked_prop);
+    if (masked_probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        ADD_FAILURE() << "masked key size probe unexpected status: " << masked_probe;
+        return {};
+    }
+    material.masked.resize(masked_prop.len);
+    masked_prop.val = material.masked.data();
+    auto masked_err = tsra_key_get_prop(key, &masked_prop);
+    if (masked_err != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "masked key fetch failed: " << masked_err;
+        return {};
+    }
+
+    // Public-key SubjectPublicKeyInfo DER (probe/fill); the raw P-384
+    // point (`RcvrPub`) is its trailing SEC1 uncompressed point, so take
+    // the last `kRawPubLen` bytes (`X ‖ Y`, dropping the `0x04` tag).
+    tsra_key_prop pub_prop{ TSRA_KEY_PROP_ID_PUB_KEY_INFO, nullptr, 0 };
+    auto pub_probe = tsra_key_get_prop(key, &pub_prop);
+    if (pub_probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        ADD_FAILURE() << "public key size probe unexpected status: " << pub_probe;
+        return {};
+    }
+    std::vector<uint8_t> pub_der(pub_prop.len);
+    pub_prop.val = pub_der.data();
+    auto pub_err = tsra_key_get_prop(key, &pub_prop);
+    if (pub_err != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "public key fetch failed: " << pub_err;
+        return {};
+    }
+    if (pub_der.size() < kRawPubLen)
+    {
+        ADD_FAILURE() << "public key DER shorter than a P-384 point";
+        return {};
+    }
+    material.pub.assign(pub_der.end() - kRawPubLen, pub_der.end());
+
+    // COSE_Sign1 KeyReport over 128 zero report-data bytes (probe/fill).
+    std::array<uint8_t, 128> report_data{};
+    tsra_buffer report_data_buf{ report_data.data(), static_cast<uint32_t>(report_data.size()) };
+    tsra_buffer report_buf{ nullptr, 0 };
+    auto report_probe = tsra_generate_key_report(key, &report_data_buf, &report_buf);
+    if (report_probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        ADD_FAILURE() << "key report size probe unexpected status: " << report_probe;
+        return {};
+    }
+    material.report.resize(report_buf.len);
+    report_buf = { material.report.data(), static_cast<uint32_t>(material.report.size()) };
+    auto report_err = tsra_generate_key_report(key, &report_data_buf, &report_buf);
+    if (report_err != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "key report fetch failed: " << report_err;
+        return {};
+    }
+    material.report.resize(report_buf.len); // shrink to the bytes written
+
+    return material;
+}
+
+void SdEvidenceHolder::wire()
+{
+    mfgr_bufs_[0] = { mfgr_root_.data(), static_cast<uint32_t>(mfgr_root_.size()) };
+    mfgr_bufs_[1] = { mfgr_leaf_.data(), static_cast<uint32_t>(mfgr_leaf_.size()) };
+    owner_bufs_[0] = { owner_root_.data(), static_cast<uint32_t>(owner_root_.size()) };
+    owner_bufs_[1] = { owner_leaf_.data(), static_cast<uint32_t>(owner_leaf_.size()) };
+    po_bufs_[0] = { po_root_.data(), static_cast<uint32_t>(po_root_.size()) };
+    po_bufs_[1] = { po_leaf_.data(), static_cast<uint32_t>(po_leaf_.size()) };
+    rcvr_bufs_[0] = { rcvr_root_.data(), static_cast<uint32_t>(rcvr_root_.size()) };
+    rcvr_bufs_[1] = { rcvr_leaf_.data(), static_cast<uint32_t>(rcvr_leaf_.size()) };
+    report_buf_ = { report_.data(), static_cast<uint32_t>(report_.size()) };
+
+    ev_.mfgr_cert_chain = { mfgr_bufs_, 2 };
+    ev_.owner_cert_chain = { owner_bufs_, 2 };
+    ev_.part_owner_cert_chain = { po_bufs_, 2 };
+    ev_.report = &report_buf_;
+    rcvr_chain_ = { rcvr_bufs_, 2 };
+}
+
+SdEvidenceHolder build_receiver_evidence(
+    const SdBackingContext &ctx,
+    const std::vector<uint8_t> &rcvr_pub,
+    const std::vector<uint8_t> &report
+)
+{
+    SdEvidenceHolder holder;
+    if (ctx.pid_pub.size() != kRawPubLen)
+    {
+        ADD_FAILURE() << "backing context PID public key must be " << kRawPubLen << " bytes";
+        return holder;
+    }
+    if (rcvr_pub.size() != kRawPubLen)
+    {
+        ADD_FAILURE() << "receiver public key must be " << kRawPubLen << " bytes";
+        return holder;
+    }
+
+    // Manufacturer and owner chains root at fresh CAs; the partition-owner
+    // chain roots at the policy SATA anchor. Every leaf certifies the same
+    // partition-identity key (the report signer).
+    std::unique_ptr<CaKey> mfgr_ca = CaKey::generate();
+    std::unique_ptr<CaKey> owner_ca = CaKey::generate();
+    if (!mfgr_ca || !owner_ca || !ctx.sata_key)
+    {
+        ADD_FAILURE() << "evidence CA key generation failed";
+        return holder;
+    }
+
+    GeneratedChain mfgr = make_chain(*mfgr_ca, ctx.pid_pub.data());
+    GeneratedChain owner = make_chain(*owner_ca, ctx.pid_pub.data());
+    GeneratedChain part_owner = make_chain(*ctx.sata_key, ctx.pid_pub.data());
+    // Receiver key certificate chain (spec `RcvrCertChain`): anchored to
+    // the same SATA key, its leaf certifies the receiver public key
+    // (`RcvrPub`) the remote backup is sealed to.
+    GeneratedChain receiver = make_chain(*ctx.sata_key, rcvr_pub.data());
+
+    holder.mfgr_root_ = std::move(mfgr.root_der);
+    holder.mfgr_leaf_ = std::move(mfgr.leaf_der);
+    holder.owner_root_ = std::move(owner.root_der);
+    holder.owner_leaf_ = std::move(owner.leaf_der);
+    holder.po_root_ = std::move(part_owner.root_der);
+    holder.po_leaf_ = std::move(part_owner.leaf_der);
+    holder.rcvr_root_ = std::move(receiver.root_der);
+    holder.rcvr_leaf_ = std::move(receiver.leaf_der);
+    holder.report_ = report;
+    holder.wire();
+
+    return holder;
+}
+
+// ── DARC key-transfer provisioning ───────────────────────────────────────────
+
+namespace
+{
+/// Byte offset of the appended optional `data_pub_key` slot in the unified
+/// 584-byte `PartPolicy` image; mirror of the Rust `OFF_DATA_PUB_KEY`.
+constexpr size_t kOffData = 484;
+constexpr size_t kDarcPolicyLen = kOffData + 4 + kRawPubLen; // 584
+
+/// Build the 584-byte DARC policy: the backing-partition policy plus a DATA
+/// anchor slot at `kOffData`, mirroring the Rust `set_data_anchor` fixture.
+std::vector<uint8_t> build_darc_part_policy(
+    const uint8_t pid[16],
+    const uint8_t pid_pub[kRawPubLen],
+    const uint8_t sata_raw[kRawPubLen],
+    const uint8_t pota_raw[kRawPubLen],
+    const uint8_t data_raw[kRawPubLen]
+)
+{
+    std::vector<uint8_t> policy = build_backing_part_policy(pid, pid_pub, sata_raw, pota_raw, true);
+    policy.resize(kDarcPolicyLen, 0);
+    write_key_slot(policy, kOffData, data_raw);
+    return policy;
+}
+} // namespace
+
+DarcReadyContext provision_darc_session(tsra_handle part_handle)
+{
+    // 1. Bootstrap a CO session under the default PSK and rotate it off the
+    // default so the DARC commands clear the default-PSK gate.
+    tsra_handle bootstrap = open_co_session(part_handle, nullptr);
+    if (bootstrap == 0)
+    {
+        return {};
+    }
+    tsra_buffer psk_buf{ const_cast<uint8_t *>(kRotatedCoPsk.data()),
+                         static_cast<uint32_t>(kRotatedCoPsk.size()) };
+    auto rotate_err = tsra_sess_ex_psk_change(bootstrap, &psk_buf);
+    tsra_sess_close(bootstrap);
+    if (rotate_err != TSRA_STATUS_SUCCESS)
+    {
+        ADD_FAILURE() << "tsra_sess_ex_psk_change failed: " << rotate_err;
+        return {};
+    }
+
+    // 2. Reopen the CO session under the rotated PSK for provisioning.
+    tsra_handle session = open_co_session(part_handle, &psk_buf);
+    if (session == 0)
+    {
+        return {};
+    }
+    auto fail = [&session](const char *msg, tsra_status err) -> DarcReadyContext {
+        ADD_FAILURE() << msg << ": " << err;
+        tsra_sess_close(session);
+        return {};
+    };
+
+    // 3. Materialize the partition identity (PID + raw public key) — the
+    // backing policy names this partition as its own backup backing
+    // partition (the self-backup SD-init below seals to this identity).
+    auto read_part_prop =
+        [part_handle](tsra_part_prop_id id, std::vector<uint8_t> &out) -> tsra_status {
+        tsra_part_prop prop{ id, nullptr, 0 };
+        auto err = tsra_part_get_prop(part_handle, &prop);
+        if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
+        {
+            return err;
+        }
+        out.resize(prop.len);
+        prop.val = out.data();
+        return tsra_part_get_prop(part_handle, &prop);
+    };
+    std::vector<uint8_t> pid;
+    std::vector<uint8_t> pid_pub;
+    if (auto err = read_part_prop(TSRA_PART_PROP_ID_PART_EX_PID, pid); err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartInfo PID query failed", err);
+    }
+    if (pid.size() != 16)
+    {
+        return fail("PartInfo PID has unexpected length", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    if (auto err = read_part_prop(TSRA_PART_PROP_ID_PART_EX_PUB_KEY, pid_pub);
+        err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartInfo PID public key query failed", err);
+    }
+    if (pid_pub.size() != kRawPubLen)
+    {
+        return fail("PartInfo PID public key has unexpected length", TSRA_STATUS_INTERNAL_ERROR);
+    }
+
+    // 4. Mint the POTA (PTA/import), SATA (self-backup evidence) and DATA
+    // (export) anchors and bind a DATA+POTA-anchored 584-byte policy.
+    std::shared_ptr<CaKey> pota_ca = CaKey::generate();
+    std::shared_ptr<CaKey> sata_key = CaKey::generate();
+    std::shared_ptr<CaKey> data_ca = CaKey::generate();
+    if (!pota_ca || !sata_key || !data_ca)
+    {
+        return fail("DARC anchor CA key generation failed", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    uint8_t pota_raw[kRawPubLen];
+    uint8_t sata_raw[kRawPubLen];
+    uint8_t data_raw[kRawPubLen];
+    std::memcpy(pota_raw, pota_ca->sec1().data() + 1, kRawPubLen);
+    std::memcpy(sata_raw, sata_key->sec1().data() + 1, kRawPubLen);
+    std::memcpy(data_raw, data_ca->sec1().data() + 1, kRawPubLen);
+    std::vector<uint8_t> policy =
+        build_darc_part_policy(pid.data(), pid_pub.data(), sata_raw, pota_raw, data_raw);
+
+    // Deterministic provisioning fixtures (thumbprints are stored, not
+    // chain-validated in this flow).
+    std::array<uint8_t, kMachSeedLen> mach_seed{};
+    for (size_t i = 0; i < mach_seed.size(); ++i)
+    {
+        mach_seed[i] = static_cast<uint8_t>(0x40 + i);
+    }
+    std::array<uint8_t, kThumbprintLen> pota_tp{};
+    std::array<uint8_t, kThumbprintLen> sata_tp{};
+    for (size_t i = 0; i < kThumbprintLen; ++i)
+    {
+        pota_tp[i] = static_cast<uint8_t>(0x80 ^ i);
+        sata_tp[i] = static_cast<uint8_t>(0x40 ^ i);
+    }
+
+    tsra_buffer mach_buf{ mach_seed.data(), static_cast<uint32_t>(mach_seed.size()) };
+    tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
+    tsra_buffer pota_buf{ pota_tp.data(), static_cast<uint32_t>(pota_tp.size()) };
+    tsra_buffer sata_buf{ sata_tp.data(), static_cast<uint32_t>(sata_tp.size()) };
+    tsra_sess_ex_part_init_params init_params{};
+    init_params.mach_seed = &mach_buf;
+    init_params.part_policy = &policy_buf;
+    init_params.pota_thumbprint = &pota_buf;
+    init_params.sata_thumbprint = &sata_buf;
+    init_params.sapota_thumbprint = nullptr;
+
+    // 5. PartInit: probe for the CSR/report sizes, then retrieve them.
+    tsra_buffer csr{ nullptr, 0 };
+    tsra_buffer report{ nullptr, 0 };
+    auto probe = tsra_sess_ex_part_init(session, &init_params, &csr, &report);
+    if (probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        return fail("PartInit size probe unexpected status", probe);
+    }
+    std::vector<uint8_t> csr_bytes(csr.len);
+    std::vector<uint8_t> report_bytes(report.len);
+    csr = { csr_bytes.data(), static_cast<uint32_t>(csr_bytes.size()) };
+    report = { report_bytes.data(), static_cast<uint32_t>(report_bytes.size()) };
+    auto init_err = tsra_sess_ex_part_init(session, &init_params, &csr, &report);
+    if (init_err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartInit failed", init_err);
+    }
+    csr_bytes.resize(csr.len); // shrink to the bytes actually written
+
+    // 6. Build the POTA-anchored root -> PTA chain from the CSR public key.
+    uint8_t pta_sec1[kSec1PubLen];
+    if (!pta_pub_from_csr(csr_bytes.data(), csr_bytes.size(), pta_sec1))
+    {
+        return fail("failed to parse PTA public key from CSR", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    PtaChain chain = make_pta_chain(*pota_ca, pta_sec1);
+    if (chain.root_der.empty() || chain.pta_der.empty())
+    {
+        return fail("failed to build PTA certificate chain", TSRA_STATUS_INTERNAL_ERROR);
+    }
+
+    // 7. PartFinal: re-supply the policy + chain (root -> PTA) out of band.
+    tsra_buffer chain_bufs[2] = {
+        { chain.root_der.data(), static_cast<uint32_t>(chain.root_der.size()) },
+        { chain.pta_der.data(), static_cast<uint32_t>(chain.pta_der.size()) },
+    };
+    tsra_sess_ex_part_final_params final_params{};
+    final_params.part_policy = &policy_buf;
+    final_params.pta_cert_chain = chain_bufs;
+    final_params.pta_cert_chain_len = 2;
+    final_params.prev_local_mk_backup = nullptr;
+
+    tsra_buffer mk_backup{ nullptr, 0 };
+    auto fin_probe = tsra_sess_ex_part_final(session, &final_params, &mk_backup);
+    if (fin_probe != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        return fail("PartFinal size probe unexpected status", fin_probe);
+    }
+    std::vector<uint8_t> mk_bytes(mk_backup.len);
+    mk_backup = { mk_bytes.data(), static_cast<uint32_t>(mk_bytes.size()) };
+    auto final_err = tsra_sess_ex_part_final(session, &final_params, &mk_backup);
+    if (final_err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("PartFinal failed", final_err);
+    }
+
+    // 8. Self-initialize the security domain (self `SdCreateRemoteBackup`)
+    // so a Security-Domain Master Key exists; the DARC commands mask/unmask
+    // the TMK under it. The partition seals to its own attested identity.
+    SealingKeyMaterial sealing = sealing_key_and_report(session);
+    if (sealing.masked.empty() || sealing.report.empty())
+    {
+        return fail("SD sealing key/report generation failed", TSRA_STATUS_INTERNAL_ERROR);
+    }
+    SdBackingContext bctx;
+    bctx.session = session;
+    bctx.policy = policy;
+    bctx.pid_pub = pid_pub;
+    bctx.sata_key = sata_key;
+    bctx.pota_key = pota_ca;
+    SdEvidenceHolder evidence = build_receiver_evidence(bctx, sealing.pub, sealing.report);
+
+    tsra_buffer masked_buf{ sealing.masked.data(), static_cast<uint32_t>(sealing.masked.size()) };
+    tsra_sd_create_remote_backup_params create_params{
+        &policy_buf,
+        &masked_buf,
+        evidence.receiver_chain(),
+        &evidence.get(),
+    };
+    std::vector<uint8_t> remote;
+    std::vector<uint8_t> local;
+    std::vector<uint8_t> mk;
+    tsra_buffer remote_buf{ nullptr, 0 };
+    tsra_buffer local_buf{ nullptr, 0 };
+    tsra_buffer mk_buf{ nullptr, 0 };
+    tsra_status create_err = TSRA_STATUS_BUFFER_TOO_SMALL;
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        create_err =
+            tsra_sd_create_remote_backup(session, &create_params, &remote_buf, &local_buf, &mk_buf);
+        if (create_err != TSRA_STATUS_BUFFER_TOO_SMALL)
+        {
+            break;
+        }
+        if (remote_buf.len > remote.size())
+        {
+            remote.resize(remote_buf.len);
+        }
+        if (local_buf.len > local.size())
+        {
+            local.resize(local_buf.len);
+        }
+        if (mk_buf.len > mk.size())
+        {
+            mk.resize(mk_buf.len);
+        }
+        remote_buf = { remote.data(), static_cast<uint32_t>(remote.size()) };
+        local_buf = { local.data(), static_cast<uint32_t>(local.size()) };
+        mk_buf = { mk.data(), static_cast<uint32_t>(mk.size()) };
+    }
+    if (create_err != TSRA_STATUS_SUCCESS)
+    {
+        return fail("SdCreateRemoteBackup (SD self-init) failed", create_err);
+    }
+
+    DarcReadyContext ctx;
+    ctx.session = session;
+    ctx.policy = std::move(policy);
+    ctx.data_key = std::move(data_ca);
+    ctx.pota_key = std::move(pota_ca);
+    return ctx;
+}
+
+std::shared_ptr<CaKey> darc_generate_ca()
+{
+    std::shared_ptr<CaKey> ca = CaKey::generate();
+    if (!ca)
+    {
+        ADD_FAILURE() << "DARC CA key generation failed";
+    }
+    return ca;
+}
+
+void DarcCertChainHolder::wire()
+{
+    bufs_[0] = { root_.data(), static_cast<uint32_t>(root_.size()) };
+    bufs_[1] = { leaf_.data(), static_cast<uint32_t>(leaf_.size()) };
+    chain_.certs = bufs_;
+    chain_.len = 2;
+}
+
+DarcCertChainHolder darc_make_chain(
+    const std::shared_ptr<CaKey> &ca,
+    const std::vector<uint8_t> &leaf_pub_raw
+)
+{
+    DarcCertChainHolder holder;
+    if (!ca || leaf_pub_raw.size() != kRawPubLen)
+    {
+        ADD_FAILURE() << "darc_make_chain requires a CA and a " << kRawPubLen
+                      << "-byte leaf public key";
+        return holder;
+    }
+    GeneratedChain chain = make_chain(*ca, leaf_pub_raw.data());
+    holder.root_ = std::move(chain.root_der);
+    holder.leaf_ = std::move(chain.leaf_der);
+    holder.wire();
+    return holder;
+}
+
+#endif // !defined(TSRA_FEATURE_MOCK)

@@ -1,0 +1,1530 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Partition persistent store: typed GSRAM layout and the [`PartStore`]
+//! accessor handle.
+
+use core::mem::size_of;
+
+use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartId;
+use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::PartState;
+use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CO;
+use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CU;
+use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
+use tsra_fw_uno_reg_soc::part_store_t::PART_STORE_T_BASE;
+
+/// Number of partition slots in the persistent store.
+pub const NUM_PARTITIONS: usize = 65;
+
+/// Persistent-store schema version stamped by this driver.
+pub const STORE_VERSION: u8 = 1;
+
+// ── Field sizes (mirror the reference `HsmPartPersistentStore`) ──────────
+const ID_LEN: usize = 16;
+const ID_PRIV_LEN: usize = 48;
+const ID_PUB_LEN: usize = 97;
+const UNWRAPPING_KEY_BK_LEN: usize = 516;
+const PART_CERT_DATA_LEN: usize = 800;
+const MASKED_BK_BOOT_DATA_LEN: usize = 300;
+const SEALED_BK3_DATA_LEN: usize = 512;
+const BK3_KEY_LEN: usize = 48;
+const NONCE_LEN: usize = 32;
+const GUID_LEN: usize = 16;
+const SESSION_TABLE_LEN: usize = 18;
+const POLICY_HASH_LEN: usize = 48;
+const POTA_THUMBPRINT_LEN: usize = 48;
+const SATA_THUMBPRINT_LEN: usize = 48;
+const SAPOTA_THUMBPRINT_LEN: usize = 48;
+const PUB_KEY_LEN: usize = 96;
+const PSK_LEN: usize = 32;
+const CREDENTIAL_LEN: usize = 32;
+const RES_MASK_LEN: usize = 16;
+/// Trailing reserved tail = reference `reserved3` (626) minus the appended
+/// Uno fields (policy_hash + pota/sata/sapota thumbprints + the flat
+/// working-state fields below).
+const RESERVED3_LEN: usize = 626
+    - POLICY_HASH_LEN
+    - POTA_THUMBPRINT_LEN
+    - SATA_THUMBPRINT_LEN
+    - SAPOTA_THUMBPRINT_LEN
+    - 4  // state
+    - 4  // generation
+    - RES_MASK_LEN
+    - 10 * 2  // key handles (u16 + sentinel)
+    - PUB_KEY_LEN  // ec_pub_key
+    - PUB_KEY_LEN  // se_pub_key
+    - PSK_LEN  // psk_co
+    - PSK_LEN  // psk_cu
+    - CREDENTIAL_LEN
+    - 1  // valid_flags (8 packed presence/init bits)
+    - PUB_KEY_LEN  // pta_pub_key
+    - 2; // session_meta (pending_mask + psk_change_mask)
+
+/// Bit positions packed into the per-partition `valid_flags` byte.
+const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
+const FLAG_POTA_THUMBPRINT_VALID: u8 = 1 << 1;
+const FLAG_SATA_THUMBPRINT_VALID: u8 = 1 << 2;
+const FLAG_SAPOTA_THUMBPRINT_VALID: u8 = 1 << 3;
+const FLAG_PTA_PUB_KEY_VALID: u8 = 1 << 4;
+const FLAG_POLICY_HASH_VALID: u8 = 1 << 5;
+const FLAG_BK3_INITIALIZED: u8 = 1 << 6;
+const FLAG_SD_INITIALIZED: u8 = 1 << 7;
+
+/// Total per-partition slot size (matches the reference layout).
+const STORE_SIZE: usize = 3072;
+
+/// Sentinel stored in a key-handle field meaning "no key".
+///
+/// Vault key ids pack `(table << 8) | slot` with `table < 65`, so
+/// `0xFFFF` (table 255) is never a real handle and is safe as the
+/// absent marker. (`0` is a *valid* handle — table 0, slot 0 — so it
+/// cannot be used.)
+const KEY_ABSENT: u16 = u16::MAX;
+
+/// Decodes a stored 2-byte handle field into an optional key id.
+#[inline]
+fn read_handle(bytes: [u8; 2]) -> Option<HsmKeyId> {
+    let raw = u16::from_le_bytes(bytes);
+    (raw != KEY_ABSENT).then(|| HsmKeyId::from(raw))
+}
+
+/// Encodes an optional key id into a 2-byte handle field.
+#[inline]
+fn write_handle(key: Option<HsmKeyId>) -> [u8; 2] {
+    key.map(u16::from).unwrap_or(KEY_ABSENT).to_le_bytes()
+}
+
+/// Absolute GSRAM base address of partition slot 0.
+#[cfg_attr(test, allow(dead_code))]
+const PART_STORE_BASE: usize = (IO_GSRAM_BASE + PART_STORE_T_BASE) as usize;
+
+/// Bytes between consecutive partition slots.
+const STRIDE: usize = size_of::<Storage>();
+
+/// Base address of partition slot 0's backing store.
+///
+/// In production this resolves to the fixed GSRAM MMIO region
+/// ([`PART_STORE_BASE`]). Host unit tests have no such region, so a single
+/// leaked, zero-initialised heap allocation laid out identically
+/// (`NUM_PARTITIONS` x `STRIDE`, `Storage` alignment) stands in for it, letting
+/// every [`Partition`] handle address real memory so the lifecycle clears can
+/// be exercised and asserted off-target.
+#[cfg(not(test))]
+#[inline]
+fn store_base() -> usize {
+    PART_STORE_BASE
+}
+
+#[cfg(test)]
+fn store_base() -> usize {
+    use core::mem::align_of;
+    use std::alloc::alloc_zeroed;
+    use std::alloc::Layout;
+    use std::sync::OnceLock;
+
+    static BASE: OnceLock<usize> = OnceLock::new();
+    *BASE.get_or_init(|| {
+        let size = NUM_PARTITIONS
+            .checked_mul(STRIDE)
+            .expect("part-store test size overflow");
+        let layout = Layout::from_size_align(size, align_of::<Storage>())
+            .expect("valid part-store test layout");
+        // SAFETY: `layout` has a non-zero size and an all-zero bit pattern is a
+        // valid `Storage` (every field is a byte array or a zero-valued scalar).
+        let ptr = unsafe { alloc_zeroed(layout) };
+        assert!(!ptr.is_null(), "part-store test backing allocation failed");
+        ptr as usize
+    })
+}
+
+// ── Lockout policy (reference `PinPolicy`) ───────────────────────────────
+
+/// Pin-policy lockout state.
+#[repr(u8)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum PinPolicyState {
+    /// Unrestricted.
+    #[default]
+    Ready,
+    /// Locked out; enforce the delay factor.
+    Lockout,
+}
+
+/// Partition lockout / pin-policy context (14 bytes, reference layout).
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PinPolicy {
+    /// Current lockout state.
+    pub state: PinPolicyState,
+    /// Back-off delay factor.
+    pub delay_factor: u16,
+    /// Allowed attempts before lockout.
+    pub allowed_attempts: u16,
+    /// Lockout timestamp (opaque 8-byte counter).
+    pub lockout_time: [u8; 8],
+}
+
+// ── On-storage sub-structs (crate-private; mirror reference layout) ───────
+
+/// Partition identity: random id, identity private key (reserved/unused on
+/// Uno — the private key lives in the vault), and identity public key.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartitionIdentifier {
+    id: [u8; ID_LEN],
+    priv_key: [u8; ID_PRIV_LEN],
+    pub_key: [u8; ID_PUB_LEN],
+}
+
+/// Partition certificate (reserved/unused on Uno for now).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PartitionCert {
+    length: u32,
+    data: [u8; PART_CERT_DATA_LEN],
+}
+
+/// Masked boot key (length-prefixed blob).
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct MaskedBkBoot {
+    len: u32,
+    data: [u8; MASKED_BK_BOOT_DATA_LEN],
+}
+
+/// Sealed backup key 3 (length-prefixed blob).
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct SealedBk3 {
+    len: u32,
+    data: [u8; SEALED_BK3_DATA_LEN],
+}
+
+/// BK3 session key (validity flag + key material).
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct Bk3SessionKey {
+    is_valid: bool,
+    _reserved: [u8; 3],
+    key: [u8; BK3_KEY_LEN],
+}
+
+/// Per-partition persistent store slot.
+///
+/// The region from `version` through `bk3_session_key` is byte-for-byte
+/// identical to the reference `HsmPartPersistentStore`; `policy_hash` and
+/// `pota_thumbprint` are Uno-specific fields appended into what the
+/// reference layout left as `reserved3`.
+#[repr(C)]
+struct Storage {
+    // ===== identical to reference HsmPartPersistentStore =====
+    version: u8,
+    flags: [u8; 3],
+    session_table: [u8; SESSION_TABLE_LEN],
+    /// Gate-1 staging flag (offset 22, was `reserved1`): CP writes, SP reads.
+    /// `false` = not armed, `true` = armed. When armed (set on `SetResource`
+    /// with a non-zero mask), the SP stages the RSA-2048 unwrapping key into
+    /// `unwrapping_key_bk` and marks `unwrapping_key_bk_valid` non-zero.
+    unwrapping_key_required: bool,
+    /// Unwrapping-key slot state, written by the SP. `0` = empty; non-zero =
+    /// occupied (the SP uses a 3-state `UnwrappingKeyValidity` enum —
+    /// Empty / PendingPct / PctPassed — so this is a `u8`, not a `bool`;
+    /// reading a value > 1 as a Rust `bool` would be UB).
+    unwrapping_key_bk_valid: u8,
+    unwrapping_key_bk: [u8; UNWRAPPING_KEY_BK_LEN],
+    pin_policy: PinPolicy,
+    vm_launch_guid: [u8; GUID_LEN],
+    partition_id_valid: bool,
+    reserved2: u8,
+    partition_identifier: PartitionIdentifier,
+    partition_cert_valid: bool,
+    partition_cert: PartitionCert,
+    masked_bk_boot: MaskedBkBoot,
+    sealed_bk3: SealedBk3,
+    nonce: [u8; NONCE_LEN],
+    bk3_session_key: Bk3SessionKey,
+    // ===== Uno-specific fields, appended flat into reserved3 =====
+    // Ordered so the DMA-target public-key buffers (`ec_pub_key`,
+    // `se_pub_key`, written directly by the ECC keygen engine) land on
+    // 4-byte boundaries. The reference region ends 4-aligned, and every
+    // field up to and including the buffers has a size that is a multiple
+    // of 4, so each stays aligned; the only non-multiple-of-4 fields — the
+    // seven `[u8;2]` key handles — are placed last, before `reserved3`,
+    // where misalignment is harmless. All fields are byte arrays (align 1)
+    // so no implicit padding is introduced; accessors do the LE conversions.
+    state: [u8; 4],
+    generation: [u8; 4],
+    res_mask: [u8; RES_MASK_LEN],
+    ec_pub_key: [u8; PUB_KEY_LEN],
+    se_pub_key: [u8; PUB_KEY_LEN],
+    pta_pub_key: [u8; PUB_KEY_LEN],
+    psk_co: [u8; PSK_LEN],
+    psk_cu: [u8; PSK_LEN],
+    credential: [u8; CREDENTIAL_LEN],
+    policy_hash: [u8; POLICY_HASH_LEN],
+    pota_thumbprint: [u8; POTA_THUMBPRINT_LEN],
+    sata_thumbprint: [u8; SATA_THUMBPRINT_LEN],
+    sapota_thumbprint: [u8; SAPOTA_THUMBPRINT_LEN],
+    id_key_id: [u8; 2],
+    ec_key_id: [u8; 2],
+    se_key_id: [u8; 2],
+    mk_key_id: [u8; 2],
+    ups_key_id: [u8; 2],
+    pta_key_id: [u8; 2],
+    unwrapping_key_id: [u8; 2],
+    local_mk_key_id: [u8; 2],
+    ephemeral_mk_key_id: [u8; 2],
+    sd_mk_key_id: [u8; 2],
+    // Presence flags for `AbsentUntilSet` byte fields plus the one-shot
+    // InitBk3 and security-domain (`SD_INITIALIZED`) gates, bit-packed into
+    // a single byte (see the `FLAG_*` constants).  Placed after the key
+    // handles, before `reserved3`, where 1-byte alignment is harmless and
+    // the DMA-target public keys above stay 4-aligned.
+    valid_flags: u8,
+    // Volatile TBOR session slot metadata: byte 0 = pending_mask
+    // (bit N set while slot N's handshake is in flight), byte 1 =
+    // psk_change_mask (bit N set once slot N has consumed its one
+    // allowed PSK change). Owned by the session_store driver.
+    session_meta: [u8; 2],
+    reserved3: [u8; RESERVED3_LEN],
+}
+
+// Compile-time layout assertions (see `part_store/layout_asserts.rs`).
+mod layout_asserts;
+
+/// GSRAM-backed partition persistent store.
+///
+/// Stateless entry point: [`PartStore::partition`] validates a raw
+/// partition id and returns a [`Partition`] handle through which the
+/// slot's fields are accessed. [`PartStore::init_default`] initializes
+/// every slot at PAL boot.
+#[derive(Debug)]
+pub struct PartStore;
+
+/// Selects how much partition state [`Partition::clear_state`] wipes.
+///
+/// Both kinds clear the per-tenant runtime state (enable-time keys,
+/// credential, BK3 session key, nonce, session table, and PIN policy);
+/// they differ only in whether the write-once provisioning material is
+/// preserved. Future reset flavours can be added as additional variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartResetKind {
+    /// NSSR `Migrate`: preserve the partition's provisioning material.
+    Migrate,
+    /// Partition deallocation / disable: also wipe the provisioning material.
+    Disable,
+}
+
+/// A validated partition-store slot.
+///
+/// Obtained only via [`PartStore::partition`], so holding one is proof
+/// that the partition index is in range (`< NUM_PARTITIONS`). Field
+/// accessors are therefore infallible with respect to the index; only the
+/// byte-buffer setters can fail (on a wrong input length).
+#[derive(Debug, Clone, Copy)]
+pub struct Partition(usize);
+
+impl PartStore {
+    /// Validates a raw partition id and returns a handle to its slot.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `pid >= NUM_PARTITIONS`.
+    #[inline]
+    pub fn partition(pid: HsmPartId) -> HsmResult<Partition> {
+        let idx = u8::from(pid) as usize;
+        if idx < NUM_PARTITIONS {
+            Ok(Partition(idx))
+        } else {
+            Err(HsmError::InvalidArg)
+        }
+    }
+
+    /// Initializes every partition slot to a zeroed posture and stamps the
+    /// store version. Called once during PAL init (GSRAM is not guaranteed
+    /// zeroed).
+    pub fn init_default() {
+        for idx in 0..NUM_PARTITIONS {
+            Partition(idx).reset();
+        }
+    }
+}
+
+impl Partition {
+    /// Raw pointer to this partition's slot in GSRAM.
+    #[inline]
+    fn slot_ptr(self) -> *mut Storage {
+        // `self.0 < NUM_PARTITIONS` by construction (see `PartStore::partition`).
+        (store_base() + self.0 * STRIDE) as *mut Storage
+    }
+
+    /// Shared reference to this partition's slot.
+    #[inline]
+    fn slot(self) -> &'static Storage {
+        // SAFETY: the index is in range by construction, keeping the slot
+        // within the reserved partition-store GSRAM region; plain shared
+        // SRAM, single-threaded executor guarantees no aliasing mutation.
+        unsafe { &*self.slot_ptr() }
+    }
+
+    /// Exclusive reference to this partition's slot, borrowed for the
+    /// lifetime of the `&mut self` handle.
+    ///
+    /// Taking `&mut self` (rather than `self` by value) deliberately ties
+    /// the returned `&mut Storage` to an exclusive borrow of the
+    /// [`Partition`] handle, so the borrow checker forbids handing out two
+    /// overlapping `&mut` into the same slot through one handle (the old
+    /// `&'static mut`-from-`Copy` signature did not). Cross-handle aliasing
+    /// (two `Partition`s for the same index) is prevented by call
+    /// discipline: every accessor borrow is short-lived and the
+    /// single-threaded cooperative executor only yields at `.await`, so no
+    /// other task observes a slot mid-mutation.
+    #[inline]
+    fn slot_mut(&mut self) -> &mut Storage {
+        // SAFETY: the index is in range by construction (see
+        // `PartStore::partition`), keeping the slot within the reserved
+        // partition-store GSRAM region. The `&mut self` receiver scopes the
+        // returned borrow; on the single-threaded executor no other context
+        // accesses the same slot for that borrow's (non-`await`) duration.
+        unsafe { &mut *self.slot_ptr() }
+    }
+
+    // ── lifecycle ────────────────────────────────────────────────────────
+
+    /// Wipes this partition's slot (zeroizes all fields), re-stamps the
+    /// store version, and resets all key handles to the "absent" sentinel
+    /// (zeroing alone would otherwise read back as the valid handle 0).
+    #[inline(never)]
+    pub fn reset(mut self) {
+        let slot = self.slot_mut();
+        // SAFETY: `slot` is a valid, uniquely-borrowed `Storage` in GSRAM;
+        // an all-zero bit pattern is a valid value for every field.
+        unsafe {
+            core::ptr::write_bytes(slot as *mut Storage as *mut u8, 0, STORE_SIZE);
+        }
+        slot.version = STORE_VERSION;
+        let absent = KEY_ABSENT.to_le_bytes();
+        slot.id_key_id = absent;
+        slot.ec_key_id = absent;
+        slot.se_key_id = absent;
+        slot.mk_key_id = absent;
+        slot.ups_key_id = absent;
+        slot.pta_key_id = absent;
+        slot.local_mk_key_id = absent;
+        slot.ephemeral_mk_key_id = absent;
+        slot.sd_mk_key_id = absent;
+        slot.unwrapping_key_id = absent;
+    }
+
+    /// Zeroes the provisioned identity: the 16-byte id, its key handle, and
+    /// the cached identity public key.
+    #[inline(never)]
+    pub fn clear_identity(mut self) {
+        self.id_mut().fill(0);
+        self.set_id_key_id(None);
+        self.id_pub_key_mut().fill(0);
+    }
+
+    /// Zeroes the enable-time keys: the establish-credential and
+    /// session-encryption key handles and their cached public keys.
+    #[inline(never)]
+    pub fn clear_enabled_keys(mut self) {
+        self.set_ec_key_id(None);
+        self.ec_pub_key_mut().fill(0);
+        self.set_se_key_id(None);
+        self.se_pub_key_mut().fill(0);
+    }
+
+    /// Clears a partition's state for a given [`PartResetKind`].
+    ///
+    /// The shared core (cleared for every kind) drops the enable-time and
+    /// provisioning vault-key handles (the vault deletions themselves are the
+    /// PAL's responsibility), the cached public keys, the caller-presented
+    /// credential, the derived BK3 session key, the nonce, the per-partition
+    /// session table + metadata, and the PIN lockout policy — matching the
+    /// reference `state.disable()` / `state.migrate()`, which both reset the
+    /// policy.
+    ///
+    /// [`PartResetKind::Disable`] additionally wipes the write-once
+    /// provisioning material (PTA public key, policy hash, POTA/SATA/SAPOTA
+    /// thumbprints, sealed BK3 + incarnation flag, rotated PSKs, and the VM
+    /// launch GUID); [`PartResetKind::Migrate`] preserves it so a host that
+    /// resets via NSSR keeps its provisioning and only re-establishes its
+    /// credential. The partition identity and `Masked_BK_BOOT` are preserved
+    /// for both — they are torn down only on free (see [`reset`]). The
+    /// resource mask, generation counter, and lifecycle state are left for the
+    /// caller to manage.
+    ///
+    /// [`reset`]: Self::reset
+    #[inline(never)]
+    pub fn clear_state(mut self, kind: PartResetKind) {
+        // ── Per-tenant runtime state (cleared for every reset kind) ──
+        // Enable-time keys + cached public keys.
+        self.clear_enabled_keys();
+        // Provisioning vault-key handles (material wiped wholesale by caller).
+        self.set_mk_key_id(None);
+        self.set_ups_key_id(None);
+        self.set_pta_key_id(None);
+        self.set_local_mk_key_id(None);
+        self.set_ephemeral_mk_key_id(None);
+        self.set_sd_mk_key_id(None);
+        self.set_unwrapping_key_id(None);
+        // The SD one-shot must follow its key. `set_sd_mk_key_id(None)` above
+        // drops the SDMK handle and the caller wipes the vault material for
+        // *every* reset kind, so leaving `sd_initialized` set would leave the
+        // partition claiming a security domain whose masking key no longer
+        // exists — and `SdCreateRemoteBackup`'s one-shot gate would then
+        // refuse to mint a replacement, permanently. The std PAL clears this
+        // on both `part_enable` and `clear_enabled_state`; uno previously
+        // cleared it only on `Disable`, so an NSSR (`Migrate`) left the flag
+        // stranded. Note `bk3_initialized` is deliberately *not* moved here:
+        // its `sealed_bk3` blob is preserved by `Migrate`, so that flag stays
+        // consistent with its material.
+        self.set_sd_initialized(false);
+        // Caller-presented secret + derived BK3 session key.
+        self.clear_credential();
+        self.clear_bk3_session();
+        // Reset the PIN lockout policy to default (matches the reference
+        // `state.disable()` and `state.migrate()`).
+        self.set_pin_policy(PinPolicy::default());
+        // Per-tenant runtime: nonce, session table, session metadata.
+        {
+            let slot = self.slot_mut();
+            slot.nonce = [0u8; NONCE_LEN];
+            slot.session_table = [0u8; SESSION_TABLE_LEN];
+            slot.session_meta = [0u8; 2];
+        }
+
+        // ── Write-once provisioning material ──
+        // Preserved by `Migrate` (NSSR keeps provisioning); wiped by `Disable`
+        // (partition deallocation).
+        // An NSSR (`Migrate`) returns the partition to its just-allocated
+        // state as far as the session PSKs are concerned: `part_psk` is
+        // `RequiredPresent` and default-baked at allocation, so the slots
+        // must read back as the defaults rather than keeping a rotated
+        // value. Re-uses [`bake_default_psks`] so allocation and NSSR can
+        // never drift apart. Mirrors the std PAL, whose migrated entry
+        // resets `psk_co`/`psk_cu` to `None` and therefore reads back as
+        // `DEFAULT_PSK_CO` / `DEFAULT_PSK_CU`. `Disable` instead zeroes
+        // them below, because the slot is being deallocated.
+        if matches!(kind, PartResetKind::Migrate) {
+            self.bake_default_psks();
+        }
+
+        if matches!(kind, PartResetKind::Disable) {
+            self.clear_pta_pub_key();
+            self.clear_policy_hash();
+            self.clear_pota_thumbprint();
+            self.clear_sata_thumbprint();
+            self.clear_sapota_thumbprint();
+            self.clear_sealed_bk3();
+            self.set_bk3_initialized(false);
+            // Disarm Gate 1 and wipe the SP-published unwrapping key: the slot
+            // belongs to a partition that is being deallocated. A later
+            // `SetResource` re-arms Gate 1, prompting the SP to stage a fresh
+            // key.
+            self.clear_unwrapping_key();
+            let slot = self.slot_mut();
+            slot.psk_co = [0u8; PSK_LEN];
+            slot.psk_cu = [0u8; PSK_LEN];
+            slot.vm_launch_guid = [0u8; GUID_LEN];
+        }
+    }
+
+    /// Bakes the default pre-shared keys into the slot.
+    ///
+    /// `part_psk` is contractually `RequiredPresent` — "default-baked at
+    /// allocation time" from [`DEFAULT_PSK_CO`] / [`DEFAULT_PSK_CU`] — so a
+    /// freshly allocated partition must present the defaults rather than the
+    /// all-zero GSRAM pattern. Without this the FW runs the TBOR session
+    /// handshake's HPKE `auth_psk` schedule with a zero PSK while the host
+    /// uses the default, so the derived export secrets diverge and the
+    /// Phase-1 confirm MAC fails.
+    ///
+    /// Called from `part_alloc`. The reset paths seed their own slots:
+    /// `clear_state([`PartResetKind::Migrate`])` re-bakes these same
+    /// defaults on an NSSR (so a rotated PSK does not survive the reset),
+    /// and [`PartResetKind::Disable`] zeroes them because the slot is being
+    /// deallocated.
+    #[inline(never)]
+    pub fn bake_default_psks(mut self) {
+        let slot = self.slot_mut();
+        slot.psk_co = DEFAULT_PSK_CO;
+        slot.psk_cu = DEFAULT_PSK_CU;
+    }
+
+    /// Borrows the partition's 16-byte identity.
+    #[inline(never)]
+    pub fn id(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().partition_identifier.id) }
+    }
+
+    /// Mutably borrows the partition's 16-byte identity.
+    #[inline(never)]
+    pub fn id_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `id`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().partition_identifier.id) }
+    }
+
+    /// Sets the partition's 16-byte identity.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `ID_LEN` bytes.
+    #[inline(never)]
+    pub fn set_id(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != ID_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().partition_identifier.id.copy_from_slice(src);
+        Ok(())
+    }
+
+    /// Borrows the partition's identity public key (X ‖ Y, 96 B).
+    ///
+    /// The backing field is 97 B (reference SEC1 layout); Uno uses the
+    /// first 96 B (raw X ‖ Y, no SEC1 prefix).
+    #[inline(never)]
+    pub fn id_pub_key(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().partition_identifier.pub_key[..PUB_KEY_LEN]) }
+    }
+
+    /// Mutably borrows the partition's identity public key (96 B).
+    #[inline(never)]
+    pub fn id_pub_key_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `id_pub_key`, exclusively borrowed.
+        unsafe {
+            DmaBuf::from_raw_mut(&mut self.slot_mut().partition_identifier.pub_key[..PUB_KEY_LEN])
+        }
+    }
+
+    /// Sets the partition's identity public key (96 B, raw X ‖ Y).
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
+    #[inline(never)]
+    pub fn set_id_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != PUB_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().partition_identifier.pub_key[..PUB_KEY_LEN].copy_from_slice(src);
+        Ok(())
+    }
+
+    /// Whether the partition identity has been provisioned.
+    #[inline(never)]
+    pub fn id_valid(self) -> bool {
+        self.slot().partition_id_valid
+    }
+
+    /// Sets the partition-identity-valid flag.
+    #[inline(never)]
+    pub fn set_id_valid(mut self, valid: bool) {
+        self.slot_mut().partition_id_valid = valid;
+    }
+
+    // ── nonce ────────────────────────────────────────────────────────────
+
+    /// Borrows the partition's 32-byte anti-replay nonce.
+    #[inline(never)]
+    pub fn nonce(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().nonce) }
+    }
+
+    /// Mutably borrows the partition's nonce.
+    #[inline(never)]
+    pub fn nonce_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `nonce`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().nonce) }
+    }
+
+    /// Sets the partition's nonce.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `NONCE_LEN` bytes.
+    #[inline(never)]
+    pub fn set_nonce(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != NONCE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().nonce.copy_from_slice(src);
+        Ok(())
+    }
+
+    // ── vm launch guid ───────────────────────────────────────────────────
+
+    /// Borrows the host-set VM-launch GUID (16 B).
+    #[inline(never)]
+    pub fn vm_launch_guid(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().vm_launch_guid) }
+    }
+
+    /// Mutably borrows the VM-launch GUID.
+    #[inline(never)]
+    pub fn vm_launch_guid_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `vm_launch_guid`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().vm_launch_guid) }
+    }
+
+    /// Sets the VM-launch GUID.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `GUID_LEN` bytes.
+    #[inline(never)]
+    pub fn set_vm_launch_guid(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != GUID_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().vm_launch_guid.copy_from_slice(src);
+        Ok(())
+    }
+
+    // ── masked boot key (variable length) ────────────────────────────────
+
+    /// Borrows the masked boot key, trimmed to its stored length.
+    #[inline(never)]
+    pub fn masked_bk_boot(self) -> &'static DmaBuf {
+        let slot = self.slot();
+        // Read the packed length field by value (no reference to it).
+        let len = (slot.masked_bk_boot.len as usize).min(MASKED_BK_BOOT_DATA_LEN);
+        // SAFETY: GSRAM bytes branded as DMA-accessible; `len` is clamped
+        // in-bounds; valid for 'static.
+        unsafe { DmaBuf::from_raw(&slot.masked_bk_boot.data[..len]) }
+    }
+
+    /// Writes the masked boot key (stores length + data).
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` exceeds `MASKED_BK_BOOT_DATA_LEN`.
+    #[inline(never)]
+    pub fn set_masked_bk_boot(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() > MASKED_BK_BOOT_DATA_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.masked_bk_boot.len = src.len() as u32;
+        slot.masked_bk_boot.data[..src.len()].copy_from_slice(src);
+        // Zeroize any stale (sensitive) bytes left by a previously longer
+        // blob so nothing survives past the new length.
+        slot.masked_bk_boot.data[src.len()..].fill(0);
+        Ok(())
+    }
+
+    // ── sealed BK3 (variable length) ─────────────────────────────────────
+
+    /// Borrows the sealed BK3 blob, trimmed to its stored length.
+    #[inline(never)]
+    pub fn sealed_bk3(self) -> &'static DmaBuf {
+        let slot = self.slot();
+        let len = (slot.sealed_bk3.len as usize).min(SEALED_BK3_DATA_LEN);
+        // SAFETY: GSRAM bytes branded as DMA-accessible; `len` clamped
+        // in-bounds; valid for 'static.
+        unsafe { DmaBuf::from_raw(&slot.sealed_bk3.data[..len]) }
+    }
+
+    /// Stores a sealed BK3 blob once until explicitly cleared.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` exceeds `SEALED_BK3_DATA_LEN`.
+    /// - [`HsmError::SealedBk3AlreadySet`] — a non-empty blob is already stored.
+    #[inline(never)]
+    pub fn set_sealed_bk3(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() > SEALED_BK3_DATA_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        if slot.sealed_bk3.len != 0 {
+            return Err(HsmError::SealedBk3AlreadySet);
+        }
+        slot.sealed_bk3.len = src.len() as u32;
+        slot.sealed_bk3.data[..src.len()].copy_from_slice(src);
+        // Clear the unused tail of the storage slot.
+        slot.sealed_bk3.data[src.len()..].fill(0);
+        Ok(())
+    }
+
+    // ── BK3 session key ──────────────────────────────────────────────────
+
+    /// Borrows the 48-byte BK3 session key.
+    #[inline(never)]
+    pub fn bk3_session(self) -> &'static DmaBuf {
+        // SAFETY: `key` is an align-1 packed field; GSRAM bytes branded as
+        // DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().bk3_session_key.key) }
+    }
+
+    /// Sets the BK3 session key and marks it valid.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `BK3_KEY_LEN` bytes.
+    #[inline(never)]
+    pub fn set_bk3_session(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != BK3_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.bk3_session_key.key.copy_from_slice(src);
+        slot.bk3_session_key.is_valid = true;
+        Ok(())
+    }
+
+    /// Whether a BK3 session key has been provisioned.
+    #[inline(never)]
+    pub fn bk3_session_valid(self) -> bool {
+        self.slot().bk3_session_key.is_valid
+    }
+
+    /// Clears the BK3 session key (zeroizes and marks absent).
+    #[inline(never)]
+    pub fn clear_bk3_session(mut self) {
+        let slot = self.slot_mut();
+        slot.bk3_session_key.key = [0u8; BK3_KEY_LEN];
+        slot.bk3_session_key.is_valid = false;
+    }
+
+    /// Clears the sealed BK3 blob (marks absent).
+    #[inline(never)]
+    pub fn clear_sealed_bk3(mut self) {
+        let slot = self.slot_mut();
+        slot.sealed_bk3.data = [0u8; SEALED_BK3_DATA_LEN];
+        slot.sealed_bk3.len = 0;
+    }
+
+    /// Clears the masked boot key (marks absent).
+    #[inline(never)]
+    pub fn clear_masked_bk_boot(mut self) {
+        let slot = self.slot_mut();
+        slot.masked_bk_boot.data = [0u8; MASKED_BK_BOOT_DATA_LEN];
+        slot.masked_bk_boot.len = 0;
+    }
+
+    /// Whether InitBk3 has already run for this partition (one-shot gate).
+    #[inline(never)]
+    pub fn bk3_initialized(self) -> bool {
+        self.slot().valid_flags & FLAG_BK3_INITIALIZED != 0
+    }
+
+    /// Sets the one-shot InitBk3 gate.
+    #[inline(never)]
+    pub fn set_bk3_initialized(mut self, valid: bool) {
+        let slot = self.slot_mut();
+        if valid {
+            slot.valid_flags |= FLAG_BK3_INITIALIZED;
+        } else {
+            slot.valid_flags &= !FLAG_BK3_INITIALIZED;
+        }
+    }
+
+    /// Whether a security domain has already been created for this
+    /// partition (one-shot gate).
+    #[inline(never)]
+    pub fn sd_initialized(self) -> bool {
+        self.slot().valid_flags & FLAG_SD_INITIALIZED != 0
+    }
+
+    /// Sets the one-shot security-domain init gate.
+    #[inline(never)]
+    pub fn set_sd_initialized(mut self, valid: bool) {
+        let slot = self.slot_mut();
+        if valid {
+            slot.valid_flags |= FLAG_SD_INITIALIZED;
+        } else {
+            slot.valid_flags &= !FLAG_SD_INITIALIZED;
+        }
+    }
+
+    // ── lockout policy ───────────────────────────────────────────────────
+
+    /// Reads the partition lockout / pin policy.
+    #[inline(never)]
+    pub fn pin_policy(self) -> PinPolicy {
+        self.slot().pin_policy
+    }
+
+    /// Sets the partition lockout / pin policy.
+    #[inline(never)]
+    pub fn set_pin_policy(mut self, policy: PinPolicy) {
+        self.slot_mut().pin_policy = policy;
+    }
+
+    // ── Uno ext fields ───────────────────────────────────────────────────
+
+    /// Borrows the partition policy hash (48 B).
+    #[inline(never)]
+    pub fn policy_hash(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().policy_hash) }
+    }
+
+    /// Mutably borrows the partition policy hash.
+    #[inline(never)]
+    pub fn policy_hash_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `policy_hash`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().policy_hash) }
+    }
+
+    /// Sets the partition policy hash (marks it present).
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `POLICY_HASH_LEN` bytes.
+    #[inline(never)]
+    pub fn set_policy_hash(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != POLICY_HASH_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.policy_hash.copy_from_slice(src);
+        slot.valid_flags |= FLAG_POLICY_HASH_VALID;
+        Ok(())
+    }
+
+    /// Whether the partition policy hash has been provisioned.
+    #[inline(never)]
+    pub fn policy_hash_valid(self) -> bool {
+        self.slot().valid_flags & FLAG_POLICY_HASH_VALID != 0
+    }
+
+    /// Clears the partition policy hash (zeroizes and marks absent).
+    #[inline(never)]
+    pub fn clear_policy_hash(mut self) {
+        let slot = self.slot_mut();
+        slot.policy_hash = [0u8; POLICY_HASH_LEN];
+        slot.valid_flags &= !FLAG_POLICY_HASH_VALID;
+    }
+
+    /// Borrows the POTA public-key thumbprint (48 B).
+    #[inline(never)]
+    pub fn pota_thumbprint(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().pota_thumbprint) }
+    }
+
+    /// Mutably borrows the POTA thumbprint.
+    #[inline(never)]
+    pub fn pota_thumbprint_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `pota_thumbprint`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().pota_thumbprint) }
+    }
+
+    /// Sets the POTA thumbprint.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `POTA_THUMBPRINT_LEN`
+    ///   bytes.
+    #[inline(never)]
+    pub fn set_pota_thumbprint(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != POTA_THUMBPRINT_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.pota_thumbprint.copy_from_slice(src);
+        slot.valid_flags |= FLAG_POTA_THUMBPRINT_VALID;
+        Ok(())
+    }
+
+    /// Whether a POTA thumbprint has been provisioned.
+    #[inline(never)]
+    pub fn pota_thumbprint_valid(self) -> bool {
+        self.slot().valid_flags & FLAG_POTA_THUMBPRINT_VALID != 0
+    }
+
+    /// Clears the POTA thumbprint (zeroizes and marks absent).
+    #[inline(never)]
+    pub fn clear_pota_thumbprint(mut self) {
+        let slot = self.slot_mut();
+        slot.pota_thumbprint = [0u8; POTA_THUMBPRINT_LEN];
+        slot.valid_flags &= !FLAG_POTA_THUMBPRINT_VALID;
+    }
+
+    /// Borrows the SATA thumbprint (48 B).
+    #[inline(never)]
+    pub fn sata_thumbprint(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().sata_thumbprint) }
+    }
+
+    /// Sets the SATA thumbprint.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `SATA_THUMBPRINT_LEN`
+    ///   bytes.
+    #[inline(never)]
+    pub fn set_sata_thumbprint(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != SATA_THUMBPRINT_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.sata_thumbprint.copy_from_slice(src);
+        slot.valid_flags |= FLAG_SATA_THUMBPRINT_VALID;
+        Ok(())
+    }
+
+    /// Whether a SATA thumbprint has been provisioned.
+    #[inline(never)]
+    pub fn sata_thumbprint_valid(self) -> bool {
+        self.slot().valid_flags & FLAG_SATA_THUMBPRINT_VALID != 0
+    }
+
+    /// Clears the SATA thumbprint (zeroizes and marks absent).
+    #[inline(never)]
+    pub fn clear_sata_thumbprint(mut self) {
+        let slot = self.slot_mut();
+        slot.sata_thumbprint = [0u8; SATA_THUMBPRINT_LEN];
+        slot.valid_flags &= !FLAG_SATA_THUMBPRINT_VALID;
+    }
+
+    /// Borrows the SAPOTA thumbprint (48 B).
+    #[inline(never)]
+    pub fn sapota_thumbprint(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().sapota_thumbprint) }
+    }
+
+    /// Sets the SAPOTA thumbprint.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `SAPOTA_THUMBPRINT_LEN`
+    ///   bytes.
+    #[inline(never)]
+    pub fn set_sapota_thumbprint(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != SAPOTA_THUMBPRINT_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.sapota_thumbprint.copy_from_slice(src);
+        slot.valid_flags |= FLAG_SAPOTA_THUMBPRINT_VALID;
+        Ok(())
+    }
+
+    /// Whether a SAPOTA thumbprint has been provisioned.
+    #[inline(never)]
+    pub fn sapota_thumbprint_valid(self) -> bool {
+        self.slot().valid_flags & FLAG_SAPOTA_THUMBPRINT_VALID != 0
+    }
+
+    /// Clears the SAPOTA thumbprint (zeroizes and marks absent).
+    #[inline(never)]
+    pub fn clear_sapota_thumbprint(mut self) {
+        let slot = self.slot_mut();
+        slot.sapota_thumbprint = [0u8; SAPOTA_THUMBPRINT_LEN];
+        slot.valid_flags &= !FLAG_SAPOTA_THUMBPRINT_VALID;
+    }
+
+    // ── lifecycle state / generation / resource mask ─────────────────────
+
+    /// Reads the partition lifecycle [`PartState`].
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — the stored byte is not a known state.
+    #[inline(never)]
+    pub fn state(self) -> HsmResult<PartState> {
+        PartState::from_u8(self.slot().state[0]).ok_or(HsmError::InvalidArg)
+    }
+
+    /// Sets the partition lifecycle [`PartState`].
+    #[inline(never)]
+    pub fn set_state(mut self, state: PartState) {
+        self.slot_mut().state = [state as u8, 0, 0, 0];
+    }
+
+    /// Reads the monotonic generation counter.
+    #[inline(never)]
+    pub fn generation(self) -> u32 {
+        u32::from_le_bytes(self.slot().generation)
+    }
+
+    /// Sets the generation counter.
+    #[inline(never)]
+    pub fn set_generation(mut self, generation: u32) {
+        self.slot_mut().generation = generation.to_le_bytes();
+    }
+
+    /// Increments the generation counter (wrapping).
+    #[inline(never)]
+    pub fn bump_generation(self) {
+        let next = self.generation().wrapping_add(1);
+        self.set_generation(next);
+    }
+
+    /// Reads the 128-bit table-ownership resource mask.
+    #[inline(never)]
+    pub fn res_mask(self) -> u128 {
+        u128::from_le_bytes(self.slot().res_mask)
+    }
+
+    /// Sets the resource mask.
+    #[inline(never)]
+    pub fn set_res_mask(mut self, mask: u128) {
+        self.slot_mut().res_mask = mask.to_le_bytes();
+    }
+
+    // ── key handles (`None` = absent; see `KEY_ABSENT`) ──────────────────
+
+    /// Reads the identity key handle.
+    #[inline(never)]
+    pub fn id_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().id_key_id)
+    }
+
+    /// Sets (or clears, with `None`) the identity key handle.
+    ///
+    /// Keeps `partition_id_valid` in sync with handle presence: the PAL
+    /// gates identity-property access on `id_key_id().is_some()`, so the
+    /// stored validity flag tracks the same "identity provisioned" state
+    /// (set on provisioning, cleared on `clear_identity` / free).
+    #[inline(never)]
+    pub fn set_id_key_id(mut self, key: Option<HsmKeyId>) {
+        let slot = self.slot_mut();
+        slot.id_key_id = write_handle(key);
+        slot.partition_id_valid = key.is_some();
+    }
+
+    /// Reads the establish-credential key handle.
+    #[inline(never)]
+    pub fn ec_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().ec_key_id)
+    }
+
+    /// Sets (or clears) the establish-credential key handle.
+    #[inline(never)]
+    pub fn set_ec_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().ec_key_id = write_handle(key);
+    }
+
+    /// Reads the session-encryption key handle.
+    #[inline(never)]
+    pub fn se_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().se_key_id)
+    }
+
+    /// Sets (or clears) the session-encryption key handle.
+    #[inline(never)]
+    pub fn set_se_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().se_key_id = write_handle(key);
+    }
+
+    /// Reads the masking key handle.
+    #[inline(never)]
+    pub fn mk_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().mk_key_id)
+    }
+
+    /// Sets (or clears) the masking key handle.
+    #[inline(never)]
+    pub fn set_mk_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().mk_key_id = write_handle(key);
+    }
+
+    /// Reads the UMS (unique-machine-secret) key handle.
+    #[inline(never)]
+    pub fn ups_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().ups_key_id)
+    }
+
+    /// Sets (or clears) the UMS key handle.
+    #[inline(never)]
+    pub fn set_ups_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().ups_key_id = write_handle(key);
+    }
+
+    /// Reads the PTA (partition trust anchor) key handle.
+    #[inline(never)]
+    pub fn pta_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().pta_key_id)
+    }
+
+    /// Sets (or clears) the PTA key handle.
+    #[inline(never)]
+    pub fn set_pta_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().pta_key_id = write_handle(key);
+    }
+
+    /// Reads the RSA unwrapping key handle.
+    #[inline(never)]
+    pub fn unwrapping_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().unwrapping_key_id)
+    }
+
+    /// Sets (or clears) the RSA unwrapping key handle.
+    #[inline(never)]
+    pub fn set_unwrapping_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().unwrapping_key_id = write_handle(key);
+    }
+
+    // ── RSA unwrapping-key backup (SP-published) — two-gate CP↔SP handshake ──
+    //
+    // Gate 1: the CP arms `unwrapping_key_required` (via `set_unwrapping_key_required`,
+    // on `SetResource` with a non-zero mask). Gate 2: the SP, seeing Gate 1
+    // armed, stages a ready-to-use 516-byte PKA-LE RSA-2048 private key into
+    // `unwrapping_key_bk` and marks `unwrapping_key_bk_valid` non-zero. The HSM
+    // then imports it into its vault (recording `unwrapping_key_id`). The key
+    // persists in the slot (it is not consumed on import); it is wiped only on
+    // partition deallocation. The 516-byte payload is the RSA-2048 private key
+    // in PKA little-endian order, `d(256) ‖ n(256) ‖ e(4)`; the wire public key
+    // is the trailing `n ‖ e` (derived on demand by `rsa_priv_pub_key`).
+
+    /// Arms/disarms Gate 1 (`unwrapping_key_required`): the CP-only flag the SP
+    /// reads to decide whether to stage an unwrapping key for this partition.
+    #[inline(never)]
+    pub fn set_unwrapping_key_required(mut self, required: bool) {
+        // Volatile: this is a CP→SP shared-memory mailbox byte. A plain store
+        // could be reordered or elided by the compiler, breaking the handshake.
+        // SAFETY: valid, aligned, writable byte in this partition's GSRAM slot.
+        unsafe {
+            core::ptr::write_volatile(&mut self.slot_mut().unwrapping_key_required, required);
+        }
+    }
+
+    /// Whether Gate 1 (`unwrapping_key_required`) is currently armed.
+    #[inline(never)]
+    pub fn unwrapping_key_required(self) -> bool {
+        // Volatile read of the CP↔SP mailbox byte.
+        // SAFETY: valid, aligned, readable byte in this partition's GSRAM slot.
+        unsafe { core::ptr::read_volatile(&self.slot().unwrapping_key_required) }
+    }
+
+    /// Whether the SP has published a valid RSA-2048 unwrapping key into this
+    /// partition's GSRAM slot. The SP writes a `UnwrappingKeyValidity` `u8`
+    /// (`0` = empty; non-zero = occupied), so occupancy is `!= 0`.
+    #[inline(never)]
+    pub fn unwrapping_key_bk_valid(self) -> bool {
+        // Volatile read: the SP writes this mailbox byte from another processor,
+        // so a cached/hoisted load could miss the publish.
+        // SAFETY: valid, aligned, readable byte in this partition's GSRAM slot.
+        let valid = unsafe { core::ptr::read_volatile(&self.slot().unwrapping_key_bk_valid) } != 0;
+        // Acquire fence pairing the SP's release before it sets this byte: the
+        // producer writes the 516-byte `unwrapping_key_bk` payload *before*
+        // marking this valid, so a consumer that observes it set must not have
+        // its subsequent payload loads (in `unwrapping_key_bk`) hoisted ahead of
+        // this observation.
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Acquire);
+        valid
+    }
+
+    /// Borrows the 516-byte PKA-LE RSA-2048 unwrapping-key backup published by
+    /// the HSP. Only meaningful when
+    /// [`unwrapping_key_bk_valid`](Self::unwrapping_key_bk_valid) is true.
+    #[inline(never)]
+    pub fn unwrapping_key_bk(self) -> &'static DmaBuf {
+        // SAFETY: `unwrapping_key_bk` is an align-1 packed field; GSRAM bytes
+        // branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().unwrapping_key_bk) }
+    }
+
+    /// Resets the SP↔CP unwrapping-key slot on partition teardown: disarms
+    /// Gate 1, volatile-wipes the 516-byte payload (so the private key can't be
+    /// recovered from GSRAM), and clears the validity byte. A later
+    /// `SetResource` re-arms Gate 1 and the SP re-stages a fresh key.
+    #[inline(never)]
+    pub fn clear_unwrapping_key(mut self) {
+        let slot = self.slot_mut();
+        // The gate + validity are CP↔SP mailbox bytes → volatile writes; the
+        // payload is volatile-wiped. SAFETY: valid, aligned bytes in this slot.
+        unsafe {
+            core::ptr::write_volatile(&mut slot.unwrapping_key_required, false);
+            DmaBuf::from_raw_mut(&mut slot.unwrapping_key_bk).zeroize();
+            core::ptr::write_volatile(&mut slot.unwrapping_key_bk_valid, 0);
+        }
+    }
+
+    /// Reads the partition-local masking key (`PartLocalMK`) handle.
+    #[inline(never)]
+    pub fn local_mk_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().local_mk_key_id)
+    }
+
+    /// Sets (or clears) the partition-local masking key handle.
+    #[inline(never)]
+    pub fn set_local_mk_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().local_mk_key_id = write_handle(key);
+    }
+
+    /// Reads the partition ephemeral masking key (`EphemeralMK`) handle.
+    #[inline(never)]
+    pub fn ephemeral_mk_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().ephemeral_mk_key_id)
+    }
+
+    /// Sets (or clears) the partition ephemeral masking key handle.
+    #[inline(never)]
+    pub fn set_ephemeral_mk_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().ephemeral_mk_key_id = write_handle(key);
+    }
+
+    /// Reads the security-domain masking key (`SDMK`) handle.
+    #[inline(never)]
+    pub fn sd_mk_key_id(self) -> Option<HsmKeyId> {
+        read_handle(self.slot().sd_mk_key_id)
+    }
+
+    /// Sets (or clears) the security-domain masking key handle.
+    #[inline(never)]
+    pub fn set_sd_mk_key_id(mut self, key: Option<HsmKeyId>) {
+        self.slot_mut().sd_mk_key_id = write_handle(key);
+    }
+
+    // ── cached public keys (establish-cred / session-enc) ────────────────
+
+    /// Borrows the establish-credential public key (X ‖ Y, 96 B).
+    #[inline(never)]
+    pub fn ec_pub_key(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().ec_pub_key) }
+    }
+
+    /// Mutably borrows the establish-credential public key.
+    #[inline(never)]
+    pub fn ec_pub_key_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `ec_pub_key`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().ec_pub_key) }
+    }
+
+    /// Sets the establish-credential public key.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
+    #[inline(never)]
+    pub fn set_ec_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != PUB_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().ec_pub_key.copy_from_slice(src);
+        Ok(())
+    }
+
+    /// Borrows the session-encryption public key (X ‖ Y, 96 B).
+    #[inline(never)]
+    pub fn se_pub_key(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().se_pub_key) }
+    }
+
+    /// Mutably borrows the session-encryption public key.
+    #[inline(never)]
+    pub fn se_pub_key_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `se_pub_key`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().se_pub_key) }
+    }
+
+    /// Sets the session-encryption public key.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
+    #[inline(never)]
+    pub fn set_se_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != PUB_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().se_pub_key.copy_from_slice(src);
+        Ok(())
+    }
+
+    // ── platform trust-anchor public key ─────────────────────────────────
+
+    /// Borrows the platform trust-anchor public key (X ‖ Y, 96 B).
+    #[inline(never)]
+    pub fn pta_pub_key(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().pta_pub_key) }
+    }
+
+    /// Sets the platform trust-anchor public key (write-once via caller gate).
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
+    #[inline(never)]
+    pub fn set_pta_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != PUB_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.pta_pub_key.copy_from_slice(src);
+        slot.valid_flags |= FLAG_PTA_PUB_KEY_VALID;
+        Ok(())
+    }
+
+    /// Whether the platform trust-anchor public key has been provisioned.
+    #[inline(never)]
+    pub fn pta_pub_key_valid(self) -> bool {
+        self.slot().valid_flags & FLAG_PTA_PUB_KEY_VALID != 0
+    }
+
+    /// Clears the platform trust-anchor public key (zeroizes and marks absent).
+    #[inline(never)]
+    pub fn clear_pta_pub_key(mut self) {
+        let slot = self.slot_mut();
+        slot.pta_pub_key = [0u8; PUB_KEY_LEN];
+        slot.valid_flags &= !FLAG_PTA_PUB_KEY_VALID;
+    }
+
+    /// Borrows the crypto-officer PSK (32 B).
+    #[inline(never)]
+    pub fn psk_co(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().psk_co) }
+    }
+
+    /// Mutably borrows the crypto-officer PSK.
+    #[inline(never)]
+    pub fn psk_co_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `psk_co`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().psk_co) }
+    }
+
+    /// Sets the crypto-officer PSK.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PSK_LEN` bytes.
+    #[inline(never)]
+    pub fn set_psk_co(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != PSK_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().psk_co.copy_from_slice(src);
+        Ok(())
+    }
+
+    /// Borrows the crypto-user PSK (32 B).
+    #[inline(never)]
+    pub fn psk_cu(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().psk_cu) }
+    }
+
+    /// Mutably borrows the crypto-user PSK.
+    #[inline(never)]
+    pub fn psk_cu_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `psk_cu`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().psk_cu) }
+    }
+
+    /// Sets the crypto-user PSK.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PSK_LEN` bytes.
+    #[inline(never)]
+    pub fn set_psk_cu(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != PSK_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.slot_mut().psk_cu.copy_from_slice(src);
+        Ok(())
+    }
+
+    // ── user credential ──────────────────────────────────────────────────
+
+    /// Borrows the user credential (id ‖ pin, 32 B).
+    #[inline(never)]
+    pub fn credential(self) -> &'static DmaBuf {
+        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
+        unsafe { DmaBuf::from_raw(&self.slot().credential) }
+    }
+
+    /// Mutably borrows the user credential.
+    #[inline(never)]
+    pub fn credential_mut(&mut self) -> &mut DmaBuf {
+        // SAFETY: as `credential`, exclusively borrowed.
+        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().credential) }
+    }
+
+    /// Sets the user credential.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `v` is not exactly `CREDENTIAL_LEN` bytes.
+    #[inline(never)]
+    pub fn set_credential(mut self, v: &DmaBuf) -> HsmResult<()> {
+        let src: &[u8] = v;
+        if src.len() != CREDENTIAL_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.slot_mut();
+        slot.credential.copy_from_slice(src);
+        slot.valid_flags |= FLAG_CREDENTIAL_VALID;
+        Ok(())
+    }
+
+    /// Whether a user credential has been provisioned.
+    #[inline(never)]
+    pub fn credential_valid(self) -> bool {
+        self.slot().valid_flags & FLAG_CREDENTIAL_VALID != 0
+    }
+
+    /// Clears the user credential (zeroizes and marks absent).
+    #[inline(never)]
+    pub fn clear_credential(mut self) {
+        let slot = self.slot_mut();
+        slot.credential = [0u8; CREDENTIAL_LEN];
+        slot.valid_flags &= !FLAG_CREDENTIAL_VALID;
+    }
+
+    // ── session table (raw region; typed view in drivers/session_store) ──
+
+    /// Borrows the raw 18-byte session-table region.
+    #[inline(never)]
+    pub fn session_table(self) -> &'static [u8; SESSION_TABLE_LEN] {
+        &self.slot().session_table
+    }
+
+    /// Mutably borrows the raw session-table region.
+    #[inline(never)]
+    pub fn session_table_mut(&mut self) -> &mut [u8; SESSION_TABLE_LEN] {
+        &mut self.slot_mut().session_table
+    }
+
+    /// Borrows the 2-byte volatile session metadata (`pending_mask`,
+    /// `psk_change_mask`) for the TBOR session slots.
+    #[inline(never)]
+    pub fn session_meta(self) -> &'static [u8; 2] {
+        &self.slot().session_meta
+    }
+
+    /// Mutably borrows the session metadata region.
+    #[inline(never)]
+    pub fn session_meta_mut(&mut self) -> &mut [u8; 2] {
+        &mut self.slot_mut().session_meta
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,30 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "engine-integration-tests-capi"
+publish = false
+version = "0.1.0"
+
+# Gated so a plain `cargo build --workspace` (e.g. a build against
+# OpenSSL 3.x) doesn't pull the OpenSSL 1.1.x FFI; the harness builds with
+# `--features integration`.
+[features]
+integration = ["dep:openssl", "dep:tsra_ossl_engine_sys"]
+
+[dependencies]
+openssl = { optional = true, workspace = true }
+tsra_ossl_engine_sys = { features = [
+  "engine",
+], optional = true, path = "../../tsra_ossl_engine_sys" }
+
+[dev-dependencies]
+serial_test = { workspace = true }
+
+[[test]]
+name = "engine_capi_tests"
+path = "src/engine_capi_tests.rs"
+
+[lints]
+workspace = true

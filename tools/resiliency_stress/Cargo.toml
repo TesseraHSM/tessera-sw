@@ -1,0 +1,34 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "resiliency_stress"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+name = "resiliency_stress"
+path = "src/main.rs"
+
+[dependencies]
+clap = { features = ["derive"], workspace = true }
+libc.workspace = true
+memmap2 = { workspace = true }
+parking_lot = { features = ["deadlock_detection"], workspace = true }
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tsra_api.workspace = true
+tsra_crypto.workspace = true
+tsra_ddi_mbor_sim.workspace = true
+tsra_res_test_dev = { optional = true, workspace = true }
+tsra_resiliency_test_helpers.workspace = true
+
+[features]
+default = []
+mock = ["tsra_api/mock"]
+res-test = ["tsra_api/res-test", "tsra_res_test_dev"]
+
+[lints]
+workspace = true

@@ -1,0 +1,27 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+[package]
+edition = "2021"
+name = "tsra_fw_hsm_pal_std"
+version = "0.1.0"
+
+[dependencies]
+async-channel.workspace = true
+tsra_crypto.workspace = true
+
+embassy-sync.workspace = true
+tokio = { features = ["rt", "sync", "time"], workspace = true }
+tsra_fw_core_crypto_key_derive.workspace = true
+tsra_fw_hsm_core_tracing.workspace = true
+tsra_fw_hsm_io.workspace = true
+tsra_fw_hsm_pal_traits.workspace = true
+zeroize.workspace = true
+
+[features]
+# Enables the per-IO `iic recv` / `oic send` debug traces. Off by default
+# because these fire on every IO and are very noisy.
+trace-io = []
+
+[dev-dependencies]
+hex.workspace = true
+tokio = { features = ["macros", "rt", "sync", "time"], workspace = true }

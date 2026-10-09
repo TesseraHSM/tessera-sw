@@ -1,0 +1,142 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! DDI KbkdfCounterHmacDerive command handler.
+//!
+//! Within an open session, derive key material from an existing ECDH
+//! shared secret via the SP 800-108 Counter Mode KDF with an HMAC
+//! PRF, persist the result in the partition vault — optionally
+//! session-scoped so it is torn down by
+//! [`CloseSession`](super::close_session) — and return the assigned
+//! `key_id` plus an (empty placeholder) masked-key envelope the host
+//! may re-import on a future session.
+//!
+//! The input key must be an ECDH shared secret (`Secret256` /
+//! `Secret384` / `Secret521`) with the `derive` permission.  The
+//! requested output `key_type` selects the vault kind: AES outputs
+//! are stored as AES keys, while every HMAC output (fixed `HmacSha*`
+//! or `VarHmac*`) is stored as a variable-length HMAC key.  See
+//! [`kdf`](super::kdf) for the full mapping and length rules.
+//!
+//! Per the underlying PRF, at least one of `label` / `context` must
+//! be present; deriving with both absent is rejected by the KDF.
+
+use tsra_fw_ddi_mbor_types::derive_kbkdf::DdiKbkdfCounterHmacDeriveReq;
+use tsra_fw_ddi_mbor_types::derive_kbkdf::DdiKbkdfCounterHmacDeriveResp;
+
+use super::kdf::KdfClass;
+use super::*;
+
+/// Handle `DdiKbkdfCounterHmacDeriveCmd`.
+///
+/// No `partition_lock` is needed.  DDI commands execute on a
+/// single-threaded cooperative executor; multiple IOs are in flight and
+/// interleave at await points — including inside the awaited
+/// `vault_key_create` (which can yield on Uno during the GDMA key copy) —
+/// but this handler's only partition-state mutations are that single,
+/// self-contained `vault_key_create` and, if a later step fails, the
+/// deletion of the key it just created — no multi-step read-modify-write
+/// across an await for an interleaved handler to corrupt.
+pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
+    pal: &'p P,
+    io: &impl HsmIo,
+    decoder: &mut DdiDecoder<'_>,
+    hdr: &DdiReqHdr,
+) -> HsmResult<&'p DmaBuf> {
+    let body: DdiKbkdfCounterHmacDeriveReq = decoder.decode_data()?;
+    let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
+    let input_key_id = HsmKeyId::from(body.key_id);
+
+    // The KDK must be an ECDH shared secret carrying `derive`.
+    super::kdf::validate_input_secret(pal.vault_key_kind(io, input_key_id)?)?;
+    if !pal.vault_key_attrs(io, input_key_id)?.derive() {
+        return Err(HsmError::InvalidPermissions);
+    }
+
+    let algo = super::from_ddi::hash(body.hash_algorithm)?;
+    let target = super::kdf::resolve_target(body.key_type, body.key_length)?;
+    // A KDF-derived key is created on-device, so `local = true` (it attests
+    // as generated, not imported — parity with the HMAC path and the sim).
+    let attrs = match target.class {
+        KdfClass::Aes => super::key_attrs::for_aes(&body.key_properties.key_metadata, true)?,
+        KdfClass::Hmac => super::key_attrs::for_var_hmac(&body.key_properties.key_metadata)?,
+    };
+    super::key_attrs::check_session_key_tag(attrs, body.key_tag)?;
+
+    // Derive the OKM into a DMA scratch slot; `vault_key_create`
+    // copies it into vault-owned storage so the scratch can drop
+    // after.  Absent label / context are passed as `None`.
+    let out = pal.dma_alloc(io, target.out_len)?;
+
+    {
+        let kdk = pal.vault_key(io, input_key_id)?;
+        if let Err(e) = pal
+            .sp800_108_kdf(
+                io,
+                algo,
+                kdk,
+                body.label.as_deref(),
+                body.context.as_deref(),
+                out,
+            )
+            .await
+        {
+            out.zeroize();
+            return Err(e);
+        }
+    }
+
+    // Commit the derived key: AES-GCM bulk keys are handed to the
+    // bulk-crypto backend (the vault records only the returned
+    // `bulk_key_id` handle, carried in the response for later bulk GCM
+    // ops); every other kind is stored directly in the vault.  Scrub the
+    // derived material if the commit fails, before propagating the error.
+    let (key_handle, bulk_key_id) =
+        match super::bulk::commit_key(pal, io, out, target.kind, HsmSessId::from(sess_id), attrs)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                out.zeroize();
+                return Err(e);
+            }
+        };
+    let key_id: u16 = key_handle.into();
+
+    // Envelope the derived key into the host's opaque re-import blob.
+    let result = async {
+        let masked_key = super::masking::mask_blob(
+            pal,
+            io,
+            HsmSessId::from(sess_id),
+            super::masking::MaskSpec {
+                attrs,
+                key_type: super::from_pal::vault_kind_ddi(target.kind)?,
+                key_label: body.key_properties.key_label,
+                key_length: out.len() as u16,
+            },
+            &out[..],
+        )
+        .await?;
+
+        pal.dma_alloc_var(io, |buf| {
+            super::encode_resp(
+                &super::success_hdr_sess(hdr, DdiOp::KbkdfCounterHmacDerive, sess_id),
+                &DdiKbkdfCounterHmacDeriveResp {
+                    key_id,
+                    masked_key,
+                    bulk_key_id,
+                },
+                buf,
+            )
+        })
+    }
+    .await;
+
+    // Scrub the derived key material now that the vault (or the bulk-crypto
+    // backend, for bulk keys) owns it and masking has consumed it.  Wipe on
+    // all paths — including a masking error — since the per-IO arena is not
+    // guaranteed to be wiped on teardown.
+    out.zeroize();
+    super::bulk::rollback_on_err(pal, io, key_handle, result.map(|b| &*b)).await
+}

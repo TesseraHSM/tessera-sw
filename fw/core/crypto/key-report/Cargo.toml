@@ -1,0 +1,24 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_fw_core_crypto_key_report"
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+test = false
+
+[dependencies]
+bitfield-struct.workspace = true
+minicbor = { features = ["derive"], workspace = true }
+tsra_fw_hsm_pal_traits = { workspace = true }
+
+[dev-dependencies]
+minicbor = { features = ["derive", "std"], workspace = true }
+tsra_ddi_mbor_sim = { workspace = true }
+
+[lints]
+workspace = true

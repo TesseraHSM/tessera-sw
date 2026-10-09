@@ -1,0 +1,416 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include <gtest/gtest.h>
+#include <scope_guard.hpp>
+#include <tsra_api.h>
+
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <random>
+#include <string>
+#include <vector>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#endif
+
+#include "algo/ecc/helpers.hpp"
+#include "handle/part_handle.hpp"
+#include "handle/part_list_handle.hpp"
+#include "utils/auto_key.hpp"
+#include "utils/part_init_config.hpp"
+#include "utils/utils.hpp"
+
+namespace
+{
+constexpr const char *kHelperEnv = "TSRA_HELPER_INPUT";
+constexpr const char *kTmpPrefix = "tsra_multi_proc_";
+
+static void write_u32(std::ofstream &out, uint32_t v)
+{
+    out.write(reinterpret_cast<const char *>(&v), sizeof(v));
+}
+
+static uint32_t read_u32(std::ifstream &in)
+{
+    uint32_t v = 0;
+    in.read(reinterpret_cast<char *>(&v), sizeof(v));
+    return v;
+}
+
+static void write_blob(std::ofstream &out, const std::vector<uint8_t> &data)
+{
+    write_u32(out, static_cast<uint32_t>(data.size()));
+    if (!data.empty())
+    {
+        out.write(reinterpret_cast<const char *>(data.data()), data.size());
+    }
+}
+
+static std::vector<uint8_t> read_blob(std::ifstream &in)
+{
+    uint32_t len = read_u32(in);
+    std::vector<uint8_t> data(len);
+    if (len != 0)
+    {
+        in.read(reinterpret_cast<char *>(data.data()), len);
+    }
+    return data;
+}
+
+static std::string self_exe_path()
+{
+#if defined(_WIN32)
+    std::wstring buffer(MAX_PATH, L'\0');
+    DWORD size = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+    buffer.resize(size);
+    return std::string(buffer.begin(), buffer.end());
+#else
+    return std::filesystem::read_symlink("/proc/self/exe").string();
+#endif
+}
+
+static int run_child_test(const std::filesystem::path &input_path, const std::string &gtest_filter)
+{
+#if defined(_WIN32)
+    _putenv_s(kHelperEnv, input_path.string().c_str());
+#else
+    setenv(kHelperEnv, input_path.string().c_str(), 1);
+#endif
+
+    std::string cmd = "\"" + self_exe_path() + "\" --gtest_filter=" + gtest_filter;
+    int rc = std::system(cmd.c_str());
+
+#if defined(_WIN32)
+    _putenv_s(kHelperEnv, "");
+#else
+    unsetenv(kHelperEnv);
+    if (rc != -1)
+    {
+        rc = WEXITSTATUS(rc);
+    }
+#endif
+
+    return rc;
+}
+
+static std::vector<uint8_t> get_part_prop_bytes(tsra_handle part, tsra_part_prop_id id)
+{
+    tsra_part_prop prop = { id, nullptr, 0 };
+    auto err = tsra_part_get_prop(part, &prop);
+    EXPECT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+    std::vector<uint8_t> buffer(prop.len);
+    prop.val = buffer.data();
+    err = tsra_part_get_prop(part, &prop);
+    EXPECT_EQ(err, TSRA_STATUS_SUCCESS);
+    buffer.resize(prop.len);
+    return buffer;
+}
+
+static std::vector<uint8_t> get_key_prop_bytes(tsra_handle key, tsra_key_prop_id id)
+{
+    tsra_key_prop prop = { id, nullptr, 0 };
+    auto err = tsra_key_get_prop(key, &prop);
+    EXPECT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+    std::vector<uint8_t> buffer(prop.len);
+    prop.val = buffer.data();
+    err = tsra_key_get_prop(key, &prop);
+    EXPECT_EQ(err, TSRA_STATUS_SUCCESS);
+    buffer.resize(prop.len);
+    return buffer;
+}
+
+static void cleanup_temp_files()
+{
+    std::error_code ec;
+    auto tmp_dir = get_test_tmp_dir();
+
+    for (const auto &entry : std::filesystem::directory_iterator(tmp_dir, ec))
+    {
+        if (ec)
+        {
+            break;
+        }
+        if (!entry.is_regular_file(ec))
+        {
+            continue;
+        }
+        const auto name = entry.path().filename().string();
+        if (name.rfind(kTmpPrefix, 0) == 0 && entry.path().extension() == ".bin")
+        {
+            std::filesystem::remove(entry.path(), ec);
+        }
+    }
+}
+} // namespace
+
+class tsra_multi_process : public ::testing::Test
+{
+  protected:
+    PartitionListHandle part_list_ = PartitionListHandle{};
+};
+
+TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_parent)
+{
+    cleanup_temp_files();
+    part_list_.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str = { path.data(), static_cast<uint32_t>(path.size()) };
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto part_guard = scope_guard::make_scope_exit([&] {
+            ASSERT_EQ(tsra_part_close(part_handle), TSRA_STATUS_SUCCESS);
+        });
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        // Reset partition before initialization to clear any previous state
+        auto reset_err = tsra_part_reset(part_handle);
+        ASSERT_EQ(reset_err, TSRA_STATUS_SUCCESS);
+
+        PartInitConfig init_config{};
+        make_part_init_config(part_handle, init_config);
+        err = part_init_with_mobk_fallback(part_handle, &creds, init_config, nullptr);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        auto bmk = get_part_prop_bytes(part_handle, TSRA_PART_PROP_ID_BACKUP_MASKING_KEY);
+
+        std::random_device rd;
+        std::array<uint8_t, 48> seed{};
+        for (auto &b : seed)
+        {
+            b = static_cast<uint8_t>(rd());
+        }
+        tsra_buffer seed_buf = { seed.data(), static_cast<uint32_t>(seed.size()) };
+
+        tsra_handle sess_handle = 0;
+        err = tsra_sess_open(part_handle, &creds, &seed_buf, &sess_handle);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        auto sess_guard = scope_guard::make_scope_exit([&sess_handle] {
+            ASSERT_EQ(tsra_sess_close(sess_handle), TSRA_STATUS_SUCCESS);
+        });
+
+        auto_key priv_key;
+        auto_key pub_key;
+        err = generate_ecc_keypair(
+            sess_handle,
+            TSRA_ECC_CURVE_P256,
+            false,
+            priv_key.get_ptr(),
+            pub_key.get_ptr()
+        );
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        auto masked_key = get_key_prop_bytes(priv_key.get(), TSRA_KEY_PROP_ID_MASKED_KEY);
+
+        std::vector<uint8_t> message(64, 0x2A);
+        tsra_buffer msg_buf = { message.data(), static_cast<uint32_t>(message.size()) };
+
+        tsra_algo sign_algo = { TSRA_ALGO_ID_ECDSA_SHA256, nullptr, 0 };
+
+        tsra_buffer sig_buf = { nullptr, 0 };
+        err = tsra_crypt_sign(&sign_algo, priv_key.get(), &msg_buf, &sig_buf);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+
+        std::vector<uint8_t> signature(sig_buf.len);
+        sig_buf.ptr = signature.data();
+        err = tsra_crypt_sign(&sign_algo, priv_key.get(), &msg_buf, &sig_buf);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        std::vector<uint8_t> path_bytes(
+            reinterpret_cast<uint8_t *>(path.data()),
+            reinterpret_cast<uint8_t *>(path.data()) + (path.size() * sizeof(tsra_char))
+        );
+
+        auto tmp_path =
+            get_test_tmp_dir() /
+            ("tsra_multi_proc_" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
+
+        std::ofstream out(tmp_path, std::ios::binary);
+        ASSERT_TRUE(out.is_open());
+        write_blob(out, path_bytes);
+        write_blob(out, bmk);
+        if (init_config.backup_config.owner_backup_key != nullptr &&
+            init_config.backup_config.owner_backup_key->ptr != nullptr &&
+            init_config.backup_config.owner_backup_key->len > 0)
+        {
+            auto *obk_ptr = static_cast<uint8_t *>(init_config.backup_config.owner_backup_key->ptr);
+            write_blob(
+                out,
+                std::vector<uint8_t>(
+                    obk_ptr,
+                    obk_ptr + init_config.backup_config.owner_backup_key->len
+                )
+            );
+        }
+        else
+        {
+            write_blob(out, {});
+        }
+        write_blob(out, std::vector<uint8_t>(seed.begin(), seed.end()));
+        write_blob(out, message);
+        write_blob(out, signature);
+        write_blob(out, masked_key);
+        out.close();
+
+        int rc = run_child_test(tmp_path, "tsra_multi_process.ecc_sign_verify_cross_process_child");
+        ASSERT_EQ(rc, 0)
+            << "If running on real hardware, set TSRA_DISABLE_MULTI_PROCESS_TESTS=1 to skip";
+
+        std::error_code ec;
+        std::filesystem::remove(tmp_path, ec);
+    });
+}
+
+TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_child)
+{
+    const char *input_path = std::getenv(kHelperEnv);
+    if (input_path == nullptr || input_path[0] == '\0')
+    {
+        GTEST_SKIP();
+    }
+
+    ASSERT_TRUE(std::filesystem::exists(input_path)) << "Missing input file: " << input_path;
+
+    std::ifstream in(input_path, std::ios::binary);
+    if (!in.is_open())
+    {
+        ADD_FAILURE() << "Failed to open input file: " << input_path << " errno=" << errno << " ("
+                      << std::strerror(errno) << ")";
+        return;
+    }
+
+    auto path_bytes = read_blob(in);
+    auto bmk = read_blob(in);
+    auto obk = read_blob(in);
+    auto seed = read_blob(in);
+    auto message = read_blob(in);
+    auto signature = read_blob(in);
+    auto masked_key = read_blob(in);
+
+    ASSERT_EQ(path_bytes.size() % sizeof(tsra_char), 0u);
+    std::vector<tsra_char> path_chars(path_bytes.size() / sizeof(tsra_char));
+    std::memcpy(path_chars.data(), path_bytes.data(), path_bytes.size());
+
+    tsra_str path_str = { path_chars.data(), static_cast<uint32_t>(path_chars.size()) };
+
+    tsra_handle part_handle = 0;
+    auto api_rev = test_api_rev();
+    auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+    auto part_guard = scope_guard::make_scope_exit([&] {
+        ASSERT_EQ(tsra_part_close(part_handle), TSRA_STATUS_SUCCESS);
+    });
+
+    tsra_credentials creds{};
+    std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+    std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+    // Reset partition before initialization to clear any previous state
+    auto reset_err = tsra_part_reset(part_handle);
+    ASSERT_EQ(reset_err, TSRA_STATUS_SUCCESS);
+
+    tsra_buffer bmk_buf = { bmk.data(), static_cast<uint32_t>(bmk.size()) };
+
+    PartInitConfig init_config{};
+    make_part_init_config(part_handle, init_config);
+    // Function-scoped so its address stays valid for tsra_part_init() below.
+    tsra_buffer obk_buf{};
+    if (!obk.empty())
+    {
+        // Override with the parent's raw OBK. Clear masked_owner_backup_key
+        // (possibly set by make_part_init_config from a cached MOBK): the
+        // Caller source requires exactly one of the two to be non-NULL.
+        obk_buf = { obk.data(), static_cast<uint32_t>(obk.size()) };
+        init_config.backup_config.source = TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER;
+        init_config.backup_config.owner_backup_key = &obk_buf;
+        init_config.backup_config.masked_owner_backup_key = nullptr;
+    }
+
+    // Child process re-init: the device may have BK3 already initialized
+    // from the parent's init. Use the fallback helper which handles this.
+    // Note: bmk_buf is passed via the raw call since the helper doesn't
+    // take explicit BMK/MUK.
+    auto init_err = tsra_part_init(
+        part_handle,
+        &creds,
+        &bmk_buf,
+        nullptr,
+        &init_config.backup_config,
+        &init_config.pota_endorsement,
+        nullptr
+    );
+
+    // Warm-device fallback for the child process.
+    std::vector<uint8_t> mobk_data;
+    tsra_buffer mobk_fb{};
+    if (init_err == TSRA_STATUS_BK3_ALREADY_INITIALIZED &&
+        init_config.backup_config.source == TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER)
+    {
+        mobk_data = load_mobk_file(get_mobk_path());
+        if (!mobk_data.empty())
+        {
+            mobk_fb.ptr = mobk_data.data();
+            mobk_fb.len = static_cast<uint32_t>(mobk_data.size());
+            init_config.backup_config.owner_backup_key = nullptr;
+            init_config.backup_config.masked_owner_backup_key = &mobk_fb;
+
+            init_err = tsra_part_init(
+                part_handle,
+                &creds,
+                &bmk_buf,
+                nullptr,
+                &init_config.backup_config,
+                &init_config.pota_endorsement,
+                nullptr
+            );
+        }
+    }
+    ASSERT_EQ(init_err, TSRA_STATUS_SUCCESS);
+
+    tsra_buffer seed_buf = { seed.data(), static_cast<uint32_t>(seed.size()) };
+
+    tsra_handle sess_handle = 0;
+    err = tsra_sess_open(part_handle, &creds, &seed_buf, &sess_handle);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+    auto sess_guard = scope_guard::make_scope_exit([&] {
+        ASSERT_EQ(tsra_sess_close(sess_handle), TSRA_STATUS_SUCCESS);
+    });
+
+    auto bmk_actual = get_part_prop_bytes(part_handle, TSRA_PART_PROP_ID_BACKUP_MASKING_KEY);
+    ASSERT_EQ(bmk_actual, bmk);
+
+    tsra_buffer masked_buf = { masked_key.data(), static_cast<uint32_t>(masked_key.size()) };
+    auto_key priv_key;
+    auto_key pub_key;
+    err = tsra_key_unmask_pair(
+        sess_handle,
+        TSRA_KEY_KIND_ECC,
+        &masked_buf,
+        priv_key.get_ptr(),
+        pub_key.get_ptr()
+    );
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+    tsra_algo sign_algo = { TSRA_ALGO_ID_ECDSA_SHA256, nullptr, 0 };
+    tsra_buffer msg_buf = { message.data(), static_cast<uint32_t>(message.size()) };
+    tsra_buffer sig_buf = { signature.data(), static_cast<uint32_t>(signature.size()) };
+
+    err = tsra_crypt_verify(&sign_algo, pub_key.get(), &msg_buf, &sig_buf);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+}

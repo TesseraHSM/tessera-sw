@@ -1,0 +1,35 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+[package]
+edition = "2021"
+name = "tsra_fw_hsm_std"
+version = "0.1.0"
+
+[dependencies]
+async-channel.workspace = true
+critical-section = { features = ["std"], workspace = true }
+embassy-executor = { features = [
+  "executor-thread",
+  "platform-std",
+  "trace",
+], workspace = true }
+embassy-sync.workspace = true
+static_cell.workspace = true
+tokio = { features = ["rt-multi-thread", "time"], workspace = true }
+tsra_fw_ddi_mbor_types.workspace = true
+tsra_fw_hsm_core = { features = ["tracing"], workspace = true }
+tsra_fw_hsm_core_tracing = { features = ["level-warn"], workspace = true }
+tsra_fw_hsm_pal_std.workspace = true
+tsra_fw_hsm_pal_traits = { workspace = true }
+
+[features]
+# Forward the per-IO `iic recv` / `oic send` debug traces. Off by default.
+trace-io = ["tsra_fw_hsm_pal_std/trace-io"]
+
+[dev-dependencies]
+hex.workspace = true
+tokio = { features = ["macros", "rt-multi-thread", "time"], workspace = true }
+tsra_crypto.workspace = true
+tsra_ddi_mbor_codec.workspace = true
+tsra_ddi_mbor_types.workspace = true
+x509.workspace = true

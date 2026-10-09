@@ -1,0 +1,172 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+cmake_minimum_required(VERSION 3.14)
+
+if(CMAKE_GENERATOR STREQUAL "Visual Studio 18 2026")
+    # VS2026 generator requires 4.2
+    cmake_minimum_required(VERSION 4.2)
+endif()
+
+project(tsra_api_cpp_tests VERSION 0.1.0)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
+SET(TEST_FEATURES "" CACHE STRING "Test features to enable")
+set(SESSION_EX_TESTS OFF CACHE BOOL "Build tests with open_session_ex")
+
+
+include(FetchContent)
+
+FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.17.0.zip
+)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+FetchContent_Declare(
+    ScopeGuard
+    GIT_REPOSITORY https://github.com/Neargye/scope_guard.git
+    GIT_TAG v0.9.1
+)
+FetchContent_MakeAvailable(ScopeGuard)
+
+FetchContent_Declare(
+    Corrosion
+    GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
+    GIT_TAG v0.6 # Optionally specify a commit hash, version tag or branch here
+)
+FetchContent_MakeAvailable(Corrosion)
+
+enable_testing()
+
+corrosion_import_crate(
+    MANIFEST_PATH ../../native/Cargo.toml
+    CRATE_TYPES cdylib
+    CRATES tsra_api_native
+    FEATURES ${TEST_FEATURES}
+    )
+
+corrosion_experimental_cbindgen(
+    TARGET tsra_api_native
+    HEADER_NAME "tsra_api.h"
+    )
+
+set(SOURCE 
+    handle/part_list_handle.cpp
+    utils/aes_keygen.cpp
+    utils/kdf_derive.cpp
+    utils/key_import.cpp
+    utils/rsa_keygen.cpp
+    utils/shared_secret.cpp
+    utils/part_init_config.cpp
+    utils/resiliency_config.cpp
+    algo/aes/cbc_enc_dec_tests.cpp
+    algo/aes/helpers.cpp
+)
+
+if(SESSION_EX_TESTS)
+    list(APPEND SOURCE
+        utils/sd_provision.cpp
+        session_ex_tests.cpp
+        algo/sealing/keygen_tests.cpp
+        sd/create_backup_tests.cpp
+        sd/create_peer_tests.cpp
+        sd/reseal_tests.cpp
+        sd/restore_local_tests.cpp
+        sd/restore_peer_tests.cpp
+        sd/restore_tests.cpp
+        darc/transfer_tests.cpp
+    )
+else()
+    list(APPEND SOURCE
+        partition_tests.cpp
+        session_tests.cpp
+        handle_mgmt_tests.cpp
+        multi_process_tests.cpp
+        algo/aes/gcm_enc_dec_tests.cpp
+        algo/aes/xts_enc_dec_tests.cpp
+        algo/ecc/ecc_static_der.cpp
+        algo/aes/keygen_tests.cpp
+        algo/ecc/keygen_tests.cpp
+        algo/ecc/unwrap_tests.cpp
+        algo/ecc/unwrap_property_tests.cpp
+        algo/ecc/unwrap_semantic_tests.cpp
+        algo/ecc/helpers.cpp
+        algo/ecc/sign_verify_tests.cpp
+        algo/ecc/keyreport_tests.cpp
+        algo/rsa/keygen_tests.cpp
+        algo/rsa/keyreport_tests.cpp
+        algo/rsa/enc_dec_tests.cpp
+        algo/rsa/rsa_static_der.cpp
+        algo/rsa/sign_verify_tests.cpp
+        algo/rsa/unwrap_tests.cpp
+        algo/sha/digest_tests.cpp
+        algo/hmac/sign_verify_tests.cpp
+        algo/hmac/keygen_tests.cpp
+        algo/secret/unmask_tests.cpp
+        algo/kdf/hkdf_tests.cpp
+        algo/kdf/kbkdf_tests.cpp
+        resiliency/init_stress_tests.cpp
+        resiliency/aes_stress_tests.cpp
+        resiliency/ecc_stress_tests.cpp
+        resiliency/mixed_stress_tests.cpp
+    )
+endif()
+
+add_executable(tsra_api_cpp_tests ${SOURCE})
+target_include_directories(tsra_api_cpp_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Expose the selected DDI backend and session-test mode to the C++ sources as
+# compile definitions.
+# `CARGO_FEATURE_*` env vars only exist during the Rust build script, not during
+# C++ compilation. Backend-specific setup uses `TSRA_FEATURE_MOCK` and
+# `TSRA_FEATURE_EMU`; suite selection uses `SESSION_EX_TESTS`.
+if(TEST_FEATURES MATCHES "(^| )mock($| )")
+    target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_FEATURE_MOCK)
+endif()
+
+if(TEST_FEATURES MATCHES "(^| )emu($| )")
+    target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_FEATURE_EMU)
+endif()
+
+if(SESSION_EX_TESTS)
+    if(TEST_FEATURES MATCHES "(^| )mock($| )")
+        message(FATAL_ERROR "mock and session_ex tests cannot be enabled together")
+    endif()
+endif()
+
+target_compile_definitions(
+    tsra_api_cpp_tests
+    PRIVATE SESSION_EX_TESTS=$<BOOL:${SESSION_EX_TESTS}>
+)
+
+if(UNIX)
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(
+        tsra_api_cpp_tests
+        PUBLIC
+            tsra_api_native
+            GTest::gtest_main
+            scope_guard::scope_guard
+            OpenSSL::Crypto
+    )
+else()
+    target_link_libraries(
+        tsra_api_cpp_tests
+        PUBLIC
+            tsra_api_native
+            GTest::gtest_main
+            scope_guard::scope_guard
+            bcrypt
+            ncrypt
+    )
+endif()
+
+include(GoogleTest)
+gtest_discover_tests(tsra_api_cpp_tests DISCOVERY_TIMEOUT 30)

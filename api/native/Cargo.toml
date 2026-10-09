@@ -1,0 +1,25 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "tsra_api_native"
+version = "0.0.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+open-enum.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tsra_api.workspace = true
+zerocopy = { features = ["derive"], workspace = true }
+
+[features]
+default = []
+emu = ["tsra_api/emu"]
+mock = ["tsra_api/mock"]
+
+[lints]
+workspace = true

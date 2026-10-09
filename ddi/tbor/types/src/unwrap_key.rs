@@ -1,0 +1,173 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Host-side wrapper for the TBOR `UnwrapKey` command.
+//!
+//! `UnwrapKey` is an **in-session** command (Crypto-Officer or
+//! Crypto-User) that RSA-AES-unwraps a host-supplied wrapped key
+//! (AES / RSA / ECC / HMAC) with the partition's unwrapping key (see
+//! [`GetUnwrappingKey`](crate::get_unwrapping_key)) and returns it as a
+//! **masked** blob under the requested scope's masking key — plus the
+//! re-derived wire public key for RSA / ECC.
+//!
+//! The `scope`, `key_class`, and `oaep_hash_algo` are raw 1-byte
+//! discriminants and `key_usage` is a raw `u64` bitfield (the firmware
+//! types them as the `KeyScope` / `KeyClass` / `HashAlgo` open-enums and
+//! the `KeyUsage` bitfield; this host crate is firewalled from the
+//! firmware PAL types).
+
+use alloc::vec::Vec;
+
+use crate::tbor;
+
+/// TBOR opcode for `UnwrapKey`.
+pub const TBOR_OP_UNWRAP_KEY: u8 = 0x14;
+
+/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`).
+pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 3072;
+/// Max masked recovered-key envelope length.
+pub const UNWRAP_MASKED_KEY_MAX_LEN: usize = 3168;
+/// Max recovered public-key length.
+pub const UNWRAP_PUB_KEY_MAX_LEN: usize = 520;
+
+/// `KeyClass` discriminant for a raw AES key.
+pub const KEY_CLASS_AES: u8 = 0;
+/// `KeyClass` discriminant for a DER RSA private key (non-CRT).
+pub const KEY_CLASS_RSA: u8 = 1;
+/// `KeyClass` discriminant for a DER RSA private key (CRT).
+pub const KEY_CLASS_RSA_CRT: u8 = 2;
+/// `KeyClass` discriminant for a PKCS#8 DER ECC private key.
+pub const KEY_CLASS_ECC: u8 = 3;
+/// `KeyClass` discriminant for a variable-length HMAC-SHA-256 key.
+pub const KEY_CLASS_HMAC_SHA256: u8 = 4;
+/// `KeyClass` discriminant for a variable-length HMAC-SHA-384 key.
+pub const KEY_CLASS_HMAC_SHA384: u8 = 5;
+/// `KeyClass` discriminant for a variable-length HMAC-SHA-512 key.
+pub const KEY_CLASS_HMAC_SHA512: u8 = 6;
+
+/// `HsmVaultKeyKind::Rsa2kPrivate` response discriminant.
+pub const KEY_KIND_RSA2K_PRIVATE: u8 = 4;
+/// `HsmVaultKeyKind::Rsa3kPrivate` response discriminant.
+pub const KEY_KIND_RSA3K_PRIVATE: u8 = 5;
+/// `HsmVaultKeyKind::Rsa4kPrivate` response discriminant.
+pub const KEY_KIND_RSA4K_PRIVATE: u8 = 6;
+/// `HsmVaultKeyKind::Rsa2kPrivateCrt` response discriminant.
+pub const KEY_KIND_RSA2K_PRIVATE_CRT: u8 = 7;
+/// `HsmVaultKeyKind::Rsa3kPrivateCrt` response discriminant.
+pub const KEY_KIND_RSA3K_PRIVATE_CRT: u8 = 8;
+/// `HsmVaultKeyKind::Rsa4kPrivateCrt` response discriminant.
+pub const KEY_KIND_RSA4K_PRIVATE_CRT: u8 = 9;
+/// `HsmVaultKeyKind::Ecc256Private` response discriminant.
+pub const KEY_KIND_ECC256_PRIVATE: u8 = 13;
+/// `HsmVaultKeyKind::Ecc384Private` response discriminant.
+pub const KEY_KIND_ECC384_PRIVATE: u8 = 14;
+/// `HsmVaultKeyKind::Ecc521Private` response discriminant.
+pub const KEY_KIND_ECC521_PRIVATE: u8 = 15;
+/// `HsmVaultKeyKind::Aes128` response discriminant.
+pub const KEY_KIND_AES128: u8 = 16;
+/// `HsmVaultKeyKind::Aes192` response discriminant.
+pub const KEY_KIND_AES192: u8 = 17;
+/// `HsmVaultKeyKind::Aes256` response discriminant.
+pub const KEY_KIND_AES256: u8 = 18;
+/// `HsmVaultKeyKind::Secret256` discriminant.
+pub const KEY_KIND_SECRET256: u8 = 22;
+/// `HsmVaultKeyKind::Secret384` discriminant.
+pub const KEY_KIND_SECRET384: u8 = 23;
+/// `HsmVaultKeyKind::Secret521` discriminant.
+pub const KEY_KIND_SECRET521: u8 = 24;
+/// `HsmVaultKeyKind::VarLenHmacSha256` response discriminant.
+pub const KEY_KIND_VAR_LEN_HMAC_SHA256: u8 = 32;
+/// `HsmVaultKeyKind::VarLenHmacSha384` response discriminant.
+pub const KEY_KIND_VAR_LEN_HMAC_SHA384: u8 = 33;
+/// `HsmVaultKeyKind::VarLenHmacSha512` response discriminant.
+pub const KEY_KIND_VAR_LEN_HMAC_SHA512: u8 = 34;
+
+/// `KeyUsage` bit: key may encrypt.
+pub const KEY_USAGE_ENCRYPT: u64 = 1 << 0;
+/// `KeyUsage` bit: key may decrypt.
+pub const KEY_USAGE_DECRYPT: u64 = 1 << 1;
+/// `KeyUsage` bit: key may sign / compute a MAC.
+pub const KEY_USAGE_SIGN: u64 = 1 << 2;
+/// `KeyUsage` bit: key may verify a signature / MAC.
+pub const KEY_USAGE_VERIFY: u64 = 1 << 3;
+/// `KeyUsage` bit: key may derive other keys.
+pub const KEY_USAGE_DERIVE: u64 = 1 << 4;
+/// `KeyUsage` bit: key may wrap other keys.
+pub const KEY_USAGE_WRAP: u64 = 1 << 5;
+/// `KeyUsage` bit: key may unwrap other keys.
+pub const KEY_USAGE_UNWRAP: u64 = 1 << 6;
+
+/// Host-facing TBOR `UnwrapKey` request.
+#[tbor(opcode = TBOR_OP_UNWRAP_KEY, session_ctrl = in_session)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TborUnwrapKeyReq {
+    /// Session id this request is bound to.
+    #[tbor(session_id)]
+    pub session_id: u16,
+
+    /// Requested key scope (masks the recovered key), 1-byte `KeyScope`.
+    pub scope: u8,
+
+    /// Class of the wrapped key, 1-byte `KeyClass` (see `KEY_CLASS_*`).
+    pub key_class: u8,
+
+    /// Requested key-usage permissions, `KeyUsage` bitfield (u64) (see
+    /// `KEY_USAGE_*`).  The device enforces which usage(s) are valid for
+    /// `key_class`.
+    pub key_usage: u64,
+
+    /// OAEP hash used to wrap the KEK, 1-byte `HashAlgo`.
+    pub oaep_hash_algo: u8,
+
+    /// The RSA-AES-wrapped key (`RSA-OAEP(KEK) ‖ AES-KWP(key)`).
+    #[tbor(max_len = 3072)]
+    pub wrapped_blob: Vec<u8>,
+
+    /// Caller-supplied key label recorded in the masked blob's metadata,
+    /// up to 128 bytes. Empty for an unlabeled key.
+    #[tbor(max_len = 128)]
+    pub key_label: Vec<u8>,
+}
+
+/// Host-facing TBOR `UnwrapKey` response.
+#[tbor(response)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TborUnwrapKeyResp {
+    /// The recovered key's vault-kind discriminant.
+    pub key_kind: u8,
+
+    /// The recovered key, masked under the scope's masking key.
+    #[tbor(max_len = 3168)]
+    pub masked_key: Vec<u8>,
+
+    /// The recovered key's wire public key for RSA / ECC; empty for
+    /// symmetric (AES / HMAC) keys.
+    #[tbor(max_len = 520)]
+    pub pub_key: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use tsra_ddi_tbor_types::TborOpReq;
+
+    use super::*;
+
+    #[test]
+    fn request_encodes_fields() {
+        let req = TborUnwrapKeyReq {
+            session_id: 7,
+            scope: 0b011,
+            key_class: KEY_CLASS_HMAC_SHA256,
+            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+            oaep_hash_algo: 1,
+            wrapped_blob: alloc::vec![0x5Au8; 300],
+            key_label: b"imported-key".to_vec(),
+        };
+        let mut buf = [0u8; 4096];
+        let frame = req.encode_request(&mut buf).expect("encode");
+        assert!(
+            frame.contains(&KEY_CLASS_HMAC_SHA256),
+            "encoded frame must carry the key-class discriminant",
+        );
+    }
+}

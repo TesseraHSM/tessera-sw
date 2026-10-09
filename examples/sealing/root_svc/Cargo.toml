@@ -1,0 +1,37 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_sealing_root_svc"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+name = "root_svc"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { features = ["derive"], workspace = true }
+hex.workspace = true
+jzon.workspace = true
+tiny_http = "0.12"
+tsra_api.workspace = true
+tsra_crypto.workspace = true
+tsra_ddi_tbor_types.workspace = true
+tsra_sealing_api.workspace = true
+tsra_sealing_common.workspace = true
+tsra_sealing_report.workspace = true
+x509.workspace = true
+zerocopy.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+ureq = { default-features = false, version = "3" }
+
+[features]
+emu = ["tsra_sealing_common/emu"]
+
+[lints]
+workspace = true

@@ -1,0 +1,1052 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include <openssl/core_dispatch.h>
+#include <openssl/core_names.h>
+#include <openssl/crypto.h>
+#include <openssl/ec.h>
+#include <openssl/err.h>
+#include <openssl/objects.h>
+#include <openssl/params.h>
+#include <openssl/proverr.h>
+#include <openssl/store.h>
+#include <openssl/x509.h>
+#include <string.h>
+
+#include "tsra_ossl_base.h"
+#include "tsra_ossl_ec.h"
+#include "tsra_ossl_file_io.h"
+#include "tsra_ossl_helpers.h"
+#include "tsra_ossl_hsm.h"
+#include "tsra_ossl_masked_key.h"
+#include "tsra_ossl_pkey_param.h"
+
+/*
+ * EC KeyManagement
+ *
+ * supported parameters (pkeyopt):
+ *
+ *   @group
+ *   Description: EC curve
+ *   Accepted values: P-256, P-384, P-521
+ *   Example:
+ *      -pkeyopt group:P-384
+ *
+ *   @tsra.key_usage
+ *   Description: Key usage type for the key pair
+ *   Accepted values: digitalSignature (private: sign, public: verify) or keyAgreement (both:
+ * derive) Default value: digitalSignature Example: -pkeyopt tsra.key_usage:digitalSignature
+ *      -pkeyopt tsra.key_usage:keyAgreement
+ *
+ *   @tsra.session
+ *   Description: Whether to create a session key or persistent key
+ *   Accepted values: true, false, 1, 0, yes, no
+ *   Default value: false
+ *   Example:
+ *      -pkeyopt tsra.session:true
+ *
+ *   @tsra.input_key
+ *   Description: Path to an external DER-encoded EC private key to import.
+ *   When set, the key is wrapped (RSA-AES) and unwrapped into the HSM
+ *   instead of generating a new key pair.
+ *   Example:
+ *      -pkeyopt tsra.input_key:/path/to/ec_key.der
+ *
+ *   @tsra.wrapped_key
+ *   Description: Path to a pre-wrapped key blob (produced by the wrap_key tool).
+ *   When set, the blob is unwrapped directly into the HSM without DER normalization.
+ *   Mutually exclusive with tsra.input_key.
+ *   Example:
+ *      -pkeyopt tsra.wrapped_key:/path/to/wrapped.bin
+ *
+ * */
+
+#define TSRA_EC_POSSIBLE_SELECTIONS                                                                \
+    (OSSL_KEYMGMT_SELECT_PUBLIC_KEY | OSSL_KEYMGMT_SELECT_PRIVATE_KEY |                            \
+     OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS)
+
+#define TSRA_EC_CURVE_ID_DEFAULT TSRA_ECC_CURVE_P256
+#define TSRA_EC_CURVE_ID_NONE -1
+
+#define TSRA_KEY_USAGE_DEFAULT KEY_USAGE_DIGITAL_SIGNATURE
+
+typedef struct
+{
+    int nid;
+    int curve_id;
+} CURVE_MAPPING_ENTRY;
+
+static const CURVE_MAPPING_ENTRY curves[] = {
+    { NID_X9_62_prime256v1, TSRA_ECC_CURVE_P256 },
+    { NID_secp384r1, TSRA_ECC_CURVE_P384 },
+    { NID_secp521r1, TSRA_ECC_CURVE_P521 },
+    { NID_undef, TSRA_EC_CURVE_ID_NONE },
+};
+
+/* Internal Helpers */
+
+static int tsra_ossl_name_to_curve_id(const char *name)
+{
+    int nid;
+
+    nid = EC_curve_nist2nid(name);
+
+    if (nid == NID_undef)
+    {
+        nid = OBJ_sn2nid(name);
+    }
+
+    if (nid == NID_undef)
+    {
+        return TSRA_EC_CURVE_ID_NONE;
+    }
+
+    for (const CURVE_MAPPING_ENTRY *it = curves; it->nid != NID_undef; it++)
+    {
+
+        if (it->nid == nid)
+        {
+            return it->curve_id;
+        }
+    }
+
+    return TSRA_EC_CURVE_ID_NONE;
+}
+
+/**
+ * Get the ECDSA signature size for a given curve.
+ * Returns the raw signature size (r || s concatenated).
+ */
+static size_t tsra_ossl_curve_id_to_sig_size(const int curve_id)
+{
+    switch (curve_id)
+    {
+    case TSRA_ECC_CURVE_P256:
+        return TSRA_EC_P256_SIG_SIZE;
+    case TSRA_ECC_CURVE_P384:
+        return TSRA_EC_P384_SIG_SIZE;
+    case TSRA_ECC_CURVE_P521:
+        return TSRA_EC_P521_SIG_SIZE;
+    default:
+        return 0;
+    }
+}
+
+/* Key Management Functions */
+
+/*
+ * Import a plaintext DER key file into the HSM.
+ * Delegates to the shared tsra_import_key_pair() helper.
+ */
+static tsra_status tsra_ossl_keymgmt_gen_import(
+    TSRA_EC_GEN_CTX *genctx,
+    const struct tsra_key_prop_list *priv_key_prop_list,
+    const struct tsra_key_prop_list *pub_key_prop_list,
+    tsra_handle *out_priv,
+    tsra_handle *out_pub
+)
+{
+    return tsra_import_key_pair(
+        genctx->provctx,
+        genctx->input_key_file,
+        priv_key_prop_list,
+        pub_key_prop_list,
+        out_priv,
+        out_pub
+    );
+}
+
+static TSRA_EC_KEY *tsra_ossl_keymgmt_gen(
+    TSRA_EC_GEN_CTX *genctx,
+    ossl_unused OSSL_CALLBACK *cb,
+    ossl_unused void *cbarg
+)
+{
+    TSRA_EC_KEY *ec_key;
+    tsra_handle public = 0, private = 0;
+    tsra_status status = TSRA_STATUS_INTERNAL_ERROR;
+    const bool enable = true;
+    const tsra_key_class priv_class = TSRA_KEY_CLASS_PRIVATE;
+    const tsra_key_class pub_class = TSRA_KEY_CLASS_PUBLIC;
+    const tsra_key_kind key_kind = TSRA_KEY_KIND_ECC;
+
+    struct tsra_algo algo = {
+
+        .id = TSRA_ALGO_ID_EC_KEY_PAIR_GEN,
+        .params = NULL,
+        .len = 0
+    };
+
+/* Now we only need 4 properties: class, kind, curve, and usage */
+#define TSRA_KEY_PROPS_SIZE 5
+    struct tsra_key_prop pub_key_props[TSRA_KEY_PROPS_SIZE] = {
+        [0] = { .id = TSRA_KEY_PROP_ID_CLASS,
+                .val = (void *)&pub_class,
+                .len = sizeof(pub_class), },
+        [1] = { .id = TSRA_KEY_PROP_ID_KIND,
+                .val = (void *)&key_kind,
+                .len = sizeof(key_kind), },
+        [2] = { .id = TSRA_KEY_PROP_ID_EC_CURVE,
+                .val = (void *)&genctx->ec_curve_id,
+                .len = sizeof(genctx->ec_curve_id), },
+        [3] = { .id = (tsra_key_prop_id)tsra_ossl_get_pub_key_property(genctx->key_usage),
+                .val = (void *)&enable,
+                .len = sizeof(bool), },
+    };
+
+    struct tsra_key_prop priv_key_props[TSRA_KEY_PROPS_SIZE] = {
+        [0] = { .id = TSRA_KEY_PROP_ID_CLASS,
+                .val = (void *)&priv_class,
+                .len = sizeof(priv_class), },
+        [1] = { .id = TSRA_KEY_PROP_ID_KIND,
+                .val = (void *)&key_kind,
+                .len = sizeof(key_kind), },
+        [2] = { .id = TSRA_KEY_PROP_ID_EC_CURVE,
+                .val = (void *)&genctx->ec_curve_id,
+                .len = sizeof(genctx->ec_curve_id), },
+        [3] = { .id = (tsra_key_prop_id)tsra_ossl_get_priv_key_property(genctx->key_usage),
+                .val = (void *)&enable,
+                .len = sizeof(bool), },
+    };
+
+    uint32_t pub_key_prop_count = 4;
+    uint32_t priv_key_prop_count = 4;
+
+    /* Add SESSION property if requested */
+    if (genctx->session_flag)
+    {
+        pub_key_props[4] = (struct tsra_key_prop){
+            .id = TSRA_KEY_PROP_ID_SESSION,
+            .val = (void *)&enable,
+            .len = sizeof(bool),
+        };
+        pub_key_prop_count++;
+
+        priv_key_props[4] = (struct tsra_key_prop){
+            .id = TSRA_KEY_PROP_ID_SESSION,
+            .val = (void *)&enable,
+            .len = sizeof(bool),
+        };
+        priv_key_prop_count++;
+    }
+
+    struct tsra_key_prop_list pub_key_prop_list = {
+        .props = pub_key_props,
+        .count = pub_key_prop_count,
+    };
+
+    struct tsra_key_prop_list priv_key_prop_list = {
+
+        .props = priv_key_props,
+        .count = priv_key_prop_count,
+    };
+
+    ec_key = OPENSSL_zalloc(sizeof(TSRA_EC_KEY));
+    if (ec_key == NULL)
+    {
+        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        return NULL;
+    }
+
+    if (genctx->wrapped_key_file[0] != '\0')
+    {
+        /* Pre-wrapped blob path: unwrap directly into HSM */
+        status = tsra_unwrap_key_pair(
+            genctx->provctx,
+            genctx->wrapped_key_file,
+            &priv_key_prop_list,
+            &pub_key_prop_list,
+            &private,
+            &public
+        );
+    }
+    else if (genctx->input_key_file[0] != '\0')
+    {
+        /* Import path: wrap external DER key, then unwrap into HSM */
+        status = tsra_ossl_keymgmt_gen_import(
+            genctx,
+            &priv_key_prop_list,
+            &pub_key_prop_list,
+            &private,
+            &public
+        );
+    }
+    else
+    {
+        /* Normal generation path */
+        status = tsra_key_gen_pair(
+            genctx->session,
+            &algo,
+            &priv_key_prop_list,
+            &pub_key_prop_list,
+            &private,
+            &public
+        );
+    }
+
+    if (status != TSRA_STATUS_SUCCESS)
+    {
+        ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GENERATE_KEY);
+        goto cleanup;
+    }
+
+    ec_key->genctx = *genctx;
+    ec_key->key.pub = public;
+    ec_key->has_public = true;
+    ec_key->key.priv = private;
+    ec_key->has_private = true;
+
+    /* Handle masked key file output if requested */
+    if (genctx->masked_key_file[0] != '\0')
+    {
+        /* First call to get required buffer size */
+        struct tsra_key_prop prop = { .id = TSRA_KEY_PROP_ID_MASKED_KEY, .val = NULL, .len = 0 };
+
+        tsra_status retrieve_status = tsra_key_get_prop(private, &prop);
+
+        if (retrieve_status == TSRA_STATUS_BUFFER_TOO_SMALL && prop.len > 0)
+        {
+            /* Allocate buffer of exact size */
+            uint32_t masked_key_buffer_size = prop.len;
+            uint8_t *masked_key_buffer = OPENSSL_malloc(masked_key_buffer_size);
+            if (masked_key_buffer == NULL)
+            {
+                ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+                status = TSRA_STATUS_INTERNAL_ERROR;
+                goto cleanup;
+            }
+
+            /* Second call to retrieve the masked key */
+            prop.val = masked_key_buffer;
+            retrieve_status = tsra_key_get_prop(private, &prop);
+
+            if (retrieve_status != TSRA_STATUS_SUCCESS)
+            {
+                OPENSSL_clear_free(masked_key_buffer, masked_key_buffer_size);
+                ERR_raise(ERR_LIB_PROV, ERR_R_OPERATION_FAIL);
+                status = TSRA_STATUS_INTERNAL_ERROR;
+                goto cleanup;
+            }
+
+            /* Write masked key to file with restricted permissions (owner-only) */
+            if (tsra_ossl_write_masked_key_to_file(
+                    masked_key_buffer,
+                    prop.len,
+                    genctx->masked_key_file
+                ) != OSSL_SUCCESS)
+            {
+                OPENSSL_clear_free(masked_key_buffer, masked_key_buffer_size);
+                ERR_raise_data(
+                    ERR_LIB_PROV,
+                    ERR_R_OPERATION_FAIL,
+                    "failed to write masked key to '%s'",
+                    genctx->masked_key_file
+                );
+                status = TSRA_STATUS_INTERNAL_ERROR;
+                goto cleanup;
+            }
+
+            OPENSSL_clear_free(masked_key_buffer, masked_key_buffer_size);
+        }
+        else if (retrieve_status != TSRA_STATUS_PROPERTY_NOT_PRESENT)
+        {
+            /* Unexpected error - not BUFFER_TOO_SMALL and not PROPERTY_NOT_PRESENT */
+            ERR_raise(ERR_LIB_PROV, ERR_R_OPERATION_FAIL);
+            status = TSRA_STATUS_INTERNAL_ERROR;
+            goto cleanup;
+        }
+        /* If PROPERTY_NOT_PRESENT, continue without masked key */
+    }
+
+    /* Success — prevent cleanup from freeing the result */
+    private = 0;
+    public = 0;
+
+cleanup:
+    if (private != 0)
+        tsra_key_delete(private);
+    if (public != 0)
+        tsra_key_delete(public);
+    if (status != TSRA_STATUS_SUCCESS)
+    {
+        OPENSSL_free(ec_key);
+        ec_key = NULL;
+    }
+    return ec_key;
+}
+
+static TSRA_EC_KEY *tsra_ossl_keymgmt_new(ossl_unused void *provctx)
+{
+    TSRA_EC_KEY *key = OPENSSL_zalloc(sizeof(TSRA_EC_KEY));
+    if (key == NULL)
+    {
+        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        return NULL;
+    }
+    return key;
+}
+
+static void tsra_ossl_keymgmt_free(TSRA_EC_KEY *ec_key)
+{
+    if (ec_key == NULL)
+    {
+        return;
+    }
+
+    if (ec_key->key.pub != 0)
+    {
+        tsra_key_delete(ec_key->key.pub);
+    }
+    if (ec_key->key.priv != 0)
+    {
+        tsra_key_delete(ec_key->key.priv);
+    }
+
+    OPENSSL_free(ec_key->pub_key_data);
+    OPENSSL_free(ec_key);
+}
+
+static void tsra_ossl_keymgmt_gen_cleanup(TSRA_EC_GEN_CTX *genctx)
+{
+    if (genctx == NULL)
+    {
+        return;
+    }
+
+    OPENSSL_clear_free(genctx, sizeof(TSRA_EC_GEN_CTX));
+}
+
+static int tsra_ossl_keymgmt_gen_set_params(TSRA_EC_GEN_CTX *genctx, const OSSL_PARAM params[])
+{
+    const OSSL_PARAM *p;
+
+    if (params == NULL)
+    {
+        return OSSL_SUCCESS;
+    }
+
+    /* Parse key_usage: determines whether the key is for signing or key agreement */
+    if ((p = OSSL_PARAM_locate_const(params, TSRA_OSSL_PKEY_PARAM_KEY_USAGE)) != NULL)
+    {
+        if (p->data_type != OSSL_PARAM_UTF8_STRING)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        if (tsra_ossl_key_usage_from_str(p->data, &genctx->key_usage) < 0)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_KEY);
+            return OSSL_FAILURE;
+        }
+    }
+
+    /* Parse group name: maps the curve string (e.g. "P-384") to an internal curve ID */
+    if ((p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_GROUP_NAME)) != NULL)
+    {
+        int curve_id;
+
+        if (p->data_type != OSSL_PARAM_UTF8_STRING)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        if ((curve_id = tsra_ossl_name_to_curve_id(p->data)) == TSRA_EC_CURVE_ID_NONE)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_CURVE);
+            return OSSL_FAILURE;
+        }
+
+        genctx->ec_curve_id = (uint32_t)curve_id;
+    }
+
+    /* Parse session flag: controls whether the key is bound to the current HSM session */
+    if ((p = OSSL_PARAM_locate_const(params, TSRA_OSSL_PKEY_PARAM_SESSION)) != NULL)
+    {
+        int session_result;
+
+        if (p->data_type != OSSL_PARAM_UTF8_STRING)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        if ((session_result = tsra_ossl_session_from_str(p->data)) < 0)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        genctx->session_flag = (bool)session_result;
+    }
+
+    /* Parse masked key output path: file where the HSM-encrypted key blob is stored */
+    if ((p = OSSL_PARAM_locate_const(params, TSRA_OSSL_PKEY_PARAM_MASKED_KEY)) != NULL)
+    {
+        if (p->data_type != OSSL_PARAM_UTF8_STRING)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        if (tsra_ossl_masked_key_filepath_validate(p->data) < 0)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        strncpy(genctx->masked_key_file, p->data, sizeof(genctx->masked_key_file) - 1);
+        genctx->masked_key_file[sizeof(genctx->masked_key_file) - 1] = '\0';
+    }
+
+    if ((p = OSSL_PARAM_locate_const(params, TSRA_OSSL_PKEY_PARAM_INPUT_KEY)) != NULL)
+    {
+        if (p->data_type != OSSL_PARAM_UTF8_STRING)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        if (tsra_ossl_input_key_filepath_validate(p->data) < 0)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        strncpy(genctx->input_key_file, p->data, sizeof(genctx->input_key_file) - 1);
+        genctx->input_key_file[sizeof(genctx->input_key_file) - 1] = '\0';
+    }
+
+    if ((p = OSSL_PARAM_locate_const(params, TSRA_OSSL_PKEY_PARAM_WRAPPED_KEY)) != NULL)
+    {
+        if (p->data_type != OSSL_PARAM_UTF8_STRING)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        if (tsra_ossl_input_key_filepath_validate(p->data) < 0)
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+
+        strncpy(genctx->wrapped_key_file, p->data, sizeof(genctx->wrapped_key_file) - 1);
+        genctx->wrapped_key_file[sizeof(genctx->wrapped_key_file) - 1] = '\0';
+    }
+
+    /* Reject if both input_key and wrapped_key are set */
+    if (genctx->input_key_file[0] != '\0' && genctx->wrapped_key_file[0] != '\0')
+    {
+        ERR_raise_data(
+            ERR_LIB_PROV,
+            PROV_R_INVALID_KEY,
+            "tsra: tsra.input_key and tsra.wrapped_key are mutually exclusive"
+        );
+        return OSSL_FAILURE;
+    }
+
+    return OSSL_SUCCESS;
+}
+
+static TSRA_EC_GEN_CTX *tsra_ossl_keymgmt_gen_init(
+    void *ctx,
+    int selection,
+    const OSSL_PARAM params[]
+)
+{
+    TSRA_EC_GEN_CTX *genctx;
+    TSRA_OSSL_PROV_CTX *provctx = ctx;
+
+    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0)
+    {
+        return NULL;
+    }
+
+    genctx = OPENSSL_zalloc(sizeof(TSRA_EC_GEN_CTX));
+
+    if (genctx == NULL)
+    {
+        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        return NULL;
+    }
+
+    /* Lazy HSM session open is deferred from query_operation to here so
+     * libcrypto can finish its own initialisation (e.g. DRBG bootstrap)
+     * without us re-entering it. */
+    if (tsra_ensure_session(provctx) != TSRA_STATUS_SUCCESS)
+    {
+        OPENSSL_free(genctx);
+        return NULL;
+    }
+
+    genctx->session = provctx->session;
+    genctx->provctx = provctx;
+
+    genctx->key_usage = TSRA_KEY_USAGE_DEFAULT;
+    genctx->ec_curve_id = TSRA_EC_CURVE_ID_DEFAULT;
+    genctx->session_flag = false;
+    genctx->masked_key_file[0] = '\0';
+    genctx->input_key_file[0] = '\0';
+    genctx->wrapped_key_file[0] = '\0';
+
+    if (tsra_ossl_keymgmt_gen_set_params(genctx, params) == 0)
+    {
+        tsra_ossl_keymgmt_gen_cleanup(genctx);
+        return NULL;
+    }
+
+    return genctx;
+}
+
+static int tsra_ossl_keymgmt_has(const TSRA_EC_KEY *ec_key, int selection)
+{
+    int has_selection = 1;
+
+    if (ec_key == NULL)
+    {
+        return OSSL_FAILURE;
+    }
+
+    if ((selection & TSRA_EC_POSSIBLE_SELECTIONS) == 0)
+    {
+        return OSSL_SUCCESS;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0)
+    {
+        has_selection &= ec_key->has_private;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0)
+    {
+        has_selection &= ec_key->has_public;
+    }
+
+    if ((selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) != 0)
+    {
+        has_selection &= 1; // EC curve is a mandatory property
+    }
+
+    return has_selection;
+}
+
+/*
+ * Extract the raw EC point from an HSM-backed key by parsing its SPKI DER.
+ * Returns a newly-allocated buffer (caller must OPENSSL_free) or NULL.
+ */
+static unsigned char *tsra_ossl_keymgmt_get_pub_point(const TSRA_EC_KEY *ec_key, size_t *out_len)
+{
+    const uint32_t spki_max_len = 2048;
+    unsigned char *point = NULL;
+
+    *out_len = 0;
+
+    uint8_t *spki_buf = OPENSSL_zalloc(spki_max_len);
+
+    if (spki_buf == NULL)
+    {
+        return NULL;
+    }
+
+    struct tsra_key_prop prop = { .id = TSRA_KEY_PROP_ID_PUB_KEY_INFO,
+                                  .val = spki_buf,
+                                  .len = spki_max_len };
+
+    if (tsra_key_get_prop(ec_key->key.pub, &prop) != TSRA_STATUS_SUCCESS)
+    {
+        OPENSSL_free(spki_buf);
+        return NULL;
+    }
+
+    const unsigned char *der = spki_buf;
+    X509_PUBKEY *xpub = d2i_X509_PUBKEY(NULL, &der, (long)prop.len);
+
+    if (xpub == NULL)
+    {
+        OPENSSL_free(spki_buf);
+        return NULL;
+    }
+
+    const unsigned char *pk_data = NULL;
+    int pk_len = 0;
+
+    X509_PUBKEY_get0_param(NULL, &pk_data, &pk_len, NULL, xpub);
+
+    if (pk_data != NULL && pk_len > 0)
+    {
+        point = OPENSSL_memdup(pk_data, (size_t)pk_len);
+        *out_len = (size_t)pk_len;
+    }
+
+    X509_PUBKEY_free(xpub);
+    OPENSSL_free(spki_buf);
+    return point;
+}
+
+static int tsra_ossl_keymgmt_match(
+    const TSRA_EC_KEY *ec_key1,
+    const TSRA_EC_KEY *ec_key2,
+    int selection
+)
+{
+    if (ec_key1 == NULL || ec_key2 == NULL)
+    {
+        return OSSL_FAILURE;
+    }
+
+    /* Domain parameters: curves must match */
+    if ((selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS) != 0)
+    {
+        if (ec_key1->genctx.ec_curve_id != ec_key2->genctx.ec_curve_id)
+        {
+            return OSSL_FAILURE;
+        }
+    }
+
+    /* Public key comparison */
+    if ((selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) != 0)
+    {
+        /* Both have HSM handles — quick compare by handle identity */
+        if (ec_key1->key.pub != 0 && ec_key2->key.pub != 0 && ec_key1->pub_key_data == NULL &&
+            ec_key2->pub_key_data == NULL)
+        {
+            if (ec_key1->key.pub != ec_key2->key.pub)
+            {
+                return OSSL_FAILURE;
+            }
+        }
+        else
+        {
+            /* At least one key is imported — compare raw EC point bytes.
+             * For HSM-backed keys, retrieve the point from SPKI DER. */
+            const unsigned char *p1 = ec_key1->pub_key_data;
+            size_t p1_len = ec_key1->pub_key_data_len;
+            unsigned char *alloc1 = NULL;
+
+            if (p1 == NULL && ec_key1->key.pub != 0)
+            {
+                alloc1 = tsra_ossl_keymgmt_get_pub_point(ec_key1, &p1_len);
+                p1 = alloc1;
+            }
+
+            const unsigned char *p2 = ec_key2->pub_key_data;
+            size_t p2_len = ec_key2->pub_key_data_len;
+            unsigned char *alloc2 = NULL;
+
+            if (p2 == NULL && ec_key2->key.pub != 0)
+            {
+                alloc2 = tsra_ossl_keymgmt_get_pub_point(ec_key2, &p2_len);
+                p2 = alloc2;
+            }
+
+            int ok =
+                (p1 != NULL && p2 != NULL && p1_len == p2_len && CRYPTO_memcmp(p1, p2, p1_len) == 0
+                );
+
+            OPENSSL_free(alloc1);
+            OPENSSL_free(alloc2);
+
+            if (!ok)
+            {
+                return OSSL_FAILURE;
+            }
+        }
+    }
+
+    /* Private key comparison */
+    if ((selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) != 0)
+    {
+        /* Both must have HSM-backed private keys to compare */
+        if (ec_key1->key.priv == 0 || ec_key2->key.priv == 0)
+        {
+            return OSSL_FAILURE;
+        }
+
+        if (ec_key1->key.priv != ec_key2->key.priv)
+        {
+            return OSSL_FAILURE;
+        }
+    }
+
+    return OSSL_SUCCESS;
+}
+
+static void *tsra_ossl_keymgmt_load(const void *reference, size_t reference_sz)
+{
+    TSRA_EC_KEY *dst_key;
+
+    /* Validate reference size matches our key object */
+    if (reference == NULL || reference_sz != sizeof(TSRA_EC_KEY))
+    {
+        ERR_raise(ERR_LIB_PROV, ERR_R_PASSED_NULL_PARAMETER);
+        return NULL;
+    }
+
+    /* Create a copy of the key - reference contains the raw bytes of TSRA_EC_KEY */
+    dst_key = OPENSSL_zalloc(sizeof(TSRA_EC_KEY));
+    if (dst_key == NULL)
+    {
+        ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+        return NULL;
+    }
+
+    /* Copy the key structure from reference */
+    memcpy(dst_key, reference, sizeof(TSRA_EC_KEY));
+
+    /* Deep copy pub_key_data to avoid double-free */
+    dst_key->pub_key_data = NULL;
+    const TSRA_EC_KEY *src_key = (const TSRA_EC_KEY *)reference;
+    if (src_key->pub_key_data != NULL && src_key->pub_key_data_len > 0)
+    {
+        dst_key->pub_key_data = OPENSSL_malloc(src_key->pub_key_data_len);
+        if (dst_key->pub_key_data == NULL)
+        {
+            ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+            OPENSSL_free(dst_key);
+            return NULL;
+        }
+        memcpy(dst_key->pub_key_data, src_key->pub_key_data, src_key->pub_key_data_len);
+    }
+
+    return dst_key;
+}
+
+/*
+ * Get the expected uncompressed EC point size for a given curve.
+ * Returns the expected size (1 + 2*coord_size) or 0 for unknown curves.
+ */
+static size_t tsra_ossl_ec_curve_id_to_point_size(int curve_id)
+{
+    switch (curve_id)
+    {
+    case TSRA_ECC_CURVE_P256:
+        return 1 + 2 * TSRA_EC_P256_COORD_SIZE; /* 65 bytes */
+    case TSRA_ECC_CURVE_P384:
+        return 1 + 2 * TSRA_EC_P384_COORD_SIZE; /* 97 bytes */
+    case TSRA_ECC_CURVE_P521:
+        return 1 + 2 * TSRA_EC_P521_COORD_SIZE; /* 133 bytes */
+    default:
+        return 0;
+    }
+}
+
+static int tsra_ossl_keymgmt_import(void *keydata, int selection, const OSSL_PARAM params[])
+{
+    TSRA_EC_KEY *ec_key = keydata;
+
+    if (ec_key == NULL || params == NULL)
+    {
+        return OSSL_FAILURE;
+    }
+
+    /* Import domain parameters (curve name) */
+    if (selection & OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS)
+    {
+        const OSSL_PARAM *p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_GROUP_NAME);
+
+        if (p != NULL)
+        {
+            const char *name = NULL;
+
+            if (!OSSL_PARAM_get_utf8_string_ptr(p, &name) || name == NULL)
+            {
+                ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+                return OSSL_FAILURE;
+            }
+
+            int curve_id = tsra_ossl_name_to_curve_id(name);
+
+            if (curve_id == TSRA_EC_CURVE_ID_NONE)
+            {
+                ERR_raise(ERR_LIB_PROV, PROV_R_INVALID_CURVE);
+                return OSSL_FAILURE;
+            }
+
+            ec_key->genctx.ec_curve_id = (tsra_ecc_curve)curve_id;
+        }
+    }
+
+    /* Import public key (raw EC point: 0x04 || x || y) */
+    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)
+    {
+        const OSSL_PARAM *p = OSSL_PARAM_locate_const(params, OSSL_PKEY_PARAM_PUB_KEY);
+
+        if (p != NULL)
+        {
+            const void *data = NULL;
+            size_t data_len = 0;
+
+            if (!OSSL_PARAM_get_octet_string_ptr(p, &data, &data_len) || data == NULL ||
+                data_len == 0)
+            {
+                ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_GET_PARAMETER);
+                return OSSL_FAILURE;
+            }
+
+            OPENSSL_free(ec_key->pub_key_data);
+            ec_key->pub_key_data = OPENSSL_memdup(data, data_len);
+
+            if (ec_key->pub_key_data == NULL)
+            {
+                ERR_raise(ERR_LIB_PROV, ERR_R_MALLOC_FAILURE);
+                return OSSL_FAILURE;
+            }
+
+            ec_key->pub_key_data_len = data_len;
+            ec_key->has_public = true;
+        }
+    }
+
+    return OSSL_SUCCESS;
+}
+
+static int tsra_ossl_keymgmt_export(
+    ossl_unused const void *keydata,
+    ossl_unused int selection,
+    ossl_unused OSSL_CALLBACK *param_cb,
+    ossl_unused void *cbarg
+)
+{
+    return OSSL_FAILURE;
+}
+
+static const OSSL_PARAM *tsra_ossl_keymgmt_import_types(int selection)
+{
+    static const OSSL_PARAM import_types[] = {
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, NULL, 0),
+        OSSL_PARAM_octet_string(OSSL_PKEY_PARAM_PUB_KEY, NULL, 0),
+        OSSL_PARAM_END
+    };
+
+    if (selection & (OSSL_KEYMGMT_SELECT_PUBLIC_KEY | OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS))
+    {
+        return import_types;
+    }
+
+    return NULL;
+}
+
+static const OSSL_PARAM *tsra_ossl_keymgmt_export_types(ossl_unused int selection)
+{
+    // TODO: Return exportable parameter types
+    return NULL;
+}
+
+static int tsra_ossl_keymgmt_get_params(TSRA_EC_KEY *key, OSSL_PARAM params[])
+{
+    OSSL_PARAM *p;
+
+    if (key == NULL)
+    {
+        return OSSL_FAILURE;
+    }
+
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_GROUP_NAME);
+    if (p != NULL && !OSSL_PARAM_set_utf8_string(
+                         p,
+                         OBJ_nid2sn(tsra_ossl_ec_curve_id_to_nid((int)key->genctx.ec_curve_id))
+                     ))
+    {
+        ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_SET_PARAMETER);
+        return OSSL_FAILURE;
+    }
+
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS);
+    if (p != NULL)
+    {
+        int bits = tsra_ossl_ec_curve_id_to_bits((int)key->genctx.ec_curve_id);
+        if (bits == 0 || !OSSL_PARAM_set_int(p, bits))
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_SET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+    }
+
+    p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE);
+    if (p != NULL)
+    {
+        /*
+         * Report the maximum DER-encoded ECDSA-Sig-Value size.
+         * SEQUENCE { INTEGER r, INTEGER s } — each INTEGER may have a
+         * leading zero byte.  OpenSSL uses this for buffer allocation.
+         */
+        size_t raw = tsra_ossl_curve_id_to_sig_size((int)key->genctx.ec_curve_id);
+        size_t coord = raw / 2;
+        size_t der_max = 2 * (coord + 3) + 3;
+        if (raw == 0 || !OSSL_PARAM_set_size_t(p, der_max))
+        {
+            ERR_raise(ERR_LIB_PROV, PROV_R_FAILED_TO_SET_PARAMETER);
+            return OSSL_FAILURE;
+        }
+    }
+
+    return OSSL_SUCCESS;
+}
+
+static const OSSL_PARAM *tsra_ossl_keymgmt_gettable_params(ossl_unused void *ctx)
+{
+    static const OSSL_PARAM params[] = {
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, NULL, 0),
+        OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, NULL),
+        OSSL_PARAM_size_t(OSSL_PKEY_PARAM_MAX_SIZE, NULL),
+        OSSL_PARAM_END
+    };
+
+    return params;
+}
+
+static const OSSL_PARAM *tsra_ossl_keymgmt_gen_settable_params(
+    ossl_unused void *genctx,
+    ossl_unused void *ctx
+)
+{
+    static const OSSL_PARAM settable_params[] = {
+        OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_GROUP_NAME, NULL, 0),
+        OSSL_PARAM_utf8_string(TSRA_OSSL_PKEY_PARAM_KEY_USAGE, NULL, 0),
+        OSSL_PARAM_utf8_string(TSRA_OSSL_PKEY_PARAM_SESSION, NULL, 0),
+        OSSL_PARAM_utf8_string(TSRA_OSSL_PKEY_PARAM_MASKED_KEY, NULL, 0),
+        OSSL_PARAM_utf8_string(TSRA_OSSL_PKEY_PARAM_INPUT_KEY, NULL, 0),
+        OSSL_PARAM_utf8_string(TSRA_OSSL_PKEY_PARAM_WRAPPED_KEY, NULL, 0),
+        OSSL_PARAM_END
+    };
+
+    return settable_params;
+}
+
+static const char *tsra_ossl_keymgmt_ec_query_operation_name(int operation_id)
+{
+    switch (operation_id)
+    {
+    case OSSL_OP_KEYEXCH:
+        return "ECDH";
+    case OSSL_OP_SIGNATURE:
+        return "ECDSA";
+    }
+    return "EC";
+}
+
+/* EC Key Management */
+const OSSL_DISPATCH tsra_ossl_ec_keymgmt_functions[] = {
+    { OSSL_FUNC_KEYMGMT_NEW, (void (*)(void))tsra_ossl_keymgmt_new },
+    { OSSL_FUNC_KEYMGMT_GEN, (void (*)(void))tsra_ossl_keymgmt_gen },
+    { OSSL_FUNC_KEYMGMT_GEN_INIT, (void (*)(void))tsra_ossl_keymgmt_gen_init },
+    { OSSL_FUNC_KEYMGMT_GEN_CLEANUP, (void (*)(void))tsra_ossl_keymgmt_gen_cleanup },
+    { OSSL_FUNC_KEYMGMT_GEN_SET_PARAMS, (void (*)(void))tsra_ossl_keymgmt_gen_set_params },
+    { OSSL_FUNC_KEYMGMT_GEN_SETTABLE_PARAMS,
+      (void (*)(void))tsra_ossl_keymgmt_gen_settable_params },
+    { OSSL_FUNC_KEYMGMT_FREE, (void (*)(void))tsra_ossl_keymgmt_free },
+    { OSSL_FUNC_KEYMGMT_HAS, (void (*)(void))tsra_ossl_keymgmt_has },
+    { OSSL_FUNC_KEYMGMT_MATCH, (void (*)(void))tsra_ossl_keymgmt_match },
+    { OSSL_FUNC_KEYMGMT_LOAD, (void (*)(void))tsra_ossl_keymgmt_load },
+    { OSSL_FUNC_KEYMGMT_IMPORT, (void (*)(void))tsra_ossl_keymgmt_import },
+    { OSSL_FUNC_KEYMGMT_EXPORT, (void (*)(void))tsra_ossl_keymgmt_export },
+    { OSSL_FUNC_KEYMGMT_IMPORT_TYPES, (void (*)(void))tsra_ossl_keymgmt_import_types },
+    { OSSL_FUNC_KEYMGMT_EXPORT_TYPES, (void (*)(void))tsra_ossl_keymgmt_export_types },
+    { OSSL_FUNC_KEYMGMT_GET_PARAMS, (void (*)(void))tsra_ossl_keymgmt_get_params },
+    { OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, (void (*)(void))tsra_ossl_keymgmt_gettable_params },
+    { OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME,
+      (void (*)(void))tsra_ossl_keymgmt_ec_query_operation_name },
+    { 0, NULL }
+};

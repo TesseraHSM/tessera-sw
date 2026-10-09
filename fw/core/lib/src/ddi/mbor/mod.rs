@@ -1,0 +1,287 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+pub(crate) mod aes_encrypt_decrypt;
+pub(crate) mod aes_generate_key;
+pub(crate) mod attest_key;
+pub(crate) mod bulk;
+pub(crate) mod change_pin;
+pub(crate) mod close_session;
+pub(crate) mod delete_key;
+pub(crate) mod ecc_generate_key_pair;
+pub(crate) mod ecc_sign;
+pub(crate) mod ecdh_key_exchange;
+pub(crate) mod establish_credential;
+pub(crate) mod from_ddi;
+pub(crate) mod from_pal;
+pub(crate) mod get_api_rev;
+pub(crate) mod get_cert_chain_info;
+pub(crate) mod get_certificate;
+pub(crate) mod get_device_info;
+pub(crate) mod get_establish_cred_encryption_key;
+pub(crate) mod get_sealed_bk3;
+pub(crate) mod get_session_encryption_key;
+pub(crate) mod get_unwrapping_key;
+pub(crate) mod hkdf_derive;
+pub(crate) mod hmac;
+pub(crate) mod init_bk3;
+pub(crate) mod kbkdf_derive;
+pub(crate) mod kdf;
+pub(crate) mod key_attrs;
+pub(crate) mod masking;
+pub(crate) mod open_session;
+pub(crate) mod reopen_session;
+pub(crate) mod rsa_mod_exp;
+pub(crate) mod rsa_unwrap;
+pub(crate) mod set_sealed_bk3;
+pub(crate) mod sha_digest;
+pub(crate) mod unmask_key;
+
+pub(crate) use aes_encrypt_decrypt::*;
+pub(crate) use aes_generate_key::*;
+pub(crate) use attest_key::*;
+pub(crate) use change_pin::*;
+pub(crate) use close_session::*;
+pub(crate) use delete_key::*;
+pub(crate) use ecc_generate_key_pair::*;
+pub(crate) use ecc_sign::*;
+pub(crate) use ecdh_key_exchange::*;
+pub(crate) use establish_credential::*;
+pub(crate) use get_api_rev::*;
+pub(crate) use get_cert_chain_info::*;
+pub(crate) use get_certificate::*;
+pub(crate) use get_device_info::*;
+pub(crate) use get_establish_cred_encryption_key::*;
+pub(crate) use get_sealed_bk3::*;
+pub(crate) use get_session_encryption_key::*;
+pub(crate) use get_unwrapping_key::*;
+pub(crate) use hkdf_derive::*;
+pub(crate) use hmac::*;
+pub(crate) use init_bk3::*;
+pub(crate) use kbkdf_derive::*;
+pub(crate) use open_session::*;
+pub(crate) use reopen_session::*;
+pub(crate) use rsa_mod_exp::*;
+pub(crate) use rsa_unwrap::*;
+pub(crate) use set_sealed_bk3::*;
+pub(crate) use sha_digest::*;
+use tsra_fw_ddi_mbor::*;
+use tsra_fw_ddi_mbor_api::DdiDecoder;
+use tsra_fw_ddi_mbor_api::DdiEncoder;
+use tsra_fw_ddi_mbor_types::error::DdiErrResp;
+use tsra_fw_ddi_mbor_types::*;
+pub(crate) use unmask_key::*;
+
+use super::*;
+
+/// Minimum DDI API revision accepted by this firmware.
+pub(crate) const DDI_API_REV_MIN: DdiApiRev = DdiApiRev { major: 1, minor: 0 };
+
+/// Maximum DDI API revision accepted by this firmware.
+pub(crate) const DDI_API_REV_MAX: DdiApiRev = DdiApiRev { major: 1, minor: 1 };
+
+/// User credential field length (user ID or PIN) — one AES block.
+///
+/// Shared by [`establish_credential`] and [`open_session`] for the
+/// all-zero sentinel check on decrypted credential plaintext.
+pub(crate) const CRED_FIELD_LEN: usize = 16;
+
+/// Partition / session `BK` and `MK` length — 80 bytes = 32-byte
+/// AES-256 key ‖ 48-byte HMAC-SHA-384 key.  Matches the HKDF-Expand
+/// OKM length used for the credential keys and the masked-key
+/// envelope plaintext size used to wrap MK / MK_SESSION.
+pub(crate) const BK_LEN: usize =
+    tsra_fw_core_crypto_key_masking::cbc::MASKING_KEY_AES_CBC_256_HMAC_384_LEN;
+
+/// Central DDI API revision check.
+///
+/// All commands except [`DdiOp::GetApiRev`] must carry `hdr.rev` set to a
+/// supported revision. `GetApiRev` is the bootstrap command — the host
+/// does not yet know the supported revision, so its `hdr.rev` must be
+/// `None` (enforced inside its handler).
+///
+/// Returns [`HsmError::UnsupportedRevision`] if `hdr.rev` is missing or
+/// outside the supported range.
+#[inline]
+fn check_api_rev(hdr: &DdiReqHdr) -> HsmResult<()> {
+    if hdr.op == DdiOp::GetApiRev {
+        return Ok(());
+    }
+    let rev = hdr.rev.ok_or(HsmError::UnsupportedRevision)?;
+    if rev < DDI_API_REV_MIN || rev > DDI_API_REV_MAX {
+        return Err(HsmError::UnsupportedRevision);
+    }
+    Ok(())
+}
+
+/// Outcome of dispatching a single MBOR command.
+///
+/// Carries the encoded response and, for `OpenSession`, the freshly
+/// allocated session id the IO layer places in the CQE so the host driver
+/// can register the session against the calling file handle. Every other
+/// command leaves `session_id` as `None`.
+pub(crate) struct DispatchResult<'p> {
+    /// Encoded response slice (borrows `pal`'s per-IO allocator).
+    pub(crate) resp: &'p DmaBuf,
+    /// Session id to place in the CQE; set only by `OpenSession`.
+    pub(crate) session_id: Option<u16>,
+}
+
+impl<'p> DispatchResult<'p> {
+    /// Wraps a plain response that carries no session id (the common case).
+    pub(crate) fn from_resp(resp: &'p DmaBuf) -> Self {
+        Self {
+            resp,
+            session_id: None,
+        }
+    }
+}
+
+/// Dispatch an MBOR command to its handler.
+///
+/// Returns a [`DispatchResult`] — the encoded response slice plus, for
+/// `OpenSession`, the freshly allocated session id — on success, or a
+/// [`HsmError`] on failure. The slice borrows from `pal`'s per-IO allocator
+/// and is valid until the IO completes.
+///
+/// An opcode this function does not implement yields
+/// [`HsmError::UnsupportedCmd`]. The caller treats that as its cue to
+/// offer the request to the platform — see
+/// [`HsmCustomDispatch`](tsra_fw_hsm_pal_traits::HsmCustomDispatch).
+///
+/// This function is `async` because `GetCertificate` calls into
+/// `HsmCertStore::get_cert` which is async.
+pub(crate) async fn dispatch<'p, P: HsmPal>(
+    pal: &'p P,
+    io: &impl HsmIo,
+    decoder: &mut DdiDecoder<'_>,
+    hdr: &DdiReqHdr,
+) -> HsmResult<DispatchResult<'p>> {
+    check_api_rev(hdr)?;
+
+    // `OpenSession` is the only command that surfaces a session id (for the
+    // CQE), so it returns a fully-formed `DispatchResult`; every other command
+    // yields just a response slice that is wrapped below.
+    if matches!(hdr.op, DdiOp::OpenSession) {
+        return open_session(pal, io, decoder, hdr).await;
+    }
+
+    let resp = match hdr.op {
+        DdiOp::GetApiRev => get_api_rev(pal, io, decoder, hdr),
+        DdiOp::GetDeviceInfo => get_device_info(pal, io, decoder, hdr),
+        DdiOp::GetCertChainInfo => get_cert_chain_info(pal, io, decoder, hdr).await,
+        DdiOp::GetCertificate => get_certificate(pal, io, decoder, hdr).await,
+        DdiOp::ShaDigest => sha_digest(pal, io, decoder, hdr).await,
+        DdiOp::GetEstablishCredEncryptionKey => {
+            get_establish_cred_encryption_key(pal, io, decoder, hdr).await
+        }
+        DdiOp::GetSessionEncryptionKey => get_session_encryption_key(pal, io, decoder, hdr).await,
+        DdiOp::GetUnwrappingKey => get_unwrapping_key(pal, io, decoder, hdr).await,
+        DdiOp::RsaUnwrap => rsa_unwrap(pal, io, decoder, hdr).await,
+        DdiOp::UnmaskKey => unmask_key(pal, io, decoder, hdr).await,
+        DdiOp::GetSealedBk3 => get_sealed_bk3(pal, io, decoder, hdr),
+        DdiOp::SetSealedBk3 => set_sealed_bk3(pal, io, decoder, hdr),
+        DdiOp::InitBk3 => init_bk3(pal, io, decoder, hdr).await,
+        DdiOp::EstablishCredential => establish_credential(pal, io, decoder, hdr).await,
+        DdiOp::ChangePin => change_pin(pal, io, decoder, hdr).await,
+        DdiOp::CloseSession => close_session(pal, io, decoder, hdr).await,
+        DdiOp::ReopenSession => reopen_session(pal, io, decoder, hdr).await,
+        DdiOp::DeleteKey => delete_key(pal, io, decoder, hdr).await,
+        DdiOp::AesGenerateKey => aes_generate_key(pal, io, decoder, hdr).await,
+        DdiOp::AesEncryptDecrypt => aes_encrypt_decrypt(pal, io, decoder, hdr).await,
+        DdiOp::EccGenerateKeyPair => ecc_generate_key_pair(pal, io, decoder, hdr).await,
+        DdiOp::EccSign => ecc_sign(pal, io, decoder, hdr).await,
+        DdiOp::EcdhKeyExchange => ecdh_key_exchange(pal, io, decoder, hdr).await,
+        DdiOp::HkdfDerive => hkdf_derive(pal, io, decoder, hdr).await,
+        DdiOp::KbkdfCounterHmacDerive => kbkdf_counter_hmac_derive(pal, io, decoder, hdr).await,
+        DdiOp::Hmac => hmac(pal, io, decoder, hdr).await,
+        DdiOp::RsaModExp => rsa_mod_exp(pal, io, decoder, hdr).await,
+        DdiOp::AttestKey => attest_key(pal, io, decoder, hdr).await,
+        // Not a core command. The caller offers it to the platform on
+        // seeing this status.
+        _ => Err(HsmError::UnsupportedCmd),
+    }?;
+    Ok(DispatchResult::from_resp(resp))
+}
+
+/// Encode a DDI response (header + data) in a single pass.
+///
+/// The caller supplies a destination buffer (typically from
+/// [`HsmAlloc::alloc_all`](tsra_fw_hsm_pal_traits::HsmAlloc::alloc_all));
+/// this helper encodes directly into it and returns the number of bytes
+/// written.
+pub(crate) fn encode_resp<H, D>(hdr: &H, data: &D, smem: &mut [u8]) -> HsmResult<usize>
+where
+    H: MborEncode,
+    D: MborEncode,
+{
+    let mut encoder = MborEncoder::new(smem);
+    MborMap(2).mbor_encode(&mut encoder)?;
+    0u8.mbor_encode(&mut encoder)?;
+    hdr.mbor_encode(&mut encoder)?;
+    1u8.mbor_encode(&mut encoder)?;
+    data.mbor_encode(&mut encoder)?;
+    Ok(encoder.position())
+}
+
+/// Encode the DDI response header and outer framing, returning the encoder
+/// positioned just before the data map.
+///
+/// Use this with [`DdiGetCertificateResp::frame`] (or similar) to encode the
+/// header first, then reserve in-place slots for variable-length fields.
+pub(crate) fn encode_resp_hdr<'a>(
+    hdr: &DdiRespHdr,
+    smem: &'a mut [u8],
+) -> HsmResult<MborEncoder<'a>> {
+    let mut encoder = MborEncoder::new(smem);
+    MborMap(2).mbor_encode(&mut encoder)?;
+    0u8.mbor_encode(&mut encoder)?;
+    hdr.mbor_encode(&mut encoder)?;
+    1u8.mbor_encode(&mut encoder)?;
+    Ok(encoder)
+}
+
+/// Build a success [`DdiRespHdr`] echoing the request's `rev` field.
+pub(crate) fn success_hdr(req: &DdiReqHdr, op: DdiOp) -> DdiRespHdr {
+    DdiRespHdr {
+        rev: req.rev,
+        op,
+        sess_id: None,
+        status: 0, // DDI Success
+        fips_approved: false,
+    }
+}
+
+/// Build a success [`DdiRespHdr`] for a session-bearing command.
+///
+/// Use this for handlers whose response header must carry the session
+/// id the command opened or closed (e.g. `OpenSession` returns the
+/// freshly-allocated id; `CloseSession` echoes the closed id back).
+pub(crate) fn success_hdr_sess(req: &DdiReqHdr, op: DdiOp, sess_id: u16) -> DdiRespHdr {
+    DdiRespHdr {
+        rev: req.rev,
+        op,
+        sess_id: Some(sess_id),
+        status: 0, // DDI Success
+        fips_approved: false,
+    }
+}
+
+/// Encode a DDI error response into `smem`.
+///
+/// Writes `DdiRespHdr { op, status } + DdiErrResp {}` and returns the
+/// encoded length. Used for post-decode errors where the host expects
+/// a DDI response body (not just a CQE status code).
+///
+/// Returns [`HsmError::DdiEncodeFailed`] if the buffer is too small.
+pub(crate) fn encode_ddi_err(op: DdiOp, status: HsmError, smem: &mut [u8]) -> HsmResult<usize> {
+    let hdr = DdiRespHdr {
+        rev: None,
+        op,
+        sess_id: None,
+        status: status.0,
+        fips_approved: false,
+    };
+    let data = DdiErrResp {};
+    DdiEncoder::encode_parts(hdr, data, smem)
+}

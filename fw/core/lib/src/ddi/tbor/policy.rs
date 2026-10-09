@@ -1,0 +1,112 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Firmware-side parser for the partition policy ([`PartPolicy`]).
+//!
+//! The canonical byte layout — structs, derives, layout asserts — is
+//! defined in [`tsra_fw_ddi_tbor_types::policy`].  That crate must
+//! stay free of firmware deps (`DmaBuf`, `HsmError`), so the
+//! validation/parser surface that consumes those primitives lives
+//! here as a thin free function over the canonical type.
+//!
+//! Validation rules (any failure returns [`HsmError::InvalidArg`]):
+//!
+//! * Buffer length equals [`PART_POLICY_LEN`].
+//! * `try_read_from_bytes` succeeds — automatically rejects any
+//!   non-canonical byte (needed for canonical hashing into the policy
+//!   digest).
+//! * `version.major == POLICY_VERSION_MAJOR`; any `version.minor`
+//!   accepted (forward-compat).
+//! * `pota_pub_key` and `sata_pub_key` are **required** Ecc384 keys.
+//! * `sapota_pub_key` and `backup_part_pub_key` are **optional**: a
+//!   zero `len` marks them absent; otherwise they must be valid Ecc384
+//!   keys.
+//! * `flags` sets no reserved bits ([`PolicyFlags::is_valid`]).
+//!
+//! `backup_part_id` and `info` are opaque caller payload and are not
+//! validated.
+
+use tsra_fw_ddi_tbor_types::policy::PartPolicy;
+use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
+use tsra_fw_ddi_tbor_types::policy::PolicyPubKey;
+use tsra_fw_ddi_tbor_types::policy::PART_POLICY_LEN;
+use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
+use tsra_fw_ddi_tbor_types::policy::POLICY_VERSION_MAJOR;
+use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmResult;
+use zerocopy::TryFromBytes;
+
+// Compile-time pin: the `PART_POLICY_LEN` re-exported from
+// `tsra_fw_hsm_pal_traits` (which has no dependency on
+// `tsra_fw_ddi_tbor_types`) must match the canonical
+// `tsra_fw_ddi_tbor_types::policy::PART_POLICY_LEN` byte for byte;
+// a mismatch would surface as a runtime `InvalidArg` when the
+// `PartInit` handler validates the request's `part_policy` length.
+const _: () = assert!(tsra_fw_hsm_pal_traits::PART_POLICY_LEN == PART_POLICY_LEN);
+
+/// Active prefix length of `PolicyPubKey::data` when `kind` decodes
+/// to [`PolicyKeyKind::Ecc384`] — raw P-384 `X ‖ Y` coordinates (no
+/// SEC1 `0x04` prefix).
+const ECC384_KEY_LEN: usize = POLICY_MAX_KEY_LEN;
+
+/// Validate a single [`PolicyPubKey`] slot.
+///
+/// When `required` is `false`, a zero `len` is accepted as "absent"
+/// (the slot is unused for this policy); any non-zero `len` must still
+/// describe a well-formed Ecc384 key.  When `required` is `true`,
+/// the slot must always be a well-formed Ecc384 key.
+fn validate_pubkey(key: &PolicyPubKey, required: bool) -> HsmResult<()> {
+    let kind = key.kind();
+    let key_len = key.len();
+
+    if !required && key_len == 0 {
+        return Ok(());
+    }
+
+    match kind {
+        PolicyKeyKind::Ecc384 => {
+            if key_len != ECC384_KEY_LEN {
+                return Err(HsmError::InvalidArg);
+            }
+        }
+        _ => return Err(HsmError::InvalidArg),
+    }
+    Ok(())
+}
+
+/// Validate a [`PART_POLICY_LEN`]-byte `PartPolicy` resident in
+/// DMA-eligible memory and return a **zero-copy** [`PartPolicy`] view
+/// borrowing `buf`.
+///
+/// `PartPolicy` is [`Unaligned`](zerocopy::Unaligned), so it is borrowed
+/// directly from the (arbitrarily-aligned) wire buffer with
+/// `try_ref_from_bytes` — no copy.  The returned reference borrows `buf`
+/// for its lifetime; callers that also need the raw bytes for hashing or
+/// persistence keep the same `&DmaBuf` and thread it into the next DMA
+/// primitive.
+pub fn from_bytes(buf: &DmaBuf) -> HsmResult<&PartPolicy> {
+    if buf.len() != PART_POLICY_LEN {
+        return Err(HsmError::InvalidArg);
+    }
+
+    let this = PartPolicy::try_ref_from_bytes(buf).map_err(|_| HsmError::InvalidArg)?;
+
+    if this.version.major != POLICY_VERSION_MAJOR {
+        return Err(HsmError::InvalidArg);
+    }
+
+    // POTA + SATA trust anchors are mandatory; SAPOTA + backing
+    // partition + DATA keys are optional (absent => zero len).
+    validate_pubkey(&this.pota_pub_key, true)?;
+    validate_pubkey(&this.sata_pub_key, true)?;
+    validate_pubkey(&this.sapota_pub_key, false)?;
+    validate_pubkey(&this.backup_part_pub_key, false)?;
+    validate_pubkey(&this.data_pub_key, false)?;
+
+    if !this.flags.is_valid() {
+        return Err(HsmError::InvalidArg);
+    }
+
+    Ok(this)
+}

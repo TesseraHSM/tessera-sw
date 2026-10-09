@@ -1,0 +1,44 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Fastpath (FP) firmware workspace.
+#
+# A single binary is built here and runs unmodified on all three FP cores
+# (FP0/FP1/FP2). Per-core identity is supplied at image-load time through a
+# 16-byte boot-config block the SP writes to the base of each core's DTCM;
+# see `plat::boot_cfg`.
+
+[workspace]
+members = ["app", "crates/pqc_ml"]
+resolver = "2"
+
+[workspace.dependencies]
+# speak one wire format. The crate is `no_std` and allocation-free.
+
+tsra_fw_uno_drivers_systick = { features = [
+  "fp-core",
+], path = "../fw/drivers/systick" }
+
+pqc_ml = { path = "crates/pqc_ml" }
+
+cortex-m = "0.7.7"
+cortex-m-rt = "0.7.5"
+embassy-executor = "0.10.0"
+embassy-futures = "0.1.2"
+embassy-time = "0.5.1"
+zerocopy = "0.8"
+
+[profile.release]
+codegen-units = 1
+debug = true
+lto = true
+# FP cores only have 32 KB of ITCM, so the image is optimised for size.
+opt-level = "z"
+panic = "abort"
+
+[profile.dev]
+codegen-units = 1
+debug = true
+lto = true
+opt-level = "z"
+panic = "abort"

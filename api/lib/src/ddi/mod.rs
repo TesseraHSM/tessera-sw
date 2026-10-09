@@ -1,0 +1,607 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+mod aes;
+mod aes_xts_key;
+mod darc_kex_key_gen;
+mod darc_key_unwrap;
+mod darc_key_wrap;
+mod darc_tmk_export;
+mod darc_tmk_gen;
+mod darc_tmk_import;
+mod descriptor_utils;
+mod dev;
+mod ecc;
+mod hkdf;
+mod hmac;
+mod kbkdf;
+mod key;
+mod masked_key;
+mod part_policy;
+mod partition;
+mod partition_ex;
+mod rsa;
+mod sd_create_peer_backup;
+mod sd_create_remote_backup;
+mod sd_evidence;
+mod sd_reseal_remote_backup;
+mod sd_restore_local_backup;
+mod sd_restore_peer_backup;
+mod sd_restore_remote_backup;
+mod sd_sealing_key_gen;
+mod session;
+mod session_ex;
+mod tpm;
+
+pub(crate) use aes::*;
+pub(crate) use aes_xts_key::*;
+pub(crate) use darc_kex_key_gen::*;
+pub(crate) use darc_key_unwrap::*;
+pub(crate) use darc_key_wrap::*;
+pub(crate) use darc_tmk_export::*;
+pub(crate) use darc_tmk_gen::*;
+pub(crate) use darc_tmk_import::*;
+pub(crate) use descriptor_utils::*;
+pub(crate) use dev::*;
+pub(crate) use ecc::*;
+pub(crate) use hkdf::*;
+pub(crate) use hmac::*;
+pub(crate) use kbkdf::*;
+pub(crate) use key::*;
+pub(crate) use masked_key::*;
+/// Typed, fluent builder for [`PartPolicy`]; construct a policy with
+/// named setters instead of hand-assembling the wire image.
+pub use part_policy::PartPolicyBuilder;
+pub(crate) use partition::*;
+pub(crate) use partition_ex::*;
+pub(crate) use rsa::*;
+pub(crate) use sd_create_peer_backup::*;
+pub(crate) use sd_create_remote_backup::*;
+pub(crate) use sd_evidence::*;
+pub(crate) use sd_reseal_remote_backup::*;
+pub(crate) use sd_restore_local_backup::*;
+pub(crate) use sd_restore_peer_backup::*;
+pub(crate) use sd_restore_remote_backup::*;
+pub(crate) use sd_sealing_key_gen::*;
+pub(crate) use session::*;
+pub(crate) use session_ex::*;
+pub(crate) use tpm::*;
+use tsra_ddi::*;
+use tsra_ddi_mbor_codec::*;
+use tsra_ddi_mbor_types::*;
+/// Max masked recovered-key envelope length returned by `DarcKeyUnwrap`.
+pub use tsra_ddi_tbor_types::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
+/// Max recovered public-key length returned by `DarcKeyUnwrap`.
+pub use tsra_ddi_tbor_types::DARC_UNWRAP_PUB_KEY_MAX_LEN;
+/// Max AES-KWP-wrapped `COSE_Key` length accepted by `DarcKeyUnwrap`.
+pub use tsra_ddi_tbor_types::DARC_UNWRAP_WRAPPED_KEY_MAX_LEN;
+/// Max masked EC private-key envelope length accepted by `DarcKeyWrap`.
+pub use tsra_ddi_tbor_types::DARC_WRAP_MASKED_KEY_MAX_LEN;
+/// Max AES-KWP-wrapped `COSE_Key` length returned by `DarcKeyWrap`.
+pub use tsra_ddi_tbor_types::DARC_WRAP_WRAPPED_KEY_MAX_LEN;
+/// Maximum number of certificates in one SD-evidence certificate chain.
+pub use tsra_ddi_tbor_types::EVIDENCE_CHAIN_MAX_CERTS;
+/// Wire length of the DARC key-exchange public key (raw P-384 `x ‖ y`).
+pub use tsra_ddi_tbor_types::KEX_PUB_KEY_LEN;
+/// Size, in bytes, of the `part_final` `local_mk_backup` envelope.
+pub use tsra_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
+/// Wire length of the masked DARC key-exchange private key.
+pub use tsra_ddi_tbor_types::MASKED_KEX_KEY_LEN;
+/// Exact length of the local (masked) security-domain backup.
+pub use tsra_ddi_tbor_types::MASKED_SD_LEN;
+/// Wire length of the masked DARC TMK envelope.
+pub use tsra_ddi_tbor_types::MASKED_TMK_LEN;
+/// Maximum number of certificates in a `part_final` PTA chain.
+pub use tsra_ddi_tbor_types::MAX_CERTS;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::PART_POLICY_LEN;
+/// Exact length of the remote partition-owner-key backup (`SdCreate`/`SdReseal`).
+pub use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::POLICY_INFO_LEN;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
+/// Maximum size, in bytes, of the `part_init` `pta_csr` buffer.
+pub use tsra_ddi_tbor_types::PTA_CSR_MAX_LEN;
+/// Maximum size, in bytes, of the `part_init` `pta_report` buffer.
+pub use tsra_ddi_tbor_types::PTA_REPORT_MAX_LEN;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::PartPolicy;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::PolicyFlags;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::PolicyKeyKind;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::PolicyPubKey;
+/// Unified partition-provisioning policy and its typed field helpers,
+/// re-exported so callers can build a [`PartPolicy`] with named setters
+/// instead of hand-assembling the wire image.
+pub use tsra_ddi_tbor_types::PolicyVer;
+/// Exact length of the security-domain masking-key backup envelope.
+pub use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
+/// Wire length of a sealed DARC TMK.
+pub use tsra_ddi_tbor_types::SEALED_TMK_LEN;
+use tsra_ddi_tbor_types::TborStatus;
+
+use super::*;
+
+// Pin the shared-module `PSK_LEN` (defined in `shared_types`, which is
+// shared with the native crate) to the wire-schema value so the two
+// cannot drift.
+const _: () = assert!(crate::PSK_LEN == tsra_ddi_tbor_types::PSK_LEN);
+
+/// Minimum negotiated API revision required by TBOR operations.
+pub(crate) const TBOR_MIN_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
+
+/// Returns `true` when `rev` supports TBOR operations.
+pub(crate) fn rev_supports_tbor(rev: HsmApiRev) -> bool {
+    rev >= TBOR_MIN_API_REV
+}
+
+/// Validates that `rev` supports TBOR operations, returning
+/// [`HsmError::UnsupportedApiRevision`] otherwise.
+pub(crate) fn require_tbor_rev(rev: HsmApiRev) -> HsmResult<()> {
+    if rev_supports_tbor(rev) {
+        Ok(())
+    } else {
+        Err(HsmError::UnsupportedApiRevision)
+    }
+}
+
+/// Converts a DDI error into the corresponding `HsmError`.
+///
+/// `DriverError::IoAborted` and `DriverError::IoAbortInProgress` are mapped
+/// to their dedicated `HsmError` variants so that higher layers (e.g., the
+/// `open_partition` retry loop) can distinguish transient IO-abort conditions
+/// from other DDI failures.
+///
+/// `DdiStatus::CredentialsNotEstablished`, `DdiStatus::NonceMismatch`,
+/// `DdiStatus::PartitionNotProvisioned`, `DdiStatus::MaskedKeyDecodeFailed`,
+/// `DdiStatus::EccVerifyFailed`, `DdiStatus::SessionNeedsRenegotiation`,
+/// `DdiStatus::PendingKeyGeneration`, `DdiStatus::KeyNotFound`,
+/// `DdiStatus::PartitionAlreadyProvisioned`, and
+/// `DdiStatus::VaultAppLimitReached` are surfaced as distinct
+/// `HsmError` variants to enable targeted retry logic during partition
+/// initialization and key operations.
+///
+/// All remaining `DdiError` variants are logged and collapsed into
+/// `HsmError::DdiCmdFailure`.
+///
+/// Every `TborStatus::Crypto*`/`CryptoCpt*` CPT (`CryptoController`) status is
+/// mapped 1:1 (by variant/name) to a dedicated `HsmError` variant so callers can
+/// distinguish CPT-originated failures instead of collapsing them into
+/// `DdiCmdFailure`.
+impl From<DdiError> for HsmError {
+    fn from(err: DdiError) -> Self {
+        match err {
+            DdiError::DriverError(DriverError::IoAborted) => HsmError::IoAborted,
+            DdiError::DriverError(DriverError::IoAbortInProgress) => HsmError::IoAbortInProgress,
+            DdiError::DeviceNotReady => HsmError::DeviceNotReady,
+            DdiError::DdiStatus(DdiStatus::CredentialsNotEstablished) => {
+                HsmError::CredentialsNotEstablished
+            }
+            DdiError::DdiStatus(DdiStatus::NonceMismatch) => HsmError::NonceMismatch,
+            DdiError::DdiStatus(DdiStatus::PartitionNotProvisioned) => {
+                HsmError::PartitionNotProvisioned
+            }
+            DdiError::DdiStatus(DdiStatus::MaskedKeyDecodeFailed) => {
+                HsmError::MaskedKeyDecodeFailed
+            }
+            DdiError::DdiStatus(DdiStatus::EccVerifyFailed) => HsmError::EccVerifyFailed,
+            DdiError::DdiStatus(DdiStatus::Bk3AlreadyInitialized) => {
+                HsmError::Bk3AlreadyInitialized
+            }
+            DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation) => {
+                HsmError::SessionNeedsRenegotiation
+            }
+            DdiError::DdiStatus(DdiStatus::PendingKeyGeneration) => HsmError::PendingKeyGeneration,
+            DdiError::DdiStatus(DdiStatus::KeyNotFound) => HsmError::KeyNotFound,
+            DdiError::DdiStatus(DdiStatus::PartitionAlreadyProvisioned) => {
+                HsmError::PartitionAlreadyProvisioned
+            }
+            DdiError::DdiStatus(DdiStatus::VaultAppLimitReached) => HsmError::VaultAppLimitReached,
+            DdiError::DdiStatus(DdiStatus::CannotDeleteInternalKeys) => {
+                HsmError::CannotDeleteInternalKeys
+            }
+            DdiError::TborStatus(TborStatus::SdAlreadyInitialized) => {
+                HsmError::SdAlreadyInitialized
+            }
+            DdiError::TborStatus(TborStatus::SdPeerCloningNotAllowed) => {
+                HsmError::SdPeerCloningNotAllowed
+            }
+            // Map the firmware's contract-level `InvalidArg` to the same
+            // `InvalidArgument` the host guards return, so callers see a
+            // consistent argument-rejection error across transports.
+            DdiError::TborStatus(TborStatus::InvalidArg) => HsmError::InvalidArgument,
+            DdiError::TborStatus(TborStatus::AesGcmDecryptTagDoesNotMatch) => {
+                HsmError::MaskedKeyAuthenticationFailed
+            }
+            DdiError::TborStatus(TborStatus::CryptoNotInitialized) => {
+                HsmError::CryptoNotInitialized
+            }
+            DdiError::TborStatus(TborStatus::CryptoBufferTooSmall) => {
+                HsmError::CryptoBufferTooSmall
+            }
+            DdiError::TborStatus(TborStatus::CryptoInputTooLarge) => HsmError::CryptoInputTooLarge,
+            DdiError::TborStatus(TborStatus::CryptoInvalidAlg) => HsmError::CryptoInvalidAlg,
+            DdiError::TborStatus(TborStatus::CryptoTimeout) => HsmError::CryptoTimeout,
+            DdiError::TborStatus(TborStatus::CryptoUnalignedCptr) => HsmError::CryptoUnalignedCptr,
+            DdiError::TborStatus(TborStatus::CryptoInvalidArg) => HsmError::CryptoInvalidArg,
+            DdiError::TborStatus(TborStatus::CryptoInvalidIvLength) => {
+                HsmError::CryptoInvalidIvLength
+            }
+            DdiError::TborStatus(TborStatus::CryptoInvalidKeyLength) => {
+                HsmError::CryptoInvalidKeyLength
+            }
+            DdiError::TborStatus(TborStatus::CryptoInvalidDataLength) => {
+                HsmError::CryptoInvalidDataLength
+            }
+            DdiError::TborStatus(TborStatus::CryptoInvalidContextLength) => {
+                HsmError::CryptoInvalidContextLength
+            }
+            DdiError::TborStatus(TborStatus::CryptoInvalidPartialContext) => {
+                HsmError::CryptoInvalidPartialContext
+            }
+            DdiError::TborStatus(TborStatus::CryptoUnsupportedMode) => {
+                HsmError::CryptoUnsupportedMode
+            }
+            DdiError::TborStatus(TborStatus::CryptoUnalignedBuffer) => {
+                HsmError::CryptoUnalignedBuffer
+            }
+            DdiError::TborStatus(TborStatus::CryptoNotSupported) => HsmError::CryptoNotSupported,
+            DdiError::TborStatus(TborStatus::CryptoHardwareError) => HsmError::CryptoHardwareError,
+            DdiError::TborStatus(TborStatus::CryptoCptRsaUcErrModLenInvalid) => {
+                HsmError::CryptoCptRsaUcErrModLenInvalid
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptRsaUcErrExpLenInvalid) => {
+                HsmError::CryptoCptRsaUcErrExpLenInvalid
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptRsaUcErrDataLenInvalid) => {
+                HsmError::CryptoCptRsaUcErrDataLenInvalid
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptGcUcErrDataLenInvalid) => {
+                HsmError::CryptoCptGcUcErrDataLenInvalid
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptGcUcErrCipherUnsupported) => {
+                HsmError::CryptoCptGcUcErrCipherUnsupported
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptGcUcErrAuthUnsupported) => {
+                HsmError::CryptoCptGcUcErrAuthUnsupported
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptGcUcErrHashModeUnsupported) => {
+                HsmError::CryptoCptGcUcErrHashModeUnsupported
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptGcUcErrIcvMiscompare) => {
+                HsmError::CryptoCptGcUcErrIcvMiscompare
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptGcUcErrKeyLenInvalid) => {
+                HsmError::CryptoCptGcUcErrKeyLenInvalid
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptRsaUcErrPkcsDecoding) => {
+                HsmError::CryptoCptRsaUcErrPkcsDecoding
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptRsaUcErrPkcsSignatureInvalid) => {
+                HsmError::CryptoCptRsaUcErrPkcsSignatureInvalid
+            }
+            DdiError::TborStatus(TborStatus::CryptoCptFault) => HsmError::CryptoCptFault,
+            DdiError::TborStatus(TborStatus::CryptoCptSwErr) => HsmError::CryptoCptSwErr,
+            DdiError::TborStatus(TborStatus::CryptoCptHwErr) => HsmError::CryptoCptHwErr,
+            DdiError::TborStatus(TborStatus::CryptoCptInstErr) => HsmError::CryptoCptInstErr,
+            DdiError::TborStatus(TborStatus::CryptoCptSwWarn) => HsmError::CryptoCptSwWarn,
+            _ => {
+                tracing::error!(?err, hsm_error = ?HsmError::DdiCmdFailure, "Unmapped DDI error");
+                HsmError::DdiCmdFailure
+            }
+        }
+    }
+}
+
+/// Handle to a key managed by the API layer.
+///
+/// The key's material always lives (masked) in its [`HsmKeyProps`]; this
+/// only tracks whether the device *also* holds a pinned copy.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum HsmKeyHandle {
+    /// MBOR: key pinned in the device vault, packed `key_id` (low 16 bits)
+    /// `| bulk_key_id` (high 16 bits).
+    Pinned(u32),
+    /// Unpinned key: material lives only as the masked blob in its
+    /// props (e.g. TBOR keys, security-domain sealing keys). There is
+    /// nothing device-side to address or delete.
+    Unpinned,
+}
+
+/// Extracts the key ID from a pinned HSM key handle.
+///
+/// The key ID is stored in the low 16 bits of the handle.
+///
+/// Returns [`HsmError::UnsupportedKeyOperation`] for an unpinned key.
+pub(crate) fn get_key_id(handle: HsmKeyHandle) -> HsmResult<u16> {
+    match handle {
+        HsmKeyHandle::Pinned(id) => Ok((id & 0xFFFF) as u16),
+        HsmKeyHandle::Unpinned => Err(HsmError::UnsupportedKeyOperation),
+    }
+}
+
+/// Extracts the optional bulk key ID from a pinned HSM key handle.
+///
+/// Returns `Ok(None)` when the pinned handle's bulk-ID field is unset
+/// (`0xFFFF`), and [`HsmError::UnsupportedKeyOperation`] for an unpinned
+/// key, which has no device-side bulk id.
+pub(crate) fn get_bulk_key_id(handle: HsmKeyHandle) -> HsmResult<Option<u16>> {
+    match handle {
+        HsmKeyHandle::Pinned(id) => {
+            let bulk_id = (id >> 16) as u16;
+            Ok((bulk_id != 0xFFFF).then_some(bulk_id))
+        }
+        HsmKeyHandle::Unpinned => Err(HsmError::UnsupportedKeyOperation),
+    }
+}
+
+/// Packs a key ID and optional bulk key ID into an HSM key handle.
+///
+/// When `bulk_key_id` is `None`, the bulk field is set to `0xFFFF`.
+pub(crate) fn to_key_handle(key_id: u16, bulk_key_id: Option<u16>) -> HsmKeyHandle {
+    let bulk_part = (bulk_key_id.unwrap_or(0xFFFF) as u32) << 16;
+    HsmKeyHandle::Pinned(bulk_part | (key_id as u32))
+}
+
+/// Builds a DDI request header with optional session ID and API revision.
+///
+/// Creates a `DdiReqHdr` for various types of DDI operations:
+/// - Device-level operations: neither `rev` nor `sess_id` (e.g., `GetApiRev`)
+/// - Session-less operations: `rev` only (e.g., `OpenSession`, `GetSessionEncryptionKey`)
+/// - Operations with explicit session: both `rev` and `sess_id` (e.g., `CloseSession`)
+///
+/// # Arguments
+///
+/// * `op` - The DDI operation to include in the header
+/// * `rev` - Optional API revision to use
+/// * `sess_id` - Optional session ID to include
+///
+/// # Returns
+///
+/// A `DdiReqHdr` configured for the specified operation and parameters.
+pub(crate) fn build_ddi_req_hdr(
+    op: DdiOp,
+    rev: Option<HsmApiRev>,
+    sess_id: Option<u16>,
+) -> DdiReqHdr {
+    DdiReqHdr {
+        op,
+        rev: rev.map(|r| r.into()),
+        sess_id,
+    }
+}
+
+/// Builds a DDI request header using the provided session.
+///
+/// # Arguments
+///
+/// * `op` - The DDI operation to include in the header
+/// * `sess` - The HSM session context
+///
+/// # Returns
+///
+/// A `DdiReqHdr` configured for the specified operation and session.
+pub(crate) fn build_ddi_req_hdr_sess(op: DdiOp, sess: &HsmSession) -> DdiReqHdr {
+    build_ddi_req_hdr(op, Some(sess.api_rev()), Some(sess.id()))
+}
+
+impl TryFrom<&HsmKeyProps> for DdiTargetKeyProperties {
+    type Error = HsmError;
+    fn try_from(props: &HsmKeyProps) -> Result<Self, Self::Error> {
+        Ok(Self {
+            key_metadata: props.flags().into(),
+            key_label: MborByteArray::from_slice(props.label())
+                .map_hsm_err(HsmError::InternalError)?,
+        })
+    }
+}
+
+impl From<HsmKeyFlags> for DdiTargetKeyMetadata {
+    fn from(flags: HsmKeyFlags) -> Self {
+        let mut meta = Self::default()
+            .with_session(flags.is_session())
+            .with_wrap(flags.can_wrap())
+            .with_unwrap(flags.can_unwrap())
+            .with_derive(flags.can_derive())
+            .with_sign(flags.can_sign())
+            .with_verify(flags.can_verify())
+            .with_encrypt(flags.can_encrypt())
+            .with_decrypt(flags.can_decrypt());
+
+        if meta.encrypt() || meta.decrypt() {
+            meta.set_encrypt(true);
+            meta.set_decrypt(true);
+        }
+
+        if meta.sign() || meta.verify() {
+            meta.set_sign(true);
+            meta.set_verify(true);
+        }
+
+        if meta.wrap() || meta.unwrap() {
+            meta.set_wrap(true);
+            meta.set_unwrap(true);
+        }
+
+        meta
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masked_key_authentication_failure_is_not_a_generic_command_failure() {
+        assert_eq!(
+            HsmError::from(DdiError::TborStatus(
+                TborStatus::AesGcmDecryptTagDoesNotMatch
+            )),
+            HsmError::MaskedKeyAuthenticationFailed
+        );
+    }
+
+    #[test]
+    fn get_key_id_rejects_unpinned_handle() {
+        assert!(matches!(
+            get_key_id(HsmKeyHandle::Unpinned),
+            Err(HsmError::UnsupportedKeyOperation)
+        ));
+    }
+
+    /// Every CPT (`CryptoController`) `TborStatus` must map 1:1 to the
+    /// identically-named `HsmError` variant. Guards against a missing or
+    /// wrong match arm silently regressing the FW-side range mirror.
+    #[test]
+    fn cpt_tbor_status_maps_to_matching_hsm_error() {
+        let cases = [
+            // Software validation / PAL / runtime errors.
+            (
+                TborStatus::CryptoNotInitialized,
+                HsmError::CryptoNotInitialized,
+            ),
+            (
+                TborStatus::CryptoBufferTooSmall,
+                HsmError::CryptoBufferTooSmall,
+            ),
+            (
+                TborStatus::CryptoInputTooLarge,
+                HsmError::CryptoInputTooLarge,
+            ),
+            (TborStatus::CryptoInvalidAlg, HsmError::CryptoInvalidAlg),
+            (TborStatus::CryptoTimeout, HsmError::CryptoTimeout),
+            (
+                TborStatus::CryptoUnalignedCptr,
+                HsmError::CryptoUnalignedCptr,
+            ),
+            (TborStatus::CryptoInvalidArg, HsmError::CryptoInvalidArg),
+            (
+                TborStatus::CryptoInvalidIvLength,
+                HsmError::CryptoInvalidIvLength,
+            ),
+            (
+                TborStatus::CryptoInvalidKeyLength,
+                HsmError::CryptoInvalidKeyLength,
+            ),
+            (
+                TborStatus::CryptoInvalidDataLength,
+                HsmError::CryptoInvalidDataLength,
+            ),
+            (
+                TborStatus::CryptoInvalidContextLength,
+                HsmError::CryptoInvalidContextLength,
+            ),
+            (
+                TborStatus::CryptoInvalidPartialContext,
+                HsmError::CryptoInvalidPartialContext,
+            ),
+            (
+                TborStatus::CryptoUnsupportedMode,
+                HsmError::CryptoUnsupportedMode,
+            ),
+            (
+                TborStatus::CryptoUnalignedBuffer,
+                HsmError::CryptoUnalignedBuffer,
+            ),
+            (TborStatus::CryptoNotSupported, HsmError::CryptoNotSupported),
+            (
+                TborStatus::CryptoHardwareError,
+                HsmError::CryptoHardwareError,
+            ),
+            // CPT hardware completion codes.
+            (
+                TborStatus::CryptoCptRsaUcErrModLenInvalid,
+                HsmError::CryptoCptRsaUcErrModLenInvalid,
+            ),
+            (
+                TborStatus::CryptoCptRsaUcErrExpLenInvalid,
+                HsmError::CryptoCptRsaUcErrExpLenInvalid,
+            ),
+            (
+                TborStatus::CryptoCptRsaUcErrDataLenInvalid,
+                HsmError::CryptoCptRsaUcErrDataLenInvalid,
+            ),
+            (
+                TborStatus::CryptoCptGcUcErrDataLenInvalid,
+                HsmError::CryptoCptGcUcErrDataLenInvalid,
+            ),
+            (
+                TborStatus::CryptoCptGcUcErrCipherUnsupported,
+                HsmError::CryptoCptGcUcErrCipherUnsupported,
+            ),
+            (
+                TborStatus::CryptoCptGcUcErrAuthUnsupported,
+                HsmError::CryptoCptGcUcErrAuthUnsupported,
+            ),
+            (
+                TborStatus::CryptoCptGcUcErrHashModeUnsupported,
+                HsmError::CryptoCptGcUcErrHashModeUnsupported,
+            ),
+            (
+                TborStatus::CryptoCptGcUcErrIcvMiscompare,
+                HsmError::CryptoCptGcUcErrIcvMiscompare,
+            ),
+            (
+                TborStatus::CryptoCptGcUcErrKeyLenInvalid,
+                HsmError::CryptoCptGcUcErrKeyLenInvalid,
+            ),
+            (
+                TborStatus::CryptoCptRsaUcErrPkcsDecoding,
+                HsmError::CryptoCptRsaUcErrPkcsDecoding,
+            ),
+            (
+                TborStatus::CryptoCptRsaUcErrPkcsSignatureInvalid,
+                HsmError::CryptoCptRsaUcErrPkcsSignatureInvalid,
+            ),
+            // CPT completion status errors.
+            (TborStatus::CryptoCptFault, HsmError::CryptoCptFault),
+            (TborStatus::CryptoCptSwErr, HsmError::CryptoCptSwErr),
+            (TborStatus::CryptoCptHwErr, HsmError::CryptoCptHwErr),
+            (TborStatus::CryptoCptInstErr, HsmError::CryptoCptInstErr),
+            (TborStatus::CryptoCptSwWarn, HsmError::CryptoCptSwWarn),
+        ];
+
+        for (status, expected) in cases {
+            assert_eq!(
+                HsmError::from(DdiError::TborStatus(status)),
+                expected,
+                "TborStatus {status:?} mapped to an unexpected HsmError"
+            );
+        }
+
+        // Contract-level `InvalidArg` is deliberately remapped to the
+        // host-facing `InvalidArgument`, not a `Crypto*` variant.
+        assert_eq!(
+            HsmError::from(DdiError::TborStatus(TborStatus::InvalidArg)),
+            HsmError::InvalidArgument
+        );
+
+        // Any status outside the mapped set collapses into the generic
+        // `DdiCmdFailure` fallback.
+        assert_eq!(
+            HsmError::from(DdiError::TborStatus(TborStatus::VaultNotFound)),
+            HsmError::DdiCmdFailure
+        );
+    }
+}

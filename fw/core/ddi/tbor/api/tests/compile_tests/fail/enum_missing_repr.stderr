@@ -1,0 +1,14 @@
+error: #[tbor] enums must have #[repr(u8)], #[repr(u16)], or #[repr(u32)]
+ --> tests/compile_tests/fail/enum_missing_repr.rs:6:10
+  |
+6 | pub enum BadEnum { A = 1, B = 2 }
+  |          ^^^^^^^
+
+error[E0206]: the trait `Copy` cannot be implemented for this type
+ --> tests/compile_tests/fail/enum_missing_repr.rs:6:10
+  |
+4 | #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+  |                                       ---- in this derive macro expansion
+5 | #[tbor]
+6 | pub enum BadEnum { A = 1, B = 2 }
+  |          ^^^^^^^ type is not a structure or enumeration

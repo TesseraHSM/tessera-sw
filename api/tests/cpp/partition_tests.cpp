@@ -1,0 +1,1228 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include <gtest/gtest.h>
+#include <scope_guard.hpp>
+#include <thread>
+#include <tsra_api.h>
+#include <vector>
+
+#include "handle/part_handle.hpp"
+#include "handle/part_list_handle.hpp"
+#include "utils/resiliency_config.hpp"
+#include "utils/utils.hpp"
+
+namespace
+{
+
+uint32_t manufacturer_cert_chain_size_hint(uint32_t actual_size)
+{
+    constexpr uint32_t u32_max = static_cast<uint32_t>(-1);
+    const uint64_t actual = actual_size;
+    const uint64_t hint = actual + (actual / 2) + (actual % 2);
+    return hint > u32_max ? u32_max : static_cast<uint32_t>(hint);
+}
+
+bool get_manufacturer_cert_chain_size_hint(tsra_handle part, uint32_t &size_hint)
+{
+    tsra_part_prop prop = { TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN, nullptr, 0 };
+    auto err = tsra_part_get_prop(part, &prop);
+    if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
+    {
+        ADD_FAILURE() << "Expected manufacturer cert-chain size query to return BUFFER_TOO_SMALL";
+        return false;
+    }
+    if (prop.len == 0)
+    {
+        ADD_FAILURE() << "Expected manufacturer cert-chain size hint to be non-zero";
+        return false;
+    }
+
+    size_hint = prop.len;
+    return true;
+}
+
+bool get_manufacturer_cert_chain_with_retry(
+    tsra_handle part,
+    uint32_t size_hint,
+    std::vector<uint8_t> &buffer
+)
+{
+    for (auto attempt = 0u; attempt < 8; ++attempt)
+    {
+        buffer.assign(size_hint, 0);
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN,
+                                buffer.data(),
+                                size_hint };
+        auto err = tsra_part_get_prop(part, &prop);
+        if (err == TSRA_STATUS_SUCCESS)
+        {
+            if (prop.len == 0)
+            {
+                ADD_FAILURE() << "Expected manufacturer cert-chain payload to be non-zero";
+                return false;
+            }
+
+            buffer.resize(prop.len);
+            return true;
+        }
+
+        if (err != TSRA_STATUS_BUFFER_TOO_SMALL)
+        {
+            ADD_FAILURE() << "Expected success or BUFFER_TOO_SMALL";
+            return false;
+        }
+        if (prop.len <= size_hint)
+        {
+            ADD_FAILURE() << "Expected BUFFER_TOO_SMALL to increase the hint";
+            return false;
+        }
+
+        size_hint = prop.len;
+    }
+
+    ADD_FAILURE() << "Manufacturer cert-chain fetch did not stabilize after retries";
+    return false;
+}
+
+bool get_stable_manufacturer_cert_chain_snapshot(
+    tsra_handle part,
+    std::vector<uint8_t> &buffer,
+    uint32_t &size_hint
+)
+{
+    for (auto attempt = 0u; attempt < 8; ++attempt)
+    {
+        uint32_t initial_size_hint = 0;
+        if (!get_manufacturer_cert_chain_size_hint(part, initial_size_hint))
+        {
+            return false;
+        }
+        if (!get_manufacturer_cert_chain_with_retry(part, initial_size_hint, buffer))
+        {
+            return false;
+        }
+
+        uint32_t current_size_hint = 0;
+        if (!get_manufacturer_cert_chain_size_hint(part, current_size_hint))
+        {
+            return false;
+        }
+
+        uint32_t actual_size = static_cast<uint32_t>(buffer.size());
+        if (current_size_hint == manufacturer_cert_chain_size_hint(actual_size))
+        {
+            size_hint = current_size_hint;
+            return true;
+        }
+    }
+
+    ADD_FAILURE() << "Manufacturer cert-chain size changed while reading a stable snapshot";
+    return false;
+}
+
+} // namespace
+
+TEST(tsra_part, get_list)
+{
+    auto handle = tsra_handle{ 0 };
+    auto err = tsra_part_get_list(&handle);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+    auto guard = scope_guard::make_scope_exit([&handle] {
+        ASSERT_EQ(tsra_part_free_list(handle), TSRA_STATUS_SUCCESS);
+    });
+    ASSERT_NE(handle, 0);
+}
+
+TEST(tsra_part, get_list_null_handle)
+{
+    auto err = tsra_part_get_list(nullptr);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(tsra_part, free_list)
+{
+    auto handle = tsra_handle{ 0 };
+    auto err = tsra_part_get_list(&handle);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+    err = tsra_part_free_list(handle);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+}
+
+TEST(tsra_part, free_list_double_free)
+{
+    auto handle = tsra_handle{ 0 };
+    auto err = tsra_part_get_list(&handle);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+    err = tsra_part_free_list(handle);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+    // Second free should return invalid handle
+    err = tsra_part_free_list(handle);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+TEST(tsra_part, free_list_invalid_handle_value)
+{
+    tsra_handle bad_handle = 0xDEADBEEF;
+    auto err = tsra_part_free_list(bad_handle);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+TEST(tsra_part, get_count)
+{
+    auto handle = PartitionListHandle();
+    auto count = uint32_t{ 0 };
+    auto err = tsra_part_get_count(handle.get(), &count);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+    ASSERT_GT(count, 0);
+}
+
+TEST(tsra_part, get_count_null_output)
+{
+    auto handle = PartitionListHandle();
+    auto err = tsra_part_get_count(handle.get(), nullptr);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(tsra_part, get_count_invalid_handle_value)
+{
+    tsra_handle bad_handle = 0xDEADBEEF;
+    uint32_t count = 0;
+    auto err = tsra_part_get_count(bad_handle, &count);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+TEST(tsra_part, get_info)
+{
+    auto handle = PartitionListHandle();
+    uint32_t count = handle.count();
+
+    for (auto i = 0u; i < count; ++i)
+    {
+        tsra_part_info info = {};
+        info.path = { nullptr, 0 };
+        auto err = tsra_part_get_info(handle.get(), i, &info);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GT(info.path.len, 0);
+
+        std::vector<tsra_char> buffer(info.path.len, 0);
+        info.path.str = buffer.data();
+
+        uint32_t path_len = info.path.len;
+        err = tsra_part_get_info(handle.get(), i, &info);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(info.path.len, path_len);
+        ASSERT_GT(info.api_rev_min.major, 0);
+        ASSERT_GT(info.api_rev_max.major, 0);
+    }
+}
+
+TEST(tsra_part, get_info_invalid_handle)
+{
+    auto bad_handle = 0xDEADBEEF;
+    tsra_part_info info = {};
+    info.path = { nullptr, 0 };
+    auto err = tsra_part_get_info(bad_handle, 0, &info);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+TEST(tsra_part, get_info_null_path_ptr)
+{
+    auto handle = PartitionListHandle();
+    for (auto i = 0u; i < handle.count(); ++i)
+    {
+        tsra_part_info info = {};
+        info.path = { nullptr, 42 };
+        auto err = tsra_part_get_info(handle.get(), i, &info);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    }
+}
+
+TEST(tsra_part, get_info_invalid_index)
+{
+    auto handle = PartitionListHandle();
+    uint32_t count = handle.count();
+    for (auto i = 0u; i < handle.count(); ++i)
+    {
+        tsra_part_info info = {};
+        info.path = { nullptr, 0 };
+        auto err = tsra_part_get_info(handle.get(), count, &info);
+        ASSERT_EQ(err, TSRA_STATUS_INDEX_OUT_OF_RANGE);
+    }
+}
+
+TEST(tsra_part, open_close)
+{
+    auto handle_list = PartitionListHandle();
+    uint32_t count = handle_list.count();
+
+    for (auto i = 0u; i < count; ++i)
+    {
+        auto path = handle_list.get_path(i);
+
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_NE(part_handle, 0u);
+
+        err = tsra_part_close(part_handle);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+    }
+}
+
+TEST(tsra_part, open_close_multiple_times)
+{
+    auto handle_list = PartitionListHandle();
+    uint32_t count = handle_list.count();
+
+    for (auto i = 0u; i < count; ++i)
+    {
+        auto path = handle_list.get_path(i);
+
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        auto api_rev = test_api_rev();
+        for (int j = 0; j < 5; ++j)
+        {
+            tsra_handle part_handle = 0;
+            auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+            ASSERT_NE(part_handle, 0u);
+
+            err = tsra_part_close(part_handle);
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        }
+    }
+}
+
+TEST(tsra_part, open_same_partition_multiple_times)
+{
+    auto handle_list = PartitionListHandle();
+    uint32_t count = handle_list.count();
+
+    for (auto i = 0u; i < count; ++i)
+    {
+        auto path = handle_list.get_path(i);
+
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        std::vector<PartitionHandle> part_handles;
+
+        // Open the same partition 5 times
+        for (int j = 0; j < 5; ++j)
+        {
+            part_handles.push_back(PartitionHandle(path));
+        }
+
+        part_handles.clear(); // All handles will be closed here
+    }
+}
+
+TEST(tsra_part, open_rejects_null_output_handle)
+{
+    auto handle_list = PartitionListHandle();
+    auto path = handle_list.get_path(0);
+    tsra_str path_str{ path.data(), static_cast<uint32_t>(path.size()) };
+
+    auto err = tsra_part_open(&path_str, nullptr, test_api_rev());
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(tsra_part, open_rejects_null_or_empty_path)
+{
+    tsra_handle part_handle = 0;
+    auto err = tsra_part_open(nullptr, &part_handle, test_api_rev());
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+    tsra_str null_path{ nullptr, 1 };
+    err = tsra_part_open(&null_path, &part_handle, test_api_rev());
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+    std::vector<tsra_char> empty_path(1, 0);
+    tsra_str empty_string_path{ empty_path.data(), 1 };
+    err = tsra_part_open(&empty_string_path, &part_handle, test_api_rev());
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+    tsra_str zero_len_path{ empty_path.data(), 0 };
+    err = tsra_part_open(&zero_len_path, &part_handle, test_api_rev());
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+}
+
+TEST(tsra_part, open_double_close)
+{
+    auto handle_list = PartitionListHandle();
+    uint32_t count = handle_list.count();
+
+    for (auto i = 0u; i < count; ++i)
+    {
+        auto path = handle_list.get_path(i);
+
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_NE(part_handle, 0u);
+
+        err = tsra_part_close(part_handle);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        // Second close should return invalid handle
+        err = tsra_part_close(part_handle);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+    }
+}
+
+TEST(tsra_part, get_prop_path)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto partition = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_PATH, nullptr, 0 };
+        auto err = tsra_part_get_prop(partition.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GT(prop.len, 0);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(partition.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_driver_version)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_DRIVER_VERSION, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GT(prop.len, 0);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_firmware_version)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_FIRMWARE_VERSION, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GT(prop.len, 0);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_hardware_version)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_HARDWARE_VERSION, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GT(prop.len, 0);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_pci_hw_id)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_PCI_HW_ID, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GT(prop.len, 0);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_min_api_rev)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        tsra_api_rev api_rev = { 0, 0 };
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_MIN_API_REV, &api_rev, sizeof(api_rev) };
+
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(prop.len, sizeof(tsra_api_rev));
+        ASSERT_GT(api_rev.major, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_max_api_rev)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        tsra_api_rev api_rev = { 0, 0 };
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_MAX_API_REV, &api_rev, sizeof(api_rev) };
+
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(prop.len, sizeof(tsra_api_rev));
+        ASSERT_GT(api_rev.major, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_api_rev_range)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        tsra_api_rev min_api_rev = { 0, 0 };
+        tsra_api_rev max_api_rev = { 0, 0 };
+
+        tsra_part_prop min_prop = { TSRA_PART_PROP_ID_MIN_API_REV,
+                                    &min_api_rev,
+                                    sizeof(min_api_rev) };
+        auto err = tsra_part_get_prop(part.get(), &min_prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_part_prop max_prop = { TSRA_PART_PROP_ID_MAX_API_REV,
+                                    &max_api_rev,
+                                    sizeof(max_api_rev) };
+        err = tsra_part_get_prop(part.get(), &max_prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        // Min should be less than or equal to max
+        ASSERT_TRUE(
+            min_api_rev.major < max_api_rev.major ||
+            (min_api_rev.major == max_api_rev.major && min_api_rev.minor <= max_api_rev.minor)
+        );
+    });
+}
+
+TEST(tsra_part, get_prop_manufacturer_cert)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GT(prop.len, 0);
+
+        // Second call with properly sized buffer
+        std::vector<tsra_char> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+
+// Verify the certificate chain is in PEM format
+#if defined(_WIN32)
+        std::wstring cert_chain(buffer.begin(), buffer.begin() + prop.len);
+        ASSERT_TRUE(cert_chain.find(L"-----BEGIN CERTIFICATE-----") != std::wstring::npos);
+        ASSERT_TRUE(cert_chain.find(L"-----END CERTIFICATE-----") != std::wstring::npos);
+#else
+        std::string cert_chain(buffer.begin(), buffer.begin() + prop.len);
+        ASSERT_TRUE(cert_chain.find("-----BEGIN CERTIFICATE-----") != std::string::npos);
+        ASSERT_TRUE(cert_chain.find("-----END CERTIFICATE-----") != std::string::npos);
+#endif
+    });
+}
+
+TEST(tsra_part, get_prop_manufacturer_cert_returns_larger_size_hint)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        std::vector<uint8_t> buffer;
+        uint32_t size_hint = 0;
+        ASSERT_TRUE(get_stable_manufacturer_cert_chain_snapshot(part.get(), buffer, size_hint));
+        uint32_t actual_size = static_cast<uint32_t>(buffer.size());
+
+        uint32_t expected_size_hint = manufacturer_cert_chain_size_hint(actual_size);
+        ASSERT_EQ(size_hint, expected_size_hint);
+    });
+}
+
+TEST(tsra_part, get_prop_manufacturer_cert_buffer_too_small)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        std::vector<uint8_t> hint_buffer;
+        uint32_t size_hint = 0;
+        ASSERT_TRUE(get_stable_manufacturer_cert_chain_snapshot(part.get(), hint_buffer, size_hint)
+        );
+        uint32_t actual_size = static_cast<uint32_t>(hint_buffer.size());
+        ASSERT_GT(actual_size, 1);
+
+        // A caller buffer strictly smaller than the actual payload must fail
+        // and the API must report a size hint that is at least the actual
+        // payload size so a retry with the hinted size succeeds.
+        std::vector<uint8_t> too_small(actual_size - 1);
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN,
+                                too_small.data(),
+                                static_cast<uint32_t>(too_small.size()) };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_GE(prop.len, actual_size);
+
+        // Retry with the hinted size must succeed, covering the retry contract.
+        uint32_t retry_size = prop.len;
+        std::vector<uint8_t> retry_buffer(retry_size);
+        prop = { TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN, retry_buffer.data(), retry_size };
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0u);
+        ASSERT_LE(prop.len, retry_size);
+    });
+}
+
+// A caller buffer that fits the actual payload but is smaller than the
+// advisory size hint must still succeed. The hint is advisory headroom for
+// cert-chain growth across resets; it must not cause spurious failures when
+// the buffer already fits the current payload.
+TEST(tsra_part, get_prop_manufacturer_cert_buffer_below_hint_succeeds)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        uint32_t size_hint = 0;
+        uint32_t actual_size = 0;
+
+        for (auto attempt = 0u; attempt < 8; ++attempt)
+        {
+            std::vector<uint8_t> hint_buffer;
+            ASSERT_TRUE(
+                get_stable_manufacturer_cert_chain_snapshot(part.get(), hint_buffer, size_hint)
+            );
+            actual_size = static_cast<uint32_t>(hint_buffer.size());
+            ASSERT_LT(actual_size, size_hint);
+
+            // Buffer sized exactly to the actual payload (below the hint) must succeed.
+            std::vector<uint8_t> exact_buffer(actual_size);
+            tsra_part_prop prop = { TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN,
+                                    exact_buffer.data(),
+                                    static_cast<uint32_t>(exact_buffer.size()) };
+            auto err = tsra_part_get_prop(part.get(), &prop);
+            if (err == TSRA_STATUS_SUCCESS)
+            {
+                ASSERT_GT(prop.len, 0u);
+                ASSERT_LE(prop.len, actual_size);
+                return;
+            }
+
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        }
+
+        FAIL() << "manufacturer certificate chain changed while testing below-hint buffer";
+    });
+}
+
+TEST(tsra_part, get_prop_backup_masking_key)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_BACKUP_MASKING_KEY, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_masked_owner_backup_key)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_pid_public_key)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // First call to get required size
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_PART_PUB_KEY, nullptr, 0 };
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+
+        // Second call with properly sized buffer
+        std::vector<uint8_t> buffer(prop.len);
+        prop.val = buffer.data();
+        err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_GT(prop.len, 0);
+    });
+}
+
+TEST(tsra_part, get_prop_null_prop_ptr)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        auto err = tsra_part_get_prop(part.get(), nullptr);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST(tsra_part, get_prop_invalid_handle)
+{
+    tsra_handle bad_handle = 0xDEADBEEF;
+    tsra_part_prop prop = { TSRA_PART_PROP_ID_PATH, nullptr, 0 };
+
+    auto err = tsra_part_get_prop(bad_handle, &prop);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+TEST(tsra_part, get_prop_buffer_too_small_api_rev)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // Provide buffer that's too small
+        tsra_api_rev api_rev = { 0, 0 };
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_MIN_API_REV,
+                                &api_rev,
+                                1 }; // Only 1 byte instead of sizeof
+
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(prop.len, sizeof(tsra_api_rev)); // Should return required size
+    });
+}
+
+TEST(tsra_part, get_prop_unsupported_property)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // Test an unsupported property
+        tsra_part_prop prop = { static_cast<tsra_part_prop_id>(-1), nullptr, 0 };
+
+        auto err = tsra_part_get_prop(part.get(), &prop);
+        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_PROPERTY);
+    });
+}
+
+TEST(tsra_part, get_prop_all_supported_properties)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+
+        // Test all supported properties
+        struct
+        {
+            tsra_part_prop_id id;
+            const char *name;
+        } supported_props[] = {
+            { TSRA_PART_PROP_ID_TYPE, "TYPE" },
+            { TSRA_PART_PROP_ID_PATH, "PATH" },
+            { TSRA_PART_PROP_ID_DRIVER_VERSION, "DRIVER_VERSION" },
+            { TSRA_PART_PROP_ID_FIRMWARE_VERSION, "FIRMWARE_VERSION" },
+            { TSRA_PART_PROP_ID_HARDWARE_VERSION, "HARDWARE_VERSION" },
+            { TSRA_PART_PROP_ID_PCI_HW_ID, "PCI_HW_ID" },
+            { TSRA_PART_PROP_ID_MIN_API_REV, "MIN_API_REV" },
+            { TSRA_PART_PROP_ID_MAX_API_REV, "MAX_API_REV" },
+            { TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN, "MANUFACTURER_CERT_CHAIN" },
+            { TSRA_PART_PROP_ID_BACKUP_MASKING_KEY, "BACKUP_MASKING_KEY" },
+            { TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY, "MASKED_OWNER_BACKUP_KEY" },
+            { TSRA_PART_PROP_ID_PART_PUB_KEY, "PARTITION_IDENTITY_PUBLIC_KEY" },
+        };
+
+        for (const auto &test_prop : supported_props)
+        {
+            SCOPED_TRACE(test_prop.name);
+
+            // First call to get size
+            tsra_part_prop prop = { test_prop.id, nullptr, 0 };
+            auto err = tsra_part_get_prop(part.get(), &prop);
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_GT(prop.len, 0);
+
+            // Second call with buffer
+            std::vector<uint8_t> buffer(prop.len);
+            prop.val = buffer.data();
+            err = tsra_part_get_prop(part.get(), &prop);
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        }
+    });
+}
+
+TEST(tsra_part, init_caller_source_with_empty_endorsement_fails)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        // Provide a valid OBK config so the failure is attributable to POTA endorsement
+        struct tsra_buffer obk_buf = { const_cast<uint8_t *>(TEST_OBK), sizeof(TEST_OBK) };
+        struct tsra_owner_backup_key_config backup_config = {
+            .source = TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER,
+            .owner_backup_key = &obk_buf
+        };
+
+        // Caller source with empty endorsement buffer should fail
+        struct tsra_buffer empty_sig_buf = { .ptr = nullptr, .len = 0 };
+        struct tsra_buffer empty_pubkey_buf = { .ptr = nullptr, .len = 0 };
+        struct tsra_pota_endorsement_data empty_endorsement_data = { .signature = &empty_sig_buf,
+                                                                     .public_key =
+                                                                         &empty_pubkey_buf };
+        struct tsra_pota_endorsement pota_endorsement = { .source =
+                                                              TSRA_POTA_ENDORSEMENT_SOURCE_CALLER,
+                                                          .endorsement = &empty_endorsement_data };
+
+        err = tsra_part_init(
+            part_handle,
+            &creds,
+            nullptr,
+            nullptr,
+            &backup_config,
+            &pota_endorsement,
+            nullptr
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST(tsra_part, init_caller_source_with_null_endorsement_fails)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        // Provide a valid OBK config so the failure is attributable to POTA endorsement
+        struct tsra_buffer obk_buf = { const_cast<uint8_t *>(TEST_OBK), sizeof(TEST_OBK) };
+        struct tsra_owner_backup_key_config backup_config = {
+            .source = TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER,
+            .owner_backup_key = &obk_buf
+        };
+
+        // Caller source with null endorsement pointer should fail
+        struct tsra_pota_endorsement pota_endorsement = { .source =
+                                                              TSRA_POTA_ENDORSEMENT_SOURCE_CALLER,
+                                                          .endorsement = nullptr };
+
+        err = tsra_part_init(
+            part_handle,
+            &creds,
+            nullptr,
+            nullptr,
+            &backup_config,
+            &pota_endorsement,
+            nullptr
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST(tsra_part, init_tpm_source_with_endorsement_fails)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        // Provide a valid OBK config so the failure is attributable to POTA endorsement
+        struct tsra_buffer obk_buf = { const_cast<uint8_t *>(TEST_OBK), sizeof(TEST_OBK) };
+        struct tsra_owner_backup_key_config backup_config = {
+            .source = TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER,
+            .owner_backup_key = &obk_buf
+        };
+
+        // TPM source with non-null endorsement should fail
+        uint8_t signature_data[96] = { 0 };
+        uint8_t public_key_data[97] = { 0 };
+        struct tsra_buffer signature_buf = { .ptr = signature_data, .len = sizeof(signature_data) };
+        struct tsra_buffer public_key_buf = { .ptr = public_key_data,
+                                              .len = sizeof(public_key_data) };
+        struct tsra_pota_endorsement_data endorsement_data = { .signature = &signature_buf,
+                                                               .public_key = &public_key_buf };
+        struct tsra_pota_endorsement pota_endorsement = { .source =
+                                                              TSRA_POTA_ENDORSEMENT_SOURCE_TPM,
+                                                          .endorsement = &endorsement_data };
+        err = tsra_part_init(
+            part_handle,
+            &creds,
+            nullptr,
+            nullptr,
+            &backup_config,
+            &pota_endorsement,
+            nullptr
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST(tsra_part, init_invalid_source_with_endorsement_fails)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        // Provide a valid OBK config so the failure is attributable to POTA endorsement
+        struct tsra_buffer obk_buf = { const_cast<uint8_t *>(TEST_OBK), sizeof(TEST_OBK) };
+        struct tsra_owner_backup_key_config backup_config = {
+            .source = TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER,
+            .owner_backup_key = &obk_buf
+        };
+
+        // Invalid source value should fail
+        uint8_t signature_data[96] = { 0 };
+        uint8_t public_key_data[97] = { 0 };
+        struct tsra_buffer signature_buf = { .ptr = signature_data, .len = sizeof(signature_data) };
+        struct tsra_buffer public_key_buf = { .ptr = public_key_data,
+                                              .len = sizeof(public_key_data) };
+        struct tsra_pota_endorsement_data endorsement_data = { .signature = &signature_buf,
+                                                               .public_key = &public_key_buf };
+        struct tsra_pota_endorsement pota_endorsement = {
+            .source = static_cast<tsra_pota_endorsement_source>(99),
+            .endorsement = &endorsement_data
+        };
+        err = tsra_part_init(
+            part_handle,
+            &creds,
+            nullptr,
+            nullptr,
+            &backup_config,
+            &pota_endorsement,
+            nullptr
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST(tsra_part, init_with_resiliency_config)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        err = tsra_part_reset(part_handle);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        PartInitConfig init_config{};
+        make_part_init_config(part_handle, init_config);
+
+        tsra_resiliency_config resiliency_config{};
+        auto resiliency_ctx = make_resiliency_config(resiliency_config);
+
+        err = part_init_with_mobk_fallback(part_handle, &creds, init_config, &resiliency_config);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+    });
+}
+
+TEST(tsra_part, init_with_resiliency_caller_pota_null_callback_fails)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        err = tsra_part_reset(part_handle);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        PartInitConfig init_config{};
+        make_part_init_config(part_handle, init_config);
+
+        // Build a resiliency config with pota_callback_ops = nullptr.
+        // When POTA source is Caller, this must fail with InvalidArgument.
+        tsra_resiliency_config resiliency_config{};
+        auto resiliency_ctx = make_resiliency_config(resiliency_config);
+        resiliency_config.pota_callback_ops = nullptr;
+
+        // Force POTA source to Caller so the validation triggers.
+        init_config.pota_endorsement.source = TSRA_POTA_ENDORSEMENT_SOURCE_CALLER;
+
+        err = tsra_part_init(
+            part_handle,
+            &creds,
+            nullptr,
+            nullptr,
+            &init_config.backup_config,
+            &init_config.pota_endorsement,
+            &resiliency_config
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST(tsra_part, init_with_resiliency_invalid_pota_source_fails)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        err = tsra_part_reset(part_handle);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        PartInitConfig init_config{};
+        make_part_init_config(part_handle, init_config);
+
+        // Force invalid POTA source
+        init_config.pota_endorsement.source = static_cast<tsra_pota_endorsement_source>(99);
+
+        tsra_resiliency_config resiliency_config{};
+        auto resiliency_ctx = make_resiliency_config(resiliency_config);
+
+        err = tsra_part_init(
+            part_handle,
+            &creds,
+            nullptr,
+            nullptr,
+            &init_config.backup_config,
+            &init_config.pota_endorsement,
+            &resiliency_config
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST(tsra_part, init_with_resiliency_tpm_pota_with_callback_fails)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        tsra_str path_str;
+        path_str.str = path.data();
+        path_str.len = static_cast<uint32_t>(path.size());
+
+        tsra_handle part_handle = 0;
+        auto api_rev = test_api_rev();
+        auto err = tsra_part_open(&path_str, &part_handle, api_rev);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        auto guard = scope_guard::make_scope_exit([&part_handle] { tsra_part_close(part_handle); });
+
+        err = tsra_part_reset(part_handle);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_credentials creds{};
+        std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
+        std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
+
+        PartInitConfig init_config{};
+        make_part_init_config(part_handle, init_config);
+
+        // Force TPM POTA source with a non-null callback.
+        // TPM + callback is rejected as InvalidArgument.
+        init_config.pota_endorsement.source = TSRA_POTA_ENDORSEMENT_SOURCE_TPM;
+        init_config.pota_endorsement.endorsement = nullptr;
+        // Use TPM OBK so mobk_callback_ops=null is valid; we're testing
+        // that TPM POTA + pota_callback is rejected.
+        init_config.backup_config.source = TSRA_OWNER_BACKUP_KEY_SOURCE_TPM;
+        init_config.backup_config.owner_backup_key = nullptr;
+
+        tsra_resiliency_config resiliency_config{};
+        auto resiliency_ctx = make_resiliency_config(resiliency_config);
+        // Force pota_callback_ops non-null so the TPM + callback mismatch triggers.
+        resiliency_config.pota_callback_ops = get_pota_callback_ops();
+        // Ensure mobk_callback_ops matches OBK source (TPM → null).
+        resiliency_config.mobk_callback_ops = nullptr;
+
+        err = tsra_part_init(
+            part_handle,
+            &creds,
+            nullptr,
+            nullptr,
+            &init_config.backup_config,
+            &init_config.pota_endorsement,
+            &resiliency_config
+        );
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}

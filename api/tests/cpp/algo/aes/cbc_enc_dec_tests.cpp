@@ -1,0 +1,2210 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include <algorithm>
+#include <cstring>
+#include <functional>
+#include <gtest/gtest.h>
+#include <string>
+#include <tsra_api.h>
+#include <vector>
+
+#include "handle/key_handle.hpp"
+#include "handle/part_handle.hpp"
+#include "handle/part_list_handle.hpp"
+#include "handle/session_handle.hpp"
+#include "helpers.hpp"
+#include "utils/auto_ctx.hpp"
+#include "utils/auto_key.hpp"
+
+class tsra_aes_cbc : public ::testing::Test
+{
+  protected:
+    static constexpr size_t AES_BLOCK_SIZE = 16;
+
+    PartitionListHandle part_list_ = PartitionListHandle{};
+
+    static void init_cbc_algo(
+        tsra_algo &algo,
+        tsra_algo_aes_cbc_params &params,
+        tsra_algo_id algo_id,
+        uint8_t iv_fill
+    )
+    {
+        uint8_t iv[AES_BLOCK_SIZE] = { 0 };
+        iv[0] = iv_fill;
+        std::memcpy(params.iv, iv, sizeof(iv));
+
+        algo.id = algo_id;
+        algo.params = &params;
+        algo.len = sizeof(params);
+    }
+
+    // Returns AES-CBC-PAD ciphertext length for a plaintext length.
+    static size_t padded_ciphertext_len(size_t plaintext_len)
+    {
+        return ((plaintext_len / AES_BLOCK_SIZE) + 1) * AES_BLOCK_SIZE;
+    }
+
+    // Verifies single-shot encrypt/decrypt roundtrip and expected ciphertext length.
+    void test_single_shot_roundtrip(
+        tsra_handle key_handle,
+        tsra_algo_id algo_id,
+        const uint8_t *plaintext,
+        size_t plaintext_len,
+        size_t expected_ciphertext_len
+    )
+    {
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, algo_id, 0xCC);
+
+        // Encrypt
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key_handle,
+                &crypt_algo,
+                plaintext,
+                plaintext_len,
+                ciphertext
+            )
+        );
+        ASSERT_EQ(ciphertext.size(), expected_ciphertext_len);
+
+        // Reset IV for decryption
+        init_cbc_algo(crypt_algo, cbc_params, algo_id, 0xCC);
+
+        // Decrypt
+        std::vector<uint8_t> decrypted;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Decrypt,
+                key_handle,
+                &crypt_algo,
+                ciphertext.data(),
+                ciphertext.size(),
+                decrypted
+            )
+        );
+
+        ASSERT_EQ(decrypted.size(), plaintext_len);
+        ASSERT_EQ(std::memcmp(decrypted.data(), plaintext, plaintext_len), 0);
+    }
+
+    // Verifies streaming encrypt/decrypt roundtrip and expected ciphertext length.
+    void test_streaming_roundtrip(
+        tsra_handle key_handle,
+        tsra_algo_id algo_id,
+        const uint8_t *plaintext,
+        size_t plaintext_len,
+        size_t chunk_size,
+        size_t expected_ciphertext_len
+    )
+    {
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, algo_id, 0xAA);
+
+        // Encrypt
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::streaming_crypt(
+                CryptOperation::Encrypt,
+                key_handle,
+                &crypt_algo,
+                plaintext,
+                plaintext_len,
+                chunk_size,
+                ciphertext
+            )
+        );
+        ASSERT_EQ(ciphertext.size(), expected_ciphertext_len);
+
+        // Reset IV for decryption
+        init_cbc_algo(crypt_algo, cbc_params, algo_id, 0xAA);
+
+        // Decrypt
+        std::vector<uint8_t> decrypted;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::streaming_crypt(
+                CryptOperation::Decrypt,
+                key_handle,
+                &crypt_algo,
+                ciphertext.data(),
+                ciphertext.size(),
+                chunk_size,
+                decrypted
+            )
+        );
+
+        ASSERT_EQ(decrypted.size(), plaintext_len);
+        ASSERT_EQ(std::memcmp(decrypted.data(), plaintext, plaintext_len), 0);
+    }
+
+    // Verifies empty CBC-PAD plaintext roundtrips for the given AES key size.
+    void test_empty_plaintext_with_padding_roundtrip(uint32_t bits)
+    {
+        part_list_.for_each_session([&](tsra_handle session) {
+            auto key = generate_aes_key(session, bits);
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x5C);
+
+            uint8_t dummy = 0;
+            tsra_buffer input{ &dummy, 0 };
+            tsra_buffer output{ nullptr, 0 };
+
+            auto err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_EQ(output.len, AES_BLOCK_SIZE);
+
+            std::vector<uint8_t> ciphertext(output.len);
+            output.ptr = ciphertext.data();
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x5C);
+            err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(output.len, AES_BLOCK_SIZE);
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x5C);
+
+            tsra_buffer cipher_buf{ ciphertext.data(), static_cast<uint32_t>(ciphertext.size()) };
+            tsra_buffer plain_query{ nullptr, 0 };
+
+            err = crypt_call(
+                CryptOperation::Decrypt,
+                &crypt_algo,
+                key.get(),
+                &cipher_buf,
+                &plain_query
+            );
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_EQ(plain_query.len, AES_BLOCK_SIZE);
+
+            std::vector<uint8_t> plaintext(plain_query.len);
+            tsra_buffer plain_out{ plaintext.data(), static_cast<uint32_t>(plaintext.size()) };
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x5C);
+            err = crypt_call(
+                CryptOperation::Decrypt,
+                &crypt_algo,
+                key.get(),
+                &cipher_buf,
+                &plain_out
+            );
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(plain_out.len, 0u);
+        });
+    }
+
+    // Verifies CBC no-padding rejects empty plaintext for the given AES key size.
+    void test_encrypt_empty_plaintext_no_padding_fails(uint32_t bits)
+    {
+        part_list_.for_each_session([&](tsra_handle session) {
+            auto key = generate_aes_key(session, bits);
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x54);
+
+            uint8_t dummy = 0;
+            tsra_buffer input{ &dummy, 0 };
+            tsra_buffer output{ nullptr, 0 };
+
+            auto err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+            ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+        });
+    }
+
+    // Verifies decrypt rejects empty ciphertext for the given AES key size and CBC mode.
+    void test_decrypt_empty_ciphertext_fails(uint32_t bits, tsra_algo_id algo_id)
+    {
+        part_list_.for_each_session([&](tsra_handle session) {
+            auto key = generate_aes_key(session, bits);
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, algo_id, 0x55);
+
+            uint8_t dummy = 0;
+            tsra_buffer input{ &dummy, 0 };
+            tsra_buffer output{ nullptr, 0 };
+
+            auto err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &output);
+            ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+        });
+    }
+
+    // Verifies tampered CBC no-padding ciphertext may decrypt but does not recover plaintext.
+    void test_decrypt_tampered_ciphertext_no_padding_does_not_match(uint32_t bits)
+    {
+        part_list_.for_each_session([&](tsra_handle session) {
+            auto key = generate_aes_key(session, bits);
+
+            std::vector<uint8_t> plaintext = make_incrementing_bytes(2 * AES_BLOCK_SIZE);
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x56);
+
+            std::vector<uint8_t> ciphertext;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Encrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext.data(),
+                    plaintext.size(),
+                    ciphertext
+                )
+            );
+
+            ciphertext[0] ^= 0x01;
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x56);
+
+            std::vector<uint8_t> decrypted;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Decrypt,
+                    key.get(),
+                    &crypt_algo,
+                    ciphertext.data(),
+                    ciphertext.size(),
+                    decrypted
+                )
+            );
+
+            ASSERT_EQ(decrypted.size(), plaintext.size());
+            ASSERT_NE(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
+        });
+    }
+};
+
+// ==================== Correctness Coverage ====================
+
+TEST_F(tsra_aes_cbc, single_shot_no_padding_all_key_sizes)
+{
+    std::vector<DataSizeTestParams> data_sizes = {
+        { 16, 16, 32, "1_block" },  // Exactly 1 block
+        { 32, 32, 48, "2_blocks" }, // Exactly 2 blocks
+        { 48, 48, 64, "3_blocks" }, // Exactly 3 blocks
+        { 64, 64, 80, "4_blocks" }, // Exactly 4 blocks
+    };
+
+    run_single_shot_key_size(
+        part_list_,
+        TSRA_ALGO_ID_AES_CBC,
+        data_sizes,
+        0xAB,
+        [&](tsra_handle key, tsra_algo_id algo, const uint8_t *input, size_t len, size_t expected) {
+            test_single_shot_roundtrip(key, algo, input, len, expected);
+        },
+        generate_aes_key
+    );
+}
+
+TEST_F(tsra_aes_cbc, single_shot_with_padding_all_key_sizes)
+{
+    std::vector<DataSizeTestParams> data_sizes = {
+        { 1, 16, 16, "1_byte" },    // Much smaller than block
+        { 13, 16, 16, "13_bytes" }, // Just under 1 block
+        { 15, 16, 16, "15_bytes" }, // 1 byte short of block
+        { 16, 16, 32, "16_bytes" }, // Exactly 1 block (needs full padding block)
+        { 17, 32, 32, "17_bytes" }, // 1 byte over 1 block
+        { 27, 32, 32, "27_bytes" }, // Between 1 and 2 blocks
+        { 32, 32, 48, "32_bytes" }, // Exactly 2 blocks
+        { 63, 64, 64, "63_bytes" }, // 1 byte short of 4 blocks
+    };
+
+    run_single_shot_key_size(
+        part_list_,
+        TSRA_ALGO_ID_AES_CBC_PAD,
+        data_sizes,
+        0xCD,
+        [&](tsra_handle key, tsra_algo_id algo, const uint8_t *input, size_t len, size_t expected) {
+            test_single_shot_roundtrip(key, algo, input, len, expected);
+        },
+        generate_aes_key
+    );
+}
+
+TEST_F(tsra_aes_cbc, streaming_no_padding_cases)
+{
+    std::vector<StreamingRoundtripCase> test_cases = {
+        { 32, 16, 32, 0xEF, "exact_blocks" },
+        { 64, 16, 64, 0xEF, "multiple_blocks" },
+        { 64, 32, 64, 0xEF, "larger_chunks" },
+        { 48, 10, 48, 0xEF, "non_aligned_chunks" },
+    };
+
+    run_streaming_case_list(
+        part_list_,
+        TSRA_ALGO_ID_AES_CBC,
+        [&](tsra_handle key,
+            tsra_algo_id algo,
+            const uint8_t *input,
+            size_t len,
+            size_t chunk_size,
+            size_t expected_ciphertext_len) {
+            test_streaming_roundtrip(key, algo, input, len, chunk_size, expected_ciphertext_len);
+        },
+        test_cases,
+        generate_aes_key
+    );
+}
+
+TEST_F(tsra_aes_cbc, streaming_with_padding_cases)
+{
+    std::vector<StreamingRoundtripCase> test_cases = {
+        { 13, 5, 16, 0x12, "small_data_small_chunks" },
+        { 27, 10, 32, 0x12, "non_aligned_data_and_chunks" },
+        { 31, 16, 32, 0x12, "almost_two_blocks" },
+        { 50, 15, 64, 0x12, "odd_chunk_size" },
+        { 100, 33, 112, 0x12, "larger_data_odd_chunks" },
+    };
+
+    run_streaming_case_list(
+        part_list_,
+        TSRA_ALGO_ID_AES_CBC_PAD,
+        [&](tsra_handle key,
+            tsra_algo_id algo,
+            const uint8_t *input,
+            size_t len,
+            size_t chunk_size,
+            size_t expected_ciphertext_len) {
+            test_streaming_roundtrip(key, algo, input, len, chunk_size, expected_ciphertext_len);
+        },
+        test_cases,
+        generate_aes_key
+    );
+}
+
+// Verifies empty CBC-PAD plaintext roundtrips with AES-128.
+TEST_F(tsra_aes_cbc, empty_plaintext_with_padding_128)
+{
+    test_empty_plaintext_with_padding_roundtrip(128);
+}
+
+// Verifies empty CBC-PAD plaintext roundtrips with AES-192.
+TEST_F(tsra_aes_cbc, empty_plaintext_with_padding_192)
+{
+    test_empty_plaintext_with_padding_roundtrip(192);
+}
+
+// Verifies empty CBC-PAD plaintext roundtrips with AES-256.
+TEST_F(tsra_aes_cbc, empty_plaintext_with_padding_256)
+{
+    test_empty_plaintext_with_padding_roundtrip(256);
+}
+
+TEST_F(tsra_aes_cbc, streaming_consistency_with_single_shot)
+{
+    part_list_.for_each_session([](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0xFF);
+
+        std::vector<uint8_t> plaintext(100, 0x55);
+
+        // Single-shot encrypt
+        std::vector<uint8_t> single_shot_ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                single_shot_ciphertext
+            )
+        );
+
+        // Reset IV for streaming
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0xFF);
+
+        // Streaming encrypt
+        std::vector<uint8_t> streaming_ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::streaming_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                17,
+                streaming_ciphertext
+            )
+        );
+
+        // Results should be identical
+        ASSERT_EQ(single_shot_ciphertext.size(), streaming_ciphertext.size());
+        ASSERT_EQ(
+            std::memcmp(
+                single_shot_ciphertext.data(),
+                streaming_ciphertext.data(),
+                single_shot_ciphertext.size()
+            ),
+            0
+        );
+    });
+}
+
+TEST_F(tsra_aes_cbc, large_data_streaming)
+{
+    part_list_.for_each_session([](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x11);
+
+        // Test with larger data (4KB)
+        std::vector<uint8_t> plaintext = make_incrementing_bytes(4096);
+
+        // Encrypt
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::streaming_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                256,
+                ciphertext
+            )
+        );
+
+        // Reset IV for decryption
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x11);
+
+        // Decrypt
+        std::vector<uint8_t> decrypted;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::streaming_crypt(
+                CryptOperation::Decrypt,
+                key.get(),
+                &crypt_algo,
+                ciphertext.data(),
+                ciphertext.size(),
+                256,
+                decrypted
+            )
+        );
+
+        ASSERT_EQ(decrypted.size(), plaintext.size());
+        ASSERT_EQ(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
+    });
+}
+
+// Verifies single-shot CBC-PAD preserves content for larger payloads.
+TEST_F(tsra_aes_cbc, large_data_single_shot)
+{
+    part_list_.for_each_session([](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x21);
+
+        std::vector<uint8_t> plaintext = make_incrementing_bytes(4096);
+
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                ciphertext
+            )
+        );
+        ASSERT_EQ(ciphertext.size(), padded_ciphertext_len(plaintext.size()));
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x21);
+        std::vector<uint8_t> decrypted;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Decrypt,
+                key.get(),
+                &crypt_algo,
+                ciphertext.data(),
+                ciphertext.size(),
+                decrypted
+            )
+        );
+
+        ASSERT_EQ(decrypted.size(), plaintext.size());
+        ASSERT_EQ(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
+    });
+}
+
+TEST_F(tsra_aes_cbc, different_ivs_produce_different_ciphertexts)
+{
+    part_list_.for_each_session([](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        uint8_t plaintext[16] = { 0x42 };
+
+        // Encrypt with IV1
+        uint8_t iv1[16] = { 0xAA };
+        tsra_algo_aes_cbc_params cbc_params1{};
+        std::memcpy(cbc_params1.iv, iv1, sizeof(iv1));
+
+        tsra_algo crypt_algo1{};
+        crypt_algo1.id = TSRA_ALGO_ID_AES_CBC;
+        crypt_algo1.params = &cbc_params1;
+        crypt_algo1.len = sizeof(cbc_params1);
+
+        std::vector<uint8_t> ciphertext1;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo1,
+                plaintext,
+                sizeof(plaintext),
+                ciphertext1
+            )
+        );
+
+        // Encrypt with IV2
+        uint8_t iv2[16] = { 0xBB };
+        tsra_algo_aes_cbc_params cbc_params2{};
+        std::memcpy(cbc_params2.iv, iv2, sizeof(iv2));
+
+        tsra_algo crypt_algo2{};
+        crypt_algo2.id = TSRA_ALGO_ID_AES_CBC;
+        crypt_algo2.params = &cbc_params2;
+        crypt_algo2.len = sizeof(cbc_params2);
+
+        std::vector<uint8_t> ciphertext2;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo2,
+                plaintext,
+                sizeof(plaintext),
+                ciphertext2
+            )
+        );
+
+        // Ciphertexts should be different
+        ASSERT_EQ(ciphertext1.size(), ciphertext2.size());
+        ASSERT_NE(std::memcmp(ciphertext1.data(), ciphertext2.data(), ciphertext1.size()), 0);
+    });
+}
+
+TEST_F(tsra_aes_cbc, single_shot_padding_size_sweep)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        for (size_t plaintext_len = 0; plaintext_len <= 64; ++plaintext_len)
+        {
+            std::vector<uint8_t> plaintext(plaintext_len, 0x5A);
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x89);
+
+            std::vector<uint8_t> ciphertext;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Encrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext.data(),
+                    plaintext.size(),
+                    ciphertext
+                )
+            );
+            ASSERT_EQ(ciphertext.size(), padded_ciphertext_len(plaintext_len));
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x89);
+            std::vector<uint8_t> decrypted;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Decrypt,
+                    key.get(),
+                    &crypt_algo,
+                    ciphertext.data(),
+                    ciphertext.size(),
+                    decrypted
+                )
+            );
+            ASSERT_EQ(decrypted.size(), plaintext.size());
+            ASSERT_EQ(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
+        }
+    });
+}
+
+TEST_F(tsra_aes_cbc, streaming_padding_size_and_chunk_sweep)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        for (auto plaintext_len : padding_sweep_plaintext_sizes())
+        {
+            std::vector<uint8_t> plaintext = make_incrementing_bytes(plaintext_len);
+
+            for (auto chunk_size : padding_sweep_chunk_sizes())
+            {
+                SCOPED_TRACE(
+                    "plaintext_len=" + std::to_string(plaintext_len) +
+                    " chunk_size=" + std::to_string(chunk_size)
+                );
+
+                test_streaming_roundtrip(
+                    key.get(),
+                    TSRA_ALGO_ID_AES_CBC_PAD,
+                    plaintext.data(),
+                    plaintext.size(),
+                    chunk_size,
+                    padded_ciphertext_len(plaintext_len)
+                );
+            }
+        }
+    });
+}
+
+// ==================== Argument Validation and API Behavior ====================
+
+TEST_F(tsra_aes_cbc, single_shot_null_pointers_are_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x12);
+
+        uint8_t plaintext[AES_BLOCK_SIZE] = { 0xAA };
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        tsra_buffer output{ nullptr, 0 };
+
+        auto err = crypt_call(CryptOperation::Encrypt, nullptr, key.get(), &input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), nullptr, &output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, nullptr);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST_F(tsra_aes_cbc, single_shot_invalid_buffer_shapes_are_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x23);
+
+        uint8_t plaintext[AES_BLOCK_SIZE] = { 0xAB };
+        tsra_buffer bad_input{ nullptr, 1 };
+        tsra_buffer output{ nullptr, 0 };
+
+        auto err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &bad_input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        tsra_buffer bad_output{ nullptr, 1 };
+        err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &bad_output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST_F(tsra_aes_cbc, single_shot_invalid_algo_param_len_is_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x34);
+
+        uint8_t plaintext[AES_BLOCK_SIZE] = { 0xCC };
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        tsra_buffer output{ nullptr, 0 };
+
+        crypt_algo.len = sizeof(cbc_params) - 1;
+        auto err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        crypt_algo.len = sizeof(cbc_params) + 1;
+        err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST_F(tsra_aes_cbc, single_shot_null_iv_is_rejected)
+{
+    part_list_.for_each_session([](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo crypt_algo{};
+        crypt_algo.id = TSRA_ALGO_ID_AES_CBC;
+        crypt_algo.params = nullptr; // No IV provided
+        crypt_algo.len = 0;
+
+        uint8_t plaintext[16] = { 0xAA };
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        tsra_buffer output{ nullptr, 0 };
+
+        auto err = tsra_crypt_encrypt(&crypt_algo, key.get(), &input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+TEST_F(tsra_aes_cbc, single_shot_invalid_key_handle_is_rejected)
+{
+    tsra_algo_aes_cbc_params cbc_params{};
+    tsra_algo crypt_algo{};
+    init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0xDD);
+
+    uint8_t plaintext[16] = { 0xEE };
+    tsra_buffer input{ plaintext, sizeof(plaintext) };
+    tsra_buffer output{ nullptr, 0 };
+
+    auto err = tsra_crypt_encrypt(&crypt_algo, 0xDEADBEEF, &input, &output);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+TEST_F(tsra_aes_cbc, unsupported_algorithm_is_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        uint8_t plaintext[AES_BLOCK_SIZE] = { 0xEE };
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        tsra_buffer output{ nullptr, 0 };
+        tsra_algo algo{};
+        algo.id = TSRA_ALGO_ID_SHA256;
+        algo.params = nullptr;
+        algo.len = 0;
+
+        ASSERT_EQ(
+            tsra_crypt_encrypt(&algo, key.get(), &input, &output),
+            TSRA_STATUS_UNSUPPORTED_ALGORITHM
+        );
+        ASSERT_EQ(
+            tsra_crypt_decrypt(&algo, key.get(), &input, &output),
+            TSRA_STATUS_UNSUPPORTED_ALGORITHM
+        );
+
+        auto_ctx ctx;
+        ASSERT_EQ(
+            tsra_crypt_encrypt_init(&algo, key.get(), ctx.get_ptr()),
+            TSRA_STATUS_UNSUPPORTED_ALGORITHM
+        );
+        ASSERT_EQ(ctx.get(), 0u);
+        ASSERT_EQ(
+            tsra_crypt_decrypt_init(&algo, key.get(), ctx.get_ptr()),
+            TSRA_STATUS_UNSUPPORTED_ALGORITHM
+        );
+        ASSERT_EQ(ctx.get(), 0u);
+    });
+}
+
+TEST_F(tsra_aes_cbc, streaming_operations_reject_key_handles_as_contexts)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        uint8_t plaintext[AES_BLOCK_SIZE] = { 0xEF };
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        tsra_buffer output{ nullptr, 0 };
+
+        ASSERT_EQ(
+            tsra_crypt_encrypt_update(key.get(), &input, &output),
+            TSRA_STATUS_INVALID_HANDLE
+        );
+        ASSERT_EQ(tsra_crypt_encrypt_finish(key.get(), &output), TSRA_STATUS_INVALID_HANDLE);
+        ASSERT_EQ(
+            tsra_crypt_decrypt_update(key.get(), &input, &output),
+            TSRA_STATUS_INVALID_HANDLE
+        );
+        ASSERT_EQ(tsra_crypt_decrypt_finish(key.get(), &output), TSRA_STATUS_INVALID_HANDLE);
+    });
+}
+
+// Validates streaming init rejects null mandatory pointers.
+TEST_F(tsra_aes_cbc, streaming_init_null_pointers_are_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x35);
+
+        tsra_handle ctx = 0;
+
+        auto err = crypt_init_call(CryptOperation::Encrypt, nullptr, key.get(), &ctx);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), nullptr);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_init_call(CryptOperation::Decrypt, nullptr, key.get(), &ctx);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), nullptr);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// Validates streaming init rejects malformed algorithm parameter layouts.
+TEST_F(tsra_aes_cbc, streaming_init_invalid_algo_params_are_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x36);
+
+        tsra_handle ctx = 0;
+
+        crypt_algo.params = nullptr;
+        crypt_algo.len = 0;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &ctx);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x36);
+        crypt_algo.params = nullptr;
+        crypt_algo.len = 0;
+        err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &ctx);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// Validates streaming init rejects incorrect CBC parameter size values.
+TEST_F(tsra_aes_cbc, streaming_init_invalid_algo_param_len_is_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x37);
+
+        tsra_handle ctx = 0;
+
+        crypt_algo.len = sizeof(cbc_params) - 1;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &ctx);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        crypt_algo.len = sizeof(cbc_params) + 1;
+        err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &ctx);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// Validates streaming init rejects invalid key handles.
+TEST_F(tsra_aes_cbc, streaming_init_invalid_key_handle_is_rejected)
+{
+    tsra_algo_aes_cbc_params cbc_params{};
+    tsra_algo crypt_algo{};
+    init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x38);
+
+    tsra_handle ctx = 0;
+    auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, 0xDEADBEEF, &ctx);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+
+    err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, 0xDEADBEEF, &ctx);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+// Validates streaming update/finish reject null buffers.
+TEST_F(tsra_aes_cbc, streaming_update_finish_null_pointers_are_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x39);
+
+        auto_ctx ctx;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        uint8_t data[AES_BLOCK_SIZE] = { 0x44 };
+        tsra_buffer input{ data, sizeof(data) };
+        tsra_buffer output{ nullptr, 0 };
+
+        err = crypt_update_call(CryptOperation::Encrypt, ctx, nullptr, &output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_update_call(CryptOperation::Encrypt, ctx, &input, nullptr);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, nullptr);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// Validates update/finish reject malformed buffer shapes (null pointer with non-zero len).
+TEST_F(tsra_aes_cbc, streaming_update_finish_invalid_buffer_shapes_are_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x3A);
+
+        auto_ctx enc_ctx;
+        auto err =
+            crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), enc_ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        auto_ctx dec_ctx;
+        err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), dec_ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        uint8_t byte = 0x01;
+        tsra_buffer bad_input{ nullptr, 1 };
+        tsra_buffer bad_output{ nullptr, 1 };
+        tsra_buffer good_output{ &byte, 1 };
+        tsra_buffer good_input{ &byte, 1 };
+
+        err = crypt_update_call(CryptOperation::Encrypt, enc_ctx, &bad_input, &good_output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_update_call(CryptOperation::Encrypt, enc_ctx, &good_input, &bad_output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_update_call(CryptOperation::Decrypt, dec_ctx, &bad_input, &good_output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_update_call(CryptOperation::Decrypt, dec_ctx, &good_input, &bad_output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_finish_call(CryptOperation::Encrypt, enc_ctx, &bad_output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+
+        err = crypt_finish_call(CryptOperation::Decrypt, dec_ctx, &bad_output);
+        ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
+// Validates single-shot output-buffer sizing behavior for no-padding mode (query/exact/too-small).
+TEST_F(tsra_aes_cbc, single_shot_output_buffer_sizing_no_padding)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x45);
+
+        std::vector<uint8_t> plaintext(2 * AES_BLOCK_SIZE, 0x99);
+        tsra_buffer input{ plaintext.data(), static_cast<uint32_t>(plaintext.size()) };
+        tsra_buffer output{ nullptr, 0 };
+
+        auto err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(output.len, plaintext.size());
+
+        std::vector<uint8_t> exact_output(output.len);
+        output.ptr = exact_output.data();
+        err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(output.len, plaintext.size());
+
+        std::vector<uint8_t> small_output(plaintext.size() - 1);
+        tsra_buffer too_small{ small_output.data(), static_cast<uint32_t>(small_output.size()) };
+        err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &too_small);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(too_small.len, plaintext.size());
+    });
+}
+
+// Validates single-shot output-buffer sizing behavior for padding mode across boundary lengths.
+TEST_F(tsra_aes_cbc, single_shot_output_buffer_sizing_with_padding)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x46);
+
+        std::vector<size_t> plaintext_lens = { 0, 15, 16, 17 };
+        for (auto plaintext_len : plaintext_lens)
+        {
+            SCOPED_TRACE("plaintext_len=" + std::to_string(plaintext_len));
+
+            std::vector<uint8_t> plaintext(plaintext_len, 0xA3);
+            uint8_t dummy = 0;
+            tsra_buffer input{ plaintext_len == 0 ? &dummy : plaintext.data(),
+                               static_cast<uint32_t>(plaintext_len) };
+            tsra_buffer output{ nullptr, 0 };
+
+            auto expected_len = padded_ciphertext_len(plaintext_len);
+
+            auto err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_EQ(output.len, expected_len);
+
+            std::vector<uint8_t> exact_output(output.len);
+            output.ptr = exact_output.data();
+            err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &output);
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+            ASSERT_EQ(output.len, expected_len);
+
+            std::vector<uint8_t> small_output(expected_len - 1);
+            tsra_buffer too_small{ small_output.data(),
+                                   static_cast<uint32_t>(small_output.size()) };
+            err = crypt_call(CryptOperation::Encrypt, &crypt_algo, key.get(), &input, &too_small);
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_EQ(too_small.len, expected_len);
+        }
+    });
+}
+
+// Validates update() output-buffer sizing behavior for no-padding mode
+// (query/too-small/exact-size).
+TEST_F(tsra_aes_cbc, streaming_update_output_buffer_sizing_no_padding)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x7B);
+
+        auto_ctx ctx;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        std::vector<uint8_t> block_a = make_incrementing_bytes(AES_BLOCK_SIZE);
+        std::vector<uint8_t> block_b(AES_BLOCK_SIZE, 0xA7);
+        tsra_buffer input_a{ block_a.data(), static_cast<uint32_t>(block_a.size()) };
+        tsra_buffer input_b{ block_b.data(), static_cast<uint32_t>(block_b.size()) };
+        tsra_buffer output{ nullptr, 0 };
+
+        // The output length is 0 because no-padding CBC keeps one trailing
+        // full block until more input or finish() so update() can stay
+        // consistent at block boundaries.
+        err = crypt_update_call(CryptOperation::Encrypt, ctx, &input_a, &output);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(output.len, 0u);
+
+        // Feeding a different second block should not change the required output size for the first
+        // block.
+        err = crypt_update_call(CryptOperation::Encrypt, ctx, &input_b, &output);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(output.len, AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> too_small(AES_BLOCK_SIZE - 1);
+        tsra_buffer short_output{ too_small.data(), static_cast<uint32_t>(too_small.size()) };
+        err = crypt_update_call(CryptOperation::Encrypt, ctx, &input_b, &short_output);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(short_output.len, AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> exact(AES_BLOCK_SIZE);
+        tsra_buffer exact_output{ exact.data(), static_cast<uint32_t>(exact.size()) };
+        err = crypt_update_call(CryptOperation::Encrypt, ctx, &input_b, &exact_output);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(exact_output.len, AES_BLOCK_SIZE);
+
+        tsra_buffer finish_output{ nullptr, 0 };
+        // The final deferred block is emitted at finish().
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &finish_output);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(finish_output.len, AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> finish_exact(AES_BLOCK_SIZE);
+        finish_output.ptr = finish_exact.data();
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &finish_output);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(finish_output.len, AES_BLOCK_SIZE);
+
+        // Streamed output should match single-shot ciphertext for A + B.
+        std::vector<uint8_t> plaintext;
+        plaintext.reserve(2 * AES_BLOCK_SIZE);
+        plaintext.insert(plaintext.end(), block_a.begin(), block_a.end());
+        plaintext.insert(plaintext.end(), block_b.begin(), block_b.end());
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x7B);
+        std::vector<uint8_t> single_shot_ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                single_shot_ciphertext
+            )
+        );
+        ASSERT_EQ(single_shot_ciphertext.size(), 2 * AES_BLOCK_SIZE);
+
+        ASSERT_EQ(std::memcmp(exact.data(), single_shot_ciphertext.data(), AES_BLOCK_SIZE), 0);
+        ASSERT_EQ(
+            std::memcmp(
+                finish_exact.data(),
+                single_shot_ciphertext.data() + AES_BLOCK_SIZE,
+                AES_BLOCK_SIZE
+            ),
+            0
+        );
+    });
+}
+
+// Validates finish() output-buffer sizing behavior for padding mode (query/too-small/exact-size).
+TEST_F(tsra_aes_cbc, streaming_finish_output_buffer_sizing_with_padding)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x7C);
+
+        auto_ctx ctx;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_buffer finish_out{ nullptr, 0 };
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &finish_out);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(finish_out.len, AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> too_small(AES_BLOCK_SIZE - 1);
+        tsra_buffer short_out{ too_small.data(), static_cast<uint32_t>(too_small.size()) };
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &short_out);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(short_out.len, AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> exact(AES_BLOCK_SIZE);
+        tsra_buffer exact_out{ exact.data(), static_cast<uint32_t>(exact.size()) };
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &exact_out);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(exact_out.len, AES_BLOCK_SIZE);
+    });
+}
+
+// ==================== Malformed Input and Padding Rejection ====================
+
+TEST_F(tsra_aes_cbc, encrypt_non_block_aligned_plaintext_no_padding_fails)
+{
+    part_list_.for_each_session([](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0xBB);
+
+        // Try to encrypt non-block-aligned data without padding
+        uint8_t plaintext[13] = { 0xCC }; // Not a multiple of 16
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        tsra_buffer output{ nullptr, 0 };
+
+        auto err = tsra_crypt_encrypt(&crypt_algo, key.get(), &input, &output);
+        ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+    });
+}
+
+// Ensures CBC decrypt rejects ciphertext lengths that are not multiples of the block size.
+TEST_F(tsra_aes_cbc, decrypt_non_block_aligned_ciphertext_fails)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        std::vector<uint8_t> bad_ciphertext(17, 0xA5);
+        tsra_buffer input{ bad_ciphertext.data(), static_cast<uint32_t>(bad_ciphertext.size()) };
+        tsra_buffer output{ nullptr, 0 };
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x56);
+        auto err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &output);
+        ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x56);
+        err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &output);
+        ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+    });
+}
+
+// Ensures CBC-PAD decrypt rejects tampered ciphertext with invalid PKCS#7 padding.
+TEST_F(tsra_aes_cbc, decrypt_invalid_padding_fails)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x67);
+
+        std::vector<uint8_t> plaintext(31, 0x44);
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                ciphertext
+            )
+        );
+
+        // For plaintext length 31, PKCS#7 pad length is 1. Mutating C[n-1][-1]
+        // with XOR 0x01 flips P[n][-1] from 0x01 to 0x00, which is always invalid.
+        // This keeps the test deterministic across chunk boundaries.
+        ciphertext[ciphertext.size() - AES_BLOCK_SIZE - 1] ^= 0x01;
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x67);
+        tsra_buffer input{ ciphertext.data(), static_cast<uint32_t>(ciphertext.size()) };
+        auto err =
+            single_shot_status_with_sizing(CryptOperation::Decrypt, &crypt_algo, key.get(), &input);
+        ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+    });
+}
+
+// Sweeps PKCS#7 malformed cases (zero pad byte and inconsistent pad bytes) across pad lengths.
+TEST_F(tsra_aes_cbc, decrypt_invalid_padding_variants_fail)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        for (size_t pad_len = 1; pad_len <= AES_BLOCK_SIZE; ++pad_len)
+        {
+            // Build plaintext so PKCS#7 pad length in the finish block is exactly `pad_len`.
+            const size_t plaintext_len = (2 * AES_BLOCK_SIZE) - pad_len;
+            std::vector<uint8_t> plaintext(plaintext_len, 0x2A);
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x68);
+
+            std::vector<uint8_t> ciphertext;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Encrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext.data(),
+                    plaintext.size(),
+                    ciphertext
+                )
+            );
+
+            SCOPED_TRACE("pad_len=" + std::to_string(pad_len));
+
+            auto assert_decrypt_fails = [&](std::vector<uint8_t> mutated) {
+                // Reinitialize algo/IV so each mutation is evaluated from the same decrypt state.
+                init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x68);
+                tsra_buffer input{ mutated.data(), static_cast<uint32_t>(mutated.size()) };
+                auto err = single_shot_status_with_sizing(
+                    CryptOperation::Decrypt,
+                    &crypt_algo,
+                    key.get(),
+                    &input
+                );
+
+                ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+            };
+
+            // We intentionally mutate the second to last (C[n-1]) block with deterministic flips
+            // here. This change was made because direct last (C[n]) block tampering can produce
+            // flaky test failures, where padding occasionally still appears valid.
+
+            // Case 1: force pad length byte to 0 (always invalid in PKCS#7).
+            auto zero_pad = ciphertext;
+            zero_pad[zero_pad.size() - AES_BLOCK_SIZE - 1] ^= static_cast<uint8_t>(pad_len);
+            assert_decrypt_fails(std::move(zero_pad));
+
+            if (pad_len > 1)
+            {
+                // Case 2: break pad-byte consistency while keeping final pad length byte intact.
+                auto inconsistent_pad = ciphertext;
+                inconsistent_pad[inconsistent_pad.size() - AES_BLOCK_SIZE - 2] ^= 0x01;
+                assert_decrypt_fails(std::move(inconsistent_pad));
+            }
+        }
+    });
+}
+
+// Validates chunked CBC-PAD decrypt still rejects tampered padding regardless of chunk boundaries.
+TEST_F(tsra_aes_cbc, streaming_decrypt_invalid_padding_fails_across_chunk_sizes)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x69);
+
+        std::vector<uint8_t> plaintext(31, 0x5B);
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                ciphertext
+            )
+        );
+
+        // For plaintext length 31, PKCS#7 pad length is 1. Mutating C[n-1][-1]
+        // with XOR 0x01 flips P[n][-1] from 0x01 to 0x00, which is always invalid.
+        // This keeps the test deterministic across chunk boundaries.
+        ciphertext[ciphertext.size() - AES_BLOCK_SIZE - 1] ^= 0x01;
+
+        std::vector<size_t> chunk_sizes = { 1, 7, 16, 31 };
+        for (auto chunk_size : chunk_sizes)
+        {
+            SCOPED_TRACE("chunk_size=" + std::to_string(chunk_size));
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x69);
+
+            auto_ctx ctx;
+            auto err =
+                crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), ctx.get_ptr());
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+            bool saw_failure = false;
+            size_t offset = 0;
+            while (offset < ciphertext.size())
+            {
+                // Feed mutated ciphertext in variable chunk boundaries to exercise stream parser
+                // paths.
+                size_t current_chunk = std::min(chunk_size, ciphertext.size() - offset);
+                tsra_buffer input{
+                    ciphertext.data() + offset,
+                    static_cast<uint32_t>(current_chunk),
+                };
+
+                err = streaming_update_status_with_sizing(CryptOperation::Decrypt, ctx, &input);
+
+                if (err != TSRA_STATUS_SUCCESS)
+                {
+                    saw_failure = true;
+                    break;
+                }
+
+                offset += current_chunk;
+            }
+
+            if (!saw_failure)
+            {
+                // If update accepted all chunks, finish must still reject invalid PKCS#7 state.
+                err = streaming_finish_status_with_sizing(CryptOperation::Decrypt, ctx);
+
+                ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+            }
+        }
+    });
+}
+
+// Verifies streaming no-padding rejects partial finish blocks for both encrypt and decrypt flows.
+TEST_F(tsra_aes_cbc, streaming_no_padding_partial_block_input_is_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        auto run_expect_failure = [&](CryptOperation operation, std::vector<uint8_t> input_bytes) {
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x22);
+
+            auto_ctx ctx;
+            auto err = crypt_init_call(operation, &crypt_algo, key.get(), ctx.get_ptr());
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+            tsra_buffer input{ input_bytes.data(), static_cast<uint32_t>(input_bytes.size()) };
+
+            bool saw_failure = false;
+            err = streaming_update_status_with_sizing(operation, ctx, &input);
+
+            if (err != TSRA_STATUS_SUCCESS)
+            {
+                saw_failure = true;
+            }
+
+            if (!saw_failure)
+            {
+                err = streaming_finish_status_with_sizing(operation, ctx);
+                ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+            }
+        };
+
+        std::vector<uint8_t> bad_plaintext(17, 0xA1);
+        run_expect_failure(CryptOperation::Encrypt, std::move(bad_plaintext));
+
+        std::vector<uint8_t> bad_ciphertext(17, 0xA2);
+        run_expect_failure(CryptOperation::Decrypt, std::move(bad_ciphertext));
+    });
+}
+
+// ==================== Streaming Lifecycle and Context Rules ====================
+
+// Verifies zero-length update is a no-op for CBC-PAD and output is emitted only at finish.
+TEST_F(tsra_aes_cbc, streaming_zero_length_update_with_padding_noop_until_finish)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x6A);
+
+        auto_ctx ctx;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        uint8_t dummy = 0x00;
+        tsra_buffer empty_input{ &dummy, 0 };
+        tsra_buffer update_out{ nullptr, 0 };
+        err = crypt_update_call(CryptOperation::Encrypt, ctx, &empty_input, &update_out);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(update_out.len, 0u);
+
+        tsra_buffer finish_out{ nullptr, 0 };
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &finish_out);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(finish_out.len, AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> finish_buf(finish_out.len);
+        finish_out.ptr = finish_buf.data();
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &finish_out);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(finish_out.len, AES_BLOCK_SIZE);
+    });
+}
+
+// Ensures streaming APIs consistently reject obviously invalid context handles.
+TEST_F(tsra_aes_cbc, streaming_invalid_context_handles_are_rejected)
+{
+    uint8_t data[AES_BLOCK_SIZE] = { 0x11 };
+    tsra_buffer input{ data, sizeof(data) };
+    tsra_buffer output{ nullptr, 0 };
+
+    auto err = crypt_update_call(CryptOperation::Encrypt, 0xDEADBEEF, &input, &output);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+
+    err = crypt_update_call(CryptOperation::Decrypt, 0xDEADBEEF, &input, &output);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+
+    err = crypt_finish_call(CryptOperation::Encrypt, 0xDEADBEEF, &output);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+
+    err = crypt_finish_call(CryptOperation::Decrypt, 0xDEADBEEF, &output);
+    ASSERT_EQ(err, TSRA_STATUS_INVALID_HANDLE);
+}
+
+// Verifies an encrypt-initialized context cannot be used through decrypt update/finish APIs.
+TEST_F(tsra_aes_cbc, streaming_operation_mismatch_on_context_is_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x79);
+
+        auto_ctx ctx;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        uint8_t data[AES_BLOCK_SIZE] = { 0x41 };
+        tsra_buffer input{ data, sizeof(data) };
+        tsra_buffer output{ nullptr, 0 };
+
+        err = crypt_update_call(CryptOperation::Decrypt, ctx, &input, &output);
+        ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+
+        err = crypt_finish_call(CryptOperation::Decrypt, ctx, &output);
+        ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+
+        err = streaming_finish_status_with_sizing(CryptOperation::Encrypt, ctx);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+    });
+}
+
+// Checks PKCS#7 behavior in streaming mode: finish without update emits one full padding block.
+TEST_F(tsra_aes_cbc, streaming_encrypt_finish_without_update_with_padding_outputs_block)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x7A);
+
+        auto_ctx ctx;
+        auto err = crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_buffer output{ nullptr, 0 };
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &output);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(output.len, AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> out_buf(output.len);
+        output.ptr = out_buf.data();
+        err = crypt_finish_call(CryptOperation::Encrypt, ctx, &output);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(output.len, AES_BLOCK_SIZE);
+    });
+}
+
+// ==================== Context Lifecycle After Finish ====================
+
+// After finish succeeds, update/finish must return INVALID_CONTEXT_STATE.
+TEST_F(tsra_aes_cbc, streaming_finish_invalidates_context)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0xA0);
+
+        // Encrypt path: use streaming_crypt to get complete ciphertext
+        auto_ctx enc_ctx;
+        auto err =
+            crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), enc_ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        // CBC-PAD: feed data via streaming_update_status_with_sizing + streaming_finish
+        uint8_t plaintext[32] = { 0xA0 };
+        tsra_buffer input{ plaintext, sizeof(plaintext) };
+        err = streaming_update_status_with_sizing(CryptOperation::Encrypt, enc_ctx, &input);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        err = streaming_finish_status_with_sizing(CryptOperation::Encrypt, enc_ctx);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        assert_encrypt_ctx_finished(enc_ctx);
+
+        // Decrypt path: use streaming_crypt helper for proper roundtrip,
+        // then test lifecycle on a fresh context
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0xA0);
+        auto_ctx dec_ctx;
+        err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), dec_ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        // Just do finish with padding (no update data) to consume the context
+        err = streaming_finish_status_with_sizing(CryptOperation::Decrypt, dec_ctx);
+        // Decrypt finish with no data on CBC-PAD will produce padding error,
+        // but context should still be finished. Accept any result.
+
+        // Use a fresh context with actual data for lifecycle test
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0xA0);
+        auto_ctx dec_ctx2;
+        err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), dec_ctx2.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        // Encrypt fresh data with single-shot for proper ciphertext
+        std::vector<uint8_t> ciphertext;
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0xA0);
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext,
+                sizeof(plaintext),
+                ciphertext
+            )
+        );
+
+        // Feed the complete ciphertext to decrypt streaming
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0xA0);
+        auto_ctx dec_ctx3;
+        err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), dec_ctx3.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_buffer dec_input{ ciphertext.data(), static_cast<uint32_t>(ciphertext.size()) };
+        err = streaming_update_status_with_sizing(CryptOperation::Decrypt, dec_ctx3, &dec_input);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        err = streaming_finish_status_with_sizing(CryptOperation::Decrypt, dec_ctx3);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        assert_decrypt_ctx_finished(dec_ctx3);
+    });
+}
+
+// Normal lifecycle: init -> update -> finish -> context is finished.
+TEST_F(tsra_aes_cbc, streaming_init_update_finish_consumes_context)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        // Use no-padding for simpler roundtrip (block-aligned data)
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0xB0);
+
+        // Encrypt
+        auto_ctx enc_ctx;
+        auto err =
+            crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), enc_ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        uint8_t block[16] = { 0x42 };
+        tsra_buffer input{ block, sizeof(block) };
+
+        err = streaming_update_status_with_sizing(CryptOperation::Encrypt, enc_ctx, &input);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        err = streaming_finish_status_with_sizing(CryptOperation::Encrypt, enc_ctx);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        assert_encrypt_ctx_finished(enc_ctx);
+
+        // Decrypt roundtrip: encrypt with single-shot to get proper ciphertext
+        std::vector<uint8_t> ciphertext;
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0xB0);
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                block,
+                sizeof(block),
+                ciphertext
+            )
+        );
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0xB0);
+        auto_ctx dec_ctx;
+        err = crypt_init_call(CryptOperation::Decrypt, &crypt_algo, key.get(), dec_ctx.get_ptr());
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        tsra_buffer dec_input{ ciphertext.data(), static_cast<uint32_t>(ciphertext.size()) };
+        err = streaming_update_status_with_sizing(CryptOperation::Decrypt, dec_ctx, &dec_input);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        err = streaming_finish_status_with_sizing(CryptOperation::Decrypt, dec_ctx);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        assert_decrypt_ctx_finished(dec_ctx);
+    });
+}
+
+// Validates single-shot decrypt output-buffer sizing behavior for no-padding mode.
+TEST_F(tsra_aes_cbc, single_shot_decrypt_output_buffer_sizing_no_padding)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x47);
+
+        std::vector<uint8_t> plaintext = make_incrementing_bytes(2 * AES_BLOCK_SIZE);
+
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                ciphertext
+            )
+        );
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x47);
+
+        tsra_buffer input{ ciphertext.data(), static_cast<uint32_t>(ciphertext.size()) };
+        tsra_buffer output{ nullptr, 0 };
+
+        auto err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &output);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(output.len, plaintext.size());
+
+        std::vector<uint8_t> too_small(plaintext.size() - 1);
+        tsra_buffer short_output{ too_small.data(), static_cast<uint32_t>(too_small.size()) };
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x47);
+        err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &short_output);
+        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(short_output.len, plaintext.size());
+
+        std::vector<uint8_t> exact_output(plaintext.size());
+        tsra_buffer exact{ exact_output.data(), static_cast<uint32_t>(exact_output.size()) };
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x47);
+        err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &exact);
+        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(exact.len, plaintext.size());
+        ASSERT_EQ(std::memcmp(exact_output.data(), plaintext.data(), plaintext.size()), 0);
+    });
+}
+
+// Validates single-shot decrypt output-buffer sizing behavior for CBC-PAD mode.
+TEST_F(tsra_aes_cbc, single_shot_decrypt_output_buffer_sizing_with_padding)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        for (auto plaintext_len : std::vector<size_t>{ 0, 1, 15, 16, 17, 31, 32 })
+        {
+            SCOPED_TRACE("plaintext_len=" + std::to_string(plaintext_len));
+
+            std::vector<uint8_t> plaintext(plaintext_len, 0xA6);
+            uint8_t dummy = 0;
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x48);
+
+            std::vector<uint8_t> ciphertext;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Encrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext_len == 0 ? &dummy : plaintext.data(),
+                    plaintext.size(),
+                    ciphertext
+                )
+            );
+
+            const auto required_output_len = ciphertext.size();
+
+            tsra_buffer input{ ciphertext.data(), static_cast<uint32_t>(ciphertext.size()) };
+            tsra_buffer output{ nullptr, 0 };
+
+            // CBC-PAD decrypt sizing returns the required output buffer capacity,
+            // which is the ciphertext length. The final output length is only known
+            // after padding is removed during the successful decrypt call.
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x48);
+            auto err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &output);
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_EQ(output.len, required_output_len);
+
+            std::vector<uint8_t> too_small(required_output_len - 1);
+            tsra_buffer short_output{ too_small.data(), static_cast<uint32_t>(too_small.size()) };
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x48);
+            err =
+                crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &short_output);
+            ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
+            ASSERT_EQ(short_output.len, required_output_len);
+
+            std::vector<uint8_t> exact_output(required_output_len);
+            tsra_buffer exact{ exact_output.data(), static_cast<uint32_t>(exact_output.size()) };
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x48);
+            err = crypt_call(CryptOperation::Decrypt, &crypt_algo, key.get(), &input, &exact);
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+            // After successful decrypt, len should be the final unpadded plaintext length.
+            ASSERT_EQ(exact.len, plaintext_len);
+
+            if (plaintext_len > 0)
+            {
+                ASSERT_EQ(std::memcmp(exact_output.data(), plaintext.data(), plaintext_len), 0);
+            }
+        }
+    });
+}
+
+// Verifies decrypting with a different IV succeeds but does not recover the original plaintext.
+TEST_F(tsra_aes_cbc, decrypt_with_different_iv_does_not_roundtrip_content)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        std::vector<uint8_t> plaintext = make_incrementing_bytes(31);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x51);
+
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                ciphertext
+            )
+        );
+
+        // Same key, different IV. CBC-PAD should still have valid padding because
+        // changing the IV only corrupts the first plaintext block.
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x52);
+
+        std::vector<uint8_t> decrypted;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Decrypt,
+                key.get(),
+                &crypt_algo,
+                ciphertext.data(),
+                ciphertext.size(),
+                decrypted
+            )
+        );
+
+        ASSERT_EQ(decrypted.size(), plaintext.size());
+        ASSERT_NE(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
+    });
+}
+
+// Verifies no-padding streaming finish without update is rejected.
+TEST_F(tsra_aes_cbc, streaming_no_padding_finish_without_update_is_rejected)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        auto run_finish_without_update = [&](CryptOperation operation) {
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x53);
+
+            auto_ctx ctx;
+            auto err = crypt_init_call(operation, &crypt_algo, key.get(), ctx.get_ptr());
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+            tsra_buffer output{ nullptr, 0 };
+            err = crypt_finish_call(operation, ctx, &output);
+
+            ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+        };
+
+        run_finish_without_update(CryptOperation::Encrypt);
+        run_finish_without_update(CryptOperation::Decrypt);
+    });
+}
+
+// Verifies single-shot CBC ciphertext can be decrypted by streaming with odd chunk boundaries.
+TEST_F(tsra_aes_cbc, single_shot_encrypt_streaming_decrypt_no_padding_diff_boundaries)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 128);
+
+        std::vector<uint8_t> plaintext = make_incrementing_bytes(4096);
+
+        tsra_algo_aes_cbc_params cbc_params{};
+        tsra_algo crypt_algo{};
+        init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x57);
+
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Encrypt,
+                key.get(),
+                &crypt_algo,
+                plaintext.data(),
+                plaintext.size(),
+                ciphertext
+            )
+        );
+
+        for (auto chunk_size : std::vector<size_t>{ 1, 7, 19, 333, 777 })
+        {
+            SCOPED_TRACE("chunk_size=" + std::to_string(chunk_size));
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC, 0x57);
+
+            std::vector<uint8_t> decrypted;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::streaming_crypt(
+                    CryptOperation::Decrypt,
+                    key.get(),
+                    &crypt_algo,
+                    ciphertext.data(),
+                    ciphertext.size(),
+                    chunk_size,
+                    decrypted
+                )
+            );
+
+            ASSERT_EQ(decrypted.size(), plaintext.size());
+            ASSERT_EQ(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
+        }
+    });
+}
+
+// Verifies CBC-PAD streaming encryption matches single-shot encryption across chunk patterns.
+TEST_F(tsra_aes_cbc, streaming_matches_single_shot_multiple_chunk_patterns)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        auto key = generate_aes_key(session, 256);
+
+        std::vector<uint8_t> plaintext = make_incrementing_bytes(1024);
+
+        std::vector<std::vector<size_t>> chunk_patterns = {
+            { 1 },
+            { 7, 31, 128 },
+            { 16, 16, 16 },
+            { 255, 3, 5 },
+        };
+
+        for (const auto &chunks : chunk_patterns)
+        {
+            SCOPED_TRACE("first_chunk=" + std::to_string(chunks[0]));
+
+            tsra_algo_aes_cbc_params cbc_params{};
+            tsra_algo crypt_algo{};
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x5A);
+
+            std::vector<uint8_t> single_shot_ciphertext;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Encrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext.data(),
+                    plaintext.size(),
+                    single_shot_ciphertext
+                )
+            );
+
+            init_cbc_algo(crypt_algo, cbc_params, TSRA_ALGO_ID_AES_CBC_PAD, 0x5A);
+
+            auto_ctx ctx;
+            auto err =
+                crypt_init_call(CryptOperation::Encrypt, &crypt_algo, key.get(), ctx.get_ptr());
+            ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+            std::vector<uint8_t> streaming_ciphertext;
+            size_t offset = 0;
+            size_t i = 0;
+
+            while (offset < plaintext.size())
+            {
+                const size_t chunk_size =
+                    std::min(chunks[i % chunks.size()], plaintext.size() - offset);
+                tsra_buffer input{
+                    plaintext.data() + offset,
+                    static_cast<uint32_t>(chunk_size),
+                };
+
+                tsra_buffer query_out{ nullptr, 0 };
+                err = crypt_update_call(CryptOperation::Encrypt, ctx, &input, &query_out);
+                ASSERT_TRUE(err == TSRA_STATUS_SUCCESS || err == TSRA_STATUS_BUFFER_TOO_SMALL);
+
+                if (query_out.len > 0)
+                {
+                    std::vector<uint8_t> out(query_out.len);
+                    tsra_buffer update_out{ out.data(), static_cast<uint32_t>(out.size()) };
+                    err = crypt_update_call(CryptOperation::Encrypt, ctx, &input, &update_out);
+                    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+                    streaming_ciphertext.insert(
+                        streaming_ciphertext.end(),
+                        out.begin(),
+                        out.begin() + update_out.len
+                    );
+                }
+
+                offset += chunk_size;
+                ++i;
+            }
+
+            tsra_buffer finish_query{ nullptr, 0 };
+            err = crypt_finish_call(CryptOperation::Encrypt, ctx, &finish_query);
+            ASSERT_TRUE(err == TSRA_STATUS_SUCCESS || err == TSRA_STATUS_BUFFER_TOO_SMALL);
+
+            if (finish_query.len > 0)
+            {
+                std::vector<uint8_t> finish_out(finish_query.len);
+                finish_query.ptr = finish_out.data();
+                err = crypt_finish_call(CryptOperation::Encrypt, ctx, &finish_query);
+                ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+                streaming_ciphertext.insert(
+                    streaming_ciphertext.end(),
+                    finish_out.begin(),
+                    finish_out.begin() + finish_query.len
+                );
+            }
+
+            ASSERT_EQ(streaming_ciphertext.size(), single_shot_ciphertext.size());
+            ASSERT_EQ(
+                std::memcmp(
+                    streaming_ciphertext.data(),
+                    single_shot_ciphertext.data(),
+                    single_shot_ciphertext.size()
+                ),
+                0
+            );
+        }
+    });
+}
+
+// Verifies truncated ciphertext is rejected for CBC and CBC-PAD across AES key sizes.
+TEST_F(tsra_aes_cbc, decrypt_truncated_ciphertext_fails_all_key_sizes_both_modes)
+{
+    part_list_.for_each_session([&](tsra_handle session) {
+        for (auto bits : std::vector<uint32_t>{ 128, 192, 256 })
+        {
+            for (auto algo_id : { TSRA_ALGO_ID_AES_CBC, TSRA_ALGO_ID_AES_CBC_PAD })
+            {
+                SCOPED_TRACE(
+                    "bits=" + std::to_string(bits) + " algo_id=" + std::to_string(algo_id)
+                );
+
+                auto key = generate_aes_key(session, bits);
+
+                const bool with_padding = algo_id == TSRA_ALGO_ID_AES_CBC_PAD;
+                std::vector<uint8_t> plaintext =
+                    with_padding ? std::vector<uint8_t>(AES_BLOCK_SIZE + 1, 0xAA)
+                                 : std::vector<uint8_t>(AES_BLOCK_SIZE * 2, 0xAA);
+
+                tsra_algo_aes_cbc_params cbc_params{};
+                tsra_algo crypt_algo{};
+                init_cbc_algo(crypt_algo, cbc_params, algo_id, 0x5B);
+
+                std::vector<uint8_t> ciphertext;
+                ASSERT_EQ(
+                    TSRA_STATUS_SUCCESS,
+                    ::single_shot_crypt(
+                        CryptOperation::Encrypt,
+                        key.get(),
+                        &crypt_algo,
+                        plaintext.data(),
+                        plaintext.size(),
+                        ciphertext
+                    )
+                );
+
+                ciphertext.pop_back();
+
+                init_cbc_algo(crypt_algo, cbc_params, algo_id, 0x5B);
+
+                tsra_buffer input{ ciphertext.data(), static_cast<uint32_t>(ciphertext.size()) };
+
+                auto err = single_shot_status_with_sizing(
+                    CryptOperation::Decrypt,
+                    &crypt_algo,
+                    key.get(),
+                    &input
+                );
+
+                ASSERT_NE(err, TSRA_STATUS_SUCCESS);
+            }
+        }
+    });
+}
+
+// Verifies CBC no-padding rejects empty plaintext with AES-128.
+TEST_F(tsra_aes_cbc, encrypt_empty_plaintext_no_padding_128_fails)
+{
+    test_encrypt_empty_plaintext_no_padding_fails(128);
+}
+
+// Verifies CBC no-padding rejects empty plaintext with AES-192.
+TEST_F(tsra_aes_cbc, encrypt_empty_plaintext_no_padding_192_fails)
+{
+    test_encrypt_empty_plaintext_no_padding_fails(192);
+}
+
+// Verifies CBC no-padding rejects empty plaintext with AES-256.
+TEST_F(tsra_aes_cbc, encrypt_empty_plaintext_no_padding_256_fails)
+{
+    test_encrypt_empty_plaintext_no_padding_fails(256);
+}
+
+// Verifies CBC-PAD decrypt rejects empty ciphertext with AES-128.
+TEST_F(tsra_aes_cbc, decrypt_empty_ciphertext_with_padding_128_fails)
+{
+    test_decrypt_empty_ciphertext_fails(128, TSRA_ALGO_ID_AES_CBC_PAD);
+}
+
+// Verifies CBC-PAD decrypt rejects empty ciphertext with AES-192.
+TEST_F(tsra_aes_cbc, decrypt_empty_ciphertext_with_padding_192_fails)
+{
+    test_decrypt_empty_ciphertext_fails(192, TSRA_ALGO_ID_AES_CBC_PAD);
+}
+
+// Verifies CBC-PAD decrypt rejects empty ciphertext with AES-256.
+TEST_F(tsra_aes_cbc, decrypt_empty_ciphertext_with_padding_256_fails)
+{
+    test_decrypt_empty_ciphertext_fails(256, TSRA_ALGO_ID_AES_CBC_PAD);
+}
+
+// Verifies CBC no-padding decrypt rejects empty ciphertext with AES-128.
+TEST_F(tsra_aes_cbc, decrypt_empty_ciphertext_no_padding_128_fails)
+{
+    test_decrypt_empty_ciphertext_fails(128, TSRA_ALGO_ID_AES_CBC);
+}
+
+// Verifies CBC no-padding decrypt rejects empty ciphertext with AES-192.
+TEST_F(tsra_aes_cbc, decrypt_empty_ciphertext_no_padding_192_fails)
+{
+    test_decrypt_empty_ciphertext_fails(192, TSRA_ALGO_ID_AES_CBC);
+}
+
+// Verifies CBC no-padding decrypt rejects empty ciphertext with AES-256.
+TEST_F(tsra_aes_cbc, decrypt_empty_ciphertext_no_padding_256_fails)
+{
+    test_decrypt_empty_ciphertext_fails(256, TSRA_ALGO_ID_AES_CBC);
+}
+
+// Verifies tampered CBC no-padding ciphertext does not recover plaintext with AES-128.
+TEST_F(tsra_aes_cbc, decrypt_tampered_ciphertext_no_padding_128_does_not_match_plaintext)
+{
+    test_decrypt_tampered_ciphertext_no_padding_does_not_match(128);
+}
+
+// Verifies tampered CBC no-padding ciphertext does not recover plaintext with AES-192.
+TEST_F(tsra_aes_cbc, decrypt_tampered_ciphertext_no_padding_192_does_not_match_plaintext)
+{
+    test_decrypt_tampered_ciphertext_no_padding_does_not_match(192);
+}
+
+// Verifies tampered CBC no-padding ciphertext does not recover plaintext with AES-256.
+TEST_F(tsra_aes_cbc, decrypt_tampered_ciphertext_no_padding_256_does_not_match_plaintext)
+{
+    test_decrypt_tampered_ciphertext_no_padding_does_not_match(256);
+}

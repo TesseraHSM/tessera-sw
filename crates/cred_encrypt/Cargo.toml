@@ -1,0 +1,20 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "tsra_cred_encrypt"
+version = "0.1.0"
+
+[dependencies]
+thiserror.workspace = true
+tsra_crypto.workspace = true
+tsra_ddi_mbor_codec.workspace = true
+tsra_ddi_mbor_types.workspace = true
+zeroize.workspace = true
+
+[features]
+default = []
+
+[lints]
+workspace = true

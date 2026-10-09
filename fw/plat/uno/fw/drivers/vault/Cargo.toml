@@ -1,0 +1,17 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_fw_uno_drivers_vault"
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+test = false
+
+[dependencies]
+tsra_fw_hsm_pal_traits = { workspace = true }
+tsra_fw_uno_key_vault = { workspace = true }
+tsra_fw_uno_reg_soc = { workspace = true }

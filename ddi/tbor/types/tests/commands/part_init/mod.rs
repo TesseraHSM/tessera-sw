@@ -1,0 +1,154 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Integration tests for the TBOR `PartInit` command.
+//!
+//! `PartInit` is mainline-supported on both `emu` and hardware. Tests
+//! run on both backends by default.
+//!
+//! Cross-test isolation comes from [`TestCtx::new`] (factory-reset +
+//! process-global lock held for the ctx's lifetime, see
+//! [`tsra_ddi_tbor_test_harness::fixture`]) so each test starts from a pristine
+//! `Enabled` partition with the canonical default PSKs.
+//!
+//! Submodules group tests by what is being exercised:
+//! * [`success_path`] — the full `OpenSession → PskChange → PartInit`
+//!   flow, plus the cold-restart determinism test.
+//! * [`fw_rejects`] — dispatcher/handler gates that reject **before**
+//!   any partition-state mutation (default PSK, role, malformed
+//!   policy).
+//! * [`crypto_rejects`] — `mach_seed_envelope` AEAD-GCM tag and
+//!   AAD-binding rejects.
+//!
+//! PartInit-specific helpers (`open_co_with`, the wire-correct
+//! `known_good_part_policy`/`mach_seed`/`pota_thumbprint` fixtures)
+//! live in this module. Shared role-session bootstrap helpers and
+//! rotated PSKs live in [`tsra_ddi_tbor_test_harness::fixture`].
+
+use tsra_ddi_tbor_test_harness::SessionHandshake;
+use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
+use tsra_ddi_tbor_types::PolicyKeyKind;
+use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::MACH_SEED_LEN;
+use tsra_ddi_tbor_types::PART_POLICY_LEN;
+use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::PSK_LEN;
+use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
+
+mod crypto_rejects;
+mod fw_rejects;
+mod sd_config;
+mod success_path;
+
+/// Build a 484-byte unified `PartPolicy` blob that passes
+/// `tsra_fw_hsm_core::ddi::tbor::policy::from_bytes`.  Layout mirrors
+/// the canonical wire format defined in
+/// `fw/core/ddi/tbor/types/src/policy.rs`: POTA + SATA trust anchors are
+/// populated Ecc384 keys; SAPOTA + backing-partition keys are left
+/// absent (zero `len`); flags are clear; `info` is filled.
+pub(crate) fn known_good_part_policy() -> [u8; PART_POLICY_LEN] {
+    const OFF_POTA: usize = 2;
+    const OFF_SATA: usize = 102;
+    const OFF_FLAGS: usize = 418;
+    const OFF_INFO: usize = 419;
+
+    // Write an Ecc384 (kind 0) raw X‖Y pubkey at `off` (no SEC1 prefix).
+    fn write_pubkey(bytes: &mut [u8], off: usize, fill: u8) {
+        bytes[off..off + 2].copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
+        bytes[off + 2..off + 4].copy_from_slice(&96u16.to_le_bytes());
+        for (i, b) in bytes[off + 4..off + 4 + 96].iter_mut().enumerate() {
+            *b = (fill.wrapping_add(i as u8)) | 0x80;
+        }
+    }
+
+    let mut bytes = [0u8; PART_POLICY_LEN];
+    bytes[0] = 1; // version major
+    bytes[1] = 0; // version minor
+    write_pubkey(&mut bytes, OFF_POTA, 0x10);
+    write_pubkey(&mut bytes, OFF_SATA, 0x20);
+    // SAPOTA + backup-part pubkeys left absent (len 0).
+    bytes[OFF_FLAGS] = 0;
+    for b in bytes[OFF_INFO..OFF_INFO + 64].iter_mut() {
+        *b = 0xAB;
+    }
+    bytes
+}
+
+/// Like [`known_good_part_policy`] but with a caller-supplied **real**
+/// `POTAPubKey` (raw P-384 `X ‖ Y`, 96 bytes), so `PartFinal` can validate
+/// a PTA certificate chain anchored to it.
+pub(crate) fn part_policy_with_pota(pota_raw: &[u8; 96]) -> [u8; PART_POLICY_LEN] {
+    const OFF_POTA: usize = 2;
+    let mut bytes = known_good_part_policy();
+    // POTA slot layout: kind(2) ‖ len(2) ‖ data(96); overwrite the data.
+    bytes[OFF_POTA + 4..OFF_POTA + 4 + 96].copy_from_slice(pota_raw);
+    bytes
+}
+
+pub(crate) fn mach_seed() -> [u8; MACH_SEED_LEN] {
+    let mut v = [0u8; MACH_SEED_LEN];
+    for (i, b) in v.iter_mut().enumerate() {
+        *b = 0x40 + i as u8;
+    }
+    v
+}
+
+pub(crate) fn pota_thumbprint() -> [u8; POTA_THUMBPRINT_LEN] {
+    let mut v = [0u8; POTA_THUMBPRINT_LEN];
+    for (i, b) in v.iter_mut().enumerate() {
+        *b = 0x80 ^ i as u8;
+    }
+    v
+}
+
+pub(super) fn sata_thumbprint() -> [u8; SATA_THUMBPRINT_LEN] {
+    let mut v = [0u8; SATA_THUMBPRINT_LEN];
+    for (i, b) in v.iter_mut().enumerate() {
+        *b = 0x40 ^ i as u8;
+    }
+    v
+}
+
+/// Seal an AEAD-GCM envelope under `param_key` with a caller-controlled
+/// AAD and plaintext. Used by `crypto_rejects` to build envelopes the
+/// canonical `encrypt_mach_seed_envelope` helper can't produce (wrong
+/// AAD length, wrong plaintext length, mismatched session id, etc.).
+/// Mirrors the `build_envelope` helper in `commands/psk_change.rs`.
+pub(super) fn build_envelope(
+    param_key: &tsra_crypto::AesKey,
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Vec<u8> {
+    use tsra_crypto::aead_envelope;
+    use tsra_crypto::aead_envelope::AeadAlg;
+    use tsra_crypto::Rng;
+
+    let iv = Rng::rand_vec(12).expect("rng iv");
+    let total = aead_envelope::seal(AeadAlg::AesGcm256, param_key, &iv, aad, plaintext, None)
+        .expect("aead size");
+    let mut out = vec![0u8; total];
+    let n = aead_envelope::seal(
+        AeadAlg::AesGcm256,
+        param_key,
+        &iv,
+        aad,
+        plaintext,
+        Some(&mut out),
+    )
+    .expect("aead seal");
+    out.truncate(n);
+    out
+}
+
+/// Open a CO session under the supplied PSK (bypassing the partition
+/// default).
+pub(super) fn open_co_with(ctx: &TestCtx, psk: &[u8; PSK_LEN]) -> SessionHandshake {
+    let opts = SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(psk);
+    let pending = ctx
+        .session_open_init_with_options(opts)
+        .expect("session_open_init under PSK");
+    ctx.session_open_finish(pending)
+        .expect("session_open_finish under PSK")
+}

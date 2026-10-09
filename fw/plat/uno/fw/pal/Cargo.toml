@@ -1,0 +1,78 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+[package]
+edition = "2024"
+name = "tsra_fw_uno_pal"
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+test = false
+
+[dependencies]
+tsra_fw_core_crypto_key_derive = { workspace = true }
+tsra_fw_core_crypto_key_masking = { optional = true, workspace = true }
+tsra_fw_core_crypto_x509_builder = { workspace = true }
+tsra_fw_ddi_mbor = { optional = true, workspace = true }
+tsra_fw_ddi_mbor_derive = { optional = true, workspace = true }
+tsra_fw_ddi_mbor_types = { optional = true, workspace = true }
+tsra_fw_hsm_io = { workspace = true }
+tsra_fw_hsm_pal_traits = { workspace = true }
+tsra_fw_single_cell = { workspace = true }
+tsra_fw_static_init = { workspace = true }
+tsra_fw_static_ref = { workspace = true }
+tsra_fw_uno_cert_blob = { workspace = true }
+tsra_fw_uno_drivers_aes = { workspace = true }
+tsra_fw_uno_drivers_bks_store = { workspace = true }
+tsra_fw_uno_drivers_boot_status = { workspace = true }
+tsra_fw_uno_drivers_core_status = { workspace = true }
+tsra_fw_uno_drivers_gdma = { workspace = true }
+tsra_fw_uno_drivers_iic = { workspace = true }
+tsra_fw_uno_drivers_ipc = { workspace = true }
+tsra_fw_uno_drivers_nvic = { workspace = true }
+tsra_fw_uno_drivers_oic = { workspace = true }
+tsra_fw_uno_drivers_part_store = { workspace = true }
+tsra_fw_uno_drivers_pqc = { workspace = true }
+tsra_fw_uno_drivers_rng = { workspace = true }
+tsra_fw_uno_drivers_semihosting = { optional = true, workspace = true }
+tsra_fw_uno_drivers_session_store = { workspace = true }
+tsra_fw_uno_drivers_sha = { workspace = true }
+tsra_fw_uno_drivers_systick = { workspace = true }
+tsra_fw_uno_drivers_upka = { workspace = true }
+tsra_fw_uno_drivers_vault = { workspace = true }
+tsra_fw_uno_error = { workspace = true }
+tsra_fw_uno_key_vault = { workspace = true }
+tsra_fw_uno_pac = { workspace = true }
+tsra_fw_uno_reg_soc = { workspace = true }
+tsra_fw_uno_trace = { workspace = true }
+
+embassy-futures = { workspace = true }
+embassy-sync = { workspace = true }
+embassy-time = { workspace = true }
+tock-registers = { workspace = true }
+
+bitfield-struct = { workspace = true }
+der = { workspace = true }
+open-enum = { workspace = true }
+zerocopy = { workspace = true }
+zeroize = { workspace = true }
+
+[features]
+default = []
+# Optional host-poll path: also signal SYS_READY via ARM semihosting in
+# addition to the silicon boot_handshake::set_boot_status(Run). Hosts
+# that cannot snoop semihosting (e.g. production) should disable this
+# feature — boot_handshake alone is sufficient.
+semihosting = ["dep:tsra_fw_uno_drivers_semihosting"]
+
+# Test-only DDI commands, routed through the `HsmCustomDispatch` PAL hook
+# rather than the core opcode tables. Never enable either feature in a
+# production build.
+fips_validation_hooks = [
+  "dep:tsra_fw_core_crypto_key_masking",
+  "dep:tsra_fw_ddi_mbor",
+  "dep:tsra_fw_ddi_mbor_derive",
+  "dep:tsra_fw_ddi_mbor_types",
+]
+tsra_test_hooks = ["dep:tsra_fw_ddi_mbor", "dep:tsra_fw_ddi_mbor_derive"]

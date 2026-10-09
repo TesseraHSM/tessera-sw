@@ -1,0 +1,191 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Integration tests for the TBOR `SdSealingKeyGen` command.
+//!
+//! Cross-test isolation comes from `open_dev`'s factory reset; no
+//! per-test cleanup is required (see [`tsra_ddi_tbor_test_harness::fixture`]).
+//!
+//! The command generates a P-384 sealing keypair and returns the
+//! **masked** private key (masked under the requested scope's masking
+//! key) plus the public key — nothing is stored on the device.  The
+//! Ephemeral/Local masking keys are provisioned by `PartFinal`, so the
+//! happy-path tests first drive `PartInit → PartFinal`.
+//!
+//! Coverage:
+//! * Happy path (Ephemeral + Local) — returns a non-zero 276-byte masked
+//!   key + 96-byte public key; a second call yields a distinct keypair.
+//! * Unsupported scope (Session + SecurityDomain) → `UnsupportedKeyScope`.
+//! * Before finalize (partition not `Initialized`) → `InvalidArg`.
+//! * Crypto-User session → `InvalidPermissions`.
+//! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
+//!
+//! `SdSealingKeyGen` itself carries no out-of-band data — the request is a
+//! session id plus a 1-byte scope, and the response is a 276-byte masked
+//! key plus a 96-byte public key — so the command runs on any transport.
+//! The *setup* is what needs OOB: [`finalized_co_session`] drives
+//! `PartFinal`, whose PTA chain travels out of band, so the tests that
+//! need a finalized partition also need the driver's data-transfer path.
+
+use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
+use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
+use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
+use tsra_ddi_tbor_test_harness::SessionHandshake;
+use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
+use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
+use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
+use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
+use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
+use tsra_ddi_tbor_types::SD_SEALING_PUB_KEY_LEN;
+
+use crate::commands::part_init::mach_seed;
+use crate::commands::part_init::part_policy_with_pota;
+use crate::commands::part_init::pota_thumbprint;
+
+/// `KeyScope` discriminants (wire mirror of the firmware `HsmKeyScope`).
+const SCOPE_SESSION: u8 = 0b001;
+const SCOPE_EPHEMERAL: u8 = 0b010;
+const SCOPE_LOCAL: u8 = 0b011;
+const SCOPE_SECURITY_DOMAIN: u8 = 0b100;
+
+/// Bring a partition to `Initialized` on a rotated CO session:
+/// bootstrap → `PartInit` → `PartFinal`.  Post-condition: the
+/// Ephemeral/Local masking keys exist, so `SdSealingKeyGen` can mask
+/// under them.  Returns the live CO session.
+///
+/// `PartFinal` validates the supplied PTA certificate chain against the
+/// POTA trust anchor bound into the policy, so this mints a POTA CA, binds
+/// its public key into the policy, and issues a POTA-anchored PTA chain
+/// from the `PartInit` CSR (mirrors the `part_final` happy-path setup).
+pub(crate) fn finalized_co_session(ctx: &TestCtx) -> SessionHandshake {
+    let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
+
+    let pota = CaKey::generate();
+    let policy = part_policy_with_pota(&pota.raw_pub());
+    let init = ctx
+        .part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+        .expect("PartInit");
+    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    ctx.part_final(&session, &policy, &[], &chain.der_items())
+        .expect("PartFinal");
+    session
+}
+
+/// Happy path for a supported `scope`: the masked key + public key are
+/// full/non-zero, and a second call yields a distinct keypair.
+fn roundtrip_for_scope(scope: u8) {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let req = TborSdSealingKeyGenReq {
+        session_id: session.session_id,
+        scope,
+    };
+    let resp = ctx.tbor(&req).expect("SdSealingKeyGen roundtrip");
+
+    // Masked private key: exactly the pinned length, non-zero.
+    assert_eq!(resp.masked_key.len(), MASKED_SEALING_KEY_LEN);
+    assert!(
+        resp.masked_key.iter().any(|&b| b != 0),
+        "masked_key must not be all-zero",
+    );
+    // Public key: a full, non-zero P-384 point.
+    assert_eq!(resp.pub_key.len(), SD_SEALING_PUB_KEY_LEN);
+    assert!(
+        resp.pub_key.iter().any(|&b| b != 0),
+        "pub_key must not be all-zero",
+    );
+
+    // Each call generates fresh randomness → a distinct keypair.
+    let resp2 = ctx.tbor(&req).expect("second SdSealingKeyGen");
+    assert_ne!(
+        resp.masked_key, resp2.masked_key,
+        "each generation must yield a distinct masked key",
+    );
+    assert_ne!(
+        resp.pub_key, resp2.pub_key,
+        "each generation must yield a distinct public key",
+    );
+}
+
+#[test]
+fn sd_sealing_key_gen_ephemeral_roundtrip() {
+    roundtrip_for_scope(SCOPE_EPHEMERAL);
+}
+
+#[test]
+fn sd_sealing_key_gen_local_roundtrip() {
+    roundtrip_for_scope(SCOPE_LOCAL);
+}
+
+#[test]
+fn sd_sealing_key_gen_rejects_unsupported_scope() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    // Session and SecurityDomain masking keys are not yet provisioned
+    // (session-key masking / CreateSD's SDKMK), so both must be rejected
+    // with the dedicated UnsupportedKeyScope error.
+    for scope in [SCOPE_SESSION, SCOPE_SECURITY_DOMAIN] {
+        let req = TborSdSealingKeyGenReq {
+            session_id: session.session_id,
+            scope,
+        };
+        ctx.expect_fw_reject(&req, TborStatus::UnsupportedKeyScope);
+    }
+}
+
+#[test]
+fn sd_sealing_key_gen_rejects_before_finalize() {
+    let ctx = TestCtx::new();
+    // Rotated CO session but no PartInit/PartFinal → the partition is not
+    // Initialized, so the scope's masking key does not exist yet.
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+
+    let req = TborSdSealingKeyGenReq {
+        session_id: session.session_id,
+        scope: SCOPE_EPHEMERAL,
+    };
+    ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+}
+
+#[test]
+fn sd_sealing_key_gen_rejected_on_cu_session() {
+    let ctx = TestCtx::new();
+
+    // Rotate the CU PSK out of the default so the dispatcher's default-PSK
+    // gate does not fire first; then reopen a CU session under the rotated
+    // PSK.  CU sessions are pinned to `SessionType::PlainText` (CO-only is
+    // `Authenticated`).
+    let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
+
+    // SdSealingKeyGen is Crypto-Officer-only: the handler's role gate
+    // (checked before the scope/state gates) rejects a CU session.
+    let req = TborSdSealingKeyGenReq {
+        session_id: session.session_id,
+        scope: SCOPE_EPHEMERAL,
+    };
+    ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+}
+
+#[test]
+fn sd_sealing_key_gen_rejected_on_default_psk() {
+    let ctx = TestCtx::new();
+    // Open a CO session WITHOUT rotating the PSK (still the public
+    // default) — the dispatcher's default-PSK gate must reject the command
+    // before the handler runs.
+    let session = ctx
+        .open_session(CO, SessionType::Authenticated)
+        .expect("open_session must succeed");
+
+    let req = TborSdSealingKeyGenReq {
+        session_id: session.session_id(),
+        scope: SCOPE_EPHEMERAL,
+    };
+    ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}

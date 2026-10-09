@@ -1,0 +1,369 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Core-side SQE/CQE concerns layered on the shared I/O ABI.
+//!
+//! The typed SQE/CQE *layout* (read/write accessors, builders, bitfield
+//! dwords, opcode constants) lives in [`tsra_fw_hsm_io`] and is
+//! re-exported here so the rest of the core keeps importing it via
+//! `crate::op::*`. This module adds the firmware-only concerns that
+//! depend on core types:
+//!
+//! - [`SqeValidateExt`] — SQE field validation (returns [`OpError`]).
+//! - [`SessionCtrl`] — session-control classification from DDI opcodes.
+//! - [`HsmOpStatus`] — opcode-handler result carrying the CQE session
+//!   dwords back to `handle_io`.
+
+// Re-export the shared SQE/CQE layout so `crate::op::{Sqe, Cqe, ...}`
+// keeps resolving for the rest of the core.
+pub use tsra_fw_hsm_io::*;
+use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+
+use super::*;
+use crate::error::HostStatus;
+use crate::error::OpError;
+
+// ── Validation constants ────────────────────────────────────────────
+
+/// 4K page size.
+const PAGE_4K: u32 = 4096;
+
+/// Maximum source buffer length (two 4K pages).
+///
+/// The SQE carries a PRP *pair*, and the host driver already allocates a
+/// second DMA page and populates PRP2 whenever the request exceeds 4K, so
+/// the inbound path spans up to 8K — matching `MAX_DST_LEN` and the 8192-byte
+/// transport buffer the host and the TBOR schemas are both built around.
+///
+/// This was 4K until the second PRP page was plumbed through
+/// [`crate::io`], which capped every request at a single page and rejected
+/// larger ones with [`HostStatus::INVALID_SRC_LEN`] before dispatch.
+const MAX_SRC_LEN: u32 = 2 * PAGE_4K;
+
+/// Maximum destination buffer length (two 4K pages).
+///
+/// The host driver allocates an 8K (2-page) response buffer and advertises
+/// its full size in the SQE, so destination-length validation must accept up
+/// to 8K — matching the reference firmware (cp/tsra uses the same
+/// `2 * PAGE_4K`).
+///
+/// Both PRP pages are now programmed, so this bounds a transfer the outbound
+/// GDMA can actually complete. Previously only PRP0 was supplied, which
+/// silently truncated any response past the first page and zero-filled the
+/// remainder — with no error reported, because the length check here passed.
+const MAX_DST_LEN: u32 = 2 * PAGE_4K;
+
+/// Size of one NVMe SGL Data Block descriptor in the OOB array.
+const OOB_ENTRY_LEN: u32 = 16;
+
+/// Maximum out-of-band descriptor-array length: one 4K descriptor page
+/// (→ up to 256 SGL Data Block descriptors).
+const MAX_OOB_LEN: u32 = PAGE_4K;
+
+/// Returns true if the 64-bit DMA address is 4K-page-aligned.
+#[inline]
+fn is_aligned_4k(addr: HsmDmaAddr) -> bool {
+    addr.lo & (PAGE_4K - 1) == 0
+}
+
+// ── SQE validation (firmware) ───────────────────────────────────────
+
+/// Firmware-side validation for the shared [`Sqe`] read view.
+///
+/// Lives in the core (not [`tsra_fw_hsm_io`]) because it returns the
+/// core's [`OpError`] / [`HostStatus`] types.
+pub trait SqeValidateExt {
+    /// Validate common SQE fields (all opcodes).
+    ///
+    /// Checks:
+    /// - `cmd.psdt` must be 0 (PRP only)
+    fn validate(&self) -> Result<(), OpError>;
+
+    /// Validate fields specific to MBOR / TBOR opcodes that carry an
+    /// inbound + outbound DDI body via DMA.
+    ///
+    /// Checks:
+    /// - Source length must be 1..=8192
+    /// - Destination length must be 1..=8192
+    /// - Source PRP1 must be 4K-aligned
+    /// - Destination PRP1 must be 4K-aligned
+    ///
+    /// Call [`validate`](Self::validate) first for common checks.
+    fn validate_io_op(&self) -> Result<(), OpError>;
+}
+
+impl SqeValidateExt for Sqe<'_> {
+    fn validate(&self) -> Result<(), OpError> {
+        let cmd = self.cmd();
+        if cmd.psdt() != 0 {
+            error!(
+                "core",
+                HsmError::SqeInvalidPsdt,
+                "Invalid PSDT value: {}",
+                cmd.psdt()
+            );
+            return Err(OpError::new(
+                HsmError::SqeInvalidPsdt,
+                HostStatus::INVALID_PSDT,
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_io_op(&self) -> Result<(), OpError> {
+        if self.src_len() == 0 || self.src_len() > MAX_SRC_LEN {
+            error!(
+                "core",
+                HsmError::IoChannelInvalidSrcLen,
+                "Invalid source length: {}",
+                self.src_len()
+            );
+            return Err(OpError::new(
+                HsmError::IoChannelInvalidSrcLen,
+                HostStatus::INVALID_SRC_LEN,
+            ));
+        }
+
+        if self.dst_len() == 0 || self.dst_len() > MAX_DST_LEN {
+            error!(
+                "core",
+                HsmError::IoChannelInvalidDstLen,
+                "Invalid destination length: {}",
+                self.dst_len()
+            );
+            return Err(OpError::new(
+                HsmError::IoChannelInvalidDstLen,
+                HostStatus::INVALID_DST_LEN,
+            ));
+        }
+
+        if !is_aligned_4k(self.src_prp1()) {
+            error!(
+                "core",
+                HsmError::IoChannelInvalidSrcAlignment,
+                "Invalid source PRP alignment: {:?}",
+                self.src_prp1()
+            );
+            return Err(OpError::new(
+                HsmError::IoChannelInvalidSrcAlignment,
+                HostStatus::INVALID_SRC_PRP,
+            ));
+        }
+
+        if !is_aligned_4k(self.dst_prp1()) {
+            error!(
+                "core",
+                HsmError::IoChannelInvalidDstAlignment,
+                "Invalid destination PRP alignment: {:?}",
+                self.dst_prp1()
+            );
+            return Err(OpError::new(
+                HsmError::IoChannelInvalidDstAlignment,
+                HostStatus::INVALID_DST_PRP,
+            ));
+        }
+
+        // Optional out-of-band SGL descriptor array (`oob_prp`/`oob_len`).
+        // When present it must be a whole number of 16-byte SGL Data
+        // Block descriptors, no larger than a single descriptor page, and
+        // 4K-page-aligned so the array cannot straddle a page boundary.
+        let oob_len = self.oob_len();
+        if oob_len != 0 {
+            if !oob_len.is_multiple_of(OOB_ENTRY_LEN) || oob_len > MAX_OOB_LEN {
+                error!(
+                    "core",
+                    HsmError::IoChannelInvalidOobLen,
+                    "Invalid OOB descriptor-array length: {}",
+                    oob_len
+                );
+                return Err(OpError::new(
+                    HsmError::IoChannelInvalidOobLen,
+                    HostStatus::INVALID_OOB_LEN,
+                ));
+            }
+
+            if !is_aligned_4k(self.oob_prp()) {
+                error!(
+                    "core",
+                    HsmError::IoChannelInvalidOobAlignment,
+                    "Invalid OOB PRP alignment: {:?}",
+                    self.oob_prp()
+                );
+                return Err(OpError::new(
+                    HsmError::IoChannelInvalidOobAlignment,
+                    HostStatus::INVALID_OOB_PRP,
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+// ── Session control ─────────────────────────────────────────────────
+
+/// Session control kind — derived from the DDI opcode.
+///
+/// Values align with CQE DW0 session_ctrl field (2 bits).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SessionCtrl {
+    /// No session required (e.g., GetApiRev, GetDeviceInfo).
+    #[default]
+    NoSession = 0,
+
+    /// Opens a new session (OpenSession).
+    Open = 1,
+
+    /// Closes a session (CloseSession).
+    Close = 2,
+
+    /// Command within an existing session.
+    InSession = 3,
+}
+
+impl SessionCtrl {
+    /// Map a DDI opcode to its session control kind.
+    pub fn from_op(op: tsra_fw_ddi_mbor_types::DdiOp) -> Self {
+        use tsra_fw_ddi_mbor_types::DdiOp;
+        match op {
+            DdiOp::GetApiRev
+            | DdiOp::GetDeviceInfo
+            | DdiOp::GetCertChainInfo
+            | DdiOp::GetCertificate
+            | DdiOp::GetEstablishCredEncryptionKey
+            | DdiOp::GetSessionEncryptionKey
+            | DdiOp::GetSealedBk3
+            | DdiOp::InitBk3
+            | DdiOp::SetSealedBk3
+            | DdiOp::EstablishCredential => Self::NoSession,
+            DdiOp::OpenSession => Self::Open,
+            DdiOp::CloseSession => Self::Close,
+            _ => Self::InSession,
+        }
+    }
+
+    /// Map a TBOR opcode to its session control kind.
+    ///
+    /// `GetApiRev` is session-less.
+    ///
+    /// `OpenSessionInit` is classified as `Open` — it initiates the
+    /// session-open flow; the SQE carries no session id (the FW
+    /// allocates a pending slot and returns its id in the response).
+    ///
+    /// `OpenSessionFinish`, `ChangePsk`, and `PartInit` reference the
+    /// pending/active slot, so the SQE must carry the slot's
+    /// `session_id` (`InSession`).  `CloseSession` carries the slot
+    /// id and is classified as `Close` so the CQE flags signal the
+    /// slot transition to the host.
+    ///
+    /// Unknown opcodes default to `NoSession` so that dispatch can
+    /// surface `HsmError::UnsupportedCmd` from the handler layer
+    /// rather than being rejected as a session-flag mismatch first.
+    pub fn from_tbor_opcode(opcode: u8) -> Self {
+        use crate::ddi::tbor::opcode;
+        match opcode {
+            opcode::API_REV
+            | opcode::PART_INFO
+            | opcode::GET_CERT_CHAIN_INFO
+            | opcode::GET_CERTIFICATE => Self::NoSession,
+            opcode::SESSION_OPEN_INIT => Self::Open,
+            opcode::SESSION_OPEN_FINISH
+            | opcode::PSK_CHANGE
+            | opcode::PART_INIT
+            | opcode::PART_FINAL
+            | opcode::SD_SEALING_KEY_GEN
+            | opcode::SD_CREATE_REMOTE_BACKUP
+            | opcode::SD_RESEAL_REMOTE_BACKUP
+            | opcode::SD_RESTORE_REMOTE_BACKUP
+            | opcode::SD_RESTORE_LOCAL_BACKUP
+            | opcode::SD_CREATE_PEER_BACKUP
+            | opcode::SD_RESTORE_PEER_BACKUP
+            | opcode::KEY_REPORT
+            | opcode::HMAC_GENERATE_KEY
+            | opcode::HMAC
+            | opcode::GET_UNWRAPPING_KEY
+            | opcode::UNWRAP_KEY
+            | opcode::AES_GENERATE_KEY
+            | opcode::AES_ENCRYPT_DECRYPT
+            | opcode::ECC_GENERATE_KEY
+            | opcode::ECC_SIGN
+            | opcode::ECDH_DERIVE
+            | opcode::RSA_MOD_EXP
+            | opcode::HASH
+            | opcode::HKDF_DERIVE
+            | opcode::CONCAT_KDF_DERIVE
+            | opcode::DARC_KEX_KEY_GEN
+            | opcode::DARC_TMK_IMPORT
+            | opcode::DARC_KEY_UNWRAP
+            | opcode::DARC_TMK_GEN
+            | opcode::DARC_TMK_EXPORT
+            | opcode::DARC_KEY_WRAP
+            | opcode::MLDSA_GENERATE_KEY
+            | opcode::MLDSA_SIGN
+            | opcode::MLDSA_VERIFY
+            | opcode::MLKEM_GENERATE_KEY
+            | opcode::MLKEM_ENCAPSULATE
+            | opcode::MLKEM_DECAPSULATE => Self::InSession,
+            opcode::SESSION_CLOSE => Self::Close,
+            _ => Self::NoSession,
+        }
+    }
+}
+
+// ── HsmOpStatus ─────────────────────────────────────────────────────
+
+/// HSM Operation Status — returned by opcode handlers.
+///
+/// Carries the response length and pre-built CQE session dwords back to
+/// `handle_io`, which writes them directly to the CQE. Session fields
+/// are packed into `cqe_dw0` and `cqe_dw1` at construction time to
+/// minimize the async future size (2 × u32 vs 5 scattered fields).
+#[derive(Default, Debug)]
+pub(crate) struct HsmOpStatus {
+    /// Encoded response length in smem (written to CQE DW0 dst_len).
+    pub(crate) resp_len: u16,
+
+    /// Pre-built CQE DW0 session bits (ctrl, id_valid, vault_valid, closed).
+    /// `handle_io` merges this with `resp_len` via `with_dst_len()`.
+    pub(crate) cqe_dw0_session: u32,
+
+    /// Pre-built CQE DW1 (session_id + app_vault_id).
+    pub(crate) cqe_dw1: u32,
+}
+
+impl HsmOpStatus {
+    /// Build from session state.
+    pub(crate) fn new(
+        resp_len: usize,
+        session_ctrl: SessionCtrl,
+        session_id: Option<u16>,
+        app_vault_id: Option<u8>,
+        session_closed: bool,
+    ) -> Self {
+        let dw0 = CqeDw0::new()
+            .with_session_ctrl(session_ctrl as u8)
+            .with_session_id_valid(session_id.is_some())
+            .with_app_vault_id_valid(app_vault_id.is_some())
+            .with_session_closed(session_closed);
+        let dw1 = CqeDw1::new()
+            .with_session_id(session_id.unwrap_or(0))
+            .with_app_vault_id(app_vault_id.unwrap_or(0));
+        Self {
+            resp_len: resp_len as u16,
+            cqe_dw0_session: u32::from(dw0),
+            cqe_dw1: u32::from(dw1),
+        }
+    }
+
+    /// Build for no-session commands (most common path).
+    #[allow(dead_code)]
+    pub(crate) fn no_session(resp_len: usize) -> Self {
+        Self {
+            resp_len: resp_len as u16,
+            cqe_dw0_session: 0,
+            cqe_dw1: 0,
+        }
+    }
+}

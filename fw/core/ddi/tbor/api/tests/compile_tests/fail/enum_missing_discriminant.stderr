@@ -1,0 +1,14 @@
+error: #[tbor] enum variants must have explicit discriminants
+ --> tests/compile_tests/fail/enum_missing_discriminant.rs:7:20
+  |
+7 | pub enum BadEnum { A, B }
+  |                    ^
+
+error[E0206]: the trait `Copy` cannot be implemented for this type
+ --> tests/compile_tests/fail/enum_missing_discriminant.rs:7:10
+  |
+4 | #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+  |                                       ---- in this derive macro expansion
+...
+7 | pub enum BadEnum { A, B }
+  |          ^^^^^^^ type is not a structure or enumeration

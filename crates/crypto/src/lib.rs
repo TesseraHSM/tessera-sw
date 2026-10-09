@@ -1,0 +1,573 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! New cryptographic library for HSM operations.
+//!
+//! This crate provides a collection of cryptographic primitives and utilities
+//! for working with Hardware Security Modules (HSMs). It includes support for:
+//!
+//! - **AES**: Symmetric encryption with various modes (CBC, GCM, XTS)
+//! - **ECC**: Elliptic Curve Cryptography with NIST curves (P-256, P-384, P-521)
+//! - **Hash**: Cryptographic hash functions (SHA-256, SHA-384, SHA-512)
+//! - **HMAC**: Hash-based Message Authentication Codes
+//! - **DER**: DER encoding/decoding for cryptographic keys
+//! - **RNG**: Cryptographically secure random number generation
+//! - **X509**: PEM/DER encoding and decoding for X.509 certificates
+//!
+//! # Platform Support
+//!
+//! This library provides platform-specific implementations:
+//! - Linux: OpenSSL-based implementations
+//! - Windows: Native Windows cryptography APIs
+
+pub mod aead_envelope;
+mod aes;
+mod der;
+mod ecc;
+mod hash;
+mod hmac;
+mod hpke;
+mod kdf;
+mod mldsa;
+mod mlkem;
+mod rand;
+mod rsa;
+mod secret;
+mod x509;
+pub mod x509_builder;
+
+mod op;
+mod traits;
+
+/// Crate-private `OSSL_LIB_CTX` (default-provider-only) for the OpenSSL
+/// backends, so the mock SDK's crypto never re-enters the tsra provider on
+/// OpenSSL 3.5. Linux-only (the Windows backends use CNG).
+#[cfg(all(target_os = "linux", ossl300))]
+mod libctx;
+
+pub use aes::*;
+pub use der::*;
+pub use ecc::*;
+pub use hash::*;
+pub use hmac::*;
+pub use hpke::*;
+pub use kdf::*;
+pub use mldsa::*;
+pub use mlkem::*;
+pub use op::*;
+pub use rand::*;
+pub use rsa::*;
+pub use secret::*;
+use thiserror::Error;
+pub use traits::*;
+pub use x509::*;
+
+#[cfg(any(test, feature = "testvectors"))]
+pub mod testvectors;
+
+/// Comprehensive error type for all cryptographic operations.
+///
+/// This enum covers errors from various cryptographic operations including
+/// AES encryption/decryption, hashing, HMAC, DER encoding/decoding, and
+/// random number generation.
+#[derive(Error, Debug, PartialEq, Eq)]
+pub enum CryptoError {
+    // AES-related errors
+    /// AES key size is invalid for the specified algorithm.
+    #[error("AES invalid key size")]
+    AesInvalidKeySize,
+    /// AES data size is invalid for the operation.
+    #[error("AES invalid data size")]
+    AesDataSizeError,
+    /// AES input size is invalid.
+    #[error("AES invalid input size")]
+    AesInvalidInputSize,
+    /// AES initialization vector size is invalid.
+    #[error("AES invalid IV size")]
+    AesInvalidIVSize,
+    /// AES initialization vector is invalid.
+    #[error("AES invalid IV")]
+    AesInvalidIVError,
+    /// AES Alternative Initial Value (AIV) verification failed.
+    #[error("AES AIV mismatch")]
+    AesAIVMismatch,
+    /// AES Message Length Indicator (MLI) is invalid.
+    #[error("AES invalid MLI (Message Length Indicator)")]
+    AesInvlidMLI,
+    /// AES padding is invalid or verification failed.
+    #[error("AES invalid padding")]
+    AesInvalidPadding,
+    /// AES key generation failed.
+    #[error("AES key generation failed")]
+    AesKeyGenError,
+    /// AES encryption operation failed.
+    #[error("AES encryption failed")]
+    AesEncryptError,
+    /// AES decryption operation failed.
+    #[error("AES decryption failed")]
+    AesDecryptError,
+    /// Output buffer is too small for AES operation.
+    #[error("AES buffer too small")]
+    AesBufferTooSmall,
+    /// General AES operation failure.
+    #[error("AES operation failed")]
+    AesError,
+
+    /// AES XTS related errors
+    /// AES XTS Key size is invalid.
+    #[error("AES XTS invalid key size")]
+    AesXtsInvalidKeySize,
+    /// AES XTS invalid key
+    #[error("AES XTS invalid key - both halves are identical")]
+    AesXtsInvalidKey,
+    /// AES XTS data size is invalid for the operation.
+    #[error("AES XTS invalid data size")]
+    AesXtsInvalidDataSize,
+    /// AES XTS buffer size is too small.
+    #[error("AES XTS buffer too small")]
+    AesXtsBufferTooSmall,
+    /// AES XTS input size is invalid.
+    #[error("AES XTS invalid input size")]
+    AesXtsInvalidInputSize,
+    /// AES XTS encryption operation failed.
+    #[error("AES XTS encryption failed")]
+    AesXtsEncryptError,
+    /// AES XTS decryption operation failed.
+    #[error("AES XTS decryption failed")]
+    AesXtsDecryptError,
+    /// AES XTS invalid tweak size.
+    #[error("AES XTS invalid tweak size")]
+    AesXtsInvalidTweakSize,
+    /// AES XTS invalid data unit length
+    #[error("AES XTS invalid data unit length")]
+    AesXtsInvalidDataUnitLen,
+    /// AES XTS config error
+    #[error("AES XTS config error")]
+    AesXtsConfigError,
+    /// AES XTS tweak overflow.
+    #[error("AES XTS tweak overflow")]
+    AesXtsTweakOverflow,
+
+    // Random number generation errors
+    /// Random number generation operation failed.
+    #[error("Random number generation failed")]
+    RngError,
+
+    // Hash-related errors
+    /// Output buffer is too small to hold the hash result.
+    #[error("Hash buffer too small")]
+    HashBufferTooSmall,
+    /// General hashing operation failure.
+    #[error("Hashing operation failed")]
+    HashError,
+    /// Hash context initialization failed.
+    #[error("Hash initialization failed")]
+    HashInitError,
+    /// Hash update operation failed.
+    #[error("Hash update failed")]
+    HashUpdateError,
+    /// Hash finalization failed.
+    #[error("Hash finalization failed")]
+    HashFinishError,
+    /// Failed to retrieve hash property.
+    #[error("Hash get property failed")]
+    HashGetPropertyError,
+    /// Hash algorithm is not supported by this backend.
+    #[error("Unsupported hash algorithm")]
+    HashUnsupportedAlgorithm,
+
+    // HMAC-related errors
+    /// HMAC context initialization failed.
+    #[error("HMAC initialization failed")]
+    HmacInitError,
+    /// HMAC key size is invalid for the specified algorithm.
+    #[error("HMAC invalid key size")]
+    HmacInvalidKeySize,
+    /// HMAC key generation failed.
+    #[error("HMAC key generation failed")]
+    HmacKeyError,
+    /// HMAC key import failed.
+    #[error("HMAC key import failed")]
+    HmacKeyImportError,
+    /// HMAC key export failed.
+    #[error("HMAC key export failed")]
+    HmacKeyExportError,
+    /// Output buffer is too small for HMAC operation.
+    #[error("HMAC buffer too small")]
+    HmacBufferTooSmall,
+    /// Failed to retrieve HMAC property.
+    #[error("HMAC get property failed")]
+    HmacGetPropertyError,
+    /// Output buffer is too small to hold HMAC signature.
+    #[error("HMAC signature buffer too small")]
+    HmacSignatureBufferTooSmall,
+    /// HMAC signing operation failed.
+    #[error("HMAC sign failed")]
+    HmacSignError,
+    /// HMAC signing context initialization failed.
+    #[error("HMAC sign initialization failed")]
+    HmacSignInitError,
+    /// HMAC signing update operation failed.
+    #[error("HMAC sign update failed")]
+    HmacSignUpdateError,
+    /// HMAC signing finalization failed.
+    #[error("HMAC sign finalization failed")]
+    HmacSignFinishError,
+    /// HMAC verification operation failed.
+    #[error("HMAC verify failed")]
+    HmacVerifyError,
+    /// HMAC verification context initialization failed.
+    #[error("HMAC verify initialization failed")]
+    HmacVerifyInitError,
+    /// HMAC verification update operation failed.
+    #[error("HMAC verify update failed")]
+    HmacVerifyUpdateError,
+    /// HMAC verification finalization failed.
+    #[error("HMAC verify finalization failed")]
+    HmacVerifyFinishError,
+    /// HMAC invalid derived key length.
+    #[error("HMAC invalid derived key length")]
+    HmacInvalidDerivedKeyLength,
+
+    // DER encoding/decoding errors
+    /// Invalid ASN.1 Object Identifier in DER structure.
+    #[error("DER invalid Object Identifier")]
+    DerInvalidOid,
+    /// Invalid key parameter or length in DER structure.
+    #[error("DER invalid parameter")]
+    DerInvalidParameter,
+    /// Failed to decode ASN.1 DER structure.
+    #[error("DER ASN.1 decode error")]
+    DerAsn1DecodeError,
+    /// Failed to encode ASN.1 DER structure.
+    #[error("DER ASN.1 encode error")]
+    DerAsn1EncodeError,
+    /// Output buffer is too small for DER-encoded data.
+    #[error("DER buffer too small")]
+    DerBufferTooSmall,
+    /// Invalid public key format in DER structure.
+    #[error("DER invalid public key")]
+    DerInvalidPubKey,
+    /// Invalid digest size for the specified hash algorithm.
+    #[error("DER invalid digest size")]
+    DerInvalidDigestSize,
+
+    // ECC-related errors
+    /// ECC key generation failed.
+    #[error("ECC key generation failed")]
+    EccKeyGenError,
+    /// ECC key import failed.
+    #[error("ECC key import failed")]
+    EccKeyImportError,
+    /// ECC key export failed.
+    #[error("ECC key export failed")]
+    EccKeyExportError,
+    /// Output buffer is too small for ECC operation.
+    #[error("ECC buffer too small")]
+    EccBufferTooSmall,
+    /// ECC key size is invalid.
+    #[error("ECC invalid key size")]
+    EccInvalidKeySize,
+    /// General ECC operation failure.
+    #[error("ECC operation failed")]
+    EccError,
+    /// ECC signing operation failed.
+    #[error("ECC sign failed")]
+    EccSignError,
+    /// ECC verification operation failed.
+    #[error("ECC verify failed")]
+    EccVerifyError,
+
+    /// ML-DSA key generation failed.
+    #[error("ML-DSA key generation error")]
+    MlDsaKeyGenError,
+
+    /// ML-DSA context string longer than FIPS 204 permits.
+    ///
+    /// The context is a parameter of both signing and verification, and is
+    /// checked when the engine is built, so this is neither a sign nor a
+    /// verify failure.
+    #[error("ML-DSA context too long")]
+    MlDsaInvalidContext,
+
+    /// ML-DSA key import failed.
+    #[error("ML-DSA key import error")]
+    MlDsaKeyImportError,
+
+    /// ML-DSA output buffer too small.
+    #[error("ML-DSA buffer too small")]
+    MlDsaBufferTooSmall,
+
+    /// ML-DSA signing failed.
+    #[error("ML-DSA sign error")]
+    MlDsaSignError,
+
+    /// ML-DSA verification could not be performed.
+    ///
+    /// A signature that decodes but does not authenticate the message is
+    /// not an error -- it is a `false` result.
+    #[error("ML-DSA verify error")]
+    MlDsaVerifyError,
+
+    /// ML-KEM key generation failed.
+    #[error("ML-KEM key generation error")]
+    MlKemKeyGenError,
+
+    /// ML-KEM key import failed.
+    #[error("ML-KEM key import error")]
+    MlKemKeyImportError,
+
+    /// ML-KEM output buffer too small.
+    #[error("ML-KEM buffer too small")]
+    MlKemBufferTooSmall,
+
+    /// ML-KEM encapsulation failed.
+    #[error("ML-KEM encapsulation error")]
+    MlKemEncapsError,
+
+    /// ML-KEM decapsulation failed.
+    ///
+    /// Only a malformed key or ciphertext reaches this: a ciphertext
+    /// that does not decrypt yields the implicit-rejection secret
+    /// rather than an error.
+    #[error("ML-KEM decapsulation error")]
+    MlKemDecapsError,
+
+    // ECDH-related errors
+    /// ECDH key derivation operation failed.
+    #[error("ECDH operation failed")]
+    EcdhError,
+    /// ECDH set peer key property failed.
+    #[error("ECDH set property failed")]
+    EcdhSetPropertyError,
+    /// ECDH derive operation failed.
+    #[error("ECDH derive failed")]
+    EcdhDeriveError,
+
+    /// ECDH invalid derived key length.
+    #[error("ECDH invalid derived key length")]
+    EcdhInvalidDerivedKeyLength,
+
+    // RSA-related errors
+    /// General RSA operation failure.
+    #[error("RSA operation failed")]
+    RsaError,
+    /// Invalid RSA key size.
+    #[error("RSA invalid key size")]
+    RsaInvalidKeySize,
+    /// RSA key generation failed.
+    #[error("RSA key generation failed")]
+    RsaKeyGenError,
+    /// RSA key import failed.
+    #[error("RSA key import failed")]
+    RsaKeyImportError,
+    /// RSA key export failed.
+    #[error("RSA key export failed")]
+    RsaKeyExportError,
+    /// RSA encryption operation failed.
+    #[error("RSA encryption failed")]
+    RsaEncryptError,
+    /// RSA decryption operation failed.
+    #[error("RSA decryption failed")]
+    RsaDecryptError,
+    /// Invalid hash algorithm for RSA operation.
+    #[error("RSA invalid hash algorithm")]
+    RsaInvalidHashAlgorithm,
+    /// Output buffer is too small for RSA operation.
+    #[error("RSA buffer too small")]
+    RsaBufferTooSmall,
+    /// Failed to set RSA property.
+    #[error("RSA set property failed")]
+    RsaSetPropertyError,
+    /// RSA signing operation failed.
+    #[error("RSA sign failed")]
+    RsaSignError,
+    /// RSA signing update operation failed.
+    #[error("RSA sign update failed")]
+    RsaSignUpdateError,
+    /// RSA signing finalization failed.
+    #[error("RSA sign finalization failed")]
+    RsaSignFinishError,
+    /// RSA verification operation failed.
+    #[error("RSA verify failed")]
+    RsaVerifyError,
+    /// RSA verification update operation failed.
+    #[error("RSA verify update failed")]
+    RsaVerifyUpdateError,
+    /// RSA verification finalization failed.
+    #[error("RSA verify finalization failed")]
+    RsaVerifyFinishError,
+    /// Invalid RSA private key blob format.
+    #[error("RSA invalid private key blob")]
+    RsaInvalidPrivateKeyBlob,
+    /// Invalid RSA public key blob format.
+    #[error("RSA invalid public key blob")]
+    RsaInvalidPublicKeyBlob,
+    /// RSA modulus size is not supported.
+    #[error("RSA unsupported modulus size")]
+    RsaUnsupportedModulusSize,
+    /// RSA message is too long for the given key size and padding scheme.
+    #[error("RSA message too long")]
+    RsaMessageTooLong,
+    /// RSA padding is invalid or verification failed.
+    #[error("RSA invalid padding")]
+    RsaInvalidPadding,
+
+    /// HKDF operation failed.
+    #[error("HKDF operation failed")]
+    HkdfError,
+    /// HKDF initialization or property setting failed.
+    #[error("HKDF initialization failed")]
+    HkdfSetPropertyError,
+    /// HKDF key derivation operation failed.
+    #[error("HKDF derive operation failed")]
+    HkdfDeriveError,
+    /// HKDF invalid PRK length.
+    #[error("HKDF invalid PRK length")]
+    HkdfInvalidPrkLength,
+
+    /// KBKDF operation failed.
+    #[error("KBKDF operation failed")]
+    KbkdfError,
+    /// KBKDF initialization or property setting failed.
+    #[error("KBKDF initialization failed")]
+    KbkdfSetPropertyError,
+    /// KBKDF key derivation operation failed.
+    #[error("KBKDF derive operation failed")]
+    KbkdfDeriveError,
+    /// KBKDF invalid derived key length.
+    #[error("KBKDF invalid derived key length")]
+    KbkdfInvalidDerivedKeyLength,
+    /// KBKDF invalid prk
+    #[error("KBKDF invalid prk length")]
+    KbkdfInvalidKdkLength,
+
+    /// Single-step concatenation KDF (X9.63 / SP 800-56A): the shared
+    /// secret `Z` was empty.
+    #[error("concat KDF invalid shared-secret length")]
+    ConcatKdfInvalidSecretLength,
+    /// Single-step concatenation KDF: the requested derived-key length was
+    /// zero or exceeds the `Hash` output-length cap.
+    #[error("concat KDF invalid derived key length")]
+    ConcatKdfInvalidDerivedKeyLength,
+    /// Single-step concatenation KDF: the underlying hash operation failed.
+    #[error("concat KDF derive operation failed")]
+    ConcatKdfDeriveError,
+
+    /// AES-GCM related errors
+
+    /// AES-GCM invalid IV length.
+    #[error("AES-GCM invalid IV length")]
+    GcmInvalidIvLength,
+    /// AES-GCM invalid tag length.
+    #[error("AES-GCM invalid tag length")]
+    GcmInvalidTagLength,
+    /// AES-GCM output buffer is too small.
+    #[error("AES-GCM output buffer too small")]
+    GcmBufferTooSmall,
+    /// AES-GCM invalid key size.
+    #[error("AES-GCM invalid key size")]
+    GcmInvalidKeySize,
+    /// AES-GCM config error (cipher could not be fetched from the libctx).
+    #[error("AES-GCM config error")]
+    GcmConfigError,
+    /// AES-GCM encryption operation failed.
+    #[error("AES-GCM encryption failed")]
+    GcmEncryptionFailed,
+    /// AES-GCM decryption operation failed.
+    #[error("AES-GCM decryption failed")]
+    GcmDecryptionFailed,
+
+    // AEAD envelope (see crates/crypto/src/aead_envelope) — wire-format-level
+    // errors not already covered by the underlying GCM variants above.
+    /// AEAD envelope magic byte does not match the expected format.
+    #[error("AEAD envelope invalid format")]
+    AeadEnvelopeInvalidFormat,
+    /// AEAD envelope `alg` byte is not supported in this build.
+    #[error("AEAD envelope unsupported algorithm")]
+    AeadEnvelopeUnsupportedAlg,
+    /// AEAD envelope `aad_len` violates the algorithm's AAD
+    /// granularity (for AES-256-GCM: must be `0` or a multiple
+    /// of `32`, and `<= u16::MAX`).
+    #[error("AEAD envelope invalid AAD length")]
+    AeadEnvelopeInvalidAadLength,
+
+    // HPKE-related errors (see crates/crypto/src/hpke).
+    /// HPKE recipient or sender public key is malformed (bad length /
+    /// not SEC1 uncompressed / point not on curve).
+    #[error("HPKE invalid public key")]
+    HpkeInvalidPublicKey,
+    /// HPKE private key is malformed (bad length or scalar out of range).
+    #[error("HPKE invalid private key")]
+    HpkeInvalidPrivateKey,
+    /// HPKE input or output buffer has an incorrect length.
+    #[error("HPKE invalid buffer size")]
+    HpkeInvalidBufferSize,
+    /// HPKE output buffer is too small for the requested operation.
+    #[error("HPKE output buffer too small")]
+    HpkeOutputBufferTooSmall,
+    /// HPKE KEM encapsulation failed (ephemeral key generation or ECDH).
+    #[error("HPKE KEM encapsulation failed")]
+    HpkeKemEncapFailed,
+    /// HPKE KEM decapsulation failed (ECDH).
+    #[error("HPKE KEM decapsulation failed")]
+    HpkeKemDecapFailed,
+    /// HPKE key schedule (Extract / Expand) failed.
+    #[error("HPKE key schedule failed")]
+    HpkeKeyScheduleFailed,
+    /// HPKE AEAD seal failed before authenticating the ciphertext.
+    #[error("HPKE AEAD seal failed")]
+    HpkeAeadSealFailed,
+    /// HPKE AEAD open failed — authentication tag mismatch or decrypt error.
+    #[error("HPKE AEAD open failed")]
+    HpkeAeadOpenFailed,
+    /// HPKE export length exceeds RFC 9180 limit (`L > 255 * Nh`).
+    #[error("HPKE export length too large")]
+    HpkeExportTooLarge,
+    /// HPKE config-struct invariant violated (mode does not match the
+    /// auth / PSK fields present). Constructible only via internal
+    /// mutation of `pub(crate)` fields — public constructors enforce
+    /// the invariant.
+    #[error("HPKE config mode/inputs mismatch")]
+    HpkeInvalidModeConfig,
+    /// HPKE ciphersuite not supported by the current build.
+    #[error("HPKE unsupported ciphersuite")]
+    HpkeUnsupportedSuite,
+}
+
+/// Macro for defining platform-specific algorithm type aliases.
+///
+/// This macro creates platform-specific type aliases for cryptographic algorithms,
+/// allowing different implementations on Linux and Windows.
+macro_rules! define_type {
+    ($vis:vis $name: ident, $linux_type: ty, $windows_type: ty) => {
+        /// Default key type for the current platform
+        #[cfg(target_os = "linux")]
+        $vis type $name = $linux_type;
+
+        /// Default key type for the current platform
+        #[cfg(target_os = "windows")]
+        $vis type $name = $windows_type;
+    };
+    ($vis:vis $name: ident<$lt:lifetime>, $linux_type: ty, $windows_type: ty) => {
+        /// Default key type for the current platform
+        #[cfg(target_os = "linux")]
+        $vis type $name<$lt> = $linux_type;
+
+        /// Default key type for the current platform
+        #[cfg(target_os = "windows")]
+        $vis type $name<$lt> = $windows_type;
+    };
+
+    ($vis:vis $name: ident<$lt:lifetime, $t1:ident>, $linux_type: ty, $windows_type: ty) => {
+        /// Default key type for the current platform
+        #[cfg(target_os = "linux")]
+        $vis type $name<$lt, $t1> = $linux_type;
+
+        /// Default key type for the current platform
+        #[cfg(target_os = "windows")]
+        $vis type $name<$lt, $t1> = $windows_type;
+    };
+}
+
+pub(crate) use define_type;

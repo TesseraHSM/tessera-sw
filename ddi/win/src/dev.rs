@@ -1,0 +1,1818 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! DDI Implementation - TSRA Windows Device - Device Module
+
+#![allow(unsafe_code)]
+#![allow(unused_assignments)]
+
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::mem;
+use std::os::windows::prelude::*;
+use std::path::Path;
+use std::ptr;
+use std::sync::Arc;
+
+use bitfield_struct::bitfield;
+use parking_lot::RwLock;
+use tsra_ddi_interface::*;
+use tsra_ddi_mbor_codec::MborDecode;
+use tsra_ddi_mbor_codec::MborDecoder;
+use tsra_ddi_mbor_codec::MborEncoder;
+use tsra_ddi_mbor_types::DdiAesOp;
+use tsra_ddi_mbor_types::DdiDecoder;
+use tsra_ddi_mbor_types::DdiDeviceKind;
+use tsra_ddi_mbor_types::DdiOpReq;
+use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiStatus;
+use tsra_ddi_mbor_types::MborError;
+use tsra_ddi_mbor_types::SessionControlKind;
+use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborResp;
+use tsra_ddi_tbor_types::TborStatus;
+use winapi::ctypes::c_void;
+use winapi::shared::minwindef::DWORD;
+use winapi::shared::winerror::ERROR_IO_PENDING;
+use winapi::um::ioapiset::DeviceIoControl;
+use winapi::um::ioapiset::GetOverlappedResult;
+use winapi::um::minwinbase::OVERLAPPED;
+use winapi::um::winbase::FILE_FLAG_OVERLAPPED;
+use winapi::um::winioctl::CTL_CODE;
+use winapi::um::winioctl::FILE_READ_ACCESS;
+use winapi::um::winioctl::FILE_WRITE_ACCESS;
+use winapi::um::winioctl::METHOD_BUFFERED;
+use winapi::um::winnt::HANDLE;
+
+use crate::io_event::IoEvent;
+
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("The TSRA Windows driver ABI requires a 64-bit target");
+
+/// Command-set value used for requests without OOB data-transfer buffers.
+const TSRA_CP_CMD_SESSION_GENERIC: u16 = 0x0;
+/// Command-set value that selects the OOB data-transfer path.
+const TSRA_CP_CMD_DATA_XFER: u16 = 0x1;
+/// IOCTL function code used for generic session commands.
+const TSRA_IOCTL_CONTROL_PATH_CMD_SESSION: u32 = 0x201;
+/// IOCTL function code used for OOB data-transfer commands.
+const TSRA_IOCTL_CONTROL_PATH_CMD_DATA_XFER: u32 = 0x202;
+/// Maximum number of OOB buffers accepted by the data-transfer IOCTL.
+///
+/// This application-facing limit determines the IOCTL buffer layout and must
+/// remain synchronized with the loaded driver.
+const TSRA_MAX_DATA_XFER_BUFFERS: usize = 64;
+/// Maximum size of one OOB buffer accepted by the Windows driver.
+///
+/// Requests exceeding this limit are rejected before issuing the IOCTL.
+const TSRA_MAX_DATA_XFER_PER_BUFFER: u32 = 64 * 1024;
+
+#[derive(Default)]
+#[repr(C)]
+pub struct TsraIoctlHeader {
+    ioctl_data_size: u32,
+    app_cmd_id: u32,
+    timeout: u32,
+    flags: u32,
+}
+
+#[repr(C)]
+pub struct TsraIoctlUserBuffer {
+    src_buf: *const u8,
+    src_length: u32,
+    dst_buf: *mut u8,
+    dst_length: u32,
+}
+
+impl Default for TsraIoctlUserBuffer {
+    fn default() -> Self {
+        Self {
+            src_buf: std::ptr::null(),
+            src_length: 0,
+            dst_buf: std::ptr::null_mut(),
+            dst_length: 0,
+        }
+    }
+}
+
+///TsraCpGenericIoctlErrorKind
+/// Enumeration values for ioctl error status
+#[derive(PartialEq)]
+enum TsraCpGenericIoctlErrorKind {
+    /// Device or driver has no memory to
+    /// satisfy the request
+    NoMemory = 1,
+    /// Application has provided an invalid
+    /// cmdset.
+    InvalidCmdset = 2,
+
+    /// Input buffers provided in the command
+    /// are more than 8k.
+    InputBufferLargerThan8K = 3,
+
+    /// Output buffers provided in the command are
+    /// more than 8k
+    OutputBufferLargerThan8K = 4,
+
+    /// Input buffer is invalid
+    ///
+    InvalidInputBuffer = 5,
+
+    // Accessing some or all of the input buffer
+    // resulted in an error
+    InputBufferAccessError = 6,
+
+    /// Output buffer is invalid
+    InvalidOutputBuffer = 7,
+
+    // accessing some or all of the output buffer
+    // resulted in an error
+    OutputBufferAccessError = 8,
+
+    /// Process issuing the ioctl does
+    /// not own the file handle
+    InvalidFDOwner = 9,
+
+    /// An error was encountered submitting
+    /// the request to the TSRA device.
+    DeviceSubmissionError = 10,
+
+    /// The limit on the number of sessions allowed
+    /// on a file handle has been reached.
+    SessionLimitReached = 11,
+
+    /// Application was trying to submit an operation
+    /// that requires a session but no session has been
+    /// opened on the file handle.
+    NoExistingSession = 12,
+
+    /// Driver has received an opcode that is not defined
+    InvalidOpcode = 13,
+
+    /// Session id in the device does not match the value
+    /// provided in the request
+    SessionIdDoesNotMatch = 14,
+
+    /// IO abort is in progress by Driver
+    DriverAbortInProgress = 0x04000001,
+
+    /// Driver aborted the IO request
+    DriverAbortedIo = 0x04000002,
+}
+
+impl TryFrom<u32> for TsraCpGenericIoctlErrorKind {
+    type Error = u32;
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            x if x == TsraCpGenericIoctlErrorKind::NoMemory as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::NoMemory)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::InvalidCmdset as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::InvalidCmdset)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::InputBufferLargerThan8K as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::InputBufferLargerThan8K)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::OutputBufferLargerThan8K as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::OutputBufferLargerThan8K)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::InvalidInputBuffer as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::InvalidInputBuffer)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::InputBufferAccessError as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::InputBufferAccessError)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::InvalidOutputBuffer as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::InvalidOutputBuffer)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::OutputBufferAccessError as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::OutputBufferAccessError)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::InvalidFDOwner as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::InvalidFDOwner)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::DeviceSubmissionError as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::DeviceSubmissionError)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::SessionLimitReached as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::SessionLimitReached)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::NoExistingSession as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::NoExistingSession)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::InvalidOpcode as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::InvalidOpcode)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::SessionIdDoesNotMatch as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::SessionIdDoesNotMatch)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::DriverAbortInProgress as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::DriverAbortInProgress)
+            }
+            x if x == TsraCpGenericIoctlErrorKind::DriverAbortedIo as u32 => {
+                Ok(TsraCpGenericIoctlErrorKind::DriverAbortedIo)
+            }
+            _ => Err(value)?,
+        }
+    }
+}
+
+#[bitfield(u8)]
+struct SessionControlFlags {
+    /// kind defines the type of
+    /// opcode
+    #[bits(2)]
+    pub kind: u8,
+
+    /// When set to true, this indicates
+    /// that the session id in the SQE is
+    /// defined.
+    #[bits(1)]
+    pub session_id_is_valid: bool,
+
+    /**
+    reserved
+    */
+    #[bits(5)]
+    pub _rsvd1: u8,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct TsraCpGenericIoctlIndata {
+    ioctl_hdr: TsraIoctlHeader,
+    context: u64,
+    opc: u16,
+    cmdset: u16,
+    user_buffers: TsraIoctlUserBuffer,
+    session_control: SessionControlFlags,
+    rsvd1: [u8; 3],
+    session_id: u16,
+    rsvd2: [u8; 14],
+    rsvd3: [u32; 32],
+    hot_patch_reserved: [usize; 16],
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct TsraCpGenericIoctlOutData {
+    pub ioctl_hdr: TsraIoctlHeader,
+    pub ctxt: u64,
+    pub status: u32,
+    pub byte_count: u32,
+    pub ioctl_status: u32,
+    pub rsvd: [u32; 32],
+    hot_patch_reserved: [usize; 16],
+}
+
+/// Describes one caller-supplied OOB buffer for the driver.
+///
+/// Its layout matches one anonymous `{ XferLen, BufferAddr }` entry in
+/// `TSRA_HSM_DATA_XFER_BUFFERS`.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct DataXferBuffer {
+    xfer_length: u32,
+    buffer_addr: *const u8,
+}
+
+/// Contains the caller-supplied OOB buffers for one data-transfer IOCTL.
+///
+/// Its layout matches `TSRA_HSM_DATA_XFER_BUFFERS`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DataXferBuffers {
+    buffer_count: u32,
+    buffers: [DataXferBuffer; TSRA_MAX_DATA_XFER_BUFFERS],
+    reserved: [u32; 128],
+}
+
+impl Default for DataXferBuffers {
+    fn default() -> Self {
+        Self {
+            buffer_count: 0,
+            buffers: [DataXferBuffer::default(); TSRA_MAX_DATA_XFER_BUFFERS],
+            reserved: [0; 128],
+        }
+    }
+}
+
+/// Fixed-size V2 IOCTL extension containing the OOB buffer table.
+///
+/// Its layout matches the `uin` union in `CP_IOCTL_INDATA_DATA_V2`.
+#[repr(C)]
+union TsraCpDataXferInputData {
+    data_xfer: DataXferBuffers,
+    reserved: [u8; 4096],
+}
+
+impl Default for TsraCpDataXferInputData {
+    fn default() -> Self {
+        Self {
+            reserved: [0; 4096],
+        }
+    }
+}
+
+/// Windows data-transfer IOCTL payload.
+///
+/// It contains the generic command followed by the fixed 4-KiB V2 extension.
+#[repr(C)]
+#[derive(Default)]
+struct TsraCpDataXferIoctlIndata {
+    generic: TsraCpGenericIoctlIndata,
+    input_data: TsraCpDataXferInputData,
+}
+
+// Keep the Rust representation pinned to the 64-bit Windows driver ABI.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(mem::size_of::<DataXferBuffer>() == 16);
+    assert!(mem::size_of::<DataXferBuffers>() == 1544);
+    assert!(mem::size_of::<TsraCpGenericIoctlIndata>() == 344);
+    assert!(mem::size_of::<TsraCpDataXferIoctlIndata>() == 4440);
+};
+
+///TsraFpIoctlErrorKind
+/// Enumeration values for ioctl error status
+/// in fast path
+#[derive(PartialEq)]
+pub enum TsraFpIoctlErrorKind {
+    /// Device or driver has no memory to
+    /// satisfy the request
+    NoMemory = 100,
+
+    /// Application has provided an invalid
+    /// input buffer
+    InvalidInputBuffer = 101,
+
+    /// Unable to access input buffer
+    InputBufferAccessError = 102,
+
+    /// INvalid destination buffer
+    InvalidOutputBuffer = 103,
+
+    /// error accessing destination buffer
+    OutputBufferAccessError = 104,
+
+    /// Process issuing the ioctl does
+    /// not own the file handle
+    InvalidFDOwner = 105,
+
+    /// Unable to submit command to device
+    DeviceSubmissionError = 106,
+
+    /// Session id does not match
+    /// Session id provided for the operation
+    /// does not match the session id registered
+    /// with the file handle
+    InvalidSessionId = 107,
+
+    /// Short app id does not match
+    /// Short app id provided for the operation
+    /// does not match the short app id registered
+    /// for the file handle
+    InvalidShortAppId = 108,
+
+    /// There is no session id registered on the
+    /// handle
+    NoValidSessionId = 109,
+
+    ///There is a valid session id but there is no
+    /// short app id
+    NoValidShortAppId = 110,
+
+    /// Device has no FP queues
+    NoFPQueuesCreated = 111,
+
+    /// Ioctl has invalid cypher type
+    InvalidCypherType = 112,
+
+    /// Ioctl has invalid frame type
+    InvalidFrameType = 113,
+
+    ///Ioctl has invalid opcode
+    InvalidOpcode = 114,
+
+    ///Input buffer is above maximum length
+    /// allowed for DMA
+    InputBufferLengthAboveMax = 115,
+
+    ///Output buffer is above maximum length
+    /// allowed for DMA
+    OutputBufferLengthAboveMax = 116,
+
+    ///Aes Gcm ioctl validation failed
+    AesGcmIoctlValidationFailed = 117,
+
+    ///Aes Xts ioctl validation failed
+    AesXtsIoctlValidationFailed = 118,
+}
+
+impl TryFrom<u32> for TsraFpIoctlErrorKind {
+    type Error = u32;
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            x if x == TsraFpIoctlErrorKind::NoMemory as u32 => Ok(TsraFpIoctlErrorKind::NoMemory),
+            x if x == TsraFpIoctlErrorKind::InvalidInputBuffer as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidInputBuffer)
+            }
+            x if x == TsraFpIoctlErrorKind::InputBufferAccessError as u32 => {
+                Ok(TsraFpIoctlErrorKind::InputBufferAccessError)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidOutputBuffer as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidOutputBuffer)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidInputBuffer as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidInputBuffer)
+            }
+            x if x == TsraFpIoctlErrorKind::InputBufferAccessError as u32 => {
+                Ok(TsraFpIoctlErrorKind::InputBufferAccessError)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidOutputBuffer as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidOutputBuffer)
+            }
+            x if x == TsraFpIoctlErrorKind::OutputBufferAccessError as u32 => {
+                Ok(TsraFpIoctlErrorKind::OutputBufferAccessError)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidFDOwner as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidFDOwner)
+            }
+            x if x == TsraFpIoctlErrorKind::DeviceSubmissionError as u32 => {
+                Ok(TsraFpIoctlErrorKind::DeviceSubmissionError)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidSessionId as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidSessionId)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidShortAppId as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidShortAppId)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidOpcode as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidOpcode)
+            }
+            x if x == TsraFpIoctlErrorKind::NoValidSessionId as u32 => {
+                Ok(TsraFpIoctlErrorKind::NoValidSessionId)
+            }
+            x if x == TsraFpIoctlErrorKind::NoValidShortAppId as u32 => {
+                Ok(TsraFpIoctlErrorKind::NoValidShortAppId)
+            }
+            x if x == TsraFpIoctlErrorKind::NoFPQueuesCreated as u32 => {
+                Ok(TsraFpIoctlErrorKind::NoFPQueuesCreated)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidCypherType as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidCypherType)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidFrameType as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidFrameType)
+            }
+            x if x == TsraFpIoctlErrorKind::InvalidOpcode as u32 => {
+                Ok(TsraFpIoctlErrorKind::InvalidOpcode)
+            }
+            x if x == TsraFpIoctlErrorKind::AesGcmIoctlValidationFailed as u32 => {
+                Ok(TsraFpIoctlErrorKind::AesGcmIoctlValidationFailed)
+            }
+            x if x == TsraFpIoctlErrorKind::AesXtsIoctlValidationFailed as u32 => {
+                Ok(TsraFpIoctlErrorKind::AesXtsIoctlValidationFailed)
+            }
+            x if x == TsraFpIoctlErrorKind::InputBufferLengthAboveMax as u32 => {
+                Ok(TsraFpIoctlErrorKind::InputBufferLengthAboveMax)
+            }
+            x if x == TsraFpIoctlErrorKind::OutputBufferLengthAboveMax as u32 => {
+                Ok(TsraFpIoctlErrorKind::OutputBufferLengthAboveMax)
+            }
+            _ => Err(value)?,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct FpGcmParams {
+    kid: u32,
+    tag: [u8; 16],
+    init_vec: [u8; 12],
+    aad_data_len: u32,
+    aligned_aad_data_len: u32,
+    enable_gcm_work_around: u8,
+    rsvd: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+pub struct FpXtsParams {
+    data_unit_len: u16,
+    rsvd: u16,
+    key_id1: u32,
+    key_id2: u32,
+    tweak: [u8; 16],
+}
+
+///FpXtsDul
+/// Encodings for
+/// Xts data unit length
+enum FpXtsDul {
+    ///Dul == length of
+    /// source buffer
+    XtsDulFull = 0,
+
+    ///Dul == 512bytes
+    XtsDul512 = 1,
+
+    ///Dul == 4096 bytes
+    XtsDul4k = 2,
+
+    ///Dul == 8192 bytes
+    XtsDul8k = 3,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union XtsOrGcmParams {
+    gcm: FpGcmParams,
+    xts: FpXtsParams,
+}
+
+#[repr(C)]
+pub struct TsraFpIoctlIndata {
+    pub ioctl_hdr: TsraIoctlHeader,
+    pub context: u64,
+    pub opc: u8,
+    pub cypher: u8,
+    pub rsvd1: u16,
+    pub user_buffers: TsraIoctlUserBuffer,
+    pub frame_type: u8,
+    pub session_id: u16,
+    pub short_app_id: u8,
+    pub xts_or_gcm: XtsOrGcmParams,
+    pub rsvd2: [u32; 30],
+    pub hot_patch_reserved: [usize; 16],
+}
+
+impl Default for TsraFpIoctlIndata {
+    fn default() -> Self {
+        TsraFpIoctlIndata {
+            xts_or_gcm: XtsOrGcmParams {
+                gcm: FpGcmParams::default(),
+            },
+            ioctl_hdr: TsraIoctlHeader::default(),
+            context: 0,
+            opc: 0,
+            cypher: 0,
+            rsvd1: 0u16,
+            user_buffers: TsraIoctlUserBuffer::default(),
+            frame_type: 0,
+            session_id: 0,
+            short_app_id: 0,
+            rsvd2: [0; 30],
+            hot_patch_reserved: [0usize; 16],
+        }
+    }
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct TsraFpIoctlOutData {
+    /// ioctl_hdr
+    pub ioctl_hdr: TsraIoctlHeader,
+
+    /// Command context
+    pub ctxt: u64,
+
+    /// Result from device
+    pub result: u32,
+
+    /// Output of AES GCM or XTS
+    /// operations
+    pub cmd_spec_data: [u8; 16],
+
+    /// # of bytes copied by device
+    /// to output buffer
+    pub byte_count: u32,
+    /// extended_status
+    /// If result indicates failure,
+    /// this will contain more
+    /// information about the failure
+    pub extended_status: u32,
+    pub fips_approved: bool,
+    pub reserved: [u8; 3],
+    pub iv_from_device: [u8; 12],
+    pub rsvd: [u32; 26],
+    pub hot_patch_reserved: [usize; 16],
+}
+
+#[allow(unused)]
+// constants for fp ioctl operations
+pub const TSRA_FP_IOCTL_CODE_XTS: u32 = 0x100;
+pub const TSRA_FP_IOCTL_CODE_GCM: u32 = 0x101;
+pub const TSRA_FP_IOCTL_FRAME_TYPE_AES: u8 = 1;
+pub const TSRA_FP_IOCTL_AES_CYPHER_GCM: u8 = 0;
+#[allow(unused)]
+pub const TSRA_FP_IOCTL_AES_CYPHER_XTS: u8 = 1;
+pub const TSRA_FP_IOCTL_OP_TYPE_ENCRYPT: u8 = 0;
+pub const TSRA_FP_IOCTL_OP_TYPE_DECRYPT: u8 = 1;
+
+// Constants for reset device operations:
+
+#[allow(unused)]
+#[derive(PartialEq)]
+pub enum AbortType {
+    Reserved = 0, // Reserved for driver use, driver will fail the IOCTL if this value is used.
+    AppLevelTwoNssr = 1, // Perform a Level-Two abort but use SubSystem Reset
+    AppLevelTwoCtrlReset = 2, // Perform a Disable/Enable Of Controller
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct ResetDeviceInData {
+    pub ioctl_hdr: TsraIoctlHeader,
+    pub ctxt: u64,
+    pub abort_type: u32,
+}
+
+#[derive(Default)]
+#[repr(C)]
+pub struct ResetDeviceOutData {
+    pub ioctl_hdr: TsraIoctlHeader,
+    pub ctxt: u64,
+    pub abort_status: u32,
+}
+
+pub const TSRA_IOCTL_RESET_DEVICE: u32 = 0x402;
+
+/// DDI Implementation - TSRA Windows Device
+#[derive(Debug, Clone)]
+pub struct DdiWinDev {
+    // File handle
+    file: Arc<RwLock<File>>,
+    // Device kind — fixed to `Physical` since this backend wraps the
+    // real Windows device driver.
+    device_kind: DdiDeviceKind,
+}
+
+impl DdiWinDev {
+    pub(crate) fn open(path: &str) -> DdiResult<Self> {
+        tracing::debug!("{:?} {}", path, "Opening DdiWinDev");
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(FILE_FLAG_OVERLAPPED)
+            .open(Path::new(path))
+            .map_err(DdiError::IoError)?;
+
+        Ok(Self {
+            file: Arc::new(RwLock::new(file)),
+            device_kind: DdiDeviceKind::Physical,
+        })
+    }
+
+    fn map_ioctl_status(&self, ioctl_status: u32) -> Result<u32, DdiError> {
+        match TsraCpGenericIoctlErrorKind::try_from(ioctl_status) {
+            Ok(TsraCpGenericIoctlErrorKind::SessionLimitReached) => {
+                return Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionLimitReached,
+                ));
+            }
+
+            Ok(TsraCpGenericIoctlErrorKind::NoExistingSession) => {
+                return Err(DdiError::DdiStatus(DdiStatus::FileHandleNoExistingSession));
+            }
+
+            Ok(TsraCpGenericIoctlErrorKind::SessionIdDoesNotMatch) => {
+                return Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch,
+                ));
+            }
+
+            Ok(TsraCpGenericIoctlErrorKind::DeviceSubmissionError) => {
+                return Err(DdiError::DeviceNotReady);
+            }
+
+            Ok(TsraCpGenericIoctlErrorKind::DriverAbortInProgress) => {
+                return Err(DdiError::DriverError(DriverError::IoAbortInProgress));
+            }
+
+            Ok(TsraCpGenericIoctlErrorKind::DriverAbortedIo) => {
+                return Err(DdiError::DriverError(DriverError::IoAborted));
+            }
+            _ => {}
+        }
+
+        match TsraFpIoctlErrorKind::try_from(ioctl_status) {
+            Ok(TsraFpIoctlErrorKind::InvalidSessionId) => {
+                return Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch,
+                ));
+            }
+
+            Ok(TsraFpIoctlErrorKind::InvalidShortAppId) => {
+                return Err(DdiError::DdiStatus(DdiStatus::InvalidShortAppId));
+            }
+
+            Ok(TsraFpIoctlErrorKind::NoValidSessionId) => {
+                return Err(DdiError::DdiStatus(DdiStatus::FileHandleNoExistingSession));
+            }
+
+            Ok(TsraFpIoctlErrorKind::NoValidShortAppId) => {
+                return Err(DdiError::DdiStatus(DdiStatus::NoShortAppIdCreated));
+            }
+
+            Ok(TsraFpIoctlErrorKind::AesXtsIoctlValidationFailed) => {
+                return Err(DdiError::InvalidParameter);
+            }
+
+            Ok(TsraFpIoctlErrorKind::AesGcmIoctlValidationFailed) => {
+                return Err(DdiError::InvalidParameter);
+            }
+            _ => {}
+        }
+
+        Ok(ioctl_status)
+    }
+
+    /// Same as [`Self::map_ioctl_status`] but for callers executing a
+    /// **TBOR** command. Driver-layer session-scoping rejections
+    /// (per-fd `TSRA_MAX_SESSIONS_PER_FD` bookkeeping — id mismatch,
+    /// limit reached) are surfaced as
+    /// `DdiError::TborStatus(TborStatus::FileHandle*)` instead of
+    /// `DdiError::DdiStatus(DdiStatus::FileHandle*)`, so callers see a
+    /// TBOR status for a TBOR command regardless of which layer of
+    /// the stack (driver vs FW) produced the rejection. The
+    /// `FileHandle*` variants exist in both `DdiStatus` and
+    /// `TborStatus` with identical numeric encodings, so this is a
+    /// pure type-level remap.
+    fn map_ioctl_status_tbor(&self, ioctl_status: u32) -> Result<u32, DdiError> {
+        match TsraCpGenericIoctlErrorKind::try_from(ioctl_status) {
+            Ok(TsraCpGenericIoctlErrorKind::SessionLimitReached) => {
+                return Err(DdiError::TborStatus(
+                    TborStatus::FileHandleSessionLimitReached,
+                ));
+            }
+            Ok(TsraCpGenericIoctlErrorKind::NoExistingSession) => {
+                return Err(DdiError::TborStatus(TborStatus::SessionNotFound));
+            }
+            Ok(TsraCpGenericIoctlErrorKind::SessionIdDoesNotMatch) => {
+                return Err(DdiError::TborStatus(
+                    TborStatus::FileHandleSessionIdDoesNotMatch,
+                ));
+            }
+            _ => {}
+        }
+        match TsraFpIoctlErrorKind::try_from(ioctl_status) {
+            Ok(TsraFpIoctlErrorKind::InvalidSessionId) => {
+                return Err(DdiError::TborStatus(
+                    TborStatus::FileHandleSessionIdDoesNotMatch,
+                ));
+            }
+            Ok(TsraFpIoctlErrorKind::NoValidSessionId) => {
+                return Err(DdiError::TborStatus(TborStatus::SessionNotFound));
+            }
+            _ => {}
+        }
+        self.map_ioctl_status(ioctl_status)
+    }
+}
+
+/// Align AAD in place according to the following rules:
+/// The AAD needs to be aligned in such a way that the
+/// AAD data comes in the middle of alignment.
+/// This means that a AAD size of 11 bytes will be aligned like this:
+///
+/// Before[Size:11]: [AB, AB, AB, AB, AB, AB, AB, AB, AB, AB, AB]
+/// Buffer size after resize to  32
+/// After: [00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, 00, | 16 bytes of zeros
+///         AB, AB, AB, AB, AB, AB, AB, AB, AB, AB, AB, | 11 bytes of AAD data    
+///         00, 00, 00, 00, 00] | 5 bytes of zeros to pad to 32B multiple
+///
+/// - If len % 32 == 0: do nothing
+/// - Else if len % 32 <= 16: prepend 16 zeros, then pad with zeros to a 32B multiple
+/// - Else: just pad with zeros to a 32B multiple
+///
+/// This mutates `buf` directly.
+///
+pub fn align_aad_in_place(buf: &mut Vec<u8>) {
+    const AAD_ALIGN: usize = 32;
+    let len = buf.len();
+    let rem = len & (AAD_ALIGN - 1);
+
+    if rem == 0 {
+        return; // already aligned
+    }
+
+    // If original remainder <= 16, insert a 16-byte zero prefix.
+    if rem <= 16 {
+        buf.splice(0..0, std::iter::repeat_n(0u8, 16).take(16));
+    }
+
+    // Now pad with zeros to the next AAD_ALIGN-byte boundary based on the NEW length.
+    let target = buf.len().div_ceil(AAD_ALIGN) * AAD_ALIGN;
+    buf.resize(target, 0);
+}
+
+impl DdiDev for DdiWinDev {
+    /// Returns the device kind.
+    ///
+    /// `DdiWinDev` always reports [`DdiDeviceKind::Physical`] since it
+    /// wraps the real Windows device driver.
+    fn device_kind(&self) -> DdiDeviceKind {
+        self.device_kind
+    }
+
+    /// Execute Operation
+    ///
+    /// # Arguments
+    /// * `req`         - Operation Request
+    /// * `cookie`      - Cookie
+    ///
+    /// # Returns
+    /// * `OpReq::Resp` - Operation response
+    ///
+    /// # Error
+    /// * `DdiError` - Error encountered while executing the command
+    fn exec_op_mbor<T: DdiOpReq>(
+        &self,
+        req: &T,
+        _cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        const REQ_BUF_LEN: usize = 8192;
+
+        let (pre_encode, post_decode) = match self.device_kind {
+            DdiDeviceKind::Physical => (true, true),
+            _ => (false, false),
+        };
+
+        let mut req_buf = [0u8; REQ_BUF_LEN];
+        let mut encoder = MborEncoder::new(&mut req_buf, pre_encode);
+
+        req.mbor_encode(&mut encoder)
+            .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
+
+        let req_buf_len = encoder.position();
+        let req_buf = &req_buf[..req_buf_len];
+
+        tracing::debug!(opcode = ?req.get_opcode(), "Request Buffer (in hex): {:02x?}", req_buf);
+
+        let mut resp_buf = Box::<[u8; 8192]>::new([0u8; 8192]);
+
+        let mut ioctl_in_buffer = TsraCpGenericIoctlIndata::default();
+        let ioctl_out_buffer = TsraCpGenericIoctlOutData::default();
+
+        ioctl_in_buffer.ioctl_hdr.ioctl_data_size =
+            mem::size_of::<TsraCpGenericIoctlIndata>() as u32;
+        ioctl_in_buffer.ioctl_hdr.app_cmd_id = 0xCD1DDEAD;
+        ioctl_in_buffer.ioctl_hdr.timeout = 100; // in ms
+        ioctl_in_buffer.ioctl_hdr.flags = 0;
+
+        ioctl_in_buffer.context = 0;
+        ioctl_in_buffer.opc = 0; /* not applicable */
+        ioctl_in_buffer.cmdset = TSRA_CP_CMD_SESSION_GENERIC;
+
+        ioctl_in_buffer.user_buffers.src_length = req_buf.len() as u32;
+        ioctl_in_buffer.user_buffers.src_buf = req_buf.as_ptr();
+        ioctl_in_buffer.user_buffers.dst_length = resp_buf.len() as u32;
+        ioctl_in_buffer.user_buffers.dst_buf = resp_buf.as_mut_ptr();
+
+        /*
+         * Retrieve the opcode and session id from the
+         * DdiReq header and map them to ioctl compatible
+         * values
+         */
+        let session_control_kind: SessionControlKind = req.get_opcode().into();
+        if (session_control_kind == SessionControlKind::NoSession
+            || session_control_kind == SessionControlKind::Open)
+            && req.get_session_id().is_some()
+        {
+            return Err(DdiError::DdiStatus(DdiStatus::InvalidArg));
+        }
+        ioctl_in_buffer
+            .session_control
+            .set_kind(session_control_kind.into());
+
+        if let Some(x) = req.get_session_id() {
+            ioctl_in_buffer.session_id = x;
+            ioctl_in_buffer
+                .session_control
+                .set_session_id_is_valid(true);
+        }
+
+        let ioctl_code: DWORD = CTL_CODE(
+            0x3F,
+            0x201,
+            METHOD_BUFFERED,
+            FILE_READ_ACCESS | FILE_WRITE_ACCESS,
+        );
+
+        // SAFETY: WINAPI call requires unsafe call. The pointers to the buffers are valid and have been checked via
+        // debugging as well as code reviews.
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        let mut bytes_returned: DWORD = 0;
+        let in_ptr = ptr::addr_of!(ioctl_in_buffer);
+        let out_ptr = ptr::addr_of!(ioctl_out_buffer);
+        let overlapped_ptr: *mut OVERLAPPED = &mut overlapped;
+
+        let event = IoEvent::new()?;
+        overlapped.hEvent = event.handle();
+
+        // SAFETY: WINAPI call requires unsafe call. The pointers to the buffers are valid and have been checked via
+        // debugging as well as code reviews.
+        let _ioctl_ret = unsafe {
+            DeviceIoControl(
+                self.file.read().as_raw_handle() as HANDLE,
+                ioctl_code,
+                in_ptr as *mut c_void,
+                mem::size_of::<TsraCpGenericIoctlIndata>() as DWORD,
+                out_ptr as *mut c_void,
+                mem::size_of::<TsraCpGenericIoctlOutData>() as DWORD,
+                ptr::null_mut(),
+                overlapped_ptr,
+            )
+        };
+
+        let last_error = std::io::Error::last_os_error();
+        if last_error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+            tracing::warn!(?last_error, "DeviceIoControl returned error after exec_op");
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        // SAFETY: WINAPI call requires unsafe call. The pointers to the buffers are valid and have been checked via
+        // debugging as well as code reviews.
+        let result = unsafe {
+            GetOverlappedResult(
+                self.file.read().as_raw_handle() as HANDLE,
+                overlapped_ptr,
+                &mut bytes_returned,
+                1,
+            )
+        };
+
+        /*
+         *  There are 2 ways to deal with this ioctl
+         *  If the ioctl has failed, return the Winerror
+         *  If the ioctl has succeeded, the extended ioctl status
+         *  will further indicate success or failure
+         */
+
+        if result == 0 {
+            //
+            // This is the WinApi Failure. The Driver will not copy any data in this case
+            // So we cannot map the error status here.
+            //
+
+            let last_error = std::io::Error::last_os_error();
+            tracing::warn!(
+                ?last_error,
+                "GetOverlappedResult returned error after exec_op"
+            );
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        self.map_ioctl_status(ioctl_out_buffer.ioctl_status)?;
+
+        if ioctl_out_buffer.ioctl_status != 0 {
+            Err(DdiError::WinError(ioctl_out_buffer.ioctl_status))?;
+        }
+
+        if ioctl_out_buffer.status != 0 {
+            Err(DdiError::DdiError(ioctl_out_buffer.status))?
+        }
+
+        let resp_len = ioctl_out_buffer.byte_count as usize;
+        tracing::debug!(opcode = ?req.get_opcode(), "Response Buffer (in hex): {:02x?}", &resp_buf[..resp_len]);
+
+        let mut decoder = DdiDecoder::new(&resp_buf[..resp_len], post_decode);
+
+        let hdr = decoder
+            .decode_hdr::<DdiRespHdr>()
+            .map_err(|_| DdiError::MborError(MborError::DecodeError))?;
+
+        if hdr.status != DdiStatus::Success {
+            return Err(DdiError::DdiStatus(hdr.status));
+        }
+
+        let mut decoder = MborDecoder::new(&resp_buf[..resp_len], post_decode);
+        let resp = <T::OpResp>::mbor_decode(&mut decoder)
+            .map_err(|_| DdiError::MborError(MborError::DecodeError))?;
+        Ok(resp)
+    }
+
+    /// Execute a TBOR-encoded DDI command on the real Windows device.
+    ///
+    /// Mirrors [`Self::exec_op_mbor`] but:
+    ///
+    ///   * encodes the request via [`TborOpReq::encode_request`];
+    ///   * sets the SQE opcode field `opc` to [`OP_TBOR`] so the
+    ///     firmware routes the request through its TBOR dispatcher
+    ///     (`fw/core/lib/src/op.rs::OP_TBOR`);
+    ///   * decodes the response with [`TborResp::decode_response`],
+    ///     which already maps embedded fw-error status into
+    ///     [`DdiError::DdiError`] / [`DdiError::TborDecodeError`].
+    ///
+    /// The Windows kernel driver is wire-agnostic — it forwards the
+    /// `opc` and `cmdset` ioctl fields verbatim into the SQE. Requests
+    /// with OOB items use its V2 data-transfer IOCTL so each item is
+    /// represented by an NVMe SGL Data Block descriptor.
+    fn exec_op_tbor<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: Option<&[&[u8]]>,
+        _cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        /// SQE opcode that routes the command through the firmware's
+        /// TBOR dispatcher (see `fw/core/lib/src/op.rs::OP_TBOR`).
+        const OP_TBOR: u16 = 2;
+
+        // Determine whether this TBOR call needs to route through
+        // the driver's Large-Data-Transfer path. When `oob_items` is
+        // Some(non-empty), the driver pins those user buffers, builds
+        // per-buffer NVMe SGL segments, and attaches a 4 KB Metadata
+        // Page through the SQE's metadata-with-session source data.
+        let oob_slice: &[&[u8]] = oob_items.unwrap_or(&[]);
+        if oob_slice.len() > TSRA_MAX_DATA_XFER_BUFFERS
+            || oob_slice
+                .iter()
+                .any(|item| item.is_empty() || item.len() > TSRA_MAX_DATA_XFER_PER_BUFFER as usize)
+        {
+            return Err(DdiError::InvalidParameter);
+        }
+        let use_data_xfer = !oob_slice.is_empty();
+
+        const REQ_BUF_LEN: usize = 8192;
+        const RESP_BUF_LEN: usize = 8192;
+
+        // -- 1. Encode the TBOR request --------------------------------
+        let mut req_buf = [0u8; REQ_BUF_LEN];
+        let req_bytes = req.encode_request(&mut req_buf)?;
+        let req_len = req_bytes.len();
+
+        // Do not log raw request bytes: TBOR requests can carry
+        // sensitive material (e.g. encrypted PSK change envelopes).
+        tracing::debug!(opcode = T::OPCODE, req_len, "TBOR request encoded");
+
+        let mut resp_buf = Box::<[u8; RESP_BUF_LEN]>::new([0u8; RESP_BUF_LEN]);
+
+        // -- 2. Build the ioctl command --------------------------------
+        let mut ioctl_in_buffer = TsraCpDataXferIoctlIndata::default();
+        let mut ioctl_out_buffer = TsraCpGenericIoctlOutData::default();
+
+        let ioctl_input_size = if use_data_xfer {
+            mem::size_of::<TsraCpDataXferIoctlIndata>()
+        } else {
+            mem::size_of::<TsraCpGenericIoctlIndata>()
+        };
+        let generic = &mut ioctl_in_buffer.generic;
+        generic.ioctl_hdr.ioctl_data_size = ioctl_input_size as u32;
+        generic.ioctl_hdr.app_cmd_id = 0xCD1DDEAD;
+        generic.ioctl_hdr.timeout = 100; // in ms
+        generic.ioctl_hdr.flags = 0;
+
+        generic.context = 0;
+        // OP_TBOR is THE flag the firmware uses to route the request
+        // through the TBOR dispatcher instead of `handle_mbor_op`.
+        generic.opc = OP_TBOR;
+        generic.cmdset = if use_data_xfer {
+            TSRA_CP_CMD_DATA_XFER
+        } else {
+            TSRA_CP_CMD_SESSION_GENERIC
+        };
+
+        generic.user_buffers.src_length = req_len as u32;
+        generic.user_buffers.src_buf = req_buf.as_ptr();
+        generic.user_buffers.dst_length = resp_buf.len() as u32;
+        generic.user_buffers.dst_buf = resp_buf.as_mut_ptr();
+
+        // Session control flags come from the TBOR request type;
+        // each request declares its own kind so the transport layer
+        // doesn't need a central opcode->ctrl table.
+        let session_ctrl = req.session_ctrl();
+        generic.session_control.set_kind(u8::from(session_ctrl));
+        if let Some(sid) = req.get_session_id() {
+            generic.session_id = sid;
+            generic.session_control.set_session_id_is_valid(true);
+        }
+
+        if use_data_xfer {
+            // SAFETY: `input_data` was fully zero-initialized. All-zero
+            // bytes are a valid representation of `DataXferBuffers`.
+            let data_xfer = unsafe { &mut ioctl_in_buffer.input_data.data_xfer };
+            data_xfer.buffer_count = oob_slice.len() as u32;
+            for (i, item) in oob_slice.iter().enumerate() {
+                data_xfer.buffers[i] = DataXferBuffer {
+                    xfer_length: item.len() as u32,
+                    buffer_addr: item.as_ptr(),
+                };
+            }
+        }
+
+        // -- 3. Issue the ioctl (overlapped, same as MBOR) ----------------
+        let ioctl_code: DWORD = CTL_CODE(
+            0x3F,
+            if use_data_xfer {
+                TSRA_IOCTL_CONTROL_PATH_CMD_DATA_XFER
+            } else {
+                TSRA_IOCTL_CONTROL_PATH_CMD_SESSION
+            },
+            METHOD_BUFFERED,
+            FILE_READ_ACCESS | FILE_WRITE_ACCESS,
+        );
+
+        // SAFETY: WINAPI call requires unsafe call. The pointers to the buffers are valid and have been checked via
+        // debugging as well as code reviews.
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        let mut bytes_returned: DWORD = 0;
+        let in_ptr = ptr::addr_of!(ioctl_in_buffer);
+        let out_ptr = ptr::addr_of_mut!(ioctl_out_buffer);
+        let overlapped_ptr: *mut OVERLAPPED = &mut overlapped;
+
+        let event = IoEvent::new()?;
+        overlapped.hEvent = event.handle();
+
+        // SAFETY: WINAPI call requires unsafe call. The pointers to the buffers are valid and have been checked via
+        // debugging as well as code reviews.
+        let ioctl_ret = unsafe {
+            DeviceIoControl(
+                self.file.read().as_raw_handle() as HANDLE,
+                ioctl_code,
+                in_ptr as *mut c_void,
+                ioctl_input_size as DWORD,
+                out_ptr as *mut c_void,
+                mem::size_of::<TsraCpGenericIoctlOutData>() as DWORD,
+                ptr::null_mut(),
+                overlapped_ptr,
+            )
+        };
+
+        if ioctl_ret == 0 {
+            let last_error = std::io::Error::last_os_error();
+            if last_error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+                tracing::warn!(
+                    ?last_error,
+                    "DeviceIoControl returned error after exec_op_tbor"
+                );
+                Err(DdiError::IoError(last_error))?;
+            }
+
+            // SAFETY: the IOCTL is pending and the pointers passed to
+            // `DeviceIoControl` remain valid until completion.
+            let result = unsafe {
+                GetOverlappedResult(
+                    self.file.read().as_raw_handle() as HANDLE,
+                    overlapped_ptr,
+                    &mut bytes_returned,
+                    1,
+                )
+            };
+
+            if result == 0 {
+                // WinApi failure path: driver does not copy any data,
+                // so the extended ioctl status is unreliable here.
+                let last_error = std::io::Error::last_os_error();
+                tracing::warn!(
+                    ?last_error,
+                    "GetOverlappedResult returned error after exec_op_tbor"
+                );
+                Err(DdiError::IoError(last_error))?;
+            }
+        }
+
+        self.map_ioctl_status_tbor(ioctl_out_buffer.ioctl_status)?;
+
+        if ioctl_out_buffer.ioctl_status != 0 {
+            Err(DdiError::WinError(ioctl_out_buffer.ioctl_status))?;
+        }
+
+        if ioctl_out_buffer.status != 0 {
+            Err(DdiError::DdiError(ioctl_out_buffer.status))?;
+        }
+
+        // -- 4. Decode the typed TBOR response --------------------
+        // `byte_count` is driver-controlled; clamp it against the
+        // allocated response buffer to avoid a host-side panic on a
+        // bogus value.
+        let resp_len = ioctl_out_buffer.byte_count as usize;
+        if resp_len > RESP_BUF_LEN {
+            return Err(DdiError::InvalidParameter);
+        }
+        let resp_bytes = &resp_buf[..resp_len];
+        // Do not log raw response bytes: responses can carry
+        // sensitive data depending on opcode.
+        tracing::debug!(opcode = T::OPCODE, resp_len, "TBOR response received");
+
+        Ok(<T::OpResp>::decode_response(resp_bytes)?)
+    }
+
+    /// Execute AES GCM operation (encryption/decryption) with slice-based buffers
+    ///
+    /// This is a slice-based variant that allows the caller to provide pre-allocated
+    /// buffers, avoiding the extra allocation and copy overhead of the Vec-based API.
+    ///
+    /// # Arguments
+    /// * `mode`        - Encryption or decryption
+    /// * `gcm_params`  - Parameters for the operation (key ID, IV, tag, session info)
+    /// * `src_buf`     - Source buffer slice to encrypt or decrypt
+    /// * `dst_buf`     - Destination buffer slice to write encrypted or decrypted data
+    /// * `tag`         - Output parameter for encryption tag or input tag for decryption
+    /// * `iv`          - Output parameter for IV returned from device
+    /// * `fips_approved` - Output parameter set to indicate if operation was FIPS approved
+    ///
+    /// # Returns
+    /// * `usize` - Number of bytes written to the destination buffer
+    ///
+    /// # Error
+    /// * `DdiError` - Error that occurred during operation
+    ///
+    /// # Notes
+    /// - The destination buffer must be at least as large as the source buffer
+    /// - For decryption, the tag must be provided in `gcm_params`
+    /// - AAD data is automatically aligned to 32-byte boundaries as required by the driver
+    fn exec_op_fp_gcm_slice(
+        &self,
+        mode: DdiAesOp,
+        gcm_params: DdiAesGcmParams,
+        src_buf: &[u8],
+        dst_buf: &mut [u8],
+        tag: &mut Option<[u8; 16]>,
+        iv: &mut Option<[u8; 12]>,
+        fips_approved: &mut bool,
+    ) -> Result<usize, DdiError> {
+        // Note: src_buf_len == 0 is valid for GCM (AAD-only authentication)
+        let src_buf_len = src_buf.len();
+
+        // If this is a decryption operation, the tag must be provided
+        if mode == DdiAesOp::Decrypt && gcm_params.tag.is_none() {
+            Err(DdiError::DdiStatus(DdiStatus::NoTagProvided))?;
+        }
+
+        // Validate destination buffer size
+        // For zero-length input, dst_buf can be empty
+        if src_buf_len > 0 && dst_buf.len() < src_buf_len {
+            tracing::error!(
+                "Destination buffer size ({}) is less than source buffer size ({})",
+                dst_buf.len(),
+                src_buf_len
+            );
+            return Err(DdiError::InvalidParameter);
+        }
+
+        let mut ioctl_in_buffer = TsraFpIoctlIndata::default();
+        let ioctl_out_buffer = TsraFpIoctlOutData::default();
+
+        ioctl_in_buffer.ioctl_hdr.ioctl_data_size = mem::size_of::<TsraFpIoctlIndata>() as u32;
+        ioctl_in_buffer.ioctl_hdr.app_cmd_id = 0xCD1DDEAE;
+        ioctl_in_buffer.ioctl_hdr.timeout = 100; // in ms
+        ioctl_in_buffer.ioctl_hdr.flags = 0;
+
+        ioctl_in_buffer.context = 0;
+
+        // Extract the aad
+        let aad = gcm_params.aad.unwrap_or_default();
+        let aad_len = aad.len();
+
+        // Fill in the actual aad length without padding
+        ioctl_in_buffer.xts_or_gcm.gcm.aad_data_len = aad_len as u32;
+
+        // If the aad is not aligned to 32 bytes, pad it with zeros
+        // The driver expects the aad to be aligned to 32 bytes
+        let mut final_aad = aad;
+        align_aad_in_place(&mut final_aad);
+
+        ioctl_in_buffer.xts_or_gcm.gcm.aligned_aad_data_len = final_aad.len() as u32;
+        ioctl_in_buffer.xts_or_gcm.gcm.enable_gcm_work_around = 1;
+
+        // Create a new buffer that concatenates aad and the source data
+        let mut new_src_buf: Vec<u8> = Vec::new();
+        new_src_buf.extend(&final_aad);
+        new_src_buf.extend(src_buf);
+
+        // Create temporary destination buffer that includes space for AAD
+        let mut temp_dest_buf: Vec<u8> = vec![0; new_src_buf.len()];
+
+        if mode == DdiAesOp::Encrypt {
+            ioctl_in_buffer.opc = TSRA_FP_IOCTL_OP_TYPE_ENCRYPT;
+        } else {
+            ioctl_in_buffer.opc = TSRA_FP_IOCTL_OP_TYPE_DECRYPT;
+            // If this is a decryption operation, we've already handled the case
+            // where a tag is not provided above, so it's safe to unwrap here.
+            // Even still, we use `ok_or_else` to log and return an error if
+            // this unwrap were to produce an unexpected `None`.
+            ioctl_in_buffer.xts_or_gcm.gcm.tag = gcm_params.tag.ok_or_else(|| {
+                tracing::error!(
+                    "Failed to unwrap tag for decryption operation despite prior validation"
+                );
+                DdiError::DdiStatus(DdiStatus::InternalError)
+            })?;
+        }
+
+        ioctl_in_buffer.cypher = TSRA_FP_IOCTL_AES_CYPHER_GCM;
+        let ioctl_code = CTL_CODE(
+            0x3F,
+            TSRA_FP_IOCTL_CODE_GCM,
+            METHOD_BUFFERED,
+            FILE_READ_ACCESS | FILE_WRITE_ACCESS,
+        );
+
+        ioctl_in_buffer.xts_or_gcm.gcm.kid = gcm_params.key_id;
+        ioctl_in_buffer.xts_or_gcm.gcm.init_vec = gcm_params.iv;
+
+        ioctl_in_buffer.frame_type = TSRA_FP_IOCTL_FRAME_TYPE_AES;
+        ioctl_in_buffer.session_id = gcm_params.session_id;
+        ioctl_in_buffer.short_app_id = gcm_params.short_app_id;
+
+        // Initialize the source and destination buffers
+        // Note if aad is present, source buffer is different
+        // than the cleartext
+        // destination buffer length is always the same as the
+        // cleartext buffer length
+        ioctl_in_buffer.user_buffers.src_length = new_src_buf.len() as u32;
+        ioctl_in_buffer.user_buffers.src_buf = new_src_buf.as_ptr();
+        ioctl_in_buffer.user_buffers.dst_length = temp_dest_buf.len() as u32;
+        ioctl_in_buffer.user_buffers.dst_buf = temp_dest_buf.as_mut_ptr();
+
+        // Explicitly set src buffer pointer to null if buffer is empty
+        if new_src_buf.is_empty() {
+            ioctl_in_buffer.user_buffers.src_buf = ptr::null();
+        }
+
+        // Explicitly set dst buffer pointer to null if buffer is empty
+        if temp_dest_buf.is_empty() {
+            ioctl_in_buffer.user_buffers.dst_buf = ptr::null_mut();
+        }
+
+        // SAFETY: WINAPI call requires unsafe call
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        let mut bytes_returned: DWORD = 0;
+        let in_ptr = ptr::addr_of!(ioctl_in_buffer);
+        let out_ptr = ptr::addr_of!(ioctl_out_buffer);
+        let overlapped_ptr: *mut OVERLAPPED = &mut overlapped;
+
+        let event = IoEvent::new()?;
+        overlapped.hEvent = event.handle();
+
+        // Safety: This is unsafe because of the call to system routine DeviceIoControl
+        let _ioctl_ret = unsafe {
+            DeviceIoControl(
+                self.file.read().as_raw_handle() as HANDLE,
+                ioctl_code,
+                in_ptr as *mut c_void,
+                mem::size_of::<TsraFpIoctlIndata>() as DWORD,
+                out_ptr as *mut c_void,
+                mem::size_of::<TsraFpIoctlOutData>() as DWORD,
+                ptr::null_mut(),
+                overlapped_ptr,
+            )
+        };
+
+        let last_error = std::io::Error::last_os_error();
+        if last_error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+            tracing::warn!(
+                ?last_error,
+                "DeviceIoControl returned error after exec_op_fp_gcm_slice"
+            );
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        // SAFETY: WINAPI call requires unsafe call
+        let result = unsafe {
+            GetOverlappedResult(
+                self.file.read().as_raw_handle() as HANDLE,
+                overlapped_ptr,
+                &mut bytes_returned,
+                1,
+            )
+        };
+
+        /* There are 2 ways to deal with this ioctl
+         *  If the ioctl has failed, return the Winerror
+         *  If the ioctl has succeeded, the extended ioctl status
+         *  will further indicate success or failure
+         */
+
+        if result == 0 {
+            let last_error = std::io::Error::last_os_error();
+            tracing::warn!(
+                ?last_error,
+                "GetOverlappedResult returned error after exec_op_fp_gcm_slice"
+            );
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        self.map_ioctl_status(ioctl_out_buffer.extended_status)?;
+
+        if ioctl_out_buffer.result != 0 {
+            Err(DdiError::FpError(ioctl_out_buffer.result))?
+        }
+
+        if ioctl_out_buffer.extended_status != 0 {
+            Err(DdiError::FpCmdSpecificError(
+                ioctl_out_buffer.extended_status,
+            ))?
+        }
+
+        // Copy the actual data (excluding AAD) to the destination buffer
+        let aad_offset = final_aad.len();
+        let data_len = temp_dest_buf.len().saturating_sub(aad_offset);
+
+        // Only copy if there's actual data (not just AAD)
+        if data_len > 0 {
+            if data_len > dst_buf.len() {
+                if mode == DdiAesOp::Encrypt {
+                    tracing::error!(
+                        "AES GCM Encrypt: Device output length ({}) is greater than destination buffer size ({})",
+                        data_len,
+                        dst_buf.len()
+                    );
+                    Err(DdiError::DdiStatus(DdiStatus::AesEncryptFailed))?;
+                } else {
+                    tracing::error!(
+                        "AES GCM Decrypt: Device output length ({}) is greater than destination buffer size ({})",
+                        data_len,
+                        dst_buf.len()
+                    );
+                    Err(DdiError::DdiStatus(DdiStatus::AesDecryptFailed))?;
+                }
+            }
+            dst_buf[..data_len].copy_from_slice(&temp_dest_buf[aad_offset..]);
+        }
+
+        // Set output parameters from device response
+        *tag = Some(ioctl_out_buffer.cmd_spec_data);
+        *iv = Some(ioctl_out_buffer.iv_from_device);
+        *fips_approved = ioctl_out_buffer.fips_approved;
+
+        Ok(data_len)
+    }
+
+    /// exec_op_fp_gcm
+    /// Windows implementation of
+    /// fast path AES GCM encryption
+    /// decryption functionality
+    /// mode -> Encryption or decryption
+    /// gcm_params -> Parameters for operation
+    /// session id and short_app_id are application
+    /// specific
+    /// src_buf
+    ///   For encryption, this is the cleartext buffer
+    ///   For decryption, this is the encrypted content
+    fn exec_op_fp_gcm(
+        &self,
+        mode: DdiAesOp,
+        gcm_params: DdiAesGcmParams,
+        src_buf: Vec<u8>,
+    ) -> Result<DdiAesGcmResult, DdiError> {
+        let src_buf_len = src_buf.len();
+        let mut dest_buf: Vec<u8> = vec![0; src_buf_len];
+        let mut fips_approved = false;
+        let mut tag = None;
+        let mut iv = None;
+
+        let total_size = self.exec_op_fp_gcm_slice(
+            mode,
+            gcm_params,
+            &src_buf,
+            &mut dest_buf,
+            &mut tag,
+            &mut iv,
+            &mut fips_approved,
+        )?;
+
+        if total_size < src_buf_len {
+            dest_buf.truncate(total_size);
+        }
+
+        Ok(DdiAesGcmResult {
+            data: dest_buf,
+            tag,
+            iv,
+            fips_approved,
+        })
+    }
+
+    /// Execute AES XTS operation (encryption/decryption) with slice-based buffers
+    ///
+    /// This is a slice-based variant that allows the caller to provide pre-allocated
+    /// buffers, avoiding the extra allocation and copy overhead of the Vec-based API.
+    ///
+    /// # Arguments
+    /// * `mode`        - Encryption or decryption
+    /// * `xts_params`  - Parameters for the operation (data unit length, keys, tweak, session info)
+    /// * `src_buf`     - Source buffer slice to encrypt or decrypt
+    /// * `dst_buf`     - Destination buffer slice to write encrypted or decrypted data
+    /// * `fips_approved` - Output parameter set to indicate if operation was FIPS approved
+    ///
+    /// # Returns
+    /// * `usize` - Number of bytes written to the destination buffer
+    ///
+    /// # Error
+    /// * `DdiError` - Error that occurred during operation
+    ///
+    /// # Notes
+    /// - The destination buffer must be at least as large as the source buffer
+    /// - The return value indicates how many bytes were actually written
+    fn exec_op_fp_xts_slice(
+        &self,
+        mode: DdiAesOp,
+        xts_params: DdiAesXtsParams,
+        src_buf: &[u8],
+        dst_buf: &mut [u8],
+        fips_approved: &mut bool,
+    ) -> Result<usize, DdiError> {
+        let src_buf_len = src_buf.len();
+
+        // Validate input parameters
+        if src_buf_len == 0 {
+            return Err(DdiError::InvalidParameter);
+        }
+
+        // Validate destination buffer size
+        if dst_buf.len() < src_buf_len {
+            tracing::error!(
+                "Destination buffer size ({}) is less than source buffer size ({})",
+                dst_buf.len(),
+                src_buf_len
+            );
+            return Err(DdiError::InvalidParameter);
+        }
+
+        let mut ioctl_in_buffer = TsraFpIoctlIndata::default();
+        let ioctl_out_buffer = TsraFpIoctlOutData::default();
+
+        let xts_dul = xts_params.data_unit_len;
+        // map the caller provided data unit length to ioctl encoding
+        // If not valid size, return error
+        if xts_dul == src_buf_len {
+            ioctl_in_buffer.xts_or_gcm.xts.data_unit_len = FpXtsDul::XtsDulFull as u16;
+        } else {
+            match xts_dul {
+                512 => ioctl_in_buffer.xts_or_gcm.xts.data_unit_len = FpXtsDul::XtsDul512 as u16,
+                4096 => ioctl_in_buffer.xts_or_gcm.xts.data_unit_len = FpXtsDul::XtsDul4k as u16,
+                8192 => ioctl_in_buffer.xts_or_gcm.xts.data_unit_len = FpXtsDul::XtsDul8k as u16,
+                _ => {
+                    tracing::error!(
+                        "FP AES XTS: Data unit length ({}) is not valid. Src buffer size: {}",
+                        xts_params.data_unit_len,
+                        src_buf_len
+                    );
+                    Err(DdiError::InvalidParameter)?;
+                }
+            }
+        }
+
+        ioctl_in_buffer.ioctl_hdr.ioctl_data_size = mem::size_of::<TsraFpIoctlIndata>() as u32;
+        ioctl_in_buffer.ioctl_hdr.app_cmd_id = 0xCD1DDEAE;
+        ioctl_in_buffer.ioctl_hdr.timeout = 100; // in ms
+        ioctl_in_buffer.ioctl_hdr.flags = 0;
+
+        ioctl_in_buffer.context = 0;
+
+        if mode == DdiAesOp::Encrypt {
+            ioctl_in_buffer.opc = TSRA_FP_IOCTL_OP_TYPE_ENCRYPT;
+        } else {
+            ioctl_in_buffer.opc = TSRA_FP_IOCTL_OP_TYPE_DECRYPT;
+        }
+
+        ioctl_in_buffer.cypher = TSRA_FP_IOCTL_AES_CYPHER_XTS; /* xts */
+        let ioctl_code = CTL_CODE(
+            0x3F,
+            TSRA_FP_IOCTL_CODE_XTS,
+            METHOD_BUFFERED,
+            FILE_READ_ACCESS | FILE_WRITE_ACCESS,
+        );
+
+        ioctl_in_buffer.xts_or_gcm.xts.key_id1 = xts_params.key_id1;
+        ioctl_in_buffer.xts_or_gcm.xts.key_id2 = xts_params.key_id2;
+
+        ioctl_in_buffer.xts_or_gcm.xts.tweak = xts_params.tweak;
+
+        ioctl_in_buffer.frame_type = TSRA_FP_IOCTL_FRAME_TYPE_AES; /* aes frame type */
+        ioctl_in_buffer.session_id = xts_params.session_id;
+        ioctl_in_buffer.short_app_id = xts_params.short_app_id;
+
+        // Initialize the source and destination buffers
+        ioctl_in_buffer.user_buffers.src_length = src_buf_len as u32;
+        ioctl_in_buffer.user_buffers.src_buf = src_buf.as_ptr();
+        ioctl_in_buffer.user_buffers.dst_length = src_buf_len as u32;
+        ioctl_in_buffer.user_buffers.dst_buf = dst_buf.as_mut_ptr();
+
+        // SAFETY: WINAPI call requires unsafe call. The pointers to the buffers are valid and have been checked via
+        // debugging as well as code reviews.
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        let mut bytes_returned: DWORD = 0;
+        let in_ptr = ptr::addr_of!(ioctl_in_buffer);
+        let out_ptr = ptr::addr_of!(ioctl_out_buffer);
+        let overlapped_ptr: *mut OVERLAPPED = &mut overlapped;
+
+        let event = IoEvent::new()?;
+        overlapped.hEvent = event.handle();
+
+        // Safety: This is unsafe because of the call to
+        // system routine DeviceIoControl
+        let _ioctl_ret = unsafe {
+            DeviceIoControl(
+                self.file.read().as_raw_handle() as HANDLE,
+                ioctl_code,
+                in_ptr as *mut c_void,
+                mem::size_of::<TsraFpIoctlIndata>() as DWORD,
+                out_ptr as *mut c_void,
+                mem::size_of::<TsraFpIoctlOutData>() as DWORD,
+                ptr::null_mut(),
+                overlapped_ptr,
+            )
+        };
+
+        let last_error = std::io::Error::last_os_error();
+        if last_error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+            tracing::warn!(
+                ?last_error,
+                "DeviceIoControl returned error after exec_op_fp_xts_slice"
+            );
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        // SAFETY: WINAPI call requires unsafe call. The pointers to the buffers are valid and have been checked via
+        // debugging as well as code reviews.
+        let result = unsafe {
+            GetOverlappedResult(
+                self.file.read().as_raw_handle() as HANDLE,
+                overlapped_ptr,
+                &mut bytes_returned,
+                1,
+            )
+        };
+
+        if result == 0 {
+            let last_error = std::io::Error::last_os_error();
+            tracing::warn!(
+                ?last_error,
+                "GetOverlappedResult returned error after exec_op_fp_xts_slice"
+            );
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        self.map_ioctl_status(ioctl_out_buffer.extended_status)?;
+
+        if ioctl_out_buffer.result != 0 {
+            Err(DdiError::FpError(ioctl_out_buffer.result))?
+        }
+
+        if ioctl_out_buffer.extended_status != 0 {
+            Err(DdiError::FpCmdSpecificError(
+                ioctl_out_buffer.extended_status,
+            ))?
+        }
+
+        let total_size = ioctl_out_buffer.byte_count as usize;
+
+        if total_size > dst_buf.len() {
+            if mode == DdiAesOp::Encrypt {
+                tracing::error!(
+                    "AES XTS Encrypt: Device output length ({}) is greater than destination buffer size ({})",
+                    total_size,
+                    dst_buf.len()
+                );
+                Err(DdiError::DdiStatus(DdiStatus::AesEncryptFailed))?;
+            } else {
+                tracing::error!(
+                    "AES XTS Decrypt: Device output length ({}) is greater than destination buffer size ({})",
+                    total_size,
+                    dst_buf.len()
+                );
+                Err(DdiError::DdiStatus(DdiStatus::AesDecryptFailed))?;
+            }
+        }
+
+        *fips_approved = ioctl_out_buffer.fips_approved;
+
+        Ok(total_size)
+    }
+
+    /// Execute AES Xts Operation on fast path
+    ///
+    /// # Arguments
+    /// * `mode`        - Encryption or decryption
+    /// * `xts_params`  - Parameters for the operation
+    /// * `src_buf`     - User buffer for encryption or decryption
+    ///
+    /// # Returns
+    /// * `DdiAesXtsParams` - On success
+    ///
+    /// # Error
+    /// * `DdiError` - Error that occurred during operation
+    fn exec_op_fp_xts(
+        &self,
+        mode: DdiAesOp,
+        xts_params: DdiAesXtsParams,
+        src_buf: Vec<u8>,
+    ) -> Result<DdiAesXtsResult, DdiError> {
+        let src_buf_len = src_buf.len();
+        let mut dest_buf: Vec<u8> = vec![0; src_buf_len];
+        let mut fips_approved = false;
+
+        let total_size = self.exec_op_fp_xts_slice(
+            mode,
+            xts_params,
+            &src_buf,
+            &mut dest_buf,
+            &mut fips_approved,
+        )?;
+
+        if total_size < src_buf_len {
+            dest_buf.truncate(total_size);
+        }
+
+        Ok(DdiAesXtsResult {
+            data: dest_buf,
+            fips_approved,
+        })
+    }
+
+    /// Erase the device.
+    ///
+    /// Issues an NVMe Subsystem Reset (NSSR) to the underlying device,
+    /// which discards all keys, sessions, and other cryptographic state
+    /// and returns the device to a clean, freshly-initialized state.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Successfully erased the device
+    /// * `Err(DdiError)` - Error occurred while executing the command
+    fn erase(&self) -> Result<(), DdiError> {
+        let ioctl_in_buffer = ResetDeviceInData {
+            ioctl_hdr: TsraIoctlHeader {
+                ioctl_data_size: mem::size_of::<ResetDeviceInData>() as u32,
+                app_cmd_id: 0xCD1DDEAE,
+                timeout: 100, // in ms
+                flags: 0,
+            },
+            abort_type: AbortType::AppLevelTwoNssr as u32,
+            ..Default::default()
+        };
+
+        let ioctl_out_buffer = ResetDeviceOutData::default();
+
+        // SAFETY: WINAPI call requires unsafe call.
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        let mut bytes_returned: DWORD = 0;
+        let in_ptr = ptr::addr_of!(ioctl_in_buffer);
+        let out_ptr = ptr::addr_of!(ioctl_out_buffer);
+        let overlapped_ptr: *mut OVERLAPPED = &mut overlapped;
+
+        let event = IoEvent::new()?;
+        overlapped.hEvent = event.handle();
+
+        let ioctl_code = CTL_CODE(
+            0x3F,
+            TSRA_IOCTL_RESET_DEVICE,
+            METHOD_BUFFERED,
+            FILE_READ_ACCESS | FILE_WRITE_ACCESS,
+        );
+
+        // SAFETY: WINAPI call requires unsafe call.
+        let _ioctl_ret = unsafe {
+            DeviceIoControl(
+                self.file.read().as_raw_handle() as HANDLE,
+                ioctl_code,
+                in_ptr as *mut c_void,
+                mem::size_of::<ResetDeviceInData>() as DWORD,
+                out_ptr as *mut c_void,
+                mem::size_of::<ResetDeviceOutData>() as DWORD,
+                ptr::null_mut(),
+                overlapped_ptr,
+            )
+        };
+
+        let last_error = std::io::Error::last_os_error();
+        if last_error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+            tracing::warn!(?last_error, "DeviceIoControl returned error after erase");
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        // SAFETY: WINAPI call requires unsafe call.
+        let result = unsafe {
+            GetOverlappedResult(
+                self.file.read().as_raw_handle() as HANDLE,
+                overlapped_ptr,
+                &mut bytes_returned,
+                1,
+            )
+        };
+
+        /* There are 2 ways to deal with this ioctl
+         *  If the ioctl has failed, return the Winerror
+         *  If the ioctl has succeeded, the extended ioctl status
+         *  will further indicate success or failure
+         */
+
+        if result == 0 {
+            let last_error = std::io::Error::last_os_error();
+            tracing::warn!(
+                ?last_error,
+                "GetOverlappedResult returned error after erase"
+            );
+            Err(DdiError::IoError(last_error))?;
+        }
+
+        if ioctl_out_buffer.abort_status != 0 {
+            Err(DdiError::ResetDeviceError(ioctl_out_buffer.abort_status))?
+        }
+
+        Ok(())
+    }
+}

@@ -1,0 +1,34 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_ddi_emu"
+version = "0.1.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+parking_lot.workspace = true
+tokio = { features = ["rt-multi-thread", "sync"], workspace = true }
+tracing.workspace = true
+tsra_ddi_interface.workspace = true
+tsra_ddi_mbor_codec.workspace = true
+tsra_ddi_mbor_types.workspace = true
+tsra_ddi_tbor_codec.workspace = true
+tsra_ddi_tbor_types.workspace = true
+tsra_fw_hsm_io.workspace = true
+tsra_fw_hsm_pal_traits.workspace = true
+tsra_fw_hsm_std.workspace = true
+
+[features]
+# Forward the per-IO `iic recv` / `oic send` debug traces. Off by default.
+trace-io = ["tsra_fw_hsm_std/trace-io"]
+
+[dev-dependencies]
+tokio = { features = ["macros", "rt-multi-thread"], workspace = true }
+tsra_ddi_mbor_codec.workspace = true
+
+[lints]
+workspace = true

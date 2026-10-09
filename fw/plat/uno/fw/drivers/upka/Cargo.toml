@@ -1,0 +1,25 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+[package]
+edition = "2021"
+name = "tsra_fw_uno_drivers_upka"
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+test = false
+
+[dependencies]
+bitfield-struct = { workspace = true }
+cortex-m = { workspace = true }
+embassy-sync = { workspace = true }
+tock-registers = { workspace = true }
+tsra_fw_hsm_pal_traits = { workspace = true }
+tsra_fw_single_cell = { workspace = true }
+tsra_fw_static_ref = { workspace = true }
+tsra_fw_uno_drivers_nvic = { workspace = true }
+tsra_fw_uno_error = { workspace = true }
+tsra_fw_uno_pac = { workspace = true }
+tsra_fw_uno_reg_soc = { workspace = true }
+zerocopy = { features = ["derive"], workspace = true }

@@ -1,0 +1,33 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_ddi_sock"
+version = "0.1.0"
+# The wire-protocol crate lives in a nested directory and is its own
+# workspace member; exclude it from this package.
+exclude = ["proto"]
+
+[lib]
+doctest = false
+
+[dependencies]
+parking_lot.workspace = true
+tracing.workspace = true
+tsra_ddi_interface.workspace = true
+tsra_ddi_mbor_codec.workspace = true
+tsra_ddi_mbor_types.workspace = true
+tsra_ddi_sock_proto.workspace = true
+tsra_ddi_tbor_codec.workspace = true
+tsra_ddi_tbor_types.workspace = true
+tsra_fw_hsm_io.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { features = ["socket"], workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { features = ["signal"], workspace = true }
+
+[lints]
+workspace = true

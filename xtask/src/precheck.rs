@@ -1,0 +1,545 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#![warn(missing_docs)]
+#![forbid(unsafe_code)]
+
+//! Xtask to run various repo-specific checks
+
+use clap::Parser;
+
+use crate::audit::Audit;
+use crate::cbindgen::Cbindgen;
+use crate::clippy::Clippy;
+use crate::copyright::Copyright;
+use crate::coverage::Coverage;
+use crate::coverage_report::CoverageReport;
+use crate::fmt::Fmt;
+use crate::nextest::Nextest;
+use crate::nextest_report::NextestReport;
+use crate::setup::Setup;
+use crate::validate_members::ValidateMembers;
+use crate::Xtask;
+use crate::XtaskCtx;
+
+#[derive(Parser, Debug, Clone, Default)]
+struct Stage {
+    /// Run setup checks
+    #[clap(long)]
+    setup: bool,
+    /// Run copyright checks
+    #[clap(long)]
+    copyright: bool,
+    /// Run cbindgen committed-header check
+    #[clap(long)]
+    cbindgen: bool,
+    /// Run validate members checks
+    #[clap(long)]
+    validate_members: bool,
+    /// Run audit checks
+    #[clap(long)]
+    audit: bool,
+    /// Run formatting checks
+    #[clap(long)]
+    fmt: bool,
+    /// Run clippy checks
+    #[clap(long)]
+    clippy: bool,
+    /// Run code coverage
+    #[clap(long)]
+    coverage: bool,
+    /// Run code coverage-report
+    #[clap(long)]
+    coverage_report: bool,
+    /// Run nextest with cli options (features, package, profile, exclude)
+    #[clap(long, conflicts_with_all = ["nextest_min", "nextest_full"])]
+    nextest: bool,
+    /// Run minimal nextest tests (skips resiliency, openssl, and native/cpp tests)
+    #[clap(long, conflicts_with_all = ["nextest", "nextest_full"])]
+    nextest_min: bool,
+    /// Run the full nextest tests
+    #[clap(long, conflicts_with_all = ["nextest", "nextest_min"])]
+    nextest_full: bool,
+    /// Run nextest-report
+    #[clap(long)]
+    nextest_report: bool,
+}
+
+impl Stage {
+    /// Merge another `Stage` into this one
+    fn merge(&mut self, other: &Stage) {
+        self.setup = self.setup || other.setup;
+        self.copyright = self.copyright || other.copyright;
+        self.cbindgen = self.cbindgen || other.cbindgen;
+        self.validate_members = self.validate_members || other.validate_members;
+        self.audit = self.audit || other.audit;
+        self.fmt = self.fmt || other.fmt;
+        self.clippy = self.clippy || other.clippy;
+        self.coverage = self.coverage || other.coverage;
+        self.coverage_report = self.coverage_report || other.coverage_report;
+        self.nextest = self.nextest || other.nextest;
+        self.nextest_min = self.nextest_min || other.nextest_min;
+        self.nextest_full = self.nextest_full || other.nextest_full;
+        self.nextest_report = self.nextest_report || other.nextest_report;
+    }
+
+    /// Return a Stage instance with minimal checks enabled (fmt and nextest_min)
+    fn min() -> Stage {
+        Stage {
+            setup: false,
+            copyright: false,
+            cbindgen: false,
+            validate_members: false,
+            audit: false,
+            fmt: true,
+            clippy: false,
+            coverage: false,
+            coverage_report: false,
+            nextest: false,
+            nextest_min: true,
+            nextest_full: false,
+            nextest_report: false,
+        }
+    }
+
+    /// Return a Stage instance with full checks enabled (everything except coverage, coverage_report & nextest_report)
+    fn full() -> Stage {
+        Stage {
+            setup: true,
+            copyright: true,
+            // cbindgen is verified via the dedicated `--cbindgen` CI step rather
+            // than the cross-platform presets, since it hard-requires
+            // clang-format-18 (not available on all local/Windows setups).
+            cbindgen: false,
+            validate_members: true,
+            audit: true,
+            fmt: true,
+            clippy: true,
+            coverage: false,        // coverage is optional
+            coverage_report: false, // coverage report is optional (intended only for CI)
+            nextest: false,
+            nextest_min: false,
+            nextest_full: true,
+            nextest_report: false, // nextest report is optional (intended only for CI)
+        }
+    }
+
+    /// Return a Stage instance with all checks enabled
+    fn all() -> Stage {
+        Stage {
+            setup: true,
+            copyright: true,
+            // See `full()`: verified via the dedicated `--cbindgen` CI step.
+            cbindgen: false,
+            validate_members: true,
+            audit: true,
+            fmt: true,
+            clippy: true,
+            coverage: true,
+            coverage_report: true,
+            nextest: false,     // subset of nextest_full
+            nextest_min: false, // subset of nextest_full
+            nextest_full: true,
+            nextest_report: true,
+        }
+    }
+}
+
+/// Xtask to run various repo-specific checks
+#[derive(Parser)]
+#[clap(about = "Run various checks")]
+pub struct Precheck {
+    /// Specify which checks to run
+    #[clap(flatten)]
+    stage: Option<Stage>,
+    /// Run the full set of checks:
+    /// setup, copyright, validate_members, audit, fmt, clippy, nextest_full
+    #[clap(
+        long,
+        conflicts_with = "all",
+        conflicts_with_all = ["nextest", "nextest_min", "nextest_full"]
+    )]
+    pub full: bool,
+    /// Run all checks
+    #[clap(
+        long,
+        conflicts_with = "full",
+        conflicts_with_all = ["nextest", "nextest_min", "nextest_full"]
+    )]
+    pub all: bool,
+    /// Skip taplo (TOML formatting) (used with --fmt)
+    #[clap(long)]
+    pub skip_taplo: bool,
+    /// Skip audit (used with --audit/--full/--all)
+    #[clap(long)]
+    pub skip_audit: bool,
+    /// Skip Clang formatting (used with --fmt)
+    #[clap(long)]
+    pub skip_clang: bool,
+    /// Skip cleaning existing llvm-cov artifacts before running coverage
+    #[clap(long)]
+    pub skip_clean: bool,
+    /// Skip specifying toolchain for formatting checks (used with --fmt)
+    #[clap(long)]
+    skip_toolchain: bool,
+    /// Crates to exclude (used with --clippy/--nextest/--nextest-min/--nextest-full/--coverage)
+    #[clap(long = "exclude")]
+    exclude: Vec<String>,
+    /// Package to run tests for (used with --nextest/--coverage)
+    #[clap(long, short = 'p')]
+    package: Option<String>,
+    /// Features to enable when running tests (used with --nextest/--coverage)
+    #[clap(long, short = 'F')]
+    features: Option<String>,
+    /// Test filterset (see https://nexte.st/docs/filtersets) (used with --nextest/--coverage)
+    #[clap(long, short = 'E')]
+    filterset: Option<String>,
+    /// The nextest profile to use (used with --nextest/--nextest-min/--nextest-full)
+    #[clap(long)]
+    profile: Option<String>,
+    /// Pass through to `cargo install --config`; accepts either `KEY=VALUE`
+    /// or a path to a Cargo `config.toml` file.
+    /// Only used for --setup ignored otherwise.
+    #[clap(long)]
+    pub config: Option<String>,
+    /// Do not append the default build location of the tsra_api_native object file to LLVM_COV_FLAGS (used with --coverage-report)
+    #[clap(long)]
+    pub no_default_native: bool,
+    /// Additional paths to object files to append to LLVM_COV_FLAGS (used with --coverage-report)
+    #[clap(long)]
+    pub additional_obj_paths: Vec<String>,
+    /// The nextest test target to run (used with --nextest/--coverage)
+    #[clap(long)]
+    pub test: Option<String>,
+    /// Test name filters (used with --nextest/--coverage)
+    #[clap(long)]
+    filter: Vec<String>,
+}
+
+impl Xtask for Precheck {
+    fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
+        log::trace!("running precheck");
+
+        // choose defaults based on --all/--full flags & whether CLI-provided stages exist
+        let mut stage = if self.all {
+            Stage::all()
+        } else if self.full {
+            Stage::full()
+        } else if self.stage.is_some() {
+            Stage::default()
+        } else {
+            Stage::min()
+        };
+
+        if let Some(stage_cli) = self.stage {
+            // merge defaults with CLI-provided stages
+            stage.merge(&stage_cli);
+        }
+
+        if stage.setup {
+            Setup {
+                force: false,
+                config: self.config,
+                skip_taplo: self.skip_taplo,
+                skip_audit: self.skip_audit,
+            }
+            .run(ctx.clone())?;
+        }
+
+        // Run Copyright
+        if stage.copyright {
+            Copyright { fix: false }.run(ctx.clone())?;
+        }
+
+        // Verify the committed cbindgen header is up to date
+        if stage.cbindgen {
+            Cbindgen {
+                fix: false,
+                clang_format_executable: "clang-format-18".to_string(),
+            }
+            .run(ctx.clone())?;
+        }
+
+        // Run ValidateMembers
+        if stage.validate_members {
+            ValidateMembers {
+                fix: false,
+                skip_taplo: self.skip_taplo,
+            }
+            .run(ctx.clone())?;
+        }
+
+        // Run Audit
+        if stage.audit && !self.skip_audit {
+            Audit {}.run(ctx.clone())?;
+        }
+
+        // Cargo format
+        if stage.fmt {
+            Fmt {
+                fix: false,                  // Do not fix formatting issues by default
+                skip_taplo: self.skip_taplo, // Pass through skip_taplo flag
+                skip_clang: self.skip_clang, // Pass through skip_clang flag
+                toolchain: if self.skip_toolchain {
+                    None
+                } else {
+                    Some("nightly".to_string()) // Use nightly toolchain by default
+                },
+            }
+            .run(ctx.clone())?;
+        }
+
+        // Cargo Clippy
+        if stage.clippy {
+            Clippy {
+                exclude: self.exclude.clone(),
+            }
+            .run(ctx.clone())?;
+        }
+
+        if stage.nextest {
+            Nextest {
+                features: self.features.clone(),
+                package: self.package.clone(),
+                no_default_features: false,
+                filterset: self.filterset.clone(),
+                profile: self.profile.clone(),
+                exclude: self.exclude.clone(),
+                test: self.test.clone(),
+                filter: self.filter.clone(),
+            }
+            .run(ctx.clone())?;
+        }
+
+        if stage.nextest_min {
+            // Run min tests
+            let tests = min_tests(&self.exclude, self.profile.clone());
+            run_tests(tests, false, self.skip_clean, ctx.clone())?;
+        }
+
+        if stage.nextest_full {
+            // Run default tests
+            let tests = default_tests(&self.exclude, self.profile.clone());
+            run_tests(tests, false, self.skip_clean, ctx.clone())?;
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                // Run tsra_ddi mock tests
+                let ddi_test_runs = ddi_tests(&self.exclude, self.profile.clone());
+                run_tests(ddi_test_runs, false, self.skip_clean, ctx.clone())?;
+            }
+        }
+
+        // Run code coverage
+        if stage.coverage {
+            if self.package.is_none()
+                && self.features.is_none()
+                && self.filterset.is_none()
+                && self.test.is_none()
+                && self.filter.is_empty()
+            {
+                // Run default tests with coverage
+                let tests = default_tests(&self.exclude, self.profile.clone());
+                run_tests(tests, true, self.skip_clean, ctx.clone())?;
+            } else {
+                Coverage {
+                    features: self.features.clone(),
+                    package: self.package.clone(),
+                    no_default_features: false,
+                    filterset: self.filterset.clone(),
+                    profile: self.profile.clone(),
+                    exclude: self.exclude.clone(),
+                    test: self.test.clone(),
+                    filter: self.filter.clone(),
+                    skip_clean: self.skip_clean,
+                }
+                .run(ctx.clone())?;
+            }
+        }
+
+        // Run nextest report
+        if stage.nextest_report {
+            NextestReport {}.run(ctx.clone())?;
+        }
+
+        // Run code coverage report
+        if stage.coverage_report {
+            CoverageReport {
+                no_default_native: self.no_default_native,
+                additional_obj_paths: self.additional_obj_paths.clone(),
+            }
+            .run(ctx.clone())?;
+        }
+
+        log::trace!("done precheck");
+        Ok(())
+    }
+}
+
+// Helper function to define test parameters for --nextest-min
+fn min_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
+    let mut tests = Vec::new();
+
+    let mut mock_exclude = exclude.to_owned();
+
+    for pkg in [
+        "tsra_api_tests",
+        "tsra_ossl_provider",
+        "tsra_res_test_dev",
+        "tsra_resiliency_test_helpers",
+        "provider-integration-tests-cli",
+        "provider-integration-tests-capi",
+        "provider-integration-tests-nginx",
+        "resiliency_stress",
+        "resiliency_macro",
+    ] {
+        if !mock_exclude.iter().any(|e| e == pkg) {
+            mock_exclude.push(pkg.to_string());
+        }
+    }
+
+    // SDK Run min mock tests
+    tests.push(Nextest {
+        features: Some("mock".to_string()),
+        package: None,
+        no_default_features: false,
+        filterset: None,
+        profile: profile.clone().or_else(|| Some("ci-mock".to_string())),
+        exclude: mock_exclude,
+        test: None,
+        filter: vec![],
+    });
+
+    tests
+}
+
+// Helper function to define default test parameters for --nextest-full and --coverage
+fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
+    let mut tests = Vec::new();
+
+    let mut mock_exclude = exclude.to_owned();
+
+    for pkg in [
+        "provider-integration-tests-cli",
+        "provider-integration-tests-capi",
+        "provider-integration-tests-nginx",
+    ] {
+        if !mock_exclude.iter().any(|e| e == pkg) {
+            mock_exclude.push(pkg.to_string());
+        }
+    }
+
+    // SDK Run all mock tests
+    tests.push(Nextest {
+        features: Some("mock".to_string()),
+        package: None,
+        no_default_features: false,
+        filterset: None,
+        profile: profile.clone().or(Some("ci-mock".to_string())),
+        exclude: mock_exclude,
+        test: None,
+        filter: vec![],
+    });
+
+    // SDK Run resiliency fault-injection tests (requires res-test
+    // feature for the fault-injection DDI device)
+    if !exclude.iter().any(|e| e == "tsra_api_tests") {
+        tests.push(Nextest {
+            features: Some("mock,res-test".to_string()),
+            package: Some("tsra_api_tests".to_string()),
+            no_default_features: false,
+            filterset: Some("test(resiliency::fault_injection::)".to_string()),
+            profile: profile.clone().or(Some("ci-mock-res".to_string())),
+            exclude: exclude.to_owned(),
+            test: None,
+            filter: vec![],
+        });
+    }
+
+    // Run emu smoke tests
+    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
+        tests.push(Nextest {
+            features: Some("emu".to_string()),
+            package: Some("tsra_ddi_mbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-emu-smoke".to_string())),
+            exclude: exclude.to_owned(),
+            test: Some("tsra_ddi_tests".to_string()),
+            filter: vec!["smoke".to_string()],
+        });
+    }
+
+    tests
+}
+
+// Helper function to define test parameters for Linux-specific tsra_ddi mock tests
+#[cfg(not(target_os = "windows"))]
+fn ddi_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
+    let mut tests = Vec::new();
+
+    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
+        // SDK Run tsra_ddi_mbor_types mock tests table-4
+        tests.push(Nextest {
+            features: Some("mock,table-4".to_string()),
+            package: Some("tsra_ddi_mbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-mock-table-4".to_string())),
+            exclude: exclude.to_owned(),
+            test: None,
+            filter: vec![],
+        });
+
+        // SDK Run tsra_ddi_mbor_types mock tests table-64
+        tests.push(Nextest {
+            features: Some("mock,table-64".to_string()),
+            package: Some("tsra_ddi_mbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-mock-table-64".to_string())),
+            exclude: exclude.to_owned(),
+            test: None,
+            filter: vec![],
+        });
+    }
+
+    if !exclude.iter().any(|e| e == "tsra_ddi_tbor_types") {
+        // SDK Run tsra_ddi_tbor_types tests through the emu
+        // backend (in-process firmware).
+        tests.push(Nextest {
+            features: Some("emu".to_string()),
+            package: Some("tsra_ddi_tbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-tbor-emu".to_string())),
+            exclude: exclude.to_owned(),
+            test: None,
+            filter: vec![],
+        });
+    }
+
+    tests
+}
+
+// Helper function to run tests defined by other helper functions
+fn run_tests(
+    tests: Vec<Nextest>,
+    coverage: bool,
+    skip_clean: bool,
+    ctx: XtaskCtx,
+) -> anyhow::Result<()> {
+    let mut first_run = true;
+    for test in tests {
+        if coverage {
+            let mut cov = Coverage::from(test);
+            // Clean at most once; if the user requested --skip-clean, never clean.
+            cov.skip_clean = !first_run || skip_clean;
+            first_run = false;
+            cov.run(ctx.clone())?;
+        } else {
+            test.run(ctx.clone())?;
+        }
+    }
+    Ok(())
+}

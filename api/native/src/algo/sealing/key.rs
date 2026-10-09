@@ -1,0 +1,64 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use tsra_api::*;
+
+use super::*;
+use crate::HANDLE_TABLE;
+use crate::TsraBuffer;
+use crate::TsraHandle;
+use crate::TsraStatus;
+use crate::handle_table::HandleType;
+use crate::utils::validate_algo_params_absent;
+use crate::utils::validate_output_buffer;
+
+impl TryFrom<&TsraAlgo> for HsmSealingKeyGenAlgo {
+    type Error = TsraStatus;
+
+    /// Converts a C FFI algorithm specification to HsmSealingKeyGenAlgo.
+    fn try_from(algo: &TsraAlgo) -> Result<Self, Self::Error> {
+        // Sealing key generation has no algorithm-specific parameter
+        // struct in the C ABI. Enforce `params == NULL` and `len == 0`
+        // to reject malformed caller input.
+        validate_algo_params_absent(algo)?;
+        Ok(HsmSealingKeyGenAlgo::default())
+    }
+}
+
+/// Generates a new security-domain sealing key.
+///
+/// # Arguments
+/// * `session` - HSM session for key generation
+/// * `algo` - Sealing key generation algorithm parameters (none)
+/// * `key_props` - Properties for the generated key
+///
+/// # Returns
+/// * `Ok(TsraHandle)` - Handle to the generated sealing key
+/// * `Err(TsraStatus)` - On failure (e.g., invalid session or props)
+pub(crate) fn sealing_generate_key(
+    session: &HsmSession,
+    algo: &TsraAlgo,
+    key_props: HsmKeyProps,
+) -> Result<TsraHandle, TsraStatus> {
+    let mut sealing_algo = HsmSealingKeyGenAlgo::try_from(algo)?;
+    let key = HsmKeyManager::generate_key(session, &mut sealing_algo, key_props)?;
+    Ok(HANDLE_TABLE.alloc_handle(HandleType::SealingKey, Box::new(key)))
+}
+
+/// Generates a key-attestation report for an unpinned sealing key.
+///
+/// The report is produced over the key's masked-key envelope via TBOR
+/// `KeyReport`. Follows the probe/fill convention: sizes `output` on the
+/// first pass, then fills it.
+pub(crate) fn sealing_generate_key_report(
+    key_handle: TsraHandle,
+    report_data: &[u8],
+    output: &mut TsraBuffer,
+) -> Result<(), TsraStatus> {
+    let key = HsmSealingKey::try_from(key_handle)?;
+    let required_size = HsmKeyManager::generate_key_report(&key, report_data, None)?;
+    let output_data = validate_output_buffer(output, required_size)?;
+    let report_len = HsmKeyManager::generate_key_report(&key, report_data, Some(output_data))?;
+    output.len = report_len as u32;
+    Ok(())
+}

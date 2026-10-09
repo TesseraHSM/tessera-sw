@@ -1,0 +1,16 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_res_test_dev"
+version = "0.1.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+parking_lot.workspace = true
+tracing.workspace = true
+tsra_ddi_interface.workspace = true
+tsra_ddi_mbor_types.workspace = true

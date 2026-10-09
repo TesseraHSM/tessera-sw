@@ -1,0 +1,23 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_ddi_sock_ecc384_loop"
+version = "0.1.0"
+
+[[bin]]
+name = "tsra_ddi_sock_ecc384_loop"
+path = "src/main.rs"
+required-features = ["sock"]
+
+[features]
+sock = ["dep:openssl", "dep:tsra_api", "dep:tsra_ddi"]
+
+[target.'cfg(unix)'.dependencies]
+openssl = { optional = true, workspace = true }
+tsra_api = { optional = true, workspace = true }
+tsra_ddi = { features = ["sock"], optional = true, workspace = true }
+
+[lints]
+workspace = true

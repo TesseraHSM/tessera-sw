@@ -1,0 +1,1057 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Code generation for the Encoder (typestate builder) and Frame types.
+//!
+//! The generated encoder uses a **typestate** pattern with zero field
+//! storage. A single struct `FooEnc<'a, S>` carries `&mut [u8]` and
+//! `data_offset`. Each field method writes directly to the buffer and
+//! transitions to the next state. Phantom state markers enforce field
+//! order at compile time.
+//!
+//! Optional fields can be skipped: each state has methods for all
+//! reachable future fields (skipping only optional fields in between).
+//! `finish()` is available when all remaining fields are optional.
+
+use proc_macro2::TokenStream;
+use quote::format_ident;
+use quote::quote;
+
+use crate::schema::*;
+
+/// Generate the typestate encoder, frame type, and all supporting items
+/// for a message schema.
+///
+/// This is the main entry point for encoder code generation. It produces:
+/// - Typestate marker enums (`FooS0`, `FooS1`, …)
+/// - The encoder struct `FooEnc<'a, S>` with field-method `impl` blocks
+/// - The `FooFrame<'a>` type with read accessors over the encoded message
+pub fn gen_encoder_and_frame(schema: &Schema) -> TokenStream {
+    let vis = &schema.vis;
+    let enc_name = format_ident!("{}Enc", schema.name);
+    let frame_name = format_ident!("{}Frame", schema.name);
+    let layout = TocLayout::compute(&schema.fields);
+
+    let toc_count_expr = build_toc_count_expr(&layout, &schema.fields);
+    let (marker_defs, state_markers) = gen_state_markers(schema);
+    let s0 = &state_markers[0];
+    let encoder_alias = format_ident!("{}Encoder", schema.name);
+
+    let (header_len_tokens, header_write, resp_extra_fields, resp_extra_pass) =
+        gen_header_parts(schema);
+
+    let new_fn = gen_new_fn(schema, &enc_name, s0, &header_len_tokens, &toc_count_expr);
+
+    let state_impls = gen_state_impls(
+        schema,
+        &layout,
+        &enc_name,
+        &frame_name,
+        &state_markers,
+        &header_len_tokens,
+        &header_write,
+        &toc_count_expr,
+        &resp_extra_pass,
+    );
+
+    let frame_tokens = gen_frame_type(schema, &layout, &frame_name, vis);
+
+    quote! {
+        #(#marker_defs)*
+
+        /// Type alias for the initial encoder state.
+        #vis type #encoder_alias<'a> = #enc_name<'a, #s0>;
+
+        /// Typestate encoder. Each field method writes directly to the
+        /// buffer and transitions to the next state. Zero field storage.
+        #vis struct #enc_name<'a, S> {
+            buf: &'a mut [u8],
+            data_offset: usize,
+            #resp_extra_fields
+            _state: core::marker::PhantomData<S>,
+        }
+
+        impl<'a> #enc_name<'a, #s0> {
+            #new_fn
+        }
+
+        #(#state_impls)*
+
+        #frame_tokens
+    }
+}
+
+// ── Helper: TOC count expression ──────────────────────────────────────
+
+/// Build the compile-time `TOC_COUNT` expression including nested groups.
+fn build_toc_count_expr(layout: &TocLayout, fields: &[SchemaField]) -> TokenStream {
+    let local_toc_count = layout.total_toc_count;
+    let group_addends: Vec<_> = fields
+        .iter()
+        .filter_map(|f| f.include_group.as_ref().map(|g| quote! { + #g::TOC_COUNT }))
+        .collect();
+    quote! { #local_toc_count #(#group_addends)* }
+}
+
+// ── Helper: state marker types ────────────────────────────────────────
+
+/// Generate the `#[doc(hidden)]` marker enums used as typestate tags
+/// (`FooS0`, `FooS1`, …, `FooSN`).
+fn gen_state_markers(schema: &Schema) -> (Vec<TokenStream>, Vec<syn::Ident>) {
+    let vis = &schema.vis;
+    let n_fields = schema.fields.len();
+    let state_markers: Vec<_> = (0..=n_fields)
+        .map(|i| format_ident!("{}S{}", schema.name, i))
+        .collect();
+    let marker_defs: Vec<_> = state_markers
+        .iter()
+        .map(|m| {
+            quote! {
+                #[doc(hidden)]
+                #vis enum #m {}
+            }
+        })
+        .collect();
+    (marker_defs, state_markers)
+}
+
+// ── Helper: header constants ──────────────────────────────────────────
+
+/// Return `(header_len_tokens, header_write, resp_extra_fields, resp_extra_pass)`.
+fn gen_header_parts(schema: &Schema) -> (TokenStream, TokenStream, TokenStream, TokenStream) {
+    let (header_len_tokens, header_write) = match schema.kind {
+        MessageKind::Request { opcode } => (
+            quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
+            quote! {
+                let hdr = u32::from_le_bytes([
+                    tsra_fw_ddi_tbor::PROTOCOL_VERSION,
+                    0x00,
+                    (TOC_COUNT - 1) as u8,
+                    #opcode,
+                ]);
+                self.buf[..4].copy_from_slice(&hdr.to_le_bytes());
+            },
+        ),
+        MessageKind::Response => (
+            quote! { tsra_fw_ddi_tbor::RESP_HEADER_LEN },
+            quote! {
+                let hdr0 = u32::from_le_bytes([
+                    tsra_fw_ddi_tbor::PROTOCOL_VERSION,
+                    self.flags,
+                    0x00,
+                    (TOC_COUNT - 1) as u8,
+                ]);
+                self.buf[..4].copy_from_slice(&hdr0.to_le_bytes());
+                self.buf[4..8].copy_from_slice(&self.status.to_le_bytes());
+            },
+        ),
+        MessageKind::Fields => unreachable!(),
+    };
+    let resp_extra_fields = if matches!(schema.kind, MessageKind::Response) {
+        quote! { status: u32, flags: u8, }
+    } else {
+        quote! {}
+    };
+    let resp_extra_pass = if matches!(schema.kind, MessageKind::Response) {
+        quote! { status: self.status, flags: self.flags, }
+    } else {
+        quote! {}
+    };
+    (
+        header_len_tokens,
+        header_write,
+        resp_extra_fields,
+        resp_extra_pass,
+    )
+}
+
+// ── Helper: new() constructor ─────────────────────────────────────────
+
+/// Generate the `new()` constructor for the initial encoder state.
+fn gen_new_fn(
+    schema: &Schema,
+    enc_name: &syn::Ident,
+    s0: &syn::Ident,
+    header_len_tokens: &TokenStream,
+    toc_count_expr: &TokenStream,
+) -> TokenStream {
+    // For empty schemas the codec still requires `toc_count >= 1`; the
+    // initial state writes a synthetic `None` placeholder at TOC[0] so
+    // that `finish()` can produce a valid frame without exposing any
+    // field methods.
+    let write_empty_placeholder = if schema.fields.is_empty() {
+        quote! {
+            tsra_fw_ddi_tbor::toc::write_toc_word(
+                buf,
+                HEADER_LEN,
+                0,
+                tsra_fw_ddi_tbor::toc::build_toc_none(),
+            );
+        }
+    } else {
+        quote! {}
+    };
+
+    match schema.kind {
+        MessageKind::Request { .. } => quote! {
+            /// Create a new encoder, validating that `buf` is large enough.
+            pub fn new(buf: &'a mut [u8]) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
+                const HEADER_LEN: usize = #header_len_tokens;
+                const TOC_COUNT: usize = #toc_count_expr;
+                const MIN_SIZE: usize = HEADER_LEN + TOC_COUNT * 4;
+                if buf.len() < MIN_SIZE {
+                    return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+                }
+                #write_empty_placeholder
+                Ok(#enc_name { buf, data_offset: 0, _state: core::marker::PhantomData })
+            }
+        },
+        MessageKind::Response => quote! {
+            /// Create a new response encoder with the given status and FIPS flag.
+            pub fn new(buf: &'a mut [u8], status: u32, fips_approved: bool) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
+                const HEADER_LEN: usize = #header_len_tokens;
+                const TOC_COUNT: usize = #toc_count_expr;
+                const MIN_SIZE: usize = HEADER_LEN + TOC_COUNT * 4;
+                if buf.len() < MIN_SIZE {
+                    return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+                }
+                let flags = if fips_approved { 0x01u8 } else { 0x00u8 };
+                #write_empty_placeholder
+                Ok(#enc_name { buf, data_offset: 0, status, flags, _state: core::marker::PhantomData })
+            }
+        },
+        MessageKind::Fields => unreachable!(),
+    }
+}
+
+// ── Helper: effective TOC index ───────────────────────────────────────
+
+/// Compute the effective TOC index expression for field `i`, accounting
+/// for preceding include-group contributions.
+pub(crate) fn effective_toc_idx(
+    i: usize,
+    layout: &TocLayout,
+    fields: &[SchemaField],
+) -> TokenStream {
+    let local_idx = layout.field_toc_indices[i];
+    let group_addends: Vec<_> = fields[..i]
+        .iter()
+        .filter_map(|pf| {
+            pf.include_group
+                .as_ref()
+                .map(|pg| quote! { + #pg::TOC_COUNT })
+        })
+        .collect();
+    if group_addends.is_empty() {
+        quote! { #local_idx }
+    } else {
+        quote! { (#local_idx #(#group_addends)*) }
+    }
+}
+
+// ── Helper: emit None for skipped optional fields ─────────────────────
+
+/// Emit `None` TOC words for a range of skipped optional fields
+/// (`skip_from..skip_to`) in a top-level message encoder context.
+fn emit_none_range_enc(
+    skip_from: usize,
+    skip_to: usize,
+    schema: &Schema,
+    layout: &TocLayout,
+) -> TokenStream {
+    let mut tokens = quote! {};
+    for j in skip_from..skip_to {
+        let f = &schema.fields[j];
+        assert!(f.optional, "cannot skip required field");
+
+        if let Some(ref group_name) = f.include_group {
+            let local_toc_idx = layout.field_toc_indices[j];
+            let preceding: Vec<_> = schema.fields[..j]
+                .iter()
+                .filter_map(|pf| {
+                    pf.include_group
+                        .as_ref()
+                        .map(|pg| quote! { + #pg::TOC_COUNT })
+                })
+                .collect();
+            let toc_offset_expr = quote! { #local_toc_idx #(#preceding)* };
+            tokens = quote! {
+                #tokens
+                {
+                    let toc_off: usize = #toc_offset_expr;
+                    for i in 0..#group_name::TOC_COUNT {
+                        tsra_fw_ddi_tbor::toc::write_toc_word(
+                            self.buf, HEADER_LEN, toc_off + i,
+                            tsra_fw_ddi_tbor::toc::build_toc_none(),
+                        );
+                    }
+                }
+            };
+            continue;
+        }
+
+        let field_toc_idx = effective_toc_idx(j, layout, &schema.fields);
+        if f.has_padding() {
+            let local_pad = layout
+                .padding_positions
+                .iter()
+                .find(|&&(_, fi)| fi == j)
+                .map(|&(ti, _)| ti)
+                .unwrap();
+            let ga: Vec<_> = schema.fields[..j]
+                .iter()
+                .filter_map(|pf| {
+                    pf.include_group
+                        .as_ref()
+                        .map(|pg| quote! { + #pg::TOC_COUNT })
+                })
+                .collect();
+            let pad_toc_idx = quote! { (#local_pad #(#ga)*) };
+            tokens = quote! {
+                #tokens
+                {
+                    let pad_word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(9, 0, self.data_offset);
+                    tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #pad_toc_idx, pad_word);
+                }
+            };
+        }
+        tokens = quote! {
+            #tokens
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, tsra_fw_ddi_tbor::toc::build_toc_none());
+        };
+    }
+    tokens
+}
+
+// ── Helper: field write code ──────────────────────────────────────────
+
+/// Generate the token stream that writes a single field value into the
+/// buffer (padding + TOC word + data section copy).
+fn gen_field_write(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream {
+    let f = &schema.fields[i];
+    let toc_type_id = f.toc_type_id;
+    let field_toc_idx = effective_toc_idx(i, layout, &schema.fields);
+    let has_padding = f.has_padding();
+    let align = f.align_expr().unwrap_or_else(|| quote! { 1 });
+
+    let pad_toc_idx = if has_padding {
+        let local_pad = layout
+            .padding_positions
+            .iter()
+            .find(|&&(_, fi)| fi == i)
+            .map(|&(ti, _)| ti)
+            .unwrap();
+        let ga: Vec<_> = schema.fields[..i]
+            .iter()
+            .filter_map(|pf| {
+                pf.include_group
+                    .as_ref()
+                    .map(|pg| quote! { + #pg::TOC_COUNT })
+            })
+            .collect();
+        quote! { (#local_pad #(#ga)*) }
+    } else {
+        quote! { 0 }
+    };
+
+    let pad_write = if has_padding {
+        quote! {
+            let pad_len = (#align - (self.data_offset % #align)) % #align;
+            let pad_end = DATA_START + self.data_offset + pad_len;
+            if pad_end > self.buf.len() {
+                return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+            }
+            for j in 0..pad_len {
+                self.buf[DATA_START + self.data_offset + j] = 0;
+            }
+            let pad_word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(9, pad_len, self.data_offset);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #pad_toc_idx, pad_word);
+            self.data_offset += pad_len;
+        }
+    } else {
+        quote! {}
+    };
+
+    match f.wire_type {
+        WireType::Uint8 => quote! {
+            let word = tsra_fw_ddi_tbor::toc::build_toc_inline_u8(#toc_type_id, v);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
+        },
+        WireType::Uint16 | WireType::SessionId | WireType::KeyId => quote! {
+            let word = tsra_fw_ddi_tbor::toc::build_toc_inline_u16(#toc_type_id, v);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
+        },
+        WireType::Uint32 => quote! {
+            #pad_write
+            let off = self.data_offset;
+            let end = DATA_START + off + 4;
+            if end > self.buf.len() {
+                return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+            }
+            self.buf[DATA_START + off..end].copy_from_slice(&v.to_le_bytes());
+            self.data_offset += 4;
+            let word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(#toc_type_id, 4, off);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
+        },
+        WireType::Uint64 => quote! {
+            #pad_write
+            let off = self.data_offset;
+            let end = DATA_START + off + 8;
+            if end > self.buf.len() {
+                return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+            }
+            self.buf[DATA_START + off..end].copy_from_slice(&v.to_le_bytes());
+            self.data_offset += 8;
+            let word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(#toc_type_id, 8, off);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
+        },
+        WireType::Buffer | WireType::SealedKey => {
+            let min_l = f.min_len;
+            let max_l = f.max_len;
+            let len_check = if f.fixed_len.is_some() || min_l > 0 || max_l < 8191 {
+                let effective_min = f.fixed_len.unwrap_or(min_l);
+                let effective_max = f.fixed_len.unwrap_or(max_l);
+                quote! {
+                    if !(#effective_min..=#effective_max).contains(&len) {
+                        return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            quote! {
+                #pad_write
+                let off = self.data_offset;
+                let len = v.len();
+                #len_check
+                let end = DATA_START + off + len;
+                if end > self.buf.len() {
+                    return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+                }
+                if self.data_offset + len > tsra_fw_ddi_tbor::MAX_DATA_SIZE {
+                    return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
+                }
+                self.buf[DATA_START + off..end].copy_from_slice(v);
+                self.data_offset += len;
+                let word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(#toc_type_id, len, off);
+                tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
+            }
+        }
+    }
+}
+
+// ── Helper: field reserve code (fill-later) ───────────────────────────
+
+/// Generate the token stream that reserves a buffer / sealed_key field's
+/// `len` bytes **without** copying data — the TOC entry and data-section
+/// offset are advanced, but the region is left for the caller to fill in
+/// place later (via `decode_mut`).  Mirrors [`gen_field_write`]'s buffer
+/// arm minus the `copy_from_slice`.  Only emitted for `#[tbor(mutable)]`
+/// fields, which the schema parser guarantees are non-optional buffer /
+/// sealed_key fields.
+fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream {
+    let f = &schema.fields[i];
+    let toc_type_id = f.toc_type_id;
+    let field_toc_idx = effective_toc_idx(i, layout, &schema.fields);
+    let has_padding = f.has_padding();
+    let align = f.align_expr().unwrap_or_else(|| quote! { 1 });
+
+    let pad_toc_idx = if has_padding {
+        let local_pad = layout
+            .padding_positions
+            .iter()
+            .find(|&&(_, fi)| fi == i)
+            .map(|&(ti, _)| ti)
+            .unwrap();
+        let ga: Vec<_> = schema.fields[..i]
+            .iter()
+            .filter_map(|pf| {
+                pf.include_group
+                    .as_ref()
+                    .map(|pg| quote! { + #pg::TOC_COUNT })
+            })
+            .collect();
+        quote! { (#local_pad #(#ga)*) }
+    } else {
+        quote! { 0 }
+    };
+
+    let pad_write = if has_padding {
+        quote! {
+            let pad_len = (#align - (self.data_offset % #align)) % #align;
+            let pad_end = DATA_START + self.data_offset + pad_len;
+            if pad_end > self.buf.len() {
+                return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+            }
+            for j in 0..pad_len {
+                self.buf[DATA_START + self.data_offset + j] = 0;
+            }
+            let pad_word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(9, pad_len, self.data_offset);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #pad_toc_idx, pad_word);
+            self.data_offset += pad_len;
+        }
+    } else {
+        quote! {}
+    };
+
+    let min_l = f.min_len;
+    let max_l = f.max_len;
+    let len_check = if f.fixed_len.is_some() || min_l > 0 || max_l < 8191 {
+        let effective_min = f.fixed_len.unwrap_or(min_l);
+        let effective_max = f.fixed_len.unwrap_or(max_l);
+        quote! {
+            if !(#effective_min..=#effective_max).contains(&len) {
+                return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        #pad_write
+        let off = self.data_offset;
+        #len_check
+        let end = DATA_START + off + len;
+        if end > self.buf.len() {
+            return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
+        }
+        if self.data_offset + len > tsra_fw_ddi_tbor::MAX_DATA_SIZE {
+            return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
+        }
+        // Zero the reserved region: a `<field>_reserve(len)` caller fills it
+        // separately (e.g. `decode_mut`), so a partially-filled slot — or an
+        // early return on an error path after reserving — must not leak prior
+        // DMA-arena contents into the response.
+        for __b in &mut self.buf[DATA_START + off..end] {
+            *__b = 0;
+        }
+        self.data_offset += len;
+        let word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(#toc_type_id, len, off);
+        tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
+    }
+}
+
+/// Generate the `impl` blocks for each typestate, containing field setter
+/// methods and `finish()`.
+#[allow(clippy::too_many_arguments)]
+fn gen_state_impls(
+    schema: &Schema,
+    layout: &TocLayout,
+    enc_name: &syn::Ident,
+    frame_name: &syn::Ident,
+    state_markers: &[syn::Ident],
+    header_len_tokens: &TokenStream,
+    header_write: &TokenStream,
+    toc_count_expr: &TokenStream,
+    resp_extra_pass: &TokenStream,
+) -> Vec<TokenStream> {
+    let n_fields = schema.fields.len();
+    let mut state_impls = Vec::new();
+
+    for si in 0..=n_fields {
+        let current_state = &state_markers[si];
+        let mut methods = Vec::new();
+
+        for j in si..n_fields {
+            let can_reach = (si..j).all(|k| schema.fields[k].optional);
+            if !can_reach {
+                break;
+            }
+
+            let f = &schema.fields[j];
+            let target_state = &state_markers[j + 1];
+            let field_name = &f.name;
+            let skip_nones = emit_none_range_enc(si, j, schema, layout);
+
+            if f.include_group.is_some() {
+                methods.push(gen_include_field_method(
+                    j,
+                    schema,
+                    layout,
+                    enc_name,
+                    target_state,
+                    header_len_tokens,
+                    toc_count_expr,
+                    resp_extra_pass,
+                    &skip_nones,
+                ));
+                continue;
+            }
+
+            let param_type = field_param_type(f);
+            let val_bind = field_val_bind(f);
+            let write_code = gen_field_write(j, schema, layout);
+
+            if f.optional {
+                methods.push(gen_optional_field_method(
+                    j,
+                    f,
+                    schema,
+                    layout,
+                    enc_name,
+                    target_state,
+                    header_len_tokens,
+                    toc_count_expr,
+                    resp_extra_pass,
+                    &skip_nones,
+                    &param_type,
+                    &val_bind,
+                    &write_code,
+                ));
+            } else {
+                methods.push(quote! {
+                    pub fn #field_name(mut self, v: #param_type) -> Result<#enc_name<'a, #target_state>, tsra_fw_hsm_pal_traits::HsmError> {
+                        const HEADER_LEN: usize = #header_len_tokens;
+                        const TOC_COUNT: usize = #toc_count_expr;
+                        const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
+                        #skip_nones
+                        #val_bind
+                        #write_code
+                        Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
+                    }
+                });
+
+                // For a `#[tbor(mutable)]` buffer / sealed_key field, also
+                // emit a `<field>_reserve(len)` setter that reserves the
+                // slot without copying — the caller fills it in place later
+                // via `decode_mut` (zero-copy "reserve + fill").
+                if f.mutable {
+                    let reserve_name = format_ident!("{}_reserve", field_name);
+                    let reserve_code = gen_field_reserve(j, schema, layout);
+                    methods.push(quote! {
+                        /// Reserve this field's `len` data bytes without
+                        /// copying; fill the region in place afterwards via
+                        /// [`decode_mut`].  Advances the encoder to the next
+                        /// field exactly like the value setter.
+                        pub fn #reserve_name(mut self, len: usize) -> Result<#enc_name<'a, #target_state>, tsra_fw_hsm_pal_traits::HsmError> {
+                            const HEADER_LEN: usize = #header_len_tokens;
+                            const TOC_COUNT: usize = #toc_count_expr;
+                            const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
+                            #skip_nones
+                            #reserve_code
+                            Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
+                        }
+                    });
+                }
+            }
+        }
+
+        // finish() when all remaining fields are optional.
+        let all_remaining_optional = (si..n_fields).all(|k| schema.fields[k].optional);
+        if all_remaining_optional {
+            let finish_nones = emit_none_range_enc(si, n_fields, schema, layout);
+            methods.push(quote! {
+                /// Finalize the message: write header, emit None for
+                /// remaining optional fields, return the frame.
+                pub fn finish(mut self) -> #frame_name<'a> {
+                    const HEADER_LEN: usize = #header_len_tokens;
+                    const TOC_COUNT: usize = #toc_count_expr;
+                    const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
+                    #finish_nones
+                    let total = DATA_START + self.data_offset;
+                    #header_write
+                    #frame_name { buf: &self.buf[..total] }
+                }
+            });
+        }
+
+        state_impls.push(quote! {
+            impl<'a> #enc_name<'a, #current_state> {
+                #(#methods)*
+            }
+        });
+    }
+
+    state_impls
+}
+
+/// Generate a method for an include-group field (closure-based delegation).
+#[allow(clippy::too_many_arguments)]
+fn gen_include_field_method(
+    j: usize,
+    schema: &Schema,
+    layout: &TocLayout,
+    enc_name: &syn::Ident,
+    target_state: &syn::Ident,
+    header_len_tokens: &TokenStream,
+    toc_count_expr: &TokenStream,
+    resp_extra_pass: &TokenStream,
+    skip_nones: &TokenStream,
+) -> TokenStream {
+    let f = &schema.fields[j];
+    let field_name = &f.name;
+    let group_name = f.include_group.as_ref().unwrap();
+    let group_enc_name = format_ident!("{}Enc", group_name);
+    let group_s0 = format_ident!("{}S0", group_name);
+    let group_done = format_ident!("{}Done", group_name);
+
+    let local_toc_idx = layout.field_toc_indices[j];
+    let preceding: Vec<_> = schema.fields[..j]
+        .iter()
+        .filter_map(|pf| {
+            pf.include_group
+                .as_ref()
+                .map(|pg| quote! { + #pg::TOC_COUNT })
+        })
+        .collect();
+    let toc_offset_expr = quote! { #local_toc_idx #(#preceding)* };
+
+    if f.optional {
+        quote! {
+            pub fn #field_name<F>(mut self, f: Option<F>) -> Result<#enc_name<'a, #target_state>, tsra_fw_hsm_pal_traits::HsmError>
+            where F: FnOnce(#group_enc_name<'a, #group_s0>) -> Result<#group_enc_name<'a, #group_done>, tsra_fw_hsm_pal_traits::HsmError>
+            {
+                const HEADER_LEN: usize = #header_len_tokens;
+                const TOC_COUNT: usize = #toc_count_expr;
+                let toc_offset: usize = #toc_offset_expr;
+                #skip_nones
+                match f {
+                    Some(f) => {
+                        let inner = #group_enc_name::__new(self.buf, self.data_offset, HEADER_LEN, toc_offset, TOC_COUNT);
+                        let done = f(inner)?;
+                        let (buf, data_offset) = done.__finish();
+                        self.buf = buf;
+                        self.data_offset = data_offset;
+                    }
+                    None => {
+                        for i in 0..#group_name::TOC_COUNT {
+                            tsra_fw_ddi_tbor::toc::write_toc_word(
+                                self.buf, HEADER_LEN, toc_offset + i,
+                                tsra_fw_ddi_tbor::toc::build_toc_none(),
+                            );
+                        }
+                    }
+                }
+                Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
+            }
+        }
+    } else {
+        quote! {
+            pub fn #field_name<F>(mut self, f: F) -> Result<#enc_name<'a, #target_state>, tsra_fw_hsm_pal_traits::HsmError>
+            where F: FnOnce(#group_enc_name<'a, #group_s0>) -> Result<#group_enc_name<'a, #group_done>, tsra_fw_hsm_pal_traits::HsmError>
+            {
+                const HEADER_LEN: usize = #header_len_tokens;
+                const TOC_COUNT: usize = #toc_count_expr;
+                let toc_offset: usize = #toc_offset_expr;
+                #skip_nones
+                let inner = #group_enc_name::__new(self.buf, self.data_offset, HEADER_LEN, toc_offset, TOC_COUNT);
+                let done = f(inner)?;
+                let (buf, data_offset) = done.__finish();
+                self.buf = buf;
+                self.data_offset = data_offset;
+                Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
+            }
+        }
+    }
+}
+
+/// Generate the method body for an optional regular field.
+#[allow(clippy::too_many_arguments)]
+fn gen_optional_field_method(
+    j: usize,
+    f: &SchemaField,
+    schema: &Schema,
+    layout: &TocLayout,
+    enc_name: &syn::Ident,
+    target_state: &syn::Ident,
+    header_len_tokens: &TokenStream,
+    toc_count_expr: &TokenStream,
+    resp_extra_pass: &TokenStream,
+    skip_nones: &TokenStream,
+    param_type: &TokenStream,
+    val_bind: &TokenStream,
+    write_code: &TokenStream,
+) -> TokenStream {
+    let field_name = &f.name;
+    let field_toc_idx = effective_toc_idx(j, layout, &schema.fields);
+    let has_padding = f.has_padding();
+    let pad_toc_idx_val = if has_padding {
+        let local_pad = layout
+            .padding_positions
+            .iter()
+            .find(|&&(_, fi)| fi == j)
+            .map(|&(ti, _)| ti)
+            .unwrap();
+        let ga: Vec<_> = schema.fields[..j]
+            .iter()
+            .filter_map(|pf| {
+                pf.include_group
+                    .as_ref()
+                    .map(|pg| quote! { + #pg::TOC_COUNT })
+            })
+            .collect();
+        quote! { (#local_pad #(#ga)*) }
+    } else {
+        quote! { 0 }
+    };
+
+    let write_none = if has_padding {
+        quote! {
+            let pad_word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(9, 0, self.data_offset);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #pad_toc_idx_val, pad_word);
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, tsra_fw_ddi_tbor::toc::build_toc_none());
+        }
+    } else {
+        quote! {
+            tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, tsra_fw_ddi_tbor::toc::build_toc_none());
+        }
+    };
+
+    quote! {
+        pub fn #field_name(mut self, v: Option<#param_type>) -> Result<#enc_name<'a, #target_state>, tsra_fw_hsm_pal_traits::HsmError> {
+            const HEADER_LEN: usize = #header_len_tokens;
+            const TOC_COUNT: usize = #toc_count_expr;
+            const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
+            #skip_nones
+            match v {
+                Some(v) => {
+                    #val_bind
+                    #write_code
+                }
+                None => {
+                    #write_none
+                }
+            }
+            Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
+        }
+    }
+}
+
+/// Return the Rust parameter type token stream for a schema field.
+fn field_param_type(f: &SchemaField) -> TokenStream {
+    if let Some(ty) = &f.scalar_newtype {
+        return quote! { #ty };
+    }
+    if let Some(ty) = &f.le_scalar {
+        return quote! { #ty };
+    }
+    match f.wire_type {
+        WireType::Uint8 => quote! { u8 },
+        WireType::Uint16 => quote! { u16 },
+        WireType::SessionId => quote! { tsra_fw_ddi_tbor_api::SessionId },
+        WireType::KeyId => quote! { tsra_fw_ddi_tbor_api::KeyId },
+        WireType::Uint32 => quote! { u32 },
+        WireType::Uint64 => quote! { u64 },
+        WireType::Buffer | WireType::SealedKey => {
+            if let Some(ty) = &f.single_pod {
+                quote! { &#ty }
+            } else if let Some(n) = f.fixed_len {
+                quote! { &[u8; #n] }
+            } else if let Some(elem) = &f.elem_type {
+                quote! { &[#elem] }
+            } else {
+                quote! { &[u8] }
+            }
+        }
+    }
+}
+
+/// Return the value-binding code that unwraps newtypes or coerces arrays.
+fn field_val_bind(f: &SchemaField) -> TokenStream {
+    // Typed inline newtype (`#[tbor(U8)] f: T`): unwrap to the raw
+    // integer so the shared inline-write path operates on the primitive.
+    if f.scalar_newtype.is_some() {
+        return quote! { let v = v.0; };
+    }
+    // `tbor_int` little-endian wrapper: `U16`/`U32`/`U64` bridge to the
+    // primitive via `.get()`; the `U8` alias already *is* `u8`.
+    if f.le_scalar.is_some() {
+        if f.le_scalar_is_byte {
+            return quote! {};
+        }
+        return quote! { let v = v.get(); };
+    }
+    match f.wire_type {
+        WireType::SessionId => quote! { let v = v.0; },
+        WireType::KeyId => quote! { let v = v.0; },
+        // Single typed-POD reference (`&T`): serialize to its raw bytes.
+        WireType::Buffer if f.single_pod.is_some() => {
+            quote! { let v: &[u8] = ::zerocopy::IntoBytes::as_bytes(v); }
+        }
+        WireType::Buffer | WireType::SealedKey if f.fixed_len.is_some() => {
+            quote! { let v: &[u8] = v.as_slice(); }
+        }
+        // Typed-slice buffer: serialize `&[T]` to its raw bytes so the
+        // shared write path (`len`, `copy_from_slice`) operates on bytes.
+        WireType::Buffer if f.elem_type.is_some() => {
+            quote! { let v: &[u8] = ::zerocopy::IntoBytes::as_bytes(v); }
+        }
+        _ => quote! {},
+    }
+}
+
+// ── Helper: Frame type ────────────────────────────────────────────────
+
+/// Generate the `FooFrame<'a>` struct with `as_bytes()`, `len()`, and
+/// per-field read accessors.
+fn gen_frame_type(
+    schema: &Schema,
+    layout: &TocLayout,
+    frame_name: &syn::Ident,
+    vis: &syn::Visibility,
+) -> TokenStream {
+    let frame_accessors: Vec<_> = schema
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| field.include_group.is_none())
+        .map(|(i, field)| {
+            let toc_idx = effective_toc_idx(i, layout, &schema.fields);
+            gen_frame_accessor(field, toc_idx, schema)
+        })
+        .collect();
+
+    quote! {
+        /// The encoded message. Provides `as_bytes()` for sending and
+        /// typed read accessors for verification.
+        #[derive(Debug)]
+        #vis struct #frame_name<'a> {
+            buf: &'a [u8],
+        }
+
+        impl<'a> #frame_name<'a> {
+            /// The complete wire message.
+            #[inline]
+            pub fn as_bytes(&self) -> &'a [u8] { self.buf }
+
+            /// Total message length.
+            #[inline]
+            pub fn len(&self) -> usize { self.buf.len() }
+
+            /// Returns `true` if the message is empty.
+            #[inline]
+            pub fn is_empty(&self) -> bool { self.buf.is_empty() }
+
+            #(#frame_accessors)*
+        }
+    }
+}
+
+/// Generate a read accessor on the Frame type for a single field.
+fn gen_frame_accessor(field: &SchemaField, toc_index: TokenStream, schema: &Schema) -> TokenStream {
+    let name = &field.name;
+
+    let header_len = match schema.kind {
+        MessageKind::Request { .. } => quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
+        MessageKind::Response => quote! { tsra_fw_ddi_tbor::RESP_HEADER_LEN },
+        MessageKind::Fields => unreachable!(),
+    };
+
+    let body = match field.wire_type {
+        WireType::Uint8 => quote! {
+            tsra_fw_ddi_tbor::toc::read_toc_inline_u8(self.buf, #header_len, #toc_index)
+        },
+        WireType::Uint16 => quote! {
+            tsra_fw_ddi_tbor::toc::read_toc_inline_u16(self.buf, #header_len, #toc_index)
+        },
+        WireType::SessionId => quote! {
+            tsra_fw_ddi_tbor_api::SessionId(tsra_fw_ddi_tbor::toc::read_toc_inline_u16(self.buf, #header_len, #toc_index))
+        },
+        WireType::KeyId => quote! {
+            tsra_fw_ddi_tbor_api::KeyId(tsra_fw_ddi_tbor::toc::read_toc_inline_u16(self.buf, #header_len, #toc_index))
+        },
+        WireType::Uint32 | WireType::Uint64 | WireType::Buffer | WireType::SealedKey => {
+            let ds = quote! {
+                {
+                    let toc_count_idx: usize = if #header_len == 4usize { 2 } else { 3 };
+                    let tc = (self.buf[toc_count_idx] & 0x1F) as usize + 1;
+                    #header_len + tc * 4
+                }
+            };
+            match field.wire_type {
+                WireType::Uint32 => {
+                    quote! { tsra_fw_ddi_tbor::toc::read_toc_uint32(self.buf, #header_len, #toc_index, #ds) }
+                }
+                WireType::Uint64 => {
+                    quote! { tsra_fw_ddi_tbor::toc::read_toc_uint64(self.buf, #header_len, #toc_index, #ds) }
+                }
+                _ => {
+                    // Frame.buf is `&[u8]` (the encoder's raw backing
+                    // buffer is not DMA-branded), so inline the slice
+                    // extraction rather than calling the codec's
+                    // `&DmaBuf`-typed `read_toc_buffer`.
+                    quote! {
+                        {
+                            let word = tsra_fw_ddi_tbor::toc::read_toc_word(self.buf, #header_len, #toc_index);
+                            let length = tsra_fw_ddi_tbor::toc::raw_toc_length(word);
+                            let offset = tsra_fw_ddi_tbor::toc::raw_toc_offset(word);
+                            let ds = #ds;
+                            &self.buf[ds + offset..ds + offset + length]
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let ret_type = match field.wire_type {
+        WireType::Uint8 => quote! { u8 },
+        WireType::Uint16 => quote! { u16 },
+        WireType::Uint32 => quote! { u32 },
+        WireType::Uint64 => quote! { u64 },
+        WireType::SessionId => quote! { tsra_fw_ddi_tbor_api::SessionId },
+        WireType::KeyId => quote! { tsra_fw_ddi_tbor_api::KeyId },
+        WireType::Buffer | WireType::SealedKey => {
+            if let Some(n) = field.fixed_len {
+                quote! { &'a [u8; #n] }
+            } else {
+                quote! { &'a [u8] }
+            }
+        }
+    };
+
+    let body = if let Some(n) = field.fixed_len {
+        let base_body = body;
+        quote! {
+            {
+                let slice = #base_body;
+                match <&[u8; #n]>::try_from(slice) {
+                    Ok(arr) => arr,
+                    Err(_) => {
+                        static ZERO: [u8; #n] = [0u8; #n];
+                        &ZERO
+                    }
+                }
+            }
+        }
+    } else {
+        body
+    };
+
+    // Inline scalar carried as a typed newtype: wrap raw int in `T(..)`.
+    let (body, ret_type) = if let Some(ty) = &field.scalar_newtype {
+        (quote! { #ty(#body) }, quote! { #ty })
+    } else if let Some(ty) = &field.le_scalar {
+        if field.le_scalar_is_byte {
+            (body, quote! { #ty })
+        } else {
+            (quote! { #ty::new(#body) }, quote! { #ty })
+        }
+    } else {
+        (body, ret_type)
+    };
+
+    if field.optional {
+        let none_type_id = quote! { tsra_fw_ddi_tbor::TocType::None as u8 };
+        quote! {
+            #[inline]
+            pub fn #name(&self) -> Option<#ret_type> {
+                if tsra_fw_ddi_tbor::toc::raw_toc_entry_type(
+                    tsra_fw_ddi_tbor::toc::read_toc_word(self.buf, #header_len, #toc_index)
+                ) == #none_type_id {
+                    None
+                } else {
+                    Some(#body)
+                }
+            }
+        }
+    } else {
+        quote! {
+            #[inline]
+            pub fn #name(&self) -> #ret_type {
+                #body
+            }
+        }
+    }
+}

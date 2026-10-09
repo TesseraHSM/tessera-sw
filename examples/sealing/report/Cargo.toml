@@ -1,0 +1,20 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_sealing_report"
+publish = false
+version = "0.1.0"
+
+[dependencies]
+anyhow.workspace = true
+bitfield-struct.workspace = true
+der = { features = ["std"], workspace = true }
+hex.workspace = true
+minicbor = { features = ["std"], workspace = true }
+tsra_crypto.workspace = true
+x509.workspace = true
+
+[lints]
+workspace = true

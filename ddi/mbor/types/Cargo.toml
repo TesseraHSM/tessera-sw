@@ -1,0 +1,72 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_ddi_mbor_types"
+version = "0.1.0"
+
+[dependencies]
+open-enum.workspace = true
+pastey.workspace = true
+tsra_ddi_mbor_codec.workspace = true
+tsra_ddi_mbor_derive.workspace = true
+zerocopy = { features = ["derive"], workspace = true }
+
+# dependencies for fuzzing
+arbitrary = { optional = true, workspace = true }
+
+# dependencies for pre_encode and/or post_decode
+pkcs1 = { optional = true, workspace = true }
+sec1 = { features = ["alloc"], optional = true, workspace = true }
+spki = { features = ["alloc"], optional = true, workspace = true }
+tracing = { optional = true, workspace = true }
+
+[dev-dependencies]
+bitflags.workspace = true
+chrono.workspace = true
+minicbor.workspace = true
+parking_lot.workspace = true
+test_with_tracing.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tsra_cred_encrypt.workspace = true
+tsra_crypto.workspace = true
+tsra_ddi.workspace = true
+tsra_ddi_mbor_codec.workspace = true
+tsra_ddi_mbor_test_helpers.workspace = true
+tsra_ddi_mock.workspace = true
+tsra_ddi_nix.workspace = true
+tsra_ddi_win.workspace = true
+x509.workspace = true
+
+[lib]
+doctest = false
+
+[[test]]
+name = "tsra_ddi_tests"
+path = "tests/tsra_ddi_tests.rs"
+
+[features]
+array = ["tsra_ddi_mbor_codec/array"]
+featuregroup-crypto = ["pkcs1", "sec1", "spki"]
+fuzzing = ["arbitrary", "tsra_ddi_mbor_codec/fuzzing"]
+post_decode = [
+  "featuregroup-crypto",
+  "tracing",
+  "tsra_ddi_mbor_codec/post_decode",
+]
+pre_encode = [
+  "featuregroup-crypto",
+  "tracing",
+  "tsra_ddi_mbor_codec/pre_encode",
+]
+# Forward backend selection to the tsra_ddi facade so the integration
+# test binary picks up the right mock/table-size combination.
+emu = ["tsra_ddi/emu"]
+mock = ["tsra_ddi/mock"]
+table-4 = ["tsra_ddi/table-4"]
+table-64 = ["tsra_ddi/table-64"]
+
+[lints]
+workspace = true

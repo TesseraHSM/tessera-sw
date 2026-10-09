@@ -1,0 +1,22 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_fw_core_crypto_key_masking"
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+test = false
+
+[dependencies]
+tsra_fw_core_crypto_aead_envelope = { workspace = true }
+tsra_fw_ddi_mbor = { workspace = true }
+tsra_fw_ddi_mbor_types = { workspace = true }
+tsra_fw_hsm_pal_traits = { workspace = true }
+zerocopy = { features = ["derive"], workspace = true }
+
+[lints]
+workspace = true

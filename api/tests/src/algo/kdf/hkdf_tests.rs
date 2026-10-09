@@ -1,0 +1,1375 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use tsra_api::*;
+use tsra_api_tests_macro::*;
+use tsra_crypto as crypto;
+use tsra_crypto::DeriveOp;
+use tsra_crypto::ExportableKey;
+use tsra_crypto::ImportableKey;
+use tsra_crypto::PrivateKey;
+use tsra_crypto::Rng;
+
+use crate::algo::ecc::*;
+
+// ================================
+// Helper functions
+// ================================
+
+/// Generates a random IV of the given size
+pub fn test_iv(size: usize) -> Vec<u8> {
+    Rng::rand_vec(size).expect("RNG failure generating IV")
+}
+
+/// Returns the set of HKDF hash algorithms supported for testing
+fn supported_hkdf_hash_algos() -> &'static [HsmHashAlgo] {
+    &[
+        HsmHashAlgo::Sha1,
+        HsmHashAlgo::Sha256,
+        HsmHashAlgo::Sha384,
+        HsmHashAlgo::Sha512,
+    ]
+}
+
+/// Generates two ECDH keypairs and derives matching shared secrets for both parties
+fn derive_ecdh_shared_secrets(
+    session: &HsmSession,
+    curve: HsmEccCurve,
+) -> (HsmGenericSecretKey, HsmGenericSecretKey) {
+    let (priv_key_a, pub_key_a) = generate_ecc_keypair_with_derive(session.clone(), curve, true)
+        .expect("Failed to generate key pair for party A");
+
+    let (priv_key_b, pub_key_b) = generate_ecc_keypair_with_derive(session.clone(), curve, true)
+        .expect("Failed to generate key pair for party B");
+
+    let shared_secret_a = ecdh_derive_shared_secret(session, &priv_key_a, &pub_key_b)
+        .expect("Failed to derive shared secret for party A");
+    let shared_secret_b = ecdh_derive_shared_secret(session, &priv_key_b, &pub_key_a)
+        .expect("Failed to derive shared secret for party B");
+
+    (shared_secret_a, shared_secret_b)
+}
+
+/// Derives an AES key from a shared secret using HKDF with the given parameters
+fn derive_aes_key_from_shared_secret(
+    session: &HsmSession,
+    hkdf_algo: &mut HsmHkdfAlgo,
+    shared_secret: &HsmGenericSecretKey,
+    bits: u32,
+) -> HsmAesKey {
+    let aes_key_props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(bits)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .build()
+        .expect("Failed to build AES key props");
+
+    let derived_key = HsmKeyManager::derive_key(session, hkdf_algo, shared_secret, aes_key_props)
+        .expect("Failed to derive AES key");
+
+    assert_eq!(derived_key.kind(), HsmKeyKind::Aes);
+    assert_eq!(derived_key.bits(), bits);
+    derived_key
+        .try_into()
+        .expect("Derived key was not an AES key")
+}
+
+/// Verifies AES-CBC encryption and decryption roundtrip correctness
+fn assert_aes_cbc_roundtrip(enc_key: &HsmAesKey, dec_key: &HsmAesKey, plaintext: &[u8]) {
+    let iv = test_iv(16);
+
+    let mut enc =
+        HsmAesCbcAlgo::with_padding(iv.clone()).expect("AES-CBC algo creation failed (enc)");
+
+    let ciphertext =
+        HsmEncrypter::encrypt_vec(&mut enc, enc_key, plaintext).expect("AES-CBC encryption failed");
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv).expect("AES-CBC algo creation failed (dec)");
+
+    let decrypted = HsmDecrypter::decrypt_vec(&mut dec, dec_key, &ciphertext)
+        .expect("AES-CBC decryption failed");
+
+    assert_eq!(decrypted, plaintext, "AES-CBC roundtrip mismatch");
+}
+
+/// Runs full HKDF matrix tests across hash algorithms and AES key sizes for a curve
+fn run_hkdf_matrix_for_curve(session: &HsmSession, curve: HsmEccCurve) {
+    let (shared_secret_a, shared_secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    for &hash_algo in supported_hkdf_hash_algos() {
+        for &bits in &[128u32, 192u32, 256u32] {
+            let mut hkdf_algo =
+                HsmHkdfAlgo::new(hash_algo, None, None).expect("Failed HKDF algo creation");
+
+            let derived_aes_key_a =
+                derive_aes_key_from_shared_secret(session, &mut hkdf_algo, &shared_secret_a, bits);
+            let derived_aes_key_b =
+                derive_aes_key_from_shared_secret(session, &mut hkdf_algo, &shared_secret_b, bits);
+
+            let plaintext =
+                format!("HKDF curve={curve:?} hash={hash_algo:?} aes_bits={bits}").into_bytes();
+            assert_aes_cbc_roundtrip(&derived_aes_key_a, &derived_aes_key_b, &plaintext);
+        }
+    }
+
+    // Salt + info should also work.
+    let salt = b"hkdf-salt";
+    let info = b"hkdf-info";
+    let mut hkdf_algo = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(salt), Some(info))
+        .expect("Failed HKDF algo creation");
+
+    let derived_aes_key_a =
+        derive_aes_key_from_shared_secret(session, &mut hkdf_algo, &shared_secret_a, 256);
+    let derived_aes_key_b =
+        derive_aes_key_from_shared_secret(session, &mut hkdf_algo, &shared_secret_b, 256);
+    assert_aes_cbc_roundtrip(
+        &derived_aes_key_a,
+        &derived_aes_key_b,
+        b"HKDF with salt+info derived key roundtrip",
+    );
+
+    // If info differs between parties, the derived keys should not match.
+    let info_a = b"hkdf-info-a";
+    let info_b = b"hkdf-info-b";
+    let mut hkdf_algo_a = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(salt), Some(info_a))
+        .expect("Failed HKDF algo creation");
+    let mut hkdf_algo_b = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(salt), Some(info_b))
+        .expect("Failed HKDF algo creation");
+
+    let derived_aes_key_a =
+        derive_aes_key_from_shared_secret(session, &mut hkdf_algo_a, &shared_secret_a, 256);
+    let derived_aes_key_b =
+        derive_aes_key_from_shared_secret(session, &mut hkdf_algo_b, &shared_secret_b, 256);
+
+    let iv = [0u8; 16];
+    let mut aes_algo_enc =
+        HsmAesCbcAlgo::with_padding(iv.to_vec()).expect("AES CBC algo creation failed");
+    let ciphertext = HsmEncrypter::encrypt_vec(
+        &mut aes_algo_enc,
+        &derived_aes_key_a,
+        b"HKDF salt/info mismatch should fail",
+    )
+    .expect("Encryption failed");
+
+    let mut aes_algo_dec =
+        HsmAesCbcAlgo::with_padding(iv.to_vec()).expect("AES CBC algo creation failed");
+    if let Ok(plaintext) =
+        HsmDecrypter::decrypt_vec(&mut aes_algo_dec, &derived_aes_key_b, &ciphertext)
+    {
+        assert_ne!(plaintext, b"HKDF salt/info mismatch should fail");
+    }
+}
+
+/// Verifies empty salt and info are equivalent to omitted values for every hash
+fn run_hkdf_empty_salt_info_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    for &hash_algo in supported_hkdf_hash_algos() {
+        let mut empty = HsmHkdfAlgo::new(hash_algo, Some(b""), Some(b"")).unwrap();
+        let mut omitted = HsmHkdfAlgo::new(hash_algo, None, None).unwrap();
+
+        let key_a = derive_aes_key_from_shared_secret(session, &mut empty, &secret_a, 256);
+        let key_b = derive_aes_key_from_shared_secret(session, &mut omitted, &secret_b, 256);
+
+        let plaintext = format!("HKDF hash={hash_algo:?} empty and omitted salt/info");
+        assert_aes_cbc_roundtrip(&key_a, &key_b, plaintext.as_bytes());
+    }
+}
+
+/// Verifies derived keys work with large plaintext inputs
+fn run_hkdf_large_plaintext_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, 256);
+
+    let large = vec![0x55; 32 * 1024];
+
+    assert_aes_cbc_roundtrip(&key_a, &key_b, &large);
+}
+
+/// Verifies secrets from different curves cannot interoperate
+fn run_hkdf_cross_curve_negative(session: &HsmSession) {
+    let (secret_p256, _) = derive_ecdh_shared_secrets(session, HsmEccCurve::P256);
+    let (secret_p384, _) = derive_ecdh_shared_secrets(session, HsmEccCurve::P384);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_p256, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_p384, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let ciphertext = HsmEncrypter::encrypt_vec(&mut enc, &key_a, b"cross curve").unwrap();
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    match HsmDecrypter::decrypt_vec(&mut dec, &key_b, &ciphertext) {
+        Ok(pt) => assert_ne!(pt, b"cross curve"),
+
+        Err(e) => {
+            assert!(
+                matches!(
+                    e,
+                    HsmError::InvalidKey | HsmError::InternalError | HsmError::DdiCmdFailure
+                ),
+                "unexpected error: {:?}",
+                e
+            );
+        }
+    }
+}
+
+/// Verifies each HKDF hash algorithm works independently
+fn run_hkdf_hash_algo_test(session: &HsmSession, curve: HsmEccCurve, hash: HsmHashAlgo) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(hash, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, 256);
+
+    let msg = format!("hash={hash:?}").into_bytes();
+    assert_aes_cbc_roundtrip(&key_a, &key_b, &msg);
+}
+
+/// Verifies encryption/decryption of empty plaintext
+fn run_hkdf_empty_plaintext_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, 256);
+
+    assert_aes_cbc_roundtrip(&key_a, &key_b, b"");
+}
+
+/// Verifies encryption of 1-byte plaintext (padding edge)
+fn run_hkdf_single_byte_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, 256);
+
+    assert_aes_cbc_roundtrip(&key_a, &key_b, b"A");
+}
+
+/// Verifies deriving multiple key sizes from same HKDF instance
+fn run_hkdf_multi_key_size_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    for bits in [128u32, 192u32, 256u32] {
+        let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, bits);
+        let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, bits);
+
+        assert_aes_cbc_roundtrip(&key_a, &key_b, b"multi size");
+    }
+}
+
+/// Verifies HKDF handles moderately large salt and info inputs
+fn run_hkdf_long_salt_info_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let salt = vec![0x11; 128];
+    let info = vec![0x22; 128];
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(&salt), Some(&info)).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, 256);
+
+    assert_aes_cbc_roundtrip(&key_a, &key_b, b"long salt info");
+}
+
+/// Verifies ECDH shared secret derivation is stable across repeated derivations
+fn run_ecdh_shared_secret_stability(session: &HsmSession, curve: HsmEccCurve) {
+    let (priv_a, _pub_a) = generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+    let (_priv_b, pub_b) = generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+
+    // Derive shared secret twice using same inputs
+    let s1 = ecdh_derive_shared_secret(session, &priv_a, &pub_b).unwrap();
+    let s2 = ecdh_derive_shared_secret(session, &priv_a, &pub_b).unwrap();
+
+    // Derive AES keys from both secrets
+    let mut hkdf1 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+    let mut hkdf2 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key1 = derive_aes_key_from_shared_secret(session, &mut hkdf1, &s1, 256);
+    let key2 = derive_aes_key_from_shared_secret(session, &mut hkdf2, &s2, 256);
+
+    // Validate equivalence via encryption/decryption
+    assert_aes_cbc_roundtrip(&key1, &key2, b"ecdh stability");
+}
+
+/// Verifies different HKDF hash algorithms produce non-interoperable keys
+fn run_hkdf_cross_hash_mismatch_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf_sha256 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+    let mut hkdf_sha384 = HsmHkdfAlgo::new(HsmHashAlgo::Sha384, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf_sha256, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf_sha384, &secret_b, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let ct = HsmEncrypter::encrypt_vec(&mut enc, &key_a, b"hash mismatch").unwrap();
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    if let Ok(pt) = HsmDecrypter::decrypt_vec(&mut dec, &key_b, &ct) {
+        assert_ne!(pt, b"hash mismatch");
+    }
+}
+
+/// Verifies different salts produce different derived keys
+fn run_hkdf_salt_sensitivity_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf_a = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(b"saltA"), None).unwrap();
+    let mut hkdf_b = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(b"saltB"), None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf_a, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf_b, &secret_b, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let ct = HsmEncrypter::encrypt_vec(&mut enc, &key_a, b"salt mismatch").unwrap();
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    if let Ok(pt) = HsmDecrypter::decrypt_vec(&mut dec, &key_b, &ct) {
+        assert_ne!(pt, b"salt mismatch");
+    }
+}
+
+/// Verifies info parameter impacts key derivation
+fn run_hkdf_info_sensitivity_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf_a = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, Some(b"infoA")).unwrap();
+    let mut hkdf_b = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, Some(b"infoB")).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf_a, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf_b, &secret_b, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let ct = HsmEncrypter::encrypt_vec(&mut enc, &key_a, b"info mismatch").unwrap();
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    if let Ok(pt) = HsmDecrypter::decrypt_vec(&mut dec, &key_b, &ct) {
+        assert_ne!(pt, b"info mismatch");
+    }
+}
+
+/// Verifies same HKDF params across different curves produce non-interoperable keys
+fn run_hkdf_same_params_cross_curve_mismatch(session: &HsmSession) {
+    let (secret_p256_a, _secret_p256_b) = derive_ecdh_shared_secrets(session, HsmEccCurve::P256);
+    let (_secret_p384_a, secret_p384_b) = derive_ecdh_shared_secrets(session, HsmEccCurve::P384);
+
+    let salt = b"same-salt";
+    let info = b"same-info";
+
+    let mut hkdf_p256 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(salt), Some(info)).unwrap();
+    let mut hkdf_p384 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(salt), Some(info)).unwrap();
+
+    let key_p256 = derive_aes_key_from_shared_secret(session, &mut hkdf_p256, &secret_p256_a, 256);
+    let key_p384 = derive_aes_key_from_shared_secret(session, &mut hkdf_p384, &secret_p384_b, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let ciphertext =
+        HsmEncrypter::encrypt_vec(&mut enc, &key_p256, b"cross curve same params").unwrap();
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+
+    if let Ok(pt) = HsmDecrypter::decrypt_vec(&mut dec, &key_p384, &ciphertext) {
+        assert_ne!(pt, b"cross curve same params");
+    }
+}
+
+/// Verifies HKDF derive rejects invalid AES key size
+fn run_hkdf_invalid_aes_key_size_test(session: &HsmSession, curve: HsmEccCurve) {
+    // Generate valid shared secret input via ECDH
+    let (secret, _) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    // Build AES key props with intentionally invalid size
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .bits(4096) // invalid for AES
+        .build()
+        .unwrap();
+
+    let result = HsmKeyManager::derive_key(session, &mut hkdf, &secret, props);
+
+    match result {
+        Err(e) => {
+            assert!(
+                matches!(e, HsmError::InvalidArgument),
+                "unexpected error: {:?}",
+                e
+            );
+        }
+        Ok(_) => panic!("expected HKDF derive to fail due to invalid AES key size"),
+    }
+}
+
+/// Verifies HKDF-derived keys from unrelated shared secrets cannot interoperate
+fn run_hkdf_unrelated_secret_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, _) = derive_ecdh_shared_secrets(session, curve);
+    let (secret_b, _) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, 256);
+
+    let iv = [0u8; 16];
+
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let ct = HsmEncrypter::encrypt_vec(&mut enc, &key_a, b"unrelated secret").unwrap();
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+
+    if let Ok(pt) = HsmDecrypter::decrypt_vec(&mut dec, &key_b, &ct) {
+        assert_ne!(pt, b"unrelated secret");
+    }
+}
+
+/// Verifies HKDF operates correctly with minimal valid parameters (weakest hash + smallest AES key)
+fn run_hkdf_min_input_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha1, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 128);
+    let key_b = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_b, 128);
+
+    assert_aes_cbc_roundtrip(&key_a, &key_b, b"min input");
+}
+
+/// Verifies ECDH shared secret derivation fails when derive capability is disabled
+fn run_ecdh_missing_derive_flag_test(session: &HsmSession) {
+    let (priv_a, _) =
+        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, false).unwrap();
+
+    let (_, pub_b) =
+        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true).unwrap();
+
+    let result = ecdh_derive_shared_secret(session, &priv_a, &pub_b);
+    assert!(result.is_err());
+}
+
+/// Verifies ECDH shared secret derivation fails for mismatched elliptic curves
+fn run_ecdh_cross_curve_fail_test(session: &HsmSession) {
+    let (priv_a, _) =
+        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true).unwrap();
+
+    let (_, pub_b) =
+        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P384, true).unwrap();
+
+    let result = ecdh_derive_shared_secret(session, &priv_a, &pub_b);
+    assert!(result.is_err());
+}
+
+/// Verifies HKDF determinism using behavioral equivalence (identical ciphertext outputs)
+fn run_hkdf_strong_determinism_test(session: &HsmSession, curve: HsmEccCurve) {
+    let (secret, _) = derive_ecdh_shared_secrets(session, curve);
+
+    let mut hkdf1 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+    let mut hkdf2 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key1 = derive_aes_key_from_shared_secret(session, &mut hkdf1, &secret, 256);
+    let key2 = derive_aes_key_from_shared_secret(session, &mut hkdf2, &secret, 256);
+
+    let iv = [0u8; 16];
+
+    let mut enc1 = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let mut enc2 = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+
+    let msg = b"determinism-check";
+
+    let ct1 = HsmEncrypter::encrypt_vec(&mut enc1, &key1, msg).unwrap();
+    let ct2 = HsmEncrypter::encrypt_vec(&mut enc2, &key2, msg).unwrap();
+
+    assert_eq!(ct1, ct2);
+}
+
+/// Verifies AES-CBC decryption fails on deterministically corrupted padding
+fn run_aes_cbc_padding_tamper_test(session: &HsmSession) {
+    let (secret_a, _) = derive_ecdh_shared_secrets(session, HsmEccCurve::P256);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+
+    let mut ct =
+        HsmEncrypter::encrypt_vec(&mut enc, &key, b"CBC padding with HKDF Derived Key").unwrap();
+
+    // Flip C_prev[15] (= ct[len-17]) — CBC: P_last[15] = AES_dec(C_last)[15] XOR C_prev[15],
+    // so this deterministically inverts the PKCS#7 pad-length byte.
+    let len = ct.len();
+    assert!(
+        len >= 32,
+        "ciphertext too short to tamper with padding without risking non-determinism"
+    );
+    ct[len - 17] ^= 0xFF;
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+
+    let result = HsmDecrypter::decrypt_vec(&mut dec, &key, &ct);
+
+    assert!(
+        result.is_err(),
+        "tampered ciphertext should fail padding validation"
+    );
+}
+
+/// Verifies AES-CBC decryption fails on deterministically tampered IV for a
+/// sub-block plaintext (single-block ciphertext, where no `C_prev` exists).
+fn run_aes_cbc_iv_tamper_single_block_test(session: &HsmSession) {
+    let (secret_a, _) = derive_ecdh_shared_secrets(session, HsmEccCurve::P256);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key = derive_aes_key_from_shared_secret(session, &mut hkdf, &secret_a, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+
+    // Plaintext < 16 bytes → single 16-byte ciphertext block after PKCS#7 padding.
+    let plaintext: &[u8] = b"short msg";
+    assert!(
+        plaintext.len() < 16,
+        "test invariant: plaintext must be sub-block"
+    );
+
+    let ct = HsmEncrypter::encrypt_vec(&mut enc, &key, plaintext).unwrap();
+    assert_eq!(
+        ct.len(),
+        16,
+        "test invariant: sub-block plaintext must produce a single ciphertext block"
+    );
+
+    // Make sure the original ciphertext decrypts correctly before tampering
+    let mut dec_orig = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let pt_orig = HsmDecrypter::decrypt_vec(&mut dec_orig, &key, &ct)
+        .expect("untampered ciphertext must decrypt");
+    assert_eq!(pt_orig, plaintext);
+
+    // Tamper: flip IV[15]. Deterministically inverts the pad-length byte.
+    // CBC: `P_0 = AES_dec(C_0) XOR IV`. Flipping `IV[15]` deterministically
+    // inverts `P_0[15]` — the PKCS#7 pad-length byte — turning e.g. `0x0B`
+    // into `0xF4` (> 0x10), guaranteeing PKCS#7 unpadder rejection.
+    let mut tampered_iv = iv;
+    tampered_iv[15] ^= 0xFF;
+
+    let mut dec_tampered = HsmAesCbcAlgo::with_padding(tampered_iv.to_vec()).unwrap();
+    let result = HsmDecrypter::decrypt_vec(&mut dec_tampered, &key, &ct);
+
+    assert!(
+        result.is_err(),
+        "decrypting with tampered IV[15] should fail padding validation, got: {result:?}"
+    );
+}
+
+// ============================================================
+// test case section
+// ============================================================
+
+/// Verifies HKDF matrix coverage for P256 across hashes, key sizes, and salt/info cases
+#[session_test]
+fn test_hkdf_matrix_p256(session: HsmSession) {
+    run_hkdf_matrix_for_curve(&session, HsmEccCurve::P256);
+}
+
+/// Verifies HKDF matrix coverage for P384 across hashes, key sizes, and salt/info cases
+#[session_test]
+fn test_hkdf_matrix_p384(session: HsmSession) {
+    run_hkdf_matrix_for_curve(&session, HsmEccCurve::P384);
+}
+
+/// Verifies HKDF matrix coverage for P521 across hashes, key sizes, and salt/info cases
+#[session_test]
+fn test_hkdf_matrix_p521(session: HsmSession) {
+    run_hkdf_matrix_for_curve(&session, HsmEccCurve::P521);
+}
+
+/// Verifies HKDF-SHA1 output against host derivation across AES sizes and salt/info cases.
+/// Firmware uses little-endian ECDH input; mock retains the host's big-endian bytes.
+#[session_test]
+fn test_hkdf_sha1_matches_host(session: HsmSession) {
+    const IV_SIZE: usize = 16;
+
+    let curve = HsmEccCurve::P256;
+    let secret_len = curve.key_size_bits().div_ceil(8);
+    let (device_private, device_public) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true)
+            .expect("Failed to generate device ECDH key pair");
+    let host_curve =
+        crypto::EccCurve::try_from(curve.key_size_bits()).expect("Unsupported host ECDH curve");
+    let host_private =
+        crypto::EccPrivateKey::from_curve(host_curve).expect("Failed to generate host ECDH key");
+    let host_public = host_private
+        .public_key()
+        .expect("Failed to get host public key");
+    let host_public_len = host_public
+        .to_bytes(None)
+        .expect("Failed to query public key size");
+    let mut host_public_der = vec![0u8; host_public_len];
+    host_public
+        .to_bytes(Some(&mut host_public_der))
+        .expect("Failed to export host public key");
+
+    let device_secret =
+        ecdh_derive_shared_secret_from_der(&session, &device_private, &host_public_der)
+            .expect("Failed to derive device ECDH secret");
+    let device_public_der = device_public
+        .pub_key_der_vec()
+        .expect("Failed to export device public key");
+    let peer_public = crypto::EccPublicKey::from_bytes(&device_public_der)
+        .expect("Failed to import device public key");
+    let host_secret = crypto::EcdhAlgo::new(&peer_public)
+        .derive(&host_private, secret_len)
+        .expect("Failed to derive host ECDH secret");
+    let mut host_secret_bytes = vec![0u8; secret_len];
+    let written = host_secret
+        .to_bytes(Some(&mut host_secret_bytes))
+        .expect("Failed to export host ECDH secret");
+    assert_eq!(
+        written, secret_len,
+        "ECDH secret length must match the curve size"
+    );
+    #[cfg(not(feature = "mock"))]
+    host_secret_bytes.reverse();
+    let host_ikm = crypto::GenericSecretKey::from_bytes(&host_secret_bytes)
+        .expect("Failed to import ECDH input for HKDF");
+
+    let salt = b"hkdf-sha1-salt".as_slice();
+    let info = b"hkdf-sha1-info".as_slice();
+    let host_hash = crypto::HashAlgo::sha1();
+    let iv = [0u8; IV_SIZE];
+    let plaintext = b"HKDF-SHA1 host reference ciphertext";
+
+    for (case, (salt, info)) in [
+        (None, None),
+        (Some(&[][..]), Some(&[][..])),
+        (Some(salt), None),
+        (None, Some(info)),
+        (Some(salt), Some(info)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for bits in [128u32, 192, 256] {
+            let key_len = usize::try_from(bits / 8).expect("AES key size must fit usize");
+            let expected =
+                crypto::HkdfAlgo::new(crypto::HkdfMode::ExtractAndExpand, &host_hash, salt, info)
+                    .derive(&host_ikm, key_len)
+                    .expect("Failed to derive host HKDF-SHA1 key");
+            let mut expected_bytes = vec![0u8; key_len];
+            let written = expected
+                .to_bytes(Some(&mut expected_bytes))
+                .expect("Failed to export host HKDF-SHA1 key");
+            assert_eq!(
+                written, key_len,
+                "Host HKDF output length must match AES key size"
+            );
+            let host_key =
+                crypto::AesKey::from_bytes(&expected_bytes).expect("Failed to import host AES key");
+
+            let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha1, salt, info)
+                .expect("Failed to create HKDF-SHA1 algorithm");
+            let device_key =
+                derive_aes_key_from_shared_secret(&session, &mut hkdf, &device_secret, bits);
+            let mut host_cipher = crypto::AesCbcAlgo::with_padding(&iv);
+            let expected_ciphertext =
+                crypto::Encrypter::encrypt_vec(&mut host_cipher, &host_key, plaintext)
+                    .expect("Failed to encrypt with host HKDF-SHA1 key");
+            let mut device_cipher = HsmAesCbcAlgo::with_padding(iv.to_vec())
+                .expect("Failed to create device AES-CBC algorithm");
+            let ciphertext = HsmEncrypter::encrypt_vec(&mut device_cipher, &device_key, plaintext)
+                .expect("Failed to encrypt with device HKDF-SHA1 key");
+
+            assert_eq!(
+                ciphertext, expected_ciphertext,
+                "HKDF-SHA1 must match host derivation (case {case}, AES-{bits})"
+            );
+        }
+    }
+}
+
+/// Verifies HKDF derivation works for every hash when only salt is provided
+#[session_test]
+fn test_hkdf_with_only_salt(session: HsmSession) {
+    let (shared_secret_a, shared_secret_b) =
+        derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let salt = b"hkdf-salt-only";
+    for &hash_algo in supported_hkdf_hash_algos() {
+        for &bits in &[128u32, 192u32, 256u32] {
+            let mut hkdf_algo =
+                HsmHkdfAlgo::new(hash_algo, Some(salt), None).expect("Failed HKDF algo creation");
+
+            let derived_aes_key_a =
+                derive_aes_key_from_shared_secret(&session, &mut hkdf_algo, &shared_secret_a, bits);
+            let derived_aes_key_b =
+                derive_aes_key_from_shared_secret(&session, &mut hkdf_algo, &shared_secret_b, bits);
+
+            let plaintext = format!("HKDF hash={hash_algo:?} salt-only AES-{bits} roundtrip");
+            assert_aes_cbc_roundtrip(&derived_aes_key_a, &derived_aes_key_b, plaintext.as_bytes());
+        }
+    }
+}
+
+/// Verifies HKDF derivation works for every hash when only info is provided
+#[session_test]
+fn test_hkdf_with_only_info(session: HsmSession) {
+    let (shared_secret_a, shared_secret_b) =
+        derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let info = b"hkdf-info-only";
+    for &hash_algo in supported_hkdf_hash_algos() {
+        for &bits in &[128u32, 192u32, 256u32] {
+            let mut hkdf_algo =
+                HsmHkdfAlgo::new(hash_algo, None, Some(info)).expect("Failed HKDF algo creation");
+
+            let derived_aes_key_a =
+                derive_aes_key_from_shared_secret(&session, &mut hkdf_algo, &shared_secret_a, bits);
+            let derived_aes_key_b =
+                derive_aes_key_from_shared_secret(&session, &mut hkdf_algo, &shared_secret_b, bits);
+
+            let plaintext = format!("HKDF hash={hash_algo:?} info-only AES-{bits} roundtrip");
+            assert_aes_cbc_roundtrip(&derived_aes_key_a, &derived_aes_key_b, plaintext.as_bytes());
+        }
+    }
+}
+
+/// Verifies HKDF rejects invalid AES key sizes
+#[session_test]
+fn test_hkdf_invalid_aes_key_size_fails(session: HsmSession) {
+    let (shared_secret_a, _) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+    let mut hkdf_algo =
+        HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).expect("Failed HKDF Algo creation");
+
+    let aes_key_props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(42)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .build()
+        .expect("Failed to build AES key props");
+
+    let result =
+        HsmKeyManager::derive_key(&session, &mut hkdf_algo, &shared_secret_a, aes_key_props);
+    let err = match result {
+        Ok(_) => panic!("HKDF derive should fail for invalid AES key size"),
+        Err(err) => err,
+    };
+    assert_eq!(err, HsmError::InvalidArgument);
+}
+
+/// Verifies HKDF rejects unsupported derived key kinds
+#[session_test]
+fn test_hkdf_unsupported_derived_key_kind_fails(session: HsmSession) {
+    let (shared_secret_a, _) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+    let mut hkdf_algo =
+        HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).expect("Failed HKDF Algo creation");
+
+    let unsupported_props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Ecc)
+        .ecc_curve(HsmEccCurve::P256)
+        .build()
+        .expect("Failed to build ECC key props");
+
+    let result = HsmKeyManager::derive_key(
+        &session,
+        &mut hkdf_algo,
+        &shared_secret_a,
+        unsupported_props,
+    );
+    let err = match result {
+        Ok(_) => panic!("HKDF derive should fail for unsupported derived key kind"),
+        Err(err) => err,
+    };
+    assert_eq!(err, HsmError::InvalidKeyProps);
+}
+
+/// Verifies cross-curve mismatch behavior globally
+#[session_test]
+fn test_hkdf_cross_curve_negative_case(session: HsmSession) {
+    run_hkdf_cross_curve_negative(&session);
+}
+
+/// Verifies empty salt/info for P256
+#[session_test]
+fn test_hkdf_empty_salt_info_p256(session: HsmSession) {
+    run_hkdf_empty_salt_info_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies empty salt/info for P384
+#[session_test]
+fn test_hkdf_empty_salt_info_p384(session: HsmSession) {
+    run_hkdf_empty_salt_info_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies empty salt/info for P521
+#[session_test]
+fn test_hkdf_empty_salt_info_p521(session: HsmSession) {
+    run_hkdf_empty_salt_info_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies large plaintext handling for P256
+#[session_test]
+fn test_hkdf_large_plaintext_p256(session: HsmSession) {
+    run_hkdf_large_plaintext_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies large plaintext handling for P384
+#[session_test]
+fn test_hkdf_large_plaintext_p384(session: HsmSession) {
+    run_hkdf_large_plaintext_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies large plaintext handling for P521
+#[session_test]
+fn test_hkdf_large_plaintext_p521(session: HsmSession) {
+    run_hkdf_large_plaintext_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies HKDF hash algos for P256
+#[session_test]
+fn test_hkdf_hash_algos_p256(session: HsmSession) {
+    for &h in supported_hkdf_hash_algos() {
+        run_hkdf_hash_algo_test(&session, HsmEccCurve::P256, h);
+    }
+}
+
+/// Verifies HKDF hash algos for P384
+#[session_test]
+fn test_hkdf_hash_algos_p384(session: HsmSession) {
+    for &h in supported_hkdf_hash_algos() {
+        run_hkdf_hash_algo_test(&session, HsmEccCurve::P384, h);
+    }
+}
+
+/// Verifies HKDF hash algos for P521
+#[session_test]
+fn test_hkdf_hash_algos_p521(session: HsmSession) {
+    for &h in supported_hkdf_hash_algos() {
+        run_hkdf_hash_algo_test(&session, HsmEccCurve::P521, h);
+    }
+}
+
+/// Verifies empty plaintext for P256
+#[session_test]
+fn test_hkdf_empty_plaintext_p256(session: HsmSession) {
+    run_hkdf_empty_plaintext_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies empty plaintext for P384
+#[session_test]
+fn test_hkdf_empty_plaintext_p384(session: HsmSession) {
+    run_hkdf_empty_plaintext_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies empty plaintext for P521
+#[session_test]
+fn test_hkdf_empty_plaintext_p521(session: HsmSession) {
+    run_hkdf_empty_plaintext_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies single-byte plaintext for P256
+#[session_test]
+fn test_hkdf_single_byte_p256(session: HsmSession) {
+    run_hkdf_single_byte_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies single-byte plaintext for P384
+#[session_test]
+fn test_hkdf_single_byte_p384(session: HsmSession) {
+    run_hkdf_single_byte_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies single-byte plaintext for P521
+#[session_test]
+fn test_hkdf_single_byte_p521(session: HsmSession) {
+    run_hkdf_single_byte_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies multi key size derivation for P256
+#[session_test]
+fn test_hkdf_multi_key_size_p256(session: HsmSession) {
+    run_hkdf_multi_key_size_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies multi key size derivation for P384
+#[session_test]
+fn test_hkdf_multi_key_size_p384(session: HsmSession) {
+    run_hkdf_multi_key_size_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies multi key size derivation for P521
+#[session_test]
+fn test_hkdf_multi_key_size_p521(session: HsmSession) {
+    run_hkdf_multi_key_size_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies long salt/info handling for P256
+#[session_test]
+fn test_hkdf_long_salt_info_p256(session: HsmSession) {
+    run_hkdf_long_salt_info_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies long salt/info handling for P384
+#[session_test]
+fn test_hkdf_long_salt_info_p384(session: HsmSession) {
+    run_hkdf_long_salt_info_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies long salt/info handling for P521
+#[session_test]
+fn test_hkdf_long_salt_info_p521(session: HsmSession) {
+    run_hkdf_long_salt_info_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies shared secret stability for P256
+#[session_test]
+fn test_ecdh_shared_secret_stability_p256(session: HsmSession) {
+    run_ecdh_shared_secret_stability(&session, HsmEccCurve::P256);
+}
+
+/// Verifies shared secret stability for P384
+#[session_test]
+fn test_ecdh_shared_secret_stability_p384(session: HsmSession) {
+    run_ecdh_shared_secret_stability(&session, HsmEccCurve::P384);
+}
+
+/// Verifies shared secret stability for P521
+#[session_test]
+fn test_ecdh_shared_secret_stability_p521(session: HsmSession) {
+    run_ecdh_shared_secret_stability(&session, HsmEccCurve::P521);
+}
+
+/// Verifies invalid key usage flags are rejected at derive time
+#[session_test]
+fn test_hkdf_invalid_key_usage_flags_fail(session: HsmSession) {
+    let (secret, _) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(256)
+        .can_encrypt(false) // invalid combination
+        .can_decrypt(true)
+        .build()
+        .unwrap();
+
+    let result = HsmKeyManager::derive_key(&session, &mut hkdf, &secret, props);
+
+    let err = match result {
+        Ok(_) => panic!("Expected derive to fail due to invalid key usage flags"),
+        Err(e) => e,
+    };
+
+    assert_eq!(err, HsmError::InvalidKeyProps);
+}
+
+/// Verifies different HKDF hash algorithms do not interoperate for P256
+#[session_test]
+fn test_hkdf_cross_hash_p256(session: HsmSession) {
+    run_hkdf_cross_hash_mismatch_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies different HKDF hash algorithms do not interoperate for P384
+#[session_test]
+fn test_hkdf_cross_hash_p384(session: HsmSession) {
+    run_hkdf_cross_hash_mismatch_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies different HKDF hash algorithms do not interoperate for P521
+#[session_test]
+fn test_hkdf_cross_hash_p521(session: HsmSession) {
+    run_hkdf_cross_hash_mismatch_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies IV impacts ciphertext
+#[session_test]
+fn test_aes_cbc_iv_sensitivity(session: HsmSession) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(&session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(&session, &mut hkdf, &secret_b, 256);
+
+    let iv1 = [0u8; 16];
+    let iv2 = [1u8; 16];
+
+    let mut enc1 = HsmAesCbcAlgo::with_padding(iv1.to_vec()).unwrap();
+    let mut enc2 = HsmAesCbcAlgo::with_padding(iv2.to_vec()).unwrap();
+
+    let ct1 = HsmEncrypter::encrypt_vec(&mut enc1, &key_a, b"iv test").unwrap();
+    let ct2 = HsmEncrypter::encrypt_vec(&mut enc2, &key_a, b"iv test").unwrap();
+
+    assert_ne!(ct1, ct2);
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv1.to_vec()).unwrap();
+    let pt = HsmDecrypter::decrypt_vec(&mut dec, &key_b, &ct1).unwrap();
+
+    assert_eq!(pt, b"iv test");
+}
+
+/// Verifies tampered ciphertext does not decrypt correctly
+#[session_test]
+fn test_aes_cbc_ciphertext_tamper(session: HsmSession) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(&session, &mut hkdf, &secret_a, 256);
+    let key_b = derive_aes_key_from_shared_secret(&session, &mut hkdf, &secret_b, 256);
+
+    let iv = [0u8; 16];
+    let mut enc = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    let mut ct = HsmEncrypter::encrypt_vec(&mut enc, &key_a, b"tamper").unwrap();
+
+    ct[0] ^= 0xFF;
+
+    let mut dec = HsmAesCbcAlgo::with_padding(iv.to_vec()).unwrap();
+    if let Ok(pt) = HsmDecrypter::decrypt_vec(&mut dec, &key_b, &ct) {
+        assert_ne!(pt, b"tamper");
+    }
+}
+
+/// Verifies salt sensitivity for P256
+#[session_test]
+fn test_hkdf_salt_sensitivity_p256(session: HsmSession) {
+    run_hkdf_salt_sensitivity_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies salt sensitivity for P384
+#[session_test]
+fn test_hkdf_salt_sensitivity_p384(session: HsmSession) {
+    run_hkdf_salt_sensitivity_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies salt sensitivity for P521
+#[session_test]
+fn test_hkdf_salt_sensitivity_p521(session: HsmSession) {
+    run_hkdf_salt_sensitivity_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies info sensitivity for P256
+#[session_test]
+fn test_hkdf_info_sensitivity_p256(session: HsmSession) {
+    run_hkdf_info_sensitivity_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies info sensitivity for P384
+#[session_test]
+fn test_hkdf_info_sensitivity_p384(session: HsmSession) {
+    run_hkdf_info_sensitivity_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies info sensitivity for P521
+#[session_test]
+fn test_hkdf_info_sensitivity_p521(session: HsmSession) {
+    run_hkdf_info_sensitivity_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies independent HKDF instances produce equivalent results
+#[session_test]
+fn test_hkdf_instance_equivalence(session: HsmSession) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let mut hkdf1 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(b"s"), Some(b"i")).unwrap();
+    let mut hkdf2 = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, Some(b"s"), Some(b"i")).unwrap();
+
+    let key1 = derive_aes_key_from_shared_secret(&session, &mut hkdf1, &secret_a, 256);
+    let key2 = derive_aes_key_from_shared_secret(&session, &mut hkdf2, &secret_b, 256);
+
+    assert_aes_cbc_roundtrip(&key1, &key2, b"instance eq");
+}
+
+/// Verifies minimum AES key size (128-bit) works correctly
+#[session_test]
+fn test_hkdf_min_aes_size(session: HsmSession) {
+    let (secret_a, secret_b) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let key_a = derive_aes_key_from_shared_secret(&session, &mut hkdf, &secret_a, 128);
+    let key_b = derive_aes_key_from_shared_secret(&session, &mut hkdf, &secret_b, 128);
+
+    assert_aes_cbc_roundtrip(&key_a, &key_b, b"128-bit key");
+}
+
+/// Verifies HKDF fails when using unsupported key class
+#[session_test]
+fn test_hkdf_invalid_key_class_fail(session: HsmSession) {
+    let (secret, _) = derive_ecdh_shared_secrets(&session, HsmEccCurve::P256);
+
+    let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).unwrap();
+
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Public) // invalid for HKDF
+        .key_kind(HsmKeyKind::Aes)
+        .bits(256)
+        .build()
+        .unwrap();
+
+    let result = HsmKeyManager::derive_key(&session, &mut hkdf, &secret, props);
+
+    assert!(result.is_err());
+}
+
+/// Verifies same HKDF params across curves do not interoperate
+#[session_test]
+fn test_hkdf_same_params_cross_curve_mismatch(session: HsmSession) {
+    run_hkdf_same_params_cross_curve_mismatch(&session);
+}
+
+/// Verifies HKDF output size limits are enforced
+#[session_test]
+fn test_hkdf_invalid_aes_key_size_p256(session: HsmSession) {
+    run_hkdf_invalid_aes_key_size_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies HKDF rejects oversized output for P384
+#[session_test]
+fn test_hkdf_invalid_aes_key_size_p384(session: HsmSession) {
+    run_hkdf_invalid_aes_key_size_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies HKDF rejects oversized output for P521
+#[session_test]
+fn test_hkdf_invalid_aes_key_size_p521(session: HsmSession) {
+    run_hkdf_invalid_aes_key_size_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies ECDH fails without derive permission
+#[session_test]
+fn test_ecdh_missing_derive_flag(session: HsmSession) {
+    run_ecdh_missing_derive_flag_test(&session);
+}
+
+/// Verifies ECDH fails for cross-curve inputs
+#[session_test]
+fn test_ecdh_cross_curve_fail(session: HsmSession) {
+    run_ecdh_cross_curve_fail_test(&session);
+}
+
+/// Verifies strong HKDF determinism for P256
+#[session_test]
+fn test_hkdf_strong_determinism_p256(session: HsmSession) {
+    run_hkdf_strong_determinism_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies strong HKDF determinism for P384
+#[session_test]
+fn test_hkdf_strong_determinism_p384(session: HsmSession) {
+    run_hkdf_strong_determinism_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies strong HKDF determinism for P521
+#[session_test]
+fn test_hkdf_strong_determinism_p521(session: HsmSession) {
+    run_hkdf_strong_determinism_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies AES-CBC padding tampering is detected
+#[session_test]
+fn test_aes_cbc_padding_tamper(session: HsmSession) {
+    run_aes_cbc_padding_tamper_test(&session);
+}
+
+/// Verifies AES-CBC IV tampering is detected for a single-block ciphertext
+/// (sub-block plaintext path).
+#[session_test]
+fn test_aes_cbc_iv_tamper_single_block(session: HsmSession) {
+    run_aes_cbc_iv_tamper_single_block_test(&session);
+}
+
+/// Verifies unrelated shared secrets do not interoperate for P256
+#[session_test]
+fn test_hkdf_unrelated_secret_p256(session: HsmSession) {
+    run_hkdf_unrelated_secret_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies unrelated shared secrets do not interoperate for P384
+#[session_test]
+fn test_hkdf_unrelated_secret_p384(session: HsmSession) {
+    run_hkdf_unrelated_secret_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies unrelated shared secrets do not interoperate for P521
+#[session_test]
+fn test_hkdf_unrelated_secret_p521(session: HsmSession) {
+    run_hkdf_unrelated_secret_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies HKDF works with minimal valid parameters for P256
+#[session_test]
+fn test_hkdf_min_input_p256(session: HsmSession) {
+    run_hkdf_min_input_test(&session, HsmEccCurve::P256);
+}
+
+/// Verifies HKDF works with minimal valid parameters for P384
+#[session_test]
+fn test_hkdf_min_input_p384(session: HsmSession) {
+    run_hkdf_min_input_test(&session, HsmEccCurve::P384);
+}
+
+/// Verifies HKDF works with minimal valid parameters for P521
+#[session_test]
+fn test_hkdf_min_input_p521(session: HsmSession) {
+    run_hkdf_min_input_test(&session, HsmEccCurve::P521);
+}
+
+/// Verifies ECDH rejects creating a shared secret without can_derive flag
+#[session_test]
+fn test_ecdh_rejects_non_derivable_shared_secret(session: HsmSession) {
+    // Generate ECC keypair WITHOUT derive capability
+    let (priv_a, _) =
+        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true).unwrap();
+    let (_, pub_b) =
+        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true).unwrap();
+
+    // Attempt ECDH → should fail due to can_derive = false
+    let non_derivable_props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::SharedSecret)
+        .bits(256)
+        // intentionally omit .can_derive(true)
+        .build()
+        .expect("Failed to build non-derivable shared secret props");
+
+    let result =
+        ecdh_derive_shared_secret_with_props(&session, &priv_a, &pub_b, non_derivable_props);
+
+    assert!(
+        matches!(result, Err(HsmError::InvalidKeyProps)),
+        "ECDH should reject creating a shared secret without can_derive flag"
+    );
+}
+
+/// Derive a matching pair of session-scoped ECDH shared secrets.
+#[cfg(feature = "session-ex-tests")]
+fn derive_session_shared_secrets(
+    session: &HsmSession,
+    curve: HsmEccCurve,
+) -> (HsmGenericSecretKey, HsmGenericSecretKey) {
+    let (priv_a, pub_a) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true).expect("keypair a");
+    let (priv_b, pub_b) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true).expect("keypair b");
+
+    let secret_props = || {
+        HsmKeyPropsBuilder::default()
+            .class(HsmKeyClass::Secret)
+            .key_kind(HsmKeyKind::SharedSecret)
+            .bits(curve.key_size_bits() as u32)
+            .can_derive(true)
+            .is_session(true)
+            .build()
+            .expect("shared-secret props")
+    };
+
+    let secret_a = ecdh_derive_shared_secret_with_props(session, &priv_a, &pub_b, secret_props())
+        .expect("derive shared secret a");
+    let secret_b = ecdh_derive_shared_secret_with_props(session, &priv_b, &pub_a, secret_props())
+        .expect("derive shared secret b");
+    (secret_a, secret_b)
+}
+
+/// Derive a labeled, session-scoped AES key from a shared secret using HKDF.
+#[cfg(feature = "session-ex-tests")]
+fn derive_aes_key_session(
+    session: &HsmSession,
+    hkdf_algo: &mut HsmHkdfAlgo,
+    shared_secret: &HsmGenericSecretKey,
+    bits: u32,
+) -> HsmAesKey {
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(bits)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .is_session(true)
+        .label(b"hkdf-derived-aes")
+        .build()
+        .expect("aes props");
+    HsmKeyManager::derive_key(session, hkdf_algo, shared_secret, props)
+        .expect("derive AES key via HKDF")
+        .try_into()
+        .expect("derived key was not an AES key")
+}
+
+/// Derive labeled, session-scoped AES and HMAC keys from an ECDH shared secret.
+/// Verify the AES keys through CBC and the HMAC keys through their properties.
+#[cfg(feature = "session-ex-tests")]
+#[session_test]
+fn test_hkdf_derive_labeled_session_keys(session: HsmSession) {
+    let (secret_a, secret_b) = derive_session_shared_secrets(&session, HsmEccCurve::P256);
+
+    // AES output: derive on both sides and verify a CBC roundtrip.
+    for bits in [128u32, 192, 256] {
+        let mut hkdf_a = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).expect("hkdf a");
+        let mut hkdf_b = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).expect("hkdf b");
+        let key_a = derive_aes_key_session(&session, &mut hkdf_a, &secret_a, bits);
+        let key_b = derive_aes_key_session(&session, &mut hkdf_b, &secret_b, bits);
+        assert_aes_cbc_roundtrip(&key_a, &key_b, b"hkdf aes roundtrip");
+    }
+
+    // HMAC output: derive and validate the typed properties + masked blob.
+    for (kind, bits) in [
+        (HsmKeyKind::HmacSha256, 256u32),
+        (HsmKeyKind::HmacSha384, 384),
+        (HsmKeyKind::HmacSha512, 512),
+    ] {
+        let mut hkdf = HsmHkdfAlgo::new(HsmHashAlgo::Sha256, None, None).expect("hkdf");
+        let hmac_props = HsmKeyPropsBuilder::default()
+            .class(HsmKeyClass::Secret)
+            .key_kind(kind)
+            .bits(bits)
+            .is_session(true)
+            .can_sign(true)
+            .can_verify(true)
+            .label(b"hkdf-derived-hmac")
+            .build()
+            .expect("build hmac props");
+
+        let derived = HsmKeyManager::derive_key(&session, &mut hkdf, &secret_a, hmac_props)
+            .expect("derive HMAC key via HKDF");
+
+        assert_eq!(derived.kind(), kind);
+        assert_eq!(derived.bits(), bits);
+
+        let hmac_key: HsmHmacKey = derived.try_into().expect("convert to HsmHmacKey");
+        assert!(
+            !hmac_key.masked_key_vec().expect("masked key").is_empty(),
+            "derived HMAC key must carry a masked blob"
+        );
+    }
+}

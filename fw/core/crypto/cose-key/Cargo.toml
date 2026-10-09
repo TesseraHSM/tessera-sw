@@ -1,0 +1,21 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_fw_core_crypto_cose_key"
+version = "0.1.0"
+
+[lib]
+bench = false
+doctest = false
+
+[dependencies]
+minicbor = { features = ["derive"], workspace = true }
+tsra_fw_hsm_pal_traits = { workspace = true }
+
+[dev-dependencies]
+minicbor = { features = ["derive", "std"], workspace = true }
+
+[lints]
+workspace = true

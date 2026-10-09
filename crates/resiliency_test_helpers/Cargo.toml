@@ -1,0 +1,16 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "tsra_resiliency_test_helpers"
+publish = false
+version = "0.1.0"
+
+[dependencies]
+fs2.workspace = true
+parking_lot.workspace = true
+tsra_api.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,133 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! DDI wire → firmware-internal type conversions shared by handlers.
+//!
+//! Translates enums and other small types that arrive on the DDI
+//! wire (host-facing) into their firmware-side counterparts (PAL
+//! traits, vault kinds, internal flag sets).  Multiple handlers
+//! share each mapping, so centralizing the conversions here keeps
+//! the set of supported variants — and the error code used for
+//! unsupported ones — consistent across all handlers.
+//!
+//! Functions are intentionally bare-named (`hash`, `curve`, …) so
+//! call sites read as `from_ddi::hash(algo)` / `from_ddi::curve(c)`,
+//! mirroring Rust's `From::from(value)` idiom.
+
+use tsra_fw_ddi_mbor_types::DdiAesKeySize;
+use tsra_fw_ddi_mbor_types::DdiEccCurve;
+use tsra_fw_ddi_mbor_types::DdiHashAlgorithm;
+use tsra_fw_ddi_mbor_types::DdiKeyType;
+use tsra_fw_hsm_pal_traits::HsmEccCurve;
+use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+
+/// Map a [`DdiHashAlgorithm`] to its [`HsmHashAlgo`] counterpart.
+/// Unsupported / unknown variants return [`HsmError::InvalidArg`].
+pub(crate) fn hash(algo: DdiHashAlgorithm) -> HsmResult<HsmHashAlgo> {
+    match algo {
+        DdiHashAlgorithm::Sha1 => Ok(HsmHashAlgo::Sha1),
+        DdiHashAlgorithm::Sha256 => Ok(HsmHashAlgo::Sha256),
+        DdiHashAlgorithm::Sha384 => Ok(HsmHashAlgo::Sha384),
+        DdiHashAlgorithm::Sha512 => Ok(HsmHashAlgo::Sha512),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+/// Map a [`DdiEccCurve`] to its [`HsmEccCurve`] counterpart.
+/// Unsupported / unknown variants return [`HsmError::InvalidArg`].
+pub(crate) fn curve(curve: DdiEccCurve) -> HsmResult<HsmEccCurve> {
+    match curve {
+        DdiEccCurve::P256 => Ok(HsmEccCurve::P256),
+        DdiEccCurve::P384 => Ok(HsmEccCurve::P384),
+        DdiEccCurve::P521 => Ok(HsmEccCurve::P521),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+/// Map a [`DdiAesKeySize`] to its raw byte length and the matching
+/// non-bulk AES vault kind.  Bulk AES variants (XTS / GCM) are
+/// rejected with [`HsmError::InvalidArg`]; use [`aes_bulk`] for the
+/// GCM bulk kinds.
+pub(crate) fn aes(size: DdiAesKeySize) -> HsmResult<(usize, HsmVaultKeyKind)> {
+    match size {
+        DdiAesKeySize::Aes128 => Ok((16, HsmVaultKeyKind::Aes128)),
+        DdiAesKeySize::Aes192 => Ok((24, HsmVaultKeyKind::Aes192)),
+        DdiAesKeySize::Aes256 => Ok((32, HsmVaultKeyKind::Aes256)),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+/// Map a bulk [`DdiAesKeySize`] to its raw AES-256 byte length and the
+/// matching bulk GCM vault kind.  The two variants differ only in FIPS
+/// posture: `AesGcmBulk256` is FIPS-approved (the device generates the
+/// IV internally on encrypt), `AesGcmBulk256Unapproved` uses the
+/// host-supplied IV.  Non-GCM-bulk sizes return
+/// [`HsmError::InvalidArg`].
+pub(crate) fn aes_bulk(size: DdiAesKeySize) -> HsmResult<(usize, HsmVaultKeyKind)> {
+    match size {
+        DdiAesKeySize::AesGcmBulk256 => Ok((32, HsmVaultKeyKind::AesGcmBulk256)),
+        DdiAesKeySize::AesGcmBulk256Unapproved => {
+            Ok((32, HsmVaultKeyKind::AesGcmBulk256Unapproved))
+        }
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+/// Map the on-wire [`DdiKeyType`] tag recorded in a masked-key blob's
+/// metadata back to the [`HsmVaultKeyKind`] the key is re-imported as.
+///
+/// Public, internal, and non-maskable kinds return
+/// [`HsmError::InvalidKeyType`].  [`DdiKeyType::RsaUnwrap`] is
+/// intentionally rejected here — the partition unwrapping key must not
+/// be re-imported as a general RSA key. Fixed `HmacSha*` tags are accepted
+/// as exact-length aliases and normalized to the corresponding
+/// `VarLenHmacSha*` vault kind.
+pub(crate) fn vault_kind_from_ddi(key_type: DdiKeyType) -> HsmResult<HsmVaultKeyKind> {
+    match key_type {
+        DdiKeyType::Rsa2kPrivate => Ok(HsmVaultKeyKind::Rsa2kPrivate),
+        DdiKeyType::Rsa3kPrivate => Ok(HsmVaultKeyKind::Rsa3kPrivate),
+        DdiKeyType::Rsa4kPrivate => Ok(HsmVaultKeyKind::Rsa4kPrivate),
+        DdiKeyType::Rsa2kPrivateCrt => Ok(HsmVaultKeyKind::Rsa2kPrivateCrt),
+        DdiKeyType::Rsa3kPrivateCrt => Ok(HsmVaultKeyKind::Rsa3kPrivateCrt),
+        DdiKeyType::Rsa4kPrivateCrt => Ok(HsmVaultKeyKind::Rsa4kPrivateCrt),
+        DdiKeyType::Ecc256Private => Ok(HsmVaultKeyKind::Ecc256Private),
+        DdiKeyType::Ecc384Private => Ok(HsmVaultKeyKind::Ecc384Private),
+        DdiKeyType::Ecc521Private => Ok(HsmVaultKeyKind::Ecc521Private),
+        DdiKeyType::Aes128 => Ok(HsmVaultKeyKind::Aes128),
+        DdiKeyType::Aes192 => Ok(HsmVaultKeyKind::Aes192),
+        DdiKeyType::Aes256 => Ok(HsmVaultKeyKind::Aes256),
+        DdiKeyType::AesXtsBulk256 => Ok(HsmVaultKeyKind::AesXtsBulk256),
+        DdiKeyType::AesGcmBulk256 => Ok(HsmVaultKeyKind::AesGcmBulk256),
+        DdiKeyType::AesGcmBulk256Unapproved => Ok(HsmVaultKeyKind::AesGcmBulk256Unapproved),
+        DdiKeyType::Secret256 => Ok(HsmVaultKeyKind::Secret256),
+        DdiKeyType::Secret384 => Ok(HsmVaultKeyKind::Secret384),
+        DdiKeyType::Secret521 => Ok(HsmVaultKeyKind::Secret521),
+        DdiKeyType::HmacSha256 => Ok(HsmVaultKeyKind::VarLenHmacSha256),
+        DdiKeyType::HmacSha384 => Ok(HsmVaultKeyKind::VarLenHmacSha384),
+        DdiKeyType::HmacSha512 => Ok(HsmVaultKeyKind::VarLenHmacSha512),
+        DdiKeyType::VarHmac256 => Ok(HsmVaultKeyKind::VarLenHmacSha256),
+        DdiKeyType::VarHmac384 => Ok(HsmVaultKeyKind::VarLenHmacSha384),
+        DdiKeyType::VarHmac512 => Ok(HsmVaultKeyKind::VarLenHmacSha512),
+        _ => Err(HsmError::InvalidKeyType),
+    }
+}
+
+/// Preserve the exact-length contract of fixed HMAC request aliases after
+/// normalizing them to variable-length vault kinds.
+pub(crate) fn validate_fixed_hmac_length(key_type: DdiKeyType, key_len: usize) -> HsmResult<()> {
+    let expected = match key_type {
+        DdiKeyType::HmacSha256 => Some(32),
+        DdiKeyType::HmacSha384 => Some(48),
+        DdiKeyType::HmacSha512 => Some(64),
+        _ => None,
+    };
+
+    if expected.is_some_and(|expected| key_len != expected) {
+        return Err(HsmError::InvalidArg);
+    }
+
+    Ok(())
+}

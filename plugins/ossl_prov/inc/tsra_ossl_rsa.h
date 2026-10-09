@@ -1,0 +1,55 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#pragma once
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
+
+#include <inttypes.h>
+#include <stdbool.h>
+
+#include <tsra.h>
+
+#include "tsra_ossl_base.h"
+#include "tsra_ossl_pkey_param.h"
+
+/*
+ * RSA-specific definitions which are shared
+ * between multiple subsystems like keymgmt, encoder, ...
+ * */
+
+#define TSRA_KEY_TYPE_RSA 0
+#define TSRA_KEY_TYPE_RSA_PSS 1
+
+/* Supported RSA key sizes in bits */
+#define TSRA_RSA_2048_KEY_BITS 2048
+#define TSRA_RSA_3072_KEY_BITS 3072
+#define TSRA_RSA_4096_KEY_BITS 4096
+
+typedef struct
+{
+    TSRA_OSSL_PROV_CTX *provctx;
+    int key_type;
+    uint32_t pubkey_bits;
+    TSRA_KEY_USAGE_TYPE key_usage;
+    tsra_handle session;
+    bool session_flag;
+    char masked_key_file[TSRA_MAX_FILE_PATH];
+    char input_key_file[TSRA_MAX_FILE_PATH];
+    char wrapped_key_file[TSRA_MAX_FILE_PATH];
+    tsra_key_kind key_kind; /* private key form: TSRA_KEY_KIND_RSA{,_CRT} */
+} TSRA_RSA_GEN_CTX;
+
+typedef struct
+{
+    TSRA_KEY_PAIR_OBJ key;
+    TSRA_RSA_GEN_CTX genctx;
+    bool has_public, has_private;
+} TSRA_RSA_KEY;
+
+#ifdef __cplusplus
+}
+#endif

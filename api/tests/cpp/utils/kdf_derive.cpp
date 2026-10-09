@@ -1,0 +1,656 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+#include <cstring>
+#include <string>
+
+#include "kdf_derive.hpp"
+#include "rng.hpp"
+
+const uint32_t AES_KEY_SIZES[] = { 128, 192, 256 };
+
+const char *get_hmac_algo_name(tsra_algo_id hmac_algo_id)
+{
+    switch (hmac_algo_id)
+    {
+    case TSRA_ALGO_ID_HMAC_SHA1:
+        return "SHA1";
+    case TSRA_ALGO_ID_HMAC_SHA256:
+        return "SHA256";
+    case TSRA_ALGO_ID_HMAC_SHA384:
+        return "SHA384";
+    case TSRA_ALGO_ID_HMAC_SHA512:
+        return "SHA512";
+    default:
+        return "unknown";
+    }
+}
+
+// Builds an tsra_algo for HKDF with the given HMAC algo ID and optional salt/info.
+void build_hkdf_algo(
+    tsra_algo_hkdf_params &hkdf_params,
+    tsra_algo &hkdf_algo,
+    tsra_algo_id hmac_algo_id,
+    tsra_buffer *salt,
+    tsra_buffer *info
+)
+{
+    hkdf_params.hmac_algo_id = hmac_algo_id;
+    hkdf_params.salt = salt;
+    hkdf_params.info = info;
+
+    hkdf_algo.id = TSRA_ALGO_ID_HKDF_DERIVE;
+    hkdf_algo.params = &hkdf_params;
+    hkdf_algo.len = sizeof(hkdf_params);
+}
+
+// Derives matching ECDH shared secrets for two parties on the given curve.
+// Both output handles are managed by auto_key for RAII cleanup.
+void derive_ecdh_shared_secrets(
+    tsra_handle session,
+    tsra_ecc_curve curve,
+    auto_key &shared_secret_a,
+    auto_key &shared_secret_b
+)
+{
+    EcdhKeyPairSet keys;
+    ASSERT_EQ(keys.generate(session, curve), TSRA_STATUS_SUCCESS);
+
+    ASSERT_EQ(
+        derive_shared_secret_via_ecdh(
+            session,
+            keys.priv_key_a.get(),
+            keys.pub_key_b.get(),
+            curve,
+            shared_secret_a.handle
+        ),
+        TSRA_STATUS_SUCCESS
+    );
+
+    ASSERT_EQ(
+        derive_shared_secret_via_ecdh(
+            session,
+            keys.priv_key_b.get(),
+            keys.pub_key_a.get(),
+            curve,
+            shared_secret_b.handle
+        ),
+        TSRA_STATUS_SUCCESS
+    );
+}
+
+// Derives an AES key from a shared secret using HKDF, then validates kind and bits.
+void derive_aes_key_from_shared_secret(
+    tsra_handle session,
+    tsra_algo *hkdf_algo,
+    tsra_handle shared_secret,
+    uint32_t bits,
+    auto_key &out_key
+)
+{
+    key_props props = {};
+    props.key_class = TSRA_KEY_CLASS_SECRET;
+    props.key_kind = TSRA_KEY_KIND_AES;
+    props.key_size_bits = bits;
+    props.encrypt = 1;
+    props.decrypt = 1;
+
+    std::vector<tsra_key_prop> props_vec;
+    tsra_key_prop_list prop_list = build_key_prop_list(props, props_vec);
+
+    auto err = tsra_key_derive(session, hkdf_algo, shared_secret, &prop_list, &out_key.handle);
+    ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+    // Validate kind
+    tsra_key_kind actual_kind{};
+    tsra_key_prop kind_prop = { .id = TSRA_KEY_PROP_ID_KIND,
+                                .val = &actual_kind,
+                                .len = sizeof(actual_kind) };
+    ASSERT_EQ(tsra_key_get_prop(out_key.get(), &kind_prop), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(actual_kind, TSRA_KEY_KIND_AES);
+
+    // Validate bit length
+    uint32_t actual_bits = 0;
+    tsra_key_prop bits_prop = { .id = TSRA_KEY_PROP_ID_BIT_LEN,
+                                .val = &actual_bits,
+                                .len = sizeof(actual_bits) };
+    ASSERT_EQ(tsra_key_get_prop(out_key.get(), &bits_prop), TSRA_STATUS_SUCCESS);
+    ASSERT_EQ(actual_bits, bits);
+}
+
+// Verifies AES-CBC-PAD encrypt/decrypt roundtrip: encrypt with enc_key, decrypt with dec_key,
+// check plaintext matches.
+void assert_aes_cbc_roundtrip(
+    tsra_handle enc_key,
+    tsra_handle dec_key,
+    const uint8_t *plaintext,
+    size_t plaintext_len
+)
+{
+    // Build AES-CBC-PAD algo with a random IV.
+    tsra_algo_aes_cbc_params cbc_params{};
+    auto iv = test_iv(sizeof(cbc_params.iv));
+    std::memcpy(cbc_params.iv, iv.data(), sizeof(cbc_params.iv));
+
+    tsra_algo enc_algo = { .id = TSRA_ALGO_ID_AES_CBC_PAD,
+                           .params = &cbc_params,
+                           .len = sizeof(cbc_params) };
+
+    // Encrypt
+    std::vector<uint8_t> ciphertext;
+    ASSERT_EQ(
+        single_shot_crypt(
+            CryptOperation::Encrypt,
+            enc_key,
+            &enc_algo,
+            plaintext,
+            plaintext_len,
+            ciphertext
+        ),
+        TSRA_STATUS_SUCCESS
+    );
+
+    // Reuse the same IV for decryption
+    tsra_algo_aes_cbc_params dec_cbc_params{};
+    std::memcpy(dec_cbc_params.iv, iv.data(), sizeof(dec_cbc_params.iv));
+
+    tsra_algo dec_algo = { .id = TSRA_ALGO_ID_AES_CBC_PAD,
+                           .params = &dec_cbc_params,
+                           .len = sizeof(dec_cbc_params) };
+
+    // Decrypt
+    std::vector<uint8_t> decrypted;
+    ASSERT_EQ(
+        single_shot_crypt(
+            CryptOperation::Decrypt,
+            dec_key,
+            &dec_algo,
+            ciphertext.data(),
+            ciphertext.size(),
+            decrypted
+        ),
+        TSRA_STATUS_SUCCESS
+    );
+
+    ASSERT_EQ(decrypted.size(), plaintext_len);
+    if (plaintext_len > 0)
+    {
+        ASSERT_EQ(std::memcmp(decrypted.data(), plaintext, plaintext_len), 0)
+            << "AES-CBC roundtrip mismatch";
+    }
+}
+
+// Runs the full HKDF matrix test for a given curve:
+//   1. Iterates hash algorithms × AES key sizes with no salt/info.
+//   2. Tests salt+info derivation with SHA-256/AES-256.
+//   3. Tests mismatched info between parties (negative).
+void run_hkdf_matrix_for_curve(tsra_handle session, tsra_ecc_curve curve)
+{
+    auto_key shared_secret_a;
+    auto_key shared_secret_b;
+    derive_ecdh_shared_secrets(session, curve, shared_secret_a, shared_secret_b);
+
+    // Part 1: hash algo × AES key size matrix, no salt/info
+    for (const auto &hash : supported_hkdf_hash_algos())
+    {
+        for (uint32_t bits : AES_KEY_SIZES)
+        {
+            SCOPED_TRACE(
+                std::string("hash=") + get_hmac_algo_name(hash) +
+                " aes_bits=" + std::to_string(bits)
+            );
+
+            tsra_algo_hkdf_params hkdf_params{};
+            tsra_algo hkdf_algo{};
+            build_hkdf_algo(hkdf_params, hkdf_algo, hash, nullptr, nullptr);
+
+            auto_key derived_key_a;
+            derive_aes_key_from_shared_secret(
+                session,
+                &hkdf_algo,
+                shared_secret_a.get(),
+                bits,
+                derived_key_a
+            );
+
+            auto_key derived_key_b;
+            derive_aes_key_from_shared_secret(
+                session,
+                &hkdf_algo,
+                shared_secret_b.get(),
+                bits,
+                derived_key_b
+            );
+
+            std::string pt_str = std::string("HKDF hash=") + get_hmac_algo_name(hash) +
+                                 " aes_bits=" + std::to_string(bits);
+            assert_aes_cbc_roundtrip(
+                derived_key_a.get(),
+                derived_key_b.get(),
+                reinterpret_cast<const uint8_t *>(pt_str.data()),
+                pt_str.size()
+            );
+        }
+    }
+
+    // Part 2: salt + info should also work
+    {
+        const char *salt_str = "hkdf-salt";
+        const char *info_str = "hkdf-info";
+        tsra_buffer salt_buf = { .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(salt_str)),
+                                 .len = static_cast<uint32_t>(std::strlen(salt_str)) };
+        tsra_buffer info_buf = { .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(info_str)),
+                                 .len = static_cast<uint32_t>(std::strlen(info_str)) };
+
+        tsra_algo_hkdf_params hkdf_params{};
+        tsra_algo hkdf_algo{};
+        build_hkdf_algo(hkdf_params, hkdf_algo, TSRA_ALGO_ID_HMAC_SHA256, &salt_buf, &info_buf);
+
+        auto_key derived_key_a;
+        derive_aes_key_from_shared_secret(
+            session,
+            &hkdf_algo,
+            shared_secret_a.get(),
+            256,
+            derived_key_a
+        );
+
+        auto_key derived_key_b;
+        derive_aes_key_from_shared_secret(
+            session,
+            &hkdf_algo,
+            shared_secret_b.get(),
+            256,
+            derived_key_b
+        );
+
+        const char *rt_msg = "HKDF with salt+info derived key roundtrip";
+        assert_aes_cbc_roundtrip(
+            derived_key_a.get(),
+            derived_key_b.get(),
+            reinterpret_cast<const uint8_t *>(rt_msg),
+            std::strlen(rt_msg)
+        );
+    }
+
+    // Part 3: different info between parties ⇒ keys should not match
+    {
+        const char *salt_str = "hkdf-salt";
+        const char *info_a_str = "hkdf-info-a";
+        const char *info_b_str = "hkdf-info-b";
+
+        tsra_buffer salt_buf = { .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(salt_str)),
+                                 .len = static_cast<uint32_t>(std::strlen(salt_str)) };
+        tsra_buffer info_a_buf = { .ptr =
+                                       reinterpret_cast<uint8_t *>(const_cast<char *>(info_a_str)),
+                                   .len = static_cast<uint32_t>(std::strlen(info_a_str)) };
+        tsra_buffer info_b_buf = { .ptr =
+                                       reinterpret_cast<uint8_t *>(const_cast<char *>(info_b_str)),
+                                   .len = static_cast<uint32_t>(std::strlen(info_b_str)) };
+
+        tsra_algo_hkdf_params hkdf_params_a{};
+        tsra_algo hkdf_algo_a{};
+        build_hkdf_algo(
+            hkdf_params_a,
+            hkdf_algo_a,
+            TSRA_ALGO_ID_HMAC_SHA256,
+            &salt_buf,
+            &info_a_buf
+        );
+
+        tsra_algo_hkdf_params hkdf_params_b{};
+        tsra_algo hkdf_algo_b{};
+        build_hkdf_algo(
+            hkdf_params_b,
+            hkdf_algo_b,
+            TSRA_ALGO_ID_HMAC_SHA256,
+            &salt_buf,
+            &info_b_buf
+        );
+
+        auto_key derived_key_a;
+        derive_aes_key_from_shared_secret(
+            session,
+            &hkdf_algo_a,
+            shared_secret_a.get(),
+            256,
+            derived_key_a
+        );
+
+        auto_key derived_key_b;
+        derive_aes_key_from_shared_secret(
+            session,
+            &hkdf_algo_b,
+            shared_secret_b.get(),
+            256,
+            derived_key_b
+        );
+
+        // Encrypt with key_a, attempt decrypt with key_b; if decryption succeeds the plaintext
+        // must differ.
+        tsra_algo_aes_cbc_params enc_params{};
+        auto iv = test_iv(sizeof(enc_params.iv));
+        std::memcpy(enc_params.iv, iv.data(), iv.size());
+        tsra_algo enc_algo = { .id = TSRA_ALGO_ID_AES_CBC_PAD,
+                               .params = &enc_params,
+                               .len = sizeof(enc_params) };
+
+        const char *mismatch_msg = "HKDF salt/info mismatch should fail";
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            single_shot_crypt(
+                CryptOperation::Encrypt,
+                derived_key_a.get(),
+                &enc_algo,
+                reinterpret_cast<const uint8_t *>(mismatch_msg),
+                std::strlen(mismatch_msg),
+                ciphertext
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+
+        // reuse the same IV for decryption
+        tsra_algo_aes_cbc_params dec_params{};
+        std::memcpy(dec_params.iv, iv.data(), iv.size());
+        tsra_algo dec_algo = { .id = TSRA_ALGO_ID_AES_CBC_PAD,
+                               .params = &dec_params,
+                               .len = sizeof(dec_params) };
+
+        std::vector<uint8_t> decrypted;
+        auto dec_err = single_shot_crypt(
+            CryptOperation::Decrypt,
+            derived_key_b.get(),
+            &dec_algo,
+            ciphertext.data(),
+            ciphertext.size(),
+            decrypted
+        );
+
+        if (dec_err == TSRA_STATUS_SUCCESS)
+        {
+            // If decryption succeeded despite key mismatch, the plaintext must differ.
+            size_t msg_len = std::strlen(mismatch_msg);
+            bool content_matches = (decrypted.size() == msg_len) &&
+                                   (std::memcmp(decrypted.data(), mismatch_msg, msg_len) == 0);
+            ASSERT_FALSE(content_matches)
+                << "Mismatched info should not produce matching plaintext";
+        }
+    }
+}
+
+void hkdf_derive_fails_common(
+    tsra_handle session,
+    tsra_algo_id hmac_algo_id,
+    key_props &props,
+    tsra_status expected_status
+)
+{
+    auto_key secret_a;
+    auto_key secret_b;
+    derive_ecdh_shared_secrets(session, TSRA_ECC_CURVE_P256, secret_a, secret_b);
+
+    tsra_algo_hkdf_params hkdf_params{};
+    tsra_algo hkdf_algo{};
+    build_hkdf_algo(hkdf_params, hkdf_algo, hmac_algo_id, nullptr, nullptr);
+
+    std::vector<tsra_key_prop> prop_vec;
+
+    tsra_key_prop_list prop_list = build_key_prop_list(props, prop_vec);
+
+    tsra_handle derived_handle = 0;
+    auto err = tsra_key_derive(session, &hkdf_algo, secret_a.get(), &prop_list, &derived_handle);
+    ASSERT_EQ(err, expected_status);
+    ASSERT_EQ(derived_handle, 0u);
+}
+
+// Builds an tsra_algo for SP 800-108 Counter Mode KBKDF with the given HMAC algo ID and
+// optional label/context.
+void build_kbkdf_counter_algo(
+    tsra_algo_kbkdf_counter_params &kbkdf_params,
+    tsra_algo &kbkdf_algo,
+    tsra_algo_id hmac_algo_id,
+    tsra_buffer *label,
+    tsra_buffer *context
+)
+{
+    kbkdf_params.hmac_algo_id = hmac_algo_id;
+    kbkdf_params.label = label;
+    kbkdf_params.context = context;
+
+    kbkdf_algo.id = TSRA_ALGO_ID_KBKDF_COUNTER_DERIVE;
+    kbkdf_algo.params = &kbkdf_params;
+    kbkdf_algo.len = sizeof(kbkdf_params);
+}
+
+// Runs the full KBKDF (SP 800-108 Counter Mode) matrix test for a given curve:
+//   1. Iterates hash algorithms × AES key sizes using a fixed label.
+//   2. Tests label+context derivation with SHA-256/AES-256.
+//   3. Tests mismatched context between parties (negative).
+// SP 800-108 requires at least one of label/context, so every positive case sets a label.
+void run_kbkdf_counter_matrix_for_curve(tsra_handle session, tsra_ecc_curve curve)
+{
+    auto_key shared_secret_a;
+    auto_key shared_secret_b;
+    derive_ecdh_shared_secrets(session, curve, shared_secret_a, shared_secret_b);
+
+    const char *label_str = "kbkdf-label";
+    tsra_buffer label_buf = { .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(label_str)),
+                              .len = static_cast<uint32_t>(std::strlen(label_str)) };
+
+    // Part 1: hash algo × AES key size matrix, label only
+    for (const auto &hash : supported_hkdf_hash_algos())
+    {
+        for (uint32_t bits : AES_KEY_SIZES)
+        {
+            SCOPED_TRACE(
+                std::string("hash=") + get_hmac_algo_name(hash) +
+                " aes_bits=" + std::to_string(bits)
+            );
+
+            tsra_algo_kbkdf_counter_params kbkdf_params{};
+            tsra_algo kbkdf_algo{};
+            build_kbkdf_counter_algo(kbkdf_params, kbkdf_algo, hash, &label_buf, nullptr);
+
+            auto_key derived_key_a;
+            derive_aes_key_from_shared_secret(
+                session,
+                &kbkdf_algo,
+                shared_secret_a.get(),
+                bits,
+                derived_key_a
+            );
+
+            auto_key derived_key_b;
+            derive_aes_key_from_shared_secret(
+                session,
+                &kbkdf_algo,
+                shared_secret_b.get(),
+                bits,
+                derived_key_b
+            );
+
+            std::string pt_str = std::string("KBKDF hash=") + get_hmac_algo_name(hash) +
+                                 " aes_bits=" + std::to_string(bits);
+            assert_aes_cbc_roundtrip(
+                derived_key_a.get(),
+                derived_key_b.get(),
+                reinterpret_cast<const uint8_t *>(pt_str.data()),
+                pt_str.size()
+            );
+        }
+    }
+
+    // Part 2: label + context should also work
+    {
+        const char *context_str = "kbkdf-context";
+        tsra_buffer context_buf = {
+            .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(context_str)),
+            .len = static_cast<uint32_t>(std::strlen(context_str))
+        };
+
+        tsra_algo_kbkdf_counter_params kbkdf_params{};
+        tsra_algo kbkdf_algo{};
+        build_kbkdf_counter_algo(
+            kbkdf_params,
+            kbkdf_algo,
+            TSRA_ALGO_ID_HMAC_SHA256,
+            &label_buf,
+            &context_buf
+        );
+
+        auto_key derived_key_a;
+        derive_aes_key_from_shared_secret(
+            session,
+            &kbkdf_algo,
+            shared_secret_a.get(),
+            256,
+            derived_key_a
+        );
+
+        auto_key derived_key_b;
+        derive_aes_key_from_shared_secret(
+            session,
+            &kbkdf_algo,
+            shared_secret_b.get(),
+            256,
+            derived_key_b
+        );
+
+        const char *rt_msg = "KBKDF with label+context derived key roundtrip";
+        assert_aes_cbc_roundtrip(
+            derived_key_a.get(),
+            derived_key_b.get(),
+            reinterpret_cast<const uint8_t *>(rt_msg),
+            std::strlen(rt_msg)
+        );
+    }
+
+    // Part 3: different context between parties ⇒ keys should not match
+    {
+        const char *context_a_str = "kbkdf-context-a";
+        const char *context_b_str = "kbkdf-context-b";
+
+        tsra_buffer context_a_buf = {
+            .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(context_a_str)),
+            .len = static_cast<uint32_t>(std::strlen(context_a_str))
+        };
+        tsra_buffer context_b_buf = {
+            .ptr = reinterpret_cast<uint8_t *>(const_cast<char *>(context_b_str)),
+            .len = static_cast<uint32_t>(std::strlen(context_b_str))
+        };
+
+        tsra_algo_kbkdf_counter_params kbkdf_params_a{};
+        tsra_algo kbkdf_algo_a{};
+        build_kbkdf_counter_algo(
+            kbkdf_params_a,
+            kbkdf_algo_a,
+            TSRA_ALGO_ID_HMAC_SHA256,
+            &label_buf,
+            &context_a_buf
+        );
+
+        tsra_algo_kbkdf_counter_params kbkdf_params_b{};
+        tsra_algo kbkdf_algo_b{};
+        build_kbkdf_counter_algo(
+            kbkdf_params_b,
+            kbkdf_algo_b,
+            TSRA_ALGO_ID_HMAC_SHA256,
+            &label_buf,
+            &context_b_buf
+        );
+
+        auto_key derived_key_a;
+        derive_aes_key_from_shared_secret(
+            session,
+            &kbkdf_algo_a,
+            shared_secret_a.get(),
+            256,
+            derived_key_a
+        );
+
+        auto_key derived_key_b;
+        derive_aes_key_from_shared_secret(
+            session,
+            &kbkdf_algo_b,
+            shared_secret_b.get(),
+            256,
+            derived_key_b
+        );
+
+        // Encrypt with key_a, attempt decrypt with key_b; if decryption succeeds the plaintext
+        // must differ.
+        tsra_algo_aes_cbc_params enc_params{};
+        auto iv = test_iv(sizeof(enc_params.iv));
+        std::memcpy(enc_params.iv, iv.data(), iv.size());
+        tsra_algo enc_algo = { .id = TSRA_ALGO_ID_AES_CBC_PAD,
+                               .params = &enc_params,
+                               .len = sizeof(enc_params) };
+
+        const char *mismatch_msg = "KBKDF context mismatch should fail";
+        std::vector<uint8_t> ciphertext;
+        ASSERT_EQ(
+            single_shot_crypt(
+                CryptOperation::Encrypt,
+                derived_key_a.get(),
+                &enc_algo,
+                reinterpret_cast<const uint8_t *>(mismatch_msg),
+                std::strlen(mismatch_msg),
+                ciphertext
+            ),
+            TSRA_STATUS_SUCCESS
+        );
+
+        // reuse the same IV for decryption
+        tsra_algo_aes_cbc_params dec_params{};
+        std::memcpy(dec_params.iv, iv.data(), iv.size());
+        tsra_algo dec_algo = { .id = TSRA_ALGO_ID_AES_CBC_PAD,
+                               .params = &dec_params,
+                               .len = sizeof(dec_params) };
+
+        std::vector<uint8_t> decrypted;
+        auto dec_err = single_shot_crypt(
+            CryptOperation::Decrypt,
+            derived_key_b.get(),
+            &dec_algo,
+            ciphertext.data(),
+            ciphertext.size(),
+            decrypted
+        );
+
+        if (dec_err == TSRA_STATUS_SUCCESS)
+        {
+            // If decryption succeeded despite key mismatch, the plaintext must differ.
+            size_t msg_len = std::strlen(mismatch_msg);
+            bool content_matches = (decrypted.size() == msg_len) &&
+                                   (std::memcmp(decrypted.data(), mismatch_msg, msg_len) == 0);
+            ASSERT_FALSE(content_matches)
+                << "Mismatched context should not produce matching plaintext";
+        }
+    }
+}
+
+void kbkdf_derive_fails_common(
+    tsra_handle session,
+    tsra_algo_id hmac_algo_id,
+    key_props &props,
+    tsra_status expected_status
+)
+{
+    auto_key secret_a;
+    auto_key secret_b;
+    derive_ecdh_shared_secrets(session, TSRA_ECC_CURVE_P256, secret_a, secret_b);
+
+    // These negative cases all fail during parameter/property validation, before the device
+    // KDF call, so label/context need not be supplied here.
+    tsra_algo_kbkdf_counter_params kbkdf_params{};
+    tsra_algo kbkdf_algo{};
+    build_kbkdf_counter_algo(kbkdf_params, kbkdf_algo, hmac_algo_id, nullptr, nullptr);
+
+    std::vector<tsra_key_prop> prop_vec;
+
+    tsra_key_prop_list prop_list = build_key_prop_list(props, prop_vec);
+
+    tsra_handle derived_handle = 0;
+    auto err = tsra_key_derive(session, &kbkdf_algo, secret_a.get(), &prop_list, &derived_handle);
+    ASSERT_EQ(err, expected_status);
+    ASSERT_EQ(derived_handle, 0u);
+}

@@ -1,0 +1,19 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_ddi_tbor_codec"
+version = "0.1.0"
+
+[features]
+default = []
+std = []
+
+[dependencies]
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

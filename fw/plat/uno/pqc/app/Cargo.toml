@@ -1,0 +1,25 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+[package]
+edition = "2021"
+name = "tsra_fw_uno_fp_app"
+version = "0.1.0"
+
+[[bin]]
+bench = false
+doctest = false
+name = "tsra_fw_uno_fp_app"
+test = false
+
+[dependencies]
+cortex-m = { features = ["critical-section-single-core"], workspace = true }
+cortex-m-rt = { workspace = true }
+embassy-executor = { features = [
+  "executor-thread",
+  "platform-cortex-m",
+], workspace = true }
+embassy-futures = { workspace = true }
+embassy-time = { workspace = true }
+pqc_ml = { workspace = true }
+tsra_fw_uno_drivers_systick = { workspace = true }
+zerocopy = { workspace = true }

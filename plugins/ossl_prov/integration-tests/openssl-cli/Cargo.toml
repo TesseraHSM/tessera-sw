@@ -1,0 +1,21 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2024"
+name = "provider-integration-tests-cli"
+version = "0.1.0"
+
+[features]
+integration = []
+
+[dev-dependencies]
+lit = { workspace = true }
+serial_test = { workspace = true }
+
+[lints]
+workspace = true
+
+[[test]]
+name = "openssl_cli_tests"
+path = "src/openssl_cli_tests.rs"

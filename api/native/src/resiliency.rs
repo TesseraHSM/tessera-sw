@@ -1,0 +1,907 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Resiliency FFI types and bridge implementations.
+//!
+//! Defines `#[repr(C)]` operations structs that C callers populate with their
+//! storage, lock, and POTA callback implementations. Bridge structs
+//! implement the Rust API traits by dispatching through the C function
+//! pointers.
+//!
+//! # Safety contract for C callers
+//!
+//! - All function pointers in the ops structs must be valid (non-null).
+//! - The `ctx` pointer must remain valid for the lifetime of the partition
+//!   handle (i.e., until `tsra_part_close` is called).
+//! - `ctx` **must not** contain or reference the same partition handle
+//!   (`tsra_handle`) that is being initialized — callbacks are invoked
+//!   while the partition's internal lock is held, so calling back into the
+//!   same partition will deadlock.
+//! - All callbacks must be thread-safe — they may be called concurrently
+//!   from multiple threads.
+
+use std::ffi::CString;
+use std::ffi::c_char;
+use std::ffi::c_void;
+use std::sync::Arc;
+
+use tsra_api as api;
+
+use crate::TsraBuffer;
+use crate::TsraStatus;
+use crate::utils::deref_ptr;
+
+/// Maximum size (in bytes) for a single resiliency storage value returned
+/// by a C callback. Prevents excessive allocation from a misbehaving caller.
+/// 1 MiB is far beyond any realistic blob (BMK ~350 B, masked key ~2720 B).
+const MAX_STORAGE_READ_SIZE: usize = 1024 * 1024;
+
+/// Maximum size (in bytes) for each POTA endorsement output buffer
+/// (signature or public key). POTA uses P-384: signature is 96 bytes,
+/// public key is 120 bytes DER.
+const MAX_POTA_BUFFER_SIZE: usize = 4 * 1024;
+
+/// OBK (Owner Backup Key) size in bytes per the API contract.
+const OBK_SIZE: usize = 48;
+
+/// Storage operations for resiliency.
+///
+/// All three function pointers are required.
+///
+/// `read`: Reads data for the given key into the output buffer. If the
+/// output buffer is too small (or null/zero-length), sets `output->len` to
+/// the required size and returns `TSRA_STATUS_BUFFER_TOO_SMALL`. Returns
+/// `TSRA_STATUS_NOT_FOUND` when the key does not exist.
+///
+/// `write`: Writes data for the given key (create or overwrite).
+///
+/// `clear`: Deletes data for the given key. No error if key doesn't exist.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TsraResiliencyStorageOps {
+    pub read: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        key: *const c_char,
+        value: *mut TsraBuffer,
+    ) -> TsraStatus,
+
+    pub write: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        key: *const c_char,
+        value: *const TsraBuffer,
+    ) -> TsraStatus,
+
+    pub clear: unsafe extern "C" fn(ctx: *mut c_void, key: *const c_char) -> TsraStatus,
+}
+
+/// Lock operations for cross-process/thread restore coordination.
+///
+/// Both function pointers are required. The lock is non-reentrant.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TsraResiliencyLockOps {
+    pub lock: unsafe extern "C" fn(ctx: *mut c_void) -> TsraStatus,
+    pub unlock: unsafe extern "C" fn(ctx: *mut c_void) -> TsraStatus,
+}
+
+/// POTA endorsement callback.
+///
+/// The `endorse` callback re-endorses the device's PID certificate public
+/// key with the caller's POTA private key. Uses the two-call buffer pattern:
+/// first call with null/zero output buffers to query sizes, second call to
+/// fill them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TsraPotaCallbackOps {
+    pub endorse: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        pota_pub_key_der: *const TsraBuffer,
+        pid_pub_key_der: *const TsraBuffer,
+        pid_cert_chain_pem: *const TsraBuffer,
+        signature: *mut TsraBuffer,
+        endorsement_pub_key: *mut TsraBuffer,
+    ) -> TsraStatus,
+}
+
+/// MOBK provider callback.
+///
+/// The `get_mobk` callback returns the caller's MOBK (masked owner backup
+/// key) during resiliency restore, allowing the SDK to re-provision the
+/// partition without re-running `init_bk3` (which is one-shot per device
+/// power cycle). Uses the two-call buffer pattern: first call with
+/// null/zero output buffer to query size, second call to fill it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TsraMobkCallbackOps {
+    pub get_mobk: unsafe extern "C" fn(ctx: *mut c_void, mobk: *mut TsraBuffer) -> TsraStatus,
+}
+
+/// Resiliency configuration passed to `tsra_part_init`.
+///
+/// - `ctx`: Opaque context pointer passed back to every callback. The SDK
+///   never dereferences this — the caller owns and manages it. Must remain
+///   valid until `tsra_part_close` returns. **Must not** contain or
+///   reference the same partition handle — see module-level safety docs.
+/// - `storage_ops` and `lock_ops` are always required (inline).
+/// - `pota_callback_ops`: Pointer to POTA callback ops. NULL when POTA
+///   endorsement source is TPM. Must be non-null when source is Caller.
+/// - `mobk_callback_ops`: Pointer to MOBK callback ops. NULL when OBK
+///   source is TPM. Must be non-null when source is Caller.
+#[repr(C)]
+pub struct TsraResiliencyConfig {
+    pub ctx: *mut c_void,
+    pub storage_ops: TsraResiliencyStorageOps,
+    pub lock_ops: TsraResiliencyLockOps,
+    pub pota_callback_ops: *const TsraPotaCallbackOps,
+    pub mobk_callback_ops: *const TsraMobkCallbackOps,
+}
+
+/// Bridge that implements [`api::ResiliencyStorage`] by calling through
+/// C function pointers.
+struct ResiliencyStorageAdapter {
+    ctx: *mut c_void,
+    ops: TsraResiliencyStorageOps,
+}
+
+// SAFETY: The C caller is contractually responsible for ensuring their
+// callbacks and the ctx pointer are thread-safe. This is documented in
+// the TsraResiliencyConfig API contract.
+#[allow(unsafe_code)]
+unsafe impl Send for ResiliencyStorageAdapter {}
+
+// SAFETY: The C caller is contractually responsible for ensuring their
+// callbacks and the ctx pointer are thread-safe. This is documented in
+// the TsraResiliencyConfig API contract.
+#[allow(unsafe_code)]
+unsafe impl Sync for ResiliencyStorageAdapter {}
+
+/// Bridge that implements [`api::ResiliencyLock`] by calling through
+/// C function pointers.
+struct ResiliencyLockAdapter {
+    ctx: *mut c_void,
+    ops: TsraResiliencyLockOps,
+}
+
+// SAFETY: See ResiliencyStorageAdapter safety comment.
+#[allow(unsafe_code)]
+unsafe impl Send for ResiliencyLockAdapter {}
+
+// SAFETY: See ResiliencyStorageAdapter safety comment.
+#[allow(unsafe_code)]
+unsafe impl Sync for ResiliencyLockAdapter {}
+
+/// Bridge that implements [`api::PotaEndorsementCallback`] by calling
+/// through C function pointers.
+struct PotaCallbackAdapter {
+    ctx: *mut c_void,
+    ops: TsraPotaCallbackOps,
+}
+
+// SAFETY: See ResiliencyStorageAdapter safety comment.
+#[allow(unsafe_code)]
+unsafe impl Send for PotaCallbackAdapter {}
+
+// SAFETY: See ResiliencyStorageAdapter safety comment.
+#[allow(unsafe_code)]
+unsafe impl Sync for PotaCallbackAdapter {}
+
+/// Bridge that implements [`api::MobkProviderCallback`] by calling
+/// through C function pointers.
+struct MobkCallbackAdapter {
+    ctx: *mut c_void,
+    ops: TsraMobkCallbackOps,
+}
+
+// SAFETY: See ResiliencyStorageBridge safety comment.
+#[allow(unsafe_code)]
+unsafe impl Send for MobkCallbackAdapter {}
+
+// SAFETY: See ResiliencyStorageBridge safety comment.
+#[allow(unsafe_code)]
+unsafe impl Sync for MobkCallbackAdapter {}
+
+impl api::ResiliencyStorage for ResiliencyStorageAdapter {
+    #[allow(unsafe_code)]
+    fn read(&self, key: &str) -> api::HsmResult<Vec<u8>> {
+        let c_key = CString::new(key).map_err(|_| api::HsmError::InvalidArgument)?;
+
+        // First call: query required size (null buffer)
+        let mut buf = TsraBuffer {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+
+        // SAFETY: Calling through a valid function pointer (guaranteed non-null
+        // by Rust's type system). c_key is a valid null-terminated C string.
+        let status: api::HsmError =
+            unsafe { (self.ops.read)(self.ctx, c_key.as_ptr(), &mut buf) }.into();
+
+        match status {
+            api::HsmError::NotFound => return Err(api::HsmError::NotFound),
+            api::HsmError::BufferTooSmall => {
+                // Expected — buf.len should now have the required size.
+                // Treat BufferTooSmall with len == 0 as a protocol violation
+                // to avoid calling back with an invalid (zero-length) buffer.
+                if buf.len == 0 {
+                    return Err(api::HsmError::InvalidArgument);
+                }
+            }
+            api::HsmError::Success if buf.len == 0 => {
+                // Zero-length data exists
+                return Ok(Vec::new());
+            }
+            api::HsmError::Success => {
+                // Protocol violation: callback returned Success with non-zero
+                // len instead of BufferTooSmall on the size-query call.
+                return Err(api::HsmError::InvalidArgument);
+            }
+            err => return Err(err),
+        }
+
+        // Second call: read into allocated buffer
+        let len = buf.len as usize;
+        if len > MAX_STORAGE_READ_SIZE {
+            return Err(api::HsmError::InvalidArgument);
+        }
+        let mut data = vec![0u8; len];
+        buf.ptr = data.as_mut_ptr() as *mut c_void;
+
+        // SAFETY: buf.ptr points to a valid allocation of buf.len bytes.
+        let status: api::HsmError =
+            unsafe { (self.ops.read)(self.ctx, c_key.as_ptr(), &mut buf) }.into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        data.truncate(buf.len as usize);
+        Ok(data)
+    }
+
+    #[allow(unsafe_code)]
+    fn write(&self, key: &str, data: &[u8]) -> api::HsmResult<()> {
+        let c_key = CString::new(key).map_err(|_| api::HsmError::InvalidArgument)?;
+
+        // Cast to *mut is safe: the C callback receives this via *const TsraBuffer
+        // so it will not write through this pointer.
+        let buf = TsraBuffer {
+            ptr: data.as_ptr() as *mut c_void,
+            len: data.len() as u32,
+        };
+
+        // SAFETY: buf.ptr points to the caller's data slice which remains
+        // valid for the duration of this synchronous call.
+        let status: api::HsmError =
+            unsafe { (self.ops.write)(self.ctx, c_key.as_ptr(), &buf) }.into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        Ok(())
+    }
+
+    #[allow(unsafe_code)]
+    fn clear(&self, key: &str) -> api::HsmResult<()> {
+        let c_key = CString::new(key).map_err(|_| api::HsmError::InvalidArgument)?;
+
+        // SAFETY: c_key is a valid null-terminated C string.
+        let status: api::HsmError = unsafe { (self.ops.clear)(self.ctx, c_key.as_ptr()) }.into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        Ok(())
+    }
+}
+
+impl api::ResiliencyLock for ResiliencyLockAdapter {
+    #[allow(unsafe_code)]
+    fn lock(&self) -> api::HsmResult<()> {
+        // SAFETY: Calling through a valid function pointer.
+        let status: api::HsmError = unsafe { (self.ops.lock)(self.ctx) }.into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        Ok(())
+    }
+
+    #[allow(unsafe_code)]
+    fn unlock(&self) -> api::HsmResult<()> {
+        // SAFETY: Calling through a valid function pointer.
+        let status: api::HsmError = unsafe { (self.ops.unlock)(self.ctx) }.into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        Ok(())
+    }
+}
+
+impl api::PotaEndorsementCallback for PotaCallbackAdapter {
+    #[allow(unsafe_code)]
+    fn endorse(
+        &self,
+        pota_pub_key_der: &[u8],
+        pid_pub_key_der: &[u8],
+        pid_cert_chain_pem: &[u8],
+    ) -> api::HsmResult<api::HsmPotaEndorsementData> {
+        // Cast to *mut is safe: the C callback receives these via *const TsraBuffer
+        // so it will not write through these pointers.
+        let pota_pk_buf = TsraBuffer {
+            ptr: pota_pub_key_der.as_ptr() as *mut c_void,
+            len: pota_pub_key_der.len() as u32,
+        };
+        let pid_pk_buf = TsraBuffer {
+            ptr: pid_pub_key_der.as_ptr() as *mut c_void,
+            len: pid_pub_key_der.len() as u32,
+        };
+        let pid_chain_buf = TsraBuffer {
+            ptr: pid_cert_chain_pem.as_ptr() as *mut c_void,
+            len: pid_cert_chain_pem.len() as u32,
+        };
+
+        // First call: query required output sizes
+        let mut sig_buf = TsraBuffer {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+        let mut pk_out_buf = TsraBuffer {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+
+        // SAFETY: pota_pk_buf, pid_pk_buf, and pid_chain_buf point to valid data.
+        // sig_buf and pk_out_buf are zero-initialized for size query.
+        let status: api::HsmError = unsafe {
+            (self.ops.endorse)(
+                self.ctx,
+                &pota_pk_buf,
+                &pid_pk_buf,
+                &pid_chain_buf,
+                &mut sig_buf,
+                &mut pk_out_buf,
+            )
+        }
+        .into();
+
+        match status {
+            api::HsmError::BufferTooSmall => { /* expected — sizes now in len fields */ }
+            api::HsmError::Success => {
+                // Protocol violation: the first (size-query) call must return
+                // BufferTooSmall with the required output sizes. Success with
+                // null buffers indicates a misbehaving callback.
+                return Err(api::HsmError::InvalidArgument);
+            }
+            err => return Err(err),
+        }
+
+        // Second call: fill allocated buffers
+        let sig_len = sig_buf.len as usize;
+        let pk_len = pk_out_buf.len as usize;
+        if sig_len > MAX_POTA_BUFFER_SIZE || pk_len > MAX_POTA_BUFFER_SIZE {
+            return Err(api::HsmError::InvalidArgument);
+        }
+        let mut sig_data = vec![0u8; sig_len];
+        let mut pk_data = vec![0u8; pk_len];
+        sig_buf.ptr = sig_data.as_mut_ptr() as *mut c_void;
+        pk_out_buf.ptr = pk_data.as_mut_ptr() as *mut c_void;
+
+        // SAFETY: Both buffers point to valid Vec allocations of the queried sizes.
+        let status: api::HsmError = unsafe {
+            (self.ops.endorse)(
+                self.ctx,
+                &pota_pk_buf,
+                &pid_pk_buf,
+                &pid_chain_buf,
+                &mut sig_buf,
+                &mut pk_out_buf,
+            )
+        }
+        .into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        sig_data.truncate(sig_buf.len as usize);
+        pk_data.truncate(pk_out_buf.len as usize);
+
+        Ok(api::HsmPotaEndorsementData::new(&sig_data, &pk_data))
+    }
+}
+
+impl api::MobkProviderCallback for MobkCallbackAdapter {
+    #[allow(unsafe_code)]
+    fn get_mobk(&self) -> api::HsmResult<Vec<u8>> {
+        // First call: query required output size
+        let mut mobk_buf = TsraBuffer {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+
+        // SAFETY: obk_buf is zero-initialized for size query.
+        let status: api::HsmError = unsafe { (self.ops.get_mobk)(self.ctx, &mut mobk_buf) }.into();
+
+        match status {
+            api::HsmError::BufferTooSmall => { /* expected — size now in len field */ }
+            api::HsmError::Success => {
+                return Err(api::HsmError::InvalidArgument);
+            }
+            err => return Err(err),
+        }
+
+        // Second call: fill allocated buffer
+        let len = mobk_buf.len as usize;
+        // length of MOBK must be minimum OBK_SIZE bytes as per the API contract.
+        if len < OBK_SIZE {
+            return Err(api::HsmError::InvalidArgument);
+        }
+        let mut data = vec![0u8; len];
+        mobk_buf.ptr = data.as_mut_ptr() as *mut c_void;
+
+        // SAFETY: obk_buf.ptr points to a valid Vec allocation of obk_buf.len bytes.
+        let status: api::HsmError = unsafe { (self.ops.get_mobk)(self.ctx, &mut mobk_buf) }.into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        let returned_len = mobk_buf.len as usize;
+        if returned_len != len {
+            return Err(api::HsmError::InvalidArgument);
+        }
+
+        data.truncate(returned_len);
+        Ok(data)
+    }
+}
+
+impl TryFrom<&TsraResiliencyConfig> for api::HsmResiliencyConfig {
+    type Error = TsraStatus;
+
+    #[allow(unsafe_code)]
+    fn try_from(config: &TsraResiliencyConfig) -> Result<Self, Self::Error> {
+        // Validate that all required function pointers are non-null.
+        // The #[repr(C)] structs could have been zero-initialized by a C caller.
+        if (config.storage_ops.read as usize) == 0
+            || (config.storage_ops.write as usize) == 0
+            || (config.storage_ops.clear as usize) == 0
+            || (config.lock_ops.lock as usize) == 0
+            || (config.lock_ops.unlock as usize) == 0
+        {
+            return Err(TsraStatus::InvalidArgument);
+        }
+
+        let storage = Box::new(ResiliencyStorageAdapter {
+            ctx: config.ctx,
+            ops: config.storage_ops,
+        });
+
+        let lock = Arc::new(ResiliencyLockAdapter {
+            ctx: config.ctx,
+            ops: config.lock_ops,
+        });
+
+        let pota_callback = if config.pota_callback_ops.is_null() {
+            None
+        } else {
+            let ops = *deref_ptr(config.pota_callback_ops)?;
+            if (ops.endorse as usize) == 0 {
+                return Err(TsraStatus::InvalidArgument);
+            }
+            Some(Box::new(PotaCallbackAdapter {
+                ctx: config.ctx,
+                ops,
+            }) as Box<dyn api::PotaEndorsementCallback>)
+        };
+
+        let mobk_callback = if config.mobk_callback_ops.is_null() {
+            None
+        } else {
+            let ops = *deref_ptr(config.mobk_callback_ops)?;
+            if (ops.get_mobk as usize) == 0 {
+                return Err(TsraStatus::InvalidArgument);
+            }
+            Some(Box::new(MobkCallbackAdapter {
+                ctx: config.ctx,
+                ops,
+            }) as Box<dyn api::MobkProviderCallback>)
+        };
+
+        Ok(api::HsmResiliencyConfig {
+            storage,
+            lock,
+            pota_callback,
+            mobk_callback,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::missing_safety_doc, clippy::undocumented_unsafe_blocks)]
+
+    use std::ptr;
+
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    enum StorageReadMode {
+        EmptySuccess,
+        ZeroLenBufferTooSmall,
+        NonZeroLenSuccess,
+        OversizedBufferTooSmall,
+        SecondCallFailure,
+    }
+
+    struct StorageReadCtx {
+        mode: StorageReadMode,
+        calls: u32,
+    }
+
+    struct StatusCtx {
+        status: TsraStatus,
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn storage_read_callback(
+        ctx: *mut c_void,
+        _key: *const c_char,
+        value: *mut TsraBuffer,
+    ) -> TsraStatus {
+        let ctx = unsafe { &mut *(ctx as *mut StorageReadCtx) };
+        let value = unsafe { &mut *value };
+        ctx.calls += 1;
+
+        match ctx.mode {
+            StorageReadMode::EmptySuccess => {
+                value.len = 0;
+                TsraStatus::Success
+            }
+            StorageReadMode::ZeroLenBufferTooSmall => {
+                value.len = 0;
+                TsraStatus::BufferTooSmall
+            }
+            StorageReadMode::NonZeroLenSuccess => {
+                value.len = 1;
+                TsraStatus::Success
+            }
+            StorageReadMode::OversizedBufferTooSmall => {
+                value.len = (MAX_STORAGE_READ_SIZE + 1) as u32;
+                TsraStatus::BufferTooSmall
+            }
+            StorageReadMode::SecondCallFailure => {
+                if ctx.calls == 1 {
+                    value.len = 3;
+                    TsraStatus::BufferTooSmall
+                } else {
+                    TsraStatus::InternalError
+                }
+            }
+        }
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn storage_write_callback(
+        ctx: *mut c_void,
+        _key: *const c_char,
+        _value: *const TsraBuffer,
+    ) -> TsraStatus {
+        let ctx = unsafe { &*(ctx as *const StatusCtx) };
+        ctx.status
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn storage_clear_callback(
+        ctx: *mut c_void,
+        _key: *const c_char,
+    ) -> TsraStatus {
+        let ctx = unsafe { &*(ctx as *const StatusCtx) };
+        ctx.status
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn lock_callback(ctx: *mut c_void) -> TsraStatus {
+        let ctx = unsafe { &*(ctx as *const StatusCtx) };
+        ctx.status
+    }
+
+    fn storage_adapter(ctx: *mut c_void) -> ResiliencyStorageAdapter {
+        ResiliencyStorageAdapter {
+            ctx,
+            ops: TsraResiliencyStorageOps {
+                read: storage_read_callback,
+                write: storage_write_callback,
+                clear: storage_clear_callback,
+            },
+        }
+    }
+
+    fn lock_adapter(ctx: *mut c_void) -> ResiliencyLockAdapter {
+        ResiliencyLockAdapter {
+            ctx,
+            ops: TsraResiliencyLockOps {
+                lock: lock_callback,
+                unlock: lock_callback,
+            },
+        }
+    }
+
+    #[test]
+    fn storage_read_accepts_empty_value() {
+        let mut ctx = StorageReadCtx {
+            mode: StorageReadMode::EmptySuccess,
+            calls: 0,
+        };
+        let adapter = storage_adapter(&mut ctx as *mut _ as *mut c_void);
+
+        let data = api::ResiliencyStorage::read(&adapter, "key").expect("read should succeed");
+        assert!(data.is_empty());
+        assert_eq!(ctx.calls, 1);
+    }
+
+    #[test]
+    fn storage_read_rejects_invalid_size_query_protocols() {
+        for mode in [
+            StorageReadMode::ZeroLenBufferTooSmall,
+            StorageReadMode::NonZeroLenSuccess,
+            StorageReadMode::OversizedBufferTooSmall,
+        ] {
+            let mut ctx = StorageReadCtx { mode, calls: 0 };
+            let adapter = storage_adapter(&mut ctx as *mut _ as *mut c_void);
+
+            let err = api::ResiliencyStorage::read(&adapter, "key")
+                .expect_err("read should reject invalid callback protocol");
+            assert_eq!(err, api::HsmError::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn storage_read_propagates_second_call_failure() {
+        let mut ctx = StorageReadCtx {
+            mode: StorageReadMode::SecondCallFailure,
+            calls: 0,
+        };
+        let adapter = storage_adapter(&mut ctx as *mut _ as *mut c_void);
+
+        let err = api::ResiliencyStorage::read(&adapter, "key")
+            .expect_err("read should propagate callback failure");
+        assert_eq!(err, api::HsmError::InternalError);
+        assert_eq!(ctx.calls, 2);
+    }
+
+    #[test]
+    fn storage_write_and_clear_reject_interior_nul_keys() {
+        let mut ctx = StatusCtx {
+            status: TsraStatus::Success,
+        };
+        let adapter = storage_adapter(&mut ctx as *mut _ as *mut c_void);
+
+        let write_err = api::ResiliencyStorage::write(&adapter, "a\0b", b"data")
+            .expect_err("write should reject interior nul key");
+        assert_eq!(write_err, api::HsmError::InvalidArgument);
+
+        let clear_err = api::ResiliencyStorage::clear(&adapter, "a\0b")
+            .expect_err("clear should reject interior nul key");
+        assert_eq!(clear_err, api::HsmError::InvalidArgument);
+    }
+
+    #[test]
+    fn storage_write_clear_and_lock_propagate_callback_failures() {
+        let mut ctx = StatusCtx {
+            status: TsraStatus::InternalError,
+        };
+        let adapter = storage_adapter(&mut ctx as *mut _ as *mut c_void);
+
+        let write_err = api::ResiliencyStorage::write(&adapter, "key", b"data")
+            .expect_err("write should propagate callback failure");
+        assert_eq!(write_err, api::HsmError::InternalError);
+
+        let clear_err = api::ResiliencyStorage::clear(&adapter, "key")
+            .expect_err("clear should propagate callback failure");
+        assert_eq!(clear_err, api::HsmError::InternalError);
+
+        let lock = lock_adapter(&mut ctx as *mut _ as *mut c_void);
+        let lock_err =
+            api::ResiliencyLock::lock(&lock).expect_err("lock should propagate callback failure");
+        assert_eq!(lock_err, api::HsmError::InternalError);
+
+        let unlock_err = api::ResiliencyLock::unlock(&lock)
+            .expect_err("unlock should propagate callback failure");
+        assert_eq!(unlock_err, api::HsmError::InternalError);
+    }
+
+    #[derive(Clone, Copy)]
+    enum PotaMode {
+        QuerySuccess,
+        OversizedQuery,
+        SecondCallFailure,
+    }
+
+    struct PotaCtx {
+        mode: PotaMode,
+        calls: u32,
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn pota_callback(
+        ctx: *mut c_void,
+        _pota_pub_key_der: *const TsraBuffer,
+        _pid_pub_key_der: *const TsraBuffer,
+        _pid_cert_chain_pem: *const TsraBuffer,
+        signature: *mut TsraBuffer,
+        endorsement_pub_key: *mut TsraBuffer,
+    ) -> TsraStatus {
+        let ctx = unsafe { &mut *(ctx as *mut PotaCtx) };
+        let signature = unsafe { &mut *signature };
+        let endorsement_pub_key = unsafe { &mut *endorsement_pub_key };
+        ctx.calls += 1;
+
+        match ctx.mode {
+            PotaMode::QuerySuccess => TsraStatus::Success,
+            PotaMode::OversizedQuery => {
+                signature.len = (MAX_POTA_BUFFER_SIZE + 1) as u32;
+                endorsement_pub_key.len = 1;
+                TsraStatus::BufferTooSmall
+            }
+            PotaMode::SecondCallFailure => {
+                if ctx.calls == 1 {
+                    signature.len = 1;
+                    endorsement_pub_key.len = 1;
+                    TsraStatus::BufferTooSmall
+                } else {
+                    TsraStatus::InternalError
+                }
+            }
+        }
+    }
+
+    fn pota_adapter(ctx: *mut c_void) -> PotaCallbackAdapter {
+        PotaCallbackAdapter {
+            ctx,
+            ops: TsraPotaCallbackOps {
+                endorse: pota_callback,
+            },
+        }
+    }
+
+    #[test]
+    fn pota_callback_rejects_invalid_protocols_and_propagates_failure() {
+        for mode in [PotaMode::QuerySuccess, PotaMode::OversizedQuery] {
+            let mut ctx = PotaCtx { mode, calls: 0 };
+            let adapter = pota_adapter(&mut ctx as *mut _ as *mut c_void);
+
+            let err = api::PotaEndorsementCallback::endorse(&adapter, b"pota", b"pid", b"chain")
+                .expect_err("endorse should reject invalid callback protocol");
+            assert_eq!(err, api::HsmError::InvalidArgument);
+        }
+
+        let mut ctx = PotaCtx {
+            mode: PotaMode::SecondCallFailure,
+            calls: 0,
+        };
+        let adapter = pota_adapter(&mut ctx as *mut _ as *mut c_void);
+
+        let err = api::PotaEndorsementCallback::endorse(&adapter, b"pota", b"pid", b"chain")
+            .expect_err("endorse should propagate callback failure");
+        assert_eq!(err, api::HsmError::InternalError);
+        assert_eq!(ctx.calls, 2);
+    }
+
+    #[derive(Clone, Copy)]
+    enum ObkMode {
+        QuerySuccess,
+        WrongQueryLen,
+        SecondCallFailure,
+        WrongReturnedLen,
+    }
+
+    struct ObkCtx {
+        mode: ObkMode,
+        calls: u32,
+    }
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn obk_callback(ctx: *mut c_void, obk: *mut TsraBuffer) -> TsraStatus {
+        let ctx = unsafe { &mut *(ctx as *mut ObkCtx) };
+        let obk = unsafe { &mut *obk };
+        ctx.calls += 1;
+
+        match ctx.mode {
+            ObkMode::QuerySuccess => TsraStatus::Success,
+            ObkMode::WrongQueryLen => {
+                obk.len = (OBK_SIZE - 1) as u32;
+                TsraStatus::BufferTooSmall
+            }
+            ObkMode::SecondCallFailure => {
+                if ctx.calls == 1 {
+                    obk.len = OBK_SIZE as u32;
+                    TsraStatus::BufferTooSmall
+                } else {
+                    TsraStatus::InternalError
+                }
+            }
+            ObkMode::WrongReturnedLen => {
+                if ctx.calls == 1 {
+                    obk.len = OBK_SIZE as u32;
+                    TsraStatus::BufferTooSmall
+                } else {
+                    obk.len = (OBK_SIZE - 1) as u32;
+                    TsraStatus::Success
+                }
+            }
+        }
+    }
+
+    fn obk_adapter(ctx: *mut c_void) -> MobkCallbackAdapter {
+        MobkCallbackAdapter {
+            ctx,
+            ops: TsraMobkCallbackOps {
+                get_mobk: obk_callback,
+            },
+        }
+    }
+
+    #[test]
+    fn obk_callback_rejects_invalid_protocols_and_propagates_failure() {
+        for mode in [ObkMode::QuerySuccess, ObkMode::WrongQueryLen] {
+            let mut ctx = ObkCtx { mode, calls: 0 };
+            let adapter = obk_adapter(&mut ctx as *mut _ as *mut c_void);
+
+            let err = api::MobkProviderCallback::get_mobk(&adapter)
+                .expect_err("get_mobk should reject invalid callback protocol");
+            assert_eq!(err, api::HsmError::InvalidArgument);
+        }
+
+        let mut second_call_ctx = ObkCtx {
+            mode: ObkMode::SecondCallFailure,
+            calls: 0,
+        };
+        let adapter = obk_adapter(&mut second_call_ctx as *mut _ as *mut c_void);
+        let err = api::MobkProviderCallback::get_mobk(&adapter)
+            .expect_err("get_mobk should propagate callback failure");
+        assert_eq!(err, api::HsmError::InternalError);
+        assert_eq!(second_call_ctx.calls, 2);
+
+        let mut wrong_len_ctx = ObkCtx {
+            mode: ObkMode::WrongReturnedLen,
+            calls: 0,
+        };
+        let adapter = obk_adapter(&mut wrong_len_ctx as *mut _ as *mut c_void);
+        let err = api::MobkProviderCallback::get_mobk(&adapter)
+            .expect_err("get_mobk should reject the returned length");
+        assert_eq!(err, api::HsmError::InvalidArgument);
+        assert_eq!(wrong_len_ctx.calls, 2);
+    }
+
+    #[test]
+    fn config_allows_null_optional_callbacks() {
+        let mut ctx = StatusCtx {
+            status: TsraStatus::Success,
+        };
+        let config = TsraResiliencyConfig {
+            ctx: &mut ctx as *mut _ as *mut c_void,
+            storage_ops: TsraResiliencyStorageOps {
+                read: storage_read_callback,
+                write: storage_write_callback,
+                clear: storage_clear_callback,
+            },
+            lock_ops: TsraResiliencyLockOps {
+                lock: lock_callback,
+                unlock: lock_callback,
+            },
+            pota_callback_ops: ptr::null(),
+            mobk_callback_ops: ptr::null(),
+        };
+
+        let resiliency_config = api::HsmResiliencyConfig::try_from(&config)
+            .expect("config should accept null optional callbacks");
+        assert!(resiliency_config.pota_callback.is_none());
+        assert!(resiliency_config.mobk_callback.is_none());
+    }
+}

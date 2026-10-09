@@ -1,0 +1,145 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include "shared_secret.hpp"
+
+uint32_t get_curve_key_bits(tsra_ecc_curve curve)
+{
+    switch (curve)
+    {
+    case TSRA_ECC_CURVE_P256:
+        return 256;
+    case TSRA_ECC_CURVE_P384:
+        return 384;
+    case TSRA_ECC_CURVE_P521:
+        return 521;
+    default:
+        return 256; // Default to P256
+    }
+}
+
+tsra_status generate_ec_key_pair_for_derive(
+    tsra_handle session_handle,
+    tsra_handle &pub_key_handle,
+    tsra_handle &priv_key_handle,
+    tsra_ecc_curve curve
+)
+{
+    tsra_algo ec_keygen_algo = { .id = TSRA_ALGO_ID_EC_KEY_PAIR_GEN, .params = nullptr, .len = 0 };
+
+    // Common properties
+    tsra_key_kind key_kind = TSRA_KEY_KIND_ECC;
+    bool derive_prop = true;
+
+    // Public key properties
+    tsra_key_class pub_key_class = TSRA_KEY_CLASS_PUBLIC;
+    std::vector<tsra_key_prop> pub_props;
+    pub_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_CLASS, .val = &pub_key_class, .len = sizeof(pub_key_class) }
+    );
+    pub_props.push_back({ .id = TSRA_KEY_PROP_ID_KIND, .val = &key_kind, .len = sizeof(key_kind) });
+    pub_props.push_back({ .id = TSRA_KEY_PROP_ID_EC_CURVE, .val = &curve, .len = sizeof(curve) });
+    pub_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_DERIVE, .val = &derive_prop, .len = sizeof(derive_prop) }
+    );
+
+    // Private key properties
+    tsra_key_class priv_key_class = TSRA_KEY_CLASS_PRIVATE;
+
+    std::vector<tsra_key_prop> priv_props;
+    priv_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_CLASS, .val = &priv_key_class, .len = sizeof(priv_key_class) }
+    );
+    priv_props.push_back({ .id = TSRA_KEY_PROP_ID_KIND, .val = &key_kind, .len = sizeof(key_kind) }
+    );
+    priv_props.push_back({ .id = TSRA_KEY_PROP_ID_EC_CURVE, .val = &curve, .len = sizeof(curve) });
+    priv_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_DERIVE, .val = &derive_prop, .len = sizeof(derive_prop) }
+    );
+
+    tsra_key_prop_list pub_prop_list = { .props = pub_props.data(),
+                                         .count = static_cast<uint32_t>(pub_props.size()) };
+    tsra_key_prop_list priv_prop_list = { .props = priv_props.data(),
+                                          .count = static_cast<uint32_t>(priv_props.size()) };
+
+    return tsra_key_gen_pair(
+        session_handle,
+        &ec_keygen_algo,
+        &priv_prop_list,
+        &pub_prop_list,
+        &priv_key_handle,
+        &pub_key_handle
+    );
+}
+
+tsra_status derive_shared_secret_via_ecdh(
+    tsra_handle session_handle,
+    tsra_handle priv_key_handle,
+    tsra_handle peer_pub_key_handle,
+    tsra_ecc_curve curve,
+    tsra_handle &out_shared_secret_handle
+)
+{
+    tsra_status err;
+
+    // Get peer's public key in DER format for ECDH
+    std::vector<uint8_t> peer_pub_key_data(512);
+    uint32_t peer_pub_key_len = static_cast<uint32_t>(peer_pub_key_data.size());
+
+    tsra_buffer pub_key_buffer = { .ptr = peer_pub_key_data.data(), .len = peer_pub_key_len };
+
+    tsra_key_prop pub_key_prop = { .id = TSRA_KEY_PROP_ID_PUB_KEY_INFO,
+                                   .val = peer_pub_key_data.data(),
+                                   .len = peer_pub_key_len };
+
+    err = tsra_key_get_prop(peer_pub_key_handle, &pub_key_prop);
+    if (err != TSRA_STATUS_SUCCESS)
+    {
+        return err;
+    }
+
+    // Update the actual length returned
+    peer_pub_key_len = pub_key_prop.len;
+    pub_key_buffer.len = peer_pub_key_len;
+
+    // Perform ECDH derivation to get shared secret
+    tsra_algo_ecdh_params ecdh_params = { .pub_key = &pub_key_buffer };
+    tsra_algo ecdh_algo = { .id = TSRA_ALGO_ID_ECDH,
+                            .params = &ecdh_params,
+                            .len = sizeof(ecdh_params) };
+
+    // Properties for the shared secret key
+    bool derive_prop = true;
+    bool is_session = true;
+    tsra_key_class secret_class = TSRA_KEY_CLASS_SECRET;
+    tsra_key_kind secret_kind = TSRA_KEY_KIND_SHARED_SECRET;
+    uint32_t key_bits = get_curve_key_bits(curve);
+
+    std::vector<tsra_key_prop> secret_props;
+    secret_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_CLASS, .val = &secret_class, .len = sizeof(secret_class) }
+    );
+    secret_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_KIND, .val = &secret_kind, .len = sizeof(secret_kind) }
+    );
+    secret_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_BIT_LEN, .val = &key_bits, .len = sizeof(key_bits) }
+    );
+    secret_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_DERIVE, .val = &derive_prop, .len = sizeof(derive_prop) }
+    );
+    secret_props.push_back(
+        { .id = TSRA_KEY_PROP_ID_SESSION, .val = &is_session, .len = sizeof(is_session) }
+    );
+
+    tsra_key_prop_list secret_prop_list = { .props = secret_props.data(),
+                                            .count = static_cast<uint32_t>(secret_props.size()) };
+
+    return tsra_key_derive(
+        session_handle,
+        &ecdh_algo,
+        priv_key_handle,
+        &secret_prop_list,
+        &out_shared_secret_handle
+    );
+}

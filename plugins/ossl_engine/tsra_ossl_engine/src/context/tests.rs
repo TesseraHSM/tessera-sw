@@ -1,0 +1,2474 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Unit tests (mock) and hardware smoke tests for the engine context, split
+//! out of `context.rs` for readability. Shared round-trip bodies live in
+//! `round_trips`; `mock` runs them against the emulator, `hw_tests` against a
+//! real device (`#[ignore]`d).
+
+use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
+use std::ptr::NonNull;
+
+use tsra_ossl_engine_core::engine::Engine;
+use tsra_ossl_engine_core::ffi;
+
+use super::*;
+
+/// Test helper: write key-material bytes to `path` with owner-only permissions
+/// and the same open hardening the engine uses for secret files — create a new
+/// file (`O_EXCL`, no clobber) mode 0600 and refuse a symlink at the path
+/// (`O_NOFOLLOW`). Used by the round-trip tests to stage a masked-key blob.
+fn write_key_material(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(SECRET_FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    file.write_all(data)
+}
+
+/// RAII cleanup guard: removes the file at `path` when dropped, so a test that
+/// returns early or panics still cleans up its temp files (mirrors the `Scratch`
+/// directory guard for individual files).
+struct TempFile(std::path::PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Test helper: a throwaway ENGINE for driving `keyload::load_key` in-process.
+/// The loader binds returned keys to it (`EC_KEY_new_method`), so it must
+/// outlive the loaded `EVP_PKEY`; the raw structural ref is returned so the
+/// caller frees it with `ENGINE_free` after dropping the key.
+#[allow(unsafe_code)]
+#[allow(clippy::unwrap_used)]
+fn new_test_engine() -> (Engine, *mut ffi::ENGINE) {
+    // SAFETY: ENGINE_new returns a fresh structural ref; wrapping it in Engine
+    // is sound for the test, and the caller ENGINE_free's the returned raw ref.
+    unsafe {
+        let raw = ffi::ENGINE_new();
+        assert!(!raw.is_null(), "ENGINE_new");
+        let engine = Engine::from_ptr(NonNull::new(raw).unwrap());
+        // The loader binds keys via EC_KEY_new_method, which needs an EC method
+        // on the engine and adopts it — register the engine's ECDSA method,
+        // exactly as bind_helper does in production.
+        // SAFETY: ecdsa_method() is process-global and never freed, so it
+        // outlives the engine.
+        engine
+            .set_ec_method(crate::sign::ecdsa_method().unwrap())
+            .unwrap();
+        // The RSA loader/import binds keys via RSA_new_method, which needs an
+        // RSA method on the engine — register the engine's RSA sign method,
+        // exactly as bind_helper does in production (HSM PKCS#1 v1.5 sign for
+        // HSM-backed keys, software public ops otherwise).
+        // SAFETY: rsa_sign_method() is process-global and never freed.
+        engine
+            .set_rsa_method(crate::rsasign::rsa_sign_method().unwrap())
+            .unwrap();
+        (engine, raw)
+    }
+}
+
+/// Sign `msg` (hashed with `md`) through `pkey` via OpenSSL's EVP interface —
+/// the same path the ABI and `openssl dgst -sign` take. Exercises the loaded
+/// key's `EC_KEY_METHOD` `sign_sig` (→ HSM). Shared by the mock and hardware
+/// sign tests.
+#[allow(unsafe_code)]
+fn evp_digest_sign(pkey: *mut ffi::EVP_PKEY, msg: &[u8], md: *const ffi::EVP_MD) -> Vec<u8> {
+    // SAFETY: pkey is a valid EVP_PKEY and md a process-lifetime EVP_MD; the
+    // calls follow the EVP_DigestSign contract and every return code is checked.
+    unsafe {
+        let ctx = ffi::EVP_MD_CTX_new();
+        assert!(!ctx.is_null());
+        assert_eq!(
+            ffi::EVP_DigestSignInit(ctx, std::ptr::null_mut(), md, std::ptr::null_mut(), pkey),
+            1,
+            "EVP_DigestSignInit"
+        );
+        assert_eq!(
+            ffi::EVP_DigestUpdate(ctx, msg.as_ptr().cast(), msg.len()),
+            1,
+            "EVP_DigestUpdate"
+        );
+        let mut siglen: usize = 0;
+        assert_eq!(
+            ffi::EVP_DigestSignFinal(ctx, std::ptr::null_mut(), &mut siglen),
+            1,
+            "EVP_DigestSignFinal (size query)"
+        );
+        let mut sig = vec![0u8; siglen];
+        assert_eq!(
+            ffi::EVP_DigestSignFinal(ctx, sig.as_mut_ptr(), &mut siglen),
+            1,
+            "EVP_DigestSignFinal"
+        );
+        sig.truncate(siglen);
+        ffi::EVP_MD_CTX_free(ctx);
+        sig
+    }
+}
+
+/// Sign a pre-computed `digest` via `EVP_PKEY_sign` with the signature digest
+/// set (the pre-hashed ABI path, distinct from `EVP_DigestSign`'s streaming
+/// one). With a digest set, 1.1.1's `pkey_rsa_sign` routes this through
+/// `RSA_sign` to the RSA_METHOD sign slot.
+#[allow(unsafe_code)]
+fn evp_pkey_sign(pkey: *mut ffi::EVP_PKEY, digest: &[u8], md: *const ffi::EVP_MD) -> Vec<u8> {
+    // SAFETY: standard EVP_PKEY_sign sequence; the ctrl is what the
+    // EVP_PKEY_CTX_set_signature_md macro expands to. Every rc is checked and the
+    // ctx is freed.
+    unsafe {
+        let ctx = ffi::EVP_PKEY_CTX_new(pkey, std::ptr::null_mut());
+        assert!(!ctx.is_null(), "EVP_PKEY_CTX_new");
+        assert_eq!(ffi::EVP_PKEY_sign_init(ctx), 1, "EVP_PKEY_sign_init");
+        assert_eq!(
+            ffi::EVP_PKEY_CTX_ctrl(
+                ctx,
+                -1,
+                ffi::EVP_PKEY_OP_TYPE_SIG_CONST,
+                ffi::EVP_PKEY_CTRL_MD_CONST,
+                0,
+                md.cast_mut().cast(),
+            ),
+            1,
+            "set signature md"
+        );
+        let mut siglen: usize = 0;
+        assert_eq!(
+            ffi::EVP_PKEY_sign(
+                ctx,
+                std::ptr::null_mut(),
+                &mut siglen,
+                digest.as_ptr(),
+                digest.len(),
+            ),
+            1,
+            "EVP_PKEY_sign (size query)"
+        );
+        let mut sig = vec![0u8; siglen];
+        assert_eq!(
+            ffi::EVP_PKEY_sign(
+                ctx,
+                sig.as_mut_ptr(),
+                &mut siglen,
+                digest.as_ptr(),
+                digest.len()
+            ),
+            1,
+            "EVP_PKEY_sign"
+        );
+        sig.truncate(siglen);
+        ffi::EVP_PKEY_CTX_free(ctx);
+        sig
+    }
+}
+
+/// Shared round-trip test bodies, driven against an already-opened
+/// [`EngineData`] so the same flow runs on the mock (always) and on real
+/// hardware (the `hw_tests` smokes). Only the `open` differs between the two.
+mod round_trips {
+    use foreign_types::ForeignType;
+    use openssl::ec::EcGroup;
+    use openssl::ec::EcKey;
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use openssl::pkey::PKey;
+    use openssl::pkey::Public;
+    use openssl::sign::Verifier;
+    use tsra_api::HsmEccCurve;
+    use tsra_api::HsmEccKeyGenAlgo;
+    #[cfg(feature = "mock")]
+    use tsra_api::HsmEccPrivateKey;
+    use tsra_api::HsmGenericSecretKeyUnmaskAlgo;
+    use tsra_api::HsmHmacAlgo;
+    use tsra_api::HsmHmacKeyUnmaskAlgo;
+    use tsra_api::HsmKeyClass;
+    use tsra_api::HsmKeyCommonProps;
+    use tsra_api::HsmKeyKind;
+    use tsra_api::HsmKeyManager;
+    use tsra_api::HsmKeyPropsBuilder;
+    use tsra_api::HsmSigner;
+
+    use super::*;
+
+    /// Generate a persistent EC P-384 signing key pair on the open HSM and
+    /// return the private-key handle. Only the mock-only deletion tests take a
+    /// live handle; the curve round trips use [`generate_masked`] instead.
+    #[cfg(feature = "mock")]
+    pub(super) fn generate_p384_key(data: &EngineData) -> EngineResult<HsmEccPrivateKey> {
+        data.with_session(|session| {
+            let priv_props = HsmKeyPropsBuilder::default()
+                .class(HsmKeyClass::Private)
+                .key_kind(HsmKeyKind::Ecc)
+                .ecc_curve(HsmEccCurve::P384)
+                .is_session(false)
+                .can_sign(true)
+                .build()
+                .map_err(|e| EngineError::wrap("build private key props", e))?;
+            let pub_props = HsmKeyPropsBuilder::default()
+                .class(HsmKeyClass::Public)
+                .key_kind(HsmKeyKind::Ecc)
+                .ecc_curve(HsmEccCurve::P384)
+                .is_session(false)
+                .can_verify(true)
+                .build()
+                .map_err(|e| EngineError::wrap("build public key props", e))?;
+            let mut algo = HsmEccKeyGenAlgo::default();
+            HsmKeyManager::generate_key_pair(session, &mut algo, priv_props, pub_props)
+                .map(|(private, _public)| private)
+                .map_err(|e| EngineError::wrap("generate EC key pair", e))
+        })
+    }
+
+    /// All curves the SDK supports; the round trips below run once per curve.
+    pub(super) const CURVES: [HsmEccCurve; 3] =
+        [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521];
+
+    /// Short tag for file names and messages.
+    fn curve_tag(curve: HsmEccCurve) -> &'static str {
+        match curve {
+            HsmEccCurve::P256 => "p256",
+            HsmEccCurve::P384 => "p384",
+            HsmEccCurve::P521 => "p521",
+        }
+    }
+
+    /// The conventional digest pairing for `curve`, as the raw `EVP_MD` (for
+    /// `EVP_DigestSign*`) and the `openssl` crate's `MessageDigest` (for the
+    /// software `Verifier`).
+    #[allow(unsafe_code)]
+    fn curve_md(curve: HsmEccCurve) -> (*const ffi::EVP_MD, MessageDigest) {
+        // SAFETY: the EVP_sha* accessors return process-lifetime constants.
+        unsafe {
+            match curve {
+                HsmEccCurve::P256 => (ffi::EVP_sha256(), MessageDigest::sha256()),
+                HsmEccCurve::P384 => (ffi::EVP_sha384(), MessageDigest::sha384()),
+                HsmEccCurve::P521 => (ffi::EVP_sha512(), MessageDigest::sha512()),
+            }
+        }
+    }
+
+    /// Generate a persistent EC key pair on `curve` on the open HSM and return
+    /// its masked blob plus the public-key DER. The generator handle is deleted
+    /// after export (the blob unmasks into a fresh handle later); device-resident
+    /// keys are not deleted on drop, so a leak would accumulate across runs.
+    fn generate_masked(data: &EngineData, curve: HsmEccCurve) -> EngineResult<(Vec<u8>, Vec<u8>)> {
+        data.with_session(|session| {
+            let priv_props = HsmKeyPropsBuilder::default()
+                .class(HsmKeyClass::Private)
+                .key_kind(HsmKeyKind::Ecc)
+                .ecc_curve(curve)
+                .is_session(false)
+                .can_sign(true)
+                .build()
+                .map_err(|e| EngineError::wrap("build private key props", e))?;
+            let pub_props = HsmKeyPropsBuilder::default()
+                .class(HsmKeyClass::Public)
+                .key_kind(HsmKeyKind::Ecc)
+                .ecc_curve(curve)
+                .is_session(false)
+                .can_verify(true)
+                .build()
+                .map_err(|e| EngineError::wrap("build public key props", e))?;
+            let mut algo = HsmEccKeyGenAlgo::default();
+            let (priv_key, _pub) =
+                HsmKeyManager::generate_key_pair(session, &mut algo, priv_props, pub_props)
+                    .map_err(|e| EngineError::wrap("generate EC key pair", e))?;
+            let masked = priv_key
+                .masked_key_vec()
+                .map_err(|e| EngineError::wrap("export masked key", e));
+            let der = priv_key
+                .pub_key_der_vec()
+                .map_err(|e| EngineError::wrap("read public key DER", e));
+            crate::context::delete_hsm_key(priv_key, "test generator key");
+            Ok((masked?, der?))
+        })
+    }
+
+    /// A transient masked-blob path for a round trip (removed by the caller).
+    fn blob_path(tag: &str) -> std::path::PathBuf {
+        // A per-call counter keeps every path unique within the process, so two
+        // concurrent tests reaching the same curve (e.g. the P-384 sign smokes)
+        // cannot clobber each other's blob between writing and loading it.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "engine-roundtrip-{tag}-{}-{n}.bin",
+            std::process::id()
+        ))
+    }
+
+    /// Generate a key on `curve` on `data`'s HSM, load it back through the
+    /// engine, and verify the returned public key matches. Backend-agnostic:
+    /// the caller opens `data` against the mock or a real device.
+    #[allow(unsafe_code)]
+    pub(super) fn run_load(data: &EngineData, curve: HsmEccCurve) -> EngineResult<()> {
+        let (masked, expected_pub_der) = generate_masked(data, curve)?;
+        let path = blob_path(&format!("load-{}", curve_tag(curve)));
+        let _ = std::fs::remove_file(&path);
+        write_key_material(&path, &masked)
+            .map_err(|e| EngineError::wrap(format!("write masked blob {}", path.display()), e))?;
+
+        let (engine, engine_raw) = new_test_engine();
+        let uri = format!("tsra://{};type=ec", path.display());
+        let raw = crate::keyload::load_key(&engine, data, &uri)?;
+        assert!(!raw.is_null(), "load_key returned a NULL EVP_PKEY");
+
+        // SAFETY: raw is an owning *mut EVP_PKEY returned by load_key.
+        let loaded: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        let loaded_der = loaded
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode loaded public key", e))?;
+        assert_eq!(loaded_der, expected_pub_der, "loaded public key mismatch");
+        drop(loaded);
+
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// Generate a key on `curve` on `data`'s HSM, load it back through the
+    /// engine, sign a digest through it (HSM `sign_sig` via `EVP_DigestSign*`,
+    /// using the curve's conventional digest), and verify the signature against
+    /// the public half in software. Backend-agnostic.
+    pub(super) fn run_sign(data: &EngineData, curve: HsmEccCurve) -> EngineResult<()> {
+        let (evp_md, verifier_md) = curve_md(curve);
+        run_sign_with_md(data, curve, evp_md, verifier_md)
+    }
+
+    /// [`run_sign`] with an explicit digest, so a digest/curve mismatch (e.g. a
+    /// digest longer than the curve order) can be exercised deliberately.
+    #[allow(unsafe_code)]
+    pub(super) fn run_sign_with_md(
+        data: &EngineData,
+        curve: HsmEccCurve,
+        evp_md: *const ffi::EVP_MD,
+        verifier_md: MessageDigest,
+    ) -> EngineResult<()> {
+        let (masked, expected_pub_der) = generate_masked(data, curve)?;
+        let path = blob_path(&format!("sign-{}", curve_tag(curve)));
+        let _ = std::fs::remove_file(&path);
+        write_key_material(&path, &masked)
+            .map_err(|e| EngineError::wrap(format!("write masked blob {}", path.display()), e))?;
+
+        let (engine, engine_raw) = new_test_engine();
+        let uri = format!("tsra://{};type=ec", path.display());
+        let raw = crate::keyload::load_key(&engine, data, &uri)?;
+        assert!(!raw.is_null(), "load_key returned a NULL EVP_PKEY");
+
+        let msg = b"engine ecdsa signing over the EVP/ABI path";
+        let sig = evp_digest_sign(raw, msg, evp_md);
+        assert!(!sig.is_empty(), "engine produced an empty signature");
+        // SAFETY: raw is an owning *mut EVP_PKEY returned by load_key.
+        let loaded: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+
+        let pubkey = PKey::public_key_from_der(&expected_pub_der)
+            .map_err(|e| EngineError::wrap("parse public key", e))?;
+        let mut verifier = Verifier::new(verifier_md, &pubkey)
+            .map_err(|e| EngineError::wrap("init verifier", e))?;
+        verifier
+            .update(msg)
+            .map_err(|e| EngineError::wrap("verifier update", e))?;
+        assert!(
+            verifier
+                .verify(&sig)
+                .map_err(|e| EngineError::wrap("verify", e))?,
+            "engine ECDSA signature must verify against the public key"
+        );
+        drop(loaded);
+
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        let _ = std::fs::remove_file(&path);
+        Ok(())
+    }
+
+    /// Park `data` in a fresh test engine's ex_data and register the keygen
+    /// pkey method, as `bind_helper` does in production.
+    pub(super) fn keygen_engine(data: EngineData) -> EngineResult<(Engine, *mut ffi::ENGINE)> {
+        let (mut engine, engine_raw) = new_test_engine();
+        let slot = crate::engine_impl::engine_data_slot()?;
+        slot.set(&mut engine, Box::new(data))?;
+        tsra_ossl_engine_core::pkey_method::register_ec_pkey_method::<
+            crate::keygen::TsraEcKeygen,
+            crate::derive::TsraEcDerive,
+        >(&engine)?;
+        tsra_ossl_engine_core::hkdf_method::register_hkdf_pkey_method::<crate::hkdf::TsraHkdf>(
+            &engine,
+        )?;
+        tsra_ossl_engine_core::rsa_pkey_method::register_rsa_pkey_method::<
+            crate::rsaimport::TsraRsaImport,
+            crate::rsasign::TsraRsaPssSign,
+        >(&engine)?;
+        Ok((engine, engine_raw))
+    }
+
+    /// Import an external RSA key through the real `EVP_PKEY_keygen` (import)
+    /// path against our engine, with the given ctrl-string options. Returns the
+    /// imported key, or the OpenSSL error text if import fails.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn try_rsa_import(
+        engine_raw: *mut ffi::ENGINE,
+        opts: &[(&str, &str)],
+    ) -> Result<*mut ffi::EVP_PKEY, String> {
+        use std::ffi::CString;
+        use std::ffi::c_int;
+
+        let cstr = |s: &str| CString::new(s).unwrap();
+        let opts: Vec<_> = opts.iter().map(|(k, v)| (cstr(k), cstr(v))).collect();
+        // SAFETY: standard EVP_PKEY keygen sequence against our engine; every
+        // return code is checked and the ctx is freed on all paths.
+        unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new_id(ffi::EVP_PKEY_RSA as c_int, engine_raw);
+            assert!(!ctx.is_null(), "EVP_PKEY_CTX_new_id(RSA, engine)");
+            assert_eq!(ffi::EVP_PKEY_keygen_init(ctx), 1, "EVP_PKEY_keygen_init");
+            for (key, value) in &opts {
+                assert_eq!(
+                    ffi::EVP_PKEY_CTX_ctrl_str(ctx, key.as_ptr(), value.as_ptr()),
+                    1,
+                    "pkey option {key:?} must be accepted at the parameter surface"
+                );
+            }
+            let mut pkey = std::ptr::null_mut();
+            let rc = ffi::EVP_PKEY_keygen(ctx, &mut pkey);
+            ffi::EVP_PKEY_CTX_free(ctx);
+            if rc == 1 {
+                assert!(!pkey.is_null(), "import returned a NULL EVP_PKEY");
+                Ok(pkey)
+            } else {
+                if !pkey.is_null() {
+                    ffi::EVP_PKEY_free(pkey);
+                }
+                Err(openssl::error::ErrorStack::get().to_string())
+            }
+        }
+    }
+
+    /// Import a software RSA key into the HSM through the real import path
+    /// (`tsra.input_key`), reload the written masked blob through the loader,
+    /// and prove the public modulus survives the round trip. Asserts the masked
+    /// blob carries the requested key kind (RSA vs RSA-CRT). Backend-agnostic.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_rsa_import(data: EngineData, dir: &Path, crt: bool) -> EngineResult<()> {
+        use openssl::rsa::Rsa;
+        use tsra_api::HsmKeyCommonProps;
+        use tsra_api::HsmKeyKind;
+        use tsra_api::HsmKeyManager;
+        use tsra_api::HsmRsaKeyUnmaskAlgo;
+
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        // Fixture: a software RSA-2048 key as unencrypted PKCS#8 DER.
+        let sw = Rsa::generate(2048).map_err(|e| EngineError::wrap("gen sw rsa", e))?;
+        let sw_pkey = PKey::from_rsa(sw).map_err(|e| EngineError::wrap("wrap sw rsa", e))?;
+        let input_der = sw_pkey
+            .private_key_to_pkcs8()
+            .map_err(|e| EngineError::wrap("encode pkcs8", e))?;
+        let expected_pub = sw_pkey
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode sw pub", e))?;
+
+        let tag = if crt { "crt" } else { "plain" };
+        let input_path = dir.join(format!("rsa-input-{tag}-{}.der", std::process::id()));
+        let blob_path = dir.join(format!("rsa-blob-{tag}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&blob_path);
+        write_key_material(&input_path, &input_der)
+            .map_err(|e| EngineError::wrap("write input der", e))?;
+
+        // Import via the pkey method (genpkey-equivalent).
+        let raw = try_rsa_import(
+            engine_raw,
+            &[
+                ("rsa_keygen_bits", "2048"),
+                ("tsra.input_key", input_path.to_str().unwrap()),
+                ("tsra.masked_key", blob_path.to_str().unwrap()),
+                ("tsra.key_kind", if crt { "RSA-CRT" } else { "RSA" }),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("RSA import failed: {e}")))?;
+        assert!(
+            std::fs::metadata(&blob_path)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
+            "masked blob not written"
+        );
+
+        // The imported key's public modulus matches the original.
+        // SAFETY: raw is the owning EVP_PKEY from the import.
+        let imported: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        let imported_pub = imported
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode imported pub", e))?;
+        assert_eq!(imported_pub, expected_pub, "imported public key mismatch");
+
+        // The masked blob carries the requested key kind.
+        let blob = std::fs::read(&blob_path).map_err(|e| EngineError::wrap("read blob", e))?;
+        slot.get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?
+            .with_session(|session| {
+                let mut algo = HsmRsaKeyUnmaskAlgo::default();
+                let (priv_key, _pub) = HsmKeyManager::unmask_key_pair(session, &mut algo, &blob)
+                    .map_err(|e| EngineError::wrap("unmask blob for kind check", e))?;
+                let expected = if crt {
+                    HsmKeyKind::RsaCrt
+                } else {
+                    HsmKeyKind::Rsa
+                };
+                assert_eq!(priv_key.kind(), expected, "masked blob key kind mismatch");
+                crate::context::delete_hsm_key(priv_key, "rsa kind-check key");
+                Ok(())
+            })?;
+
+        // The blob reloads through the loader with the same public key.
+        let uri = format!("tsra://{};type=rsa", blob_path.display());
+        let reloaded_raw = crate::keyload::load_key(
+            &engine,
+            slot.get(&engine)
+                .ok_or(EngineError::NullParam("engine_data"))?,
+            &uri,
+        )?;
+        // SAFETY: reloaded_raw is the owning EVP_PKEY from load_key.
+        let reloaded: PKey<Public> = unsafe { PKey::from_ptr(reloaded_raw.cast()) };
+        let reloaded_pub = reloaded
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode reloaded pub", e))?;
+        assert_eq!(reloaded_pub, expected_pub, "reloaded public key mismatch");
+
+        // Teardown: drop keys (release engine refs), drop EngineData (delete
+        // HSM keys), free the engine, drop the stale pkey-table entries.
+        drop(imported);
+        drop(reloaded);
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&blob_path);
+        Ok(())
+    }
+
+    /// Import a software RSA key into the HSM, then sign a digest through the
+    /// engine (HSM PKCS#1 v1.5 via `EVP_DigestSign`, routed to our RSA_METHOD
+    /// sign slot) and verify the signature against the public half in software.
+    /// Backend-agnostic.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_rsa_sign(data: EngineData, dir: &Path) -> EngineResult<()> {
+        use openssl::hash::MessageDigest;
+        use openssl::rsa::Rsa;
+        use openssl::sign::Verifier;
+
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        // Fixture: a software RSA-2048 key as unencrypted PKCS#8 DER, plus its
+        // public DER for software verification.
+        let sw = Rsa::generate(2048).map_err(|e| EngineError::wrap("gen sw rsa", e))?;
+        let sw_pkey = PKey::from_rsa(sw).map_err(|e| EngineError::wrap("wrap sw rsa", e))?;
+        let input_der = sw_pkey
+            .private_key_to_pkcs8()
+            .map_err(|e| EngineError::wrap("encode pkcs8", e))?;
+        let expected_pub = sw_pkey
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode sw pub", e))?;
+
+        let input_path = dir.join(format!("rsa-sign-in-{}.der", std::process::id()));
+        let _ = std::fs::remove_file(&input_path);
+        // Remove the input DER on any exit (early return or panic), not just the
+        // happy path.
+        let _input_guard = TempFile(input_path.clone());
+        write_key_material(&input_path, &input_der)
+            .map_err(|e| EngineError::wrap("write input der", e))?;
+
+        // Import into the HSM; the returned EVP_PKEY is HSM-backed.
+        let raw = try_rsa_import(
+            engine_raw,
+            &[
+                ("rsa_keygen_bits", "2048"),
+                ("tsra.input_key", input_path.to_str().unwrap()),
+                ("tsra.key_kind", "RSA-CRT"),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("RSA import failed: {e}")))?;
+
+        // Sign through the engine under each supported digest (EVP_DigestSign
+        // routes to our RSA_METHOD sign slot → HSM) and verify each signature
+        // against the public half in software.
+        let msg = b"engine rsa signing over the EVP/ABI path";
+        let pubkey = PKey::public_key_from_der(&expected_pub)
+            .map_err(|e| EngineError::wrap("parse public key", e))?;
+        // SAFETY: the EVP_shaN accessors return process-lifetime constants.
+        let cases: [(*const ffi::EVP_MD, MessageDigest); 3] = unsafe {
+            [
+                (ffi::EVP_sha256(), MessageDigest::sha256()),
+                (ffi::EVP_sha384(), MessageDigest::sha384()),
+                (ffi::EVP_sha512(), MessageDigest::sha512()),
+            ]
+        };
+        for (evp_md, verifier_md) in cases {
+            let sig = evp_digest_sign(raw, msg, evp_md);
+            assert!(!sig.is_empty(), "engine produced an empty RSA signature");
+            let mut verifier = Verifier::new(verifier_md, &pubkey)
+                .map_err(|e| EngineError::wrap("init verifier", e))?;
+            verifier
+                .update(msg)
+                .map_err(|e| EngineError::wrap("verifier update", e))?;
+            assert!(
+                verifier
+                    .verify(&sig)
+                    .map_err(|e| EngineError::wrap("verify", e))?,
+                "engine RSA signature must verify against the public key"
+            );
+        }
+
+        // Also exercise the pre-hashed EVP_PKEY_sign ABI (digest set) — the other
+        // entry that must reach the sign slot, distinct from EVP_DigestSign.
+        // SAFETY: EVP_sha256 returns a process-lifetime constant.
+        let md256 = unsafe { ffi::EVP_sha256() };
+        let digest = openssl::hash::hash(MessageDigest::sha256(), msg)
+            .map_err(|e| EngineError::wrap("hash msg", e))?;
+        let sig = evp_pkey_sign(raw, &digest, md256);
+        assert!(!sig.is_empty(), "EVP_PKEY_sign produced an empty signature");
+        let mut verifier = Verifier::new(MessageDigest::sha256(), &pubkey)
+            .map_err(|e| EngineError::wrap("init verifier", e))?;
+        verifier
+            .update(msg)
+            .map_err(|e| EngineError::wrap("verifier update", e))?;
+        assert!(
+            verifier
+                .verify(&sig)
+                .map_err(|e| EngineError::wrap("verify", e))?,
+            "EVP_PKEY_sign (pre-hashed, digest set) signature must verify"
+        );
+
+        // Teardown: own the imported EVP_PKEY to free it, drop keys, free engine.
+        // SAFETY: raw is the owning EVP_PKEY from the import.
+        let imported: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        drop(imported);
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // input_path removed by _input_guard on drop.
+        Ok(())
+    }
+
+    /// A pure software RSA key (no HSM handle) signed with PSS through the engine
+    /// must be REJECTED, never delegated to a software signature. This exercises
+    /// the real `EVP_PKEY_sign` dispatch on a ctx bound to the engine — so our
+    /// `EVP_PKEY_METHOD` sign override actually runs — rather than calling the
+    /// handler directly; a regression that delegated software PSS would fail here.
+    /// No HSM is opened (the reject precedes any HSM work); only the mock unit
+    /// test drives it (the hardware smokes do not need a software-key path).
+    #[cfg(feature = "mock")]
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_rsa_pss_rejects_software_key(data: EngineData) -> EngineResult<()> {
+        use std::ffi::CString;
+
+        use openssl::rsa::Rsa;
+
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        // A software RSA-2048 key that was never imported into the HSM.
+        let sw = Rsa::generate(2048).map_err(|e| EngineError::wrap("gen sw rsa", e))?;
+        let sw_pkey = PKey::from_rsa(sw).map_err(|e| EngineError::wrap("wrap sw rsa", e))?;
+
+        let pad_key = CString::new("rsa_padding_mode").unwrap();
+        let pad_val = CString::new("pss").unwrap();
+        let digest = [0u8; 32];
+        // SAFETY: a standard EVP_PKEY_sign sequence on a ctx bound to our engine
+        // (so the override dispatches); the software key carries no HSM handle, so
+        // the real sign must fail. Every rc is checked and the ctx is freed.
+        let rejected = unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new(sw_pkey.as_ptr().cast(), engine_raw);
+            assert!(!ctx.is_null(), "EVP_PKEY_CTX_new(sw pkey, engine)");
+            assert_eq!(ffi::EVP_PKEY_sign_init(ctx), 1, "EVP_PKEY_sign_init");
+            let md256 = ffi::EVP_sha256();
+            assert_eq!(
+                ffi::EVP_PKEY_CTX_ctrl(
+                    ctx,
+                    -1,
+                    ffi::EVP_PKEY_OP_TYPE_SIG_CONST,
+                    ffi::EVP_PKEY_CTRL_MD_CONST,
+                    0,
+                    md256.cast_mut().cast(),
+                ),
+                1,
+                "set signature md"
+            );
+            assert_eq!(
+                ffi::EVP_PKEY_CTX_ctrl_str(ctx, pad_key.as_ptr(), pad_val.as_ptr()),
+                1,
+                "set rsa_padding_mode:pss"
+            );
+            // The size query succeeds (AUTOARGLEN, no ownership check); the real
+            // sign must then fail for this software key.
+            let mut siglen: usize = 0;
+            assert_eq!(
+                ffi::EVP_PKEY_sign(
+                    ctx,
+                    std::ptr::null_mut(),
+                    &mut siglen,
+                    digest.as_ptr(),
+                    digest.len(),
+                ),
+                1,
+                "PSS size query"
+            );
+            let mut sig = vec![0u8; siglen];
+            let rc = ffi::EVP_PKEY_sign(
+                ctx,
+                sig.as_mut_ptr(),
+                &mut siglen,
+                digest.as_ptr(),
+                digest.len(),
+            );
+            ffi::EVP_PKEY_CTX_free(ctx);
+            rc != 1
+        };
+        // Capture the queued error to pin that the ownership gate in sign_inner
+        // rejected — not pss_sign's backstop null-key guard. A regression removing
+        // only the owns() early-reject would fall through to pss_sign (whose guard
+        // still errors), so `rejected` alone would not catch it; the distinct
+        // gate message would.
+        let err_text = openssl::error::ErrorStack::get().to_string();
+        assert!(
+            rejected,
+            "software-key RSA-PSS through the engine must be rejected, not signed"
+        );
+        assert!(
+            err_text.contains("software RSA signing through the engine is not supported"),
+            "expected the ownership gate to reject, not pss_sign's backstop; got: {err_text}"
+        );
+
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        Ok(())
+    }
+
+    /// Export the HSM's unwrapping public key through the import path
+    /// (`genpkey ... -pkeyopt tsra.key_usage:keyWrapping`) and prove it is a
+    /// usable 2048-bit RSA public key. Also pins that a non-2048 size is
+    /// rejected up front (the HSM unwrapping key is fixed at 2048 bits). Only
+    /// the mock test exercises this today; the hardware smoke follows.
+    #[cfg(feature = "mock")]
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_rsa_export_unwrapping_key(data: EngineData) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        // A non-2048 size is rejected before any export work.
+        let err = try_rsa_import(
+            engine_raw,
+            &[
+                ("rsa_keygen_bits", "3072"),
+                ("tsra.key_usage", "keyWrapping"),
+            ],
+        )
+        .expect_err("keyWrapping must reject a non-2048 size");
+        assert!(
+            err.contains("requires rsa_keygen_bits=2048"),
+            "unexpected error: {err}"
+        );
+
+        // The 2048 export yields a usable 2048-bit RSA public key.
+        let raw = try_rsa_import(
+            engine_raw,
+            &[
+                ("rsa_keygen_bits", "2048"),
+                ("tsra.key_usage", "keyWrapping"),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("keyWrapping export failed: {e}")))?;
+        // SAFETY: raw is the owning EVP_PKEY from the export.
+        let exported: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        let rsa = exported
+            .rsa()
+            .map_err(|e| EngineError::wrap("exported key is not RSA", e))?;
+        // size() is the modulus in bytes; 256 bytes == 2048 bits.
+        assert_eq!(rsa.size(), 256, "unwrapping key must be a 2048-bit RSA key");
+
+        // Teardown.
+        drop(exported);
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        Ok(())
+    }
+
+    /// Import an external RSA key through the pre-wrapped path
+    /// (`tsra.wrapped_key`): pre-wrap a software PKCS#8 key against the HSM's
+    /// unwrapping public key (RSA-OAEP-SHA256 + AES-256-KWP, via the same wrap
+    /// an external SDK holder would use), import the blob, and prove the masked
+    /// kind and reloaded public key — the wrapped-blob analogue of
+    /// [`run_rsa_import`]. Mock-only: it uses the cached unwrapping key handle.
+    #[cfg(feature = "mock")]
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_rsa_import_wrapped(data: EngineData, dir: &Path) -> EngineResult<()> {
+        use openssl::rsa::Rsa;
+        use tsra_api::HsmEncrypter;
+        use tsra_api::HsmHashAlgo;
+        use tsra_api::HsmKeyCommonProps;
+        use tsra_api::HsmKeyKind;
+        use tsra_api::HsmKeyManager;
+        use tsra_api::HsmRsaAesWrapAlgo;
+        use tsra_api::HsmRsaKeyUnmaskAlgo;
+        use zeroize::Zeroizing;
+
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        // Software RSA-2048 as unencrypted PKCS#8, plus its public DER.
+        let sw = Rsa::generate(2048).map_err(|e| EngineError::wrap("gen sw rsa", e))?;
+        let sw_pkey = PKey::from_rsa(sw).map_err(|e| EngineError::wrap("wrap sw rsa", e))?;
+        let pkcs8 = Zeroizing::new(
+            sw_pkey
+                .private_key_to_pkcs8()
+                .map_err(|e| EngineError::wrap("encode pkcs8", e))?,
+        );
+        let expected_pub = sw_pkey
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode sw pub", e))?;
+
+        // Pre-wrap the PKCS#8 against the HSM's unwrapping public key, exactly as
+        // an external party holding that key would, so the wrapped_key path
+        // receives a blob produced outside the import itself.
+        let wrapped = {
+            let ed = slot
+                .get(&engine)
+                .ok_or(EngineError::NullParam("engine_data"))?;
+            ed.with_session(|session| {
+                ed.with_unwrapping_key(session, |_unwrap_priv, unwrap_pub| {
+                    let mut wrap = HsmRsaAesWrapAlgo::new(HsmHashAlgo::Sha256, 32);
+                    HsmEncrypter::encrypt_vec(&mut wrap, unwrap_pub, &pkcs8)
+                        .map_err(|e| EngineError::wrap("external RSA-AES wrap", e))
+                })
+            })?
+        };
+
+        let blob_in = dir.join(format!("rsa-wrapped-in-{}.bin", std::process::id()));
+        let blob_out = dir.join(format!("rsa-wrapped-out-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&blob_in);
+        let _ = std::fs::remove_file(&blob_out);
+        write_key_material(&blob_in, &wrapped)
+            .map_err(|e| EngineError::wrap("write wrapped blob", e))?;
+
+        // Import through the pre-wrapped path.
+        let raw = try_rsa_import(
+            engine_raw,
+            &[
+                ("rsa_keygen_bits", "2048"),
+                ("tsra.wrapped_key", blob_in.to_str().unwrap()),
+                ("tsra.masked_key", blob_out.to_str().unwrap()),
+                ("tsra.key_kind", "RSA-CRT"),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("wrapped_key import failed: {e}")))?;
+
+        // SAFETY: raw is the owning EVP_PKEY from the import.
+        let imported: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        let imported_pub = imported
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode imported pub", e))?;
+        assert_eq!(
+            imported_pub, expected_pub,
+            "wrapped import public key mismatch"
+        );
+
+        // The masked blob carries RSA-CRT.
+        let blob = std::fs::read(&blob_out).map_err(|e| EngineError::wrap("read blob", e))?;
+        slot.get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?
+            .with_session(|session| {
+                let mut algo = HsmRsaKeyUnmaskAlgo::default();
+                let (priv_key, _pub) = HsmKeyManager::unmask_key_pair(session, &mut algo, &blob)
+                    .map_err(|e| EngineError::wrap("unmask blob for kind check", e))?;
+                assert_eq!(
+                    priv_key.kind(),
+                    HsmKeyKind::RsaCrt,
+                    "wrapped masked blob key kind mismatch"
+                );
+                crate::context::delete_hsm_key(priv_key, "rsa wrapped kind-check key");
+                Ok(())
+            })?;
+
+        // The blob reloads through the loader with the same public key.
+        let uri = format!("tsra://{};type=rsa", blob_out.display());
+        let reloaded_raw = crate::keyload::load_key(
+            &engine,
+            slot.get(&engine)
+                .ok_or(EngineError::NullParam("engine_data"))?,
+            &uri,
+        )?;
+        // SAFETY: reloaded_raw is the owning EVP_PKEY from load_key.
+        let reloaded: PKey<Public> = unsafe { PKey::from_ptr(reloaded_raw.cast()) };
+        let reloaded_pub = reloaded
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode reloaded pub", e))?;
+        assert_eq!(reloaded_pub, expected_pub, "reloaded public key mismatch");
+
+        // Teardown.
+        drop(imported);
+        drop(reloaded);
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        let _ = std::fs::remove_file(&blob_in);
+        let _ = std::fs::remove_file(&blob_out);
+        Ok(())
+    }
+
+    /// A direct-ABI keygen-bits setter (`EVP_PKEY_CTX_set_rsa_keygen_bits`,
+    /// which dispatches the numeric `EVP_PKEY_CTRL_RSA_KEYGEN_BITS` ctrl, not
+    /// the string form) must be recorded in the import state. Request
+    /// keyWrapping with a direct-set 3072 and confirm it is rejected for not
+    /// being 2048 — it would wrongly fall back to the 2048 default if the
+    /// numeric ctrl were not recorded. Mock-only.
+    #[cfg(feature = "mock")]
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_rsa_keygen_bits_direct_ctrl(data: EngineData) -> EngineResult<()> {
+        use std::ffi::CString;
+        use std::ffi::c_int;
+
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        // SAFETY: standard keygen ctx; bits set through the numeric ctrl, then a
+        // keygen that must fail the keyWrapping non-2048 check. Freed on all paths.
+        let err = unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new_id(ffi::EVP_PKEY_RSA as c_int, engine_raw);
+            assert!(!ctx.is_null(), "EVP_PKEY_CTX_new_id(RSA, engine)");
+            assert_eq!(ffi::EVP_PKEY_keygen_init(ctx), 1, "EVP_PKEY_keygen_init");
+            let usage = CString::new("tsra.key_usage").unwrap();
+            let wrapping = CString::new("keyWrapping").unwrap();
+            assert_eq!(
+                ffi::EVP_PKEY_CTX_ctrl_str(ctx, usage.as_ptr(), wrapping.as_ptr()),
+                1,
+                "key_usage must be accepted"
+            );
+            assert!(
+                ffi::EVP_PKEY_CTX_ctrl(
+                    ctx,
+                    ffi::EVP_PKEY_RSA as c_int,
+                    ffi::EVP_PKEY_OP_KEYGEN_CONST,
+                    ffi::EVP_PKEY_CTRL_RSA_KEYGEN_BITS_CONST,
+                    3072,
+                    std::ptr::null_mut(),
+                ) > 0,
+                "direct keygen_bits ctrl must be accepted"
+            );
+            let mut pkey = std::ptr::null_mut();
+            let rc = ffi::EVP_PKEY_keygen(ctx, &mut pkey);
+            let err = openssl::error::ErrorStack::get().to_string();
+            if !pkey.is_null() {
+                ffi::EVP_PKEY_free(pkey);
+            }
+            ffi::EVP_PKEY_CTX_free(ctx);
+            assert_ne!(
+                rc, 1,
+                "keyWrapping with a direct-set 3072 bits must be rejected"
+            );
+            err
+        };
+        assert!(
+            err.contains("requires rsa_keygen_bits=2048"),
+            "unexpected error: {err}"
+        );
+
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        Ok(())
+    }
+
+    /// Run an HKDF derive on a `NID_hkdf` context against `engine_raw` with
+    /// the given ctrl-string options. Returns the output bytes, or the
+    /// OpenSSL error text if an option or the derive is rejected.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn try_hkdf(
+        engine_raw: *mut ffi::ENGINE,
+        opts: &[(&str, &str)],
+        len_hint: Option<usize>,
+    ) -> Result<Vec<u8>, String> {
+        use std::ffi::CString;
+        use std::ffi::c_int;
+
+        // SAFETY: standard NID_hkdf derive sequence; ctx freed on all paths.
+        unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new_id(ffi::NID_hkdf as c_int, engine_raw);
+            assert!(!ctx.is_null(), "EVP_PKEY_CTX_new_id(NID_hkdf, engine)");
+            assert_eq!(ffi::EVP_PKEY_derive_init(ctx), 1, "EVP_PKEY_derive_init");
+            for (k, v) in opts {
+                let key = CString::new(*k).unwrap();
+                let value = CString::new(*v).unwrap();
+                if ffi::EVP_PKEY_CTX_ctrl_str(ctx, key.as_ptr(), value.as_ptr()) != 1 {
+                    let err = openssl::error::ErrorStack::get().to_string();
+                    ffi::EVP_PKEY_CTX_free(ctx);
+                    return Err(format!("option {k} rejected: {err}"));
+                }
+            }
+            // The built-in HKDF has no size query (pkeyutl requires -kdflen),
+            // so software-path callers pass the length; armed callers query.
+            let mut len = match len_hint {
+                Some(n) => n,
+                None => {
+                    let mut len = 0usize;
+                    if ffi::EVP_PKEY_derive(ctx, std::ptr::null_mut(), &mut len) != 1 {
+                        let err = openssl::error::ErrorStack::get().to_string();
+                        ffi::EVP_PKEY_CTX_free(ctx);
+                        return Err(format!("size query failed: {err}"));
+                    }
+                    len
+                }
+            };
+            let mut buf = vec![0u8; len.max(1)];
+            let rc = ffi::EVP_PKEY_derive(ctx, buf.as_mut_ptr(), &mut len);
+            ffi::EVP_PKEY_CTX_free(ctx);
+            if rc != 1 {
+                return Err(openssl::error::ErrorStack::get().to_string());
+            }
+            buf.truncate(len);
+            Ok(buf)
+        }
+    }
+
+    /// Chained ECDH → HKDF round trip: derive a masked shared secret with a
+    /// keyAgreement key, then HKDF it into masked AES and HMAC keys, in
+    /// buffer, file-IKM and output_file modes. Negatives pin the parameter
+    /// validation.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_hkdf(data: EngineData, dir: &Path) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        // ECDH: keyAgreement key + software peer → masked shared secret.
+        let agree_blob = dir.join(format!("hkdf-agree-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&agree_blob);
+        let raw = try_armed_keygen(
+            engine_raw,
+            "P-384",
+            &agree_blob,
+            &[("tsra.key_usage", "keyAgreement")],
+        )
+        .map_err(|e| EngineError::Other(format!("keyAgreement keygen failed: {e}")))?;
+        let group = EcGroup::from_curve_name(Nid::SECP384R1).unwrap();
+        let peer = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let secret_blob = derive_masked(engine_raw, raw, peer.as_ptr().cast(), None);
+        assert!(!secret_blob.is_empty(), "no shared-secret blob");
+        let ikm_path = dir.join(format!("hkdf-ikm-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&ikm_path);
+        write_key_material(&ikm_path, &secret_blob)
+            .map_err(|e| EngineError::wrap(format!("write IKM blob {}", ikm_path.display()), e))?;
+
+        // HMAC-kind derived key, IKM by file, blob to buffer.
+        let ikm = ikm_path.to_str().unwrap();
+        let hmac_blob = try_hkdf(
+            engine_raw,
+            &[
+                ("md", "SHA384"),
+                ("salt", "test-salt"),
+                ("info", "engine-hkdf"),
+                ("tsra.ikm_file", ikm),
+                ("derived_key_type", "hmac"),
+                ("derived_key_bits", "384"),
+            ],
+            None,
+        )
+        .expect("hmac-kind HKDF failed");
+        assert!(!hmac_blob.is_empty(), "empty hmac-kind blob");
+
+        // AES-kind derived key with defaults (type aes, 256 bits).
+        let aes_blob = try_hkdf(
+            engine_raw,
+            &[
+                ("md", "SHA256"),
+                ("tsra.ikm_file", ikm),
+                ("derived_key_type", "aes"),
+            ],
+            None,
+        )
+        .expect("aes-kind HKDF failed");
+        assert!(!aes_blob.is_empty(), "empty aes-kind blob");
+
+        // No md: defaults to SHA-256 for provider parity. An hmac derive with
+        // neither md nor derived_key_bits must succeed as HMAC-SHA256/256 — this
+        // only holds if the default digest is SHA-256, since HMAC bits must match
+        // the digest size (a different default would mismatch the 256-bit default).
+        let default_md_blob = try_hkdf(
+            engine_raw,
+            &[("tsra.ikm_file", ikm), ("derived_key_type", "hmac")],
+            None,
+        )
+        .expect("HKDF with the default md (SHA-256) failed");
+        assert!(!default_md_blob.is_empty(), "empty default-md blob");
+
+        // Armed in-memory IKM: the masked shared secret as hexkey bytes.
+        let hex_ikm: String = secret_blob.iter().map(|b| format!("{b:02x}")).collect();
+        let mem_blob = try_hkdf(
+            engine_raw,
+            &[
+                ("md", "SHA256"),
+                ("hexkey", hex_ikm.as_str()),
+                ("derived_key_type", "aes"),
+            ],
+            None,
+        )
+        .expect("hexkey-armed HKDF failed");
+        assert!(!mem_blob.is_empty(), "empty blob from in-memory IKM");
+
+        // key/hexkey and tsra.ikm_file are mutually exclusive.
+        let err = try_hkdf(
+            engine_raw,
+            &[
+                ("md", "SHA256"),
+                ("hexkey", hex_ikm.as_str()),
+                ("tsra.ikm_file", ikm),
+                ("derived_key_type", "aes"),
+            ],
+            None,
+        )
+        .expect_err("both IKM sources must fail");
+        assert!(
+            err.contains("mutually exclusive"),
+            "unexpected error: {err}"
+        );
+
+        // Only extract-and-expand is supported armed; each other mode is
+        // accepted as a ctrl but rejected at derive time.
+        for bad_mode in ["EXTRACT_ONLY", "EXPAND_ONLY"] {
+            let err = try_hkdf(
+                engine_raw,
+                &[
+                    ("md", "SHA256"),
+                    ("tsra.ikm_file", ikm),
+                    ("derived_key_type", "aes"),
+                    ("mode", bad_mode),
+                ],
+                None,
+            )
+            .expect_err("non-default HKDF mode must be rejected");
+            assert!(
+                err.contains("extract-and-expand"),
+                "unexpected error for mode {bad_mode}: {err}"
+            );
+        }
+
+        // output_file mode: blob to disk, nothing in the buffer.
+        let out = dir.join(format!("hkdf-derived-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let returned = try_hkdf(
+            engine_raw,
+            &[
+                ("md", "SHA256"),
+                ("tsra.ikm_file", ikm),
+                ("derived_key_type", "hmac"),
+                ("derived_key_bits", "256"),
+                ("output_file", out.to_str().unwrap()),
+            ],
+            None,
+        )
+        .expect("output_file HKDF failed");
+        assert!(returned.is_empty(), "file mode must return no bytes");
+        assert!(
+            std::fs::metadata(&out)
+                .map(|m| m.len() > 0)
+                .unwrap_or(false),
+            "derived blob not written"
+        );
+
+        // Negatives: hmac bits must be a SHA-2 size; md is required; an armed
+        // ctx without any IKM is rejected.
+        let err = try_hkdf(
+            engine_raw,
+            &[
+                ("md", "SHA256"),
+                ("tsra.ikm_file", ikm),
+                ("derived_key_type", "hmac"),
+                ("derived_key_bits", "128"),
+            ],
+            None,
+        )
+        .expect_err("hmac/128 must fail");
+        assert!(
+            err.contains("must match the HKDF digest size"),
+            "unexpected error: {err}"
+        );
+        // Digest/bits mismatch: the HMAC kind follows md, so SHA-256 with
+        // 384-bit keys must be rejected.
+        let err = try_hkdf(
+            engine_raw,
+            &[
+                ("md", "SHA256"),
+                ("tsra.ikm_file", ikm),
+                ("derived_key_type", "hmac"),
+                ("derived_key_bits", "384"),
+            ],
+            None,
+        )
+        .expect_err("md/bits mismatch must fail");
+        assert!(
+            err.contains("must match the HKDF digest size"),
+            "unexpected error: {err}"
+        );
+        // (Missing md is no longer an error: it defaults to SHA-256 for provider
+        // parity — covered by the default-md derive above.)
+        let err = try_hkdf(
+            engine_raw,
+            &[("md", "SHA256"), ("derived_key_type", "aes")],
+            None,
+        )
+        .expect_err("missing IKM must fail");
+        assert!(err.contains("requires an IKM"), "unexpected error: {err}");
+
+        // The blobs' properties are the observable contract: unmask each and
+        // check kind, size and usage flags; prove the HMAC key signs.
+        let data = slot
+            .get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        data.with_session(|session| {
+            let mut unmask = HsmGenericSecretKeyUnmaskAlgo::default();
+            let k = HsmKeyManager::unmask_key(session, &mut unmask, &hmac_blob)
+                .map_err(|e| EngineError::wrap("unmask hmac blob", e))?;
+            assert_eq!(k.kind(), HsmKeyKind::HmacSha384, "hmac kind follows md");
+            assert_eq!(k.bits(), 384);
+            assert!(k.can_sign() && k.can_verify(), "hmac usage flags");
+            crate::context::delete_hsm_key(k, "hkdf test hmac props key");
+
+            let mut unmask = HsmGenericSecretKeyUnmaskAlgo::default();
+            let k = HsmKeyManager::unmask_key(session, &mut unmask, &aes_blob)
+                .map_err(|e| EngineError::wrap("unmask aes blob", e))?;
+            assert_eq!(k.kind(), HsmKeyKind::Aes);
+            assert_eq!(k.bits(), 256);
+            assert!(k.can_encrypt() && k.can_decrypt(), "aes usage flags");
+            crate::context::delete_hsm_key(k, "hkdf test aes props key");
+
+            // Usability: the derived key produces an HMAC tag of the digest
+            // size.
+            let mut unmask = HsmHmacKeyUnmaskAlgo::default();
+            let hk = HsmKeyManager::unmask_key(session, &mut unmask, &hmac_blob)
+                .map_err(|e| EngineError::wrap("unmask hmac key", e))?;
+            let mut algo = HsmHmacAlgo::new();
+            let tag = HsmSigner::sign_vec(&mut algo, &hk, b"hkdf playground tag");
+            crate::context::delete_hsm_key(hk, "hkdf test hmac sign key");
+            let tag = tag.map_err(|e| EngineError::wrap("hmac sign", e))?;
+            assert_eq!(tag.len(), 48, "hmac-sha384 tag size");
+            Ok(())
+        })?;
+
+        // Matrix coverage: derive across digests (HMAC kind follows the digest)
+        // and AES key sizes, unmask each and confirm the kind and bit length.
+        // SHA-384/HMAC and AES-256 are already covered above.
+        //
+        // Each derive is driven through the engine (try_hkdf → EVP_PKEY_derive
+        // → the handler's own with_session), so the blobs are collected first
+        // and unmasked afterwards: unmasking inside a with_session that also
+        // drove a derive would re-enter the session lock and deadlock.
+        let matrix = [
+            ("SHA256", "hmac", 256u32, HsmKeyKind::HmacSha256),
+            ("SHA512", "hmac", 512, HsmKeyKind::HmacSha512),
+            ("SHA256", "aes", 128, HsmKeyKind::Aes),
+            ("SHA256", "aes", 192, HsmKeyKind::Aes),
+        ];
+        let mut derived = Vec::new();
+        for (md, ktype, bits, kind) in matrix {
+            let bits_s = bits.to_string();
+            let blob = try_hkdf(
+                engine_raw,
+                &[
+                    ("md", md),
+                    ("tsra.ikm_file", ikm),
+                    ("derived_key_type", ktype),
+                    ("derived_key_bits", bits_s.as_str()),
+                ],
+                None,
+            )
+            .map_err(|e| EngineError::Other(format!("hkdf {md}/{ktype}/{bits} failed: {e}")))?;
+            assert!(!blob.is_empty(), "empty {ktype}/{bits} blob");
+            derived.push((blob, bits, kind, md, ktype));
+        }
+        data.with_session(|session| {
+            for (blob, bits, kind, md, ktype) in &derived {
+                let mut unmask = HsmGenericSecretKeyUnmaskAlgo::default();
+                let k = HsmKeyManager::unmask_key(session, &mut unmask, blob)
+                    .map_err(|e| EngineError::wrap("unmask matrix blob", e))?;
+                assert_eq!(k.kind(), *kind, "kind for {md}/{ktype}/{bits}");
+                assert_eq!(k.bits(), *bits, "bits for {md}/{ktype}/{bits}");
+                crate::context::delete_hsm_key(k, "hkdf matrix key");
+            }
+            Ok(())
+        })?;
+
+        // Teardown (see run_keygen for the release ordering contract).
+        // SAFETY: raw is the owning key from keygen.
+        let agreed: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        drop(agreed);
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        for p in [&agree_blob, &ikm_path, &out] {
+            let _ = std::fs::remove_file(p);
+        }
+        Ok(())
+    }
+
+    /// Derive through `EVP_PKEY_derive` against our engine: returns the masked
+    /// blob (buffer mode) or an empty vec after writing `output_file`.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn derive_masked(
+        engine_raw: *mut ffi::ENGINE,
+        local: *mut ffi::EVP_PKEY,
+        peer: *mut ffi::EVP_PKEY,
+        output_file: Option<&Path>,
+    ) -> Vec<u8> {
+        use std::ffi::CString;
+
+        // SAFETY: standard EVP derive sequence; all return codes checked.
+        unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new(local, engine_raw);
+            assert!(!ctx.is_null(), "EVP_PKEY_CTX_new(pkey, engine)");
+            assert_eq!(ffi::EVP_PKEY_derive_init(ctx), 1, "EVP_PKEY_derive_init");
+            assert_eq!(
+                ffi::EVP_PKEY_derive_set_peer(ctx, peer),
+                1,
+                "EVP_PKEY_derive_set_peer"
+            );
+            if let Some(path) = output_file {
+                let k = CString::new("output_file").unwrap();
+                let v = CString::new(path.to_str().unwrap()).unwrap();
+                assert_eq!(
+                    ffi::EVP_PKEY_CTX_ctrl_str(ctx, k.as_ptr(), v.as_ptr()),
+                    1,
+                    "output_file"
+                );
+            }
+            let mut len = 0usize;
+            assert_eq!(
+                ffi::EVP_PKEY_derive(ctx, std::ptr::null_mut(), &mut len),
+                1,
+                "derive size query"
+            );
+            assert_eq!(len, if output_file.is_some() { 1 } else { 8192 });
+            let mut buf = vec![0u8; len];
+            assert_eq!(
+                ffi::EVP_PKEY_derive(ctx, buf.as_mut_ptr(), &mut len),
+                1,
+                "derive"
+            );
+            buf.truncate(len);
+            ffi::EVP_PKEY_CTX_free(ctx);
+            buf
+        }
+    }
+
+    /// Generate a keyAgreement key through the pkey method, derive against a
+    /// software peer in buffer and output_file modes, reload the masked EC
+    /// blob and derive again, and pin the negatives (agreement keys must not
+    /// sign; a peer on another curve is rejected at set_peer).
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_derive(data: EngineData, dir: &Path, curve: &str) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+
+        let blob_path = dir.join(format!("engine-agree-{curve}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&blob_path);
+        let raw = try_armed_keygen(
+            engine_raw,
+            curve,
+            &blob_path,
+            &[
+                ("tsra.session", "false"),
+                ("tsra.key_usage", "keyAgreement"),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("keyAgreement keygen failed: {e}")))?;
+
+        // Software peer on the same curve.
+        let nid = match curve {
+            "P-256" => Nid::X9_62_PRIME256V1,
+            "P-521" => Nid::SECP521R1,
+            _ => Nid::SECP384R1,
+        };
+        let group = EcGroup::from_curve_name(nid).unwrap();
+        let peer = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let peer_raw: *mut ffi::EVP_PKEY = peer.as_ptr().cast();
+
+        // Buffer mode: the masked blob of the derived secret.
+        let blob = derive_masked(engine_raw, raw, peer_raw, None);
+        assert!(!blob.is_empty(), "buffer-mode derive produced no blob");
+
+        // File mode: blob to disk, nothing in the buffer.
+        let out = dir.join(format!("engine-derived-{curve}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let returned = derive_masked(engine_raw, raw, peer_raw, Some(&out));
+        assert!(returned.is_empty(), "file-mode derive must return no bytes");
+        let written = std::fs::metadata(&out)
+            .map_err(|e| EngineError::wrap("stat derived blob", e))?
+            .len();
+        assert!(written > 0, "derived blob not written");
+
+        // An agreement key must not sign.
+        // SAFETY: DigestSign on the agreement key must fail at the HSM.
+        unsafe {
+            let md_ctx = ffi::EVP_MD_CTX_new();
+            assert!(!md_ctx.is_null());
+            assert_eq!(
+                ffi::EVP_DigestSignInit(
+                    md_ctx,
+                    std::ptr::null_mut(),
+                    ffi::EVP_sha384(),
+                    std::ptr::null_mut(),
+                    raw
+                ),
+                1
+            );
+            let msg = b"keyAgreement keys must not sign";
+            let mut sig_len = 0usize;
+            let mut rc = ffi::EVP_DigestSign(
+                md_ctx,
+                std::ptr::null_mut(),
+                &mut sig_len,
+                msg.as_ptr(),
+                msg.len(),
+            );
+            if rc == 1 {
+                let mut sig = vec![0u8; sig_len];
+                rc = ffi::EVP_DigestSign(
+                    md_ctx,
+                    sig.as_mut_ptr(),
+                    &mut sig_len,
+                    msg.as_ptr(),
+                    msg.len(),
+                );
+            }
+            assert_ne!(rc, 1, "keyAgreement key must not sign");
+            ffi::ERR_clear_error();
+            ffi::EVP_MD_CTX_free(md_ctx);
+        }
+
+        // The masked EC blob reloads and derives (the loaded-key path).
+        let uri = format!("tsra://{};type=ec", blob_path.display());
+        let reloaded_raw = crate::keyload::load_key(
+            &engine,
+            slot.get(&engine)
+                .ok_or(EngineError::NullParam("engine_data"))?,
+            &uri,
+        )?;
+        let blob2 = derive_masked(engine_raw, reloaded_raw, peer_raw, None);
+        assert!(!blob2.is_empty(), "loaded-key derive produced no blob");
+
+        // A peer on a different curve is rejected at set_peer.
+        let other = if nid == Nid::SECP384R1 {
+            Nid::X9_62_PRIME256V1
+        } else {
+            Nid::SECP384R1
+        };
+        let other_group = EcGroup::from_curve_name(other).unwrap();
+        let bad_peer = PKey::from_ec_key(EcKey::generate(&other_group).unwrap()).unwrap();
+        // SAFETY: set_peer must reject the group mismatch; ctx is freed here.
+        unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new(raw, engine_raw);
+            assert!(!ctx.is_null());
+            assert_eq!(ffi::EVP_PKEY_derive_init(ctx), 1);
+            assert_ne!(
+                ffi::EVP_PKEY_derive_set_peer(ctx, bad_peer.as_ptr().cast()),
+                1,
+                "curve-mismatch peer must be rejected"
+            );
+            ffi::ERR_clear_error();
+            ffi::EVP_PKEY_CTX_free(ctx);
+        }
+
+        // Teardown (see run_keygen for the release ordering contract).
+        // SAFETY: raw is the owning key from keygen.
+        let generated: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        // SAFETY: reloaded_raw is the owning key from load_key.
+        let reloaded: PKey<Public> = unsafe { PKey::from_ptr(reloaded_raw.cast()) };
+        drop(generated);
+        drop(reloaded);
+        let _ = slot.take(&mut engine)?;
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        let _ = std::fs::remove_file(&blob_path);
+        let _ = std::fs::remove_file(&out);
+        Ok(())
+    }
+
+    /// Create an EC keygen context against `engine_raw`, apply
+    /// `ec_paramgen_curve:<curve>` + `tsra.masked_key:<blob>` + `extra`
+    /// control strings (each must be accepted at the parameter surface), and
+    /// run `EVP_PKEY_keygen`. Returns the generated key, or the OpenSSL error
+    /// stack text if keygen itself fails.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn try_armed_keygen(
+        engine_raw: *mut ffi::ENGINE,
+        curve: &str,
+        blob: &Path,
+        extra: &[(&str, &str)],
+    ) -> Result<*mut ffi::EVP_PKEY, String> {
+        use std::ffi::CString;
+        use std::ffi::c_int;
+
+        let cstr = |s: &str| CString::new(s).unwrap();
+        let mut opts = vec![
+            (cstr("ec_paramgen_curve"), cstr(curve)),
+            (cstr("tsra.masked_key"), cstr(blob.to_str().unwrap())),
+        ];
+        opts.extend(extra.iter().map(|(k, v)| (cstr(k), cstr(v))));
+
+        // SAFETY: standard EVP_PKEY keygen sequence against our engine; every
+        // return code is checked and the ctx is freed on all paths.
+        unsafe {
+            let ctx = ffi::EVP_PKEY_CTX_new_id(ffi::EVP_PKEY_EC as c_int, engine_raw);
+            assert!(!ctx.is_null(), "EVP_PKEY_CTX_new_id(EC, engine)");
+            assert_eq!(ffi::EVP_PKEY_keygen_init(ctx), 1, "EVP_PKEY_keygen_init");
+            for (key, value) in &opts {
+                assert_eq!(
+                    ffi::EVP_PKEY_CTX_ctrl_str(ctx, key.as_ptr(), value.as_ptr()),
+                    1,
+                    "pkey option {key:?} must be accepted at the parameter surface"
+                );
+            }
+            let mut pkey = std::ptr::null_mut();
+            let rc = ffi::EVP_PKEY_keygen(ctx, &mut pkey);
+            ffi::EVP_PKEY_CTX_free(ctx);
+            if rc == 1 {
+                assert!(!pkey.is_null(), "keygen returned a NULL EVP_PKEY");
+                Ok(pkey)
+            } else {
+                if !pkey.is_null() {
+                    ffi::EVP_PKEY_free(pkey);
+                }
+                Err(openssl::error::ErrorStack::get().to_string())
+            }
+        }
+    }
+
+    /// Generate a key on the HSM through the real `EVP_PKEY_keygen` path (see
+    /// [`keygen_engine`] / [`try_armed_keygen`]). Signs with the returned key,
+    /// verifies in software, and reloads the written masked blob through the
+    /// loader to prove the generate→persist→reload cycle closes. `curve` is
+    /// the OpenSSL curve name (e.g. "P-384"). Backend-agnostic: the caller
+    /// opens `data` against the mock or a real device.
+    #[allow(unsafe_code)]
+    pub(super) fn run_keygen(data: EngineData, dir: &Path, curve: &str) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        tsra_ossl_engine_core::asn1_method::register_ec_asn1_method::<crate::asn1::TsraEcAsn1>(
+            &engine,
+        )?;
+
+        let blob_path = dir.join(format!("engine-keygen-{curve}-{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&blob_path);
+        // The curve's conventional digest.
+        // SAFETY: the EVP_sha* accessors return process-lifetime constants.
+        let (evp_md, verifier_md) = unsafe {
+            match curve {
+                "P-256" => (ffi::EVP_sha256(), MessageDigest::sha256()),
+                "P-521" => (ffi::EVP_sha512(), MessageDigest::sha512()),
+                _ => (ffi::EVP_sha384(), MessageDigest::sha384()),
+            }
+        };
+
+        // The provider-parity companions are passed explicitly with their
+        // (only) supported values.
+        let raw = try_armed_keygen(
+            engine_raw,
+            curve,
+            &blob_path,
+            &[
+                ("tsra.session", "false"),
+                ("tsra.key_usage", "digitalSignature"),
+            ],
+        )
+        .map_err(|e| EngineError::Other(format!("keygen failed: {e}")))?;
+        let blob_len = std::fs::metadata(&blob_path)
+            .map_err(|e| EngineError::wrap("stat masked blob", e))?
+            .len();
+        assert!(blob_len > 0, "masked blob not written");
+
+        // The generated key must sign immediately (HSM sign_sig), verifying in
+        // software against its own public half.
+        let msg = b"engine ecdsa signing with a generated key";
+        let sig = evp_digest_sign(raw, msg, evp_md);
+        assert!(!sig.is_empty(), "generated key produced an empty signature");
+        // SAFETY: raw is the owning EVP_PKEY from keygen.
+        let generated: PKey<Public> = unsafe { PKey::from_ptr(raw.cast()) };
+        let pub_der = generated
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode generated public key", e))?;
+        let pubkey = PKey::public_key_from_der(&pub_der)
+            .map_err(|e| EngineError::wrap("parse public key", e))?;
+        let mut verifier = Verifier::new(verifier_md, &pubkey)
+            .map_err(|e| EngineError::wrap("init verifier", e))?;
+        verifier
+            .update(msg)
+            .map_err(|e| EngineError::wrap("verifier update", e))?;
+        assert!(
+            verifier
+                .verify(&sig)
+                .map_err(|e| EngineError::wrap("verify", e))?,
+            "generated key's signature must verify"
+        );
+
+        // Provider parity: -text (EVP_PKEY_print_private) prints the info
+        // block, and a private-key export fails with the one clear refusal
+        // instead of the raw i2d error trail.
+        // SAFETY: mem BIO + valid pkey; BIO_ctrl(BIO_CTRL_INFO) hands out a
+        // borrowed pointer to the BIO's buffer.
+        unsafe {
+            let bio = ffi::BIO_new(ffi::BIO_s_mem());
+            assert!(!bio.is_null());
+            assert_eq!(
+                ffi::EVP_PKEY_print_private(bio, raw, 0, std::ptr::null_mut()),
+                1,
+                "EVP_PKEY_print_private"
+            );
+            let mut data: *mut std::ffi::c_char = std::ptr::null_mut();
+            let len = ffi::BIO_ctrl(
+                bio,
+                ffi::BIO_CTRL_INFO as std::ffi::c_int,
+                0,
+                (&raw mut data).cast::<std::ffi::c_void>(),
+            );
+            assert!(len > 0);
+            let text = std::str::from_utf8(std::slice::from_raw_parts(
+                data.cast::<u8>(),
+                usize::try_from(len).map_err(|_| EngineError::Other("BIO len".into()))?,
+            ))
+            .map_err(|_| EngineError::Other("print output is not UTF-8".into()))?;
+            assert!(
+                text.contains("==== PrivateKeyInfo (PKCS#8) ===="),
+                "missing provider-parity block: {text}"
+            );
+            assert!(
+                text.contains(&format!("curve                : {curve}")),
+                "missing curve line for {curve}: {text}"
+            );
+            ffi::BIO_free(bio);
+
+            let p8 = ffi::EVP_PKEY2PKCS8(raw);
+            assert!(
+                p8.is_null(),
+                "private export of an HSM-backed key must be refused"
+            );
+            let err = openssl::error::ErrorStack::get().to_string();
+            assert!(
+                err.contains("cannot be exported"),
+                "missing refusal message: {err}"
+            );
+        }
+
+        // The written blob must reload through the loader and carry the same
+        // public key.
+        let uri = format!("tsra://{};type=ec", blob_path.display());
+        let reloaded_raw = crate::keyload::load_key(
+            &engine,
+            slot.get(&engine)
+                .ok_or(EngineError::NullParam("engine_data"))?,
+            &uri,
+        )?;
+        // SAFETY: reloaded_raw is the owning EVP_PKEY from load_key.
+        let reloaded: PKey<Public> = unsafe { PKey::from_ptr(reloaded_raw.cast()) };
+        let reloaded_der = reloaded
+            .public_key_to_der()
+            .map_err(|e| EngineError::wrap("encode reloaded public key", e))?;
+        assert_eq!(reloaded_der, pub_der, "reloaded blob public key mismatch");
+
+        // Drop the keys (releasing their engine refs), drop the parked
+        // EngineData (deleting the HSM keys), then the test engine.
+        drop(generated);
+        drop(reloaded);
+        let _ = slot.take(&mut engine)?;
+        // Leave the global ASN1 table while the ENGINE is still alive
+        // (production does this in the destroy hook, which runs mid-free).
+        tsra_ossl_engine_core::asn1_method::release_ec_asn1_method(&engine);
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+        // The framework freed this engine's pkey method during ENGINE_free;
+        // drop the stale table entry (address-only, nothing dereferenced).
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        let _ = std::fs::remove_file(&blob_path);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "mock"))]
+mod mock {
+    #![allow(clippy::unwrap_used)]
+
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    use openssl::ec::EcGroup;
+    use openssl::ec::EcKey;
+    use openssl::hash::MessageDigest;
+    use openssl::nid::Nid;
+    use openssl::pkey::PKey;
+    use serial_test::serial;
+    use tsra_api::HsmEccCurve;
+    use tsra_api::HsmEccPrivateKey;
+    use tsra_api::HsmEccSignAlgo;
+    use tsra_api::HsmSigner;
+
+    use super::*;
+
+    /// Shared per-process MOBK path. The mock device's BK3 is global to the
+    /// process: the first test establishes it (plaintext OBK) and the engine
+    /// persists the MOBK here; later tests re-init from that MOBK (re-running
+    /// init_bk3 fails). Shared across tests so the second open sees the first
+    /// open's persisted MOBK.
+    fn shared_mobk_path() -> PathBuf {
+        std::env::temp_dir().join(format!("engine-test-mobk-{}.bin", std::process::id()))
+    }
+
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let pid = std::process::id();
+            let dir = std::env::temp_dir().join(format!("engine-ctx-{tag}-{pid}-{n}"));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Materialize a fresh P-384 key pair on disk + a 48-byte OBK, return
+    /// settings pointing at them with resiliency enabled.
+    fn caller_settings(scratch: &Scratch) -> ResiliencySettings {
+        let group = EcGroup::from_curve_name(Nid::SECP384R1).unwrap();
+        let ec = EcKey::generate(&group).unwrap();
+        let pkey = PKey::from_ec_key(ec).unwrap();
+        // PKCS#8: FilePotaCallback signs via tsra_crypto, which accepts only
+        // that private-key format.
+        let priv_der = pkey.private_key_to_pkcs8().unwrap();
+        let pub_der = pkey.public_key_to_der().unwrap();
+
+        let priv_path = scratch.0.join("pota_priv.der");
+        let pub_path = scratch.0.join("pota_pub.der");
+        let obk_path = scratch.0.join("obk.bin");
+        fs::write(&priv_path, &priv_der).unwrap();
+        fs::write(&pub_path, &pub_der).unwrap();
+        fs::write(&obk_path, vec![0u8; 48]).unwrap();
+
+        ResiliencySettings {
+            enabled: true,
+            storage_dir: scratch.0.join("res"),
+            obk_source: HsmOwnerBackupKeySource::Caller,
+            obk_path,
+            mobk_path: shared_mobk_path(),
+            pota_source: HsmPotaEndorsementSource::Caller,
+            pota_priv_path: Some(priv_path),
+            pota_pub_path: Some(pub_path),
+        }
+    }
+
+    // `#[serial]`: these share the process-global mock device (BK3 state),
+    // so they must not run concurrently.
+    #[test]
+    #[serial]
+    fn open_hsm_with_resiliency_succeeds() {
+        let scratch = Scratch::new("open");
+        // The storage dir is created by the open path (setup_storage_dir) with
+        // mode 0700; pre-creating it here would inherit the umask and could be
+        // rejected, so leave it to the open path to stay umask-independent.
+        let settings = caller_settings(&scratch);
+        let creds = HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN);
+
+        let data = EngineData::new();
+        assert!(!data.is_hsm_open());
+        data.open_hsm_with(settings, creds).unwrap();
+        assert!(data.is_hsm_open());
+    }
+
+    /// Full engine key-load round trip: generate an EC key + its masked blob in
+    /// the HSM, write the blob to disk, load it back through the engine's
+    /// `load_private_key` path, and verify the returned EVP_PKEY's public key
+    /// matches. Dropping the EVP_PKEY (no ex_data free callback) and then the
+    /// EngineData (which deletes the loaded key from the HSM) must not crash.
+    #[test]
+    #[serial]
+    fn load_ec_key_round_trips_through_engine() {
+        let scratch = Scratch::new("load");
+        // Leave the `res` storage dir to the open path (setup_storage_dir),
+        // which creates it mode 0700; pre-creating it here would inherit the
+        // umask and be rejected as insecure (see open_hsm_with_resiliency_succeeds).
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        for curve in round_trips::CURVES {
+            round_trips::run_load(&data, curve).unwrap();
+        }
+    }
+
+    /// Whether `key` can still sign on the device — the observation channel
+    /// for the deletion tests. Signing is a real HSM round trip, unlike e.g.
+    /// masked_key_vec, which returns a blob cached at key creation.
+    fn hsm_sign_works(key: &HsmEccPrivateKey) -> bool {
+        let mut algo = HsmEccSignAlgo::default();
+        HsmSigner::sign_vec(&mut algo, key, &[0u8; 48]).is_ok()
+    }
+
+    // release_loaded_key must delete the key from the HSM, not merely drop
+    // the Rust handle: signing through a surviving clone (Arc-shared device
+    // handle) must fail after the release.
+    #[test]
+    #[serial]
+    fn release_loaded_key_deletes_key_from_hsm() {
+        let scratch = Scratch::new("release-del");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let key = round_trips::generate_p384_key(&data).unwrap();
+        let observer = key.clone();
+        assert!(
+            hsm_sign_works(&observer),
+            "key must be usable before release"
+        );
+
+        let ptr = data.retain_loaded_key(key);
+        data.release_loaded_key(ptr);
+        assert!(
+            !hsm_sign_works(&observer),
+            "release_loaded_key must delete the key from the HSM"
+        );
+    }
+
+    // EngineData teardown must delete every retained key (the Drop impl).
+    // The observer's cloned session keeps the session alive, so the failure
+    // is attributable to deletion, not to the session closing.
+    #[test]
+    #[serial]
+    fn engine_teardown_deletes_retained_keys() {
+        let scratch = Scratch::new("teardown-del");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let key = round_trips::generate_p384_key(&data).unwrap();
+        let observer = key.clone();
+        assert!(
+            hsm_sign_works(&observer),
+            "key must be usable before teardown"
+        );
+
+        let _ = data.retain_loaded_key(key);
+        drop(data);
+        assert!(
+            !hsm_sign_works(&observer),
+            "EngineData teardown must delete retained keys from the HSM"
+        );
+    }
+
+    // A signature produced through a loaded key (HSM sign via our EC_KEY_METHOD,
+    // reached the same way the ABI and CLI do — EVP_DigestSign*) must verify
+    // against the key's public half in software.
+    #[test]
+    #[serial]
+    fn sign_through_loaded_key_verifies() {
+        let scratch = Scratch::new("sign");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        for curve in round_trips::CURVES {
+            round_trips::run_sign(&data, curve).unwrap();
+        }
+    }
+
+    // A digest longer than the curve order (SHA-512 over P-384, 64 > 48
+    // bytes): software OpenSSL truncates the digest per the ECDSA spec, and the
+    // HSM must agree — the signature it produces must verify in software with
+    // the same digest. Pins the behavior so a firmware change breaking the
+    // truncation convention is caught.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn sign_with_digest_longer_than_curve_order_verifies() {
+        let scratch = Scratch::new("digestlen");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        // SAFETY: EVP_sha512 returns a process-lifetime constant.
+        let md = unsafe { ffi::EVP_sha512() };
+        round_trips::run_sign_with_md(&data, HsmEccCurve::P384, md, MessageDigest::sha512())
+            .unwrap();
+    }
+
+    // Generate keys on the HSM through the real EVP_PKEY_keygen path — the
+    // ABI equivalent of `openssl genpkey -engine tsra -algorithm EC
+    // -pkeyopt ec_paramgen_curve:<curve> -pkeyopt tsra.masked_key:<path>` —
+    // one round trip per supported curve (see round_trips::run_keygen).
+    #[test]
+    #[serial]
+    fn keygen_via_pkey_method_signs_and_reloads() {
+        for curve in ["P-256", "P-384", "P-521"] {
+            let scratch = Scratch::new("keygen");
+            let data = EngineData::new();
+            data.open_hsm_with(
+                caller_settings(&scratch),
+                HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+            )
+            .unwrap();
+            round_trips::run_keygen(data, &scratch.0, curve).unwrap();
+        }
+    }
+
+    // Import an external RSA key into the HSM through the real EVP_PKEY_keygen
+    // (import) path — the ABI equivalent of `openssl genpkey -engine tsra
+    // -algorithm RSA -pkeyopt tsra.input_key:<der> -pkeyopt
+    // tsra.masked_key:<path>` — for both RSA-CRT (default) and plain RSA,
+    // asserting the masked blob's kind and the reloaded public key (see
+    // round_trips::run_rsa_import).
+    #[test]
+    #[serial]
+    fn rsa_import_via_pkey_method_reloads() {
+        for crt in [true, false] {
+            let scratch = Scratch::new("rsa-import");
+            let data = EngineData::new();
+            data.open_hsm_with(
+                caller_settings(&scratch),
+                HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+            )
+            .unwrap();
+            round_trips::run_rsa_import(data, &scratch.0, crt).unwrap();
+        }
+    }
+
+    // A signature produced through a loaded/imported RSA key (HSM PKCS#1 v1.5
+    // via our RSA_METHOD sign slot, reached through EVP_DigestSign like the ABI
+    // and CLI do) must verify against the key's public half in software (see
+    // round_trips::run_rsa_sign).
+    #[test]
+    #[serial]
+    fn rsa_sign_through_loaded_key_verifies() {
+        let scratch = Scratch::new("rsa-sign");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_rsa_sign(data, &scratch.0).unwrap();
+    }
+
+    // A software RSA key signed with PSS through the engine must be rejected (the
+    // sign override never falls back to a software signature) — driven through a
+    // real EVP_PKEY_sign on an engine-bound ctx, not the handler directly (see
+    // round_trips::run_rsa_pss_rejects_software_key). No HSM is opened.
+    #[test]
+    #[serial]
+    fn rsa_pss_software_key_rejected() {
+        round_trips::run_rsa_pss_rejects_software_key(EngineData::new()).unwrap();
+    }
+
+    // Import an external RSA key through the pre-wrapped path
+    // (`tsra.wrapped_key`): wrap a software PKCS#8 against the HSM's
+    // unwrapping public key, import, and verify the masked kind and reloaded
+    // public key (see round_trips::run_rsa_import_wrapped).
+    #[test]
+    #[serial]
+    fn rsa_import_wrapped_via_pkey_method_reloads() {
+        let scratch = Scratch::new("rsa-wrapped");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_rsa_import_wrapped(data, &scratch.0).unwrap();
+    }
+
+    // Export the HSM's unwrapping public key via `genpkey -algorithm RSA
+    // -pkeyopt tsra.key_usage:keyWrapping`, asserting a usable 2048-bit RSA
+    // public key and the non-2048 rejection (see
+    // round_trips::run_rsa_export_unwrapping_key).
+    #[test]
+    #[serial]
+    fn rsa_export_unwrapping_key_via_pkey_method() {
+        let scratch = Scratch::new("rsa-export");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_rsa_export_unwrapping_key(data).unwrap();
+    }
+
+    // A direct-ABI keygen-bits setter (numeric ctrl, not the string form) must
+    // be recorded so an armed import honors it — here keyWrapping with a
+    // direct-set 3072 is rejected for not being 2048 (see
+    // round_trips::run_rsa_keygen_bits_direct_ctrl).
+    #[test]
+    #[serial]
+    fn rsa_keygen_bits_direct_ctrl_is_recorded() {
+        let scratch = Scratch::new("rsa-bits");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_rsa_keygen_bits_direct_ctrl(data).unwrap();
+    }
+
+    // ECDH through the real EVP_PKEY_derive path — buffer and output_file
+    // modes, blob reload, and the negatives — one round trip per supported
+    // curve (see round_trips::run_derive).
+    #[test]
+    #[serial]
+    fn derive_via_pkey_method_produces_masked_secret() {
+        for curve in ["P-256", "P-384", "P-521"] {
+            let scratch = Scratch::new("derive");
+            let data = EngineData::new();
+            data.open_hsm_with(
+                caller_settings(&scratch),
+                HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+            )
+            .unwrap();
+            round_trips::run_derive(data, &scratch.0, curve).unwrap();
+        }
+    }
+
+    // Chained ECDH → HKDF: masked shared secret in, masked AES/HMAC keys
+    // out, in all modes, plus the parameter negatives (see
+    // round_trips::run_hkdf).
+    #[test]
+    #[serial]
+    fn hkdf_via_pkey_method_derives_masked_keys() {
+        let scratch = Scratch::new("hkdf");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_hkdf(data, &scratch.0).unwrap();
+    }
+
+    // An unarmed NID_hkdf context resolved through the engine must match the
+    // built-in software HKDF byte-for-byte.
+    #[test]
+    #[serial]
+    fn software_hkdf_delegates_unchanged() {
+        let scratch = Scratch::new("hkdf-sw");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        let (mut engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+
+        let opts = [
+            ("md", "SHA256"),
+            // Colon-delimited: OpenSSL's hex grammar must be accepted.
+            ("hexkey", "00:11:22:33:44:55:66:77:88:99:aa:bb:cc:dd:ee:ff"),
+            ("salt", "pepper"),
+            ("info", "context"),
+        ];
+        let via_engine = round_trips::try_hkdf(engine_raw, &opts, Some(42)).unwrap();
+        let builtin = round_trips::try_hkdf(std::ptr::null_mut(), &opts, Some(42)).unwrap();
+        assert_eq!(via_engine.len(), 42);
+        assert_eq!(via_engine, builtin, "software HKDF must be unchanged");
+
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let _ = slot.take(&mut engine).unwrap();
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        #[allow(unsafe_code)]
+        unsafe {
+            ffi::ENGINE_free(engine_raw)
+        };
+    }
+
+    // With the engine's ASN1 method globally registered, plain software EC
+    // keys must serialize and parse exactly as before (the ported built-in
+    // fallbacks; byte-exactness is pinned in engine-core's asn1_method tests).
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn software_ec_keys_serialize_unchanged_under_registered_asn1_method() {
+        let (engine, engine_raw) = new_test_engine();
+        tsra_ossl_engine_core::asn1_method::register_ec_asn1_method::<crate::asn1::TsraEcAsn1>(
+            &engine,
+        )
+        .unwrap();
+
+        // Software key: generate, PKCS#8-encode (through our registered
+        // priv_encode), parse back (through our priv_decode), and compare.
+        let group = EcGroup::from_curve_name(Nid::SECP384R1).unwrap();
+        let ec = EcKey::generate(&group).unwrap();
+        let pkey = PKey::from_ec_key(ec).unwrap();
+        let der = pkey.private_key_to_pkcs8().unwrap();
+        let parsed = PKey::private_key_from_pkcs8(&der).unwrap();
+        assert_eq!(
+            parsed.public_key_to_der().unwrap(),
+            pkey.public_key_to_der().unwrap(),
+            "software key must round-trip unchanged"
+        );
+
+        tsra_ossl_engine_core::asn1_method::release_ec_asn1_method(&engine);
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+    }
+
+    // The provider-parity options accept only their implemented values:
+    // session keys and keyAgreement usage must fail keygen with a clear
+    // "not yet supported" error (never mint an unusable key silently).
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn keygen_rejects_unsupported_option_values() {
+        let scratch = Scratch::new("keygen-opts");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        let (mut engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+
+        let blob = scratch.0.join("opts.bin");
+        let err =
+            round_trips::try_armed_keygen(engine_raw, "P-384", &blob, &[("tsra.session", "true")])
+                .expect_err("tsra.session:true must fail keygen");
+        assert!(
+            err.contains("not yet supported") && err.contains("session keys"),
+            "missing clear error for tsra.session:true: {err}"
+        );
+        assert!(!blob.exists(), "no blob may be written on failure");
+
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let _ = slot.take(&mut engine).unwrap();
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+    }
+
+    // A curve the HSM does not implement must fail keygen cleanly (the armed
+    // context reaches our handler, which rejects the NID).
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn keygen_rejects_unsupported_curve() {
+        let scratch = Scratch::new("keygen-bad");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        let (mut engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+
+        let blob = scratch.0.join("bad_curve.bin");
+        let err = round_trips::try_armed_keygen(engine_raw, "secp256k1", &blob, &[])
+            .expect_err("keygen with an unsupported curve must fail");
+        assert!(
+            err.contains("unsupported curve"),
+            "missing clear error: {err}"
+        );
+        assert!(!blob.exists(), "no blob may be written on failure");
+
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let _ = slot.take(&mut engine).unwrap();
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // SAFETY: engine_raw is the ENGINE_new ref from new_test_engine.
+        unsafe { ffi::ENGINE_free(engine_raw) };
+    }
+
+    #[test]
+    #[serial]
+    fn open_hsm_is_idempotent() {
+        let scratch = Scratch::new("idem");
+        // See open_hsm_with_resiliency_succeeds: let the open path create the
+        // storage dir at 0700 rather than depending on the umask here.
+        let data = EngineData::new();
+        let creds = HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN);
+
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        // Second call must not panic, must not re-open, must succeed.
+        data.open_hsm_with(caller_settings(&scratch), creds)
+            .unwrap();
+        assert!(data.is_hsm_open());
+    }
+
+    #[test]
+    fn hex_decode_rejects_wrong_length() {
+        assert!(hex_decode_16("abcd", "X").is_err());
+    }
+
+    #[test]
+    fn hex_decode_rejects_non_hex() {
+        let s = "g".repeat(32);
+        assert!(hex_decode_16(&s, "X").is_err());
+    }
+
+    #[test]
+    fn hex_decode_round_trip() {
+        let s = "000102030405060708090a0b0c0d0e0f";
+        assert_eq!(
+            hex_decode_16(s, "X").unwrap(),
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+    }
+
+    // An unset credential with no default must be a hard error, not a silent
+    // fallback. (In production builds cred_field is called with None.)
+    #[test]
+    fn cred_field_missing_without_default_errors() {
+        let r = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", None);
+        assert!(matches!(r, Err(EngineError::Other(_))));
+    }
+
+    #[test]
+    fn cred_field_missing_with_default_uses_default() {
+        let def = [7u8; 16];
+        let got = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", Some(def)).unwrap();
+        assert_eq!(got, def);
+    }
+}
+
+/// Hardware smoke test. Drives the full device open (`open_hsm_from_env`:
+/// partition open → init → session) using the ambient `TSRA_*` environment,
+/// so a real HSM host can validate a configuration end to end — e.g. the TPM
+/// OBK/POTA sources, which the mock cannot exercise.
+///
+/// Compiled only in non-mock builds and `#[ignore]`d, so it never runs in the
+/// normal (mock) CI cell — invoke it explicitly on a provisioned host:
+///
+/// ```text
+/// export TSRA_CREDENTIALS_ID=<32 hex>  TSRA_CREDENTIALS_PIN=<32 hex>
+/// export TSRA_RESILIENCY_ENABLED=1        # turns on resiliency persistence (storage dir + MOBK/POTA callbacks)
+/// export TSRA_OBK_SOURCE=tpm  TSRA_POTA_SOURCE=tpm  # source selection applies regardless of the flag above
+/// # Storage dir must already exist, be mode 0700, and be owned by you. The
+/// # default is /var/lib/tsra/resiliency; create it once (override with
+/// # TSRA_RESILIENCY_STORAGE_DIR to use e.g. a path under $HOME):
+/// sudo install -d -m 700 -o "$USER" /var/lib/tsra/resiliency
+/// umask 0077
+/// cargo test -p tsra_ossl_engine --features engine open_from_env_smoke -- --ignored --nocapture
+/// ```
+#[cfg(all(test, not(feature = "mock")))]
+mod hw_tests {
+    use openssl::hash::MessageDigest;
+    use tsra_api::HsmEccCurve;
+
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn open_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        assert!(
+            data.is_hsm_open(),
+            "HSM should be open after open_hsm_from_env"
+        );
+        Ok(())
+    }
+
+    /// Hardware key-loading round trips against a real device, one per
+    /// supported curve — the same flow
+    /// `mock::load_ec_key_round_trips_through_engine` runs on the mock (see
+    /// [`super::round_trips::run_load`]).
+    ///
+    /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine load_ec_key_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn load_ec_key_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        for curve in round_trips::CURVES {
+            round_trips::run_load(&data, curve)?;
+        }
+        Ok(())
+    }
+
+    /// Hardware ECDSA signing round trips against a real device, one per
+    /// supported curve — the same flow
+    /// `mock::sign_through_loaded_key_verifies` runs on the mock (see
+    /// [`super::round_trips::run_sign`]). Proves the device produces a valid
+    /// ECDSA signature.
+    ///
+    /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine sign_ec_key_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn sign_ec_key_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        for curve in round_trips::CURVES {
+            round_trips::run_sign(&data, curve)?;
+        }
+        Ok(())
+    }
+
+    /// A digest longer than the curve order (SHA-512 over P-384, 64 > 48 bytes)
+    /// on a real device — the hardware counterpart of
+    /// `mock::sign_with_digest_longer_than_curve_order_verifies`. The device
+    /// must truncate per the ECDSA spec (its signature must verify in software
+    /// with the same digest), so a firmware change breaking the truncation
+    /// convention is caught on hardware, not only on the mock.
+    ///
+    /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine sign_long_digest_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    #[allow(unsafe_code)]
+    fn sign_long_digest_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        // SAFETY: EVP_sha512 returns a process-lifetime constant.
+        let md = unsafe { ffi::EVP_sha512() };
+        round_trips::run_sign_with_md(&data, HsmEccCurve::P384, md, MessageDigest::sha512())
+    }
+
+    /// Hardware EC keygen round trips against a real device, one per supported
+    /// curve — the same flow `mock::keygen_via_pkey_method_signs_and_reloads`
+    /// runs on the mock (see [`super::round_trips::run_keygen`]): generate
+    /// through `EVP_PKEY_keygen`, sign, verify in software, and reload the
+    /// written masked blob.
+    ///
+    /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine keygen_ec_key_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn keygen_ec_key_from_env_smoke() -> EngineResult<()> {
+        for curve in ["P-256", "P-384", "P-521"] {
+            let data = EngineData::new();
+            data.open_hsm_from_env()?;
+            round_trips::run_keygen(data, &std::env::temp_dir(), curve)?;
+        }
+        Ok(())
+    }
+
+    /// Hardware ECDH round trips, same flow as the mock test (see
+    /// [`super::round_trips::run_derive`]); env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine derive_ec_key_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn derive_ec_key_from_env_smoke() -> EngineResult<()> {
+        for curve in ["P-256", "P-384", "P-521"] {
+            let data = EngineData::new();
+            data.open_hsm_from_env()?;
+            round_trips::run_derive(data, &std::env::temp_dir(), curve)?;
+        }
+        Ok(())
+    }
+
+    /// Hardware RSA import round trips, same flow as the mock test (see
+    /// [`super::round_trips::run_rsa_import`]); env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine rsa_import_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn rsa_import_from_env_smoke() -> EngineResult<()> {
+        for crt in [true, false] {
+            let data = EngineData::new();
+            data.open_hsm_from_env()?;
+            round_trips::run_rsa_import(data, &std::env::temp_dir(), crt)?;
+        }
+        Ok(())
+    }
+
+    /// Hardware RSA sign round trip, same flow as the mock test (see
+    /// [`super::round_trips::run_rsa_sign`]): import a software RSA key, sign a
+    /// digest on the device via `EVP_DigestSign`, and verify in software. Env
+    /// setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine rsa_sign_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn rsa_sign_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_rsa_sign(data, &std::env::temp_dir())
+    }
+
+    /// Hardware ECDH → HKDF chain, same flow as the mock test (see
+    /// [`super::round_trips::run_hkdf`]); env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine hkdf_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn hkdf_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_hkdf(data, &std::env::temp_dir())
+    }
+}

@@ -1,0 +1,53 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Note on why multiple profiles are used to enable JUnit support: this is done
+# as a workaround to prevent each nextest run from overwriting the same output
+# file (saved to target/nextest/<profile>/<path>) during CI runs.
+
+# profile for running all mock tests
+# Resiliency stress tests are timing-sensitive; reserve the whole runner so
+# they do not run in parallel with any other test or each other.
+[[profile.ci-mock.overrides]]
+filter = "test(resiliency::stress::) or test(_resiliency_stress::)"
+# threads-required = "num-cpus"
+
+[profile.ci-mock.junit]
+path = "junit.xml"
+
+# profile for running resiliency fault-injection tests
+[profile.ci-mock-res.junit]
+path = "junit.xml"
+
+# profile for running all mock tests w/ table-4
+[profile.ci-mock-table-4.junit]
+path = "junit.xml"
+
+# profile for running all mock tests w/ table-64
+[profile.ci-mock-table-64.junit]
+path = "junit.xml"
+
+# profile for running the TBOR types tests against the emu backend
+# (in-process firmware).
+[profile.ci-tbor-emu.junit]
+path = "junit.xml"
+
+# profile for running integration tests
+# test-threads = 1: serial_test uses a per-process mutex; nextest runs each test
+# in its own process, so explicit serialization is required to avoid file collisions.
+[profile.ci-provider-integration]
+test-threads = 1
+
+[profile.ci-provider-integration.junit]
+path = "junit.xml"
+
+[profile.ci-api.junit]
+path = "junit.xml"
+
+# profile for running emu smoke tests
+# (in-process firmware).
+[profile.ci-emu-smoke.junit]
+path = "junit.xml"
+
+# profile for running emu ddi tests
+[profile.ci-emu-ddi.junit]
+path = "junit.xml"

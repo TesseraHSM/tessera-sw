@@ -1,0 +1,189 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include "key_import.hpp"
+
+tsra_status rsa_aes_wrap_bytes(
+    tsra_handle wrapping_pub_key,
+    const std::vector<uint8_t> &plaintext,
+    uint32_t aes_key_bits,
+    std::vector<uint8_t> &wrapped_out
+)
+{
+    tsra_algo_rsa_pkcs_oaep_params oaep_params = {};
+    oaep_params.hash_algo_id = TSRA_ALGO_ID_SHA256;
+    oaep_params.mgf1_hash_algo_id = TSRA_MGF1_ID_SHA256;
+    oaep_params.label = nullptr;
+
+    tsra_algo_rsa_aes_wrap_params wrap_params = {};
+    wrap_params.oaep_params = &oaep_params;
+    wrap_params.aes_key_bits = aes_key_bits;
+
+    tsra_algo wrap_algo = {};
+    wrap_algo.id = TSRA_ALGO_ID_RSA_AES_WRAP;
+    wrap_algo.params = &wrap_params;
+    wrap_algo.len = sizeof(wrap_params);
+
+    tsra_buffer input_key = {};
+    input_key.ptr = const_cast<uint8_t *>(plaintext.data());
+    input_key.len = static_cast<uint32_t>(plaintext.size());
+
+    tsra_buffer wrapped_key_buf = {};
+    wrapped_key_buf.ptr = nullptr;
+    wrapped_key_buf.len = 0;
+
+    auto wrap_err = tsra_crypt_encrypt(&wrap_algo, wrapping_pub_key, &input_key, &wrapped_key_buf);
+    if (wrap_err != TSRA_STATUS_BUFFER_TOO_SMALL || wrapped_key_buf.len == 0)
+    {
+        return wrap_err;
+    }
+
+    wrapped_out.resize(wrapped_key_buf.len);
+    wrapped_key_buf.ptr = wrapped_out.data();
+    wrap_err = tsra_crypt_encrypt(&wrap_algo, wrapping_pub_key, &input_key, &wrapped_key_buf);
+    if (wrap_err != TSRA_STATUS_SUCCESS)
+    {
+        wrapped_out.clear();
+        return wrap_err;
+    }
+
+    wrapped_out.resize(wrapped_key_buf.len);
+    return TSRA_STATUS_SUCCESS;
+}
+
+tsra_status import_keypair(
+    tsra_handle wrapping_pub_key,
+    tsra_handle wrapping_priv_key,
+    const std::vector<uint8_t> &key_der,
+    key_props props,
+    tsra_handle *imported_priv_key,
+    tsra_handle *imported_pub_key
+)
+{
+    // Step 1: Wrap the DER-encoded key with RSA-AES wrap.
+    std::vector<uint8_t> wrapped_key_data;
+    auto wrap_err = rsa_aes_wrap_bytes(wrapping_pub_key, key_der, 256, wrapped_key_data);
+    if (wrap_err != TSRA_STATUS_SUCCESS)
+    {
+        return wrap_err;
+    }
+
+    tsra_buffer wrapped_key_buf = {};
+    wrapped_key_buf.ptr = wrapped_key_data.data();
+    wrapped_key_buf.len = static_cast<uint32_t>(wrapped_key_data.size());
+
+    // Step 2: Setup unwrap algorithm
+    tsra_algo_rsa_pkcs_oaep_params oaep_params = {};
+    oaep_params.hash_algo_id = TSRA_ALGO_ID_SHA256;
+    oaep_params.mgf1_hash_algo_id = TSRA_MGF1_ID_SHA256;
+    oaep_params.label = nullptr;
+
+    tsra_algo_rsa_aes_key_wrap_params unwrap_params = {};
+    unwrap_params.aes_key_bits = 256;
+    unwrap_params.oaep_params = &oaep_params;
+
+    tsra_algo unwrap_algo = {};
+    unwrap_algo.id = TSRA_ALGO_ID_RSA_AES_KEY_WRAP;
+    unwrap_algo.params = &unwrap_params;
+    unwrap_algo.len = sizeof(unwrap_params);
+
+    // Step 3: Setup key properties based on key kind
+    tsra_key_class priv_key_class = TSRA_KEY_CLASS_PRIVATE;
+    tsra_key_class pub_key_class = TSRA_KEY_CLASS_PUBLIC;
+
+    std::vector<tsra_key_prop> priv_props_vec;
+    std::vector<tsra_key_prop> pub_props_vec;
+
+    if (props.key_kind == TSRA_KEY_KIND_RSA)
+    {
+        // RSA private key properties (decrypt and sign capabilities)
+        priv_props_vec = {
+            { .id = TSRA_KEY_PROP_ID_BIT_LEN,
+              .val = &props.key_size_bits,
+              .len = sizeof(props.key_size_bits) },
+            { .id = TSRA_KEY_PROP_ID_CLASS, .val = &priv_key_class, .len = sizeof(priv_key_class) },
+            { .id = TSRA_KEY_PROP_ID_KIND, .val = &props.key_kind, .len = sizeof(props.key_kind) },
+            { .id = TSRA_KEY_PROP_ID_SESSION,
+              .val = &props.session_key,
+              .len = sizeof(props.session_key) },
+            { .id = TSRA_KEY_PROP_ID_DECRYPT, .val = &props.decrypt, .len = sizeof(props.decrypt) },
+            { .id = TSRA_KEY_PROP_ID_SIGN, .val = &props.sign, .len = sizeof(props.sign) }
+        };
+
+        // RSA public key properties (encrypt and verify capabilities)
+        pub_props_vec = {
+            { .id = TSRA_KEY_PROP_ID_BIT_LEN,
+              .val = &props.key_size_bits,
+              .len = sizeof(props.key_size_bits) },
+            { .id = TSRA_KEY_PROP_ID_CLASS, .val = &pub_key_class, .len = sizeof(pub_key_class) },
+            { .id = TSRA_KEY_PROP_ID_KIND, .val = &props.key_kind, .len = sizeof(props.key_kind) },
+            { .id = TSRA_KEY_PROP_ID_SESSION,
+              .val = &props.session_key,
+              .len = sizeof(props.session_key) },
+            { .id = TSRA_KEY_PROP_ID_ENCRYPT, .val = &props.encrypt, .len = sizeof(props.encrypt) },
+            { .id = TSRA_KEY_PROP_ID_VERIFY, .val = &props.verify, .len = sizeof(props.verify) }
+        };
+    }
+    else if (props.key_kind == TSRA_KEY_KIND_ECC)
+    {
+        // Determine ECC curve from key size
+        tsra_ecc_curve curve;
+        switch (props.key_size_bits)
+        {
+        case 256:
+            curve = TSRA_ECC_CURVE_P256;
+            break;
+        case 384:
+            curve = TSRA_ECC_CURVE_P384;
+            break;
+        case 521:
+            curve = TSRA_ECC_CURVE_P521;
+            break;
+        default:
+            return TSRA_STATUS_INVALID_ARGUMENT;
+        }
+
+        // ECC private key properties (sign capability)
+        priv_props_vec = {
+            { .id = TSRA_KEY_PROP_ID_EC_CURVE, .val = &curve, .len = sizeof(curve) },
+            { .id = TSRA_KEY_PROP_ID_CLASS, .val = &priv_key_class, .len = sizeof(priv_key_class) },
+            { .id = TSRA_KEY_PROP_ID_KIND, .val = &props.key_kind, .len = sizeof(props.key_kind) },
+            { .id = TSRA_KEY_PROP_ID_SESSION,
+              .val = &props.session_key,
+              .len = sizeof(props.session_key) },
+            { .id = TSRA_KEY_PROP_ID_SIGN, .val = &props.sign, .len = sizeof(props.sign) }
+        };
+
+        // ECC public key properties (verify capability)
+        pub_props_vec = {
+            { .id = TSRA_KEY_PROP_ID_EC_CURVE, .val = &curve, .len = sizeof(curve) },
+            { .id = TSRA_KEY_PROP_ID_CLASS, .val = &pub_key_class, .len = sizeof(pub_key_class) },
+            { .id = TSRA_KEY_PROP_ID_KIND, .val = &props.key_kind, .len = sizeof(props.key_kind) },
+            { .id = TSRA_KEY_PROP_ID_SESSION,
+              .val = &props.session_key,
+              .len = sizeof(props.session_key) },
+            { .id = TSRA_KEY_PROP_ID_VERIFY, .val = &props.verify, .len = sizeof(props.verify) }
+        };
+    }
+    else
+    {
+        return TSRA_STATUS_INVALID_ARGUMENT;
+    }
+
+    tsra_key_prop_list priv_key_props = { .props = priv_props_vec.data(),
+                                          .count = static_cast<uint32_t>(priv_props_vec.size()) };
+
+    tsra_key_prop_list pub_key_props = { .props = pub_props_vec.data(),
+                                         .count = static_cast<uint32_t>(pub_props_vec.size()) };
+
+    // Step 4: Unwrap the key pair
+    return tsra_key_unwrap_pair(
+        &unwrap_algo,
+        wrapping_priv_key,
+        &wrapped_key_buf,
+        &priv_key_props,
+        &pub_key_props,
+        imported_priv_key,
+        imported_pub_key
+    );
+}

@@ -1,0 +1,619 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! HSM error / status type.
+//!
+//! [`HsmError`] is the universal error type used across PAL traits, core
+//! handlers, and the DDI protocol layer. It is an open `u32` enum with
+//! named variants matching the DDI protocol status codes.
+//!
+//! Custom diagnostic codes (e.g. for internal telemetry) can use values
+//! outside the named variant range.
+
+use open_enum::open_enum;
+
+/// HSM error / status code.
+///
+/// An open `u32` enum. Named variants match the DDI protocol status
+/// codes. Unknown values are preserved — the type is "open" like a C enum.
+#[open_enum]
+#[derive(Eq, PartialEq, Clone, Copy)]
+#[repr(u32)]
+pub enum HsmError {
+    InvalidArg = 0x08000003,
+    InternalError = 0x08000008,
+    UnsupportedCmd = 0x08000009,
+    DdiEncodeFailed = 0x08680001,
+    DdiDecodeFailed = 0x08680002,
+    // TBOR wire-decode failures. Each corresponds to a distinct
+    // structural fault detected by the zero-copy TBOR decoder; the
+    // decode path returns these directly (no intermediate error type).
+    TborBufferTooShort = 0x08680010,
+    TborUnsupportedVersion = 0x08680011,
+    TborMessageTruncated = 0x08680012,
+    TborOffsetLengthOutOfBounds = 0x08680013,
+    TborInvalidFixedLength = 0x08680014,
+    TborOpcodeMismatch = 0x08680015,
+    TborUnexpectedTocType = 0x08680016,
+    TborInvalidNonePayload = 0x08680017,
+    TborNonMonotonicTocOffsets = 0x08680018,
+    TborMissingField = 0x08680019,
+    TborDuplicateField = 0x0868001A,
+    TborInvalidEnumValue = 0x0868001B,
+    // TBOR wire-encode failures.
+    TborBufferTooSmall = 0x0868001C,
+    TborTooManyTocEntries = 0x0868001D,
+    TborDataTooLarge = 0x0868001E,
+    TborDataOffsetOverflow = 0x0868001F,
+    VaultSessionLimitReached = 0x08700001,
+    SessionNotExpected = 0x08700002,
+    SessionExpected = 0x08700003,
+    SessionNotFound = 0x08700004,
+    InvalidManagerCredentials = 0x08700006,
+    InvalidAppCredentials = 0x08700007,
+    VaultNotFound = 0x08700008,
+    AppAlreadyExists = 0x08700009,
+    AppNotFound = 0x0870000A,
+    KeyNotFound = 0x0870000E,
+    InvalidKeyType = 0x0870000F,
+    KeyDecodeFailed = 0x08700010,
+    RsaEncryptFailed = 0x08700011,
+    RsaDecryptFailed = 0x08700012,
+    RsaSignFailed = 0x08700013,
+    FileHandleSessionLimitReached = 0x0870001E,
+    FileHandleNoExistingSession = 0x0870001F,
+    FileHandleSessionIdDoesNotMatch = 0x08700020,
+    KeyTagAlreadyExists = 0x08700021,
+    InvalidPermissions = 0x08700022,
+    EccSignFailed = 0x08700023,
+    EccVerifyFailed = 0x08700024,
+    AesEncryptFailed = 0x08700025,
+    AesDecryptFailed = 0x08700026,
+
+    FunctionNotEnabled = 0x08700027,
+    AnotherKeyInUse = 0x08700028,
+    KeyNotInUse = 0x08700029,
+    UnsupportedRevision = 0x0870002A,
+    DerAndKeyTypeMismatch = 0x0870002B,
+    VaultAppLimitReached = 0x0870002C,
+    NotEnoughSpace = 0x0870002D,
+    ReachedMaxKeys = 0x0870002E,
+    CannotDeleteKeyInUse = 0x0870002F,
+    CannotDeleteSomeKeysInUse = 0x08700030,
+    CannotCloseSessionInUse = 0x08700031,
+    CannotCloseSomeSessionsInUse = 0x08700032,
+    CannotDeleteKeyAndCloseSessionInUse = 0x08700033,
+    InvalidKeyNumber = 0x08700034,
+    FunctionNotFound = 0x08700036,
+    RsaToDerError = 0x08700037,
+    RsaGenerateError = 0x08700038,
+    RsaGetModulusError = 0x08700039,
+    RsaGetPublicExponentError = 0x0870003A,
+    RsaInvalidKeyLength = 0x0870003B,
+    EccToDerError = 0x0870003C,
+    EccGenerateError = 0x0870003D,
+    EccDeriveError = 0x0870003E,
+    EccGetCurveError = 0x0870003F,
+    EccGetCoordinatesError = 0x08700040,
+    ShaError = 0x08700041,
+    AesGenerateError = 0x08700042,
+    CoseSign1UnexpectedSignature = 0x08700043,
+    CannotUseDefaultCredentials = 0x08700044,
+    HkdfError = 0x08700045,
+    KbkdfError = 0x08700046,
+    RsaUnwrapError = 0x08700047,
+    AttestKeyError = 0x08700048,
+    InvalidShortAppId = 0x08700049,
+    NoShortAppIdCreated = 0x0870004A,
+    NoTagProvided = 0x0870004B,
+    AesGcmInvalidBufferSize = 0x0870004C,
+    AesGcmDecryptTagDoesNotMatch = 0x0870004D,
+    AesXtsInvalidBufferSize = 0x0870004E,
+    AesXtsInvalidDul = 0x0870004F,
+    EccInvalidKeyLength = 0x08700050,
+    AesInvalidKeyLength = 0x08700051,
+    InvalidCertificate = 0x08700052,
+    PendingKeyGeneration = 0x08700053,
+    CannotDeleteInternalKeys = 0x08700054,
+    FailedToSendSoftAesRequest = 0x08700055,
+    HmacError = 0x08700056,
+    PinDecryptionFailed = 0x08700057,
+    ReachedMaxAesBulkKeys = 0x08700058,
+    HmacInvalidInputSize = 0x08700059,
+    RngError = 0x0870005A,
+    NonceMismatch = 0x0870005B,
+    EstablishCredEncryptionKeyGenerateFailed = 0x0870005C,
+    HkdfInvalidInputParam = 0x0870005D,
+    KbkdfInvalidInputParam = 0x0870005E,
+    LoginFailed = 0x0870005F,
+    FailedSoftAesResponse = 0x08700060,
+    KeyStructuralValidationFailed = 0x08700061,
+    PendingIo = 0x08700062,
+    ReceivedEmptyIoEvent = 0x08700063,
+    IoChannelReceiveError = 0x08700064,
+    IoChannelDecodeError = 0x08700065,
+    IoChannelUnknownOp = 0x08700066,
+    IoChannelInvalidSrcLen = 0x08700067,
+    IoChannelInvalidDstLen = 0x08700068,
+    PartitionNotEnabled = 0x08700069,
+    IoChannePipelNotEnabled = 0x0870006A,
+    IoChannePipeNotValid = 0x0870006B,
+    DmaBufferAllocFailure = 0x0870006C,
+    IoChannelInvalidBufferDescriptor = 0x0870006D,
+    DmaHardwareEmptyCompletionFound = 0x0870006E,
+    DmaCompletedWithError = 0x0870006F,
+    DmaIoIdentifierMismatch = 0x08700070,
+    IoChannelPipeNotFound = 0x08700071,
+    FailedToAssociateIoWithPartition = 0x08700072,
+    FailedToStartDmaTransaction = 0x08700073,
+    IoChannelFailedToSendResponse = 0x08700074,
+    FailedToIdentifyDmaBuffer = 0x08700075,
+    IoChannelRequestDecodeError = 0x08700076,
+    IoCommandNotFound = 0x08700077,
+    IoChannelInvalidSrcAlignment = 0x08700078,
+    IoChannelInvalidDstAlignment = 0x08700079,
+    IoCommandError = 0x0870007A,
+    SpuriousIpcMessageReceived = 0x0870007B,
+    InvalidIpcMessageReceived = 0x0870007C,
+    FailedToDecodeIpcMessage = 0x0870007D,
+    InvalidIpcMessageOpCodeFound = 0x0870007E,
+    IoChannelTxEmptyCompletionFound = 0x0870007F,
+    FailedToAssociateIoWithCompletion = 0x08700080,
+    IoChannelFailedToSendCompletion = 0x08700081,
+    DefragmentationNeeded = 0x08700082,
+    InvalidSessionControlOpcode = 0x08700083,
+    DerDecodeFailed = 0x08700084,
+    InvalidMemoryMapEntry = 0x08700085,
+    ProcessedInvalidIoEvent = 0x08700086,
+    ProcessedIoEventInInvalidState = 0x08700087,
+    CannotAssociateIoWithPkaCompletion = 0x08700088,
+    IdentifiedPkaEngineNotBusy = 0x08700089,
+    IdentifiedEccCalculationFailure = 0x0870008A,
+    FailedToGenerateEccPublicKey = 0x0870008B,
+    IdentifiedRsaCalculationFailure = 0x0870008C,
+    FailedToBeginRsaCalculation = 0x0870008D,
+    FailedToPerformRsaMultiplication = 0x0870008E,
+    FailedToEndRsaCalculation = 0x0870008F,
+    FailedToPerformRsaModularInverse = 0x08700090,
+    FailedToComputeEcdhSharedSecret = 0x08700091,
+    FailedToIdentifyIoChannelPipe = 0x08700092,
+    IdentifiedInvalidIoChannelPipe = 0x08700093,
+    FailedToSendIpMessage = 0x08700094,
+    IpcResponseFailure = 0x08700095,
+    KeyDerivationFailure = 0x08700096,
+    DerDecodeFailedForAesBulkKey = 0x08700097,
+    InvalidIpcShutdownMessage = 0x08700098,
+    SessionEncryptionKeyGenerateFailed = 0x08700099,
+    IoTimedOut = 0x0870009A,
+    IoDrainInProgress = 0x0870009B,
+    IoChannelPipeDeleteError = 0x0870009C,
+    IpcResponseDecodeError = 0x0870009D,
+    UnknownSelfTestRequestReceived = 0x0870009E,
+    SelfTestMissingInstance = 0x0870009F,
+    FailedToWipePkaMemory = 0x087000A0,
+    IoDrainReady = 0x087000A1,
+    InvalidPackageInfo = 0x087000A2,
+    PctValidationEccGenKeyFailed = 0x087000A3,
+    PctValidationEstablishCredEncKeyFailed = 0x087000A4,
+    PctValidationSessionEncKeyFailed = 0x087000A5,
+    PctValidationUnwrappingKeyFailed = 0x087000A6,
+    PctValidationRsaUnwrapEccKeyFailed = 0x087000A7,
+    PctValidationRsaUnwrapRsaKeyFailed = 0x087000A8,
+    NonFipsApprovedDigest = 0x087000A9,
+    DigestHashMismatchWithEccCurve = 0x087000AA,
+    UnsupportedDigestHashAlgorithm = 0x087000AB,
+    FailedToStartPublicKeyValidation = 0x087000AC,
+    FailedToEndEccPublicKeyValidation = 0x087000AD,
+    EccPointValidationFailed = 0x087000AE,
+    EccPublicKeyValidationFailed = 0x087000AF,
+    EccDerKeyShorterThanCurve = 0x087000B0,
+    RsaUnwrapInvalidRequest = 0x087000B1,
+    RsaUnwrapInvalidKek = 0x087000B2,
+    RsaUnwrapOaepDecodeFailed = 0x087000B3,
+    RsaUnwrapInvalidAesUnwrapState = 0x087000B4,
+    RsaUnwrapAesUnwrapFailed = 0x087000B5,
+    AttestationReportEncodeFailed = 0x087000B6,
+    CoseKeyEncodeFailed = 0x087000B7,
+    AttestKeyInternalError = 0x087000B8,
+    MaskedKeyInvalidLength = 0x087000BE,
+    MaskedKeyPreEncodeFailed = 0x087000BF,
+    MaskedKeyEncodeFailed = 0x087000C0,
+    MaskedKeyDecodeFailed = 0x087000C1,
+    InvalidAlgorithm = 0x087000C2,
+    InsufficientBuffer = 0x087000C3,
+    InvalidKeyLength = 0x087000C4,
+    MetadataEncodeFailed = 0x087000C5,
+    MetadataDecodeFailed = 0x087000C6,
+    SessionNeedsRenegotiation = 0x087000C7,
+    BkBootGenerationFailed = 0x087000C8,
+    MaskingBk3Failed = 0x087000C9,
+    UnmaskingBk3Failed = 0x087000CA,
+    MaskingBkBootFailed = 0x087000CB,
+    UnmaskingBkBootFailed = 0x087000CC,
+    MaskedBkBootNotPresent = 0x087000CD,
+    SealedBk3TooLarge = 0x087000CE,
+    PartitionAlreadyProvisioned = 0x087000CF,
+    SealedBk3NotPresent = 0x087000D0,
+    CredentialsNotEstablished = 0x087000D1,
+    InvalidAliasKey = 0x087000D2,
+    UnmaskUnwrappingKeyNotAllowed = 0x087000D3,
+    InvalidPartitionIdContent = 0x087000D4,
+    PartitionNotProvisioned = 0x087000D5,
+    Bk3AlreadyInitialized = 0x087000D6,
+    SealedBk3AlreadySet = 0x087000D7,
+    PartitionIdKeyGenerationPctFailed = 0x087000D8,
+
+    // ── AES Key Wrap errors ────────────────────────────────────────
+    AesUnwrapFailed = 0x087000D9,
+
+    // ── Session establishment protocol ─────────────────────────────
+    SessionAuthFailure = 0x087000DA,
+    InvalidPskId = 0x087000DB,
+    SessionNotPending = 0x087000DC,
+    AeadEnvelopeAuthFailed = 0x087000DD,
+    AeadEnvelopeDecodeFailed = 0x087000DE,
+    InvalidSessionType = 0x087000DF,
+
+    // ── Core lifecycle / transport diagnostics ─────────────────────
+    SqeInvalidPsdt = 0x087000E0,
+    RecvTaskFailure = 0x087000E1,
+    PollIoFailure = 0x087000E2,
+    SendTaskFailure = 0x087000E3,
+    CompleteIoFailure = 0x087000E4,
+    DropIoFailure = 0x087000E5,
+
+    /// In-session command rejected because the calling role's
+    /// partition PSK is still the well-known compiled-in default.
+    /// The only in-session commands permitted in this state are
+    /// session tear-down (`CloseSession`) and the PSK rotation
+    /// itself (`ChangePsk`); rotate the PSK once and retry.
+    DefaultPskMustRotate = 0x087000E6,
+
+    /// `OpenSessionInit` rejected the caller-supplied `suite_id`
+    /// because no such suite is implemented (or it has been retired).
+    /// See [`SessionSuite`] for the registered values.
+    UnsupportedSessionSuite = 0x087000E7,
+
+    /// X.509 DER parsing failed (malformed structure, bad tag/length,
+    /// or unsupported field encoding).
+    X509ParseError = 0x087000F0,
+
+    /// The root certificate is not self-signed (issuer ≠ subject).
+    X509NotSelfSigned = 0x087000F1,
+
+    /// The certificate's issuer does not match the previous certificate's subject.
+    X509IssuerMismatch = 0x087000F2,
+
+    /// The ECDSA signature did not verify.
+    X509SignatureInvalid = 0x087000F3,
+
+    /// The certificate's AKID does not match the previous certificate's SKID.
+    X509AkidSkidMismatch = 0x087000F4,
+
+    /// An intermediate certificate does not have cA=true in BasicConstraints.
+    X509NotCa = 0x087000F5,
+
+    /// The chain exceeds the maximum path length from BasicConstraints.
+    X509PathLenExceeded = 0x087000F6,
+
+    /// A CA certificate does not have the keyCertSign bit set in KeyUsage.
+    X509KeyUsageInvalid = 0x087000F7,
+
+    /// The signature algorithm is not a supported ECDSA variant.
+    X509UnsupportedAlgorithm = 0x087000F8,
+
+    /// The certificate contains an unrecognized critical extension.
+    X509UnrecognizedCriticalExtension = 0x087000F9,
+
+    /// `step()` was called after the chain was already fully validated.
+    X509AlreadyComplete = 0x087000FA,
+
+    /// Failed to export an ECC key to HSM wire format (raw scalar /
+    /// coordinate bytes).  This is **not** a DER encoding error — the
+    /// HSM ECC format is the raw padded scalar/coordinate bytes
+    /// produced by `ExportableHsmKey::to_hsm_bytes` (see
+    /// `HsmEccCurve::wire_coord_len`).
+    EccExportError = 0x087000FB,
+
+    // ── Partition initialization (PartInit) ────────────────────────
+    /// `PartInit` rejected because a Partition Trust Anchor key has
+    /// already been bound to this partition incarnation.  One-shot
+    /// enforcement: the only path to a fresh PTA binding is via a
+    /// full partition free/realloc cycle.
+    PtaKeyAlreadySet = 0x087000FC,
+
+    /// `PartInit` rejected because a Unique Machine Secret (UMS) key
+    /// has already been bound to this partition incarnation.
+    /// One-shot enforcement matching [`Self::PtaKeyAlreadySet`]: the
+    /// only path to a fresh UMS binding is via a full partition
+    /// free/realloc cycle.
+    UpsKeyAlreadySet = 0x087000FD,
+
+    /// A partition operation required the Unique Machine Secret (UMS)
+    /// vault key but `PartInit` has not yet successfully bound one
+    /// for this incarnation.  Returned by
+    /// [`HsmPartitionManager::part_ums_key_id`](crate::HsmPartitionManager::part_ums_key_id)
+    /// when the slot is empty.
+    UmsKeyNotSet = 0x087000FE,
+
+    /// Returned by the property-based getters on
+    /// [`HsmPartitionManager`](crate::HsmPartitionManager)
+    /// (`part_prop_get_*` / `part_prop_get_bytes`) when the addressed
+    /// [`PartPropId`](crate::PartPropId) slot is absent (i.e. has not
+    /// been populated, or was last
+    /// [`part_prop_clear`](crate::HsmPartitionManager::part_prop_clear)ed).
+    /// Distinct from [`HsmError::InvalidArg`], which signals a
+    /// caller bug (unknown id, kind mismatch, etc.).
+    PartPropNotFound = 0x087000FF,
+    /// Returned by [`HsmSeedStore`](crate::HsmSeedStore)
+    /// (`mfgr_seed` / `owner_seed`) when no provisioned BKS seed row
+    /// carries the requested selector (SVN / owner id).
+    SeedNotFound = 0x08700100,
+
+    /// A per-command undo-log push failed because the fixed
+    /// per-command log buffer is full (its entry slots would overrun
+    /// the byte-pre-image arena).  Distinct from
+    /// [`NotEnoughSpace`](Self::NotEnoughSpace), which signals genuine
+    /// vault/resource exhaustion: an `UndoLogFull` instead indicates a
+    /// firmware sizing bug — the handler records more inverse actions
+    /// than its opcode's `UNDO_LOG_SIZE` budget allows — and should
+    /// never occur in a correctly-sized handler.
+    UndoLogFull = 0x08700101,
+
+    /// A command was asked to operate on a [`HsmKeyScope`](crate::HsmKeyScope)
+    /// whose backing key material does not (yet) exist on the partition.
+    /// Returned by `SdSealingKeyGen` for the `Session` and
+    /// `SecurityDomain` scopes: their masking keys are provisioned by
+    /// commands that are not yet implemented (session-key masking /
+    /// `CreateSD`'s `SDKMK`).  Distinct from
+    /// [`InvalidArg`](Self::InvalidArg) (a malformed request) — the
+    /// request is well-formed, the scope is simply unsupported for now.
+    UnsupportedKeyScope = 0x08700102,
+
+    /// Returned by `KeyReport` when the masked key's kind cannot be
+    /// attested: symmetric keys (no public component to bind), RSA
+    /// private keys (public-modulus extraction not yet implemented), and
+    /// every non-attestable / internal kind.  Distinct from
+    /// [`UnsupportedCmd`](Self::UnsupportedCmd) (an unknown command) —
+    /// the command is supported, the key type simply is not.
+    UnsupportedKeyType = 0x08700103,
+
+    /// The SQE's out-of-band descriptor-array length (`oob_len`) is
+    /// malformed: not a whole number of 16-byte SGL descriptors, or
+    /// larger than a single descriptor page.
+    IoChannelInvalidOobLen = 0x08700104,
+
+    /// The SQE's out-of-band descriptor-array pointer (`oob_prp`) is not
+    /// 4K-page-aligned, so the descriptor array could straddle a page.
+    IoChannelInvalidOobAlignment = 0x08700105,
+
+    /// `PartFinal` was asked to restore a `prev_local_mk_backup` whose
+    /// bound SVN is **newer** than this firmware's current SVN — an
+    /// anti-rollback violation: a backup minted under a newer platform
+    /// SVN must not be restored on older firmware.  Distinct from
+    /// [`InvalidArg`](Self::InvalidArg) (a malformed request) — the
+    /// envelope is well-formed, its lineage is simply too new.
+    PartFinalBackupSvnRollback = 0x08700106,
+
+    /// `PartFinal` validated the supplied PTA certificate chain
+    /// (well-formed and correctly anchored to the policy `POTAPubKey`),
+    /// but the chain's **leaf** public key does not match this
+    /// partition's Partition Trust Anchor (PTA) key.  Distinct from an
+    /// [`X509`](Self::X509SignatureInvalid) chain error — the chain is
+    /// cryptographically valid, its identity is simply wrong.
+    PartFinalPtaMismatch = 0x08700107,
+
+    /// The TBOR `SdCreateRemoteBackup` handler was asked to create a
+    /// security domain on a partition whose one-shot
+    /// [`SD_INITIALIZED`](crate::PartPropId::SD_INITIALIZED) flag is
+    /// already set (the security-domain masking key `SDMK` is already
+    /// provisioned in this partition incarnation).  The one-shot gate
+    /// permits only `false → true`; reset happens PAL-internally on
+    /// partition free / NSSR.
+    SdAlreadyInitialized = 0x08700108,
+
+    /// A `SdRestore*` handler was asked to restore a security-domain
+    /// backup whose bound SVN is **newer** than the current firmware SVN.
+    /// A backup minted under a newer SVN cannot be restored on this
+    /// (older) firmware (anti-rollback); older-or-equal SVNs are accepted
+    /// since the masking keys are re-derivable from the versioned device
+    /// seeds.  Enforced only after the AEAD tag authenticates the
+    /// envelope, so a tampered cleartext SVN fails the tag rather than
+    /// spoofing this error.
+    SdBackupSvnRollback = 0x08700109,
+
+    /// A `SdCreatePeerBackup` / `SdRestorePeerBackup` handler was asked to
+    /// clone a security domain to (or from) a peer partition, but the
+    /// partition's unified [`PartPolicy`](crate::PartPolicy) does not permit
+    /// peer cloning (its `allow_peer_cloning` policy flag is clear).  Peer
+    /// backup/restore is only allowed when the security-domain owner has
+    /// opted in via policy.
+    SdPeerCloningNotAllowed = 0x0870010A,
+
+    /// A single-step concatenation KDF (X9.63 / SP 800-56A one-step)
+    /// failed: the shared secret was empty, the requested output length is
+    /// invalid, or the underlying hash operation failed.  Surfaced by
+    /// `x963_kdf` / `sp800_56a_kdf`.
+    ConcatKdfError = 0x0870010B,
+
+    /// A variable-length DMA allocation callback
+    /// ([`HsmAlloc::dma_alloc_var`](crate::HsmAlloc::dma_alloc_var) /
+    /// [`dma_alloc_var_with`](crate::HsmAlloc::dma_alloc_var_with)) reported
+    /// having written more bytes than the buffer it was handed.  The
+    /// allocator refuses to expose a slice longer than it owns, so the
+    /// command fails instead of over-reading the heap.  Like
+    /// [`UndoLogFull`](Self::UndoLogFull) this indicates a **firmware bug** —
+    /// an encoder mis-reporting its output length — and should never occur;
+    /// it is distinct from [`InvalidArg`](Self::InvalidArg), which blames a
+    /// malformed request, and from
+    /// [`NotEnoughSpace`](Self::NotEnoughSpace), which signals genuine
+    /// exhaustion.
+    DmaAllocLenOverrun = 0x0870010C,
+
+    /// An ML-DSA signature failed verification.  Reported as an error
+    /// status rather than a boolean result so a caller that neglects to
+    /// inspect the response cannot silently treat a bad signature as
+    /// valid.  Mirrors [`EccVerifyFailed`](Self::EccVerifyFailed).
+    MlDsaVerifyFailed = 0x0870010D,
+
+    // Firmware-internal diagnostic codes logged by the CPU fault and panic
+    // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol
+    // statuses: they use the PAL diagnostic facility (`0x08F`) to stay clear of
+    // the DDI status range, and are emitted to the trace log only (never
+    // returned over the wire).
+    /// A Rust `panic!` reached the firmware panic handler.
+    Panic = 0x08F00001,
+
+    /// A CPU `HardFault` exception was taken (an escalated bus/usage/mem
+    /// fault, or a stack overflow).
+    HardFault = 0x08F00002,
+
+    /// An exception or interrupt with no dedicated handler reached the
+    /// `DefaultHandler`.
+    UnexpectedException = 0x08F00003,
+
+    // -- CPT (CryptoController) errors --------------------------------
+    // Mirror of tiger-collab's `DeviceErrorCodes::CryptoController` range
+    // (fw/crates/error/src/device.rs, subopcode 0x0a). Values are copied
+    // verbatim so CPT-originated codes carry the same numeric meaning
+    // across both stacks.
+
+    // Software validation / PAL / runtime errors.
+    CryptoNotInitialized = 0x090A0001,
+    CryptoBufferTooSmall = 0x090A0002,
+    CryptoInputTooLarge = 0x090A0003,
+    CryptoInvalidAlg = 0x090A0004,
+    CryptoTimeout = 0x090A0005,
+    CryptoUnalignedCptr = 0x090A0006,
+    CryptoInvalidArg = 0x090A0007,
+    CryptoInvalidIvLength = 0x090A0008,
+    CryptoInvalidKeyLength = 0x090A0009,
+    CryptoInvalidDataLength = 0x090A000A,
+    CryptoInvalidContextLength = 0x090A000B,
+    CryptoInvalidPartialContext = 0x090A000C,
+    CryptoUnsupportedMode = 0x090A000D,
+    CryptoUnalignedBuffer = 0x090A000E,
+    CryptoNotSupported = 0x090A000F,
+    CryptoHardwareError = 0x090A0010,
+
+    // CPT hardware completion codes (payload16 >= 0x0100).
+    CryptoCptRsaUcErrModLenInvalid = 0x090A0106,
+    CryptoCptRsaUcErrExpLenInvalid = 0x090A0107,
+    CryptoCptRsaUcErrDataLenInvalid = 0x090A0108,
+    CryptoCptGcUcErrDataLenInvalid = 0x090A0143,
+    CryptoCptGcUcErrCipherUnsupported = 0x090A0146,
+    CryptoCptGcUcErrAuthUnsupported = 0x090A0147,
+    CryptoCptGcUcErrHashModeUnsupported = 0x090A0149,
+    CryptoCptGcUcErrIcvMiscompare = 0x090A014C,
+    CryptoCptGcUcErrKeyLenInvalid = 0x090A014E,
+    CryptoCptRsaUcErrPkcsDecoding = 0x090A0151,
+    CryptoCptRsaUcErrPkcsSignatureInvalid = 0x090A0152,
+
+    // CPT completion status errors.
+    CryptoCptFault = 0x090A0200,
+    CryptoCptSwErr = 0x090A0300,
+    CryptoCptHwErr = 0x090A0400,
+    CryptoCptInstErr = 0x090A0500,
+    CryptoCptSwWarn = 0x090A0600,
+}
+
+impl core::fmt::Debug for HsmError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "HsmError({:#010x})", self.0)
+    }
+}
+
+impl From<u32> for HsmError {
+    #[inline]
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl From<HsmError> for u32 {
+    #[inline]
+    fn from(e: HsmError) -> Self {
+        e.0
+    }
+}
+
+/// A specialized [`Result`] type for HSM operations.
+pub type HsmResult<T> = Result<T, HsmError>;
+#[cfg(test)]
+mod tests {
+    use super::HsmError;
+
+    #[test]
+    fn cpt_error_codes_match_tiger_collab_device_error_codes() {
+        // Values copied from tiger-collab's `DeviceErrorCodes::CryptoController`
+        // range (fw/crates/error/src/device.rs); pinned here since the two
+        // repos do not share a crate dependency.
+        assert_eq!(u32::from(HsmError::CryptoNotInitialized), 0x090A0001);
+        assert_eq!(u32::from(HsmError::CryptoBufferTooSmall), 0x090A0002);
+        assert_eq!(u32::from(HsmError::CryptoInputTooLarge), 0x090A0003);
+        assert_eq!(u32::from(HsmError::CryptoInvalidAlg), 0x090A0004);
+        assert_eq!(u32::from(HsmError::CryptoTimeout), 0x090A0005);
+        assert_eq!(u32::from(HsmError::CryptoUnalignedCptr), 0x090A0006);
+        assert_eq!(u32::from(HsmError::CryptoInvalidArg), 0x090A0007);
+        assert_eq!(u32::from(HsmError::CryptoInvalidIvLength), 0x090A0008);
+        assert_eq!(u32::from(HsmError::CryptoInvalidKeyLength), 0x090A0009);
+        assert_eq!(u32::from(HsmError::CryptoInvalidDataLength), 0x090A000A);
+        assert_eq!(u32::from(HsmError::CryptoInvalidContextLength), 0x090A000B);
+        assert_eq!(u32::from(HsmError::CryptoInvalidPartialContext), 0x090A000C);
+        assert_eq!(u32::from(HsmError::CryptoUnsupportedMode), 0x090A000D);
+        assert_eq!(u32::from(HsmError::CryptoUnalignedBuffer), 0x090A000E);
+        assert_eq!(u32::from(HsmError::CryptoNotSupported), 0x090A000F);
+        assert_eq!(u32::from(HsmError::CryptoHardwareError), 0x090A0010);
+
+        assert_eq!(
+            u32::from(HsmError::CryptoCptRsaUcErrModLenInvalid),
+            0x090A0106
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptRsaUcErrExpLenInvalid),
+            0x090A0107
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptRsaUcErrDataLenInvalid),
+            0x090A0108
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptGcUcErrDataLenInvalid),
+            0x090A0143
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptGcUcErrCipherUnsupported),
+            0x090A0146
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptGcUcErrAuthUnsupported),
+            0x090A0147
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptGcUcErrHashModeUnsupported),
+            0x090A0149
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptGcUcErrIcvMiscompare),
+            0x090A014C
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptGcUcErrKeyLenInvalid),
+            0x090A014E
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptRsaUcErrPkcsDecoding),
+            0x090A0151
+        );
+        assert_eq!(
+            u32::from(HsmError::CryptoCptRsaUcErrPkcsSignatureInvalid),
+            0x090A0152
+        );
+
+        assert_eq!(u32::from(HsmError::CryptoCptFault), 0x090A0200);
+        assert_eq!(u32::from(HsmError::CryptoCptSwErr), 0x090A0300);
+        assert_eq!(u32::from(HsmError::CryptoCptHwErr), 0x090A0400);
+        assert_eq!(u32::from(HsmError::CryptoCptInstErr), 0x090A0500);
+        assert_eq!(u32::from(HsmError::CryptoCptSwWarn), 0x090A0600);
+    }
+}

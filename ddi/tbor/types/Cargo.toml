@@ -1,0 +1,48 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_ddi_tbor_types"
+version = "0.1.0"
+
+[dependencies]
+bitfield-struct.workspace = true
+open-enum.workspace = true
+tsra_ddi_tbor_codec.workspace = true
+tsra_ddi_tbor_derive.workspace = true
+zerocopy = { features = ["derive"], workspace = true }
+
+[dev-dependencies]
+minicbor = { features = ["derive"], workspace = true }
+parking_lot.workspace = true
+rand.workspace = true
+tsra_crypto = { features = ["testvectors"], workspace = true }
+tsra_ddi.workspace = true
+tsra_ddi_interface.workspace = true
+tsra_ddi_mbor_sim.workspace = true
+tsra_ddi_mbor_test_helpers.workspace = true
+tsra_ddi_mbor_types.workspace = true
+tsra_ddi_tbor_test_harness.workspace = true
+tsra_session_ex_crypto.workspace = true
+x509.workspace = true
+
+[lib]
+doctest = false
+
+[[test]]
+name = "tsra_ddi_tbor_tests"
+path = "tests/tsra_ddi_tbor_tests.rs"
+
+[features]
+# Forward backend selection to the tsra_ddi facade so the integration
+# test binary picks up the right backend. The same tests run across every
+# transport — choose one with `--features emu` / `mock` / `sock`.
+emu = ["tsra_ddi/emu", "tsra_ddi_tbor_test_harness/emu"]
+mock = ["tsra_ddi/mock", "tsra_ddi_tbor_test_harness/mock"]
+sock = ["tsra_ddi/sock", "tsra_ddi_tbor_test_harness/sock"]
+table-4 = ["tsra_ddi/table-4", "tsra_ddi_tbor_test_harness/table-4"]
+table-64 = ["tsra_ddi/table-64", "tsra_ddi_tbor_test_harness/table-64"]
+
+[lints]
+workspace = true

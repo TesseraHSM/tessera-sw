@@ -1,0 +1,163 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+language = "C"
+
+header = "/*\n * Copyright (c) Microsoft Corporation.\n * Licensed under the MIT License.\n */"
+
+cpp_compat = true
+
+include_guard = "TSRA_API_H"
+
+documentation_style = "c"
+
+# Codegen Options
+
+# When generating a C header, the kind of declaration style to use for structs
+# or enums.
+#
+# possible values:
+# * "type": typedef struct { ... } MyType;
+# * "tag": struct MyType { ... };
+# * "both": typedef struct MyType { ... } MyType;
+#
+# default: "both"
+style = "tag"
+
+# If this option is true `usize` and `isize` will be converted into `size_t` and `ptrdiff_t`
+# instead of `uintptr_t` and `intptr_t` respectively.
+usize_is_size_t = true
+
+[export]
+
+# A list of items to not include in the generated bindings
+# default: []
+exclude = ["TsraWideChar"]
+include = [
+  "HsmEccCurve",
+  "HsmError",
+  "HsmKeyClass",
+  "HsmKeyKind",
+  "HsmPartType",
+  "TsraAlgoAesCbcParams",
+  "TsraAlgoAesGcmParams",
+  "TsraAlgoAesXtsParams",
+  "TsraAlgoEcdhParams",
+  "TsraAlgoHkdfParams",
+  "TsraAlgoKbkdfCounterParams",
+  "TsraAlgoRsaAesKeyWrapParams",
+  "TsraAlgoRsaAesWrapParams",
+  "TsraAlgoRsaPkcsOaepParams",
+  "TsraAlgoRsaPkcsPssParams",
+  "TsraDarcCertChain",
+  "TsraDarcKeyUnwrapParams",
+  "TsraDarcKeyWrapParams",
+  "TsraDarcTmkExportParams",
+  "TsraDarcTmkImportParams",
+  "TsraMobkCallbackOps",
+  "TsraPotaCallbackOps",
+  "TsraResiliencyConfig",
+  "TsraResiliencyLockOps",
+  "TsraResiliencyStorageOps",
+  "TsraSdCertChain",
+  "TsraSdCreatePeerBackupParams",
+  "TsraSdCreateRemoteBackupParams",
+  "TsraSdEvidence",
+  "TsraSdResealRemoteBackupParams",
+  "TsraSdRestoreLocalBackupParams",
+  "TsraSdRestorePeerBackupParams",
+  "TsraSdRestoreRemoteBackupParams",
+  "TsraSessExPartFinalParams",
+  "TsraSessExPartInitParams",
+  "TsraSessionPsk",
+]
+
+item_types = [
+  "constants",
+  "enums",
+  "functions",
+  "opaque",
+  "structs",
+  "typedefs",
+]
+
+[export.rename]
+"AES_GCM_IV_SIZE" = "TSRA_AES_GCM_IV_SIZE"
+"AES_GCM_TAG_SIZE" = "TSRA_AES_GCM_TAG_SIZE"
+"HsmEccCurve" = "tsra_ecc_curve"
+"HsmError" = "tsra_status"
+"HsmKeyClass" = "tsra_key_class"
+"HsmKeyKind" = "tsra_key_kind"
+"HsmOwnerBackupKeySource" = "tsra_owner_backup_key_source"
+"HsmPartType" = "tsra_part_type"
+"HsmPotaEndorsementSource" = "tsra_pota_endorsement_source"
+"HsmSessionExType" = "tsra_session_ex_type"
+"PSK_LEN" = "TSRA_PSK_LEN"
+"TsraAlgo" = "tsra_algo"
+"TsraAlgoAesCbcParams" = "tsra_algo_aes_cbc_params"
+"TsraAlgoAesGcmParams" = "tsra_algo_aes_gcm_params"
+"TsraAlgoAesXtsParams" = "tsra_algo_aes_xts_params"
+"TsraAlgoEcdhParams" = "tsra_algo_ecdh_params"
+"TsraAlgoHkdfParams" = "tsra_algo_hkdf_params"
+"TsraAlgoId" = "tsra_algo_id"
+"TsraAlgoKbkdfCounterParams" = "tsra_algo_kbkdf_counter_params"
+"TsraAlgoRsaAesKeyWrapParams" = "tsra_algo_rsa_aes_key_wrap_params"
+"TsraAlgoRsaAesWrapParams" = "tsra_algo_rsa_aes_wrap_params"
+"TsraAlgoRsaPkcsOaepParams" = "tsra_algo_rsa_pkcs_oaep_params"
+"TsraAlgoRsaPkcsPssParams" = "tsra_algo_rsa_pkcs_pss_params"
+"TsraApiRev" = "tsra_api_rev"
+"TsraBuffer" = "tsra_buffer"
+"TsraChar" = "tsra_char"
+"TsraCredentials" = "tsra_credentials"
+"TsraDarcCertChain" = "tsra_darc_cert_chain"
+"TsraDarcKeyUnwrapParams" = "tsra_darc_key_unwrap_params"
+"TsraDarcKeyWrapParams" = "tsra_darc_key_wrap_params"
+"TsraDarcTmkExportParams" = "tsra_darc_tmk_export_params"
+"TsraDarcTmkImportParams" = "tsra_darc_tmk_import_params"
+"TsraEccCurve" = "tsra_ecc_curve"
+"TsraHandle" = "tsra_handle"
+"TsraKeyClass" = "tsra_key_class"
+"TsraKeyKind" = "tsra_key_kind"
+"TsraKeyProp" = "tsra_key_prop"
+"TsraKeyPropId" = "tsra_key_prop_id"
+"TsraKeyPropList" = "tsra_key_prop_list"
+"TsraMgf1Id" = "tsra_mgf1_id"
+"TsraMobkCallbackOps" = "tsra_mobk_callback_ops"
+"TsraOwnerBackupKeyConfig" = "tsra_owner_backup_key_config"
+"TsraOwnerBackupKeySource" = "tsra_owner_backup_key_source"
+"TsraPartInfo" = "tsra_part_info"
+"TsraPartPolicyBuilder" = "tsra_part_policy_builder"
+"TsraPartProp" = "tsra_part_prop"
+"TsraPartPropId" = "tsra_part_prop_id"
+"TsraPartType" = "tsra_part_type"
+"TsraPotaCallbackOps" = "tsra_pota_callback_ops"
+"TsraPotaEndorsement" = "tsra_pota_endorsement"
+"TsraPotaEndorsementData" = "tsra_pota_endorsement_data"
+"TsraPotaEndorsementSource" = "tsra_pota_endorsement_source"
+"TsraResiliencyConfig" = "tsra_resiliency_config"
+"TsraResiliencyLockOps" = "tsra_resiliency_lock_ops"
+"TsraResiliencyStorageOps" = "tsra_resiliency_storage_ops"
+"TsraSdCertChain" = "tsra_sd_cert_chain"
+"TsraSdCreatePeerBackupParams" = "tsra_sd_create_peer_backup_params"
+"TsraSdCreateRemoteBackupParams" = "tsra_sd_create_remote_backup_params"
+"TsraSdEvidence" = "tsra_sd_evidence"
+"TsraSdResealRemoteBackupParams" = "tsra_sd_reseal_remote_backup_params"
+"TsraSdRestoreLocalBackupParams" = "tsra_sd_restore_local_backup_params"
+"TsraSdRestorePeerBackupParams" = "tsra_sd_restore_peer_backup_params"
+"TsraSdRestoreRemoteBackupParams" = "tsra_sd_restore_remote_backup_params"
+"TsraSessExPartFinalParams" = "tsra_sess_ex_part_final_params"
+"TsraSessExPartInitParams" = "tsra_sess_ex_part_init_params"
+"TsraSessionExType" = "tsra_session_ex_type"
+"TsraSessionProp" = "tsra_session_prop"
+"TsraSessionPropId" = "tsra_session_prop_id"
+"TsraSessionPsk" = "tsra_session_psk"
+"TsraStatus" = "tsra_status"
+"TsraStr" = "tsra_str"
+
+[defines]
+"target_os = linux" = "__linux__ "
+"target_os = windows" = "_WIN32"
+
+[enum]
+enum_class = false
+rename_variants = "QualifiedScreamingSnakeCase"

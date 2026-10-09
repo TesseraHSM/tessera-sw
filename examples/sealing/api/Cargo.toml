@@ -1,0 +1,32 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_sealing_api"
+publish = false
+version = "0.1.0"
+
+[lib]
+doctest = false
+name = "tsra_sealing_api"
+path = "src/lib.rs"
+test = false
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+tsra_api.workspace = true
+tsra_crypto.workspace = true
+tsra_ddi_tbor_types.workspace = true
+x509.workspace = true
+zerocopy.workspace = true
+
+[dev-dependencies]
+minicbor = { features = ["std"], workspace = true }
+
+[features]
+emu = ["tsra_api/emu"]
+
+[lints]
+workspace = true

@@ -1,0 +1,37 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_ddi"
+version = "0.1.0"
+
+[lib]
+doctest = false
+test = false
+
+[dependencies]
+cfg-if.workspace = true
+tsra_ddi_emu = { optional = true, workspace = true }
+tsra_ddi_interface.workspace = true
+tsra_ddi_mock = { optional = true, workspace = true }
+tsra_ddi_sock = { optional = true, workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tsra_ddi_nix.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tsra_ddi_win.workspace = true
+
+[features]
+default = []
+emu = ["tsra_ddi_emu"]
+mock = ["tsra_ddi_mock"]
+sock = ["tsra_ddi_sock"]
+table-4 = ["tsra_ddi_mock/table-4"]
+table-64 = ["tsra_ddi_mock/table-64"]
+# Forward the per-IO `iic recv` / `oic send` debug traces (emu backend only).
+trace-io = ["tsra_ddi_emu?/trace-io"]
+
+[lints]
+workspace = true

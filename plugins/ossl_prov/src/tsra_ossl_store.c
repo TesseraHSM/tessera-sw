@@ -1,0 +1,703 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#include <openssl/core_dispatch.h>
+#include <openssl/core_names.h>
+#include <openssl/core_object.h>
+#include <openssl/err.h>
+#include <openssl/params.h>
+#include <openssl/proverr.h>
+#include <openssl/store.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "tsra_ossl_base.h"
+#include "tsra_ossl_ec.h"
+#include "tsra_ossl_file_io.h"
+#include "tsra_ossl_hsm.h"
+#include "tsra_ossl_pkey_param.h"
+#include "tsra_ossl_rsa.h"
+#include "tsra_ossl_store.h"
+
+/* Storage-domain key types (mapped to HSM key kinds when needed) */
+typedef enum
+{
+    TSRA_STORE_KEY_TYPE_EC = 1,
+    TSRA_STORE_KEY_TYPE_RSA,
+    TSRA_STORE_KEY_TYPE_RSA_PSS,
+    TSRA_STORE_KEY_TYPE_AES,
+} tsra_store_key_type;
+
+typedef struct
+{
+    char *file_path;
+    tsra_store_key_type key_type;
+} TSRA_URI_INFO;
+
+typedef struct
+{
+    TSRA_OSSL_PROV_CTX *provctx;
+    TSRA_URI_INFO uri_info;
+    int eof;
+    TSRA_KEY_PAIR_OBJ key_handles;
+    int key_type;
+    int expect;    /* Expected object type (OSSL_STORE_INFO_PKEY, OSSL_STORE_INFO_PUBKEY, etc.) */
+    void *key_obj; /* Allocated key object (TSRA_EC_KEY, etc.) for store callback */
+
+    /* Properties queried from unmasked key */
+    tsra_ecc_curve ec_curve; /* EC curve ID for ECC keys */
+    uint32_t rsa_bits;       /* RSA key bit length */
+    bool is_session_key;     /* Whether this is a session key */
+} TSRA_STORE_CTX;
+
+static TSRA_STORE_CTX *store_ctx_new(TSRA_OSSL_PROV_CTX *provctx)
+{
+    TSRA_STORE_CTX *ctx = NULL;
+
+    if (provctx == NULL)
+    {
+        return NULL;
+    }
+
+    ctx = OPENSSL_zalloc(sizeof(TSRA_STORE_CTX));
+    if (ctx == NULL)
+    {
+        return NULL;
+    }
+
+    ctx->provctx = provctx;
+    ctx->uri_info.file_path = NULL;
+    ctx->uri_info.key_type = 0;
+    ctx->eof = 0;
+    ctx->key_type = -1; // Uninitialized
+    ctx->expect = 0;    // No expectation set
+    ctx->ec_curve = 0;
+    ctx->is_session_key = false;
+
+    return ctx;
+}
+
+static void tsra_uri_info_free(TSRA_URI_INFO *info)
+{
+    if (info == NULL)
+        return;
+
+    if (info->file_path != NULL)
+        OPENSSL_free(info->file_path);
+}
+
+/*
+ * Delete HSM key handles if they are still owned by the store context.
+ * Handles are zeroed after deletion to prevent double-free.
+ */
+static void store_ctx_delete_key_handles(TSRA_STORE_CTX *ctx)
+{
+    if (ctx == NULL)
+    {
+        return;
+    }
+
+    if (ctx->key_handles.pub != 0)
+    {
+        tsra_key_delete(ctx->key_handles.pub);
+        ctx->key_handles.pub = 0;
+    }
+    if (ctx->key_handles.priv != 0)
+    {
+        tsra_key_delete(ctx->key_handles.priv);
+        ctx->key_handles.priv = 0;
+    }
+}
+
+static void store_ctx_free(TSRA_STORE_CTX *ctx)
+{
+    if (ctx == NULL)
+    {
+        return;
+    }
+
+    /* Delete any HSM handles still owned by store (not transferred to keymgmt) */
+    store_ctx_delete_key_handles(ctx);
+
+    tsra_uri_info_free(&ctx->uri_info);
+    if (ctx->key_obj != NULL)
+    {
+        OPENSSL_free(ctx->key_obj);
+    }
+    OPENSSL_clear_free(ctx, sizeof(TSRA_STORE_CTX));
+}
+
+static tsra_store_key_type parse_key_type(const char *type_str)
+{
+    if (type_str == NULL)
+        return 0;
+
+    if (strcasecmp(type_str, "ec") == 0)
+        return TSRA_STORE_KEY_TYPE_EC;
+    else if (strcasecmp(type_str, "rsa") == 0)
+        return TSRA_STORE_KEY_TYPE_RSA;
+    else if (strcasecmp(type_str, "rsa-pss") == 0)
+        return TSRA_STORE_KEY_TYPE_RSA_PSS;
+    else if (strcasecmp(type_str, "aes") == 0)
+        return TSRA_STORE_KEY_TYPE_AES;
+
+    return 0;
+}
+
+/* Map storage key type to HSM key kind for unmask operations */
+static tsra_key_kind store_type_to_hsm_kind(tsra_store_key_type type)
+{
+    switch (type)
+    {
+    case TSRA_STORE_KEY_TYPE_EC:
+        return TSRA_KEY_KIND_ECC;
+    case TSRA_STORE_KEY_TYPE_RSA:
+    case TSRA_STORE_KEY_TYPE_RSA_PSS:
+        return TSRA_KEY_KIND_RSA;
+    case TSRA_STORE_KEY_TYPE_AES:
+        return TSRA_KEY_KIND_AES;
+    default:
+        return 0;
+    }
+}
+
+static int parse_uri_attribute(const char *attr_str, char **out_key, char **out_val)
+{
+    const char *eq = strchr(attr_str, '=');
+    size_t key_len, val_len;
+
+    if (eq == NULL)
+        return OSSL_FAILURE;
+
+    key_len = eq - attr_str;
+    if (key_len == 0)
+        return OSSL_FAILURE;
+
+    *out_key = OPENSSL_malloc(key_len + 1);
+    if (*out_key == NULL)
+        return OSSL_FAILURE;
+    strncpy(*out_key, attr_str, key_len);
+    (*out_key)[key_len] = '\0';
+
+    val_len = strlen(eq + 1);
+    *out_val = OPENSSL_malloc(val_len + 1);
+    if (*out_val == NULL)
+    {
+        OPENSSL_free(*out_key);
+        return OSSL_FAILURE;
+    }
+    strcpy(*out_val, eq + 1);
+
+    return OSSL_SUCCESS;
+}
+
+static int parse_tsra_uri(const char *uri, TSRA_URI_INFO *out_info)
+{
+    const char *scheme = "tsra://";
+    size_t scheme_len = strlen(scheme);
+    const char *path_start, *semicolon;
+    size_t path_len;
+    char *attr_copy = NULL, *attr_token = NULL, *attr_saveptr = NULL;
+    char *attr_name = NULL, *attr_value = NULL;
+
+    if (uri == NULL || out_info == NULL)
+    {
+        return OSSL_FAILURE;
+    }
+
+    // Initialize output structure
+    out_info->file_path = NULL;
+    out_info->key_type = 0;
+
+    // Check URI starts with "tsra://"
+    if (strncmp(uri, scheme, scheme_len) != 0)
+    {
+        return OSSL_FAILURE;
+    }
+
+    path_start = uri + scheme_len;
+
+    // Find semicolon that separates path from attributes
+    semicolon = strchr(path_start, ';');
+    if (semicolon == NULL)
+    {
+        path_len = strlen(path_start);
+    }
+    else
+    {
+        path_len = semicolon - path_start;
+    }
+
+    // Path must not be empty
+    if (path_len == 0)
+    {
+        return OSSL_FAILURE;
+    }
+
+    // Allocate and copy path
+    out_info->file_path = OPENSSL_malloc(path_len + 1);
+    if (out_info->file_path == NULL)
+    {
+        return OSSL_FAILURE;
+    }
+    strncpy(out_info->file_path, path_start, path_len);
+    out_info->file_path[path_len] = '\0';
+
+    // Parse attributes if present
+    if (semicolon != NULL)
+    {
+        attr_copy = OPENSSL_strdup(semicolon + 1);
+        if (attr_copy == NULL)
+        {
+            /* Caller owns out_info and will free via tsra_uri_info_free() */
+            return OSSL_FAILURE;
+        }
+
+        attr_token = strtok_r(attr_copy, ";", &attr_saveptr);
+        while (attr_token != NULL)
+        {
+            if (parse_uri_attribute(attr_token, &attr_name, &attr_value))
+            {
+                if (strcasecmp(attr_name, "type") == 0)
+                {
+                    out_info->key_type = parse_key_type(attr_value);
+                }
+
+                OPENSSL_free(attr_name);
+                OPENSSL_free(attr_value);
+            }
+
+            attr_token = strtok_r(NULL, ";", &attr_saveptr);
+        }
+
+        OPENSSL_free(attr_copy);
+    }
+
+    // Validate that type was provided
+    if (out_info->key_type == 0)
+    {
+        /* Caller owns out_info and will free via tsra_uri_info_free() */
+        return OSSL_FAILURE;
+    }
+
+    return OSSL_SUCCESS;
+}
+
+static int load_and_unmask_key(TSRA_STORE_CTX *ctx)
+{
+    tsra_status status;
+    struct tsra_buffer masked_buf = { 0 };
+    tsra_key_kind actual_kind;
+    struct tsra_key_prop prop;
+
+    if (ctx->provctx == NULL || ctx->provctx->session == 0)
+    {
+        return OSSL_FAILURE;
+    }
+
+    /* Read masked key from file - fail if file doesn't exist or cannot be read */
+    if (tsra_file_load(ctx->uri_info.file_path, &masked_buf) != TSRA_STATUS_SUCCESS)
+    {
+        ERR_raise_data(
+            ERR_LIB_PROV,
+            PROV_R_MISSING_KEY,
+            "failed to load masked key file '%s'",
+            ctx->uri_info.file_path
+        );
+        return OSSL_FAILURE;
+    }
+
+    if (masked_buf.ptr == NULL)
+    {
+        ERR_raise_data(
+            ERR_LIB_PROV,
+            PROV_R_MISSING_KEY,
+            "masked key file not found: '%s'",
+            ctx->uri_info.file_path != NULL ? ctx->uri_info.file_path : "<null>"
+        );
+        return OSSL_FAILURE;
+    }
+
+    /* Unmask the key - fail if unmask operation fails */
+    status = tsra_key_unmask_pair(
+        ctx->provctx->session,
+        store_type_to_hsm_kind(ctx->uri_info.key_type),
+        &masked_buf,
+        &ctx->key_handles.priv,
+        &ctx->key_handles.pub
+    );
+
+    if (status != TSRA_STATUS_SUCCESS)
+    {
+        OPENSSL_cleanse(masked_buf.ptr, masked_buf.len);
+        OPENSSL_free(masked_buf.ptr);
+        return OSSL_FAILURE;
+    }
+
+    /* Query the key kind to verify it matches expectations */
+    actual_kind = 0;
+    prop.id = TSRA_KEY_PROP_ID_KIND;
+    prop.val = &actual_kind;
+    prop.len = sizeof(tsra_key_kind);
+
+    status = tsra_key_get_prop(ctx->key_handles.priv, &prop);
+
+    if (status != TSRA_STATUS_SUCCESS)
+    {
+        store_ctx_delete_key_handles(ctx);
+        OPENSSL_cleanse(masked_buf.ptr, masked_buf.len);
+        OPENSSL_free(masked_buf.ptr);
+        return OSSL_FAILURE;
+    }
+
+    ctx->key_type = actual_kind;
+
+    /* For ECC keys, query additional properties */
+    if (actual_kind == TSRA_KEY_KIND_ECC)
+    {
+        /* Query EC curve */
+        tsra_ecc_curve curve_id = 0;
+        prop.id = TSRA_KEY_PROP_ID_EC_CURVE;
+        prop.val = &curve_id;
+        prop.len = sizeof(tsra_ecc_curve);
+
+        status = tsra_key_get_prop(ctx->key_handles.priv, &prop);
+        if (status == TSRA_STATUS_SUCCESS)
+        {
+            ctx->ec_curve = curve_id;
+        }
+
+        /* Query session flag */
+        uint8_t is_session = 0;
+        prop.id = TSRA_KEY_PROP_ID_SESSION;
+        prop.val = &is_session;
+        prop.len = sizeof(uint8_t);
+
+        status = tsra_key_get_prop(ctx->key_handles.priv, &prop);
+        if (status == TSRA_STATUS_SUCCESS)
+        {
+            ctx->is_session_key = (is_session != 0);
+        }
+    }
+    /* For RSA keys, query bit length and session flag */
+    else if (actual_kind == TSRA_KEY_KIND_RSA || actual_kind == TSRA_KEY_KIND_RSA_CRT)
+    {
+        /* Query RSA bit length */
+        uint32_t bit_len = 0;
+        prop.id = TSRA_KEY_PROP_ID_BIT_LEN;
+        prop.val = &bit_len;
+        prop.len = sizeof(uint32_t);
+
+        status = tsra_key_get_prop(ctx->key_handles.priv, &prop);
+        if (status == TSRA_STATUS_SUCCESS)
+        {
+            ctx->rsa_bits = bit_len;
+        }
+
+        /* Query session flag */
+        uint8_t is_session = 0;
+        prop.id = TSRA_KEY_PROP_ID_SESSION;
+        prop.val = &is_session;
+        prop.len = sizeof(uint8_t);
+
+        status = tsra_key_get_prop(ctx->key_handles.priv, &prop);
+        if (status == TSRA_STATUS_SUCCESS)
+        {
+            ctx->is_session_key = (is_session != 0);
+        }
+    }
+    /* Any other kind leaves the context's key properties unpopulated, so
+     * fail here rather than handing back a half-initialized context. */
+    else
+    {
+        ERR_raise_data(
+            ERR_LIB_PROV,
+            PROV_R_INVALID_KEY,
+            "masked key has unsupported key kind %u",
+            (unsigned int)actual_kind
+        );
+        store_ctx_delete_key_handles(ctx);
+        OPENSSL_cleanse(masked_buf.ptr, masked_buf.len);
+        OPENSSL_free(masked_buf.ptr);
+        return OSSL_FAILURE;
+    }
+
+    OPENSSL_cleanse(masked_buf.ptr, masked_buf.len);
+    OPENSSL_free(masked_buf.ptr);
+
+    return OSSL_SUCCESS;
+}
+
+static const char *store_type_to_ossl_name(tsra_store_key_type type)
+{
+    switch (type)
+    {
+    case TSRA_STORE_KEY_TYPE_EC:
+        return "EC";
+    case TSRA_STORE_KEY_TYPE_RSA:
+        return "RSA";
+    case TSRA_STORE_KEY_TYPE_RSA_PSS:
+        return "RSA-PSS";
+    default:
+        return NULL;
+    }
+}
+
+static void *tsra_store_open(
+    void *provctx,
+    const char *uri,
+    ossl_unused const OSSL_PARAM params[],
+    ossl_unused OSSL_CALLBACK *object_cb,
+    ossl_unused void *object_cbarg
+)
+{
+    TSRA_STORE_CTX *ctx = NULL;
+    TSRA_OSSL_PROV_CTX *prov_ctx = (TSRA_OSSL_PROV_CTX *)provctx;
+
+    if (uri == NULL)
+    {
+        return NULL;
+    }
+
+    /* Lazy HSM session open is deferred from query_operation to here so
+     * libcrypto can finish its own initialisation (e.g. DRBG bootstrap)
+     * without us re-entering it. */
+    if (tsra_ensure_session(prov_ctx) != TSRA_STATUS_SUCCESS)
+    {
+        return NULL;
+    }
+
+    // Create context first
+    ctx = store_ctx_new(prov_ctx);
+    if (ctx == NULL)
+    {
+        return NULL;
+    }
+
+    // Parse URI with type support into the allocated context
+    if (!parse_tsra_uri(uri, &ctx->uri_info))
+    {
+        store_ctx_free(ctx);
+        return NULL;
+    }
+
+    return (void *)ctx;
+}
+
+static int tsra_store_load(
+    void *loaderctx,
+    OSSL_CALLBACK *object_cb,
+    void *object_cbarg,
+    ossl_unused OSSL_PASSPHRASE_CALLBACK *pw_cb,
+    ossl_unused void *pw_cbarg
+)
+{
+    TSRA_STORE_CTX *ctx = (TSRA_STORE_CTX *)loaderctx;
+    OSSL_PARAM params[4];
+    int object_type = OSSL_OBJECT_PKEY;
+    const char *data_type;
+    TSRA_EC_KEY *ec_key = NULL;
+    TSRA_RSA_KEY *rsa_key = NULL;
+
+    if (ctx == NULL || ctx->eof)
+        return OSSL_FAILURE;
+
+    if (!load_and_unmask_key(ctx))
+    {
+        ctx->eof = 1;
+        return OSSL_FAILURE;
+    }
+
+    /* Get OpenSSL data type name from URI storage type */
+    data_type = store_type_to_ossl_name(ctx->uri_info.key_type);
+    if (data_type == NULL)
+    {
+        ctx->eof = 1;
+        return OSSL_FAILURE;
+    }
+
+    // For EC keys, construct an TSRA_EC_KEY object
+    if (ctx->uri_info.key_type == TSRA_STORE_KEY_TYPE_EC)
+    {
+        ec_key = OPENSSL_zalloc(sizeof(TSRA_EC_KEY));
+        if (ec_key == NULL)
+        {
+            ctx->eof = 1;
+            return OSSL_FAILURE;
+        }
+
+        // Copy key handles
+        ec_key->key.pub = ctx->key_handles.pub;
+        ec_key->key.priv = ctx->key_handles.priv;
+        ec_key->has_public = true;
+        /*
+         * Set has_private based on what OpenSSL expects:
+         * - If expect == OSSL_STORE_INFO_PUBKEY, report as public-key-only
+         *   so OpenSSL's load_pubkey() accepts it for verification
+         * - Otherwise, report as having private key for signing operations
+         * The actual private key handle is always available for signing.
+         */
+        ec_key->has_private = (ctx->expect != OSSL_STORE_INFO_PUBKEY);
+
+        /* Initialize genctx using queried properties from unmasked key */
+        ec_key->genctx.ec_curve_id = ctx->ec_curve;
+        ec_key->genctx.key_usage = KEY_USAGE_DIGITAL_SIGNATURE;
+        ec_key->genctx.session = ctx->provctx->session;
+        ec_key->genctx.session_flag = ctx->is_session_key;
+
+        /* Store the key object in context so it persists past this call */
+        ctx->key_obj = ec_key;
+
+        // Build OSSL_PARAM array to return to OpenSSL
+        // Pass the actual TSRA_EC_KEY structure as binary reference
+        params[0] = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
+        params[1] =
+            OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)data_type, 0);
+        params[2] = OSSL_PARAM_construct_octet_string(
+            OSSL_OBJECT_PARAM_REFERENCE,
+            ec_key, /* Pass the actual key object bytes */
+            sizeof(TSRA_EC_KEY)
+        );
+        params[3] = OSSL_PARAM_construct_end();
+    }
+    else if (ctx->uri_info.key_type == TSRA_STORE_KEY_TYPE_RSA ||
+             ctx->uri_info.key_type == TSRA_STORE_KEY_TYPE_RSA_PSS)
+    {
+        rsa_key = OPENSSL_zalloc(sizeof(TSRA_RSA_KEY));
+        if (rsa_key == NULL)
+        {
+            ctx->eof = 1;
+            return OSSL_FAILURE;
+        }
+
+        /* Copy key handles */
+        rsa_key->key.pub = ctx->key_handles.pub;
+        rsa_key->key.priv = ctx->key_handles.priv;
+        rsa_key->has_public = true;
+        rsa_key->has_private = (ctx->expect != OSSL_STORE_INFO_PUBKEY);
+
+        /* Initialize genctx using queried properties */
+        rsa_key->genctx.pubkey_bits = ctx->rsa_bits;
+        /* Set key_type based on URI: RSA-PSS keys use PSS padding by default */
+        rsa_key->genctx.key_type = (ctx->uri_info.key_type == TSRA_STORE_KEY_TYPE_RSA_PSS)
+                                       ? TSRA_KEY_TYPE_RSA_PSS
+                                       : TSRA_KEY_TYPE_RSA;
+        rsa_key->genctx.key_usage = KEY_USAGE_DIGITAL_SIGNATURE;
+        rsa_key->genctx.session = ctx->provctx->session;
+        rsa_key->genctx.session_flag = ctx->is_session_key;
+
+        /* Store key object in context */
+        ctx->key_obj = rsa_key;
+
+        params[0] = OSSL_PARAM_construct_int(OSSL_OBJECT_PARAM_TYPE, &object_type);
+        params[1] =
+            OSSL_PARAM_construct_utf8_string(OSSL_OBJECT_PARAM_DATA_TYPE, (char *)data_type, 0);
+        params[2] = OSSL_PARAM_construct_octet_string(
+            OSSL_OBJECT_PARAM_REFERENCE,
+            rsa_key,
+            sizeof(TSRA_RSA_KEY)
+        );
+        params[3] = OSSL_PARAM_construct_end();
+    }
+    else
+    {
+        /* Unsupported key type */
+        ctx->eof = 1;
+        return OSSL_FAILURE;
+    }
+
+    // Mark as EOF (single object per store)
+    ctx->eof = 1;
+
+    // Call OpenSSL's callback with the object description
+    int cb_result = object_cb(params, object_cbarg);
+
+    if (cb_result)
+    {
+        /*
+         * Callback succeeded - keymgmt_load has copied the handles.
+         * Transfer ownership by zeroing our handles to prevent double-delete.
+         * keymgmt_free will delete the handles when the key is released.
+         */
+        ctx->key_handles.pub = 0;
+        ctx->key_handles.priv = 0;
+    }
+    /* If callback failed, handles remain owned by store and will be
+     * deleted in store_ctx_free */
+
+    return cb_result;
+}
+
+static int tsra_store_eof(void *loaderctx)
+{
+    TSRA_STORE_CTX *ctx = (TSRA_STORE_CTX *)loaderctx;
+
+    if (ctx == NULL)
+        return 1;
+
+    return ctx->eof;
+}
+
+static int tsra_store_close(void *loaderctx)
+{
+    store_ctx_free((TSRA_STORE_CTX *)loaderctx);
+    return OSSL_SUCCESS;
+}
+
+static void *tsra_store_attach(ossl_unused void *loaderctx, ossl_unused OSSL_CORE_BIO *in)
+{
+    return NULL;
+}
+
+static int tsra_store_export_object(
+    ossl_unused void *loaderctx,
+    ossl_unused const void *reference,
+    ossl_unused size_t reference_sz,
+    ossl_unused OSSL_CALLBACK *export_cb,
+    ossl_unused void *export_cbarg
+)
+{
+    return OSSL_FAILURE;
+}
+
+static int tsra_store_set_ctx_params(void *loaderctx, const OSSL_PARAM params[])
+{
+    TSRA_STORE_CTX *ctx = (TSRA_STORE_CTX *)loaderctx;
+    const OSSL_PARAM *p;
+
+    if (ctx == NULL)
+        return OSSL_SUCCESS;
+
+    if (params == NULL)
+        return OSSL_SUCCESS;
+
+    p = OSSL_PARAM_locate_const(params, OSSL_STORE_PARAM_EXPECT);
+    if (p != NULL)
+    {
+        if (!OSSL_PARAM_get_int(p, &ctx->expect))
+            return OSSL_FAILURE;
+    }
+
+    return OSSL_SUCCESS;
+}
+
+static const OSSL_PARAM *tsra_store_settable_ctx_params(ossl_unused void *provctx)
+{
+    static const OSSL_PARAM known_settable_ctx_params[] = {
+        OSSL_PARAM_int(OSSL_STORE_PARAM_EXPECT, NULL),
+        OSSL_PARAM_END
+    };
+    return known_settable_ctx_params;
+}
+
+const OSSL_DISPATCH tsra_ossl_store_functions[] = {
+    { OSSL_FUNC_STORE_OPEN, (void (*)(void))tsra_store_open },
+    { OSSL_FUNC_STORE_ATTACH, (void (*)(void))tsra_store_attach },
+    { OSSL_FUNC_STORE_LOAD, (void (*)(void))tsra_store_load },
+    { OSSL_FUNC_STORE_EOF, (void (*)(void))tsra_store_eof },
+    { OSSL_FUNC_STORE_CLOSE, (void (*)(void))tsra_store_close },
+    { OSSL_FUNC_STORE_EXPORT_OBJECT, (void (*)(void))tsra_store_export_object },
+    { OSSL_FUNC_STORE_SET_CTX_PARAMS, (void (*)(void))tsra_store_set_ctx_params },
+    { OSSL_FUNC_STORE_SETTABLE_CTX_PARAMS, (void (*)(void))tsra_store_settable_ctx_params },
+    { 0, NULL }
+};

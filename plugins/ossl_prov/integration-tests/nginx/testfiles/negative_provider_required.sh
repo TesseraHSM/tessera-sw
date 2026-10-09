@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Negative test: verify that nginx cannot load its config when the provider
+# is unavailable.
+
+set -euo pipefail
+
+PROVIDER_SO="${PROVIDER_SO:?PROVIDER_SO must be set to the path of tsra_provider.so}"
+NGINX_CONF="${NGINX_CONF:?NGINX_CONF must be set to the path of the generated nginx.conf}"
+NGINX_PREFIX="${NGINX_PREFIX:?NGINX_PREFIX must be set}"
+NGINX_ERROR_LOG="${NGINX_ERROR_LOG:?NGINX_ERROR_LOG must be set}"
+
+NGINX_FLAGS=(-p "$NGINX_PREFIX" -e "$NGINX_ERROR_LOG" -c "$NGINX_CONF")
+
+# Stop nginx (may already be stopped — ignore errors)
+nginx -s stop "${NGINX_FLAGS[@]}" || true
+sleep 1
+
+# Try to hide the provider by renaming it.  If the provider lives in a
+# system directory (e.g. /usr/lib/ossl-modules) the mv will fail — fall
+# back to unsetting OPENSSL_CONF which prevents the provider from loading.
+if mv "$PROVIDER_SO" "${PROVIDER_SO}.disabled" 2>/dev/null; then
+    trap 'mv "${PROVIDER_SO}.disabled" "$PROVIDER_SO"' EXIT
+    OUTPUT=$(nginx -t "${NGINX_FLAGS[@]}" 2>&1 || true)
+else
+    OUTPUT=$(env -u OPENSSL_CONF nginx -t "${NGINX_FLAGS[@]}" 2>&1 || true)
+fi
+
+echo "$OUTPUT"
+
+# When the tsra provider is unavailable, nginx fails to open the
+# `store:tsra://` cert key.  The exact OpenSSL diagnostic differs by version:
+#   - OpenSSL 3.0.x:  "... unregistered scheme ..."
+#   - OpenSSL 3.5.x:  "OSSL_STORE_open() failed ... No store loader found ...
+#                      Scheme (tsra : 0) ..."
+# Both confirm the same negative behaviour: no loader for the tsra scheme.
+if echo "$OUTPUT" | grep -qiE "unregistered scheme|no store loader found"; then
+    echo "Negative test passed: nginx correctly rejects config without provider."
+else
+    echo "ERROR: nginx did not report a missing tsra store-loader error — provider may still be loaded." >&2
+    exit 1
+fi

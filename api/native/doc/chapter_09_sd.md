@@ -1,0 +1,879 @@
+# Security Domain API
+
+The security-domain (SD) API opens a session to a partition and provisions
+its security domain. A security-domain session (opened with
+[`tsra_sess_ex_open`](#tsra_sess_ex_open)) is required to issue the
+provisioning command in this chapter.
+
+All policy-taking Rust APIs accept `&PartPolicy`, including partition
+init/final and remote/peer backup operations. Policy remains an explicit
+per-call input; partition and session opening are unchanged. Native C
+params continue to carry the serialized 484-byte policy in an
+`tsra_buffer`. The native wrappers parse that image into `PartPolicy`
+after validating output capacity, preserving size probes and returning
+`TSRA_STATUS_INVALID_ARGUMENT` for a wrong-length policy once outputs
+are sufficiently sized. The C ABI and DDI wire format are unchanged.
+
+### Masked sealing-key metadata
+
+The host masked-key decoder recognizes the SD sealing-key metadata kind and
+validates the envelope shape. This is metadata parsing, not authentication:
+the HSM must authenticate the blob when it is used. Local-scoped receivers
+require the original partition-local masking key to be restored first.
+Generating a replacement key cannot recover backups sealed to the original
+receiver. This decoder support does not add a public key-import API or a
+native C entry point.
+
+### Attestation certificate chains
+
+SD attestation requires a non-empty manufacturer chain, a non-empty
+partition-owner chain, and a signed report. The device-owner chain is optional:
+set `tsra_sd_evidence.owner_cert_chain` to `{NULL, 0}` to omit it. A supplied
+owner chain is still validated and must certify the same report-signing leaf
+key as the other chains. Missing manufacturer or partition-owner evidence is
+still rejected. The partition-owner trust anchor and report/policy checks are
+unchanged; omitting owner evidence does not bypass them.
+
+This applies to reseal and peer backup operations and to remote create/restore
+when `require_trusted_sa_key` is set. With that flag clear, remote create/restore
+continue to ignore the entire evidence group. Existing three-chain callers
+remain supported. The C ABI and TBOR descriptor layout are unchanged; empty
+owner evidence requires firmware supporting this relaxed validation.
+
+## tsra_sess_ex_open
+
+Open a security-domain session to the device.
+
+The session uses the API revision that was selected when the partition was
+opened with [`tsra_part_open`](#tsra_part_open). `psk` must be a non-NULL
+pointer to an [`tsra_session_psk`](#tsra_session_psk) selecting the role
+slot; only its inner `psk` buffer may be NULL, which selects the partition
+default PSK for the slot. A NULL `psk` pointer is rejected with
+`TSRA_STATUS_INVALID_ARGUMENT`. The `session_type` selects the channel
+integrity profile pinned for the session (see
+[tsra_session_ex_type](#tsra_session_ex_type)), and a handle to the new
+session is returned.
+
+```cpp
+tsra_status tsra_sess_ex_open(
+    tsra_handle dev_handle,
+    const tsra_session_psk *psk,
+    tsra_session_ex_type session_type,
+    tsra_handle *sess_handle
+    );
+```
+
+**Parameters**
+
+ | Parameter         | Name                                                | Description                                    |
+ | ----------------- | --------------------------------------------------- | ---------------------------------------------- |
+ | [in] dev_handle   | [tsra_handle](#tsra_handle)                     | partition handle                               |
+ | [in] psk          | const tsra_session_psk *                          | PSK credential (non-NULL); inner `psk` buffer NULL = default |
+ | [in] session_type | [tsra_session_ex_type](#tsra_session_ex_type)   | channel integrity profile to pin               |
+ | [out] sess_handle | [tsra_handle *](#tsra_handle)                   | new security-domain session handle      &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_session_psk
+
+PSK credential for [`tsra_sess_ex_open`](#tsra_sess_ex_open): the PSK
+slot plus an optional caller-supplied PSK. When the `psk` buffer is NULL,
+the partition **default** PSK for the slot is used — required for the first
+session, before the default is rotated via
+[`tsra_sess_ex_psk_change`](#tsra_sess_ex_psk_change). After rotation,
+point `psk` at the rotated 32-byte secret.
+
+```cpp
+struct tsra_session_psk {
+    uint8_t psk_id;
+    const struct tsra_buffer *psk;
+};
+```
+
+ | Field  | Name                             | Description                                        |
+ | ------ | -------------------------------- | -------------------------------------------------- |
+ | psk_id | uint8_t                          | PSK slot: 0 = Crypto Officer, 1 = Crypto User      |
+ | psk    | [tsra_buffer*](#tsra_buffer) | optional PSK (exactly 32 bytes); NULL = default PSK |
+
+## tsra_sess_ex_part_init
+
+Provision a partition's security domain over a security-domain session.
+
+Initializes the partition from the caller-supplied machine seed
+(`mach_seed`) and unified partition policy (`part_policy`), together with
+the partition-owner (`pota_thumbprint`), security-administrator
+(`sata_thumbprint`), and optional secondary-owner (`sapota_thumbprint`)
+trust-anchor thumbprints. On success it returns the partition's
+certificate-signing request (`pta_csr`) and attestation report
+(`pta_report`).
+
+The provisioning inputs are grouped into an
+[`tsra_sess_ex_part_init_params`](#tsra_sess_ex_part_init_params)
+structure. `pta_csr` and `pta_report` are caller-provided output buffers:
+on input `len` is the buffer capacity; on success `len` is set to the
+number of bytes written. Because provisioning is a one-shot operation, an
+undersized buffer (or a NULL `ptr` with `len == 0`) is rejected with
+`TSRA_STATUS_BUFFER_TOO_SMALL` and `len` set to the maximum possible
+output size **before** the partition is provisioned. The buffer is
+validated up-front against a fixed upper bound, so the probe reports that
+bound rather than the exact size for the current device — callers should
+expect to allocate up to that maximum. The standard two-call size probe
+(call once with a zero-length buffer to learn the required capacity, then
+retry with a buffer of at least that size) is therefore safe for this
+command. A NULL `ptr` with a non-zero `len` is rejected with
+`TSRA_STATUS_INVALID_ARGUMENT`.
+
+```cpp
+tsra_status tsra_sess_ex_part_init(
+    tsra_handle sess_handle,
+    const struct tsra_sess_ex_part_init_params *params,
+    struct tsra_buffer *pta_csr,
+    struct tsra_buffer *pta_report
+    );
+```
+
+**Parameters**
+
+ | Parameter            | Name                                                                  | Description                                     |
+ | -------------------- | --------------------------------------------------------------------- | ----------------------------------------------- |
+ | [in] sess_handle     | [tsra_handle](#tsra_handle)                                       | security-domain session handle                  |
+ | [in] params          | [tsra_sess_ex_part_init_params*](#tsra_sess_ex_part_init_params)   | provisioning input buffers                      |
+ | [in, out] pta_csr    | [tsra_buffer *](#tsra_buffer)                                     | output buffer for the DER PKCS#10 CSR           |
+ | [in, out] pta_report | [tsra_buffer *](#tsra_buffer)                                     | output buffer for the attestation report &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sess_ex_part_init_params
+
+Partition-policy inputs use the name `part_policy` and appear first in the
+provisioning, finalization, and security-domain backup input structures.
+Callers must rebuild against the updated header: moving these fields changes
+the C struct layouts, even though the function signatures are unchanged.
+
+Provisioning input buffers for
+[`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init). Each field points
+to an [tsra_buffer](#tsra_buffer); `sapota_thumbprint` is optional and
+may be NULL to omit it.
+
+```cpp
+struct tsra_sess_ex_part_init_params {
+    const struct tsra_buffer *part_policy;
+    const struct tsra_buffer *mach_seed;
+    const struct tsra_buffer *pota_thumbprint;
+    const struct tsra_buffer *sata_thumbprint;
+    const struct tsra_buffer *sapota_thumbprint;
+};
+```
+
+ | Field             | Name                             | Description                              |
+ | ----------------- | -------------------------------- | ---------------------------------------- |
+ | part_policy       | [tsra_buffer*](#tsra_buffer) | unified partition policy image (see [Partition policy builder](#partition-policy-builder)) |
+ | mach_seed         | [tsra_buffer*](#tsra_buffer) | machine seed plaintext                   |
+ | pota_thumbprint   | [tsra_buffer*](#tsra_buffer) | POTA public-key thumbprint               |
+ | sata_thumbprint   | [tsra_buffer*](#tsra_buffer) | SATA public-key thumbprint               |
+ | sapota_thumbprint | [tsra_buffer*](#tsra_buffer) | optional SAPOTA thumbprint (may be NULL) |
+
+## tsra_sess_ex_part_final
+
+Finalize a partition's security domain over a security-domain session.
+
+Completes provisioning started by
+[`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init): re-supplies the
+unified partition policy and the PTA certificate chain (root to leaf),
+optionally restoring a prior `local_mk` backup, and returns the current
+`local_mk` backup envelope the firmware produced.
+
+The inputs are grouped into an
+[`tsra_sess_ex_part_final_params`](#tsra_sess_ex_part_final_params)
+structure. `local_mk_backup` is a caller-provided output buffer with the
+same capacity/length contract and two-call size-probe behavior as the
+`tsra_sess_ex_part_init` outputs: an undersized buffer (or a NULL `ptr`
+with `len == 0`) is rejected with `TSRA_STATUS_BUFFER_TOO_SMALL` and
+`len` set to the maximum **before** the partition is finalized. A NULL
+`ptr` with a non-zero `len` is rejected with
+`TSRA_STATUS_INVALID_ARGUMENT`.
+
+```cpp
+tsra_status tsra_sess_ex_part_final(
+    tsra_handle sess_handle,
+    const struct tsra_sess_ex_part_final_params *params,
+    struct tsra_buffer *local_mk_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                 | Name                                                                      | Description                                  |
+ | ------------------------- | ------------------------------------------------------------------------- | -------------------------------------------- |
+ | [in] sess_handle          | [tsra_handle](#tsra_handle)                                           | security-domain session handle               |
+ | [in] params               | [tsra_sess_ex_part_final_params*](#tsra_sess_ex_part_final_params)     | finalization input buffers                   |
+ | [in, out] local_mk_backup | [tsra_buffer *](#tsra_buffer)                                         | output buffer for the local_mk backup &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sess_ex_part_final_params
+
+Finalization input buffers for
+[`tsra_sess_ex_part_final`](#tsra_sess_ex_part_final). `pta_cert_chain`
+points to an array of `pta_cert_chain_len` [tsra_buffer](#tsra_buffer)s,
+each holding one DER-encoded PTA certificate (root to leaf; at most
+`MAX_CERTS`). `prev_local_mk_backup` is optional and may be NULL to omit it.
+
+The shared firmware requires the PTA certificate to preserve the exact
+DER subject Name from the PTA CSR and to use SHA-1 of the uncompressed
+SEC1 PTA public key as its Subject Key Identifier. The PTA certificate
+must be a CA with `keyCertSign` usage. A certificate violating this profile
+is rejected before finalization, even if its key and POTA signature are valid.
+
+After successful finalization, certificate slot 2 exposes only the PTA-signed
+PID certificate at index 0. Shared command code above PAL generates a fresh
+certificate on each request using ordinary signing and the existing PTA and
+PID keys. DER bytes and lengths can change between requests. Chain metadata
+fingerprints an independently generated certificate, so its thumbprint need
+not match a subsequent certificate read. Neither a certificate chain nor
+issuer metadata is stored in firmware. The caller retains its POTA/PTA chain
+and prepends it to this PID certificate to construct root-first evidence.
+Slot 0's provisioning behavior is unchanged, though on the std PAL its leaf
+certificate is not byte-for-byte identical: `fw/plat/std/pal/src/cert.rs`
+now derives the slot-0 leaf serial from the PID key's SHA-1 identifier (the
+same derivation as the slot-2 PID serial). Slot 1 remains unsupported.
+The owner chain can be omitted; manufacturer and partition-owner chains plus
+the signed report satisfy the SD attestation requirement.
+
+```cpp
+struct tsra_sess_ex_part_final_params {
+    const struct tsra_buffer *part_policy;
+    const struct tsra_buffer *pta_cert_chain;
+    uint32_t pta_cert_chain_len;
+    const struct tsra_buffer *prev_local_mk_backup;
+};
+```
+
+ | Field                | Name                             | Description                                     |
+ | -------------------- | -------------------------------- | ----------------------------------------------- |
+ | part_policy          | [tsra_buffer*](#tsra_buffer)     | unified partition policy (must match part_init) |
+ | pta_cert_chain       | [tsra_buffer*](#tsra_buffer)     | array of DER PTA certificates (root to leaf)    |
+ | pta_cert_chain_len   | uint32_t                         | number of certificates in the chain             |
+ | prev_local_mk_backup | [tsra_buffer*](#tsra_buffer)     | optional prior local_mk backup (may be NULL)    |
+
+## Partition policy builder
+
+The `part_policy` image consumed by
+[`tsra_sess_ex_part_init`](#tsra_sess_ex_part_init) and
+[`tsra_sess_ex_part_final`](#tsra_sess_ex_part_final) is a fixed-size
+binary layout. Rather than assemble it by hand, callers may use the
+opaque partition-policy builder to set named, typed fields and then
+serialize the canonical image. The on-wire format is unchanged — the
+builder is a pure convenience that emits exactly the bytes the init /
+final entry points already accept.
+
+Typical use:
+
+1. [`tsra_part_policy_builder_new`](#tsra_part_policy_builder_new)
+   allocates a builder (its version defaults to `major = 1, minor = 0`,
+   with every other field zeroed).
+2. Set both required POTA and SATA keys with the
+   `tsra_part_policy_builder_set_*` setters, plus any optional fields.
+3. [`tsra_part_policy_build`](#tsra_part_policy_build) serializes the
+   image into a caller-provided [tsra_buffer](#tsra_buffer); it
+   follows the same two-call size-probe contract as other output buffers
+   (an undersized buffer is rejected with
+   `TSRA_STATUS_BUFFER_TOO_SMALL` and `len` set to the required size).
+4. [`tsra_part_policy_builder_free`](#tsra_part_policy_builder_free)
+   releases the builder.
+
+The serialized image may then be passed as the `part_policy` buffer to
+`tsra_sess_ex_part_init` / `tsra_sess_ex_part_final`.
+
+### tsra_part_policy_builder_new
+
+Allocate a new partition-policy builder.
+
+```cpp
+tsra_status tsra_part_policy_builder_new(
+    struct tsra_part_policy_builder **out_builder);
+```
+
+**Parameters**
+
+- `out_builder` — on success, receives a non-NULL opaque builder handle
+  that must be released with `tsra_part_policy_builder_free`. Left
+  unmodified on failure.
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, or `TSRA_STATUS_INVALID_ARGUMENT`
+if `out_builder` is NULL.
+
+### tsra_part_policy_builder_free
+
+Release a builder handle. Passing NULL is a no-op.
+
+```cpp
+void tsra_part_policy_builder_free(
+    struct tsra_part_policy_builder *builder
+    );
+```
+
+### tsra_part_policy_builder_set_* 
+
+Set individual policy fields. Each returns `TSRA_STATUS_SUCCESS`, or
+`TSRA_STATUS_INVALID_ARGUMENT` on a NULL handle or buffer. `kind` is the
+public-key kind discriminant (`0` = ECC P-384).
+
+Both POTA and SATA keys are mandatory: call
+`tsra_part_policy_builder_set_pota_key` and
+`tsra_part_policy_builder_set_sata_key` before building. If either key
+is unset, `tsra_part_policy_build` returns
+`TSRA_STATUS_INVALID_ARGUMENT`, including for size probes.
+SAPOTA and backing-partition keys remain optional.
+
+Fixed-size fields reject input that does not satisfy their length
+requirement rather than truncating or padding it: if a key, `info`, or
+backing-partition id violates its slot's length rule, the setter still
+returns `TSRA_STATUS_SUCCESS`, but the subsequent
+`tsra_part_policy_build` fails with `TSRA_STATUS_INVALID_ARGUMENT`.
+A *known* key kind must be exactly the length that kind requires — an
+ECC P-384 (`kind = 0`) key is `X || Y`, i.e. exactly 96 bytes — because
+the firmware rejects every other length; a shorter key that merely fits
+the slot is therefore rejected too. `info` and the backing-partition id
+must not exceed their respective slots (truncating key material would
+silently yield a *different* key).
+
+The `flags` byte passed to `tsra_part_policy_builder_set_flags` is a
+bitfield:
+
+| Bit   | Meaning                  |
+|-------|--------------------------|
+| 0     | `include_fmc_cdi`        |
+| 1     | `require_trusted_sa_key` |
+| 2     | `allow_peer_cloning`     |
+| 3 – 7 | reserved (must be zero)  |
+
+The major version must be 1; any minor version is accepted. Setting an
+unsupported major version or any reserved flag bit still returns
+`TSRA_STATUS_SUCCESS` from the setter, but
+`tsra_part_policy_build` rejects the policy with
+`TSRA_STATUS_INVALID_ARGUMENT`, including during size probes.
+
+```cpp
+tsra_status tsra_part_policy_builder_set_version(
+    struct tsra_part_policy_builder *builder, uint8_t major, uint8_t minor);
+tsra_status tsra_part_policy_builder_set_pota_key(
+    struct tsra_part_policy_builder *builder, uint16_t kind,
+    const struct tsra_buffer *key);
+tsra_status tsra_part_policy_builder_set_sata_key(
+    struct tsra_part_policy_builder *builder, uint16_t kind,
+    const struct tsra_buffer *key);
+tsra_status tsra_part_policy_builder_set_sapota_key(
+    struct tsra_part_policy_builder *builder, uint16_t kind,
+    const struct tsra_buffer *key);
+tsra_status tsra_part_policy_builder_set_backup_part_id(
+    struct tsra_part_policy_builder *builder, const struct tsra_buffer *id);
+tsra_status tsra_part_policy_builder_set_backup_part_pub_key(
+    struct tsra_part_policy_builder *builder, uint16_t kind,
+    const struct tsra_buffer *key);
+tsra_status tsra_part_policy_builder_set_info(
+    struct tsra_part_policy_builder *builder, const struct tsra_buffer *info);
+tsra_status tsra_part_policy_builder_set_flags(
+    struct tsra_part_policy_builder *builder, uint8_t flags);
+```
+
+### tsra_part_policy_build
+
+Serialize the policy into its canonical wire image.
+
+```cpp
+tsra_status tsra_part_policy_build(
+    struct tsra_part_policy_builder *builder,
+    struct tsra_buffer *out
+    );
+```
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, `TSRA_STATUS_INVALID_ARGUMENT` on a
+NULL or misaligned handle or buffer, or `TSRA_STATUS_BUFFER_TOO_SMALL` if
+`out` is too small (with `out.len` set to the required size).
+Missing a required POTA or SATA key, or a previously recorded setter
+validation error, also returns `TSRA_STATUS_INVALID_ARGUMENT`.
+An unsupported major version or reserved flag bit also returns
+`TSRA_STATUS_INVALID_ARGUMENT`.
+
+## tsra_sess_ex_psk_change
+
+Rotate the calling session's own partition PSK.
+
+Replaces the PSK of the slot implied by the session role (CO session → CO,
+CU session → CU) with `new_psk`, sealed under the session key. This is
+required **once** on a fresh partition to move past the default-PSK gate
+before provisioning, and may also be used later to re-rotate. `new_psk`
+must be exactly 32 bytes.
+
+```cpp
+tsra_status tsra_sess_ex_psk_change(
+    tsra_handle sess_handle,
+    const struct tsra_buffer *new_psk
+    );
+```
+
+**Parameters**
+
+ | Parameter        | Name                              | Description                              |
+ | ---------------- | --------------------------------- | ---------------------------------------- |
+ | [in] sess_handle | [tsra_handle](#tsra_handle)       | security-domain session handle           |
+ | [in] new_psk     | [tsra_buffer *](#tsra_buffer)     | new PSK buffer (exactly 32 bytes) &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+## tsra_sd_create_remote_backup
+
+Create a new security domain and its remote backup over a security-domain
+session.
+
+Creates a security domain under the calling session's partition from the
+unified partition policy, using the sender's masked SD-sealing key (from
+`tsra_key_gen`), the receiver key certificate chain (spec `RcvrCertChain`),
+and — when the policy requires it — the receiver's attestation evidence, and
+returns the three backups the firmware produces: the remote
+partition-owner-key backup (an HPKE-Auth seal of BKS3, 161 bytes), the local
+partition-owner-key backup (276 bytes), and the security-domain masking-key
+backup (260 bytes).
+
+The `receiver_cert_chain` is always validated and anchored to the policy SATA
+key; its leaf is the recipient public key (`RcvrPub`) the remote backup is
+sealed to. The `receiver_evidence` attestation is verified only
+when the policy sets `require_trusted_sa_key`: its partition-owner chain is
+anchored to the policy SAPOTA key and its report must attest the same
+`RcvrPub` recovered from `receiver_cert_chain`, otherwise the create is
+rejected with `TSRA_STATUS_INVALID_ARGUMENT`. When the flag is clear the
+evidence is ignored (pass empty chains and an empty report).
+
+The inputs are grouped into an
+[`tsra_sd_create_remote_backup_params`](#tsra_sd_create_remote_backup_params)
+structure. All three output buffers follow the two-call size-probe contract:
+an undersized buffer (or a NULL `ptr` with `len == 0`) is rejected with
+`TSRA_STATUS_BUFFER_TOO_SMALL` and `len` set to the required size, and
+every output buffer is validated **before** the one-shot domain-creation
+command is issued, so a too-small buffer never consumes it. A NULL `params`
+pointer is rejected with `TSRA_STATUS_INVALID_ARGUMENT`. Creating a domain
+is a once-per-partition operation; a second create on an initialized
+partition returns `TSRA_STATUS_SD_ALREADY_INITIALIZED`.
+
+```cpp
+tsra_status tsra_sd_create_remote_backup(
+    tsra_handle sess_handle,
+    const struct tsra_sd_create_remote_backup_params *params,
+    struct tsra_buffer *pok_remote_backup,
+    struct tsra_buffer *pok_local_backup,
+    struct tsra_buffer *sd_mk_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                   | Name                                                                                                     | Description                                       |
+ | --------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+ | [in] sess_handle            | [tsra_handle](#tsra_handle)                                                                          | security-domain session handle                    |
+ | [in] params                 | [tsra_sd_create_remote_backup_params*](#tsra_sd_create_remote_backup_params)         | create-backup input buffers                       |
+ | [in, out] pok_remote_backup | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the remote pok backup (161 B)   |
+ | [in, out] pok_local_backup  | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the local pok backup (276 B)    |
+ | [in, out] sd_mk_backup      | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the sd masking-key backup (260 B) &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sd_create_remote_backup_params
+
+Input buffers for
+[`tsra_sd_create_remote_backup`](#tsra_sd_create_remote_backup).
+
+```cpp
+struct tsra_sd_create_remote_backup_params {
+    const struct tsra_buffer *part_policy;
+    const struct tsra_buffer *masked_sealing_key;
+    struct tsra_sd_cert_chain receiver_cert_chain;
+    const struct tsra_sd_evidence *receiver_evidence;
+};
+```
+
+ | Field              | Name                                       | Description                                        |
+ | ------------------ | ------------------------------------------ | -------------------------------------------------- |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (584 B)             |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | sender's masked SD-sealing key (276 B)             |
+ | receiver_cert_chain | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | receiver key chain (spec `RcvrCertChain`), SATA-anchored; always required |
+ | receiver_evidence  | [tsra_sd_evidence*](#tsra_sd_evidence) | receiver attestation evidence; verified only when policy sets `require_trusted_sa_key` |
+
+## tsra_sd_reseal_remote_backup
+
+Reseal an existing remote backup to a new recipient over a security-domain
+session.
+
+HPKE-opens the source remote backup with the receiver's masked SD-sealing
+key (authenticated by the source sender in `src_evidence`) and reseals the
+recovered backup to the destination receiver (`dest_evidence`), returning the
+resealed remote backup (161 bytes).
+
+The inputs are grouped into an
+[`tsra_sd_reseal_remote_backup_params`](#tsra_sd_reseal_remote_backup_params)
+structure. `dst_remote_backup` follows the same two-call size-probe contract
+as the create outputs and is validated **before** the reseal is performed. A
+NULL `params` pointer is rejected with `TSRA_STATUS_INVALID_ARGUMENT`.
+
+```cpp
+tsra_status tsra_sd_reseal_remote_backup(
+    tsra_handle sess_handle,
+    const struct tsra_sd_reseal_remote_backup_params *params,
+    struct tsra_buffer *dst_remote_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                   | Name                                                                                                     | Description                                       |
+ | --------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+ | [in] sess_handle            | [tsra_handle](#tsra_handle)                                                                          | security-domain session handle                    |
+ | [in] params                 | [tsra_sd_reseal_remote_backup_params*](#tsra_sd_reseal_remote_backup_params)         | reseal-backup input buffers                       |
+ | [in, out] dst_remote_backup | [tsra_buffer *](#tsra_buffer)                                                                        | output buffer for the resealed remote backup (161 B) &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sd_reseal_remote_backup_params
+
+Input buffers for
+[`tsra_sd_reseal_remote_backup`](#tsra_sd_reseal_remote_backup).
+
+```cpp
+struct tsra_sd_reseal_remote_backup_params {
+    const struct tsra_buffer *part_policy;
+    const struct tsra_buffer *masked_sealing_key;
+    const struct tsra_sd_evidence *src_evidence;
+    const struct tsra_sd_evidence *dest_evidence;
+    const struct tsra_buffer *src_remote_backup;
+};
+```
+
+ | Field              | Name                                       | Description                                        |
+ | ------------------ | ------------------------------------------ | -------------------------------------------------- |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (584 B)             |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (276 B)           |
+ | src_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | source (sender) attestation evidence               |
+ | dest_evidence      | [tsra_sd_evidence*](#tsra_sd_evidence)     | destination (receiver) attestation evidence        |
+ | src_remote_backup  | [tsra_buffer*](#tsra_buffer)               | source remote backup to reseal (161 B)             |
+
+## tsra_sd_restore_remote_backup
+
+Restore a security domain from a remote backup over a security-domain
+session.
+
+HPKE-opens the remote backup with the receiver's masked SD-sealing key
+(authenticated by the sender key recovered from `sender_cert_chain`),
+recovers the security-domain masking key from `prev_sd_mk_backup`, and
+returns the refreshed device-local backups: the local partition-owner-key
+backup (276 bytes) and the security-domain masking-key backup (260 bytes).
+
+The `sender_cert_chain` is always validated and anchored to the policy SATA
+key; its leaf is the sender public key (`SndrPub`) that sealed the remote
+backup. The `sender_evidence` attestation is verified only when
+the policy sets `require_trusted_sa_key`: its partition-owner chain is
+anchored to the policy SAPOTA key and its v2 report must attest the same
+`SndrPub` recovered from `sender_cert_chain`, otherwise the restore is
+rejected with `TSRA_STATUS_INVALID_ARGUMENT`. When the flag is clear the
+evidence is ignored (pass empty chains and an empty report).
+
+The trusted sealing authority may have a different partition policy from the
+restored SD. Its report's policy hash is **not** required to equal the
+destination policy hash: SATA endorses the sender key and SAPOTA authorizes
+its attesting partition. Applications that pin a particular authority policy
+must verify the sender report against that policy. The destination still
+requires the request policy to match its own bound policy. Reseal separately
+requires both the original sender and new receiver reports to match the
+requested SD policy; that check is unchanged. No C ABI or wire-format change
+is required.
+
+The inputs are grouped into an
+[`tsra_sd_restore_remote_backup_params`](#tsra_sd_restore_remote_backup_params)
+structure. Both output buffers follow the two-call size-probe contract and
+are validated **before** the restore is performed. A NULL `params` pointer
+is rejected with `TSRA_STATUS_INVALID_ARGUMENT`. Restore is a
+once-per-partition operation; a restore on an already-initialized partition
+returns `TSRA_STATUS_SD_ALREADY_INITIALIZED`.
+
+```cpp
+tsra_status tsra_sd_restore_remote_backup(
+    tsra_handle sess_handle,
+    const struct tsra_sd_restore_remote_backup_params *params,
+    struct tsra_buffer *pok_local_backup,
+    struct tsra_buffer *sd_mk_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                  | Name                                                                                                      | Description                                       |
+ | -------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+ | [in] sess_handle           | [tsra_handle](#tsra_handle)                                                                           | security-domain session handle                    |
+ | [in] params                | [tsra_sd_restore_remote_backup_params*](#tsra_sd_restore_remote_backup_params)        | restore-backup input buffers                      |
+ | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                         | output buffer for the local pok backup (276 B)    |
+ | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                         | output buffer for the sd masking-key backup (260 B) &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sd_restore_remote_backup_params
+
+Input buffers for
+[`tsra_sd_restore_remote_backup`](#tsra_sd_restore_remote_backup).
+
+```cpp
+struct tsra_sd_restore_remote_backup_params {
+    const struct tsra_buffer *part_policy;
+    const struct tsra_buffer *masked_sealing_key;
+    struct tsra_sd_cert_chain sender_cert_chain;
+    const struct tsra_sd_evidence *sender_evidence;
+    const struct tsra_buffer *src_remote_backup;
+    const struct tsra_buffer *prev_sd_mk_backup;
+};
+```
+
+ | Field              | Name                                       | Description                                        |
+ | ------------------ | ------------------------------------------ | -------------------------------------------------- |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)           | unified partition-policy image (584 B)             |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)           | receiver's masked SD-sealing key (276 B)           |
+ | sender_cert_chain  | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | sender key chain (spec `SndrCertChain`), SATA-anchored; always required |
+ | sender_evidence    | [tsra_sd_evidence*](#tsra_sd_evidence) | sender attestation evidence; verified only when policy sets `require_trusted_sa_key` |
+ | src_remote_backup  | [tsra_buffer*](#tsra_buffer)           | remote backup to restore (161 B)                   |
+ | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)           | previous security-domain masking-key backup (260 B)|
+
+## tsra_sd_create_peer_backup
+
+Create a peer-transferable backup of a security domain over a
+security-domain session.
+
+Recovers BKS3 from `pok_local_backup` and HPKE-Auth-seals it to the
+destination peer named by `dst_evidence` (authenticated by the sender's
+masked SD-sealing key), returning the peer backup (161 bytes). Peer
+cloning is gated by the security domain's `allow_peer_cloning` policy flag.
+
+The inputs are grouped into an
+[`tsra_sd_create_peer_backup_params`](#tsra_sd_create_peer_backup_params)
+structure. The output buffer follows the two-call size-probe contract and
+is validated **before** the peer backup is created. A NULL `params` pointer
+is rejected with `TSRA_STATUS_INVALID_ARGUMENT`.
+
+```cpp
+tsra_status tsra_sd_create_peer_backup(
+    tsra_handle sess_handle,
+    const struct tsra_sd_create_peer_backup_params *params,
+    struct tsra_buffer *pok_peer_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                | Name                                                                                              | Description                                     |
+ | ------------------------ | ------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+ | [in] sess_handle         | [tsra_handle](#tsra_handle)                                                                   | security-domain session handle                  |
+ | [in] params              | [tsra_sd_create_peer_backup_params*](#tsra_sd_create_peer_backup_params)      | create-peer-backup input buffers                |
+ | [in, out] pok_peer_backup | [tsra_buffer *](#tsra_buffer)                                                                | output buffer for the peer backup (161 B) &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sd_create_peer_backup_params
+
+Input buffers for
+[`tsra_sd_create_peer_backup`](#tsra_sd_create_peer_backup).
+
+```cpp
+struct tsra_sd_create_peer_backup_params {
+    const struct tsra_buffer *part_policy;
+    const struct tsra_buffer *masked_sealing_key;
+    const struct tsra_sd_evidence *dst_evidence;
+    const struct tsra_buffer *pok_local_backup;
+};
+```
+
+ | Field              | Name                                       | Description                                        |
+ | ------------------ | ------------------------------------------ | -------------------------------------------------- |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (584 B)             |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | sender's masked SD-sealing key (276 B)             |
+ | dst_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | destination (peer) attestation evidence            |
+ | pok_local_backup   | [tsra_buffer*](#tsra_buffer)               | device-local partition-owner-key backup (276 B)    |
+
+## tsra_sd_restore_peer_backup
+
+Restore a security domain from a peer backup over a security-domain
+session.
+
+HPKE-opens the peer backup with the receiver's masked SD-sealing key
+(authenticated by the source peer in `src_evidence`), recovers the
+security-domain masking key from `prev_sd_mk_backup`, and returns the
+refreshed device-local backups: the local partition-owner-key backup
+(276 bytes) and the security-domain masking-key backup (260 bytes). Peer
+cloning is gated by the security domain's `allow_peer_cloning` policy flag.
+
+The inputs are grouped into an
+[`tsra_sd_restore_peer_backup_params`](#tsra_sd_restore_peer_backup_params)
+structure. Both output buffers follow the two-call size-probe contract and
+are validated **before** the restore is performed. A NULL `params` pointer
+is rejected with `TSRA_STATUS_INVALID_ARGUMENT`. Restore is a
+once-per-partition operation; a restore on an already-initialized partition
+returns `TSRA_STATUS_SD_ALREADY_INITIALIZED`.
+
+```cpp
+tsra_status tsra_sd_restore_peer_backup(
+    tsra_handle sess_handle,
+    const struct tsra_sd_restore_peer_backup_params *params,
+    struct tsra_buffer *pok_local_backup,
+    struct tsra_buffer *sd_mk_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                  | Name                                                                                                  | Description                                       |
+ | -------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+ | [in] sess_handle           | [tsra_handle](#tsra_handle)                                                                       | security-domain session handle                    |
+ | [in] params                | [tsra_sd_restore_peer_backup_params*](#tsra_sd_restore_peer_backup_params)        | restore-backup input buffers                      |
+ | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                     | output buffer for the local pok backup (276 B)    |
+ | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                     | output buffer for the sd masking-key backup (260 B) &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sd_restore_peer_backup_params
+
+Input buffers for
+[`tsra_sd_restore_peer_backup`](#tsra_sd_restore_peer_backup).
+
+```cpp
+struct tsra_sd_restore_peer_backup_params {
+    const struct tsra_buffer *part_policy;
+    const struct tsra_buffer *masked_sealing_key;
+    const struct tsra_sd_evidence *src_evidence;
+    const struct tsra_buffer *pok_peer_backup;
+    const struct tsra_buffer *prev_sd_mk_backup;
+};
+```
+
+ | Field              | Name                                       | Description                                         |
+ | ------------------ | ------------------------------------------ | --------------------------------------------------- |
+ | part_policy        | [tsra_buffer*](#tsra_buffer)               | unified partition-policy image (584 B)              |
+ | masked_sealing_key | [tsra_buffer*](#tsra_buffer)               | receiver's masked SD-sealing key (276 B)            |
+ | src_evidence       | [tsra_sd_evidence*](#tsra_sd_evidence)     | source (peer) attestation evidence                  |
+ | pok_peer_backup    | [tsra_buffer*](#tsra_buffer)               | peer backup to restore (161 B)                      |
+ | prev_sd_mk_backup  | [tsra_buffer*](#tsra_buffer)               | previous security-domain masking-key backup (260 B) |
+
+## tsra_sd_restore_local_backup
+
+Restore a security domain from its device-local backups over a
+security-domain session.
+
+Restores the security domain from the device-local partition-owner-key
+backup and security-domain masking-key backup, returning the refreshed
+device-local backups: the local partition-owner-key backup (276 bytes) and
+the security-domain masking-key backup (260 bytes). Unlike the remote/peer
+restores, this carries no attestation evidence — the backups are masked
+under the device-local key.
+
+The inputs are grouped into an
+[`tsra_sd_restore_local_backup_params`](#tsra_sd_restore_local_backup_params)
+structure. Both output buffers follow the two-call size-probe contract and
+are validated **before** the restore is performed. A NULL `params` pointer
+is rejected with `TSRA_STATUS_INVALID_ARGUMENT`. Restore is a
+once-per-partition operation; a restore on an already-initialized partition
+returns `TSRA_STATUS_SD_ALREADY_INITIALIZED`.
+
+```cpp
+tsra_status tsra_sd_restore_local_backup(
+    tsra_handle sess_handle,
+    const struct tsra_sd_restore_local_backup_params *params,
+    struct tsra_buffer *pok_local_backup,
+    struct tsra_buffer *sd_mk_backup
+    );
+```
+
+**Parameters**
+
+ | Parameter                  | Name                                                                                                    | Description                                       |
+ | -------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+ | [in] sess_handle           | [tsra_handle](#tsra_handle)                                                                         | security-domain session handle                    |
+ | [in] params                | [tsra_sd_restore_local_backup_params*](#tsra_sd_restore_local_backup_params)        | restore-backup input buffers                      |
+ | [in, out] pok_local_backup | [tsra_buffer *](#tsra_buffer)                                                                       | output buffer for the local pok backup (276 B)    |
+ | [in, out] sd_mk_backup     | [tsra_buffer *](#tsra_buffer)                                                                       | output buffer for the sd masking-key backup (260 B) &nbsp; |
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+### tsra_sd_restore_local_backup_params
+
+Input buffers for
+[`tsra_sd_restore_local_backup`](#tsra_sd_restore_local_backup).
+
+```cpp
+struct tsra_sd_restore_local_backup_params {
+    const struct tsra_buffer *pok_local_backup;
+    const struct tsra_buffer *sd_mk_backup;
+};
+```
+
+ | Field             | Name                             | Description                                        |
+ | ----------------- | -------------------------------- | -------------------------------------------------- |
+ | pok_local_backup  | [tsra_buffer*](#tsra_buffer)     | device-local partition-owner-key backup (276 B)    |
+ | sd_mk_backup      | [tsra_buffer*](#tsra_buffer)     | security-domain masking-key backup (260 B)         |
+
+### tsra_sd_evidence
+
+Attestation evidence for one security-domain-backup party: three certificate
+chains (manufacturer, owner, partition-owner) and a COSE_Sign1 attestation
+report. The DER bytes are borrowed, not copied, and must outlive the call.
+
+```cpp
+struct tsra_sd_evidence {
+    struct tsra_sd_cert_chain mfgr_cert_chain;
+    struct tsra_sd_cert_chain owner_cert_chain;
+    struct tsra_sd_cert_chain part_owner_cert_chain;
+    const struct tsra_buffer *report;
+};
+```
+
+ | Field                 | Name                                         | Description                                  |
+ | --------------------- | -------------------------------------------- | -------------------------------------------- |
+ | mfgr_cert_chain       | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | manufacturer certificate chain               |
+ | owner_cert_chain      | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | owner certificate chain                      |
+ | part_owner_cert_chain | [tsra_sd_cert_chain](#tsra_sd_cert_chain) | partition-owner certificate chain            |
+ | report                | [tsra_buffer*](#tsra_buffer)             | COSE_Sign1 attestation report                |
+
+### tsra_sd_cert_chain
+
+One certificate chain in an SD attestation-evidence party: an array of `len`
+[tsra_buffer](#tsra_buffer)s, each holding one DER-encoded certificate
+ordered root to leaf (at most `EVIDENCE_CHAIN_MAX_CERTS`).
+
+```cpp
+struct tsra_sd_cert_chain {
+    const struct tsra_buffer *certs;
+    uint32_t len;
+};
+```
+
+ | Field | Name                             | Description                                   |
+ | ----- | -------------------------------- | --------------------------------------------- |
+ | certs | [tsra_buffer*](#tsra_buffer)     | array of DER certificates (root to leaf)      |
+ | len   | uint32_t                         | number of certificates in the chain           |

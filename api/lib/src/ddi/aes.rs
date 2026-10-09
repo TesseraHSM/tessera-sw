@@ -1,0 +1,702 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! AES key generation operations at the DDI layer.
+//!
+//! This module provides low-level AES key generation functionality that
+//! interacts directly with the HSM device driver interface. It handles
+//! the construction of DDI requests and processing of responses for AES
+//! cryptographic operations.
+
+use itertools::Itertools;
+use resiliency_macro::*;
+use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
+use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
+use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
+use tsra_ddi_tbor_types::AES_OP_DECRYPT;
+use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
+use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
+use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
+use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
+use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
+use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
+
+use super::*;
+
+/// Generates an AES key within an HSM session.
+///
+/// Creates a new AES key using the specified key properties and returns both
+/// the key handle for performing operations and the masked key material for
+/// secure storage. This function constructs the appropriate DDI request and
+/// executes it through the session's device connection.
+///
+/// # Arguments
+///
+/// * `session` - The HSM session in which to generate the key
+/// * `props` - Key properties specifying size, usage permissions, and attributes
+///
+/// # Returns
+///
+/// Returns a tuple containing:
+/// - `HsmKeyHandle` - Handle for performing cryptographic operations with the key
+/// - `HsmMaskedKey` - Masked key material for secure storage and transport
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The key size is not a valid AES size (128, 192, or 256 bits)
+/// - Key properties cannot be converted to DDI format
+/// - The DDI operation fails
+/// - The session is invalid or closed
+#[resiliency_key_gen(session = "session")]
+pub(crate) fn aes_generate_key(
+    session: &HsmSession,
+    props: HsmKeyProps,
+) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
+    props.ensure_scope_supported(session.is_ex())?;
+    // Transport step: run the generate command and get the key handle
+    // plus the device-returned masked blob. A V2 (TBOR) session yields an
+    // unpinned handle (`Unpinned`); a V1 (MBOR) session a pinned vault id
+    // (`Pinned`).
+    let (handle, masked_key) = if session.is_ex() {
+        aes_generate_key_tbor(session, &props)?
+    } else {
+        aes_generate_key_mbor(session, &props)?
+    };
+
+    // Common step (identical for both transports): a guard deletes a
+    // device-resident key if validation fails — a no-op for a
+    // non-resident key. Derive props from the returned masked blob
+    // and validate them against the request.
+    let guard = ddi::HsmKeyIdGuard::new(session, handle);
+    let key_props = HsmMaskedKey::to_key_props(&masked_key)?;
+    if !props.validate_dev_props(&key_props) {
+        return Err(HsmError::InvalidKeyProps);
+    }
+    Ok((guard.release(), key_props))
+}
+
+/// Runs MBOR `AesGenerateKey`, returning the resident `Resident`
+/// handle and the device-returned masked blob.
+fn aes_generate_key_mbor(
+    session: &HsmSession,
+    props: &HsmKeyProps,
+) -> HsmResult<(HsmKeyHandle, Vec<u8>)> {
+    let req = DdiAesGenerateKeyCmdReq {
+        hdr: build_ddi_req_hdr_sess(DdiOp::AesGenerateKey, session),
+        data: DdiAesGenerateKeyReq {
+            key_size: key_size_to_ddi(props.bits() as usize)?,
+            key_tag: None,
+            key_properties: props.try_into()?,
+        },
+        ext: None,
+    };
+
+    let resp = session.with_dev(|dev| dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from))?;
+    let handle = to_key_handle(resp.data.key_id, resp.data.bulk_key_id);
+    Ok((handle, resp.data.masked_key.as_slice().to_vec()))
+}
+
+/// Encrypts data using AES-CBC mode at the DDI layer.
+///
+/// Performs AES encryption in CBC (Cipher Block Chaining) mode using the specified
+/// key and initialization vector. This function interacts directly with the HSM
+/// device driver interface to perform the cryptographic operation.
+///
+/// # Arguments
+///
+/// * `session` - The HSM session in which to perform the encryption
+/// * `key` - The AES key to use for encryption
+/// * `iv` - The initialization vector (modified in place for chaining)
+/// * `plaintext` - The data to be encrypted
+/// * `ciphertext` - Buffer to receive the encrypted output
+///
+/// # Returns
+///
+/// Returns the number of bytes written to the ciphertext buffer.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The session is invalid or closed
+/// - The key is invalid or unsuitable for CBC encryption
+/// - The IV size is incorrect (must be 16 bytes for AES)
+/// - The plaintext size is invalid or not properly aligned
+/// - The ciphertext buffer is too small
+/// - The DDI operation fails
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_cbc_encrypt(
+    key: &HsmAesKey,
+    iv: &mut [u8],
+    plaintext: &[&[u8]],
+    ciphertext: &mut [u8],
+) -> HsmResult<usize> {
+    let mut len = 0;
+    let iter = plaintext.iter().flat_map(|s| s.iter());
+    for chunk in &iter.chunks(DdiAesEncryptDecryptReq::MAX_MSG_SIZE) {
+        let plaintext_chunk = chunk.copied().collect();
+        let written = aes_cbc_encrypt_decrypt(
+            key,
+            DdiAesOp::Encrypt,
+            iv,
+            plaintext_chunk,
+            &mut ciphertext[len..],
+        )?;
+        len += written;
+    }
+    Ok(len)
+}
+
+/// Decrypts data using AES-CBC mode at the DDI layer.
+///
+/// Performs AES decryption in CBC (Cipher Block Chaining) mode using the specified
+/// key and initialization vector. This function interacts directly with the HSM
+/// device driver interface to perform the cryptographic operation.
+///
+/// # Arguments
+///
+/// * `session` - The HSM session in which to perform the decryption
+/// * `key` - The AES key to use for decryption
+/// * `iv` - The initialization vector (modified in place for chaining)
+/// * `ciphertext` - The data to be decrypted
+/// * `plaintext` - Buffer to receive the decrypted output
+///
+/// # Returns
+///
+/// Returns the number of bytes written to the plaintext buffer.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The session is invalid or closed
+/// - The key is invalid or unsuitable for CBC decryption
+/// - The IV size is incorrect (must be 16 bytes for AES)
+/// - The ciphertext size is invalid or not properly aligned
+/// - The plaintext buffer is too small
+/// - The DDI operation fails
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_cbc_decrypt(
+    key: &HsmAesKey,
+    iv: &mut [u8],
+    ciphertext: &[u8],
+    plaintext: &mut [u8],
+) -> HsmResult<usize> {
+    let mut len = 0;
+    let chunks = ciphertext.chunks(DdiAesEncryptDecryptReq::MAX_MSG_SIZE);
+    for chunk in chunks {
+        let written = aes_cbc_encrypt_decrypt(
+            key,
+            DdiAesOp::Decrypt,
+            iv,
+            chunk.to_vec(),
+            &mut plaintext[len..],
+        )?;
+        len += written;
+    }
+    Ok(len)
+}
+
+/// Internal helper function for AES-CBC encryption or decryption operations.
+///
+/// This function constructs and executes a single AES-CBC encryption or decryption
+/// request at the DDI layer. It handles the low-level protocol details including
+/// request formatting, execution, IV updating, and response processing.
+///
+/// # Arguments
+///
+/// * `key` - The AES key to use for the operation
+/// * `op` - The operation type (encrypt or decrypt)
+/// * `iv` - The initialization vector (modified in place to support chaining)
+/// * `input` - The input data (plaintext for encryption, ciphertext for decryption)
+/// * `output` - Buffer to receive the operation output
+///
+/// # Returns
+///
+/// Returns the number of bytes written to the output buffer.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The input data cannot be converted to DDI format
+/// - The IV cannot be converted to DDI format
+/// - The DDI command execution fails
+/// - The session is invalid
+///
+/// # IV Chaining
+///
+/// The IV is updated after each operation by copying the last 16 bytes from the
+/// response. This allows proper chaining of multiple CBC operations on the same
+/// data stream.
+///
+/// # Internal Implementation
+///
+/// This function should not be called directly. Use `aes_cbc_encrypt` or
+/// `aes_cbc_decrypt` instead, which handle chunking of large data.
+fn aes_cbc_encrypt_decrypt(
+    key: &HsmAesKey,
+    op: DdiAesOp,
+    iv: &mut [u8],
+    input: Vec<u8>,
+    output: &mut [u8],
+) -> HsmResult<usize> {
+    if key.session().is_ex() {
+        aes_cbc_encrypt_decrypt_tbor(key, op, iv, &input, output)
+    } else {
+        aes_cbc_encrypt_decrypt_mbor(key, op, iv, &input, output)
+    }
+}
+
+/// AES-CBC transforms one chunk over MBOR `AesEncryptDecrypt` using the
+/// device-resident key. Updates `iv` with the chaining IV and copies the
+/// transformed bytes into `output`.
+fn aes_cbc_encrypt_decrypt_mbor(
+    key: &HsmAesKey,
+    op: DdiAesOp,
+    iv: &mut [u8],
+    input: &[u8],
+    output: &mut [u8],
+) -> HsmResult<usize> {
+    let req = DdiAesEncryptDecryptCmdReq {
+        hdr: build_ddi_req_hdr_sess(DdiOp::AesEncryptDecrypt, &key.session()),
+        data: DdiAesEncryptDecryptReq {
+            key_id: ddi::get_key_id(key.handle())?,
+            op,
+            msg: MborByteArray::from_slice(input).map_hsm_err(HsmError::InternalError)?,
+            iv: MborByteArray::from_slice(iv).map_hsm_err(HsmError::InternalError)?,
+        },
+        ext: None,
+    };
+
+    let resp = key.with_dev(|dev| dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from))?;
+
+    // Update IV for chaining
+    let resp_iv = resp.data.iv.as_slice();
+    iv.copy_from_slice(&resp_iv[..16]);
+
+    // Copy output data
+    let resp_msg = resp.data.msg.as_slice();
+    let to_copy = resp_msg.len().min(output.len());
+    output[..to_copy].copy_from_slice(&resp_msg[..to_copy]);
+
+    Ok(to_copy)
+}
+
+/// Maps an AES key size in bits to the 1-byte TBOR `AesKeySize`
+/// discriminant.
+fn aes_bits_to_tbor_size(bits: u32) -> HsmResult<u8> {
+    match bits {
+        128 => Ok(AES_KEY_SIZE_128),
+        192 => Ok(AES_KEY_SIZE_192),
+        256 => Ok(AES_KEY_SIZE_256),
+        _ => Err(HsmError::InvalidKeySize),
+    }
+}
+
+/// Runs TBOR `AesGenerateKey`, returning the unpinned `Unpinned`
+/// handle and the device-returned masked blob (the key is never stored
+/// on-device; the blob is unmasked on-use by `aes_cbc_encrypt_decrypt`).
+fn aes_generate_key_tbor(
+    session: &HsmSession,
+    props: &HsmKeyProps,
+) -> HsmResult<(HsmKeyHandle, Vec<u8>)> {
+    let key_label = props.label();
+    if key_label.len() > TBOR_KEY_LABEL_MAX_LEN {
+        return Err(HsmError::InvalidKeyProps);
+    }
+    let scope = props.tbor_scope();
+    let req = TborAesGenerateKeyReq {
+        session_id: session.ex_session_id()?,
+        scope,
+        key_size: aes_bits_to_tbor_size(props.bits())?,
+        key_usage: aes_tbor_key_usage(props)?,
+        key_label: key_label.to_vec(),
+    };
+    let mut cookie = None;
+    let resp = session.with_dev(|dev| {
+        dev.exec_op_tbor(&req, None, &mut cookie)
+            .map_err(HsmError::from)
+    })?;
+
+    HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
+    Ok((ddi::HsmKeyHandle::Unpinned, resp.masked_key))
+}
+
+/// Maps the requested AES key usage onto the TBOR `KeyUsage` bitfield.
+/// A generated AES key is an encrypt/decrypt symmetric key; any other
+/// usage is rejected here rather than silently mapped.
+fn aes_tbor_key_usage(props: &HsmKeyProps) -> HsmResult<u64> {
+    if props.can_encrypt() && props.can_decrypt() {
+        Ok(KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT)
+    } else {
+        Err(HsmError::InvalidKeyProps)
+    }
+}
+
+/// AES-CBC transforms one chunk over TBOR `AesEncryptDecrypt` using the
+/// caller-held masked key (unmask-on-use). Updates `iv` with the chaining
+/// IV and copies the transformed bytes into `output`.
+fn aes_cbc_encrypt_decrypt_tbor(
+    key: &HsmAesKey,
+    op: DdiAesOp,
+    iv: &mut [u8],
+    input: &[u8],
+    output: &mut [u8],
+) -> HsmResult<usize> {
+    let props = key.props();
+    let masked = props.masked_key().ok_or(HsmError::InternalError)?;
+
+    let mut iv_arr = [0u8; 16];
+    if iv.len() != iv_arr.len() {
+        return Err(HsmError::InternalError);
+    }
+    iv_arr.copy_from_slice(iv);
+
+    let tbor_op = match op {
+        DdiAesOp::Encrypt => AES_OP_ENCRYPT,
+        DdiAesOp::Decrypt => AES_OP_DECRYPT,
+        _ => return Err(HsmError::InternalError),
+    };
+
+    let req = TborAesEncryptDecryptReq {
+        session_id: key.session().ex_session_id()?,
+        masked_key: masked.to_vec(),
+        op: tbor_op,
+        msg: input.to_vec(),
+        iv: iv_arr,
+    };
+    let mut cookie = None;
+    let resp = key.with_dev(|dev| {
+        dev.exec_op_tbor(&req, None, &mut cookie)
+            .map_err(HsmError::from)
+    })?;
+
+    iv.copy_from_slice(&resp.iv);
+    let to_copy = resp.msg.len().min(output.len());
+    output[..to_copy].copy_from_slice(&resp.msg[..to_copy]);
+    Ok(to_copy)
+}
+
+/// Converts a key size in bits to the corresponding DDI AES key size enum.
+///
+/// # Arguments
+///
+/// * `size` - Key size in bits
+///
+/// # Returns
+///
+/// Returns the corresponding `DdiAesKeySize` variant for valid AES key sizes.
+///
+/// # Errors
+///
+/// Returns `HsmError::AesInvalidKeySize` if the size is not 128, 192, or 256 bits.
+fn key_size_to_ddi(size: usize) -> HsmResult<DdiAesKeySize> {
+    match size {
+        128 => Ok(DdiAesKeySize::Aes128),
+        192 => Ok(DdiAesKeySize::Aes192),
+        256 => Ok(DdiAesKeySize::Aes256),
+        _ => Err(HsmError::InvalidKeySize),
+    }
+}
+
+/// Encrypts data using AES-XTS mode at the DDI layer.
+///
+/// # Arguments
+///
+/// * `key` - AES-XTS key to use
+/// * `tweak` - Initial tweak value (little-endian `u128`)
+/// * `dul` - Data unit length in bytes
+/// * `plaintext` - Data to encrypt (must be DUL-aligned)
+/// * `ciphertext` - Output buffer to receive ciphertext
+///
+/// # Returns
+///
+/// Returns the number of bytes written to `ciphertext`.
+///
+/// # Errors
+///
+/// Returns an error if the underlying DDI operation fails.
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_xts_encrypt(
+    key: &HsmAesXtsKey,
+    tweak: u128,
+    dul: usize,
+    plaintext: &[u8],
+    ciphertext: &mut [u8],
+) -> HsmResult<usize> {
+    aes_xts_encrypt_decrypt(key, DdiAesOp::Encrypt, tweak, dul, plaintext, ciphertext)
+}
+
+/// Decrypts data using AES-XTS mode at the DDI layer.
+///
+/// # Arguments
+///
+/// * `key` - AES-XTS key to use
+/// * `tweak` - Initial tweak value (little-endian `u128`)
+/// * `dul` - Data unit length in bytes
+/// * `ciphertext` - Data to decrypt (must be DUL-aligned)
+/// * `plaintext` - Output buffer to receive plaintext
+///
+/// # Returns
+///
+/// Returns the number of bytes written to `plaintext`.
+///
+/// # Errors
+///
+/// Returns an error if the underlying DDI operation fails.
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_xts_decrypt(
+    key: &HsmAesXtsKey,
+    tweak: u128,
+    dul: usize,
+    ciphertext: &[u8],
+    plaintext: &mut [u8],
+) -> HsmResult<usize> {
+    aes_xts_encrypt_decrypt(key, DdiAesOp::Decrypt, tweak, dul, ciphertext, plaintext)
+}
+
+/// Internal helper for AES-XTS encryption or decryption.
+///
+/// Builds a DDI fast-path XTS request using the two underlying key handles,
+/// the specified tweak and DUL, and copies the response bytes into `output`.
+///
+/// # Arguments
+///
+/// * `key` - AES-XTS key to use
+/// * `op` - Encrypt or decrypt operation selector
+/// * `tweak` - Initial tweak value (little-endian `u128`)
+/// * `dul` - Data unit length in bytes
+/// * `input` - Input buffer
+/// * `output` - Output buffer
+///
+/// # Returns
+///
+/// Returns the number of bytes copied to `output`.
+///
+/// # Errors
+///
+/// Returns an error if the DDI fast-path command fails.
+fn aes_xts_encrypt_decrypt(
+    key: &HsmAesXtsKey,
+    op: DdiAesOp,
+    tweak: u128,
+    dul: usize,
+    input: &[u8],
+    output: &mut [u8],
+) -> HsmResult<usize> {
+    // Setup DDI params for AES XTS encrypt/decrypt
+    let xts_params = DdiAesXtsParams {
+        key_id1: ddi::get_bulk_key_id(key.handle().0)?.ok_or(HsmError::InvalidKey)? as u32,
+        key_id2: ddi::get_bulk_key_id(key.handle().1)?.ok_or(HsmError::InvalidKey)? as u32,
+        data_unit_len: dul,
+        tweak: tweak.to_le_bytes(),
+        session_id: key.sess_id(),
+        short_app_id: 0,
+    };
+    let mut is_fips_approved = false;
+
+    let resp = key.with_dev(|dev| {
+        dev.exec_op_fp_xts_slice(op, xts_params, input, output, &mut is_fips_approved)
+            .map_err(HsmError::from)
+    })?;
+    Ok(resp)
+}
+
+/// Generates an AES-GCM key within an HSM session.
+///
+/// Creates a new AES-GCM key using the specified key properties and returns both
+/// the key handle for performing operations and the masked key material for
+/// secure storage. AES-GCM keys are 256-bit only.
+/// Uses MBOR for legacy sessions; TBOR generation is not yet supported.
+///
+/// # Arguments
+///
+/// * `session` - The HSM session in which to generate the key
+/// * `props` - Key properties specifying usage permissions and attributes
+///
+/// # Returns
+///
+/// Returns a tuple containing:
+/// - `HsmKeyHandle` - Handle for performing cryptographic operations with the key
+/// - `HsmKeyProps` - Key properties including masked key material
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - Key properties cannot be converted to DDI format
+/// - The DDI operation fails
+/// - The session is invalid or closed
+#[resiliency_key_gen(session = "session")]
+pub(crate) fn aes_gcm_generate_key(
+    session: &HsmSession,
+    props: HsmKeyProps,
+) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
+    if session.is_ex() {
+        aes_gcm_generate_key_tbor(session, props)
+    } else {
+        aes_gcm_generate_key_mbor(session, props)
+    }
+}
+
+/// Generates an AES-GCM bulk key using the legacy MBOR command.
+fn aes_gcm_generate_key_mbor(
+    session: &HsmSession,
+    props: HsmKeyProps,
+) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
+    let req = DdiAesGenerateKeyCmdReq {
+        hdr: build_ddi_req_hdr_sess(DdiOp::AesGenerateKey, session),
+        data: DdiAesGenerateKeyReq {
+            key_size: DdiAesKeySize::AesGcmBulk256Unapproved,
+            key_tag: None,
+            key_properties: (&props).try_into()?,
+        },
+        ext: None,
+    };
+
+    let resp = session.with_dev(|dev| dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from))?;
+
+    let key_id = ddi::HsmKeyIdGuard::new(
+        session,
+        to_key_handle(resp.data.key_id, resp.data.bulk_key_id),
+    );
+    let masked_key = resp.data.masked_key.as_slice();
+    let key_props = HsmMaskedKey::to_key_props(masked_key)?;
+    // Validate that the device returned properties match the requested properties.
+    if !props.validate_dev_props(&key_props) {
+        return Err(HsmError::InvalidKeyProps);
+    }
+
+    Ok((key_id.release(), key_props))
+}
+
+/// Placeholder for TBOR AES-GCM key generation, which is not yet supported.
+fn aes_gcm_generate_key_tbor(
+    _session: &HsmSession,
+    _props: HsmKeyProps,
+) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
+    Err(HsmError::UnsupportedAlgorithm)
+}
+
+/// Encrypts data using AES-GCM mode at the DDI layer.
+///
+/// Performs AES encryption in GCM (Galois/Counter Mode) using the specified
+/// key, initialization vector, and optional additional authenticated data.
+/// Uses the slice-based API for efficiency.
+///
+/// # Arguments
+///
+/// * `key` - The AES-GCM key to use for encryption
+/// * `iv` - The initialization vector (12 bytes)
+/// * `aad` - Optional additional authenticated data
+/// * `plaintext` - The data to be encrypted
+/// * `ciphertext` - Buffer to receive the encrypted output
+///
+/// # Returns
+///
+/// Returns a tuple of (bytes_written, tag) where tag is the 16-byte authentication tag.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The session is invalid or closed
+/// - The key is invalid or unsuitable for GCM encryption
+/// - The DDI operation fails
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_gcm_encrypt(
+    key: &HsmAesGcmKey,
+    iv: [u8; 12],
+    aad: Option<Vec<u8>>,
+    plaintext: &[u8],
+    ciphertext: &mut [u8],
+) -> HsmResult<(usize, [u8; 16])> {
+    let gcm_params = DdiAesGcmParams {
+        key_id: ddi::get_bulk_key_id(key.handle())?.ok_or(HsmError::InvalidKey)? as u32,
+        iv,
+        aad,
+        tag: None, // Tag is output for encryption
+        session_id: key.sess_id(),
+        short_app_id: key.with_session(|s| s._app_id()),
+    };
+
+    let mut tag: Option<[u8; 16]> = None;
+    let mut returned_iv: Option<[u8; 12]> = None;
+    let mut is_fips_approved = false;
+
+    let bytes_written = key.with_dev(|dev| {
+        dev.exec_op_fp_gcm_slice(
+            DdiAesOp::Encrypt,
+            gcm_params,
+            plaintext,
+            ciphertext,
+            &mut tag,
+            &mut returned_iv,
+            &mut is_fips_approved,
+        )
+        .map_err(HsmError::from)
+    })?;
+
+    Ok((bytes_written, tag.ok_or(HsmError::InternalError)?))
+}
+
+/// Decrypts data using AES-GCM mode at the DDI layer.
+///
+/// Performs AES decryption in GCM (Galois/Counter Mode) using the specified
+/// key, initialization vector, authentication tag, and optional additional
+/// authenticated data. Uses the slice-based API for efficiency.
+///
+/// # Arguments
+///
+/// * `key` - The AES-GCM key to use for decryption
+/// * `iv` - The initialization vector (12 bytes)
+/// * `tag` - The authentication tag for verification
+/// * `aad` - Optional additional authenticated data
+/// * `ciphertext` - The data to be decrypted
+/// * `plaintext` - Buffer to receive the decrypted output
+///
+/// # Returns
+///
+/// Returns the number of bytes written to the plaintext buffer.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The session is invalid or closed
+/// - The key is invalid or unsuitable for GCM decryption
+/// - Authentication tag verification fails
+/// - The DDI operation fails
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_gcm_decrypt(
+    key: &HsmAesGcmKey,
+    iv: [u8; 12],
+    tag: [u8; 16],
+    aad: Option<Vec<u8>>,
+    ciphertext: &[u8],
+    plaintext: &mut [u8],
+) -> HsmResult<usize> {
+    let gcm_params = DdiAesGcmParams {
+        key_id: ddi::get_bulk_key_id(key.handle())?.ok_or(HsmError::InvalidKey)? as u32,
+        iv,
+        aad,
+        tag: Some(tag),
+        session_id: key.sess_id(),
+        short_app_id: key.with_session(|s| s._app_id()),
+    };
+
+    let mut returned_tag: Option<[u8; 16]> = None;
+    let mut returned_iv: Option<[u8; 12]> = None;
+    let mut is_fips_approved = false;
+
+    let bytes_written = key.with_dev(|dev| {
+        dev.exec_op_fp_gcm_slice(
+            DdiAesOp::Decrypt,
+            gcm_params,
+            ciphertext,
+            plaintext,
+            &mut returned_tag,
+            &mut returned_iv,
+            &mut is_fips_approved,
+        )
+        .map_err(HsmError::from)
+    })?;
+
+    Ok(bytes_written)
+}
