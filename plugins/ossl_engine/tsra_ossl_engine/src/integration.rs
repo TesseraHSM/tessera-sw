@@ -15,6 +15,8 @@ use tsra_api::HsmKeyManager;
 use tsra_api::HsmKeyPropsBuilder;
 use tsra_ossl_engine_core::error::EngineError;
 use tsra_ossl_engine_core::error::EngineResult;
+/// Mode for key-material files, as the engine writes them.
+pub use tsra_ossl_engine_resiliency::SECRET_FILE_MODE;
 
 use crate::context::EngineData;
 

@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 
 use tsra_ossl_engine_core::engine::Engine;
 use tsra_ossl_engine_core::ffi;
+use tsra_ossl_engine_core::rsa_pkey_method::ANY_KEYTYPE;
 
 use super::*;
 
@@ -128,7 +129,7 @@ fn evp_pkey_sign(pkey: *mut ffi::EVP_PKEY, digest: &[u8], md: *const ffi::EVP_MD
         assert_eq!(
             ffi::EVP_PKEY_CTX_ctrl(
                 ctx,
-                -1,
+                ANY_KEYTYPE,
                 ffi::EVP_PKEY_OP_TYPE_SIG_CONST,
                 ffi::EVP_PKEY_CTRL_MD_CONST,
                 0,
@@ -1042,7 +1043,7 @@ mod round_trips {
             assert_eq!(
                 ffi::EVP_PKEY_CTX_ctrl(
                     ctx,
-                    -1,
+                    ANY_KEYTYPE,
                     ffi::EVP_PKEY_OP_TYPE_SIG_CONST,
                     ffi::EVP_PKEY_CTRL_MD_CONST,
                     0,
@@ -1124,8 +1125,9 @@ mod round_trips {
             ],
         )
         .expect_err("keyWrapping must reject a non-2048 size");
+        let bits = crate::context::RSA_UNWRAPPING_KEY_BITS;
         assert!(
-            err.contains("requires rsa_keygen_bits=2048"),
+            err.contains(&format!("requires rsa_keygen_bits={bits}")),
             "unexpected error: {err}"
         );
 
@@ -1133,7 +1135,7 @@ mod round_trips {
         let raw = try_rsa_import(
             engine_raw,
             &[
-                ("rsa_keygen_bits", "2048"),
+                ("rsa_keygen_bits", bits.to_string().as_str()),
                 ("tsra.key_usage", "keyWrapping"),
             ],
         )
@@ -1143,8 +1145,11 @@ mod round_trips {
         let rsa = exported
             .rsa()
             .map_err(|e| EngineError::wrap("exported key is not RSA", e))?;
-        // size() is the modulus in bytes; 256 bytes == 2048 bits.
-        assert_eq!(rsa.size(), 256, "unwrapping key must be a 2048-bit RSA key");
+        assert_eq!(
+            rsa.size().checked_mul(u8::BITS),
+            Some(bits),
+            "unwrapping key must be a {bits}-bit RSA key"
+        );
 
         // Teardown.
         drop(exported);
@@ -1167,7 +1172,6 @@ mod round_trips {
     pub(super) fn run_rsa_import_wrapped(data: EngineData, dir: &Path) -> EngineResult<()> {
         use openssl::rsa::Rsa;
         use tsra_api::HsmEncrypter;
-        use tsra_api::HsmHashAlgo;
         use tsra_api::HsmKeyCommonProps;
         use tsra_api::HsmKeyKind;
         use tsra_api::HsmKeyManager;
@@ -1199,7 +1203,10 @@ mod round_trips {
                 .ok_or(EngineError::NullParam("engine_data"))?;
             ed.with_session(|session| {
                 ed.with_unwrapping_key(session, |_unwrap_priv, unwrap_pub| {
-                    let mut wrap = HsmRsaAesWrapAlgo::new(HsmHashAlgo::Sha256, 32);
+                    let mut wrap = HsmRsaAesWrapAlgo::new(
+                        crate::rsaimport::WRAP_HASH,
+                        crate::rsaimport::WRAP_KEK_BYTES,
+                    );
                     HsmEncrypter::encrypt_vec(&mut wrap, unwrap_pub, &pkcs8)
                         .map_err(|e| EngineError::wrap("external RSA-AES wrap", e))
                 })
@@ -1333,7 +1340,10 @@ mod round_trips {
             err
         };
         assert!(
-            err.contains("requires rsa_keygen_bits=2048"),
+            err.contains(&format!(
+                "requires rsa_keygen_bits={}",
+                crate::context::RSA_UNWRAPPING_KEY_BITS
+            )),
             "unexpected error: {err}"
         );
 
@@ -1603,7 +1613,10 @@ mod round_trips {
             let k = HsmKeyManager::unmask_key(session, &mut unmask, &aes_blob)
                 .map_err(|e| EngineError::wrap("unmask aes blob", e))?;
             assert_eq!(k.kind(), HsmKeyKind::Aes);
-            assert_eq!(k.bits(), 256);
+            assert_eq!(
+                k.bits(),
+                tsra_ossl_engine_core::hkdf_method::DEFAULT_DERIVED_KEY_BITS
+            );
             assert!(k.can_encrypt() && k.can_decrypt(), "aes usage flags");
             crate::context::delete_hsm_key(k, "hkdf test aes props key");
 
@@ -1714,7 +1727,12 @@ mod round_trips {
                 1,
                 "derive size query"
             );
-            assert_eq!(len, if output_file.is_some() { 1 } else { 8192 });
+            let expected = if output_file.is_some() {
+                tsra_ossl_engine_core::FILE_OUTPUT_SIZE_HINT
+            } else {
+                tsra_ossl_engine_core::MASKED_KEY_MAX_BUFFER
+            };
+            assert_eq!(len, expected);
             let mut buf = vec![0u8; len];
             assert_eq!(
                 ffi::EVP_PKEY_derive(ctx, buf.as_mut_ptr(), &mut len),
@@ -2126,7 +2144,7 @@ mod mock {
         let obk_path = scratch.0.join("obk.bin");
         fs::write(&priv_path, &priv_der).unwrap();
         fs::write(&pub_path, &pub_der).unwrap();
-        fs::write(&obk_path, vec![0u8; 48]).unwrap();
+        fs::write(&obk_path, vec![0u8; tsra_ossl_engine_resiliency::OBK_LEN]).unwrap();
 
         ResiliencySettings {
             enabled: true,
@@ -2589,20 +2607,21 @@ mod mock {
 
     #[test]
     fn hex_decode_rejects_wrong_length() {
-        assert!(hex_decode_16("abcd", "X").is_err());
+        assert!(decode_credential_hex("abcd", "X").is_err());
     }
 
     #[test]
     fn hex_decode_rejects_non_hex() {
-        let s = "g".repeat(32);
-        assert!(hex_decode_16(&s, "X").is_err());
+        let s = "g".repeat(CREDENTIALS_HEX_SIZE);
+        let err = decode_credential_hex(&s, "X").unwrap_err();
+        assert!(err.to_string().contains("non-hex"), "{err}");
     }
 
     #[test]
     fn hex_decode_round_trip() {
         let s = "000102030405060708090a0b0c0d0e0f";
         assert_eq!(
-            hex_decode_16(s, "X").unwrap(),
+            decode_credential_hex(s, "X").unwrap(),
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
         );
     }
