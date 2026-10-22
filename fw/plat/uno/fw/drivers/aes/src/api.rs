@@ -4,6 +4,10 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use bitfield_struct::bitfield;
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
@@ -14,10 +18,6 @@ use tsra_fw_uno_reg_soc::aes::regs::AesRegs;
 use tsra_fw_uno_reg_soc::aes::AES_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_reg_soc::io_gsram::*;
-use bitfield_struct::bitfield;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::AesError;
 

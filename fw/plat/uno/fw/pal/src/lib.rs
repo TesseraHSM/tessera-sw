@@ -54,6 +54,9 @@ mod session;
 mod test_hooks;
 mod vault;
 
+pub use io::*;
+pub use ipc::*;
+pub use pal::*;
 /// Re-export of the PAL trait types consumed by uno-PAL users.
 ///
 /// Lets downstream crates (test harness, integration tests, sample
@@ -63,6 +66,3 @@ pub use tsra_fw_hsm_pal_traits::DmaBuf;
 pub use tsra_fw_hsm_pal_traits::HsmAlloc;
 pub use tsra_fw_hsm_pal_traits::HsmIo;
 pub use tsra_fw_hsm_pal_traits::HsmPal;
-pub use io::*;
-pub use ipc::*;
-pub use pal::*;

@@ -14,6 +14,10 @@
 //!   `cpu_stall(100_000 µs)` (≈100 ms) — see `RNG_INIT_DELAY_NOPS`
 //!   below for rationale.
 
+use cortex_m::asm::nop;
+use tock_registers::interfaces::ReadWriteable;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
@@ -26,10 +30,6 @@ use tsra_fw_uno_reg_soc::rng::REPCNT_CUTOFF;
 use tsra_fw_uno_reg_soc::rng::RNG_BASE;
 use tsra_fw_uno_reg_soc::rng::RN_DATA;
 use tsra_fw_uno_reg_soc::rng::STATUS;
-use cortex_m::asm::nop;
-use tock_registers::interfaces::ReadWriteable;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 /// MMIO register overlay for the RNG peripheral.
 const REGS: StaticRef<RngRegs> = unsafe { StaticRef::new(RNG_BASE as *const RngRegs) };

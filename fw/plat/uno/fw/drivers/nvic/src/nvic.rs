@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_pac::Interrupt;
 use tsra_fw_uno_reg_cortex_m::nvic::regs::NvicRegs;
 use tsra_fw_uno_reg_cortex_m::nvic::NVIC_BASE;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 const NVIC: StaticRef<NvicRegs> = unsafe { StaticRef::new(NVIC_BASE as *const NvicRegs) };
 

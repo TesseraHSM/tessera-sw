@@ -8,13 +8,13 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_reg_soc::intc::regs::IntcRegs;
 use tsra_fw_uno_reg_soc::intc::INTC_BASE;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 /// IPC message length in DWORDs (16 × 4 = 64 bytes).
 pub const IPC_MSG_DWORDS: usize = 16;

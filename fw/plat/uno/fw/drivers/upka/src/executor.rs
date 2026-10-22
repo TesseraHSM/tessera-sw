@@ -1,6 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use cortex_m::asm::dmb;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
@@ -10,9 +13,6 @@ use tsra_fw_uno_reg_soc::upka::UpkaEngine;
 use tsra_fw_uno_reg_soc::upka::ENGINE_STRIDE;
 use tsra_fw_uno_reg_soc::upka::UPKA_BASE;
 use tsra_fw_uno_reg_soc::upka::UPKA_ENGINE_STATUS;
-use cortex_m::asm::dmb;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 const STATUS_FLAGS_MASK: u32 = 0x1E;
 

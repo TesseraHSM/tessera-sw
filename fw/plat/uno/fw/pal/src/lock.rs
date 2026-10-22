@@ -13,14 +13,14 @@
 
 #![allow(unsafe_code)]
 
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::mutex::MutexGuard;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_uno_drivers_part_store::NUM_PARTITIONS;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::mutex::Mutex;
-use embassy_sync::mutex::MutexGuard;
 
 use crate::UnoHsmPal;
 

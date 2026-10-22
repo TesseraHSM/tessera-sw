@@ -40,6 +40,8 @@
 
 mod trampoline;
 
+use embassy_executor::Spawner;
+use embassy_sync::once_lock::OnceLock;
 use tsra_fw_hsm_core::Hsm;
 use tsra_fw_hsm_core_tracing::info;
 use tsra_fw_hsm_pal_traits::*;
@@ -49,8 +51,6 @@ use tsra_fw_uno_pac as _;
 use tsra_fw_uno_pal::BootPhase;
 use tsra_fw_uno_pal::UnoHsmIo;
 use tsra_fw_uno_pal::UnoHsmPal;
-use embassy_executor::Spawner;
-use embassy_sync::once_lock::OnceLock;
 
 // Placeholder so the linker emits a non-empty `.data` section.
 //

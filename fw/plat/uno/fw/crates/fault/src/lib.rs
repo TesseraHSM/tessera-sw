@@ -49,6 +49,9 @@
 
 mod decode;
 
+use cortex_m_rt::exception;
+use cortex_m_rt::ExceptionFrame;
+use tock_registers::interfaces::Readable;
 use tsra_fw_hsm_core_tracing::error;
 // `HsmError` is referenced only inside `error!`, which compiles out when no
 // trace level is enabled (production); the import is then unused.
@@ -58,9 +61,6 @@ use tsra_fw_uno_reg_cortex_m::scb::regs::ScbRegs;
 use tsra_fw_uno_reg_cortex_m::scb::CFSR;
 use tsra_fw_uno_reg_cortex_m::scb::HFSR;
 use tsra_fw_uno_reg_cortex_m::scb::SCB_BASE;
-use cortex_m_rt::exception;
-use cortex_m_rt::ExceptionFrame;
-use tock_registers::interfaces::Readable;
 
 /// Borrow the System Control Block MMIO register block.
 ///

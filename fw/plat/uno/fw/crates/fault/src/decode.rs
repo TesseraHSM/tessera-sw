@@ -13,11 +13,11 @@
 //! firmware's logging backend and compiles out with the rest of tracing in
 //! trace-disabled builds.
 
+use tock_registers::interfaces::Readable;
 use tsra_fw_hsm_core_tracing::error;
 use tsra_fw_uno_error::HsmError;
 use tsra_fw_uno_reg_cortex_m::scb::regs::ScbRegs;
 use tsra_fw_uno_reg_cortex_m::scb::CFSR;
-use tock_registers::interfaces::Readable;
 
 /// Print one decoded line per set CFSR fault bit, grouped by fault unit.
 ///

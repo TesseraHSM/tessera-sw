@@ -12,18 +12,18 @@
 //! backend (mailbox for `backend-semihosting` on the emulator, atomic for
 //! `backend-uart` on silicon).
 
-#[cfg(feature = "trace")]
-use tsra_fw_static_ref::StaticRef;
-#[cfg(feature = "trace")]
-use tsra_fw_uno_reg_soc::trace_mailbox::regs::TraceMailboxRegs;
-#[cfg(feature = "trace")]
-use tsra_fw_uno_reg_soc::trace_mailbox::TRACE_MAILBOX_BASE;
 use portable_atomic::AtomicU32;
 use portable_atomic::Ordering;
 #[cfg(feature = "trace")]
 use tock_registers::interfaces::Readable;
 #[cfg(feature = "trace")]
 use tock_registers::interfaces::Writeable;
+#[cfg(feature = "trace")]
+use tsra_fw_static_ref::StaticRef;
+#[cfg(feature = "trace")]
+use tsra_fw_uno_reg_soc::trace_mailbox::regs::TraceMailboxRegs;
+#[cfg(feature = "trace")]
+use tsra_fw_uno_reg_soc::trace_mailbox::TRACE_MAILBOX_BASE;
 
 #[cfg(feature = "trace")]
 const TRACE: StaticRef<TraceMailboxRegs> =

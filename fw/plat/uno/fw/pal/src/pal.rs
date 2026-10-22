@@ -30,6 +30,10 @@
 
 use core::cell::Cell;
 
+use embassy_futures::select::Either;
+use embassy_futures::select::select;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::mutex::Mutex;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -91,10 +95,6 @@ use tsra_fw_uno_reg_soc::psram::HSM_TO_FP_IPC_TX_RING_OFFSET;
 use tsra_fw_uno_reg_soc::psram::HSM_TO_FP_IPC_TX_RING_STRIDE;
 use tsra_fw_uno_reg_soc::psram::PSRAM_BASE;
 use tsra_fw_uno_trace::tracing::*;
-use embassy_futures::select::Either;
-use embassy_futures::select::select;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::mutex::Mutex;
 
 use crate::alloc::IO_ALLOC_INIT;
 use crate::alloc::IoAllocTable;

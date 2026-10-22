@@ -16,8 +16,8 @@
 
 #![allow(unsafe_code)]
 
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use bitfield_struct::bitfield;
+use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
 use zerocopy::IntoBytes;

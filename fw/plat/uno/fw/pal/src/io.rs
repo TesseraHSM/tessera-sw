@@ -27,6 +27,8 @@
 use core::mem;
 use core::ops::AsyncFnOnce;
 
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
@@ -41,8 +43,6 @@ use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::UnoHsmPal;
 use crate::alloc::ADMIN_IO_INDEX;
