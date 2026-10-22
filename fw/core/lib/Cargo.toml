@@ -37,5 +37,8 @@ zerocopy.workspace = true
 
 [features]
 default = ["std"]
+# Full legacy MBOR DDI command set. Without it, MBOR `EstablishCredential`
+# and `RsaUnwrap` are compiled out; every other MBOR command stays.
+mbor = []
 std = []
 tracing = []

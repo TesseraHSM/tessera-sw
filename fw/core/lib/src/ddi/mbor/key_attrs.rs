@@ -126,6 +126,7 @@ pub(crate) fn for_aes(metadata: &DdiTargetKeyMetadata, local: bool) -> HsmResult
 /// `EncryptDecrypt` (the two RSA operations exposed by the DDI).  Any
 /// other usage flag — derive, wrap, or unwrap — is rejected with
 /// [`HsmError::InvalidPermissions`].
+#[cfg(feature = "mbor")]
 pub(crate) fn for_rsa(metadata: &DdiTargetKeyMetadata, local: bool) -> HsmResult<HsmVaultKeyAttrs> {
     validate_pairs(metadata)?;
     let mut attrs = HsmVaultKeyAttrs::new().with_local(local);

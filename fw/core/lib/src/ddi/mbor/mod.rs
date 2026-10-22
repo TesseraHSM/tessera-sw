@@ -1,6 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+// Without the `mbor` feature, `EstablishCredential` and `RsaUnwrap` are
+// compiled out to fit the Uno ITCM. TBOR does not depend on either; every
+// other MBOR command stays.
+
 pub(crate) mod aes_encrypt_decrypt;
 pub(crate) mod aes_generate_key;
 pub(crate) mod attest_key;
@@ -11,6 +15,7 @@ pub(crate) mod delete_key;
 pub(crate) mod ecc_generate_key_pair;
 pub(crate) mod ecc_sign;
 pub(crate) mod ecdh_key_exchange;
+#[cfg(feature = "mbor")]
 pub(crate) mod establish_credential;
 pub(crate) mod from_ddi;
 pub(crate) mod from_pal;
@@ -32,6 +37,7 @@ pub(crate) mod masking;
 pub(crate) mod open_session;
 pub(crate) mod reopen_session;
 pub(crate) mod rsa_mod_exp;
+#[cfg(feature = "mbor")]
 pub(crate) mod rsa_unwrap;
 pub(crate) mod set_sealed_bk3;
 pub(crate) mod sha_digest;
@@ -46,6 +52,7 @@ pub(crate) use delete_key::*;
 pub(crate) use ecc_generate_key_pair::*;
 pub(crate) use ecc_sign::*;
 pub(crate) use ecdh_key_exchange::*;
+#[cfg(feature = "mbor")]
 pub(crate) use establish_credential::*;
 pub(crate) use get_api_rev::*;
 pub(crate) use get_cert_chain_info::*;
@@ -62,6 +69,7 @@ pub(crate) use kbkdf_derive::*;
 pub(crate) use open_session::*;
 pub(crate) use reopen_session::*;
 pub(crate) use rsa_mod_exp::*;
+#[cfg(feature = "mbor")]
 pub(crate) use rsa_unwrap::*;
 pub(crate) use set_sealed_bk3::*;
 pub(crate) use sha_digest::*;
@@ -177,11 +185,13 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         }
         DdiOp::GetSessionEncryptionKey => get_session_encryption_key(pal, io, decoder, hdr).await,
         DdiOp::GetUnwrappingKey => get_unwrapping_key(pal, io, decoder, hdr).await,
+        #[cfg(feature = "mbor")]
         DdiOp::RsaUnwrap => rsa_unwrap(pal, io, decoder, hdr).await,
         DdiOp::UnmaskKey => unmask_key(pal, io, decoder, hdr).await,
         DdiOp::GetSealedBk3 => get_sealed_bk3(pal, io, decoder, hdr),
         DdiOp::SetSealedBk3 => set_sealed_bk3(pal, io, decoder, hdr),
         DdiOp::InitBk3 => init_bk3(pal, io, decoder, hdr).await,
+        #[cfg(feature = "mbor")]
         DdiOp::EstablishCredential => establish_credential(pal, io, decoder, hdr).await,
         DdiOp::ChangePin => change_pin(pal, io, decoder, hdr).await,
         DdiOp::CloseSession => close_session(pal, io, decoder, hdr).await,
