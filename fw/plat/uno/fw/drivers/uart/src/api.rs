@@ -3,6 +3,8 @@
 
 //! UART driver implementation using tock-register MMIO.
 
+#![allow(unsafe_code)]
+
 use core::fmt;
 
 use tock_registers::interfaces::Readable;
@@ -13,6 +15,7 @@ use tsra_fw_uno_reg_soc::uart::UART_BASE;
 use tsra_fw_uno_reg_soc::uart::*;
 
 /// MMIO register overlay for the UART peripheral.
+// SAFETY: UART_BASE is the aligned, permanently mapped Uno UART register block.
 const REGS: StaticRef<UartRegs> = unsafe { StaticRef::new(UART_BASE as *const UartRegs) };
 
 /// Synchronous UART driver.

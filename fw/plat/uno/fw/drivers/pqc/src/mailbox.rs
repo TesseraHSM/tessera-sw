@@ -355,15 +355,18 @@ pub unsafe fn map_normal() {
     const MPU_CTRL_PRIVDEFENA: u32 = 1 << 2;
 
     dmb();
-    write_volatile(MPU_RNR, REGION);
-    write_volatile(MPU_RBAR, WINDOW_BASE as u32);
-    write_volatile(MPU_RASR, RASR);
-    // The stack guard enables the MPU too; setting the bits here as well keeps
-    // this independent of which of the two runs first.
-    write_volatile(
-        MPU_CTRL,
-        read_volatile(MPU_CTRL) | MPU_CTRL_ENABLE | MPU_CTRL_PRIVDEFENA,
-    );
+    // SAFETY: These are aligned architectural MPU registers; the caller reserves region 6.
+    unsafe {
+        write_volatile(MPU_RNR, REGION);
+        write_volatile(MPU_RBAR, WINDOW_BASE as u32);
+        write_volatile(MPU_RASR, RASR);
+        // The stack guard enables the MPU too; setting the bits here as well keeps
+        // this independent of which of the two runs first.
+        write_volatile(
+            MPU_CTRL,
+            read_volatile(MPU_CTRL) | MPU_CTRL_ENABLE | MPU_CTRL_PRIVDEFENA,
+        );
+    }
     dsb();
     isb();
 }

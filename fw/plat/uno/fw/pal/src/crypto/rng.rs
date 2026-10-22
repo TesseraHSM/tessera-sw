@@ -30,6 +30,7 @@ impl HsmRng for UnoHsmPal {
     /// * Any [`HsmError`](tsra_fw_hsm_pal_traits::HsmError) surfaced by
     ///   the RNG driver (e.g. hardware fault).
     fn rng_fill_bytes(&self, _io: &impl HsmIo, buf: &mut [u8]) -> HsmResult<()> {
+        // SAFETY: The RNG driver only writes through the CPU; this borrow is not used for DMA.
         let dma = unsafe { DmaBuf::from_raw_mut(buf) };
         self.rng.fill_bytes(dma)
     }

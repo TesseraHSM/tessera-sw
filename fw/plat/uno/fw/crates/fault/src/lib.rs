@@ -71,6 +71,7 @@ use tsra_fw_uno_reg_cortex_m::scb::SCB_BASE;
 /// where the firmware is already halting, so aliasing is not a concern.
 #[inline(always)]
 fn scb() -> &'static ScbRegs {
+    // SAFETY: SCB_BASE is architecturally mapped and aligned; fault handling only reads registers.
     unsafe { &*(SCB_BASE as *const ScbRegs) }
 }
 
@@ -189,6 +190,7 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
         error!("fault", HsmError::HardFault, "frame: {:#?}", ef);
 
         #[cfg(feature = "fault-stackdump")]
+        // SAFETY: The development-only dump intentionally probes the faulting stack before halting.
         unsafe {
             stack_dump(msp);
         }
@@ -246,10 +248,15 @@ unsafe fn stack_dump(sp: u32) {
     for row in 0..ROWS {
         let addr = base.wrapping_add(row * 16);
         let p = addr as *const u32;
-        let w0 = unsafe { core::ptr::read_volatile(p) };
-        let w1 = unsafe { core::ptr::read_volatile(p.add(1)) };
-        let w2 = unsafe { core::ptr::read_volatile(p.add(2)) };
-        let w3 = unsafe { core::ptr::read_volatile(p.add(3)) };
+        // SAFETY: This debug-only fault probe uses aligned addresses under the caller's contract.
+        let (w0, w1, w2, w3) = unsafe {
+            (
+                core::ptr::read_volatile(p),
+                core::ptr::read_volatile(p.add(1)),
+                core::ptr::read_volatile(p.add(2)),
+                core::ptr::read_volatile(p.add(3)),
+            )
+        };
         error!(
             "fault",
             HsmError::HardFault,

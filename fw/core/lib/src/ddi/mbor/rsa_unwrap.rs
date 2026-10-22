@@ -52,7 +52,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiRsaUnwrapReq = decoder.decode_data()?;
+    let body: DdiRsaUnwrapReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 
     // Only RSA-OAEP wrapping is supported.

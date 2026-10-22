@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(unsafe_code)]
+
 use core::future::poll_fn;
 use core::task::Poll;
 
@@ -23,9 +25,11 @@ use tsra_fw_uno_reg_soc::sha::SHA_BASE;
 use crate::ShaError;
 
 /// SHA peripheral MMIO registers.
+// SAFETY: SHA_BASE is the aligned, permanently mapped SHA register block.
 const SHA: StaticRef<ShaRegs> = unsafe { StaticRef::new(SHA_BASE as *const ShaRegs) };
 
 /// DTCM overlay for SHA command descriptors.
+// SAFETY: IO_GSRAM_BASE is the aligned, permanently mapped command storage.
 const SHA_Q: StaticRef<IoGsramRegs> =
     unsafe { StaticRef::new(IO_GSRAM_BASE as *const IoGsramRegs) };
 
@@ -369,7 +373,7 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
                     }
                 }
 
-                let idx = (slot_idx.unwrap() & Self::MASK) as usize;
+                let idx = (slot_idx.expect("command slot allocated above") & Self::MASK) as usize;
                 let slot = &mut s.slots[idx];
 
                 if slot.status != 0 {
@@ -479,10 +483,11 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
 
                 // Our slot is active when active has reached it — all prior
                 // commands have completed and the hardware is free.
-                if s.active == slot_idx.unwrap() {
+                if s.active == slot_idx.expect("exclusive slot allocated above") {
                     Poll::Ready(Ok(()))
                 } else {
-                    let idx = (slot_idx.unwrap() & Self::MASK) as usize;
+                    let idx =
+                        (slot_idx.expect("exclusive slot allocated above") & Self::MASK) as usize;
                     s.slots[idx].waker.register(cx.waker());
                     Poll::Pending
                 }
@@ -492,13 +497,13 @@ impl<const DEPTH: usize> ShaDriver<DEPTH> {
 
         let result = f(&ShaExclusive {
             driver: self,
-            slot_idx: (slot_idx.unwrap() & Self::MASK) as usize,
+            slot_idx: (slot_idx.expect("exclusive slot acquired") & Self::MASK) as usize,
         });
 
         // Release our slot: clear exclusive flag, advance head and active
         // past it, then submit/wake the next queued slot if present.
         self.state.with(|s| {
-            let my = slot_idx.unwrap();
+            let my = slot_idx.expect("exclusive slot acquired");
             let idx = (my & Self::MASK) as usize;
             s.slots[idx].exclusive = false;
             s.active = my.wrapping_add(1);
@@ -625,6 +630,7 @@ fn write_cmd(idx: usize, req: &ShaRequest<'_>, mode: u8) {
     // Plain pointer writes — SHA_CMD is in DTCM, not MMIO.
     // The COMMAND register write (submit_cmd) is the barrier.
     let entry_ptr = (&SHA_Q.sha_cmd[idx]) as *const ShaCmdEntry as *mut u32;
+    // SAFETY: The selected command slot contains eight aligned words owned by this submission.
     unsafe {
         entry_ptr.add(0).write(cmd.into());
         entry_ptr.add(1).write(req.digest.as_ptr() as u32);

@@ -26,6 +26,7 @@ use tsra_fw_uno_reg_soc::trace_mailbox::regs::TraceMailboxRegs;
 use tsra_fw_uno_reg_soc::trace_mailbox::TRACE_MAILBOX_BASE;
 
 #[cfg(feature = "trace")]
+// SAFETY: The emulator provides this aligned, permanently mapped TraceMailbox register block.
 const TRACE: StaticRef<TraceMailboxRegs> =
     unsafe { StaticRef::new(TRACE_MAILBOX_BASE as *const TraceMailboxRegs) };
 
@@ -50,6 +51,7 @@ static CURRENT_TASK_ID: AtomicU32 = AtomicU32::new(0);
 #[inline]
 pub fn current_task_id() -> u32 {
     // Word 0 of the TraceMailbox holds the active task ID.
+    // SAFETY: The emulator backend maps this aligned mailbox word for the firmware's lifetime.
     unsafe {
         core::ptr::read_volatile(
             tsra_fw_uno_reg_soc::trace_mailbox::TRACE_MAILBOX_BASE as *const u32,

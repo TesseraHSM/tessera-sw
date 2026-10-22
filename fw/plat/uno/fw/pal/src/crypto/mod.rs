@@ -35,15 +35,19 @@
 //! [`HsmEcc`]: tsra_fw_hsm_pal_traits::HsmEcc
 //! [`HsmRsa`]: tsra_fw_hsm_pal_traits::HsmRsa
 
+#[allow(unsafe_code)]
 mod aes;
 mod ecc;
 mod ecc_det;
 mod gcm;
+#[allow(unsafe_code)]
 mod hash;
 mod hmac;
 mod kdf;
 mod kw;
+#[allow(unsafe_code)]
 mod mldsa;
+#[allow(unsafe_code)]
 mod rng;
 mod rsa;
 

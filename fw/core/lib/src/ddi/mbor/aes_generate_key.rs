@@ -43,7 +43,7 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiAesGenerateKeyReq = decoder.decode_data()?;
+    let body: DdiAesGenerateKeyReq<'_> = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 

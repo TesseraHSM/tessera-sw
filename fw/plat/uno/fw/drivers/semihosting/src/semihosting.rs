@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 pub fn sys_exit(code: u32) {
+    // SAFETY: The semihosting trap uses integer arguments and declares both clobbered registers.
     unsafe {
         core::arch::asm!(
             "mov r0, #0x18",
@@ -16,6 +17,7 @@ pub fn sys_exit(code: u32) {
 
 /// Signal READY to the host via custom semihosting operation.
 pub fn sys_ready() {
+    // SAFETY: SYS_READY has no pointer arguments and both clobbered registers are declared.
     unsafe {
         core::arch::asm!(
             "mov r0, #0x100",
@@ -29,6 +31,7 @@ pub fn sys_ready() {
 
 /// Write a null-terminated byte slice via SYS_WRITE0 (single BKPT trap).
 pub fn sys_write0(buf: &[u8]) {
+    // SAFETY: The documented NUL-terminated buffer remains borrowed throughout the trap.
     unsafe {
         core::arch::asm!(
             "mov r0, #0x04",

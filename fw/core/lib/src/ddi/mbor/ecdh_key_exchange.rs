@@ -32,7 +32,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiEcdhKeyExchangeReq = decoder.decode_data()?;
+    let body: DdiEcdhKeyExchangeReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let priv_key_id = HsmKeyId::from(body.priv_key_id);
 

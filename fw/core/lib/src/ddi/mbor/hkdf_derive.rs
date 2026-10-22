@@ -39,7 +39,7 @@ pub(crate) async fn hkdf_derive<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiHkdfDeriveReq = decoder.decode_data()?;
+    let body: DdiHkdfDeriveReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let input_key_id = HsmKeyId::from(body.key_id);
 

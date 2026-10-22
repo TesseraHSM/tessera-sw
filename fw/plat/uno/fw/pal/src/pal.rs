@@ -413,16 +413,30 @@ impl Default for UnoHsmPal {
             ],
         };
 
+        // SAFETY: Each macro reserves a distinct static buffer and rejects repeated initialization.
+        let (iic, oic, gdma, aes, sha, pka, rng, pqc, ipc) = unsafe {
+            (
+                static_init!(Iic, Iic::new(iic_config)),
+                static_init!(Oic, Oic::new(oic_config)),
+                static_init!(Gdma, Gdma::new(gdma_config)),
+                static_init!(Aes, Aes::new(false)),
+                static_init!(Sha, Sha::new()),
+                static_init!(Upka, Upka::new()),
+                static_init!(RngDriver, RngDriver::new()),
+                static_init!(PqcDriver, PqcDriver::new()),
+                static_init!(Ipc, Ipc::new(ipc_config)),
+            )
+        };
         Self {
-            iic: unsafe { static_init!(Iic, Iic::new(iic_config)) },
-            oic: unsafe { static_init!(Oic, Oic::new(oic_config)) },
-            gdma: unsafe { static_init!(Gdma, Gdma::new(gdma_config)) },
-            aes: unsafe { static_init!(Aes, Aes::new(false)) },
-            sha: unsafe { static_init!(Sha, Sha::new()) },
-            pka: unsafe { static_init!(Upka, Upka::new()) },
-            rng: unsafe { static_init!(RngDriver, RngDriver::new()) },
-            pqc: unsafe { static_init!(PqcDriver, PqcDriver::new()) },
-            ipc: unsafe { static_init!(Ipc, Ipc::new(ipc_config)) },
+            iic,
+            oic,
+            gdma,
+            aes,
+            sha,
+            pka,
+            rng,
+            pqc,
+            ipc,
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
             io_alloc: IO_ALLOC_INIT,
             io_peak: IO_ALLOC_INIT,

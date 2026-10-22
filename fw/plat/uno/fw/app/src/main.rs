@@ -38,6 +38,7 @@
 #![no_std]
 #![no_main]
 
+#[allow(unsafe_code)]
 mod trampoline;
 
 use embassy_executor::Spawner;
@@ -63,6 +64,7 @@ use tsra_fw_uno_pal::UnoHsmPal;
 // section is naturally >= 16 bytes (and a multiple of 16 bytes in
 // size), this dummy can be removed.
 #[used]
+#[allow(unsafe_code)]
 #[unsafe(link_section = ".data")]
 static mut DEFAULT_DATA: [u8; 16] = [0x1; 16];
 

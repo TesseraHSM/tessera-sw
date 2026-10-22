@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 #![no_std]
+#![allow(unsafe_code)]
 //! Boot status driver — writes the HSM boot status to GSRAM for Admin polling.
 
 use tsra_fw_uno_reg_soc::io_gsram::BOOT_STATUS_OFFSET;
@@ -20,6 +21,7 @@ pub enum BootStatus {
 /// Write the boot status to the GSRAM mailbox register.
 #[inline]
 pub fn set(status: BootStatus) {
+    // SAFETY: The aligned boot-status mailbox is a writable, permanently mapped MMIO register.
     unsafe {
         ((IO_GSRAM_BASE + BOOT_STATUS_OFFSET) as *mut u32).write_volatile(status as u32);
     }

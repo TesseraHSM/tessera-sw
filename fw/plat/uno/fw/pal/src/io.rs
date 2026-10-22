@@ -50,6 +50,7 @@ use crate::alloc::UnoScopedAlloc;
 use crate::alloc::reset_io_alloc;
 
 /// Typed overlay of the IO GSRAM region.
+// SAFETY: IO_GSRAM_BASE is the aligned, permanently mapped IO queue region.
 const IO_Q: StaticRef<IoGsramRegs> = unsafe { StaticRef::new(IO_GSRAM_BASE as *const IoGsramRegs) };
 
 /// An in-flight IO identified by its IO_SQ slot index.
@@ -149,6 +150,7 @@ impl HsmIo for UnoHsmIo {
             assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<HsmSqe>());
 
         let io_sq = &IO_Q.io_sq[self.index as usize];
+        // SAFETY: The queue entry and HsmSqe share the asserted layout; this IO owns the slot.
         unsafe { &*(io_sq as *const IoSqEntry as *const HsmSqe) }
     }
 
@@ -162,6 +164,7 @@ impl HsmIo for UnoHsmIo {
         const _ASSERT_CQE_ALIGN: () =
             assert!(mem::align_of::<IoCqEntry>() == mem::align_of::<HsmCqe>());
 
+        // SAFETY: The asserted layout matches HsmCqe; the mutable IO borrow owns its CQ slot.
         unsafe {
             let ptr = core::ptr::addr_of!(IO_Q.io_cq[self.index as usize]) as *mut HsmCqe;
             &mut *ptr

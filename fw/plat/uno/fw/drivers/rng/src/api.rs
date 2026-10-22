@@ -14,6 +14,8 @@
 //!   `cpu_stall(100_000 µs)` (≈100 ms) — see `RNG_INIT_DELAY_NOPS`
 //!   below for rationale.
 
+#![allow(unsafe_code)]
+
 use cortex_m::asm::nop;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
@@ -32,6 +34,7 @@ use tsra_fw_uno_reg_soc::rng::RN_DATA;
 use tsra_fw_uno_reg_soc::rng::STATUS;
 
 /// MMIO register overlay for the RNG peripheral.
+// SAFETY: RNG_BASE is the aligned, permanently mapped RNG register block.
 const REGS: StaticRef<RngRegs> = unsafe { StaticRef::new(RNG_BASE as *const RngRegs) };
 
 /// Settling delay (in `nop` iterations) applied after `CTRL.ENABLE`.

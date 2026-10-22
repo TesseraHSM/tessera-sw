@@ -31,3 +31,6 @@ portable-atomic = { workspace = true }
 tock-registers = { optional = true, workspace = true }
 tsra_fw_static_ref = { optional = true, workspace = true }
 tsra_fw_uno_reg_soc = { optional = true, workspace = true }
+
+[lints]
+workspace = true

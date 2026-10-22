@@ -39,6 +39,7 @@
 //! ```
 
 #![no_std]
+#![allow(unsafe_code)]
 
 use core::cell::RefCell;
 use core::task::Waker;
@@ -92,7 +93,7 @@ impl SysTickDriver {
         }
     }
 
-    fn set_alarm(&self, _cs: &critical_section::CriticalSection, at: u64) -> bool {
+    fn set_alarm(&self, _cs: &critical_section::CriticalSection<'_>, at: u64) -> bool {
         self.now() < at
     }
 }

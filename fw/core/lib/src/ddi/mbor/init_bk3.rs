@@ -114,7 +114,7 @@ pub(crate) async fn init_bk3<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiInitBk3Req = decoder.decode_data()?;
+    let body: DdiInitBk3Req<'_> = decoder.decode_data()?;
 
     let _lock = pal.partition_lock(io).await?;
 
