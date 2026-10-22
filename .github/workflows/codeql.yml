@@ -1,0 +1,86 @@
+name: "CodeQL Advanced"
+
+on:
+  push:
+    branches: [ main, dev, fw-main ]
+  pull_request:
+    branches: [ main, dev, fw-main ]
+  merge_group:
+    branches: [ main, dev, fw-main ]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at midnight PST (8 AM UTC)
+env:
+  CARGO_TERM_COLOR: always
+  CACHE_KEY_ID: dummy # dummy value to force cache miss
+  # Use the runner's system OpenSSL (ubuntu-24.04 ships OpenSSL 3.0.x), the
+  # same pattern as provider-matrix.yml. openssl-sys / the provider build
+  # resolve headers and libs from these system paths.
+  OPENSSL_DIR: /usr
+  OPENSSL_INCLUDE_DIR: /usr/include
+  OPENSSL_LIB_DIR: /usr/lib/x86_64-linux-gnu
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: c-cpp
+            build-mode: manual
+          - language: rust
+            build-mode: none
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Install apt packages
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libbsd-dev libssl-dev
+
+    - name: Restore Cargo cache
+      id: cargo-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+        key: ${{ runner.environment }}-${{ runner.os }}-${{ runner.arch }}-cargo-${{ env.CACHE_KEY_ID }}
+
+    - name: Setup
+      if: steps.cargo-cache.outputs.cache-hit != 'true'
+      run: cargo xtask setup
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      with:
+        languages: ${{ matrix.language }}
+        build-mode: ${{ matrix.build-mode }}
+        queries: security-extended,security-and-quality
+        config-file: ./.github/codeql/codeql-config.yml
+      env:
+        CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: "-test"
+        CODEQL_ACTION_FILE_COVERAGE_ON_PRS: "true"
+
+    - name: Run manual build steps
+      if: matrix.build-mode == 'manual'
+      shell: bash
+      run: |
+        cargo xtask build --release --package tsra_ossl_provider
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
+      with:
+        category: "/language:${{matrix.language}}"
