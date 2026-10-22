@@ -41,6 +41,11 @@ jobs:
           ~/.cargo/git/db/
         key: ${{ runner.environment }}-${{ runner.os }}-${{ runner.arch }}-cargo-${{ env.CACHE_KEY_ID }}
 
+    - name: Install ARM GCC
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-arm-none-eabi
+
     - name: Setup
       if: steps.cargo-cache.outputs.cache-hit != 'true' 
       run: cargo xtask precheck --setup
