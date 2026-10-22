@@ -93,7 +93,7 @@ TEST_F(init_resiliency_stress, init_part_under_reset)
             init_config.mobk_cache = query_mobk_property(r.part);
             ASSERT_FALSE(init_config.mobk_cache.empty()) << "Baseline init must provide MOBK";
             init_config.obk_buf = { init_config.mobk_cache.data(),
-                                   static_cast<uint32_t>(init_config.mobk_cache.size()) };
+                                    static_cast<uint32_t>(init_config.mobk_cache.size()) };
             init_config.backup_config.owner_backup_key = nullptr;
             init_config.backup_config.masked_owner_backup_key = &init_config.obk_buf;
         }
