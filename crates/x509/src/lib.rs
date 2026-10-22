@@ -145,6 +145,44 @@ impl X509Certificate {
         &self.der
     }
 
+    /// Verify this certificate's signature with the supplied issuer's public key.
+    ///
+    /// Does not check validity dates, CA constraints, or trust.
+    #[cfg(target_os = "linux")]
+    pub fn verify_signature(&self, issuer: &Self) -> Result<bool, X509CertificateError> {
+        let public_key = issuer.cert.public_key().map_err(|error| {
+            tracing::error!(?error);
+            X509CertificateError::OSSLGetPublicKeyError
+        })?;
+        self.cert.verify(&public_key).map_err(|error| {
+            tracing::error!(?error);
+            X509CertificateError::VerifyError
+        })
+    }
+
+    /// Verify this certificate's signature with the supplied issuer's public key.
+    ///
+    /// Does not check validity dates, CA constraints, or trust.
+    #[cfg(target_os = "windows")]
+    pub fn verify_signature(&self, issuer: &Self) -> Result<bool, X509CertificateError> {
+        let certificate = self.create_cert_context()?;
+        let issuer = issuer.create_cert_context()?;
+        // SAFETY: Both certificate contexts remain alive for the entire call.
+        let result = unsafe {
+            CryptVerifyCertificateSignatureEx(
+                HCRYPTPROV_LEGACY::default(),
+                X509_ASN_ENCODING,
+                CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT,
+                certificate.ptr.cast(),
+                CRYPT_VERIFY_CERT_SIGN_ISSUER_CERT,
+                Some(issuer.ptr.cast()),
+                CRYPT_VERIFY_CERT_FLAGS(0),
+                None,
+            )
+        };
+        Ok(result.is_ok())
+    }
+
     /// Private helper function for Windows that allocates and returns a pointer
     /// to a CNG `CERT_CONTEXT` object representing the certificate.
     #[cfg(target_os = "windows")]
