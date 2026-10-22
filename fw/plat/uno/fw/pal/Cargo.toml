@@ -76,3 +76,6 @@ fips_validation_hooks = [
   "dep:tsra_fw_ddi_mbor_types",
 ]
 tsra_test_hooks = ["dep:tsra_fw_ddi_mbor", "dep:tsra_fw_ddi_mbor_derive"]
+
+[lints]
+workspace = true

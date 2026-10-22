@@ -13,3 +13,6 @@ tock-registers.workspace = true
 [features]
 default = []
 emu = []
+
+[lints]
+workspace = true

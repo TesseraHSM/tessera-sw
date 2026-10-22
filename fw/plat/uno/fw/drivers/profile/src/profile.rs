@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //! Mailbox helpers for firmware profiling.
 //!
-//! Gated behind the `trace` feature (on by default). When disabled,
+//! Gated behind the `trace` feature (disabled by default). When disabled,
 //! all functions compile to nothing — zero instructions per IO.
 //!
 //! Independently of the emulator-only mailbox profiling, this module also
