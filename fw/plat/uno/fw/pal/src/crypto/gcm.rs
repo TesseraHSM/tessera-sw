@@ -415,6 +415,36 @@ impl UnoHsmPal {
         let len_fix = xor(&len_block(aad_len, text_len), &len_block(pad, rounded));
         let fix = len_fix != [0; AES_BLOCK_SIZE];
 
+        // Whole blocks, no length-block fix and buffers the engine can use as
+        // they are (most masked keys and bulk GCM): one engine command, with
+        // no scratch, no hash subkey and no tag correction.
+        if !fix && tail == 0 && bufs.aligned() {
+            let engine_tag = match dir {
+                Dir::Decrypt(t) => *t,
+                Dir::Encrypt => [0; AES_BLOCK_SIZE],
+            };
+            let done = self
+                .bcp
+                .gcm(GcmRequest {
+                    op: match dir {
+                        Dir::Encrypt => GcmOp::Encrypt,
+                        Dir::Decrypt(_) => GcmOp::Decrypt,
+                    },
+                    key,
+                    iv,
+                    aad_len: pad,
+                    unpadded_aad_len: aad_len,
+                    tag: &engine_tag,
+                    data: bufs.engine_data(len),
+                })
+                .await;
+            let result = verdict(dir, &engine_tag, done);
+            if result.is_err() {
+                bufs.dst()[pad..len].zeroize();
+            }
+            return result;
+        }
+
         self.alloc_scoped_async(io, async |scope| {
             let h = if fix {
                 Some(self.hash_subkey(key, scope).await?)
