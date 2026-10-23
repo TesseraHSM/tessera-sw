@@ -398,6 +398,29 @@ pub trait HsmAes {
         data: &mut DmaBuf,
     ) -> HsmResult<()>;
 
+    /// AES-GCM decrypt in place of `data = [padded_AAD | text | tag]`,
+    /// the tag being its last 16 bytes.
+    ///
+    /// Same contract as
+    /// [`gcm_decrypt_in_place`](Self::gcm_decrypt_in_place) over the
+    /// `[padded_AAD | text]` prefix; the tag is left intact. An
+    /// implementation may use the tag's bytes as scratch while it runs
+    /// (e.g. to zero-pad a partial final block in place instead of
+    /// copying the message to an engine buffer).
+    async fn gcm_open_in_place(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        data: &mut DmaBuf,
+    ) -> HsmResult<()> {
+        let msg_len = data.len().checked_sub(16).ok_or(HsmError::InvalidArg)?;
+        let (msg, tag) = data.split_at_mut(msg_len);
+        self.gcm_decrypt_in_place(io, key, iv, aad_len, tag, msg)
+            .await
+    }
+
     // ── AES Key Wrap (RFC 3394) ────────────────────────────────────
 
     /// AES Key Wrap (RFC 3394) — wrap key data.

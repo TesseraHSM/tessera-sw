@@ -30,9 +30,11 @@
 //! block on the CP1 AES engine. With no text at all there is nothing for
 //! the engine, so the tag is computed in software (GMAC).
 //!
-//! The engine runs in place on the caller's buffer when it can: a partial
-//! final block (which needs room for the padding) or a misaligned buffer
-//! goes through a scratch buffer instead.
+//! The engine runs in place on the caller's buffer when it can: whole
+//! blocks, or a partial final block when the caller lends scratch past the
+//! message to zero-pad it in place (`gcm_open_in_place` lends the tag's
+//! bytes). Otherwise, or for a misaligned buffer, the message goes through
+//! a scratch buffer instead.
 //!
 //! ## GHASH
 //!
@@ -309,6 +311,9 @@ enum Bufs<'a> {
     },
     /// Transform in place.
     InPlace(&'a mut DmaBuf),
+    /// Transform `buf[..len]` in place; `buf[len..]` is scratch, room to
+    /// zero-pad a partial final block for the engine in place.
+    Slack { buf: &'a mut DmaBuf, len: usize },
 }
 
 impl Bufs<'_> {
@@ -316,6 +321,7 @@ impl Bufs<'_> {
         match self {
             Self::Copy { src, .. } => src,
             Self::InPlace(buf) => buf,
+            Self::Slack { buf, len } => &buf[..*len],
         }
     }
 
@@ -323,21 +329,34 @@ impl Bufs<'_> {
         match self {
             Self::Copy { dst, .. } => dst,
             Self::InPlace(buf) => buf,
+            Self::Slack { buf, len } => &mut buf[..*len],
         }
     }
 
     fn aligned(&self) -> bool {
         match self {
             Self::Copy { src, dst } => is_aligned(src) && is_aligned(dst),
-            Self::InPlace(buf) => is_aligned(buf),
+            Self::InPlace(buf) | Self::Slack { buf, .. } => is_aligned(buf),
         }
     }
 
-    /// Hand the buffers to the engine as they are.
-    fn engine_data(&mut self) -> GcmData<'_> {
+    /// Bytes the engine may run over in place: the message plus any slack.
+    fn room(&self) -> usize {
         match self {
-            Self::Copy { src, dst } => GcmData::Copy { src, dst },
-            Self::InPlace(buf) => GcmData::InPlace(buf),
+            Self::Slack { buf, .. } => buf.len(),
+            _ => self.src().len(),
+        }
+    }
+
+    /// Hand the first `n` bytes (at most [`room`](Self::room)) to the
+    /// engine as they are.
+    fn engine_data(&mut self, n: usize) -> GcmData<'_> {
+        match self {
+            Self::Copy { src, dst } => GcmData::Copy {
+                src: &src[..n],
+                dst: &mut dst[..n],
+            },
+            Self::InPlace(buf) | Self::Slack { buf, .. } => GcmData::InPlace(&mut buf[..n]),
         }
     }
 }
@@ -425,11 +444,19 @@ impl UnoHsmPal {
             // `pad_ks`: the keystream the engine leaves in the final block
             // past the text (encrypt only).
             let mut pad_ks = [0u8; AES_BLOCK_SIZE];
-            let result = if tail == 0 && bufs.aligned() {
-                let done = self.bcp.gcm(req(bufs.engine_data())).await;
+            let result = if bufs.aligned() && bufs.room() >= pad + rounded {
+                // Whole blocks, or slack to zero-pad the final one in place.
+                if let Bufs::Slack { buf, len } = &mut bufs {
+                    buf[*len..pad + rounded].fill(0);
+                }
+                let done = self.bcp.gcm(req(bufs.engine_data(pad + rounded))).await;
                 let result = verdict(dir, &engine_tag, done);
                 if result.is_err() {
                     bufs.dst()[pad..len].zeroize();
+                } else if let (Dir::Encrypt, Bufs::Slack { buf, len }) = (dir, &bufs)
+                    && tail != 0
+                {
+                    pad_ks[tail..].copy_from_slice(&buf[*len..pad + rounded]);
                 }
                 result
             } else {
@@ -604,6 +631,41 @@ impl UnoHsmPal {
         self.gcm_run(io, key, iv, aad_len, Dir::Decrypt(tag), Bufs::InPlace(data))
             .await
             .map(|_| ())
+    }
+
+    /// AES-256-GCM decrypt in place over `[padded_AAD | text | tag]`,
+    /// borrowing the tag's bytes to zero-pad a partial final block in place
+    /// and restoring them. On a tag mismatch the text is wiped.
+    pub(super) async fn gcm_open_in_place_impl(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        data: &mut DmaBuf,
+    ) -> HsmResult<()> {
+        let len = data
+            .len()
+            .checked_sub(GCM_TAG_LEN)
+            .ok_or(HsmError::InvalidArg)?;
+        let mut tag = [0u8; GCM_TAG_LEN];
+        tag.copy_from_slice(&data[len..]);
+        let result = self
+            .gcm_run(
+                io,
+                key,
+                iv,
+                aad_len,
+                Dir::Decrypt(&tag),
+                Bufs::Slack {
+                    buf: &mut *data,
+                    len,
+                },
+            )
+            .await
+            .map(|_| ());
+        data[len..].copy_from_slice(&tag);
+        result
     }
 }
 

@@ -169,19 +169,18 @@ pub(crate) async fn open_gcm<'a>(
         return Err(Error::InvalidKeyLength);
     }
 
-    // Split out [HEADER | IV | AAD+DATA | TAG] for the PAL call.
+    // Split out [HEADER | IV | AAD+DATA+TAG] for the PAL call.
     let (prefix_with_iv, after_iv) = buf.split_at_mut(aad_off);
     let (_header_bytes, iv_region) = prefix_with_iv.split_at_mut(iv_off);
 
-    // payload_off - aad_off == aad_len; tag_off - payload_off == data_len.
-    let aad_data_len = tag_off - aad_off;
-    let (aad_dat, tag_region) = after_iv.split_at_mut(aad_data_len);
-    let (tag, _trailing) = tag_region.split_at_mut(header.alg.tag_len());
-
-    // PAL decrypts in place; on tag mismatch the AAD+DATA region is
-    // left in an unspecified state per the PAL contract.
+    // `tag_off..total_len` is exactly the tag, so `after_iv` is
+    // `[AAD+DATA | TAG]`: the PAL decrypts the AAD+DATA region in place
+    // and may borrow the tag's bytes as scratch (restoring them), which
+    // saves a hardware engine from copying the message to pad a partial
+    // final block. On tag mismatch the AAD+DATA region is left in an
+    // unspecified state per the PAL contract.
     crypto
-        .gcm_decrypt_in_place(io, key, iv_region, header.aad_len, tag, aad_dat)
+        .gcm_open_in_place(io, key, iv_region, header.aad_len, after_iv)
         .await
         .map_err(|e| match e {
             HsmError::AesGcmDecryptTagDoesNotMatch => Error::AuthFailed,

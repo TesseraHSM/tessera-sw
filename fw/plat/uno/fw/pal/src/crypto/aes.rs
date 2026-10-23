@@ -412,6 +412,21 @@ impl HsmAes for UnoHsmPal {
             .await
     }
 
+    async fn gcm_open_in_place(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        data: &mut DmaBuf,
+    ) -> HsmResult<()> {
+        if iv.len() != GCM_IV_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        self.gcm_open_in_place_impl(io, key, iv, aad_len, data)
+            .await
+    }
+
     // ── AES Key Wrap (RFC 3394) / Key Wrap with Padding (RFC 5649) ──
 
     /// AES-KW wrap (RFC 3394 §2.2.1).
