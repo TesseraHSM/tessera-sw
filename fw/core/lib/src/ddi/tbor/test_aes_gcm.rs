@@ -14,7 +14,9 @@
 //!
 //! The PAL works on a `[padded_AAD | text]` buffer, so the handler formats
 //! one in a scratch DMA buffer, transforms it in place, copies the text
-//! into the response, and wipes the scratch.
+//! into the response, and wipes the scratch. The text moves on the DMA
+//! engine: CP1 reads the DMA heap uncached, so a CPU copy of kilobytes would
+//! cost more than the encryption.
 //!
 //! [`HsmAes`]: tsra_fw_hsm_pal_traits::HsmAes
 
@@ -55,7 +57,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let shift = 4 * usize::from(iv.first().copied().unwrap_or(0) & 3);
     let raw = pal.dma_alloc(io, shift + buf_len.max(1))?;
     let work = &mut raw[shift..];
-    format_gcm_buf(aad, data, &mut work[..buf_len]);
+    format_gcm_buf(aad, &[], &mut work[..pad]);
+    dma_copy(pal, io, data, &mut work[pad..buf_len]).await;
 
     let resp = pal.dma_alloc_var(io, |buf| {
         let frame = TborTestAesGcmResp::encode(buf, 0, false)?
@@ -79,11 +82,19 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 .await
         };
         if result.is_ok() {
-            out.data.copy_from_slice(&buf[pad..]);
+            dma_copy(pal, io, &buf[pad..], out.data).await;
         }
         result
     };
 
     raw.zeroize();
     result.map(|()| &*resp)
+}
+
+/// Copy `src` to the same-length `dst` on the DMA engine, or on the CPU if
+/// the engine refuses (it rejects empty copies).
+async fn dma_copy<P: HsmPal>(pal: &P, io: &impl HsmIo, src: &DmaBuf, dst: &mut DmaBuf) {
+    if src.is_empty() || pal.copy_mem(io, src, dst).await.is_err() {
+        dst.copy_from_slice(src);
+    }
 }
