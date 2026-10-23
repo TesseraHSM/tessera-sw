@@ -151,8 +151,9 @@ impl DmaBuf {
     /// be optimized away even when the compiler can prove the bytes are
     /// never read again. Intended for scrubbing key material. Writes whole
     /// aligned words where it can: DMA memory is uncached, so every store is
-    /// its own bus write.
-    #[inline]
+    /// its own bus write. Kept out of line: it is called from nearly every
+    /// command handler, and its head/body/tail loops are not small.
+    #[inline(never)]
     pub fn zeroize(&mut self) {
         // SAFETY: every bit pattern is a valid `u32`.
         let (head, words, tail) = unsafe { self.inner.align_to_mut::<u32>() };
