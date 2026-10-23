@@ -408,6 +408,32 @@ pub trait HsmPartitionManager {
     /// [`HsmResult<()>`] — `Ok(())` on success.
     fn part_prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
 
+    /// Whether the PSK selected by `psk_id` (`0` = [`PSK_CO`], `1` =
+    /// [`PSK_CU`]) still holds its well-known default
+    /// ([`DEFAULT_PSK_CO`](crate::DEFAULT_PSK_CO) /
+    /// [`DEFAULT_PSK_CU`](crate::DEFAULT_PSK_CU)).
+    ///
+    /// The default reads the PSK and compares it in constant time. A PAL
+    /// may instead remember the answer until the PSK next changes.
+    ///
+    /// # Errors
+    ///
+    /// [`HsmError::InvalidPskId`] for any other `psk_id`; otherwise as
+    /// [`part_prop_get_bytes`](Self::part_prop_get_bytes).
+    ///
+    /// [`PSK_CO`]: PartPropId::PSK_CO
+    /// [`PSK_CU`]: PartPropId::PSK_CU
+    fn part_psk_is_default(&self, io: &impl HsmIo, psk_id: u8) -> HsmResult<bool> {
+        let (id, default) = match psk_id {
+            0 => (PartPropId::PSK_CO, &crate::DEFAULT_PSK_CO),
+            1 => (PartPropId::PSK_CU, &crate::DEFAULT_PSK_CU),
+            _ => return Err(HsmError::InvalidPskId),
+        };
+        // Constant-time, burst-reading the stored PSK, which may sit in
+        // memory the CPU reads uncached.
+        Ok(self.part_prop_get_bytes(io, id)?.ct_eq(default))
+    }
+
     /// Reset a property slot to its absent state.
     ///
     /// # Parameters
@@ -960,9 +986,9 @@ impl PartPropId {
         use PartPropDefault::AbsentUntilSet as Abs;
         use PartPropDefault::RequiredPresent as Req;
         use PartPropKind::Bool;
-        use PartPropKind::U8;
         use PartPropKind::U16;
         use PartPropKind::U32;
+        use PartPropKind::U8;
 
         // Writable vault-ref props share the same shape (u16 HsmKeyId, RW, absent).
         const VAULT_REF_RW: PartPropMeta = PartPropMeta::scalar(U16, Rw, Abs, false);

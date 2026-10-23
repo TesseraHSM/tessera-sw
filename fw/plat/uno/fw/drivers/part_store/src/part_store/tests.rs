@@ -241,3 +241,40 @@ fn sealed_bk3_stays_write_once_after_migrate() {
     p.set_sealed_bk3(buf(&replacement)).unwrap();
     assert_eq!(&p.sealed_bk3()[..], &replacement);
 }
+
+/// `psk_is_default` remembers its answers, but every write that can change a
+/// PSK makes it compare again.
+#[test]
+fn psk_is_default_follows_psk_writes() {
+    let pid = 12usize;
+    let rotated = [0x5Au8; PSK_LEN];
+
+    Partition(pid).bake_default_psks();
+    assert!(Partition(pid).psk_is_default(true));
+    assert!(Partition(pid).psk_is_default(false));
+    // Asked again, from what it remembered.
+    assert!(Partition(pid).psk_is_default(true));
+
+    Partition(pid).set_psk_co(buf(&rotated)).unwrap();
+    assert!(!Partition(pid).psk_is_default(true));
+    assert!(Partition(pid).psk_is_default(false));
+
+    Partition(pid).set_psk_cu(buf(&rotated)).unwrap();
+    assert!(!Partition(pid).psk_is_default(false));
+
+    // An NSSR re-bakes the defaults.
+    Partition(pid).clear_state(PartResetKind::Migrate);
+    assert!(Partition(pid).psk_is_default(true));
+    assert!(Partition(pid).psk_is_default(false));
+
+    // Deallocation zeroes them, which is not the default either.
+    Partition(pid).clear_state(PartResetKind::Disable);
+    assert!(!Partition(pid).psk_is_default(true));
+    assert!(!Partition(pid).psk_is_default(false));
+
+    // A write through the mutable view counts too.
+    Partition(pid).bake_default_psks();
+    assert!(Partition(pid).psk_is_default(true));
+    Partition(pid).psk_co_mut().copy_from_slice(&rotated);
+    assert!(!Partition(pid).psk_is_default(true));
+}

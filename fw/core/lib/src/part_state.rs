@@ -1045,28 +1045,15 @@ pub fn part_set_sapota_thumbprint(
 }
 
 /// Whether the PSK selected by `psk_id` is still the well-known
-/// default value.
-///
-/// Reads the PSK via [`part_psk`] and compares against
-/// [`DEFAULT_PSK_CO`] / [`DEFAULT_PSK_CU`] in constant time.  Returns
-/// `Ok(true)` only when the stored bytes match the default.
+/// default value ([`DEFAULT_PSK_CO`] / [`DEFAULT_PSK_CU`]).  Returns
+/// `Ok(true)` only when the stored bytes match the default; see
+/// [`HsmPartitionManager::part_psk_is_default`].
 pub fn part_psk_is_default(
     pal: &impl HsmPartitionManager,
     io: &impl HsmIo,
     psk_id: u8,
 ) -> HsmResult<bool> {
-    let stored = part_psk(pal, io, psk_id)?;
-    let default = match psk_id {
-        0 => DEFAULT_PSK_CO.as_slice(),
-        1 => DEFAULT_PSK_CU.as_slice(),
-        // Unreachable: `part_psk` above already rejected any other
-        // selector with `InvalidPskId`.  Returned here for defence in
-        // depth so the match stays exhaustive.
-        _ => return Err(HsmError::InvalidPskId),
-    };
-    // Constant-time, burst-reading `stored` out of the partition store,
-    // which CP1 reads uncached.
-    Ok(stored.ct_eq(default))
+    pal.part_psk_is_default(io, psk_id)
 }
 
 /// Whether the partition's caller-presented credential blob has been

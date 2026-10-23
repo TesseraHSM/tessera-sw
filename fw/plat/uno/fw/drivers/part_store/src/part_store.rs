@@ -5,6 +5,8 @@
 //! accessor handle.
 
 use core::mem::size_of;
+use core::sync::atomic::AtomicU8;
+use core::sync::atomic::Ordering::Relaxed;
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -76,6 +78,20 @@ const FLAG_SD_INITIALIZED: u8 = 1 << 7;
 
 /// Total per-partition slot size (matches the reference layout).
 const STORE_SIZE: usize = 3072;
+
+/// Per partition, what [`Partition::psk_is_default`] has found, so a PSK
+/// need not be read back out of GSRAM (which CP1 reads uncached) and
+/// compared for every command. Every write to the partition's slot clears
+/// it (see [`Partition::slot_mut`]), so an answer cannot outlive a change
+/// to either PSK.
+static PSK_DEFAULT: [AtomicU8; NUM_PARTITIONS] = [const { AtomicU8::new(0) }; NUM_PARTITIONS];
+
+/// [`PSK_DEFAULT`] bits: for each PSK, whether it has been compared with
+/// its default, and whether it matched.
+const PSK_CO_CHECKED: u8 = 1 << 0;
+const PSK_CO_DEFAULT: u8 = 1 << 1;
+const PSK_CU_CHECKED: u8 = 1 << 2;
+const PSK_CU_DEFAULT: u8 = 1 << 3;
 
 /// Sentinel stored in a key-handle field meaning "no key".
 ///
@@ -385,6 +401,8 @@ impl Partition {
     /// other task observes a slot mid-mutation.
     #[inline]
     fn slot_mut(&mut self) -> &mut Storage {
+        // Any write may change a PSK: forget what is known of them.
+        PSK_DEFAULT[self.0].store(0, Relaxed);
         // SAFETY: the index is in range by construction (see
         // `PartStore::partition`), keeping the slot within the reserved
         // partition-store GSRAM region. The `&mut self` receiver scopes the
@@ -1391,6 +1409,34 @@ impl Partition {
         let slot = self.slot_mut();
         slot.pta_pub_key = [0u8; PUB_KEY_LEN];
         slot.valid_flags &= !FLAG_PTA_PUB_KEY_VALID;
+    }
+
+    /// Whether the crypto-officer PSK (`co`) or the crypto-user one still
+    /// holds its well-known default ([`DEFAULT_PSK_CO`] /
+    /// [`DEFAULT_PSK_CU`]). Compared in constant time, and remembered
+    /// until the slot is next written.
+    pub fn psk_is_default(self, co: bool) -> bool {
+        let (checked, default) = if co {
+            (PSK_CO_CHECKED, PSK_CO_DEFAULT)
+        } else {
+            (PSK_CU_CHECKED, PSK_CU_DEFAULT)
+        };
+        let known = PSK_DEFAULT[self.0].load(Relaxed);
+        if known & checked != 0 {
+            return known & default != 0;
+        }
+        let is_default = if co {
+            self.psk_co().ct_eq(&DEFAULT_PSK_CO)
+        } else {
+            self.psk_cu().ct_eq(&DEFAULT_PSK_CU)
+        };
+        let found = if is_default {
+            checked | default
+        } else {
+            checked
+        };
+        PSK_DEFAULT[self.0].store(known | found, Relaxed);
+        is_default
     }
 
     /// Borrows the crypto-officer PSK (32 B).

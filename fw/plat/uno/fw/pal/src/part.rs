@@ -800,6 +800,17 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
+    /// Remembered by the partition store until the partition is next
+    /// written; see `Partition::psk_is_default`.
+    fn part_psk_is_default(&self, io: &impl HsmIo, psk_id: u8) -> HsmResult<bool> {
+        let co = match psk_id {
+            0 => true,
+            1 => false,
+            _ => return Err(HsmError::InvalidPskId),
+        };
+        Ok(PartStore::partition(io.pid())?.psk_is_default(co))
+    }
+
     fn part_prop_get_bytes<'a>(&'a self, io: &impl HsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf> {
         let p = PartStore::partition(io.pid())?;
         match id {
