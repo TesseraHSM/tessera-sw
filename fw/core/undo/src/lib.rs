@@ -261,6 +261,11 @@ pub struct UndoLog<'a> {
     nentries: usize,
     /// Bytes used by the pre-image arena (from the back).
     arena_used: usize,
+    /// High-water marks of the bytes ever written at the front (entry
+    /// slots) and back (arena): what [`zeroize`](Self::zeroize) scrubs,
+    /// since [`discard`](Self::discard) rewinds the counters without wiping.
+    front_dirty: usize,
+    back_dirty: usize,
 }
 
 impl<'a> UndoLog<'a> {
@@ -278,6 +283,8 @@ impl<'a> UndoLog<'a> {
             buf,
             nentries: 0,
             arena_used: 0,
+            front_dirty: 0,
+            back_dirty: 0,
         }
     }
 
@@ -323,6 +330,7 @@ impl<'a> UndoLog<'a> {
         }
         let o = self.nentries * ENTRY_SIZE;
         entry.write(&mut self.buf[o..o + ENTRY_SIZE]);
+        self.front_dirty = self.front_dirty.max(o + ENTRY_SIZE);
         self.nentries += 1;
         Ok(())
     }
@@ -393,6 +401,7 @@ impl<'a> UndoLog<'a> {
         self.push_entry_reserving(UndoEntry::prop_restore_bytes(id, handle), len)?;
         self.buf[off..off + len].copy_from_slice(prior);
         self.arena_used = new_arena_used;
+        self.back_dirty = self.back_dirty.max(new_arena_used);
         Ok(())
     }
 
@@ -450,10 +459,16 @@ impl<'a> UndoLog<'a> {
     /// so captured secret pre-images do not linger in the per-IO DMA heap
     /// (which is only watermark-reset, not cleared, on the next IO).
     fn zeroize(&mut self) {
-        // Delegate to `DmaBuf::zeroize`, which uses per-byte volatile
-        // writes + a compiler fence so the wipe cannot be elided even
-        // though these bytes are never read again through this reference.
-        self.buf.zeroize();
+        // Delegate to `DmaBuf::zeroize`, whose volatile writes + compiler
+        // fence keep the wipe from being elided even though these bytes are
+        // never read again through this reference. Only the bytes this log
+        // ever wrote: most commands capture nothing, and the rest of the
+        // buffer is the per-IO heap's to scrub.
+        let len = self.buf.len();
+        self.buf[..self.front_dirty].zeroize();
+        self.buf[len - self.back_dirty..].zeroize();
+        self.front_dirty = 0;
+        self.back_dirty = 0;
         self.nentries = 0;
         self.arena_used = 0;
     }

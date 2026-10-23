@@ -147,12 +147,20 @@ impl DmaBuf {
 
     /// Securely zeroes the buffer.
     ///
-    /// Uses per-byte volatile writes followed by a compiler fence so the
-    /// wipe cannot be optimized away even when the compiler can prove the
-    /// bytes are never read again. Intended for scrubbing key material.
+    /// Uses volatile writes followed by a compiler fence so the wipe cannot
+    /// be optimized away even when the compiler can prove the bytes are
+    /// never read again. Intended for scrubbing key material. Writes whole
+    /// aligned words where it can: DMA memory is uncached, so every store is
+    /// its own bus write.
     #[inline]
     pub fn zeroize(&mut self) {
-        for b in self.inner.iter_mut() {
+        // SAFETY: every bit pattern is a valid `u32`.
+        let (head, words, tail) = unsafe { self.inner.align_to_mut::<u32>() };
+        for w in words {
+            // SAFETY: `w` is a valid, aligned, writable word of this buffer.
+            unsafe { core::ptr::write_volatile(w, 0) };
+        }
+        for b in head.iter_mut().chain(tail) {
             // SAFETY: `b` is a valid, aligned, writable byte of this buffer.
             unsafe { core::ptr::write_volatile(b, 0) };
         }
