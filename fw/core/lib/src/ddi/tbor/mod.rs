@@ -88,6 +88,7 @@ use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_undo::UndoLog;
+use tsra_fw_hsm_undo::UNDO_LOG_SIZE;
 
 use super::*;
 use crate::part_state;
@@ -683,6 +684,27 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     }?;
 
     Ok(DispatchResult { resp, session_id })
+}
+
+/// Bytes of undo log to bind for `opcode`: [`UNDO_LOG_SIZE`] for the
+/// commands that mutate partition state — the [`dispatch`] arms that hand
+/// their handler the log — and none for the rest, which never record.
+/// Kept in sync with those arms: a command bound an empty log fails its
+/// first record with `UndoLogFull` rather than mutate unrecorded.
+pub(crate) fn undo_log_size(opcode: u8) -> usize {
+    match opcode {
+        opcode::SESSION_OPEN_INIT
+        | opcode::SESSION_OPEN_FINISH
+        | opcode::PSK_CHANGE
+        | opcode::PART_INIT
+        | opcode::PART_FINAL
+        | opcode::SD_CREATE_REMOTE_BACKUP
+        | opcode::SD_RESTORE_REMOTE_BACKUP
+        | opcode::SD_RESTORE_LOCAL_BACKUP
+        | opcode::SD_RESTORE_PEER_BACKUP
+        | opcode::UNWRAP_KEY => UNDO_LOG_SIZE,
+        _ => 0,
+    }
 }
 
 /// Returns `true` iff `opcode` is one of the opcodes wired into

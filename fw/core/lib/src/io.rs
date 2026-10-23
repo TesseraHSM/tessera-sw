@@ -48,7 +48,6 @@ use tsra_fw_ddi_tbor::RequestView as TborRequestView;
 use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_undo::UndoLog;
 use tsra_fw_hsm_undo::WalkOutcome;
-use tsra_fw_hsm_undo::UNDO_LOG_SIZE;
 
 use super::*;
 
@@ -73,18 +72,16 @@ impl<P: HsmPal> Hsm<P> {
 
         // The per-command undo log (TBOR only), owned here so it outlives
         // `complete_io` and the post-completion walk.  Stays `None` for
-        // MBOR / flush / invalid SQEs; a TBOR command binds it on entry and
-        // **fails before mutating** if its DMA buffer can't be carved.
+        // MBOR / flush / invalid SQEs; a TBOR command binds it before
+        // dispatch and **fails before mutating** if its DMA buffer can't be
+        // carved.
         let mut undo: Option<UndoLog<'_>> = None;
 
         let op_result = match validated {
             Err(e) => Err(e),
             Ok(()) => match op {
                 OP_MBOR => self.handle_mbor_op(&mut io).await,
-                OP_TBOR => match self.bind_undo(&io) {
-                    Ok(log) => self.handle_tbor_op(&mut io, undo.insert(log)).await,
-                    Err(e) => Err(e),
-                },
+                OP_TBOR => self.handle_tbor_op(&mut io, &mut undo).await,
                 OP_FLUSH => self.handle_flush_op(&mut io).await,
                 _ => Err(OpError::new(
                     HsmError::UnsupportedCmd,
@@ -180,18 +177,20 @@ impl<P: HsmPal> Hsm<P> {
         }
     }
 
-    /// Bind the per-command undo log for a TBOR command, carved from `io`'s
-    /// DMA heap.
+    /// Bind the per-command undo log for TBOR command `opcode`, carved from
+    /// `io`'s DMA heap.
     ///
-    /// [`UNDO_LOG_SIZE`] bytes are taken from `io`'s DMA heap so the byte
-    /// pre-images the undo walk restores are DMA-accessible.  The undo log
-    /// is **mandatory**: if the buffer can't be carved, the command fails
-    /// here (`ALLOC_ERR`) *before* mutating any partition state, rather than
-    /// running with no rollback.
-    fn bind_undo<'s>(&'s self, io: &P::Io) -> Result<UndoLog<'s>, OpError> {
+    /// The bytes [`undo_log_size`](ddi::tbor::undo_log_size) gives the
+    /// opcode are taken from `io`'s DMA heap so the byte pre-images the undo
+    /// walk restores are DMA-accessible: none for a command that mutates no
+    /// partition state, whose slot scrub then need not wipe them.  The undo
+    /// log is **mandatory**: if the buffer can't be carved, the command
+    /// fails here (`ALLOC_ERR`) *before* mutating any partition state,
+    /// rather than running with no rollback.
+    fn bind_undo<'s>(&'s self, io: &P::Io, opcode: u8) -> Result<UndoLog<'s>, OpError> {
         let buf = self
             .pal()
-            .dma_alloc(io, UNDO_LOG_SIZE)
+            .dma_alloc(io, ddi::tbor::undo_log_size(opcode))
             .op_status(HostStatus::ALLOC_ERR)?;
         Ok(UndoLog::new(buf))
     }
@@ -399,7 +398,7 @@ impl<P: HsmPal> Hsm<P> {
     async fn handle_tbor_op<'s>(
         &'s self,
         io: &mut P::Io,
-        undo: &mut UndoLog<'s>,
+        undo: &mut Option<UndoLog<'s>>,
     ) -> Result<Reply<'s>, OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
@@ -472,6 +471,7 @@ impl<P: HsmPal> Hsm<P> {
                     .op_status(HostStatus::INTERNAL_ERROR)?;
                 (resp, session_ctrl, None, false)
             } else {
+                let undo = undo.insert(self.bind_undo(io, opcode)?);
                 let dispatch_result = ddi::tbor::dispatch(
                     self.pal(),
                     io,
