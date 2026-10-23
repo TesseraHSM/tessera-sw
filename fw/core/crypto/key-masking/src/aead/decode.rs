@@ -6,8 +6,13 @@
 //! [`MaskedKeyMetadata`], and hand the caller a borrowed
 //! [`UnmaskedView`] covering the recovered plaintext.
 
-use tsra_fw_core_crypto_aead_envelope::open as aead_open;
+use tsra_fw_core_crypto_aead_envelope::open_with_header as aead_open_with_header;
+use tsra_fw_core_crypto_aead_envelope::parse_header as aead_parse_header;
 use tsra_fw_core_crypto_aead_envelope::peek as aead_peek;
+use tsra_fw_core_crypto_aead_envelope::peek_with_header as aead_peek_with_header;
+use tsra_fw_core_crypto_aead_envelope::AeadHeader;
+use tsra_fw_core_crypto_aead_envelope::HEADER_LEN as AEAD_HEADER_LEN;
+use tsra_fw_hsm_pal_traits::copy_from_uncached;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -93,12 +98,38 @@ pub async fn unmask<'a>(
     key: &DmaBuf,
     blob: &'a mut DmaBuf,
 ) -> HsmResult<UnmaskedView<'a>> {
-    // aead_envelope::open parses the alg byte from the envelope
-    // header, validates the key length against alg.key_len(),
-    // verifies the AEAD tag, and decrypts the ciphertext region in
-    // place. Tag mismatch surfaces as
+    let header = aead_parse_header(blob)?;
+    unmask_with_header(crypto, io, key, blob, header).await
+}
+
+/// [`unmask`] for a blob whose head [`peek_head`] has read, so its
+/// envelope header is not read again.
+///
+/// # Errors
+///
+/// As [`unmask`].
+pub async fn unmask_with_head<'a>(
+    crypto: &impl HsmCrypto,
+    io: &impl HsmIo,
+    key: &DmaBuf,
+    blob: &'a mut DmaBuf,
+    head: &BlobHead,
+) -> HsmResult<UnmaskedView<'a>> {
+    unmask_with_header(crypto, io, key, blob, head.header).await
+}
+
+async fn unmask_with_header<'a>(
+    crypto: &impl HsmCrypto,
+    io: &impl HsmIo,
+    key: &DmaBuf,
+    blob: &'a mut DmaBuf,
+    header: AeadHeader,
+) -> HsmResult<UnmaskedView<'a>> {
+    // aead_envelope::open validates the key length against the alg in
+    // the envelope header, verifies the AEAD tag, and decrypts the
+    // ciphertext region in place. Tag mismatch surfaces as
     // HsmError::AesGcmDecryptTagDoesNotMatch.
-    let env = aead_open(crypto, io, key, blob).await?;
+    let env = aead_open_with_header(crypto, io, key, blob, header).await?;
 
     // Envelope-level schema check: only a 192 B metadata AAD is a
     // masked-key blob. The AEAD algorithm is unconstrained here —
@@ -156,16 +187,65 @@ const USAGE_FLAGS_OFF: usize = 8;
 /// So the validation is not skipped, only moved to the point where its
 /// input is trustworthy -- which is where it belonged.
 pub fn peek_scope(blob: &DmaBuf) -> HsmResult<HsmKeyScope> {
-    let env = aead_peek(blob)?;
+    peek_head(blob).map(|head| head.scope)
+}
+
+/// Bytes of a blob [`peek_head`] reads: the envelope header, a 12-byte
+/// IV, and the metadata up to the end of `usage_flags`.
+const BLOB_HEAD_LEN: usize = AEAD_HEADER_LEN + 12 + USAGE_FLAGS_OFF + 8;
+
+/// A word-aligned buffer for a blob's head (burst copies need alignment).
+#[repr(C, align(4))]
+struct HeadCopy([u8; BLOB_HEAD_LEN]);
+
+/// What [`peek_head`] read from a masked-key blob: its key scope, and its
+/// envelope header for [`unmask_with_head`].
+#[derive(Debug, Clone, Copy)]
+pub struct BlobHead {
+    scope: HsmKeyScope,
+    header: AeadHeader,
+}
+
+impl BlobHead {
+    /// The scope whose masking key masked the blob. Unauthenticated until
+    /// the blob is unmasked; see [`peek_scope`].
+    pub fn scope(&self) -> HsmKeyScope {
+        self.scope
+    }
+}
+
+/// [`peek_scope`], also keeping the blob's envelope header for
+/// [`unmask_with_head`]. The blob's cleartext start is read in one burst:
+/// it sits in DMA memory, which the CPU may read uncached at a fixed cost
+/// per load.
+///
+/// # Errors
+///
+/// As [`peek_scope`].
+pub fn peek_head(blob: &DmaBuf) -> HsmResult<BlobHead> {
+    let mut head = HeadCopy([0; BLOB_HEAD_LEN]);
+    let header = match blob.get(..BLOB_HEAD_LEN) {
+        Some(src) => {
+            copy_from_uncached(&mut head.0, src);
+            aead_parse_header(&head.0)?
+        }
+        // Too short to be a blob: let the envelope parse say why.
+        None => aead_parse_header(blob)?,
+    };
+    let env = aead_peek_with_header(blob, header)?;
     if env.aad.len() != META_LEN {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
-    let raw = env
-        .aad
-        .get(USAGE_FLAGS_OFF..USAGE_FLAGS_OFF + 8)
+    let flags = AEAD_HEADER_LEN + env.iv.len() + USAGE_FLAGS_OFF;
+    let raw = head
+        .0
+        .get(flags..flags + 8)
         .and_then(|b| <[u8; 8]>::try_from(b).ok())
         .ok_or(HsmError::MaskedKeyDecodeFailed)?;
-    Ok(HsmVaultKeyAttrs::from_bits(u64::from_le_bytes(raw)).scope())
+    Ok(BlobHead {
+        scope: HsmVaultKeyAttrs::from_bits(u64::from_le_bytes(raw)).scope(),
+        header,
+    })
 }
 
 /// Peek the cleartext [`MaskedKeyMetadata`] of a masked-key blob **without

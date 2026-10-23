@@ -53,8 +53,10 @@ pub(crate) const fn is_valid_aad_len(n: usize, granularity: usize) -> bool {
 
 /// Parsed envelope header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Header {
+pub struct Header {
+    /// AEAD algorithm.
     pub alg: AeadAlg,
+    /// AAD length in bytes.
     pub aad_len: usize,
 }
 

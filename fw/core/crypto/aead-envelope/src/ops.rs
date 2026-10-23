@@ -42,6 +42,7 @@ use crate::error::Error;
 pub use crate::error::Error as AeadError;
 use crate::format::is_valid_aad_len;
 use crate::format::read_header;
+pub use crate::format::Header as AeadHeader;
 pub use crate::format::FORMAT_TAG;
 pub use crate::format::HEADER_LEN;
 pub use crate::format::MAX_AAD_LEN;
@@ -180,6 +181,23 @@ pub async fn open<'a>(
     buf: &'a mut DmaBuf,
 ) -> HsmResult<AeadEnvelope<'a>> {
     let header = read_header(buf)?;
+    open_with_header(crypto, io, key, buf, header).await
+}
+
+/// [`open`] for an envelope whose header [`parse_header`] has already
+/// parsed (from a copy of `buf`'s start), so it is not read from `buf`
+/// again. `header` must be `buf`'s own: any other fails authentication.
+///
+/// # Errors
+///
+/// As [`open`].
+pub async fn open_with_header<'a>(
+    crypto: &impl HsmCrypto,
+    io: &impl HsmIo,
+    key: &DmaBuf,
+    buf: &'a mut DmaBuf,
+    header: AeadHeader,
+) -> HsmResult<AeadEnvelope<'a>> {
     let env = match header.alg {
         AeadAlg::AesGcm256 => open_gcm(crypto, io, key, buf, header).await?,
     };
@@ -219,7 +237,28 @@ pub async fn open<'a>(
 ///   [`AeadError::BufferTooSmall`] (buffer shorter than the framing
 ///   implies).
 pub fn peek(buf: &DmaBuf) -> HsmResult<AeadPeek<'_>> {
-    let header = read_header(buf)?;
+    peek_with_header(buf, read_header(buf)?)
+}
+
+/// Parse and validate an envelope header from the envelope's first
+/// [`HEADER_LEN`] bytes, e.g. a copy of them read along with more of the
+/// envelope's cleartext start.
+///
+/// # Errors
+///
+/// As [`peek`] for a malformed header.
+pub fn parse_header(head: &[u8]) -> HsmResult<AeadHeader> {
+    Ok(read_header(head)?)
+}
+
+/// [`peek`] for an envelope whose header [`parse_header`] has already
+/// parsed: validates the framing and borrows the regions without reading
+/// `buf`.
+///
+/// # Errors
+///
+/// As [`peek`] for a buffer too short for the framing.
+pub fn peek_with_header(buf: &DmaBuf, header: AeadHeader) -> HsmResult<AeadPeek<'_>> {
     // Validates the minimum envelope length (HEADER + iv + aad + tag)
     // and yields the region boundaries; iv_len / tag_len are derived
     // from the `alg` parsed above. The payload / tag offsets are

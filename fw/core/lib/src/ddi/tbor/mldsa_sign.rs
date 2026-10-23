@@ -14,8 +14,8 @@
 //! secret key, and the fastpath core signs with the expanded half
 //! directly rather than re-deriving the key pair (`f0bf65c4`).
 
-use tsra_fw_core_crypto_key_masking::aead::peek_scope;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_masking::aead::peek_head;
+use tsra_fw_core_crypto_key_masking::aead::unmask_with_head;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
@@ -65,13 +65,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // The scope that masked this key is recorded (cleartext, tag-bound) in
     // the blob metadata; resolve its masking key before unmasking. The peek
     // borrow is transient -- it ends before the in-place unmask.
-    let scope = peek_scope(req.masked_key)?;
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+    let head = peek_head(req.masked_key)?;
+    let masking_key = resolve_masking_key(pal, io, head.scope(), sess_id)?;
 
     let outcome: HsmResult<&'p DmaBuf> = async {
         // Unmask in place. The AAD carries the parameter set, so the kind
         // comes from the envelope rather than being inferred from length.
-        let view = unmask(pal, io, masking_key, req.masked_key).await?;
+        let view = unmask_with_head(pal, io, masking_key, req.masked_key, &head).await?;
         let kind = view.key_kind;
         if !view.key_attrs.sign() {
             return Err(HsmError::InvalidPermissions);

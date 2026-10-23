@@ -17,8 +17,8 @@
 //! `sign` (`C_Sign`) permission with `InvalidPermissions`.  Available to
 //! both Crypto-Officer and Crypto-User sessions.
 
-use tsra_fw_core_crypto_key_masking::aead::peek_scope;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_masking::aead::peek_head;
+use tsra_fw_core_crypto_key_masking::aead::unmask_with_head;
 use tsra_fw_ddi_tbor_types::TborHmacReq;
 use tsra_fw_ddi_tbor_types::TborHmacResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
@@ -53,8 +53,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
     // Peek the masked-key metadata (cleartext, tag-bound) to route to the
     // right masking key before unmasking.
-    let scope = peek_scope(req.masked_key)?;
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+    let head = peek_head(req.masked_key)?;
+    let masking_key = resolve_masking_key(pal, io, head.scope(), sess_id)?;
 
     let masked_key = req.masked_key;
     let msg = req.msg;
@@ -66,7 +66,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // proceeding or propagating.  `view`'s borrow of `masked_key` ends
         // with the inner block, releasing it for the wipe.
         let mac_res = async {
-            let view = unmask(pal, io, masking_key, masked_key).await?;
+            let view = unmask_with_head(pal, io, masking_key, masked_key, &head).await?;
             // The kind must be an HMAC variant (selects the MAC algorithm
             // and tag length); a non-HMAC kind is rejected as
             // `InvalidKeyType`.

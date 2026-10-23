@@ -16,9 +16,12 @@ mod decode;
 mod encode;
 mod format;
 
+pub use decode::peek_head;
 pub use decode::peek_metadata;
 pub use decode::peek_scope;
 pub use decode::unmask;
+pub use decode::unmask_with_head;
+pub use decode::BlobHead;
 pub use decode::UnmaskedView;
 pub use encode::mask;
 pub use encode::mask_in_place;

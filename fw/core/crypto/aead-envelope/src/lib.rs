@@ -86,13 +86,17 @@ mod gcm;
 mod ops;
 
 pub use ops::open;
+pub use ops::open_with_header;
+pub use ops::parse_header;
 pub use ops::payload_offset;
 pub use ops::peek;
+pub use ops::peek_with_header;
 pub use ops::seal;
 pub use ops::seal_in_place;
 pub use ops::AeadAlg;
 pub use ops::AeadEnvelope;
 pub use ops::AeadError;
+pub use ops::AeadHeader;
 pub use ops::AeadPeek;
 pub use ops::FORMAT_TAG;
 pub use ops::HEADER_LEN;

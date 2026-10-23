@@ -17,8 +17,8 @@
 
 use tsra_fw_core_crypto_key_masking::aead::mask;
 use tsra_fw_core_crypto_key_masking::aead::masked_blob_len;
-use tsra_fw_core_crypto_key_masking::aead::peek_scope;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_masking::aead::peek_head;
+use tsra_fw_core_crypto_key_masking::aead::unmask_with_head;
 use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::TborEcdhDeriveReq;
@@ -85,15 +85,15 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // tag-bound) in its blob metadata; resolve its masking key before
     // unmasking.  The peek borrow is transient — it ends before the in-place
     // unmask.
-    let scope_local = peek_scope(req.masked_key)?;
-    let masking_key_local = resolve_masking_key(pal, io, scope_local, sess_id)?;
+    let head = peek_head(req.masked_key)?;
+    let masking_key_local = resolve_masking_key(pal, io, head.scope(), sess_id)?;
 
     // Unmask the local key in place, derive, and mask the secret inside a
     // block that yields a `Result`, so **every** post-unmask path (success
     // or error) falls through to the `masked_key` wipe below — the recovered
     // plaintext must never survive in the request buffer.
     let outcome: HsmResult<&'p DmaBuf> = async {
-        let view = unmask(pal, io, masking_key_local, req.masked_key).await?;
+        let view = unmask_with_head(pal, io, masking_key_local, req.masked_key, &head).await?;
         let curve = ecc_private_curve(view.key_kind)?;
         if !view.key_attrs.derive() {
             return Err(HsmError::InvalidPermissions);

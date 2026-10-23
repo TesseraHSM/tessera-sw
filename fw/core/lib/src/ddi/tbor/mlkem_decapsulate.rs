@@ -23,8 +23,8 @@
 
 use tsra_fw_core_crypto_key_masking::aead::mask;
 use tsra_fw_core_crypto_key_masking::aead::masked_blob_len;
-use tsra_fw_core_crypto_key_masking::aead::peek_scope;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_masking::aead::peek_head;
+use tsra_fw_core_crypto_key_masking::aead::unmask_with_head;
 use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::TborMlKemDecapsulateReq;
@@ -89,12 +89,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // the request buffer.
     // The scope that masked this key is recorded (cleartext, tag-bound) in
     // the blob metadata; resolve its masking key before unmasking.
-    let key_scope = peek_scope(req.masked_key)?;
-    let masking_key_in = resolve_masking_key(pal, io, key_scope, sess_id)?;
+    let head = peek_head(req.masked_key)?;
+    let masking_key_in = resolve_masking_key(pal, io, head.scope(), sess_id)?;
 
     let outcome: HsmResult<&'p DmaBuf> = async {
         // Unmask in place; the AAD carries the parameter set.
-        let view = unmask(pal, io, masking_key_in, req.masked_key).await?;
+        let view = unmask_with_head(pal, io, masking_key_in, req.masked_key, &head).await?;
         let kind = view.key_kind;
         if !view.key_attrs.derive() {
             return Err(HsmError::InvalidPermissions);

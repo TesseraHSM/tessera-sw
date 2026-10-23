@@ -20,8 +20,9 @@
 //! `Encrypt`, `decrypt` for `Decrypt`; `InvalidPermissions` otherwise).
 //! Available to both Crypto-Officer and Crypto-User sessions.
 
-use tsra_fw_core_crypto_key_masking::aead::peek_scope;
-use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_key_masking::aead::peek_head;
+use tsra_fw_core_crypto_key_masking::aead::unmask_with_head;
+use tsra_fw_core_crypto_key_masking::aead::BlobHead;
 use tsra_fw_ddi_tbor_types::AesOp;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptReq;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptResp;
@@ -31,7 +32,6 @@ use tsra_fw_hsm_pal_traits::AesOp as PalAesOp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
-use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -76,7 +76,7 @@ async fn transform<P: HsmPal>(
     pal: &P,
     io: &impl HsmIo,
     op: PalAesOp,
-    scope: HsmKeyScope,
+    head: BlobHead,
     sess_id: HsmSessId,
     masked_key: &mut DmaBuf,
     input: &DmaBuf,
@@ -84,7 +84,7 @@ async fn transform<P: HsmPal>(
     out_msg: &mut DmaBuf,
     out_iv: &mut DmaBuf,
 ) -> HsmResult<()> {
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+    let masking_key = resolve_masking_key(pal, io, head.scope(), sess_id)?;
 
     // Unmask in place; validate the key is an AES key that permits the
     // requested direction; transform straight from the recovered key into
@@ -92,7 +92,7 @@ async fn transform<P: HsmPal>(
     // request buffer) is wiped on EVERY path — `view`'s borrow of
     // `masked_key` ends with the inner block, releasing it for the wipe.
     let crypt_res = async {
-        let view = unmask(pal, io, masking_key, masked_key).await?;
+        let view = unmask_with_head(pal, io, masking_key, masked_key, &head).await?;
         assert_aes_kind(view.key_kind)?;
         // Encrypt is a `C_Encrypt` op, Decrypt a `C_Decrypt` op; the key
         // must carry the matching permission.
@@ -153,7 +153,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
     // Peek the masked-key metadata (cleartext, tag-bound) to route to the
     // right masking key before unmasking.
-    let scope = peek_scope(req.masked_key)?;
+    let head = peek_head(req.masked_key)?;
 
     // Build the response with the `msg` / `iv` slots reserved (sized but
     // unwritten) — no data copy at encode time.
@@ -172,18 +172,18 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // and have the AES engine write straight into the response.  The slots
     // are disjoint (`msg` precedes `iv`), so split the response between them.
     {
-        let (head, tail) = resp.split_at_mut(out_iv.start);
+        let (before_iv, from_iv) = resp.split_at_mut(out_iv.start);
         transform(
             pal,
             io,
             op,
-            scope,
+            head,
             sess_id,
             masked_key,
             msg,
             iv,
-            &mut head[out_msg],
-            &mut tail[..out_iv.len()],
+            &mut before_iv[out_msg],
+            &mut from_iv[..out_iv.len()],
         )
         .await?;
     }
