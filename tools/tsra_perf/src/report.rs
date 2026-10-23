@@ -151,8 +151,11 @@ struct Row {
     p99: f64,
 }
 
-/// Rows by `(op, threads, payload)`; later rows replace earlier ones.
-fn read_tsv(path: &Path) -> Result<BTreeMap<(String, usize, String), Row>, String> {
+/// Rows keyed by `(op, threads, payload)`, in file order; a later row
+/// replaces an earlier one with the same key.
+type Rows = Vec<((String, usize, String), Row)>;
+
+fn read_tsv(path: &Path) -> Result<Rows, String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let mut lines = text.lines();
@@ -171,7 +174,8 @@ fn read_tsv(path: &Path) -> Result<BTreeMap<(String, usize, String), Row>, Strin
         (col("label")?, col("op")?, col("threads")?, col("payload")?);
     let (c_rps, c_p50, c_p99) = (col("rps")?, col("p50_us")?, col("p99_us")?);
 
-    let mut rows = BTreeMap::new();
+    let mut rows: Rows = Vec::new();
+    let mut index = BTreeMap::new();
     for (n, line) in lines.enumerate() {
         let f: Vec<&str> = line.split('\t').collect();
         let get = |c: usize| {
@@ -187,15 +191,20 @@ fn read_tsv(path: &Path) -> Result<BTreeMap<(String, usize, String), Row>, Strin
         let threads = get(c_thr)?
             .parse::<usize>()
             .map_err(|e| format!("{} line {}: {e}", path.display(), n + 2))?;
-        rows.insert(
-            (get(c_op)?.to_owned(), threads, get(c_payload)?.to_owned()),
-            Row {
-                label: get(c_label)?.to_owned(),
-                rps: num(c_rps)?,
-                p50: num(c_p50)?,
-                p99: num(c_p99)?,
-            },
-        );
+        let key = (get(c_op)?.to_owned(), threads, get(c_payload)?.to_owned());
+        let row = Row {
+            label: get(c_label)?.to_owned(),
+            rps: num(c_rps)?,
+            p50: num(c_p50)?,
+            p99: num(c_p99)?,
+        };
+        match index.get(&key) {
+            Some(&i) => rows[i] = (key, row),
+            None => {
+                index.insert(key.clone(), rows.len());
+                rows.push((key, row));
+            }
+        }
     }
     Ok(rows)
 }
@@ -216,10 +225,9 @@ pub(crate) fn compare(
 ) -> Result<(), String> {
     let base = read_tsv(baseline)?;
     let cand = read_tsv(candidate)?;
-    let label = |rows: &BTreeMap<_, Row>, path: &Path| {
-        rows.values()
-            .next()
-            .map(|r| r.label.clone())
+    let label = |rows: &Rows, path: &Path| {
+        rows.first()
+            .map(|(_, r)| r.label.clone())
             .filter(|l| !l.is_empty())
             .unwrap_or_else(|| path.display().to_string())
     };
@@ -230,7 +238,9 @@ pub(crate) fn compare(
     s.push_str("| Operation | Payload | Threads | RPS before | RPS after | Δ RPS | p50 µs before | p50 µs after | Δ p50 | p99 µs before | p99 µs after |\n");
     s.push_str("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for (key, b) in &base {
-        let Some(c) = cand.get(key) else { continue };
+        let Some((_, c)) = cand.iter().find(|(k, _)| k == key) else {
+            continue;
+        };
         let _ = writeln!(
             s,
             "| {} | {} | {} | {:.1} | {:.1} | {} | {:.1} | {:.1} | {} | {:.1} | {:.1} |",
