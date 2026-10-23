@@ -3,11 +3,11 @@
 
 use core::ops::AsyncFnOnce;
 
+use embassy_sync::waitqueue::WakerRegistration;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
-use embassy_sync::waitqueue::WakerRegistration;
 
 use crate::engine::UpkaEngine;
 use crate::pool::EngineSlot;
@@ -89,6 +89,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                     status: 0,
                     state: crate::EngineState::Idle,
                     completion_armed: false,
+                    wiping: false,
                 }),
                 specific_waiters: core::array::from_fn(|_| SpecificWaiter {
                     waker: WakerRegistration::new(),
@@ -171,7 +172,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn ecc_sign(
         &self,
         curve: UpkaEccCurve,
@@ -206,7 +206,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     #[allow(clippy::too_many_arguments)]
     pub async fn ecc_verify(
         &self,
@@ -241,7 +240,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Output buffer is too small or hardware
     ///   rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn ecc_gen_keypair(
         &self,
         curve: UpkaEccCurve,
@@ -274,7 +272,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     #[allow(clippy::too_many_arguments)]
     pub async fn ecdh_derive(
         &self,
@@ -319,7 +316,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn rsa_mod_exp_priv(
         &self,
         key_type: UpkaRsaKeyType,
@@ -349,7 +345,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn rsa_mod_exp_pub(
         &self,
         key_type: UpkaRsaKeyType,
@@ -375,7 +370,6 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// - `Err(UpkaError::CMD_ERROR)`: Input or output buffer shape is invalid,
     ///   or hardware rejected the command.
     /// - `Err(UpkaError::QUEUE_FULL)`: No engine can be acquired.
-    /// - `Err(UpkaError::WIPE_FAILED)`: Post-operation wipe failed.
     pub async fn ecc_gen_pub_key(
         &self,
         curve: UpkaEccCurve,
@@ -420,7 +414,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     /// Execute an async closure on any free engine.
     ///
     /// The engine is automatically wiped and released after the closure
-    /// completes, even if it returns an error.
+    /// completes, even if it returns an error. The wipe is not awaited: the
+    /// engine returns to the pool when it finishes (see
+    /// [`UpkaEngine::release_after_wipe`]).
     ///
     /// # Parameters
     ///
@@ -428,25 +424,16 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     ///
     /// # Returns
     ///
-    /// - `Ok(R)`: Closure result when operation and cleanup succeed.
-    /// - `Err(HsmError)`: Operation error, or cleanup error if operation
-    ///   succeeded but release failed.
-    ///
-    /// # Error Precedence
-    ///
-    /// If both operation and cleanup fail, the operation error is returned.
+    /// - `Ok(R)`: Closure result when the operation succeeds.
+    /// - `Err(HsmError)`: Operation error.
     pub async fn with_engine<F, R>(&self, f: F) -> HsmResult<R>
     where
         F: for<'a> AsyncFnOnce(&'a mut UpkaEngine<'_, DEPTH, ENGINES>) -> HsmResult<R>,
     {
         let mut eng = self.acquire_any().await?;
         let result = f(&mut eng).await;
-        let release_result = eng.release().await;
-        match (result, release_result) {
-            (Err(primary_err), _) => Err(primary_err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
-            (Ok(value), Ok(())) => Ok(value),
-        }
+        eng.release_after_wipe();
+        result
     }
 
     /// Execute a closure on a specific engine by ID.
@@ -461,24 +448,15 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     ///
     /// # Returns
     ///
-    /// - `Ok(T)`: Closure result when operation and cleanup succeed.
-    /// - `Err(HsmError)`: Operation error, or cleanup error if operation
-    ///   succeeded but release failed.
-    ///
-    /// # Error Precedence
-    ///
-    /// If both operation and cleanup fail, the operation error is returned.
+    /// - `Ok(T)`: Closure result when the operation succeeds.
+    /// - `Err(HsmError)`: Operation error.
     pub async fn with_specific_engine<F, T>(&self, id: u8, f: F) -> HsmResult<T>
     where
         F: for<'a> AsyncFnOnce(&'a mut UpkaEngine<'_, DEPTH, ENGINES>) -> HsmResult<T>,
     {
         let mut eng = self.acquire_engine(id).await?;
         let result = f(&mut eng).await;
-        let release_result = eng.release().await;
-        match (result, release_result) {
-            (Err(primary_err), _) => Err(primary_err),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
-            (Ok(value), Ok(())) => Ok(value),
-        }
+        eng.release_after_wipe();
+        result
     }
 }

@@ -11,6 +11,8 @@ use tsra_fw_uno_pac::Interrupt;
 use crate::api::UpkaDriver;
 use crate::engine::UpkaEngine;
 use crate::executor::EngineExecutor;
+use crate::opcode::map_status;
+use crate::opcode::UPKA_MEM_WIPE;
 use crate::pool::UpkaState;
 use crate::UpkaError;
 
@@ -142,10 +144,27 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
         }
         let flags = EngineExecutor::completion_flags(id as u8);
         if flags != 0 {
-            slot.capture_completion_status(flags as u8);
             Nvic::unpend_raw(Interrupt::UPKA_0_DONE as u16 + id as u16);
             Nvic::unpend_raw(Interrupt::UPKA_0_ERROR as u16 + id as u16);
-            slot.wake_waiter();
+            if slot.wiping {
+                Self::finish_wipe(s, id, flags as u8);
+            } else {
+                slot.capture_completion_status(flags as u8);
+                slot.wake_waiter();
+            }
+        }
+    }
+
+    /// Complete a post-operation wipe started by
+    /// [`UpkaEngine::release_after_wipe`]: release the engine, or wipe it
+    /// again if the wipe failed — never hand back an engine that may still
+    /// hold key material.
+    fn finish_wipe(s: &mut UpkaState<DEPTH, ENGINES>, id: usize, flags: u8) {
+        if map_status(flags).is_ok() {
+            let _ = s.release_engine_and_dispatch(id as u8);
+        } else {
+            s.engine_slots[id].arm_completion_wait();
+            EngineExecutor::submit_engine_command(id as u8, UPKA_MEM_WIPE, 0, 0, 0, 0);
         }
     }
 

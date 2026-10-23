@@ -25,6 +25,10 @@ pub(crate) struct EngineSlot {
 
     /// Indicates whether the engine should produce a completion wake-up.
     pub(crate) completion_armed: bool,
+
+    /// A post-operation wipe is running; its completion releases the
+    /// engine (see `UpkaEngine::release_after_wipe`).
+    pub(crate) wiping: bool,
 }
 
 impl EngineSlot {
@@ -32,6 +36,7 @@ impl EngineSlot {
         self.status = 0;
         self.state = EngineState::Idle;
         self.completion_armed = false;
+        self.wiping = false;
     }
 
     pub(crate) fn mark_in_use(&mut self, awaiting_completion: bool) {

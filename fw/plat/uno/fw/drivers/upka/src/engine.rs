@@ -902,6 +902,24 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         Ok(())
     }
 
+    /// Start wiping the engine and release it back to the pool once the
+    /// wipe completes, without waiting for it.
+    ///
+    /// The engine stays out of the pool until the wipe has finished: the
+    /// wipe's completion, handled when the engine's interrupt is serviced,
+    /// releases it, and a failed wipe is issued again rather than releasing
+    /// an engine that may still hold key material. Callers that must know
+    /// the wipe has finished use [`release`](Self::release).
+    pub fn release_after_wipe(mut self) {
+        self.driver.state.with(|s| {
+            let slot = &mut s.engine_slots[self.id as usize];
+            slot.arm_completion_wait();
+            slot.wiping = true;
+        });
+        self.issue_command(UPKA_MEM_WIPE, 0, 0, 0, 0);
+        self.released = true;
+    }
+
     fn sync_wipe_and_release(&mut self) {
         EngineExecutor::wait_until_idle(self.id);
         self.issue_command(UPKA_MEM_WIPE, 0, 0, 0, 0);
