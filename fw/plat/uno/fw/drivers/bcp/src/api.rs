@@ -470,16 +470,18 @@ impl BcpDriver {
     /// command is past its deadline.
     ///
     /// The engine raises no CP1 interrupt, so the PAL calls this from its
-    /// poll loop. Cheap when idle: one GSRAM read of the CQ PI shadow.
+    /// poll loop. With no command in flight it touches no register: the
+    /// poll loop runs for every host command, so even one GSRAM read per
+    /// pass shows up in the latency of trivial commands.
     pub fn wake(&self) {
         self.state.with(|s| {
-            if !s.up {
+            if !s.up || s.free == ALL_FREE {
                 return;
             }
             let pi = (GSRAM.bcp_cq_pi_shadow.get() as u16) & MASK;
             if pi != s.cq_ci {
                 reap(s, pi);
-            } else if s.free != ALL_FREE {
+            } else {
                 let now = Instant::now();
                 let late =
                     s.slots.iter().enumerate().any(|(i, slot)| {
