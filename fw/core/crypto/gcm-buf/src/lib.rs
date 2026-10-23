@@ -104,6 +104,21 @@ pub const fn gcm_buf_len(aad_len: usize, text_len: usize) -> usize {
     padded_aad_len(aad_len) + text_len
 }
 
+/// Offset of the AAD content within the padded AAD region.
+///
+/// `16` for the prefix layout (`aad_len % 32` in `1..=16`), otherwise `0`.
+/// The AAD bytes of a `[padded_aad | text]` buffer are
+/// `buf[aad_offset(aad_len)..aad_offset(aad_len) + aad_len]`.
+///
+/// # Parameters
+/// * `aad_len` — unpadded AAD length supplied by the caller.
+pub const fn aad_offset(aad_len: usize) -> usize {
+    match AadLayout::from_len(aad_len) {
+        AadLayout::Prefix16 => 16,
+        AadLayout::Empty | AadLayout::Aligned | AadLayout::Trailing => 0,
+    }
+}
+
 /// Format AAD and text into a GCM buffer using the PAL `pad_aad`
 /// convention.
 ///
@@ -227,6 +242,21 @@ mod tests {
         assert_eq!(aad_len, 32);
         assert_eq!(&buf[..32], &aad);
         assert_eq!(&buf[32..40], &text);
+    }
+
+    #[test]
+    fn aad_offset_matches_format() {
+        // The offset must locate the AAD exactly where `format_gcm_buf`
+        // put it, for every layout.
+        for aad_len in [0usize, 1, 13, 16, 17, 20, 31, 32, 33, 48, 50, 64, 90] {
+            let aad: [u8; 90] = core::array::from_fn(|i| i as u8 + 1);
+            let aad = &aad[..aad_len];
+            let mut buf = [0u8; 160];
+            format_gcm_buf(aad, &[], &mut buf);
+            let off = aad_offset(aad_len);
+            assert!(off + aad_len <= padded_aad_len(aad_len) || aad_len == 0);
+            assert_eq!(&buf[off..off + aad_len], aad, "aad_len={aad_len}");
+        }
     }
 
     #[test]

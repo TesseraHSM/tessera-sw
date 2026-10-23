@@ -10,6 +10,9 @@
 
 use core::convert::TryInto;
 
+use tsra_fw_core_crypto_gcm_buf::aad_offset;
+use tsra_fw_core_crypto_gcm_buf::padded_aad_len;
+
 use super::*;
 
 fn aes_op_is_encrypt(op: AesOp) -> bool {
@@ -31,6 +34,21 @@ fn gcm_tag_mut(tag: &mut DmaBuf) -> HsmResult<&mut [u8; 16]> {
     let tag: &mut [u8] = tag;
     tag.try_into()
         .map_err(|_| HsmError::AesGcmInvalidBufferSize)
+}
+
+/// Split a `[padded_AAD | text]` GCM buffer (the [`HsmAes`] layout, per
+/// `tsra_fw_core_crypto_gcm_buf`) into the AAD content and the length of
+/// the padded AAD region that precedes the text.
+fn gcm_layout(buf: &[u8], aad_len: usize) -> HsmResult<(Option<&[u8]>, usize)> {
+    let pad = padded_aad_len(aad_len);
+    if pad > buf.len() {
+        return Err(HsmError::AesGcmInvalidBufferSize);
+    }
+    if aad_len == 0 {
+        return Ok((None, 0));
+    }
+    let off = aad_offset(aad_len);
+    Ok((Some(&buf[off..off + aad_len]), pad))
 }
 
 impl HsmAes for StdHsmPal {
@@ -116,20 +134,13 @@ impl HsmAes for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag_mut(tag)?;
-        if aad_len > plaintext.len() || aad_len > ciphertext.len() {
+        let (aad, pad) = gcm_layout(plaintext, aad_len)?;
+        if ciphertext.len() < plaintext.len() {
             return Err(HsmError::AesGcmInvalidBufferSize);
         }
-        let aad: Option<&[u8]> = if aad_len > 0 {
-            Some(&plaintext[..aad_len])
-        } else {
-            None
-        };
-        let data: &[u8] = &plaintext[aad_len..];
-        if let Some(aad) = aad {
-            ciphertext[..aad_len].copy_from_slice(aad);
-        }
+        ciphertext[..pad].copy_from_slice(&plaintext[..pad]);
         self.aes
-            .gcm_encrypt(key, iv, aad, data, &mut ciphertext[aad_len..], tag)
+            .gcm_encrypt(key, iv, aad, &plaintext[pad..], &mut ciphertext[pad..], tag)
             .await
     }
 
@@ -144,18 +155,10 @@ impl HsmAes for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag_mut(tag)?;
-        if aad_len > data.len() {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
         let input = data.to_vec();
-        let aad = if aad_len > 0 {
-            Some(&input[..aad_len])
-        } else {
-            None
-        };
-        let plaintext = &input[aad_len..];
+        let (aad, pad) = gcm_layout(&input, aad_len)?;
         self.aes
-            .gcm_encrypt(key, iv, aad, plaintext, &mut data[aad_len..], tag)
+            .gcm_encrypt(key, iv, aad, &input[pad..], &mut data[pad..], tag)
             .await
     }
 
@@ -171,18 +174,13 @@ impl HsmAes for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag(tag)?;
-        if aad_len > ciphertext.len() || aad_len > plaintext.len() {
+        let (aad, pad) = gcm_layout(ciphertext, aad_len)?;
+        if plaintext.len() < ciphertext.len() {
             return Err(HsmError::AesGcmInvalidBufferSize);
         }
-        let aad: Option<&[u8]> = if aad_len > 0 {
-            plaintext[..aad_len].copy_from_slice(&ciphertext[..aad_len]);
-            Some(&ciphertext[..aad_len])
-        } else {
-            None
-        };
-        let data: &[u8] = &ciphertext[aad_len..];
+        plaintext[..pad].copy_from_slice(&ciphertext[..pad]);
         self.aes
-            .gcm_decrypt(key, iv, aad, tag, data, &mut plaintext[aad_len..])
+            .gcm_decrypt(key, iv, aad, tag, &ciphertext[pad..], &mut plaintext[pad..])
             .await
     }
 
@@ -197,18 +195,10 @@ impl HsmAes for StdHsmPal {
     ) -> HsmResult<()> {
         let iv = gcm_iv(iv)?;
         let tag = gcm_tag(tag)?;
-        if aad_len > data.len() {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
         let input = data.to_vec();
-        let aad = if aad_len > 0 {
-            Some(&input[..aad_len])
-        } else {
-            None
-        };
-        let ciphertext = &input[aad_len..];
+        let (aad, pad) = gcm_layout(&input, aad_len)?;
         self.aes
-            .gcm_decrypt(key, iv, aad, tag, ciphertext, &mut data[aad_len..])
+            .gcm_decrypt(key, iv, aad, tag, &input[pad..], &mut data[pad..])
             .await
     }
 
