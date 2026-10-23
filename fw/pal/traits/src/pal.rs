@@ -92,6 +92,34 @@ pub trait HsmPal:
     /// propagate from this method.
     async fn run(&self);
 
+    /// Copies a response to the host, then posts `io`'s completion:
+    /// [`copy_mem_to_host`](HsmGdmaController::copy_mem_to_host) followed
+    /// by [`complete_io`](HsmIoController::complete_io), as one step so a
+    /// platform can post the completion as soon as the copy lands rather
+    /// than when the IO's task next runs.
+    ///
+    /// The CQE must already hold the completion of a successful copy.
+    ///
+    /// # Errors
+    ///
+    /// - [`ReplyError::Copy`] — the copy failed and nothing was posted;
+    ///   the caller still owes the host a completion.
+    /// - [`ReplyError::Complete`] — the copy landed but the completion
+    ///   could not be posted.
+    async fn reply_io(
+        &self,
+        io: &mut Self::Io,
+        resp: &DmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        prp: bool,
+    ) -> Result<(), ReplyError> {
+        self.copy_mem_to_host(io, resp, dst, dst2, prp)
+            .await
+            .map_err(ReplyError::Copy)?;
+        self.complete_io(io).await.map_err(ReplyError::Complete)
+    }
+
     /// Releases platform resources.
     ///
     /// Called after [`run`](Self::run) returns.  Powers down

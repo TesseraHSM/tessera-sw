@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 
 use core::future::poll_fn;
+use core::task::Context;
 use core::task::Poll;
+use core::task::Waker;
 
-use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
@@ -31,9 +32,26 @@ use crate::GdmaError;
 use crate::MemInterface;
 
 struct TagSlot {
-    waker: WakerRegistration,
+    /// The awaiting task. A plain `Option` rather than a
+    /// `WakerRegistration` so a linked copy can hand it on (see
+    /// [`GdmaDriver::wake_with`]).
+    waker: Option<Waker>,
     completed: bool,
     status: u8,
+    /// Work to start as soon as the copy succeeds; see
+    /// [`GdmaDriver::copy_mem_linked`].
+    link: Option<u32>,
+    /// What starting `link` returned, for the copy's future.
+    linked: Option<u16>,
+}
+
+impl TagSlot {
+    fn register(&mut self, w: &Waker) {
+        match &self.waker {
+            Some(old) if old.will_wake(w) => {}
+            _ => self.waker = Some(w.clone()),
+        }
+    }
 }
 
 struct GdmaState<const DEPTH: usize> {
@@ -143,9 +161,11 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         let regs = unsafe { StaticRef::new(GDMA_BASE as *const GdmaRegs) };
 
         let tags = core::array::from_fn(|_| TagSlot {
-            waker: WakerRegistration::new(),
+            waker: None,
             completed: false,
             status: 0,
+            link: None,
+            linked: None,
         });
 
         let tag_free = if DEPTH >= 32 {
@@ -206,7 +226,8 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         }
     }
 
-    /// Allocate a tag, write an SQ entry, and ring the doorbell.
+    /// Allocate a tag, write an SQE entry, and ring the doorbell.
+    #[allow(clippy::too_many_arguments)]
     fn submit(
         &self,
         src_addr: GdmaBuf,
@@ -215,6 +236,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_addr: GdmaBuf,
         dst_ifc: MemInterface,
         dst_len: u32,
+        link: Option<u32>,
     ) -> HsmResult<u16> {
         if src_len == 0 || dst_len == 0 {
             return Err(GdmaError::ZERO_LENGTH);
@@ -280,6 +302,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             let sq_ptr = sq as *mut GdmaSqEntry as *mut u32;
             let sq_words = unsafe { core::slice::from_raw_parts_mut(sq_ptr, entry.len()) };
             tsra_fw_bulk_copy::copy_slice(sq_words, &entry);
+            s.tags[tag as usize].link = link;
 
             // Ensure SQ entry write is visible to HW before doorbell
             cortex_m::asm::dmb();
@@ -317,24 +340,66 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_ifc: MemInterface,
         dst_len: u32,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len)?;
+        let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, None)?;
         Ok(poll_fn(move |cx| {
-            self.state.with(|s| {
-                let slot = &mut s.tags[tag as usize];
-                if slot.completed {
-                    let status = slot.status;
-                    slot.completed = false;
-                    s.tag_free |= 1u32 << tag;
-                    return Poll::Ready(if status == 0 {
-                        Ok(())
-                    } else {
-                        Err(GdmaError::dma_error(status))
-                    });
-                }
-                slot.waker.register(cx.waker());
-                Poll::Pending
-            })
+            self.poll_tag(tag, cx).map(|r| r.map(|_| ()))
         }))
+    }
+
+    /// [`copy_mem`](Self::copy_mem), then start the follow-on work `link`
+    /// as soon as the copy succeeds, from [`wake_with`](Self::wake_with)
+    /// rather than when the awaiting task next runs.
+    ///
+    /// `link` is opaque here: it is passed to `wake_with`'s `start`, and
+    /// what that returns (`None` if it started nothing) is the future's
+    /// output. The future resolves once the copy has completed; when the
+    /// follow-on started, `start` was handed the awaiting task's waker, so
+    /// the task is next woken by the follow-on's own completion.
+    ///
+    /// # Errors
+    ///
+    /// As [`copy_mem`](Self::copy_mem).
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_mem_linked(
+        &self,
+        src_addr: GdmaBuf,
+        src_ifc: MemInterface,
+        src_len: u32,
+        dst_addr: GdmaBuf,
+        dst_ifc: MemInterface,
+        dst_len: u32,
+        link: u32,
+    ) -> HsmResult<impl core::future::Future<Output = HsmResult<Option<u16>>> + '_> {
+        let tag = self.submit(
+            src_addr,
+            src_ifc,
+            src_len,
+            dst_addr,
+            dst_ifc,
+            dst_len,
+            Some(link),
+        )?;
+        Ok(poll_fn(move |cx| self.poll_tag(tag, cx)))
+    }
+
+    /// Poll `tag` for completion, freeing it once complete.
+    fn poll_tag(&self, tag: u16, cx: &mut Context<'_>) -> Poll<HsmResult<Option<u16>>> {
+        self.state.with(|s| {
+            let slot = &mut s.tags[tag as usize];
+            if slot.completed {
+                let status = slot.status;
+                let linked = slot.linked.take();
+                slot.completed = false;
+                s.tag_free |= 1u32 << tag;
+                return Poll::Ready(if status == 0 {
+                    Ok(linked)
+                } else {
+                    Err(GdmaError::dma_error(status))
+                });
+            }
+            slot.register(cx.waker());
+            Poll::Pending
+        })
     }
 
     /// Drain all available CQ entries and wake their awaiters.
@@ -343,9 +408,17 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// SingleCell borrow and batching the MMIO head pointer write.
     /// Call from the GDMA_CQ IRQ handler or the main poll loop.
     pub fn wake(&self, irq: u16) {
-        self.state.with(|s| {
-            // Clear NVIC pending bit for this interrupt
+        self.wake_with(irq, |_, _| None);
+    }
 
+    /// [`wake`](Self::wake), first starting the follow-on of each
+    /// successful [linked](Self::copy_mem_linked) copy:
+    /// `start(link, waker)` gets the copy's `link` and the waker of the
+    /// task awaiting it, and returns what it started. If it started
+    /// something, it has taken over waking the task, so the copy's
+    /// completion does not wake it.
+    pub fn wake_with(&self, irq: u16, mut start: impl FnMut(u32, Option<&Waker>) -> Option<u16>) {
+        self.state.with(|s| {
             let tail = unsafe { self.cq_tail_shadow.read_volatile() } as u16;
 
             while s.cq_head != tail {
@@ -367,7 +440,16 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                     let slot = &mut s.tags[tag as usize];
                     slot.status = status;
                     slot.completed = true;
-                    slot.waker.wake();
+                    if let Some(link) = slot.link.take() {
+                        if status == 0 {
+                            slot.linked = start(link, slot.waker.as_ref());
+                        }
+                    }
+                    if slot.linked.is_some() {
+                        slot.waker = None;
+                    } else if let Some(waker) = slot.waker.take() {
+                        waker.wake();
+                    }
                 }
             }
 

@@ -13,7 +13,6 @@ test = false
 
 [dependencies]
 cortex-m = { workspace = true }
-embassy-sync = { workspace = true }
 heapless = { workspace = true }
 tock-registers = { workspace = true }
 tsra_fw_bulk_copy = { workspace = true }

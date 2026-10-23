@@ -30,8 +30,10 @@ use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmIo;
+use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::ReplyError;
 use tsra_fw_uno_drivers_gdma::GdmaAddr;
 use tsra_fw_uno_drivers_gdma::GdmaBuf;
 use tsra_fw_uno_drivers_gdma::MemInterface;
@@ -40,6 +42,7 @@ use tsra_fw_uno_reg_soc::zero::ZERO_SIZE;
 use tsra_fw_uno_trace::tracing::*;
 use zeroize::Zeroize;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 /// Converts an [`HsmDmaAddr`] (the trait-level 64-bit address) into a
@@ -304,6 +307,54 @@ impl HsmGdmaController for UnoHsmPal {
 }
 
 impl UnoHsmPal {
+    /// [`HsmPal::reply_io`](tsra_fw_hsm_pal_traits::HsmPal::reply_io): the
+    /// response copy is linked to the CQE post, which
+    /// [`wake_gdma`](Self::wake_gdma) starts the moment the copy lands, so
+    /// the IO's task is woken once, by the post's completion.
+    pub(crate) async fn reply_linked(
+        &self,
+        io: &mut UnoHsmIo,
+        resp: &DmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        prp: bool,
+    ) -> Result<(), ReplyError> {
+        let len = resp.len() as u32;
+        let link = u32::from(io.index()) | u32::from(io.queue_id() as u8) << 16;
+        let posted = self
+            .gdma
+            .copy_mem_linked(
+                device_dma_buf(resp.as_ptr(), len),
+                MemInterface::Device,
+                len,
+                host_dma_buf(dst, dst2, prp),
+                host_interface(io.pid()).map_err(ReplyError::Copy)?,
+                len,
+                link,
+            )
+            .map_err(ReplyError::Copy)?
+            .await
+            .map_err(ReplyError::Copy)?;
+        match posted {
+            Some(tag) => self.oic.wait_send(tag).await,
+            // The post could not start then (no free tag or a full ring):
+            // post it now.
+            None => self.complete_io(io).await,
+        }
+        .map_err(ReplyError::Complete)
+    }
+
+    /// GDMA completion handler: wakes each finished copy's task, first
+    /// posting the CQE of each reply whose response has just landed (see
+    /// [`reply_linked`](Self::reply_linked)).
+    pub(crate) fn wake_gdma(&self, irq: u16) {
+        self.gdma.wake_with(irq, |link, waker| {
+            self.oic
+                .start_send(link as u16, (link >> 16) as u8, waker)
+                .ok()
+        });
+    }
+
     /// GDMA-zero a GDMA-reachable device region `[dst_ptr, dst_ptr + len)`.
     ///
     /// Copies zeros from the [`ZERO_BASE`] window, chunked to its

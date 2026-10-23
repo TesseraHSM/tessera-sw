@@ -56,6 +56,15 @@ pub type HsmSqe = [u32; SQE_DWORDS];
 /// Layout is platform-defined and decoded by the core's `Cqe` wrapper.
 pub type HsmCqe = [u32; CQE_DWORDS];
 
+/// Why [`HsmPal::reply_io`](crate::HsmPal::reply_io) failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyError {
+    /// The response copy failed, so no completion was posted.
+    Copy(HsmError),
+    /// The response was copied but its completion could not be posted.
+    Complete(HsmError),
+}
+
 /// Handle to a single in-flight I/O.
 ///
 /// Represents a submission/completion pair: the caller reads the

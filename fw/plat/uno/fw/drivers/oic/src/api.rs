@@ -3,6 +3,7 @@
 
 use core::future::poll_fn;
 use core::task::Poll;
+use core::task::Waker;
 
 use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::ReadWriteable;
@@ -299,6 +300,27 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
         let tag = self.submit(index, queue_id)?;
         Ok(self.wait_completion(tag))
+    }
+
+    /// Start a [`send`](Self::send) on behalf of the task `waker` wakes,
+    /// from outside that task (e.g. as the follow-on of a DMA). The task
+    /// awaits it with [`wait_send`](Self::wait_send) on the returned tag.
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send).
+    pub fn start_send(&self, index: u16, queue_id: u8, waker: Option<&Waker>) -> HsmResult<u16> {
+        let tag = self.submit(index, queue_id)?;
+        if let Some(waker) = waker {
+            self.state
+                .with(|s| s.tags[tag as usize].waker.register(waker));
+        }
+        Ok(tag)
+    }
+
+    /// Wait for a send started by [`start_send`](Self::start_send).
+    pub fn wait_send(&self, tag: u16) -> impl core::future::Future<Output = HsmResult<()>> + '_ {
+        self.wait_completion(tag)
     }
 
     /// Drain all available OCQ entries and wake their awaiters.

@@ -12,9 +12,8 @@
 //!                  │         dispatch opcode      in-DMA
 //!                  │                              session validate
 //!                  │                              DDI dispatch
-//!                  │                              out-DMA
 //!              populate CQE
-//!              complete_io
+//!              reply_io (out-DMA + CQE post), or complete_io on failure
 //! ```
 //!
 //! # Error handling
@@ -93,23 +92,53 @@ impl<P: HsmPal> Hsm<P> {
                 )),
             },
         };
-        let handler_ok = op_result.is_ok();
-        Self::finalize_cqe(&mut io, op_result);
 
-        // Post the completion (CQE) to the host, then run the undo/commit
-        // walk, then free the slot.  Splitting `complete_io` from
+        // Post the completion (CQE) to the host — together with the
+        // response copy when the handler produced one — then run the
+        // undo/commit walk, then free the slot.  Splitting the post from
         // `drop_io` lets the walk run over `io` *after* the CQE post, so a
         // failed post reverts too.
-        let cqe_ok = match self.pal().complete_io(&mut io).await {
-            Ok(()) => true,
-            Err(_e) => {
-                error!(
-                    "core",
-                    HsmError::CompleteIoFailure,
-                    "complete_io failed: {:?}",
-                    _e
-                );
-                false
+        let (handler_ok, cqe_ok) = match op_result {
+            Ok(reply) => {
+                Self::finalize_cqe(&mut io, Ok(reply.status));
+                match self
+                    .pal()
+                    .reply_io(&mut io, reply.resp, reply.dst, reply.dst2, true)
+                    .await
+                {
+                    Ok(()) => (true, true),
+                    Err(ReplyError::Complete(_e)) => {
+                        error!(
+                            "core",
+                            HsmError::CompleteIoFailure,
+                            "complete_io failed: {:?}",
+                            _e
+                        );
+                        (true, false)
+                    }
+                    // The response never reached the host: fail the
+                    // command and post that instead.
+                    Err(ReplyError::Copy(_e)) => {
+                        error!(
+                            "core",
+                            HsmError::FailedToStartDmaTransaction,
+                            "response DMA failed: {:?}",
+                            _e
+                        );
+                        Self::finalize_cqe(
+                            &mut io,
+                            Err(OpError::new(
+                                HsmError::FailedToStartDmaTransaction,
+                                HostStatus::DMA_TXN_ERROR,
+                            )),
+                        );
+                        (false, self.post_completion(&mut io).await)
+                    }
+                }
+            }
+            Err(e) => {
+                Self::finalize_cqe(&mut io, Err(e));
+                (false, self.post_completion(&mut io).await)
             }
         };
 
@@ -205,8 +234,28 @@ impl<P: HsmPal> Hsm<P> {
                 cqe.set_dw1(CqeDw1::from(status.cqe_dw1));
             }
             Err(e) => {
+                // Also clears any success fields written for a reply whose
+                // response copy then failed.
+                cqe.set_dw0(CqeDw0::from(0));
+                cqe.set_dw1(CqeDw1::from(0));
                 cqe.set_status(e.status);
                 error!("core", e.err, "handle_op failed");
+            }
+        }
+    }
+
+    /// Posts `io`'s CQE with no response copy; `true` once it is posted.
+    async fn post_completion(&self, io: &mut P::Io) -> bool {
+        match self.pal().complete_io(io).await {
+            Ok(()) => true,
+            Err(_e) => {
+                error!(
+                    "core",
+                    HsmError::CompleteIoFailure,
+                    "complete_io failed: {:?}",
+                    _e
+                );
+                false
             }
         }
     }
@@ -218,7 +267,10 @@ impl<P: HsmPal> Hsm<P> {
     ///
     /// **Phase 2 (post-decode)** — Session validation, DDI dispatch.
     /// Errors → DDI error response DMA'd to host, CQE Success.
-    async fn handle_mbor_op(&self, io: &mut P::Io) -> Result<HsmOpStatus, OpError> {
+    ///
+    /// Returns the response for [`Self::handle_io`] to send back with the
+    /// completion.
+    async fn handle_mbor_op(&self, io: &mut P::Io) -> Result<Reply<'_>, OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
         let req_buf = self
@@ -317,25 +369,12 @@ impl<P: HsmPal> Hsm<P> {
             (resp, session_ctrl, cqe_sess_id, cqe_closed)
         };
 
-        let resp_len = resp.len();
-
-        // ── Outbound DMA (yield 2) ─────────────────────────────────
-        self.pal()
-            .copy_mem_to_host(io, resp, params.dst_addr, params.dst_addr2, true)
-            .await
-            .op_err(
-                "core",
-                HsmError::FailedToStartDmaTransaction,
-                HostStatus::DMA_TXN_ERROR,
-            )?;
-
-        Ok(HsmOpStatus::new(
-            resp_len,
-            session_ctrl,
-            cqe_sess_id,
-            None,
-            cqe_closed,
-        ))
+        Ok(Reply {
+            status: HsmOpStatus::new(resp.len(), session_ctrl, cqe_sess_id, None, cqe_closed),
+            resp,
+            dst: params.dst_addr,
+            dst2: params.dst_addr2,
+        })
     }
 
     /// Handles an [`OP_TBOR`] IO command.
@@ -353,11 +392,14 @@ impl<P: HsmPal> Hsm<P> {
     /// (built by the per-opcode handlers via the encoder API). For now,
     /// dispatch errors that cannot construct a typed error response
     /// surface as CQE-level host status codes.
+    ///
+    /// Returns the response for [`Self::handle_io`] to send back with the
+    /// completion.
     async fn handle_tbor_op<'s>(
         &'s self,
         io: &mut P::Io,
         undo: &mut UndoLog<'s>,
-    ) -> Result<HsmOpStatus, OpError> {
+    ) -> Result<Reply<'s>, OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
         let req_buf = self
@@ -468,25 +510,12 @@ impl<P: HsmPal> Hsm<P> {
             }
         };
 
-        let resp_len = resp.len();
-
-        // ── Outbound DMA (yield 2) ─────────────────────────────────
-        self.pal()
-            .copy_mem_to_host(io, resp, params.dst_addr, params.dst_addr2, true)
-            .await
-            .op_err(
-                "core",
-                HsmError::FailedToStartDmaTransaction,
-                HostStatus::DMA_TXN_ERROR,
-            )?;
-
-        Ok(HsmOpStatus::new(
-            resp_len,
-            session_ctrl,
-            cqe_sess_id,
-            None,
-            cqe_closed,
-        ))
+        Ok(Reply {
+            status: HsmOpStatus::new(resp.len(), session_ctrl, cqe_sess_id, None, cqe_closed),
+            resp,
+            dst: params.dst_addr,
+            dst2: params.dst_addr2,
+        })
     }
 
     /// Validates the SQE for an MBOR / TBOR IO command and extracts the
@@ -622,12 +651,22 @@ impl<P: HsmPal> Hsm<P> {
     /// Handles an [`OP_FLUSH`] IO command.
     ///
     /// Returns [`HsmError::IoChannelUnknownOp`] — flush is not yet supported.
-    async fn handle_flush_op(&self, _io: &mut P::Io) -> Result<HsmOpStatus, OpError> {
+    async fn handle_flush_op(&self, _io: &mut P::Io) -> Result<Reply<'_>, OpError> {
         Err(OpError::new(
             HsmError::IoChannelUnknownOp,
             HostStatus::INVALID_COMMAND_OPCODE,
         ))
     }
+}
+
+/// A handled command's completion fields and the response that goes back
+/// with them.
+struct Reply<'a> {
+    status: HsmOpStatus,
+    resp: &'a DmaBuf,
+    /// Host pages the response is copied to (SQE PRP1 / PRP2).
+    dst: HsmDmaAddr,
+    dst2: HsmDmaAddr,
 }
 
 /// Fields extracted from a validated MBOR / TBOR IO SQE.

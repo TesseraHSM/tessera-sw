@@ -32,11 +32,13 @@ use core::cell::Cell;
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
+use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::ReplyError;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
 use tsra_fw_uno_drivers_bcp::BcpDriver;
@@ -86,6 +88,7 @@ use tsra_fw_uno_trace::tracing::*;
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
 
+use crate::UnoHsmIo;
 use crate::alloc::IO_ALLOC_INIT;
 use crate::alloc::IoAllocTable;
 use crate::ipc::*;
@@ -168,7 +171,7 @@ const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     (Interrupt::SHA_DONE as u16, |pal, _| pal.sha.wake()),
     (Interrupt::AES_ERROR as u16, |pal, _| pal.aes.wake()),
     (Interrupt::SHA_ERROR as u16, |pal, _| pal.sha.wake()),
-    (Interrupt::GDMA_CQ as u16, |pal, irq| pal.gdma.wake(irq)),
+    (Interrupt::GDMA_CQ as u16, |pal, irq| pal.wake_gdma(irq)),
     (Interrupt::INTC_IPC as u16, |pal, irq| pal.ipc.wake(irq)),
     // PKA done IRQs (32..=47) — `wake_pka` derives the engine index.
     (Interrupt::UPKA_0_DONE as u16, wake_pka),
@@ -829,6 +832,19 @@ impl HsmPal for UnoHsmPal {
             self.poll_once();
             embassy_futures::yield_now().await;
         }
+    }
+
+    /// Copies the response and posts the CQE without waking the IO's task
+    /// in between; see [`reply_linked`](UnoHsmPal::reply_linked).
+    async fn reply_io(
+        &self,
+        io: &mut UnoHsmIo,
+        resp: &DmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        prp: bool,
+    ) -> Result<(), ReplyError> {
+        self.reply_linked(io, resp, dst, dst2, prp).await
     }
 
     /// No-op — the emulated SoC does not require teardown.
