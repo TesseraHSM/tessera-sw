@@ -12,6 +12,7 @@ use tsra_fw_uno_error::HsmResult;
 use crate::api::UpkaDriver;
 use crate::executor::EngineExecutor;
 use crate::opcode::*;
+use crate::pool::StagedCmd;
 use crate::UpkaEccCurve;
 use crate::UpkaError;
 use crate::UpkaModSize;
@@ -156,20 +157,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         hash: &DmaBuf,
         signature: &mut DmaBuf,
     ) -> HsmResult<()> {
-        Self::ensure_cmd_input(
-            !priv_key.is_empty()
-                && hash.len() >= hash_size(curve)
-                && signature.len() >= signature_size(curve),
-        )?;
-
-        self.execute_cmd(
-            ecc_sign_opcode(curve),
-            signature.as_mut_ptr() as u32,
-            hash.as_ptr() as u32,
-            priv_key.as_ptr() as u32,
-            0,
-        )
-        .await
+        self.execute(ecc_sign_cmd(curve, priv_key, hash, signature)?)
+            .await
     }
 
     /// Verify an ECDSA signature.
@@ -404,41 +393,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         input: &DmaBuf,
         output: &mut DmaBuf,
     ) -> HsmResult<()> {
-        let mod_size = rsa_mod_size(key_type);
-        let is_crt = matches!(
-            key_type,
-            UpkaRsaKeyType::Rsa2048Crt | UpkaRsaKeyType::Rsa3072Crt | UpkaRsaKeyType::Rsa4096Crt
-        );
-        // A non-CRT key is `[d ‖ n ‖ e]` (`2k+4`) passed as a single operand. A
-        // CRT key is the `[p ‖ q ‖ dp ‖ dq ‖ n ‖ n1q ‖ n2p ‖ e]` PKA operand
-        // (`5k+4`) submitted as TWO operands: `param1 = [p ‖ q ‖ dp ‖ dq]` (`2k`,
-        // at offset 0) in arg3 and `param2 = [n ‖ n1q ‖ n2p]` (`3k`, at offset
-        // `2k`) in arg4. The trailing `e` is unused by the private exponentiation.
-        let min_key_len = if is_crt {
-            5 * mod_size + 4
-        } else {
-            2 * mod_size
-        };
-        Self::ensure_cmd_input(
-            key.len() >= min_key_len && input.len() == mod_size && output.len() == mod_size,
-        )?;
-
-        // CRT needs a non-null `param2` pointer; passing `0` (as for non-CRT)
-        // makes the PKA dereference a null operand and fault with a bus error.
-        let param2 = if is_crt {
-            key.as_ptr() as u32 + (2 * mod_size) as u32
-        } else {
-            0
-        };
-
-        self.execute_cmd(
-            rsa_priv_opcode(key_type),
-            output.as_mut_ptr() as u32,
-            input.as_ptr() as u32,
-            key.as_ptr() as u32,
-            param2,
-        )
-        .await
+        self.execute(rsa_mod_exp_priv_cmd(key_type, key, input, output)?)
+            .await
     }
 
     /// Run an RSA public-key modular exponentiation.
@@ -465,19 +421,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         input: &DmaBuf,
         output: &mut DmaBuf,
     ) -> HsmResult<()> {
-        let mod_size = rsa_mod_size(key_type);
-        Self::ensure_cmd_input(
-            !key.is_empty() && input.len() == mod_size && output.len() == mod_size,
-        )?;
-
-        self.execute_cmd(
-            rsa_pub_opcode(key_type),
-            output.as_mut_ptr() as u32,
-            input.as_ptr() as u32,
-            key.as_ptr() as u32,
-            0,
-        )
-        .await
+        self.execute(rsa_mod_exp_pub_cmd(key_type, key, input, output)?)
+            .await
     }
 
     /// Derive a public key from a private key.
@@ -927,6 +872,11 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         self.driver.release_engine(self.id);
     }
 
+    async fn execute(&mut self, cmd: StagedCmd) -> HsmResult<()> {
+        self.execute_cmd(cmd.opcode, cmd.result, cmd.arg1, cmd.arg2, cmd.arg3)
+            .await
+    }
+
     async fn execute_cmd(
         &mut self,
         opcode: u32,
@@ -971,4 +921,93 @@ impl<const DEPTH: usize, const ENGINES: usize> Drop for UpkaEngine<'_, DEPTH, EN
             self.released = true;
         }
     }
+}
+
+fn ensure_input(valid: bool) -> HsmResult<()> {
+    if valid {
+        Ok(())
+    } else {
+        Err(UpkaError::CMD_ERROR)
+    }
+}
+
+/// The command of [`UpkaEngine::ecc_sign`], after checking its operands.
+pub(crate) fn ecc_sign_cmd(
+    curve: UpkaEccCurve,
+    priv_key: &DmaBuf,
+    hash: &DmaBuf,
+    signature: &mut DmaBuf,
+) -> HsmResult<StagedCmd> {
+    ensure_input(
+        !priv_key.is_empty()
+            && hash.len() >= hash_size(curve)
+            && signature.len() >= signature_size(curve),
+    )?;
+    Ok(StagedCmd {
+        opcode: ecc_sign_opcode(curve),
+        result: signature.as_mut_ptr() as u32,
+        arg1: hash.as_ptr() as u32,
+        arg2: priv_key.as_ptr() as u32,
+        arg3: 0,
+    })
+}
+
+/// The command of [`UpkaEngine::rsa_mod_exp_priv`], after checking its
+/// operands.
+pub(crate) fn rsa_mod_exp_priv_cmd(
+    key_type: UpkaRsaKeyType,
+    key: &DmaBuf,
+    input: &DmaBuf,
+    output: &mut DmaBuf,
+) -> HsmResult<StagedCmd> {
+    let mod_size = rsa_mod_size(key_type);
+    let is_crt = matches!(
+        key_type,
+        UpkaRsaKeyType::Rsa2048Crt | UpkaRsaKeyType::Rsa3072Crt | UpkaRsaKeyType::Rsa4096Crt
+    );
+    // A non-CRT key is `[d ‖ n ‖ e]` (`2k+4`) passed as a single operand. A
+    // CRT key is the `[p ‖ q ‖ dp ‖ dq ‖ n ‖ n1q ‖ n2p ‖ e]` PKA operand
+    // (`5k+4`) submitted as TWO operands: `param1 = [p ‖ q ‖ dp ‖ dq]` (`2k`,
+    // at offset 0) in arg3 and `param2 = [n ‖ n1q ‖ n2p]` (`3k`, at offset
+    // `2k`) in arg4. The trailing `e` is unused by the private exponentiation.
+    let min_key_len = if is_crt {
+        5 * mod_size + 4
+    } else {
+        2 * mod_size
+    };
+    ensure_input(key.len() >= min_key_len && input.len() == mod_size && output.len() == mod_size)?;
+
+    // CRT needs a non-null `param2` pointer; passing `0` (as for non-CRT)
+    // makes the PKA dereference a null operand and fault with a bus error.
+    let param2 = if is_crt {
+        key.as_ptr() as u32 + (2 * mod_size) as u32
+    } else {
+        0
+    };
+    Ok(StagedCmd {
+        opcode: rsa_priv_opcode(key_type),
+        result: output.as_mut_ptr() as u32,
+        arg1: input.as_ptr() as u32,
+        arg2: key.as_ptr() as u32,
+        arg3: param2,
+    })
+}
+
+/// The command of [`UpkaEngine::rsa_mod_exp_pub`], after checking its
+/// operands.
+pub(crate) fn rsa_mod_exp_pub_cmd(
+    key_type: UpkaRsaKeyType,
+    key: &DmaBuf,
+    input: &DmaBuf,
+    output: &mut DmaBuf,
+) -> HsmResult<StagedCmd> {
+    let mod_size = rsa_mod_size(key_type);
+    ensure_input(!key.is_empty() && input.len() == mod_size && output.len() == mod_size)?;
+    Ok(StagedCmd {
+        opcode: rsa_pub_opcode(key_type),
+        result: output.as_mut_ptr() as u32,
+        arg1: input.as_ptr() as u32,
+        arg2: key.as_ptr() as u32,
+        arg3: 0,
+    })
 }

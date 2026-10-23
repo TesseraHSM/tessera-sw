@@ -9,11 +9,18 @@ use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
 
+use crate::engine::ecc_sign_cmd;
+use crate::engine::rsa_mod_exp_priv_cmd;
+use crate::engine::rsa_mod_exp_pub_cmd;
 use crate::engine::UpkaEngine;
 use crate::pool::EngineSlot;
 use crate::pool::QueueSlot;
 use crate::pool::SpecificWaiter;
+use crate::pool::StagedCmd;
+use crate::pool::Ticket;
+use crate::pool::TicketState;
 use crate::pool::UpkaState;
+use crate::pool::TICKETS;
 use crate::scheduler::Scheduler;
 use crate::UpkaEccCurve;
 use crate::UpkaRsaKeyType;
@@ -90,6 +97,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                     state: crate::EngineState::Idle,
                     completion_armed: false,
                     wiping: false,
+                    ticket: None,
                 }),
                 specific_waiters: core::array::from_fn(|_| SpecificWaiter {
                     waker: WakerRegistration::new(),
@@ -99,9 +107,20 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
                 queue_slots: core::array::from_fn(|_| QueueSlot {
                     waker: WakerRegistration::new(),
                     state: crate::QueueSlotState::Free,
+                    ticket: 0,
                 }),
                 queue_head: 0,
                 queue_tail: 0,
+                tickets: core::array::from_fn(|_| Ticket {
+                    waker: WakerRegistration::new(),
+                    state: TicketState::Free,
+                    cmd: StagedCmd::default(),
+                }),
+                ticket_free: if TICKETS == 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << TICKETS) - 1
+                },
             }),
         }
     }
@@ -159,6 +178,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
 
     /// Sign a digest using ECDSA.
     ///
+    /// Runs as a staged command: on the first engine free, which is wiped
+    /// as soon as the command completes (see `Scheduler::run_staged`).
+    ///
     /// # Parameters
     ///
     /// - `curve`: ECC curve selector.
@@ -179,7 +201,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         hash: &DmaBuf,
         signature: &mut DmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |eng| eng.ecc_sign(curve, priv_key, hash, signature).await)
+        self.scheduler()
+            .run_staged(ecc_sign_cmd(curve, priv_key, hash, signature)?)
             .await
     }
 
@@ -300,6 +323,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
 
     /// Run an RSA private-key modular exponentiation.
     ///
+    /// Runs as a staged command: on the first engine free, which is wiped
+    /// as soon as the command completes (see `Scheduler::run_staged`).
+    ///
     /// `key_type` selects both modulus size and key format (standard or CRT).
     /// Input and output buffers must match the selected modulus size.
     ///
@@ -323,11 +349,15 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         input: &DmaBuf,
         output: &mut DmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |eng| eng.rsa_mod_exp_priv(key_type, key, input, output).await)
+        self.scheduler()
+            .run_staged(rsa_mod_exp_priv_cmd(key_type, key, input, output)?)
             .await
     }
 
     /// Run an RSA public-key modular exponentiation.
+    ///
+    /// Runs as a staged command: on the first engine free, which is wiped
+    /// as soon as the command completes (see `Scheduler::run_staged`).
     ///
     /// `key_type` selects modulus size. Input and output buffers must match
     /// the selected modulus size.
@@ -352,7 +382,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         input: &DmaBuf,
         output: &mut DmaBuf,
     ) -> HsmResult<()> {
-        self.with_engine(async |eng| eng.rsa_mod_exp_pub(key_type, key, input, output).await)
+        self.scheduler()
+            .run_staged(rsa_mod_exp_pub_cmd(key_type, key, input, output)?)
             .await
     }
 
