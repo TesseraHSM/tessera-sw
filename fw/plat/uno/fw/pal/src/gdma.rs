@@ -342,7 +342,8 @@ impl UnoHsmPal {
     /// protects private keys / plaintext — the CPU-visible arena is the
     /// only place they exist.
     ///
-    /// The SRAM (DMA) buffer is wiped off-CPU with the GDMA engine; the DTCM
+    /// The SRAM (DMA) buffer is wiped off-CPU with the GDMA engine unless
+    /// its dirty region is at most [`CPU_SCRUB_MAX`] bytes; the DTCM
     /// (NonDma) buffer sits in the M7 TCM, which GDMA cannot reach, so it is
     /// wiped by the CPU. If the GDMA wipe fails (e.g. no free tags under
     /// heavy concurrency), the SRAM buffer is scrubbed by the CPU as a
@@ -357,7 +358,11 @@ impl UnoHsmPal {
     /// A heap that was never touched is skipped entirely.
     pub(crate) async fn scrub_io_slot(&self, io_index: u16) {
         let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, io_index);
-        if dma_len != 0 && self.gdma_zero_region(dma_ptr, dma_len).await.is_err() {
+        if dma_len != 0 && dma_len <= CPU_SCRUB_MAX {
+            // SAFETY: `(dma_ptr, dma_len)` is a prefix of the slot's SRAM
+            // buffer, valid for writes over its whole length.
+            unsafe { cpu_zeroize(dma_ptr, dma_len) };
+        } else if dma_len != 0 && self.gdma_zero_region(dma_ptr, dma_len).await.is_err() {
             // Surface the fallback: a persistent GDMA fault would otherwise
             // silently degrade every wipe into a CPU loop with no signal.
             // Logged via the trace facade (as the iic/oic drivers do for
@@ -384,9 +389,16 @@ impl UnoHsmPal {
     }
 }
 
+/// SRAM scrubs of at most this many bytes are done by the CPU: its stores
+/// to SRAM are posted (about a cycle each), so a small wipe costs less CPU
+/// than submitting a GDMA transfer and handling its completion. Most IOs'
+/// dirty region is well under this; larger ones go to the GDMA.
+const CPU_SCRUB_MAX: usize = 2048;
+
 /// Volatile CPU zeroization of `[ptr, ptr + len)` that the optimizer cannot
 /// elide, via the vetted [`zeroize`] crate. Used for the M7 TCM (which GDMA
-/// cannot reach) and as the GDMA-failure fallback for SRAM.
+/// cannot reach), small SRAM scrubs, and as the GDMA-failure fallback for
+/// SRAM.
 ///
 /// Zeroes the widest naturally-aligned element the region supports: an
 /// 8-byte-aligned `u64` (QWORD) body, framed by a byte-wise head/tail for
