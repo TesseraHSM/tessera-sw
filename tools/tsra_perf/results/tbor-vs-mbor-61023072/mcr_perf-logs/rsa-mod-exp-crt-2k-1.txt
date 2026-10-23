@@ -1,0 +1,15 @@
+
+    ███╗   ███╗ ██████╗██████╗     ██████╗ ███████╗██████╗ ███████╗
+    ████╗ ████║██╔════╝██╔══██╗    ██╔══██╗██╔════╝██╔══██╗██╔════╝
+    ██╔████╔██║██║     ██████╔╝    ██████╔╝█████╗  ██████╔╝█████╗  
+    ██║╚██╔╝██║██║     ██╔══██╗    ██╔═══╝ ██╔══╝  ██╔══██╗██╔══╝  
+    ██║ ╚═╝ ██║╚██████╗██║  ██║    ██║     ███████╗██║  ██║██║     
+    ╚═╝     ╚═╝ ╚═════╝╚═╝  ╚═╝    ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     
+
+Found devices:
+    0. "/dev/azihsm0"
+Selected device: "/dev/azihsm0"
+Device type: DdiDeviceKind(2), Resource Count: 64, FIPS Approved: false
+
+MainThread: thread_count 1 total_counter 29679 in secs 20: RPS: 1483
+MainThread: Per request time: Samples 29679 Mean: 673.6us, Median: 671.6us, Min: 667.4us, Max: 803.1us, Std Dev: 3.5us, P75: 671.6us P90: 671.6us P95: 671.6us P99: 685.0us

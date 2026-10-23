@@ -1,0 +1,7 @@
+unix_time	label	op	threads	payload	keys	seconds	ops	rps	mean_us	stddev_us	min_us	p50_us	p90_us	p99_us	max_us	errors
+1792768570	v0.0.0.0-61023072test, pf_res_cnt=64 (tsra_perf MBOR cross-check)	mbor-get-api-rev	1	-	1	20	686467	34323.3	29.0	3.0	24.4	28.5	30.4	39.1	97.9	0
+1792768596	v0.0.0.0-61023072test, pf_res_cnt=64 (tsra_perf MBOR cross-check)	mbor-get-api-rev	32	-	1	20	1709415	85470.8	374.0	179.5	154.7	300.8	609.1	1063.1	2679.1	0
+1792768622	v0.0.0.0-61023072test, pf_res_cnt=64 (tsra_perf MBOR cross-check)	mbor-ecc-sign-p256	1	32B digest	1	20	48128	2406.4	415.0	2.2	409.8	414.7	416.6	424.8	486.0	0
+1792768648	v0.0.0.0-61023072test, pf_res_cnt=64 (tsra_perf MBOR cross-check)	mbor-ecc-sign-p256	32	32B digest	1	20	726894	36344.7	879.7	220.7	489.3	863.6	928.2	1743.7	4661.1	0
+1792768674	v0.0.0.0-61023072test, pf_res_cnt=64 (tsra_perf MBOR cross-check)	mbor-ecc-sign-p384	1	48B digest	1	20	28874	1443.7	692.0	2.4	686.9	691.9	693.5	699.8	753.4	0
+1792768700	v0.0.0.0-61023072test, pf_res_cnt=64 (tsra_perf MBOR cross-check)	mbor-ecc-sign-p384	32	48B digest	1	20	495741	24787.0	1290.4	56.8	1141.7	1289.6	1300.8	1313.2	2612.2	0

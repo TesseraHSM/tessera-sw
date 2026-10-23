@@ -10,7 +10,8 @@ with software GHASH) to the BCP (CDMA) bulk crypto engine did to TBOR
 commands. Every keyed TBOR command unmasks its key with AES-GCM, so all of
 them are affected, not only `TestAesGcm`.
 
-All runs were on the Uno EVB with host mcrnix (`tsra.ko`), kvanto-manticore
+All runs were on the Uno EVB with host mcrnix (`tsra.ko` loaded with
+`pf_res_cnt=64`, as the flash pipeline always loads it), kvanto-manticore
 `8c1930e`. Each `(operation, threads)` pair runs alone: 3 s warm-up, 20 s
 measured, 3 s cool-down. Requests rotate through 8 keys per key type and 64
 messages per thread. Every operation was checked against the host reference
@@ -72,3 +73,10 @@ MBOR keeps its keys in the vault, so a sign does no unmasking (and MBOR masking
 uses AES-CBC, not GCM). At 16 threads MBOR P-256 signs about twice as fast as
 TBOR (33.6k vs. 16.8k RPS). Under load, CP1's per-request work in TBOR, which
 includes unmasking every key, is still the limit; the PKA engines are not.
+
+## TBOR vs. MBOR
+
+`tbor-vs-mbor-61023072/` compares every TBOR operation that has an MBOR
+equivalent against it, under identical settings (one firmware, 1 and 32
+threads, one key and input per operation), TBOR measured with `tsra_perf` and
+MBOR with `mcr_perf`.
