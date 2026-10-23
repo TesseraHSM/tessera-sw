@@ -1064,21 +1064,9 @@ pub fn part_psk_is_default(
         // depth so the match stays exhaustive.
         _ => return Err(HsmError::InvalidPskId),
     };
-    if stored.len() != default.len() {
-        return Ok(false);
-    }
-    // Constant-time, a word at a time: `stored` is read uncached from the
-    // partition store, where each load costs the same whatever its width.
-    let (stored_words, stored_rest) = stored.as_chunks::<4>();
-    let (default_words, default_rest) = default.as_chunks::<4>();
-    let mut diff = 0u32;
-    for (a, b) in stored_words.iter().zip(default_words) {
-        diff |= u32::from_ne_bytes(*a) ^ u32::from_ne_bytes(*b);
-    }
-    for (a, b) in stored_rest.iter().zip(default_rest) {
-        diff |= u32::from(a ^ b);
-    }
-    Ok(diff == 0)
+    // Constant-time, burst-reading `stored` out of the partition store,
+    // which CP1 reads uncached.
+    Ok(stored.ct_eq(default))
 }
 
 /// Whether the partition's caller-presented credential blob has been

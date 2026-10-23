@@ -85,6 +85,10 @@ const GCM_AAD_PAD: usize = 32;
 
 type Block = [u8; AES_BLOCK_SIZE];
 
+/// A word-aligned block, which DMA memory can be burst-read into.
+#[repr(C, align(4))]
+struct AlignedBlock(Block);
+
 // =============================================================================
 // GHASH accumulator
 // =============================================================================
@@ -648,15 +652,16 @@ impl UnoHsmPal {
             .len()
             .checked_sub(GCM_TAG_LEN)
             .ok_or(HsmError::InvalidArg)?;
-        let mut tag = [0u8; GCM_TAG_LEN];
-        tag.copy_from_slice(&data[len..]);
+        // One burst read: the tag sits in uncached DMA memory.
+        let mut tag = AlignedBlock([0; GCM_TAG_LEN]);
+        data[len..].copy_to_slice(&mut tag.0);
         let result = self
             .gcm_run(
                 io,
                 key,
                 iv,
                 aad_len,
-                Dir::Decrypt(&tag),
+                Dir::Decrypt(&tag.0),
                 Bufs::Slack {
                     buf: &mut *data,
                     len,
@@ -664,7 +669,7 @@ impl UnoHsmPal {
             )
             .await
             .map(|_| ());
-        data[len..].copy_from_slice(&tag);
+        data[len..].copy_from_slice(&tag.0);
         result
     }
 }

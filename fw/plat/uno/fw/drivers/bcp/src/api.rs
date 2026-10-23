@@ -13,6 +13,7 @@ use embassy_time::Instant;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
+use tsra_fw_hsm_pal_traits::copy_from_uncached;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
@@ -689,12 +690,26 @@ fn bring_up() {
 }
 
 /// Write a key into the vault slot of command `id`, as little-endian words.
+///
+/// The key (in a vault slot or a request buffer) sits in memory CP1 reads
+/// uncached, so it is burst-read into a stack copy first, which is wiped
+/// once loaded.
 fn load_key(id: usize, key: &[u8]) {
-    let (words, _) = key.as_chunks::<4>();
+    let mut copy = Aligned([0; BCP_KEY_LEN]);
+    copy_from_uncached(&mut copy.0, key);
+    let (words, _) = copy.0.as_chunks::<4>();
     for (i, word) in words.iter().enumerate() {
         BCP.key_vault[id * KEY_WORDS + i].set(u32::from_le_bytes(*word));
     }
+    for word in copy.0.as_chunks_mut::<4>().0 {
+        // SAFETY: `word` is a valid, writable part of `copy`.
+        unsafe { core::ptr::write_volatile(word, [0; 4]) };
+    }
 }
+
+/// Word-aligned bytes, so [`copy_from_uncached`] can burst into them.
+#[repr(C, align(4))]
+struct Aligned<const N: usize>([u8; N]);
 
 /// Wipe the vault slot of command `id`.
 fn clear_key(id: usize) {
@@ -756,15 +771,14 @@ fn write_dfl(id: usize, req: &GcmRequest<'_>) {
 
 /// Read the tag the engine wrote back into the DFL element of command `id`.
 fn read_tag(id: usize) -> [u8; BCP_TAG_LEN] {
-    let p = dfl_ptr(id);
-    let mut tag = [0u8; BCP_TAG_LEN];
-    let (words, _) = tag.as_chunks_mut::<4>();
-    for (i, chunk) in words.iter_mut().enumerate() {
-        // SAFETY: see `write_dfl`; DW1-4 lie within the element.
-        let word = unsafe { p.add(DFL_CRYPTO_OUT_DW + i).read_volatile() };
-        *chunk = word.to_le_bytes();
-    }
-    tag
+    // SAFETY: see `write_dfl`; DW1-4 lie within the element, and the
+    // engine finished writing them before the CQE that got us here.
+    let src = unsafe {
+        core::slice::from_raw_parts(dfl_ptr(id).add(DFL_CRYPTO_OUT_DW) as *const u8, BCP_TAG_LEN)
+    };
+    let mut tag = Aligned([0; BCP_TAG_LEN]);
+    copy_from_uncached(&mut tag.0, src);
+    tag.0
 }
 
 /// Write an abort for command `id` at ring index `sq_idx`.

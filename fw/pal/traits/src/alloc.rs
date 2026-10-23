@@ -177,6 +177,34 @@ impl DmaBuf {
     pub fn copy_to_slice(&self, dst: &mut [u8]) {
         copy_from_uncached(dst, &self.inner);
     }
+
+    /// Constant-time equality with `other`: no early exit on a mismatch.
+    ///
+    /// Reads this buffer in bursts (see [`copy_from_uncached`]) through a
+    /// stack copy that is wiped afterwards, so it suits secrets kept in DMA
+    /// memory.
+    pub fn ct_eq(&self, other: &[u8]) -> bool {
+        if self.inner.len() != other.len() {
+            return false;
+        }
+        #[repr(C, align(4))]
+        struct Block([u8; 32]);
+        let mut copy = Block([0; 32]);
+        let mut diff = 0u8;
+        for (a, b) in self.inner.chunks(32).zip(other.chunks(32)) {
+            let copy = &mut copy.0[..a.len()];
+            copy_from_uncached(copy, a);
+            for (x, y) in copy.iter().zip(b) {
+                diff |= x ^ y;
+            }
+        }
+        for b in copy.0.iter_mut() {
+            // SAFETY: `b` is a valid, writable byte of `copy`.
+            unsafe { core::ptr::write_volatile(b, 0) };
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        diff == 0
+    }
 }
 
 /// Copies `src` into `dst`, which must be the same length, reading `src`
@@ -204,8 +232,38 @@ pub fn copy_from_uncached(dst: &mut [u8], src: &[u8]) {
         // `dst` is a distinct `&mut`, so they do not overlap.
         unsafe { burst_copy(src.as_ptr(), dst.as_mut_ptr(), blocks) };
         done = blocks * 32;
+        if dst.len() - done >= 16 {
+            // SAFETY: as above, for the 16 bytes at `done`.
+            unsafe { burst_copy16(src.as_ptr().add(done), dst.as_mut_ptr().add(done)) };
+            done += 16;
+        }
     }
     dst[done..].copy_from_slice(&src[done..]);
+}
+
+/// Copies 16 bytes from `src` to `dst` with a four-word burst load and store.
+///
+/// # Safety
+///
+/// `src` and `dst` must be word-aligned, valid for 16 bytes of reads and
+/// writes respectively, and must not overlap.
+#[cfg(target_arch = "arm")]
+#[inline]
+unsafe fn burst_copy16(src: *const u8, dst: *mut u8) {
+    // SAFETY: per the function contract.
+    unsafe {
+        core::arch::asm!(
+            "ldm {src}, {{r0, r1, r2, r3}}",
+            "stm {dst}, {{r0, r1, r2, r3}}",
+            src = in(reg) src,
+            dst = in(reg) dst,
+            out("r0") _,
+            out("r1") _,
+            out("r2") _,
+            out("r3") _,
+            options(nostack, preserves_flags),
+        );
+    }
 }
 
 /// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word burst
