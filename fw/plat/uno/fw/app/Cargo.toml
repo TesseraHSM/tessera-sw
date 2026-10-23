@@ -14,10 +14,12 @@ test = false
 [dependencies]
 cortex-m = { features = ["critical-section-single-core"], workspace = true }
 cortex-m-rt = { features = ["device"], workspace = true }
+# The executor's `trace` hooks (which record the running task) are only
+# needed by the trace backends and `profile` below, which enable them; left
+# out otherwise, every task poll skips them.
 embassy-executor = { features = [
   "executor-thread",
   "platform-cortex-m",
-  "trace",
 ], workspace = true }
 embassy-futures = { workspace = true }
 embassy-sync = { workspace = true }
@@ -76,11 +78,13 @@ fault-stackdump = ["tsra_fw_uno_fault/fault-stackdump"]
 # needs `semihosting` (SYS_READY / SYS_EXIT) — trace is verbose output
 # only and all tests pass without it.
 trace-semihosting = [
+  "embassy-executor/trace",
   "tsra_fw_uno_trace/backend-semihosting",
   "tsra_fw_uno_trace/level-info",
   "tsra_fw_uno_trace/tracing",
 ]
 trace-uart = [
+  "embassy-executor/trace",
   "tsra_fw_uno_trace/backend-uart",
   "tsra_fw_uno_trace/level-info",
   "tsra_fw_uno_trace/tracing",
@@ -93,6 +97,7 @@ trace-uart = [
 # `Debug` formatting, so unlike `trace-semihosting` it stays cheap and can
 # be combined with a no-trace (production-like) build for profiling.
 profile = [
+  "embassy-executor/trace",
   "tsra_fw_uno_drivers_profile/backend-semihosting",
   "tsra_fw_uno_drivers_profile/trace",
 ]
