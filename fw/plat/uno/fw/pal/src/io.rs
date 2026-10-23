@@ -110,23 +110,25 @@ impl UnoHsmIo {
         // a host IO), so an internally created admin IO stores the same
         // encoding for `pid()` to round-trip it back to `pid`.
         let axi_id = crate::pal::pfn_to_axi_id(u8::from(pid)).unwrap_or(crate::pal::NO_PARTITION);
-        IO_Q.io_meta[ADMIN_IO_INDEX as usize]
-            .ctlr
+        let meta: &IoMetaEntry = &IO_Q.io_meta[ADMIN_IO_INDEX as usize];
+        meta.ctlr
             .write(IO_META_CTLR::CONTROLLER_ID.val(axi_id as u32));
-        Self::load(ADMIN_IO_INDEX)
+        let queue = meta.queue.extract();
+        Self::load(
+            ADMIN_IO_INDEX,
+            axi_id,
+            queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
+            queue.read(IO_META_QUEUE::QUEUE_INDEX) as u16,
+        )
     }
 
-    /// Makes the handle for slot `index`, copying in its `IO_META` entry and
-    /// SQE.
-    fn load(index: u16) -> Self {
+    /// Makes the handle for slot `index` from its routing metadata (as
+    /// recorded in its `IO_META` entry), copying in its SQE.
+    fn load(index: u16, axi_id: u8, queue_id: u16, queue_idx: u16) -> Self {
         const _ASSERT_SQE_SIZE: () =
             assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<HsmSqe>());
         const _ASSERT_SQE_ALIGN: () =
             assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<HsmSqe>());
-
-        let meta: &IoMetaEntry = &IO_Q.io_meta[index as usize];
-        let axi_id = meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
-        let queue = meta.queue.extract();
 
         // Host slots have an SQE; the admin slot (past `IO_SQ`) has none and
         // keeps an all-zero one.
@@ -149,8 +151,8 @@ impl UnoHsmIo {
             pid: HsmPartId::from(
                 crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
             ),
-            queue_id: queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
-            queue_idx: queue.read(IO_META_QUEUE::QUEUE_INDEX) as u16,
+            queue_id,
+            queue_idx,
             sqe,
         }
     }
@@ -210,9 +212,14 @@ impl HsmIoController for UnoHsmPal {
 
     /// Awaits the next inbound IO from the IIC driver.
     async fn poll_io(&self) -> HsmResult<Self::Io> {
-        let index = self.iic.recv().await;
-        reset_io_alloc(self, index);
-        Ok(UnoHsmIo::load(index))
+        let io = self.iic.recv().await;
+        reset_io_alloc(self, io.index);
+        Ok(UnoHsmIo::load(
+            io.index,
+            io.axi_id,
+            io.queue_id,
+            io.queue_index,
+        ))
     }
 
     /// Posts the completion (CQE) to the host via OIC.

@@ -17,9 +17,66 @@ use tsra_fw_uno_trace::tracing::*;
 
 use crate::ChannelConfig;
 use crate::IcqEntry;
+use crate::IcqInfo;
+use crate::IcqStatus;
 use crate::IoMetaEntry;
 use crate::IoMetaQueue;
 use crate::IsqEntry;
+
+/// An inbound IO taken off the ICQ by [`IicDriver::recv`]: its IO_SQ slot
+/// and the routing metadata that is also written to the slot's IO_META
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecvIo {
+    /// IO_SQ slot index.
+    pub index: u16,
+    /// AXI id of the source controller.
+    pub axi_id: u8,
+    /// Source queue identifier.
+    pub queue_id: u16,
+    /// Index of the IO within its source queue.
+    pub queue_index: u16,
+}
+
+/// Reads the ICQ entry at `p` with one four-word burst: the ring sits in
+/// memory CP1 reads uncached, where each load costs tens of cycles whatever
+/// its width but a burst costs little more than one.
+///
+/// # Safety
+///
+/// `p` must point to a word-aligned ICQ entry.
+#[inline(always)]
+unsafe fn read_entry(p: *const IcqEntry) -> IcqEntry {
+    let w: [u32; 4];
+    #[cfg(target_arch = "arm")]
+    {
+        let (a, b, c, d): (u32, u32, u32, u32);
+        // SAFETY: per the function contract.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r0, r1, r2, r3}}",
+                p = in(reg) p,
+                out("r0") a,
+                out("r1") b,
+                out("r2") c,
+                out("r3") d,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        w = [a, b, c, d];
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        // SAFETY: per the function contract.
+        w = unsafe { core::ptr::read_volatile(p as *const [u32; 4]) };
+    }
+    IcqEntry {
+        addr_lo: w[0],
+        addr_hi: w[1],
+        info: IcqInfo::from(w[2]),
+        status: IcqStatus::from(w[3]),
+    }
+}
 
 /// Mutable driver state — ring indices and async waker.
 struct ChannelState {
@@ -264,12 +321,12 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// Receive an inbound IO request asynchronously (zero-copy).
     ///
     /// Waits until an ICQ entry is available, copies metadata into the
-    /// IO_META sidecar, and returns the IO_SQ slot index. Failed
-    /// entries (status != 0) are silently recycled.
+    /// IO_META sidecar, and returns the IO_SQ slot index along with that
+    /// metadata. Failed entries (status != 0) are silently recycled.
     ///
     /// When done, call [`free_io`](Self::free_io) to return the slot
     /// and grant credit back.
-    pub fn recv(&self) -> impl core::future::Future<Output = u16> + '_ {
+    pub fn recv(&self) -> impl core::future::Future<Output = RecvIo> + '_ {
         poll_fn(move |cx| {
             self.state.with(|s| {
                 // Read tail from shadow (DTCM)
@@ -280,7 +337,9 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
                 }
 
                 let icq_slot = (s.icq_head & Self::MASK) as usize;
-                let entry = unsafe { &*self.icq_ring.add(icq_slot) };
+                // SAFETY: `icq_slot` is within the ring, whose entries are
+                // word-aligned.
+                let entry = unsafe { read_entry(self.icq_ring.add(icq_slot)) };
 
                 let success = entry.status.success();
                 let index = self.buf_index(entry.buffer_addr());
@@ -309,14 +368,21 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
                     return Poll::Pending;
                 }
 
+                let io = RecvIo {
+                    index,
+                    axi_id: entry.info.axi_id(),
+                    queue_id: entry.info.queue_id() as u16,
+                    queue_index: entry.info.queue_index(),
+                };
+
                 // Persist metadata into IO_META sidecar
                 let meta = unsafe { &mut *self.io_meta.add(index as usize) };
-                meta.controller_id = entry.info.axi_id();
+                meta.controller_id = io.axi_id;
                 meta.queue = IoMetaQueue::new()
-                    .with_queue_id(entry.info.queue_id() as u16)
-                    .with_queue_index(entry.info.queue_index());
+                    .with_queue_id(io.queue_id)
+                    .with_queue_index(io.queue_index);
 
-                Poll::Ready(index)
+                Poll::Ready(io)
             })
         })
     }
