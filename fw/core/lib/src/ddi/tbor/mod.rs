@@ -71,10 +71,12 @@ pub(crate) mod session_open_init;
 pub(crate) mod test_aes_gcm;
 pub(crate) mod unwrap_key;
 
+use tsra_fw_ddi_tbor::toc::raw_toc_entry_type;
+use tsra_fw_ddi_tbor::toc::raw_toc_inline_u16;
 use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
-use tsra_fw_ddi_tbor::TocEntry;
+use tsra_fw_ddi_tbor::TocType;
 use tsra_fw_ddi_tbor::PROTOCOL_VERSION;
 use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::DmaBuf;
@@ -954,13 +956,17 @@ pub(crate) fn peek_session_id(view: &RequestView<'_>) -> Option<HsmSessId> {
 }
 
 fn extract_session_id(view: &RequestView<'_>) -> HsmResult<HsmSessId> {
+    // Scan the raw TOC words, which the parse holds: decoding every entry
+    // would read each `uint32` / `uint64` value from the message, in
+    // uncached DMA memory, only to drop it.
     let mut found: Option<u16> = None;
-    for entry in view.toc_iter() {
-        if let TocEntry::SessionId(id) = entry {
+    for i in 0..view.toc_count() {
+        let word = view.toc_word(i);
+        if raw_toc_entry_type(word) == TocType::SessionId as u8 {
             if found.is_some() {
                 return Err(HsmError::DdiDecodeFailed);
             }
-            found = Some(id);
+            found = Some(raw_toc_inline_u16(word));
         }
     }
     found.map(HsmSessId::from).ok_or(HsmError::DdiDecodeFailed)
