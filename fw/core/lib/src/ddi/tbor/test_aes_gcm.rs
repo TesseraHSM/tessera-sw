@@ -27,6 +27,7 @@ use tsra_fw_ddi_tbor_types::AesOp;
 use tsra_fw_ddi_tbor_types::TborTestAesGcmReq;
 use tsra_fw_ddi_tbor_types::TborTestAesGcmResp;
 use tsra_fw_ddi_tbor_types::TEST_AES_GCM_TAG_LEN;
+use tsra_fw_hsm_pal_traits::copy_from_uncached;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
@@ -131,30 +132,27 @@ async fn direct<'p, P: HsmPal>(
     }
     let src = &req_buf[src_off..src_off + pad + text_len];
 
-    let raw = pal.dma_alloc_var(io, |buf| {
-        let frame = TborTestAesGcmResp::encode(
+    let (raw, (data, tag_slot)) = pal.dma_alloc_var_with(io, |buf| {
+        let (enc, data) = TborTestAesGcmResp::encode(
             buf.get_mut(pad..).ok_or(HsmError::NotEnoughSpace)?,
             0,
             false,
         )?
-        .data_reserve(text_len)?
-        .tag_reserve(TEST_AES_GCM_TAG_LEN)?
-        .finish();
-        Ok(pad + frame.as_bytes().len())
+        .data_reserve_range(text_len)?;
+        let (enc, tag) = enc.tag_reserve_range(TEST_AES_GCM_TAG_LEN)?;
+        Ok((pad + enc.finish().as_bytes().len(), (data, tag)))
     })?;
-    let base = raw.as_ptr() as usize;
-    let (data_off, tag_off) = {
-        let out = TborTestAesGcmResp::decode_mut(&mut raw[pad..])?;
-        (
-            out.data.as_ptr() as usize - base,
-            out.tag.as_ptr() as usize - base,
-        )
-    };
-    let mut head = [0u8; 32];
+    let (data_off, tag_off) = (pad + data.start, pad + tag_slot.start);
+    // The frame head sits in DMA memory, which the CPU may read uncached:
+    // save it with burst reads.
+    #[repr(C, align(4))]
+    struct Head([u8; 32]);
+    let mut head = Head([0; 32]);
     let head = head
+        .0
         .get_mut(..data_off - pad)
         .ok_or(HsmError::InternalError)?;
-    head.copy_from_slice(&raw[pad..data_off]);
+    copy_from_uncached(head, &raw[pad..data_off]);
 
     let (front, back) = raw.split_at_mut(data_off + text_len);
     let dst = &mut front[data_off - pad..];
