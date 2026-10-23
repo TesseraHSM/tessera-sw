@@ -1067,9 +1067,16 @@ pub fn part_psk_is_default(
     if stored.len() != default.len() {
         return Ok(false);
     }
-    let mut diff = 0u8;
-    for (a, b) in stored.iter().zip(default.iter()) {
-        diff |= a ^ b;
+    // Constant-time, a word at a time: `stored` is read uncached from the
+    // partition store, where each load costs the same whatever its width.
+    let (stored_words, stored_rest) = stored.as_chunks::<4>();
+    let (default_words, default_rest) = default.as_chunks::<4>();
+    let mut diff = 0u32;
+    for (a, b) in stored_words.iter().zip(default_words) {
+        diff |= u32::from_ne_bytes(*a) ^ u32::from_ne_bytes(*b);
+    }
+    for (a, b) in stored_rest.iter().zip(default_rest) {
+        diff |= u32::from(a ^ b);
     }
     Ok(diff == 0)
 }

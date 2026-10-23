@@ -222,19 +222,36 @@ impl MaskedKeyMetadata {
     /// for future use, and the platform-identity bindings are policy
     /// fields for the caller to compare against current PAL values.
     pub(crate) fn validate_v1(&self) -> HsmResult<()> {
+        let n = self.key_label_len as usize;
+        // Pad bytes after the label MUST be zero — prevents callers
+        // from smuggling unbound-looking data through the slack — and so
+        // must the reserved tail. The two are adjacent, so one pass over
+        // `key_label[n..] ‖ _reserved` checks both.
         if self.magic != META_MAGIC
             || self.version.get() != META_VERSION_V1
-            || (self.key_label_len as usize) > KEY_LABEL_MAX
-            || !self._reserved.iter().all(|&b| b == 0)
+            || n > KEY_LABEL_MAX
+            || !all_zero(&self.as_bytes()[LABEL_OFF + n..])
         {
-            return Err(HsmError::MaskedKeyDecodeFailed);
-        }
-        // Pad bytes after the label MUST be zero — prevents callers
-        // from smuggling unbound-looking data through the slack.
-        let n = self.key_label_len as usize;
-        if !self.key_label[n..].iter().all(|&b| b == 0) {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
         Ok(())
     }
+}
+
+/// Offset of `key_label`, which the reserved tail directly follows.
+const LABEL_OFF: usize = core::mem::offset_of!(MaskedKeyMetadata, key_label);
+const _: () = assert!(
+    core::mem::offset_of!(MaskedKeyMetadata, _reserved) == LABEL_OFF + KEY_LABEL_MAX
+        && LABEL_OFF + KEY_LABEL_MAX + RESERVED_LEN == META_LEN
+);
+
+/// `true` iff every byte of `bytes` is zero.
+///
+/// Metadata is checked in place in the DMA heap, which CP1 reads uncached
+/// at the same cost per load whatever its width, so this ORs whole words
+/// instead of testing byte by byte.
+fn all_zero(bytes: &[u8]) -> bool {
+    let (words, rest) = bytes.as_chunks::<4>();
+    let acc = words.iter().fold(0u32, |acc, w| acc | u32::from_ne_bytes(*w));
+    acc == 0 && rest.iter().all(|&b| b == 0)
 }
