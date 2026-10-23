@@ -74,9 +74,13 @@ pub(crate) struct Header {
 /// * [`Error::InvalidAadLength`] — `aad_len_be` violates the alg's
 ///   granularity.
 pub(crate) fn read_header(buf: &[u8]) -> Result<Header> {
-    let head = buf
-        .get(..HEADER_LEN)
-        .ok_or(Error::BufferTooSmall { needed: HEADER_LEN })?;
+    // Read the header once: envelopes usually sit in DMA memory, which the
+    // CPU may read uncached at a fixed cost per load.
+    let mut head = [0u8; HEADER_LEN];
+    head.copy_from_slice(
+        buf.get(..HEADER_LEN)
+            .ok_or(Error::BufferTooSmall { needed: HEADER_LEN })?,
+    );
     if head[..4] != FORMAT_TAG {
         return Err(Error::InvalidFormat);
     }
