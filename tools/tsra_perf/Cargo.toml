@@ -1,0 +1,30 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "tsra_perf"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+name = "tsra_perf"
+path = "src/main.rs"
+
+[dependencies]
+clap = { features = ["derive"], workspace = true }
+rand.workspace = true
+tsra_crypto.workspace = true
+tsra_ddi.workspace = true
+tsra_ddi_interface.workspace = true
+tsra_ddi_mbor_test_helpers.workspace = true
+tsra_ddi_tbor_test_harness.workspace = true
+tsra_ddi_tbor_types.workspace = true
+
+[features]
+default = []
+# Run against the in-process emulator instead of the device driver.
+emu = ["tsra_ddi/emu", "tsra_ddi_tbor_test_harness/emu"]
+
+[lints]
+workspace = true

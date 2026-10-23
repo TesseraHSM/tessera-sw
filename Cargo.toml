@@ -88,6 +88,7 @@ members = [
   "plugins/ossl_prov/integration-tests/openssl-capi",
   "plugins/ossl_prov/integration-tests/openssl-cli",
   "tools/resiliency_stress",
+  "tools/tsra_perf",
   "xtask",
 
 ]

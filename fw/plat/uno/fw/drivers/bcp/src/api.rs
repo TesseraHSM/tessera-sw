@@ -15,7 +15,6 @@ use tock_registers::interfaces::Writeable;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
-use tsra_fw_uno_drivers_uart::Uart;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::bcp::regs::BcpRegs;
 use tsra_fw_uno_reg_soc::bcp::BCP_BASE;
@@ -305,8 +304,6 @@ struct BcpState {
     cq_ci: u16,
     /// Free command IDs (bit N = ID N free).
     free: u8,
-    /// Last internal-slot error state reported on the UART.
-    err_state: [u32; 3],
     /// Per command ID; IDs index the key-vault slots and DFL elements.
     slots: [Slot; MAX_IN_FLIGHT],
 }
@@ -335,7 +332,6 @@ impl BcpDriver {
                 sq_pi: 0,
                 cq_ci: 0,
                 free: ALL_FREE,
-                err_state: [0; 3],
                 slots: core::array::from_fn(|_| Slot {
                     waker: WakerRegistration::new(),
                     done: false,
@@ -466,16 +462,12 @@ fn reap(s: &mut BcpState, pi: u16) {
 
         let id = dw0.cmd_id() as usize;
         if id >= MAX_IN_FLIGHT || s.free & (1 << id) != 0 {
-            diag("stray", &[dw0.into(), dw1.into()]);
             continue;
         }
 
         if s.slots[id].aborting {
             // The abort freeing a failed command's engine slot is done; the
             // command completes with its original status.
-            if dw0.status() & BCP_STATUS_ERROR != 0 {
-                diag("abort", &[dw0.into(), dw1.into()]);
-            }
             let slot = &mut s.slots[id];
             slot.aborting = false;
             slot.done = true;
@@ -495,9 +487,6 @@ fn reap(s: &mut BcpState, pi: u16) {
                 BCP.cmd_slot_err_status0.get(),
                 BCP.cmd_slot_err_status1.get(),
             ];
-            if err != [0, BCP_ERR1_TAG_MISMATCH] {
-                diag("err", &[dw0.into(), dw1.into(), err[0], err[1]]);
-            }
             write_abort(s.sq_pi as usize, id);
             ring(s);
         }
@@ -515,49 +504,15 @@ fn reap(s: &mut BcpState, pi: u16) {
     }
 
     BCP.cq_ci.write(CQ_CI::INDEX.val(s.cq_ci.into()));
-
-    // Report internal slots left in the error state, once per change.
-    let state = [
-        BCP.cmd_slot_err_state0.get(),
-        BCP.cmd_slot_err_state1.get(),
-        BCP.cmd_slot_err_state2.get() & 0xF,
-    ];
-    if state != s.err_state {
-        s.err_state = state;
-        diag("slot-err", &state);
-    }
 }
 
 /// Reset a stuck engine and fail every command in flight. The next command
 /// brings the engine back up.
 fn recover(s: &mut BcpState) {
-    diag(
-        "stall",
-        &[
-            BCP.control.get(),
-            BCP.status.get(),
-            BCP.sq_pi.get(),
-            BCP.sq_ci.get(),
-            BCP.cq_pi.get(),
-            BCP.cq_ci.get(),
-            GSRAM.bcp_sq_ci_shadow.get(),
-            GSRAM.bcp_cq_pi_shadow.get(),
-            BCP.intr_cause.get(),
-            BCP.cmd_slot_err_state0.get(),
-            BCP.cmd_slot_err_state1.get(),
-            BCP.cmd_slot_err_state2.get(),
-            BCP.cmd_slot_reserved0.get(),
-            BCP.cmd_slot_reserved1.get(),
-            BCP.cmd_slot_reserved2.get(),
-            BCP.cmd_cmpl_engine_status.get(),
-        ],
-    );
-
     BCP.control.write(CONTROL::CDMA_RST::SET);
     s.up = false;
     s.sq_pi = 0;
     s.cq_ci = 0;
-    s.err_state = [0; 3];
 
     let free = s.free;
     for (i, slot) in s.slots.iter_mut().enumerate() {
@@ -568,22 +523,6 @@ fn recover(s: &mut BcpState) {
             slot.waker.wake();
         }
     }
-}
-
-/// Bring-up diagnostics on the HSM UART: `BCP <what> <hex words>`.
-pub fn diag(what: &str, words: &[u32]) {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut uart = Uart::new();
-    uart.write("BCP ");
-    uart.write(what);
-    for &w in words {
-        let mut buf = [b' '; 9];
-        for (i, b) in buf[1..].iter_mut().enumerate() {
-            *b = HEX[((w >> (28 - 4 * i)) & 0xF) as usize];
-        }
-        uart.write_bytes(&buf);
-    }
-    uart.write_bytes(b"\r\n");
 }
 
 /// Check a request.
@@ -672,17 +611,6 @@ fn bring_up() {
             + CONTROL::CQE_NVME_UPDT_EN::SET,
     );
     BCP.control.modify(CONTROL::CDMA_EN::SET);
-
-    diag(
-        "up",
-        &[
-            BCP.control.get(),
-            BCP.status.get(),
-            BCP.sq_cfg.get(),
-            BCP.cq_cfg.get(),
-            BCP.list0_cfg.get(),
-        ],
-    );
 }
 
 /// Write a key into the vault slot of command `id`, as little-endian words.

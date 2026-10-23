@@ -4,15 +4,16 @@
 //! TBOR `TestAesGcm` command handler (test-only, feature `tbor-test-cmds`).
 //!
 //! AES-256-GCM encrypts or decrypts the request `data` under the raw
-//! request `key` through the PAL's [`HsmAes`] bulk GCM methods, so the
-//! platform's bulk crypto engine (the BCP on Uno) can be exercised end to
-//! end on the regular HSM command path. Out of session; nothing is
-//! persisted. The command is an encryption oracle under host-chosen keys,
-//! which is why it is compiled only with `tbor-test-cmds`.
+//! request `key` through the PAL's in-place [`HsmAes`] GCM methods — the
+//! same path firmware key masking takes — so the platform's GCM can be
+//! exercised and measured end to end on the regular HSM command path. Out
+//! of session; nothing is persisted. The command is an encryption oracle
+//! under host-chosen keys, which is why it is compiled only with
+//! `tbor-test-cmds`.
 //!
-//! The PAL takes a `[padded_AAD | text]` source buffer, so the handler
-//! formats one in a scratch DMA buffer, has the PAL write the text and tag
-//! straight into the response, and wipes the scratch.
+//! The PAL works on a `[padded_AAD | text]` buffer, so the handler formats
+//! one in a scratch DMA buffer, transforms it in place, copies the text
+//! into the response, and wipes the scratch.
 //!
 //! [`HsmAes`]: tsra_fw_hsm_pal_traits::HsmAes
 
@@ -64,17 +65,17 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // returned.
     let result = {
         let out = TborTestAesGcmResp::decode_mut(resp)?;
-        let src = &work[..buf_len];
+        let buf = &mut work[..buf_len];
         let result = if encrypt {
-            pal.gcm_bulk_encrypt(io, key, iv, aad_len, src, out.data, out.tag)
+            pal.gcm_encrypt_in_place(io, key, iv, aad_len, buf, out.tag)
                 .await
         } else {
             out.tag.copy_from_slice(tag);
-            pal.gcm_bulk_decrypt(io, key, iv, aad_len, tag, src, out.data)
+            pal.gcm_decrypt_in_place(io, key, iv, aad_len, tag, buf)
                 .await
         };
-        if result.is_err() {
-            out.data.zeroize();
+        if result.is_ok() {
+            out.data.copy_from_slice(&buf[pad..]);
         }
         result
     };

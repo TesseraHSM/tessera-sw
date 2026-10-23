@@ -12,12 +12,12 @@ Licensed under the MIT License.
 ## Description
 
 AES-256-GCM encrypts or decrypts host-supplied `data` under a **raw**
-32-byte key carried in the request, through the platform's bulk crypto
-engine on the regular HSM command path (the PAL `HsmAes::gcm_bulk_encrypt` /
-`gcm_bulk_decrypt` methods). On Uno that engine is the BCP (CDMA); the std
-platform uses its software AES. It exists to bring up and validate the
-engine end to end, without key provisioning or a session. Nothing is
-persisted.
+32-byte key carried in the request, through the platform's GCM on the
+regular HSM command path (the PAL `HsmAes::gcm_encrypt_in_place` /
+`gcm_decrypt_in_place` methods, the same path firmware key masking takes).
+On Uno that is the CP1 AES engine with software GHASH; the std platform
+uses its software AES. It exists to validate and measure the platform GCM
+end to end, without key provisioning or a session. Nothing is persisted.
 
 The command is an encryption oracle under host-chosen keys, so the
 firmware dispatches it only when built with the `tbor-test-cmds` cargo

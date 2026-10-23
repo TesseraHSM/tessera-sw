@@ -32,9 +32,6 @@
 //! [`HsmAes::gcm_bulk_encrypt`]: tsra_fw_hsm_pal_traits::HsmAes::gcm_bulk_encrypt
 //! [`HsmAes::gcm_bulk_decrypt`]: tsra_fw_hsm_pal_traits::HsmAes::gcm_bulk_decrypt
 
-use core::sync::atomic::AtomicU32;
-use core::sync::atomic::Ordering;
-
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -47,7 +44,6 @@ use tsra_fw_uno_drivers_bcp::BCP_TEXT_ALIGN;
 use tsra_fw_uno_drivers_bcp::BcpError;
 use tsra_fw_uno_drivers_bcp::GcmOp;
 use tsra_fw_uno_drivers_bcp::GcmRequest;
-use tsra_fw_uno_drivers_bcp::diag;
 
 use super::aes::AES_BLOCK_SIZE;
 use super::gcm::GCM_IV_LEN;
@@ -58,31 +54,6 @@ use super::gcm::padded_aad_len;
 use crate::UnoHsmPal;
 
 type Block = [u8; AES_BLOCK_SIZE];
-
-/// Bring-up counters, printed on the HSM UART every [`OPS_REPORT`]
-/// operations as `BCP ops <engine> <len-fix> <tail-fix> <software>
-/// <hw-auth>`:
-/// operations run on the BCP, of which with an AAD length-block fix-up and
-/// with a partial-block fix-up; operations with no whole block (software
-/// only); and decrypts the BCP authenticated itself.
-static OPS: [AtomicU32; 5] = [const { AtomicU32::new(0) }; 5];
-const OP_ENGINE: usize = 0;
-const OP_LEN_FIX: usize = 1;
-const OP_TAIL_FIX: usize = 2;
-const OP_SOFTWARE: usize = 3;
-const OP_HW_AUTH: usize = 4;
-const OPS_REPORT: u32 = 64;
-
-fn count(op: usize) {
-    OPS[op].fetch_add(1, Ordering::Relaxed);
-}
-
-fn report_ops() {
-    let ops = OPS.each_ref().map(|c| c.load(Ordering::Relaxed));
-    if (ops[OP_ENGINE] + ops[OP_SOFTWARE]).is_multiple_of(OPS_REPORT) {
-        diag("ops", &ops);
-    }
-}
 
 /// GCM length block `[8·aad_len]₆₄ ‖ [8·text_len]₆₄`.
 fn len_block(aad_len: usize, text_len: usize) -> Block {
@@ -228,13 +199,6 @@ impl UnoHsmPal {
             let len = len_block(aad_len, text_len);
 
             let s = if aligned_len > 0 {
-                count(OP_ENGINE);
-                if pad != aad_len {
-                    count(OP_LEN_FIX);
-                }
-                if tail_ct.is_some() {
-                    count(OP_TAIL_FIX);
-                }
                 let len_hw = len_block(pad, aligned_len);
 
                 // The tag the engine should compute: T' = T ⊕ (L' ⊕ L)·H when
@@ -276,7 +240,6 @@ impl UnoHsmPal {
                 }
             } else {
                 // No whole text block for the engine.
-                count(OP_SOFTWARE);
                 ghash.update(&src[..pad]);
                 if let Some(ct) = tail_ct {
                     ghash.update(&ct);
@@ -285,7 +248,6 @@ impl UnoHsmPal {
                 ghash.finish()
             };
 
-            report_ops();
             Ok(xor(&s, &ek_j0))
         })
         .await
@@ -340,9 +302,6 @@ impl UnoHsmPal {
             Ok(c) => c.ok() || (!encrypt && c.tag_mismatch_only()),
             Err(_) => false,
         };
-        if !encrypt && matches!(&done, Ok(c) if c.ok()) {
-            count(OP_HW_AUTH);
-        }
         if ok {
             dst[..aligned_len].copy_from_slice(&hw_dst[pad..pad + aligned_len]);
         }

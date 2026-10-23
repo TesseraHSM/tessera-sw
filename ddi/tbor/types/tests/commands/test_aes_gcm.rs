@@ -4,9 +4,10 @@
 //! Integration tests for the test-only TBOR `TestAesGcm` command.
 //!
 //! `TestAesGcm` runs AES-256-GCM under a raw host key through the
-//! device's bulk crypto engine (the PAL `HsmAes::gcm_bulk_*` methods: the
-//! BCP on Uno, software AES on std/emu). The firmware must be built with
-//! `tbor-test-cmds`; the std/emu build and the Uno bring-up image are.
+//! device's GCM (the PAL `HsmAes::gcm_*_in_place` methods that key masking
+//! uses: CP1 AES with software GHASH on Uno, software AES on std/emu). The
+//! firmware must be built with `tbor-test-cmds`; the std/emu build and the
+//! Uno bring-up image are.
 //!
 //! Every result is checked against an independent reference: the NIST
 //! CAVP AES-256 GCM vectors, the GCM spec (McGrew & Viega) AES-256 test
