@@ -59,19 +59,25 @@ const NUM_ELEMENTS: u32 = DEPTH.trailing_zeros() - 3;
 /// Chunks one command may span; see [`BCP_MAX_SRC_LEN`].
 const MAX_CHUNKS: usize = 2;
 
-/// Commands in flight at once. Each command has at most [`MAX_CHUNKS`]
-/// SQEs the engine may not have fetched yet (its chunks, or later the
-/// abort that frees a failed command's engine slot, sent only after the
-/// command's CQE) and at most one CQE not yet reaped. A ring must stay one
-/// short of full so it never looks empty (`PI == CI`).
-const MAX_IN_FLIGHT: usize = (DEPTH - 1) / MAX_CHUNKS;
+/// SQEs the commands in flight may have outstanding. Each command reserves
+/// one per chunk from submission until it completes: the engine may not
+/// have fetched them yet, and the abort that frees a failed command's
+/// engine slot (sent only after the command's CQE, so after its chunks
+/// were fetched) reuses the reservation. A ring must stay one short of
+/// full so it never looks empty (`PI == CI`).
+const SQE_BUDGET: usize = DEPTH - 1;
 
-/// Tasks that can wait for a free command ID before the oldest waiters are
-/// woken early to make room (they then register again).
-const ID_WAITERS: usize = 8;
+/// Command IDs: as many as single-chunk commands fit [`SQE_BUDGET`]. Each
+/// command has at most one CQE not yet reaped.
+const IDS: usize = SQE_BUDGET;
+
+/// Tasks that can wait for a command ID before the oldest waiters are
+/// woken early to make room (they then register again): every task that
+/// can run a command, so a busy engine does not churn the waiters.
+const ID_WAITERS: usize = 32;
 
 /// `free` bitmap with every command ID free.
-const ALL_FREE: u8 = ((1u16 << MAX_IN_FLIGHT) - 1) as u8;
+const ALL_FREE: u8 = ((1u16 << IDS) - 1) as u8;
 
 /// Command deadline. One chunk takes microseconds; past this the engine is
 /// presumed stuck, reset, and the commands in flight fail. Well inside the
@@ -342,6 +348,8 @@ struct Slot {
     tag: [u8; BCP_TAG_LEN],
     err: [u32; 2],
     deadline: Instant,
+    /// SQEs reserved against [`SQE_BUDGET`] until the command completes.
+    chunks: u8,
 }
 
 struct BcpState {
@@ -353,15 +361,18 @@ struct BcpState {
     cq_ci: u16,
     /// Free command IDs (bit N = ID N free).
     free: u8,
+    /// SQEs reserved by the commands in flight (at most [`SQE_BUDGET`]).
+    reserved: usize,
     /// Tasks waiting for a free command ID.
     id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
-    slots: [Slot; MAX_IN_FLIGHT],
+    slots: [Slot; IDS],
 }
 
 /// Async BCP driver.
 ///
-/// Up to `MAX_IN_FLIGHT` commands may be outstanding, and further callers
+/// Up to `IDS` commands may be outstanding while their chunks fit
+/// [`SQE_BUDGET`], and further callers
 /// wait for a command ID; each command owns the key-vault slot and DFL
 /// element numbered by its ID.
 pub struct BcpDriver {
@@ -384,6 +395,7 @@ impl BcpDriver {
                 sq_pi: 0,
                 cq_ci: 0,
                 free: ALL_FREE,
+                reserved: 0,
                 id_waiters: MultiWakerRegistration::new(),
                 slots: core::array::from_fn(|_| Slot {
                     waker: WakerRegistration::new(),
@@ -393,6 +405,7 @@ impl BcpDriver {
                     tag: [0; BCP_TAG_LEN],
                     err: [0; 2],
                     deadline: Instant::from_ticks(0),
+                    chunks: 0,
                 }),
             }),
         }
@@ -420,7 +433,8 @@ impl BcpDriver {
                     if let Err(e) = validate(&req) {
                         return Poll::Ready(Err(e));
                     }
-                    if s.free == 0 {
+                    let chunks = req.data.src().1.div_ceil(BCP_CHUNK_LEN);
+                    if s.free == 0 || s.reserved + chunks > SQE_BUDGET {
                         s.id_waiters.register(cx.waker());
                         return Poll::Pending;
                     }
@@ -434,6 +448,8 @@ impl BcpDriver {
                     s.slots[id].done = false;
                     s.slots[id].aborting = false;
                     s.slots[id].deadline = Instant::now() + CMD_TIMEOUT;
+                    s.slots[id].chunks = chunks as u8;
+                    s.reserved += chunks;
                     cmd = Some(id);
 
                     load_key(id, req.key);
@@ -451,6 +467,7 @@ impl BcpDriver {
                         err: slot.err,
                     };
                     slot.tag = [0; BCP_TAG_LEN];
+                    s.reserved -= usize::from(slot.chunks);
                     clear_key(id);
                     s.free |= 1 << id;
                     s.id_waiters.wake();
@@ -517,7 +534,7 @@ fn reap(s: &mut BcpState, pi: u16) {
         s.cq_ci = (s.cq_ci + 1) & MASK;
 
         let id = dw0.cmd_id() as usize;
-        if id >= MAX_IN_FLIGHT || s.free & (1 << id) != 0 {
+        if id >= IDS || s.free & (1 << id) != 0 {
             continue;
         }
 

@@ -10,9 +10,9 @@
 //! run PQC now, so CP1 drives it directly: it is the Uno PAL's AES-GCM.
 //! The driver programs one 8-entry submission/completion queue pair and
 //! DFL list 0 in GSRAM, and submits AES-256-GCM commands of up to two
-//! 4 KiB chunks, three at a time; further callers wait for a command ID.
-//! Each in-flight command owns the key-vault slot and DFL entry matching
-//! its command ID.
+//! 4 KiB chunks, up to seven at a time while their chunks fit the ring;
+//! further callers wait. Each in-flight command owns the key-vault slot and
+//! DFL entry matching its command ID.
 //!
 //! The engine has no interrupt routed to CP1, so completions are reaped by
 //! [`BcpDriver::wake`], which the PAL calls from its poll loop. The engine
