@@ -27,12 +27,16 @@
 use core::mem;
 use core::ops::AsyncFnOnce;
 
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
+use tsra_fw_hsm_pal_traits::SQE_DWORDS;
+use tsra_fw_hsm_pal_traits::copy_from_uncached;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
@@ -41,8 +45,6 @@ use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::UnoHsmPal;
 use crate::alloc::ADMIN_IO_INDEX;
@@ -57,6 +59,11 @@ const IO_Q: StaticRef<IoGsramRegs> = unsafe { StaticRef::new(IO_GSRAM_BASE as *c
 /// Holds the slot index for the lifetime of a single IO operation.
 /// Metadata (controller_id, queue_id, queue_index) is stored in
 /// `IO_META[index]`, written by the IIC driver at recv time.
+///
+/// The metadata and the SQE are copied in when the handle is made: IO
+/// GSRAM is uncached, every CPU load from it costs tens of cycles, and the
+/// core reads the SQE fields and the partition many times per IO. Neither
+/// changes while the IO owns the slot.
 #[derive(Debug)]
 pub struct UnoHsmIo {
     /// IO_SQ slot index. Host IO uses `0..ADMIN_IO_INDEX`; the reserved
@@ -64,6 +71,13 @@ pub struct UnoHsmIo {
     /// for PAL-internal provisioning crypto. So the valid range is
     /// `0..=ADMIN_IO_INDEX`, not just the host range.
     index: u16,
+    /// Partition, from `IO_META[index]`.
+    pid: HsmPartId,
+    /// Queue ID and index, from `IO_META[index]`.
+    queue_id: u16,
+    queue_idx: u16,
+    /// Copy of `IO_SQ[index]`.
+    sqe: HsmSqe,
 }
 
 impl UnoHsmIo {
@@ -92,23 +106,53 @@ impl UnoHsmIo {
     /// [`ADMIN_IO_INDEX`]: crate::alloc::ADMIN_IO_INDEX
     /// [`UnoScopedAlloc`]: crate::alloc::UnoScopedAlloc
     pub(crate) fn admin_no_scrub(pid: HsmPartId) -> Self {
-        let io = Self {
-            index: ADMIN_IO_INDEX,
-        };
         // CONTROLLER_ID holds the hardware axi_id (what IIC `recv` records for
         // a host IO), so an internally created admin IO stores the same
         // encoding for `pid()` to round-trip it back to `pid`.
         let axi_id = crate::pal::pfn_to_axi_id(u8::from(pid)).unwrap_or(crate::pal::NO_PARTITION);
-        io.io_meta()
+        IO_Q.io_meta[ADMIN_IO_INDEX as usize]
             .ctlr
             .write(IO_META_CTLR::CONTROLLER_ID.val(axi_id as u32));
-        io
+        Self::load(ADMIN_IO_INDEX)
     }
 
-    /// Returns a reference to the IO_META entry for this slot.
-    #[inline]
-    fn io_meta(&self) -> &IoMetaEntry {
-        &IO_Q.io_meta[self.index as usize]
+    /// Makes the handle for slot `index`, copying in its `IO_META` entry and
+    /// SQE.
+    fn load(index: u16) -> Self {
+        const _ASSERT_SQE_SIZE: () =
+            assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<HsmSqe>());
+        const _ASSERT_SQE_ALIGN: () =
+            assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<HsmSqe>());
+
+        let meta: &IoMetaEntry = &IO_Q.io_meta[index as usize];
+        let axi_id = meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
+        let queue = meta.queue.extract();
+
+        // Host slots have an SQE; the admin slot (past `IO_SQ`) has none and
+        // keeps an all-zero one.
+        let mut sqe: HsmSqe = [0; SQE_DWORDS];
+        if let Some(io_sq) = IO_Q.io_sq.get(index as usize) {
+            // SAFETY: `IoSqEntry` and `HsmSqe` have the same size and
+            // alignment (asserted above), and both are plain dwords.
+            let src = unsafe {
+                core::slice::from_raw_parts(io_sq as *const IoSqEntry as *const u8, SQE_DWORDS * 4)
+            };
+            // SAFETY: `sqe` is `SQE_DWORDS` dwords, viewed as their bytes.
+            let dst = unsafe {
+                core::slice::from_raw_parts_mut(sqe.as_mut_ptr() as *mut u8, SQE_DWORDS * 4)
+            };
+            copy_from_uncached(dst, src);
+        }
+
+        Self {
+            index,
+            pid: HsmPartId::from(
+                crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
+            ),
+            queue_id: queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
+            queue_idx: queue.read(IO_META_QUEUE::QUEUE_INDEX) as u16,
+            sqe,
+        }
     }
 }
 
@@ -125,32 +169,23 @@ impl HsmIo for UnoHsmIo {
     /// naming no function yields an out-of-range id, which the partition
     /// lookup rejects with `InvalidArg` rather than aliasing a valid slot.
     fn pid(&self) -> HsmPartId {
-        let axi_id = self.io_meta().ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
-        HsmPartId::from(crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION))
+        self.pid
     }
 
     /// Returns the queue ID from IO_META.
     fn queue_id(&self) -> u16 {
-        self.io_meta().queue.read(IO_META_QUEUE::QUEUE_ID) as u16
+        self.queue_id
     }
 
     /// Returns the queue index from IO_META.
     fn queue_idx(&self) -> u16 {
-        self.io_meta().queue.read(IO_META_QUEUE::QUEUE_INDEX) as u16
+        self.queue_idx
     }
 
-    /// Returns the SQE from `IO_SQ[index]`.
-    ///
-    /// IIC DMAs the host-side 64-byte SQE directly into this slot, so it
-    /// can be read in-place without a copy.
+    /// Returns the SQE the IIC DMAed into `IO_SQ[index]` (copied in when the
+    /// handle was made).
     fn sqe(&self) -> &HsmSqe {
-        const _ASSERT_SQE_SIZE: () =
-            assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<HsmSqe>());
-        const _ASSERT_SQE_ALIGN: () =
-            assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<HsmSqe>());
-
-        let io_sq = &IO_Q.io_sq[self.index as usize];
-        unsafe { &*(io_sq as *const IoSqEntry as *const HsmSqe) }
+        &self.sqe
     }
 
     /// Returns a mutable reference to the CQE at `IO_CQ[index]`.
@@ -177,7 +212,7 @@ impl HsmIoController for UnoHsmPal {
     async fn poll_io(&self) -> HsmResult<Self::Io> {
         let index = self.iic.recv().await;
         reset_io_alloc(self, index);
-        Ok(UnoHsmIo { index })
+        Ok(UnoHsmIo::load(index))
     }
 
     /// Posts the completion (CQE) to the host via OIC.

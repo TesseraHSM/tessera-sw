@@ -167,38 +167,45 @@ impl DmaBuf {
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Copies this buffer into `dst`, which must be the same length.
-    ///
-    /// DMA memory is uncached: each CPU load waits out the interconnect's
-    /// latency (~45 cycles on Uno) whatever its width, while a burst of
-    /// eight words costs little more than one load. When both buffers are
-    /// word-aligned this moves whole 32-byte blocks with burst loads, so
-    /// reading a structure out of DMA memory once and working on the copy
-    /// beats reading it field by field in place.
+    /// Copies this buffer into `dst`, which must be the same length, with
+    /// burst reads: see [`copy_from_uncached`].
     ///
     /// # Panics
     ///
     /// Panics if the lengths differ.
     #[inline]
     pub fn copy_to_slice(&self, dst: &mut [u8]) {
-        assert_eq!(
-            self.inner.len(),
-            dst.len(),
-            "DmaBuf::copy_to_slice length mismatch"
-        );
-        #[allow(unused_mut)]
-        let mut done = 0;
-        #[cfg(target_arch = "arm")]
-        if (self.inner.as_ptr() as usize | dst.as_ptr() as usize) % 4 == 0 {
-            let blocks = dst.len() / 32;
-            // SAFETY: both ranges hold `blocks * 32` bytes and are
-            // word-aligned; `dst` is a distinct `&mut`, so they do not
-            // overlap.
-            unsafe { burst_copy(self.inner.as_ptr(), dst.as_mut_ptr(), blocks) };
-            done = blocks * 32;
-        }
-        dst[done..].copy_from_slice(&self.inner[done..]);
+        copy_from_uncached(dst, &self.inner);
     }
+}
+
+/// Copies `src` into `dst`, which must be the same length, reading `src`
+/// in bursts where the platform has them.
+///
+/// For memory the CPU reads uncached (DMA memory on Uno), each load waits
+/// out the interconnect's latency (~45 cycles) whatever its width, while a
+/// burst of eight words costs little more than one load. When both slices
+/// are word-aligned this moves whole 32-byte blocks with burst loads, so
+/// reading a structure out of such memory once and working on the copy
+/// beats reading it field by field in place.
+///
+/// # Panics
+///
+/// Panics if the lengths differ.
+#[inline]
+pub fn copy_from_uncached(dst: &mut [u8], src: &[u8]) {
+    assert_eq!(src.len(), dst.len(), "copy_from_uncached length mismatch");
+    #[allow(unused_mut)]
+    let mut done = 0;
+    #[cfg(target_arch = "arm")]
+    if (src.as_ptr() as usize | dst.as_ptr() as usize) % 4 == 0 {
+        let blocks = dst.len() / 32;
+        // SAFETY: both ranges hold `blocks * 32` bytes and are word-aligned;
+        // `dst` is a distinct `&mut`, so they do not overlap.
+        unsafe { burst_copy(src.as_ptr(), dst.as_mut_ptr(), blocks) };
+        done = blocks * 32;
+    }
+    dst[done..].copy_from_slice(&src[done..]);
 }
 
 /// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word burst
