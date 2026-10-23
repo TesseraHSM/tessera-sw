@@ -16,6 +16,8 @@ pub const IPC_ADMIN_HSM_TX_CI_OFFSET: u32 = 0x7010;
 pub const ICQ_TAIL_SHADOW_OFFSET: u32 = 0xEF40;
 pub const OCQ_TAIL_SHADOW_OFFSET: u32 = 0x11E40;
 pub const GDMA_CQ_TAIL_SHADOW_OFFSET: u32 = 0x13240;
+pub const BCP_SQ_CI_SHADOW_OFFSET: u32 = 0x16180;
+pub const BCP_CQ_PI_SHADOW_OFFSET: u32 = 0x16184;
 pub const IPC_ADMIN_HSM_RX_RING_OFFSET: u32 = 0x7014;
 pub const IPC_ADMIN_HSM_RX_RING_COUNT: u32 = 2;
 pub const IPC_ADMIN_HSM_RX_RING_STRIDE: u32 = 0x40;
@@ -55,6 +57,15 @@ pub const UPKA_ENGINE_CMD_STRIDE: u32 = 0x14;
 pub const SHA_CMD_OFFSET: u32 = 0x154A4;
 pub const SHA_CMD_COUNT: u32 = 32;
 pub const SHA_CMD_STRIDE: u32 = 0x20;
+pub const BCP_SQ_OFFSET: u32 = 0x16000;
+pub const BCP_SQ_COUNT: u32 = 8;
+pub const BCP_SQ_STRIDE: u32 = 0x10;
+pub const BCP_CQ_OFFSET: u32 = 0x16100;
+pub const BCP_CQ_COUNT: u32 = 8;
+pub const BCP_CQ_STRIDE: u32 = 0x08;
+pub const BCP_DFL_OFFSET: u32 = 0x16200;
+pub const BCP_DFL_COUNT: u32 = 8;
+pub const BCP_DFL_STRIDE: u32 = 0x80;
 pub const IO_META_OFFSET: u32 = 0x20C58;
 pub const IO_META_COUNT: u32 = 33;
 pub const IO_META_STRIDE: u32 = 0x08;
@@ -119,6 +130,14 @@ tock_registers::register_bitfields! [u32,
     ],
     /// 'DMA shadow of a queue producer/consumer index.'
     pub GDMA_CQ_TAIL_SHADOW [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'DMA shadow of a queue producer/consumer index.'
+    pub BCP_SQ_CI_SHADOW [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'DMA shadow of a queue producer/consumer index.'
+    pub BCP_CQ_PI_SHADOW [
         VAL OFFSET(0) NUMBITS(32) [],
     ],
     /// 'Inbound Completion Queue info: status and interface select.'
@@ -323,6 +342,59 @@ pub struct ShaCmdEntry {
     pub sha_key_len: crate::RW<u32>,
 }
 
+/// Regfile entry struct for `bcp_sqe`.
+#[repr(C)]
+pub struct BcpSqe {
+    pub dw0: crate::RW<u32>,
+    pub dw1: crate::RW<u32>,
+    pub dw2: crate::RW<u32>,
+    pub dw3: crate::RW<u32>,
+}
+
+/// Regfile entry struct for `bcp_cqe`.
+#[repr(C)]
+pub struct BcpCqe {
+    pub dw0: crate::RW<u32>,
+    pub dw1: crate::RW<u32>,
+}
+
+/// Regfile entry struct for `bcp_dfl_entry`.
+#[repr(C)]
+pub struct BcpDflEntry {
+    pub dw0: crate::RW<u32>,
+    pub dw1: crate::RW<u32>,
+    pub dw2: crate::RW<u32>,
+    pub dw3: crate::RW<u32>,
+    pub dw4: crate::RW<u32>,
+    pub dw5: crate::RW<u32>,
+    pub dw6: crate::RW<u32>,
+    pub dw7: crate::RW<u32>,
+    pub dw8: crate::RW<u32>,
+    pub dw9: crate::RW<u32>,
+    pub dw10: crate::RW<u32>,
+    pub dw11: crate::RW<u32>,
+    pub dw12: crate::RW<u32>,
+    pub dw13: crate::RW<u32>,
+    pub dw14: crate::RW<u32>,
+    pub dw15: crate::RW<u32>,
+    pub dw16: crate::RW<u32>,
+    pub dw17: crate::RW<u32>,
+    pub dw18: crate::RW<u32>,
+    pub dw19: crate::RW<u32>,
+    pub dw20: crate::RW<u32>,
+    pub dw21: crate::RW<u32>,
+    pub dw22: crate::RW<u32>,
+    pub dw23: crate::RW<u32>,
+    pub dw24: crate::RW<u32>,
+    pub dw25: crate::RW<u32>,
+    pub dw26: crate::RW<u32>,
+    pub dw27: crate::RW<u32>,
+    pub dw28: crate::RW<u32>,
+    pub dw29: crate::RW<u32>,
+    pub dw30: crate::RW<u32>,
+    pub dw31: crate::RW<u32>,
+}
+
 /// Regfile entry struct for `io_meta_entry`.
 #[repr(C)]
 pub struct IoMetaEntry {
@@ -367,9 +439,18 @@ pub mod regs {
             (0x15364 => pub upka_engine_cmd: [super::UpkaCmdEntry; 16]),
             (0x154a4 => pub sha_cmd: [super::ShaCmdEntry; 32]),
             (0x158a4 => _reserved6),
+            (0x16000 => pub bcp_sq: [super::BcpSqe; 8]),
+            (0x16080 => _reserved7),
+            (0x16100 => pub bcp_cq: [super::BcpCqe; 8]),
+            (0x16140 => _reserved8),
+            (0x16180 => pub bcp_sq_ci_shadow: crate::RW<u32, super::BCP_SQ_CI_SHADOW::Register>),
+            (0x16184 => pub bcp_cq_pi_shadow: crate::RW<u32, super::BCP_CQ_PI_SHADOW::Register>),
+            (0x16188 => _reserved9),
+            (0x16200 => pub bcp_dfl: [super::BcpDflEntry; 8]),
+            (0x16600 => _reserved10),
             (0x20c58 => pub io_meta: [super::IoMetaEntry; 33]),
             (0x20d60 => pub sram_io_buf: [u8; 540672]),
-            (0xa4d60 => _reserved7),
+            (0xa4d60 => _reserved11),
             (0x1d0000 => pub fp_dsa_cache: [u8; 196608]),
             (0x200000 => @END),
         }

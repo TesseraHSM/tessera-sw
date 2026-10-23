@@ -5,8 +5,8 @@
 //!
 //! `TestAesGcm` AES-256-GCM encrypts or decrypts up to
 //! [`TEST_AES_GCM_DATA_MAX_LEN`] bytes under a **raw** key carried in the
-//! request, through the platform's `HsmAes` GCM path. It exists to bring
-//! up and validate a platform GCM engine end to end without key
+//! request, through the platform's `HsmAes` bulk GCM path. It exists to
+//! bring up and validate a platform GCM engine end to end without key
 //! provisioning or a session. The firmware dispatches it only when built
 //! with the `tbor-test-cmds` feature: it is an encryption oracle under
 //! host-chosen keys and must never ship in a production image.

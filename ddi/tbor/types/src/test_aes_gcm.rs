@@ -5,7 +5,7 @@
 //!
 //! `TestAesGcm` is an **out-of-session** command that AES-256-GCM
 //! encrypts or decrypts `data` under a **raw** key carried in the
-//! request, through the device's regular HSM GCM path.  It exists to
+//! request, through the device's bulk crypto engine.  It exists to
 //! bring up and validate a platform GCM engine end to end, without key
 //! provisioning or a session.  The firmware only dispatches it when
 //! built with the `tbor-test-cmds` feature; production images reject

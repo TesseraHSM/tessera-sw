@@ -88,7 +88,7 @@ const CTR_LOW_OFFSET: usize = 12;
 /// neither `Copy` nor `Clone`: the table makes a copy expensive, and
 /// nothing needs one.
 #[derive(Debug)]
-struct Ghash {
+pub(super) struct Ghash {
     /// `H`'s multiples, high and low halves: entry `i` is `i · H`.
     hh: [u64; 16],
     hl: [u64; 16],
@@ -101,7 +101,7 @@ impl Ghash {
     /// Create a new GHASH accumulator from a 16-byte hash subkey `H`.
     ///
     /// Returns `None` when `h.len() != 16`.
-    fn new(h: &[u8]) -> Option<Self> {
+    pub(super) fn new(h: &[u8]) -> Option<Self> {
         let h: &[u8; 16] = h.try_into().ok()?;
 
         let mut hh = [0u64; 16];
@@ -151,7 +151,7 @@ impl Ghash {
     ///
     /// Follows the GHASH update rule: each block is XORed into the
     /// running state before a finite-field multiplication by `H`.
-    fn update(&mut self, data: &DmaBuf) {
+    pub(super) fn update(&mut self, data: &[u8]) {
         for chunk in data.chunks(16) {
             let mut block = [0u8; 16];
             block[..chunk.len()].copy_from_slice(chunk);
@@ -224,8 +224,8 @@ impl Ghash {
     }
 
     /// Return the final GHASH value as a byte array.
-    #[cfg(test)]
-    fn finish(self) -> [u8; 16] {
+    #[cfg(any(test, feature = "bcp"))]
+    pub(super) fn finish(self) -> [u8; 16] {
         self.y
     }
 }
@@ -293,7 +293,7 @@ impl GcmLayout {
 /// Compute the padded AAD length (a multiple of [`GCM_AAD_PAD`]).
 ///
 /// Returns 0 when `aad_len` is 0 (no AAD region at all).
-fn padded_aad_len(aad_len: usize) -> usize {
+pub(super) fn padded_aad_len(aad_len: usize) -> usize {
     if aad_len == 0 {
         0
     } else {
@@ -370,7 +370,7 @@ fn increment_counter(block: &mut DmaBuf) {
 // =============================================================================
 
 /// Constant-time comparison of two byte slices.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -451,7 +451,7 @@ impl UnoHsmPal {
     /// Single-block AES-ECB encrypt: `output = AES_K(block)`.
     ///
     /// Both `block` and `output` must be exactly [`AES_BLOCK_SIZE`].
-    async fn ecb_encrypt_block(
+    pub(super) async fn ecb_encrypt_block(
         &self,
         io: &impl HsmIo,
         key: &DmaBuf,

@@ -398,6 +398,74 @@ pub trait HsmAes {
         data: &mut DmaBuf,
     ) -> HsmResult<()>;
 
+    // ── AES-GCM on the bulk crypto engine ─────────────────────────
+
+    /// AES-256-GCM encrypt on the platform's bulk crypto engine.
+    ///
+    /// `src` uses the `[padded_AAD | text]` layout of
+    /// [`gcm_encrypt`](Self::gcm_encrypt); only the text is written out.
+    /// Platforms without a separate bulk engine run the same transform as
+    /// `gcm_encrypt`. On Uno the bulk engine is the BCP (CDMA), which is
+    /// only built into bring-up images (`tbor-test-cmds`).
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (per-IO scope).
+    /// - `key` — AES-256 key (32 bytes).
+    /// - `iv` — 12-byte (96-bit) nonce. Must be unique per encryption
+    ///   with the same key.
+    /// - `aad_len` — **Unpadded** AAD length in bytes.
+    /// - `src` — `[padded_AAD | plaintext]`.
+    /// - `dst` — Ciphertext destination; at least
+    ///   `src.len() - round_up_32(aad_len)` bytes.
+    /// - `tag` — Output buffer for the 16-byte authentication tag.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — ciphertext written to the start of `dst`, `tag` set.
+    /// - `Err(HsmError::InvalidArg)` — key or IV length invalid, or the
+    ///   text is larger than the engine accepts.
+    /// - `Err(HsmError::AesGcmInvalidBufferSize)` — buffer sizes
+    ///   inconsistent with `aad_len`.
+    /// - `Err(HsmError::UnsupportedCmd)` — no bulk engine in this build.
+    /// - `Err(HsmError)` — engine failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn gcm_bulk_encrypt(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        src: &DmaBuf,
+        dst: &mut DmaBuf,
+        tag: &mut DmaBuf,
+    ) -> HsmResult<()>;
+
+    /// AES-256-GCM decrypt on the platform's bulk crypto engine.
+    ///
+    /// The decrypt counterpart of
+    /// [`gcm_bulk_encrypt`](Self::gcm_bulk_encrypt): `src` is
+    /// `[padded_AAD | ciphertext]` and `dst` receives the plaintext once
+    /// `tag` verifies.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — tag verified, plaintext written to the start of `dst`.
+    /// - `Err(HsmError::AesGcmDecryptTagDoesNotMatch)` — authentication
+    ///   failed; `dst` holds no plaintext.
+    /// - Otherwise as [`gcm_bulk_encrypt`](Self::gcm_bulk_encrypt).
+    #[allow(clippy::too_many_arguments)]
+    async fn gcm_bulk_decrypt(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        tag: &DmaBuf,
+        src: &DmaBuf,
+        dst: &mut DmaBuf,
+    ) -> HsmResult<()>;
+
     // ── AES Key Wrap (RFC 3394) ────────────────────────────────────
 
     /// AES Key Wrap (RFC 3394) — wrap key data.

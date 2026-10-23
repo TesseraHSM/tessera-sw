@@ -4,10 +4,9 @@
 //! Integration tests for the test-only TBOR `TestAesGcm` command.
 //!
 //! `TestAesGcm` runs AES-256-GCM under a raw host key through the
-//! device's regular HSM GCM path (the PAL `HsmAes::gcm_*` methods), so it
-//! exercises whichever GCM engine the platform wires there. The firmware
-//! must be built with `tbor-test-cmds`; the std/emu build and the Uno
-//! bring-up image are.
+//! device's bulk crypto engine (the PAL `HsmAes::gcm_bulk_*` methods: the
+//! BCP on Uno, software AES on std/emu). The firmware must be built with
+//! `tbor-test-cmds`; the std/emu build and the Uno bring-up image are.
 //!
 //! Every result is checked against an independent reference: the GCM
 //! spec (McGrew & Viega) AES-256 test cases 13-16, and the host OpenSSL
@@ -15,10 +14,10 @@
 //! uses a fresh key, IV, AAD and text, so nothing can be cached or
 //! specialized across calls.
 //!
-//! Text lengths are split into block-aligned and unaligned sets. The CP1
-//! AES engine rejects CTR lengths that are not a multiple of 16
-//! (known-issues 2.4), so on silicon the unaligned set fails for as long
-//! as GCM runs on CP1 AES-CTR.
+//! Text lengths are split into block-aligned and unaligned sets. The BCP
+//! only processes whole blocks, so on Uno the aligned set runs entirely on
+//! the engine, while the unaligned set (and every AAD length that is not a
+//! multiple of 32) also exercises the PAL's software tag correction.
 //!
 //! Coverage:
 //! * GCM spec test cases 13-16, encrypt and decrypt.

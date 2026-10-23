@@ -412,6 +412,50 @@ impl HsmAes for UnoHsmPal {
             .await
     }
 
+    async fn gcm_bulk_encrypt(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        src: &DmaBuf,
+        dst: &mut DmaBuf,
+        tag: &mut DmaBuf,
+    ) -> HsmResult<()> {
+        #[cfg(feature = "bcp")]
+        {
+            self.gcm_bulk_encrypt_impl(io, key, iv, aad_len, src, dst, tag)
+                .await
+        }
+        #[cfg(not(feature = "bcp"))]
+        {
+            let _ = (io, key, iv, aad_len, src, dst, tag);
+            Err(HsmError::UnsupportedCmd)
+        }
+    }
+
+    async fn gcm_bulk_decrypt(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        tag: &DmaBuf,
+        src: &DmaBuf,
+        dst: &mut DmaBuf,
+    ) -> HsmResult<()> {
+        #[cfg(feature = "bcp")]
+        {
+            self.gcm_bulk_decrypt_impl(io, key, iv, aad_len, tag, src, dst)
+                .await
+        }
+        #[cfg(not(feature = "bcp"))]
+        {
+            let _ = (io, key, iv, aad_len, tag, src, dst);
+            Err(HsmError::UnsupportedCmd)
+        }
+    }
+
     // ── AES Key Wrap (RFC 3394) / Key Wrap with Padding (RFC 5649) ──
 
     /// AES-KW wrap (RFC 3394 §2.2.1).

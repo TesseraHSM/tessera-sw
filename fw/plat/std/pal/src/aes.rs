@@ -202,6 +202,50 @@ impl HsmAes for StdHsmPal {
             .await
     }
 
+    async fn gcm_bulk_encrypt(
+        &self,
+        _io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        src: &DmaBuf,
+        dst: &mut DmaBuf,
+        tag: &mut DmaBuf,
+    ) -> HsmResult<()> {
+        let iv = gcm_iv(iv)?;
+        let tag = gcm_tag_mut(tag)?;
+        let (aad, pad) = gcm_layout(src, aad_len)?;
+        let text = &src[pad..];
+        if dst.len() < text.len() {
+            return Err(HsmError::AesGcmInvalidBufferSize);
+        }
+        self.aes
+            .gcm_encrypt(key, iv, aad, text, &mut dst[..text.len()], tag)
+            .await
+    }
+
+    async fn gcm_bulk_decrypt(
+        &self,
+        _io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        tag: &DmaBuf,
+        src: &DmaBuf,
+        dst: &mut DmaBuf,
+    ) -> HsmResult<()> {
+        let iv = gcm_iv(iv)?;
+        let tag = gcm_tag(tag)?;
+        let (aad, pad) = gcm_layout(src, aad_len)?;
+        let text = &src[pad..];
+        if dst.len() < text.len() {
+            return Err(HsmError::AesGcmInvalidBufferSize);
+        }
+        self.aes
+            .gcm_decrypt(key, iv, aad, tag, text, &mut dst[..text.len()])
+            .await
+    }
+
     async fn aes_kw_wrap(
         &self,
         _io: &impl HsmIo,

@@ -12,11 +12,12 @@ Licensed under the MIT License.
 ## Description
 
 AES-256-GCM encrypts or decrypts host-supplied `data` under a **raw**
-32-byte key carried in the request, through the platform's regular HSM
-GCM path (the PAL `HsmAes::gcm_encrypt_in_place` /
-`gcm_decrypt_in_place` methods). It exists to bring up and validate a
-platform GCM engine end to end, without key provisioning or a session.
-Nothing is persisted.
+32-byte key carried in the request, through the platform's bulk crypto
+engine on the regular HSM command path (the PAL `HsmAes::gcm_bulk_encrypt` /
+`gcm_bulk_decrypt` methods). On Uno that engine is the BCP (CDMA); the std
+platform uses its software AES. It exists to bring up and validate the
+engine end to end, without key provisioning or a session. Nothing is
+persisted.
 
 The command is an encryption oracle under host-chosen keys, so the
 firmware dispatches it only when built with the `tbor-test-cmds` cargo
@@ -71,9 +72,12 @@ Carries the transformed text followed by the 16-byte tag.
 | `UnsupportedCmd` | Firmware built without `tbor-test-cmds` |
 | `DdiDecodeFailed` | Malformed request body (wrong fixed length, or `aad` / `data` over the maximum) |
 
-Platform GCM engines may also return their own errors. On Uno, while GCM
-runs on CP1 AES-CTR, a `data` length that is not a multiple of 16 is
-rejected by the AES engine (known issue 2.4).
+Platform engines may also return their own errors (on Uno, BCP driver
+errors such as a failed engine command).
+
+On Uno the BCP processes only whole blocks: the padded AAD and the
+16-byte-aligned part of `data`. The PAL encrypts a final partial block and
+corrects the tag in software, so any `aad` and `data` length is accepted.
 
 ## See also
 

@@ -14,6 +14,7 @@ members = [
   "crates/static_ref",
   "crates/trace",
   "drivers/aes",
+  "drivers/bcp",
   "drivers/bks_store",
   "drivers/boot_status",
   "drivers/core_status",
@@ -49,6 +50,7 @@ tsra_fw_uno_cert_blob = { path = "crates/cert_blob" }
 tsra_fw_uno_reg_cortex_m = { path = "reg/cortex-m" }
 
 tsra_fw_uno_drivers_aes = { path = "drivers/aes" }
+tsra_fw_uno_drivers_bcp = { path = "drivers/bcp" }
 tsra_fw_uno_drivers_bks_store = { path = "drivers/bks_store" }
 tsra_fw_uno_drivers_boot_status = { path = "drivers/boot_status" }
 tsra_fw_uno_drivers_core_status = { path = "drivers/core_status" }

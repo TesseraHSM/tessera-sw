@@ -1,0 +1,205 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+//
+// BCP -- Bulk Crypto Processor (Marvell CDMA engine)
+//
+// Queue-driven AES-256-GCM / AES-256-XTS DMA engine. Previously driven by
+// the FP cores; CP1 drives it directly now that they run PQC. Register
+// layout follows the silicon `Cdma_t` (fp/qmgr/hal/CDMA/RegCdma.h); only
+// the registers the CP1 driver uses are described.
+//
+// MMIO layout:
+//   CFG .. STATUS              @ 0x000 - 0x008
+//   Delivery (submission) Q0   @ 0x020 - 0x038
+//   Completion Q0              @ 0x080 - 0x098
+//   Dummy slave port base      @ 0x0B0 - 0x0B4
+//   List 0 (DFL) config/base   @ 0x0E0 - 0x0E8
+//   Command slot state         @ 0x140 - 0x158 (68 internal slots)
+//   Interrupt cause / enable   @ 0x180 - 0x184
+//   Halt enable                @ 0x18C
+//   Global error check enable  @ 0x190
+//   Engine status, diagnostics @ 0x1DC - 0x210
+//   Command slot error check   @ 0x200 - 0x20C
+//   Key vault                  @ 0x1000 (512 x 32-byte AES-256 keys)
+//
+// Address map:
+//   BCP              @ 0xA0C0_0000  (single instance)
+//
+// Firmware flow:
+//   1. Load the AES-256 key into a key-vault slot (little-endian words).
+//   2. Fill a 128-byte DFL entry (SGL data descriptors + crypto params).
+//   3. Write a 16-byte SQE pointing at the DFL entry; ring SQ_PI.
+//   4. Poll the CQ PI shadow; read the CQE and the tag the engine wrote
+//      back into the DFL entry; advance CQ_CI.
+
+reg bcp_cfg_t {
+    desc = "Engine configuration.";
+    field { sw = rw; hw = r; } RTC[1:0] = 0x0;
+    field { sw = rw; hw = r; } WTC[3:2] = 0x0;
+    field { sw = r; hw = na; } RSVD0[15:4] = 0x0;
+    field { sw = rw; hw = r; } CDMA_OPERATING_MODE[16:16] = 0x0;
+    field { sw = rw; hw = r; } CQ_OPERATING_MODE[17:17] = 0x0;
+    field { sw = rw; hw = r; } MAX_DESCR_ELMNT_CHK_EN[18:18] = 0x0;
+    field { sw = r; hw = na; } RSVD1[31:19] = 0x0;
+};
+
+reg bcp_control_t {
+    desc = "Engine control.";
+    field { sw = rw; hw = rw; desc = "Soft reset."; } CDMA_RST[0:0] = 0x0;
+    field { sw = rw; hw = r; desc = "Engine enable."; } CDMA_EN[1:1] = 0x0;
+    field { sw = rw; hw = r; desc = "AXI read enable."; } AXI_RD_EN[2:2] = 0x0;
+    field { sw = rw; hw = r; desc = "AXI write enable."; } AXI_WR_EN[3:3] = 0x0;
+    field {
+        sw = rw;
+        hw = r;
+        desc = "Write the crypto output (GCM tag) back into the DFL entry
+                at the list's CRYPTO_OUT offset on completion.";
+    } CQE_CRYPTO_UPDT_EN[4:4] = 0x0;
+    field { sw = rw; hw = r; } CQE_NVME_UPDT_EN[5:5] = 0x0;
+    field { sw = r; hw = na; } RSVD0[7:6] = 0x0;
+    field { sw = rw; hw = r; } DESCR_FETCH_PAUSE_REQ[8:8] = 0x0;
+    field { sw = rw; hw = r; } DATA_FETCH_PAUSE_REQ[9:9] = 0x0;
+    field { sw = rw; hw = r; } CRYPTO_PAUSE_REQ[10:10] = 0x0;
+    field { sw = rw; hw = r; } DATA_OUTPUT_PAUSE_REQ[11:11] = 0x0;
+    field { sw = r; hw = na; } RSVD1[31:12] = 0x0;
+};
+
+reg bcp_status_t {
+    desc = "Engine status.";
+    field { sw = r; hw = w; desc = "Halted on a fatal error."; } ERR_HALT[0:0] = 0x0;
+    field { sw = r; hw = w; } ACTIVE[1:1] = 0x0;
+    field { sw = r; hw = w; } AXI_RD_IDLE[2:2] = 0x0;
+    field { sw = r; hw = w; } AXI_WR_IDLE[3:3] = 0x0;
+    field { sw = r; hw = na; } RSVD0[7:4] = 0x0;
+    field { sw = r; hw = w; } DESCR_FETCH_PAUSED[8:8] = 0x0;
+    field { sw = r; hw = w; } DATA_FETCH_PAUSED[9:9] = 0x0;
+    field { sw = r; hw = w; } CRYPTO_PAUSED[10:10] = 0x0;
+    field { sw = r; hw = w; } DATA_OUTPUT_PAUSED[11:11] = 0x0;
+    field { sw = r; hw = na; } RSVD1[31:12] = 0x0;
+};
+
+reg bcp_queue_cfg_t {
+    desc = "Delivery / completion queue configuration.";
+    field {
+        sw = rw;
+        hw = r;
+        desc = "Ring depth: 0=8, 1=16, 2=32, 3=64 entries.";
+    } NUM_ELEMENTS[1:0] = 0x0;
+    field { sw = r; hw = na; } RSVD0[7:2] = 0x0;
+    field {
+        sw = rw;
+        hw = r;
+        desc = "Element size. SQ: 0=16 B. CQ: 0=8 B.";
+    } ELEMENT_SZ[9:8] = 0x0;
+    field { sw = r; hw = na; } RSVD1[15:10] = 0x0;
+    field { sw = rw; hw = r; desc = "Interface select; 0 = SoC AXI."; } INTRFC_SEL[23:16] = 0x0;
+    field { sw = r; hw = na; } RSVD2[29:24] = 0x0;
+    field {
+        sw = rw;
+        hw = r;
+        desc = "Mirror the hardware-owned index (SQ CI / CQ PI) to the
+                shadow address.";
+    } SHADOW_EN[30:30] = 0x0;
+    field { sw = rw; hw = r; desc = "Queue enable."; } EN[31:31] = 0x0;
+};
+
+reg bcp_queue_index_t {
+    desc = "Queue producer / consumer index.";
+    field { sw = rw; hw = rw; } INDEX[11:0] = 0x0;
+    field { sw = r; hw = na; } RSVD0[31:12] = 0x0;
+};
+
+reg bcp_addr_t {
+    desc = "Address word.";
+    field { sw = rw; hw = r; } ADDR[31:0] = 0x0;
+};
+
+reg bcp_list_cfg_t {
+    desc = "Descriptor fetch list (DFL) configuration.";
+    field { sw = rw; hw = r; desc = "Element size in DWORDs."; } ELEMENT_DWORD_SZ[5:0] = 0x0;
+    field {
+        sw = rw;
+        hw = r;
+        desc = "DWORD offset of the source data length / descriptors.";
+    } DESCR_DWORD_OFFSET[11:6] = 0x0;
+    field {
+        sw = rw;
+        hw = r;
+        desc = "DWORD offset of the crypto input (tag or tweak, IV, AAD
+                length).";
+    } CRYPTO_IN_DWORD_OFFSET[17:12] = 0x0;
+    field {
+        sw = rw;
+        hw = r;
+        desc = "DWORD offset the engine writes the crypto output (tag) to.";
+    } CRYPTO_OUT_DWORD_OFFSET[23:18] = 0x0;
+    field { sw = rw; hw = r; desc = "Interface select; 0 = SoC AXI."; } INTRFC_SEL[31:24] = 0x0;
+};
+
+reg bcp_mask_t {
+    desc = "32-bit mask.";
+    field { sw = rw; hw = rw; } MASK[31:0] = 0x0;
+};
+
+reg bcp_key_word_t {
+    desc = "One little-endian key word.";
+    field { sw = w; hw = r; } WORD[31:0] = 0x0;
+};
+
+addrmap bcp {
+    name = "BCP";
+    desc = "Bulk crypto processor (CDMA). Base address 0xA0C0_0000.";
+    default regwidth = 32;
+
+    bcp_cfg_t         CFG                  @ 0x000;
+    bcp_control_t     CONTROL              @ 0x004;
+    bcp_status_t      STATUS               @ 0x008;
+
+    bcp_queue_cfg_t   SQ_CFG               @ 0x020;
+    bcp_addr_t        SQ_BASE_LO           @ 0x024;
+    bcp_addr_t        SQ_BASE_HI           @ 0x028;
+    bcp_addr_t        SQ_CI_SHADOW_ADDR    @ 0x02C;
+    bcp_queue_index_t SQ_PI                @ 0x034;
+    bcp_queue_index_t SQ_CI                @ 0x038;
+
+    bcp_queue_cfg_t   CQ_CFG               @ 0x080;
+    bcp_addr_t        CQ_BASE_LO           @ 0x084;
+    bcp_addr_t        CQ_BASE_HI           @ 0x088;
+    bcp_addr_t        CQ_PI_SHADOW_ADDR    @ 0x08C;
+    bcp_queue_index_t CQ_PI                @ 0x094;
+    bcp_queue_index_t CQ_CI                @ 0x098;
+
+    bcp_addr_t        DUMMY_PORT_BASE_LO   @ 0x0B0;
+    bcp_addr_t        DUMMY_PORT_BASE_HI   @ 0x0B4;
+
+    bcp_list_cfg_t    LIST0_CFG            @ 0x0E0;
+    bcp_addr_t        LIST0_BASE_LO        @ 0x0E4;
+    bcp_addr_t        LIST0_BASE_HI        @ 0x0E8;
+
+    // One bit per internal command slot (68): 32 + 32 + 4.
+    bcp_mask_t        CMD_SLOT_ERR_STATE0  @ 0x140;
+    bcp_mask_t        CMD_SLOT_ERR_STATE1  @ 0x144;
+    bcp_mask_t        CMD_SLOT_ERR_STATE2  @ 0x148;
+    bcp_mask_t        CMD_SLOT_RESERVED0   @ 0x150;
+    bcp_mask_t        CMD_SLOT_RESERVED1   @ 0x154;
+    bcp_mask_t        CMD_SLOT_RESERVED2   @ 0x158;
+
+    bcp_mask_t        INTR_CAUSE           @ 0x180;
+    bcp_mask_t        INTR_ENABLE0         @ 0x184;
+    bcp_mask_t        HALT_ENABLE          @ 0x18C;
+    // Bit 16: key-vault ECC, bit 20: AXI write BRESP, bit 25: AXI read RRESP.
+    bcp_mask_t        GLOBAL_ERR_CHECK_EN  @ 0x190;
+
+    bcp_mask_t        CMD_CMPL_ENGINE_STATUS @ 0x1DC;
+    // Selects the internal slot whose error status 0x208/0x20C report.
+    bcp_mask_t        DIAG_CONTROL         @ 0x1F4;
+
+    bcp_mask_t        CMD_SLOT_ERR_CHECK_EN0 @ 0x200;
+    bcp_mask_t        CMD_SLOT_ERR_CHECK_EN1 @ 0x204;
+    bcp_mask_t        CMD_SLOT_ERR_STATUS0 @ 0x208;
+    bcp_mask_t        CMD_SLOT_ERR_STATUS1 @ 0x20C;
+    bcp_mask_t        DIAG_CMD_SLOT_STATUS0 @ 0x210;
+
+    // 512 slots x 32 bytes; slot N is words [8N, 8N + 8).
+    bcp_key_word_t    KEY_VAULT[4096]      @ 0x1000 += 0x4;
+};

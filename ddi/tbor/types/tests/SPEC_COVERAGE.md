@@ -378,6 +378,23 @@ the dispatcher and firmware through `TestCtx::tbor` / `expect_fw_reject`.
 
 ---
 
+## `TestAesGcm` (opcode out-of-session, test-only `tbor-test-cmds`)
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| GCM spec AES-256 vectors TC13–15 (block-aligned) encrypt and decrypt | ✅ | `test_aes_gcm::spec_vectors_block_aligned` | TC13 has no text, so it never reaches the Uno BCP |
+| GCM spec TC16 (60-byte text, 20-byte AAD) | ✅ | `test_aes_gcm::spec_vector_unaligned` | Exercises the Uno PAL tag correction |
+| Block-aligned text with every AAD layout matches host OpenSSL | ✅ 🔁 | `test_aes_gcm::block_aligned_lengths_match_host` |  |
+| Unaligned and random lengths match host OpenSSL | ✅ 🔁 | `test_aes_gcm::unaligned_lengths_match_host` |  |
+| Request `tag` ignored on encrypt | ✅ | `test_aes_gcm::encrypt_ignores_request_tag` |  |
+| Tampered tag → `AesGcmDecryptTagDoesNotMatch` | ✅ 🔁 | `test_aes_gcm::decrypt_rejects_tampered_tag` |  |
+| Tampered ciphertext / AAD → `AesGcmDecryptTagDoesNotMatch` | ✅ | `test_aes_gcm::decrypt_rejects_tampered_ciphertext_and_aad` |  |
+| Wrong key / IV → `AesGcmDecryptTagDoesNotMatch` | ✅ | `test_aes_gcm::decrypt_rejects_wrong_key_and_iv` |  |
+| Unknown `op` → `InvalidArg` | ✅ 🔁 | `test_aes_gcm::rejects_invalid_op` |  |
+| AAD / text over the maximum rejected | 🟡 | `test_aes_gcm::rejects_over_max_lengths` | Asserted at the request boundary (host encoder or FW decoder) |
+| Default-PSK gate | n/a | — | Out of session |
+| Firmware without `tbor-test-cmds` → `UnsupportedCmd` | ⚠️ | — | The test binary targets `tbor-test-cmds` builds |
+
 ## Known gaps (summary)
 
 The rows marked ⚠️ above, consolidated:

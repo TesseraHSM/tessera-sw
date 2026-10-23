@@ -24,6 +24,7 @@ tsra_fw_static_init = { workspace = true }
 tsra_fw_static_ref = { workspace = true }
 tsra_fw_uno_cert_blob = { workspace = true }
 tsra_fw_uno_drivers_aes = { workspace = true }
+tsra_fw_uno_drivers_bcp = { optional = true, workspace = true }
 tsra_fw_uno_drivers_bks_store = { workspace = true }
 tsra_fw_uno_drivers_boot_status = { workspace = true }
 tsra_fw_uno_drivers_core_status = { workspace = true }
@@ -60,6 +61,9 @@ zeroize = { workspace = true }
 
 [features]
 default = []
+# BCP (CDMA) bulk crypto engine behind `HsmAes::gcm_bulk_*`. Bring-up only:
+# it serves the test-only `TestAesGcm` command.
+bcp = ["dep:tsra_fw_uno_drivers_bcp"]
 # Optional host-poll path: also signal SYS_READY via ARM semihosting in
 # addition to the silicon boot_handshake::set_boot_status(Run). Hosts
 # that cannot snoop semihosting (e.g. production) should disable this
