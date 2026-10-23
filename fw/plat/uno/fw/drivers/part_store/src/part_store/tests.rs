@@ -278,3 +278,50 @@ fn psk_is_default_follows_psk_writes() {
     Partition(pid).psk_co_mut().copy_from_slice(&rotated);
     assert!(!Partition(pid).psk_is_default(true));
 }
+
+/// The DTCM shadow of the small fields serves repeated reads, but every
+/// setter's write shows up in the next read.
+#[test]
+fn shadowed_fields_follow_writes() {
+    let pid = 13usize;
+    let cred = [0x66u8; CREDENTIAL_LEN];
+
+    Partition(pid).reset();
+    Partition(pid).set_state(PartState::Initialized);
+    Partition(pid).set_generation(7);
+    Partition(pid).set_res_mask(0x0123_4567_89ab_cdef_0011_2233_4455_6677);
+    Partition(pid).set_mk_key_id(Some(HsmKeyId::from(0x0102u16)));
+    Partition(pid).set_sd_mk_key_id(Some(HsmKeyId::from(0x0304u16)));
+
+    // Twice each: once loading the shadow, once from it.
+    for _ in 0..2 {
+        let p = Partition(pid);
+        assert_eq!(p.state().unwrap(), PartState::Initialized);
+        assert_eq!(p.generation(), 7);
+        assert_eq!(p.res_mask(), 0x0123_4567_89ab_cdef_0011_2233_4455_6677);
+        assert_eq!(p.mk_key_id(), Some(HsmKeyId::from(0x0102u16)));
+        assert_eq!(p.sd_mk_key_id(), Some(HsmKeyId::from(0x0304u16)));
+        assert_eq!(p.local_mk_key_id(), None);
+        assert!(!p.credential_valid());
+    }
+
+    Partition(pid).set_state(PartState::Enabled);
+    assert_eq!(Partition(pid).state().unwrap(), PartState::Enabled);
+    Partition(pid).bump_generation();
+    assert_eq!(Partition(pid).generation(), 8);
+    Partition(pid).set_res_mask(1);
+    assert_eq!(Partition(pid).res_mask(), 1);
+    Partition(pid).set_mk_key_id(None);
+    assert_eq!(Partition(pid).mk_key_id(), None);
+    Partition(pid).set_local_mk_key_id(Some(HsmKeyId::from(0x0506u16)));
+    assert_eq!(
+        Partition(pid).local_mk_key_id(),
+        Some(HsmKeyId::from(0x0506u16))
+    );
+    Partition(pid).set_credential(buf(&cred)).unwrap();
+    assert!(Partition(pid).credential_valid());
+    Partition(pid).set_sd_initialized(true);
+    assert!(Partition(pid).sd_initialized());
+    Partition(pid).set_sd_initialized(false);
+    assert!(!Partition(pid).sd_initialized());
+}
