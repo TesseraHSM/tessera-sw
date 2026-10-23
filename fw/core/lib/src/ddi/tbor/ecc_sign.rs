@@ -110,23 +110,19 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // Reserve the wire-format signature slot (`r ‖ s`, curve-sized) and
         // have the PAL sign straight into it — no scratch, no copy.
-        let resp = pal.dma_alloc_var(io, |buf| {
-            let frame = TborEccSignResp::encode(buf, 0, false)?
-                .signature_reserve(curve.wire_sig_len())?
-                .finish();
-            Ok(frame.as_bytes().len())
+        let (resp, signature) = pal.dma_alloc_var_with(io, |buf| {
+            let (enc, signature) = TborEccSignResp::encode(buf, 0, false)?
+                .signature_reserve_range(curve.wire_sig_len())?;
+            Ok((enc.finish().as_bytes().len(), signature))
         })?;
-        {
-            let out = TborEccSignResp::decode_mut(resp)?;
-            pal.ecc_sign(
-                io,
-                curve,
-                view.target_key,
-                &operand[..sign_len],
-                out.signature,
-            )
-            .await?;
-        }
+        pal.ecc_sign(
+            io,
+            curve,
+            view.target_key,
+            &operand[..sign_len],
+            &mut resp[signature],
+        )
+        .await?;
         // Coerce the `&mut` response buffer to a shared `&DmaBuf` (preserving
         // the `'p` allocator lifetime) so the async block's output matches
         // the handler's `&'p DmaBuf` return.

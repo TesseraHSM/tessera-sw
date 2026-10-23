@@ -618,6 +618,7 @@ fn gen_state_impls(
                 // via `decode_mut` (zero-copy "reserve + fill").
                 if f.mutable {
                     let reserve_name = format_ident!("{}_reserve", field_name);
+                    let reserve_range_name = format_ident!("{}_reserve_range", field_name);
                     let reserve_code = gen_field_reserve(j, schema, layout);
                     methods.push(quote! {
                         /// Reserve this field's `len` data bytes without
@@ -631,6 +632,20 @@ fn gen_state_impls(
                             #skip_nones
                             #reserve_code
                             Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
+                        }
+
+                        /// Like the plain reserve setter, but also returns
+                        /// the reserved region's byte range in the message,
+                        /// so the caller can fill it without decoding the
+                        /// finished message again.
+                        pub fn #reserve_range_name(mut self, len: usize) -> Result<(#enc_name<'a, #target_state>, core::ops::Range<usize>), tsra_fw_hsm_pal_traits::HsmError> {
+                            const HEADER_LEN: usize = #header_len_tokens;
+                            const TOC_COUNT: usize = #toc_count_expr;
+                            const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
+                            #skip_nones
+                            #reserve_code
+                            let range = DATA_START + self.data_offset - len..DATA_START + self.data_offset;
+                            Ok((#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData }, range))
                         }
                     });
                 }

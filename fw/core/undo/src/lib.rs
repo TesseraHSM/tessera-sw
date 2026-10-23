@@ -293,6 +293,12 @@ impl<'a> UndoLog<'a> {
         self.nentries == 0
     }
 
+    /// `true` if the log holds nothing to walk or scrub: no entries, and no
+    /// bytes written to its buffer since it was last cleared.
+    pub fn is_clean(&self) -> bool {
+        self.nentries == 0 && self.front_dirty == 0 && self.back_dirty == 0
+    }
+
     /// Number of entries pushed.
     pub fn len(&self) -> usize {
         self.nentries

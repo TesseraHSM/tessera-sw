@@ -157,12 +157,11 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
     // Build the response with the `msg` / `iv` slots reserved (sized but
     // unwritten) — no data copy at encode time.
-    let resp = pal.dma_alloc_var(io, |buf| {
-        let frame = TborAesEncryptDecryptResp::encode(buf, 0, false)?
-            .msg_reserve(msg_len)?
-            .iv_reserve(AES_BLOCK_LEN)?
-            .finish();
-        Ok(frame.as_bytes().len())
+    let (resp, (out_msg, out_iv)) = pal.dma_alloc_var_with(io, |buf| {
+        let (enc, out_msg) =
+            TborAesEncryptDecryptResp::encode(buf, 0, false)?.msg_reserve_range(msg_len)?;
+        let (enc, out_iv) = enc.iv_reserve_range(AES_BLOCK_LEN)?;
+        Ok((enc.finish().as_bytes().len(), (out_msg, out_iv)))
     })?;
 
     let masked_key = req.masked_key;
@@ -170,12 +169,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let iv = req.iv;
 
     // Fill the reserved slots in place: unmask the key in the request buffer
-    // and have the AES engine write straight into the response.  The view is
-    // scoped so its borrow of `resp` ends before `resp` is returned.
+    // and have the AES engine write straight into the response.  The slots
+    // are disjoint (`msg` precedes `iv`), so split the response between them.
     {
-        let out = TborAesEncryptDecryptResp::decode_mut(resp)?;
+        let (head, tail) = resp.split_at_mut(out_iv.start);
         transform(
-            pal, io, op, scope, sess_id, masked_key, msg, iv, out.msg, out.iv,
+            pal,
+            io,
+            op,
+            scope,
+            sess_id,
+            masked_key,
+            msg,
+            iv,
+            &mut head[out_msg],
+            &mut tail[..out_iv.len()],
         )
         .await?;
     }

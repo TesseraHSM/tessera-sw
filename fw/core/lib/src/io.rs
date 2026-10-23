@@ -146,7 +146,8 @@ impl<P: HsmPal> Hsm<P> {
         // *and* the CQE posted; otherwise revert unconditionally.  Safe
         // without a lock or generation check — admin teardown can't race an
         // in-flight IO, and this walk runs before `drop_io` frees the slot.
-        if let Some(log) = undo {
+        // A command that recorded nothing (most do) has nothing to walk.
+        if let Some(log) = undo.filter(|log| !log.is_clean()) {
             let outcome = if handler_ok && cqe_ok {
                 log.apply_commit(self.pal(), &io).await
             } else {

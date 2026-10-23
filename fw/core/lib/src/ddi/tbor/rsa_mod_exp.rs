@@ -93,17 +93,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // Reserve the modulus-sized `x` slot and have the PAL compute
         // `y^d mod n` straight into it — no scratch, no copy.
-        let resp = pal.dma_alloc_var(io, |buf| {
-            let frame = TborRsaModExpResp::encode(buf, 0, false)?
-                .x_reserve(modulus_len)?
-                .finish();
-            Ok(frame.as_bytes().len())
+        let (resp, x) = pal.dma_alloc_var_with(io, |buf| {
+            let (enc, x) =
+                TborRsaModExpResp::encode(buf, 0, false)?.x_reserve_range(modulus_len)?;
+            Ok((enc.finish().as_bytes().len(), x))
         })?;
-        {
-            let out = TborRsaModExpResp::decode_mut(resp)?;
-            pal.mod_exp_priv(io, key_size, view.target_key, req.y, out.x)
-                .await?;
-        }
+        pal.mod_exp_priv(io, key_size, view.target_key, req.y, &mut resp[x])
+            .await?;
 
         // Coerce the `&mut` response buffer to a shared `&DmaBuf` (preserving
         // the `'p` allocator lifetime) so the async block's output matches
