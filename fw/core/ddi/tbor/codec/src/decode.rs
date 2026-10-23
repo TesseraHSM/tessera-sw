@@ -29,7 +29,7 @@ const TOC_CACHE_LEN: usize = RESP_HEADER_LEN + 4 * TOC_CACHED_ENTRIES;
 /// words costs little more than one), and decoders read the header and
 /// every TOC word several times. Kept small so the views stay cheap to
 /// move; TOC words past it are read from the message.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C, align(4))]
 struct TocCache([u8; TOC_CACHE_LEN]);
 
@@ -52,6 +52,20 @@ impl TocCache {
             read_toc_word(buf, header_len, index)
         }
     }
+}
+
+// ── RequestHead ───────────────────────────────────────────────────────
+
+/// What [`RequestView::parse`] read of one request buffer, kept by
+/// [`RequestView::head`] so a later decode of the same buffer
+/// ([`RequestView::parse_with`]) need not read and validate it again.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestHead {
+    /// Address and length of the parsed buffer.
+    addr: usize,
+    len: usize,
+    toc: TocCache,
+    toc_count: usize,
 }
 
 // ── RequestView ───────────────────────────────────────────────────────
@@ -108,6 +122,35 @@ impl<'a> RequestView<'a> {
             toc,
             toc_count,
         })
+    }
+
+    /// [`parse`](Self::parse), reusing `head` when it is this buffer's:
+    /// the same address and length, so it holds what parsing `buf` reads
+    /// and finds valid.
+    ///
+    /// # Errors
+    ///
+    /// As [`parse`](Self::parse).
+    pub fn parse_with(buf: &'a DmaBuf, head: &RequestHead) -> Result<Self, HsmError> {
+        if head.addr == buf.as_ptr() as usize && head.len == buf.len() {
+            return Ok(Self {
+                buf,
+                toc: head.toc,
+                toc_count: head.toc_count,
+            });
+        }
+        Self::parse(buf)
+    }
+
+    /// What this parse read, for [`parse_with`](Self::parse_with) to reuse
+    /// on the same buffer.
+    pub fn head(&self) -> RequestHead {
+        RequestHead {
+            addr: self.buf.as_ptr() as usize,
+            len: self.buf.len(),
+            toc: self.toc,
+            toc_count: self.toc_count,
+        }
     }
 
     /// Protocol version.

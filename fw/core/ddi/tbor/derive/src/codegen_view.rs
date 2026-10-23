@@ -250,17 +250,27 @@ fn data_start_expr(header_len: &TokenStream, _needs_data_start: bool) -> TokenSt
 /// Generate validation code as a standalone block (used by `lib.rs` for
 /// the top-level `decode()` function).
 pub fn gen_validation_standalone(schema: &Schema) -> TokenStream {
-    gen_validation(schema)
+    gen_validation(schema, false)
+}
+
+/// [`gen_validation_standalone`] for a request decoder that also has a
+/// `head: &RequestHead` from an earlier parse of `buf` to reuse.
+pub fn gen_validation_with_head(schema: &Schema) -> TokenStream {
+    gen_validation(schema, true)
 }
 
 /// Generate the full validation block for a message schema.
-fn gen_validation(schema: &Schema) -> TokenStream {
+fn gen_validation(schema: &Schema, with_head: bool) -> TokenStream {
     let layout = TocLayout::compute(&schema.fields);
     let total_toc_count = layout.total_toc_count;
 
     let (parse_call, _header_len_val, opcode_check) = match schema.kind {
         MessageKind::Request { opcode } => (
-            quote! { tsra_fw_ddi_tbor::RequestView::parse(buf)? },
+            if with_head {
+                quote! { tsra_fw_ddi_tbor::RequestView::parse_with(buf, head)? }
+            } else {
+                quote! { tsra_fw_ddi_tbor::RequestView::parse(buf)? }
+            },
             quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
             quote! {
                 if raw.opcode() != #opcode {

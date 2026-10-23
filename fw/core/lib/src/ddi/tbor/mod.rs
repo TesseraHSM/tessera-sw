@@ -71,6 +71,7 @@ pub(crate) mod session_open_init;
 pub(crate) mod test_aes_gcm;
 pub(crate) mod unwrap_key;
 
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor::RequestView;
 use tsra_fw_ddi_tbor::ResponseEncoder;
 use tsra_fw_ddi_tbor::TocEntry;
@@ -550,6 +551,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     pal: &'p P,
     io: &impl HsmIo,
     req_buf: &mut DmaBuf,
+    head: &RequestHead,
     opcode: u8,
     sqe_session_id: u16,
     body_sess_id: Option<HsmSessId>,
@@ -653,11 +655,11 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::GET_UNWRAPPING_KEY => get_unwrapping_key::handle(pal, io, req_buf).await,
         opcode::UNWRAP_KEY => unwrap_key::handle(pal, io, req_buf, undo).await,
         opcode::AES_GENERATE_KEY => aes_generate_key::handle(pal, io, req_buf).await,
-        opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, req_buf).await,
+        opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, req_buf, head).await,
         opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, req_buf).await,
-        opcode::ECC_SIGN => ecc_sign::handle(pal, io, req_buf).await,
+        opcode::ECC_SIGN => ecc_sign::handle(pal, io, req_buf, head).await,
         opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, req_buf).await,
-        opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, req_buf).await,
+        opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, req_buf, head).await,
         opcode::HASH => hash::handle(pal, io, req_buf).await,
         opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, req_buf).await,
         opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, req_buf).await,
@@ -676,7 +678,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::MLKEM_ENCAPSULATE => mlkem_encapsulate::handle(pal, io, req_buf).await,
         opcode::MLKEM_DECAPSULATE => mlkem_decapsulate::handle(pal, io, req_buf).await,
         #[cfg(feature = "tbor-test-cmds")]
-        opcode::TEST_AES_GCM => test_aes_gcm::handle(pal, io, req_buf).await,
+        opcode::TEST_AES_GCM => test_aes_gcm::handle(pal, io, req_buf, head).await,
         _ => Err(HsmError::UnsupportedCmd),
     }?;
 

@@ -53,6 +53,49 @@ fn spec_example1_request_decode() {
     }
 }
 
+/// `parse_with` reuses a head only for the buffer it came from.
+#[test]
+fn request_parse_with_reuses_only_its_own_head() {
+    let mut a = [0u8; 256];
+    let a = RequestEncoder::new(&mut a, 0x01, 0x0A)
+        .session_id(43)
+        .unwrap()
+        .buffer(b"Hello")
+        .unwrap()
+        .finish()
+        .unwrap();
+    let mut b = [0u8; 256];
+    let b = RequestEncoder::new(&mut b, 0x01, 0x0B)
+        .session_id(7)
+        .unwrap()
+        .buffer(b"World")
+        .unwrap()
+        .finish()
+        .unwrap();
+    let head = RequestView::parse(brand(a)).unwrap().head();
+
+    let again = RequestView::parse_with(brand(a), &head).unwrap();
+    assert_eq!(again.opcode(), 0x0A);
+    assert_eq!(again.toc_count(), 2);
+    match again.toc_entry(1) {
+        TocEntry::Buffer(data) => assert_eq!(data, b"Hello"),
+        other => panic!("expected Buffer, got {:?}", other),
+    }
+
+    // Another buffer is parsed afresh, and so is a shorter view of the
+    // same one.
+    let other = RequestView::parse_with(brand(b), &head).unwrap();
+    assert_eq!(other.opcode(), 0x0B);
+    match other.toc_entry(0) {
+        TocEntry::SessionId(v) => assert_eq!(v, 7),
+        other => panic!("expected SessionId, got {:?}", other),
+    }
+    assert_eq!(
+        RequestView::parse_with(brand(&a[..6]), &head).unwrap_err(),
+        HsmError::TborBufferTooShort
+    );
+}
+
 #[test]
 fn spec_example1_request_encode() {
     let mut buf = [0u8; 256];

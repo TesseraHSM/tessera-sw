@@ -19,6 +19,7 @@
 
 use tsra_fw_core_crypto_key_masking::aead::peek_head;
 use tsra_fw_core_crypto_key_masking::aead::unmask_with_head;
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::RsaOp;
 use tsra_fw_ddi_tbor_types::TborRsaModExpReq;
 use tsra_fw_ddi_tbor_types::TborRsaModExpResp;
@@ -43,8 +44,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &impl HsmIo,
     req_buf: &mut DmaBuf,
+    head: &RequestHead,
 ) -> HsmResult<&'p DmaBuf> {
-    let req = TborRsaModExpReq::decode_mut(req_buf)?;
+    let req = TborRsaModExpReq::decode_mut_with(req_buf, head)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id));
     validate_active_session(pal, io, sess_id)?;
 

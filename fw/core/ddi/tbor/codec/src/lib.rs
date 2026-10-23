@@ -46,6 +46,7 @@ pub mod fmt;
 pub mod toc;
 
 // Re-exports for convenience.
+pub use decode::RequestHead;
 pub use decode::RequestView;
 pub use decode::ResponseView;
 pub use encode::RequestEncoder;

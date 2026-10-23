@@ -95,6 +95,34 @@ fn on_struct(
         quote! {}
     };
 
+    // Requests also get `_with` decoders, which reuse the `RequestHead` of
+    // an earlier parse of the same buffer (e.g. the IO layer's, for the
+    // opcode) instead of reading its header and TOC again.
+    let decode_with_fns = match schema.kind {
+        schema::MessageKind::Request { .. } => {
+            let validation = codegen_view::gen_validation_with_head(&schema);
+            let decode_mut_with = codegen_view_mut::gen_decode_mut_with_head_body(&schema).map(|body| {
+                quote! {
+                    /// [`decode_mut`](Self::decode_mut), reusing `head` if it is from
+                    /// parsing `buf`.
+                    pub fn decode_mut_with<'a>(buf: &'a mut tsra_fw_hsm_pal_traits::DmaBuf, head: &tsra_fw_ddi_tbor::RequestHead) -> Result<#view_mut_name<'a>, tsra_fw_hsm_pal_traits::HsmError> {
+                        #body
+                    }
+                }
+            });
+            quote! {
+                /// [`decode`](Self::decode), reusing `head` if it is from parsing
+                /// `buf`.
+                pub fn decode_with<'a>(buf: &'a tsra_fw_hsm_pal_traits::DmaBuf, head: &tsra_fw_ddi_tbor::RequestHead) -> Result<#view_name<'a>, tsra_fw_hsm_pal_traits::HsmError> {
+                    #validation
+                    Ok(#view_name::from_validated(buf))
+                }
+                #decode_mut_with
+            }
+        }
+        _ => quote! {},
+    };
+
     let encode_fn = match schema.kind {
         schema::MessageKind::Request { .. } => quote! {
             pub fn encode<'a>(buf: &'a mut [u8]) -> Result<#enc_name<'a, #s0>, tsra_fw_hsm_pal_traits::HsmError> {
@@ -145,6 +173,7 @@ fn on_struct(
             pub const MAX_ENCODED_SIZE: usize = #max_encoded_size;
             #decode_fn
             #decode_mut_fn
+            #decode_with_fns
             #encode_fn
         }
 

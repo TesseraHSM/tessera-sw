@@ -22,6 +22,7 @@
 
 use tsra_fw_core_crypto_gcm_buf::format_gcm_buf;
 use tsra_fw_core_crypto_gcm_buf::padded_aad_len;
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::AesOp;
 use tsra_fw_ddi_tbor_types::TborTestAesGcmReq;
 use tsra_fw_ddi_tbor_types::TborTestAesGcmResp;
@@ -37,8 +38,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &impl HsmIo,
     req_buf: &mut DmaBuf,
+    head: &RequestHead,
 ) -> HsmResult<&'p DmaBuf> {
-    let req = TborTestAesGcmReq::decode(req_buf)?;
+    let req = TborTestAesGcmReq::decode_with(req_buf, head)?;
     let encrypt = match req.op() {
         AesOp::Encrypt => true,
         AesOp::Decrypt => false,

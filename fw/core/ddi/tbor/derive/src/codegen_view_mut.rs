@@ -87,6 +87,16 @@ pub fn gen_view_mut(schema: &Schema) -> TokenStream {
 /// data section, and constructs the `ViewMut` struct with all
 /// per-field borrows pre-split.
 pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
+    gen_decode_mut(schema, false)
+}
+
+/// [`gen_decode_mut_body`] for a request decoder that also has a
+/// `head: &RequestHead` from an earlier parse of `buf` to reuse.
+pub fn gen_decode_mut_with_head_body(schema: &Schema) -> Option<TokenStream> {
+    gen_decode_mut(schema, true)
+}
+
+fn gen_decode_mut(schema: &Schema, with_head: bool) -> Option<TokenStream> {
     if !schema.has_mutable_fields() {
         return None;
     }
@@ -266,7 +276,11 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
         })
         .collect();
 
-    let validation = crate::codegen_view::gen_validation_standalone(schema);
+    let validation = if with_head {
+        crate::codegen_view::gen_validation_with_head(schema)
+    } else {
+        crate::codegen_view::gen_validation_standalone(schema)
+    };
 
     Some(quote! {
         // ── Phase 1a: validation pass (shared reborrow). The parsed view

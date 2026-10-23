@@ -437,7 +437,9 @@ impl<P: HsmPal> Hsm<P> {
             // there meant a second `RequestView::parse` plus a full TOC
             // scan per request -- measured at 7.2us, which was the whole
             // remaining gap to MBOR on `EccSign`.
-            let (opcode, body_sess_id) = {
+            // The parse's `RequestHead` goes to the handler too, whose
+            // decoder reuses it instead of parsing the request again.
+            let (opcode, body_sess_id, head) = {
                 let req_view = TborRequestView::parse(&req_buf[..params.src_len]).op_err(
                     "core",
                     HsmError::DdiDecodeFailed,
@@ -451,7 +453,7 @@ impl<P: HsmPal> Hsm<P> {
                 } else {
                     None
                 };
-                (op, sid)
+                (op, sid, req_view.head())
             };
 
             // Per-opcode session-flag validation: GetApiRev /
@@ -474,6 +476,7 @@ impl<P: HsmPal> Hsm<P> {
                     self.pal(),
                     io,
                     &mut req_buf[..params.src_len],
+                    &head,
                     opcode,
                     params.sqe_session_id,
                     body_sess_id,

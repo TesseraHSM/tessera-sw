@@ -23,6 +23,7 @@
 use tsra_fw_core_crypto_key_masking::aead::peek_head;
 use tsra_fw_core_crypto_key_masking::aead::unmask_with_head;
 use tsra_fw_core_crypto_key_masking::aead::BlobHead;
+use tsra_fw_ddi_tbor::RequestHead;
 use tsra_fw_ddi_tbor_types::AesOp;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptReq;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptResp;
@@ -127,11 +128,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &impl HsmIo,
     req_buf: &mut DmaBuf,
+    head: &RequestHead,
 ) -> HsmResult<&'p DmaBuf> {
     // `decode_mut` exposes `masked_key` as `&mut` (a slice of the request
     // buffer) so `unmask` can decrypt it in place; `msg` / `iv` are disjoint
     // shared borrows.
-    let req = TborAesEncryptDecryptReq::decode_mut(req_buf)?;
+    let req = TborAesEncryptDecryptReq::decode_mut_with(req_buf, head)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id));
     validate_active_session(pal, io, sess_id)?;
 
