@@ -83,6 +83,11 @@ struct ChannelState {
     /// ICQ consumer index — FW advances after reading completions.
     icq_head: u16,
 
+    /// ICQ producer index as last read from the tail shadow. The entries
+    /// before it are posted, so [`recv`](IicDriver::recv) consumes them
+    /// without rereading the shadow, which sits in uncached SRAM.
+    icq_tail: u16,
+
     /// ISQ producer index. Only firmware writes the ISQ tail, so it is
     /// tracked here instead of read back from the register.
     isq_tail: u16,
@@ -189,6 +194,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             io_meta: config.io_meta_base as *mut IoMetaEntry,
             state: SingleCell::new(ChannelState {
                 icq_head: 0,
+                icq_tail: 0,
                 isq_tail: (DEPTH - 1) as u16,
                 waker: WakerRegistration::new(),
             }),
@@ -329,11 +335,14 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     pub fn recv(&self) -> impl core::future::Future<Output = RecvIo> + '_ {
         poll_fn(move |cx| {
             self.state.with(|s| {
-                // Read tail from shadow (DTCM)
-                let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
-                if s.icq_head == tail {
-                    s.waker.register(cx.waker());
-                    return Poll::Pending;
+                // Reread the tail shadow only once the entries known to be
+                // posted are consumed.
+                if s.icq_head == s.icq_tail {
+                    s.icq_tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
+                    if s.icq_head == s.icq_tail {
+                        s.waker.register(cx.waker());
+                        return Poll::Pending;
+                    }
                 }
 
                 let icq_slot = (s.icq_head & Self::MASK) as usize;
@@ -393,8 +402,8 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             // Clear NVIC pending bit for this interrupt
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
 
-            let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
-            if s.icq_head != tail {
+            s.icq_tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
+            if s.icq_head != s.icq_tail {
                 s.waker.wake();
             }
         });
