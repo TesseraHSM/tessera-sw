@@ -55,5 +55,6 @@ pub mod sd_restore_peer_backup;
 pub mod sd_restore_remote_backup;
 pub mod sd_sealing_key_gen;
 pub mod session_close;
+pub mod test_aes_gcm;
 pub mod unexpected_toc_type;
 pub mod unwrap_key;

@@ -33,14 +33,19 @@ tsra_fw_uno_pal = { workspace = true }
 tsra_fw_uno_trace = { workspace = true }
 
 [features]
-#default = ["trace-uart"]
-default = []
+#default = ["tbor-test-cmds", "trace-uart"]
+default = ["tbor-test-cmds"]
 
 # Compile in the full legacy MBOR DDI command set. Off by default to keep
 # CP1 ITCM headroom: without it, MBOR `EstablishCredential` and `RsaUnwrap`
 # are left out. TBOR does not use either, and every other MBOR command
 # stays.
 mbor = ["tsra_fw_hsm_core/mbor"]
+
+# Test-only TBOR commands (`TestAesGcm`, 0xF0) for bringing up the bulk
+# crypto engine. On by default during bring-up only: they run raw-key
+# crypto out of session and must be off in a production image.
+tbor-test-cmds = ["tsra_fw_hsm_core/tbor-test-cmds"]
 
 # Enable ARM semihosting integration for the emulator:
 #   - The PAL emits `SYS_READY` when the boot handshake completes, so the

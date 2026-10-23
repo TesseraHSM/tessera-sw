@@ -92,6 +92,7 @@ single `none` TOC placeholder and no typed body fields.
 | `0x29` | `MlKemGenerateKey` | NoSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) (**schema-only**) |
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
+| `0xF0` | `TestAesGcm` | NoSession | [`commands/test_aes_gcm.md`](./commands/test_aes_gcm.md) (**test-only**, `tbor-test-cmds` firmware builds) |
 
 ## Default-PSK gate
 

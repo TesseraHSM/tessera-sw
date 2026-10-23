@@ -67,6 +67,8 @@ pub(crate) mod sd_sealing_key_gen;
 pub(crate) mod session_close;
 pub(crate) mod session_open_finish;
 pub(crate) mod session_open_init;
+#[cfg(feature = "tbor-test-cmds")]
+pub(crate) mod test_aes_gcm;
 pub(crate) mod unwrap_key;
 
 use tsra_fw_ddi_tbor::RequestView;
@@ -380,6 +382,12 @@ pub(crate) mod opcode {
     /// TEMPORARY: dispatched out of session for hardware bring-up, like the
     /// other PQC opcodes.  See [`super::mlkem_decapsulate`].
     pub(crate) const MLKEM_DECAPSULATE: u8 = 0x2B;
+
+    /// `TestAesGcm` — test-only AES-256-GCM under a raw request key, out
+    /// of session. Compiled only with `tbor-test-cmds`. See
+    /// [`super::test_aes_gcm`].
+    #[cfg(feature = "tbor-test-cmds")]
+    pub(crate) const TEST_AES_GCM: u8 = 0xF0;
 }
 
 /// Validate that `sess_id` belongs to an active Crypto-Officer session.
@@ -667,6 +675,8 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::MLKEM_GENERATE_KEY => mlkem_generate_key::handle(pal, io, req_buf).await,
         opcode::MLKEM_ENCAPSULATE => mlkem_encapsulate::handle(pal, io, req_buf).await,
         opcode::MLKEM_DECAPSULATE => mlkem_decapsulate::handle(pal, io, req_buf).await,
+        #[cfg(feature = "tbor-test-cmds")]
+        opcode::TEST_AES_GCM => test_aes_gcm::handle(pal, io, req_buf).await,
         _ => Err(HsmError::UnsupportedCmd),
     }?;
 
@@ -723,7 +733,17 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::MLKEM_GENERATE_KEY
             | opcode::MLKEM_ENCAPSULATE
             | opcode::MLKEM_DECAPSULATE
-    )
+    ) || is_test_opcode(opcode)
+}
+
+/// Returns `true` for the test-only opcodes compiled in with
+/// `tbor-test-cmds`.
+fn is_test_opcode(opcode: u8) -> bool {
+    match opcode {
+        #[cfg(feature = "tbor-test-cmds")]
+        opcode::TEST_AES_GCM => true,
+        _ => false,
+    }
 }
 
 /// Returns `true` iff `opcode` is an in-session command (i.e. requires
@@ -778,6 +798,9 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
         | opcode::DARC_KEY_WRAP => true,
+        // The test-only opcodes run out of session.
+        #[cfg(feature = "tbor-test-cmds")]
+        opcode::TEST_AES_GCM => false,
         // Default-deny: any future opcode is treated as in-session
         // until classified, so the default-PSK gate applies to it.
         _ => true,
@@ -843,6 +866,9 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
         | opcode::DARC_KEY_WRAP => true,
+        // The test-only opcodes carry no session id.
+        #[cfg(feature = "tbor-test-cmds")]
+        opcode::TEST_AES_GCM => false,
         _ => true,
     }
 }
@@ -1029,6 +1055,20 @@ mod tests {
     #[test]
     fn key_report_is_in_session() {
         assert!(is_in_session(opcode::KEY_REPORT));
+    }
+
+    #[cfg(feature = "tbor-test-cmds")]
+    #[test]
+    fn test_aes_gcm_is_known_and_out_of_session() {
+        assert!(is_known_opcode(opcode::TEST_AES_GCM));
+        assert!(!is_in_session(opcode::TEST_AES_GCM));
+        assert!(!needs_session_id_cross_check(opcode::TEST_AES_GCM));
+    }
+
+    #[cfg(not(feature = "tbor-test-cmds"))]
+    #[test]
+    fn test_opcodes_unknown_without_feature() {
+        assert!(!is_known_opcode(0xF0));
     }
 
     #[test]

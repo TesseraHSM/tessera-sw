@@ -79,6 +79,7 @@ pub mod sd_sealing_key_gen;
 pub mod session_close;
 pub mod session_open_finish;
 pub mod session_open_init;
+pub mod test_aes_gcm;
 pub mod unwrap_key;
 
 pub use aes_encrypt_decrypt::*;
@@ -126,4 +127,5 @@ pub use sd_sealing_key_gen::*;
 pub use session_close::*;
 pub use session_open_finish::*;
 pub use session_open_init::*;
+pub use test_aes_gcm::*;
 pub use unwrap_key::*;

@@ -307,6 +307,8 @@ impl SessionCtrl {
             | opcode::MLKEM_ENCAPSULATE
             | opcode::MLKEM_DECAPSULATE => Self::InSession,
             opcode::SESSION_CLOSE => Self::Close,
+            #[cfg(feature = "tbor-test-cmds")]
+            opcode::TEST_AES_GCM => Self::NoSession,
             _ => Self::NoSession,
         }
     }
