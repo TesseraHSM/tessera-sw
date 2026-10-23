@@ -20,6 +20,10 @@ use crate::toc::*;
 #[derive(Debug)]
 pub struct RequestView<'a> {
     buf: &'a DmaBuf,
+    /// Header fields, read once by [`parse`](Self::parse): the message
+    /// sits in uncached DMA memory, where re-reading them is not free.
+    toc_count: usize,
+    opcode: u8,
 }
 
 impl<'a> RequestView<'a> {
@@ -39,12 +43,15 @@ impl<'a> RequestView<'a> {
             return Err(HsmError::TborBufferTooShort);
         }
 
-        let version = buf[0];
+        // One load for the whole header.
+        let mut hdr = [0u8; REQ_HEADER_LEN];
+        hdr.copy_from_slice(&buf[..REQ_HEADER_LEN]);
+        let version = hdr[0];
         if version != PROTOCOL_VERSION {
             return Err(HsmError::TborUnsupportedVersion);
         }
 
-        let toc_count = (buf[2] & 0x1F) as usize + 1;
+        let toc_count = (hdr[2] & 0x1F) as usize + 1;
         let min_len = REQ_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
@@ -56,7 +63,11 @@ impl<'a> RequestView<'a> {
         // Validate all known offset/length TOC entries.
         validate_toc_entries(buf, REQ_HEADER_LEN, toc_count, data_size)?;
 
-        Ok(Self { buf })
+        Ok(Self {
+            buf,
+            toc_count,
+            opcode: hdr[3],
+        })
     }
 
     /// Protocol version.
@@ -68,13 +79,13 @@ impl<'a> RequestView<'a> {
     /// Operation code.
     #[inline]
     pub fn opcode(&self) -> u8 {
-        self.buf[3]
+        self.opcode
     }
 
     /// Number of TOC entries (1–32).
     #[inline]
     pub fn toc_count(&self) -> usize {
-        (self.buf[2] & 0x1F) as usize + 1
+        self.toc_count
     }
 
     /// Byte offset where the variable-length data section starts.
@@ -141,6 +152,9 @@ impl<'a> RequestView<'a> {
 #[derive(Debug)]
 pub struct ResponseView<'a> {
     buf: &'a DmaBuf,
+    /// TOC entry count, read once by [`parse`](Self::parse) (see
+    /// [`RequestView`]).
+    toc_count: usize,
 }
 
 impl<'a> ResponseView<'a> {
@@ -160,12 +174,15 @@ impl<'a> ResponseView<'a> {
             return Err(HsmError::TborBufferTooShort);
         }
 
-        let version = buf[0];
+        // One load for the version and TOC count.
+        let mut hdr = [0u8; 4];
+        hdr.copy_from_slice(&buf[..4]);
+        let version = hdr[0];
         if version != PROTOCOL_VERSION {
             return Err(HsmError::TborUnsupportedVersion);
         }
 
-        let toc_count = (buf[3] & 0x1F) as usize + 1;
+        let toc_count = (hdr[3] & 0x1F) as usize + 1;
         let min_len = RESP_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
@@ -176,7 +193,7 @@ impl<'a> ResponseView<'a> {
 
         validate_toc_entries(buf, RESP_HEADER_LEN, toc_count, data_size)?;
 
-        Ok(Self { buf })
+        Ok(Self { buf, toc_count })
     }
 
     /// Protocol version.
@@ -206,7 +223,7 @@ impl<'a> ResponseView<'a> {
     /// Number of TOC entries (1–32).
     #[inline]
     pub fn toc_count(&self) -> usize {
-        (self.buf[3] & 0x1F) as usize + 1
+        self.toc_count
     }
 
     /// Byte offset where the variable-length data section starts.

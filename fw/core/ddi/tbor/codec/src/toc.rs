@@ -150,7 +150,22 @@ pub fn raw_toc_inline_u16(word: u32) -> u16 {
 #[inline(always)]
 pub fn read_toc_word(buf: &[u8], header_len: usize, toc_index: usize) -> u32 {
     let base = header_len + toc_index * 4;
-    u32::from_be_bytes([buf[base], buf[base + 1], buf[base + 2], buf[base + 3]])
+    u32::from_be_bytes(read_array(buf, base))
+}
+
+/// Read `N` bytes at `base` with a single slice copy.
+///
+/// Messages live in uncached DMA memory, where every load costs the same
+/// whatever its width; indexing byte by byte leaves the compiler one load
+/// per byte (and a bounds check each), a slice copy one load per word.
+///
+/// # Panics
+/// Panics if `buf` holds fewer than `base + N` bytes, as indexing would.
+#[inline(always)]
+fn read_array<const N: usize>(buf: &[u8], base: usize) -> [u8; N] {
+    let mut bytes = [0u8; N];
+    bytes.copy_from_slice(&buf[base..base + N]);
+    bytes
 }
 
 /// Read inline uint8 value from TOC entry at the given index.
@@ -190,8 +205,7 @@ pub fn read_toc_buffer(
 pub fn read_toc_uint32(buf: &[u8], header_len: usize, toc_index: usize, data_start: usize) -> u32 {
     let word = read_toc_word(buf, header_len, toc_index);
     let offset = raw_toc_offset(word);
-    let base = data_start + offset;
-    u32::from_le_bytes([buf[base], buf[base + 1], buf[base + 2], buf[base + 3]])
+    u32::from_le_bytes(read_array(buf, data_start + offset))
 }
 
 /// Read a uint64 from the data section via an offset/length TOC entry.
@@ -199,17 +213,7 @@ pub fn read_toc_uint32(buf: &[u8], header_len: usize, toc_index: usize, data_sta
 pub fn read_toc_uint64(buf: &[u8], header_len: usize, toc_index: usize, data_start: usize) -> u64 {
     let word = read_toc_word(buf, header_len, toc_index);
     let offset = raw_toc_offset(word);
-    let base = data_start + offset;
-    u64::from_le_bytes([
-        buf[base],
-        buf[base + 1],
-        buf[base + 2],
-        buf[base + 3],
-        buf[base + 4],
-        buf[base + 5],
-        buf[base + 6],
-        buf[base + 7],
-    ])
+    u64::from_le_bytes(read_array(buf, data_start + offset))
 }
 
 // ── TOC word write helpers ─────────────────────────────────────────────
