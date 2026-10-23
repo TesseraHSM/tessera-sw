@@ -11,7 +11,7 @@
 //! ```text
 //!  main ──► init PAL ──► spawn poll_io ──► run (NVIC polling loop)
 //!                            │
-//!                        poll_io ──► iic.recv() ──► spawn handle_io
+//!                        poll_io ──► iic.recv() ──► signal io_worker[slot]
 //!                                                       │
 //!                                                   HSM core pipeline:
 //!                                                   SQE parse → in-DMA
@@ -23,9 +23,10 @@
 //! - **`main`**: Initialises the PAL (timer, IIC/OIC/GDMA channels),
 //!   spawns the IO receive loop, then enters the NVIC polling loop.
 //! - **`poll_io`** (single instance): Awaits IOs from the IIC driver
-//!   and spawns a `handle_io` task for each one.
-//! - **`handle_io`** (pool of 32): Owns one IO for its lifetime,
-//!   delegating to the HSM core for SQE parsing, DMA, and CQE delivery.
+//!   and hands each one to the `io_worker` of its IO slot.
+//! - **`io_worker`** (one per IO slot, 32): Owns its slot's IO for the
+//!   IO's lifetime, delegating to the HSM core for SQE parsing, DMA, and
+//!   CQE delivery, then waits for the slot's next IO.
 //!
 //! # Interrupt handling
 //!
@@ -50,7 +51,9 @@ use tsra_fw_uno_pal::BootPhase;
 use tsra_fw_uno_pal::UnoHsmIo;
 use tsra_fw_uno_pal::UnoHsmPal;
 use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::once_lock::OnceLock;
+use embassy_sync::signal::Signal;
 
 // Placeholder so the linker emits a non-empty `.data` section.
 //
@@ -72,56 +75,70 @@ static mut DEFAULT_DATA: [u8; 16] = [0x1; 16];
 /// accesses via `HSM.get().await` are zero-cost after the first init.
 static HSM: OnceLock<Hsm<UnoHsmPal>> = OnceLock::new();
 
+/// Host IO slots, each served by its own [`io_worker`] task.
+const IO_WORKERS: usize = 32;
+
+/// Hands each received IO to the worker that owns its slot.
+struct IoHandoff([Signal<NoopRawMutex, UnoHsmIo>; IO_WORKERS]);
+
+// SAFETY: single-core Cortex-M7 with Embassy cooperative scheduling; only
+// tasks, never an ISR, touch these signals.
+unsafe impl Sync for IoHandoff {}
+
+static IO_HANDOFF: IoHandoff = IoHandoff([const { Signal::new() }; IO_WORKERS]);
+
 /// IO receive loop — runs forever as a single Embassy task.
 ///
 /// Awaits [`HsmIoController::poll_io`] for the next inbound IO from
-/// the IIC driver, then spawns a [`handle_io`] task from the 32-slot
-/// pool. If no pool slots are available, the IO token is silently
-/// dropped and the loop retries on the next iteration.
-///
-/// # Parameters
-/// - `spawner`: Embassy task spawner used to enqueue [`handle_io`] jobs.
+/// the IIC driver and hands it to the [`io_worker`] that owns its slot.
+/// A slot is not handed out again until its IO is dropped, by which time
+/// the slot's worker is waiting for the next one. An IO from a slot with
+/// no worker is dropped and the loop retries on the next iteration.
 ///
 /// # Returns
 /// Never returns (`!`). This is a permanent receive-and-dispatch loop.
 ///
 /// # Side Effects
 /// - Continuously drains inbound IO work from PAL.
-/// - Schedules per-IO tasks onto the executor when task slots are available.
+/// - Wakes the worker of each received IO's slot.
 #[embassy_executor::task]
-async fn poll_io(spawner: Spawner) -> ! {
+async fn poll_io() -> ! {
+    let pal = HSM.get().await.pal();
     loop {
-        let Ok(io) = HSM.get().await.pal().poll_io().await else {
+        let Ok(io) = pal.poll_io().await else {
             continue;
         };
 
-        let Ok(token) = handle_io(io) else {
-            continue;
-        };
-
-        spawner.spawn(token);
+        if let Some(slot) = IO_HANDOFF.0.get(usize::from(io.index())) {
+            slot.signal(io);
+        }
     }
 }
 
-/// Processes a single IO to completion.
+/// Processes the IOs of one slot, one at a time, each to completion.
 ///
-/// Takes ownership of the [`UnoHsmIo`], keeping the underlying
-/// IO_SQ slot reserved until the completion DMA finishes. Delegates
-/// SQE parsing, inbound/outbound DMA, DDI dispatch, and CQE
-/// population to [`Hsm::handle_io`].
+/// Waits for [`poll_io`] to hand over the slot's next [`UnoHsmIo`], keeping
+/// the underlying IO_SQ slot reserved until the completion DMA finishes.
+/// Delegates SQE parsing, inbound/outbound DMA, DDI dispatch, and CQE
+/// population to [`Hsm::handle_io`]. A long-lived worker per slot spares
+/// each IO a task spawn, which must search the pool for a free task.
 ///
 /// # Parameters
-/// - `io`: Owned IO token for one request/response transaction.
+/// - `slot`: The hand-off of the slot this worker serves.
 ///
 /// # Returns
-/// Returns `()` after this IO has been fully processed and completed.
+/// Never returns (`!`).
 ///
 /// # Side Effects
-/// - Advances the HSM request pipeline for one IO.
-/// - Triggers DMA activity and CQE completion for that IO.
-#[embassy_executor::task(pool_size = 32)]
-async fn handle_io(io: UnoHsmIo) {
-    HSM.get().await.handle_io(io).await;
+/// - Advances the HSM request pipeline for each IO of its slot.
+/// - Triggers DMA activity and CQE completion for those IOs.
+#[embassy_executor::task(pool_size = IO_WORKERS)]
+async fn io_worker(slot: &'static Signal<NoopRawMutex, UnoHsmIo>) -> ! {
+    let hsm = HSM.get().await;
+    loop {
+        let io = slot.wait().await;
+        hsm.handle_io(io).await;
+    }
 }
 
 /// Dedicated core-liveliness heartbeat task.
@@ -145,10 +162,10 @@ async fn heartbeat() -> ! {
 
 /// IPC message/event receive loop — runs forever as a single
 /// Embassy task. PAL handles boot handshake internally;
-/// app spawns [`poll_io`] once boot completes.
+/// app spawns the [`io_worker`]s and [`poll_io`] once boot completes.
 ///
 /// # Parameters
-/// - `spawner`: Embassy task spawner used to start [`poll_io`] after boot.
+/// - `spawner`: Embassy task spawner used to start the IO tasks after boot.
 ///
 /// # Returns
 /// Never returns (`!`). This is a permanent IPC servicing loop.
@@ -166,7 +183,12 @@ async fn poll_ipc(spawner: Spawner) -> ! {
         if !booted && hsm.pal().boot_phase() == BootPhase::Running {
             booted = true;
             info!("app", "boot complete, spawning poll_io");
-            if let Ok(token) = poll_io(spawner) {
+            for slot in &IO_HANDOFF.0 {
+                if let Ok(token) = io_worker(slot) {
+                    spawner.spawn(token);
+                }
+            }
+            if let Ok(token) = poll_io() {
                 spawner.spawn(token);
             }
         }
