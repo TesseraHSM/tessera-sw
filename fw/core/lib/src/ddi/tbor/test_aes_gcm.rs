@@ -5,8 +5,9 @@
 //!
 //! AES-256-GCM encrypts or decrypts the request `data` under the raw
 //! request `key` through the PAL's in-place [`HsmAes`] GCM methods — the
-//! same path firmware key masking takes — so the platform's GCM can be
-//! exercised and measured end to end on the regular HSM command path. Out
+//! same path firmware key masking takes, on Uno the BCP (CDMA) engine — so
+//! the platform's GCM can be exercised and measured end to end on the
+//! regular HSM command path. Out
 //! of session; nothing is persisted. The command is an encryption oracle
 //! under host-chosen keys, which is why it is compiled only with
 //! `tbor-test-cmds`.
@@ -49,8 +50,11 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let buf_len = pad + text_len;
 
     // `[padded_AAD | text]`; at least one byte so an all-empty request
-    // still gets a valid allocation.
-    let work = pal.dma_alloc(io, buf_len.max(1))?;
+    // still gets a valid allocation. The IV varies the buffer's offset in
+    // 4-byte steps, so tests cover each alignment the PAL may be handed.
+    let shift = 4 * usize::from(iv.first().copied().unwrap_or(0) & 3);
+    let raw = pal.dma_alloc(io, shift + buf_len.max(1))?;
+    let work = &mut raw[shift..];
     format_gcm_buf(aad, data, &mut work[..buf_len]);
 
     let resp = pal.dma_alloc_var(io, |buf| {
@@ -80,6 +84,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         result
     };
 
-    work.zeroize();
+    raw.zeroize();
     result.map(|()| &*resp)
 }

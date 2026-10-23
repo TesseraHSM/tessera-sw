@@ -42,11 +42,10 @@ default = ["tbor-test-cmds"]
 # stays.
 mbor = ["tsra_fw_hsm_core/mbor"]
 
-# Test-only TBOR commands (`TestAesGcm`, 0xF0) for bringing up the bulk
-# crypto engine (BCP), which this also builds in. On by default during
-# bring-up only: they run raw-key crypto out of session and must be off in
-# a production image.
-tbor-test-cmds = ["tsra_fw_hsm_core/tbor-test-cmds", "tsra_fw_uno_pal/bcp"]
+# Test-only TBOR commands (`TestAesGcm`, 0xF0) for validating and measuring
+# the platform AES-GCM (the BCP). On by default during bring-up only: they
+# run raw-key crypto out of session and must be off in a production image.
+tbor-test-cmds = ["tsra_fw_hsm_core/tbor-test-cmds"]
 
 # Enable ARM semihosting integration for the emulator:
 #   - The PAL emits `SYS_READY` when the boot handshake completes, so the

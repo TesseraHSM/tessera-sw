@@ -15,9 +15,11 @@ AES-256-GCM encrypts or decrypts host-supplied `data` under a **raw**
 32-byte key carried in the request, through the platform's GCM on the
 regular HSM command path (the PAL `HsmAes::gcm_encrypt_in_place` /
 `gcm_decrypt_in_place` methods, the same path firmware key masking takes).
-On Uno that is the CP1 AES engine with software GHASH; the std platform
-uses its software AES. It exists to validate and measure the platform GCM
-end to end, without key provisioning or a session. Nothing is persisted.
+On Uno that is the BCP (CDMA) bulk crypto engine; the std platform uses
+its software AES. It exists to validate and measure the platform GCM end
+to end, without key provisioning or a session. Nothing is persisted. The
+firmware places its working buffer at an offset chosen by the IV's first
+byte (`4 × (iv[0] mod 4)`), so tests cover each buffer alignment.
 
 The command is an encryption oracle under host-chosen keys, so the
 firmware dispatches it only when built with the `tbor-test-cmds` cargo

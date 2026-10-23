@@ -5,9 +5,9 @@
 //!
 //! `TestAesGcm` runs AES-256-GCM under a raw host key through the
 //! device's GCM (the PAL `HsmAes::gcm_*_in_place` methods that key masking
-//! uses: CP1 AES with software GHASH on Uno, software AES on std/emu). The
-//! firmware must be built with `tbor-test-cmds`; the std/emu build and the
-//! Uno bring-up image are.
+//! uses: the BCP on Uno, software AES on std/emu). The firmware must be
+//! built with `tbor-test-cmds`; the std/emu build and the Uno bring-up
+//! image are.
 //!
 //! Every result is checked against an independent reference: the NIST
 //! CAVP AES-256 GCM vectors, the GCM spec (McGrew & Viega) AES-256 test
@@ -18,7 +18,9 @@
 //! Text lengths are split into block-aligned and unaligned sets. The BCP
 //! only processes whole blocks, so on Uno the aligned set runs entirely on
 //! the engine, while the unaligned set (and every AAD length that is not a
-//! multiple of 32) also exercises the PAL's software tag correction.
+//! multiple of 32) also exercises the PAL's tag correction, and an empty
+//! text its software GMAC path. The firmware moves its working buffer by
+//! the IV, so the random IVs also cover every buffer alignment.
 //!
 //! Coverage:
 //! * NIST CAVP AES-256 vectors with a 96-bit IV and 128-bit tag

@@ -6,6 +6,7 @@ use core::future::Future;
 use core::task::Poll;
 
 use bitfield_struct::bitfield;
+use embassy_sync::waitqueue::MultiWakerRegistration;
 use embassy_sync::waitqueue::WakerRegistration;
 use embassy_time::Duration;
 use embassy_time::Instant;
@@ -55,10 +56,19 @@ const MASK: u16 = (DEPTH - 1) as u16;
 /// `NUM_ELEMENTS` encoding of [`DEPTH`] (0 = 8 entries, 1 = 16, ...).
 const NUM_ELEMENTS: u32 = DEPTH.trailing_zeros() - 3;
 
-/// Commands in flight at once. A failed command takes a second SQE (the
-/// abort that frees its engine slot), and the ring must stay one short of
-/// full so it never looks empty (`PI == CI`).
-const MAX_IN_FLIGHT: usize = (DEPTH - 1) / 2;
+/// Chunks one command may span; see [`BCP_MAX_SRC_LEN`].
+const MAX_CHUNKS: usize = 2;
+
+/// Commands in flight at once. Each command has at most [`MAX_CHUNKS`]
+/// SQEs the engine may not have fetched yet (its chunks, or later the
+/// abort that frees a failed command's engine slot, sent only after the
+/// command's CQE) and at most one CQE not yet reaped. A ring must stay one
+/// short of full so it never looks empty (`PI == CI`).
+const MAX_IN_FLIGHT: usize = (DEPTH - 1) / MAX_CHUNKS;
+
+/// Tasks that can wait for a free command ID before the oldest waiters are
+/// woken early to make room (they then register again).
+const ID_WAITERS: usize = 8;
 
 /// `free` bitmap with every command ID free.
 const ALL_FREE: u8 = ((1u16 << MAX_IN_FLIGHT) - 1) as u8;
@@ -86,9 +96,17 @@ pub const BCP_IV_LEN: usize = 12;
 /// GCM tag length.
 pub const BCP_TAG_LEN: usize = 16;
 
-/// Largest source (padded AAD + text) one command may carry: one chunk,
-/// as the FP firmware submitted it.
-pub const BCP_MAX_SRC_LEN: usize = 4096;
+/// Bytes per SQE (chunk), as the FP firmware chunked host commands. The
+/// engine mis-processes a single chunk larger than this, so longer
+/// commands span several SQEs.
+pub const BCP_CHUNK_LEN: usize = 4096;
+
+/// Largest source (padded AAD + text) one command may carry.
+pub const BCP_MAX_SRC_LEN: usize = BCP_CHUNK_LEN * MAX_CHUNKS;
+
+/// Buffer address alignment the engine is given. The PAL bounces buffers
+/// that are not aligned.
+pub const BCP_ADDR_ALIGN: usize = 4;
 
 /// AAD padding granularity the engine requires.
 pub const BCP_AAD_ALIGN: usize = 32;
@@ -122,6 +140,12 @@ const DFL_CRYPTO_OUT_DW: usize = 1;
 
 /// SQE `CmdState`: a single NEW|LAST chunk.
 const CMD_STATE_NEW_LAST: u8 = 0b101;
+
+/// SQE command state: first chunk of a command with more to follow.
+const CMD_STATE_NEW: u8 = 0b001;
+
+/// SQE command state: a middle chunk.
+const CMD_STATE_CONTINUE: u8 = 0b010;
 
 /// SQE `CmdState`: CONTINUE|LAST, as an abort is sent.
 const CMD_STATE_CONTINUE_LAST: u8 = 0b110;
@@ -229,12 +253,40 @@ pub enum GcmOp {
     Decrypt,
 }
 
+/// Source and destination of a GCM command: `[padded_AAD | text]`, which
+/// the engine writes back whole, copying the padded AAD through. Buffers
+/// must be [`BCP_ADDR_ALIGN`]-aligned and live in GSRAM the CDMA may
+/// master (the PAL DMA heap does).
+#[derive(Debug)]
+pub enum GcmData<'a> {
+    /// Read `src`, write `dst`, which is at least as long.
+    Copy {
+        src: &'a DmaBuf,
+        dst: &'a mut DmaBuf,
+    },
+    /// Transform in place.
+    InPlace(&'a mut DmaBuf),
+}
+
+impl GcmData<'_> {
+    /// Source address and length.
+    fn src(&self) -> (u32, usize) {
+        match self {
+            Self::Copy { src, .. } => (src.as_ptr() as u32, src.len()),
+            Self::InPlace(buf) => (buf.as_ptr() as u32, buf.len()),
+        }
+    }
+
+    /// Destination address and length.
+    fn dst(&self) -> (u32, usize) {
+        match self {
+            Self::Copy { dst, .. } => (dst.as_ptr() as u32, dst.len()),
+            Self::InPlace(buf) => (buf.as_ptr() as u32, buf.len()),
+        }
+    }
+}
+
 /// One AES-256-GCM command.
-///
-/// `src` is `[padded_AAD | text]`. The engine writes the same layout to
-/// `dst`, copying the padded AAD through, so `dst` must be as long as
-/// `src` and the transformed text starts at `aad_len`. Both must live in
-/// GSRAM the CDMA may master (the PAL DMA heap does).
 #[derive(Debug)]
 pub struct GcmRequest<'a> {
     pub op: GcmOp,
@@ -252,10 +304,7 @@ pub struct GcmRequest<'a> {
     /// `[padded_AAD | text]`; the text is a non-empty multiple of
     /// [`BCP_TEXT_ALIGN`], and the whole source at most
     /// [`BCP_MAX_SRC_LEN`] bytes.
-    pub src: &'a DmaBuf,
-    /// `[padded_AAD | transformed text]` output; at least `src.len()`
-    /// bytes.
-    pub dst: &'a mut DmaBuf,
+    pub data: GcmData<'a>,
 }
 
 /// Engine completion.
@@ -304,14 +353,17 @@ struct BcpState {
     cq_ci: u16,
     /// Free command IDs (bit N = ID N free).
     free: u8,
+    /// Tasks waiting for a free command ID.
+    id_waiters: MultiWakerRegistration<ID_WAITERS>,
     /// Per command ID; IDs index the key-vault slots and DFL elements.
     slots: [Slot; MAX_IN_FLIGHT],
 }
 
 /// Async BCP driver.
 ///
-/// Up to `MAX_IN_FLIGHT` commands may be outstanding; each owns the
-/// key-vault slot and DFL element numbered by its command ID.
+/// Up to `MAX_IN_FLIGHT` commands may be outstanding, and further callers
+/// wait for a command ID; each command owns the key-vault slot and DFL
+/// element numbered by its ID.
 pub struct BcpDriver {
     state: SingleCell<BcpState>,
 }
@@ -332,6 +384,7 @@ impl BcpDriver {
                 sq_pi: 0,
                 cq_ci: 0,
                 free: ALL_FREE,
+                id_waiters: MultiWakerRegistration::new(),
                 slots: core::array::from_fn(|_| Slot {
                     waker: WakerRegistration::new(),
                     done: false,
@@ -347,9 +400,9 @@ impl BcpDriver {
 
     /// Submit an AES-256-GCM command and await its completion.
     ///
-    /// Returns the raw completion; the caller decides what the status
-    /// means. Fails with [`BcpError::TIMEOUT`] if the engine had to be
-    /// reset.
+    /// Waits for a command ID when all are in use. Returns the raw
+    /// completion; the caller decides what the status means. Fails with
+    /// [`BcpError::TIMEOUT`] if the engine had to be reset.
     ///
     /// # Cancellation safety
     ///
@@ -368,7 +421,8 @@ impl BcpDriver {
                         return Poll::Ready(Err(e));
                     }
                     if s.free == 0 {
-                        return Poll::Ready(Err(BcpError::QUEUE_FULL));
+                        s.id_waiters.register(cx.waker());
+                        return Poll::Pending;
                     }
                     if !s.up {
                         bring_up();
@@ -384,8 +438,7 @@ impl BcpDriver {
 
                     load_key(id, req.key);
                     write_dfl(id, &req);
-                    write_sqe(s.sq_pi as usize, id, req.op, req.src.len());
-                    ring(s);
+                    submit(s, id, req.op, req.data.src().1);
                 }
 
                 let id = cmd.unwrap_or_default();
@@ -400,6 +453,7 @@ impl BcpDriver {
                     slot.tag = [0; BCP_TAG_LEN];
                     clear_key(id);
                     s.free |= 1 << id;
+                    s.id_waiters.wake();
                     if done.status == STATUS_STALLED {
                         return Poll::Ready(Err(BcpError::TIMEOUT));
                     }
@@ -530,17 +584,19 @@ fn validate(req: &GcmRequest<'_>) -> HsmResult<()> {
     if req.key.len() != BCP_KEY_LEN {
         return Err(BcpError::INVALID_KEY_LEN);
     }
-    let text_len = req
-        .src
-        .len()
+    let (src, src_len) = req.data.src();
+    let (dst, dst_len) = req.data.dst();
+    let text_len = src_len
         .checked_sub(req.aad_len)
         .ok_or(BcpError::INVALID_DATA_LEN)?;
     if !req.aad_len.is_multiple_of(BCP_AAD_ALIGN)
         || req.unpadded_aad_len > req.aad_len
         || text_len == 0
         || !text_len.is_multiple_of(BCP_TEXT_ALIGN)
-        || req.src.len() > BCP_MAX_SRC_LEN
-        || req.dst.len() < req.src.len()
+        || src_len > BCP_MAX_SRC_LEN
+        || dst_len < src_len
+        || !(src as usize).is_multiple_of(BCP_ADDR_ALIGN)
+        || !(dst as usize).is_multiple_of(BCP_ADDR_ALIGN)
     {
         return Err(BcpError::INVALID_DATA_LEN);
     }
@@ -650,17 +706,18 @@ fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
 /// AAD through ahead of the text, as the host fast path expected.
 fn write_dfl(id: usize, req: &GcmRequest<'_>) {
     let mut dw = [0u32; DFL_DWORDS];
-    let src_len = req.src.len() as u32;
-    let dst_len = src_len;
+    let (src, src_len) = req.data.src();
+    let (dst, _) = req.data.dst();
+    let len = src_len as u32;
 
     // Source: length, then an SGL data-block descriptor {addr, len, type 0}.
-    dw[6] = src_len;
-    dw[7] = req.src.as_ptr() as u32;
-    dw[9] = src_len;
-    // Destination: likewise.
-    dw[11] = dst_len;
-    dw[12] = req.dst.as_ptr() as u32;
-    dw[14] = dst_len;
+    dw[6] = len;
+    dw[7] = src;
+    dw[9] = len;
+    // Destination: likewise, as long as the source.
+    dw[11] = len;
+    dw[12] = dst;
+    dw[14] = len;
 
     dw[17] = id as u32;
     dw[18] = req.unpadded_aad_len as u32;
@@ -706,28 +763,46 @@ fn write_abort(sq_idx: usize, id: usize) {
     e.dw3.set(0);
 }
 
-/// Write the SQE at ring index `sq_idx` for command `id`.
-fn write_sqe(sq_idx: usize, id: usize, op: GcmOp, src_len: usize) {
+/// Queue command `id`: one SQE per [`BCP_CHUNK_LEN`] chunk of its
+/// `len`-byte source, the first NEW and the last LAST, as the FP firmware
+/// chunked host commands. Later chunks carry only their byte count; the
+/// engine keeps the rest from the first.
+fn submit(s: &mut BcpState, id: usize, op: GcmOp, len: usize) {
     let process_type = match op {
         GcmOp::Encrypt => PROCESS_GCM_ENCRYPT,
         GcmOp::Decrypt => PROCESS_GCM_ENCRYPT + 1,
     };
-    let dw0 = SqeDw0::new()
-        .with_cmd_id(id as u16)
-        .with_cmd_state(CMD_STATE_NEW_LAST)
-        .with_opcode(OPCODE_DATA_TRANSFER)
-        .with_dfl_idx(id as u16)
-        .with_dfl_num(0);
-    let dw1 = SqeDw1::new()
-        .with_process_type(process_type)
-        .with_sgl(true)
-        .with_chunk_byte_cnt(src_len as u16);
-    let dw2 = SqeDw2::new().with_key1_idx(id as u16);
+    let mut off = 0;
+    while off < len {
+        let chunk = (len - off).min(BCP_CHUNK_LEN);
+        let first = off == 0;
+        off += chunk;
+        let state = match (first, off == len) {
+            (true, true) => CMD_STATE_NEW_LAST,
+            (true, false) => CMD_STATE_NEW,
+            (false, true) => CMD_STATE_CONTINUE_LAST,
+            (false, false) => CMD_STATE_CONTINUE,
+        };
+        let dw0 = SqeDw0::new()
+            .with_cmd_id(id as u16)
+            .with_cmd_state(state)
+            .with_opcode(OPCODE_DATA_TRANSFER)
+            .with_dfl_idx(id as u16)
+            .with_dfl_num(0);
+        let dw1 = if first {
+            SqeDw1::new().with_process_type(process_type).with_sgl(true)
+        } else {
+            SqeDw1::new()
+        }
+        .with_chunk_byte_cnt(chunk as u16);
+        let dw2 = SqeDw2::new().with_key1_idx(id as u16);
 
-    let e = &GSRAM.bcp_sq[sq_idx];
-    e.dw0.set(dw0.into());
-    e.dw1.set(dw1.into());
-    e.dw2.set(dw2.into());
-    // DW3: interface selects, all 0 = SoC AXI.
-    e.dw3.set(0);
+        let e = &GSRAM.bcp_sq[s.sq_pi as usize];
+        e.dw0.set(dw0.into());
+        e.dw1.set(dw1.into());
+        e.dw2.set(dw2.into());
+        // DW3: interface selects, all 0 = SoC AXI.
+        e.dw3.set(0);
+        ring(s);
+    }
 }

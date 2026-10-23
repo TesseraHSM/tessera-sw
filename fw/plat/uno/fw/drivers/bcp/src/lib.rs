@@ -7,10 +7,12 @@
 //! CDMA engine at `0xA0C0_0000`.
 //!
 //! The FP cores used to drive this engine for host bulk AES-GCM/XTS; they
-//! run PQC now, so CP1 drives it directly. The driver programs one
-//! 8-entry submission/completion queue pair and DFL list 0 in GSRAM, and
-//! submits single-chunk AES-256-GCM commands. Each in-flight command owns
-//! the key-vault slot and DFL entry matching its command ID.
+//! run PQC now, so CP1 drives it directly: it is the Uno PAL's AES-GCM.
+//! The driver programs one 8-entry submission/completion queue pair and
+//! DFL list 0 in GSRAM, and submits AES-256-GCM commands of up to two
+//! 4 KiB chunks, three at a time; further callers wait for a command ID.
+//! Each in-flight command owns the key-vault slot and DFL entry matching
+//! its command ID.
 //!
 //! The engine has no interrupt routed to CP1, so completions are reaped by
 //! [`BcpDriver::wake`], which the PAL calls from its poll loop. The engine
@@ -31,8 +33,9 @@
 //!     iv: &iv,
 //!     aad_len: 32,
 //!     unpadded_aad_len: 20,
-//!     src,      // [padded_AAD | text]
-//!     dst,      // [padded_AAD | ciphertext], as long as src
+//!     tag: &[0; BCP_TAG_LEN],
+//!     // [padded_AAD | text] -> [padded_AAD | ciphertext]
+//!     data: GcmData::InPlace(buf),
 //! }).await?;
 //! ```
 

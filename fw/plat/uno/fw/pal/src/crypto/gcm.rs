@@ -1,31 +1,38 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pure-software AES-GCM for the Uno PAL.
+//! AES-256-GCM for the Uno PAL on the BCP (CDMA) bulk crypto engine.
 //!
-//! AES-GCM combines AES-CTR encryption with GHASH authentication.
-//! The caller supplies buffers laid out as `[padded_AAD | text]` where
-//! the AAD region is zero-padded to a multiple of [`GCM_AAD_PAD`] bytes
-//! per the scheme in `tsra_fw_core_crypto_gcm_buf`.
+//! The caller supplies `[padded_AAD | text]` buffers, the AAD zero-padded
+//! to a multiple of [`GCM_AAD_PAD`] bytes per the scheme in
+//! `tsra_fw_core_crypto_gcm_buf`, which makes the region's GHASH blocks
+//! those of the standard AAD up to a leading all-zero block (which GHASH
+//! ignores).
 //!
-//! ## GCM operations
+//! ## Tag correction
 //!
-//! | Entry point                      | AAD + text layout | Description                        |
-//! |----------------------------------|-------------------|------------------------------------|
-//! | [`gcm_encrypt_impl`]             | separate src/dst  | Encrypt, separate plaintext/ct     |
-//! | [`gcm_encrypt_in_place_impl`]    | single buffer     | Encrypt text in-place, compute tag |
-//! | [`gcm_decrypt_impl`]             | separate src/dst  | Verify tag, decrypt to separate    |
-//! | [`gcm_decrypt_in_place_impl`]    | single buffer     | Verify tag, decrypt text in-place  |
+//! The engine only processes whole blocks and its length block counts the
+//! padded AAD, so the PAL hands it the text rounded up to whole blocks,
+//! zero-padded, and corrects the tag in software. With `L` the standard
+//! length block, `L'` the engine's (padded AAD and rounded text lengths)
+//! and `H = E_K(0¹²⁸)`:
 //!
-//! ## AES-GCM algorithm outline (encrypt)
+//! * **Decrypt**: the zero-padded final block is exactly the block GHASH
+//!   takes, so only the length block differs. The engine is given the tag
+//!   it should compute, `T' = T ⊕ (L ⊕ L')·H`, and authenticates the
+//!   message itself.
+//! * **Encrypt**: the engine also encrypts the padding, leaving keystream
+//!   `D` (zero within the text) in the final ciphertext block, so
+//!   `T = T' ⊕ D·H² ⊕ (L ⊕ L')·H`.
 //!
-//! 1. Build J₀ from the 96-bit IV: `J₀ = IV ‖ 0³¹ ‖ 1`.
-//! 2. Encrypt the text portion using AES-CTR starting at J₀ + 1.
-//! 3. Compute GHASH of `(AAD, ciphertext, len(AAD)‖len(C))` using
-//!    hash subkey `H = AES_K(0¹²⁸)`.
-//! 4. Produce tag: `T = GHASH_result ⊕ AES_K(J₀)`.
+//! When `L = L'` (AAD a multiple of 32 bytes, text of whole blocks) the
+//! engine's tag is the tag and nothing else runs; otherwise `H` takes one
+//! block on the CP1 AES engine. With no text at all there is nothing for
+//! the engine, so the tag is computed in software (GMAC).
 //!
-//! Decryption reverses the process: verify the tag first, then decrypt.
+//! The engine runs in place on the caller's buffer when it can: a partial
+//! final block (which needs room for the padding) or a misaligned buffer
+//! goes through a scratch buffer instead.
 //!
 //! ## GHASH
 //!
@@ -39,9 +46,6 @@
 //! consumes the state four bits at a time, 32 rounds per block instead
 //! of 128. See [`Ghash::mul_by_h`] for why the table lookups are
 //! constant-time on CP1 and what would break that.
-//!
-//! GHASH itself is pure software — no DMA, no async — but accepts
-//! `DmaBuf` slices for consistency with the PAL calling convention.
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
@@ -51,6 +55,14 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
+use tsra_fw_uno_drivers_bcp::BCP_ADDR_ALIGN;
+use tsra_fw_uno_drivers_bcp::BCP_KEY_LEN;
+use tsra_fw_uno_drivers_bcp::BCP_MAX_SRC_LEN;
+use tsra_fw_uno_drivers_bcp::BcpError;
+use tsra_fw_uno_drivers_bcp::GcmCompletion;
+use tsra_fw_uno_drivers_bcp::GcmData;
+use tsra_fw_uno_drivers_bcp::GcmOp;
+use tsra_fw_uno_drivers_bcp::GcmRequest;
 
 use super::aes::AES_BLOCK_SIZE;
 use crate::UnoHsmPal;
@@ -69,9 +81,7 @@ pub const GCM_TAG_LEN: usize = 16;
 /// of this many bytes, matching the convention in `gcm_buf`.
 const GCM_AAD_PAD: usize = 32;
 
-/// Byte offset of the 32-bit big-endian counter within a 16-byte CTR
-/// block.  GCM places the counter in the last 4 bytes.
-const CTR_LOW_OFFSET: usize = 12;
+type Block = [u8; AES_BLOCK_SIZE];
 
 // =============================================================================
 // GHASH accumulator
@@ -214,17 +224,7 @@ impl Ghash {
         self.y[8..].copy_from_slice(&zl.to_be_bytes());
     }
 
-    /// Write the final GHASH value to a 16-byte output buffer.
-    fn finish_into(self, out: &mut DmaBuf) -> HsmResult<()> {
-        if out.len() != 16 {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
-        out.copy_from_slice(&self.y);
-        Ok(())
-    }
-
     /// Return the final GHASH value as a byte array.
-    #[cfg(any(test, feature = "bcp"))]
     pub(super) fn finish(self) -> [u8; 16] {
         self.y
     }
@@ -247,133 +247,30 @@ fn xor_block_arr(dst: &mut [u8; 16], src: &[u8; 16]) {
 }
 
 // =============================================================================
-// Buffer layout
+// Helpers
 // =============================================================================
-
-/// Describes the `[padded_AAD | text]` split inside a GCM buffer.
-///
-/// Given a buffer of `src_len` bytes and an unpadded `aad_len`, the
-/// first `pad_len` bytes hold the zero-padded AAD and the remaining
-/// `text_len` bytes hold the plaintext (or ciphertext).
-#[derive(Debug, Clone, Copy)]
-struct GcmLayout {
-    /// Length of the padded AAD region (a multiple of [`GCM_AAD_PAD`]).
-    pad_len: usize,
-
-    /// Length of the text (plaintext or ciphertext) that follows the
-    /// padded AAD region.
-    text_len: usize,
-}
-
-impl GcmLayout {
-    /// Compute the layout from a total buffer size and an unpadded AAD
-    /// length.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`HsmError::AesGcmInvalidBufferSize`] if the padded AAD
-    /// length exceeds the buffer.
-    fn new(src_len: usize, aad_len: usize) -> HsmResult<Self> {
-        let pad_len = padded_aad_len(aad_len);
-        if pad_len > src_len {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
-        Ok(Self {
-            pad_len,
-            text_len: src_len - pad_len,
-        })
-    }
-
-    /// The byte range that covers the text portion of the buffer.
-    fn text_range(&self) -> core::ops::Range<usize> {
-        self.pad_len..self.pad_len + self.text_len
-    }
-}
 
 /// Compute the padded AAD length (a multiple of [`GCM_AAD_PAD`]).
 ///
 /// Returns 0 when `aad_len` is 0 (no AAD region at all).
-pub(super) fn padded_aad_len(aad_len: usize) -> usize {
-    if aad_len == 0 {
-        0
-    } else {
-        (aad_len + GCM_AAD_PAD - 1) & !(GCM_AAD_PAD - 1)
-    }
+fn padded_aad_len(aad_len: usize) -> usize {
+    aad_len.next_multiple_of(GCM_AAD_PAD)
 }
 
-/// Byte offset of the unpadded AAD content within the padded region.
-///
-/// When `aad_len % GCM_AAD_PAD` is in `[1, AES_BLOCK_SIZE]`, the
-/// `gcm_buf` convention prepends 16 zero bytes before the AAD content,
-/// pushing the real AAD to offset 16.  Otherwise the AAD starts at
-/// offset 0.
-fn aad_content_offset(aad_len: usize) -> usize {
-    let rem = aad_len % GCM_AAD_PAD;
-    if rem != 0 && rem <= AES_BLOCK_SIZE {
-        AES_BLOCK_SIZE
-    } else {
-        0
-    }
+/// GCM length block `[8·aad_len]₆₄ ‖ [8·text_len]₆₄`.
+fn len_block(aad_len: usize, text_len: usize) -> Block {
+    let mut b = [0u8; AES_BLOCK_SIZE];
+    b[..8].copy_from_slice(&(aad_len as u64 * 8).to_be_bytes());
+    b[8..].copy_from_slice(&(text_len as u64 * 8).to_be_bytes());
+    b
 }
 
-/// Extract the unpadded AAD slice from a `[padded_AAD | text]` buffer.
-///
-/// # Errors
-///
-/// Returns [`HsmError::AesGcmInvalidBufferSize`] if the AAD content
-/// does not fit within the padded region.
-fn extract_aad(data: &DmaBuf, aad_len: usize) -> HsmResult<&DmaBuf> {
-    let layout = GcmLayout::new(data.len(), aad_len)?;
-    let start = aad_content_offset(aad_len);
-    if start + aad_len > layout.pad_len {
-        return Err(HsmError::AesGcmInvalidBufferSize);
-    }
-    Ok(&data[start..start + aad_len])
+fn xor(a: &Block, b: &Block) -> Block {
+    core::array::from_fn(|i| a[i] ^ b[i])
 }
 
-// =============================================================================
-// J₀ (initial counter block) helpers
-// =============================================================================
-
-/// Build the GCM initial counter block J₀ from a 96-bit IV.
-///
-/// `J₀ = IV ‖ 0x00000001` (12 bytes IV + 4-byte big-endian counter = 1).
-///
-/// # Errors
-///
-/// Returns [`HsmError::InvalidArg`] if `iv` is not [`GCM_IV_LEN`] bytes.
-fn write_j0(dst: &mut DmaBuf, iv: &DmaBuf) -> HsmResult<()> {
-    if iv.len() != GCM_IV_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    dst[..AES_BLOCK_SIZE].fill(0);
-    dst[..GCM_IV_LEN].copy_from_slice(iv);
-    dst[15] = 1; // counter = 1 in big-endian
-    Ok(())
-}
-
-/// Increment the 32-bit big-endian counter in the last 4 bytes of a
-/// 16-byte block, wrapping at 2³².  This advances J₀ → J₀ + 1, which
-/// is the first counter value used by AES-CTR.
-fn increment_counter(block: &mut DmaBuf) {
-    let ctr = u32::from_be_bytes([
-        block[CTR_LOW_OFFSET],
-        block[CTR_LOW_OFFSET + 1],
-        block[CTR_LOW_OFFSET + 2],
-        block[CTR_LOW_OFFSET + 3],
-    ]);
-    block[CTR_LOW_OFFSET..CTR_LOW_OFFSET + 4].copy_from_slice(&ctr.wrapping_add(1).to_be_bytes());
-}
-
-// =============================================================================
-// Tag helpers
-// =============================================================================
-
-/// Constant-time comparison of two byte slices.
-pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+/// Constant-time comparison of two blocks.
+fn constant_time_eq(a: &Block, b: &Block) -> bool {
     let mut diff = 0u8;
     for (&x, &y) in a.iter().zip(b) {
         diff |= x ^ y;
@@ -381,64 +278,68 @@ pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// XOR 16 bytes of `src` into `dst` (`DmaBuf` variant).
-///
-/// # Errors
-///
-/// Returns [`HsmError::AesGcmInvalidBufferSize`] if either buffer is
-/// not exactly [`AES_BLOCK_SIZE`] bytes.
-fn xor_block(dst: &mut DmaBuf, src: &DmaBuf) -> HsmResult<()> {
-    if dst.len() != AES_BLOCK_SIZE || src.len() != AES_BLOCK_SIZE {
-        return Err(HsmError::AesGcmInvalidBufferSize);
-    }
-    for (d, &s) in dst.iter_mut().zip(src.iter()) {
-        *d ^= s;
-    }
-    Ok(())
+fn ghash(h: &Block) -> HsmResult<Ghash> {
+    Ghash::new(h).ok_or(HsmError::AesGcmInvalidBufferSize)
 }
 
-/// Write the bit-length of `byte_len` as a big-endian 64-bit integer
-/// at `dst[offset..offset + 8]`.
-///
-/// # Errors
-///
-/// Returns [`HsmError::AesGcmInvalidBufferSize`] if `byte_len` would
-/// overflow when multiplied by 8.
-fn write_bit_length(dst: &mut DmaBuf, offset: usize, byte_len: usize) -> HsmResult<()> {
-    let bits = u64::try_from(byte_len)
-        .ok()
-        .and_then(|n| n.checked_mul(8))
-        .ok_or(HsmError::AesGcmInvalidBufferSize)?;
-    dst[offset..offset + 8].copy_from_slice(&bits.to_be_bytes());
-    Ok(())
+/// A `len`-byte buffer aligned for the engine, from the scope's DMA heap.
+fn engine_buf<S: HsmScopedAlloc>(scope: &S, len: usize) -> HsmResult<&mut DmaBuf> {
+    let raw = scope.dma_alloc(len + BCP_ADDR_ALIGN - 1)?;
+    let off = raw.as_ptr().align_offset(BCP_ADDR_ALIGN);
+    Ok(&mut raw[off..off + len])
 }
 
-/// Compute `GHASH(H, AAD, ciphertext)` and write the result to `tag`.
-///
-/// Follows NIST SP 800-38D § 6.4:
-///   `GHASH_H(A ‖ C ‖ len(A)₆₄ ‖ len(C)₆₄)`
-///
-/// `lengths` is a caller-supplied 16-byte scratch buffer used to hold
-/// the `len(A) ‖ len(C)` block.
-fn compute_ghash(
-    h: &DmaBuf,
-    aad: &DmaBuf,
-    ciphertext: &DmaBuf,
-    lengths: &mut DmaBuf,
-    tag: &mut DmaBuf,
-) -> HsmResult<()> {
-    if h.len() != AES_BLOCK_SIZE || lengths.len() != AES_BLOCK_SIZE || tag.len() != GCM_TAG_LEN {
-        return Err(HsmError::AesGcmInvalidBufferSize);
+fn is_aligned(buf: &DmaBuf) -> bool {
+    buf.as_ptr().align_offset(BCP_ADDR_ALIGN) == 0
+}
+
+/// GCM direction; a decrypt carries the tag to check.
+#[derive(Clone, Copy)]
+enum Dir<'a> {
+    Encrypt,
+    Decrypt(&'a Block),
+}
+
+/// The caller's `[padded_AAD | text]` input and output.
+enum Bufs<'a> {
+    /// Read `src`, write `dst` (the same length).
+    Copy {
+        src: &'a DmaBuf,
+        dst: &'a mut DmaBuf,
+    },
+    /// Transform in place.
+    InPlace(&'a mut DmaBuf),
+}
+
+impl Bufs<'_> {
+    fn src(&self) -> &DmaBuf {
+        match self {
+            Self::Copy { src, .. } => src,
+            Self::InPlace(buf) => buf,
+        }
     }
 
-    write_bit_length(lengths, 0, aad.len())?;
-    write_bit_length(lengths, 8, ciphertext.len())?;
+    fn dst(&mut self) -> &mut DmaBuf {
+        match self {
+            Self::Copy { dst, .. } => dst,
+            Self::InPlace(buf) => buf,
+        }
+    }
 
-    let mut ghash = Ghash::new(h).ok_or(HsmError::AesGcmInvalidBufferSize)?;
-    ghash.update(aad);
-    ghash.update(ciphertext);
-    ghash.update(lengths);
-    ghash.finish_into(tag)
+    fn aligned(&self) -> bool {
+        match self {
+            Self::Copy { src, dst } => is_aligned(src) && is_aligned(dst),
+            Self::InPlace(buf) => is_aligned(buf),
+        }
+    }
+
+    /// Hand the buffers to the engine as they are.
+    fn engine_data(&mut self) -> GcmData<'_> {
+        match self {
+            Self::Copy { src, dst } => GcmData::Copy { src, dst },
+            Self::InPlace(buf) => GcmData::InPlace(buf),
+        }
+    }
 }
 
 // =============================================================================
@@ -446,193 +347,172 @@ fn compute_ghash(
 // =============================================================================
 
 impl UnoHsmPal {
-    // ── AES primitives used by GCM ──────────────────────────────────
-
-    /// Single-block AES-ECB encrypt: `output = AES_K(block)`.
-    ///
-    /// Both `block` and `output` must be exactly [`AES_BLOCK_SIZE`].
-    pub(super) async fn ecb_encrypt_block(
-        &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
-        block: &DmaBuf,
-        output: &mut DmaBuf,
-    ) -> HsmResult<()> {
-        if block.len() != AES_BLOCK_SIZE || output.len() != AES_BLOCK_SIZE {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
-        self.alloc_scoped_async(io, async |scope| {
-            let input = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            input.copy_from_slice(block);
-            self.aes_run(AesMode::Ecb, AesOp::Encrypt, key, None, input, output)
-                .await
-        })
-        .await
-    }
-
-    /// AES-CTR encrypt/decrypt from `input` into `output`.
-    ///
-    /// Constructs the initial counter J₀ + 1 from `iv`, then submits a
-    /// single AES-CTR command covering the full input.  Empty input is
-    /// a no-op.
-    ///
-    /// The CP1 AES engine rejects CTR lengths that are not a multiple of
-    /// the block size, so a partial final block runs on a zero-padded copy
-    /// and only the input's length is kept.
-    async fn ctr_crypt(
-        &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
-    ) -> HsmResult<()> {
-        if input.is_empty() {
-            return Ok(());
-        }
-        let len = input.len();
-        if output.len() < len {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
-        self.alloc_scoped_async(io, async |scope| {
-            let ctr = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            write_j0(ctr, iv)?;
-            increment_counter(ctr);
-            if len.is_multiple_of(AES_BLOCK_SIZE) {
-                return self
-                    .aes_run(
-                        AesMode::Ctr,
-                        AesOp::Encrypt,
-                        key,
-                        Some(ctr),
-                        input,
-                        &mut output[..len],
-                    )
-                    .await;
-            }
-
-            let padded = len.next_multiple_of(AES_BLOCK_SIZE);
-            let src = scope.dma_alloc(padded)?;
-            let dst = scope.dma_alloc(padded)?;
-            src[..len].copy_from_slice(input);
-            src[len..].fill(0);
-            let result = self
-                .aes_run(AesMode::Ctr, AesOp::Encrypt, key, Some(ctr), src, dst)
-                .await;
-            if result.is_ok() {
-                output[..len].copy_from_slice(&dst[..len]);
-            }
-            src.zeroize();
-            dst.zeroize();
-            result
-        })
-        .await
-    }
-
-    /// In-place AES-CTR over `data`.
-    ///
-    /// Copies `data` into a freshly allocated, disjoint scratch buffer and
-    /// runs the transform from scratch back into `data`.
-    ///
-    /// This avoids forming an `&` alias over `data` that would coexist with
-    /// the `&mut data` borrow — such overlapping `&`/`&mut` references are
-    /// undefined behavior in Rust, even though the AES engine reads each
-    /// input block before writing the corresponding output block.
-    async fn ctr_crypt_in_place(
-        &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        data: &mut DmaBuf,
-    ) -> HsmResult<()> {
-        if data.is_empty() {
-            return Ok(());
-        }
-        self.alloc_scoped_async(io, async |scope| {
-            let scratch = scope.dma_alloc(data.len())?;
-            scratch.copy_from_slice(data);
-            self.ctr_crypt(io, key, iv, scratch, data).await
-        })
-        .await
-    }
-
-    // ── GCM tag computation ─────────────────────────────────────────
-
-    /// Compute the GCM authentication tag.
-    ///
-    /// `T = GHASH(H, AAD, ciphertext) ⊕ AES_K(J₀)`
-    ///
-    /// where `H = AES_K(0¹²⁸)` and `J₀ = IV ‖ 0x00000001`.
-    async fn compute_tag(
-        &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        aad: &DmaBuf,
-        ciphertext: &DmaBuf,
-        tag: &mut DmaBuf,
-    ) -> HsmResult<()> {
-        if tag.len() != GCM_TAG_LEN {
-            return Err(HsmError::AesGcmInvalidBufferSize);
-        }
-        self.alloc_scoped_async(io, async |scope| {
-            // H = AES_K(0^128)
-            let zero = scope.dma_alloc_zeroed(AES_BLOCK_SIZE)?;
-            let h = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            self.ecb_encrypt_block(io, key, zero, h).await?;
-
-            // E(K, J₀)
-            let j0 = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            write_j0(j0, iv)?;
-            let ek_j0 = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            self.aes_run(AesMode::Ecb, AesOp::Encrypt, key, None, j0, ek_j0)
-                .await?;
-
-            // T = GHASH(H, AAD, C) ⊕ E(K, J₀)
-            let lengths = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            compute_ghash(h, aad, ciphertext, lengths, tag)?;
-            xor_block(tag, ek_j0)
-        })
-        .await
-    }
-
-    /// Compute the expected tag and verify it against `expected` in
-    /// constant time.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`HsmError::AesGcmDecryptTagDoesNotMatch`] on mismatch.
-    async fn verify_tag(
-        &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        aad: &DmaBuf,
-        ciphertext: &DmaBuf,
-        expected: &DmaBuf,
-    ) -> HsmResult<()> {
-        let matches = self
-            .alloc_scoped_async(io, async |scope| {
-                let computed = scope.dma_alloc(GCM_TAG_LEN)?;
-                self.compute_tag(io, key, iv, aad, ciphertext, computed)
-                    .await?;
-                Ok::<_, HsmError>(constant_time_eq(computed, expected))
-            })
+    /// `H = E_K(0¹²⁸)` on the CP1 AES engine.
+    async fn hash_subkey<S: HsmScopedAlloc>(&self, key: &DmaBuf, scope: &S) -> HsmResult<Block> {
+        let zero = scope.dma_alloc_zeroed(AES_BLOCK_SIZE)?;
+        let out = scope.dma_alloc(AES_BLOCK_SIZE)?;
+        self.aes_run(AesMode::Ecb, AesOp::Encrypt, key, None, zero, out)
             .await?;
-        if !matches {
-            return Err(HsmError::AesGcmDecryptTagDoesNotMatch);
+        let mut h = [0u8; AES_BLOCK_SIZE];
+        h.copy_from_slice(out);
+        out.zeroize();
+        Ok(h)
+    }
+
+    /// AES-256-GCM over `bufs`; returns the tag of an encrypt. A decrypt
+    /// that fails authentication wipes its output text and returns
+    /// [`HsmError::AesGcmDecryptTagDoesNotMatch`].
+    async fn gcm_run(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &DmaBuf,
+        aad_len: usize,
+        dir: Dir<'_>,
+        mut bufs: Bufs<'_>,
+    ) -> HsmResult<Block> {
+        if key.len() != BCP_KEY_LEN {
+            return Err(HsmError::InvalidArg);
         }
-        Ok(())
+        let iv: &[u8] = iv;
+        let iv: &[u8; GCM_IV_LEN] = iv.try_into().map_err(|_| HsmError::InvalidArg)?;
+        let len = bufs.src().len();
+        let pad = padded_aad_len(aad_len);
+        let text_len = len
+            .checked_sub(pad)
+            .ok_or(HsmError::AesGcmInvalidBufferSize)?;
+        if text_len == 0 {
+            return self.gmac(io, key, iv, aad_len, dir, bufs).await;
+        }
+        let rounded = text_len.next_multiple_of(AES_BLOCK_SIZE);
+        let tail = text_len % AES_BLOCK_SIZE;
+        if pad + rounded > BCP_MAX_SRC_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let len_fix = xor(&len_block(aad_len, text_len), &len_block(pad, rounded));
+        let fix = len_fix != [0; AES_BLOCK_SIZE];
+
+        self.alloc_scoped_async(io, async |scope| {
+            let h = if fix {
+                Some(self.hash_subkey(key, scope).await?)
+            } else {
+                None
+            };
+
+            // The tag the engine checks a decrypt against.
+            let engine_tag = match (dir, &h) {
+                (Dir::Decrypt(t), Some(h)) => {
+                    let mut g = ghash(h)?;
+                    g.update(&len_fix);
+                    xor(t, &g.finish())
+                }
+                (Dir::Decrypt(t), None) => *t,
+                (Dir::Encrypt, _) => [0; AES_BLOCK_SIZE],
+            };
+            let req = |data| GcmRequest {
+                op: match dir {
+                    Dir::Encrypt => GcmOp::Encrypt,
+                    Dir::Decrypt(_) => GcmOp::Decrypt,
+                },
+                key,
+                iv,
+                aad_len: pad,
+                unpadded_aad_len: aad_len,
+                tag: &engine_tag,
+                data,
+            };
+
+            // `pad_ks`: the keystream the engine leaves in the final block
+            // past the text (encrypt only).
+            let mut pad_ks = [0u8; AES_BLOCK_SIZE];
+            let result = if tail == 0 && bufs.aligned() {
+                let done = self.bcp.gcm(req(bufs.engine_data())).await;
+                let result = verdict(dir, &engine_tag, done);
+                if result.is_err() {
+                    bufs.dst()[pad..len].zeroize();
+                }
+                result
+            } else {
+                let work = engine_buf(scope, pad + rounded)?;
+                work[..len].copy_from_slice(bufs.src());
+                work[len..].fill(0);
+                let done = self.bcp.gcm(req(GcmData::InPlace(work))).await;
+                let result = verdict(dir, &engine_tag, done);
+                if result.is_ok() {
+                    if tail != 0 {
+                        pad_ks[tail..].copy_from_slice(&work[len..]);
+                    }
+                    bufs.dst()[..len].copy_from_slice(&work[..len]);
+                }
+                work.zeroize();
+                result
+            };
+            let engine_tag = result?;
+
+            match (dir, h) {
+                (Dir::Encrypt, Some(h)) => {
+                    // T = T' ⊕ D·H² ⊕ (L ⊕ L')·H.
+                    let mut g = ghash(&h)?;
+                    if tail != 0 {
+                        g.update(&pad_ks);
+                    }
+                    g.update(&len_fix);
+                    Ok(xor(&engine_tag, &g.finish()))
+                }
+                _ => Ok(engine_tag),
+            }
+        })
+        .await
+    }
+
+    /// GCM with no text: the tag is `GHASH(AAD, L) ⊕ E_K(J₀)`, computed in
+    /// software with `H` and `E_K(J₀)` from one CP1 AES command.
+    async fn gmac(
+        &self,
+        io: &impl HsmIo,
+        key: &DmaBuf,
+        iv: &[u8; GCM_IV_LEN],
+        aad_len: usize,
+        dir: Dir<'_>,
+        mut bufs: Bufs<'_>,
+    ) -> HsmResult<Block> {
+        self.alloc_scoped_async(io, async |scope| {
+            // [0¹²⁸ | J₀] → [H | E_K(J₀)].
+            let blocks = scope.dma_alloc_zeroed(2 * AES_BLOCK_SIZE)?;
+            blocks[AES_BLOCK_SIZE..AES_BLOCK_SIZE + GCM_IV_LEN].copy_from_slice(iv);
+            blocks[2 * AES_BLOCK_SIZE - 1] = 1;
+            let out = scope.dma_alloc(2 * AES_BLOCK_SIZE)?;
+            self.aes_run(AesMode::Ecb, AesOp::Encrypt, key, None, blocks, out)
+                .await?;
+            let (h, ek_j0) = out.split_at(AES_BLOCK_SIZE);
+            let mut g = Ghash::new(h).ok_or(HsmError::AesGcmInvalidBufferSize)?;
+            // The padded region's blocks are the AAD's, after a possible
+            // leading zero block that leaves GHASH unchanged.
+            g.update(bufs.src());
+            g.update(&len_block(aad_len, 0));
+            let mut ek = [0u8; AES_BLOCK_SIZE];
+            ek.copy_from_slice(ek_j0);
+            let tag = xor(&g.finish(), &ek);
+            out.zeroize();
+            ek.fill(0);
+
+            if let Dir::Decrypt(expected) = dir
+                && !constant_time_eq(&tag, expected)
+            {
+                return Err(HsmError::AesGcmDecryptTagDoesNotMatch);
+            }
+            if let Bufs::Copy { src, dst } = &mut bufs {
+                dst.copy_from_slice(src);
+            }
+            Ok(tag)
+        })
+        .await
     }
 
     // ── Public GCM entry points ─────────────────────────────────────
 
-    /// AES-GCM encrypt with separate `[padded_AAD | text]` source and
-    /// destination buffers.
-    ///
-    /// The padded-AAD region is copied verbatim; only the text portion
-    /// is encrypted via AES-CTR.  The authentication tag covers the
-    /// original AAD and the resulting ciphertext.
+    /// AES-256-GCM encrypt from `plaintext` into `ciphertext`, both
+    /// `[padded_AAD | text]`; the padded AAD is copied through.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn gcm_encrypt_impl(
         &self,
@@ -647,31 +527,19 @@ impl UnoHsmPal {
         if tag.len() != GCM_TAG_LEN || ciphertext.len() < plaintext.len() {
             return Err(HsmError::InvalidArg);
         }
-        let layout = GcmLayout::new(plaintext.len(), aad_len)?;
-        let aad = extract_aad(plaintext, aad_len)?;
-
-        // Copy the padded-AAD region verbatim.
-        ciphertext[..layout.pad_len].copy_from_slice(&plaintext[..layout.pad_len]);
-
-        // Encrypt the text portion.
-        self.ctr_crypt(
-            io,
-            key,
-            iv,
-            &plaintext[layout.text_range()],
-            &mut ciphertext[layout.text_range()],
-        )
-        .await?;
-
-        // Tag covers AAD + encrypted text.
-        self.compute_tag(io, key, iv, aad, &ciphertext[layout.text_range()], tag)
-            .await
+        let dst = &mut ciphertext[..plaintext.len()];
+        let bufs = Bufs::Copy {
+            src: plaintext,
+            dst,
+        };
+        let t = self
+            .gcm_run(io, key, iv, aad_len, Dir::Encrypt, bufs)
+            .await?;
+        tag.copy_from_slice(&t);
+        Ok(())
     }
 
-    /// AES-GCM encrypt in-place over `[padded_AAD | text]`.
-    ///
-    /// The text portion is encrypted via AES-CTR and the tag is
-    /// computed over the AAD + resulting ciphertext.
+    /// AES-256-GCM encrypt in place over `[padded_AAD | text]`.
     pub(super) async fn gcm_encrypt_in_place_impl(
         &self,
         io: &impl HsmIo,
@@ -684,21 +552,16 @@ impl UnoHsmPal {
         if tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let layout = GcmLayout::new(data.len(), aad_len)?;
-
-        self.ctr_crypt_in_place(io, key, iv, &mut data[layout.text_range()])
+        let t = self
+            .gcm_run(io, key, iv, aad_len, Dir::Encrypt, Bufs::InPlace(data))
             .await?;
-
-        let aad = extract_aad(data, aad_len)?;
-        self.compute_tag(io, key, iv, aad, &data[layout.text_range()], tag)
-            .await
+        tag.copy_from_slice(&t);
+        Ok(())
     }
 
-    /// AES-GCM decrypt with separate `[padded_AAD | text]` source and
-    /// destination buffers.
-    ///
-    /// Verifies the tag first (authenticate-then-decrypt).  On tag
-    /// mismatch the plaintext buffer is not written.
+    /// AES-256-GCM decrypt from `ciphertext` into `plaintext`, both
+    /// `[padded_AAD | text]`. On a tag mismatch the plaintext text is
+    /// wiped.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn gcm_decrypt_impl(
         &self,
@@ -710,32 +573,23 @@ impl UnoHsmPal {
         ciphertext: &DmaBuf,
         plaintext: &mut DmaBuf,
     ) -> HsmResult<()> {
-        if tag.len() != GCM_TAG_LEN || plaintext.len() < ciphertext.len() {
+        let tag: &[u8] = tag;
+        let tag: &Block = tag.try_into().map_err(|_| HsmError::InvalidArg)?;
+        if plaintext.len() < ciphertext.len() {
             return Err(HsmError::InvalidArg);
         }
-        let layout = GcmLayout::new(ciphertext.len(), aad_len)?;
-        let aad = extract_aad(ciphertext, aad_len)?;
-
-        // Authenticate before decrypting.
-        self.verify_tag(io, key, iv, aad, &ciphertext[layout.text_range()], tag)
-            .await?;
-
-        // Copy padded-AAD and decrypt the text portion.
-        plaintext[..layout.pad_len].copy_from_slice(&ciphertext[..layout.pad_len]);
-        self.ctr_crypt(
-            io,
-            key,
-            iv,
-            &ciphertext[layout.text_range()],
-            &mut plaintext[layout.text_range()],
-        )
-        .await
+        let dst = &mut plaintext[..ciphertext.len()];
+        let bufs = Bufs::Copy {
+            src: ciphertext,
+            dst,
+        };
+        self.gcm_run(io, key, iv, aad_len, Dir::Decrypt(tag), bufs)
+            .await
+            .map(|_| ())
     }
 
-    /// AES-GCM decrypt in-place over `[padded_AAD | text]`.
-    ///
-    /// Verifies the tag first (authenticate-then-decrypt).  On tag
-    /// mismatch the data buffer is not modified.
+    /// AES-256-GCM decrypt in place over `[padded_AAD | text]`. On a tag
+    /// mismatch the text is wiped.
     pub(super) async fn gcm_decrypt_in_place_impl(
         &self,
         io: &impl HsmIo,
@@ -745,18 +599,25 @@ impl UnoHsmPal {
         tag: &DmaBuf,
         data: &mut DmaBuf,
     ) -> HsmResult<()> {
-        if tag.len() != GCM_TAG_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        let layout = GcmLayout::new(data.len(), aad_len)?;
-        let aad = extract_aad(data, aad_len)?;
-
-        // Authenticate before decrypting.
-        self.verify_tag(io, key, iv, aad, &data[layout.text_range()], tag)
-            .await?;
-
-        self.ctr_crypt_in_place(io, key, iv, &mut data[layout.text_range()])
+        let tag: &[u8] = tag;
+        let tag: &Block = tag.try_into().map_err(|_| HsmError::InvalidArg)?;
+        self.gcm_run(io, key, iv, aad_len, Dir::Decrypt(tag), Bufs::InPlace(data))
             .await
+            .map(|_| ())
+    }
+}
+
+/// Interpret an engine completion: the engine's tag for an encrypt, or the
+/// verdict on a decrypt.
+fn verdict(dir: Dir<'_>, engine_tag: &Block, done: HsmResult<GcmCompletion>) -> HsmResult<Block> {
+    let done = done?;
+    match dir {
+        Dir::Encrypt if done.ok() => Ok(done.tag),
+        Dir::Decrypt(_) if done.ok() && constant_time_eq(&done.tag, engine_tag) => Ok(done.tag),
+        Dir::Decrypt(_) if done.ok() || done.tag_mismatch_only() => {
+            Err(HsmError::AesGcmDecryptTagDoesNotMatch)
+        }
+        _ => Err(BcpError::CMD_ERROR),
     }
 }
 

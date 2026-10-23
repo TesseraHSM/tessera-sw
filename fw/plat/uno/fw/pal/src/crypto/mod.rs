@@ -39,8 +39,6 @@ mod aes;
 mod ecc;
 mod ecc_det;
 mod gcm;
-#[cfg(feature = "bcp")]
-mod gcm_bulk;
 mod hash;
 mod hmac;
 mod kdf;

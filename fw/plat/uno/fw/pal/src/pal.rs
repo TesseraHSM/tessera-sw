@@ -39,7 +39,6 @@ use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
-#[cfg(feature = "bcp")]
 use tsra_fw_uno_drivers_bcp::BcpDriver;
 use tsra_fw_uno_drivers_boot_status as boot_status;
 use tsra_fw_uno_drivers_boot_status::BootStatus;
@@ -285,8 +284,7 @@ pub struct UnoHsmPal {
     /// IPC Controller — doorbell-based inter-processor communication.
     pub ipc: &'static Ipc,
 
-    /// Bulk crypto processor (CDMA) — AES-256-GCM. Bring-up images only.
-    #[cfg(feature = "bcp")]
+    /// Bulk crypto processor (CDMA) — AES-256-GCM.
     pub bcp: &'static BcpDriver,
 
     /// Boot handshake phase (PAL lifecycle state).
@@ -394,7 +392,6 @@ impl Default for UnoHsmPal {
             rng: unsafe { static_init!(RngDriver, RngDriver::new()) },
             pqc: unsafe { static_init!(PqcDriver, PqcDriver::new()) },
             ipc: unsafe { static_init!(Ipc, Ipc::new(ipc_config)) },
-            #[cfg(feature = "bcp")]
             bcp: unsafe { static_init!(BcpDriver, BcpDriver::new()) },
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
             io_alloc: IO_ALLOC_INIT,
@@ -566,7 +563,6 @@ impl UnoHsmPal {
         }
 
         // The BCP raises no CP1 interrupt; reap its completions every pass.
-        #[cfg(feature = "bcp")]
         self.bcp.wake();
     }
 

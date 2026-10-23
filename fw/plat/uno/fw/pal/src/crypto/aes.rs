@@ -340,7 +340,7 @@ impl HsmAes for UnoHsmPal {
             .await
     }
 
-    /// AES-GCM encrypt using AES-CTR plus software GHASH.
+    /// AES-256-GCM encrypt on the BCP (see `gcm.rs`).
     #[allow(clippy::too_many_arguments)]
     async fn gcm_encrypt(
         &self,
@@ -359,7 +359,7 @@ impl HsmAes for UnoHsmPal {
             .await
     }
 
-    /// AES-GCM encrypt in-place using AES-CTR plus software GHASH.
+    /// AES-256-GCM encrypt in place on the BCP.
     async fn gcm_encrypt_in_place(
         &self,
         io: &impl HsmIo,
@@ -376,7 +376,7 @@ impl HsmAes for UnoHsmPal {
             .await
     }
 
-    /// AES-GCM decrypt using AES-CTR plus software GHASH.
+    /// AES-256-GCM decrypt on the BCP.
     #[allow(clippy::too_many_arguments)]
     async fn gcm_decrypt(
         &self,
@@ -395,7 +395,7 @@ impl HsmAes for UnoHsmPal {
             .await
     }
 
-    /// AES-GCM decrypt in-place using AES-CTR plus software GHASH.
+    /// AES-256-GCM decrypt in place on the BCP.
     async fn gcm_decrypt_in_place(
         &self,
         io: &impl HsmIo,
@@ -410,50 +410,6 @@ impl HsmAes for UnoHsmPal {
         }
         self.gcm_decrypt_in_place_impl(io, key, iv, aad_len, tag, data)
             .await
-    }
-
-    async fn gcm_bulk_encrypt(
-        &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        aad_len: usize,
-        src: &DmaBuf,
-        dst: &mut DmaBuf,
-        tag: &mut DmaBuf,
-    ) -> HsmResult<()> {
-        #[cfg(feature = "bcp")]
-        {
-            self.gcm_bulk_encrypt_impl(io, key, iv, aad_len, src, dst, tag)
-                .await
-        }
-        #[cfg(not(feature = "bcp"))]
-        {
-            let _ = (io, key, iv, aad_len, src, dst, tag);
-            Err(HsmError::UnsupportedCmd)
-        }
-    }
-
-    async fn gcm_bulk_decrypt(
-        &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        aad_len: usize,
-        tag: &DmaBuf,
-        src: &DmaBuf,
-        dst: &mut DmaBuf,
-    ) -> HsmResult<()> {
-        #[cfg(feature = "bcp")]
-        {
-            self.gcm_bulk_decrypt_impl(io, key, iv, aad_len, tag, src, dst)
-                .await
-        }
-        #[cfg(not(feature = "bcp"))]
-        {
-            let _ = (io, key, iv, aad_len, tag, src, dst);
-            Err(HsmError::UnsupportedCmd)
-        }
     }
 
     // ── AES Key Wrap (RFC 3394) / Key Wrap with Padding (RFC 5649) ──
