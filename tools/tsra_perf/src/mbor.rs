@@ -40,16 +40,15 @@ use tsra_ddi_mbor_types::DdiKeyUsage;
 use x509::X509Certificate;
 use x509::X509CertificateOp;
 
+use crate::mbor_keys::TEST_CRED_ID as CRED_ID;
+use crate::mbor_keys::TEST_CRED_PIN as CRED_PIN;
 use crate::mbor_keys::TEST_ECC_384_PRIVATE_KEY;
 use crate::mbor_keys::TEST_POTA_ECC_PRIVATE_KEY;
 use crate::mbor_keys::TEST_POTA_ECC_PUB_KEY;
+use crate::mbor_keys::TEST_SESSION_SEED as SESSION_SEED;
 
 /// MBOR API revision the requests carry.
 pub(crate) const REV: DdiApiRev = DdiApiRev { major: 1, minor: 0 };
-
-const CRED_ID: [u8; 16] = [0x70; 16];
-const CRED_PIN: [u8; 16] = [0xDB; 16];
-const SESSION_SEED: [u8; 48] = [0xE5; 48];
 
 /// A device-generated MBOR ECC key.
 pub(crate) struct MborEccKey {
