@@ -571,7 +571,7 @@ fn recover(s: &mut BcpState) {
 }
 
 /// Bring-up diagnostics on the HSM UART: `BCP <what> <hex words>`.
-fn diag(what: &str, words: &[u32]) {
+pub fn diag(what: &str, words: &[u32]) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut uart = Uart::new();
     uart.write("BCP ");
