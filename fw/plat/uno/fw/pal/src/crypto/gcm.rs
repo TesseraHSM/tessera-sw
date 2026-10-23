@@ -475,6 +475,10 @@ impl UnoHsmPal {
     /// Constructs the initial counter J₀ + 1 from `iv`, then submits a
     /// single AES-CTR command covering the full input.  Empty input is
     /// a no-op.
+    ///
+    /// The CP1 AES engine rejects CTR lengths that are not a multiple of
+    /// the block size, so a partial final block runs on a zero-padded copy
+    /// and only the input's length is kept.
     async fn ctr_crypt(
         &self,
         io: &impl HsmIo,
@@ -486,22 +490,41 @@ impl UnoHsmPal {
         if input.is_empty() {
             return Ok(());
         }
-        if output.len() < input.len() {
+        let len = input.len();
+        if output.len() < len {
             return Err(HsmError::AesGcmInvalidBufferSize);
         }
         self.alloc_scoped_async(io, async |scope| {
             let ctr = scope.dma_alloc(AES_BLOCK_SIZE)?;
             write_j0(ctr, iv)?;
             increment_counter(ctr);
-            self.aes_run(
-                AesMode::Ctr,
-                AesOp::Encrypt,
-                key,
-                Some(ctr),
-                input,
-                &mut output[..input.len()],
-            )
-            .await
+            if len.is_multiple_of(AES_BLOCK_SIZE) {
+                return self
+                    .aes_run(
+                        AesMode::Ctr,
+                        AesOp::Encrypt,
+                        key,
+                        Some(ctr),
+                        input,
+                        &mut output[..len],
+                    )
+                    .await;
+            }
+
+            let padded = len.next_multiple_of(AES_BLOCK_SIZE);
+            let src = scope.dma_alloc(padded)?;
+            let dst = scope.dma_alloc(padded)?;
+            src[..len].copy_from_slice(input);
+            src[len..].fill(0);
+            let result = self
+                .aes_run(AesMode::Ctr, AesOp::Encrypt, key, Some(ctr), src, dst)
+                .await;
+            if result.is_ok() {
+                output[..len].copy_from_slice(&dst[..len]);
+            }
+            src.zeroize();
+            dst.zeroize();
+            result
         })
         .await
     }
