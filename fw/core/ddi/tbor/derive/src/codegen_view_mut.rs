@@ -92,11 +92,6 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
     }
 
     let view_mut_name = format_ident!("{}ViewMut", schema.name);
-    let header_len = match schema.kind {
-        MessageKind::Request { .. } => quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
-        MessageKind::Response => quote! { tsra_fw_ddi_tbor::RESP_HEADER_LEN },
-        MessageKind::Fields => unreachable!(),
-    };
 
     let layout = TocLayout::compute(&schema.fields);
 
@@ -129,19 +124,19 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
             let var = format_ident!("__scalar_{}", field.name);
             let body = match field.wire_type {
                 WireType::Uint8 => Some(quote! {
-                    tsra_fw_ddi_tbor::toc::read_toc_inline_u8(&*buf, #header_len, #toc_idx)
+                    tsra_fw_ddi_tbor::toc::raw_toc_inline_u8(__raw.toc_word(#toc_idx))
                 }),
                 WireType::Uint16 => Some(quote! {
-                    tsra_fw_ddi_tbor::toc::read_toc_inline_u16(&*buf, #header_len, #toc_idx)
+                    tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(__raw.toc_word(#toc_idx))
                 }),
                 WireType::SessionId => Some(quote! {
                     tsra_fw_ddi_tbor_api::SessionId(
-                        tsra_fw_ddi_tbor::toc::read_toc_inline_u16(&*buf, #header_len, #toc_idx)
+                        tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(__raw.toc_word(#toc_idx))
                     )
                 }),
                 WireType::KeyId => Some(quote! {
                     tsra_fw_ddi_tbor_api::KeyId(
-                        tsra_fw_ddi_tbor::toc::read_toc_inline_u16(&*buf, #header_len, #toc_idx)
+                        tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(__raw.toc_word(#toc_idx))
                     )
                 }),
                 _ => None,
@@ -158,9 +153,7 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
             let len_var = format_ident!("__len_{}", field.name);
             quote! {
                 let (#off_var, #len_var): (usize, usize) = {
-                    let __word = tsra_fw_ddi_tbor::toc::read_toc_word(
-                        &*buf, #header_len, #toc_idx
-                    );
+                    let __word = __raw.toc_word(#toc_idx);
                     (
                         tsra_fw_ddi_tbor::toc::raw_toc_offset(__word),
                         tsra_fw_ddi_tbor::toc::raw_toc_length(__word),
@@ -275,29 +268,24 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
 
     let validation = crate::codegen_view::gen_validation_standalone(schema);
 
-    let data_start_expr = quote! {
-        {
-            let toc_count_idx: usize = if #header_len == 4 { 2 } else { 3 };
-            let toc_count = ((&*buf)[toc_count_idx] & 0x1F) as usize + 1;
-            #header_len + toc_count * 4
-        }
-    };
-
     Some(quote! {
-        // ── Phase 1a: validation pass (shared reborrow).
-        {
+        // ── Phase 1a: validation pass (shared reborrow). The parsed view
+        // keeps the header and TOC it read, which Phase 1b reuses rather
+        // than reading the message again.
+        let __raw = {
             let buf: &tsra_fw_hsm_pal_traits::DmaBuf = &*buf;
             #validation
-        }
+            raw
+        };
 
-        // ── Phase 1b: scalar reads, offset captures, monotonic check.
-        // Each helper uses a transient shared reborrow of `&*buf`;
-        // none outlive their statement, so the outer `&mut` borrow
-        // remains usable for Phase 2 below.
+        // ── Phase 1b: scalar reads, offset captures, monotonic check,
+        // all from the parsed view. Its shared borrow of `*buf` ends
+        // with its last use here, so the outer `&mut` borrow is usable
+        // for Phase 2 below.
         #(#scalar_captures)*
         #(#offset_captures)*
         #(#monotonic_checks)*
-        let __data_start: usize = #data_start_expr;
+        let __data_start: usize = __raw.data_start();
 
         // ── Phase 2: pipelined split_at_mut over the parent buffer.
         let (__prefix, __rest) = buf.split_at_mut(__data_start);

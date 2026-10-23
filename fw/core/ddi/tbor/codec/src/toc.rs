@@ -265,20 +265,27 @@ pub fn decode_toc_entry<'a>(
     toc_index: usize,
     data_start: usize,
 ) -> TocEntry<'a> {
-    let word = read_toc_word(buf, header_len, toc_index);
+    decode_toc_word(buf, read_toc_word(buf, header_len, toc_index), data_start)
+}
+
+/// Decode a TOC entry from its already-read `word`, resolving data-section
+/// references against `buf`; see [`decode_toc_entry`].
+pub fn decode_toc_word(buf: &DmaBuf, word: u32, data_start: usize) -> TocEntry<'_> {
     let entry_type = raw_toc_entry_type(word);
+    let start = data_start + raw_toc_offset(word);
+    let buffer = || &buf[start..start + raw_toc_length(word)];
 
     match entry_type {
-        0 => TocEntry::SessionId(read_toc_inline_u16(buf, header_len, toc_index)),
-        1 => TocEntry::KeyId(read_toc_inline_u16(buf, header_len, toc_index)),
-        2 => TocEntry::SealedKey(read_toc_buffer(buf, header_len, toc_index, data_start)),
+        0 => TocEntry::SessionId(raw_toc_inline_u16(word)),
+        1 => TocEntry::KeyId(raw_toc_inline_u16(word)),
+        2 => TocEntry::SealedKey(buffer()),
         3 => TocEntry::Uint8(raw_toc_inline_u8(word)),
-        4 => TocEntry::Uint16(read_toc_inline_u16(buf, header_len, toc_index)),
-        5 => TocEntry::Uint32(read_toc_uint32(buf, header_len, toc_index, data_start)),
-        6 => TocEntry::Uint64(read_toc_uint64(buf, header_len, toc_index, data_start)),
-        7 => TocEntry::Buffer(read_toc_buffer(buf, header_len, toc_index, data_start)),
+        4 => TocEntry::Uint16(raw_toc_inline_u16(word)),
+        5 => TocEntry::Uint32(u32::from_le_bytes(read_array(buf, start))),
+        6 => TocEntry::Uint64(u64::from_le_bytes(read_array(buf, start))),
+        7 => TocEntry::Buffer(buffer()),
         8 => TocEntry::None,
-        9 => TocEntry::Padding(read_toc_buffer(buf, header_len, toc_index, data_start)),
+        9 => TocEntry::Padding(buffer()),
         _ => TocEntry::Unknown {
             entry_type,
             raw_bits: word,

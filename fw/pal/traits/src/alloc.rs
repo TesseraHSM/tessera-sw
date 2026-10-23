@@ -239,7 +239,41 @@ pub fn copy_from_uncached(dst: &mut [u8], src: &[u8]) {
             done += 16;
         }
     }
+    #[cfg(target_arch = "arm")]
+    while dst.len() - done >= 4 {
+        // Whole words left (or a misaligned buffer): a load each, rather
+        // than a copy call that may go byte by byte.
+        // SAFETY: `done + 4` is within both slices.
+        unsafe {
+            let word = load_word(src.as_ptr().add(done));
+            core::ptr::write_unaligned(dst.as_mut_ptr().add(done) as *mut u32, word);
+        }
+        done += 4;
+    }
     dst[done..].copy_from_slice(&src[done..]);
+}
+
+/// Loads the (possibly unaligned) word at `p` with a single `ldr`, which
+/// the compiler cannot merge into a call to `memcpy`.
+///
+/// # Safety
+///
+/// `p` must be valid for a 4-byte read from normal memory (unaligned word
+/// loads fault on device memory).
+#[cfg(target_arch = "arm")]
+#[inline(always)]
+unsafe fn load_word(p: *const u8) -> u32 {
+    let word: u32;
+    // SAFETY: per the function contract.
+    unsafe {
+        core::arch::asm!(
+            "ldr {w}, [{p}]",
+            p = in(reg) p,
+            w = out(reg) word,
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+    word
 }
 
 /// Copies 16 bytes from `src` to `dst` with a four-word burst load and store.

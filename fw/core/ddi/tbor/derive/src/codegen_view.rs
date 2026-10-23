@@ -387,11 +387,6 @@ fn gen_padding_checks(layout: &TocLayout) -> Vec<TokenStream> {
 /// Generate length-constraint checks for buffer/sealed_key fields that
 /// have `fixed_len`, `min_len`, or `max_len` constraints.
 fn gen_len_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
-    let header_len_val = match schema.kind {
-        MessageKind::Request { .. } => quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
-        MessageKind::Response => quote! { tsra_fw_ddi_tbor::RESP_HEADER_LEN },
-        MessageKind::Fields => unreachable!(),
-    };
     schema
         .fields
         .iter()
@@ -413,9 +408,7 @@ fn gen_len_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
                 let none_type_id = quote! { tsra_fw_ddi_tbor::TocType::None as u8 };
                 Some(quote! {
                     if raw.toc_entry_type(#toc_idx) != #none_type_id {
-                        let len = tsra_fw_ddi_tbor::toc::raw_toc_length(
-                            tsra_fw_ddi_tbor::toc::read_toc_word(raw.as_bytes(), #header_len_val, #toc_idx)
-                        );
+                        let len = tsra_fw_ddi_tbor::toc::raw_toc_length(raw.toc_word(#toc_idx));
                         if !(#min_l..=#max_l).contains(&len) {
                             return Err(tsra_fw_hsm_pal_traits::HsmError::TborInvalidFixedLength);
                         }
@@ -424,9 +417,7 @@ fn gen_len_checks(schema: &Schema, layout: &TocLayout) -> Vec<TokenStream> {
             } else {
                 Some(quote! {
                     {
-                        let len = tsra_fw_ddi_tbor::toc::raw_toc_length(
-                            tsra_fw_ddi_tbor::toc::read_toc_word(raw.as_bytes(), #header_len_val, #toc_idx)
-                        );
+                        let len = tsra_fw_ddi_tbor::toc::raw_toc_length(raw.toc_word(#toc_idx));
                         if !(#min_l..=#max_l).contains(&len) {
                             return Err(tsra_fw_hsm_pal_traits::HsmError::TborInvalidFixedLength);
                         }
