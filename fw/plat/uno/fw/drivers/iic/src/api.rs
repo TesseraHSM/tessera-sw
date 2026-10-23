@@ -4,16 +4,16 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::ReadWriteable;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_reg_soc::iic::regs::IicRegs;
 use tsra_fw_uno_reg_soc::iic::IIC_BASE;
 use tsra_fw_uno_reg_soc::iic::*;
 use tsra_fw_uno_trace::tracing::*;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::ReadWriteable;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::ChannelConfig;
 use crate::IcqEntry;
@@ -25,6 +25,10 @@ use crate::IsqEntry;
 struct ChannelState {
     /// ICQ consumer index — FW advances after reading completions.
     icq_head: u16,
+
+    /// ISQ producer index. Only firmware writes the ISQ tail, so it is
+    /// tracked here instead of read back from the register.
+    isq_tail: u16,
 
     /// Waker for async recv — woken by IRQ or polling.
     waker: WakerRegistration,
@@ -128,6 +132,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             io_meta: config.io_meta_base as *mut IoMetaEntry,
             state: SingleCell::new(ChannelState {
                 icq_head: 0,
+                isq_tail: (DEPTH - 1) as u16,
                 waker: WakerRegistration::new(),
             }),
             regs,
@@ -198,6 +203,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         isq.status.write(ISQ_CHANNEL_STATUS::EMPTY::SET);
         isq.tail
             .write(ISQ_CHANNEL_TAIL::TAIL.val((DEPTH as u32) - 1));
+        self.state.with(|s| s.isq_tail = (DEPTH - 1) as u16);
         isq.head.write(ISQ_CHANNEL_HEAD::HEAD.val(0));
         isq.ctrl.modify(
             ISQ_CHANNEL_CTRL::DEPTH.val(Self::ENCODED_DEPTH)
@@ -232,12 +238,12 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// Both DFL refill and IQ credit release happen together when an IO
     /// is fully processed.
     pub fn free_io(&self, index: u16, queue_id: u16) {
-        // Return buffer to DFL (read PI from HW each time)
+        // Return buffer to DFL
         let buf_addr = self.buf_addr(index);
-        let pi = self.regs.isq_ch[self.channel as usize]
-            .tail
-            .read(ISQ_CHANNEL_TAIL::TAIL) as u16;
-        let new_pi = (pi + 1) & Self::MASK;
+        let new_pi = self.state.with(|s| {
+            s.isq_tail = (s.isq_tail + 1) & Self::MASK;
+            s.isq_tail
+        });
         let entry = unsafe { &mut *self.isq_ring.add(new_pi as usize) };
         entry.addr_lo = buf_addr;
         entry.addr_hi = 0;
@@ -322,16 +328,6 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
 
             let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
-            let _hw_tail = self.regs.icq_ch[self.channel as usize].tail.get() as u16;
-            //             debug!(
-            //                 "iic",
-            //                 "wake ch={} head={} shadow_tail={} hw_tail={} shadow_ptr={:#x}",
-            //                 self.channel,
-            //                 s.icq_head,
-            //                 tail,
-            //                 hw_tail,
-            //                 self.icq_tail_shadow as u32
-            //             );
             if s.icq_head != tail {
                 s.waker.wake();
             }

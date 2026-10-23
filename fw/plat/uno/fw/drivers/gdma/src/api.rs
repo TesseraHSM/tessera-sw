@@ -4,6 +4,10 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::ReadWriteable;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
@@ -20,10 +24,6 @@ use tsra_fw_uno_reg_soc::io_gsram::GdmaSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_STATUS;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_SQ_COUNT;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::ReadWriteable;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::ChannelConfig;
 use crate::GdmaBuf;
@@ -352,8 +352,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 let cq_slot = (s.cq_head & Self::MASK) as usize;
                 let cq_entry = unsafe { &*self.cq_ring.add(cq_slot) };
 
-                let tag = cq_entry.status.read(GDMA_CQ_STATUS::TAG) as u16;
-                let status = if cq_entry.status.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
+                // One read of the (uncached) status word for both fields.
+                let st = cq_entry.status.extract();
+                let tag = st.read(GDMA_CQ_STATUS::TAG) as u16;
+                let status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
                     0u8
                 } else {
                     1u8

@@ -221,7 +221,7 @@ impl HsmIoController for UnoHsmPal {
     /// separately by [`drop_io`](HsmIoController::drop_io) so the caller
     /// can run post-completion work over `io` first.
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
-        self.oic.send(io.index)?.await
+        self.oic.send(io.index, io.queue_id as u8)?.await
     }
 
     /// Drops an IO without sending a completion (e.g. for disabled

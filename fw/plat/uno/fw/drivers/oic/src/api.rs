@@ -4,24 +4,22 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::ReadWriteable;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OcqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OsqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
 use tsra_fw_uno_reg_soc::io_gsram::OCQ_TAG;
 use tsra_fw_uno_reg_soc::io_gsram::OSQ_DESC;
 use tsra_fw_uno_reg_soc::io_gsram::OSQ_TAG;
 use tsra_fw_uno_reg_soc::oic::regs::OicRegs;
 use tsra_fw_uno_reg_soc::oic::*;
 use tsra_fw_uno_trace::tracing::*;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::ReadWriteable;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::ChannelConfig;
 use crate::OicError;
@@ -35,6 +33,9 @@ struct TagSlot {
 struct OicState<const DEPTH: usize> {
     ocq_head: u16,
     osq_tail: u16,
+    /// Last OSQ consumer index read from the hardware; re-read only when the
+    /// ring looks full.
+    osq_head_cached: u16,
     tag_free: u32,
     tags: [TagSlot; DEPTH],
 }
@@ -45,8 +46,7 @@ struct OicState<const DEPTH: usize> {
 /// address comes from the generated `OIC_BASE` constant.
 ///
 /// Zero-copy: the OSQ entry points directly to the IO CQ entry in DTCM.
-/// Work item metadata (controller_id, queue_id, queue_index) is read
-/// from the IO_META sidecar.
+/// The caller supplies the work item's queue ID (from its IO_META entry).
 ///
 /// # Type Parameters
 ///
@@ -66,9 +66,6 @@ pub struct OicDriver<const DEPTH: usize> {
 
     /// IO_CQ array in DTCM.
     io_cq: *const IoCqEntry,
-
-    /// IO_META sidecar array in DTCM.
-    io_meta: *const IoMetaEntry,
 
     /// Mutable state protected by single-threaded access.
     state: SingleCell<OicState<DEPTH>>,
@@ -140,10 +137,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             ocq_ring: config.ocq_base as *const OcqEntry,
             ocq_tail_shadow: config.ocq_tail_shadow as *const u32,
             io_cq: config.io_cq_base as *const IoCqEntry,
-            io_meta: config.io_meta_base as *const IoMetaEntry,
             state: SingleCell::new(OicState {
                 ocq_head: 0,
                 osq_tail: 0,
+                osq_head_cached: 0,
                 tag_free,
                 tags,
             }),
@@ -214,11 +211,9 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
     /// Allocate a tag, post an OSQ entry for the given IO index,
     /// and ring the doorbell.
-    fn submit(&self, index: u16) -> HsmResult<u16> {
+    fn submit(&self, index: u16, queue_id: u8) -> HsmResult<u16> {
         let io_cq_entry = unsafe { &*self.io_cq.add(index as usize) };
         let data_addr = io_cq_entry as *const _ as u32;
-        let meta = unsafe { &*self.io_meta.add(index as usize) };
-        let queue_id = meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u8;
 
         self.state.with(|s| {
             if s.tag_free == 0 {
@@ -227,12 +222,14 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             let tag = s.tag_free.trailing_zeros() as u16;
             s.tag_free &= !(1u32 << tag);
 
-            let osq_head = self.regs.osq_ch[self.channel as usize]
-                .head
-                .read(OSQ_CHANNEL_HEAD::HEAD) as u16;
-            if (s.osq_tail + 1) & Self::MASK == osq_head {
-                s.tag_free |= 1u32 << tag;
-                return Err(OicError::OSQ_FULL);
+            if (s.osq_tail + 1) & Self::MASK == s.osq_head_cached {
+                s.osq_head_cached = self.regs.osq_ch[self.channel as usize]
+                    .head
+                    .read(OSQ_CHANNEL_HEAD::HEAD) as u16;
+                if (s.osq_tail + 1) & Self::MASK == s.osq_head_cached {
+                    s.tag_free |= 1u32 << tag;
+                    return Err(OicError::OSQ_FULL);
+                }
             }
 
             // Write OSQ entry.
@@ -289,7 +286,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     /// for completion.
     ///
     /// Zero-copy: the OSQ entry points directly to `io_cq[index]` in
-    /// DTCM. Metadata is read from `io_meta[index]`.
+    /// DTCM; `queue_id` is the IO's source queue (its `IO_META` queue ID).
     ///
     /// # Errors
     ///
@@ -298,8 +295,9 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     pub fn send(
         &self,
         index: u16,
+        queue_id: u8,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(index)?;
+        let tag = self.submit(index, queue_id)?;
         Ok(self.wait_completion(tag))
     }
 
@@ -312,8 +310,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 let ocq_slot = (s.ocq_head & Self::MASK) as usize;
                 let ocq_entry = unsafe { &*self.ocq_ring.add(ocq_slot) };
 
-                let tag = ocq_entry.tag.read(OCQ_TAG::TAG) as u16;
-                let status = ocq_entry.tag.read(OCQ_TAG::STATUS) as u8;
+                // One read of the (uncached) tag word for both fields.
+                let word = ocq_entry.tag.extract();
+                let tag = word.read(OCQ_TAG::TAG) as u16;
+                let status = word.read(OCQ_TAG::STATUS) as u8;
 
                 s.ocq_head = (s.ocq_head + 1) & Self::MASK;
 
