@@ -60,6 +60,10 @@ pub struct UnmaskedView<'a> {
     pub target_key: &'a DmaBuf,
 }
 
+/// A word-aligned buffer for a metadata copy (burst copies need alignment).
+#[repr(C, align(4))]
+struct MetaCopy([u8; META_LEN]);
+
 /// In-place unmask: parse, authenticate, decrypt, and validate a
 /// masked-key blob.
 ///
@@ -104,16 +108,23 @@ pub async fn unmask<'a>(
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
 
-    // Parse the 192 B AAD region as MaskedKeyMetadata. `ref_from_bytes`
-    // never panics; the length check above guarantees a 192 B slice.
+    // Parse and validate a copy of the 192 B AAD region: it sits in
+    // uncached DMA memory, which one burst read fetches far faster than
+    // validation reads it field by field. `ref_from_bytes` never panics;
+    // the length check above guarantees a 192 B slice.
+    let mut copy = MetaCopy([0; META_LEN]);
+    env.aad.copy_to_slice(&mut copy.0);
     let metadata =
-        MaskedKeyMetadata::ref_from_bytes(env.aad).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
+        MaskedKeyMetadata::ref_from_bytes(&copy.0).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
 
     metadata.validate_v1()?;
 
-    // validate_v1 guarantees key_label_len ≤ KEY_LABEL_MAX, so this
-    // accessor cannot return an error here.
-    let key_label = metadata.key_label()?;
+    // The label is borrowed from the blob, not the copy. validate_v1
+    // guarantees key_label_len ≤ KEY_LABEL_MAX, so this range cannot fail.
+    let key_label = env
+        .aad
+        .get(metadata.key_label_range()?)
+        .ok_or(HsmError::MaskedKeyDecodeFailed)?;
 
     Ok(UnmaskedView {
         key_label,

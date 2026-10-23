@@ -166,6 +166,72 @@ impl DmaBuf {
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
+
+    /// Copies this buffer into `dst`, which must be the same length.
+    ///
+    /// DMA memory is uncached: each CPU load waits out the interconnect's
+    /// latency (~45 cycles on Uno) whatever its width, while a burst of
+    /// eight words costs little more than one load. When both buffers are
+    /// word-aligned this moves whole 32-byte blocks with burst loads, so
+    /// reading a structure out of DMA memory once and working on the copy
+    /// beats reading it field by field in place.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the lengths differ.
+    #[inline]
+    pub fn copy_to_slice(&self, dst: &mut [u8]) {
+        assert_eq!(
+            self.inner.len(),
+            dst.len(),
+            "DmaBuf::copy_to_slice length mismatch"
+        );
+        #[allow(unused_mut)]
+        let mut done = 0;
+        #[cfg(target_arch = "arm")]
+        if (self.inner.as_ptr() as usize | dst.as_ptr() as usize) % 4 == 0 {
+            let blocks = dst.len() / 32;
+            // SAFETY: both ranges hold `blocks * 32` bytes and are
+            // word-aligned; `dst` is a distinct `&mut`, so they do not
+            // overlap.
+            unsafe { burst_copy(self.inner.as_ptr(), dst.as_mut_ptr(), blocks) };
+            done = blocks * 32;
+        }
+        dst[done..].copy_from_slice(&self.inner[done..]);
+    }
+}
+
+/// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word burst
+/// loads and stores.
+///
+/// # Safety
+///
+/// `src` and `dst` must be word-aligned, valid for `blocks * 32` bytes of
+/// reads and writes respectively, and must not overlap.
+#[cfg(target_arch = "arm")]
+#[inline]
+unsafe fn burst_copy(mut src: *const u8, mut dst: *mut u8, blocks: usize) {
+    for _ in 0..blocks {
+        // SAFETY: per the function contract; `ldm`/`stm` advance `src` and
+        // `dst` by the 32 bytes moved.
+        unsafe {
+            core::arch::asm!(
+                "ldm {src}!, {{r0, r1, r2, r3, r4, r5, r8, r12}}",
+                "stm {dst}!, {{r0, r1, r2, r3, r4, r5, r8, r12}}",
+                src = inout(reg) src,
+                dst = inout(reg) dst,
+                out("r0") _,
+                out("r1") _,
+                out("r2") _,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") _,
+                out("r12") _,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
 }
 
 impl core::ops::Deref for DmaBuf {
