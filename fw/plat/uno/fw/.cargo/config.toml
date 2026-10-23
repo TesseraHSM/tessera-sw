@@ -13,7 +13,10 @@ rustflags = [
   "link-arg=-Tlink.x",
   "-C",
   "target-cpu=cortex-m7",
-] #, "-C", "llvm-args=-inline-threshold=25"]
+  # Limit code growth to fit CP1's 512 KiB ITCM without lowering crypto opt-levels.
+  "-C",
+  "llvm-args=-inline-threshold=25",
+]
 
 [unstable]
 build-std = ["compiler_builtins", "core"]
