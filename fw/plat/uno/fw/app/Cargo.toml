@@ -36,10 +36,10 @@ tsra_fw_uno_trace = { workspace = true }
 #default = ["trace-uart"]
 default = []
 
-# Compile in the full legacy MBOR DDI command set. Off by default: CP1
-# does not fit its 512 KB ITCM with it, so without this feature MBOR
-# `EstablishCredential` and `RsaUnwrap` are left out. TBOR does not use
-# either, and every other MBOR command stays.
+# Compile in the full legacy MBOR DDI command set. Off by default to keep
+# CP1 ITCM headroom: without it, MBOR `EstablishCredential` and `RsaUnwrap`
+# are left out. TBOR does not use either, and every other MBOR command
+# stays.
 mbor = ["tsra_fw_hsm_core/mbor"]
 
 # Enable ARM semihosting integration for the emulator:
