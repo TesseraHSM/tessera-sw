@@ -64,6 +64,7 @@ mod test_action;
 #[cfg(feature = "tsra_test_hooks")]
 mod trigger_crash;
 
+use common::ReqHdr;
 use tsra_fw_ddi_mbor::MborDecode;
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborMap;
@@ -71,7 +72,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use common::ReqHdr;
 
 use crate::pal::UnoHsmPal;
 

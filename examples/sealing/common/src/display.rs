@@ -607,6 +607,7 @@ mod tests {
             .iter()
             .map(|cert| cert.cert.to_vec())
             .collect::<Vec<_>>();
+        verify_certificate_chain(&valid)?;
         let mut wrong_root = valid.clone();
         wrong_root[0] = CaKey::generate().self_cert();
         let mut tampered = valid.clone();
@@ -615,12 +616,12 @@ mod tests {
         reversed.reverse();
         let mut unused_issuer = valid.clone();
         unused_issuer.insert(1, CaKey::generate().self_cert());
-        for invalid in [
-            wrong_root,
-            tampered,
-            reversed,
-            unused_issuer,
-            vec![vec![0x30, 0x00]],
+        for (name, invalid) in [
+            ("wrong root", wrong_root),
+            ("tampered signature", tampered),
+            ("reversed chain", reversed),
+            ("unused issuer", unused_issuer),
+            ("malformed certificate", vec![vec![0x30, 0x00]]),
         ] {
             let evidence = Evidence {
                 mfgr_cert_chain: invalid,
@@ -630,7 +631,7 @@ mod tests {
             };
             let mut output = Vec::new();
             let error = write_sender_evidence(&mut output, &evidence)
-                .expect_err("invalid certificate chain must fail");
+                .expect_err(&format!("{name}: invalid certificate chain must fail"));
             assert!(error
                 .to_string()
                 .contains("verify sender manufacturer certificate chain"));

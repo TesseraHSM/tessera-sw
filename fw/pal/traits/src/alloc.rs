@@ -77,6 +77,8 @@
 //! pal.copy_mem_from_host(io, src_addr, staging, true).await?;
 //! ```
 
+#![allow(unsafe_code)]
+
 use core::ops::AsyncFnOnce;
 
 use super::*;
@@ -114,6 +116,7 @@ impl DmaBuf {
     #[doc(hidden)]
     #[inline(always)]
     pub unsafe fn from_raw(buf: &[u8]) -> &Self {
+        // SAFETY: DmaBuf is transparent over [u8]; the caller guarantees DMA accessibility.
         unsafe { &*(buf as *const [u8] as *const DmaBuf) }
     }
 
@@ -125,6 +128,7 @@ impl DmaBuf {
     #[doc(hidden)]
     #[inline(always)]
     pub unsafe fn from_raw_mut(buf: &mut [u8]) -> &mut Self {
+        // SAFETY: The transparent cast preserves the exclusive borrow and DMA accessibility.
         unsafe { &mut *(buf as *mut [u8] as *mut DmaBuf) }
     }
 
@@ -135,6 +139,7 @@ impl DmaBuf {
     #[inline(always)]
     pub fn split_at(&self, mid: usize) -> (&DmaBuf, &DmaBuf) {
         let (a, b) = self.inner.split_at(mid);
+        // SAFETY: Both subslices retain the original buffer's DMA accessibility.
         unsafe { (DmaBuf::from_raw(a), DmaBuf::from_raw(b)) }
     }
 
@@ -142,6 +147,7 @@ impl DmaBuf {
     #[inline(always)]
     pub fn split_at_mut(&mut self, mid: usize) -> (&mut DmaBuf, &mut DmaBuf) {
         let (a, b) = self.inner.split_at_mut(mid);
+        // SAFETY: The disjoint subslices retain DMA accessibility and exclusive borrows.
         unsafe { (DmaBuf::from_raw_mut(a), DmaBuf::from_raw_mut(b)) }
     }
 
@@ -233,6 +239,7 @@ impl core::ops::Index<core::ops::Range<usize>> for DmaBuf {
     type Output = DmaBuf;
     #[inline(always)]
     fn index(&self, r: core::ops::Range<usize>) -> &DmaBuf {
+        // SAFETY: A subslice of this DMA buffer remains DMA-accessible.
         unsafe { DmaBuf::from_raw(&self.inner[r]) }
     }
 }
@@ -240,6 +247,7 @@ impl core::ops::Index<core::ops::Range<usize>> for DmaBuf {
 impl core::ops::IndexMut<core::ops::Range<usize>> for DmaBuf {
     #[inline(always)]
     fn index_mut(&mut self, r: core::ops::Range<usize>) -> &mut DmaBuf {
+        // SAFETY: The exclusively borrowed subslice remains DMA-accessible.
         unsafe { DmaBuf::from_raw_mut(&mut self.inner[r]) }
     }
 }
@@ -248,6 +256,7 @@ impl core::ops::Index<core::ops::RangeTo<usize>> for DmaBuf {
     type Output = DmaBuf;
     #[inline(always)]
     fn index(&self, r: core::ops::RangeTo<usize>) -> &DmaBuf {
+        // SAFETY: A subslice of this DMA buffer remains DMA-accessible.
         unsafe { DmaBuf::from_raw(&self.inner[r]) }
     }
 }
@@ -255,6 +264,7 @@ impl core::ops::Index<core::ops::RangeTo<usize>> for DmaBuf {
 impl core::ops::IndexMut<core::ops::RangeTo<usize>> for DmaBuf {
     #[inline(always)]
     fn index_mut(&mut self, r: core::ops::RangeTo<usize>) -> &mut DmaBuf {
+        // SAFETY: The exclusively borrowed subslice remains DMA-accessible.
         unsafe { DmaBuf::from_raw_mut(&mut self.inner[r]) }
     }
 }
@@ -263,6 +273,7 @@ impl core::ops::Index<core::ops::RangeFrom<usize>> for DmaBuf {
     type Output = DmaBuf;
     #[inline(always)]
     fn index(&self, r: core::ops::RangeFrom<usize>) -> &DmaBuf {
+        // SAFETY: A subslice of this DMA buffer remains DMA-accessible.
         unsafe { DmaBuf::from_raw(&self.inner[r]) }
     }
 }
@@ -270,6 +281,7 @@ impl core::ops::Index<core::ops::RangeFrom<usize>> for DmaBuf {
 impl core::ops::IndexMut<core::ops::RangeFrom<usize>> for DmaBuf {
     #[inline(always)]
     fn index_mut(&mut self, r: core::ops::RangeFrom<usize>) -> &mut DmaBuf {
+        // SAFETY: The exclusively borrowed subslice remains DMA-accessible.
         unsafe { DmaBuf::from_raw_mut(&mut self.inner[r]) }
     }
 }

@@ -12,4 +12,6 @@ test = false
 
 [dependencies]
 cortex-m = { workspace = true }
-cortex-m-rt = { workspace = true }
+
+[lints]
+workspace = true

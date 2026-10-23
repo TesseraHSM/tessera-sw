@@ -292,7 +292,7 @@ fn verify_aiv(aiv: &[u8], padded: &[u8]) -> HsmResult<usize> {
         return Err(HsmError::AesUnwrapFailed);
     }
 
-    let mli = u32::from_be_bytes(aiv[4..8].try_into().unwrap()) as usize;
+    let mli = u32::from_be_bytes([aiv[4], aiv[5], aiv[6], aiv[7]]) as usize;
     let n = padded.len() / SEMI;
 
     if n == 0 || mli > SEMI * n || mli <= SEMI * (n - 1) {

@@ -21,3 +21,6 @@ level-error = [] # error only (default when tracing is on)
 level-info = []  # info + warn + error
 level-trace = [] # all levels
 level-warn = []  # warn + error
+
+[lints]
+workspace = true

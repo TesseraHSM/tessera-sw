@@ -76,15 +76,10 @@ tsra_fw_uno_pal = { path = "pal" }
 tsra_fw_uno_reg_soc = { path = "reg/soc" }
 tsra_fw_uno_trace = { path = "crates/trace" }
 
-tsra_fw_core_crypto_aes_cbc_pad = { path = "../../../core/crypto/aes-cbc-pad" }
-tsra_fw_core_crypto_gcm_buf = { path = "../../../core/crypto/gcm-buf" }
-tsra_fw_core_crypto_hpke = { path = "../../../core/crypto/hpke" }
 tsra_fw_core_crypto_key_derive = { path = "../../../core/crypto/key-derive" }
 tsra_fw_core_crypto_key_masking = { path = "../../../core/crypto/key-masking" }
 tsra_fw_core_crypto_x509_builder = { path = "../../../core/crypto/x509-builder" }
-tsra_fw_core_crypto_x509_chain = { path = "../../../core/crypto/x509-chain" }
 tsra_fw_ddi_mbor = { path = "../../../core/ddi/mbor/codec" }
-tsra_fw_ddi_mbor_api = { path = "../../../core/ddi/mbor/api" }
 tsra_fw_ddi_mbor_derive = { path = "../../../core/ddi/mbor/derive" }
 tsra_fw_ddi_mbor_types = { path = "../../../core/ddi/mbor/types" }
 tsra_fw_hsm_core = { default-features = false, path = "../../../core/lib" }
@@ -93,11 +88,9 @@ tsra_fw_hsm_io = { path = "../../../core/io" }
 tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
 
 bitfield-struct = "0.13.0"
-cfg-if = "1.0.0"
 cortex-m = "0.7.7"
 cortex-m-rt = "0.7.5"
 critical-section = "1.2.0"
-darling = "0.20"
 der = { default-features = false, features = [
   "derive",
   "oid",
@@ -109,14 +102,9 @@ embassy-time = "0.5.1"
 embassy-time-driver = { features = ["tick-hz-32"], version = "0.2.2" }
 embassy-time-queue-utils = "0.3.1"
 heapless = "0.9.2"
-linkme = "0.3.36"
 open-enum = "0.5.2"
-pastey = "0.2.2"
 portable-atomic = "1"
-proc-macro2 = "1"
-quote = "1"
 static_assertions = "1.1.0"
-syn = { features = ["full"], version = "2" }
 tock-registers = { git = "https://github.com/tock/tock.git", rev = "release-2.2" }
 zerocopy = "0.8.48"
 zeroize = { default-features = false, version = "1.8.1" }

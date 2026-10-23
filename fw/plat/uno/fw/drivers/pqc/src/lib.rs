@@ -44,12 +44,15 @@
 //! last one is not obvious.
 
 mod api;
+#[allow(unsafe_code)]
 mod doorbell;
 mod engine;
 mod error;
+#[allow(unsafe_code)]
 mod mailbox;
 mod pool;
 mod request;
+#[allow(unsafe_code)]
 mod shared_status;
 
 mod types;

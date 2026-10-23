@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //! Mailbox helpers for firmware profiling.
 //!
-//! Gated behind the `trace` feature (on by default). When disabled,
+//! Gated behind the `trace` feature (disabled by default). When disabled,
 //! all functions compile to nothing — zero instructions per IO.
 //!
 //! Independently of the emulator-only mailbox profiling, this module also
@@ -12,20 +12,21 @@
 //! backend (mailbox for `backend-semihosting` on the emulator, atomic for
 //! `backend-uart` on silicon).
 
-#[cfg(feature = "trace")]
-use tsra_fw_static_ref::StaticRef;
-#[cfg(feature = "trace")]
-use tsra_fw_uno_reg_soc::trace_mailbox::regs::TraceMailboxRegs;
-#[cfg(feature = "trace")]
-use tsra_fw_uno_reg_soc::trace_mailbox::TRACE_MAILBOX_BASE;
 use portable_atomic::AtomicU32;
 use portable_atomic::Ordering;
 #[cfg(feature = "trace")]
 use tock_registers::interfaces::Readable;
 #[cfg(feature = "trace")]
 use tock_registers::interfaces::Writeable;
+#[cfg(feature = "trace")]
+use tsra_fw_static_ref::StaticRef;
+#[cfg(feature = "trace")]
+use tsra_fw_uno_reg_soc::trace_mailbox::regs::TraceMailboxRegs;
+#[cfg(feature = "trace")]
+use tsra_fw_uno_reg_soc::trace_mailbox::TRACE_MAILBOX_BASE;
 
 #[cfg(feature = "trace")]
+// SAFETY: The emulator provides this aligned, permanently mapped TraceMailbox register block.
 const TRACE: StaticRef<TraceMailboxRegs> =
     unsafe { StaticRef::new(TRACE_MAILBOX_BASE as *const TraceMailboxRegs) };
 
@@ -50,6 +51,7 @@ static CURRENT_TASK_ID: AtomicU32 = AtomicU32::new(0);
 #[inline]
 pub fn current_task_id() -> u32 {
     // Word 0 of the TraceMailbox holds the active task ID.
+    // SAFETY: The emulator backend maps this aligned mailbox word for the firmware's lifetime.
     unsafe {
         core::ptr::read_volatile(
             tsra_fw_uno_reg_soc::trace_mailbox::TRACE_MAILBOX_BASE as *const u32,

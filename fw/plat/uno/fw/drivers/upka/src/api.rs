@@ -3,11 +3,11 @@
 
 use core::ops::AsyncFnOnce;
 
+use embassy_sync::waitqueue::WakerRegistration;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
-use embassy_sync::waitqueue::WakerRegistration;
 
 use crate::engine::UpkaEngine;
 use crate::pool::EngineSlot;

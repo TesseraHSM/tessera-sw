@@ -23,7 +23,6 @@
 //!   decoders alongside the RSA ones below, plus a `parse_ec_private_key`
 //!   returning the scalar + curve OID; consumed by `ecc`.
 
-use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use der::Decode;
 use der::Sequence;
 use der::asn1::AnyRef;
@@ -31,6 +30,7 @@ use der::asn1::Null;
 use der::asn1::ObjectIdentifier;
 use der::asn1::OctetStringRef;
 use der::asn1::UintRef;
+use tsra_fw_hsm_pal_traits::HsmEccCurve;
 
 // ── RSA (PKCS#8 PrivateKeyInfo / PKCS#1 RSAPrivateKey) ─────────────────────
 

@@ -38,8 +38,11 @@
 #![no_std]
 #![no_main]
 
+#[allow(unsafe_code)]
 mod trampoline;
 
+use embassy_executor::Spawner;
+use embassy_sync::once_lock::OnceLock;
 use tsra_fw_hsm_core::Hsm;
 use tsra_fw_hsm_core_tracing::info;
 use tsra_fw_hsm_pal_traits::*;
@@ -49,8 +52,6 @@ use tsra_fw_uno_pac as _;
 use tsra_fw_uno_pal::BootPhase;
 use tsra_fw_uno_pal::UnoHsmIo;
 use tsra_fw_uno_pal::UnoHsmPal;
-use embassy_executor::Spawner;
-use embassy_sync::once_lock::OnceLock;
 
 // Placeholder so the linker emits a non-empty `.data` section.
 //
@@ -63,6 +64,7 @@ use embassy_sync::once_lock::OnceLock;
 // section is naturally >= 16 bytes (and a multiple of 16 bytes in
 // size), this dummy can be removed.
 #[used]
+#[allow(unsafe_code)]
 #[unsafe(link_section = ".data")]
 static mut DEFAULT_DATA: [u8; 16] = [0x1; 16];
 

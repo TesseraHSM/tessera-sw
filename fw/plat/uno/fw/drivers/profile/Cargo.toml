@@ -14,17 +14,23 @@ test = false
 default = []
 # Enable TraceMailbox MMIO writes — only valid on the emulator where
 # the TRACE_MAILBOX peripheral exists. Do NOT enable on silicon.
-trace = []
+trace = [
+  "dep:tock-registers",
+  "dep:tsra_fw_static_ref",
+  "dep:tsra_fw_uno_reg_soc",
+]
 # Trace output backend awareness (set by the trace crate). Selects the
 # task-ID source returned by `current_task_id`: the TraceMailbox MMIO for
 # `backend-semihosting` (emulator), or the portable atomic otherwise
 # (e.g. `backend-uart` on silicon).
-backend-semihosting = []
+backend-semihosting = ["dep:tsra_fw_uno_reg_soc"]
 backend-uart = []
 
 [dependencies]
 portable-atomic = { workspace = true }
-tock-registers = { workspace = true }
-tsra_fw_static_ref = { workspace = true }
-tsra_fw_uno_drivers_semihosting = { workspace = true }
-tsra_fw_uno_reg_soc = { workspace = true }
+tock-registers = { optional = true, workspace = true }
+tsra_fw_static_ref = { optional = true, workspace = true }
+tsra_fw_uno_reg_soc = { optional = true, workspace = true }
+
+[lints]
+workspace = true

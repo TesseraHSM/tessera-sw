@@ -1,6 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(unsafe_code)]
+
+use cortex_m::asm::dmb;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
@@ -10,13 +15,11 @@ use tsra_fw_uno_reg_soc::upka::UpkaEngine;
 use tsra_fw_uno_reg_soc::upka::ENGINE_STRIDE;
 use tsra_fw_uno_reg_soc::upka::UPKA_BASE;
 use tsra_fw_uno_reg_soc::upka::UPKA_ENGINE_STATUS;
-use cortex_m::asm::dmb;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 const STATUS_FLAGS_MASK: u32 = 0x1E;
 
 /// DTCM overlay for PKA command descriptors.
+// SAFETY: IO_GSRAM_BASE is the aligned, permanently mapped command storage.
 const UPKA_Q: StaticRef<IoGsramRegs> =
     unsafe { StaticRef::new(IO_GSRAM_BASE as *const IoGsramRegs) };
 
@@ -125,6 +128,7 @@ impl EngineExecutor {
 
     /// Get a typed MMIO reference to the selected PKA engine register block.
     fn engine_regs(id: u8) -> StaticRef<UpkaEngine> {
+        // SAFETY: The engine ID selects its aligned register block in the mapped UPKA peripheral.
         unsafe { StaticRef::new((UPKA_BASE + u32::from(id) * ENGINE_STRIDE) as *const UpkaEngine) }
     }
 }

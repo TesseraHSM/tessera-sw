@@ -6,5 +6,6 @@
 //! Used with `cortex-m-rt`'s `#[interrupt]` attribute.
 #![no_std]
 
+#[allow(unsafe_code)]
 mod pac;
 pub use pac::*;

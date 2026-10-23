@@ -1,19 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(unsafe_code)]
+
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::ReadWriteable;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_reg_soc::iic::regs::IicRegs;
 use tsra_fw_uno_reg_soc::iic::IIC_BASE;
 use tsra_fw_uno_reg_soc::iic::*;
 use tsra_fw_uno_trace::tracing::*;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::ReadWriteable;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::ChannelConfig;
 use crate::IcqEntry;
@@ -73,6 +75,7 @@ pub struct IicDriver<const DEPTH: usize> {
 
 // SAFETY: Single-core Cortex-M with cooperative scheduling.
 unsafe impl<const DEPTH: usize> Send for IicDriver<DEPTH> {}
+// SAFETY: Access is serialized by the single-core cooperative scheduler, not ISR mutation.
 unsafe impl<const DEPTH: usize> Sync for IicDriver<DEPTH> {}
 
 impl<const DEPTH: usize> core::fmt::Debug for IicDriver<DEPTH> {
@@ -115,6 +118,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             let _ = Self::_ASSERT_MIN;
         }
 
+        // SAFETY: IIC_BASE is the aligned, permanently mapped IIC register block.
         let regs = unsafe { StaticRef::new(IIC_BASE as *const IicRegs) };
         let isq_ring = config.isq_base as *mut IsqEntry;
 
@@ -161,12 +165,14 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         // ── Step 1: Pre-fill ISQ with buffer addresses ──────────────
         for i in 0..DEPTH {
             let buf_addr = config.io_pool_base + (i as u32) * config.io_size;
+            // SAFETY: Configuration reserves DEPTH aligned ISQ entries, initialized before enable.
             let entry = unsafe { &mut *self.isq_ring.add(i) };
             entry.addr_lo = buf_addr;
             entry.addr_hi = 0;
         }
 
         // ── Step 2: Reset RX queue shadow PI ───────────────────────
+        // SAFETY: Configuration supplies an aligned, writable shadow word, before channel enable.
         unsafe { (config.icq_tail_shadow as *mut u32).write_volatile(0) };
 
         // ── Step 3: Program ICQ channel ────────────────────────────
@@ -238,6 +244,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             .tail
             .read(ISQ_CHANNEL_TAIL::TAIL) as u16;
         let new_pi = (pi + 1) & Self::MASK;
+        // SAFETY: The masked producer index selects a free entry in the configured ISQ ring.
         let entry = unsafe { &mut *self.isq_ring.add(new_pi as usize) };
         entry.addr_lo = buf_addr;
         entry.addr_hi = 0;
@@ -267,6 +274,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         poll_fn(move |cx| {
             self.state.with(|s| {
                 // Read tail from shadow (DTCM)
+                // SAFETY: The configured shadow word is aligned and remains mapped for the driver.
                 let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
                 if s.icq_head == tail {
                     s.waker.register(cx.waker());
@@ -274,6 +282,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
                 }
 
                 let icq_slot = (s.icq_head & Self::MASK) as usize;
+                // SAFETY: The masked consumer index selects an available entry in the ICQ ring.
                 let entry = unsafe { &*self.icq_ring.add(icq_slot) };
 
                 let success = entry.status.success();
@@ -304,6 +313,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
                 }
 
                 // Persist metadata into IO_META sidecar
+                // SAFETY: The completed buffer's index selects its exclusively owned metadata slot.
                 let meta = unsafe { &mut *self.io_meta.add(index as usize) };
                 meta.controller_id = entry.info.axi_id();
                 meta.queue = IoMetaQueue::new()
@@ -321,6 +331,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             // Clear NVIC pending bit for this interrupt
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
 
+            // SAFETY: The configured shadow word is aligned and remains mapped for the driver.
             let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
             let _hw_tail = self.regs.icq_ch[self.channel as usize].tail.get() as u16;
             //             debug!(

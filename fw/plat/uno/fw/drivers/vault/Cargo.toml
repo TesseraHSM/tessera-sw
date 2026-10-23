@@ -15,3 +15,6 @@ test = false
 tsra_fw_hsm_pal_traits = { workspace = true }
 tsra_fw_uno_key_vault = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
+
+[lints]
+workspace = true

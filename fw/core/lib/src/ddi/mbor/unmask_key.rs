@@ -46,7 +46,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
-    let body: DdiUnmaskKeyReq = decoder.decode_data()?;
+    let body: DdiUnmaskKeyReq<'_> = decoder.decode_data()?;
 
     // Decode the blob's cleartext (MAC-covered) metadata WITHOUT the
     // masking key: its recorded scope selects which masking key the blob

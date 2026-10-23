@@ -25,7 +25,7 @@ pub(crate) async fn aes_encrypt_decrypt<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiAesEncryptDecryptReq = decoder.decode_data()?;
+    let body: DdiAesEncryptDecryptReq<'_> = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 

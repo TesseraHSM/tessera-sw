@@ -423,6 +423,7 @@ unsafe fn cpu_zeroize(ptr: *mut u8, len: usize) {
         // `body_len` is a `u64` multiple within the region, so the cast and
         // slice are valid for writes.
         let body_ptr = unsafe { ptr.add(head) } as *mut u64;
+        // SAFETY: body_ptr is aligned and body_len bytes remain within the exclusive region.
         let body = unsafe { core::slice::from_raw_parts_mut(body_ptr, body_len / 8) };
         body.zeroize();
     }

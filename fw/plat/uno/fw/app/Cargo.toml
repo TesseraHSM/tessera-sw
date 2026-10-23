@@ -85,3 +85,6 @@ profile = [
   "tsra_fw_uno_drivers_profile/backend-semihosting",
   "tsra_fw_uno_drivers_profile/trace",
 ]
+
+[lints]
+workspace = true

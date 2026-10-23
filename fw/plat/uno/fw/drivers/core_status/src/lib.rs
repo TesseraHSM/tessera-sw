@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 #![no_std]
+#![allow(unsafe_code)]
 //! Core status driver — writes the HSM core liveliness heartbeat to DTCM.
 //!
 //! Mirrors the [`boot_status`](tsra_fw_uno_drivers_boot_status) driver:
@@ -26,6 +27,7 @@ pub enum CoreStatus {
 /// Write `status` to the DTCM `CORE_RUN_STATUS` register.
 #[inline]
 pub fn set(status: CoreStatus) {
+    // SAFETY: The aligned core-status slot is writable and permanently mapped in HSM DTCM.
     unsafe {
         ((HSM_DTCM_BASE + CORE_RUN_STATUS_OFFSET) as *mut u32).write_volatile(status as u32);
     }

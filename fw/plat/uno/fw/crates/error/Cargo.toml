@@ -13,3 +13,6 @@ test = false
 [dependencies]
 open-enum.workspace = true
 tsra_fw_hsm_pal_traits.workspace = true
+
+[lints]
+workspace = true

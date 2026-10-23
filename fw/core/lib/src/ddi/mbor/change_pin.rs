@@ -39,7 +39,7 @@ pub(crate) async fn change_pin<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiChangePinReq = decoder.decode_data()?;
+    let body: DdiChangePinReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 
     let _lock = pal.partition_lock(io).await?;

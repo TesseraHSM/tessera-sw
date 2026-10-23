@@ -12,3 +12,6 @@ test = false
 
 [dependencies]
 tsra_fw_uno_reg_soc = { workspace = true }
+
+[lints]
+workspace = true

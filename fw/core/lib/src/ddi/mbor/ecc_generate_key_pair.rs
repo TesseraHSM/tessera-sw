@@ -32,7 +32,7 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiEccGenerateKeyPairReq = decoder.decode_data()?;
+    let body: DdiEccGenerateKeyPairReq<'_> = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let pal_curve = super::from_ddi::curve(body.curve)?;

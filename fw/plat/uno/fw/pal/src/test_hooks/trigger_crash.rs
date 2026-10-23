@@ -8,6 +8,7 @@
 
 use core::convert::Infallible;
 
+use open_enum::open_enum;
 use tsra_fw_ddi_mbor::MborDecode;
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborEncode;
@@ -18,7 +19,6 @@ use tsra_fw_ddi_mbor::MborLenAccumulator;
 use tsra_fw_ddi_mbor_derive::Ddi;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use open_enum::open_enum;
 
 use super::test_action::decode_payload;
 

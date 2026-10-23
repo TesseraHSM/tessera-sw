@@ -25,6 +25,7 @@
 #![no_std]
 
 #[cfg(feature = "tracing")]
+#[allow(unsafe_code)]
 mod emit;
 
 pub extern crate tsra_fw_hsm_core_tracing as tracing;

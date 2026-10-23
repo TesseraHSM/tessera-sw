@@ -35,10 +35,10 @@ use core::ptr::addr_of;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
-use tsra_fw_uno_drivers_systick as systick;
 use embassy_executor::Spawner;
 use embassy_time::Duration;
 use embassy_time::Timer;
+use tsra_fw_uno_drivers_systick as systick;
 
 /// Number of fastpath cores.
 const FP_CORES: u8 = 3;
