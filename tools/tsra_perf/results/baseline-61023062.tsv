@@ -1,0 +1,34 @@
+unix_time	label	op	threads	payload	keys	seconds	ops	rps	mean_us	stddev_us	min_us	p50_us	p90_us	p99_us	max_us	errors
+1792737369	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	mbor-get-api-rev	1	-	8	20	700313	35015.7	28.4	2.9	24.2	28.3	29.3	38.1	123.0	0
+1792737395	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	mbor-get-api-rev	4	-	8	20	1334479	66723.9	59.6	9.2	29.2	60.5	68.2	91.5	236.0	0
+1792737421	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	mbor-get-api-rev	16	-	8	20	1679818	83990.9	190.1	72.9	53.6	170.0	235.1	496.4	1781.1	0
+1792737447	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-get-api-rev	1	-	8	20	701122	35056.1	28.4	2.8	24.2	28.4	29.3	38.0	139.1	0
+1792737473	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-get-api-rev	4	-	8	20	1301529	65076.4	61.2	9.6	30.7	62.6	69.8	94.9	203.9	0
+1792737499	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-get-api-rev	16	-	8	20	1611110	80555.5	198.2	76.3	37.5	176.9	245.9	517.6	2212.7	0
+1792737525	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p256	1	32B digest	8	20	40909	2045.5	488.3	2.3	482.9	488.1	489.7	497.9	563.0	0
+1792737551	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p256	4	32B digest	8	20	149780	7489.0	533.5	6.4	488.1	533.0	540.0	549.2	989.1	0
+1792737577	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p256	16	32B digest	8	20	199160	9958.0	1606.0	167.9	1132.2	1593.9	1690.4	1818.8	4800.5	0
+1792737603	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p384	1	48B digest	8	20	26033	1301.7	767.6	5.1	760.8	767.0	768.6	809.1	855.4	0
+1792737629	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p384	4	48B digest	8	20	103950	5197.5	768.9	2.2	756.7	768.8	770.7	778.2	807.0	0
+1792737655	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p384	16	48B digest	8	20	196412	9820.6	1628.4	278.6	1061.6	1599.4	1659.1	3156.6	5005.3	0
+1792737681	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p521	1	64B digest	8	20	17357	867.9	1151.4	18.0	1139.3	1145.3	1185.5	1246.2	1290.0	0
+1792737707	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p521	4	64B digest	8	20	69727	3486.3	1146.6	2.3	1140.7	1146.3	1148.7	1156.1	1193.1	0
+1792737733	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-ecc-sign-p521	16	64B digest	8	20	175461	8773.0	1823.0	226.8	1390.1	1811.1	1884.7	3568.0	5395.0	0
+1792737759	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-2k	1	256B	8	20	8778	438.9	2276.2	37.0	2217.3	2272.9	2336.0	2349.1	2372.6	0
+1792737785	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-2k	4	256B	8	20	35883	1794.2	2228.5	8.3	2220.1	2227.1	2230.5	2277.2	2358.9	0
+1792737811	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-2k	16	256B	8	20	98267	4913.4	3255.5	455.0	2303.6	3240.4	3384.1	6342.8	9254.0	0
+1792737837	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-2k-crt	1	256B	8	20	19814	990.7	1008.3	9.8	1001.0	1005.9	1009.9	1053.7	1069.3	0
+1792737863	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-2k-crt	4	256B	8	20	55181	2759.1	1448.7	2.7	1369.8	1448.7	1450.8	1457.8	1528.4	0
+1792737889	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-2k-crt	16	256B	8	20	56040	2802.0	5708.5	1025.1	3636.9	5651.9	5723.7	11058.0	17453.3	0
+1792737915	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-4k-crt	1	512B	8	20	5448	272.4	3666.6	31.9	3578.6	3661.8	3702.6	3722.6	3742.5	0
+1792737941	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-4k-crt	4	512B	8	20	22250	1112.5	3593.8	23.2	3576.2	3584.8	3628.2	3690.3	3838.1	0
+1792737967	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-rsa-sign-4k-crt	16	512B	8	20	32476	1623.8	9851.2	1932.7	5127.9	9635.4	10439.7	19217.1	30585.4	0
+1792737993	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-gcm-encrypt	1	2048B+32B AAD	8	20	40678	2033.9	490.8	2.2	486.0	490.5	492.2	500.3	515.0	0
+1792738019	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-gcm-encrypt	4	2048B+32B AAD	8	20	43957	2197.8	1818.7	269.4	1353.1	1818.1	1822.4	3643.2	3658.5	0
+1792738045	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-gcm-encrypt	16	2048B+32B AAD	8	20	44057	2202.8	7262.0	371.7	6191.9	7261.8	7398.0	7579.2	15287.3	0
+1792738071	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-gcm-decrypt	1	2048B+32B AAD	8	20	40214	2010.7	496.4	4.2	489.9	494.8	503.6	506.8	548.6	0
+1792738097	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-gcm-decrypt	4	2048B+32B AAD	8	20	43488	2174.4	1838.4	9.2	1534.2	1838.5	1840.4	1847.3	2144.5	0
+1792738123	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-gcm-decrypt	16	2048B+32B AAD	8	20	43596	2179.8	7338.8	254.1	6184.1	7339.1	7416.1	7725.3	15436.9	0
+1792738149	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-cbc-encrypt	1	1024B	8	20	143944	7197.2	138.3	2.5	123.5	138.1	139.7	148.8	189.3	0
+1792738175	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-cbc-encrypt	4	1024B	8	20	188196	9409.8	424.3	37.1	303.3	425.5	472.4	477.6	871.3	0
+1792738201	v0.0.0.0-61023062test (software GCM + CTR partial-block fix)	tbor-aes-cbc-encrypt	16	1024B	8	20	188630	9431.5	1695.5	37.4	1448.5	1697.1	1701.7	1754.1	3536.3	0

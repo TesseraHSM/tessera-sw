@@ -1,0 +1,7 @@
+unix_time	label	op	threads	payload	keys	seconds	ops	rps	mean_us	stddev_us	min_us	p50_us	p90_us	p99_us	max_us	errors
+1792741308	v0.0.0.0-61023072test (BCP GCM, full MBOR)	mbor-ecc-sign-p256	1	32B digest	8	20	48167	2408.3	414.6	3.2	402.8	414.3	416.2	425.6	522.7	0
+1792741334	v0.0.0.0-61023072test (BCP GCM, full MBOR)	mbor-ecc-sign-p256	4	32B digest	8	20	191295	9564.8	417.6	3.9	400.0	416.9	421.4	431.8	523.0	0
+1792741360	v0.0.0.0-61023072test (BCP GCM, full MBOR)	mbor-ecc-sign-p256	16	32B digest	8	20	671436	33571.8	476.0	43.5	408.0	472.2	495.2	528.8	2181.4	0
+1792741386	v0.0.0.0-61023072test (BCP GCM, full MBOR)	mbor-ecc-sign-p384	1	48B digest	8	20	28881	1444.0	691.9	3.8	686.3	691.5	693.4	702.3	783.1	0
+1792741412	v0.0.0.0-61023072test (BCP GCM, full MBOR)	mbor-ecc-sign-p384	4	48B digest	8	20	115194	5759.7	693.8	3.5	677.6	693.2	696.3	705.7	777.4	0
+1792741438	v0.0.0.0-61023072test (BCP GCM, full MBOR)	mbor-ecc-sign-p384	16	48B digest	8	20	454181	22709.0	703.9	18.4	675.6	703.2	714.8	727.3	1487.6	0
