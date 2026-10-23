@@ -19,6 +19,8 @@
 //! `--verify-all` checks every timed response as well.
 
 mod bench;
+mod mbor;
+mod mbor_keys;
 mod ops;
 mod report;
 mod setup;
@@ -162,9 +164,12 @@ const BASELINE_OPS: &[OpKind] = &[
     OpKind::TborGetApiRev,
     OpKind::EccSignP256,
     OpKind::EccSignP384,
+    OpKind::EccSignP521,
     OpKind::RsaSign2k,
     OpKind::RsaSign2kCrt,
+    OpKind::RsaSign4kCrt,
     OpKind::AesGcmEncrypt,
+    OpKind::AesGcmDecrypt,
     OpKind::AesCbcEncrypt,
 ];
 

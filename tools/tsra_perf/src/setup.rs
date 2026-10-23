@@ -22,6 +22,7 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
+use tsra_ddi_mbor_test_helpers::helper_close_session;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -44,6 +45,8 @@ use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
 
+use crate::mbor::MborSession;
+use crate::mbor::REV;
 use crate::ops::OpKind;
 use crate::ops::Worker;
 use crate::RunArgs;
@@ -92,6 +95,8 @@ pub(crate) struct Env {
     ctx: Option<TestCtx>,
     pub(crate) session_id: u16,
     pub(crate) keys: Keys,
+    /// The MBOR session and keys of keyed MBOR operations.
+    mbor: Option<MborSession>,
     /// API revisions seen in the pre-flight check, which later responses
     /// must repeat.
     pub(crate) mbor_rev: OnceLock<String>,
@@ -115,9 +120,24 @@ impl Env {
             ctx: None,
             session_id: 0,
             keys: Keys::default(),
+            mbor: None,
             mbor_rev: OnceLock::new(),
             tbor_rev: OnceLock::new(),
         };
+
+        let mbor_curves: Vec<u8> = kinds
+            .iter()
+            .filter_map(|k| k.mbor_ecc().map(|m| m.0))
+            .collect();
+        if !mbor_curves.is_empty() {
+            if kinds.iter().any(|k| k.needs_session()) {
+                return Err("keyed MBOR and TBOR operations need separate runs (and a \
+                            power cycle between them)"
+                    .into());
+            }
+            say(args, "factory reset, MBOR credential and session".into());
+            env.mbor = Some(MborSession::open(&env.path, &mbor_curves, args.keys)?);
+        }
 
         if kinds.iter().any(|k| k.needs_session()) {
             say(
@@ -154,11 +174,23 @@ impl Env {
             .expect("keyed operations require the session set up by Env::new")
     }
 
-    /// Close the session.
+    /// The MBOR session keyed MBOR operations run on.
+    pub(crate) fn mbor_session(&self) -> &MborSession {
+        self.mbor
+            .as_ref()
+            .expect("keyed MBOR operations require the session set up by Env::new")
+    }
+
+    /// Close the sessions.
     pub(crate) fn close(self) {
         if let Some(ctx) = &self.ctx {
             if let Err(e) = ctx.session_close(self.session_id) {
                 eprintln!("warning: closing session {}: {e:?}", self.session_id);
+            }
+        }
+        if let Some(m) = &self.mbor {
+            if let Err(e) = helper_close_session(&m.dev, Some(m.session_id), Some(REV)) {
+                eprintln!("warning: closing MBOR session {}: {e:?}", m.session_id);
             }
         }
     }

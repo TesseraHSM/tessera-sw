@@ -43,10 +43,16 @@ CO session that all keyed requests share (the hardware allows one session per
 file descriptor and one concurrent CO session). Then it generates the ECC keys
 on the device and imports host-generated RSA and AES keys with `UnwrapKey`, so
 the host can check results. Out-of-session commands (`ApiRev`, `TestAesGcm`)
-and MBOR commands use a file descriptor per thread.
+and MBOR `GetApiRev` use a file descriptor per thread.
 
 `tbor-aes-gcm-*` uses the test-only `TestAesGcm` command, so the firmware must
 be built with `tbor-test-cmds` (the Uno bring-up image is).
+
+Keyed MBOR operations (`mbor-ecc-sign-*`) instead factory-reset the device,
+establish an MBOR credential and open an MBOR app session as the MBOR DDI tests
+do, then generate their keys in it. `EstablishCredential` is only in firmware
+built with the `mbor` feature, and MBOR and TBOR setup do not mix on one boot,
+so run keyed MBOR operations on their own, after a power cycle.
 
 ## Usage
 
@@ -67,8 +73,9 @@ tsra_perf compare before.tsv after.tsv --markdown compare.md
 ```
 
 `suite` runs the baseline set when no `--op` is given: MBOR and TBOR
-`GetApiRev`, TBOR ECC sign (P-256, P-384), RSA sign (2048, plain and CRT),
-`TestAesGcm` encrypt (2 KiB text, 32 B AAD) and AES-256-CBC encrypt (1 KiB).
+`GetApiRev`, TBOR ECC sign (P-256, P-384, P-521), RSA sign (2048 plain and
+CRT, 4096 CRT), `TestAesGcm` encrypt and decrypt (2 KiB text, 32 B AAD) and
+AES-256-CBC encrypt (1 KiB).
 
 Build with `--features emu` to run against the in-process emulator.
 

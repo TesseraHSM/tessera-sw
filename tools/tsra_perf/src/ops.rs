@@ -24,7 +24,10 @@ use tsra_crypto::Verifier;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
 use tsra_ddi_interface::DdiResult;
+use tsra_ddi_mbor_codec::MborByteArray;
+use tsra_ddi_mbor_test_helpers::helper_ecc_sign;
 use tsra_ddi_mbor_test_helpers::helper_get_api_rev;
+use tsra_ddi_mbor_types::DdiHashAlgorithm;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
@@ -37,6 +40,7 @@ use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
+use crate::mbor::REV;
 use crate::setup::Env;
 use crate::RunArgs;
 
@@ -46,6 +50,12 @@ pub(crate) enum OpKind {
     /// MBOR `GetApiRev`.
     #[value(name = "mbor-get-api-rev")]
     MborGetApiRev,
+    /// MBOR `EccSign`, P-256, 32-byte digest (firmware with `mbor`).
+    #[value(name = "mbor-ecc-sign-p256")]
+    MborEccSignP256,
+    /// MBOR `EccSign`, P-384, 48-byte digest (firmware with `mbor`).
+    #[value(name = "mbor-ecc-sign-p384")]
+    MborEccSignP384,
     /// TBOR `ApiRev`.
     #[value(name = "tbor-get-api-rev")]
     TborGetApiRev,
@@ -108,6 +118,15 @@ impl OpKind {
         }
     }
 
+    /// `(curve, digest length, hash)` of an MBOR ECC sign operation.
+    pub(crate) fn mbor_ecc(self) -> Option<(u8, usize, DdiHashAlgorithm)> {
+        match self {
+            Self::MborEccSignP256 => Some((ECC_CURVE_P256, 32, DdiHashAlgorithm::Sha256)),
+            Self::MborEccSignP384 => Some((ECC_CURVE_P384, 48, DdiHashAlgorithm::Sha384)),
+            _ => None,
+        }
+    }
+
     /// `(modulus bytes, CRT)` of an RSA sign operation.
     pub(crate) fn rsa(self) -> Option<(usize, bool)> {
         match self {
@@ -138,6 +157,8 @@ impl OpKind {
     /// Input size, for reports.
     pub(crate) fn payload(self, args: &RunArgs) -> String {
         if let Some((_, len)) = self.ecc() {
+            format!("{len}B digest")
+        } else if let Some((_, len, _)) = self.mbor_ecc() {
             format!("{len}B digest")
         } else if let Some((bytes, _)) = self.rsa() {
             format!("{bytes}B")
@@ -217,7 +238,10 @@ impl Pools {
         let n = args.messages;
         let mut pools = Self::default();
 
-        if kinds.iter().any(|k| k.ecc().is_some()) {
+        if kinds
+            .iter()
+            .any(|k| k.ecc().is_some() || k.mbor_ecc().is_some())
+        {
             pools.digests = (0..n)
                 .map(|_| {
                     let mut d = [0u8; 64];
@@ -372,6 +396,7 @@ impl<'e> Worker<'e> {
     pub(crate) fn exec(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
         match op {
             OpKind::MborGetApiRev => self.mbor_api_rev(verify),
+            OpKind::MborEccSignP256 | OpKind::MborEccSignP384 => self.mbor_ecc_sign(op, verify),
             OpKind::TborGetApiRev => self.tbor_api_rev(verify),
             OpKind::EccSignP256 | OpKind::EccSignP384 | OpKind::EccSignP521 => {
                 self.ecc_sign(op, verify)
@@ -402,6 +427,44 @@ impl<'e> Worker<'e> {
             } else {
                 Ok(())
             }
+        });
+        (dt, result)
+    }
+
+    fn mbor_ecc_sign(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
+        let (curve, len, hash) = op.mbor_ecc().expect("MBOR ECC sign operation");
+        let mbor = self.env.mbor_session();
+        let keys = &mbor.ecc[&curve];
+        let (k, m) = self.rotate(keys.len(), self.pools.digests.len());
+        let key = &keys[k];
+        let digest = &self.pools.digests[m][..len];
+        let arg = match MborByteArray::from_slice(digest) {
+            Ok(a) => a,
+            Err(e) => return (Duration::ZERO, Err(format!("digest: {e:?}"))),
+        };
+        let (dt, resp) = timed(|| {
+            helper_ecc_sign(
+                &mbor.dev,
+                Some(mbor.session_id),
+                Some(REV),
+                key.id,
+                arg,
+                hash,
+            )
+        });
+        let result = resp.and_then(|r| {
+            if !verify {
+                return Ok(());
+            }
+            // The host decode leaves the signature as big-endian `r ‖ s`.
+            let ok = Verifier::verify(
+                &mut EccAlgo::default(),
+                &key.public,
+                digest,
+                r.data.signature.as_slice(),
+            )
+            .map_err(|e| format!("host ECDSA verify: {e:?}"))?;
+            ensure(ok, "MBOR ECDSA signature does not verify")
         });
         (dt, result)
     }
