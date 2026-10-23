@@ -10,6 +10,21 @@ pub struct AesCbcTestVector {
     pub plaintext: &'static [u8],
     pub ciphertext: &'static [u8],
 }
+/// AES-GCM test vector (96-bit IV, 128-bit tag)
+#[derive(Debug)]
+pub struct AesGcmTestVector {
+    pub test_count_id: u32,
+    pub encrypt: bool,
+    pub key: &'static [u8],
+    pub iv: &'static [u8],
+    pub aad: &'static [u8],
+    pub plaintext: &'static [u8],
+    pub ciphertext: &'static [u8],
+    pub tag: &'static [u8],
+    /// Decrypt only: `false` when the vector must fail authentication.
+    pub valid: bool,
+}
+
 /// AES XTS Test vector struct
 #[derive(Debug)]
 pub struct AesXtsTestVector {
@@ -39,6 +54,7 @@ mod cbc_256_nist_mmt_test_vectors;
 mod cbc_256_nist_sbox_test_vectors;
 mod cbc_256_nist_varkey_test_vectors;
 mod cbc_256_nist_vartxt_test_vectors;
+mod gcm_256_nist_test_vectors;
 mod xts_128_nist_test_vectors;
 mod xts_256_nist_test_vectors;
 
@@ -60,5 +76,6 @@ pub use cbc_256_nist_mmt_test_vectors::AES_CBC_256_MMT_TEST_VECTORS;
 pub use cbc_256_nist_sbox_test_vectors::AES_CBC_256_SBOX_TEST_VECTORS;
 pub use cbc_256_nist_varkey_test_vectors::AES_CBC_256_VAR_KEY_TEST_VECTORS;
 pub use cbc_256_nist_vartxt_test_vectors::AES_CBC_256_VAR_TXT_TEST_VECTORS;
+pub use gcm_256_nist_test_vectors::AES_GCM_256_NIST_TEST_VECTORS;
 pub use xts_128_nist_test_vectors::AES_XTS_128_NIST_TEST_VECTORS;
 pub use xts_256_nist_test_vectors::AES_XTS_256_NIST_TEST_VECTORS;

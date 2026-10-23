@@ -382,6 +382,8 @@ the dispatcher and firmware through `TestCtx::tbor` / `expect_fw_reject`.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
+| NIST CAVP AES-256 encrypt vectors (96-bit IV, 128-bit tag) | ✅ 🔁 | `test_aes_gcm::nist_cavp_encrypt_vectors` | 375 vectors from `gcmEncryptExtIV256.rsp` |
+| NIST CAVP AES-256 decrypt vectors, including FAIL cases | ✅ 🔁 | `test_aes_gcm::nist_cavp_decrypt_vectors` | 375 vectors from `gcmDecrypt256.rsp`; 191 must return `AesGcmDecryptTagDoesNotMatch` |
 | GCM spec AES-256 vectors TC13–15 (block-aligned) encrypt and decrypt | ✅ | `test_aes_gcm::spec_vectors_block_aligned` | TC13 has no text, so it never reaches the Uno BCP |
 | GCM spec TC16 (60-byte text, 20-byte AAD) | ✅ | `test_aes_gcm::spec_vector_unaligned` | Exercises the Uno PAL tag correction |
 | Block-aligned text with every AAD layout matches host OpenSSL | ✅ 🔁 | `test_aes_gcm::block_aligned_lengths_match_host` |  |

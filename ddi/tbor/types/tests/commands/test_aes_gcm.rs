@@ -8,11 +8,11 @@
 //! BCP on Uno, software AES on std/emu). The firmware must be built with
 //! `tbor-test-cmds`; the std/emu build and the Uno bring-up image are.
 //!
-//! Every result is checked against an independent reference: the GCM
-//! spec (McGrew & Viega) AES-256 test cases 13-16, and the host OpenSSL
-//! implementation in `tsra_crypto` for randomized inputs. Each request
-//! uses a fresh key, IV, AAD and text, so nothing can be cached or
-//! specialized across calls.
+//! Every result is checked against an independent reference: the NIST
+//! CAVP AES-256 GCM vectors, the GCM spec (McGrew & Viega) AES-256 test
+//! cases 13-16, and the host OpenSSL implementation in `tsra_crypto` for
+//! randomized inputs. Each randomized request uses a fresh key, IV, AAD and
+//! text, so nothing can be cached or specialized across calls.
 //!
 //! Text lengths are split into block-aligned and unaligned sets. The BCP
 //! only processes whole blocks, so on Uno the aligned set runs entirely on
@@ -20,6 +20,9 @@
 //! multiple of 32) also exercises the PAL's software tag correction.
 //!
 //! Coverage:
+//! * NIST CAVP AES-256 vectors with a 96-bit IV and 128-bit tag
+//!   (`gcmEncryptExtIV256.rsp` / `gcmDecrypt256.rsp`): 375 encrypt, and
+//!   375 decrypt of which 191 must fail authentication.
 //! * GCM spec test cases 13-16, encrypt and decrypt.
 //! * Block-aligned and unaligned text lengths (0..=2048) with assorted
 //!   AAD lengths (0..=256) covering every `[padded_AAD | text]` layout,
@@ -32,6 +35,8 @@
 //! Ungated: runs on emu and on hardware.
 
 use rand::RngExt;
+use tsra_crypto::testvectors::aes::AesGcmTestVector;
+use tsra_crypto::testvectors::aes::AES_GCM_256_NIST_TEST_VECTORS;
 use tsra_crypto::AesGcmAlgo;
 use tsra_crypto::AesKey;
 use tsra_crypto::EncryptOp;
@@ -257,6 +262,28 @@ fn check_round_trip(ctx: &TestCtx, aad_len: usize, data_len: usize) {
     );
 }
 
+/// Runs one NIST CAVP vector through the device.
+fn check_cavp(ctx: &TestCtx, v: &AesGcmTestVector) {
+    let id = v.test_count_id;
+    let key: Key = v.key.try_into().expect("32-byte key");
+    let iv: Iv = v.iv.try_into().expect("96-bit IV");
+    let tag: Tag = v.tag.try_into().expect("128-bit tag");
+
+    if v.encrypt {
+        let enc = device_seal(ctx, &key, &iv, v.aad, v.plaintext);
+        assert_eq!(enc.data, v.ciphertext, "CAVP {id}: ciphertext");
+        assert_eq!(enc.tag, tag, "CAVP {id}: tag");
+    } else if v.valid {
+        let dec = device_open(ctx, &key, &iv, v.aad, v.ciphertext, &tag);
+        assert_eq!(dec.data, v.plaintext, "CAVP {id}: plaintext");
+    } else {
+        ctx.expect_fw_reject(
+            &req(AES_OP_DECRYPT, &key, &iv, v.aad, v.ciphertext, &tag),
+            TborStatus::AesGcmDecryptTagDoesNotMatch,
+        );
+    }
+}
+
 /// Seals a fixed-shape aligned message for the negative tests.
 fn sealed_sample(ctx: &TestCtx) -> (Key, Iv, Vec<u8>, Vec<u8>, Tag) {
     let mut rng = rand::rng();
@@ -266,6 +293,32 @@ fn sealed_sample(ctx: &TestCtx) -> (Key, Iv, Vec<u8>, Vec<u8>, Tag) {
     let pt = random_bytes(64);
     let enc = device_seal(ctx, &key, &iv, &aad, &pt);
     (key, iv, aad, enc.data, enc.tag)
+}
+
+/// NIST CAVP AES-256 encrypt vectors reproduce the published ciphertext
+/// and tag.
+#[test]
+fn nist_cavp_encrypt_vectors() {
+    let ctx = TestCtx::new();
+    let mut n = 0;
+    for v in AES_GCM_256_NIST_TEST_VECTORS.iter().filter(|v| v.encrypt) {
+        check_cavp(&ctx, v);
+        n += 1;
+    }
+    assert_eq!(n, 375, "CAVP encrypt vector count");
+}
+
+/// NIST CAVP AES-256 decrypt vectors recover the published plaintext, or
+/// fail authentication where CAVP marks them FAIL.
+#[test]
+fn nist_cavp_decrypt_vectors() {
+    let ctx = TestCtx::new();
+    let mut n = 0;
+    for v in AES_GCM_256_NIST_TEST_VECTORS.iter().filter(|v| !v.encrypt) {
+        check_cavp(&ctx, v);
+        n += 1;
+    }
+    assert_eq!(n, 375, "CAVP decrypt vector count");
 }
 
 /// GCM spec test cases 13-15 (block-aligned text) encrypt and decrypt
