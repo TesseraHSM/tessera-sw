@@ -48,7 +48,14 @@ impl UnoHsmPal {
     /// Reject cross-session access to a `Session`-scoped key with
     /// [`HsmError::KeyNotFound`]; partition-scoped keys are unaffected.
     fn enforce_session_key_isolation(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
-        let Some(bound) = vault(io).key_session(key_id)? else {
+        Self::check_key_session(io, vault(io).key_session(key_id)?)
+    }
+
+    /// The isolation check of
+    /// [`enforce_session_key_isolation`](Self::enforce_session_key_isolation)
+    /// for a key bound to session `bound` (`None` if partition-scoped).
+    fn check_key_session(io: &impl HsmIo, bound: Option<u16>) -> HsmResult<()> {
+        let Some(bound) = bound else {
             return Ok(());
         };
         let sqe = Sqe::from(io.sqe());
@@ -106,8 +113,8 @@ impl HsmVault for UnoHsmPal {
     }
 
     fn vault_key(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
-        self.enforce_session_key_isolation(io, key_id)?;
-        let (table, off, len) = vault(io).key_location(key_id)?;
+        let ((table, off, len), session) = vault(io).key_location_and_session(key_id)?;
+        Self::check_key_session(io, session)?;
         let addr = VaultStorage::blob_addr(table) + off;
         // SAFETY: `key_location` validated the key is live; `addr..addr+len`
         // lies within that table's 'static GSRAM blob region.

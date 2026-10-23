@@ -410,8 +410,25 @@ impl<S: TableStorage> KeyVault<S> {
     /// - [`HsmError::KeyNotFound`] — `key_id` does not refer to a live
     ///   key.
     pub fn key_location(&self, key_id: HsmKeyId) -> HsmResult<(usize, usize, usize)> {
+        self.key_location_and_session(key_id).map(|(loc, _)| loc)
+    }
+
+    /// [`key_location`](Self::key_location) and
+    /// [`key_session`](Self::key_session) from one read of the key's
+    /// entry, which lives in memory the CPU may read uncached.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::KeyNotFound`] — `key_id` does not refer to a live
+    ///   key.
+    #[allow(clippy::type_complexity)]
+    pub fn key_location_and_session(
+        &self,
+        key_id: HsmKeyId,
+    ) -> HsmResult<((usize, usize, usize), Option<u16>)> {
         let (table, slot) = split_key_id(key_id);
         let entry = self.entry(table, slot)?;
+        let session = entry.session().then(|| entry.session_or_tag());
         let len = self.resolved_len(table, &entry)?;
         let off = entry.attrs_byte_offset() + ATTRIBUTES_BLOB_SIZE;
         // Validate `off..off+len` lies within the table blob: callers
@@ -423,7 +440,7 @@ impl<S: TableStorage> KeyVault<S> {
         if end > blob_len {
             return Err(HsmError::KeyNotFound);
         }
-        Ok((table, off, len))
+        Ok(((table, off, len), session))
     }
 
     /// Test-only borrow of the backing storage (for asserting on raw
