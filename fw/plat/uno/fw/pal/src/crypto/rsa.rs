@@ -426,7 +426,10 @@ impl HsmRsa for UnoHsmPal {
         }
         let upka_key_type = rsa_key_to_upka_key_type(key_size);
         self.service_pka();
-        self.pka.rsa_mod_exp_priv(upka_key_type, key, y, x).await
+        let done = self.pka.rsa_mod_exp_priv(upka_key_type, key, y, x).await;
+        // Resumed by this command's completion: handle any that came in since.
+        self.service_pka();
+        done
     }
 
     async fn mod_exp_pub(
@@ -439,7 +442,10 @@ impl HsmRsa for UnoHsmPal {
     ) -> HsmResult<()> {
         let upka_key_type = rsa_key_to_upka_key_type(key_size);
         self.service_pka();
-        self.pka.rsa_mod_exp_pub(upka_key_type, key, x, y).await
+        let done = self.pka.rsa_mod_exp_pub(upka_key_type, key, x, y).await;
+        // Resumed by this command's completion: handle any that came in since.
+        self.service_pka();
+        done
     }
 
     fn rsa_priv_pub_key(
