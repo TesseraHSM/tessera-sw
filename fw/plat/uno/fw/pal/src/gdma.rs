@@ -626,8 +626,10 @@ const CPU_SCRUB_MAX: usize = 4096;
 /// [`CPU_SCRUB_MAX`] for a detached IO's slot (see
 /// [`UnoHsmPal::drop_detached`]): no task awaits its GDMA scrub, so the
 /// GDMA costs only its submission and completion, and wins from a few
-/// hundred cycles of CPU stores (about 1 KiB) up.
-const DETACHED_CPU_SCRUB_MAX: usize = 1024;
+/// hundred cycles of CPU stores up. It frees the slot later, though,
+/// which costs an IO bound by its engine's latency (ECDSA's dirty
+/// region is under this) more than the CPU saved.
+const DETACHED_CPU_SCRUB_MAX: usize = 2048;
 
 /// Volatile CPU zeroization of `[ptr, ptr + len)` that the optimizer cannot
 /// elide, via the vetted [`zeroize`] crate. Used for the M7 TCM (which GDMA
