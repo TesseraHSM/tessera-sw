@@ -455,32 +455,42 @@ impl UnoHsmPal {
     /// finishes the job (see [`finish_scrub`](Self::finish_scrub)).
     fn drop_detached(&self, index: u16, queue_id: u8) {
         let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, index);
-        if dma_len > CPU_SCRUB_MAX && dma_len <= ZERO_SIZE as usize {
-            let len = dma_len as u32;
-            let link = u32::from(index) | u32::from(queue_id) << 16 | SCRUB_LINK;
-            if self
-                .gdma
-                .copy_mem_detached(
-                    device_dma_buf(ZERO_BASE as *const u8, len),
-                    MemInterface::Device,
-                    len,
-                    device_dma_buf(dma_ptr, len),
-                    MemInterface::Device,
-                    len,
-                    link,
-                )
-                .is_ok()
-            {
-                return;
-            }
+        if dma_len > CPU_SCRUB_MAX && self.start_detached_scrub(index, queue_id, dma_ptr, dma_len) {
+            return;
         }
         self.scrub_io_slot_cpu(index);
         self.iic.free_io(index, u16::from(queue_id));
     }
 
+    /// Starts the GDMA zeroing the `len` dirty SRAM bytes at `ptr` of
+    /// detached IO slot `index`, for [`drop_detached`](Self::drop_detached);
+    /// `false` if it could not. Out of line to keep the common, small IO's
+    /// drop (inlined into the OIC completion loop) short.
+    #[cold]
+    #[inline(never)]
+    fn start_detached_scrub(&self, index: u16, queue_id: u8, ptr: *mut u8, len: usize) -> bool {
+        if len > ZERO_SIZE as usize {
+            return false;
+        }
+        let len = len as u32;
+        let link = u32::from(index) | u32::from(queue_id) << 16 | SCRUB_LINK;
+        self.gdma
+            .copy_mem_detached(
+                device_dma_buf(ZERO_BASE as *const u8, len),
+                MemInterface::Device,
+                len,
+                device_dma_buf(ptr, len),
+                MemInterface::Device,
+                len,
+                link,
+            )
+            .is_ok()
+    }
+
     /// The GDMA has zeroed (if `zeroed`) the dirty SRAM of detached IO slot
     /// `index`, as [`drop_detached`](Self::drop_detached) asked: finish the
     /// scrub with the CPU, all of it if the GDMA failed, and free the slot.
+    #[inline(never)]
     fn finish_scrub(&self, index: u16, queue_id: u8, zeroed: bool) {
         if zeroed {
             self.scrub_io_slot_nondma(index);
