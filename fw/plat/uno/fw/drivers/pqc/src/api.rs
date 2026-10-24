@@ -10,9 +10,12 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_single_cell::SingleCell;
 
+use crate::engine::gen_key_request;
 use crate::engine::PqcEngine;
 use crate::error::PqcError;
 use crate::pool::PqcState;
+use crate::pool::Staged;
+use crate::request::PqcOp;
 use crate::shared_status;
 use crate::types::EngineId;
 use crate::types::ENGINES;
@@ -48,7 +51,7 @@ impl PqcDriver {
                 // Already queued: take the engine if one has been handed over.
                 if let Some(idx) = queue_idx {
                     return match s.poll_queue_slot(idx, cx) {
-                        Some(id) => Poll::Ready(Ok(id)),
+                        Some((id, _)) => Poll::Ready(Ok(id)),
                         None => Poll::Pending,
                     };
                 }
@@ -83,6 +86,71 @@ impl PqcDriver {
         }
     }
 
+    /// As [`acquire_any`](Self::acquire_any), but with key generation
+    /// request `staged` to start on the engine the moment it is ours: posted
+    /// here if an engine is free, else by the task that frees one, without
+    /// waiting for this one to wake.
+    ///
+    /// Returns the engine and the request's number.
+    ///
+    /// `staged` is wiped once posted or handed over.
+    async fn acquire_and_post(&self, staged: &mut Staged) -> HsmResult<(PqcEngine<'_>, u32)> {
+        let mut queue_idx: Option<u8> = None;
+
+        let result = poll_fn(|cx| {
+            self.state.with(|s| {
+                if let Some(idx) = queue_idx {
+                    return match s.poll_queue_slot(idx, cx) {
+                        Some((id, Some(seq))) => Poll::Ready(Ok((id, seq))),
+                        Some((id, None)) => {
+                            Poll::Ready(Ok((id, s.responses.post(id, &staged.params()))))
+                        }
+                        None => Poll::Pending,
+                    };
+                }
+
+                if !s.has_waiters() {
+                    if let Some(id) = s.claim_free_engine() {
+                        return Poll::Ready(Ok((id, s.responses.post(id, &staged.params()))));
+                    }
+                }
+
+                let Some(idx) = s.reserve_queue_slot() else {
+                    return Poll::Ready(Err(PqcError::QUEUE_FULL));
+                };
+                s.queue[idx as usize].staged = Some(staged.clone());
+                queue_idx = Some(idx);
+                s.poll_queue_slot(idx, cx);
+                Poll::Pending
+            })
+        })
+        .await;
+        staged.wipe();
+
+        let (id, seq) = result?;
+        Ok((
+            PqcEngine {
+                driver: self,
+                id,
+                released: false,
+            },
+            seq,
+        ))
+    }
+
+    /// Run key generation request `staged` on whichever FP core is free.
+    async fn gen_key(
+        &self,
+        staged: &mut Staged,
+        pub_key: &mut [u8],
+        sec_key: &mut [u8],
+    ) -> HsmResult<()> {
+        let (mut engine, seq) = self.acquire_and_post(staged).await?;
+        let result = engine.finish_gen_key(seq, pub_key, sec_key).await;
+        engine.release();
+        result
+    }
+
     /// Acquire an engine, run `f` on it, and release it however `f` ends.
     ///
     pub async fn with_engine<F, R>(&self, f: F) -> HsmResult<R>
@@ -99,8 +167,8 @@ impl PqcDriver {
 
     /// Generate an ML-DSA keypair on whichever FP core is free.
     ///
-    /// Convenience wrapper over [`acquire_any`](Self::acquire_any) +
-    /// [`PqcEngine::mldsa_gen_key`] + release.
+    /// As [`PqcEngine::mldsa_gen_key`], but the request is posted the moment
+    /// an engine frees up, even before this task wakes to collect it.
     pub async fn mldsa_gen_key(
         &self,
         kind: HsmVaultKeyKind,
@@ -108,8 +176,8 @@ impl PqcDriver {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mldsa_gen_key(kind, seed, pub_key, sec_key).await)
-            .await
+        let mut staged = gen_key_request(PqcOp::MlDsaGenerateKey, kind, seed, pub_key, sec_key)?;
+        self.gen_key(&mut staged, pub_key, sec_key).await
     }
 
     /// Leave a fresh sentinel for the FP cores and read what each has
@@ -160,8 +228,8 @@ impl PqcDriver {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mlkem_gen_key(kind, seed, pub_key, sec_key).await)
-            .await
+        let mut staged = gen_key_request(PqcOp::MlKemGenerateKey, kind, seed, pub_key, sec_key)?;
+        self.gen_key(&mut staged, pub_key, sec_key).await
     }
 
     /// Encapsulate to a public key on whichever FP core is free.
@@ -210,17 +278,6 @@ impl PqcDriver {
             .await
     }
 
-    /// Next request sequence number.
-    ///
-    /// Monotonic across all engines, so a response can never be mistaken
-    /// for one to an earlier request on the same core.
-    pub(crate) fn next_request_seq(&self) -> u32 {
-        self.state.with(|s| {
-            s.request_seq = s.request_seq.wrapping_add(1);
-            s.request_seq
-        })
-    }
-
     /// Wakes each task whose engine has posted the response it awaits.
     ///
     /// The cores raise no interrupt CP1 can claim for itself (their pending
@@ -229,13 +286,14 @@ impl PqcDriver {
     /// this driver's state.
     pub fn wake(&self) {
         self.state.with(|s| {
-            let mut awaiting = s.awaiting;
+            let r = &mut s.responses;
+            let mut awaiting = r.awaiting;
             while awaiting != 0 {
                 let i = awaiting.trailing_zeros() as usize;
                 awaiting &= awaiting - 1;
-                if crate::mailbox::response_seq(EngineId::new(i as u8)) == s.awaiting_seq[i] {
-                    s.awaiting &= !(1 << i);
-                    s.resp_wakers[i].wake();
+                if crate::mailbox::response_seq(EngineId::new(i as u8)) == r.awaiting_seq[i] {
+                    r.awaiting &= !(1 << i);
+                    r.wakers[i].wake();
                 }
             }
         });

@@ -113,4 +113,9 @@ pub enum QueueSlotState {
     /// An engine has been handed to the waiting task, which has not yet
     /// woken to collect it.
     Assigned(EngineId),
+
+    /// An engine has been handed to the waiting task with the request the
+    /// task staged already posted to it, as request number `.1` (see
+    /// [`Staged`](crate::pool::Staged)).
+    Running(EngineId, u32),
 }

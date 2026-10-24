@@ -8,9 +8,9 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::api::PqcDriver;
-use crate::doorbell;
 use crate::error::PqcError;
 use crate::mailbox;
+use crate::pool::Staged;
 use crate::request::PqcOp;
 use crate::types::EngineId;
 
@@ -111,6 +111,50 @@ pub fn mlkem_sec_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
     }
 }
 
+/// Check a key generation's buffers against parameter set `kind` and build
+/// its request.
+///
+/// `seed` is the private seed from the HSM's TRNG -- `xi` for ML-DSA, the
+/// pair `(d ‖ z)` for ML-KEM -- which the request carries in its two seed
+/// fields; an FP core has no entropy source of its own. The keys come back
+/// in the core's operand slot.
+pub(crate) fn gen_key_request(
+    op: PqcOp,
+    kind: HsmVaultKeyKind,
+    seed: &[u8],
+    pub_key: &[u8],
+    sec_key: &[u8],
+) -> HsmResult<Staged> {
+    let (seed_len, expected_pub, expected_sec) = match op {
+        PqcOp::MlDsaGenerateKey => (
+            MLDSA_SEED_LEN,
+            mldsa_pub_key_len(kind)?,
+            mldsa_sec_key_len(kind)?,
+        ),
+        _ => (
+            MLKEM_SEED_LEN,
+            mlkem_pub_key_len(kind)?,
+            mlkem_sec_key_len(kind)?,
+        ),
+    };
+    if seed.len() != seed_len || pub_key.len() != expected_pub || sec_key.len() != expected_sec {
+        return Err(PqcError::INVALID_BUFFER_SIZE);
+    }
+
+    let mut staged = Staged {
+        op: op as u32,
+        key_kind: kind.0 as u32,
+        xi: [0; MLDSA_SEED_LEN],
+        rnd: [0; MLDSA_SEED_LEN],
+    };
+    let (xi, rnd) = seed.split_at(MLDSA_SEED_LEN);
+    staged.xi.copy_from_slice(xi);
+    if !rnd.is_empty() {
+        staged.rnd.copy_from_slice(rnd);
+    }
+    Ok(staged)
+}
+
 /// Exclusive claim on one FP core.
 ///
 /// Returned by [`PqcDriver::acquire_any`].  The engine is returned to the
@@ -149,50 +193,8 @@ impl PqcEngine<'_> {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
-        let expected_pub = mldsa_pub_key_len(kind)?;
-        let expected_sec = mldsa_sec_key_len(kind)?;
-        if seed.len() != MLDSA_SEED_LEN
-            || pub_key.len() != expected_pub
-            || sec_key.len() != expected_sec
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        // `seed` arrives already filled with entropy from the HSM's TRNG and
-        // is handed to the core as the ML-DSA seed `xi`. It is the private
-        // key, so it stays here rather than coming back over the wire.
-        let xi: [u8; MLDSA_SEED_LEN] = seed
-            .as_ref()
-            .try_into()
-            .map_err(|_| PqcError::INVALID_BUFFER_SIZE)?;
-
-        let resp = self
-            .submit(&mailbox::RequestParams {
-                op: PqcOp::MlDsaGenerateKey as u32,
-                key_kind: kind.0 as u32,
-                xi: &xi,
-                rnd: &[0u8; MLDSA_SEED_LEN],
-                msg_len: 0,
-                ctx_len: 0,
-                sig_len: 0,
-                pub_key_len: 0,
-            })
-            .await?;
-
-        if resp.out_len as usize != expected_pub {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        // Both keys are too large for the mailbox, so they travel in this
-        // core's operand slot. Read only after the response sequence number
-        // matched, which the core writes last.
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sec_key)
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        Ok(())
+        let mut staged = gen_key_request(PqcOp::MlDsaGenerateKey, kind, seed, pub_key, sec_key)?;
+        self.gen_key(&mut staged, pub_key, sec_key).await
     }
 
     /// Sign a message on this engine.
@@ -270,49 +272,8 @@ impl PqcEngine<'_> {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
-        let expected_pub = mlkem_pub_key_len(kind)?;
-        let expected_sec = mlkem_sec_key_len(kind)?;
-        if seed.len() != MLKEM_SEED_LEN
-            || pub_key.len() != expected_pub
-            || sec_key.len() != expected_sec
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        // The core takes the pair in its two seed fields: `d` then `z`.
-        let mut d = [0u8; MLDSA_SEED_LEN];
-        let mut z = [0u8; MLDSA_SEED_LEN];
-        d.copy_from_slice(&seed[..MLDSA_SEED_LEN]);
-        z.copy_from_slice(&seed[MLDSA_SEED_LEN..]);
-
-        let resp = self
-            .submit(&mailbox::RequestParams {
-                op: PqcOp::MlKemGenerateKey as u32,
-                key_kind: kind.0 as u32,
-                xi: &d,
-                rnd: &z,
-                msg_len: 0,
-                ctx_len: 0,
-                sig_len: 0,
-                pub_key_len: 0,
-            })
-            .await;
-
-        // The seed pair is key material; do not leave copies on the stack.
-        d.fill(0);
-        z.fill(0);
-        let resp = resp?;
-
-        if resp.out_len as usize != expected_pub {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sec_key)
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        Ok(())
+        let mut staged = gen_key_request(PqcOp::MlKemGenerateKey, kind, seed, pub_key, sec_key)?;
+        self.gen_key(&mut staged, pub_key, sec_key).await
     }
 
     /// Encapsulate to a public key on this engine.
@@ -480,6 +441,50 @@ impl PqcEngine<'_> {
         }
     }
 
+    /// Run key generation request `staged` here, wiping it once posted.
+    async fn gen_key(
+        &mut self,
+        staged: &mut Staged,
+        pub_key: &mut [u8],
+        sec_key: &mut [u8],
+    ) -> HsmResult<()> {
+        let id = self.id;
+        let seq = self
+            .driver
+            .state
+            .with(|s| s.responses.post(id, &staged.params()));
+        staged.wipe();
+        self.finish_gen_key(seq, pub_key, sec_key).await
+    }
+
+    /// Collect the keys key generation request `seq` left in this core's
+    /// operand slot.
+    pub(crate) async fn finish_gen_key(
+        &mut self,
+        seq: u32,
+        pub_key: &mut [u8],
+        sec_key: &mut [u8],
+    ) -> HsmResult<()> {
+        let resp = self.await_response(seq).await?;
+        if resp.status != 0 {
+            return Err(PqcError::FP_ERROR);
+        }
+        if resp.out_len as usize != pub_key.len() {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+
+        // Both keys are too large for the mailbox, so they travel in this
+        // core's operand slot. Read only after the response sequence number
+        // matched, which the core writes last.
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sec_key)
+        {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+
+        Ok(())
+    }
+
     /// Send a request to this engine's FP core and wait for its answer.
     ///
     /// The request travels in the core's PSRAM mailbox; the doorbell only
@@ -513,22 +518,20 @@ impl PqcEngine<'_> {
         // debugging build if you need to see what the cores are
         // publishing.
 
-        let seq = self.driver.next_request_seq();
-        mailbox::post_request(self.id, seq, params);
+        let id = self.id;
+        let seq = self.driver.state.with(|s| s.responses.post(id, params));
+        self.await_response(seq).await
+    }
 
-        doorbell::ring(self.id, seq);
-
-        // Await the response, woken by `PqcDriver::wake` (from the PAL's
-        // poll loop) once the core posts it, rather than re-polling the
-        // mailbox from this task on every executor pass: three tasks doing
-        // that, each pass re-queueing itself and reading the clock, took
-        // most of CP1's time while every core worked, and lengthened every
-        // pass, so a task handed a freed core started it later.
+    /// Await the response to request `seq`, already posted to this engine.
+    pub(crate) async fn await_response(&mut self, seq: u32) -> HsmResult<mailbox::Response> {
+        // Woken by `PqcDriver::wake` (from the PAL's poll loop) once the
+        // core posts the response, rather than re-polling the mailbox from
+        // this task on every executor pass: three tasks doing that, each
+        // pass re-queueing itself and reading the clock, took most of CP1's
+        // time while every core worked, and lengthened every pass, so a
+        // task handed a freed core started it later.
         let engine = usize::from(self.id.raw());
-        self.driver.state.with(|s| {
-            s.awaiting |= 1 << engine;
-            s.awaiting_seq[engine] = seq;
-        });
         let deadline = embassy_time::Instant::now() + SUBMIT_TIMEOUT;
         let response = embassy_futures::select::select(
             core::future::poll_fn(|cx| {
@@ -537,13 +540,15 @@ impl PqcEngine<'_> {
                 }
                 self.driver
                     .state
-                    .with(|s| s.resp_wakers[engine].register(cx.waker()));
+                    .with(|s| s.responses.wakers[engine].register(cx.waker()));
                 core::task::Poll::Pending
             }),
             embassy_time::Timer::at(deadline),
         )
         .await;
-        self.driver.state.with(|s| s.awaiting &= !(1 << engine));
+        self.driver
+            .state
+            .with(|s| s.responses.awaiting &= !(1 << engine));
         if let embassy_futures::select::Either::First(resp) = response {
             return Ok(resp);
         }

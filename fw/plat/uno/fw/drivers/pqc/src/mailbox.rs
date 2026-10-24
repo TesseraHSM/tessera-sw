@@ -293,24 +293,42 @@ fn mailbox(engine: EngineId) -> *mut u32 {
 /// Written out rather than pulled from `cortex-m` so this driver keeps its
 /// current dependency set. No `nomem`, so the compiler also may not move
 /// memory accesses across it.
+///
+/// Host builds, which exist only to unit-test the pool's bookkeeping and
+/// never reach the hardware, get a plain fence for each barrier.
 #[inline(always)]
 pub(crate) fn dmb() {
+    #[cfg(target_arch = "arm")]
     // SAFETY: a barrier instruction; no operands, no memory of its own.
-    unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("dmb sy", options(nostack, preserves_flags))
+    };
+    #[cfg(not(target_arch = "arm"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Data synchronisation barrier.
 #[inline(always)]
 pub(crate) fn dsb() {
+    #[cfg(target_arch = "arm")]
     // SAFETY: as `dmb`.
-    unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("dsb sy", options(nostack, preserves_flags))
+    };
+    #[cfg(not(target_arch = "arm"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Instruction synchronisation barrier.
 #[inline(always)]
 fn isb() {
+    #[cfg(target_arch = "arm")]
     // SAFETY: as `dmb`.
-    unsafe { core::arch::asm!("isb sy", options(nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("isb sy", options(nostack, preserves_flags))
+    };
+    #[cfg(not(target_arch = "arm"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 /// Base and size of the window covering the mailboxes and all three slots.

@@ -11,6 +11,9 @@ use core::task::Context;
 
 use embassy_sync::waitqueue::WakerRegistration;
 
+use crate::doorbell;
+use crate::mailbox;
+use crate::mailbox::SEED_LEN;
 use crate::types::EngineId;
 use crate::types::EngineState;
 use crate::types::QueueSlotState;
@@ -52,6 +55,10 @@ pub(crate) struct QueueSlot {
     ///
     /// [`NO_SLOT`] terminates a list.
     pub(crate) next: u8,
+
+    /// The request the waiting task left for whoever frees an engine to
+    /// post, if any.
+    pub(crate) staged: Option<Staged>,
 }
 
 impl QueueSlot {
@@ -60,6 +67,43 @@ impl QueueSlot {
             waker: WakerRegistration::new(),
             state: QueueSlotState::Free,
             next: NO_SLOT,
+            staged: None,
+        }
+    }
+}
+
+/// A request whose inputs all travel in the mailbox (key generation's), left
+/// by a task queued for an engine so the engine can start on it the moment
+/// it is freed: [`PqcState::release_engine`] posts it, rather than waking the
+/// task to, which can be tens of microseconds away under load.
+#[derive(Clone)]
+pub(crate) struct Staged {
+    pub(crate) op: u32,
+    pub(crate) key_kind: u32,
+    pub(crate) xi: [u8; SEED_LEN],
+    pub(crate) rnd: [u8; SEED_LEN],
+}
+
+impl Staged {
+    /// The request, as the mailbox carries it.
+    pub(crate) fn params(&self) -> mailbox::RequestParams<'_> {
+        mailbox::RequestParams {
+            op: self.op,
+            key_kind: self.key_kind,
+            xi: &self.xi,
+            rnd: &self.rnd,
+            msg_len: 0,
+            ctx_len: 0,
+            sig_len: 0,
+            pub_key_len: 0,
+        }
+    }
+
+    /// Wipe the seeds, which are key material.
+    pub(crate) fn wipe(&mut self) {
+        for b in self.xi.iter_mut().chain(self.rnd.iter_mut()) {
+            // SAFETY: `b` is a valid, writable byte of `self`.
+            unsafe { core::ptr::write_volatile(b, 0) };
         }
     }
 }
@@ -90,6 +134,12 @@ pub(crate) struct PqcState {
     /// sentinel differs from the last.
     pub(crate) probe_seq: u32,
 
+    /// Requests posted and responses awaited.
+    pub(crate) responses: Responses,
+}
+
+/// Bookkeeping for requests in flight on the engines.
+pub(crate) struct Responses {
     /// Sequence number for PQC requests, so a response is unambiguously
     /// matched to the request that produced it.
     pub(crate) request_seq: u32,
@@ -102,7 +152,35 @@ pub(crate) struct PqcState {
     pub(crate) awaiting_seq: [u32; ENGINES],
 
     /// The task awaiting each engine's response.
-    pub(crate) resp_wakers: [WakerRegistration; ENGINES],
+    pub(crate) wakers: [WakerRegistration; ENGINES],
+}
+
+impl Responses {
+    const fn new() -> Self {
+        Self {
+            request_seq: 0,
+            awaiting: 0,
+            awaiting_seq: [0; ENGINES],
+            wakers: [const { WakerRegistration::new() }; ENGINES],
+        }
+    }
+
+    /// Post `request` to engine `id`, ring its doorbell, and mark its
+    /// response awaited.
+    ///
+    /// Returns the request's number, which the response will carry.
+    pub(crate) fn post(&mut self, id: EngineId, request: &mailbox::RequestParams<'_>) -> u32 {
+        // Monotonic across all engines, so a response can never be mistaken
+        // for one to an earlier request on the same core.
+        self.request_seq = self.request_seq.wrapping_add(1);
+        let seq = self.request_seq;
+        mailbox::post_request(id, seq, request);
+        doorbell::ring(id, seq);
+        let engine = usize::from(id.raw());
+        self.awaiting |= 1 << engine;
+        self.awaiting_seq[engine] = seq;
+        seq
+    }
 }
 
 impl PqcState {
@@ -127,10 +205,7 @@ impl PqcState {
             wait_head: NO_SLOT,
             wait_tail: NO_SLOT,
             probe_seq: 0,
-            request_seq: 0,
-            awaiting: 0,
-            awaiting_seq: [0; ENGINES],
-            resp_wakers: [const { WakerRegistration::new() }; ENGINES],
+            responses: Responses::new(),
         }
     }
 
@@ -179,18 +254,30 @@ impl PqcState {
 
     /// Register `cx` against a queue slot and report the engine assigned to
     /// it, if any.
-    pub(crate) fn poll_queue_slot(&mut self, idx: u8, cx: &Context<'_>) -> Option<EngineId> {
-        match self.queue[idx as usize].state {
-            QueueSlotState::Assigned(id) => {
+    ///
+    /// The engine comes with the number of the staged request already posted
+    /// to it, if there was one.
+    pub(crate) fn poll_queue_slot(
+        &mut self,
+        idx: u8,
+        cx: &Context<'_>,
+    ) -> Option<(EngineId, Option<u32>)> {
+        let handed = match self.queue[idx as usize].state {
+            QueueSlotState::Assigned(id) => Some((id, None)),
+            QueueSlotState::Running(id, seq) => Some((id, Some(seq))),
+            _ => None,
+        };
+        match handed {
+            Some(handed) => {
                 // The engine has been collected; recycle the slot onto the
                 // free list so a later arrival can reuse it.
                 let slot = &mut self.queue[idx as usize];
                 slot.state = QueueSlotState::Free;
                 slot.next = self.free_head;
                 self.free_head = idx;
-                Some(id)
+                Some(handed)
             }
-            _ => {
+            None => {
                 self.queue[idx as usize].waker.register(cx.waker());
                 None
             }
@@ -215,9 +302,19 @@ impl PqcState {
 
         match waiter {
             Some(idx) => {
-                // Stays busy: ownership transfers directly to the waiter.
-                self.queue[idx].state = QueueSlotState::Assigned(id);
-                self.queue[idx].waker.wake();
+                // Stays busy: ownership transfers directly to the waiter,
+                // which finds the request it staged, if any, already started.
+                let slot = &mut self.queue[idx];
+                slot.state = match &mut slot.staged {
+                    Some(staged) => {
+                        let seq = self.responses.post(id, &staged.params());
+                        staged.wipe();
+                        QueueSlotState::Running(id, seq)
+                    }
+                    None => QueueSlotState::Assigned(id),
+                };
+                slot.staged = None;
+                slot.waker.wake();
             }
             None => {
                 self.engines[id.raw() as usize].state = EngineState::Idle;
