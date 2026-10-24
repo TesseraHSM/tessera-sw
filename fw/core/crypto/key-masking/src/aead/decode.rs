@@ -190,9 +190,22 @@ pub fn peek_scope(blob: &DmaBuf) -> HsmResult<HsmKeyScope> {
     peek_head(blob).map(|head| head.scope)
 }
 
+/// Bytes of `usage_flags` [`peek_head`] reads: the low word, which holds
+/// the scope (bits 17–19).
+const USAGE_FLAGS_SCOPE_LEN: usize = 4;
+const _: () = assert!(
+    HsmVaultKeyAttrs::new()
+        .with_scope(HsmKeyScope::SecurityDomain)
+        .into_bits()
+        >> (8 * USAGE_FLAGS_SCOPE_LEN)
+        == 0,
+    "the scope must lie in the bytes of `usage_flags` that `peek_head` reads"
+);
+
 /// Bytes of a blob [`peek_head`] reads: the envelope header, a 12-byte
-/// IV, and the metadata up to the end of `usage_flags`.
-const BLOB_HEAD_LEN: usize = AEAD_HEADER_LEN + 12 + USAGE_FLAGS_OFF + 8;
+/// IV, and the metadata up to the end of the low word of `usage_flags` —
+/// 32 bytes, one eight-word burst.
+const BLOB_HEAD_LEN: usize = AEAD_HEADER_LEN + 12 + USAGE_FLAGS_OFF + USAGE_FLAGS_SCOPE_LEN;
 
 /// A word-aligned buffer for a blob's head (burst copies need alignment).
 #[repr(C, align(4))]
@@ -239,11 +252,11 @@ pub fn peek_head(blob: &DmaBuf) -> HsmResult<BlobHead> {
     let flags = AEAD_HEADER_LEN + env.iv.len() + USAGE_FLAGS_OFF;
     let raw = head
         .0
-        .get(flags..flags + 8)
-        .and_then(|b| <[u8; 8]>::try_from(b).ok())
+        .get(flags..flags + USAGE_FLAGS_SCOPE_LEN)
+        .and_then(|b| <[u8; USAGE_FLAGS_SCOPE_LEN]>::try_from(b).ok())
         .ok_or(HsmError::MaskedKeyDecodeFailed)?;
     Ok(BlobHead {
-        scope: HsmVaultKeyAttrs::from_bits(u64::from_le_bytes(raw)).scope(),
+        scope: HsmVaultKeyAttrs::from_bits(u64::from(u32::from_le_bytes(raw))).scope(),
         header,
     })
 }
