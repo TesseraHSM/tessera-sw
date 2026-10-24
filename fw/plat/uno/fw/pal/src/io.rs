@@ -24,6 +24,7 @@
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
 //! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
 
+use core::cell::UnsafeCell;
 use core::mem;
 use core::ops::AsyncFnOnce;
 
@@ -48,6 +49,7 @@ use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 
 use crate::UnoHsmPal;
 use crate::alloc::ADMIN_IO_INDEX;
+use crate::alloc::IO_SLOTS;
 use crate::alloc::UnoScopedAlloc;
 use crate::alloc::reset_io_alloc;
 
@@ -63,7 +65,9 @@ const IO_Q: StaticRef<IoGsramRegs> = unsafe { StaticRef::new(IO_GSRAM_BASE as *c
 /// The metadata and the SQE are copied in when the handle is made: IO
 /// GSRAM is uncached, every CPU load from it costs tens of cycles, and the
 /// core reads the SQE fields and the partition many times per IO. Neither
-/// changes while the IO owns the slot.
+/// changes while the IO owns the slot. The SQE's copy is kept per slot
+/// (see [`SQE_COPIES`]) rather than in the handle, which is moved several
+/// times per IO and so stays a few registers' worth.
 #[derive(Debug)]
 pub struct UnoHsmIo {
     /// IO_SQ slot index. Host IO uses `0..ADMIN_IO_INDEX`; the reserved
@@ -76,9 +80,23 @@ pub struct UnoHsmIo {
     /// Queue ID and index, from `IO_META[index]`.
     queue_id: u16,
     queue_idx: u16,
-    /// Copy of `IO_SQ[index]`.
-    sqe: HsmSqe,
 }
+
+/// The copy of each slot's `IO_SQ` entry, made by [`UnoHsmIo::load`] for
+/// [`HsmIo::sqe`]. The admin slot has no `IO_SQ` entry, and its copy stays
+/// all-zero.
+///
+/// A slot's copy is written only as the handle for a new IO in it is made,
+/// when no handle for the slot is left: the IIC hands a slot out again only
+/// after the slot is freed, which follows its last IO's handle being
+/// consumed.
+struct SqeCopies(UnsafeCell<[HsmSqe; IO_SLOTS]>);
+
+// SAFETY: single-core, and only tasks touch it (never an ISR); see the
+// type's documentation for why a copy is never written while borrowed.
+unsafe impl Sync for SqeCopies {}
+
+static SQE_COPIES: SqeCopies = SqeCopies(UnsafeCell::new([[0; SQE_DWORDS]; IO_SLOTS]));
 
 impl UnoHsmIo {
     /// Constructs a **bare, unscrubbed** IO handle over the dedicated admin
@@ -132,16 +150,19 @@ impl UnoHsmIo {
 
         // Host slots have an SQE; the admin slot (past `IO_SQ`) has none and
         // keeps an all-zero one.
-        let mut sqe: HsmSqe = [0; SQE_DWORDS];
         if let Some(io_sq) = IO_Q.io_sq.get(index as usize) {
             // SAFETY: `IoSqEntry` and `HsmSqe` have the same size and
             // alignment (asserted above), and both are plain dwords.
             let src = unsafe {
                 core::slice::from_raw_parts(io_sq as *const IoSqEntry as *const u8, SQE_DWORDS * 4)
             };
-            // SAFETY: `sqe` is `SQE_DWORDS` dwords, viewed as their bytes.
+            // SAFETY: `index` is a host slot (it has an `IO_SQ` entry), and
+            // no handle for it, so no borrow of its copy, is left (see
+            // `SqeCopies`). The copy is `SQE_DWORDS` dwords, viewed as their
+            // bytes.
             let dst = unsafe {
-                core::slice::from_raw_parts_mut(sqe.as_mut_ptr() as *mut u8, SQE_DWORDS * 4)
+                let copy = SQE_COPIES.0.get().cast::<HsmSqe>().add(index as usize);
+                core::slice::from_raw_parts_mut(copy.cast::<u8>(), SQE_DWORDS * 4)
             };
             copy_from_uncached(dst, src);
         }
@@ -153,7 +174,6 @@ impl UnoHsmIo {
             ),
             queue_id,
             queue_idx,
-            sqe,
         }
     }
 }
@@ -198,7 +218,17 @@ impl HsmIo for UnoHsmIo {
     /// Returns the SQE the IIC DMAed into `IO_SQ[index]` (copied in when the
     /// handle was made).
     fn sqe(&self) -> &HsmSqe {
-        &self.sqe
+        debug_assert!(usize::from(self.index) < IO_SLOTS);
+        // SAFETY: a handle's `index` is a slot (`IO_SQ`'s or the admin
+        // slot), so within `SQE_COPIES`, and the slot's copy is not written
+        // while its handle, `self`, lives (see `SqeCopies`).
+        unsafe {
+            &*SQE_COPIES
+                .0
+                .get()
+                .cast::<HsmSqe>()
+                .add(usize::from(self.index))
+        }
     }
 
     /// Returns a mutable reference to the CQE at `IO_CQ[index]`.
