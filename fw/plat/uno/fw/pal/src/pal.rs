@@ -209,6 +209,20 @@ const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     (Interrupt::UPKA_15_ERROR as u16, wake_pka),
 ];
 
+/// `(ISPR register, mask)` of the PKA done IRQs, a run of [`PKA_ENGINES`]
+/// IRQs within one register, for [`UnoHsmPal::service_pka`].
+const PKA_DONE_ISPR: (usize, u32) = {
+    let first = Interrupt::UPKA_0_DONE as usize;
+    assert!(first % 32 + PKA_ENGINES <= 32);
+    (first / 32, (((1u64 << PKA_ENGINES) - 1) as u32) << (first % 32))
+};
+
+/// PKA engines, whose done IRQs are numbered consecutively from engine 0's.
+const PKA_ENGINES: usize = 16;
+const _: () = assert!(
+    Interrupt::UPKA_15_DONE as usize == Interrupt::UPKA_0_DONE as usize + PKA_ENGINES - 1
+);
+
 /// Highest IRQ number in WAKE_ENTRIES — computed at compile time.
 const MAX_IRQ_NUM: usize = {
     let mut max = 0usize;
@@ -567,6 +581,24 @@ impl UnoHsmPal {
 
         // The BCP raises no CP1 interrupt; reap its completions every pass.
         self.bcp.wake();
+    }
+
+    /// Handles PKA engine completions now, rather than at the run loop's
+    /// next pass: an engine sits idle from finishing a command until its
+    /// completion is handled (which starts its wipe, or its next command),
+    /// and when the CPU is saturated a pass, which polls every ready task,
+    /// can be tens of microseconds away. Called as each PKA command is
+    /// started, so only work that uses the PKA pays for it: one NVIC
+    /// register read when no engine has finished. Errors, which are rare,
+    /// are left to the run loop.
+    pub(crate) fn service_pka(&self) {
+        let (reg, mask) = PKA_DONE_ISPR;
+        let mut bits = Nvic::pending_bits(reg) & mask;
+        while bits != 0 {
+            let bit = bits.trailing_zeros();
+            bits &= bits - 1;
+            wake_pka(self, (reg * 32 + bit as usize) as u16);
+        }
     }
 
     /// Handle an incoming IPC message.

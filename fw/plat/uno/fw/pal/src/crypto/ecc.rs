@@ -454,6 +454,7 @@ impl HsmEcc for UnoHsmPal {
         signature: &mut DmaBuf,
     ) -> HsmResult<()> {
         let pka_curve = map_ecc_curve(curve)?;
+        self.service_pka();
         self.pka
             .ecc_sign(pka_curve, priv_key, hash, signature)
             .await

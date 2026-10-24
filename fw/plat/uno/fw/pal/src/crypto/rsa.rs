@@ -425,6 +425,7 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         let upka_key_type = rsa_key_to_upka_key_type(key_size);
+        self.service_pka();
         self.pka.rsa_mod_exp_priv(upka_key_type, key, y, x).await
     }
 
@@ -437,6 +438,7 @@ impl HsmRsa for UnoHsmPal {
         y: &mut DmaBuf,
     ) -> HsmResult<()> {
         let upka_key_type = rsa_key_to_upka_key_type(key_size);
+        self.service_pka();
         self.pka.rsa_mod_exp_pub(upka_key_type, key, x, y).await
     }
 
