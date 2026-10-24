@@ -451,11 +451,13 @@ impl UnoHsmPal {
 
     /// Scrubs and frees the slot of detached IO `index`, whose CQE is
     /// posted, as [`drop_io`](HsmIoController::drop_io) would. Dirty SRAM
-    /// beyond [`CPU_SCRUB_MAX`] is zeroed by the GDMA, whose completion
+    /// beyond [`DETACHED_CPU_SCRUB_MAX`] is zeroed by the GDMA, whose completion
     /// finishes the job (see [`finish_scrub`](Self::finish_scrub)).
     fn drop_detached(&self, index: u16, queue_id: u8) {
         let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, index);
-        if dma_len > CPU_SCRUB_MAX && self.start_detached_scrub(index, queue_id, dma_ptr, dma_len) {
+        if dma_len > DETACHED_CPU_SCRUB_MAX
+            && self.start_detached_scrub(index, queue_id, dma_ptr, dma_len)
+        {
             return;
         }
         self.scrub_io_slot_cpu(index);
@@ -620,6 +622,12 @@ const SCRUB_LINK: u32 = 1 << 31;
 /// (a 1 KiB AES-CBC request's is about 2.4 KiB); larger ones go to the
 /// GDMA.
 const CPU_SCRUB_MAX: usize = 4096;
+
+/// [`CPU_SCRUB_MAX`] for a detached IO's slot (see
+/// [`UnoHsmPal::drop_detached`]): no task awaits its GDMA scrub, so the
+/// GDMA costs only its submission and completion, and wins from a few
+/// hundred cycles of CPU stores (about 1 KiB) up.
+const DETACHED_CPU_SCRUB_MAX: usize = 1024;
 
 /// Volatile CPU zeroization of `[ptr, ptr + len)` that the optimizer cannot
 /// elide, via the vetted [`zeroize`] crate. Used for the M7 TCM (which GDMA
