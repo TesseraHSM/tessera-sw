@@ -98,26 +98,20 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
     let attrs = shared_secret_attrs(HsmKeyScope(scope.0));
 
-    let ciphertext = pal.dma_alloc(io, ct_len)?;
     let shared_secret = pal.dma_alloc(io, SHARED_SECRET_LEN)?;
 
     // Encapsulate and mask inside a block that yields a `Result`, so every
     // path falls through to the shared-secret wipe below.
     let outcome: HsmResult<&'p DmaBuf> = async {
-        pal.mlkem_encaps(
-            io,
-            kind,
-            req.pub_key(),
-            &mut ciphertext[..],
-            &mut shared_secret[..],
-        )
-        .await?;
-
         let masked_len = masked_blob_len(AeadAlg::AesGcm256, SHARED_SECRET_LEN);
 
+        // Reserve the response up front so the fastpath core writes the
+        // ciphertext straight into it: copying it in from a temporary
+        // buffer costs CP1 a load per word of uncached DMA memory, after
+        // the core is released, which holds up its next request.
         let resp = pal.dma_alloc_var(io, |buf| {
             let frame = TborMlKemEncapsulateResp::encode(buf, 0, false)?
-                .ciphertext(&ciphertext[..ct_len])?
+                .ciphertext_reserve(ct_len)?
                 .masked_shared_secret_reserve(masked_len)?
                 .finish();
             Ok(frame.as_bytes().len())
@@ -125,6 +119,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         {
             let out = TborMlKemEncapsulateResp::decode_mut(resp)?;
+            pal.mlkem_encaps(
+                io,
+                kind,
+                req.pub_key(),
+                out.ciphertext,
+                &mut shared_secret[..],
+            )
+            .await?;
             pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
                 let masking_key = resolve_masking_key(pal, io, HsmKeyScope(scope.0), sess_id)?;
 
