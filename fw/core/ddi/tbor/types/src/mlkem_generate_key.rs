@@ -134,7 +134,11 @@ pub struct TborMlKemGenerateKeyResp<'a> {
     pub masked_key: &'a [u8],
 
     /// The ML-KEM public / encapsulation key.  Up to 1568 B for ML-KEM-1024.
-    #[tbor(buffer, max_len = 1568)]
+    ///
+    /// `mutable` so the handler can reserve the slot and have the fastpath
+    /// core write the key straight into it, rather than copying it in from
+    /// a temporary buffer.
+    #[tbor(buffer, max_len = 1568, mutable)]
     pub pub_key: &'a [u8],
 }
 

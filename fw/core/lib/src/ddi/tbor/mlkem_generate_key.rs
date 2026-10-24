@@ -18,8 +18,9 @@
 //! re-measuring if key generation throughput matters more than
 //! decapsulation.
 
-use tsra_fw_core_crypto_key_masking::aead::mask;
+use tsra_fw_core_crypto_key_masking::aead::mask_in_place;
 use tsra_fw_core_crypto_key_masking::aead::masked_blob_len;
+use tsra_fw_core_crypto_key_masking::aead::payload_offset;
 use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::MlKemKeyKind;
@@ -122,39 +123,47 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // encapsulation key; the expanded key keeps a full key generation out
     // of every decapsulation.
     let sec_len = mlkem_sec_key_len(vault_kind)?;
-    let key_blob = pal.dma_alloc(io, MLKEM_SEED_LEN + sec_len)?;
-    let pub_key = pal.dma_alloc(io, pub_len)?;
+    let plain_len = MLKEM_SEED_LEN + sec_len;
 
-    // Generate and mask inside a block that yields a `Result`, so every
-    // path falls through to the seed wipe below: the seed pair is the
-    // private key, and scope exit does not zero freed DMA memory.
+    // The key pair is generated into the response itself. On any failure
+    // the response is dropped, and the IO's teardown scrub wipes the slot,
+    // plaintext included (`mask_in_place` also zeroes the envelope on its
+    // own failures).
     let outcome: HsmResult<&'p DmaBuf> = async {
-        {
-            let (seed, sec_key) = key_blob.split_at_mut(MLKEM_SEED_LEN);
-            pal.mlkem_gen_key(
-                io,
-                vault_kind,
-                &mut seed[..],
-                &mut pub_key[..],
-                &mut sec_key[..],
-            )
-            .await?;
-        }
+        let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
+        let payload_at = payload_offset(AeadAlg::AesGcm256);
 
-        let masked_len = masked_blob_len(AeadAlg::AesGcm256, MLKEM_SEED_LEN + sec_len);
-
+        // Reserve both output slots up front so the fastpath core can write
+        // the key pair straight into the response, as `MlDsaGenerateKey`
+        // does: copying kilobytes of key in from temporary buffers costs
+        // CP1 a load per word of uncached DMA memory, and holds up the next
+        // request for the core.
         let resp = pal.dma_alloc_var(io, |buf| {
             let frame = TborMlKemGenerateKeyResp::encode(buf, 0, false)?
                 .masked_key_reserve(masked_len)?
-                .pub_key(&pub_key[..pub_len])?
+                .pub_key_reserve(pub_len)?
                 .finish();
             Ok(frame.as_bytes().len())
         })?;
 
         {
             let out = TborMlKemGenerateKeyResp::decode_mut(resp)?;
-            // Mask the seed+expanded decapsulation key as one unit, straight
-            // into the reserved response slot.
+
+            // Generate straight into the masked-key slot's payload region,
+            // where the ciphertext will land: `mask_in_place` seals over it
+            // without a second copy.
+            {
+                let payload = out
+                    .masked_key
+                    .get_mut(payload_at..payload_at + plain_len)
+                    .ok_or(HsmError::InternalError)?;
+                let (seed, sec_key) = payload.split_at_mut(MLKEM_SEED_LEN);
+                pal.mlkem_gen_key(io, vault_kind, &mut seed[..], out.pub_key, &mut sec_key[..])
+                    .await?;
+            }
+
+            // Mask the seed+expanded decapsulation key as one unit, in place
+            // in the reserved response slot.
             pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
                 let masking_key = resolve_masking_key(pal, io, HsmKeyScope(scope.0), sess_id)?;
                 let key_label = alloc.dma_alloc(MLKEM_KEY_LABEL.len())?;
@@ -166,17 +175,19 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                     owner_seed_id: owner,
                     key_label,
                 };
-                let written = mask(
+                let written = mask_in_place(
                     pal,
                     io,
                     alloc,
                     AeadAlg::AesGcm256,
                     masking_key,
                     &params,
-                    key_blob,
-                    Some(out.masked_key),
+                    plain_len,
+                    out.masked_key,
                 )
                 .await?;
+                // A short write would leave uninitialized bytes in the slot,
+                // which was reserved to exactly `masked_len`.
                 if written != masked_len {
                     return Err(HsmError::InternalError);
                 }
@@ -190,6 +201,5 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     }
     .await;
 
-    key_blob.zeroize();
     outcome
 }
