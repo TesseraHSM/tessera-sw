@@ -47,13 +47,19 @@ use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
 
 use crate::mbor::MborSession;
 use crate::mbor::REV;
+use crate::ops::MlDsaCmd;
+use crate::ops::MlKemCmd;
 use crate::ops::OpKind;
 use crate::ops::Worker;
+use crate::pqc;
+use crate::pqc::MlDsaKey;
+use crate::pqc::MlDsaSigned;
+use crate::pqc::MlKemKey;
 use crate::RunArgs;
 
 /// `KeyScope::Local`: keys masked under the partition-local masking key,
 /// usable from any session of the partition.
-const SCOPE_LOCAL: u8 = 0b011;
+pub(crate) const SCOPE_LOCAL: u8 = 0b011;
 
 /// A device-generated ECC key.
 pub(crate) struct EccKey {
@@ -84,6 +90,16 @@ pub(crate) struct Keys {
     pub(crate) aes: Vec<AesKeyEntry>,
     /// Raw keys for the out-of-session `TestAesGcm`.
     pub(crate) gcm: Vec<[u8; 32]>,
+    /// Device-generated ML-DSA keys for `MlDsaSign`, keyed by `key_kind`.
+    pub(crate) mldsa: BTreeMap<u8, Vec<MlDsaKey>>,
+    /// Host-signed `MlDsaVerify` inputs, keyed by `key_kind`.
+    pub(crate) mldsa_signed: BTreeMap<u8, MlDsaSigned>,
+    /// Host-generated encapsulation keys for `MlKemEncapsulate`, keyed by
+    /// `key_kind`.
+    pub(crate) mlkem_pub: BTreeMap<u8, Vec<Vec<u8>>>,
+    /// Device-generated ML-KEM keys with host ciphertexts for
+    /// `MlKemDecapsulate`, keyed by `key_kind`.
+    pub(crate) mlkem: BTreeMap<u8, Vec<MlKemKey>>,
 }
 
 /// The device under test and everything set up on it.
@@ -283,12 +299,59 @@ impl Env {
                 .collect::<Result<_, String>>()?;
         }
 
+        for &op in kinds {
+            match op.mldsa() {
+                Some((MlDsaCmd::Sign, p)) => {
+                    say(args, format!("generating {} {} keys", args.keys, p.name));
+                    let pool = pqc::device_mldsa_keys(ctx, session_id, p, args.keys)?;
+                    keys.mldsa.insert(p.key_kind, pool);
+                }
+                Some((MlDsaCmd::Verify, p)) => {
+                    say(
+                        args,
+                        format!(
+                            "signing {} messages with each of {} host {} keys",
+                            args.messages, args.keys, p.name
+                        ),
+                    );
+                    let signed = pqc::host_mldsa_signed(p, args.keys, args.messages)?;
+                    keys.mldsa_signed.insert(p.key_kind, signed);
+                }
+                _ => {}
+            }
+            match op.mlkem() {
+                Some((MlKemCmd::Encap, p)) => {
+                    say(
+                        args,
+                        format!("generating {} host {} keys", args.keys, p.name),
+                    );
+                    let pool = pqc::host_mlkem_pub_keys(p, args.keys)?;
+                    keys.mlkem_pub.insert(p.key_kind, pool);
+                }
+                Some((MlKemCmd::Decap, p)) => {
+                    say(
+                        args,
+                        format!(
+                            "generating {} {} keys, {} host ciphertexts each",
+                            args.keys, p.name, args.messages
+                        ),
+                    );
+                    let pool =
+                        pqc::device_mlkem_keys(ctx, session_id, p, args.keys, args.messages)?;
+                    keys.mlkem.insert(p.key_kind, pool);
+                }
+                _ => {}
+            }
+        }
+
         self.keys = keys;
         Ok(())
     }
 
     /// Run every selected operation against each key, checking each
-    /// response against the host reference.
+    /// response against the host reference (and following up where a
+    /// response alone cannot show the device did the work; see
+    /// [`Worker::prove`]).
     fn preflight(&self, args: &RunArgs, kinds: &BTreeSet<OpKind>) -> Result<(), String> {
         let list: Vec<OpKind> = kinds.iter().copied().collect();
         let mut worker = Worker::new(self, args, 0, &list)?;
@@ -296,7 +359,7 @@ impl Env {
             let rounds = 2 * args.keys;
             for i in 0..rounds {
                 let (_, result) = worker.exec(op, true);
-                result.map_err(|e| {
+                result.and_then(|()| worker.prove(op)).map_err(|e| {
                     format!("pre-flight {} request {i}/{rounds} failed: {e}", op.name())
                 })?;
             }

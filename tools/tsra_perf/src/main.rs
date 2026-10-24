@@ -22,6 +22,7 @@ mod bench;
 mod mbor;
 mod mbor_keys;
 mod ops;
+mod pqc;
 mod report;
 mod setup;
 

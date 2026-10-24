@@ -23,15 +23,29 @@ use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
 use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_test_helpers::helper_ecc_sign;
 use tsra_ddi_mbor_test_helpers::helper_get_api_rev;
 use tsra_ddi_mbor_types::DdiHashAlgorithm;
+use tsra_ddi_tbor_test_harness::pqc::MlDsaParams;
+use tsra_ddi_tbor_test_harness::pqc::MlKemParams;
+use tsra_ddi_tbor_test_harness::pqc::ML_DSA_44;
+use tsra_ddi_tbor_test_harness::pqc::ML_DSA_65;
+use tsra_ddi_tbor_test_harness::pqc::ML_DSA_87;
+use tsra_ddi_tbor_test_harness::pqc::ML_KEM_1024;
+use tsra_ddi_tbor_test_harness::pqc::ML_KEM_512;
+use tsra_ddi_tbor_test_harness::pqc::ML_KEM_768;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
+use tsra_ddi_tbor_types::TborMlDsaSignReq;
+use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
+use tsra_ddi_tbor_types::TborMlKemDecapsulateReq;
+use tsra_ddi_tbor_types::TborMlKemEncapsulateReq;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::TborTestAesGcmReq;
 use tsra_ddi_tbor_types::AES_OP_DECRYPT;
 use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
@@ -41,7 +55,10 @@ use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
 use crate::mbor::REV;
+use crate::pqc;
+use crate::pqc::MLDSA_MSG_LEN;
 use crate::setup::Env;
+use crate::setup::SCOPE_LOCAL;
 use crate::RunArgs;
 
 /// A measured operation.
@@ -98,6 +115,82 @@ pub(crate) enum OpKind {
     /// TBOR `AesEncryptDecrypt` decrypt, AES-256-CBC.
     #[value(name = "tbor-aes-cbc-decrypt")]
     AesCbcDecrypt,
+    /// TBOR `MlDsaGenerateKey`, ML-DSA-44.
+    #[value(name = "tbor-mldsa-keygen-44")]
+    MlDsaKeygen44,
+    /// TBOR `MlDsaGenerateKey`, ML-DSA-65.
+    #[value(name = "tbor-mldsa-keygen-65")]
+    MlDsaKeygen65,
+    /// TBOR `MlDsaGenerateKey`, ML-DSA-87.
+    #[value(name = "tbor-mldsa-keygen-87")]
+    MlDsaKeygen87,
+    /// TBOR `MlDsaSign`, ML-DSA-44, 64-byte message.
+    #[value(name = "tbor-mldsa-sign-44")]
+    MlDsaSign44,
+    /// TBOR `MlDsaSign`, ML-DSA-65, 64-byte message.
+    #[value(name = "tbor-mldsa-sign-65")]
+    MlDsaSign65,
+    /// TBOR `MlDsaSign`, ML-DSA-87, 64-byte message.
+    #[value(name = "tbor-mldsa-sign-87")]
+    MlDsaSign87,
+    /// TBOR `MlDsaVerify`, ML-DSA-44, 64-byte message.
+    #[value(name = "tbor-mldsa-verify-44")]
+    MlDsaVerify44,
+    /// TBOR `MlDsaVerify`, ML-DSA-65, 64-byte message.
+    #[value(name = "tbor-mldsa-verify-65")]
+    MlDsaVerify65,
+    /// TBOR `MlDsaVerify`, ML-DSA-87, 64-byte message.
+    #[value(name = "tbor-mldsa-verify-87")]
+    MlDsaVerify87,
+    /// TBOR `MlKemGenerateKey`, ML-KEM-512.
+    #[value(name = "tbor-mlkem-keygen-512")]
+    MlKemKeygen512,
+    /// TBOR `MlKemGenerateKey`, ML-KEM-768.
+    #[value(name = "tbor-mlkem-keygen-768")]
+    MlKemKeygen768,
+    /// TBOR `MlKemGenerateKey`, ML-KEM-1024.
+    #[value(name = "tbor-mlkem-keygen-1024")]
+    MlKemKeygen1024,
+    /// TBOR `MlKemEncapsulate`, ML-KEM-512.
+    #[value(name = "tbor-mlkem-encap-512")]
+    MlKemEncap512,
+    /// TBOR `MlKemEncapsulate`, ML-KEM-768.
+    #[value(name = "tbor-mlkem-encap-768")]
+    MlKemEncap768,
+    /// TBOR `MlKemEncapsulate`, ML-KEM-1024.
+    #[value(name = "tbor-mlkem-encap-1024")]
+    MlKemEncap1024,
+    /// TBOR `MlKemDecapsulate`, ML-KEM-512.
+    #[value(name = "tbor-mlkem-decap-512")]
+    MlKemDecap512,
+    /// TBOR `MlKemDecapsulate`, ML-KEM-768.
+    #[value(name = "tbor-mlkem-decap-768")]
+    MlKemDecap768,
+    /// TBOR `MlKemDecapsulate`, ML-KEM-1024.
+    #[value(name = "tbor-mlkem-decap-1024")]
+    MlKemDecap1024,
+}
+
+/// An ML-DSA command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MlDsaCmd {
+    /// `MlDsaGenerateKey`.
+    Keygen,
+    /// `MlDsaSign`.
+    Sign,
+    /// `MlDsaVerify`.
+    Verify,
+}
+
+/// An ML-KEM command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MlKemCmd {
+    /// `MlKemGenerateKey`.
+    Keygen,
+    /// `MlKemEncapsulate`.
+    Encap,
+    /// `MlKemDecapsulate`.
+    Decap,
 }
 
 impl OpKind {
@@ -140,6 +233,38 @@ impl OpKind {
         }
     }
 
+    /// `(command, parameter set)` of an ML-DSA operation.
+    pub(crate) fn mldsa(self) -> Option<(MlDsaCmd, &'static MlDsaParams)> {
+        match self {
+            Self::MlDsaKeygen44 => Some((MlDsaCmd::Keygen, &ML_DSA_44)),
+            Self::MlDsaKeygen65 => Some((MlDsaCmd::Keygen, &ML_DSA_65)),
+            Self::MlDsaKeygen87 => Some((MlDsaCmd::Keygen, &ML_DSA_87)),
+            Self::MlDsaSign44 => Some((MlDsaCmd::Sign, &ML_DSA_44)),
+            Self::MlDsaSign65 => Some((MlDsaCmd::Sign, &ML_DSA_65)),
+            Self::MlDsaSign87 => Some((MlDsaCmd::Sign, &ML_DSA_87)),
+            Self::MlDsaVerify44 => Some((MlDsaCmd::Verify, &ML_DSA_44)),
+            Self::MlDsaVerify65 => Some((MlDsaCmd::Verify, &ML_DSA_65)),
+            Self::MlDsaVerify87 => Some((MlDsaCmd::Verify, &ML_DSA_87)),
+            _ => None,
+        }
+    }
+
+    /// `(command, parameter set)` of an ML-KEM operation.
+    pub(crate) fn mlkem(self) -> Option<(MlKemCmd, &'static MlKemParams)> {
+        match self {
+            Self::MlKemKeygen512 => Some((MlKemCmd::Keygen, &ML_KEM_512)),
+            Self::MlKemKeygen768 => Some((MlKemCmd::Keygen, &ML_KEM_768)),
+            Self::MlKemKeygen1024 => Some((MlKemCmd::Keygen, &ML_KEM_1024)),
+            Self::MlKemEncap512 => Some((MlKemCmd::Encap, &ML_KEM_512)),
+            Self::MlKemEncap768 => Some((MlKemCmd::Encap, &ML_KEM_768)),
+            Self::MlKemEncap1024 => Some((MlKemCmd::Encap, &ML_KEM_1024)),
+            Self::MlKemDecap512 => Some((MlKemCmd::Decap, &ML_KEM_512)),
+            Self::MlKemDecap768 => Some((MlKemCmd::Decap, &ML_KEM_768)),
+            Self::MlKemDecap1024 => Some((MlKemCmd::Decap, &ML_KEM_1024)),
+            _ => None,
+        }
+    }
+
     fn is_gcm(self) -> bool {
         matches!(self, Self::AesGcmEncrypt | Self::AesGcmDecrypt)
     }
@@ -151,7 +276,11 @@ impl OpKind {
     /// Whether the operation runs in the shared session, with keys from
     /// setup.
     pub(crate) fn needs_session(self) -> bool {
-        self.ecc().is_some() || self.rsa().is_some() || self.is_cbc()
+        self.ecc().is_some()
+            || self.rsa().is_some()
+            || self.is_cbc()
+            || self.mldsa().is_some()
+            || self.mlkem().is_some()
     }
 
     /// Input size, for reports.
@@ -166,6 +295,10 @@ impl OpKind {
             format!("{}B+{}B AAD", args.gcm_len, args.gcm_aad_len)
         } else if self.is_cbc() {
             format!("{}B", args.cbc_len)
+        } else if let Some((MlDsaCmd::Sign | MlDsaCmd::Verify, _)) = self.mldsa() {
+            format!("{MLDSA_MSG_LEN}B msg")
+        } else if let Some((MlKemCmd::Encap | MlKemCmd::Decap, p)) = self.mlkem() {
+            format!("{}B ct", p.ciphertext_len)
         } else {
             "-".into()
         }
@@ -230,6 +363,8 @@ struct Pools {
     rsa: BTreeMap<usize, Vec<RsaMsg>>,
     cbc: Vec<CbcEntry>,
     gcm: Vec<GcmEntry>,
+    /// Messages for `MlDsaSign`.
+    mldsa: Vec<[u8; MLDSA_MSG_LEN]>,
 }
 
 impl Pools {
@@ -304,6 +439,13 @@ impl Pools {
                     })
                 })
                 .collect::<Result<_, String>>()?;
+        }
+
+        if kinds
+            .iter()
+            .any(|k| matches!(k.mldsa(), Some((MlDsaCmd::Sign, _))))
+        {
+            pools.mldsa = (0..n).map(|_| pqc::random()).collect();
         }
         Ok(pools)
     }
@@ -385,6 +527,14 @@ impl<'e> Worker<'e> {
         (n % keys, (n / keys) % msgs)
     }
 
+    /// [`Self::rotate`] over inputs all threads share: each thread starts at
+    /// its own key and message, so concurrent requests differ.
+    fn rotate_shared(&mut self, keys: usize, msgs: usize) -> (usize, usize) {
+        let (k, m) = self.rotate(keys, msgs);
+        let t = usize::from(self.tid);
+        ((k + t) % keys, (m + t) % msgs)
+    }
+
     fn own(&self) -> &TestCtx {
         self.own
             .as_ref()
@@ -411,6 +561,43 @@ impl<'e> Worker<'e> {
             OpKind::AesGcmDecrypt => self.gcm_decrypt(verify),
             OpKind::AesCbcEncrypt => self.cbc(true, verify),
             OpKind::AesCbcDecrypt => self.cbc(false, verify),
+            OpKind::MlDsaKeygen44 | OpKind::MlDsaKeygen65 | OpKind::MlDsaKeygen87 => {
+                self.mldsa_keygen(op, verify)
+            }
+            OpKind::MlDsaSign44 | OpKind::MlDsaSign65 | OpKind::MlDsaSign87 => {
+                self.mldsa_sign(op, verify)
+            }
+            OpKind::MlDsaVerify44 | OpKind::MlDsaVerify65 | OpKind::MlDsaVerify87 => {
+                self.mldsa_verify(op)
+            }
+            OpKind::MlKemKeygen512 | OpKind::MlKemKeygen768 | OpKind::MlKemKeygen1024 => {
+                self.mlkem_keygen(op, verify)
+            }
+            OpKind::MlKemEncap512 | OpKind::MlKemEncap768 | OpKind::MlKemEncap1024 => {
+                self.mlkem_encap(op, verify)
+            }
+            OpKind::MlKemDecap512 | OpKind::MlKemDecap768 | OpKind::MlKemDecap1024 => {
+                self.mlkem_decap(op, verify)
+            }
+        }
+    }
+
+    /// Pre-flight follow-up to a checked `op` request, for operations whose
+    /// response alone cannot show that the device did the work: a PQC
+    /// keygen generates one more key and uses it, and `MlDsaVerify` must
+    /// reject a tampered signature. Other operations have none.
+    pub(crate) fn prove(&mut self, op: OpKind) -> Result<(), String> {
+        match op {
+            OpKind::MlDsaKeygen44 | OpKind::MlDsaKeygen65 | OpKind::MlDsaKeygen87 => {
+                self.prove_mldsa_keygen(op)
+            }
+            OpKind::MlDsaVerify44 | OpKind::MlDsaVerify65 | OpKind::MlDsaVerify87 => {
+                self.prove_mldsa_verify(op)
+            }
+            OpKind::MlKemKeygen512 | OpKind::MlKemKeygen768 | OpKind::MlKemKeygen1024 => {
+                self.prove_mlkem_keygen(op)
+            }
+            _ => Ok(()),
         }
     }
 
@@ -619,6 +806,201 @@ impl<'e> Worker<'e> {
             }
         });
         (dt, result)
+    }
+
+    fn mldsa_keygen(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
+        let (_, p) = op.mldsa().expect("ML-DSA operation");
+        let env = self.env;
+        let req = pqc::mldsa_keygen_req(env.session_id, p);
+        let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
+        let result = resp.and_then(|r| {
+            if verify {
+                pqc::check_mldsa_key(p, &r.pub_key, &r.masked_key).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        (dt, result)
+    }
+
+    fn mldsa_sign(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
+        let (_, p) = op.mldsa().expect("ML-DSA operation");
+        let env = self.env;
+        let keys = &env.keys.mldsa[&p.key_kind];
+        let (k, m) = self.rotate(keys.len(), self.pools.mldsa.len());
+        let key = &keys[k];
+        let req = TborMlDsaSignReq {
+            session_id: env.session_id,
+            masked_key: key.masked.clone(),
+            message: self.pools.mldsa[m].to_vec(),
+            ctx: Vec::new(),
+        };
+        let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
+        let result = resp.and_then(|r| {
+            if verify {
+                pqc::check_mldsa_sig(p, &key.public, &req.message, &r.signature)
+            } else {
+                Ok(())
+            }
+        });
+        (dt, result)
+    }
+
+    /// The device's verdict is the check: a signature it rejects fails the
+    /// request, so every request is checked.
+    fn mldsa_verify(&mut self, op: OpKind) -> (Duration, Result<(), String>) {
+        let (_, p) = op.mldsa().expect("ML-DSA operation");
+        let env = self.env;
+        let signed = &env.keys.mldsa_signed[&p.key_kind];
+        let (k, m) = self.rotate_shared(signed.keys.len(), signed.messages.len());
+        let req = TborMlDsaVerifyReq {
+            session_id: env.session_id,
+            pub_key: signed.keys[k].pub_key.clone(),
+            message: signed.messages[m].to_vec(),
+            ctx: Vec::new(),
+            signature: signed.keys[k].sigs[m].clone(),
+        };
+        // The device error is kept so that a rejection is reported by name.
+        let (dt, resp) = timed(|| Ok(env.session_ctx().tbor(&req)));
+        let result = resp.and_then(|r| match r {
+            Ok(_) => Ok(()),
+            Err(DdiError::TborStatus(TborStatus::MlDsaVerifyFailed)) => {
+                Err("MlDsaVerify rejected a valid signature".into())
+            }
+            Err(e) => Err(format!("{e:?}")),
+        });
+        (dt, result)
+    }
+
+    fn mlkem_keygen(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
+        let (_, p) = op.mlkem().expect("ML-KEM operation");
+        let env = self.env;
+        let req = pqc::mlkem_keygen_req(env.session_id, p);
+        let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
+        let result = resp.and_then(|r| {
+            if verify {
+                pqc::check_mlkem_key(p, &r.pub_key, &r.masked_key).map(|_| ())
+            } else {
+                Ok(())
+            }
+        });
+        (dt, result)
+    }
+
+    fn mlkem_encap(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
+        let (_, p) = op.mlkem().expect("ML-KEM operation");
+        let env = self.env;
+        let keys = &env.keys.mlkem_pub[&p.key_kind];
+        let (k, _) = self.rotate_shared(keys.len(), 1);
+        let req = TborMlKemEncapsulateReq {
+            session_id: env.session_id,
+            scope: SCOPE_LOCAL,
+            pub_key: keys[k].clone(),
+        };
+        let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
+        let result = resp.and_then(|r| {
+            if verify {
+                pqc::check_mlkem_ct(p, &r.ciphertext)?;
+                pqc::check_masked_secret(&r.masked_shared_secret)
+            } else {
+                Ok(())
+            }
+        });
+        (dt, result)
+    }
+
+    fn mlkem_decap(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
+        let (_, p) = op.mlkem().expect("ML-KEM operation");
+        let env = self.env;
+        let keys = &env.keys.mlkem[&p.key_kind];
+        // Every key has `--messages` ciphertexts.
+        let (k, m) = self.rotate_shared(keys.len(), keys[0].cts.len());
+        let key = &keys[k];
+        let req = TborMlKemDecapsulateReq {
+            session_id: env.session_id,
+            scope: SCOPE_LOCAL,
+            masked_key: key.masked.clone(),
+            ciphertext: key.cts[m].clone(),
+        };
+        let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
+        let result = resp.and_then(|r| {
+            if verify {
+                pqc::check_masked_secret(&r.masked_shared_secret)
+            } else {
+                Ok(())
+            }
+        });
+        (dt, result)
+    }
+
+    /// Generate an ML-DSA key, sign with it on the device, and verify the
+    /// signature with its public key on the host.
+    fn prove_mldsa_keygen(&mut self, op: OpKind) -> Result<(), String> {
+        let (_, p) = op.mldsa().expect("ML-DSA operation");
+        let env = self.env;
+        let key = env
+            .session_ctx()
+            .tbor(&pqc::mldsa_keygen_req(env.session_id, p))
+            .map_err(|e| format!("MlDsaGenerateKey: {e:?}"))?;
+        let public = pqc::check_mldsa_key(p, &key.pub_key, &key.masked_key)?;
+        let message = pqc::random::<MLDSA_MSG_LEN>().to_vec();
+        let signed = env
+            .session_ctx()
+            .tbor(&TborMlDsaSignReq {
+                session_id: env.session_id,
+                masked_key: key.masked_key,
+                message: message.clone(),
+                ctx: Vec::new(),
+            })
+            .map_err(|e| format!("MlDsaSign with a generated key: {e:?}"))?;
+        pqc::check_mldsa_sig(p, &public, &message, &signed.signature)
+    }
+
+    /// `MlDsaVerify` must reject a signature with a flipped bit.
+    fn prove_mldsa_verify(&mut self, op: OpKind) -> Result<(), String> {
+        let (_, p) = op.mldsa().expect("ML-DSA operation");
+        let env = self.env;
+        let signed = &env.keys.mldsa_signed[&p.key_kind];
+        let (k, m) = self.rotate_shared(signed.keys.len(), signed.messages.len());
+        let mut signature = signed.keys[k].sigs[m].clone();
+        // The signature starts with the challenge hash, which any change to
+        // it breaks.
+        signature[0] ^= 0x01;
+        let resp = env.session_ctx().tbor(&TborMlDsaVerifyReq {
+            session_id: env.session_id,
+            pub_key: signed.keys[k].pub_key.clone(),
+            message: signed.messages[m].to_vec(),
+            ctx: Vec::new(),
+            signature,
+        });
+        match resp {
+            Err(DdiError::TborStatus(TborStatus::MlDsaVerifyFailed)) => Ok(()),
+            Ok(_) => Err("MlDsaVerify accepted a tampered signature".into()),
+            Err(e) => Err(format!("MlDsaVerify of a tampered signature: {e:?}")),
+        }
+    }
+
+    /// Generate an ML-KEM key and have the device decapsulate a host
+    /// ciphertext with it. The device masks the shared secret, so this shows
+    /// the key is usable, not that the two sides agree on the secret.
+    fn prove_mlkem_keygen(&mut self, op: OpKind) -> Result<(), String> {
+        let (_, p) = op.mlkem().expect("ML-KEM operation");
+        let env = self.env;
+        let key = env
+            .session_ctx()
+            .tbor(&pqc::mlkem_keygen_req(env.session_id, p))
+            .map_err(|e| format!("MlKemGenerateKey: {e:?}"))?;
+        let public = pqc::check_mlkem_key(p, &key.pub_key, &key.masked_key)?;
+        let decap = env
+            .session_ctx()
+            .tbor(&TborMlKemDecapsulateReq {
+                session_id: env.session_id,
+                scope: SCOPE_LOCAL,
+                masked_key: key.masked_key,
+                ciphertext: pqc::host_encapsulate(p, &public)?,
+            })
+            .map_err(|e| format!("MlKemDecapsulate with a generated key: {e:?}"))?;
+        pqc::check_masked_secret(&decap.masked_shared_secret)
     }
 }
 
