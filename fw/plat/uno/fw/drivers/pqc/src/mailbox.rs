@@ -410,6 +410,13 @@ pub fn post_request(engine: EngineId, seq: u32, params: &RequestParams<'_>) -> u
 }
 
 /// Read a response, if the core has answered request `seq`.
+/// The sequence number of the last response engine `engine`'s core
+/// posted, which [`take_response`] matches against its request's.
+pub(crate) fn response_seq(engine: EngineId) -> u32 {
+    // SAFETY: as `take_response`.
+    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) }
+}
+
 pub fn take_response(engine: EngineId, seq: u32) -> Option<Response> {
     let mb = mailbox(engine);
 

@@ -605,6 +605,7 @@ impl UnoHsmPal {
 
         // The BCP raises no CP1 interrupt; reap its completions every pass.
         self.bcp.wake();
+        self.pqc.wake();
         self.retry_detached();
     }
 

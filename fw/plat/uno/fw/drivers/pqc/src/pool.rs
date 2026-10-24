@@ -93,6 +93,16 @@ pub(crate) struct PqcState {
     /// Sequence number for PQC requests, so a response is unambiguously
     /// matched to the request that produced it.
     pub(crate) request_seq: u32,
+
+    /// Engines whose task awaits a response, by bit (see
+    /// [`PqcDriver::wake`](crate::PqcDriver::wake)).
+    pub(crate) awaiting: u8,
+
+    /// The sequence number each awaited response will carry.
+    pub(crate) awaiting_seq: [u32; ENGINES],
+
+    /// The task awaiting each engine's response.
+    pub(crate) resp_wakers: [WakerRegistration; ENGINES],
 }
 
 impl PqcState {
@@ -118,6 +128,9 @@ impl PqcState {
             wait_tail: NO_SLOT,
             probe_seq: 0,
             request_seq: 0,
+            awaiting: 0,
+            awaiting_seq: [0; ENGINES],
+            resp_wakers: [const { WakerRegistration::new() }; ENGINES],
         }
     }
 

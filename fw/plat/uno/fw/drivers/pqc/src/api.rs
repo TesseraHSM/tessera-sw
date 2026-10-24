@@ -221,6 +221,26 @@ impl PqcDriver {
         })
     }
 
+    /// Wakes each task whose engine has posted the response it awaits.
+    ///
+    /// The cores raise no interrupt CP1 can claim for itself (their pending
+    /// bits belong to the IPC driver), so the PAL calls this from its poll
+    /// loop, as it does the BCP's. With no response awaited it touches only
+    /// this driver's state.
+    pub fn wake(&self) {
+        self.state.with(|s| {
+            let mut awaiting = s.awaiting;
+            while awaiting != 0 {
+                let i = awaiting.trailing_zeros() as usize;
+                awaiting &= awaiting - 1;
+                if crate::mailbox::response_seq(EngineId::new(i as u8)) == s.awaiting_seq[i] {
+                    s.awaiting &= !(1 << i);
+                    s.resp_wakers[i].wake();
+                }
+            }
+        });
+    }
+
     /// Return an engine to the pool.
     pub(crate) fn release_engine(&self, id: EngineId) {
         self.state.with(|s| s.release_engine(id));

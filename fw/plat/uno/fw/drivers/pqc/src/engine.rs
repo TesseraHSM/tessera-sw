@@ -18,36 +18,13 @@ use crate::types::EngineId;
 /// is an invalid signature rather than a fault.  Mirrors the FP side.
 const STATUS_CRYPTO_FAILED: u32 = 4;
 
-/// How many times to poll for a response before giving up.
-const SUBMIT_POLL_ATTEMPTS: u32 = 40;
-
-/// Wait between polls.  FP looks for work every 2 ms, so 40 attempts at
-/// 5 ms leaves ample margin while bounding a dead core to 200 ms.
-const SUBMIT_POLL_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(5);
-
-/// How long to yield-poll the mailbox before falling back to
-/// [`SUBMIT_POLL_INTERVAL`].
+/// How long to await a core's response before giving up on it.
 ///
-/// `Timer::after` cannot sleep for less than one embassy tick, and CP1 runs
-/// `tick-hz-32` — so the shortest sleep available is 31.25 ms, against PQC
-/// operations that complete in 3–9 ms. Sleeping first meant every request
-/// paid a full tick it did not need.
-///
-/// Yielding instead re-checks the mailbox on each executor pass, which is
-/// the pattern the platform already uses for every other peripheral
-/// (`UnoHsmPal::run` is `loop { poll_once(); yield_now().await }`). Other
-/// tasks still run between checks, so this is not a busy-wait that starves
-/// the executor.
-///
-/// Expressed as a deadline rather than an iteration count so it does not
-/// depend on how long one trip through the executor happens to take. The
-/// window must cover the slowest operation — ML-DSA-87 signing runs to
+/// Must cover the slowest operation, with margin: ML-DSA-87 signing runs to
 /// ~175 ms because FIPS 204 rejection sampling retries until a candidate
-/// passes the norm checks — or the tail of that distribution falls off a
-/// cliff onto the 31.25 ms timer.
-///
-/// The timer fallback remains beyond this, bounding the total wait.
-const SUBMIT_YIELD_WINDOW: embassy_time::Duration = embassy_time::Duration::from_millis(400);
+/// passes the norm checks. The response is picked up as soon as it lands
+/// (see [`PqcDriver::wake`]); this only bounds a dead core.
+const SUBMIT_TIMEOUT: embassy_time::Duration = embassy_time::Duration::from_millis(600);
 
 /// Length of the compact ML-DSA private seed (`xi`).  Identical for every
 /// parameter set, which is why the key kind has to travel with it.
@@ -541,22 +518,34 @@ impl PqcEngine<'_> {
 
         doorbell::ring(self.id, seq);
 
-        // Fast path: yield to the executor and re-check, so a response
-        // that lands in a few milliseconds is picked up in a few
-        // milliseconds rather than at the next 31.25 ms tick.
-        let yield_deadline = embassy_time::Instant::now() + SUBMIT_YIELD_WINDOW;
-        while embassy_time::Instant::now() < yield_deadline {
-            if let Some(resp) = mailbox::take_response(self.id, seq) {
-                return Ok(resp);
-            }
-            embassy_futures::yield_now().await;
-        }
-
-        for _ in 0..SUBMIT_POLL_ATTEMPTS {
-            if let Some(resp) = mailbox::take_response(self.id, seq) {
-                return Ok(resp);
-            }
-            embassy_time::Timer::after(SUBMIT_POLL_INTERVAL).await;
+        // Await the response, woken by `PqcDriver::wake` (from the PAL's
+        // poll loop) once the core posts it, rather than re-polling the
+        // mailbox from this task on every executor pass: three tasks doing
+        // that, each pass re-queueing itself and reading the clock, took
+        // most of CP1's time while every core worked, and lengthened every
+        // pass, so a task handed a freed core started it later.
+        let engine = usize::from(self.id.raw());
+        self.driver.state.with(|s| {
+            s.awaiting |= 1 << engine;
+            s.awaiting_seq[engine] = seq;
+        });
+        let deadline = embassy_time::Instant::now() + SUBMIT_TIMEOUT;
+        let response = embassy_futures::select::select(
+            core::future::poll_fn(|cx| {
+                if let Some(resp) = mailbox::take_response(self.id, seq) {
+                    return core::task::Poll::Ready(resp);
+                }
+                self.driver
+                    .state
+                    .with(|s| s.resp_wakers[engine].register(cx.waker()));
+                core::task::Poll::Pending
+            }),
+            embassy_time::Timer::at(deadline),
+        )
+        .await;
+        self.driver.state.with(|s| s.awaiting &= !(1 << engine));
+        if let embassy_futures::select::Either::First(resp) = response {
+            return Ok(resp);
         }
 
         error!(
