@@ -351,8 +351,7 @@ impl UnoHsmPal {
     /// [`reply_linked`](Self::reply_linked), but no task awaits either:
     /// [`wake_gdma`](Self::wake_gdma) starts the post (of `copy_failed`
     /// if the copy failed), and [`wake_oic`](Self::wake_oic) drops the IO
-    /// once it is done. Declines an IO whose dirty SRAM is too large for
-    /// the CPU to scrub, as the drop cannot wait for the GDMA.
+    /// once it is done.
     pub(crate) fn reply_detached(
         &self,
         io: UnoHsmIo,
@@ -363,8 +362,7 @@ impl UnoHsmPal {
         copy_failed: fn(&mut HsmCqe),
     ) -> Result<(), UnoHsmIo> {
         let index = usize::from(io.index());
-        if index >= IO_SLOTS || crate::alloc::io_slot_dma_dirty(self, io.index()).1 > CPU_SCRUB_MAX
-        {
+        if index >= IO_SLOTS {
             return Err(io);
         }
         let Ok(ifc) = host_interface(io.pid()) else {
@@ -403,7 +401,14 @@ impl UnoHsmPal {
                     .start_send(link as u16, (link >> 16) as u8, waker)
                     .ok()
             },
-            |link, copied| self.post_detached(link as u16, (link >> 16) as u8, copied),
+            |link, ok| {
+                let (index, queue_id) = (link as u16, (link >> 16) as u8);
+                if link & SCRUB_LINK != 0 {
+                    self.finish_scrub(index, queue_id, ok);
+                } else {
+                    self.post_detached(index, queue_id, ok);
+                }
+            },
         );
     }
 
@@ -437,13 +442,52 @@ impl UnoHsmPal {
     }
 
     /// OIC completion handler: wakes each finished post's task, and drops
-    /// each detached IO whose CQE is now posted, as
-    /// [`drop_io`](HsmIoController::drop_io) would.
+    /// each detached IO whose CQE is now posted (see
+    /// [`drop_detached`](Self::drop_detached)).
     pub(crate) fn wake_oic(&self, irq: u16) {
-        self.oic.wake_with(irq, |index, queue_id| {
+        self.oic
+            .wake_with(irq, |index, queue_id| self.drop_detached(index, queue_id));
+    }
+
+    /// Scrubs and frees the slot of detached IO `index`, whose CQE is
+    /// posted, as [`drop_io`](HsmIoController::drop_io) would. Dirty SRAM
+    /// beyond [`CPU_SCRUB_MAX`] is zeroed by the GDMA, whose completion
+    /// finishes the job (see [`finish_scrub`](Self::finish_scrub)).
+    fn drop_detached(&self, index: u16, queue_id: u8) {
+        let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, index);
+        if dma_len > CPU_SCRUB_MAX && dma_len <= ZERO_SIZE as usize {
+            let len = dma_len as u32;
+            let link = u32::from(index) | u32::from(queue_id) << 16 | SCRUB_LINK;
+            if self
+                .gdma
+                .copy_mem_detached(
+                    device_dma_buf(ZERO_BASE as *const u8, len),
+                    MemInterface::Device,
+                    len,
+                    device_dma_buf(dma_ptr, len),
+                    MemInterface::Device,
+                    len,
+                    link,
+                )
+                .is_ok()
+            {
+                return;
+            }
+        }
+        self.scrub_io_slot_cpu(index);
+        self.iic.free_io(index, u16::from(queue_id));
+    }
+
+    /// The GDMA has zeroed (if `zeroed`) the dirty SRAM of detached IO slot
+    /// `index`, as [`drop_detached`](Self::drop_detached) asked: finish the
+    /// scrub with the CPU, all of it if the GDMA failed, and free the slot.
+    fn finish_scrub(&self, index: u16, queue_id: u8, zeroed: bool) {
+        if zeroed {
+            self.scrub_io_slot_nondma(index);
+        } else {
             self.scrub_io_slot_cpu(index);
-            self.iic.free_io(index, u16::from(queue_id));
-        });
+        }
+        self.iic.free_io(index, u16::from(queue_id));
     }
 
     /// GDMA-zero a GDMA-reachable device region `[dst_ptr, dst_ptr + len)`.
@@ -540,6 +584,12 @@ impl UnoHsmPal {
         // SAFETY: `(dma_ptr, dma_len)` is a prefix of the slot's SRAM
         // buffer, valid for writes over its whole length.
         unsafe { cpu_zeroize(dma_ptr, dma_len) };
+        self.scrub_io_slot_nondma(io_index);
+    }
+
+    /// The rest of a scrub once the slot's SRAM is zero: wipe its DTCM
+    /// buffer, which the GDMA cannot reach, and drop the high-water marks.
+    fn scrub_io_slot_nondma(&self, io_index: u16) {
         let (nd_ptr, nd_len) = crate::alloc::io_slot_nondma_dirty(self, io_index);
         // SAFETY: `(nd_ptr, nd_len)` is a prefix of the slot's DTCM buffer,
         // valid for writes over its whole length.
@@ -547,6 +597,11 @@ impl UnoHsmPal {
         crate::alloc::clear_io_peak(self, io_index);
     }
 }
+
+/// Marks the `link` of a detached GDMA copy that zeroes a detached IO's
+/// slot (see [`UnoHsmPal::drop_detached`]), rather than copying its
+/// response.
+const SCRUB_LINK: u32 = 1 << 31;
 
 /// SRAM scrubs of at most this many bytes are done by the CPU: its stores
 /// to SRAM are posted (about a cycle each), so a small wipe costs less CPU
