@@ -22,6 +22,7 @@ use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::copy_from_uncached;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp as DriverAesOp;
 use tsra_fw_uno_drivers_aes::AesRequest;
@@ -265,16 +266,21 @@ impl HsmAes for UnoHsmPal {
         }
         require_block_multiple(input, output.len())?;
 
+        // The engine updates the IV it is given in place: hand it the
+        // caller's `iv_out` when there is one, so the chaining IV needs no
+        // copying back. The IV sits in DMA memory, which the CPU reads
+        // uncached: copy it with one burst.
+        if let Some(iv_out) = iv_out.take() {
+            copy_from_uncached(iv_out, iv_in);
+            return self
+                .aes_run(AesMode::Cbc, aes_op(op), key, Some(iv_out), input, output)
+                .await;
+        }
         self.alloc_scoped_async(io, async |scope| {
             let iv_work = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            iv_work.copy_from_slice(iv_in);
+            copy_from_uncached(iv_work, iv_in);
             self.aes_run(AesMode::Cbc, aes_op(op), key, Some(iv_work), input, output)
-                .await?;
-
-            if let Some(iv_out) = iv_out.take() {
-                iv_out.copy_from_slice(iv_work);
-            }
-            Ok::<(), HsmError>(())
+                .await
         })
         .await
     }
@@ -297,16 +303,18 @@ impl HsmAes for UnoHsmPal {
         }
         require_block_multiple(data, data.len())?;
 
+        // As in `aes_cbc_enc_dec`: the engine updates `iv_out` in place.
+        if let Some(iv_out) = iv_out.take() {
+            copy_from_uncached(iv_out, iv_in);
+            return self
+                .aes_run_in_place(AesMode::Cbc, op, key, Some(iv_out), data)
+                .await;
+        }
         self.alloc_scoped_async(io, async |scope| {
             let iv_work = scope.dma_alloc(AES_BLOCK_SIZE)?;
-            iv_work.copy_from_slice(iv_in);
+            copy_from_uncached(iv_work, iv_in);
             self.aes_run_in_place(AesMode::Cbc, op, key, Some(iv_work), data)
-                .await?;
-
-            if let Some(iv_out) = iv_out.take() {
-                iv_out.copy_from_slice(iv_work);
-            }
-            Ok::<(), HsmError>(())
+                .await
         })
         .await
     }
