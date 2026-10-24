@@ -9,7 +9,7 @@
 //! # Task architecture
 //!
 //! ```text
-//!  main ──► init PAL ──► spawn poll_io ──► run (NVIC polling loop)
+//!  main ──► init PAL ──► spawn poll_io      (executor loop polls NVIC)
 //!                            │
 //!                        poll_io ──► iic.recv() ──► signal io_worker[slot]
 //!                                                       │
@@ -20,8 +20,9 @@
 //!                                                   → complete_io
 //! ```
 //!
-//! - **`main`**: Initialises the PAL (timer, IIC/OIC/GDMA channels),
-//!   spawns the IO receive loop, then enters the NVIC polling loop.
+//! - **`main`**: Runs the executor, polling the PAL's peripherals
+//!   between its passes; its first task initialises the PAL (timer,
+//!   IIC/OIC/GDMA channels) and spawns the IO receive loop.
 //! - **`poll_io`** (single instance): Awaits IOs from the IIC driver
 //!   and hands each one to the `io_worker` of its IO slot.
 //! - **`io_worker`** (one per IO slot, 32): Owns its slot's IO for the
@@ -32,8 +33,9 @@
 //!
 //! Peripheral interrupts (IIC, OIC, GDMA) are enabled at the source
 //! (`irq_enable` register) so the hardware asserts the NVIC pending bit.
-//! No ISR handlers are installed for these — the PAL's `run()` loop
-//! polls `Nvic::is_pending()` and wakes the appropriate driver. The
+//! No ISR handlers are installed for these — [`main`] calls
+//! [`UnoHsmPal::poll_once`] after every executor pass, which polls
+//! `Nvic::is_pending()` and wakes the appropriate driver. The
 //! SysTick exception is handled internally by the systick driver crate.
 
 #![no_std]
@@ -71,7 +73,7 @@ static mut DEFAULT_DATA: [u8; 16] = [0x1; 16];
 
 /// Global HSM singleton, shared by all Embassy tasks.
 ///
-/// Uses [`OnceLock`] for one-time initialisation in `main`. Subsequent
+/// Uses [`OnceLock`] for one-time initialisation in [`init`]. Subsequent
 /// accesses via `HSM.get().await` are zero-cost after the first init.
 static HSM: OnceLock<Hsm<UnoHsmPal>> = OnceLock::new();
 
@@ -195,47 +197,61 @@ async fn poll_ipc(spawner: Spawner) -> ! {
     }
 }
 
-/// Firmware async entry point.
+/// Firmware initialisation, the executor's first task.
 ///
 /// 1. Initialises the HSM singleton with a default [`UnoHsmPal`].
 /// 2. Calls [`HsmPal::init`] — sets up SysTick, RNG, IPC, signals Done.
-/// 3. Spawns [`poll_ipc`] which drives boot handshake + steady-state IPC.
-/// 4. Enters [`HsmPal::run`] — the NVIC polling loop that wakes
-///    drivers when peripheral interrupts are pending.
+/// 3. Spawns [`poll_ipc`] which drives boot handshake + steady-state IPC,
+///    and the [`heartbeat`].
 ///
-/// The NVIC loop runs from the start so `ipc.wake()` fires naturally
-/// when Admin sends messages — no poll_once hack needed.
+/// Neither step 1 nor 2 awaits, so [`main`]'s peripheral polling, which
+/// starts once the singleton is set, never sees an uninitialised PAL.
 ///
 /// # Parameters
 /// - `spawner`: Embassy task spawner used to start long-lived background tasks.
-///
-/// # Returns
-/// Returns `()` if initialization fails to spawn IPC handling and exits early;
-/// otherwise, this function does not normally return while firmware is running.
-///
-/// # Side Effects
-/// - Initializes global singleton state.
-/// - Initializes PAL platform services.
-/// - Spawns IPC loop task and enters main NVIC polling loop.
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[embassy_executor::task]
+async fn init(spawner: Spawner) {
     info!("app", "Tessera Integrated HSM firmware starting up...");
-    let _ = HSM.init(Hsm::new(UnoHsmPal::default()));
-    let hsm = HSM.get().await;
+    let hsm = HSM.get_or_init(|| Hsm::new(UnoHsmPal::default()));
     hsm.pal().init();
 
     if let Ok(token) = poll_ipc(spawner) {
         spawner.spawn(token);
-    } else {
-        return;
     }
-
     if let Ok(token) = heartbeat() {
         spawner.spawn(token);
-    } else {
-        return;
+    }
+}
+
+/// Firmware entry point: runs the Embassy executor, and between its passes
+/// polls the PAL's peripherals ([`UnoHsmPal::poll_once`]), waking the tasks
+/// whose interrupts are pending or whose engines have finished.
+///
+/// That polling used to be a task of its own ([`HsmPal::run`]), which the
+/// run queue -- last woken, first polled -- placed early in each pass: a
+/// completion landing later in the pass went unseen until the next one, and
+/// its task ran in the pass after that. Polled once each pass ends, a
+/// completion is seen within the pass it lands in, and the tasks it wakes,
+/// being woken last, run first in the next.
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    // `usize::MAX` is the pender context of Embassy's thread-mode executor,
+    // for which the pender only signals an event. This loop never sleeps,
+    // so it has no use for the event.
+    let executor = embassy_executor::raw::Executor::new(usize::MAX as *mut ());
+    let executor_ptr: *const embassy_executor::raw::Executor = &raw const executor;
+    // SAFETY: `main` never returns, so the executor outlives every use.
+    let executor: &'static embassy_executor::raw::Executor = unsafe { &*executor_ptr };
+    let spawner = executor.spawner();
+    if let Ok(token) = init(spawner) {
+        spawner.spawn(token);
     }
 
-    hsm.pal().run().await;
-    hsm.pal().deinit();
+    loop {
+        // SAFETY: `poll` is only ever called here, so never reentrantly.
+        unsafe { executor.poll() };
+        if let Some(hsm) = HSM.try_get() {
+            hsm.pal().poll_once();
+        }
+    }
 }
