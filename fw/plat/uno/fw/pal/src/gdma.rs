@@ -442,9 +442,11 @@ impl UnoHsmPal {
 
 /// SRAM scrubs of at most this many bytes are done by the CPU: its stores
 /// to SRAM are posted (about a cycle each), so a small wipe costs less CPU
-/// than submitting a GDMA transfer and handling its completion. Most IOs'
-/// dirty region is well under this; larger ones go to the GDMA.
-const CPU_SCRUB_MAX: usize = 2048;
+/// than submitting a GDMA transfer and handling its completion, which also
+/// costs the IO another poll. Most IOs' dirty region is well under this
+/// (a 1 KiB AES-CBC request's is about 2.4 KiB); larger ones go to the
+/// GDMA.
+const CPU_SCRUB_MAX: usize = 4096;
 
 /// Volatile CPU zeroization of `[ptr, ptr + len)` that the optimizer cannot
 /// elide, via the vetted [`zeroize`] crate. Used for the M7 TCM (which GDMA
