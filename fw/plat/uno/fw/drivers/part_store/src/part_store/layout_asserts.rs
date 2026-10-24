@@ -39,4 +39,13 @@ const _: () =
 const _: () = assert!(core::mem::offset_of!(Storage, sd_mk_key_id) + 2 <= SHADOW_TAIL + SHADOW_RUN);
 const _: () = assert!(core::mem::offset_of!(Storage, valid_flags) < SHADOW_TAIL + SHADOW_RUN);
 const _: () = assert!(SHADOW_HEAD + SHADOW_RUN <= SHADOW_TAIL);
+// The front run holds the whole session table, its 16-bit slot ids each
+// within one word, and the tail run the session metadata.
+const _: () = assert!(SHADOW_FRONT + SHADOW_RUN <= SHADOW_HEAD);
+const _: () = assert!(
+    core::mem::offset_of!(Storage, session_table) + SESSION_TABLE_LEN <= SHADOW_FRONT + SHADOW_RUN
+);
+const _: () =
+    assert!((core::mem::offset_of!(Storage, session_table) - SHADOW_FRONT).is_multiple_of(2));
+const _: () = assert!(core::mem::offset_of!(Storage, session_meta) + 2 <= SHADOW_TAIL + SHADOW_RUN);
 const _: () = assert!(SHADOW_TAIL + SHADOW_RUN <= STORE_SIZE);

@@ -325,3 +325,45 @@ fn shadowed_fields_follow_writes() {
     Partition(pid).set_sd_initialized(false);
     assert!(!Partition(pid).sd_initialized());
 }
+
+/// The session table and metadata read through the shadow follow every
+/// write made through the borrows the store hands out, and a reset.
+#[test]
+fn shadowed_session_fields_follow_writes() {
+    let pid = 14usize;
+    Partition(pid).reset();
+
+    // Twice each: once loading the shadow, once from it.
+    for _ in 0..2 {
+        let p = Partition(pid);
+        assert!((0..SESSION_TABLE_LEN).all(|i| p.session_table_byte(i) == 0));
+        assert_eq!((p.session_meta_byte(0), p.session_meta_byte(1)), (0, 0));
+    }
+
+    let mut p = Partition(pid);
+    for (i, b) in p.session_table_mut().iter_mut().enumerate() {
+        *b = 0x10 + i as u8;
+    }
+    p.session_meta_mut().copy_from_slice(&[0xA5, 0x5A]);
+    for _ in 0..2 {
+        let p = Partition(pid);
+        assert!((0..SESSION_TABLE_LEN).all(|i| p.session_table_byte(i) == 0x10 + i as u8));
+        for i in (0..SESSION_TABLE_LEN).step_by(2) {
+            let lo = 0x10 + i as u16;
+            assert_eq!(p.session_table_u16(i), lo | ((lo + 1) << 8));
+        }
+        assert_eq!(
+            (p.session_meta_byte(0), p.session_meta_byte(1)),
+            (0xA5, 0x5A)
+        );
+    }
+
+    Partition(pid).session_table_mut()[1] = 0xEE;
+    assert_eq!(Partition(pid).session_table_byte(1), 0xEE);
+    Partition(pid).session_meta_mut()[0] = 0x01;
+    assert_eq!(Partition(pid).session_meta_byte(0), 0x01);
+
+    Partition(pid).reset();
+    assert_eq!(Partition(pid).session_table_byte(1), 0);
+    assert_eq!(Partition(pid).session_meta_byte(0), 0);
+}

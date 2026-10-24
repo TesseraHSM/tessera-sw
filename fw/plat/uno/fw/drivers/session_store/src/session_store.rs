@@ -66,30 +66,27 @@ impl SessionTable {
     // ── raw field helpers ────────────────────────────────────────────────
 
     #[inline]
-    fn region(&self) -> &[u8; SESSION_STORE_LEN] {
-        self.0.session_table()
-    }
-
-    #[inline]
     fn region_mut(&mut self) -> &mut [u8; SESSION_STORE_LEN] {
         self.0.session_table_mut()
     }
 
+    // Reads come from the partition's DTCM shadow: every in-session
+    // command checks its session, and the table itself sits in GSRAM, which
+    // CP1 reads uncached a load at a time.
+
     #[inline]
     fn alloc_mask(&self) -> u8 {
-        self.region()[ALLOC_MASK]
+        self.0.session_table_byte(ALLOC_MASK)
     }
 
     #[inline]
     fn renego_mask(&self) -> u8 {
-        self.region()[RENEGO_MASK]
+        self.0.session_table_byte(RENEGO_MASK)
     }
 
     #[inline]
     fn phys_id(&self, slot: usize) -> u16 {
-        let off = PHYS_IDS + slot * 2;
-        let r = self.region();
-        u16::from_le_bytes([r[off], r[off + 1]])
+        self.0.session_table_u16(PHYS_IDS + slot * 2)
     }
 
     #[inline]
@@ -102,7 +99,7 @@ impl SessionTable {
 
     #[inline]
     fn pending_mask(&self) -> u8 {
-        self.0.session_meta()[0]
+        self.0.session_meta_byte(0)
     }
 
     #[inline]
@@ -112,7 +109,7 @@ impl SessionTable {
 
     #[inline]
     fn psk_change_mask(&self) -> u8 {
-        self.0.session_meta()[1]
+        self.0.session_meta_byte(1)
     }
 
     #[inline]

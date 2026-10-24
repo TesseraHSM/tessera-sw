@@ -97,16 +97,18 @@ const PSK_CO_DEFAULT: u8 = 1 << 1;
 const PSK_CU_CHECKED: u8 = 1 << 2;
 const PSK_CU_DEFAULT: u8 = 1 << 3;
 
-/// Bytes in each of a [`Shadow`]'s two runs of slot fields: `state ‖
-/// generation ‖ res_mask`, and the key handles followed by `valid_flags`.
+/// Bytes in each of a [`Shadow`]'s three runs of slot fields: `state ‖
+/// generation ‖ res_mask`; the key handles followed by `valid_flags` and
+/// `session_meta`; and the slot's front, which holds the session table.
 const SHADOW_RUN: usize = 24;
 
 /// Words in a [`Shadow`].
-const SHADOW_WORDS: usize = 2 * SHADOW_RUN / 4;
+const SHADOW_WORDS: usize = 3 * SHADOW_RUN / 4;
 
 /// Where each [`Shadow`] run starts in [`Storage`].
 const SHADOW_HEAD: usize = offset_of!(Storage, state);
 const SHADOW_TAIL: usize = offset_of!(Storage, id_key_id);
+const SHADOW_FRONT: usize = 0;
 
 /// A DTCM copy of a partition slot's small, read-mostly fields (lifecycle
 /// state, generation, resource mask, key handles and presence flags),
@@ -114,7 +116,12 @@ const SHADOW_TAIL: usize = offset_of!(Storage, id_key_id);
 /// GSRAM uncached, a load at a time. Loaded on first use; every write to
 /// the slot drops it (see [`Partition::slot_mut`]). Only fields written
 /// solely through [`Partition`]'s setters, never through a `&mut` the
-/// store hands out (which could be written after the drop), belong here.
+/// store hands out (which could be written after the drop), belong here --
+/// save the session table and metadata, which every in-session command
+/// reads: the session store writes them through
+/// [`session_table_mut`](Partition::session_table_mut) and
+/// [`session_meta_mut`](Partition::session_meta_mut) and uses each borrow
+/// at once, so no reload can fall between the drop and the write.
 struct Shadow {
     valid: AtomicBool,
     words: [AtomicU32; SHADOW_WORDS],
@@ -137,8 +144,10 @@ static SHADOWS: [Shadow; NUM_PARTITIONS] = [const { Shadow::new() }; NUM_PARTITI
 const fn shadow_word(off: usize) -> (usize, u32) {
     let at = if off >= SHADOW_TAIL {
         SHADOW_RUN + off - SHADOW_TAIL
-    } else {
+    } else if off >= SHADOW_HEAD {
         off - SHADOW_HEAD
+    } else {
+        2 * SHADOW_RUN + off - SHADOW_FRONT
     };
     (at / 4, 8 * (at % 4) as u32)
 }
@@ -463,27 +472,31 @@ impl Partition {
         (self.shadow(word) >> shift) as u16
     }
 
-    /// Load this slot's [`Shadow`] with two burst reads.
+    /// Load this slot's [`Shadow`] with three burst reads.
     #[cold]
     #[inline(never)]
     fn load_shadow(self) {
-        /// Word-aligned room for both runs (burst copies need alignment).
+        /// Word-aligned room for all three runs (burst copies need
+        /// alignment).
         #[repr(C, align(4))]
-        struct Runs([u8; 2 * SHADOW_RUN]);
+        struct Runs([u8; 3 * SHADOW_RUN]);
 
         let slot = self.slot() as *const Storage as *const u8;
-        // SAFETY: both runs lie within the slot (asserted in
+        // SAFETY: the runs lie within the slot (asserted in
         // `layout_asserts`), which `slot` borrows for `'static`.
-        let (head, tail) = unsafe {
+        let (head, tail, front) = unsafe {
             (
                 core::slice::from_raw_parts(slot.add(SHADOW_HEAD), SHADOW_RUN),
                 core::slice::from_raw_parts(slot.add(SHADOW_TAIL), SHADOW_RUN),
+                core::slice::from_raw_parts(slot.add(SHADOW_FRONT), SHADOW_RUN),
             )
         };
-        let mut runs = Runs([0; 2 * SHADOW_RUN]);
-        let (to_head, to_tail) = runs.0.split_at_mut(SHADOW_RUN);
+        let mut runs = Runs([0; 3 * SHADOW_RUN]);
+        let (to_head, rest) = runs.0.split_at_mut(SHADOW_RUN);
+        let (to_tail, to_front) = rest.split_at_mut(SHADOW_RUN);
         copy_from_uncached(to_head, head);
         copy_from_uncached(to_tail, tail);
+        copy_from_uncached(to_front, front);
         let shadow = &SHADOWS[self.0];
         for (chunk, word) in runs.0.as_chunks::<4>().0.iter().zip(&shadow.words) {
             word.store(u32::from_le_bytes(*chunk), Relaxed);
@@ -1690,6 +1703,21 @@ impl Partition {
         &self.slot().session_table
     }
 
+    /// Byte `i` of the raw session table, from the [`Shadow`].
+    #[inline]
+    pub fn session_table_byte(self, i: usize) -> u8 {
+        assert!(i < SESSION_TABLE_LEN);
+        self.shadow_byte(offset_of!(Storage, session_table) + i)
+    }
+
+    /// The 16-bit little-endian field at even offset `i` of the raw session
+    /// table, from the [`Shadow`].
+    #[inline]
+    pub fn session_table_u16(self, i: usize) -> u16 {
+        assert!(i.is_multiple_of(2) && i + 2 <= SESSION_TABLE_LEN);
+        self.shadow_u16(offset_of!(Storage, session_table) + i)
+    }
+
     /// Mutably borrows the raw session-table region.
     #[inline(never)]
     pub fn session_table_mut(&mut self) -> &mut [u8; SESSION_TABLE_LEN] {
@@ -1701,6 +1729,13 @@ impl Partition {
     #[inline(never)]
     pub fn session_meta(self) -> &'static [u8; 2] {
         &self.slot().session_meta
+    }
+
+    /// Byte `i` of the session metadata, from the [`Shadow`].
+    #[inline]
+    pub fn session_meta_byte(self, i: usize) -> u8 {
+        assert!(i < 2);
+        self.shadow_byte(offset_of!(Storage, session_meta) + i)
     }
 
     /// Mutably borrows the session metadata region.
