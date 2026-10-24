@@ -278,12 +278,16 @@ impl PqcDriver {
             .await
     }
 
-    /// Wakes each task whose engine has posted the response it awaits.
+    /// Wakes each task whose engine has posted the response it awaits, then
+    /// each task handed an engine since the last call.
     ///
     /// The cores raise no interrupt CP1 can claim for itself (their pending
     /// bits belong to the IPC driver), so the PAL calls this from its poll
     /// loop, as it does the BCP's. With no response awaited it touches only
     /// this driver's state.
+    ///
+    /// Tasks handed an engine are woken last so that they, whose engines
+    /// idle until they run, run first.
     pub fn wake(&self) {
         self.state.with(|s| {
             let r = &mut s.responses;
@@ -295,6 +299,13 @@ impl PqcDriver {
                     r.awaiting &= !(1 << i);
                     r.wakers[i].wake();
                 }
+            }
+
+            let mut handed = s.take_handed_over();
+            while handed != 0 {
+                let idx = handed.trailing_zeros() as usize;
+                handed &= handed - 1;
+                s.queue[idx].waker.wake();
             }
         });
     }

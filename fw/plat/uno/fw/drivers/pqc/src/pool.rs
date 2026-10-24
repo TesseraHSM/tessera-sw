@@ -136,7 +136,13 @@ pub(crate) struct PqcState {
 
     /// Requests posted and responses awaited.
     pub(crate) responses: Responses,
+
+    /// Queue slots handed an engine whose task is still to be woken, by
+    /// bit (see [`take_handed_over`](Self::take_handed_over)).
+    pub(crate) handed_over: u32,
 }
+
+const _: () = assert!(QUEUE_DEPTH <= u32::BITS as usize);
 
 /// Bookkeeping for requests in flight on the engines.
 pub(crate) struct Responses {
@@ -206,6 +212,7 @@ impl PqcState {
             wait_tail: NO_SLOT,
             probe_seq: 0,
             responses: Responses::new(),
+            handed_over: 0,
         }
     }
 
@@ -284,6 +291,18 @@ impl PqcState {
         }
     }
 
+    /// The queue slots handed an engine since the last call, whose tasks
+    /// the caller must wake.
+    ///
+    /// The hand-off does not wake the task itself: the PAL polls this
+    /// driver after each executor pass ([`PqcDriver::wake`](crate::PqcDriver::wake)),
+    /// and a task woken then, being woken last, runs first in the next
+    /// pass, whereas one woken mid-pass runs after every task the end of
+    /// the pass wakes. Until it runs, the engine it is handed sits idle.
+    pub(crate) fn take_handed_over(&mut self) -> u32 {
+        core::mem::take(&mut self.handed_over)
+    }
+
     /// Return an engine to the pool, handing it straight to the
     /// longest-waiting task if there is one.
     pub(crate) fn release_engine(&mut self, id: EngineId) {
@@ -314,7 +333,7 @@ impl PqcState {
                     None => QueueSlotState::Assigned(id),
                 };
                 slot.staged = None;
-                slot.waker.wake();
+                self.handed_over |= 1 << idx;
             }
             None => {
                 self.engines[id.raw() as usize].state = EngineState::Idle;
