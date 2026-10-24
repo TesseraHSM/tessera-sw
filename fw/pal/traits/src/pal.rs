@@ -120,6 +120,33 @@ pub trait HsmPal:
         self.complete_io(io).await.map_err(ReplyError::Complete)
     }
 
+    /// [`reply_io`](Self::reply_io), then
+    /// [`drop_io`](HsmIoController::drop_io) once the completion is posted,
+    /// carried out by the platform without the caller: for an IO with
+    /// nothing left to do after its completion is posted, whose task can
+    /// then move on at once. If the copy fails, the CQE is first passed to
+    /// `copy_failed`, which makes it report that.
+    ///
+    /// The CQE must already hold the completion of a successful copy.
+    ///
+    /// # Errors
+    ///
+    /// Returns `io`, having started nothing, if the platform cannot take
+    /// the IO over now; the caller then replies and drops it itself. The
+    /// default implementation never takes it.
+    fn finish_io(
+        &self,
+        io: Self::Io,
+        resp: &DmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        prp: bool,
+        copy_failed: fn(&mut HsmCqe),
+    ) -> Result<(), Self::Io> {
+        let _ = (resp, dst, dst2, prp, copy_failed);
+        Err(io)
+    }
+
     /// Releases platform resources.
     ///
     /// Called after [`run`](Self::run) returns.  Powers down

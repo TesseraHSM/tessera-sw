@@ -158,6 +158,17 @@ impl UnoHsmIo {
     }
 }
 
+/// Applies `f` to the CQE of IO slot `index`, as [`HsmIo::cqe`] exposes it
+/// to the IO's task.
+pub(crate) fn update_cqe(index: u16, f: fn(&mut HsmCqe)) {
+    if let Some(entry) = IO_Q.io_cq.get(usize::from(index)) {
+        // SAFETY: as in `HsmIo::cqe`: `IoCqEntry` and `HsmCqe` have the
+        // same size and alignment, and only the IO's owner, here the
+        // platform, accesses its CQE.
+        f(unsafe { &mut *(core::ptr::addr_of!(*entry) as *mut HsmCqe) });
+    }
+}
+
 impl HsmIo for UnoHsmIo {
     /// Returns the IO slot index.
     fn index(&self) -> u16 {

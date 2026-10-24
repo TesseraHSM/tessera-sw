@@ -44,6 +44,9 @@ struct TagSlot {
     link: Option<u32>,
     /// What starting `link` returned, for the copy's future.
     linked: Option<u16>,
+    /// No future awaits the copy (see [`GdmaDriver::copy_mem_detached`]):
+    /// its completion goes to `wake_with`'s `done`, and frees the tag.
+    detached: bool,
 }
 
 impl TagSlot {
@@ -167,6 +170,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             status: 0,
             link: None,
             linked: None,
+            detached: false,
         });
 
         let tag_free = if DEPTH >= 32 {
@@ -383,6 +387,38 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         Ok(poll_fn(move |cx| self.poll_tag(tag, cx)))
     }
 
+    /// [`copy_mem_linked`](Self::copy_mem_linked) that no future awaits:
+    /// the copy's completion goes to [`wake_with`](Self::wake_with)'s
+    /// `done`, which gets `link` and whether the copy succeeded, and the
+    /// tag is freed there.
+    ///
+    /// # Errors
+    ///
+    /// As [`copy_mem`](Self::copy_mem), when submitting.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_mem_detached(
+        &self,
+        src_addr: GdmaBuf,
+        src_ifc: MemInterface,
+        src_len: u32,
+        dst_addr: GdmaBuf,
+        dst_ifc: MemInterface,
+        dst_len: u32,
+        link: u32,
+    ) -> HsmResult<()> {
+        let tag = self.submit(
+            src_addr,
+            src_ifc,
+            src_len,
+            dst_addr,
+            dst_ifc,
+            dst_len,
+            Some(link),
+        )?;
+        self.state.with(|s| s.tags[tag as usize].detached = true);
+        Ok(())
+    }
+
     /// Poll `tag` for completion, freeing it once complete.
     fn poll_tag(&self, tag: u16, cx: &mut Context<'_>) -> Poll<HsmResult<Option<u16>>> {
         self.state.with(|s| {
@@ -409,7 +445,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// SingleCell borrow and batching the MMIO head pointer write.
     /// Call from the GDMA_CQ IRQ handler or the main poll loop.
     pub fn wake(&self, irq: u16) {
-        self.wake_with(irq, |_, _| None);
+        self.wake_with(irq, |_, _| None, |_, _| {});
     }
 
     /// [`wake`](Self::wake), first starting the follow-on of each
@@ -417,8 +453,14 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     /// `start(link, waker)` gets the copy's `link` and the waker of the
     /// task awaiting it, and returns what it started. If it started
     /// something, it has taken over waking the task, so the copy's
-    /// completion does not wake it.
-    pub fn wake_with(&self, irq: u16, mut start: impl FnMut(u32, Option<&Waker>) -> Option<u16>) {
+    /// completion does not wake it. Each [detached](Self::copy_mem_detached)
+    /// copy's completion goes to `done(link, succeeded)` instead.
+    pub fn wake_with(
+        &self,
+        irq: u16,
+        mut start: impl FnMut(u32, Option<&Waker>) -> Option<u16>,
+        mut done: impl FnMut(u32, bool),
+    ) {
         self.state.with(|s| {
             let tail = unsafe { self.cq_tail_shadow.read_volatile() } as u16;
 
@@ -431,12 +473,12 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 if (s.cq_head + 1) & Self::MASK != tail && cq_slot + 1 < DEPTH {
                     // SAFETY: `entry` and the entry after it lie in the ring.
                     let (first, second) = unsafe { read_status_pair(entry) };
-                    Self::complete(s, first, &mut start);
-                    Self::complete(s, second, &mut start);
+                    Self::complete(s, first, &mut start, &mut done);
+                    Self::complete(s, second, &mut start, &mut done);
                 } else {
                     // SAFETY: `entry` lies in the ring.
                     let status = unsafe { &*entry }.status.get();
-                    Self::complete(s, status, &mut start);
+                    Self::complete(s, status, &mut start, &mut done);
                 }
             }
 
@@ -454,6 +496,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         s: &mut GdmaState<DEPTH>,
         status: u32,
         start: &mut impl FnMut(u32, Option<&Waker>) -> Option<u16>,
+        done: &mut impl FnMut(u32, bool),
     ) {
         let st = LocalRegisterCopy::<u32, GDMA_CQ_STATUS::Register>::new(status);
         let tag = st.read(GDMA_CQ_STATUS::TAG) as u16;
@@ -467,6 +510,13 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
 
         if (tag as usize) < DEPTH {
             let slot = &mut s.tags[tag as usize];
+            if slot.detached {
+                slot.detached = false;
+                let link = slot.link.take().unwrap_or_default();
+                s.tag_free |= 1u32 << tag;
+                done(link, status == 0);
+                return;
+            }
             slot.status = status;
             slot.completed = true;
             if let Some(link) = slot.link.take() {

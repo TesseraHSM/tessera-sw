@@ -26,6 +26,7 @@
 //! | `copy_mem_to_host`   | Device           | Host                  |
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
@@ -44,6 +45,7 @@ use zeroize::Zeroize;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
+use crate::alloc::IO_SLOTS;
 
 /// Converts an [`HsmDmaAddr`] (the trait-level 64-bit address) into a
 /// [`GdmaBuf`] suitable for a host-side DMA operand.
@@ -344,14 +346,103 @@ impl UnoHsmPal {
         .map_err(ReplyError::Complete)
     }
 
+    /// [`HsmPal::finish_io`](tsra_fw_hsm_pal_traits::HsmPal::finish_io):
+    /// the response copy is linked to the CQE post as in
+    /// [`reply_linked`](Self::reply_linked), but no task awaits either:
+    /// [`wake_gdma`](Self::wake_gdma) starts the post (of `copy_failed`
+    /// if the copy failed), and [`wake_oic`](Self::wake_oic) drops the IO
+    /// once it is done. Declines an IO whose dirty SRAM is too large for
+    /// the CPU to scrub, as the drop cannot wait for the GDMA.
+    pub(crate) fn reply_detached(
+        &self,
+        io: UnoHsmIo,
+        resp: &DmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        prp: bool,
+        copy_failed: fn(&mut HsmCqe),
+    ) -> Result<(), UnoHsmIo> {
+        let index = usize::from(io.index());
+        if index >= IO_SLOTS || crate::alloc::io_slot_dma_dirty(self, io.index()).1 > CPU_SCRUB_MAX
+        {
+            return Err(io);
+        }
+        let Ok(ifc) = host_interface(io.pid()) else {
+            return Err(io);
+        };
+        let queue_id = io.queue_id() as u8;
+        self.detached.with(|d| {
+            d.copy_failed[index] = copy_failed;
+            d.queue[index] = queue_id;
+        });
+        let len = resp.len() as u32;
+        let link = u32::from(io.index()) | u32::from(queue_id) << 16;
+        match self.gdma.copy_mem_detached(
+            device_dma_buf(resp.as_ptr(), len),
+            MemInterface::Device,
+            len,
+            host_dma_buf(dst, dst2, prp),
+            ifc,
+            len,
+            link,
+        ) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(io),
+        }
+    }
+
     /// GDMA completion handler: wakes each finished copy's task, first
     /// posting the CQE of each reply whose response has just landed (see
-    /// [`reply_linked`](Self::reply_linked)).
+    /// [`reply_linked`](Self::reply_linked) and
+    /// [`reply_detached`](Self::reply_detached)).
     pub(crate) fn wake_gdma(&self, irq: u16) {
-        self.gdma.wake_with(irq, |link, waker| {
-            self.oic
-                .start_send(link as u16, (link >> 16) as u8, waker)
-                .ok()
+        self.gdma.wake_with(
+            irq,
+            |link, waker| {
+                self.oic
+                    .start_send(link as u16, (link >> 16) as u8, waker)
+                    .ok()
+            },
+            |link, copied| self.post_detached(link as u16, (link >> 16) as u8, copied),
+        );
+    }
+
+    /// The response copy of the detached reply of IO slot `index` is done:
+    /// post its CQE, first made to report the copy's failure if it failed.
+    /// A post that cannot start now (no OIC tag or ring room) is retried by
+    /// [`retry_detached`](Self::retry_detached).
+    fn post_detached(&self, index: u16, queue_id: u8, copied: bool) {
+        if !copied {
+            let mark = self.detached.with(|d| d.copy_failed[usize::from(index)]);
+            crate::io::update_cqe(index, mark);
+        }
+        if self.oic.send_detached(index, queue_id).is_err() {
+            self.detached.with(|d| d.unposted |= 1 << index);
+        }
+    }
+
+    /// Starts the detached posts [`post_detached`](Self::post_detached)
+    /// could not, now that the OIC may have room. One DTCM read when there
+    /// are none.
+    pub(crate) fn retry_detached(&self) {
+        let mut unposted = self.detached.with(|d| d.unposted);
+        while unposted != 0 {
+            let index = unposted.trailing_zeros() as u16;
+            unposted &= unposted - 1;
+            let queue_id = self.detached.with(|d| d.queue[usize::from(index)]);
+            if self.oic.send_detached(index, queue_id).is_ok() {
+                self.detached.with(|d| d.unposted &= !(1 << index));
+            }
+        }
+    }
+
+    /// OIC completion handler: wakes each finished post's task, and drops
+    /// each detached IO whose CQE is now posted, as
+    /// [`drop_io`](HsmIoController::drop_io) would.
+    pub(crate) fn wake_oic(&self, irq: u16) {
+        self.oic.wake_with(irq, |index, queue_id| {
+            self.scrub_io_slot_cpu(index);
+            self.iic.free_io(index, u16::from(queue_id));
         });
     }
 
@@ -436,6 +527,23 @@ impl UnoHsmPal {
 
         // Both heaps are now zero up to their peaks; drop the high-water marks
         // so the next scrub covers only writes made after this point.
+        crate::alloc::clear_io_peak(self, io_index);
+    }
+}
+
+impl UnoHsmPal {
+    /// [`scrub_io_slot`](Self::scrub_io_slot) all by the CPU, so nothing to
+    /// await; meant for a slot whose dirty SRAM is at most
+    /// [`CPU_SCRUB_MAX`].
+    fn scrub_io_slot_cpu(&self, io_index: u16) {
+        let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, io_index);
+        // SAFETY: `(dma_ptr, dma_len)` is a prefix of the slot's SRAM
+        // buffer, valid for writes over its whole length.
+        unsafe { cpu_zeroize(dma_ptr, dma_len) };
+        let (nd_ptr, nd_len) = crate::alloc::io_slot_nondma_dirty(self, io_index);
+        // SAFETY: `(nd_ptr, nd_len)` is a prefix of the slot's DTCM buffer,
+        // valid for writes over its whole length.
+        unsafe { cpu_zeroize(nd_ptr, nd_len) };
         crate::alloc::clear_io_peak(self, io_index);
     }
 }

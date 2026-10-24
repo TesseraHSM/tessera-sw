@@ -98,6 +98,22 @@ impl<P: HsmPal> Hsm<P> {
         let (handler_ok, cqe_ok) = match op_result {
             Ok(reply) => {
                 Self::finalize_cqe(&mut io, Ok(reply.status));
+                // With nothing to walk once the completion is posted, the
+                // platform can finish the IO on its own, freeing this task
+                // for the slot's next IO now.
+                if undo.as_ref().is_none_or(UndoLog::is_clean) {
+                    match self.pal().finish_io(
+                        io,
+                        reply.resp,
+                        reply.dst,
+                        reply.dst2,
+                        true,
+                        Self::mark_copy_failed,
+                    ) {
+                        Ok(()) => return,
+                        Err(back) => io = back,
+                    }
+                }
                 match self
                     .pal()
                     .reply_io(&mut io, reply.resp, reply.dst, reply.dst2, true)
@@ -242,6 +258,16 @@ impl<P: HsmPal> Hsm<P> {
                 error!("core", e.err, "handle_op failed");
             }
         }
+    }
+
+    /// Turns a CQE holding a successful completion into the one
+    /// [`finalize_cqe`](Self::finalize_cqe) leaves if the response copy
+    /// then fails.
+    fn mark_copy_failed(cqe: &mut HsmCqe) {
+        let mut cqe = Cqe::from(cqe);
+        cqe.set_dw0(CqeDw0::from(0));
+        cqe.set_dw1(CqeDw1::from(0));
+        cqe.set_status(HostStatus::DMA_TXN_ERROR);
     }
 
     /// Posts `io`'s CQE with no response copy; `true` once it is posted.

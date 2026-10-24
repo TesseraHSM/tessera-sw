@@ -30,6 +30,9 @@ struct TagSlot {
     waker: WakerRegistration,
     completed: bool,
     status: u8,
+    /// The IO slot index and queue of a [detached](OicDriver::send_detached)
+    /// post, which no task awaits.
+    detached: Option<(u16, u8)>,
 }
 
 struct OicState<const DEPTH: usize> {
@@ -125,6 +128,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             waker: WakerRegistration::new(),
             completed: false,
             status: 0,
+            detached: None,
         });
 
         let tag_free = if DEPTH >= 32 {
@@ -319,6 +323,20 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         Ok(tag)
     }
 
+    /// Post the completion of IO `index` for `queue_id`, which no task will
+    /// await: once the post is done, [`wake_with`](Self::wake_with) hands
+    /// `index` and `queue_id` to its `finished`.
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send).
+    pub fn send_detached(&self, index: u16, queue_id: u8) -> HsmResult<()> {
+        let tag = self.submit(index, queue_id)?;
+        self.state
+            .with(|s| s.tags[tag as usize].detached = Some((index, queue_id)));
+        Ok(())
+    }
+
     /// Wait for a send started by [`start_send`](Self::start_send).
     pub fn wait_send(&self, tag: u16) -> impl core::future::Future<Output = HsmResult<()>> + '_ {
         self.wait_completion(tag)
@@ -326,6 +344,21 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
     /// Drain all available OCQ entries and wake their awaiters.
     pub fn wake(&self, irq: u16) {
+        self.wake_with(irq, |_, _| {});
+    }
+
+    /// [`wake`](Self::wake), handing the IO slot index and queue of each
+    /// finished [detached](Self::send_detached) post to `finished`, once
+    /// the driver's own state is updated.
+    pub fn wake_with(&self, irq: u16, mut finished: impl FnMut(u16, u8)) {
+        let mut done = [(0u16, 0u8); DEPTH];
+        let mut n = 0;
+        let mut note = |io: Option<(u16, u8)>| {
+            if let (Some(io), Some(slot)) = (io, done.get_mut(n)) {
+                *slot = io;
+                n += 1;
+            }
+        };
         self.state.with(|s| {
             let tail = unsafe { self.ocq_tail_shadow.read_volatile() } as u16;
 
@@ -338,12 +371,12 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 if (s.ocq_head + 1) & Self::MASK != tail && ocq_slot + 1 < DEPTH {
                     // SAFETY: `entry` and the entry after it lie in the ring.
                     let (first, second) = unsafe { read_tag_pair(entry) };
-                    Self::complete(s, first);
-                    Self::complete(s, second);
+                    note(Self::complete(s, first));
+                    note(Self::complete(s, second));
                 } else {
                     // SAFETY: `entry` lies in the ring.
                     let tag = unsafe { &*entry }.tag.get();
-                    Self::complete(s, tag);
+                    note(Self::complete(s, tag));
                 }
             }
 
@@ -352,11 +385,15 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 .write(OCQ_CHANNEL_HEAD::HEAD.val(s.ocq_head.into()));
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
         });
+        for &(index, queue_id) in &done[..n] {
+            finished(index, queue_id);
+        }
     }
 
     /// Consume the OCQ entry at the head, whose tag word is `word`: record
-    /// the send's outcome and wake the task awaiting it.
-    fn complete(s: &mut OicState<DEPTH>, word: u32) {
+    /// the send's outcome and wake the task awaiting it, or, for a detached
+    /// send, free its tag and return its IO.
+    fn complete(s: &mut OicState<DEPTH>, word: u32) -> Option<(u16, u8)> {
         let word = LocalRegisterCopy::<u32, OCQ_TAG::Register>::new(word);
         let tag = word.read(OCQ_TAG::TAG) as u16;
         let status = word.read(OCQ_TAG::STATUS) as u8;
@@ -365,10 +402,15 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
         if (tag as usize) < DEPTH {
             let slot = &mut s.tags[tag as usize];
+            if let Some(io) = slot.detached.take() {
+                s.tag_free |= 1u32 << tag;
+                return Some(io);
+            }
             slot.status = status;
             slot.completed = true;
             slot.waker.wake();
         }
+        None
     }
 }
 

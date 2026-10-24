@@ -31,6 +31,7 @@
 use core::cell::Cell;
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -39,6 +40,7 @@ use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::ReplyError;
+use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
 use tsra_fw_uno_drivers_bcp::BcpDriver;
@@ -90,6 +92,7 @@ use embassy_futures::select::select;
 
 use crate::UnoHsmIo;
 use crate::alloc::IO_ALLOC_INIT;
+use crate::alloc::IO_SLOTS;
 use crate::alloc::IoAllocTable;
 use crate::ipc::*;
 
@@ -166,7 +169,7 @@ const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     // driver wake handler — the engine fires exactly one of them per
     // command completion.
     (Interrupt::IIC_ICQ as u16, |pal, irq| pal.iic.wake(irq)),
-    (Interrupt::OIC_OCQ as u16, |pal, irq| pal.oic.wake(irq)),
+    (Interrupt::OIC_OCQ as u16, |pal, irq| pal.wake_oic(irq)),
     (Interrupt::AES_DONE as u16, |pal, _| pal.aes.wake()),
     (Interrupt::SHA_DONE as u16, |pal, _| pal.sha.wake()),
     (Interrupt::AES_ERROR as u16, |pal, _| pal.aes.wake()),
@@ -323,7 +326,23 @@ pub struct UnoHsmPal {
     /// it; initialise this table saturated (any value `>= ` capacity) to make
     /// the first scrub cover the whole slot instead.
     pub(crate) io_peak: IoAllocTable,
+
+    /// The IOs this platform finishes on its own (see
+    /// [`reply_detached`](Self::reply_detached)).
+    pub(crate) detached: SingleCell<Detached>,
 }
+
+/// What finishing detached IOs needs (see
+/// [`UnoHsmPal::reply_detached`]), per IO slot.
+pub(crate) struct Detached {
+    /// Makes the CQE report a failed response copy.
+    pub(crate) copy_failed: [fn(&mut HsmCqe); IO_SLOTS],
+    /// The queue to post the CQE to.
+    pub(crate) queue: [u8; IO_SLOTS],
+    /// Slots whose post could not start yet, by bit.
+    pub(crate) unposted: u64,
+}
+const _: () = assert!(IO_SLOTS <= 64);
 
 // SAFETY: UnoHsmPal is only accessed from a single-threaded Embassy
 // executor on a single-core Cortex-M7 with no preemptive ISRs.  The
@@ -413,6 +432,11 @@ impl Default for UnoHsmPal {
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
             io_alloc: IO_ALLOC_INIT,
             io_peak: IO_ALLOC_INIT,
+            detached: SingleCell::new(Detached {
+                copy_failed: [|_| {}; IO_SLOTS],
+                queue: [0; IO_SLOTS],
+                unposted: 0,
+            }),
         }
     }
 }
@@ -581,6 +605,7 @@ impl UnoHsmPal {
 
         // The BCP raises no CP1 interrupt; reap its completions every pass.
         self.bcp.wake();
+        self.retry_detached();
     }
 
     /// Handles PKA engine completions now, rather than at the run loop's
@@ -877,6 +902,20 @@ impl HsmPal for UnoHsmPal {
         prp: bool,
     ) -> Result<(), ReplyError> {
         self.reply_linked(io, resp, dst, dst2, prp).await
+    }
+
+    /// Finishes the IO from the GDMA and OIC completion handlers; see
+    /// [`reply_detached`](UnoHsmPal::reply_detached).
+    fn finish_io(
+        &self,
+        io: UnoHsmIo,
+        resp: &DmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        prp: bool,
+        copy_failed: fn(&mut HsmCqe),
+    ) -> Result<(), UnoHsmIo> {
+        self.reply_detached(io, resp, dst, dst2, prp, copy_failed)
     }
 
     /// No-op — the emulated SoC does not require teardown.
