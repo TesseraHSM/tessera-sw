@@ -41,13 +41,38 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     req_buf: &mut DmaBuf,
     head: &RequestHead,
 ) -> HsmResult<&'p DmaBuf> {
-    let req = TborTestAesGcmReq::decode_with(req_buf, head)?;
-    let encrypt = match req.op() {
+    // The mutable view reads every field's TOC word from the parse's copy,
+    // not from the message, which sits in uncached DMA memory; keep where
+    // each field lies, and slice the request again once it is dropped.
+    let base = req_buf.as_ptr() as usize;
+    let at = |field: &DmaBuf| {
+        let start = field.as_ptr() as usize - base;
+        start..start + field.len()
+    };
+    let (op, key, iv, aad, data, tag) = {
+        let req = TborTestAesGcmReq::decode_mut_with(req_buf, head)?;
+        (
+            req.op,
+            at(req.key),
+            at(req.iv),
+            at(req.aad),
+            at(req.data),
+            at(req.tag),
+        )
+    };
+    let req_buf: &DmaBuf = req_buf;
+    let encrypt = match AesOp(op) {
         AesOp::Encrypt => true,
         AesOp::Decrypt => false,
         _ => return Err(HsmError::InvalidArg),
     };
-    let (key, iv, aad, data, tag) = (req.key(), req.iv(), req.aad(), req.data(), req.tag());
+    let (key, iv, aad, data, tag) = (
+        &req_buf[key],
+        &req_buf[iv],
+        &req_buf[aad],
+        &req_buf[data],
+        &req_buf[tag],
+    );
 
     if let Some(resp) = direct(pal, io, req_buf, encrypt, key, iv, aad, data, tag).await? {
         return Ok(resp);

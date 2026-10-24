@@ -50,6 +50,10 @@ pub const TEST_AES_GCM_AAD_MAX_LEN: usize = 256;
 pub const TEST_AES_GCM_DATA_MAX_LEN: usize = 2048;
 
 /// `TestAesGcm` request schema.
+///
+/// `data` is `#[tbor(mutable)]` so the request has a `decode_mut`, whose
+/// view takes every field from the TOC its parse read once, where the
+/// shared view's accessors read each field's TOC word from the message.
 #[tbor(opcode = 0xF0)]
 pub struct TborTestAesGcmReq<'a> {
     /// The direction, carried as the 1-byte [`AesOp`] discriminant.
@@ -69,7 +73,7 @@ pub struct TborTestAesGcmReq<'a> {
     pub aad: &'a [u8],
 
     /// Plaintext (encrypt) or ciphertext (decrypt), up to 2048 bytes.
-    #[tbor(buffer, max_len = 2048)]
+    #[tbor(buffer, max_len = 2048, mutable)]
     pub data: &'a [u8],
 
     /// Expected tag for decrypt; ignored on encrypt.
