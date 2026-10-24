@@ -24,6 +24,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use zerocopy::FromBytes;
 
 use crate::aead::format::MaskedKeyMetadata;
+use crate::aead::format::META_FIELDS_LEN;
 use crate::aead::format::META_LEN;
 
 /// Borrowed view over a successfully unmasked blob.
@@ -139,16 +140,22 @@ async fn unmask_with_header<'a>(
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
 
-    // Parse and validate a copy of the 192 B AAD region: it sits in
-    // uncached DMA memory, which one burst read fetches far faster than
-    // validation reads it field by field. `ref_from_bytes` never panics;
-    // the length check above guarantees a 192 B slice.
+    // Parse and validate the fields ahead of the label from a copy of the
+    // AAD's first `META_FIELDS_LEN` bytes: the AAD sits in uncached DMA
+    // memory, which one burst read fetches far faster than validation
+    // reads it field by field. The rest of the copy stays zero, and the
+    // label padding and reserved tail are not checked: the tag has just
+    // authenticated every byte of the AAD, so `new_v1` built it, zeroing
+    // them. (`peek_metadata`, on unauthenticated bytes, still checks.)
+    // Reading all 192 bytes out of uncached memory for that check cost
+    // ~5% of an AES-CBC command. `ref_from_bytes` never panics; the copy
+    // is `META_LEN` bytes.
     let mut copy = MetaCopy([0; META_LEN]);
-    env.aad.copy_to_slice(&mut copy.0);
+    copy_from_uncached(&mut copy.0[..META_FIELDS_LEN], &env.aad[..META_FIELDS_LEN]);
     let metadata =
         MaskedKeyMetadata::ref_from_bytes(&copy.0).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
 
-    metadata.validate_v1()?;
+    metadata.validate_v1_fields()?;
 
     // The label is borrowed from the blob, not the copy. validate_v1
     // guarantees key_label_len ≤ KEY_LABEL_MAX, so this range cannot fail.

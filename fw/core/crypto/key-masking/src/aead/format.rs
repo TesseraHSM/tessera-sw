@@ -233,15 +233,28 @@ impl MaskedKeyMetadata {
     /// for future use, and the platform-identity bindings are policy
     /// fields for the caller to compare against current PAL values.
     pub(crate) fn validate_v1(&self) -> HsmResult<()> {
-        let n = self.key_label_len as usize;
+        self.validate_v1_fields()?;
         // Pad bytes after the label MUST be zero — prevents callers
         // from smuggling unbound-looking data through the slack — and so
         // must the reserved tail. The two are adjacent, so one pass over
         // `key_label[n..] ‖ _reserved` checks both.
+        if !all_zero(&self.as_bytes()[LABEL_OFF + self.key_label_len as usize..]) {
+            return Err(HsmError::MaskedKeyDecodeFailed);
+        }
+        Ok(())
+    }
+
+    /// [`validate_v1`](Self::validate_v1) save its zero checks of the label
+    /// padding and reserved tail, so it reads only the [`META_FIELDS_LEN`]
+    /// bytes ahead of the label.
+    ///
+    /// Meant for a record whose every byte an AEAD tag has authenticated,
+    /// which [`new_v1`](Self::new_v1) therefore produced, zeroing those
+    /// bytes: there the checks could only catch an encoder bug.
+    pub(crate) fn validate_v1_fields(&self) -> HsmResult<()> {
         if self.magic != META_MAGIC
             || self.version.get() != META_VERSION_V1
-            || n > KEY_LABEL_MAX
-            || !all_zero(&self.as_bytes()[LABEL_OFF + n..])
+            || self.key_label_len as usize > KEY_LABEL_MAX
         {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
@@ -251,6 +264,11 @@ impl MaskedKeyMetadata {
 
 /// Offset of `key_label`, which the reserved tail directly follows.
 const LABEL_OFF: usize = core::mem::offset_of!(MaskedKeyMetadata, key_label);
+
+/// Bytes of a [`MaskedKeyMetadata`] that hold its fields ahead of the label,
+/// rounded up to one 32-byte burst.
+pub(crate) const META_FIELDS_LEN: usize = 32;
+const _: () = assert!(LABEL_OFF <= META_FIELDS_LEN && META_FIELDS_LEN <= META_LEN);
 const _: () = assert!(
     core::mem::offset_of!(MaskedKeyMetadata, _reserved) == LABEL_OFF + KEY_LABEL_MAX
         && LABEL_OFF + KEY_LABEL_MAX + RESERVED_LEN == META_LEN
