@@ -449,7 +449,7 @@ fn gen_field_write(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream
 /// arm minus the `copy_from_slice`.  Only emitted for `#[tbor(mutable)]`
 /// fields, which the schema parser guarantees are non-optional buffer /
 /// sealed_key fields.
-fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream {
+fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout, zero: bool) -> TokenStream {
     let f = &schema.fields[i];
     let toc_type_id = f.toc_type_id;
     let field_toc_idx = effective_toc_idx(i, layout, &schema.fields);
@@ -508,6 +508,22 @@ fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStre
         quote! {}
     };
 
+    // Zero the reserved region: a `<field>_reserve(len)` caller fills it
+    // separately (e.g. `decode_mut`), so a partially-filled slot — or an
+    // early return on an error path after reserving — must not leak prior
+    // DMA-arena contents into the response. `<field>_reserve_range_overwrite`
+    // leaves it to its caller, which overwrites all of it or discards the
+    // message.
+    let zero_code = if zero {
+        quote! {
+            for __b in &mut self.buf[DATA_START + off..end] {
+                *__b = 0;
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         #pad_write
         let off = self.data_offset;
@@ -519,13 +535,7 @@ fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStre
         if self.data_offset + len > tsra_fw_ddi_tbor::MAX_DATA_SIZE {
             return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
         }
-        // Zero the reserved region: a `<field>_reserve(len)` caller fills it
-        // separately (e.g. `decode_mut`), so a partially-filled slot — or an
-        // early return on an error path after reserving — must not leak prior
-        // DMA-arena contents into the response.
-        for __b in &mut self.buf[DATA_START + off..end] {
-            *__b = 0;
-        }
+        #zero_code
         self.data_offset += len;
         let word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(#toc_type_id, len, off);
         tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
@@ -619,7 +629,10 @@ fn gen_state_impls(
                 if f.mutable {
                     let reserve_name = format_ident!("{}_reserve", field_name);
                     let reserve_range_name = format_ident!("{}_reserve_range", field_name);
-                    let reserve_code = gen_field_reserve(j, schema, layout);
+                    let reserve_overwrite_name =
+                        format_ident!("{}_reserve_range_overwrite", field_name);
+                    let reserve_code = gen_field_reserve(j, schema, layout, true);
+                    let reserve_overwrite_code = gen_field_reserve(j, schema, layout, false);
                     methods.push(quote! {
                         /// Reserve this field's `len` data bytes without
                         /// copying; fill the region in place afterwards via
@@ -644,6 +657,21 @@ fn gen_state_impls(
                             const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
                             #skip_nones
                             #reserve_code
+                            let range = DATA_START + self.data_offset - len..DATA_START + self.data_offset;
+                            Ok((#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData }, range))
+                        }
+
+                        /// Like the range-returning reserve setter, but
+                        /// leaves the region as it is rather than zeroing
+                        /// it: for a caller that overwrites every byte of
+                        /// the range, or else discards the message, so no
+                        /// prior contents can reach the peer.
+                        pub fn #reserve_overwrite_name(mut self, len: usize) -> Result<(#enc_name<'a, #target_state>, core::ops::Range<usize>), tsra_fw_hsm_pal_traits::HsmError> {
+                            const HEADER_LEN: usize = #header_len_tokens;
+                            const TOC_COUNT: usize = #toc_count_expr;
+                            const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
+                            #skip_nones
+                            #reserve_overwrite_code
                             let range = DATA_START + self.data_offset - len..DATA_START + self.data_offset;
                             Ok((#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData }, range))
                         }

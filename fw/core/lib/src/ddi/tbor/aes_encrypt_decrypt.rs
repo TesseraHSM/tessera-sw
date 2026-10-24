@@ -158,10 +158,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let head = peek_head(req.masked_key)?;
 
     // Build the response with the `msg` / `iv` slots reserved (sized but
-    // unwritten) — no data copy at encode time.
+    // unwritten) — no data copy at encode time. The AES engine writes the
+    // whole `msg` slot, or the request fails and the response is dropped,
+    // so that slot need not be zeroed first.
     let (resp, (out_msg, out_iv)) = pal.dma_alloc_var_with(io, |buf| {
-        let (enc, out_msg) =
-            TborAesEncryptDecryptResp::encode(buf, 0, false)?.msg_reserve_range(msg_len)?;
+        let (enc, out_msg) = TborAesEncryptDecryptResp::encode(buf, 0, false)?
+            .msg_reserve_range_overwrite(msg_len)?;
         let (enc, out_iv) = enc.iv_reserve_range(AES_BLOCK_LEN)?;
         Ok((enc.finish().as_bytes().len(), (out_msg, out_iv)))
     })?;

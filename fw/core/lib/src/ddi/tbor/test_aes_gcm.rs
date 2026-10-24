@@ -157,13 +157,15 @@ async fn direct<'p, P: HsmPal>(
     }
     let src = &req_buf[src_off..src_off + pad + text_len];
 
+    // The engine writes the whole data slot, or the request fails and the
+    // response is dropped, so the slot need not be zeroed first.
     let (raw, (data, tag_slot)) = pal.dma_alloc_var_with(io, |buf| {
         let (enc, data) = TborTestAesGcmResp::encode(
             buf.get_mut(pad..).ok_or(HsmError::NotEnoughSpace)?,
             0,
             false,
         )?
-        .data_reserve_range(text_len)?;
+        .data_reserve_range_overwrite(text_len)?;
         let (enc, tag) = enc.tag_reserve_range(TEST_AES_GCM_TAG_LEN)?;
         Ok((pad + enc.finish().as_bytes().len(), (data, tag)))
     })?;
