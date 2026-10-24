@@ -9,6 +9,7 @@ use core::task::Waker;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
+use tock_registers::LocalRegisterCopy;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
@@ -423,33 +424,19 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
 
             while s.cq_head != tail {
                 let cq_slot = (s.cq_head & Self::MASK) as usize;
-                let cq_entry = unsafe { &*self.cq_ring.add(cq_slot) };
-
-                // One read of the (uncached) status word for both fields.
-                let st = cq_entry.status.extract();
-                let tag = st.read(GDMA_CQ_STATUS::TAG) as u16;
-                let status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
-                    0u8
+                // SAFETY: `cq_slot` is within the ring.
+                let entry = unsafe { self.cq_ring.add(cq_slot) };
+                // When the next entry is posted too and follows this one in
+                // memory, one burst reads both status words.
+                if (s.cq_head + 1) & Self::MASK != tail && cq_slot + 1 < DEPTH {
+                    // SAFETY: `entry` and the entry after it lie in the ring.
+                    let (first, second) = unsafe { read_status_pair(entry) };
+                    Self::complete(s, first, &mut start);
+                    Self::complete(s, second, &mut start);
                 } else {
-                    1u8
-                };
-
-                s.cq_head = (s.cq_head + 1) & Self::MASK;
-
-                if (tag as usize) < DEPTH {
-                    let slot = &mut s.tags[tag as usize];
-                    slot.status = status;
-                    slot.completed = true;
-                    if let Some(link) = slot.link.take() {
-                        if status == 0 {
-                            slot.linked = start(link, slot.waker.as_ref());
-                        }
-                    }
-                    if slot.linked.is_some() {
-                        slot.waker = None;
-                    } else if let Some(waker) = slot.waker.take() {
-                        waker.wake();
-                    }
+                    // SAFETY: `entry` lies in the ring.
+                    let status = unsafe { &*entry }.status.get();
+                    Self::complete(s, status, &mut start);
                 }
             }
 
@@ -458,5 +445,77 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 .write(CQ_CHANNEL_HEAD::HEAD.val(s.cq_head.into()));
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
         });
+    }
+
+    /// Consume the CQ entry at the head, whose status word is `status`:
+    /// record the copy's outcome, start its follow-on through `start` (see
+    /// [`wake_with`](Self::wake_with)) and wake the task awaiting it.
+    fn complete(
+        s: &mut GdmaState<DEPTH>,
+        status: u32,
+        start: &mut impl FnMut(u32, Option<&Waker>) -> Option<u16>,
+    ) {
+        let st = LocalRegisterCopy::<u32, GDMA_CQ_STATUS::Register>::new(status);
+        let tag = st.read(GDMA_CQ_STATUS::TAG) as u16;
+        let status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
+            0u8
+        } else {
+            1u8
+        };
+
+        s.cq_head = (s.cq_head + 1) & Self::MASK;
+
+        if (tag as usize) < DEPTH {
+            let slot = &mut s.tags[tag as usize];
+            slot.status = status;
+            slot.completed = true;
+            if let Some(link) = slot.link.take() {
+                if status == 0 {
+                    slot.linked = start(link, slot.waker.as_ref());
+                }
+            }
+            if slot.linked.is_some() {
+                slot.waker = None;
+            } else if let Some(waker) = slot.waker.take() {
+                waker.wake();
+            }
+        }
+    }
+}
+
+/// Reads the status words of the CQ entry at `p` and the one after it with
+/// one five-word burst: the ring sits in memory CP1 reads uncached, where
+/// each load costs tens of cycles whatever its width but a burst costs
+/// little more than one.
+///
+/// # Safety
+///
+/// `p` and `p.add(1)` must point to CQ entries.
+#[inline(always)]
+unsafe fn read_status_pair(p: *const GdmaCqEntry) -> (u32, u32) {
+    const _ASSERT_ENTRY_WORDS: () = assert!(core::mem::size_of::<GdmaCqEntry>() == 16);
+    #[cfg(target_arch = "arm")]
+    {
+        let (first, second): (u32, u32);
+        // SAFETY: per the function contract; a CQ entry is four words, so
+        // the next entry's status is the fifth word.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r0, r1, r2, r3, r4}}",
+                p = in(reg) p,
+                out("r0") first,
+                out("r1") _,
+                out("r2") _,
+                out("r3") _,
+                out("r4") second,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (first, second)
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        // SAFETY: per the function contract.
+        unsafe { ((*p).status.get(), (*p.add(1)).status.get()) }
     }
 }

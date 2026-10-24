@@ -9,6 +9,7 @@ use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
+use tock_registers::LocalRegisterCopy;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
@@ -330,20 +331,19 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
             while s.ocq_head != tail {
                 let ocq_slot = (s.ocq_head & Self::MASK) as usize;
-                let ocq_entry = unsafe { &*self.ocq_ring.add(ocq_slot) };
-
-                // One read of the (uncached) tag word for both fields.
-                let word = ocq_entry.tag.extract();
-                let tag = word.read(OCQ_TAG::TAG) as u16;
-                let status = word.read(OCQ_TAG::STATUS) as u8;
-
-                s.ocq_head = (s.ocq_head + 1) & Self::MASK;
-
-                if (tag as usize) < DEPTH {
-                    let slot = &mut s.tags[tag as usize];
-                    slot.status = status;
-                    slot.completed = true;
-                    slot.waker.wake();
+                // SAFETY: `ocq_slot` is within the ring.
+                let entry = unsafe { self.ocq_ring.add(ocq_slot) };
+                // When the next entry is posted too and follows this one in
+                // memory, one burst reads both tag words.
+                if (s.ocq_head + 1) & Self::MASK != tail && ocq_slot + 1 < DEPTH {
+                    // SAFETY: `entry` and the entry after it lie in the ring.
+                    let (first, second) = unsafe { read_tag_pair(entry) };
+                    Self::complete(s, first);
+                    Self::complete(s, second);
+                } else {
+                    // SAFETY: `entry` lies in the ring.
+                    let tag = unsafe { &*entry }.tag.get();
+                    Self::complete(s, tag);
                 }
             }
 
@@ -352,5 +352,60 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 .write(OCQ_CHANNEL_HEAD::HEAD.val(s.ocq_head.into()));
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
         });
+    }
+
+    /// Consume the OCQ entry at the head, whose tag word is `word`: record
+    /// the send's outcome and wake the task awaiting it.
+    fn complete(s: &mut OicState<DEPTH>, word: u32) {
+        let word = LocalRegisterCopy::<u32, OCQ_TAG::Register>::new(word);
+        let tag = word.read(OCQ_TAG::TAG) as u16;
+        let status = word.read(OCQ_TAG::STATUS) as u8;
+
+        s.ocq_head = (s.ocq_head + 1) & Self::MASK;
+
+        if (tag as usize) < DEPTH {
+            let slot = &mut s.tags[tag as usize];
+            slot.status = status;
+            slot.completed = true;
+            slot.waker.wake();
+        }
+    }
+}
+
+/// Reads the tag words of the OCQ entry at `p` and the one after it with
+/// one five-word burst: the ring sits in memory CP1 reads uncached, where
+/// each load costs tens of cycles whatever its width but a burst costs
+/// little more than one.
+///
+/// # Safety
+///
+/// `p` and `p.add(1)` must point to OCQ entries.
+#[inline(always)]
+unsafe fn read_tag_pair(p: *const OcqEntry) -> (u32, u32) {
+    const _ASSERT_ENTRY_WORDS: () = assert!(core::mem::size_of::<OcqEntry>() == 16);
+    #[cfg(target_arch = "arm")]
+    {
+        let (first, second): (u32, u32);
+        // SAFETY: per the function contract; an OCQ entry is four words
+        // with the tag last, so the burst from this entry's tag word ends
+        // at the next entry's.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r0, r1, r2, r3, r4}}",
+                p = in(reg) core::ptr::addr_of!((*p).tag),
+                out("r0") first,
+                out("r1") _,
+                out("r2") _,
+                out("r3") _,
+                out("r4") second,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (first, second)
+    }
+    #[cfg(not(target_arch = "arm"))]
+    {
+        // SAFETY: per the function contract.
+        unsafe { ((*p).tag.get(), (*p.add(1)).tag.get()) }
     }
 }
