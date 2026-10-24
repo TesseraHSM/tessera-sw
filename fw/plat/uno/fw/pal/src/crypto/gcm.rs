@@ -55,6 +55,7 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::copy_from_uncached;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
 use tsra_fw_uno_drivers_bcp::BCP_ADDR_ALIGN;
@@ -84,6 +85,14 @@ pub const GCM_TAG_LEN: usize = 16;
 const GCM_AAD_PAD: usize = 32;
 
 type Block = [u8; AES_BLOCK_SIZE];
+
+/// `block`'s bytes, read with one burst: a caller's tag may sit in DMA
+/// memory, which the CPU reads uncached.
+fn load_block(block: &Block) -> Block {
+    let mut copy = AlignedBlock([0; AES_BLOCK_SIZE]);
+    copy_from_uncached(&mut copy.0, block);
+    copy.0
+}
 
 /// A word-aligned block, which DMA memory can be burst-read into.
 #[repr(C, align(4))]
@@ -420,7 +429,7 @@ impl UnoHsmPal {
         // no scratch, no hash subkey and no tag correction.
         if !fix && tail == 0 && bufs.aligned() {
             let engine_tag = match dir {
-                Dir::Decrypt(t) => *t,
+                Dir::Decrypt(t) => load_block(t),
                 Dir::Encrypt => [0; AES_BLOCK_SIZE],
             };
             let done = self
@@ -459,7 +468,7 @@ impl UnoHsmPal {
                     g.update(&len_fix);
                     xor(t, &g.finish())
                 }
-                (Dir::Decrypt(t), None) => *t,
+                (Dir::Decrypt(t), None) => load_block(t),
                 (Dir::Encrypt, _) => [0; AES_BLOCK_SIZE],
             };
             let req = |data| GcmRequest {

@@ -529,9 +529,7 @@ fn reap(s: &mut BcpState, pi: u16) {
     cortex_m::asm::dmb();
 
     while s.cq_ci != pi {
-        let entry = &GSRAM.bcp_cq[s.cq_ci as usize];
-        let dw0 = CqeDw0::from(entry.dw0.get());
-        let dw1 = CqeDw1::from(entry.dw1.get());
+        let (dw0, dw1) = read_cqe(s.cq_ci as usize);
         s.cq_ci = (s.cq_ci + 1) & MASK;
 
         let id = dw0.cmd_id() as usize;
@@ -725,7 +723,12 @@ fn dfl_ptr(id: usize) -> *mut u32 {
 
 /// Pack bytes into little-endian words at `dw[start..]`.
 fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
-    for (i, chunk) in bytes.chunks(4).enumerate() {
+    // The bytes (an IV or tag) may sit in DMA memory, which the CPU reads
+    // uncached: take them in one burst.
+    let mut copy = Aligned([0; BCP_TAG_LEN]);
+    let copy = &mut copy.0[..bytes.len()];
+    copy_from_uncached(copy, bytes);
+    for (i, chunk) in copy.chunks(4).enumerate() {
         let mut word = [0u8; 4];
         word[..chunk.len()].copy_from_slice(chunk);
         dw[start + i] = u32::from_le_bytes(word);
@@ -767,6 +770,24 @@ fn write_dfl(id: usize, req: &GcmRequest<'_>) {
         // `DFL_DWORDS` words long, and only this command uses it.
         unsafe { p.add(i).write_volatile(*word) };
     }
+}
+
+/// Read the completion-ring entry at `ci` with one burst: the ring sits in
+/// memory the CPU reads uncached.
+fn read_cqe(ci: usize) -> (CqeDw0, CqeDw1) {
+    let entry = &GSRAM.bcp_cq[ci];
+    // SAFETY: a CQE is two words of GSRAM, written by the engine before
+    // the producer index that got us here.
+    let src = unsafe {
+        core::slice::from_raw_parts(entry as *const _ as *const u8, 2 * size_of::<u32>())
+    };
+    let mut copy = Aligned([0; 8]);
+    copy_from_uncached(&mut copy.0, src);
+    let [a, b, c, d, e, f, g, h] = copy.0;
+    (
+        CqeDw0::from(u32::from_le_bytes([a, b, c, d])),
+        CqeDw1::from(u32::from_le_bytes([e, f, g, h])),
+    )
 }
 
 /// Read the tag the engine wrote back into the DFL element of command `id`.
