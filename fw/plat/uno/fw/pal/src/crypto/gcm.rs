@@ -421,8 +421,10 @@ impl UnoHsmPal {
         if pad + rounded > BCP_MAX_SRC_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let len_fix = xor(&len_block(aad_len, text_len), &len_block(pad, rounded));
-        let fix = len_fix != [0; AES_BLOCK_SIZE];
+        // The engine's length block counts the padded AAD and the rounded
+        // text; GCM's counts what was given. The tag needs correcting by
+        // their difference when they differ.
+        let fix = pad != aad_len || rounded != text_len;
 
         // Whole blocks, no length-block fix and buffers the engine can use as
         // they are (most masked keys and bulk GCM): one engine command, with
@@ -454,6 +456,7 @@ impl UnoHsmPal {
             return result;
         }
 
+        let len_fix = xor(&len_block(aad_len, text_len), &len_block(pad, rounded));
         self.alloc_scoped_async(io, async |scope| {
             let h = if fix {
                 Some(self.hash_subkey(key, scope).await?)

@@ -764,12 +764,14 @@ fn write_dfl(id: usize, req: &GcmRequest<'_>) {
     put_bytes(&mut dw, 23, req.iv);
     dw[26] = req.aad_len as u32;
 
-    let p = dfl_ptr(id);
-    for (i, word) in dw.iter().enumerate() {
-        // SAFETY: `p` is DFL element `id` of the GSRAM ring (`id < DEPTH`),
-        // `DFL_DWORDS` words long, and only this command uses it.
-        unsafe { p.add(i).write_volatile(*word) };
-    }
+    // Burst-write the element: the ring sits in memory the CPU writes
+    // uncached, one bus transaction per store, while a store-multiple
+    // writes several words in one.
+    // SAFETY: `dfl_ptr(id)` is DFL element `id` of the GSRAM ring
+    // (`id < DEPTH`), `DFL_DWORDS` words long and word-aligned, and only
+    // this command uses it.
+    let dst = unsafe { core::slice::from_raw_parts_mut(dfl_ptr(id), DFL_DWORDS) };
+    tsra_fw_bulk_copy::copy_slice(dst, &dw);
 }
 
 /// Read the completion-ring entry at `ci` with one burst: the ring sits in
