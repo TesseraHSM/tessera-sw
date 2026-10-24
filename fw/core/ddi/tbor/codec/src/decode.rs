@@ -14,8 +14,10 @@ use crate::toc::*;
 
 // ── TOC cache ──────────────────────────────────────────────────────────
 
-/// TOC entries kept in a [`TocCache`]: every hot message has fewer.
-const TOC_CACHED_ENTRIES: usize = 8;
+/// TOC entries kept in a [`TocCache`] after the longer (response) header,
+/// so the cache is one eight-word burst; a request, with its shorter
+/// header, gets one more. Every hot message has no more.
+const TOC_CACHED_ENTRIES: usize = 6;
 
 /// Bytes a [`TocCache`] holds: the longer (response) header and
 /// [`TOC_CACHED_ENTRIES`] entries.

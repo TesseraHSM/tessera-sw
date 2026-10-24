@@ -233,11 +233,11 @@ pub fn copy_from_uncached(dst: &mut [u8], src: &[u8]) {
         // `dst` is a distinct `&mut`, so they do not overlap.
         unsafe { burst_copy(src.as_ptr(), dst.as_mut_ptr(), blocks) };
         done = blocks * 32;
-        if dst.len() - done >= 16 {
-            // SAFETY: as above, for the 16 bytes at `done`.
-            unsafe { burst_copy16(src.as_ptr().add(done), dst.as_mut_ptr().add(done)) };
-            done += 16;
-        }
+        let words = (dst.len() - done) / 4;
+        // SAFETY: as above, for the `words` (fewer than eight) words at
+        // `done`.
+        unsafe { burst_copy_words(src.as_ptr().add(done), dst.as_mut_ptr().add(done), words) };
+        done += words * 4;
     }
     #[cfg(target_arch = "arm")]
     while dst.len() - done >= 4 {
@@ -250,7 +250,10 @@ pub fn copy_from_uncached(dst: &mut [u8], src: &[u8]) {
         }
         done += 4;
     }
-    dst[done..].copy_from_slice(&src[done..]);
+    // Most callers copy whole words: skip the call for an empty tail.
+    if done < dst.len() {
+        dst[done..].copy_from_slice(&src[done..]);
+    }
 }
 
 /// Loads the (possibly unaligned) word at `p` with a single `ldr`, which
@@ -276,28 +279,59 @@ unsafe fn load_word(p: *const u8) -> u32 {
     word
 }
 
-/// Copies 16 bytes from `src` to `dst` with a four-word burst load and store.
+/// Copies `words` words, fewer than eight, from `src` to `dst` with one
+/// burst load and store: a block's tail costs one load's latency, not one
+/// per word.
 ///
 /// # Safety
 ///
-/// `src` and `dst` must be word-aligned, valid for 16 bytes of reads and
-/// writes respectively, and must not overlap.
+/// `src` and `dst` must be word-aligned, valid for `words * 4` bytes of
+/// reads and writes respectively, and must not overlap.
 #[cfg(target_arch = "arm")]
 #[inline]
-unsafe fn burst_copy16(src: *const u8, dst: *mut u8) {
-    // SAFETY: per the function contract.
-    unsafe {
-        core::arch::asm!(
-            "ldm {src}, {{r0, r1, r2, r3}}",
-            "stm {dst}, {{r0, r1, r2, r3}}",
-            src = in(reg) src,
-            dst = in(reg) dst,
-            out("r0") _,
-            out("r1") _,
-            out("r2") _,
-            out("r3") _,
-            options(nostack, preserves_flags),
-        );
+unsafe fn burst_copy_words(src: *const u8, dst: *mut u8, words: usize) {
+    // `ldm` / `stm` of the listed registers; a single word takes `ldr` /
+    // `str`, as a one-register list has no wide encoding.
+    macro_rules! burst {
+        ($regs:literal) => {
+            // SAFETY: per the function contract, for the listed words.
+            unsafe {
+                core::arch::asm!(
+                    concat!("ldm {src}, {{", $regs, "}}"),
+                    concat!("stm {dst}, {{", $regs, "}}"),
+                    src = in(reg) src,
+                    dst = in(reg) dst,
+                    out("r0") _,
+                    out("r1") _,
+                    out("r2") _,
+                    out("r3") _,
+                    out("r4") _,
+                    out("r5") _,
+                    out("r8") _,
+                    options(nostack, preserves_flags),
+                )
+            }
+        };
+    }
+    match words {
+        0 => {}
+        // SAFETY: per the function contract, for one word.
+        1 => unsafe {
+            core::arch::asm!(
+                "ldr {w}, [{src}]",
+                "str {w}, [{dst}]",
+                src = in(reg) src,
+                dst = in(reg) dst,
+                w = out(reg) _,
+                options(nostack, preserves_flags),
+            )
+        },
+        2 => burst!("r0, r1"),
+        3 => burst!("r0, r1, r2"),
+        4 => burst!("r0, r1, r2, r3"),
+        5 => burst!("r0, r1, r2, r3, r4"),
+        6 => burst!("r0, r1, r2, r3, r4, r5"),
+        _ => burst!("r0, r1, r2, r3, r4, r5, r8"),
     }
 }
 
