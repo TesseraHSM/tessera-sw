@@ -133,11 +133,10 @@ pub const SLOT_SS_OFFSET: usize = SLOT_MSG_OFFSET;
 /// public key keeps its usual place.
 pub const SLOT_KEY_OUT_OFFSET: usize = SLOT_MSG_OFFSET;
 
-/// Offset of the private key **supplied to signing and decapsulation**,
-/// mirroring `SLOT_KEY_IN_OFFSET` on FP.
+/// Offset of the private key **supplied to decapsulation**, mirroring
+/// `SLOT_KEY_IN_OFFSET` on FP.
 ///
-/// Shares the signature region: FP copies the key into dTCM before writing
-/// the signature back over it.
+/// Shares the signature region, which decapsulation does not otherwise use.
 pub const SLOT_KEY_IN_OFFSET: usize = SLOT_SIG_OFFSET;
 
 /// Offset of the ML-KEM ciphertext **consumed by decapsulation**,
@@ -146,6 +145,23 @@ pub const SLOT_KEY_IN_OFFSET: usize = SLOT_SIG_OFFSET;
 /// Borrows the public-key region because the decapsulation key occupies
 /// [`SLOT_CT_OFFSET`]; decapsulation takes no public key.
 pub const SLOT_CT_IN_OFFSET: usize = SLOT_PK_OFFSET;
+
+/// Offset of the expanded secret key supplied to **signing**, mirroring
+/// the FP side: straight after the 64-byte `mu` in the message region.
+///
+/// Signing keeps its signature at the far end of the slot (see
+/// [`sign_sig_offset`]), so for ML-DSA-44 and -65 a signature waiting to be
+/// read and the next signing request's inputs fit side by side, and the
+/// core can start on that request while the signature is read
+/// ([`PqcEngine::release_early`](crate::PqcEngine)). ML-DSA-87's do not,
+/// and wait their turn.
+pub const SLOT_SIGN_KEY_OFFSET: usize = SLOT_MSG_OFFSET + 64;
+
+/// Offset of a `sig_len`-byte signature **produced by signing**: the end of
+/// the slot.
+pub const fn sign_sig_offset(sig_len: usize) -> usize {
+    SLOT_SIZE - sig_len
+}
 
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;

@@ -177,7 +177,7 @@ pub(crate) async fn sign_request(
     staged.rnd = *rnd;
     staged.msg_len = HASH_LEN as u32;
     staged.operands[0] = Operand::new(&mu[..], mailbox::SLOT_MSG_OFFSET);
-    staged.operands[1] = Operand::new(sec_key, mailbox::SLOT_KEY_IN_OFFSET);
+    staged.operands[1] = Operand::new(sec_key, mailbox::SLOT_SIGN_KEY_OFFSET);
     Ok(staged)
 }
 
@@ -464,8 +464,9 @@ impl PqcEngine<'_> {
         if resp.out_len as usize != sig.len() {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.hand_on(hand_on, &[(mailbox::SLOT_SIG_OFFSET, sig.len())]);
-        let read = mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig);
+        let at = mailbox::sign_sig_offset(sig.len());
+        self.hand_on(hand_on, &[(at, sig.len())]);
+        let read = mailbox::read_slot_at(self.id, at, sig);
         self.collected();
         if !read {
             return Err(PqcError::INVALID_BUFFER_SIZE);

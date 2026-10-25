@@ -566,8 +566,9 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
 /// to cost a full key generation per signature — 8.51 ms of ML-DSA-87's
 /// 24.5 ms floor.
 ///
-/// The key overlaps the region the signature goes back into, so one of the
-/// two has to be staged in dTCM. It is the signature: at up to 4627 bytes
+/// For ML-DSA-87 the key overlaps the region the signature goes back into
+/// (at the end of the slot), so one of the two has to be staged in dTCM.
+/// It is the signature: at up to 4627 bytes
 /// it is the smaller of the pair, and staging it costs nothing extra
 /// because signing already needs a buffer of exactly that shape to hold the
 /// mask stream between the commitment and z passes. The key is then read
@@ -599,7 +600,7 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
 
     let ok = {
         let (Some(sk), Some(mu)) = (
-            mailbox::slot_range(core_id, mailbox::SLOT_KEY_IN_OFFSET, sk_len),
+            mailbox::slot_range(core_id, mailbox::SLOT_SIGN_KEY_OFFSET, sk_len),
             message_representative(core_id, req),
         ) else {
             mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
@@ -617,7 +618,8 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
     // Only now, with the key no longer being read, does the slot region it
     // shares with the signature get written.
     outputs_free(core_id);
-    let Some(sig) = mailbox::slot_range_mut(core_id, mailbox::SLOT_SIG_OFFSET, sig_len) else {
+    let at = mailbox::sign_sig_offset(sig_len);
+    let Some(sig) = mailbox::slot_range_mut(core_id, at, sig_len) else {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };

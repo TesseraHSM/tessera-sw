@@ -171,18 +171,24 @@ pub const SLOT_CT_OFFSET: usize = SLOT_SIG_OFFSET;
 /// ```
 pub const SLOT_KEY_OUT_OFFSET: usize = SLOT_MSG_OFFSET;
 
-/// Offset of the private key **supplied to signing and decapsulation**.
+/// Offset of the expanded secret key **supplied to signing**: straight
+/// after the 64-byte `mu`, mirroring the HSM side.
 ///
-/// Shares the signature region, which is safe because the key is copied
-/// into dTCM before the signature is written back over it — the same
-/// staging the message and context already rely on:
+/// The signature goes back at the far end of the slot
+/// ([`sign_sig_offset`]), so for ML-DSA-44 and -65 the HSM can stage the
+/// next signing request while this one's signature is still being read.
+pub const SLOT_SIGN_KEY_OFFSET: usize = SLOT_MSG_OFFSET + 64;
+
+/// Offset of a `sig_len`-byte signature **produced by signing**: the end
+/// of the slot.
+pub const fn sign_sig_offset(sig_len: usize) -> usize {
+    SLOT_SIZE - sig_len
+}
+
+/// Offset of the private key **supplied to decapsulation**.
 ///
-/// ```text
-///        0    586   message        (sign only)
-///      588    255   context        (sign only)
-///      844   4896   private key    -> overwritten by the 4627-byte
-///                                     signature once consumed
-/// ```
+/// Shares the signature region, which decapsulation does not otherwise
+/// use.
 pub const SLOT_KEY_IN_OFFSET: usize = SLOT_SIG_OFFSET;
 
 /// Offset of the ML-KEM ciphertext **consumed by decapsulation**.
