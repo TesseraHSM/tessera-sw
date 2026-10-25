@@ -138,6 +138,9 @@ pub fn poly_decompose(w1: &mut Poly, w0: &mut Poly, w: &Poly, gamma2: u32) {
 /// and writing a whole polynomial per row per attempt. `w` is left as the
 /// transform produced it, so the hint pass reduces again on its own way
 /// through, which is the same work it was doing before.
+///
+/// `w` must be an inverse-NTT output (magnitude below q), as both callers'
+/// are.
 pub fn poly_decompose_reduced(w1: &mut Poly, w0: &mut Poly, w: &Poly, gamma2: u32) {
     // Dispatch once, not once per coefficient. `decompose` selects on
     // gamma2 internally, and inlined into a 256-iteration loop that put the
@@ -153,7 +156,10 @@ pub fn poly_decompose_reduced(w1: &mut Poly, w0: &mut Poly, w: &Poly, gamma2: u3
 
 fn decompose_pass<const G: u32>(w1: &mut Poly, w0: &mut Poly, w: &Poly) {
     for ((w1, w0), &w) in w1.iter_mut().zip(w0.iter_mut()).zip(w.iter()) {
-        let a = super::ntt::caddq(super::ntt::reduce32(w));
+        // `w` is the inverse transform's output, which is below q in
+        // magnitude, so `caddq` alone lifts it into [0, q) -- `reduce32`
+        // first would only map it to the same value.
+        let a = super::ntt::caddq(w);
 
         let mut a1 = (a + 127) >> 7;
         if G == 261888 {
