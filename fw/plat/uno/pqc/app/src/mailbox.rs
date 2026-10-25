@@ -128,23 +128,21 @@ mod word {
 /// a request never has to describe where its parts are, and inputs and
 /// outputs of the same operation never overlap.
 ///
-/// Verify is what forces the packing to be tight -- it is the only command
-/// carrying all four operands at once, and at 586 + 255 + 4627 + 2592 =
-/// 8060 B it fills the slot exactly. Adding an operand, or raising any
-/// cap, needs the slot to grow.
+/// Signing and verification carry the message representative `mu` in the
+/// message region rather than the message itself: the HSM hashes the
+/// message and context string into it (see `message_representative` in
+/// `main.rs`), so neither reaches this core and the context region is
+/// unused.
 ///
 /// ```text
 ///   offset      max    operand
-///        0      586    message
-///      588      255    context string
+///        0      586    message (64-byte mu for signing and verification)
+///      588      255    context string (unused)
 ///      844     4627    signature
 ///     5472     2592    public key
 ///                      = 8064, the whole slot
 /// ```
 pub const SLOT_MSG_OFFSET: usize = 0;
-
-/// Offset of the context string within the operand slot.
-pub const SLOT_CTX_OFFSET: usize = 588;
 
 /// Offset of the signature within the operand slot.
 pub const SLOT_SIG_OFFSET: usize = 844;

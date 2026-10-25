@@ -10,6 +10,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_single_cell::SingleCell;
 
+use crate::engine::complete_mldsa_sec_key;
 use crate::engine::decaps_request;
 use crate::engine::encaps_request;
 use crate::engine::gen_key_request;
@@ -17,6 +18,7 @@ use crate::engine::sign_request;
 use crate::engine::verify_request;
 use crate::engine::PqcEngine;
 use crate::error::PqcError;
+use crate::hash::HASH_LEN;
 use crate::pool::PqcState;
 use crate::pool::Staged;
 use crate::request::PqcOp;
@@ -158,10 +160,16 @@ impl PqcDriver {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
+        let dsa = staged.op == PqcOp::MlDsaGenerateKey as u32;
         let (mut engine, seq) = self.acquire_and_post(staged).await?;
         let result = engine.finish_gen_key(seq, pub_key, sec_key).await;
         engine.release();
-        result
+        result?;
+        // After the release, so the core is already on its next request.
+        if dsa {
+            complete_mldsa_sec_key(pub_key, sec_key).await;
+        }
+        Ok(())
     }
 
     /// Acquire an engine, run `f` on it, and release it however `f` ends.
@@ -232,7 +240,8 @@ impl PqcDriver {
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
-        let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig)?;
+        let mut mu = [0u8; HASH_LEN];
+        let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig, &mut mu).await?;
         let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
         let result = engine.finish_sign(seq, sig).await;
         engine.release();
@@ -294,7 +303,8 @@ impl PqcDriver {
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
-        let mut staged = verify_request(kind, pub_key, msg, ctx, sig)?;
+        let mut mu = [0u8; HASH_LEN];
+        let mut staged = verify_request(kind, pub_key, msg, ctx, sig, &mut mu).await?;
         let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
         let result = engine.finish_verify(seq).await;
         engine.release();

@@ -470,6 +470,23 @@ fn mlkem_variant(key_kind: u32) -> Option<pqc_ml::MlKemVariant> {
     }
 }
 
+/// The message representative `mu` a signing or verification request
+/// carries in place of its message, if it is well formed.
+///
+/// The HSM computes `mu = H(H(pk) || 0 || |ctx| || ctx || msg)` and stages
+/// those 64 bytes where the message would go: hashing the public key is up
+/// to 20 Keccak permutations of a verification, and the HSM's core is
+/// otherwise idle while this one works.
+fn message_representative(core_id: u8, req: &mailbox::Request) -> Option<[u8; 64]> {
+    if req.msg_len != 64 || req.ctx_len != 0 {
+        return None;
+    }
+    let src = mailbox::slot_range(core_id, mailbox::SLOT_MSG_OFFSET, 64)?;
+    let mut mu = [0u8; 64];
+    mu.copy_from_slice(src);
+    Some(mu)
+}
+
 /// Derive a key pair from the supplied seed, publishing the public key.
 #[inline(never)]
 fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
@@ -497,7 +514,9 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     // needs wiping.
     //
     // The expanded secret key travels back to the HSM, which masks it
-    // alongside the seed so signing never has to re-derive it.
+    // alongside the seed so signing never has to re-derive it -- and which
+    // fills in its public-key hash `tr` first: hashing the public key is
+    // up to 20 Keccak permutations this core leaves to the HSM's.
     let Some(sk_out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_KEY_OUT_OFFSET, sk_len)
     else {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
@@ -514,7 +533,7 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
         &mut pk_buf.assume_init_mut().0[..pk_len]
     };
 
-    pqc_ml::ml_dsa_keygen(variant, &req.xi, pk_buf, sk_out, work);
+    pqc_ml::ml_dsa_keygen_external_tr(variant, &req.xi, pk_buf, sk_out, work);
 
     let Some(pk) = mailbox::slot_range_mut(core_id, mailbox::SLOT_PK_OFFSET, pk_len) else {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
@@ -564,24 +583,15 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
     };
 
     let ok = {
-        let (Some(sk), Some(msg), Some(ctx)) = (
+        let (Some(sk), Some(mu)) = (
             mailbox::slot_range(core_id, mailbox::SLOT_KEY_IN_OFFSET, sk_len),
-            mailbox::slot_range(core_id, mailbox::SLOT_MSG_OFFSET, req.msg_len),
-            mailbox::slot_range(core_id, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
+            message_representative(core_id, req),
         ) else {
             mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
             return;
         };
 
-        pqc_ml::ml_dsa_sign(
-            variant,
-            &mut sig_buf[..sig_len],
-            msg,
-            ctx,
-            sk,
-            &req.rnd,
-            work,
-        )
+        pqc_ml::ml_dsa_sign_internal(variant, &mut sig_buf[..sig_len], &mu, sk, &req.rnd, work)
     };
 
     if !ok {
@@ -618,9 +628,8 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
         return;
     }
 
-    let (Some(msg), Some(ctx), Some(sig_src), Some(pk_src)) = (
-        mailbox::slot_range(core_id, mailbox::SLOT_MSG_OFFSET, req.msg_len),
-        mailbox::slot_range(core_id, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
+    let (Some(mu), Some(sig_src), Some(pk_src)) = (
+        message_representative(core_id, req),
         mailbox::slot_range(core_id, mailbox::SLOT_SIG_OFFSET, req.sig_len),
         mailbox::slot_range(core_id, mailbox::SLOT_PK_OFFSET, req.pub_key_len),
     ) else {
@@ -631,8 +640,8 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     // Stage the signature and public key into dTCM. Both are unpacked into
     // polynomials and read repeatedly, and PSRAM costs enough per access
     // that one bulk copy wins -- the same trade that made decapsulation
-    // ~4.5% faster. The message and context are read once and stay in
-    // place. Neither staging buffer is otherwise in use during a verify.
+    // ~4.5% faster. Neither staging buffer is otherwise in use during a
+    // verify.
     //
     // Word aligned so `mailbox::stage` can burst rather than fall back.
     //
@@ -678,7 +687,7 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
         &mut work.assume_init_mut()[..]
     };
 
-    let verified = pqc_ml::ml_dsa_verify(variant, msg, sig, ctx, pk, work);
+    let verified = pqc_ml::ml_dsa_verify_internal(variant, &mu, sig, pk, work);
 
     if verified {
         mailbox::respond(core_id, req, mailbox::STATUS_OK, 0);

@@ -61,6 +61,7 @@ tsra_fw_uno_drivers_nvic = { path = "drivers/nvic" }
 tsra_fw_uno_drivers_oic = { path = "drivers/oic" }
 tsra_fw_uno_drivers_part_store = { path = "drivers/part_store" }
 tsra_fw_uno_drivers_pqc = { path = "drivers/pqc" }
+pqc_ml = { path = "../pqc/crates/pqc_ml" }
 tsra_fw_uno_drivers_profile = { default-features = false, path = "drivers/profile" }
 tsra_fw_uno_drivers_rng = { path = "drivers/rng" }
 tsra_fw_uno_drivers_semihosting = { path = "drivers/semihosting" }

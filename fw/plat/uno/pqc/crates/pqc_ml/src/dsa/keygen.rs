@@ -86,9 +86,4 @@ pub fn keygen_internal(
         packing::pack_t1(&mut pk[32 + i * 320..], &t1);
         packing::pack_t0(&mut sk[sk_t0_offset + i * 416..], &t0);
     }
-
-    let pk_len = params.pk_bytes();
-    let mut tr = [0u8; 64];
-    shake256(&pk[..pk_len], &mut tr);
-    sk[64..128].copy_from_slice(&tr);
 }

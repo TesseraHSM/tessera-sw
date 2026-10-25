@@ -47,6 +47,7 @@ mod api;
 mod doorbell;
 mod engine;
 mod error;
+mod hash;
 mod mailbox;
 mod pool;
 mod request;
