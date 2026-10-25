@@ -789,17 +789,20 @@ async fn main(spawner: Spawner) {
 
         // Ahead of GSRAM, the signer keeps matrix elements and key
         // transforms in dTCM-speed memory this image does not otherwise
-        // map, per the legacy memory map (fp/qmgr/CM7/ldscripts/M7MemMap.h):
-        // on FP1 the top half of its 64 KB dTCM, above the stack; on the
-        // others the 16 KB "share dTCM" block at 0x2002_0000, where the
-        // legacy firmware put each core's stack, so each core's view of it
-        // is its own. Only up to the SP's liveliness word, though: the SP
-        // zeroes `CORE_RUN_STATUS` behind this core's back, and above it
-        // lie the legacy stack and its C2SV words.
-        let (near, bytes) = if id == 1 {
-            (0x2000_8000usize, 0x8000usize)
-        } else {
-            (0x2002_0000, CORE_RUN_STATUS as usize - 0x2002_0000)
+        // map. On FP1, the top half of its 64 KB dTCM, above the stack. On
+        // the others, the 16 KB block at 0x2002_0000 -- each core's view of
+        // a different block it shares with a neighbour (FP0's with FP1,
+        // FP2's with FP0; sp/src/dc_scm/rot_memory_map.h), which no core
+        // here reaches through its other view at 0x2003_0000 -- but only
+        // the part no one else uses: below the SP's liveliness word, which
+        // the SP zeroes behind the core's back (`CORE_RUN_STATUS`), and on
+        // FP2 below the admin core's legacy AES-GCM queues and FIPS flags
+        // from 0x2002_1C60 (cp/hsm/mem-map/src/soc.rs). The SP's crash dumps
+        // in these blocks are only ever read, after a core has crashed.
+        let (near, bytes) = match id {
+            1 => (0x2000_8000usize, 0x8000usize),
+            2 => (0x2002_0000, 0x1C60),
+            _ => (0x2002_0000, CORE_RUN_STATUS as usize - 0x2002_0000),
         };
         pqc_ml::spill::init_near(near as *mut i32, bytes / 4);
     }
