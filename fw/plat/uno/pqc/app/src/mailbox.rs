@@ -120,6 +120,9 @@ mod word {
     pub const SIG_LEN: usize = 24;
     /// Length of the public key in the operand slot (verify only).
     pub const PUB_KEY_LEN: usize = 25;
+    /// The last request whose outputs the HSM has read out of the operand
+    /// slot (see [`await_collected`](super::await_collected)).
+    pub const COLLECTED: usize = 26;
 }
 
 /// Operand slot layout.
@@ -433,6 +436,27 @@ pub fn take_request(core_id: u8) -> Option<Request> {
             pub_key_len: read_volatile(mb.add(word::PUB_KEY_LEN)) as usize,
         })
     }
+}
+
+/// Wait until the HSM has read the outputs of request `prev`, the one this
+/// core answered last, out of the operand slot -- or given up on them --
+/// before writing the current request's over them.
+///
+/// The HSM may post the next request before it reads the last one's
+/// outputs, so that the core starts on it at once: it does so only when the
+/// new request's inputs land clear of those outputs, and it marks them
+/// collected as soon as it has read them, long before a core gets as far as
+/// writing outputs. Request numbers only grow, so any number at or past
+/// `prev` will do; zero means there was no previous request.
+pub fn await_collected(core_id: u8, prev: u32) {
+    if prev == 0 {
+        return;
+    }
+    let mb = mailbox(core_id);
+    // SAFETY: as `take_request`.
+    while (unsafe { read_volatile(mb.add(word::COLLECTED)) }.wrapping_sub(prev) as i32) < 0 {}
+    // The outputs' writes must not be observed before the read above.
+    cortex_m::asm::dmb();
 }
 
 /// Publish a response.

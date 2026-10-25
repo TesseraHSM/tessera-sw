@@ -168,6 +168,15 @@ fn cycles() -> u32 {
 /// The heartbeat is written between requests, so it tracks the loop's
 /// forward progress rather than any single workload; no request comes
 /// close to the SP's one-second poll.
+/// The request this core answered last, for [`outputs_free`].
+static PREV_SEQ: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Wait until the operand slot is free for this request's outputs: the HSM
+/// may still be reading the last request's (see `mailbox::await_collected`).
+fn outputs_free(core_id: u8) {
+    mailbox::await_collected(core_id, PREV_SEQ.load(Ordering::Relaxed));
+}
+
 fn serve(core_id: u8) -> ! {
     // Publish a marker immediately so a core that never gets here is
     // distinguishable from one that does but sees nothing.
@@ -196,6 +205,7 @@ fn serve(core_id: u8) -> ! {
 
             if let Some(req) = mailbox::take_request(core_id) {
                 service(core_id, &req);
+                PREV_SEQ.store(req.seq, Ordering::Relaxed);
             }
 
             ipc::ring_response(core_id, ring.wrapping_add(1));
@@ -298,6 +308,7 @@ fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     let ek = &mut ek[..ek_len];
     pqc_ml::ml_kem_keygen(variant, &req.xi, &req.rnd, ek, &mut scratch[..dk_len]);
 
+    outputs_free(core_id);
     let Some((ek_out, dk_out)) = mailbox::slot_pair_mut(
         core_id,
         mailbox::SLOT_PK_OFFSET,
@@ -348,6 +359,7 @@ fn service_mlkem_encaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     mailbox::stage(&mut ek[..ek_len], src);
 
     let mut ss = [0u8; mailbox::SHARED_SECRET_LEN];
+    outputs_free(core_id);
     {
         let Some(ct) = mailbox::slot_range_mut(core_id, mailbox::SLOT_CT_OFFSET, ct_len) else {
             mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
@@ -426,6 +438,7 @@ fn service_mlkem_decaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     // Do not leave key material in dTCM for the next request to find.
     scratch[..staged_len].fill(0);
 
+    outputs_free(core_id);
     let Some(out) =
         mailbox::slot_range_mut(core_id, mailbox::SLOT_SS_OFFSET, mailbox::SHARED_SECRET_LEN)
     else {
@@ -533,7 +546,9 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
         &mut pk_buf.assume_init_mut().0[..pk_len]
     };
 
-    pqc_ml::ml_dsa_keygen_external_tr(variant, &req.xi, pk_buf, sk_out, work);
+    pqc_ml::ml_dsa_keygen_external_tr(variant, &req.xi, pk_buf, sk_out, work, || {
+        outputs_free(core_id)
+    });
 
     let Some(pk) = mailbox::slot_range_mut(core_id, mailbox::SLOT_PK_OFFSET, pk_len) else {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
@@ -601,6 +616,7 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
 
     // Only now, with the key no longer being read, does the slot region it
     // shares with the signature get written.
+    outputs_free(core_id);
     let Some(sig) = mailbox::slot_range_mut(core_id, mailbox::SLOT_SIG_OFFSET, sig_len) else {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;

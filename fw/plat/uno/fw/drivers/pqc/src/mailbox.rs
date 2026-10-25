@@ -92,6 +92,7 @@ mod word {
     pub const RND: usize = 16;
     pub const SIG_LEN: usize = 24;
     pub const PUB_KEY_LEN: usize = 25;
+    pub const COLLECTED: usize = 26;
 }
 
 /// Operand slot layout, mirroring the FP side.
@@ -422,6 +423,18 @@ pub fn post_request(engine: EngineId, seq: u32, params: &RequestParams<'_>) -> u
         write_volatile(mb.add(word::REQUEST_SEQ), seq);
     }
     seq
+}
+
+/// Tell `engine`'s core that request `seq`'s outputs have been read out of
+/// its operand slot, which it waits for before writing the next request's
+/// over them (see [`PqcEngine::release_early`](crate::PqcEngine)).
+pub(crate) fn mark_collected(engine: EngineId, seq: u32) {
+    // SAFETY: as `post_request`.
+    unsafe {
+        // The slot reads before must complete before the core can see this.
+        dmb();
+        write_volatile(mailbox(engine).add(word::COLLECTED), seq);
+    }
 }
 
 /// Read a response, if the core has answered request `seq`.

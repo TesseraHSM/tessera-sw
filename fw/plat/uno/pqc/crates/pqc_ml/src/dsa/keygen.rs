@@ -13,14 +13,23 @@ use super::sampling;
 use crate::keccak::shake256;
 use crate::keccak::XofPrefix;
 
+/// Bytes of `s1` packed: at most seven polynomials of 96 bytes (eta = 2)
+/// or five of 128 (eta = 4).
+const S1_PACKED_MAX: usize = 7 * 96;
+
 /// Internal keygen from a 32-byte seed xi.
 /// `work` is a caller-provided 7×256 i32 scratch buffer.
+///
+/// Nothing is written to `sk` until `before_sk` has returned, which is not
+/// before the first row of the matrix product: a caller whose `sk` may
+/// still hold the previous key, being read out, waits in `before_sk`.
 pub fn keygen_internal(
     params: &MlDsaParams,
     xi: &[u8; 32],
     pk: &mut [u8],
     sk: &mut [u8],
     work: &mut [[i32; N]],
+    before_sk: impl FnOnce(),
 ) {
     let k = params.k as usize;
     let l = params.l as usize;
@@ -43,17 +52,17 @@ pub fn keygen_internal(
     // s1_hat lives in caller-provided workspace
     let s1_hat = work;
 
-    // Sample and NTT s1
+    // Sample and NTT s1, packing it here until `sk` may be written.
+    let s1_len = l * params.eta_pack_bytes();
+    let mut s1_packed = [0u8; S1_PACKED_MAX];
     for j in 0..l {
         sampling::poly_sample_eta(&mut s1_hat[j], &eta_xof, j as u16, params.eta);
-        let sk_s1_offset = 128 + j * params.eta_pack_bytes();
-        packing::pack_eta(&mut sk[sk_s1_offset..], &s1_hat[j], params.eta);
+        packing::pack_eta(&mut s1_packed[j * params.eta_pack_bytes()..], &s1_hat[j], params.eta);
         ntt::ntt(&mut s1_hat[j]);
     }
 
     pk[..32].copy_from_slice(rho);
-    sk[..32].copy_from_slice(rho);
-    sk[32..64].copy_from_slice(key);
+    let mut before_sk = Some(before_sk);
 
     let sk_s2_offset = 128 + l * params.eta_pack_bytes();
     let sk_t0_offset = sk_s2_offset + k * params.eta_pack_bytes();
@@ -71,6 +80,13 @@ pub fn keygen_internal(
             ntt::poly_pointwise_acc_montgomery(&mut t_poly, &a_ij, &s1_hat[j]);
         }
         ntt::invntt(&mut t_poly);
+
+        if let Some(f) = before_sk.take() {
+            f();
+            sk[..32].copy_from_slice(rho);
+            sk[32..64].copy_from_slice(key);
+            sk[128..128 + s1_len].copy_from_slice(&s1_packed[..s1_len]);
+        }
 
         sampling::poly_sample_eta(&mut s2_poly, &eta_xof, (l + i) as u16, params.eta);
         packing::pack_eta(

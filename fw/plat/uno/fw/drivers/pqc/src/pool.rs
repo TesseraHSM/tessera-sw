@@ -385,6 +385,32 @@ impl PqcState {
         self.queue[idx as usize].staged = None;
     }
 
+    /// Hand engine `id` straight to the longest-waiting task, if it left a
+    /// request none of whose inputs land in `outputs` -- the `(offset, len)`
+    /// operand slot regions of the request just finished, which its task is
+    /// still to read. Returns whether the engine was handed over.
+    ///
+    /// The core holds the new request's outputs back until the old ones are
+    /// marked collected, so only its inputs could disturb them.
+    pub(crate) fn release_engine_early(&mut self, id: EngineId, outputs: &[(usize, usize)]) -> bool {
+        if self.wait_head == NO_SLOT {
+            return false;
+        }
+        let Some(staged) = &self.queue[self.wait_head as usize].staged else {
+            return false;
+        };
+        let clear = staged.operands.iter().all(|o| {
+            o.len == 0
+                || outputs
+                    .iter()
+                    .all(|&(off, len)| o.offset + o.len <= off || off + len <= o.offset)
+        });
+        if clear {
+            self.release_engine(id);
+        }
+        clear
+    }
+
     /// Return an engine to the pool, handing it straight to the
     /// longest-waiting task if there is one.
     pub(crate) fn release_engine(&mut self, id: EngineId) {

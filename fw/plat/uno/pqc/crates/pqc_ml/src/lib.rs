@@ -120,7 +120,7 @@ pub fn ml_dsa_keygen(
     sk: &mut [u8],
     work: &mut [[i32; DSA_N]],
 ) {
-    ml_dsa_keygen_external_tr(variant, xi, pk, sk, work);
+    ml_dsa_keygen_external_tr(variant, xi, pk, sk, work, || {});
     let mut tr = [0u8; 64];
     shake256(&pk[..variant.params().pk_bytes()], &mut tr);
     sk[64..128].copy_from_slice(&tr);
@@ -129,14 +129,18 @@ pub fn ml_dsa_keygen(
 /// As [`ml_dsa_keygen`], but leaving the public-key hash `tr = H(pk)`
 /// (bytes 64..128 of `sk`) unwritten, for a caller that computes it
 /// elsewhere.
+///
+/// Nothing is written to `sk` before `before_sk` returns, which is called
+/// once, after the first row of the matrix product.
 pub fn ml_dsa_keygen_external_tr(
     variant: MlDsaVariant,
     xi: &[u8; 32],
     pk: &mut [u8],
     sk: &mut [u8],
     work: &mut [[i32; DSA_N]],
+    before_sk: impl FnOnce(),
 ) {
-    dsa::keygen::keygen_internal(variant.params(), xi, pk, sk, work);
+    dsa::keygen::keygen_internal(variant.params(), xi, pk, sk, work, before_sk);
 }
 
 // ================================================================

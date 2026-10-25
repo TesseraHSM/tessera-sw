@@ -85,6 +85,7 @@ impl PqcDriver {
                 driver: self,
                 id,
                 released: false,
+                seq: 0,
             }),
             // The closure's only error is `QUEUE_FULL`, returned before a
             // slot is reserved, so there is never a slot to give back here.
@@ -148,6 +149,7 @@ impl PqcDriver {
                 driver: self,
                 id,
                 released: false,
+                seq,
             },
             seq,
         ))
@@ -162,7 +164,7 @@ impl PqcDriver {
     ) -> HsmResult<()> {
         let dsa = staged.op == PqcOp::MlDsaGenerateKey as u32;
         let (mut engine, seq) = self.acquire_and_post(staged).await?;
-        let result = engine.finish_gen_key(seq, pub_key, sec_key).await;
+        let result = engine.finish_gen_key(seq, pub_key, sec_key, true).await;
         engine.release();
         result?;
         // After the release, so the core is already on its next request.
@@ -243,7 +245,7 @@ impl PqcDriver {
         let mut mu = [0u8; HASH_LEN];
         let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig, &mut mu).await?;
         let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
-        let result = engine.finish_sign(seq, sig).await;
+        let result = engine.finish_sign(seq, sig, true).await;
         engine.release();
         result
     }
@@ -272,7 +274,7 @@ impl PqcDriver {
     ) -> HsmResult<()> {
         let mut staged = encaps_request(kind, pub_key, m, ciphertext, shared_secret)?;
         let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
-        let result = engine.finish_encaps(seq, ciphertext, shared_secret).await;
+        let result = engine.finish_encaps(seq, ciphertext, shared_secret, true).await;
         engine.release();
         result
     }
@@ -288,7 +290,7 @@ impl PqcDriver {
     ) -> HsmResult<()> {
         let mut staged = decaps_request(kind, sec_key, ciphertext, shared_secret)?;
         let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
-        let result = engine.finish_decaps(seq, shared_secret).await;
+        let result = engine.finish_decaps(seq, shared_secret, true).await;
         engine.release();
         result
     }

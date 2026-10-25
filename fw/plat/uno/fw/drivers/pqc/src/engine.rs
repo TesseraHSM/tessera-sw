@@ -278,6 +278,9 @@ pub struct PqcEngine<'a> {
     pub(crate) driver: &'a PqcDriver,
     pub(crate) id: EngineId,
     pub(crate) released: bool,
+    /// The request last posted here, zero for none: the core holds the
+    /// next request's outputs back until it is marked collected.
+    pub(crate) seq: u32,
 }
 
 impl PqcEngine<'_> {
@@ -332,7 +335,7 @@ impl PqcEngine<'_> {
         let mut mu = [0u8; HASH_LEN];
         let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig, &mut mu).await?;
         let seq = self.post(&mut staged);
-        self.finish_sign(seq, sig).await
+        self.finish_sign(seq, sig, false).await
     }
 
     /// Generate an ML-KEM key pair on this engine.
@@ -372,7 +375,7 @@ impl PqcEngine<'_> {
     ) -> HsmResult<()> {
         let mut staged = encaps_request(kind, pub_key, m, ciphertext, shared_secret)?;
         let seq = self.post(&mut staged);
-        self.finish_encaps(seq, ciphertext, shared_secret).await
+        self.finish_encaps(seq, ciphertext, shared_secret, false).await
     }
 
     /// Decapsulate a ciphertext on this engine.
@@ -393,7 +396,7 @@ impl PqcEngine<'_> {
     ) -> HsmResult<()> {
         let mut staged = decaps_request(kind, sec_key, ciphertext, shared_secret)?;
         let seq = self.post(&mut staged);
-        self.finish_decaps(seq, shared_secret).await
+        self.finish_decaps(seq, shared_secret, false).await
     }
 
     /// Verify a signature on this engine.
@@ -423,17 +426,48 @@ impl PqcEngine<'_> {
         let id = self.id;
         let seq = self.driver.state.with(|s| s.responses.post(id, staged));
         staged.wipe();
+        self.seq = seq;
         seq
+    }
+
+    /// With `hand_on`, give this engine to the next waiting request now,
+    /// before the outputs of the one just finished -- the `(offset, len)`
+    /// slot regions `outputs` -- are read, if that request's inputs land
+    /// clear of them: the core starts on it while they are read, and holds
+    /// its own outputs back until [`collected`](Self::collected).
+    ///
+    /// Only for a caller that releases the engine once these outputs are
+    /// read, as the driver's one-shot operations do.
+    fn hand_on(&mut self, hand_on: bool, outputs: &[(usize, usize)]) {
+        let id = self.id;
+        if hand_on && self.driver.state.with(|s| s.release_engine_early(id, outputs)) {
+            self.released = true;
+        }
+    }
+
+    /// Tell the core the last request's outputs have been read.
+    fn collected(&self) {
+        if self.seq != 0 {
+            mailbox::mark_collected(self.id, self.seq);
+        }
     }
 
     /// Collect the signature signing request `seq` left in this core's
     /// operand slot.
-    pub(crate) async fn finish_sign(&mut self, seq: u32, sig: &mut [u8]) -> HsmResult<()> {
+    pub(crate) async fn finish_sign(
+        &mut self,
+        seq: u32,
+        sig: &mut [u8],
+        hand_on: bool,
+    ) -> HsmResult<()> {
         let resp = self.await_ok(seq).await?;
         if resp.out_len as usize != sig.len() {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
+        self.hand_on(hand_on, &[(mailbox::SLOT_SIG_OFFSET, sig.len())]);
+        let read = mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig);
+        self.collected();
+        if !read {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
         Ok(())
@@ -458,14 +492,23 @@ impl PqcEngine<'_> {
         seq: u32,
         ciphertext: &mut [u8],
         shared_secret: &mut [u8],
+        hand_on: bool,
     ) -> HsmResult<()> {
         let resp = self.await_ok(seq).await?;
         if resp.out_len as usize != ciphertext.len() {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ciphertext)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
-        {
+        self.hand_on(
+            hand_on,
+            &[
+                (mailbox::SLOT_CT_OFFSET, ciphertext.len()),
+                (mailbox::SLOT_SS_OFFSET, shared_secret.len()),
+            ],
+        );
+        let read = mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ciphertext)
+            && mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret);
+        self.collected();
+        if !read {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
         Ok(())
@@ -477,12 +520,16 @@ impl PqcEngine<'_> {
         &mut self,
         seq: u32,
         shared_secret: &mut [u8],
+        hand_on: bool,
     ) -> HsmResult<()> {
         let resp = self.await_ok(seq).await?;
         if resp.out_len as usize != mailbox::SHARED_SECRET_LEN {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret) {
+        self.hand_on(hand_on, &[(mailbox::SLOT_SS_OFFSET, shared_secret.len())]);
+        let read = mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret);
+        self.collected();
+        if !read {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
         Ok(())
@@ -497,7 +544,7 @@ impl PqcEngine<'_> {
     ) -> HsmResult<()> {
         let dsa = staged.op == PqcOp::MlDsaGenerateKey as u32;
         let seq = self.post(staged);
-        self.finish_gen_key(seq, pub_key, sec_key).await?;
+        self.finish_gen_key(seq, pub_key, sec_key, false).await?;
         if dsa {
             complete_mldsa_sec_key(pub_key, sec_key).await;
         }
@@ -511,6 +558,7 @@ impl PqcEngine<'_> {
         seq: u32,
         pub_key: &mut [u8],
         sec_key: &mut [u8],
+        hand_on: bool,
     ) -> HsmResult<()> {
         let resp = self.await_ok(seq).await?;
         if resp.out_len as usize != pub_key.len() {
@@ -520,9 +568,17 @@ impl PqcEngine<'_> {
         // Both keys are too large for the mailbox, so they travel in this
         // core's operand slot. Read only after the response sequence number
         // matched, which the core writes last.
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sec_key)
-        {
+        self.hand_on(
+            hand_on,
+            &[
+                (mailbox::SLOT_PK_OFFSET, pub_key.len()),
+                (mailbox::SLOT_KEY_OUT_OFFSET, sec_key.len()),
+            ],
+        );
+        let read = mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
+            && mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sec_key);
+        self.collected();
+        if !read {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -626,6 +682,7 @@ impl PqcEngine<'_> {
     pub fn release(mut self) {
         if !self.released {
             self.released = true;
+            self.collected();
             self.driver.release_engine(self.id);
         }
     }
@@ -639,6 +696,7 @@ impl Drop for PqcEngine<'_> {
     fn drop(&mut self) {
         if !self.released {
             self.released = true;
+            self.collected();
             self.driver.release_engine(self.id);
         }
     }
