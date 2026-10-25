@@ -119,18 +119,19 @@ pub(crate) fn key_slot(j: usize) -> Option<*mut i32> {
     }
 }
 
-/// Copy a polynomial out to a spill slot.
+/// Copy a polynomial out to a spill slot, or a near one.
 ///
 /// # Safety
-/// `dst` must come from [`slot`].
+/// `dst` must come from [`key_slot`] or be the signer's own polynomial's
+/// worth of the near region.
 pub(crate) unsafe fn store(dst: *mut i32, src: &[i32; DSA_N]) {
     burst(dst, src.as_ptr(), DSA_N);
 }
 
-/// Read a polynomial back from a spill slot.
+/// Read a polynomial back from a spill slot, or a near one.
 ///
 /// # Safety
-/// `src` must come from [`slot`].
+/// As for [`store`].
 pub(crate) unsafe fn load(dst: &mut [i32; DSA_N], src: *const i32) {
     burst(dst.as_mut_ptr(), src, DSA_N);
 }

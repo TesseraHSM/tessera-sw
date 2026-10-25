@@ -787,14 +787,19 @@ async fn main(spawner: Spawner) {
             FP_SPILL_WORDS,
         );
 
-        // Ahead of GSRAM, the signer keeps matrix elements in the 16 KB
-        // block every FP core has at 0x2002_0000: the "share dTCM" of the
-        // legacy memory map (fp/qmgr/CM7/ldscripts/M7MemMap.h), which put
-        // each core's stack at the top of its own, so each core's view is
-        // its own memory. Nothing in this firmware maps or reaches it.
-        const FP_NEAR_BASE: usize = 0x2002_0000;
-        const FP_NEAR_WORDS: usize = 0x4000 / 4;
-        pqc_ml::spill::init_near(FP_NEAR_BASE as *mut i32, FP_NEAR_WORDS);
+        // Ahead of GSRAM, the signer keeps matrix elements and key
+        // transforms in dTCM-speed memory this image does not otherwise
+        // map, per the legacy memory map (fp/qmgr/CM7/ldscripts/M7MemMap.h):
+        // on FP1 the top half of its 64 KB dTCM, above the stack; on the
+        // others the 16 KB "share dTCM" block at 0x2002_0000, where the
+        // legacy firmware put each core's stack, so each core's view of it
+        // is its own.
+        let (near, bytes) = if id == 1 {
+            (0x2000_8000usize, 0x8000usize)
+        } else {
+            (0x2002_0000, 0x4000)
+        };
+        pqc_ml::spill::init_near(near as *mut i32, bytes / 4);
     }
 
     systick::init();
