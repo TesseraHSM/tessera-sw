@@ -36,7 +36,7 @@ pub fn kpke_keygen(params: &MlKemParams, d: &[u8; 32], ek: &mut [u8], dk: &mut [
 
     // Sample s, NTT(s), store in dk
     let mut nonce: u8 = 0;
-    let mut s_hat: Poly = [0i16; N];
+    let mut s_hat = Poly::ZERO;
     for i in 0..k {
         sampling::poly_cbd(&mut s_hat, sigma, nonce, params.eta1);
         nonce += 1;
@@ -48,10 +48,10 @@ pub fn kpke_keygen(params: &MlKemParams, d: &[u8; 32], ek: &mut [u8], dk: &mut [
     // Compute t_hat = A_hat * s_hat + e_hat, accumulating every row at
     // once so each column of s is decoded from dk a single time; the
     // row-major loop decoded all k of them for every row.
-    let mut a_ij: Poly = [0i16; N];
-    let mut e_hat: Poly = [0i16; N];
-    let mut s_hat_j: Poly = [0i16; N];
-    let mut t: [Poly; MAX_K] = [[0i16; N]; MAX_K];
+    let mut a_ij = Poly::ZERO;
+    let mut e_hat = Poly::ZERO;
+    let mut s_hat_j = Poly::ZERO;
+    let mut t = [Poly::ZERO; MAX_K];
 
     for t_i in t[..k].iter_mut() {
         poly::poly_zero(t_i);
@@ -94,11 +94,11 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
     let rho = &ek[384 * k..384 * k + 32];
 
     let u_poly_bytes = N * du as usize / 8;
-    let mut a_ij: Poly = [0i16; N];
-    let mut r_hat_j: Poly = [0i16; N];
-    let mut t_hat_j: Poly = [0i16; N];
-    let mut u: [Poly; MAX_K] = [[0i16; N]; MAX_K];
-    let mut v: Poly = [0i16; N];
+    let mut a_ij = Poly::ZERO;
+    let mut r_hat_j = Poly::ZERO;
+    let mut t_hat_j = Poly::ZERO;
+    let mut u = [Poly::ZERO; MAX_K];
+    let mut v = Poly::ZERO;
 
     // One pass over r. Accumulating every row of u at once means each
     // r_hat[j] is sampled and transformed once instead of once per row --
@@ -124,7 +124,7 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
     }
 
     // u[i] = INTT(A^T[i] * r_hat) + e1[i], compressed into the ciphertext
-    let mut e1: Poly = [0i16; N];
+    let mut e1 = Poly::ZERO;
     for i in 0..k {
         ntt::invntt(&mut u[i]);
         sampling::poly_cbd(&mut e1, r, (k + i) as u8, params.eta2);
@@ -135,11 +135,11 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
 
     // v = INTT(t^T * r_hat) + e2 + Decompress_1(m)
     ntt::invntt(&mut v);
-    let mut e2: Poly = [0i16; N];
+    let mut e2 = Poly::ZERO;
     sampling::poly_cbd(&mut e2, r, (2 * k) as u8, params.eta2);
     poly::poly_add_inplace(&mut v, &e2);
 
-    let mut msg_poly: Poly = [0i16; N];
+    let mut msg_poly = Poly::ZERO;
     packing::byte_decode_1(&mut msg_poly, m);
     for i in 0..N {
         msg_poly[i] = poly::decompress(msg_poly[i] as u16, 1) as i16;
@@ -158,14 +158,14 @@ pub fn kpke_decrypt(params: &MlKemParams, m: &mut [u8; 32], dk: &[u8], ct: &[u8]
     let u_poly_bytes = N * du as usize / 8;
 
     // v = Decompress_dv(ct_v)
-    let mut v: Poly = [0i16; N];
+    let mut v = Poly::ZERO;
     poly::poly_decompress(&mut v, &ct[k * u_poly_bytes..], dv);
 
     // s^T * NTT(u)
-    let mut su: Poly = [0i16; N];
+    let mut su = Poly::ZERO;
     poly::poly_zero(&mut su);
-    let mut u_i: Poly = [0i16; N];
-    let mut s_hat_i: Poly = [0i16; N];
+    let mut u_i = Poly::ZERO;
+    let mut s_hat_i = Poly::ZERO;
 
     for i in 0..k {
         poly::poly_decompress(&mut u_i, &ct[u_poly_bytes * i..], du);
@@ -176,12 +176,12 @@ pub fn kpke_decrypt(params: &MlKemParams, m: &mut [u8; 32], dk: &[u8], ct: &[u8]
     ntt::invntt(&mut su);
 
     // w = v - s^T * u
-    let mut w: Poly = [0i16; N];
+    let mut w = Poly::ZERO;
     poly::poly_sub(&mut w, &v, &su);
     poly::poly_reduce(&mut w);
 
     // Compress_1(w) → message
-    let mut m_poly: Poly = [0i16; N];
+    let mut m_poly = Poly::ZERO;
     for i in 0..N {
         let mut t = w[i] as i32;
         t += (t >> 31) & Q as i32;

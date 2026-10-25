@@ -4,6 +4,11 @@
 use super::params::N;
 /// NTT for ML-KEM: q=3329, 16-bit coefficients, 128-point transform.
 use super::params::Q;
+use super::poly::Poly;
+#[cfg(target_arch = "arm")]
+use super::zetas::BASEMUL_ZETAS;
+#[cfg(target_arch = "arm")]
+use super::zetas::PLANT;
 use super::zetas::ZETAS;
 
 const QINV: i16 = 62209u16 as i16; // q^{-1} mod 2^16
@@ -43,79 +48,30 @@ const Q_NEG: i32 = -(Q as i32);
 #[cfg(target_arch = "arm")]
 const QINV_QNEG: i32 = (Q_NEG << 16) | (QINV_P & 0xFFFF);
 
-/// One whole forward layer of Cooley-Tukey butterflies, two at a time.
-///
-/// ML-KEM's coefficients are 16-bit, so a pair of them shares one register
-/// and the halfword instructions do both butterflies at once: one `ldr`
-/// fetches two coefficients, `pkhtb` packs the two reduced products back
-/// into a word, and `sadd16`/`ssub16` finish both halves in one
-/// instruction each. That is the part ML-DSA could not do -- its
-/// coefficients are 32-bit and fill a register on their own.
-///
-/// The window loop is in the assembly too. Driven from Rust, each of the
-/// 127 windows spilled and reloaded the loop state around the block --
-/// some twenty instructions a window, more than the butterflies
-/// themselves cost in the 64 one-pair windows of the last layer.
-///
-/// # Safety
-/// `ap` must be valid for 256 `i16` writes and word aligned; `zp` must be
-/// valid for `128 / len` ascending `i16` reads; `len` must be a power of
-/// two in 2..=128.
 #[cfg(target_arch = "arm")]
-#[inline(never)]
-unsafe fn ct_layer(ap: *mut i16, zp: *const i16, len: usize) {
-    core::arch::asm!(
-        "2:",
-        "ldrsh  {z}, [{zp}], #2",
-        "lsr    {cnt}, {off}, #2",
-        "3:",
-        "ldr    {x}, [{xp}]",
-        "ldr    {y}, [{xp}, {off}]",
-        "smulbb {t0}, {y}, {z}",
-        "smultb {t1}, {y}, {z}",
-        "mul    {y}, {t0}, {a}",
-        "smlabt {t0}, {y}, {a}, {t0}",
-        "mul    {y}, {t1}, {a}",
-        "smlabt {t1}, {y}, {a}, {t1}",
-        "pkhtb  {y}, {t1}, {t0}, asr #16",
-        "ssub16 {t0}, {x}, {y}",
-        "sadd16 {x}, {x}, {y}",
-        "str    {t0}, [{xp}, {off}]",
-        "str    {x}, [{xp}], #4",
-        "subs   {cnt}, {cnt}, #1",
-        "bne    3b",
-        "add    {xp}, {xp}, {off}",
-        "subs   {n}, {n}, #1",
-        "bne    2b",
-        xp = inout(reg) ap => _,
-        zp = inout(reg) zp => _,
-        n = inout(reg) N / 2 / len => _,
-        off = in(reg) len * 2,
-        a = in(reg) QINV_QNEG,
-        z = out(reg) _,
-        cnt = out(reg) _,
-        x = out(reg) _,
-        y = out(reg) _,
-        t0 = out(reg) _,
-        t1 = out(reg) _,
-        options(nostack),
-    );
+extern "C" {
+    /// `asm/kem_ntt.S`: the forward transform, Plantard twiddles `tw`.
+    fn pqc_ml_kem_ntt(p: *mut i16, tw: *const i16);
+    /// `asm/kem_ntt.S`: the inverse transform with the final scaling,
+    /// reading the twiddles down from `tw_end`.
+    fn pqc_ml_kem_invntt(p: *mut i16, tw_end: *const i16);
 }
 
 /// Forward NTT (in-place). Kyber's 128-point NTT.
 /// After NTT, pairs (a[2i], a[2i+1]) represent coefficients in
 /// Z_q[x]/(x^2 - zeta^{2*brv(i)+1}).
-pub fn ntt(a: &mut [i16; N]) {
+///
+/// On ARM this is `asm/kem_ntt.S`, whose twiddle products are Plantard
+/// rather than Montgomery reduced: its outputs equal these mod q but not as
+/// integers, and are smaller -- an input bounded by B comes out within
+/// B + 7 * 1664 rather than B + 7q. Every caller reduces or multiplies
+/// before the representative matters.
+pub fn ntt(a: &mut Poly) {
     #[cfg(target_arch = "arm")]
     {
-        let ap = a.as_mut_ptr();
-        let mut len = N / 2;
-        while len >= 2 {
-            // SAFETY: each layer covers the whole polynomial, and layer
-            // `len` takes the 128 / len zetas that start at 128 / len.
-            unsafe { ct_layer(ap, ZETAS.as_ptr().add(N / 2 / len), len) };
-            len >>= 1;
-        }
+        // SAFETY: `Poly` is word aligned and 256 coefficients long, and
+        // PLANT holds the 127 twiddles the transform reads.
+        unsafe { pqc_ml_kem_ntt(a.as_mut_ptr(), PLANT.as_ptr()) };
     }
 
     #[cfg(not(target_arch = "arm"))]
@@ -123,7 +79,7 @@ pub fn ntt(a: &mut [i16; N]) {
         let mut zetas = ZETAS[1..].iter();
         let mut len: usize = 128;
         while len >= 2 {
-            let mut rest: &mut [i16] = a;
+            let mut rest: &mut [i16] = &mut a[..];
             while !rest.is_empty() {
                 let (chunk, tail) = rest.split_at_mut(2 * len);
                 rest = tail;
@@ -141,131 +97,30 @@ pub fn ntt(a: &mut [i16; N]) {
     }
 }
 
-/// The Barrett constant scaled by 2^6: `smmulr` by it computes
-/// `(v * a + 2^25) >> 26` -- [`barrett_reduce`]'s quotient, rounding and
-/// all -- in one instruction.
-#[cfg(target_arch = "arm")]
-const BARRETT_V64: i32 = 20159 << 6;
-
-/// One whole inverse layer of Gentleman-Sande butterflies, two at a time.
+/// Inverse NTT (in-place), including the multiplication by
+/// f = mont^2/128 that leaves the result in the Montgomery domain.
 ///
-/// The packed counterpart of [`ct_layer`]: `sadd16`/`ssub16`
-/// form both sums and both differences at once, the differences take the
-/// forward transform's Montgomery multiply, and the sums are Barrett
-/// reduced per halfword exactly as [`barrett_reduce`] does, so the result
-/// matches the scalar transform bit for bit. The two reductions are
-/// independent and are interleaved, so their multiplies keep the single
-/// MAC pipe busy.
-///
-/// One routine serves all seven layers -- the pair count per window is the
-/// half-window offset divided by four -- which costs a call per layer but
-/// keeps one copy of the loop in the 32 KB iTCM rather than seven.
-///
-/// # Safety
-/// `ap` must be valid for 256 `i16` writes and word aligned; `zp` must be
-/// valid for `128 / len` descending `i16` reads; `len` must be a power of
-/// two in 2..=128.
-#[cfg(target_arch = "arm")]
-#[inline(never)]
-unsafe fn gs_layer(ap: *mut i16, zp: *const i16, len: usize) {
-    core::arch::asm!(
-        "2:",
-        "ldrsh  {z}, [{zp}], #-2",
-        "lsr    {cnt}, {off}, #2",
-        "3:",
-        "ldr    {x}, [{xp}]",
-        "ldr    {y}, [{xp}, {off}]",
-        "ssub16 {t1}, {y}, {x}",
-        "sadd16 {t0}, {x}, {y}",
-        "smulbb {x}, {t1}, {z}",
-        "smultb {y}, {t1}, {z}",
-        "sxth   {t2}, {t0}",
-        "mul    {t1}, {x}, {a}",
-        "smmulr {t2}, {t2}, {v}",
-        "smlabt {x}, {t1}, {a}, {x}",
-        "mul    {t1}, {y}, {a}",
-        "smlabt {y}, {t1}, {a}, {y}",
-        "asr    {t1}, {t0}, #16",
-        "pkhtb  {x}, {y}, {x}, asr #16",
-        "smmulr {t1}, {t1}, {v}",
-        "str    {x}, [{xp}, {off}]",
-        "smulbt {t2}, {t2}, {a}",
-        "smulbt {t1}, {t1}, {a}",
-        "pkhbt  {t2}, {t2}, {t1}, lsl #16",
-        "sadd16 {t0}, {t0}, {t2}",
-        "str    {t0}, [{xp}], #4",
-        "subs   {cnt}, {cnt}, #1",
-        "bne    3b",
-        "add    {xp}, {xp}, {off}",
-        "subs   {n}, {n}, #1",
-        "bne    2b",
-        xp = inout(reg) ap => _,
-        zp = inout(reg) zp => _,
-        n = inout(reg) N / 2 / len => _,
-        off = in(reg) len * 2,
-        a = in(reg) QINV_QNEG,
-        v = in(reg) BARRETT_V64,
-        z = out(reg) _,
-        cnt = out(reg) _,
-        x = out(reg) _,
-        y = out(reg) _,
-        t0 = out(reg) _,
-        t1 = out(reg) _,
-        t2 = out(reg) _,
-        options(nostack),
-    );
-}
-
-/// Inverse NTT (in-place).
-pub fn invntt(a: &mut [i16; N]) {
-    // Multiply by f = mont^2/128 mod q = 1441 (the reference value).
-    const F: i32 = 1441;
-
+/// On ARM this is `asm/kem_ntt.S`: Plantard reduced like [`ntt`], equal to
+/// this mod q, every output within 1664. It needs an input below 2^14 in
+/// magnitude -- the sums are reduced only after the first and fifth layers
+/// -- and the accumulations of [`poly_basemul_acc`] that feed it stay under
+/// 14200 for k up to 4.
+pub fn invntt(a: &mut Poly) {
     #[cfg(target_arch = "arm")]
     {
-        let ap = a.as_mut_ptr();
-        let mut len = 2;
-        while len <= 128 {
-            // SAFETY: each layer covers the whole polynomial, and layer
-            // `len` consumes the 128 / len zetas that end at 256 / len - 1.
-            unsafe { gs_layer(ap, ZETAS.as_ptr().add(256 / len - 1), len) };
-            len <<= 1;
-        }
-        // SAFETY: `[i16; N]` with N even, word aligned as above.
-        unsafe {
-            core::arch::asm!(
-                "2:",
-                "ldr    {x}, [{xp}]",
-                "smulbb {t0}, {x}, {f}",
-                "smultb {t1}, {x}, {f}",
-                "mul    {y}, {t0}, {a}",
-                "mul    {t2}, {t1}, {a}",
-                "smlabt {t0}, {y}, {a}, {t0}",
-                "smlabt {t1}, {t2}, {a}, {t1}",
-                "pkhtb  {x}, {t1}, {t0}, asr #16",
-                "str    {x}, [{xp}], #4",
-                "subs   {n}, {n}, #1",
-                "bne    2b",
-                xp = inout(reg) ap => _,
-                n = inout(reg) N / 2 => _,
-                f = in(reg) F,
-                a = in(reg) QINV_QNEG,
-                x = out(reg) _,
-                y = out(reg) _,
-                t0 = out(reg) _,
-                t1 = out(reg) _,
-                t2 = out(reg) _,
-                options(nostack),
-            );
-        }
+        // SAFETY: as for `ntt`; the cursor starts one past PLANT's last
+        // entry and the transform reads all 127 below it.
+        unsafe { pqc_ml_kem_invntt(a.as_mut_ptr(), PLANT.as_ptr().add(PLANT.len())) };
     }
 
     #[cfg(not(target_arch = "arm"))]
     {
+        // Multiply by f = mont^2/128 mod q = 1441 (the reference value).
+        const F: i32 = 1441;
         let mut zetas = ZETAS[1..128].iter().rev();
         let mut len: usize = 2;
         while len <= 128 {
-            let mut rest: &mut [i16] = a;
+            let mut rest: &mut [i16] = &mut a[..];
             while !rest.is_empty() {
                 let (chunk, tail) = rest.split_at_mut(2 * len);
                 rest = tail;
@@ -345,12 +200,12 @@ fn basemul_acc2(r: &mut [i16], a: &[i16], b: &[i16], zeta: i32) {
 /// Not inlined: the block is a hundred and fifty bytes, and it has four
 /// callers in a 32 KB iTCM.
 #[inline(never)]
-pub fn poly_basemul_acc(r: &mut [i16; N], a: &[i16; N], b: &[i16; N]) {
+pub fn poly_basemul_acc(r: &mut Poly, a: &Poly, b: &Poly) {
     #[cfg(target_arch = "arm")]
     {
-        // SAFETY: three word-aligned `[i16; N]` (as for the transforms);
-        // `r` is the only one written and is a distinct borrow. The zeta
-        // cursor reads ZETAS[64..128], one per quadruple.
+        // SAFETY: three word-aligned polynomials; `r` is the only one
+        // written and is a distinct borrow. The zeta cursor reads all of
+        // BASEMUL_ZETAS, one per quadruple.
         unsafe {
             core::arch::asm!(
                 "2:",
@@ -393,7 +248,7 @@ pub fn poly_basemul_acc(r: &mut [i16; N], a: &[i16; N], b: &[i16; N]) {
                 rp = inout(reg) r.as_mut_ptr() => _,
                 ap = inout(reg) a.as_ptr() => _,
                 bp = inout(reg) b.as_ptr() => _,
-                zp = inout(reg) ZETAS.as_ptr().add(64) => _,
+                zp = inout(reg) BASEMUL_ZETAS.as_ptr() => _,
                 n = inout(reg) N / 4 => _,
                 k = in(reg) QINV_QNEG,
                 z = out(reg) _,
@@ -411,9 +266,9 @@ pub fn poly_basemul_acc(r: &mut [i16; N], a: &[i16; N], b: &[i16; N]) {
     #[cfg(not(target_arch = "arm"))]
     {
         let mut zi = 64usize;
-        let mut rr: &mut [i16] = r;
-        let mut aa: &[i16] = a;
-        let mut bb: &[i16] = b;
+        let mut rr: &mut [i16] = &mut r[..];
+        let mut aa: &[i16] = &a[..];
+        let mut bb: &[i16] = &b[..];
         while !rr.is_empty() {
             let (rc, rt) = rr.split_at_mut(4);
             let (ac, at) = aa.split_at(4);
@@ -432,7 +287,7 @@ pub fn poly_basemul_acc(r: &mut [i16; N], a: &[i16; N], b: &[i16; N]) {
 
 /// Convert polynomial to Montgomery domain: multiply each coefficient by R.
 /// Used after basemul_acc to cancel the R^{-1} factor.
-pub fn poly_tomont(a: &mut [i16; N]) {
+pub fn poly_tomont(a: &mut Poly) {
     for i in 0..N {
         a[i] = montgomery_reduce(a[i] as i32 * MONT_SQ);
     }

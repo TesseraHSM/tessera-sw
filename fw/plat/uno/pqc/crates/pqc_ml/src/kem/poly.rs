@@ -6,7 +6,29 @@ use super::params::N;
 /// ML-KEM polynomial operations (i16 coefficients, q=3329).
 use super::params::Q;
 
-pub type Poly = [i16; N];
+/// A polynomial's 256 coefficients, word aligned: the assembly moves two
+/// coefficients a word and the transforms two words at a time with
+/// `ldrd`/`strd`, which fault on an address that is only halfword aligned.
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+pub struct Poly(pub [i16; N]);
+
+impl Poly {
+    pub const ZERO: Poly = Poly([0; N]);
+}
+
+impl core::ops::Deref for Poly {
+    type Target = [i16; N];
+    fn deref(&self) -> &[i16; N] {
+        &self.0
+    }
+}
+
+impl core::ops::DerefMut for Poly {
+    fn deref_mut(&mut self) -> &mut [i16; N] {
+        &mut self.0
+    }
+}
 
 pub fn poly_zero(p: &mut Poly) {
     for c in p.iter_mut() {
