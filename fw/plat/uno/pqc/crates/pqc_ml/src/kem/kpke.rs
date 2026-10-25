@@ -46,34 +46,36 @@ pub fn kpke_keygen(params: &MlKemParams, d: &[u8; 32], ek: &mut [u8], dk: &mut [
 
     // Compute t_hat = A_hat * s_hat + e_hat, accumulating every row at
     // once so each column of s is decoded from dk a single time; the
-    // row-major loop decoded all k of them for every row.
+    // row-major loop decoded all k of them for every row. The rows sum in
+    // 32 bits against s_hat_j prepared once for its k products, and are
+    // reduced once each at the end.
     let mut a_ij = Poly::ZERO;
     let mut e_hat = Poly::ZERO;
     let mut s_hat_j = Poly::ZERO;
-    let mut t = [Poly::ZERO; MAX_K];
-
-    for t_i in t[..k].iter_mut() {
-        poly::poly_zero(t_i);
-    }
+    let mut s_prep = ntt::Prepared::ZERO;
+    let mut acc = [ntt::Acc::ZERO; MAX_K];
 
     for j in 0..k {
         packing::byte_decode_12(&mut s_hat_j, &dk[384 * j..]);
+        ntt::basemul_prep(&mut s_prep, &s_hat_j);
         for i in 0..k {
             sampling::poly_uniform(&mut a_ij, rho, i as u8, j as u8);
-            ntt::poly_basemul_acc(&mut t[i], &a_ij, &s_hat_j);
+            ntt::basemul_acc32(&mut acc[i], &a_ij, &s_prep, j == 0);
         }
     }
 
+    let mut t_i = Poly::ZERO;
     for i in 0..k {
         // Sample and NTT e_i, then t_i = t_i * R + e_i, reduced: the R
-        // cancels the R^{-1} basemul leaves.
+        // cancels the R^{-1} the reduction of the row leaves.
         sampling::poly_cbd(&mut e_hat, sigma, nonce, params.eta1);
         nonce += 1;
         ntt::ntt(&mut e_hat);
-        ntt::poly_tomont_add(&mut t[i], &e_hat);
+        ntt::acc_reduce(&mut t_i, &acc[i]);
+        ntt::poly_tomont_add(&mut t_i, &e_hat);
 
         // ek = ByteEncode12(t_hat[0]) || ... || ByteEncode12(t_hat[k-1]) || rho
-        packing::byte_encode_12(&mut ek[384 * i..], &t[i]);
+        packing::byte_encode_12(&mut ek[384 * i..], &t_i);
     }
     // Append rho at the end of ek
     ek[384 * k..384 * k + 32].copy_from_slice(rho);
@@ -93,39 +95,41 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
     let mut a_ij = Poly::ZERO;
     let mut r_hat_j = Poly::ZERO;
     let mut t_hat_j = Poly::ZERO;
-    let mut u = [Poly::ZERO; MAX_K];
-    let mut v = Poly::ZERO;
+    let mut r_prep = ntt::Prepared::ZERO;
+    // Rows of u in acc[..k], v in acc[k], each summed in 32 bits.
+    let mut acc = [ntt::Acc::ZERO; MAX_K + 1];
 
     // One pass over r. Accumulating every row of u at once means each
-    // r_hat[j] is sampled and transformed once instead of once per row --
-    // the row-major loop paid k CBD extractions and k NTTs for every one it
-    // needed.
-    for u_i in u[..k].iter_mut() {
-        poly::poly_zero(u_i);
-    }
-    poly::poly_zero(&mut v);
-
+    // r_hat[j] is sampled, transformed and prepared once instead of once
+    // per row -- the row-major loop paid k CBD extractions and k NTTs for
+    // every one it needed.
     for j in 0..k {
         sampling::poly_cbd(&mut r_hat_j, r, j as u8, params.eta1);
         ntt::ntt(&mut r_hat_j);
+        ntt::basemul_prep(&mut r_prep, &r_hat_j);
 
         for i in 0..k {
             // A^T[i][j] = A[j][i]
             sampling::poly_uniform(&mut a_ij, rho, j as u8, i as u8);
-            ntt::poly_basemul_acc(&mut u[i], &a_ij, &r_hat_j);
+            ntt::basemul_acc32(&mut acc[i], &a_ij, &r_prep, j == 0);
         }
 
         packing::byte_decode_12(&mut t_hat_j, &ek[384 * j..]);
-        ntt::poly_basemul_acc(&mut v, &t_hat_j, &r_hat_j);
+        ntt::basemul_acc32(&mut acc[k], &t_hat_j, &r_prep, j == 0);
     }
 
     // u[i] = INTT(A^T[i] * r_hat) + e1[i], compressed into the ciphertext
+    let mut u_i = Poly::ZERO;
     let mut e1 = Poly::ZERO;
     for i in 0..k {
-        ntt::invntt(&mut u[i]);
+        ntt::acc_reduce(&mut u_i, &acc[i]);
+        ntt::invntt(&mut u_i);
         sampling::poly_cbd(&mut e1, r, (k + i) as u8, params.eta2);
-        poly::poly_compress_add(&mut ct[u_poly_bytes * i..], &u[i], &e1, du);
+        poly::poly_compress_add(&mut ct[u_poly_bytes * i..], &u_i, &e1, du);
     }
+
+    let mut v = Poly::ZERO;
+    ntt::acc_reduce(&mut v, &acc[k]);
 
     // v = INTT(t^T * r_hat) + e2 + Decompress_1(m). The message goes into
     // e2's coefficients as they stand, and the pair is added to v as it is

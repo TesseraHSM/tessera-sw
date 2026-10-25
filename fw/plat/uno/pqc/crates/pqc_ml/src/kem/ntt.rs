@@ -286,6 +286,110 @@ pub fn poly_basemul_acc(r: &mut Poly, a: &Poly, b: &Poly) {
     }
 }
 
+/// A polynomial prepared to be the right-hand side of several basemuls:
+/// each pair (b0, b1) followed by (b0, b1*zeta mod q), so the product
+/// needs no reduction inside the sum ([`basemul_acc32`]).
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+pub struct Prepared(pub [u32; N]);
+
+impl Prepared {
+    pub const ZERO: Prepared = Prepared([0; N]);
+}
+
+/// A row of basemul products summed in 32 bits: two sums a pair, the even
+/// coefficient's first. [`acc_reduce`] takes it to a polynomial.
+#[derive(Clone, Copy)]
+#[repr(C, align(4))]
+pub struct Acc(pub [i32; N]);
+
+impl Acc {
+    pub const ZERO: Acc = Acc([0; N]);
+}
+
+#[cfg(target_arch = "arm")]
+extern "C" {
+    fn pqc_ml_kem_basemul_prep(bb: *mut u32, b: *const i16, zetas: *const i16);
+    fn pqc_ml_kem_basemul_acc32(acc: *mut i32, a: *const i16, bb: *const u32, first: u32);
+    fn pqc_ml_kem_acc_reduce(r: *mut i16, acc: *const i32);
+}
+
+#[cfg(not(target_arch = "arm"))]
+fn pair_zeta(i: usize) -> i32 {
+    let z = ZETAS[64 + i / 2] as i32;
+    if i % 2 == 0 {
+        z
+    } else {
+        -z
+    }
+}
+
+/// Prepare `b` for [`basemul_acc32`]. Worth it for a `b` that several rows
+/// multiply -- r_hat in encryption, s_hat in key generation.
+pub fn basemul_prep(bb: &mut Prepared, b: &Poly) {
+    #[cfg(target_arch = "arm")]
+    {
+        // SAFETY: `bb` and `b` are 256 words and coefficients, word aligned,
+        // and BASEMUL_ZETAS holds the 64 twiddles the routine reads.
+        unsafe { pqc_ml_kem_basemul_prep(bb.0.as_mut_ptr(), b.as_ptr(), BASEMUL_ZETAS.as_ptr()) };
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    for i in 0..N / 2 {
+        let (b0, b1) = (b[2 * i] as u16 as u32, b[2 * i + 1] as i32);
+        let bz = montgomery_reduce(b1 * pair_zeta(i)) as u16 as u32;
+        bb.0[2 * i] = b0 | (b1 as u16 as u32) << 16;
+        bb.0[2 * i + 1] = b0 | bz << 16;
+    }
+}
+
+/// `acc += a * b` for `b` prepared by [`basemul_prep`], or `acc = a * b`
+/// when `first`: two multiplies a pair and no reduction. `a` must be below
+/// 2^12 in magnitude, and at most four products summed.
+pub fn basemul_acc32(acc: &mut Acc, a: &Poly, bb: &Prepared, first: bool) {
+    #[cfg(target_arch = "arm")]
+    {
+        // SAFETY: three word-aligned buffers of 256 elements; `acc` is the
+        // only one written and a distinct borrow.
+        unsafe {
+            pqc_ml_kem_basemul_acc32(acc.0.as_mut_ptr(), a.as_ptr(), bb.0.as_ptr(), first as u32)
+        };
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    for i in 0..N / 2 {
+        let (a0, a1) = (a[2 * i] as i32, a[2 * i + 1] as i32);
+        let (b0, b1) = (
+            bb.0[2 * i] as u16 as i16 as i32,
+            (bb.0[2 * i] >> 16) as i16 as i32,
+        );
+        let bz = (bb.0[2 * i + 1] >> 16) as i16 as i32;
+        let (c0, c1) = (a0 * b0 + a1 * bz, a0 * b1 + a1 * b0);
+        if first {
+            acc.0[2 * i] = c0;
+            acc.0[2 * i + 1] = c1;
+        } else {
+            acc.0[2 * i] += c0;
+            acc.0[2 * i + 1] += c1;
+        }
+    }
+}
+
+/// `r = mont(acc)`: each sum reduced once, carrying the same 2^-16 the
+/// per-term reductions of [`poly_basemul_acc`] did.
+pub fn acc_reduce(r: &mut Poly, acc: &Acc) {
+    #[cfg(target_arch = "arm")]
+    {
+        // SAFETY: as for `basemul_acc32`; `r` is a distinct borrow.
+        unsafe { pqc_ml_kem_acc_reduce(r.as_mut_ptr(), acc.0.as_ptr()) };
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    for (r, &a) in r.iter_mut().zip(acc.0.iter()) {
+        *r = montgomery_reduce(a);
+    }
+}
+
 /// `t = t * R + e`, reduced: key generation's finish for each row of t_hat,
 /// cancelling the R^{-1} that [`poly_basemul_acc`] leaves, adding e_hat
 /// and reducing for ByteEncode_12. On ARM it is one pass of
