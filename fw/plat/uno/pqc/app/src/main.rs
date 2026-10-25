@@ -786,6 +786,15 @@ async fn main(spawner: Spawner) {
             (FP_SPILL_BASE + id as usize * FP_SPILL_PER_CORE) as *mut i32,
             FP_SPILL_WORDS,
         );
+
+        // Ahead of GSRAM, the signer keeps matrix elements in the 16 KB
+        // block every FP core has at 0x2002_0000: the "share dTCM" of the
+        // legacy memory map (fp/qmgr/CM7/ldscripts/M7MemMap.h), which put
+        // each core's stack at the top of its own, so each core's view is
+        // its own memory. Nothing in this firmware maps or reaches it.
+        const FP_NEAR_BASE: usize = 0x2002_0000;
+        const FP_NEAR_WORDS: usize = 0x4000 / 4;
+        pqc_ml::spill::init_near(FP_NEAR_BASE as *mut i32, FP_NEAR_WORDS);
     }
 
     systick::init();

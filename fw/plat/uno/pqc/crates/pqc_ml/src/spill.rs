@@ -44,6 +44,33 @@ const NEEDED_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS + KEY_SLOTS * KEY_WORDS;
 
 static mut BASE: *mut i32 = core::ptr::null_mut();
 
+static mut NEAR: *mut i32 = core::ptr::null_mut();
+static mut NEAR_WORDS: usize = 0;
+
+/// Hand the signer memory to keep matrix elements in ahead of the spill:
+/// memory the core reads at dTCM speed but that its stack does not cover.
+/// Elements there are read in place, like the ones the work buffer holds.
+///
+/// # Safety
+/// `base` must be valid for `words` `i32` reads and writes, word aligned,
+/// and reserved for this core alone for the lifetime of the program.
+pub unsafe fn init_near(base: *mut i32, words: usize) {
+    NEAR = base;
+    NEAR_WORDS = words;
+}
+
+/// The region [`init_near`] gave, empty if none.
+///
+/// # Safety
+/// The caller must be its only user for as long as the slice lives.
+pub(crate) unsafe fn near() -> &'static mut [i32] {
+    if NEAR.is_null() {
+        &mut []
+    } else {
+        core::slice::from_raw_parts_mut(NEAR, NEAR_WORDS)
+    }
+}
+
 /// Hand the signer a region to spill into.
 ///
 /// A region smaller than [`NEEDED_WORDS`] is refused outright rather than

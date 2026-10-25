@@ -67,6 +67,13 @@ pub fn sign_internal(
     // multiply-accumulate unpacks as it reads.
     let a_cache = a_cache.as_flattened_mut();
     let cache_slots = a_cache.len() / PACKED_WORDS;
+    // The elements after those go to the platform's near region, if it
+    // gave one, the same way -- and only the rest to the spill.
+    //
+    // SAFETY: signing is the near region's only user, and this the only
+    // borrow of it.
+    let near = unsafe { crate::spill::near() };
+    let held = cache_slots + near.len() / PACKED_WORDS;
     let mut a_cached = false;
 
     // s1, s2 and t0 are transformed once per attempt but depend only on the
@@ -120,12 +127,12 @@ pub fn sign_internal(
             sampling::unpack_gamma1(y_hat, yb, params.gamma1);
             ntt::ntt(y_hat);
             for i in 0..k {
-                let spill = if t < cache_slots {
+                let spill = if t < held {
                     None
                 } else {
-                    crate::spill::matrix_slot(t - cache_slots)
+                    crate::spill::matrix_slot(t - held)
                 };
-                if !a_cached || (t >= cache_slots && spill.is_none()) {
+                if !a_cached || (t >= held && spill.is_none()) {
                     // The first attempt, or an element with nowhere to be
                     // kept: derive it.
                     sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
@@ -137,6 +144,11 @@ pub fn sign_internal(
                     if !a_cached {
                         if t < cache_slots {
                             crate::spill::pack(&mut a_cache[t * PACKED_WORDS..], &c_hat);
+                        } else if t < held {
+                            crate::spill::pack(
+                                &mut near[(t - cache_slots) * PACKED_WORDS..],
+                                &c_hat,
+                            );
                         } else if let Some(p) = spill {
                             // SAFETY: `p` is this core's own slot, sized for
                             // one packed element by `spill::init`.
@@ -152,7 +164,8 @@ pub fn sign_internal(
                             unsafe { crate::spill::load_packed_words(&mut c_hat, p) };
                             &c_hat
                         }
-                        None => &a_cache[t * PACKED_WORDS..],
+                        None if t < cache_slots => &a_cache[t * PACKED_WORDS..],
+                        None => &near[(t - cache_slots) * PACKED_WORDS..],
                     };
                     if j == 0 {
                         // SAFETY: one whole word-aligned polynomial.
