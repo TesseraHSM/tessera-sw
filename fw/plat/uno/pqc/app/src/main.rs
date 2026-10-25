@@ -258,33 +258,56 @@ fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     let ek_len = variant.pk_size();
     let dk_len = variant.sk_size();
 
-    let mut scratch = [0u8; KEM_DK_LEN];
+    // Both cleared through `fast_zero` rather than the array initialiser.
+    //
+    // SAFETY: written in full by `fast_zero` before any read.
+    let mut scratch = core::mem::MaybeUninit::<Align4<KEM_DK_LEN>>::uninit();
+    let mut ek = core::mem::MaybeUninit::<Align4<MAX_MLKEM_PK_LEN>>::uninit();
+    let (scratch, ek) = unsafe {
+        fast_zero(
+            scratch.as_mut_ptr().cast(),
+            core::mem::size_of::<Align4<KEM_DK_LEN>>(),
+        );
+        fast_zero(
+            ek.as_mut_ptr().cast(),
+            core::mem::size_of::<Align4<MAX_MLKEM_PK_LEN>>(),
+        );
+        (
+            &mut scratch.assume_init_mut().0,
+            &mut ek.assume_init_mut().0,
+        )
+    };
     if dk_len > scratch.len() {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     }
 
-    // Generate the decapsulation key into dTCM and copy it out in one go,
-    // rather than letting the packing write PSRAM directly.
+    // Generate both keys into dTCM and copy them out.
     //
     // Unlike ML-DSA, `dk = (dk_pke || ek || H(ek) || z)` is assembled from
     // several small pieces, and PSRAM is slow enough per access that those
     // scattered writes cost more than one bulk copy: writing it in place
-    // measured 4-6% *worse* across all three parameter sets.
-    {
-        let Some(ek) = mailbox::slot_range_mut(core_id, mailbox::SLOT_PK_OFFSET, ek_len) else {
-            mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
-            return;
-        };
-        pqc_ml::ml_kem_keygen(variant, &req.xi, &req.rnd, ek, &mut scratch[..dk_len]);
-    }
+    // measured 4-6% *worse* across all three parameter sets. The same goes
+    // for `ek`, which keygen reads back twice -- to copy it into `dk` and to
+    // hash it -- at 35 cycles a word from PSRAM.
+    let ek = &mut ek[..ek_len];
+    pqc_ml::ml_kem_keygen(variant, &req.xi, &req.rnd, ek, &mut scratch[..dk_len]);
 
-    let Some(dk_out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_KEY_OUT_OFFSET, dk_len)
-    else {
+    let Some((ek_out, dk_out)) = mailbox::slot_pair_mut(
+        core_id,
+        mailbox::SLOT_PK_OFFSET,
+        ek_len,
+        mailbox::SLOT_KEY_OUT_OFFSET,
+        dk_len,
+    ) else {
         scratch[..dk_len].fill(0);
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
+    // Written out a word at a time: PSRAM takes single stores at a fraction
+    // of what an eight-word `stmia` costs it, unlike reads, where the burst
+    // wins (see `mailbox::stage`).
+    ek_out.copy_from_slice(ek);
     dk_out.copy_from_slice(&scratch[..dk_len]);
 
     // Do not leave key material in dTCM for the next request to find.
@@ -505,25 +528,40 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
         &mut work.assume_init_mut()[..]
     };
 
-    // Both keys are written straight into their slot regions. Taking the
-    // two borrows together is what makes that possible; staging the secret
-    // key through dTCM would cost a copy back plus a wipe of the staging
+    // The secret key is written straight into its slot region: staging it
+    // through dTCM would cost a copy back plus a wipe of the staging
     // buffer, and would leave key material in dTCM in between.
+    //
+    // The public key is not, because keygen reads it straight back to
+    // hash it into `tr`, and a PSRAM read costs 35 cycles a word. It is
+    // built in dTCM and copied out afterwards; it is public, so nothing
+    // needs wiping.
     //
     // The expanded secret key travels back to the HSM, which masks it
     // alongside the seed so signing never has to re-derive it.
-    let Some((pk, sk_out)) = mailbox::slot_pair_mut(
-        core_id,
-        mailbox::SLOT_PK_OFFSET,
-        pk_len,
-        mailbox::SLOT_KEY_OUT_OFFSET,
-        sk_len,
-    ) else {
+    let Some(sk_out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_KEY_OUT_OFFSET, sk_len)
+    else {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
 
-    pqc_ml::ml_dsa_keygen(variant, &req.xi, pk, sk_out, work);
+    // SAFETY: written in full by `fast_zero` before any read.
+    let mut pk_buf = core::mem::MaybeUninit::<Align4<DSA_PK_LEN>>::uninit();
+    let pk_buf = unsafe {
+        fast_zero(
+            pk_buf.as_mut_ptr().cast(),
+            core::mem::size_of::<Align4<DSA_PK_LEN>>(),
+        );
+        &mut pk_buf.assume_init_mut().0[..pk_len]
+    };
+
+    pqc_ml::ml_dsa_keygen(variant, &req.xi, pk_buf, sk_out, work);
+
+    let Some(pk) = mailbox::slot_range_mut(core_id, mailbox::SLOT_PK_OFFSET, pk_len) else {
+        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        return;
+    };
+    pk.copy_from_slice(pk_buf);
 
     mailbox::respond(core_id, req, mailbox::STATUS_OK, pk_len as u32);
 }
@@ -710,9 +748,10 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
 //
 // | Operation | Live buffers | Bytes |
 // |---|---|---|
-// | ML-DSA keygen | work | 7,168 |
+// | ML-DSA keygen | work + public key | 9,760 |
 // | ML-DSA sign | work + secret key | 12,064 |
 // | ML-DSA verify | work + signature + public key | 14,387 |
+// | ML-KEM keygen | decapsulation key + encapsulation key | 4,736 |
 // | ML-KEM decapsulate | ciphertext + decapsulation key | 4,736 |
 
 /// ML-DSA signature (ML-DSA-87), the largest of the three parameter sets.
@@ -778,9 +817,10 @@ async fn main(spawner: Spawner) {
     // region this core alone owns.
     unsafe {
         const FP_SPILL_BASE: usize = 0x611D_0000;
-        // Exactly what one core needs: ML-DSA-87 spills 44 of its 56 matrix
-        // elements, packed three bytes to a coefficient, plus 23 key-derived
-        // transforms held unpacked. No parameter set needs more. The stride
+        // What one core needs, plus 3 KB: ML-DSA-87 spills 40 of its 56
+        // matrix elements, packed three bytes to a coefficient, plus 23
+        // key-derived transforms held unpacked. No parameter set needs more.
+        // (It spilled 44 before dTCM held its share packed too.) The stride
         // used to be 0x1B000, of which 41 KB per core was never addressable.
         const FP_SPILL_PER_CORE: usize = 0xE000;
         const FP_SPILL_WORDS: usize = FP_SPILL_PER_CORE / 4;

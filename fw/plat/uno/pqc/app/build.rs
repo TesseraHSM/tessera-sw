@@ -15,7 +15,11 @@ fn main() {
     // cortex-m-rt's `device` feature makes its link.x `INCLUDE device.x`,
     // which a PAC would supply. This app takes no interrupts, so there are
     // no handlers to name.
-    fs::write(out.join("device.x"), "/* No device interrupts on the FP cores. */\n").unwrap();
+    fs::write(
+        out.join("device.x"),
+        "/* No device interrupts on the FP cores. */\n",
+    )
+    .unwrap();
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed={}", memory_x.display());
 }
