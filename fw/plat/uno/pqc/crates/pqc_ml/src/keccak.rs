@@ -3,7 +3,8 @@
 // Keccak-f[1600] permutation and SHAKE-128/256 sponge.
 //
 // On ARM (thumbv7em) targets: uses pqm4 assembly from
-// https://github.com/mupq/pqm4 (common/keccakf1600.S).
+// https://github.com/mupq/pqm4 (common/keccakf1600.S), with the permutation
+// rescheduled for Cortex-M7 by SLOTHY (see asm/keccakf1600.S).
 // On host targets: pure Rust fallback for testing.
 // SHAKE-128 rate = 168 bytes, SHAKE-256 rate = 136 bytes
 pub const SHAKE128_RATE: usize = 168;
