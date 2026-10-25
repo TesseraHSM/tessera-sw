@@ -10,7 +10,6 @@ use super::params::MlKemParams;
 use super::params::N;
 /// K-PKE: Internal lattice-based public-key encryption for ML-KEM.
 /// FIPS 203 Algorithms 13 (KeyGen), 14 (Encrypt), 15 (Decrypt).
-use super::params::Q;
 use super::poly::Poly;
 use super::poly::{self};
 use super::sampling;
@@ -129,7 +128,6 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
         ntt::invntt(&mut u[i]);
         sampling::poly_cbd(&mut e1, r, (k + i) as u8, params.eta2);
         poly::poly_add_inplace(&mut u[i], &e1);
-        poly::poly_reduce(&mut u[i]);
         poly::poly_compress(&mut ct[u_poly_bytes * i..], &u[i], du);
     }
 
@@ -145,8 +143,6 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
         msg_poly[i] = poly::decompress(msg_poly[i] as u16, 1) as i16;
     }
     poly::poly_add_inplace(&mut v, &msg_poly);
-    poly::poly_reduce(&mut v);
-
     poly::poly_compress(&mut ct[k * u_poly_bytes..], &v, dv);
 }
 
@@ -178,14 +174,8 @@ pub fn kpke_decrypt(params: &MlKemParams, m: &mut [u8; 32], dk: &[u8], ct: &[u8]
     // w = v - s^T * u
     let mut w = Poly::ZERO;
     poly::poly_sub(&mut w, &v, &su);
-    poly::poly_reduce(&mut w);
 
-    // Compress_1(w) → message
-    let mut m_poly = Poly::ZERO;
-    for i in 0..N {
-        let mut t = w[i] as i32;
-        t += (t >> 31) & Q as i32;
-        m_poly[i] = poly::compress(t as u16, 1) as i16;
-    }
-    packing::byte_encode_1(m, &m_poly);
+    // Compress_1(w) -> message: ByteEncode_1 of Compress_1, which is the
+    // general packing at d = 1. w is within -1664..4992, inside its range.
+    poly::poly_compress(m, &w, 1);
 }

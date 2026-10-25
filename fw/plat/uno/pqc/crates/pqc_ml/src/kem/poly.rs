@@ -86,37 +86,50 @@ pub fn decompress(y: u16, d: u8) -> u16 {
     ((y as u32 * Q as u32 + (1 << (d - 1))) >> d) as u16
 }
 
-/// Lift a centered coefficient into [0, q).
-#[inline(always)]
-fn unsigned(x: i16) -> u16 {
-    let t = x as i32;
-    (t + ((t >> 31) & Q as i32)) as u16
-}
-
 /// Compress every coefficient to `d` bits and pack them little-endian
 /// (ByteEncode_d of FIPS 203), `d` in 1..=11.
 ///
-/// One loop serves every `d`, a word at a time. Specialised byte shuffles
-/// for each `d` were a little quicker per coefficient but took 0.9 KB of a
-/// 32 KB iTCM for what is a few percent of a ciphertext operation.
+/// The coefficients need not be reduced: any within +-5000 compress as
+/// their residue mod q does. Every caller passes an inverse-transform
+/// output (at most 1664 on ARM) plus small noise, or a difference with a
+/// decompressed polynomial, so none needs a Barrett pass first.
+///
+/// On ARM this is `asm/kem_compress.S`: one loop for every `d`, a word at
+/// a time, with the division by q a single multiply. Specialised byte
+/// shuffles for each `d` were a little quicker per coefficient but took
+/// 0.9 KB of a 32 KB iTCM.
 pub fn poly_compress(r: &mut [u8], a: &Poly, d: u8) {
     let out = &mut r[..32 * d as usize];
-    let d = d as u32;
-    let mut words = out.as_chunks_mut::<4>().0.iter_mut();
-    let mut acc: u32 = 0;
-    let mut bits: u32 = 0;
-    for &c in a.iter() {
-        let t = compress(unsigned(c), d as u8) as u32;
-        acc |= t << bits;
-        bits += d;
-        if bits >= 32 {
-            if let Some(w) = words.next() {
-                *w = acc.to_le_bytes();
+
+    #[cfg(target_arch = "arm")]
+    {
+        extern "C" {
+            fn pqc_ml_kem_compress(out: *mut u8, a: *const i16, d: u32);
+        }
+        // SAFETY: `out` holds the 32 * d bytes 256 d-bit values pack to,
+        // and `a` is 256 coefficients, all within the routine's range.
+        unsafe { pqc_ml_kem_compress(out.as_mut_ptr(), a.as_ptr(), d as u32) };
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    {
+        let d = d as u32;
+        let mut words = out.as_chunks_mut::<4>().0.iter_mut();
+        let mut acc: u32 = 0;
+        let mut bits: u32 = 0;
+        for &c in a.iter() {
+            let t = compress((c as i32).rem_euclid(Q as i32) as u16, d as u8) as u32;
+            acc |= t << bits;
+            bits += d;
+            if bits >= 32 {
+                if let Some(w) = words.next() {
+                    *w = acc.to_le_bytes();
+                }
+                // `bits - d` of `t` went into the word just written; the
+                // rest starts the next one. 32 - (bits - d) is at most 11.
+                acc = t >> (32 - (bits - d));
+                bits -= 32;
             }
-            // `bits - d` of `t` went into the word just written; the rest
-            // starts the next one. 32 - (bits - d) is at most 11.
-            acc = t >> (32 - (bits - d));
-            bits -= 32;
         }
     }
 }
