@@ -133,3 +133,42 @@ pqc_ml_kem_rej:
     orr     r0, r0, r1, lsl #16
     pop     {r4-r9, pc}
 .size pqc_ml_kem_rej, .-pqc_ml_kem_rej
+
+@ uint32_t pqc_ml_dsa_eta(int32_t a[256], uint32_t ctr, const uint32_t buf[34],
+@                         const int8_t tab[16])
+@
+@ ML-DSA's eta sampling over one SHAKE256 block: each nibble n, low then
+@ high of every byte, gives tab[n] -- eta - (n mod (2 eta + 1)) -- or, where
+@ tab[n] is -128, nothing. Stops while eight more could still fit, and
+@ returns the coefficients filled in the low half and the words used in
+@ the high half, for the caller to finish the few that are left.
+
+.global pqc_ml_dsa_eta
+.type pqc_ml_dsa_eta, %function
+.align 2
+pqc_ml_dsa_eta:
+    push    {r4-r8, lr}
+    mov     r5, r0
+    add     r4, r0, r1, lsl #2      @ next free slot
+    add     r6, r0, #(248 * 4)      @ past this, eight might not fit
+    mov     r7, #34                 @ words left in the block
+1:
+    cmp     r4, r6
+    bhi     9f
+    ldr     r8, [r2], #4
+    .irp sh, 0, 4, 8, 12, 16, 20, 24, 28
+    ubfx    r12, r8, #\sh, #4
+    ldrsb   r12, [r3, r12]
+    cmn     r12, #128
+    it      ne
+    strne   r12, [r4], #4
+    .endr
+    subs    r7, r7, #1
+    bne     1b
+9:
+    sub     r0, r4, r5
+    lsrs    r0, r0, #2
+    rsb     r1, r7, #34             @ words used
+    orr     r0, r0, r1, lsl #16
+    pop     {r4-r8, pc}
+.size pqc_ml_dsa_eta, .-pqc_ml_dsa_eta
