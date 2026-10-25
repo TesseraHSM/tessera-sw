@@ -72,19 +72,76 @@ impl QueueSlot {
     }
 }
 
-/// A request whose inputs all travel in the mailbox (key generation's), left
-/// by a task queued for an engine so the engine can start on it the moment
-/// it is freed: [`PqcState::release_engine`] posts it, rather than waking the
-/// task to, which can be tens of microseconds away under load.
+/// A bulk input of a [`Staged`] request: `len` bytes at `ptr`, copied into
+/// the engine's operand slot at `offset` as the request is posted.
+#[derive(Clone, Copy)]
+pub(crate) struct Operand {
+    pub(crate) ptr: *const u8,
+    pub(crate) len: usize,
+    pub(crate) offset: usize,
+}
+
+impl Operand {
+    /// No operand.
+    pub(crate) const NONE: Self = Self {
+        ptr: core::ptr::null(),
+        len: 0,
+        offset: 0,
+    };
+
+    /// `data`, for the operand slot at `offset`.
+    pub(crate) fn new(data: &[u8], offset: usize) -> Self {
+        Self {
+            ptr: data.as_ptr(),
+            len: data.len(),
+            offset,
+        }
+    }
+}
+
+/// A request left by a task queued for an engine so the engine can start on
+/// it the moment it is freed: [`PqcState::release_engine`] posts it, rather
+/// than waking the task to, which can be tens of microseconds away under
+/// load.
+///
+/// The bulk inputs are referenced, not copied: they stay in the task's own
+/// buffers, which outlive the request because the task is suspended in
+/// [`PqcDriver::acquire_and_post`](crate::PqcDriver) until it is posted, and
+/// a task dropped while queued takes its request back out of the queue.
 #[derive(Clone)]
 pub(crate) struct Staged {
     pub(crate) op: u32,
     pub(crate) key_kind: u32,
     pub(crate) xi: [u8; SEED_LEN],
     pub(crate) rnd: [u8; SEED_LEN],
+    pub(crate) msg_len: u32,
+    pub(crate) ctx_len: u32,
+    pub(crate) sig_len: u32,
+    pub(crate) pub_key_len: u32,
+    pub(crate) operands: [Operand; 4],
 }
 
+// SAFETY: the operand pointers are only dereferenced while the task that
+// staged them is suspended waiting for its request to be posted (see
+// `Staged`), and the firmware runs on one core.
+unsafe impl Send for Staged {}
+
 impl Staged {
+    /// A request with no bulk inputs and every length zero.
+    pub(crate) const fn new(op: u32, key_kind: u32) -> Self {
+        Self {
+            op,
+            key_kind,
+            xi: [0; SEED_LEN],
+            rnd: [0; SEED_LEN],
+            msg_len: 0,
+            ctx_len: 0,
+            sig_len: 0,
+            pub_key_len: 0,
+            operands: [Operand::NONE; 4],
+        }
+    }
+
     /// The request, as the mailbox carries it.
     pub(crate) fn params(&self) -> mailbox::RequestParams<'_> {
         mailbox::RequestParams {
@@ -92,19 +149,34 @@ impl Staged {
             key_kind: self.key_kind,
             xi: &self.xi,
             rnd: &self.rnd,
-            msg_len: 0,
-            ctx_len: 0,
-            sig_len: 0,
-            pub_key_len: 0,
+            msg_len: self.msg_len,
+            ctx_len: self.ctx_len,
+            sig_len: self.sig_len,
+            pub_key_len: self.pub_key_len,
         }
     }
 
-    /// Wipe the seeds, which are key material.
+    /// Copy the bulk inputs into engine `id`'s operand slot.
+    fn stage_operands(&self, id: EngineId) {
+        for o in &self.operands {
+            if o.len != 0 {
+                // SAFETY: see `Staged`: the buffer behind the pointer is
+                // still borrowed by the suspended task that staged it.
+                let data = unsafe { core::slice::from_raw_parts(o.ptr, o.len) };
+                // Cannot fail: every operand was checked against its
+                // region's maximum before it was staged.
+                let _ = mailbox::write_slot(id, o.offset, data);
+            }
+        }
+    }
+
+    /// Wipe the seeds, which are key material, and forget the bulk inputs.
     pub(crate) fn wipe(&mut self) {
         for b in self.xi.iter_mut().chain(self.rnd.iter_mut()) {
             // SAFETY: `b` is a valid, writable byte of `self`.
             unsafe { core::ptr::write_volatile(b, 0) };
         }
+        self.operands = [Operand::NONE; 4];
     }
 }
 
@@ -171,16 +243,17 @@ impl Responses {
         }
     }
 
-    /// Post `request` to engine `id`, ring its doorbell, and mark its
-    /// response awaited.
+    /// Stage `request`'s bulk inputs in engine `id`'s operand slot, post
+    /// it, ring the doorbell, and mark its response awaited.
     ///
     /// Returns the request's number, which the response will carry.
-    pub(crate) fn post(&mut self, id: EngineId, request: &mailbox::RequestParams<'_>) -> u32 {
+    pub(crate) fn post(&mut self, id: EngineId, request: &Staged) -> u32 {
+        request.stage_operands(id);
         // Monotonic across all engines, so a response can never be mistaken
         // for one to an earlier request on the same core.
         self.request_seq = self.request_seq.wrapping_add(1);
         let seq = self.request_seq;
-        mailbox::post_request(id, seq, request);
+        mailbox::post_request(id, seq, &request.params());
         doorbell::ring(id, seq);
         let engine = usize::from(id.raw());
         self.awaiting |= 1 << engine;
@@ -303,6 +376,15 @@ impl PqcState {
         core::mem::take(&mut self.handed_over)
     }
 
+    /// Take back the request a task dropped while still queued in slot
+    /// `idx` left there, which refers to that task's buffers.
+    pub(crate) fn unstage(&mut self, idx: u8) {
+        if let Some(staged) = self.queue[idx as usize].staged.as_mut() {
+            staged.wipe();
+        }
+        self.queue[idx as usize].staged = None;
+    }
+
     /// Return an engine to the pool, handing it straight to the
     /// longest-waiting task if there is one.
     pub(crate) fn release_engine(&mut self, id: EngineId) {
@@ -326,7 +408,7 @@ impl PqcState {
                 let slot = &mut self.queue[idx];
                 slot.state = match &mut slot.staged {
                     Some(staged) => {
-                        let seq = self.responses.post(id, &staged.params());
+                        let seq = self.responses.post(id, staged);
                         staged.wipe();
                         QueueSlotState::Running(id, seq)
                     }

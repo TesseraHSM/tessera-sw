@@ -10,6 +10,7 @@ use tsra_fw_uno_trace::tracing::*;
 use crate::api::PqcDriver;
 use crate::error::PqcError;
 use crate::mailbox;
+use crate::pool::Operand;
 use crate::pool::Staged;
 use crate::request::PqcOp;
 use crate::types::EngineId;
@@ -141,17 +142,120 @@ pub(crate) fn gen_key_request(
         return Err(PqcError::INVALID_BUFFER_SIZE);
     }
 
-    let mut staged = Staged {
-        op: op as u32,
-        key_kind: kind.0 as u32,
-        xi: [0; MLDSA_SEED_LEN],
-        rnd: [0; MLDSA_SEED_LEN],
-    };
+    let mut staged = Staged::new(op as u32, kind.0 as u32);
     let (xi, rnd) = seed.split_at(MLDSA_SEED_LEN);
     staged.xi.copy_from_slice(xi);
     if !rnd.is_empty() {
         staged.rnd.copy_from_slice(rnd);
     }
+    Ok(staged)
+}
+
+/// Check a signing request's buffers against parameter set `kind` and
+/// build it; `sig` is only sized here.
+pub(crate) fn sign_request(
+    kind: HsmVaultKeyKind,
+    sec_key: &[u8],
+    rnd: &[u8; MLDSA_SEED_LEN],
+    msg: &[u8],
+    ctx: &[u8],
+    sig: &[u8],
+) -> HsmResult<Staged> {
+    if sig.len() != mldsa_sig_len(kind)?
+        || sec_key.len() != mldsa_sec_key_len(kind)?
+        || msg.len() > MLDSA_MSG_MAX
+        || ctx.len() > MLDSA_CTX_MAX
+    {
+        return Err(PqcError::INVALID_BUFFER_SIZE);
+    }
+    let mut staged = Staged::new(PqcOp::MlDsaSign as u32, kind.0 as u32);
+    staged.rnd = *rnd;
+    staged.msg_len = msg.len() as u32;
+    staged.ctx_len = ctx.len() as u32;
+    staged.operands = [
+        Operand::new(msg, mailbox::SLOT_MSG_OFFSET),
+        Operand::new(ctx, mailbox::SLOT_CTX_OFFSET),
+        Operand::new(sec_key, mailbox::SLOT_KEY_IN_OFFSET),
+        Operand::NONE,
+    ];
+    Ok(staged)
+}
+
+/// Check a verification request's buffers against parameter set `kind` and
+/// build it.
+pub(crate) fn verify_request(
+    kind: HsmVaultKeyKind,
+    pub_key: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    sig: &[u8],
+) -> HsmResult<Staged> {
+    if pub_key.len() != mldsa_pub_key_len(kind)?
+        || sig.len() != mldsa_sig_len(kind)?
+        || msg.len() > MLDSA_MSG_MAX
+        || ctx.len() > MLDSA_CTX_MAX
+    {
+        return Err(PqcError::INVALID_BUFFER_SIZE);
+    }
+    let mut staged = Staged::new(PqcOp::MlDsaVerify as u32, kind.0 as u32);
+    staged.msg_len = msg.len() as u32;
+    staged.ctx_len = ctx.len() as u32;
+    staged.sig_len = sig.len() as u32;
+    staged.pub_key_len = pub_key.len() as u32;
+    staged.operands = [
+        Operand::new(msg, mailbox::SLOT_MSG_OFFSET),
+        Operand::new(ctx, mailbox::SLOT_CTX_OFFSET),
+        Operand::new(sig, mailbox::SLOT_SIG_OFFSET),
+        Operand::new(pub_key, mailbox::SLOT_PK_OFFSET),
+    ];
+    Ok(staged)
+}
+
+/// Check an encapsulation request's buffers against parameter set `kind`
+/// and build it; `ciphertext` and `shared_secret` are only sized here.
+pub(crate) fn encaps_request(
+    kind: HsmVaultKeyKind,
+    pub_key: &[u8],
+    m: &[u8; MLDSA_SEED_LEN],
+    ciphertext: &[u8],
+    shared_secret: &[u8],
+) -> HsmResult<Staged> {
+    if pub_key.len() != mlkem_pub_key_len(kind)?
+        || ciphertext.len() != mlkem_ct_len(kind)?
+        || shared_secret.len() != mailbox::SHARED_SECRET_LEN
+    {
+        return Err(PqcError::INVALID_BUFFER_SIZE);
+    }
+    let mut staged = Staged::new(PqcOp::MlKemEncapsulate as u32, kind.0 as u32);
+    staged.xi = *m;
+    staged.pub_key_len = pub_key.len() as u32;
+    staged.operands[0] = Operand::new(pub_key, mailbox::SLOT_PK_OFFSET);
+    Ok(staged)
+}
+
+/// Check a decapsulation request's buffers against parameter set `kind` and
+/// build it; `shared_secret` is only sized here.
+pub(crate) fn decaps_request(
+    kind: HsmVaultKeyKind,
+    sec_key: &[u8],
+    ciphertext: &[u8],
+    shared_secret: &[u8],
+) -> HsmResult<Staged> {
+    if sec_key.len() != mlkem_sec_key_len(kind)?
+        || ciphertext.len() != mlkem_ct_len(kind)?
+        || shared_secret.len() != mailbox::SHARED_SECRET_LEN
+    {
+        return Err(PqcError::INVALID_BUFFER_SIZE);
+    }
+    let mut staged = Staged::new(PqcOp::MlKemDecapsulate as u32, kind.0 as u32);
+    // The ciphertext length rides in the signature-length field, as it did
+    // when the ciphertext shared that region.
+    staged.sig_len = ciphertext.len() as u32;
+    // The decapsulation key occupies the region the ciphertext used to use,
+    // so the ciphertext moves to the public-key region -- which
+    // decapsulation does not otherwise touch.
+    staged.operands[0] = Operand::new(sec_key, mailbox::SLOT_KEY_IN_OFFSET);
+    staged.operands[1] = Operand::new(ciphertext, mailbox::SLOT_CT_IN_OFFSET);
     Ok(staged)
 }
 
@@ -216,45 +320,9 @@ impl PqcEngine<'_> {
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
-        let expected_sig = mldsa_sig_len(kind)?;
-        if sig.len() != expected_sig
-            || sec_key.len() != mldsa_sec_key_len(kind)?
-            || msg.len() > MLDSA_MSG_MAX
-            || ctx.len() > MLDSA_CTX_MAX
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        // Stage the bulk inputs before posting: the core reads them only
-        // after seeing the request sequence number, which is written last.
-        if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_CTX_OFFSET, ctx)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_KEY_IN_OFFSET, sec_key)
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        let resp = self
-            .submit(&mailbox::RequestParams {
-                op: PqcOp::MlDsaSign as u32,
-                key_kind: kind.0 as u32,
-                xi: &[0u8; MLDSA_SEED_LEN],
-                rnd,
-                msg_len: msg.len() as u32,
-                ctx_len: ctx.len() as u32,
-                sig_len: 0,
-                pub_key_len: 0,
-            })
-            .await?;
-
-        if resp.out_len as usize != expected_sig {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        Ok(())
+        let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig)?;
+        let seq = self.post(&mut staged);
+        self.finish_sign(seq, sig).await
     }
 
     /// Generate an ML-KEM key pair on this engine.
@@ -292,42 +360,9 @@ impl PqcEngine<'_> {
         ciphertext: &mut [u8],
         shared_secret: &mut [u8],
     ) -> HsmResult<()> {
-        let expected_pub = mlkem_pub_key_len(kind)?;
-        let expected_ct = mlkem_ct_len(kind)?;
-        if pub_key.len() != expected_pub
-            || ciphertext.len() != expected_ct
-            || shared_secret.len() != mailbox::SHARED_SECRET_LEN
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        if !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pub_key) {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        let resp = self
-            .submit(&mailbox::RequestParams {
-                op: PqcOp::MlKemEncapsulate as u32,
-                key_kind: kind.0 as u32,
-                xi: m,
-                rnd: &[0u8; MLDSA_SEED_LEN],
-                msg_len: 0,
-                ctx_len: 0,
-                sig_len: 0,
-                pub_key_len: pub_key.len() as u32,
-            })
-            .await?;
-
-        if resp.out_len as usize != expected_ct {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ciphertext)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        Ok(())
+        let mut staged = encaps_request(kind, pub_key, m, ciphertext, shared_secret)?;
+        let seq = self.post(&mut staged);
+        self.finish_encaps(seq, ciphertext, shared_secret).await
     }
 
     /// Decapsulate a ciphertext on this engine.
@@ -346,48 +381,9 @@ impl PqcEngine<'_> {
         ciphertext: &[u8],
         shared_secret: &mut [u8],
     ) -> HsmResult<()> {
-        let expected_ct = mlkem_ct_len(kind)?;
-        if sec_key.len() != mlkem_sec_key_len(kind)?
-            || ciphertext.len() != expected_ct
-            || shared_secret.len() != mailbox::SHARED_SECRET_LEN
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        // The decapsulation key occupies the region the ciphertext used to
-        // use, so the ciphertext moves to the public-key region — which
-        // decapsulation does not otherwise touch.
-        if !mailbox::write_slot(self.id, mailbox::SLOT_KEY_IN_OFFSET, sec_key)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_CT_IN_OFFSET, ciphertext)
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        let resp = self
-            .submit(&mailbox::RequestParams {
-                op: PqcOp::MlKemDecapsulate as u32,
-                key_kind: kind.0 as u32,
-                xi: &[0u8; MLDSA_SEED_LEN],
-                rnd: &[0u8; MLDSA_SEED_LEN],
-                msg_len: 0,
-                ctx_len: 0,
-                // The ciphertext length rides in the signature-length
-                // field, as it did when the ciphertext shared that region.
-                sig_len: ciphertext.len() as u32,
-                pub_key_len: 0,
-            })
-            .await;
-
-        let resp = resp?;
-
-        if resp.out_len as usize != mailbox::SHARED_SECRET_LEN {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret) {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
-        Ok(())
+        let mut staged = decaps_request(kind, sec_key, ciphertext, shared_secret)?;
+        let seq = self.post(&mut staged);
+        self.finish_decaps(seq, shared_secret).await
     }
 
     /// Verify a signature on this engine.
@@ -403,42 +399,82 @@ impl PqcEngine<'_> {
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
-        if pub_key.len() != mldsa_pub_key_len(kind)?
-            || sig.len() != mldsa_sig_len(kind)?
-            || msg.len() > MLDSA_MSG_MAX
-            || ctx.len() > MLDSA_CTX_MAX
-        {
+        let mut staged = verify_request(kind, pub_key, msg, ctx, sig)?;
+        let seq = self.post(&mut staged);
+        self.finish_verify(seq).await
+    }
+
+    /// Post `staged` to this engine, wiping it once posted.
+    ///
+    /// The core reads the bulk inputs only after seeing the request's
+    /// sequence number, which is written last.
+    fn post(&mut self, staged: &mut Staged) -> u32 {
+        let id = self.id;
+        let seq = self.driver.state.with(|s| s.responses.post(id, staged));
+        staged.wipe();
+        seq
+    }
+
+    /// Collect the signature signing request `seq` left in this core's
+    /// operand slot.
+    pub(crate) async fn finish_sign(&mut self, seq: u32, sig: &mut [u8]) -> HsmResult<()> {
+        let resp = self.await_ok(seq).await?;
+        if resp.out_len as usize != sig.len() {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-
-        if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_CTX_OFFSET, ctx)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_SIG_OFFSET, sig)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
-        {
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
+        Ok(())
+    }
 
-        // A bad signature comes back as a status, so use the status-tolerant
-        // submit rather than letting every non-zero status become an error.
-        let resp = self
-            .submit_raw(&mailbox::RequestParams {
-                op: PqcOp::MlDsaVerify as u32,
-                key_kind: kind.0 as u32,
-                xi: &[0u8; MLDSA_SEED_LEN],
-                rnd: &[0u8; MLDSA_SEED_LEN],
-                msg_len: msg.len() as u32,
-                ctx_len: ctx.len() as u32,
-                sig_len: sig.len() as u32,
-                pub_key_len: pub_key.len() as u32,
-            })
-            .await?;
-
+    /// Collect the outcome of verification request `seq`.
+    pub(crate) async fn finish_verify(&mut self, seq: u32) -> HsmResult<bool> {
+        // A bad signature comes back as a status, so take the status as is
+        // rather than letting every non-zero status become an error.
+        let resp = self.await_response(seq).await?;
         match resp.status {
             0 => Ok(true),
             s if s == STATUS_CRYPTO_FAILED => Ok(false),
             _ => Err(PqcError::FP_ERROR),
         }
+    }
+
+    /// Collect the ciphertext and shared secret encapsulation request `seq`
+    /// left in this core's operand slot.
+    pub(crate) async fn finish_encaps(
+        &mut self,
+        seq: u32,
+        ciphertext: &mut [u8],
+        shared_secret: &mut [u8],
+    ) -> HsmResult<()> {
+        let resp = self.await_ok(seq).await?;
+        if resp.out_len as usize != ciphertext.len() {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ciphertext)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
+        {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
+    }
+
+    /// Collect the shared secret decapsulation request `seq` left in this
+    /// core's operand slot.
+    pub(crate) async fn finish_decaps(
+        &mut self,
+        seq: u32,
+        shared_secret: &mut [u8],
+    ) -> HsmResult<()> {
+        let resp = self.await_ok(seq).await?;
+        if resp.out_len as usize != mailbox::SHARED_SECRET_LEN {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret) {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
     }
 
     /// Run key generation request `staged` here, wiping it once posted.
@@ -448,12 +484,7 @@ impl PqcEngine<'_> {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
-        let id = self.id;
-        let seq = self
-            .driver
-            .state
-            .with(|s| s.responses.post(id, &staged.params()));
-        staged.wipe();
+        let seq = self.post(staged);
         self.finish_gen_key(seq, pub_key, sec_key).await
     }
 
@@ -465,10 +496,7 @@ impl PqcEngine<'_> {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
-        let resp = self.await_response(seq).await?;
-        if resp.status != 0 {
-            return Err(PqcError::FP_ERROR);
-        }
+        let resp = self.await_ok(seq).await?;
         if resp.out_len as usize != pub_key.len() {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -485,42 +513,14 @@ impl PqcEngine<'_> {
         Ok(())
     }
 
-    /// Send a request to this engine's FP core and wait for its answer.
-    ///
-    /// The request travels in the core's PSRAM mailbox; the doorbell only
-    /// wakes it.  Completion is detected by polling the mailbox sequence
-    /// number rather than an interrupt pending bit, because block 1's
-    /// pending bits belong to the IPC driver, whose `wake()` clears every
-    /// bit it processes and would race the reply away.
-    async fn submit(
-        &mut self,
-        params: &mailbox::RequestParams<'_>,
-    ) -> HsmResult<mailbox::Response> {
-        let resp = self.submit_raw(params).await?;
+    /// As [`await_response`](Self::await_response), but a non-zero status
+    /// is an error.
+    async fn await_ok(&mut self, seq: u32) -> HsmResult<mailbox::Response> {
+        let resp = self.await_response(seq).await?;
         if resp.status != 0 {
             return Err(PqcError::FP_ERROR);
         }
         Ok(resp)
-    }
-
-    /// As [`submit`](Self::submit), but returns the core's status untouched.
-    ///
-    /// Verify needs this: a bad signature is a legitimate outcome carried in
-    /// the status, not a transport fault.
-    async fn submit_raw(
-        &mut self,
-        params: &mailbox::RequestParams<'_>,
-    ) -> HsmResult<mailbox::Response> {
-        // NOTE: `probe_fp_shared_memory()` used to run here. It writes a
-        // sentinel and reads all three FP status blocks out of PSRAM, and
-        // its only consumer was a trace call -- so with tracing out of the
-        // hot path it was pure cost on every request. Call it from a
-        // debugging build if you need to see what the cores are
-        // publishing.
-
-        let id = self.id;
-        let seq = self.driver.state.with(|s| s.responses.post(id, params));
-        self.await_response(seq).await
     }
 
     /// Await the response to request `seq`, already posted to this engine.

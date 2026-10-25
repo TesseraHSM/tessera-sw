@@ -10,7 +10,11 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_single_cell::SingleCell;
 
+use crate::engine::decaps_request;
+use crate::engine::encaps_request;
 use crate::engine::gen_key_request;
+use crate::engine::sign_request;
+use crate::engine::verify_request;
 use crate::engine::PqcEngine;
 use crate::error::PqcError;
 use crate::pool::PqcState;
@@ -86,32 +90,41 @@ impl PqcDriver {
         }
     }
 
-    /// As [`acquire_any`](Self::acquire_any), but with key generation
-    /// request `staged` to start on the engine the moment it is ours: posted
-    /// here if an engine is free, else by the task that frees one, without
-    /// waiting for this one to wake.
+    /// As [`acquire_any`](Self::acquire_any), but with request `staged` to
+    /// start on the engine the moment it is ours: posted here if an engine is
+    /// free, else by the task that frees one, without waiting for this one
+    /// to wake.
     ///
     /// Returns the engine and the request's number.
     ///
     /// `staged` is wiped once posted or handed over.
     async fn acquire_and_post(&self, staged: &mut Staged) -> HsmResult<(PqcEngine<'_>, u32)> {
-        let mut queue_idx: Option<u8> = None;
+        // The slot this task waits in, until it collects its engine. The
+        // request left there refers to the caller's buffers, so a task
+        // dropped while still queued must take it back out.
+        let queue_idx: core::cell::Cell<Option<u8>> = core::cell::Cell::new(None);
+        let _unstage = Unstage {
+            driver: self,
+            idx: &queue_idx,
+        };
 
         let result = poll_fn(|cx| {
             self.state.with(|s| {
-                if let Some(idx) = queue_idx {
-                    return match s.poll_queue_slot(idx, cx) {
+                if let Some(idx) = queue_idx.get() {
+                    let handed = s.poll_queue_slot(idx, cx);
+                    if handed.is_some() {
+                        queue_idx.set(None);
+                    }
+                    return match handed {
                         Some((id, Some(seq))) => Poll::Ready(Ok((id, seq))),
-                        Some((id, None)) => {
-                            Poll::Ready(Ok((id, s.responses.post(id, &staged.params()))))
-                        }
+                        Some((id, None)) => Poll::Ready(Ok((id, s.responses.post(id, staged)))),
                         None => Poll::Pending,
                     };
                 }
 
                 if !s.has_waiters() {
                     if let Some(id) = s.claim_free_engine() {
-                        return Poll::Ready(Ok((id, s.responses.post(id, &staged.params()))));
+                        return Poll::Ready(Ok((id, s.responses.post(id, staged))));
                     }
                 }
 
@@ -119,7 +132,7 @@ impl PqcDriver {
                     return Poll::Ready(Err(PqcError::QUEUE_FULL));
                 };
                 s.queue[idx as usize].staged = Some(staged.clone());
-                queue_idx = Some(idx);
+                queue_idx.set(Some(idx));
                 s.poll_queue_slot(idx, cx);
                 Poll::Pending
             })
@@ -207,6 +220,9 @@ impl PqcDriver {
     }
 
     /// Sign a message on whichever FP core is free.
+    ///
+    /// As [`PqcEngine::mldsa_sign`], but the request is posted the moment
+    /// an engine frees up, even before this task wakes to collect it.
     pub async fn mldsa_sign(
         &self,
         kind: HsmVaultKeyKind,
@@ -216,8 +232,11 @@ impl PqcDriver {
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mldsa_sign(kind, sec_key, rnd, msg, ctx, sig).await)
-            .await
+        let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig)?;
+        let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
+        let result = engine.finish_sign(seq, sig).await;
+        engine.release();
+        result
     }
 
     /// Generate an ML-KEM key pair on whichever FP core is free.
@@ -232,7 +251,8 @@ impl PqcDriver {
         self.gen_key(&mut staged, pub_key, sec_key).await
     }
 
-    /// Encapsulate to a public key on whichever FP core is free.
+    /// Encapsulate to a public key on whichever FP core is free, posting
+    /// the request the moment an engine frees up.
     pub async fn mlkem_encaps(
         &self,
         kind: HsmVaultKeyKind,
@@ -241,15 +261,15 @@ impl PqcDriver {
         ciphertext: &mut [u8],
         shared_secret: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .mlkem_encaps(kind, pub_key, m, ciphertext, shared_secret)
-                .await
-        })
-        .await
+        let mut staged = encaps_request(kind, pub_key, m, ciphertext, shared_secret)?;
+        let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
+        let result = engine.finish_encaps(seq, ciphertext, shared_secret).await;
+        engine.release();
+        result
     }
 
-    /// Decapsulate a ciphertext on whichever FP core is free.
+    /// Decapsulate a ciphertext on whichever FP core is free, posting the
+    /// request the moment an engine frees up.
     pub async fn mlkem_decaps(
         &self,
         kind: HsmVaultKeyKind,
@@ -257,15 +277,15 @@ impl PqcDriver {
         ciphertext: &[u8],
         shared_secret: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .mlkem_decaps(kind, sec_key, ciphertext, shared_secret)
-                .await
-        })
-        .await
+        let mut staged = decaps_request(kind, sec_key, ciphertext, shared_secret)?;
+        let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
+        let result = engine.finish_decaps(seq, shared_secret).await;
+        engine.release();
+        result
     }
 
-    /// Verify a signature on whichever FP core is free.
+    /// Verify a signature on whichever FP core is free, posting the
+    /// request the moment an engine frees up.
     pub async fn mldsa_verify(
         &self,
         kind: HsmVaultKeyKind,
@@ -274,8 +294,11 @@ impl PqcDriver {
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
-        self.with_engine(async |engine| engine.mldsa_verify(kind, pub_key, msg, ctx, sig).await)
-            .await
+        let mut staged = verify_request(kind, pub_key, msg, ctx, sig)?;
+        let (mut engine, seq) = self.acquire_and_post(&mut staged).await?;
+        let result = engine.finish_verify(seq).await;
+        engine.release();
+        result
     }
 
     /// Wakes each task whose engine has posted the response it awaits, then
@@ -318,6 +341,22 @@ impl PqcDriver {
     /// Number of engines currently idle.  Diagnostics only.
     pub fn free_engines(&self) -> u32 {
         self.state.with(|s| s.free_mask.count_ones())
+    }
+}
+
+/// Takes a queued task's request back out of its slot if the task is
+/// dropped before collecting an engine (see
+/// [`PqcDriver::acquire_and_post`]).
+struct Unstage<'a> {
+    driver: &'a PqcDriver,
+    idx: &'a core::cell::Cell<Option<u8>>,
+}
+
+impl Drop for Unstage<'_> {
+    fn drop(&mut self) {
+        if let Some(idx) = self.idx.get() {
+            self.driver.state.with(|s| s.unstage(idx));
+        }
     }
 }
 
