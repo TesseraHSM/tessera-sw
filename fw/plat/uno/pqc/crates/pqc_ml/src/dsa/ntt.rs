@@ -45,7 +45,7 @@ pub fn caddq(a: i32) -> i32 {
     r
 }
 
-/// Montgomery constants, in the form the butterfly loops want them.
+/// Montgomery constants, in the form the pointwise loops want them.
 ///
 /// The reduction is `(a - t*q) >> 32` but `smlal` only accumulates, so one
 /// of the two constants has to carry the sign. It must be `q`, not `qinv`.
@@ -62,212 +62,11 @@ const QINV_I: i32 = 58728449;
 #[cfg(target_arch = "arm")]
 const Q_I: i32 = -(Q as i32);
 
-/// Cooley-Tukey butterflies, two at a time.
-///
-/// The generated code was already using the optimal three-instruction
-/// Montgomery reduction, so there was nothing to win in the arithmetic --
-/// but four of the twelve instructions per butterfly were loop overhead,
-/// and `opt-level = "z"` will not unroll to amortise them. Unrolling in
-/// Rust instead makes the register allocator spill and fall back to a
-/// generic 64-bit reduction, which costs more than the overhead it saves.
-///
-/// Doing it here sidesteps both: the pair shares one loop increment and
-/// one branch, and `ldrd`/`strd` move both coefficients per access. Twelve
-/// instructions per butterfly become eight.
-///
-/// # Safety
-/// `xp` and `yp` must each be valid for `pairs * 2` `i32` writes and word
-/// aligned, and must not overlap.
 #[cfg(target_arch = "arm")]
-#[inline(always)]
-unsafe fn ct_butterfly_pairs(xp: *mut i32, yp: *mut i32, zeta: i32, pairs: usize) {
-    // Six scratch registers, reused across the body. Thumb-2 has about
-    // thirteen allocatable registers, and asking for one name per value
-    // overruns that: the allocator does not fail, it simply stops
-    // terminating.
-    core::arch::asm!(
-        "2:",
-        "ldrd  {a}, {b}, [{yp}]",
-        "smull {c}, {d}, {a}, {z}",
-        "smull {e}, {f}, {b}, {z}",
-        "mul   {a}, {c}, {qinv}",
-        "mul   {b}, {e}, {qinv}",
-        "smlal {c}, {d}, {a}, {q}",
-        "smlal {e}, {f}, {b}, {q}",
-        "ldrd  {a}, {b}, [{xp}]",
-        "sub   {c}, {a}, {d}",
-        "add   {a}, {a}, {d}",
-        "sub   {e}, {b}, {f}",
-        "add   {b}, {b}, {f}",
-        "strd  {c}, {e}, [{yp}], #8",
-        "strd  {a}, {b}, [{xp}], #8",
-        "subs  {n}, {n}, #1",
-        "bne   2b",
-        xp = inout(reg) xp => _,
-        yp = inout(reg) yp => _,
-        n = inout(reg) pairs => _,
-        z = in(reg) zeta,
-        qinv = in(reg) QINV_I,
-        q = in(reg) Q_I,
-        a = out(reg) _,
-        b = out(reg) _,
-        c = out(reg) _,
-        d = out(reg) _,
-        e = out(reg) _,
-        f = out(reg) _,
-        options(nostack),
-    );
-}
-
-/// One whole layer of single-butterfly windows -- the last forward layer,
-/// where each window is one adjacent pair with its own zeta.
-///
-/// Worth its own routine: at `len == 1` there are 128 windows of one
-/// butterfly, so the per-window scaffolding costs more than the arithmetic
-/// it sets up.
-///
-/// # Safety
-/// `ap` must be valid for `windows * 2` `i32` writes and `zp` for
-/// `windows` reads.
-#[cfg(target_arch = "arm")]
-#[inline(always)]
-unsafe fn ct_layer_len1(ap: *mut i32, zp: *const i32, windows: usize) {
-    core::arch::asm!(
-        "2:",
-        "ldr   {z0}, [{zp}], #4",
-        "ldr   {z1}, [{zp}], #4",
-        "ldrd  {ra}, {rb}, [{ap}]",
-        "ldrd  {rc}, {rd}, [{ap}, #8]",
-        "smull {re}, {rf}, {rb}, {z0}",
-        "smull {rb}, {rd}, {rd}, {z1}",
-        "mul   {z0}, {re}, {qinv}",
-        "mul   {z1}, {rb}, {qinv}",
-        "smlal {re}, {rf}, {z0}, {q}",
-        "smlal {rb}, {rd}, {z1}, {q}",
-        "sub   {z0}, {ra}, {rf}",
-        "add   {ra}, {ra}, {rf}",
-        "sub   {z1}, {rc}, {rd}",
-        "add   {rc}, {rc}, {rd}",
-        "strd  {ra}, {z0}, [{ap}]",
-        "strd  {rc}, {z1}, [{ap}, #8]",
-        "add   {ap}, {ap}, #16",
-        "subs  {n}, {n}, #1",
-        "bne   2b",
-        ap = inout(reg) ap => _,
-        zp = inout(reg) zp => _,
-        n = inout(reg) windows => _,
-        qinv = in(reg) QINV_I,
-        q = in(reg) Q_I,
-        z0 = out(reg) _,
-        z1 = out(reg) _,
-        ra = out(reg) _,
-        rb = out(reg) _,
-        rc = out(reg) _,
-        rd = out(reg) _,
-        re = out(reg) _,
-        rf = out(reg) _,
-        options(nostack),
-    );
-}
-
-/// A whole layer of butterflies, window loop and all.
-///
-/// The per-window Rust loop looked cheap but was not: the inner asm block
-/// claims twelve registers, which leaves the enclosing loop nothing, so the
-/// allocator spilled its state to the stack and reloaded it every window.
-/// That cost about twelve instructions per window, six of them stack
-/// traffic, and a transform has 255 windows.
-///
-/// Taking the window loop into the same block fixes it, and making `LEN` a
-/// const parameter lets the half-window offset and the pair count become
-/// immediates rather than registers -- which is what keeps the whole thing
-/// inside the thirteen registers Thumb-2 has to give.
-///
-/// # Safety
-/// `ap` must be valid for `windows * 2 * LEN` `i32` writes, `zp` for
-/// `windows` reads. `LEN` must be even.
-#[cfg(target_arch = "arm")]
-#[inline(always)]
-unsafe fn ct_layer<const LEN: usize>(ap: *mut i32, zp: *const i32, windows: usize) {
-    core::arch::asm!(
-        "2:",
-        "ldr   {z}, [{zp}], #4",
-        "mov   {cnt}, {pairs}",
-        "3:",
-        "ldrd  {a}, {b}, [{xp}, {off}]",
-        "smull {c}, {d}, {a}, {z}",
-        "smull {e}, {f}, {b}, {z}",
-        "mul   {a}, {c}, {qinv}",
-        "mul   {b}, {e}, {qinv}",
-        "smlal {c}, {d}, {a}, {q}",
-        "smlal {e}, {f}, {b}, {q}",
-        "ldrd  {a}, {b}, [{xp}]",
-        "sub   {c}, {a}, {d}",
-        "add   {a}, {a}, {d}",
-        "sub   {e}, {b}, {f}",
-        "add   {b}, {b}, {f}",
-        "strd  {c}, {e}, [{xp}, {off}]",
-        "strd  {a}, {b}, [{xp}], #8",
-        "subs  {cnt}, {cnt}, #1",
-        "bne   3b",
-        "add   {xp}, {xp}, {off}",
-        "subs  {n}, {n}, #1",
-        "bne   2b",
-        xp = inout(reg) ap => _,
-        zp = inout(reg) zp => _,
-        n = inout(reg) windows => _,
-        qinv = in(reg) QINV_I,
-        q = in(reg) Q_I,
-        off = const LEN * 4,
-        pairs = const LEN / 2,
-        z = out(reg) _,
-        cnt = out(reg) _,
-        a = out(reg) _,
-        b = out(reg) _,
-        c = out(reg) _,
-        d = out(reg) _,
-        e = out(reg) _,
-        f = out(reg) _,
-        options(nostack),
-    );
-}
-
-/// Forward NTT over raw pointers.
-///
-/// The wide layers have few windows, so they keep the simple walk; the
-/// narrow ones, which are almost all of the 255 windows, hand the whole
-/// layer to one assembly block.
-#[cfg(target_arch = "arm")]
-fn ntt_arm(a: &mut [i32; N]) {
-    let zbase = ZETAS.as_ptr();
-    let ap = a.as_mut_ptr();
-    let mut zi = 1usize;
-    let mut len = N / 2;
-    while len >= 16 {
-        let mut base = ap;
-        for _ in 0..N / (2 * len) {
-            // SAFETY: `base` walks windows of `2 * len` within `a`, and
-            // `zi` stays inside ZETAS -- a transform consumes 255 zetas and
-            // the table holds 255 past the unused first entry.
-            unsafe {
-                ct_butterfly_pairs(base, base.add(len), *zbase.add(zi), len / 2);
-                base = base.add(2 * len);
-            }
-            zi += 1;
-        }
-        len >>= 1;
-    }
-    // SAFETY: each call covers exactly the windows of its layer, taking the
-    // zetas that follow the ones already consumed.
-    unsafe {
-        ct_layer::<8>(ap, zbase.add(zi), N / 16);
-        zi += N / 16;
-        ct_layer::<4>(ap, zbase.add(zi), N / 8);
-        zi += N / 8;
-        ct_layer::<2>(ap, zbase.add(zi), N / 4);
-        zi += N / 4;
-        ct_layer_len1(ap, zbase.add(zi), N / 4);
-    }
+extern "C" {
+    /// `asm/dsa_ntt.S`: the forward transform, bit for bit the reference's,
+    /// taking the 255 twiddles from `zetas` in order.
+    fn pqc_ml_dsa_ntt(p: *mut i32, zetas: *const i32);
 }
 
 /// Forward NTT (in-place). Input coefficients in normal order,
@@ -275,7 +74,9 @@ fn ntt_arm(a: &mut [i32; N]) {
 pub fn ntt(a: &mut [i32; N]) {
     #[cfg(target_arch = "arm")]
     {
-        ntt_arm(a);
+        // SAFETY: `a` is 256 word-aligned coefficients, and ZETAS[1..]
+        // holds the 255 twiddles the transform reads.
+        unsafe { pqc_ml_dsa_ntt(a.as_mut_ptr(), ZETAS.as_ptr().add(1)) };
     }
 
     #[cfg(not(target_arch = "arm"))]
