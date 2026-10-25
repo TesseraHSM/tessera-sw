@@ -166,63 +166,31 @@ pub fn expand_mask_bytes(out: &mut [u8], seed: &XofPrefix, nonce: u16) {
 /// ExpandMask, second half: unpack the stream into coefficients in
 /// [-(gamma1-1), gamma1].
 pub fn unpack_gamma1(a: &mut Poly, buf: &[u8], gamma1: u32) {
-    match gamma1 {
-        131072 => unpack_gamma1_17(buf, a),
-        524288 => unpack_gamma1_19(buf, a),
-        _ => {}
+    // 18 bits a coefficient for gamma1 = 2^17, 20 for 2^19, each field f
+    // standing for gamma1 - f.
+    let d = if gamma1 == 1 << 17 { 18 } else { 20 };
+
+    // A word at a time where the stream is word aligned, as every caller's
+    // is: one load per five or nine bytes instead of one per byte.
+    #[cfg(target_arch = "arm")]
+    if (buf.as_ptr() as usize).is_multiple_of(4) {
+        extern "C" {
+            fn pqc_ml_dsa_unpack_z20(a: *mut i32, buf: *const u8);
+            fn pqc_ml_dsa_unpack_z18(a: *mut i32, buf: *const u8);
+        }
+        // SAFETY: `a` is 256 coefficients; `buf` is word aligned and, as
+        // the slicing checks, holds the 576 or 640 bytes read.
+        unsafe {
+            if d == 18 {
+                pqc_ml_dsa_unpack_z18(a.as_mut_ptr(), buf[..576].as_ptr());
+            } else {
+                pqc_ml_dsa_unpack_z20(a.as_mut_ptr(), buf[..640].as_ptr());
+            }
+        }
+        return;
     }
-}
 
-fn unpack_gamma1_17(buf: &[u8], a: &mut Poly) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..576];
-    // 18 bits per coefficient, packed little-endian
-    // gamma1 = 2^17, coefficients in [-(2^17-1), 2^17]
-    // Stored as gamma1 - coeff, so value in [0, 2*gamma1]
-    for i in 0..N / 4 {
-        // 4 coefficients from 9 bytes
-        let off = 9 * i;
-        a[4 * i] = (buf[off] as i32)
-            | ((buf[off + 1] as i32) << 8)
-            | (((buf[off + 2] & 0x03) as i32) << 16);
-        a[4 * i] = (1 << 17) - a[4 * i];
-
-        a[4 * i + 1] = ((buf[off + 2] as i32) >> 2)
-            | ((buf[off + 3] as i32) << 6)
-            | (((buf[off + 4] & 0x0F) as i32) << 14);
-        a[4 * i + 1] = (1 << 17) - a[4 * i + 1];
-
-        a[4 * i + 2] = ((buf[off + 4] as i32) >> 4)
-            | ((buf[off + 5] as i32) << 4)
-            | (((buf[off + 6] & 0x3F) as i32) << 12);
-        a[4 * i + 2] = (1 << 17) - a[4 * i + 2];
-
-        a[4 * i + 3] = ((buf[off + 6] as i32) >> 6)
-            | ((buf[off + 7] as i32) << 2)
-            | ((buf[off + 8] as i32) << 10);
-        a[4 * i + 3] = (1 << 17) - a[4 * i + 3];
-    }
-}
-
-fn unpack_gamma1_19(buf: &[u8], a: &mut Poly) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..640];
-    // 20 bits per coefficient
-    // gamma1 = 2^19, stored as gamma1 - coeff
-    for i in 0..N / 2 {
-        let off = 5 * i;
-        a[2 * i] = (buf[off] as i32)
-            | ((buf[off + 1] as i32) << 8)
-            | (((buf[off + 2] & 0x0F) as i32) << 16);
-        a[2 * i] = (1 << 19) - a[2 * i];
-
-        a[2 * i + 1] = ((buf[off + 2] as i32) >> 4)
-            | ((buf[off + 3] as i32) << 4)
-            | ((buf[off + 4] as i32) << 12);
-        a[2 * i + 1] = (1 << 19) - a[2 * i + 1];
-    }
+    super::packing::unpack_centered(a, buf, d, gamma1 as i32);
 }
 
 /// SampleInBall: generate the challenge polynomial c with exactly tau nonzero

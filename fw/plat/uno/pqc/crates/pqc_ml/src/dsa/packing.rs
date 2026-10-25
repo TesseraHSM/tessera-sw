@@ -145,12 +145,10 @@ pub fn pack_z(buf: &mut [u8], a: &Poly, gamma1: u32) {
     }
 }
 
+/// BitUnpack of z, gamma1 - field: the same encoding as the signer's y, so
+/// the same unpacker.
 pub fn unpack_z(a: &mut Poly, buf: &[u8], gamma1: u32) {
-    match gamma1 {
-        131072 => unpack_z17(a, buf),
-        524288 => unpack_z19(a, buf),
-        _ => {}
-    }
+    super::sampling::unpack_gamma1(a, buf, gamma1);
 }
 
 // gamma1 = 2^17: 18 bits per coefficient, stored as gamma1 - coeff
@@ -176,30 +174,6 @@ fn pack_z17(buf: &mut [u8], a: &Poly) {
     }
 }
 
-fn unpack_z17(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..576];
-    for i in 0..N / 4 {
-        let off = 9 * i;
-        a[4 * i] = (buf[off] as i32)
-            | ((buf[off + 1] as i32) << 8)
-            | (((buf[off + 2] & 0x03) as i32) << 16);
-        a[4 * i + 1] = ((buf[off + 2] as i32) >> 2)
-            | ((buf[off + 3] as i32) << 6)
-            | (((buf[off + 4] & 0x0F) as i32) << 14);
-        a[4 * i + 2] = ((buf[off + 4] as i32) >> 4)
-            | ((buf[off + 5] as i32) << 4)
-            | (((buf[off + 6] & 0x3F) as i32) << 12);
-        a[4 * i + 3] = ((buf[off + 6] as i32) >> 6)
-            | ((buf[off + 7] as i32) << 2)
-            | ((buf[off + 8] as i32) << 10);
-        for j in 0..4 {
-            a[4 * i + j] = (1 << 17) - a[4 * i + j];
-        }
-    }
-}
-
 // gamma1 = 2^19: 20 bits per coefficient
 fn pack_z19(buf: &mut [u8], a: &Poly) {
     // Narrow to the exact encoded length once, so the byte accesses
@@ -214,23 +188,6 @@ fn pack_z19(buf: &mut [u8], a: &Poly) {
         buf[off + 2] = ((t0 >> 16) | (t1 << 4)) as u8;
         buf[off + 3] = (t1 >> 4) as u8;
         buf[off + 4] = (t1 >> 12) as u8;
-    }
-}
-
-fn unpack_z19(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..640];
-    for i in 0..N / 2 {
-        let off = 5 * i;
-        a[2 * i] = (buf[off] as i32)
-            | ((buf[off + 1] as i32) << 8)
-            | (((buf[off + 2] & 0x0F) as i32) << 16);
-        a[2 * i + 1] = ((buf[off + 2] as i32) >> 4)
-            | ((buf[off + 3] as i32) << 4)
-            | ((buf[off + 4] as i32) << 12);
-        a[2 * i] = (1 << 19) - a[2 * i];
-        a[2 * i + 1] = (1 << 19) - a[2 * i + 1];
     }
 }
 
