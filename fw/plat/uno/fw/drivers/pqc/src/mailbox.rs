@@ -93,6 +93,7 @@ mod word {
     pub const SIG_LEN: usize = 24;
     pub const PUB_KEY_LEN: usize = 25;
     pub const COLLECTED: usize = 26;
+    pub const INPUTS_TAKEN: usize = 27;
 }
 
 /// Operand slot layout, mirroring the FP side.
@@ -451,6 +452,17 @@ pub(crate) fn mark_collected(engine: EngineId, seq: u32) {
         dmb();
         write_volatile(mailbox(engine).add(word::COLLECTED), seq);
     }
+}
+
+/// The last request whose inputs `engine`'s core has taken out of its
+/// operand slot, which is then free for the next request's
+/// ([`PqcState::prestage`](crate::pool::PqcState::prestage)).
+pub(crate) fn inputs_taken(engine: EngineId) -> u32 {
+    // SAFETY: as `take_response`.
+    let seq = unsafe { read_volatile(mailbox(engine).add(word::INPUTS_TAKEN)) };
+    // Nothing staged after this may be observed before it.
+    dmb();
+    seq
 }
 
 /// Read a response, if the core has answered request `seq`.

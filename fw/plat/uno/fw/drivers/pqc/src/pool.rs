@@ -25,19 +25,40 @@ use crate::types::QUEUE_DEPTH;
 /// with a real index.
 pub(crate) const NO_SLOT: u8 = u8::MAX;
 
+/// "No engine", for [`QueueSlot::prestaged_on`].
+pub(crate) const NO_ENGINE: u8 = u8::MAX;
+
 /// Per-engine state.
 pub(crate) struct EngineSlot {
     /// Lifecycle state.
     pub(crate) state: EngineState,
+
+    /// The request last posted here, until the engine is released; zero
+    /// for none.
+    pub(crate) inflight: u32,
+
+    /// Where that request's outputs go in the operand slot.
+    pub(crate) outputs: Outputs,
+
+    /// The waiter whose request's inputs are already staged in this
+    /// engine's operand slot, [`NO_SLOT`] for none (see
+    /// [`PqcState::prestage`]).
+    pub(crate) prestaged: u8,
 }
 
 impl EngineSlot {
     pub(crate) const fn new() -> Self {
         Self {
             state: EngineState::Idle,
+            inflight: 0,
+            outputs: [(0, 0); 2],
+            prestaged: NO_SLOT,
         }
     }
 }
+
+/// The `(offset, len)` operand slot regions a request's outputs occupy.
+pub(crate) type Outputs = [(usize, usize); 2];
 
 /// One entry in the FIFO of tasks waiting for an engine.
 pub(crate) struct QueueSlot {
@@ -59,6 +80,10 @@ pub(crate) struct QueueSlot {
     /// The request the waiting task left for whoever frees an engine to
     /// post, if any.
     pub(crate) staged: Option<Staged>,
+
+    /// The engine whose operand slot already holds that request's inputs,
+    /// [`NO_ENGINE`] for none.
+    pub(crate) prestaged_on: u8,
 }
 
 impl QueueSlot {
@@ -68,6 +93,7 @@ impl QueueSlot {
             state: QueueSlotState::Free,
             next: NO_SLOT,
             staged: None,
+            prestaged_on: NO_ENGINE,
         }
     }
 }
@@ -119,6 +145,9 @@ pub(crate) struct Staged {
     pub(crate) sig_len: u32,
     pub(crate) pub_key_len: u32,
     pub(crate) operands: [Operand; 4],
+    /// Where the outputs will go, which a request staged behind this one
+    /// must keep clear of.
+    pub(crate) outputs: Outputs,
 }
 
 // SAFETY: the operand pointers are only dereferenced while the task that
@@ -139,6 +168,7 @@ impl Staged {
             sig_len: 0,
             pub_key_len: 0,
             operands: [Operand::NONE; 4],
+            outputs: [(0, 0); 2],
         }
     }
 
@@ -154,6 +184,16 @@ impl Staged {
             sig_len: self.sig_len,
             pub_key_len: self.pub_key_len,
         }
+    }
+
+    /// Whether every bulk input lands clear of `outputs`.
+    fn avoids(&self, outputs: &[(usize, usize)]) -> bool {
+        self.operands.iter().all(|o| {
+            o.len == 0
+                || outputs
+                    .iter()
+                    .all(|&(off, len)| o.offset + o.len <= off || off + len <= o.offset)
+        })
     }
 
     /// Copy the bulk inputs into engine `id`'s operand slot.
@@ -243,12 +283,11 @@ impl Responses {
         }
     }
 
-    /// Stage `request`'s bulk inputs in engine `id`'s operand slot, post
-    /// it, ring the doorbell, and mark its response awaited.
+    /// Post `request`, whose bulk inputs are already in engine `id`'s
+    /// operand slot, ring the doorbell, and mark its response awaited.
     ///
     /// Returns the request's number, which the response will carry.
-    pub(crate) fn post(&mut self, id: EngineId, request: &Staged) -> u32 {
-        request.stage_operands(id);
+    fn post(&mut self, id: EngineId, request: &Staged) -> u32 {
         // Monotonic across all engines, so a response can never be mistaken
         // for one to an earlier request on the same core.
         self.request_seq = self.request_seq.wrapping_add(1);
@@ -383,68 +422,164 @@ impl PqcState {
             staged.wipe();
         }
         self.queue[idx as usize].staged = None;
+        let e = self.queue[idx as usize].prestaged_on;
+        if e != NO_ENGINE {
+            self.engines[e as usize].prestaged = NO_SLOT;
+            self.queue[idx as usize].prestaged_on = NO_ENGINE;
+        }
     }
 
-    /// Hand engine `id` straight to the longest-waiting task, if it left a
-    /// request none of whose inputs land in `outputs` -- the `(offset, len)`
-    /// operand slot regions of the request just finished, which its task is
-    /// still to read. Returns whether the engine was handed over.
+    /// Stage `request`'s bulk inputs in engine `id`'s operand slot, unless
+    /// they are there already, and post it.
+    ///
+    /// Returns the request's number, which the response will carry.
+    pub(crate) fn post(&mut self, id: EngineId, request: &Staged, inputs_staged: bool) -> u32 {
+        if !inputs_staged {
+            request.stage_operands(id);
+        }
+        let seq = self.responses.post(id, request);
+        let engine = &mut self.engines[id.raw() as usize];
+        engine.inflight = seq;
+        engine.outputs = request.outputs;
+        seq
+    }
+
+    /// Stage the next waiting request's inputs in the operand slot of each
+    /// engine whose core has already taken its own request's inputs out of
+    /// it, so that request starts as soon as the engine is released rather
+    /// than after the copy: up to 7 KB at PSRAM speed, which the core
+    /// would otherwise sit through idle.
+    ///
+    /// The request staged is the oldest waiting one not staged elsewhere
+    /// whose inputs land clear of the running request's outputs; it is
+    /// served by that engine when it is released (see
+    /// [`release_engine`](Self::release_engine)).
+    pub(crate) fn prestage(&mut self) {
+        for e in 0..ENGINES {
+            let engine = &self.engines[e];
+            if engine.inflight == 0 || engine.prestaged != NO_SLOT {
+                continue;
+            }
+            let id = EngineId::new(e as u8);
+            if mailbox::inputs_taken(id) != engine.inflight {
+                continue;
+            }
+            let outputs = engine.outputs;
+            let mut idx = self.wait_head;
+            while idx != NO_SLOT {
+                let slot = &mut self.queue[idx as usize];
+                if slot.prestaged_on == NO_ENGINE {
+                    if let Some(staged) = &slot.staged {
+                        if staged.avoids(&outputs) {
+                            staged.stage_operands(id);
+                            slot.prestaged_on = e as u8;
+                            self.engines[e].prestaged = idx;
+                            break;
+                        }
+                    }
+                }
+                idx = slot.next;
+            }
+        }
+    }
+
+    /// Unlink waiter `idx` from the wait ring.
+    fn unlink(&mut self, idx: u8) {
+        let next = self.queue[idx as usize].next;
+        if self.wait_head == idx {
+            self.wait_head = next;
+        } else {
+            let mut prev = self.wait_head;
+            while self.queue[prev as usize].next != idx {
+                prev = self.queue[prev as usize].next;
+            }
+            self.queue[prev as usize].next = next;
+            if self.wait_tail == idx {
+                self.wait_tail = prev;
+            }
+        }
+        if self.wait_head == NO_SLOT {
+            self.wait_tail = NO_SLOT;
+        }
+    }
+
+    /// The waiter engine `id` goes to when released: the one whose inputs
+    /// are already staged in its slot, else the longest-waiting one not
+    /// staged on another engine, else -- rather than leave this engine
+    /// idle while others wait -- the longest-waiting one at all.
+    fn next_waiter(&self, id: EngineId) -> Option<u8> {
+        let pre = self.engines[id.raw() as usize].prestaged;
+        if pre != NO_SLOT {
+            return Some(pre);
+        }
+        let mut idx = self.wait_head;
+        while idx != NO_SLOT {
+            if self.queue[idx as usize].prestaged_on == NO_ENGINE {
+                return Some(idx);
+            }
+            idx = self.queue[idx as usize].next;
+        }
+        (self.wait_head != NO_SLOT).then_some(self.wait_head)
+    }
+
+    /// Hand engine `id` straight to the waiter it would go to on release,
+    /// if that waiter left a request none of whose inputs land in
+    /// `outputs` -- the `(offset, len)` operand slot regions of the request
+    /// just finished, which its task is still to read. Returns whether the
+    /// engine was handed over.
     ///
     /// The core holds the new request's outputs back until the old ones are
-    /// marked collected, so only its inputs could disturb them.
+    /// marked collected, so only its inputs could disturb them; inputs
+    /// staged ahead were checked against the same outputs when staged.
     pub(crate) fn release_engine_early(&mut self, id: EngineId, outputs: &[(usize, usize)]) -> bool {
-        if self.wait_head == NO_SLOT {
-            return false;
-        }
-        let Some(staged) = &self.queue[self.wait_head as usize].staged else {
+        let Some(idx) = self.next_waiter(id) else {
             return false;
         };
-        let clear = staged.operands.iter().all(|o| {
-            o.len == 0
-                || outputs
-                    .iter()
-                    .all(|&(off, len)| o.offset + o.len <= off || off + len <= o.offset)
-        });
+        let slot = &self.queue[idx as usize];
+        let clear = match &slot.staged {
+            Some(staged) => slot.prestaged_on == id.raw() || staged.avoids(outputs),
+            None => false,
+        };
         if clear {
             self.release_engine(id);
         }
         clear
     }
 
-    /// Return an engine to the pool, handing it straight to the
-    /// longest-waiting task if there is one.
+    /// Return an engine to the pool, handing it straight to a waiting task
+    /// if there is one (see [`next_waiter`](Self::next_waiter)).
     pub(crate) fn release_engine(&mut self, id: EngineId) {
-        // The head of the wait ring is by construction the waiter that
-        // queued first, so serving it is both fair and O(1).
-        let waiter = if self.wait_head == NO_SLOT {
-            None
-        } else {
-            let idx = self.wait_head;
-            self.wait_head = self.queue[idx as usize].next;
-            if self.wait_head == NO_SLOT {
-                self.wait_tail = NO_SLOT;
-            }
-            Some(idx as usize)
-        };
+        let e = id.raw() as usize;
+        self.engines[e].inflight = 0;
+        let waiter = self.next_waiter(id);
+        self.engines[e].prestaged = NO_SLOT;
 
         match waiter {
             Some(idx) => {
+                self.unlink(idx);
+                let idx = idx as usize;
+                // Staged here already, or on another engine, which then
+                // has nothing staged.
+                let on = self.queue[idx].prestaged_on;
+                let inputs_staged = on == id.raw();
+                if on != NO_ENGINE && !inputs_staged {
+                    self.engines[on as usize].prestaged = NO_SLOT;
+                }
+                self.queue[idx].prestaged_on = NO_ENGINE;
                 // Stays busy: ownership transfers directly to the waiter,
                 // which finds the request it staged, if any, already started.
-                let slot = &mut self.queue[idx];
-                slot.state = match &mut slot.staged {
-                    Some(staged) => {
-                        let seq = self.responses.post(id, staged);
+                self.queue[idx].state = match self.queue[idx].staged.take() {
+                    Some(mut staged) => {
+                        let seq = self.post(id, &staged, inputs_staged);
                         staged.wipe();
                         QueueSlotState::Running(id, seq)
                     }
                     None => QueueSlotState::Assigned(id),
                 };
-                slot.staged = None;
                 self.handed_over |= 1 << idx;
             }
             None => {
-                self.engines[id.raw() as usize].state = EngineState::Idle;
+                self.engines[e].state = EngineState::Idle;
                 self.free_mask |= 1u8 << id.raw();
             }
         }

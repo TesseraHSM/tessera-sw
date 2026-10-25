@@ -145,6 +145,10 @@ pub(crate) fn gen_key_request(
     }
 
     let mut staged = Staged::new(op as u32, kind.0 as u32);
+    staged.outputs = [
+        (mailbox::SLOT_PK_OFFSET, expected_pub),
+        (mailbox::SLOT_KEY_OUT_OFFSET, expected_sec),
+    ];
     let (xi, rnd) = seed.split_at(MLDSA_SEED_LEN);
     staged.xi.copy_from_slice(xi);
     if !rnd.is_empty() {
@@ -178,6 +182,7 @@ pub(crate) async fn sign_request(
     staged.msg_len = HASH_LEN as u32;
     staged.operands[0] = Operand::new(&mu[..], mailbox::SLOT_MSG_OFFSET);
     staged.operands[1] = Operand::new(sec_key, mailbox::SLOT_SIGN_KEY_OFFSET);
+    staged.outputs[0] = (mailbox::sign_sig_offset(sig.len()), sig.len());
     Ok(staged)
 }
 
@@ -239,6 +244,10 @@ pub(crate) fn encaps_request(
     staged.xi = *m;
     staged.pub_key_len = pub_key.len() as u32;
     staged.operands[0] = Operand::new(pub_key, mailbox::SLOT_PK_OFFSET);
+    staged.outputs = [
+        (mailbox::SLOT_CT_OFFSET, ciphertext.len()),
+        (mailbox::SLOT_SS_OFFSET, shared_secret.len()),
+    ];
     Ok(staged)
 }
 
@@ -265,6 +274,7 @@ pub(crate) fn decaps_request(
     // decapsulation does not otherwise touch.
     staged.operands[0] = Operand::new(sec_key, mailbox::SLOT_KEY_IN_OFFSET);
     staged.operands[1] = Operand::new(ciphertext, mailbox::SLOT_CT_IN_OFFSET);
+    staged.outputs[0] = (mailbox::SLOT_SS_OFFSET, shared_secret.len());
     Ok(staged)
 }
 
@@ -424,7 +434,7 @@ impl PqcEngine<'_> {
     /// sequence number, which is written last.
     fn post(&mut self, staged: &mut Staged) -> u32 {
         let id = self.id;
-        let seq = self.driver.state.with(|s| s.responses.post(id, staged));
+        let seq = self.driver.state.with(|s| s.post(id, staged, false));
         staged.wipe();
         self.seq = seq;
         seq

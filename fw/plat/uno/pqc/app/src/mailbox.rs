@@ -123,6 +123,9 @@ mod word {
     /// The last request whose outputs the HSM has read out of the operand
     /// slot (see [`await_collected`](super::await_collected)).
     pub const COLLECTED: usize = 26;
+    /// The last request whose inputs this core has taken out of the
+    /// operand slot (see [`inputs_taken`](super::inputs_taken)).
+    pub const INPUTS_TAKEN: usize = 27;
 }
 
 /// Operand slot layout.
@@ -463,6 +466,20 @@ pub fn await_collected(core_id: u8, prev: u32) {
     while (unsafe { read_volatile(mb.add(word::COLLECTED)) }.wrapping_sub(prev) as i32) < 0 {}
     // The outputs' writes must not be observed before the read above.
     cortex_m::asm::dmb();
+}
+
+/// Tell the HSM that request `seq`'s inputs have been taken out of the
+/// operand slot, so it may stage the next request's there while this one
+/// runs -- clear of where this one's outputs will go.
+///
+/// Only for requests that read nothing more from the slot: signing reads
+/// its key in place throughout, and never calls this.
+pub fn inputs_taken(core_id: u8, seq: u32) {
+    let mb = mailbox(core_id);
+    // The reads of the inputs must be complete before the HSM can see this.
+    cortex_m::asm::dmb();
+    // SAFETY: as `take_request`.
+    unsafe { write_volatile(mb.add(word::INPUTS_TAKEN), seq) };
 }
 
 /// Publish a response.

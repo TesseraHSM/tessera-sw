@@ -272,6 +272,7 @@ fn service(core_id: u8, req: &mailbox::Request) {
 fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
     let ek_len = variant.pk_size();
     let dk_len = variant.sk_size();
+    mailbox::inputs_taken(core_id, req.seq);
 
     // Both cleared through `fast_zero` rather than the array initialiser.
     //
@@ -357,6 +358,7 @@ fn service_mlkem_encaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
         return;
     };
     mailbox::stage(&mut ek[..ek_len], src);
+    mailbox::inputs_taken(core_id, req.seq);
 
     let mut ss = [0u8; mailbox::SHARED_SECRET_LEN];
     outputs_free(core_id);
@@ -429,6 +431,7 @@ fn service_mlkem_decaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
         mailbox::stage(&mut scratch[..ct_len], ct_src);
         mailbox::stage(&mut scratch[ct_len..staged_len], dk_src);
     }
+    mailbox::inputs_taken(core_id, req.seq);
 
     let (ct, dk) = scratch[..staged_len].split_at(ct_len);
 
@@ -506,6 +509,7 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     let params = variant.params();
     let pk_len = params.pk_bytes();
     let sk_len = params.sk_bytes();
+    mailbox::inputs_taken(core_id, req.seq);
 
     // SAFETY: written in full by `fast_zero` before any read.
     let mut work = core::mem::MaybeUninit::<[[i32; 256]; pqc_ml::DSA_WORK_POLYS_SHORT]>::uninit();
@@ -692,6 +696,7 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     let pk = &mut pk_buf[..pk_src.len()];
     mailbox::stage(sig, sig_src);
     mailbox::stage(pk, pk_src);
+    mailbox::inputs_taken(core_id, req.seq);
 
     // SAFETY: see `service_keygen` -- one operation in flight per core, so
     // the scratch cannot be aliased.

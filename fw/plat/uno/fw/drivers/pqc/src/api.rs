@@ -120,14 +120,14 @@ impl PqcDriver {
                     }
                     return match handed {
                         Some((id, Some(seq))) => Poll::Ready(Ok((id, seq))),
-                        Some((id, None)) => Poll::Ready(Ok((id, s.responses.post(id, staged)))),
+                        Some((id, None)) => Poll::Ready(Ok((id, s.post(id, staged, false)))),
                         None => Poll::Pending,
                     };
                 }
 
                 if !s.has_waiters() {
                     if let Some(id) = s.claim_free_engine() {
-                        return Poll::Ready(Ok((id, s.responses.post(id, staged))));
+                        return Poll::Ready(Ok((id, s.post(id, staged, false))));
                     }
                 }
 
@@ -327,12 +327,14 @@ impl PqcDriver {
         self.state.with(|s| {
             let r = &mut s.responses;
             let mut awaiting = r.awaiting;
+            let mut finished = false;
             while awaiting != 0 {
                 let i = awaiting.trailing_zeros() as usize;
                 awaiting &= awaiting - 1;
                 if crate::mailbox::response_seq(EngineId::new(i as u8)) == r.awaiting_seq[i] {
                     r.awaiting &= !(1 << i);
                     r.wakers[i].wake();
+                    finished = true;
                 }
             }
 
@@ -341,6 +343,12 @@ impl PqcDriver {
                 let idx = handed.trailing_zeros() as usize;
                 handed &= handed - 1;
                 s.queue[idx].waker.wake();
+            }
+
+            // Not in a pass that has a finished engine to hand on: staging
+            // can take tens of microseconds, which that engine would idle.
+            if !finished {
+                s.prestage();
             }
         });
     }
