@@ -21,6 +21,7 @@ fn main() {
             .file("asm/rej.S")
             .file("asm/kem_cbd.S")
             .file("asm/dsa_unpack_z.S")
+            .file("asm/dsa_check.S")
             .compile("pqc_ml_asm");
 
         println!("cargo:rerun-if-changed=asm/keccakf1600.S");
@@ -32,5 +33,6 @@ fn main() {
         println!("cargo:rerun-if-changed=asm/rej.S");
         println!("cargo:rerun-if-changed=asm/kem_cbd.S");
         println!("cargo:rerun-if-changed=asm/dsa_unpack_z.S");
+        println!("cargo:rerun-if-changed=asm/dsa_check.S");
     }
 }

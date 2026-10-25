@@ -776,11 +776,12 @@ fn main() -> ! {
     // region this core alone owns.
     unsafe {
         const FP_SPILL_BASE: usize = 0x611D_0000;
-        // What one core needs, plus 3 KB: ML-DSA-87 spills 40 of its 56
-        // matrix elements, packed three bytes to a coefficient, plus 23
-        // key-derived transforms held unpacked. No parameter set needs more.
-        // (It spilled 44 before dTCM held its share packed too.) The stride
-        // used to be 0x1B000, of which 41 KB per core was never addressable.
+        // ML-DSA-87 spills at most 40 of its 56 matrix elements, packed
+        // three bytes to a coefficient: 30 KB. No parameter set needs more.
+        // The rest of each core's 56 KB once held key-derived transforms,
+        // which signing no longer keeps; the stride is left as the GSRAM
+        // map reserves it. (It used to be 0x1B000, of which 41 KB per core
+        // was never addressable.)
         const FP_SPILL_PER_CORE: usize = 0xE000;
         const FP_SPILL_WORDS: usize = FP_SPILL_PER_CORE / 4;
         pqc_ml::spill::init(
@@ -788,9 +789,8 @@ fn main() -> ! {
             FP_SPILL_WORDS,
         );
 
-        // Ahead of GSRAM, the signer keeps matrix elements and key
-        // transforms in dTCM-speed memory this image does not otherwise
-        // map. On FP1, the top half of its 64 KB dTCM, above the stack. On
+        // Ahead of GSRAM, the signer keeps matrix elements in dTCM-speed
+        // memory this image does not otherwise map. On FP1, the top half of its 64 KB dTCM, above the stack. On
         // the others, the 16 KB block at 0x2002_0000 -- each core's view of
         // a different block it shares with a neighbour (FP0's with FP1,
         // FP2's with FP0; sp/src/dc_scm/rot_memory_map.h) -- but only the

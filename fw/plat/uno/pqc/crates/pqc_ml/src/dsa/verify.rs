@@ -94,10 +94,10 @@ pub fn verify_internal(
         ntt::invntt(&mut w_prime);
 
         // HighBits straight off the transform, as signing does: w1 into
-        // tmp and w0 into t1_poly, which is done with until the next row.
-        // UseHint then needs only the parts at the hinted positions rather
-        // than a fresh decomposition of each.
-        rounding::poly_decompose_reduced(&mut tmp, &mut t1_poly, &w_prime, params.gamma2);
+        // tmp, and (w0 << 6) | w1 left in w_prime. UseHint then needs only
+        // the parts at the hinted positions rather than a fresh
+        // decomposition of each.
+        rounding::poly_decompose_reduced(&mut tmp, &mut w_prime, params.gamma2);
         let hint_start = if i == 0 {
             0
         } else {
@@ -106,7 +106,7 @@ pub fn verify_internal(
         let hint_end = hint_sig[params.omega as usize + i] as usize;
         for j in hint_start..hint_end {
             let idx = hint_sig[j] as usize;
-            tmp[idx] = rounding::use_hint_parts(tmp[idx], t1_poly[idx], params.gamma2);
+            tmp[idx] = rounding::use_hint_parts(tmp[idx], w_prime[idx] >> 6, params.gamma2);
         }
 
         let w1_bytes = params.w1_pack_bytes();
