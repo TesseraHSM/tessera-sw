@@ -155,25 +155,134 @@ pub fn poly_decompose_reduced(w1: &mut Poly, w0: &mut Poly, w: &Poly, gamma2: u3
 }
 
 fn decompose_pass<const G: u32>(w1: &mut Poly, w0: &mut Poly, w: &Poly) {
-    for ((w1, w0), &w) in w1.iter_mut().zip(w0.iter_mut()).zip(w.iter()) {
-        // `w` is the inverse transform's output, which is below q in
-        // magnitude, so `caddq` alone lifts it into [0, q) -- `reduce32`
-        // first would only map it to the same value.
-        let a = super::ntt::caddq(w);
-
-        let mut a1 = (a + 127) >> 7;
-        if G == 261888 {
-            a1 = ((a1 * 1025 + (1 << 21)) >> 22) & 15;
-        } else {
-            a1 = (a1 * 11275 + (1 << 23)) >> 24;
-            a1 ^= ((43 - a1) >> 31) & a1;
+    // Two coefficients a pass; the per-coefficient arithmetic is the same
+    // as the scalar loop below, `a1 * 2 * G` folded into an `mls`.
+    #[cfg(target_arch = "arm")]
+    {
+        // SAFETY: three distinct `[i32; N]`, word aligned, N even; `w1` and
+        // `w0` are written, `w` only read.
+        unsafe {
+            if G == 261888 {
+                core::arch::asm!(
+                    "2:",
+                    "ldrd   {w0}, {w1}, [{wp}], #8",
+                    "and    {t}, {q}, {w0}, asr #31",
+                    "add    {w0}, {w0}, {t}",
+                    "and    {t}, {q}, {w1}, asr #31",
+                    "add    {w1}, {w1}, {t}",
+                    "add    {h0}, {w0}, #127",
+                    "add    {h1}, {w1}, #127",
+                    "lsr    {h0}, {h0}, #7",
+                    "lsr    {h1}, {h1}, #7",
+                    "add    {h0}, {h0}, {h0}, lsl #10",
+                    "add    {h1}, {h1}, {h1}, lsl #10",
+                    "add    {h0}, {h0}, #0x200000",
+                    "add    {h1}, {h1}, #0x200000",
+                    "ubfx   {h0}, {h0}, #22, #4",
+                    "ubfx   {h1}, {h1}, #22, #4",
+                    "mls    {w0}, {h0}, {g2x2}, {w0}",
+                    "mls    {w1}, {h1}, {g2x2}, {w1}",
+                    "strd   {h0}, {h1}, [{w1p}], #8",
+                    "sub    {t}, {half}, {w0}",
+                    "and    {t}, {q}, {t}, asr #31",
+                    "sub    {w0}, {w0}, {t}",
+                    "sub    {t}, {half}, {w1}",
+                    "and    {t}, {q}, {t}, asr #31",
+                    "sub    {w1}, {w1}, {t}",
+                    "strd   {w0}, {w1}, [{w0p}], #8",
+                    "subs   {n}, {n}, #1",
+                    "bne    2b",
+                    wp = inout(reg) w.as_ptr() => _,
+                    w1p = inout(reg) w1.as_mut_ptr() => _,
+                    w0p = inout(reg) w0.as_mut_ptr() => _,
+                    n = inout(reg) N / 2 => _,
+                    q = in(reg) Q as i32,
+                    half = in(reg) (Q as i32 - 1) / 2,
+                    g2x2 = in(reg) 2 * G as i32,
+                    w0 = out(reg) _,
+                    w1 = out(reg) _,
+                    h0 = out(reg) _,
+                    h1 = out(reg) _,
+                    t = out(reg) _,
+                    options(nostack),
+                );
+            } else {
+                core::arch::asm!(
+                    "2:",
+                    "ldrd   {w0}, {w1}, [{wp}], #8",
+                    "and    {t}, {q}, {w0}, asr #31",
+                    "add    {w0}, {w0}, {t}",
+                    "and    {t}, {q}, {w1}, asr #31",
+                    "add    {w1}, {w1}, {t}",
+                    "add    {h0}, {w0}, #127",
+                    "add    {h1}, {w1}, #127",
+                    "lsr    {h0}, {h0}, #7",
+                    "lsr    {h1}, {h1}, #7",
+                    "mul    {h0}, {h0}, {k}",
+                    "mul    {h1}, {h1}, {k}",
+                    "add    {h0}, {h0}, #0x800000",
+                    "add    {h1}, {h1}, #0x800000",
+                    "asr    {h0}, {h0}, #24",
+                    "asr    {h1}, {h1}, #24",
+                    "rsb    {t}, {h0}, #43",
+                    "and    {t}, {h0}, {t}, asr #31",
+                    "eor    {h0}, {h0}, {t}",
+                    "rsb    {t}, {h1}, #43",
+                    "and    {t}, {h1}, {t}, asr #31",
+                    "eor    {h1}, {h1}, {t}",
+                    "mls    {w0}, {h0}, {g2x2}, {w0}",
+                    "mls    {w1}, {h1}, {g2x2}, {w1}",
+                    "strd   {h0}, {h1}, [{w1p}], #8",
+                    "sub    {t}, {half}, {w0}",
+                    "and    {t}, {q}, {t}, asr #31",
+                    "sub    {w0}, {w0}, {t}",
+                    "sub    {t}, {half}, {w1}",
+                    "and    {t}, {q}, {t}, asr #31",
+                    "sub    {w1}, {w1}, {t}",
+                    "strd   {w0}, {w1}, [{w0p}], #8",
+                    "subs   {n}, {n}, #1",
+                    "bne    2b",
+                    wp = inout(reg) w.as_ptr() => _,
+                    w1p = inout(reg) w1.as_mut_ptr() => _,
+                    w0p = inout(reg) w0.as_mut_ptr() => _,
+                    n = inout(reg) N / 2 => _,
+                    q = in(reg) Q as i32,
+                    half = in(reg) (Q as i32 - 1) / 2,
+                    g2x2 = in(reg) 2 * G as i32,
+                    k = in(reg) 11275,
+                    w0 = out(reg) _,
+                    w1 = out(reg) _,
+                    h0 = out(reg) _,
+                    h1 = out(reg) _,
+                    t = out(reg) _,
+                    options(nostack),
+                );
+            }
         }
+    }
 
-        let mut a0 = a - a1 * 2 * G as i32;
-        a0 -= (((Q as i32 - 1) / 2 - a0) >> 31) & Q as i32;
+    #[cfg(not(target_arch = "arm"))]
+    {
+        for ((w1, w0), &w) in w1.iter_mut().zip(w0.iter_mut()).zip(w.iter()) {
+            // `w` is the inverse transform's output, which is below q in
+            // magnitude, so `caddq` alone lifts it into [0, q) -- `reduce32`
+            // first would only map it to the same value.
+            let a = super::ntt::caddq(w);
 
-        *w1 = a1;
-        *w0 = a0;
+            let mut a1 = (a + 127) >> 7;
+            if G == 261888 {
+                a1 = ((a1 * 1025 + (1 << 21)) >> 22) & 15;
+            } else {
+                a1 = (a1 * 11275 + (1 << 23)) >> 24;
+                a1 ^= ((43 - a1) >> 31) & a1;
+            }
+
+            let mut a0 = a - a1 * 2 * G as i32;
+            a0 -= (((Q as i32 - 1) / 2 - a0) >> 31) & Q as i32;
+
+            *w1 = a1;
+            *w0 = a0;
+        }
     }
 }
 
