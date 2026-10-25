@@ -793,11 +793,13 @@ async fn main(spawner: Spawner) {
         // on FP1 the top half of its 64 KB dTCM, above the stack; on the
         // others the 16 KB "share dTCM" block at 0x2002_0000, where the
         // legacy firmware put each core's stack, so each core's view of it
-        // is its own.
+        // is its own. Only up to the SP's liveliness word, though: the SP
+        // zeroes `CORE_RUN_STATUS` behind this core's back, and above it
+        // lie the legacy stack and its C2SV words.
         let (near, bytes) = if id == 1 {
             (0x2000_8000usize, 0x8000usize)
         } else {
-            (0x2002_0000, 0x4000)
+            (0x2002_0000, CORE_RUN_STATUS as usize - 0x2002_0000)
         };
         pqc_ml::spill::init_near(near as *mut i32, bytes / 4);
     }
