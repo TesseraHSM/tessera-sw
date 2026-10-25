@@ -10,11 +10,6 @@ rustflags = [
   "link-arg=-Tlink.x",
   "-C",
   "target-cpu=cortex-m7",
-  # Each fastpath core runs its own image on its own core with nothing
-  # else touching its dTCM, so 64-bit atomics can be built from an
-  # interrupt mask instead of portable-atomic's 2 KB spinlock table.
-  "--cfg",
-  "portable_atomic_unsafe_assume_single_core",
 ]
 
 [unstable]

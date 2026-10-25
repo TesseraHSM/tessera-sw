@@ -15,17 +15,10 @@ resolver = "2"
 [workspace.dependencies]
 # speak one wire format. The crate is `no_std` and allocation-free.
 
-tsra_fw_uno_drivers_systick = { features = [
-  "fp-core",
-], path = "../fw/drivers/systick" }
-
 pqc_ml = { path = "crates/pqc_ml" }
 
 cortex-m = "0.7.7"
 cortex-m-rt = "0.7.5"
-embassy-executor = "0.10.0"
-embassy-futures = "0.1.2"
-embassy-time = "0.5.1"
 zerocopy = "0.8"
 
 [profile.release]

@@ -13,10 +13,10 @@
 //! PAL and no interrupt plumbing, so wiring the same driver here would mean
 //! porting that machinery too.
 //!
-//! Polling the pending register from an Embassy task instead costs a few
-//! milliseconds of latency on a PQC operation measured in milliseconds, and
-//! keeps this step small enough to debug on a core with no console.  It can
-//! become interrupt-driven later without changing the protocol.
+//! Polling the pending register from the main loop instead costs nothing
+//! while requests keep arriving, and keeps this step small enough to debug
+//! on a core with no console.  It can become interrupt-driven later without
+//! changing the protocol.
 //!
 //! # Descriptors
 //!
