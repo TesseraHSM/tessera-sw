@@ -17,6 +17,7 @@ use super::poly::{self};
 use super::rounding;
 use super::sampling;
 use crate::keccak::shake256_init;
+use crate::keccak::XofPrefix;
 use crate::spill::PACKED_WORDS;
 use crate::DsaWorkBuf;
 
@@ -32,24 +33,23 @@ pub fn sign_internal(
     let l = params.l as usize;
 
     // The expanded key is read in place from the operand slot, which is
-    // shared memory an order of magnitude slower than dTCM. rho is absorbed
-    // once per matrix element, so it earns a local copy; the rest is read a
-    // handful of times per attempt and is left where it is.
-    let mut rho = [0u8; 32];
-    rho.copy_from_slice(&sk[0..32]);
-    let rho = &rho;
+    // shared memory an order of magnitude slower than dTCM; it is read a
+    // handful of times per attempt. rho, which seeds every matrix element,
+    // is taken once into the XOF prefix they all start from.
+    let rho = &XofPrefix::new(&sk[0..32]);
     let key = &sk[32..64];
 
-    // rho'' = H(key || rnd || mu)
-    let mut rhoprime = [0u8; 64];
-    {
+    // rho'' = H(key || rnd || mu), likewise the prefix of every ExpandMask.
+    let rhoprime = {
+        let mut rhoprime = [0u8; 64];
         let mut hctx = shake256_init();
         hctx.absorb(key);
         hctx.absorb(rnd);
         hctx.absorb(mu);
         hctx.finalize();
         hctx.squeeze(&mut rhoprime);
-    }
+        XofPrefix::new(&rhoprime)
+    };
 
     // w = A*y lives in the caller-provided workspace and survives from the
     // commitment pass into the hint pass. Keeping it is what lets the

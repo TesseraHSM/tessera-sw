@@ -15,6 +15,7 @@ use super::poly::{self};
 use super::rounding;
 use super::sampling;
 use crate::keccak::shake256_init;
+use crate::keccak::XofPrefix;
 
 /// -2^d * 2^32 mod q: c_hat's Montgomery product with it is c_hat * -2^d.
 const NEG_2D_MONT: i64 = 4165636;
@@ -34,7 +35,7 @@ pub fn verify_internal(
         return false;
     }
 
-    let rho = &pk[0..32];
+    let rho = XofPrefix::new(&pk[0..32]);
     let ctilde = &sig[0..ctilde_len];
 
     // z_hat lives in caller-provided workspace
@@ -79,7 +80,7 @@ pub fn verify_internal(
 
     for i in 0..k {
         for j in 0..l {
-            sampling::poly_uniform(&mut a_ij, rho, i as u8, j as u8);
+            sampling::poly_uniform(&mut a_ij, &rho, i as u8, j as u8);
             if j == 0 {
                 ntt::poly_pointwise_montgomery(&mut w_prime, &a_ij, &z_hat[0]);
             } else {

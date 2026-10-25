@@ -14,6 +14,7 @@ use super::poly::Poly;
 use super::poly::{self};
 use super::sampling;
 use crate::keccak::sha3_512;
+use crate::keccak::XofPrefix;
 
 /// Largest `k` across the parameter sets (ML-KEM-1024).
 const MAX_K: usize = 4;
@@ -31,7 +32,8 @@ pub fn kpke_keygen(params: &MlKemParams, d: &[u8; 32], ek: &mut [u8], dk: &mut [
     let mut g_out = [0u8; 64];
     sha3_512(&g_input, &mut g_out);
     let rho = &g_out[0..32];
-    let sigma = &g_out[32..64];
+    let sigma = &XofPrefix::new(&g_out[32..64]);
+    let rho_xof = &XofPrefix::new(rho);
 
     // Sample s, NTT(s), store in dk
     let mut nonce: u8 = 0;
@@ -59,7 +61,7 @@ pub fn kpke_keygen(params: &MlKemParams, d: &[u8; 32], ek: &mut [u8], dk: &mut [
         packing::byte_decode_12(&mut s_hat_j, &dk[384 * j..]);
         ntt::basemul_prep(&mut s_prep, &s_hat_j);
         for i in 0..k {
-            sampling::poly_uniform(&mut a_ij, rho, i as u8, j as u8);
+            sampling::poly_uniform(&mut a_ij, rho_xof, i as u8, j as u8);
             ntt::basemul_acc32(&mut acc[i], &a_ij, &s_prep, j == 0);
         }
     }
@@ -89,7 +91,8 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
     let dv = params.dv;
 
     // ek = ByteEncode12(t_hat) || rho
-    let rho = &ek[384 * k..384 * k + 32];
+    let rho = &XofPrefix::new(&ek[384 * k..384 * k + 32]);
+    let r = &XofPrefix::new(r);
 
     let u_poly_bytes = N * du as usize / 8;
     let mut a_ij = Poly::ZERO;

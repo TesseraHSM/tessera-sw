@@ -11,6 +11,7 @@ use super::poly::{self};
 use super::rounding;
 use super::sampling;
 use crate::keccak::shake256;
+use crate::keccak::XofPrefix;
 
 /// Internal keygen from a 32-byte seed xi.
 /// `work` is a caller-provided 7×256 i32 scratch buffer.
@@ -36,13 +37,15 @@ pub fn keygen_internal(
     let rho = &expanded[0..32];
     let rhoprime = &expanded[32..96];
     let key = &expanded[96..128];
+    let a_xof = XofPrefix::new(rho);
+    let eta_xof = XofPrefix::new(rhoprime);
 
     // s1_hat lives in caller-provided workspace
     let s1_hat = work;
 
     // Sample and NTT s1
     for j in 0..l {
-        sampling::poly_sample_eta(&mut s1_hat[j], rhoprime, j as u16, params.eta);
+        sampling::poly_sample_eta(&mut s1_hat[j], &eta_xof, j as u16, params.eta);
         let sk_s1_offset = 128 + j * params.eta_pack_bytes();
         packing::pack_eta(&mut sk[sk_s1_offset..], &s1_hat[j], params.eta);
         ntt::ntt(&mut s1_hat[j]);
@@ -64,12 +67,12 @@ pub fn keygen_internal(
     for i in 0..k {
         poly::poly_zero(&mut t_poly);
         for j in 0..l {
-            sampling::poly_uniform(&mut a_ij, rho, i as u8, j as u8);
+            sampling::poly_uniform(&mut a_ij, &a_xof, i as u8, j as u8);
             ntt::poly_pointwise_acc_montgomery(&mut t_poly, &a_ij, &s1_hat[j]);
         }
         ntt::invntt(&mut t_poly);
 
-        sampling::poly_sample_eta(&mut s2_poly, rhoprime, (l + i) as u16, params.eta);
+        sampling::poly_sample_eta(&mut s2_poly, &eta_xof, (l + i) as u16, params.eta);
         packing::pack_eta(
             &mut sk[sk_s2_offset + i * params.eta_pack_bytes()..],
             &s2_poly,

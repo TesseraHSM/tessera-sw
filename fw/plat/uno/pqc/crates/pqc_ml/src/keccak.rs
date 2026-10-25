@@ -282,6 +282,85 @@ impl ShakeCtx {
     }
 }
 
+/// The start of a run of SHAKE calls that differ only in a suffix of a
+/// byte or two after a whole-lane prefix -- ExpandA's elements, the
+/// samplers' nonces: the prefix absorbed once, for each call's sponge to
+/// take up in one step ([`ShakeCtx::absorb_xof`]) rather than absorbing
+/// it again and padding a byte at a time.
+///
+/// On ARM only the prefix's interleaved lanes are kept, a third of a
+/// state: signing holds two of these.
+pub struct XofPrefix {
+    #[cfg(target_arch = "arm")]
+    lanes: [u32; 16],
+    #[cfg(not(target_arch = "arm"))]
+    prefix: [u8; 64],
+    len: usize,
+}
+
+impl XofPrefix {
+    /// `prefix` must be a whole number of lanes, at most eight.
+    pub fn new(prefix: &[u8]) -> Self {
+        #[cfg(target_arch = "arm")]
+        {
+            let mut x = XofPrefix {
+                lanes: [0; 16],
+                len: prefix.len(),
+            };
+            // SAFETY: at most eight lanes, which `lanes` holds.
+            unsafe {
+                KeccakF1600_StateXORBytes(
+                    x.lanes.as_mut_ptr(),
+                    prefix.as_ptr(),
+                    0,
+                    prefix.len() as u32,
+                )
+            };
+            x
+        }
+
+        #[cfg(not(target_arch = "arm"))]
+        {
+            let mut p = [0u8; 64];
+            p[..prefix.len()].copy_from_slice(prefix);
+            XofPrefix {
+                prefix: p,
+                len: prefix.len(),
+            }
+        }
+    }
+}
+
+impl ShakeCtx {
+    /// On a fresh sponge, absorb `prefix` and the `len` low bytes of
+    /// `suffix`, little-endian, and pad: ready to squeeze. The prefix must
+    /// leave a lane spare below the last byte of the rate.
+    #[inline(never)]
+    pub fn absorb_xof(&mut self, prefix: &XofPrefix, suffix: u16, len: u32) {
+        #[cfg(target_arch = "arm")]
+        {
+            let st = &mut self.st;
+            for (d, s) in st.state.iter_mut().zip(prefix.lanes.iter()) {
+                *d ^= *s;
+            }
+            // The padding's final 0x80 is bit 63 of the rate's last lane,
+            // which interleaving puts at the top of that lane's odd word.
+            st.state[((self.rate - 1) / 4) | 1] ^= 0x8000_0000;
+            let lane = (suffix as u32 | 0x1F << (8 * len)) as u64;
+            st.xor_bytes(&lane.to_le_bytes(), prefix.len);
+            st.permute();
+            self.pos = 0;
+        }
+
+        #[cfg(not(target_arch = "arm"))]
+        {
+            self.absorb(&prefix.prefix[..prefix.len]);
+            self.absorb(&suffix.to_le_bytes()[..len as usize]);
+            self.finalize();
+        }
+    }
+}
+
 pub fn shake128_init() -> ShakeCtx {
     ShakeCtx::new(SHAKE128_RATE)
 }

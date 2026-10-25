@@ -7,18 +7,17 @@ use super::params::Q;
 use super::poly::Poly;
 use crate::keccak::shake128_init;
 use crate::keccak::shake256_init;
+use crate::keccak::XofPrefix;
 use crate::keccak::SHAKE128_RATE;
 
 /// ExpandA: generate one matrix element from SHAKE128(rho || j || i).
 /// Rejection sampling mod q=3329, exactly like ML-DSA but with 12-bit extraction.
 ///
 /// Squeezed a whole rate block at a time: see `dsa::sampling::poly_uniform`.
-pub fn poly_uniform(a: &mut Poly, rho: &[u8], i: u8, j: u8) {
-    let mut ctx = shake128_init();
-    ctx.absorb(rho);
+pub fn poly_uniform(a: &mut Poly, rho: &XofPrefix, i: u8, j: u8) {
     // FIPS 203 / Kyber: XOF(ρ, i, j) = SHAKE128(ρ ‖ j ‖ i)  — column, row order
-    ctx.absorb(&[j, i]);
-    ctx.finalize();
+    let mut ctx = shake128_init();
+    ctx.absorb_xof(rho, u16::from_le_bytes([j, i]), 2);
 
     // Three little-endian words hold eight 12-bit candidates, so each one
     // is a shift (and at most one OR) and a mask rather than byte loads.
@@ -73,11 +72,9 @@ pub fn poly_uniform(a: &mut Poly, rho: &[u8], i: u8, j: u8) {
 /// CBD(eta): Centered Binomial Distribution sampling from PRF output.
 /// Uses SHAKE256(seed || nonce) to generate eta*N/4 bytes, then
 /// each coefficient = (sum of eta bits) - (sum of eta bits).
-pub fn poly_cbd(r: &mut Poly, seed: &[u8], nonce: u8, eta: u8) {
+pub fn poly_cbd(r: &mut Poly, seed: &XofPrefix, nonce: u8, eta: u8) {
     let mut ctx = shake256_init();
-    ctx.absorb(seed);
-    ctx.absorb(&[nonce]);
-    ctx.finalize();
+    ctx.absorb_xof(seed, nonce as u16, 1);
 
     // 2 * eta bits a coefficient, as words for `asm/kem_cbd.S` -- and room
     // for one more than eta = 3's 48, since its `cbd3` reads every 3-byte

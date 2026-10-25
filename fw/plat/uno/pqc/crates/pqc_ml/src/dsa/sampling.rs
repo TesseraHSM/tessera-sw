@@ -8,6 +8,7 @@ use super::poly::Poly;
 use crate::keccak::shake128_init;
 use crate::keccak::shake256_init;
 use crate::keccak::ShakeCtx;
+use crate::keccak::XofPrefix;
 use crate::keccak::SHAKE128_RATE;
 use crate::keccak::SHAKE256_RATE;
 
@@ -17,11 +18,9 @@ use crate::keccak::SHAKE256_RATE;
 /// The sponge is squeezed a whole rate block at a time. Extracting three
 /// bytes per call instead costs a full lane de-interleave per sample, which
 /// dominated the cost of this routine.
-pub fn poly_uniform(a: &mut Poly, rho: &[u8], i: u8, j: u8) {
+pub fn poly_uniform(a: &mut Poly, rho: &XofPrefix, i: u8, j: u8) {
     let mut ctx = shake128_init();
-    ctx.absorb(rho);
-    ctx.absorb(&[j, i]);
-    ctx.finalize();
+    ctx.absorb_xof(rho, u16::from_le_bytes([j, i]), 2);
 
     // Three little-endian words hold four 3-byte candidates, so each one
     // is a shift, an OR and a mask rather than three byte loads.
@@ -71,11 +70,9 @@ pub fn poly_uniform(a: &mut Poly, rho: &[u8], i: u8, j: u8) {
 
 /// SampleEta: sample a polynomial with coefficients in [-eta, eta].
 /// Uses SHAKE256(seed || nonce).
-pub fn poly_sample_eta(a: &mut Poly, seed: &[u8], nonce: u16, eta: u8) {
+pub fn poly_sample_eta(a: &mut Poly, seed: &XofPrefix, nonce: u16, eta: u8) {
     let mut ctx = shake256_init();
-    ctx.absorb(seed);
-    ctx.absorb(&nonce.to_le_bytes());
-    ctx.finalize();
+    ctx.absorb_xof(seed, nonce, 2);
 
     match eta {
         2 => sample_eta2(&mut ctx, a),
@@ -160,11 +157,9 @@ pub const GAMMA1_MAX_BYTES: usize = 640;
 ///
 /// Kept separate from the unpacking so signing can hold the bytes and
 /// re-derive y in the z pass without running the XOF a second time.
-pub fn expand_mask_bytes(out: &mut [u8], seed: &[u8], nonce: u16) {
+pub fn expand_mask_bytes(out: &mut [u8], seed: &XofPrefix, nonce: u16) {
     let mut ctx = shake256_init();
-    ctx.absorb(seed);
-    ctx.absorb(&nonce.to_le_bytes());
-    ctx.finalize();
+    ctx.absorb_xof(seed, nonce, 2);
     ctx.squeeze(out);
 }
 
