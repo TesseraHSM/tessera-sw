@@ -87,6 +87,21 @@ static FP_IDENTITY: FpIdentity = FpIdentity {
 /// This core's id, cached once at boot.
 static CORE_ID: AtomicU8 = AtomicU8::new(FP_ID_UNPATCHED);
 
+extern "C" {
+    fn DefaultHandler();
+}
+
+/// The device-interrupt part of the vector table.
+///
+/// This app takes no device interrupts -- the doorbell is polled -- but
+/// without a PAC cortex-m-rt reserves all 240 entries, 960 bytes of a
+/// 32 KB iTCM. With its `device` feature it leaves the table to the app,
+/// and its link script insists on at least one entry.
+#[used]
+#[no_mangle]
+#[link_section = ".vector_table.interrupts"]
+static __INTERRUPTS: [unsafe extern "C" fn(); 1] = [DefaultHandler];
+
 /// Read the patched core id, or `None` if the image was never patched or
 /// carries a nonsensical value.
 fn read_core_id() -> Option<u8> {

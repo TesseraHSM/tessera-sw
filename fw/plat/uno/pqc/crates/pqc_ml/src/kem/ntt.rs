@@ -138,33 +138,155 @@ pub fn ntt(a: &mut [i16; N]) {
     }
 }
 
+/// `qinv` in the bottom half, `-q` in the top. `mul` only needs the low
+/// half of `qinv` -- the bits of the product it keeps do not depend on the
+/// top -- and the `smlabt`/`smulbt` forms read `-q` from the top, so one
+/// register serves the whole Montgomery reduction.
+#[cfg(target_arch = "arm")]
+const QINV_QNEG: i32 = (Q_NEG << 16) | (QINV_P & 0xFFFF);
+
+/// The Barrett constant scaled by 2^6: `smmulr` by it computes
+/// `(v * a + 2^25) >> 26` -- [`barrett_reduce`]'s quotient, rounding and
+/// all -- in one instruction.
+#[cfg(target_arch = "arm")]
+const BARRETT_V64: i32 = 20159 << 6;
+
+/// One whole inverse layer of Gentleman-Sande butterflies, two at a time.
+///
+/// The packed counterpart of [`ct_butterfly_pairs`]: `sadd16`/`ssub16`
+/// form both sums and both differences at once, the differences take the
+/// forward transform's Montgomery multiply, and the sums are Barrett
+/// reduced per halfword exactly as [`barrett_reduce`] does, so the result
+/// matches the scalar transform bit for bit. The two reductions are
+/// independent and are interleaved, so their multiplies keep the single
+/// MAC pipe busy.
+///
+/// One routine serves all seven layers -- the pair count per window is the
+/// half-window offset divided by four -- which costs a call per layer but
+/// keeps one copy of the loop in the 32 KB iTCM rather than seven.
+///
+/// # Safety
+/// `ap` must be valid for 256 `i16` writes and word aligned; `zp` must be
+/// valid for `128 / len` descending `i16` reads; `len` must be a power of
+/// two in 2..=128.
+#[cfg(target_arch = "arm")]
+#[inline(never)]
+unsafe fn gs_layer(ap: *mut i16, zp: *const i16, len: usize) {
+    core::arch::asm!(
+        "2:",
+        "ldrsh  {z}, [{zp}], #-2",
+        "lsr    {cnt}, {off}, #2",
+        "3:",
+        "ldr    {x}, [{xp}]",
+        "ldr    {y}, [{xp}, {off}]",
+        "ssub16 {t1}, {y}, {x}",
+        "sadd16 {t0}, {x}, {y}",
+        "smulbb {x}, {t1}, {z}",
+        "smultb {y}, {t1}, {z}",
+        "sxth   {t2}, {t0}",
+        "mul    {t1}, {x}, {a}",
+        "smmulr {t2}, {t2}, {v}",
+        "smlabt {x}, {t1}, {a}, {x}",
+        "mul    {t1}, {y}, {a}",
+        "smlabt {y}, {t1}, {a}, {y}",
+        "asr    {t1}, {t0}, #16",
+        "pkhtb  {x}, {y}, {x}, asr #16",
+        "smmulr {t1}, {t1}, {v}",
+        "str    {x}, [{xp}, {off}]",
+        "smulbt {t2}, {t2}, {a}",
+        "smulbt {t1}, {t1}, {a}",
+        "pkhbt  {t2}, {t2}, {t1}, lsl #16",
+        "sadd16 {t0}, {t0}, {t2}",
+        "str    {t0}, [{xp}], #4",
+        "subs   {cnt}, {cnt}, #1",
+        "bne    3b",
+        "add    {xp}, {xp}, {off}",
+        "subs   {n}, {n}, #1",
+        "bne    2b",
+        xp = inout(reg) ap => _,
+        zp = inout(reg) zp => _,
+        n = inout(reg) N / 2 / len => _,
+        off = in(reg) len * 2,
+        a = in(reg) QINV_QNEG,
+        v = in(reg) BARRETT_V64,
+        z = out(reg) _,
+        cnt = out(reg) _,
+        x = out(reg) _,
+        y = out(reg) _,
+        t0 = out(reg) _,
+        t1 = out(reg) _,
+        t2 = out(reg) _,
+        options(nostack),
+    );
+}
+
 /// Inverse NTT (in-place).
 pub fn invntt(a: &mut [i16; N]) {
-    let mut zetas = ZETAS[1..128].iter().rev();
-    let mut len: usize = 2;
-    while len <= 128 {
-        let mut rest: &mut [i16] = a;
-        while !rest.is_empty() {
-            let (chunk, tail) = rest.split_at_mut(2 * len);
-            rest = tail;
-            let Some(&zeta) = zetas.next() else { return };
-            let zeta = zeta as i32;
-            let (lo, hi) = chunk.split_at_mut(len);
-            for (x, y) in lo.iter_mut().zip(hi.iter_mut()) {
-                let t = *x;
-                *x = barrett_reduce(t + *y);
-                *y = montgomery_reduce(-zeta * (t - *y) as i32);
-            }
-        }
-        len <<= 1;
-    }
-    // Multiply by f = R^2 * n^{-1} mod q = 3303 (centered: -26... wait)
-    // f = -944 computed earlier, but let's use the standard Kyber value
-    // Actually: f = 1441 (from reference Kyber; mont^2/128 mod q)
-    // Let me use the reference value directly.
+    // Multiply by f = mont^2/128 mod q = 1441 (the reference value).
     const F: i32 = 1441;
-    for x in a.iter_mut() {
-        *x = montgomery_reduce(F * *x as i32);
+
+    #[cfg(target_arch = "arm")]
+    {
+        let ap = a.as_mut_ptr();
+        let mut len = 2;
+        while len <= 128 {
+            // SAFETY: each layer covers the whole polynomial, and layer
+            // `len` consumes the 128 / len zetas that end at 256 / len - 1.
+            unsafe { gs_layer(ap, ZETAS.as_ptr().add(256 / len - 1), len) };
+            len <<= 1;
+        }
+        // SAFETY: `[i16; N]` with N even, word aligned as above.
+        unsafe {
+            core::arch::asm!(
+                "2:",
+                "ldr    {x}, [{xp}]",
+                "smulbb {t0}, {x}, {f}",
+                "smultb {t1}, {x}, {f}",
+                "mul    {y}, {t0}, {a}",
+                "mul    {t2}, {t1}, {a}",
+                "smlabt {t0}, {y}, {a}, {t0}",
+                "smlabt {t1}, {t2}, {a}, {t1}",
+                "pkhtb  {x}, {t1}, {t0}, asr #16",
+                "str    {x}, [{xp}], #4",
+                "subs   {n}, {n}, #1",
+                "bne    2b",
+                xp = inout(reg) ap => _,
+                n = inout(reg) N / 2 => _,
+                f = in(reg) F,
+                a = in(reg) QINV_QNEG,
+                x = out(reg) _,
+                y = out(reg) _,
+                t0 = out(reg) _,
+                t1 = out(reg) _,
+                t2 = out(reg) _,
+                options(nostack),
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    {
+        let mut zetas = ZETAS[1..128].iter().rev();
+        let mut len: usize = 2;
+        while len <= 128 {
+            let mut rest: &mut [i16] = a;
+            while !rest.is_empty() {
+                let (chunk, tail) = rest.split_at_mut(2 * len);
+                rest = tail;
+                let Some(&zeta) = zetas.next() else { return };
+                let zeta = zeta as i32;
+                let (lo, hi) = chunk.split_at_mut(len);
+                for (x, y) in lo.iter_mut().zip(hi.iter_mut()) {
+                    let t = *x;
+                    *x = barrett_reduce(t + *y);
+                    *y = montgomery_reduce(-zeta * (t - *y) as i32);
+                }
+            }
+            len <<= 1;
+        }
+        for x in a.iter_mut() {
+            *x = montgomery_reduce(F * *x as i32);
+        }
     }
 }
 

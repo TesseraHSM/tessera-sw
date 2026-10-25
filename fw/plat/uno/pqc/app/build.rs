@@ -12,6 +12,10 @@ fn main() {
     // memory.x lives at the FP workspace root (one level up from app/).
     let memory_x = manifest.join("../memory.x");
     fs::copy(&memory_x, out.join("memory.x")).unwrap();
+    // cortex-m-rt's `device` feature makes its link.x `INCLUDE device.x`,
+    // which a PAC would supply. This app takes no interrupts, so there are
+    // no handlers to name.
+    fs::write(out.join("device.x"), "/* No device interrupts on the FP cores. */\n").unwrap();
     println!("cargo:rustc-link-search={}", out.display());
     println!("cargo:rerun-if-changed={}", memory_x.display());
 }

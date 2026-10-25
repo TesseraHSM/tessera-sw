@@ -13,7 +13,7 @@ test = false
 
 [dependencies]
 cortex-m = { features = ["critical-section-single-core"], workspace = true }
-cortex-m-rt = { workspace = true }
+cortex-m-rt = { features = ["device"], workspace = true }
 embassy-executor = { features = [
   "executor-thread",
   "platform-cortex-m",
