@@ -320,6 +320,7 @@ pub fn poly_basemul(r: &mut [i16; N], a: &[i16; N], b: &[i16; N]) {
 }
 
 /// One degree-1 product accumulated into `r`, in Z_q[x]/(x^2 - zeta).
+#[cfg(not(target_arch = "arm"))]
 #[inline(always)]
 fn basemul_acc2(r: &mut [i16], a: &[i16], b: &[i16], zeta: i32) {
     let a0 = a[0] as i32;
@@ -338,27 +339,98 @@ fn basemul_acc2(r: &mut [i16], a: &[i16], b: &[i16], zeta: i32) {
 
 /// Pointwise multiply-accumulate: r += a * b (no intermediate buffer).
 ///
-/// The two halves of each quadruple are taken one at a time. Doing both at
-/// once keeps eight coefficients and a zeta live, which is more than the
-/// register file holds, and the loop spent a third of its instructions
-/// spilling.
+/// On ARM each degree-1 product takes one word of each operand and three
+/// Montgomery reductions where the scalar version took five: `smuadx`
+/// forms `a0*b1 + a1*b0` in one instruction and is reduced once, and
+/// `a0*b0 + mont(a1*b1)*zeta` is accumulated in 32 bits before its single
+/// reduction. The result agrees with the scalar version mod q and is never
+/// larger in magnitude, so the 16-bit accumulators keep their headroom.
+///
+/// Not inlined: the block is a hundred and fifty bytes, and it has four
+/// callers in a 32 KB iTCM.
+#[inline(never)]
 pub fn poly_basemul_acc(r: &mut [i16; N], a: &[i16; N], b: &[i16; N]) {
-    let mut zi = 64usize;
-    let mut rr: &mut [i16] = r;
-    let mut aa: &[i16] = a;
-    let mut bb: &[i16] = b;
-    while !rr.is_empty() {
-        let (rc, rt) = rr.split_at_mut(4);
-        let (ac, at) = aa.split_at(4);
-        let (bc, bt) = bb.split_at(4);
-        rr = rt;
-        aa = at;
-        bb = bt;
+    #[cfg(target_arch = "arm")]
+    {
+        // SAFETY: three word-aligned `[i16; N]` (as for the transforms);
+        // `r` is the only one written and is a distinct borrow. The zeta
+        // cursor reads ZETAS[64..128], one per quadruple.
+        unsafe {
+            core::arch::asm!(
+                "2:",
+                "ldrsh  {z}, [{zp}], #2",
+                "ldr    {x0}, [{ap}], #4",
+                "ldr    {x1}, [{bp}], #4",
+                "smultt {t}, {x0}, {x1}",
+                "smulbb {u}, {x0}, {x1}",
+                "mul    {m}, {t}, {k}",
+                "smuadx {v}, {x0}, {x1}",
+                "smlabt {t}, {m}, {k}, {t}",
+                "ldr    {x0}, [{rp}]",
+                "smlatb {u}, {t}, {z}, {u}",
+                "mul    {m}, {v}, {k}",
+                "mul    {t}, {u}, {k}",
+                "smlabt {v}, {m}, {k}, {v}",
+                "smlabt {u}, {t}, {k}, {u}",
+                "pkhtb  {v}, {v}, {u}, asr #16",
+                "sadd16 {x0}, {x0}, {v}",
+                "str    {x0}, [{rp}], #4",
+                "rsb    {z}, {z}, #0",
+                "ldr    {x0}, [{ap}], #4",
+                "ldr    {x1}, [{bp}], #4",
+                "smultt {t}, {x0}, {x1}",
+                "smulbb {u}, {x0}, {x1}",
+                "mul    {m}, {t}, {k}",
+                "smuadx {v}, {x0}, {x1}",
+                "smlabt {t}, {m}, {k}, {t}",
+                "ldr    {x0}, [{rp}]",
+                "smlatb {u}, {t}, {z}, {u}",
+                "mul    {m}, {v}, {k}",
+                "mul    {t}, {u}, {k}",
+                "smlabt {v}, {m}, {k}, {v}",
+                "smlabt {u}, {t}, {k}, {u}",
+                "pkhtb  {v}, {v}, {u}, asr #16",
+                "sadd16 {x0}, {x0}, {v}",
+                "str    {x0}, [{rp}], #4",
+                "subs   {n}, {n}, #1",
+                "bne    2b",
+                rp = inout(reg) r.as_mut_ptr() => _,
+                ap = inout(reg) a.as_ptr() => _,
+                bp = inout(reg) b.as_ptr() => _,
+                zp = inout(reg) ZETAS.as_ptr().add(64) => _,
+                n = inout(reg) N / 4 => _,
+                k = in(reg) QINV_QNEG,
+                z = out(reg) _,
+                x0 = out(reg) _,
+                x1 = out(reg) _,
+                t = out(reg) _,
+                u = out(reg) _,
+                m = out(reg) _,
+                v = out(reg) _,
+                options(nostack),
+            );
+        }
+    }
 
-        let zeta = ZETAS[zi] as i32;
-        zi += 1;
-        basemul_acc2(&mut rc[..2], &ac[..2], &bc[..2], zeta);
-        basemul_acc2(&mut rc[2..], &ac[2..], &bc[2..], -zeta);
+    #[cfg(not(target_arch = "arm"))]
+    {
+        let mut zi = 64usize;
+        let mut rr: &mut [i16] = r;
+        let mut aa: &[i16] = a;
+        let mut bb: &[i16] = b;
+        while !rr.is_empty() {
+            let (rc, rt) = rr.split_at_mut(4);
+            let (ac, at) = aa.split_at(4);
+            let (bc, bt) = bb.split_at(4);
+            rr = rt;
+            aa = at;
+            bb = bt;
+
+            let zeta = ZETAS[zi] as i32;
+            zi += 1;
+            basemul_acc2(&mut rc[..2], &ac[..2], &bc[..2], zeta);
+            basemul_acc2(&mut rc[2..], &ac[2..], &bc[2..], -zeta);
+        }
     }
 }
 

@@ -170,52 +170,6 @@ unsafe fn ct_layer_len1(ap: *mut i32, zp: *const i32, windows: usize) {
     );
 }
 
-/// The inverse counterpart: the *first* inverse layer, walking the zeta
-/// table backwards.
-///
-/// # Safety
-/// As [`ct_layer_len1`], with `zp` read descending.
-#[cfg(target_arch = "arm")]
-#[inline(always)]
-unsafe fn gs_layer_len1(ap: *mut i32, zp: *const i32, windows: usize) {
-    core::arch::asm!(
-        "2:",
-        "ldr   {z0}, [{zp}], #-4",
-        "ldr   {z1}, [{zp}], #-4",
-        "ldrd  {ra}, {rb}, [{ap}]",
-        "ldrd  {rc}, {rd}, [{ap}, #8]",
-        "sub   {re}, {rb}, {ra}",
-        "add   {ra}, {ra}, {rb}",
-        "sub   {rf}, {rd}, {rc}",
-        "add   {rc}, {rc}, {rd}",
-        "smull {rb}, {rd}, {re}, {z0}",
-        "smull {re}, {rf}, {rf}, {z1}",
-        "mul   {z0}, {rb}, {qinv}",
-        "mul   {z1}, {re}, {qinv}",
-        "smlal {rb}, {rd}, {z0}, {q}",
-        "smlal {re}, {rf}, {z1}, {q}",
-        "strd  {ra}, {rd}, [{ap}]",
-        "strd  {rc}, {rf}, [{ap}, #8]",
-        "add   {ap}, {ap}, #16",
-        "subs  {n}, {n}, #1",
-        "bne   2b",
-        ap = inout(reg) ap => _,
-        zp = inout(reg) zp => _,
-        n = inout(reg) windows => _,
-        qinv = in(reg) QINV_I,
-        q = in(reg) Q_I,
-        z0 = out(reg) _,
-        z1 = out(reg) _,
-        ra = out(reg) _,
-        rb = out(reg) _,
-        rc = out(reg) _,
-        rd = out(reg) _,
-        re = out(reg) _,
-        rf = out(reg) _,
-        options(nostack),
-    );
-}
-
 /// A whole layer of butterflies, window loop and all.
 ///
 /// The per-window Rust loop looked cheap but was not: the inner asm block
@@ -278,57 +232,6 @@ unsafe fn ct_layer<const LEN: usize>(ap: *mut i32, zp: *const i32, windows: usiz
     );
 }
 
-/// The inverse counterpart of [`ct_layer`], walking zetas backwards.
-///
-/// # Safety
-/// As [`ct_layer`], with `zp` read descending.
-#[cfg(target_arch = "arm")]
-#[inline(always)]
-unsafe fn gs_layer<const LEN: usize>(ap: *mut i32, zp: *const i32, windows: usize) {
-    core::arch::asm!(
-        "2:",
-        "ldr   {z}, [{zp}], #-4",
-        "mov   {cnt}, {pairs}",
-        "3:",
-        "ldrd  {a}, {b}, [{xp}]",
-        "ldrd  {c}, {d}, [{xp}, {off}]",
-        "sub   {e}, {c}, {a}",
-        "add   {a}, {a}, {c}",
-        "sub   {f}, {d}, {b}",
-        "add   {b}, {b}, {d}",
-        "strd  {a}, {b}, [{xp}]",
-        "smull {a}, {b}, {e}, {z}",
-        "smull {c}, {d}, {f}, {z}",
-        "mul   {e}, {a}, {qinv}",
-        "mul   {f}, {c}, {qinv}",
-        "smlal {a}, {b}, {e}, {q}",
-        "smlal {c}, {d}, {f}, {q}",
-        "strd  {b}, {d}, [{xp}, {off}]",
-        "add   {xp}, {xp}, #8",
-        "subs  {cnt}, {cnt}, #1",
-        "bne   3b",
-        "add   {xp}, {xp}, {off}",
-        "subs  {n}, {n}, #1",
-        "bne   2b",
-        xp = inout(reg) ap => _,
-        zp = inout(reg) zp => _,
-        n = inout(reg) windows => _,
-        qinv = in(reg) QINV_I,
-        q = in(reg) Q_I,
-        off = const LEN * 4,
-        pairs = const LEN / 2,
-        z = out(reg) _,
-        cnt = out(reg) _,
-        a = out(reg) _,
-        b = out(reg) _,
-        c = out(reg) _,
-        d = out(reg) _,
-        e = out(reg) _,
-        f = out(reg) _,
-        options(nostack),
-    );
-}
-
 /// Forward NTT over raw pointers.
 ///
 /// The wide layers have few windows, so they keep the simple walk; the
@@ -367,35 +270,6 @@ fn ntt_arm(a: &mut [i32; N]) {
     }
 }
 
-/// Inverse NTT over raw pointers, consuming the zeta table backwards.
-#[cfg(target_arch = "arm")]
-fn invntt_arm(a: &mut [i32; N]) {
-    let zbase = ZETAS.as_ptr();
-    let ap = a.as_mut_ptr();
-    // SAFETY: the narrow layers come first for the inverse, taking zetas
-    // 255 downwards.
-    unsafe {
-        gs_layer_len1(ap, zbase.add(N - 1), N / 4);
-        gs_layer::<2>(ap, zbase.add(N / 2 - 1), N / 4);
-        gs_layer::<4>(ap, zbase.add(N / 4 - 1), N / 8);
-        gs_layer::<8>(ap, zbase.add(N / 8 - 1), N / 16);
-    }
-    let mut zi = N / 16 - 1;
-    let mut len = 16usize;
-    while len < N {
-        let mut base = ap;
-        for _ in 0..N / (2 * len) {
-            // SAFETY: as above; `zi` descends to 1.
-            unsafe {
-                gs_butterfly_pairs(base, base.add(len), *zbase.add(zi), len / 2);
-                base = base.add(2 * len);
-            }
-            zi -= 1;
-        }
-        len <<= 1;
-    }
-}
-
 /// Forward NTT (in-place). Input coefficients in normal order,
 /// output in bit-reversed order. Coefficients are in Montgomery domain.
 pub fn ntt(a: &mut [i32; N]) {
@@ -427,54 +301,20 @@ pub fn ntt(a: &mut [i32; N]) {
     }
 }
 
-/// Gentleman-Sande butterflies, two at a time; the inverse counterpart of
-/// [`ct_butterfly_pairs`].
-///
-/// # Safety
-/// `xp` and `yp` must each be valid for `pairs * 2` `i32` writes and word
-/// aligned, and must not overlap.
-#[cfg(target_arch = "arm")]
-#[inline(always)]
-unsafe fn gs_butterfly_pairs(xp: *mut i32, yp: *mut i32, zeta: i32, pairs: usize) {
-    core::arch::asm!(
-        "2:",
-        "ldrd  {a}, {b}, [{xp}]",
-        "ldrd  {c}, {d}, [{yp}]",
-        "sub   {e}, {c}, {a}",
-        "add   {a}, {a}, {c}",
-        "sub   {f}, {d}, {b}",
-        "add   {b}, {b}, {d}",
-        "strd  {a}, {b}, [{xp}], #8",
-        "smull {a}, {b}, {e}, {z}",
-        "smull {c}, {d}, {f}, {z}",
-        "mul   {e}, {a}, {qinv}",
-        "mul   {f}, {c}, {qinv}",
-        "smlal {a}, {b}, {e}, {q}",
-        "smlal {c}, {d}, {f}, {q}",
-        "strd  {b}, {d}, [{yp}], #8",
-        "subs  {n}, {n}, #1",
-        "bne   2b",
-        xp = inout(reg) xp => _,
-        yp = inout(reg) yp => _,
-        n = inout(reg) pairs => _,
-        z = in(reg) zeta,
-        qinv = in(reg) QINV_I,
-        q = in(reg) Q_I,
-        a = out(reg) _,
-        b = out(reg) _,
-        c = out(reg) _,
-        d = out(reg) _,
-        e = out(reg) _,
-        f = out(reg) _,
-        options(nostack),
-    );
-}
-
 /// Inverse NTT (in-place). Input in bit-reversed order,
 /// output in normal order, multiplied by Montgomery factor.
 pub fn invntt(a: &mut [i32; N]) {
+    // pqm4's merged-layer inverse as scheduled for the M7 by SLOTHY, final
+    // scaling included (asm/dilithium_intt.S).
     #[cfg(target_arch = "arm")]
-    invntt_arm(a);
+    {
+        extern "C" {
+            fn pqc_ml_dsa_invntt(p: *mut i32);
+        }
+        // SAFETY: `a` is 256 word-aligned `i32`s, which the routine
+        // transforms in place; it touches nothing else.
+        unsafe { pqc_ml_dsa_invntt(a.as_mut_ptr()) };
+    }
 
     #[cfg(not(target_arch = "arm"))]
     {
@@ -499,49 +339,14 @@ pub fn invntt(a: &mut [i32; N]) {
             }
             len <<= 1;
         }
-    }
-    // Final multiply by f = n^{-1} * R^2 mod q = 41978
-    // This makes INTT output be in Montgomery domain (multiplied by R),
-    // which cancels the R^{-1} from pointwise_montgomery.
-    const F: i64 = 41978;
 
-    #[cfg(target_arch = "arm")]
-    {
-        // A whole pass over every coefficient, on every inverse transform,
-        // and it was the last scalar loop left in the hot path.
-        // SAFETY: `[i32; N]` with N even, word aligned.
-        unsafe {
-            core::arch::asm!(
-                "2:",
-                "ldrd  {ra}, {rb}, [{ap}]",
-                "smull {rc}, {rd}, {ra}, {f}",
-                "smull {re}, {rf}, {rb}, {f}",
-                "mul   {ra}, {rc}, {qinv}",
-                "mul   {rb}, {re}, {qinv}",
-                "smlal {rc}, {rd}, {ra}, {q}",
-                "smlal {re}, {rf}, {rb}, {q}",
-                "strd  {rd}, {rf}, [{ap}], #8",
-                "subs  {n}, {n}, #1",
-                "bne   2b",
-                ap = inout(reg) a.as_mut_ptr() => _,
-                n = inout(reg) N / 2 => _,
-                f = in(reg) F as i32,
-                qinv = in(reg) QINV_I,
-                q = in(reg) Q_I,
-                ra = out(reg) _,
-                rb = out(reg) _,
-                rc = out(reg) _,
-                rd = out(reg) _,
-                re = out(reg) _,
-                rf = out(reg) _,
-                options(nostack),
-            );
+        // Final multiply by f = n^{-1} * R^2 mod q = 41978
+        // This makes INTT output be in Montgomery domain (multiplied by R),
+        // which cancels the R^{-1} from pointwise_montgomery.
+        const F: i64 = 41978;
+        for x in a.iter_mut() {
+            *x = montgomery_reduce(F * *x as i64);
         }
-    }
-
-    #[cfg(not(target_arch = "arm"))]
-    for x in a.iter_mut() {
-        *x = montgomery_reduce(F * *x as i64);
     }
 }
 
