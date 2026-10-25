@@ -39,6 +39,10 @@ use tsra_fw_uno_drivers_systick as systick;
 use embassy_executor::Spawner;
 use embassy_time::Duration;
 use embassy_time::Timer;
+// Every request workspace is cleared through this rather than the array
+// initialiser: the compiler's `memset` costs about 20 K cycles on a
+// signature's 25 KB.
+use pqc_ml::fast_zero;
 
 /// Number of fastpath cores.
 const FP_CORES: u8 = 3;
@@ -450,52 +454,6 @@ const MAX_MLKEM_PK_LEN: usize = 1568;
 /// falling back to a byte-wise copy.
 #[repr(align(4))]
 struct Align4<const N: usize>([u8; N]);
-
-/// Zero `n` bytes at `p`, eight words per store.
-///
-/// `compiler_builtins`' `memset` runs `stmia rd!, {r4}` behind a compare
-/// and two branches -- four instructions per word -- and every fastpath
-/// request clears tens of kilobytes of scratch before any crypto runs: a
-/// signature spends about 20 K cycles on its 25 KB workspace, which is
-/// 0.4% of the operation. LTO internalises that symbol, so a strong
-/// definition cannot replace it and the buffers are cleared through here
-/// instead.
-///
-/// r6/r7 are left out of the register list because the compiler reserves
-/// them. The tail is volatile so LLVM cannot turn it back into a `memset`
-/// call into itself.
-///
-/// # Safety
-/// `p` must be valid for `n` writes and word aligned.
-unsafe fn fast_zero(p: *mut u8, n: usize) {
-    let mut q = p;
-    let mut left = n;
-
-    #[cfg(target_arch = "arm")]
-    {
-        let bursts = left / 32;
-        if bursts != 0 {
-            core::arch::asm!(
-                "2:",
-                "stmia {d}!, {{r0, r1, r2, r3, r4, r5, r8, r9}}",
-                "subs  {n}, {n}, #1",
-                "bne   2b",
-                d = inout(reg) q,
-                n = inout(reg) bursts => _,
-                in("r0") 0, in("r1") 0, in("r2") 0, in("r3") 0,
-                in("r4") 0, in("r5") 0, in("r8") 0, in("r9") 0,
-                options(nostack),
-            );
-            left -= bursts * 32;
-        }
-    }
-
-    while left != 0 {
-        core::ptr::write_volatile(q, 0);
-        q = q.add(1);
-        left -= 1;
-    }
-}
 
 /// Map a `HsmVaultKeyKind` discriminant onto an ML-KEM parameter set.
 fn mlkem_variant(key_kind: u32) -> Option<pqc_ml::MlKemVariant> {

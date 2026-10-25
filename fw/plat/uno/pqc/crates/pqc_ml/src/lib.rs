@@ -14,11 +14,11 @@ pub mod spill;
 /// symbol, so a strong definition cannot replace it. Signing creates about
 /// sixty-eight sponge states per signature and each one clears 200 bytes,
 /// which is why this is worth having rather than leaning on the array
-/// initialiser.
+/// initialiser. The app clears its request workspaces through it too.
 ///
 /// # Safety
 /// `p` must be valid for `n` writes and word aligned.
-pub(crate) unsafe fn fast_zero(p: *mut u8, n: usize) {
+pub unsafe fn fast_zero(p: *mut u8, n: usize) {
     let mut q = p;
     let mut left = n;
 

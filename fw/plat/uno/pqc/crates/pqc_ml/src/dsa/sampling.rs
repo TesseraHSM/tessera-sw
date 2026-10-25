@@ -29,7 +29,30 @@ pub fn poly_uniform(a: &mut Poly, rho: &[u8], i: u8, j: u8) {
     let mut ctr = 0;
     while ctr < N {
         ctx.squeeze_words(&mut buf);
-        for w in buf.as_chunks::<3>().0 {
+        let groups = buf.as_chunks::<3>().0;
+
+        // On ARM `asm/rej.S` takes every group that is sure to fit, and
+        // the loop below only the few candidates past it.
+        #[cfg(target_arch = "arm")]
+        let groups = {
+            extern "C" {
+                fn pqc_ml_dsa_rej(a: *mut i32, ctr: u32, buf: *const u32, groups: u32) -> u32;
+            }
+            // SAFETY: `a` has room for N coefficients and the routine stores
+            // at most N - ctr of them; `buf` holds the groups it reads.
+            let r = unsafe {
+                pqc_ml_dsa_rej(
+                    a.as_mut_ptr(),
+                    ctr as u32,
+                    buf.as_ptr(),
+                    groups.len() as u32,
+                )
+            };
+            ctr = (r & 0xFFFF) as usize;
+            &groups[(r >> 16) as usize..]
+        };
+
+        for w in groups {
             let (w0, w1, w2) = (u32::from_le(w[0]), u32::from_le(w[1]), u32::from_le(w[2]));
             let mut take = |d: u32| {
                 let d = d & 0x7F_FFFF;

@@ -155,18 +155,24 @@ pub fn kpke_decrypt(params: &MlKemParams, m: &mut [u8; 32], dk: &[u8], ct: &[u8]
     let mut v = Poly::ZERO;
     poly::poly_decompress(&mut v, &ct[k * u_poly_bytes..], dv);
 
-    // s^T * NTT(u)
+    // s^T * NTT(u), summed in 32 bits like encryption's rows. Each u_hat
+    // takes part in one product only, so preparing it costs what it saves,
+    // but the single reduction at the end does not, and it leaves this the
+    // only product routine the image needs.
     let mut su = Poly::ZERO;
-    poly::poly_zero(&mut su);
+    let mut acc = ntt::Acc::ZERO;
+    let mut u_prep = ntt::Prepared::ZERO;
     let mut u_i = Poly::ZERO;
     let mut s_hat_i = Poly::ZERO;
 
     for i in 0..k {
         poly::poly_decompress(&mut u_i, &ct[u_poly_bytes * i..], du);
         ntt::ntt(&mut u_i);
+        ntt::basemul_prep(&mut u_prep, &u_i);
         packing::byte_decode_12(&mut s_hat_i, &dk[384 * i..]);
-        ntt::poly_basemul_acc(&mut su, &s_hat_i, &u_i);
+        ntt::basemul_acc32(&mut acc, &s_hat_i, &u_prep, i == 0);
     }
+    ntt::acc_reduce(&mut su, &acc);
     ntt::invntt(&mut su);
 
     // w = v - s^T * u
