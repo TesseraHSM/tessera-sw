@@ -232,7 +232,13 @@ impl ShakeCtx {
     }
 
     pub fn finalize(&mut self) {
-        self.st.xor_bytes(&[0x1F], self.pos);
+        self.pad(0x1F);
+    }
+
+    /// Pad after domain byte `ds` and permute, ready to squeeze. SHAKE and
+    /// SHA3 differ only in `ds`.
+    fn pad(&mut self, ds: u8) {
+        self.st.xor_bytes(&[ds], self.pos);
         self.st.xor_bytes(&[0x80], self.rate - 1);
         self.st.permute();
         self.pos = 0;
@@ -303,58 +309,24 @@ pub fn shake128(input: &[u8], out: &mut [u8]) {
 const SHA3_256_RATE: usize = 136;
 const SHA3_512_RATE: usize = 72;
 
-/// SHA3 context — identical to SHAKE but with different padding byte.
-pub struct Sha3Ctx {
-    st: KeccakState,
-    rate: usize,
-    pos: usize,
-}
+/// SHA3: the SHAKE sponge with domain byte 0x06, its fixed-length output
+/// taken straight after padding. It shares [`ShakeCtx`]'s absorb rather than
+/// carrying a copy of it.
+pub struct Sha3Ctx(ShakeCtx);
 
 impl Sha3Ctx {
     fn new(rate: usize) -> Self {
-        Sha3Ctx {
-            st: KeccakState::new(),
-            rate,
-            pos: 0,
-        }
+        Sha3Ctx(ShakeCtx::new(rate))
     }
 
     pub fn absorb(&mut self, data: &[u8]) {
-        let mut offset = 0;
-        let mut remaining = data.len();
-
-        if self.pos > 0 {
-            let space = self.rate - self.pos;
-            let take = if remaining < space { remaining } else { space };
-            self.st.xor_bytes(&data[offset..offset + take], self.pos);
-            self.pos += take;
-            offset += take;
-            remaining -= take;
-            if self.pos == self.rate {
-                self.st.permute();
-                self.pos = 0;
-            }
-        }
-
-        while remaining >= self.rate {
-            self.st.xor_bytes(&data[offset..offset + self.rate], 0);
-            self.st.permute();
-            offset += self.rate;
-            remaining -= self.rate;
-        }
-
-        if remaining > 0 {
-            self.st.xor_bytes(&data[offset..offset + remaining], 0);
-            self.pos = remaining;
-        }
+        self.0.absorb(data);
     }
 
     /// Finalize with SHA3 padding (0x06) instead of SHAKE (0x1F).
     pub fn finalize(&mut self, out: &mut [u8]) {
-        self.st.xor_bytes(&[0x06], self.pos);
-        self.st.xor_bytes(&[0x80], self.rate - 1);
-        self.st.permute();
-        self.st.extract_bytes(out, 0);
+        self.0.pad(0x06);
+        self.0.st.extract_bytes(out, 0);
     }
 }
 
