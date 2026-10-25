@@ -84,11 +84,12 @@ pub fn sign_internal(
     // key, so their transforms are held and reused: in whatever the matrix
     // leaves of the near region, and past that in their own region of the
     // spill, above the matrix, so their indices do not depend on how much
-    // this parameter set spilled.
+    // this parameter set spilled. s2 comes first, as the one every attempt
+    // reads, then s1, then t0.
     //
-    // Both passes walk their rows from zero and can stop early, so a count
-    // of how many slots have been filled is enough -- an attempt that got
-    // as far as row n leaves rows 0..n valid for the next one.
+    // Each pass walks its rows from zero and can stop early, so a count of
+    // how many slots have been filled is enough -- an attempt that got as
+    // far as row n leaves rows 0..n valid for the next one.
     let (keys_near, keys_ptr) = (near_keys.len() / N, near_keys.as_mut_ptr());
     let key_slot = |j: usize| {
         if j < keys_near {
@@ -99,8 +100,10 @@ pub fn sign_internal(
             crate::spill::key_slot(j)
         }
     };
-    let mut s1_done = 0usize;
-    let mut hint_done = 0usize;
+    let (mut s2_done, mut s1_done, mut t0_done) = (0usize, 0usize, 0usize);
+    // s1 and s2 coefficients are packed eta - f in d-bit fields.
+    let eta_d = if params.eta == 2 { 3 } else { 4 };
+    let eta_bias = params.eta as i32;
 
     // Stack temporaries: single polynomials only
     let mut w1_i: Poly = [0i32; N];
@@ -218,9 +221,46 @@ pub fn sign_internal(
         sampling::poly_challenge(&mut c_hat, &ctilde[..ctilde_len], params.tau);
         ntt::ntt(&mut c_hat);
 
+        // An attempt has three checks to pass, and they are made in the
+        // order that rejects soonest. The low bits of w - c*s2 fail most
+        // often -- about two attempts in three for ML-DSA-65, against one in
+        // three for z -- and cost about as much per row as z does per
+        // column, so they go first, and an attempt they reject never pays
+        // for c*s1. c*t0 and the hints, which reject almost never, are left
+        // for an attempt that has passed both.
+
+        // ---- r0 pass: check w0 - c*s2 row by row ----
+        let mut reject = false;
+        for i in 0..k {
+            rounding::poly_decompose_reduced(&mut w1_i, &mut w0_i, &w[i], params.gamma2);
+            c_times_key(
+                &mut tmp,
+                &c_hat,
+                key_slot(i),
+                i,
+                &mut s2_done,
+                &sk[sk_s2_offset + i * params.eta_pack_bytes()..],
+                eta_d,
+                eta_bias,
+            );
+            if !poly::poly_sub_reduce_chknorm(&mut w0_i, &tmp, params.gamma2 - params.beta) {
+                reject = true;
+                break;
+            }
+            // r0 and w1 are all the hint pass wants of this row, and w_i is
+            // not read again this attempt, so they replace it -- w1 below
+            // six bits, which is the most it needs.
+            for (v, (&r0, &w1)) in w[i].iter_mut().zip(w0_i.iter().zip(w1_i.iter())) {
+                *v = (r0 << 6) | w1;
+            }
+        }
+        if reject {
+            kappa += l as u16;
+            continue;
+        }
+
         // ---- z pass: compute z_j, check norm, pack directly into sig ----
         sig[..ctilde_len].copy_from_slice(&ctilde[..ctilde_len]);
-        let mut z_reject = false;
         let mut sig_z_offset = ctilde_len;
 
         for j in 0..l {
@@ -231,32 +271,18 @@ pub fn sign_internal(
                 &sig[ctilde_len + j * ybytes..ctilde_len + (j + 1) * ybytes],
                 params.gamma1,
             );
-
-            // c * s1_j — reuse w0_i/w1_i (unused in z-pass)
-            match key_slot(j) {
-                // SAFETY: a slot of this core's own region, and `s1_done`
-                // says whether this one has been written yet.
-                Some(p) if j < s1_done => unsafe { crate::spill::load(&mut w0_i, p) },
-                slot => {
-                    packing::unpack_eta(
-                        &mut w0_i,
-                        &sk[sk_s1_offset + j * params.eta_pack_bytes()..],
-                        params.eta,
-                    );
-                    ntt::ntt(&mut w0_i);
-                    if let Some(p) = slot {
-                        // SAFETY: as above.
-                        unsafe { crate::spill::store(p, &w0_i) };
-                        s1_done = j + 1;
-                    }
-                }
-            }
-            ntt::poly_pointwise_montgomery_inplace(&mut w0_i, &c_hat);
-            ntt::invntt(&mut w0_i);
-
-            // z_j = y_j + c*s1_j
+            c_times_key(
+                &mut w0_i,
+                &c_hat,
+                key_slot(k + j),
+                j,
+                &mut s1_done,
+                &sk[sk_s1_offset + j * params.eta_pack_bytes()..],
+                eta_d,
+                eta_bias,
+            );
             if !poly::poly_add_reduce_chknorm(&mut tmp, &w0_i, params.gamma1 - params.beta) {
-                z_reject = true;
+                reject = true;
                 break;
             }
 
@@ -265,12 +291,12 @@ pub fn sign_internal(
             sig_z_offset += params.z_pack_bytes();
         }
 
-        if z_reject {
+        if reject {
             kappa += l as u16;
             continue;
         }
 
-        // ---- hint pass: check w0-cs2, ct0, build hints incrementally ----
+        // ---- hint pass: check c*t0, build hints incrementally ----
         let hint_offset = ctilde_len + l * params.z_pack_bytes();
         let hint_buf = &mut sig[hint_offset..hint_offset + params.omega as usize + k];
         // Zero the hint buffer
@@ -279,68 +305,31 @@ pub fn sign_internal(
         }
         let mut hint_idx = 0usize; // write position in first omega bytes
         let mut hint_count = 0u32;
-        let mut w0_reject = false;
 
         for i in 0..k {
-            // w_i is still in the workspace from the commitment pass.
-            rounding::poly_decompose_reduced(&mut w1_i, &mut w0_i, &w[i], params.gamma2);
-
-            // c * s2_i, folded in place so no fifth polynomial is needed
-            match key_slot(l + 2 * i) {
-                // SAFETY: as in the z-pass.
-                Some(p) if 2 * i < hint_done => unsafe { crate::spill::load(&mut tmp, p) },
-                slot => {
-                    packing::unpack_eta(
-                        &mut tmp,
-                        &sk[sk_s2_offset + i * params.eta_pack_bytes()..],
-                        params.eta,
-                    );
-                    ntt::ntt(&mut tmp);
-                    if let Some(p) = slot {
-                        // SAFETY: as above.
-                        unsafe { crate::spill::store(p, &tmp) };
-                        hint_done = 2 * i + 1;
-                    }
-                }
-            }
-            ntt::poly_pointwise_montgomery_inplace(&mut tmp, &c_hat);
-            ntt::invntt(&mut tmp);
-
-            if !poly::poly_sub_reduce_chknorm(&mut w0_i, &tmp, params.gamma2 - params.beta) {
-                w0_reject = true;
-                break;
-            }
-
-            // c * t0_i, likewise in place
-            match key_slot(l + 2 * i + 1) {
-                // SAFETY: as in the z-pass.
-                Some(p) if 2 * i + 1 < hint_done => unsafe { crate::spill::load(&mut tmp, p) },
-                slot => {
-                    packing::unpack_t0(&mut tmp, &sk[sk_t0_offset + i * 416..]);
-                    ntt::ntt(&mut tmp);
-                    if let Some(p) = slot {
-                        // SAFETY: as above.
-                        unsafe { crate::spill::store(p, &tmp) };
-                        hint_done = 2 * i + 2;
-                    }
-                }
-            }
-            ntt::poly_pointwise_montgomery_inplace(&mut tmp, &c_hat);
-            ntt::invntt(&mut tmp);
+            c_times_key(
+                &mut tmp,
+                &c_hat,
+                key_slot(k + l + i),
+                i,
+                &mut t0_done,
+                &sk[sk_t0_offset + i * 416..],
+                13,
+                1 << 12,
+            );
             if !poly::poly_reduce_chknorm(&mut tmp, params.gamma2) {
-                w0_reject = true;
+                reject = true;
                 break;
             }
 
-            // MakeHint and pack incrementally into hint_buf
-            // w0_i + ct0 is read once and w0_i is rebuilt on the next row,
-            // so the sum is formed here rather than in a pass that writes
-            // back a polynomial nothing reads again.
+            // MakeHint and pack incrementally into hint_buf, from the r0
+            // and w1 the r0 pass left in w_i.
             for coeff in 0..N {
-                let h = rounding::make_hint(w0_i[coeff] + tmp[coeff], w1_i[coeff], params.gamma2);
+                let v = w[i][coeff];
+                let h = rounding::make_hint((v >> 6) + tmp[coeff], v & 63, params.gamma2);
                 if h != 0 {
                     if hint_count >= params.omega as u32 {
-                        w0_reject = true;
+                        reject = true;
                         break;
                     }
                     hint_buf[hint_idx] = coeff as u8;
@@ -348,14 +337,14 @@ pub fn sign_internal(
                     hint_count += 1;
                 }
             }
-            if w0_reject {
+            if reject {
                 break;
             }
             // Write cumulative count for polynomial i
             hint_buf[params.omega as usize + i] = hint_count as u8;
         }
 
-        if w0_reject {
+        if reject {
             kappa += l as u16;
             continue;
         }
@@ -370,4 +359,41 @@ pub fn sign_internal(
     }
 
     false
+}
+
+/// `dst = c * p`, for `p` the `i`th polynomial of s1, s2 or t0, packed in
+/// `src` as `bias - f` in `d`-bit fields.
+///
+/// The key's transform is read back from `slot` if an earlier attempt left
+/// it there -- `*done` counts how many of this polynomial's family have
+/// been -- and otherwise unpacked and transformed, and kept in `slot` for
+/// the next attempt if there is one.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn c_times_key(
+    dst: &mut Poly,
+    c_hat: &Poly,
+    slot: Option<*mut i32>,
+    i: usize,
+    done: &mut usize,
+    src: &[u8],
+    d: u32,
+    bias: i32,
+) {
+    match slot {
+        // SAFETY: a slot of this core's own region, which `done` says an
+        // earlier attempt filled.
+        Some(p) if i < *done => unsafe { crate::spill::load(dst, p) },
+        slot => {
+            packing::unpack_centered(dst, src, d, bias);
+            ntt::ntt(dst);
+            if let Some(p) = slot {
+                // SAFETY: as above.
+                unsafe { crate::spill::store(p, dst) };
+                *done = i + 1;
+            }
+        }
+    }
+    ntt::poly_pointwise_montgomery_inplace(dst, c_hat);
+    ntt::invntt(dst);
 }
