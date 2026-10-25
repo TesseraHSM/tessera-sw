@@ -16,6 +16,7 @@ use super::params::N;
 /// On ARM targets, the NTT/INTT core loops use inline assembly.
 /// On host targets, pure Rust is used.
 use super::params::Q;
+#[cfg(not(target_arch = "arm"))]
 use super::zetas::ZETAS;
 
 /// Montgomery reduction: given a 64-bit value a, compute a * R^{-1} mod q
@@ -64,9 +65,10 @@ const Q_I: i32 = -(Q as i32);
 
 #[cfg(target_arch = "arm")]
 extern "C" {
-    /// `asm/dsa_ntt.S`: the forward transform, bit for bit the reference's,
-    /// taking the 255 twiddles from `zetas` in order.
-    fn pqc_ml_dsa_ntt(p: *mut i32, zetas: *const i32);
+    /// `asm/dsa_ntt.S`: the forward transform, with the reference's
+    /// twiddles, which it carries itself, and an output congruent to the
+    /// reference's.
+    fn pqc_ml_dsa_ntt(p: *mut i32);
 }
 
 /// Forward NTT (in-place). Input coefficients in normal order,
@@ -74,9 +76,8 @@ extern "C" {
 pub fn ntt(a: &mut [i32; N]) {
     #[cfg(target_arch = "arm")]
     {
-        // SAFETY: `a` is 256 word-aligned coefficients, and ZETAS[1..]
-        // holds the 255 twiddles the transform reads.
-        unsafe { pqc_ml_dsa_ntt(a.as_mut_ptr(), ZETAS.as_ptr().add(1)) };
+        // SAFETY: `a` is 256 word-aligned coefficients.
+        unsafe { pqc_ml_dsa_ntt(a.as_mut_ptr()) };
     }
 
     #[cfg(not(target_arch = "arm"))]
