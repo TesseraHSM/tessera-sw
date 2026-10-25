@@ -9,16 +9,15 @@ use super::params::MlDsaParams;
 /// ML-DSA Verification (FIPS 204 Algorithm 3 / Internal Algorithm 8).
 ///
 /// Stack-optimized: z_hat lives in caller-provided workspace; hints unpacked per-poly.
-use super::params::D;
-/// ML-DSA Verification (FIPS 204 Algorithm 3 / Internal Algorithm 8).
-///
-/// Stack-optimized: z_hat lives in caller-provided workspace; hints unpacked per-poly.
 use super::params::N;
 use super::poly::Poly;
 use super::poly::{self};
 use super::rounding;
 use super::sampling;
 use crate::keccak::shake256_init;
+
+/// -2^d * 2^32 mod q: c_hat's Montgomery product with it is c_hat * -2^d.
+const NEG_2D_MONT: i64 = 4165636;
 
 pub fn verify_internal(
     params: &MlDsaParams,
@@ -58,10 +57,15 @@ pub fn verify_internal(
         return false;
     }
 
-    // Reconstruct challenge
+    // Reconstruct challenge, scaled by -2^d: then each row's c * t1 * 2^d
+    // comes off as one multiply-accumulate on t1's own transform, with no
+    // shift, product or subtraction pass of its own.
     let mut c_hat: Poly = [0i32; N];
     sampling::poly_challenge(&mut c_hat, ctilde, params.tau);
     ntt::ntt(&mut c_hat);
+    for x in c_hat.iter_mut() {
+        *x = ntt::montgomery_reduce(*x as i64 * NEG_2D_MONT);
+    }
 
     // Compute w'_i = A*z_hat - c*t1*2^d for each i, apply UseHint, hash
     let mut commit_ctx = shake256_init();
@@ -84,11 +88,8 @@ pub fn verify_internal(
         }
 
         packing::unpack_t1(&mut t1_poly, &pk[32 + i * 320..]);
-        poly::poly_shiftl(&mut t1_poly, D);
         ntt::ntt(&mut t1_poly);
-        ntt::poly_pointwise_montgomery(&mut tmp, &c_hat, &t1_poly);
-
-        poly::poly_sub_inplace(&mut w_prime, &tmp);
+        ntt::poly_pointwise_acc_montgomery(&mut w_prime, &c_hat, &t1_poly);
         ntt::invntt(&mut w_prime);
 
         // HighBits straight off the transform, as signing does: w1 into
