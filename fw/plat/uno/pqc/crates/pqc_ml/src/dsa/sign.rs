@@ -67,22 +67,24 @@ pub fn sign_internal(
     // multiply-accumulate unpacks as it reads.
     let a_cache = a_cache.as_flattened_mut();
     let cache_slots = a_cache.len() / PACKED_WORDS;
-    // The elements after those go to the platform's near region, if it
-    // gave one, the same way -- and only the rest to the spill.
+    // The elements after those go to the platform's near regions, if it
+    // gave any, the same way -- the first region filled before the second
+    // -- and only the rest to the spill.
     //
-    // SAFETY: signing is the near region's only user, and this the only
-    // borrow of it.
-    let near = unsafe { crate::spill::near() };
-    let near_a = (k * l)
-        .saturating_sub(cache_slots)
-        .min(near.len() / PACKED_WORDS);
-    let (near, near_keys) = near.split_at_mut(near_a * PACKED_WORDS);
-    let held = cache_slots + near_a;
+    // SAFETY: signing is the near regions' only user, and this the only
+    // borrow of them.
+    let [near1, near2] = unsafe { crate::spill::near() };
+    let want = (k * l).saturating_sub(cache_slots);
+    let near_a1 = want.min(near1.len() / PACKED_WORDS);
+    let near_a2 = (want - near_a1).min(near2.len() / PACKED_WORDS);
+    let (near1, near_keys1) = near1.split_at_mut(near_a1 * PACKED_WORDS);
+    let (near2, near_keys2) = near2.split_at_mut(near_a2 * PACKED_WORDS);
+    let held = cache_slots + near_a1 + near_a2;
     let mut a_cached = false;
 
     // s1, s2 and t0 are transformed once per attempt but depend only on the
     // key, so their transforms are held and reused: in whatever the matrix
-    // leaves of the near region, and past that in their own region of the
+    // leaves of the near regions, and past that in their own region of the
     // spill, above the matrix, so their indices do not depend on how much
     // this parameter set spilled. s2 comes first, as the one every attempt
     // reads, then s1, then t0.
@@ -90,12 +92,15 @@ pub fn sign_internal(
     // Each pass walks its rows from zero and can stop early, so a count of
     // how many slots have been filled is enough -- an attempt that got as
     // far as row n leaves rows 0..n valid for the next one.
-    let (keys_near, keys_ptr) = (near_keys.len() / N, near_keys.as_mut_ptr());
+    let (keys1, keys1_ptr) = (near_keys1.len() / N, near_keys1.as_mut_ptr());
+    let (keys2, keys2_ptr) = (near_keys2.len() / N, near_keys2.as_mut_ptr());
     let key_slot = |j: usize| {
-        if j < keys_near {
-            // SAFETY: slot j of the near region's key part, which this
-            // signature alone uses.
-            Some(unsafe { keys_ptr.add(j * N) })
+        // SAFETY: slot j of the near regions' key parts, which this
+        // signature alone uses.
+        if j < keys1 {
+            Some(unsafe { keys1_ptr.add(j * N) })
+        } else if j < keys1 + keys2 {
+            Some(unsafe { keys2_ptr.add((j - keys1) * N) })
         } else {
             crate::spill::key_slot(j)
         }
@@ -164,7 +169,7 @@ pub fn sign_internal(
                             crate::spill::pack(&mut a_cache[t * PACKED_WORDS..], &c_hat);
                         } else if t < held {
                             crate::spill::pack(
-                                &mut near[(t - cache_slots) * PACKED_WORDS..],
+                                near_elem(near1, near2, t - cache_slots),
                                 &c_hat,
                             );
                         } else if let Some(p) = spill {
@@ -183,7 +188,7 @@ pub fn sign_internal(
                             &c_hat
                         }
                         None if t < cache_slots => &a_cache[t * PACKED_WORDS..],
-                        None => &near[(t - cache_slots) * PACKED_WORDS..],
+                        None => near_elem(near1, near2, t - cache_slots),
                     };
                     if j == 0 {
                         // SAFETY: one whole word-aligned polynomial.
@@ -396,4 +401,16 @@ fn c_times_key(
     }
     ntt::poly_pointwise_montgomery_inplace(dst, c_hat);
     ntt::invntt(dst);
+}
+
+/// Near-region matrix element `u`: the first region's elements, then the
+/// second's.
+#[inline(always)]
+fn near_elem<'a>(near1: &'a mut [i32], near2: &'a mut [i32], u: usize) -> &'a mut [i32] {
+    let first = near1.len() / PACKED_WORDS;
+    if u < first {
+        &mut near1[u * PACKED_WORDS..]
+    } else {
+        &mut near2[(u - first) * PACKED_WORDS..]
+    }
 }
