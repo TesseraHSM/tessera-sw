@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
+#[cfg(not(target_arch = "arm"))]
 use super::ntt;
 /// ML-KEM polynomial operations (i16 coefficients, q=3329).
 use super::params::N;
@@ -54,7 +55,20 @@ pub fn poly_add_inplace(a: &mut Poly, b: &Poly) {
     }
 }
 
+/// Reduce every coefficient mod q to the centered range: at most q/2 in
+/// magnitude on ARM, where it is `asm/kem_ntt.S`'s Plantard multiply by 1,
+/// and the reference Barrett's representative elsewhere.
 pub fn poly_reduce(a: &mut Poly) {
+    #[cfg(target_arch = "arm")]
+    {
+        extern "C" {
+            fn pqc_ml_kem_reduce(a: *mut i16);
+        }
+        // SAFETY: `Poly` is 256 word-aligned coefficients.
+        unsafe { pqc_ml_kem_reduce(a.as_mut_ptr()) };
+    }
+
+    #[cfg(not(target_arch = "arm"))]
     for i in 0..N {
         a[i] = ntt::barrett_reduce(a[i]);
     }
@@ -99,16 +113,29 @@ pub fn decompress(y: u16, d: u8) -> u16 {
 /// shuffles for each `d` were a little quicker per coefficient but took
 /// 0.9 KB of a 32 KB iTCM.
 pub fn poly_compress(r: &mut [u8], a: &Poly, d: u8) {
+    compress_into(r, a, None, d);
+}
+
+/// [`poly_compress`] of `a + b`, without forming the sum first: encryption
+/// adds each polynomial's noise this way rather than in a pass of its own.
+/// Every sum must be within +-5000.
+pub fn poly_compress_add(r: &mut [u8], a: &Poly, b: &Poly, d: u8) {
+    compress_into(r, a, Some(b), d);
+}
+
+fn compress_into(r: &mut [u8], a: &Poly, b: Option<&Poly>, d: u8) {
     let out = &mut r[..32 * d as usize];
 
     #[cfg(target_arch = "arm")]
     {
         extern "C" {
-            fn pqc_ml_kem_compress(out: *mut u8, a: *const i16, d: u32);
+            fn pqc_ml_kem_compress(out: *mut u8, a: *const i16, d: u32, b: *const i16);
         }
-        // SAFETY: `out` holds the 32 * d bytes 256 d-bit values pack to,
-        // and `a` is 256 coefficients, all within the routine's range.
-        unsafe { pqc_ml_kem_compress(out.as_mut_ptr(), a.as_ptr(), d as u32) };
+        let bp = b.map_or(core::ptr::null(), |b| b.as_ptr());
+        // SAFETY: `out` holds the 32 * d bytes 256 d-bit values pack to;
+        // `a` and, when given, `b` are 256 coefficients, every sum within
+        // the routine's range.
+        unsafe { pqc_ml_kem_compress(out.as_mut_ptr(), a.as_ptr(), d as u32, bp) };
     }
 
     #[cfg(not(target_arch = "arm"))]
@@ -117,8 +144,9 @@ pub fn poly_compress(r: &mut [u8], a: &Poly, d: u8) {
         let mut words = out.as_chunks_mut::<4>().0.iter_mut();
         let mut acc: u32 = 0;
         let mut bits: u32 = 0;
-        for &c in a.iter() {
-            let t = compress((c as i32).rem_euclid(Q as i32) as u16, d as u8) as u32;
+        for (i, &c) in a.iter().enumerate() {
+            let c = c as i32 + b.map_or(0, |b| b[i] as i32);
+            let t = compress(c.rem_euclid(Q as i32) as u16, d as u8) as u32;
             acc |= t << bits;
             bits += d;
             if bits >= 32 {

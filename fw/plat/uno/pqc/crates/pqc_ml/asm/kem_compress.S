@@ -3,13 +3,16 @@
 @
 @ ML-KEM Compress_d and its packing, for the Cortex-M7.
 @
-@ void pqc_ml_kem_compress(uint8_t *out, const int16_t a[256], uint32_t d)
+@ void pqc_ml_kem_compress(uint8_t *out, const int16_t a[256], uint32_t d,
+@                          const int16_t *b)
 @
-@ Writes round(2^d * (a mod q) / q) mod 2^d for every coefficient, d bits
-@ each and least significant first -- ByteEncode_d(Compress_d(a)) -- for d
-@ in 1..=11. `out` takes 32*d bytes and need not be aligned.
+@ Writes round(2^d * (c mod q) / q) mod 2^d for every coefficient c of a,
+@ or of a + b when b is not null, d bits each and least significant first
+@ -- ByteEncode_d(Compress_d(c)) -- for d in 1..=11. `out` takes 32*d bytes
+@ and need not be aligned. Adding b here saves encryption a pass over each
+@ polynomial for its noise.
 @
-@ The coefficients need not be reduced: anything within +-5000 is exact.
+@ The sums need not be reduced: anything within +-5000 is exact.
 @ Adding 4096*q leaves the result unchanged mod 2^d (2^11 divides 4096) and
 @ makes every numerator positive, so one rounded-up reciprocal serves,
 @
@@ -33,6 +36,7 @@
 .align 2
 pqc_ml_kem_compress:
     push    {r4-r10, lr}
+    mov     r7, r3                  @ addend, or null
     movw    r3, #(CR & 0xffff)
     movt    r3, #(CR >> 16)
     movw    r10, #(C0 & 0xffff)
@@ -42,9 +46,13 @@ pqc_ml_kem_compress:
     subs    r4, r4, #1              @ 2^d - 1
     movs    r5, #0                  @ bits not yet stored
     movs    r6, #0                  @ how many
-    movs    r7, #128                @ input words, two coefficients each
+    mov     lr, #128                @ input words, two coefficients each
 1:
     ldr     r8, [r1], #4
+    cbz     r7, 4f
+    ldr     r9, [r7], #4
+    sadd16  r8, r8, r9
+4:
     sxth    r9, r8
     asrs    r8, r8, #16
     lsls    r9, r9, r2
@@ -75,7 +83,7 @@ pqc_ml_kem_compress:
     sub     r12, r2, r6
     lsr     r5, r8, r12
 3:
-    subs    r7, r7, #1
+    subs    lr, lr, #1
     bne     1b
     pop     {r4-r10, pc}
 .size pqc_ml_kem_compress, .-pqc_ml_kem_compress

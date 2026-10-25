@@ -12,6 +12,7 @@ use super::zetas::PLANT;
 use super::zetas::ZETAS;
 
 const QINV: i16 = 62209u16 as i16; // q^{-1} mod 2^16
+#[cfg(not(target_arch = "arm"))]
 const MONT_SQ: i32 = 1353; // R^2 mod q = 2285^2 mod 3329
 
 #[inline(always)]
@@ -285,10 +286,25 @@ pub fn poly_basemul_acc(r: &mut Poly, a: &Poly, b: &Poly) {
     }
 }
 
-/// Convert polynomial to Montgomery domain: multiply each coefficient by R.
-/// Used after basemul_acc to cancel the R^{-1} factor.
-pub fn poly_tomont(a: &mut Poly) {
+/// `t = t * R + e`, reduced: key generation's finish for each row of t_hat,
+/// cancelling the R^{-1} that [`poly_basemul_acc`] leaves, adding e_hat
+/// and reducing for ByteEncode_12. On ARM it is one pass of
+/// `asm/kem_ntt.S`, every result at most q/2 in magnitude; elsewhere the
+/// reference's three steps.
+pub fn poly_tomont_add(t: &mut Poly, e: &Poly) {
+    #[cfg(target_arch = "arm")]
+    {
+        extern "C" {
+            fn pqc_ml_kem_tomont_add(t: *mut i16, e: *const i16);
+        }
+        // SAFETY: two word-aligned `Poly`s of 256 coefficients; `t` is the
+        // only one written and a distinct borrow.
+        unsafe { pqc_ml_kem_tomont_add(t.as_mut_ptr(), e.as_ptr()) };
+    }
+
+    #[cfg(not(target_arch = "arm"))]
     for i in 0..N {
-        a[i] = montgomery_reduce(a[i] as i32 * MONT_SQ);
+        let x = montgomery_reduce(t[i] as i32 * MONT_SQ);
+        t[i] = barrett_reduce(x + e[i]);
     }
 }

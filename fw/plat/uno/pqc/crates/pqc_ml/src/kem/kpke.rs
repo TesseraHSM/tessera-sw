@@ -65,15 +65,12 @@ pub fn kpke_keygen(params: &MlKemParams, d: &[u8; 32], ek: &mut [u8], dk: &mut [
     }
 
     for i in 0..k {
-        ntt::poly_tomont(&mut t[i]); // cancel R^{-1} from basemul
-
-        // Sample and NTT e_i
+        // Sample and NTT e_i, then t_i = t_i * R + e_i, reduced: the R
+        // cancels the R^{-1} basemul leaves.
         sampling::poly_cbd(&mut e_hat, sigma, nonce, params.eta1);
         nonce += 1;
         ntt::ntt(&mut e_hat);
-
-        poly::poly_add_inplace(&mut t[i], &e_hat);
-        poly::poly_reduce(&mut t[i]);
+        ntt::poly_tomont_add(&mut t[i], &e_hat);
 
         // ek = ByteEncode12(t_hat[0]) || ... || ByteEncode12(t_hat[k-1]) || rho
         packing::byte_encode_12(&mut ek[384 * i..], &t[i]);
@@ -127,23 +124,20 @@ pub fn kpke_encrypt(params: &MlKemParams, ct: &mut [u8], ek: &[u8], m: &[u8; 32]
     for i in 0..k {
         ntt::invntt(&mut u[i]);
         sampling::poly_cbd(&mut e1, r, (k + i) as u8, params.eta2);
-        poly::poly_add_inplace(&mut u[i], &e1);
-        poly::poly_compress(&mut ct[u_poly_bytes * i..], &u[i], du);
+        poly::poly_compress_add(&mut ct[u_poly_bytes * i..], &u[i], &e1, du);
     }
 
-    // v = INTT(t^T * r_hat) + e2 + Decompress_1(m)
+    // v = INTT(t^T * r_hat) + e2 + Decompress_1(m). The message goes into
+    // e2's coefficients as they stand, and the pair is added to v as it is
+    // compressed: Decompress_1 of a bit is 0 or 1665.
     ntt::invntt(&mut v);
     let mut e2 = Poly::ZERO;
     sampling::poly_cbd(&mut e2, r, (2 * k) as u8, params.eta2);
-    poly::poly_add_inplace(&mut v, &e2);
-
-    let mut msg_poly = Poly::ZERO;
-    packing::byte_decode_1(&mut msg_poly, m);
-    for i in 0..N {
-        msg_poly[i] = poly::decompress(msg_poly[i] as u16, 1) as i16;
+    for (i, c) in e2.iter_mut().enumerate() {
+        let bit = ((m[i / 8] >> (i % 8)) & 1) as i16;
+        *c += -bit & 1665;
     }
-    poly::poly_add_inplace(&mut v, &msg_poly);
-    poly::poly_compress(&mut ct[k * u_poly_bytes..], &v, dv);
+    poly::poly_compress_add(&mut ct[k * u_poly_bytes..], &v, &e2, dv);
 }
 
 /// K-PKE.Decrypt(dk, ct): decrypt ciphertext, return 32-byte message.

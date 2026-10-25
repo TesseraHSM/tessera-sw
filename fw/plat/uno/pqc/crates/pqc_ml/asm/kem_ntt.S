@@ -31,6 +31,7 @@
 .equ ONEP,  0x0013afb7      @ b' that multiplies by 1 (b = -2^32 mod q = -1353)
 .equ FSCP,  0x275f6ed0      @ b' for 1441 * 2^-16, the reference's mont(a * f) (b = -304)
 .equ FZ1P,  0xeb8b6b6e      @ b' for that times zeta_1, the last twiddle (b = 366)
+.equ RMONTP, 0xafb7680c     @ b' that multiplies by 2^16 mod q = 2285 (b = 1036)
 
 @ Two words of y in \y0/\y1 times b' in \z, Plantard reduced and packed back
 @ in place; \t0/\t1 are scratch. QQ is in r3, 8q in r4.
@@ -245,3 +246,60 @@ pqc_ml_kem_invntt:
 7:
     pop     {r0, r4-r11, pc}
 .size pqc_ml_kem_invntt, .-pqc_ml_kem_invntt
+
+@ void pqc_ml_kem_tomont_add(int16_t t[256], const int16_t e[256])
+@
+@ t = t * 2^16 + e mod q, as at most 1664 in magnitude: key generation's
+@ last steps for each row of t_hat -- cancelling the 2^-16 basemul leaves,
+@ adding e_hat, reducing for ByteEncode_12 -- in one pass of two Plantard
+@ multiplies a coefficient. Any 16-bit t and e with |t*2^16 mod q + e|
+@ below 2^15 is exact; e_hat is at most 3 + 7*1664.
+.global pqc_ml_kem_tomont_add
+.type pqc_ml_kem_tomont_add, %function
+.align 2
+pqc_ml_kem_tomont_add:
+    push    {r4-r11, lr}
+    movw    r3, #(QQ & 0xffff)
+    movt    r3, #(QQ >> 16)
+    movw    r4, #C8Q
+    movw    r5, #(RMONTP & 0xffff)
+    movt    r5, #(RMONTP >> 16)
+    movw    r6, #(ONEP & 0xffff)
+    movt    r6, #(ONEP >> 16)
+    movs    r2, #64
+1:
+    ldrd    r7, r8, [r0]
+    ldrd    r9, r10, [r1], #8
+    subs    r2, r2, #1
+    plant2  r5, r7, r8, r11, r12
+    sadd16  r7, r7, r9
+    sadd16  r8, r8, r10
+    plant2  r6, r7, r8, r11, r12
+    strd    r7, r8, [r0], #8
+    bne     1b
+    pop     {r4-r11, pc}
+.size pqc_ml_kem_tomont_add, .-pqc_ml_kem_tomont_add
+
+@ void pqc_ml_kem_reduce(int16_t a[256])
+@
+@ a mod q, as at most 1664 in magnitude, for every 16-bit a: a Plantard
+@ multiply by 1, two coefficients a word.
+.global pqc_ml_kem_reduce
+.type pqc_ml_kem_reduce, %function
+.align 2
+pqc_ml_kem_reduce:
+    push    {r4-r8, lr}
+    movw    r3, #(QQ & 0xffff)
+    movt    r3, #(QQ >> 16)
+    movw    r4, #C8Q
+    movw    r5, #(ONEP & 0xffff)
+    movt    r5, #(ONEP >> 16)
+    movs    r2, #64
+1:
+    ldrd    r6, r7, [r0]
+    subs    r2, r2, #1
+    plant2  r5, r6, r7, r8, r12
+    strd    r6, r7, [r0], #8
+    bne     1b
+    pop     {r4-r8, pc}
+.size pqc_ml_kem_reduce, .-pqc_ml_kem_reduce
