@@ -79,10 +79,11 @@ pub fn poly_cbd(r: &mut Poly, seed: &[u8], nonce: u8, eta: u8) {
     ctx.absorb(&[nonce]);
     ctx.finalize();
 
-    let nbytes = eta as usize * N / 4;
-    // Max: eta=3, 192 bytes
-    let mut buf = [0u8; 192];
-    ctx.squeeze(&mut buf[..nbytes]);
+    // 2 * eta bits a coefficient, as words for `asm/kem_cbd.S` -- and room
+    // for one more than eta = 3's 48, since its `cbd3` reads every 3-byte
+    // group as a word.
+    let mut buf = [0u32; CBD_WORDS];
+    ctx.squeeze_words(&mut buf[..eta as usize * N / 16]);
 
     match eta {
         2 => cbd2(r, &buf),
@@ -91,10 +92,26 @@ pub fn poly_cbd(r: &mut Poly, seed: &[u8], nonce: u8, eta: u8) {
     }
 }
 
-fn cbd2(r: &mut Poly, buf: &[u8]) {
+const CBD_WORDS: usize = 3 * N / 16 + 1;
+
+#[cfg(target_arch = "arm")]
+extern "C" {
+    fn pqc_ml_kem_cbd2(r: *mut i16, buf: *const u32);
+    fn pqc_ml_kem_cbd3(r: *mut i16, buf: *const u32);
+}
+
+fn cbd2(r: &mut Poly, buf: &[u32; CBD_WORDS]) {
+    // SAFETY: `r` has room for the N coefficients stored and `buf` holds
+    // the N / 8 words read.
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        pqc_ml_kem_cbd2(r.as_mut_ptr(), buf.as_ptr())
+    };
+
     // eta=2: 4 bits per coefficient (2 + 2)
+    #[cfg(not(target_arch = "arm"))]
     for i in 0..N / 8 {
-        let t = u32::from_le_bytes([buf[4 * i], buf[4 * i + 1], buf[4 * i + 2], buf[4 * i + 3]]);
+        let t = u32::from_le(buf[i]);
         let d = (t & 0x55555555) + ((t >> 1) & 0x55555555);
         for j in 0..8 {
             let a = ((d >> (4 * j)) & 0x3) as i16;
@@ -104,11 +121,19 @@ fn cbd2(r: &mut Poly, buf: &[u8]) {
     }
 }
 
-fn cbd3(r: &mut Poly, buf: &[u8]) {
+fn cbd3(r: &mut Poly, buf: &[u32; CBD_WORDS]) {
+    // SAFETY: `r` has room for the N coefficients stored, and `buf` the
+    // 3 * N / 4 + 1 bytes read -- the last group's word runs one past.
+    #[cfg(target_arch = "arm")]
+    unsafe {
+        pqc_ml_kem_cbd3(r.as_mut_ptr(), buf.as_ptr())
+    };
+
     // eta=3: 6 bits per coefficient (3 + 3), 3 bytes → 4 coefficients
+    #[cfg(not(target_arch = "arm"))]
     for i in 0..N / 4 {
-        let t =
-            buf[3 * i] as u32 | ((buf[3 * i + 1] as u32) << 8) | ((buf[3 * i + 2] as u32) << 16);
+        let byte = |k: usize| (u32::from_le(buf[k / 4]) >> (8 * (k % 4))) & 0xFF;
+        let t = byte(3 * i) | (byte(3 * i + 1) << 8) | (byte(3 * i + 2) << 16);
         let d = (t & 0x249249) + ((t >> 1) & 0x249249) + ((t >> 2) & 0x249249);
         for j in 0..4 {
             let a = ((d >> (6 * j)) & 0x7) as i16;

@@ -3,8 +3,8 @@
 // Build script: assemble the ARM kernels for thumbv7em targets with the cc
 // crate -- pqm4's Keccak-f[1600] (https://github.com/mupq/pqm4) and ML-DSA
 // inverse NTT, both as scheduled for the Cortex-M7 by SLOTHY, the ML-DSA
-// forward NTT, the ML-KEM transforms, products and compression, and the
-// rejection samplers' parsing.
+// forward NTT, the ML-KEM transforms, products, compression and CBD
+// sampling, and the rejection samplers' parsing.
 // Set CC_thumbv7em_none_eabi to your arm-none-eabi-gcc path if needed.
 
 fn main() {
@@ -19,6 +19,7 @@ fn main() {
             .file("asm/kem_compress.S")
             .file("asm/kem_basemul.S")
             .file("asm/rej.S")
+            .file("asm/kem_cbd.S")
             .compile("pqc_ml_asm");
 
         println!("cargo:rerun-if-changed=asm/keccakf1600.S");
@@ -28,5 +29,6 @@ fn main() {
         println!("cargo:rerun-if-changed=asm/kem_compress.S");
         println!("cargo:rerun-if-changed=asm/kem_basemul.S");
         println!("cargo:rerun-if-changed=asm/rej.S");
+        println!("cargo:rerun-if-changed=asm/kem_cbd.S");
     }
 }
