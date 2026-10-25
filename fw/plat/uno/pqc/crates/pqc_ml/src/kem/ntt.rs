@@ -36,7 +36,14 @@ const QINV_P: i32 = QINV as i32;
 #[cfg(target_arch = "arm")]
 const Q_NEG: i32 = -(Q as i32);
 
-/// Cooley-Tukey butterflies, two at a time.
+/// `qinv` in the bottom half, `-q` in the top. `mul` only needs the low
+/// half of `qinv` -- the bits of the product it keeps do not depend on the
+/// top -- and the `smlabt`/`smulbt` forms read `-q` from the top, so one
+/// register serves the whole Montgomery reduction.
+#[cfg(target_arch = "arm")]
+const QINV_QNEG: i32 = (Q_NEG << 16) | (QINV_P & 0xFFFF);
+
+/// One whole forward layer of Cooley-Tukey butterflies, two at a time.
 ///
 /// ML-KEM's coefficients are 16-bit, so a pair of them shares one register
 /// and the halfword instructions do both butterflies at once: one `ldr`
@@ -45,42 +52,52 @@ const Q_NEG: i32 = -(Q as i32);
 /// instruction each. That is the part ML-DSA could not do -- its
 /// coefficients are 32-bit and fill a register on their own.
 ///
+/// The window loop is in the assembly too. Driven from Rust, each of the
+/// 127 windows spilled and reloaded the loop state around the block --
+/// some twenty instructions a window, more than the butterflies
+/// themselves cost in the 64 one-pair windows of the last layer.
+///
 /// # Safety
-/// `xp` and `yp` must each be valid for `pairs * 2` `i16` writes and word
-/// aligned, and must not overlap.
+/// `ap` must be valid for 256 `i16` writes and word aligned; `zp` must be
+/// valid for `128 / len` ascending `i16` reads; `len` must be a power of
+/// two in 2..=128.
 #[cfg(target_arch = "arm")]
-#[inline(always)]
-unsafe fn ct_butterfly_pairs(xp: *mut i16, yp: *mut i16, zeta: i16, pairs: usize) {
+#[inline(never)]
+unsafe fn ct_layer(ap: *mut i16, zp: *const i16, len: usize) {
     core::arch::asm!(
         "2:",
-        "ldr    {xw}, [{xp}]",
-        "ldr    {yw}, [{yp}]",
-        "smulbb {p0}, {yw}, {z}",
-        "smultb {p1}, {yw}, {z}",
-        "mul    {t0}, {p0}, {qinv}",
-        "mul    {t1}, {p1}, {qinv}",
-        "smlabb {p0}, {t0}, {q}, {p0}",
-        "smlabb {p1}, {t1}, {q}, {p1}",
-        "pkhtb  {tw}, {p1}, {p0}, asr #16",
-        "ssub16 {p0}, {xw}, {tw}",
-        "sadd16 {p1}, {xw}, {tw}",
-        "str    {p0}, [{yp}], #4",
-        "str    {p1}, [{xp}], #4",
+        "ldrsh  {z}, [{zp}], #2",
+        "lsr    {cnt}, {off}, #2",
+        "3:",
+        "ldr    {x}, [{xp}]",
+        "ldr    {y}, [{xp}, {off}]",
+        "smulbb {t0}, {y}, {z}",
+        "smultb {t1}, {y}, {z}",
+        "mul    {y}, {t0}, {a}",
+        "smlabt {t0}, {y}, {a}, {t0}",
+        "mul    {y}, {t1}, {a}",
+        "smlabt {t1}, {y}, {a}, {t1}",
+        "pkhtb  {y}, {t1}, {t0}, asr #16",
+        "ssub16 {t0}, {x}, {y}",
+        "sadd16 {x}, {x}, {y}",
+        "str    {t0}, [{xp}, {off}]",
+        "str    {x}, [{xp}], #4",
+        "subs   {cnt}, {cnt}, #1",
+        "bne    3b",
+        "add    {xp}, {xp}, {off}",
         "subs   {n}, {n}, #1",
         "bne    2b",
-        xp = inout(reg) xp => _,
-        yp = inout(reg) yp => _,
-        n = inout(reg) pairs => _,
-        z = in(reg) zeta as i32,
-        qinv = in(reg) QINV_P,
-        q = in(reg) Q_NEG,
-        xw = out(reg) _,
-        yw = out(reg) _,
-        p0 = out(reg) _,
-        p1 = out(reg) _,
+        xp = inout(reg) ap => _,
+        zp = inout(reg) zp => _,
+        n = inout(reg) N / 2 / len => _,
+        off = in(reg) len * 2,
+        a = in(reg) QINV_QNEG,
+        z = out(reg) _,
+        cnt = out(reg) _,
+        x = out(reg) _,
+        y = out(reg) _,
         t0 = out(reg) _,
         t1 = out(reg) _,
-        tw = out(reg) _,
         options(nostack),
     );
 }
@@ -91,26 +108,12 @@ unsafe fn ct_butterfly_pairs(xp: *mut i16, yp: *mut i16, zeta: i16, pairs: usize
 pub fn ntt(a: &mut [i16; N]) {
     #[cfg(target_arch = "arm")]
     {
-        // Walking the windows by pointer rather than by slice splitting:
-        // the assembly claims most of the register file, and an enclosing
-        // loop that has to spill its state every window costs more than
-        // the butterflies it sets up. There are 127 windows here.
-        let zbase = ZETAS.as_ptr();
         let ap = a.as_mut_ptr();
-        let mut zi = 1usize;
         let mut len = N / 2;
         while len >= 2 {
-            let mut base = ap;
-            for _ in 0..N / (2 * len) {
-                // SAFETY: `base` walks windows of `2 * len` within `a`, and
-                // `zi` stays inside ZETAS -- the transform consumes 127
-                // zetas and the table holds 127 past the unused first.
-                unsafe {
-                    ct_butterfly_pairs(base, base.add(len), *zbase.add(zi), len / 2);
-                    base = base.add(2 * len);
-                }
-                zi += 1;
-            }
+            // SAFETY: each layer covers the whole polynomial, and layer
+            // `len` takes the 128 / len zetas that start at 128 / len.
+            unsafe { ct_layer(ap, ZETAS.as_ptr().add(N / 2 / len), len) };
             len >>= 1;
         }
     }
@@ -138,13 +141,6 @@ pub fn ntt(a: &mut [i16; N]) {
     }
 }
 
-/// `qinv` in the bottom half, `-q` in the top. `mul` only needs the low
-/// half of `qinv` -- the bits of the product it keeps do not depend on the
-/// top -- and the `smlabt`/`smulbt` forms read `-q` from the top, so one
-/// register serves the whole Montgomery reduction.
-#[cfg(target_arch = "arm")]
-const QINV_QNEG: i32 = (Q_NEG << 16) | (QINV_P & 0xFFFF);
-
 /// The Barrett constant scaled by 2^6: `smmulr` by it computes
 /// `(v * a + 2^25) >> 26` -- [`barrett_reduce`]'s quotient, rounding and
 /// all -- in one instruction.
@@ -153,7 +149,7 @@ const BARRETT_V64: i32 = 20159 << 6;
 
 /// One whole inverse layer of Gentleman-Sande butterflies, two at a time.
 ///
-/// The packed counterpart of [`ct_butterfly_pairs`]: `sadd16`/`ssub16`
+/// The packed counterpart of [`ct_layer`]: `sadd16`/`ssub16`
 /// form both sums and both differences at once, the differences take the
 /// forward transform's Montgomery multiply, and the sums are Barrett
 /// reduced per halfword exactly as [`barrett_reduce`] does, so the result

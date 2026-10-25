@@ -261,6 +261,19 @@ impl ShakeCtx {
             offset += take;
         }
     }
+
+    /// [`squeeze`](Self::squeeze) into words, the output bytes in order: on
+    /// a little-endian target each word holds the next four bytes, so a
+    /// sampler can pick fields out with shifts rather than byte loads.
+    pub fn squeeze_words(&mut self, out: &mut [u32]) {
+        // SAFETY: the bytes of an initialised `u32` slice are a valid,
+        // initialised `u8` slice four times as long, and nothing else
+        // borrows `out` while this one is live.
+        let bytes = unsafe {
+            core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), out.len() * 4)
+        };
+        self.squeeze(bytes);
+    }
 }
 
 pub fn shake128_init() -> ShakeCtx {
