@@ -61,19 +61,27 @@ pub fn sign_internal(
     // holds the leading elements of A across attempts. Re-expanding the
     // matrix is by far the largest cost of a signature, so those spare
     // slots buy back one expansion each per retry, and they cost nothing.
-    let (w, a_cache) = work.split_at_mut(k);
-    // They are kept packed, three bytes to a coefficient as the spill holds
-    // them: a third more of the matrix fits in the same dTCM, and the
-    // multiply-accumulate unpacks as it reads.
-    let a_cache = a_cache.as_flattened_mut();
-    let cache_slots = a_cache.len() / PACKED_WORDS;
+    let (w, a_polys) = work.split_at_mut(k);
     // The elements after those go to the platform's near regions, if it
-    // gave any, the same way -- the first region filled before the second
-    // -- and only the rest to the spill.
+    // gave any -- the first region filled before the second -- packed,
+    // three bytes to a coefficient as the spill holds them, and only the
+    // rest to the spill.
     //
     // SAFETY: signing is the near regions' only user, and this the only
     // borrow of them.
     let [near1, near2] = unsafe { crate::spill::near() };
+    let near_slots = near1.len() / PACKED_WORDS + near2.len() / PACKED_WORDS;
+    // The work slots keep their elements whole, a word to a coefficient, if
+    // the whole matrix still fits without the spill that way: a cached
+    // product is then the plain multiply-accumulate. Otherwise they pack
+    // them too, fitting a third more, and the multiply-accumulate unpacks
+    // as it reads.
+    let whole = a_polys.len() + near_slots >= k * l;
+    let cache_slots = if whole {
+        a_polys.len()
+    } else {
+        a_polys.len() * N / PACKED_WORDS
+    };
     let want = (k * l).saturating_sub(cache_slots);
     let near_a1 = want.min(near1.len() / PACKED_WORDS);
     let near_a2 = (want - near_a1).min(near2.len() / PACKED_WORDS);
@@ -128,18 +136,27 @@ pub fn sign_internal(
                 } else {
                     crate::spill::matrix_slot(t - held)
                 };
-                if !a_cached || (t >= held && spill.is_none()) {
-                    // The first attempt, or an element with nowhere to be
-                    // kept: derive it.
-                    sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
-                    if j == 0 {
-                        ntt::poly_pointwise_montgomery(&mut w[i], &c_hat, y_hat);
-                    } else {
-                        ntt::poly_pointwise_acc_montgomery(&mut w[i], &c_hat, y_hat);
+                // Kept whole: derived straight into its slot the first
+                // time, and used from there.
+                let kept_whole = whole && t < cache_slots;
+                if kept_whole || !a_cached || (t >= held && spill.is_none()) {
+                    // Otherwise the first attempt, or an element with
+                    // nowhere to be kept: derive it.
+                    let a = if kept_whole { &mut a_polys[t] } else { &mut c_hat };
+                    if !(kept_whole && a_cached) {
+                        sampling::poly_uniform(a, rho, i as u8, j as u8);
                     }
-                    if !a_cached {
+                    if j == 0 {
+                        ntt::poly_pointwise_montgomery(&mut w[i], a, y_hat);
+                    } else {
+                        ntt::poly_pointwise_acc_montgomery(&mut w[i], a, y_hat);
+                    }
+                    if !a_cached && !kept_whole {
                         if t < cache_slots {
-                            crate::spill::pack(&mut a_cache[t * PACKED_WORDS..], &c_hat);
+                            crate::spill::pack(
+                                &mut a_polys.as_flattened_mut()[t * PACKED_WORDS..],
+                                &c_hat,
+                            );
                         } else if t < held {
                             crate::spill::pack(
                                 near_elem(near1, near2, t - cache_slots),
@@ -160,7 +177,7 @@ pub fn sign_internal(
                             unsafe { crate::spill::load_packed_words(&mut c_hat, p) };
                             &c_hat
                         }
-                        None if t < cache_slots => &a_cache[t * PACKED_WORDS..],
+                        None if t < cache_slots => &a_polys.as_flattened()[t * PACKED_WORDS..],
                         None => near_elem(near1, near2, t - cache_slots),
                     };
                     if j == 0 {

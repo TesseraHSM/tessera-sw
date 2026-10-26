@@ -157,6 +157,9 @@ pub fn invntt(a: &mut [i32; N]) {
 /// The matrix product assigns on its first column and accumulates on the
 /// rest, so this runs k times per attempt and is worth the same treatment
 /// as the accumulate.
+// Out of line: called from several places per operation, each a whole
+// polynomial, so the call costs nothing and the copies do.
+#[inline(never)]
 pub fn poly_pointwise_montgomery(c: &mut [i32; N], a: &[i32; N], b: &[i32; N]) {
     #[cfg(target_arch = "arm")]
     {
@@ -338,6 +341,9 @@ pub fn poly_pointwise_acc_montgomery_packed(c: &mut [i32; N], a: &[i32], b: &[i3
 }
 
 /// Pointwise Montgomery multiply-accumulate: c += a * b.
+// Out of line: called from several places per operation, each a whole
+// polynomial, so the call costs nothing and the copies do.
+#[inline(never)]
 pub fn poly_pointwise_acc_montgomery(c: &mut [i32; N], a: &[i32; N], b: &[i32; N]) {
     #[cfg(target_arch = "arm")]
     {
