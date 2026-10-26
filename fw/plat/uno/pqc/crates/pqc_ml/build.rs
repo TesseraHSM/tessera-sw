@@ -4,7 +4,8 @@
 // crate -- pqm4's Keccak-f[1600] (https://github.com/mupq/pqm4) and ML-DSA
 // inverse NTT, both as scheduled for the Cortex-M7 by SLOTHY, the ML-DSA
 // forward NTT, the ML-KEM transforms, products, compression and CBD
-// sampling, and ML-DSA's rejection sampling and Decompose.
+// sampling, and ML-DSA's rejection sampling, Decompose and secret-key
+// unpacking.
 // Set CC_thumbv7em_none_eabi to your arm-none-eabi-gcc path if needed.
 
 fn main() {
@@ -23,6 +24,7 @@ fn main() {
             .file("asm/dsa_unpack_z.S")
             .file("asm/dsa_check.S")
             .file("asm/dsa_decompose.S")
+            .file("asm/dsa_unpack_eta.S")
             .compile("pqc_ml_asm");
 
         println!("cargo:rerun-if-changed=asm/keccakf1600.S");
@@ -36,5 +38,6 @@ fn main() {
         println!("cargo:rerun-if-changed=asm/dsa_unpack_z.S");
         println!("cargo:rerun-if-changed=asm/dsa_check.S");
         println!("cargo:rerun-if-changed=asm/dsa_decompose.S");
+        println!("cargo:rerun-if-changed=asm/dsa_unpack_eta.S");
     }
 }

@@ -100,6 +100,23 @@ pub(crate) fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
         }
     }
 
+    // s1 and s2, eta - f in 3 or 4 bits: eight fields to every d bytes, a
+    // word load each (asm/dsa_unpack_eta.S), not a test a coefficient for
+    // the word running out.
+    #[cfg(target_arch = "arm")]
+    if d <= 4 {
+        extern "C" {
+            fn pqc_ml_dsa_unpack_eta(r: *mut i32, s: *const u8, eta: i32, d: u32);
+        }
+        // SAFETY: `a` is 256 coefficients with the 8d-word stream staged at
+        // its end, which the routine reads from there, as it may.
+        unsafe {
+            let a = a.as_mut_ptr();
+            pqc_ml_dsa_unpack_eta(a, a.add(top).cast(), bias, d);
+        }
+        return;
+    }
+
     let mask = (1u32 << d) - 1;
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
