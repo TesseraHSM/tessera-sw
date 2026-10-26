@@ -37,14 +37,18 @@ const NEEDED_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS;
 static mut BASE: *mut i32 = core::ptr::null_mut();
 
 /// Near regions given so far, in order; unused entries are empty.
-static mut NEAR: [(*mut i32, usize); 2] = [(core::ptr::null_mut(), 0); 2];
+static mut NEAR: [(*mut i32, usize); NEAR_REGIONS] = [(core::ptr::null_mut(), 0); NEAR_REGIONS];
+
+/// How many separate pieces of near memory a platform can give.
+pub const NEAR_REGIONS: usize = 3;
 
 /// Hand the signer memory to keep matrix elements in ahead of the spill:
 /// memory the core reads at dTCM speed but that its stack does not cover.
 /// Elements there are read in place, like the ones the work buffer holds.
 ///
-/// A platform whose fast memory is in two pieces calls this once for each,
-/// the first filled before the second; any call past the second is ignored.
+/// A platform whose fast memory is in pieces calls this once for each, up
+/// to [`NEAR_REGIONS`], the first filled first; any call past those is
+/// ignored.
 ///
 /// # Safety
 /// `base` must be valid for `words` `i32` reads and writes, word aligned,
@@ -59,7 +63,7 @@ pub unsafe fn init_near(base: *mut i32, words: usize) {
 ///
 /// # Safety
 /// The caller must be their only user for as long as the slices live.
-pub(crate) unsafe fn near() -> [&'static mut [i32]; 2] {
+pub(crate) unsafe fn near() -> [&'static mut [i32]; NEAR_REGIONS] {
     (*core::ptr::addr_of!(NEAR)).map(|(base, words)| {
         if base.is_null() {
             &mut []

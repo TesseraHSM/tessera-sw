@@ -69,8 +69,8 @@ pub fn sign_internal(
     //
     // SAFETY: signing is the near regions' only user, and this the only
     // borrow of them.
-    let [near1, near2] = unsafe { crate::spill::near() };
-    let near_slots = near1.len() / PACKED_WORDS + near2.len() / PACKED_WORDS;
+    let near = &mut unsafe { crate::spill::near() };
+    let near_slots: usize = near.iter().map(|r| r.len() / PACKED_WORDS).sum();
     // The work slots keep their elements whole, a word to a coefficient, if
     // the whole matrix still fits without the spill that way: a cached
     // product is then the plain multiply-accumulate. Otherwise they pack
@@ -82,10 +82,7 @@ pub fn sign_internal(
     } else {
         a_polys.len() * N / PACKED_WORDS
     };
-    let want = (k * l).saturating_sub(cache_slots);
-    let near_a1 = want.min(near1.len() / PACKED_WORDS);
-    let near_a2 = (want - near_a1).min(near2.len() / PACKED_WORDS);
-    let held = cache_slots + near_a1 + near_a2;
+    let held = cache_slots + (k * l).saturating_sub(cache_slots).min(near_slots);
     let mut a_cached = false;
 
     // s1 and s2 coefficients are packed eta - f in d-bit fields.
@@ -159,7 +156,7 @@ pub fn sign_internal(
                             );
                         } else if t < held {
                             crate::spill::pack(
-                                near_elem(near1, near2, t - cache_slots),
+                                near_elem(near, t - cache_slots),
                                 &c_hat,
                             );
                         } else if let Some(p) = spill {
@@ -178,7 +175,7 @@ pub fn sign_internal(
                             &c_hat
                         }
                         None if t < cache_slots => &a_polys.as_flattened()[t * PACKED_WORDS..],
-                        None => near_elem(near1, near2, t - cache_slots),
+                        None => near_elem(near, t - cache_slots),
                     };
                     if j == 0 {
                         // SAFETY: one whole word-aligned polynomial.
@@ -472,13 +469,15 @@ fn find_close(a: &Poly, n: usize, [k, m]: [i32; 2]) -> usize {
 }
 
 /// Near-region matrix element `u`: the first region's elements, then the
-/// second's.
+/// next's.
 #[inline(always)]
-fn near_elem<'a>(near1: &'a mut [i32], near2: &'a mut [i32], u: usize) -> &'a mut [i32] {
-    let first = near1.len() / PACKED_WORDS;
-    if u < first {
-        &mut near1[u * PACKED_WORDS..]
-    } else {
-        &mut near2[(u - first) * PACKED_WORDS..]
+fn near_elem<'a>(near: &'a mut [&'static mut [i32]], mut u: usize) -> &'a mut [i32] {
+    for r in near.iter_mut() {
+        let n = r.len() / PACKED_WORDS;
+        if u < n {
+            return &mut r[u * PACKED_WORDS..];
+        }
+        u -= n;
     }
+    &mut []
 }
