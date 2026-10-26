@@ -218,34 +218,24 @@ fn pack_z19(buf: &mut [u8], a: &Poly) {
 
 // ---- w1 packing ----
 
-pub fn pack_w1(buf: &mut [u8], a: &Poly, gamma2: u32) {
-    match gamma2 {
-        95232 => pack_w1_6bit(buf, a),  // 6 bits
-        261888 => pack_w1_4bit(buf, a), // 4 bits
-        _ => {}
-    }
-}
-
-// gamma2 = (q-1)/88: w1 in [0, 43], 6 bits per coefficient
-fn pack_w1_6bit(buf: &mut [u8], a: &Poly) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &mut buf[..192];
-    for i in 0..N / 4 {
-        let off = 3 * i;
-        buf[off] = (a[4 * i] | (a[4 * i + 1] << 6)) as u8;
-        buf[off + 1] = ((a[4 * i + 1] >> 2) | (a[4 * i + 2] << 4)) as u8;
-        buf[off + 2] = ((a[4 * i + 2] >> 4) | (a[4 * i + 3] << 2)) as u8;
-    }
-}
-
-// gamma2 = (q-1)/32: w1 in [0, 15], 4 bits per coefficient
-fn pack_w1_4bit(buf: &mut [u8], a: &Poly) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &mut buf[..128];
-    for i in 0..N / 2 {
-        buf[i] = (a[2 * i] | (a[2 * i + 1] << 4)) as u8;
+/// Overwrite coefficient `i` of a packed w1 (see
+/// `rounding::poly_decompose_pack`) with `v`: 4 bits a coefficient for
+/// gamma2 = (q-1)/32, 6 for (q-1)/88.
+pub fn repack_w1(buf: &mut [u8], i: usize, v: i32, gamma2: u32) {
+    if gamma2 == 261888 {
+        let s = 4 * (i & 1);
+        buf[i / 2] = (buf[i / 2] & !(0xF << s)) | ((v as u8) << s);
+    } else {
+        let (b, s) = (6 * i / 8, 6 * i % 8);
+        let mut x = u16::from(buf[b]);
+        if s > 2 {
+            x |= u16::from(buf[b + 1]) << 8;
+        }
+        x = (x & !(0x3F << s)) | ((v as u16) << s);
+        buf[b] = x as u8;
+        if s > 2 {
+            buf[b + 1] = (x >> 8) as u8;
+        }
     }
 }
 

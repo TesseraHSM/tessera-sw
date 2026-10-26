@@ -95,16 +95,16 @@ impl MlDsaVariant {
 /// covers the accumulators at every parameter set; the rest is cache, and
 /// there is as much of it as the fastpath core's 32 KB of dTCM will carry
 /// once signing's other working set is accounted for.
-pub const DSA_WORK_POLYS: usize = 20;
+pub const DSA_WORK_POLYS: usize = 21;
 
 /// Polynomials key generation and verification need: `l`, which is at most
 /// seven. Neither caches the matrix -- they walk it once -- so neither pays
 /// for signing's larger workspace.
 pub const DSA_WORK_POLYS_SHORT: usize = 7;
 
-/// DSA work buffer type: 20 polynomials × 256 coefficients × i32.
+/// DSA work buffer type: 21 polynomials × 256 coefficients × i32.
 /// Allocate this in `.bss` (static) for constrained stacks, or on the stack
-/// if you have ≥20 KiB available.
+/// if you have ≥21 KiB available.
 pub type DsaWorkBuf = [[i32; DSA_N]; DSA_WORK_POLYS];
 
 // ================================================================

@@ -85,7 +85,6 @@ pub fn sign_internal(
     let eta_bias = params.eta as i32;
 
     // Stack temporaries: single polynomials only
-    let mut w1_i: Poly = [0i32; N];
     let mut w0_i: Poly = [0i32; N];
     let mut tmp: Poly = [0i32; N];
     // The commitment pass wants a scratch polynomial for the matrix
@@ -186,11 +185,10 @@ pub fn sign_internal(
 
         for i in 0..k {
             ntt::invntt(&mut w[i]);
-            // w1 into w1_i for the hash; w_i keeps (w0 << 6) | w1 for the
-            // r0 check and the hints.
-            rounding::poly_decompose_reduced(&mut w1_i, &mut w[i], params.gamma2);
+            // w1 packed for the hash; w_i keeps (w0 << 6) | w1 for the r0
+            // check and the hints.
             let w1_bytes = params.w1_pack_bytes();
-            packing::pack_w1(&mut w1_packed[..w1_bytes], &w1_i, params.gamma2);
+            rounding::poly_decompose_pack(&mut w1_packed[..w1_bytes], &mut w[i], params.gamma2);
             commit_ctx.absorb(&w1_packed[..w1_bytes]);
         }
 

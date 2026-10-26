@@ -75,7 +75,6 @@ pub fn verify_internal(
     let mut a_ij: Poly = [0i32; N];
     let mut w_prime: Poly = [0i32; N];
     let mut t1_poly: Poly = [0i32; N];
-    let mut tmp: Poly = [0i32; N];
     let mut w1_packed_buf = [0u8; 192];
 
     for i in 0..k {
@@ -93,11 +92,13 @@ pub fn verify_internal(
         ntt::poly_pointwise_acc_montgomery(&mut w_prime, &c_hat, &t1_poly);
         ntt::invntt(&mut w_prime);
 
-        // HighBits straight off the transform, as signing does: w1 into
-        // tmp, and (w0 << 6) | w1 left in w_prime. UseHint then needs only
-        // the parts at the hinted positions rather than a fresh
-        // decomposition of each.
-        rounding::poly_decompose_reduced(&mut tmp, &mut w_prime, params.gamma2);
+        // HighBits straight off the transform, as signing does: w1 packed
+        // for the hash, and (w0 << 6) | w1 left in w_prime. UseHint then
+        // needs only the parts at the hinted positions rather than a fresh
+        // decomposition of each, and patches just those in the packing.
+        let w1_bytes = params.w1_pack_bytes();
+        let w1_packed = &mut w1_packed_buf[..w1_bytes];
+        rounding::poly_decompose_pack(w1_packed, &mut w_prime, params.gamma2);
         let hint_start = if i == 0 {
             0
         } else {
@@ -106,12 +107,10 @@ pub fn verify_internal(
         let hint_end = hint_sig[params.omega as usize + i] as usize;
         for j in hint_start..hint_end {
             let idx = hint_sig[j] as usize;
-            tmp[idx] = rounding::use_hint_parts(tmp[idx], w_prime[idx] >> 6, params.gamma2);
+            let w1 = rounding::use_hint_parts(w_prime[idx] & 63, w_prime[idx] >> 6, params.gamma2);
+            packing::repack_w1(w1_packed, idx, w1, params.gamma2);
         }
-
-        let w1_bytes = params.w1_pack_bytes();
-        packing::pack_w1(&mut w1_packed_buf[..w1_bytes], &tmp, params.gamma2);
-        commit_ctx.absorb(&w1_packed_buf[..w1_bytes]);
+        commit_ctx.absorb(w1_packed);
     }
 
     // Recompute c_tilde' and compare

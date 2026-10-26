@@ -136,43 +136,47 @@ pub fn poly_decompose(w1: &mut Poly, w0: &mut Poly, w: &Poly, gamma2: u32) {
     }
 }
 
-/// Decompose straight off the inverse transform, reducing as it reads,
-/// into `w1` and in place: `w` becomes `(w0 << 6) | w1`.
+/// Decompose straight off the inverse transform, reducing as it reads, in
+/// place -- `w` becomes `(w0 << 6) | w1` -- and pack w1 into `packed` as the
+/// commitment hash takes it: 4 bits a coefficient for gamma2 = (q-1)/32,
+/// 6 for (q-1)/88, so `packed` is 128 or 192 bytes.
 ///
 /// Folding the reduction into the split costs nothing -- the coefficient
 /// is already in a register -- and leaving both parts behind in `w` is
 /// what spares signing's r0 check and verification's UseHint a second
 /// decomposition: each wants w0 (its sign, for UseHint) and w1 together,
-/// and w1 is below 64 for both values of gamma2.
+/// and w1 is below 64 for both values of gamma2. Packing w1 as it is made
+/// spares writing it out a word a coefficient only to read it back.
 ///
 /// `w` must be an inverse-NTT output (magnitude below q), as both callers'
 /// are.
-pub fn poly_decompose_reduced(w1: &mut Poly, w: &mut Poly, gamma2: u32) {
+pub fn poly_decompose_pack(packed: &mut [u8], w: &mut Poly, gamma2: u32) {
     // Dispatch once, not once per coefficient. `decompose` selects on
     // gamma2 internally, and inlined into a 256-iteration loop that put the
     // test and a pair of magic constants inside the loop body. Choosing the
     // variant here makes gamma2 a compile-time constant, so the test
     // disappears and the multipliers fold into immediates.
     match gamma2 {
-        261888 => decompose_pass::<261888>(w1, w),
-        95232 => decompose_pass::<95232>(w1, w),
+        261888 => decompose_pack::<261888>(&mut packed[..N / 2], w),
+        95232 => decompose_pack::<95232>(&mut packed[..3 * N / 4], w),
         _ => {}
     }
 }
 
-fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
-    // Two coefficients a pass; the per-coefficient arithmetic is the same
-    // as the scalar loop below, `a1 * 2 * G` folded into an `mls`.
+fn decompose_pack<const G: u32>(packed: &mut [u8], w: &mut Poly) {
+    // Two coefficients at a time; the per-coefficient arithmetic is the
+    // same as the scalar loop below, `a1 * 2 * G` folded into an `mls`.
+    // 4-bit w1 packs a byte a pair; 6-bit, three bytes every two pairs.
     #[cfg(target_arch = "arm")]
     {
-        let wp = w.as_mut_ptr();
-        // SAFETY: two distinct `[i32; N]`, word aligned, N even; each pair
-        // of `w` is read before it is written back.
+        // SAFETY: `w` is one word-aligned `[i32; N]`, each pair read before
+        // it is written back; `packed` is N / 2 or 3N / 4 bytes, exactly
+        // what the loop stores.
         unsafe {
             if G == 261888 {
                 core::arch::asm!(
                     "2:",
-                    "ldrd   {w0}, {w1}, [{wp}], #8",
+                    "ldrd   {w0}, {w1}, [{wp}]",
                     "and    {t}, {q}, {w0}, asr #31",
                     "add    {w0}, {w0}, {t}",
                     "and    {t}, {q}, {w1}, asr #31",
@@ -189,7 +193,6 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
                     "ubfx   {h1}, {h1}, #22, #4",
                     "mls    {w0}, {h0}, {g2x2}, {w0}",
                     "mls    {w1}, {h1}, {g2x2}, {w1}",
-                    "strd   {h0}, {h1}, [{w1p}], #8",
                     "sub    {t}, {half}, {w0}",
                     "and    {t}, {q}, {t}, asr #31",
                     "sub    {w0}, {w0}, {t}",
@@ -198,12 +201,13 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
                     "sub    {w1}, {w1}, {t}",
                     "orr    {w0}, {h0}, {w0}, lsl #6",
                     "orr    {w1}, {h1}, {w1}, lsl #6",
-                    "strd   {w0}, {w1}, [{w0p}], #8",
+                    "strd   {w0}, {w1}, [{wp}], #8",
+                    "orr    {t}, {h0}, {h1}, lsl #4",
+                    "strb   {t}, [{op}], #1",
                     "subs   {n}, {n}, #1",
                     "bne    2b",
-                    wp = inout(reg) wp => _,
-                    w1p = inout(reg) w1.as_mut_ptr() => _,
-                    w0p = inout(reg) wp => _,
+                    wp = inout(reg) w.as_mut_ptr() => _,
+                    op = inout(reg) packed.as_mut_ptr() => _,
                     n = inout(reg) N / 2 => _,
                     q = in(reg) Q as i32,
                     half = in(reg) (Q as i32 - 1) / 2,
@@ -218,7 +222,7 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
             } else {
                 core::arch::asm!(
                     "2:",
-                    "ldrd   {w0}, {w1}, [{wp}], #8",
+                    "ldrd   {w0}, {w1}, [{wp}]",
                     "and    {t}, {q}, {w0}, asr #31",
                     "add    {w0}, {w0}, {t}",
                     "and    {t}, {q}, {w1}, asr #31",
@@ -241,7 +245,6 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
                     "eor    {h1}, {h1}, {t}",
                     "mls    {w0}, {h0}, {g2x2}, {w0}",
                     "mls    {w1}, {h1}, {g2x2}, {w1}",
-                    "strd   {h0}, {h1}, [{w1p}], #8",
                     "sub    {t}, {half}, {w0}",
                     "and    {t}, {q}, {t}, asr #31",
                     "sub    {w0}, {w0}, {t}",
@@ -250,12 +253,24 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
                     "sub    {w1}, {w1}, {t}",
                     "orr    {w0}, {h0}, {w0}, lsl #6",
                     "orr    {w1}, {h1}, {w1}, lsl #6",
-                    "strd   {w0}, {w1}, [{w0p}], #8",
+                    "strd   {w0}, {w1}, [{wp}], #8",
+                    // Even pairs start the 24 bits of four coefficients,
+                    // odd pairs finish and store them.
+                    "tst    {n}, #1",
+                    "orr    {h0}, {h0}, {h1}, lsl #6",
+                    "bne    4f",
+                    "mov    {x}, {h0}",
+                    "b      3f",
+                    "4:",
+                    "orr    {x}, {x}, {h0}, lsl #12",
+                    "strh   {x}, [{op}], #2",
+                    "lsr    {x}, {x}, #16",
+                    "strb   {x}, [{op}], #1",
+                    "3:",
                     "subs   {n}, {n}, #1",
                     "bne    2b",
-                    wp = inout(reg) wp => _,
-                    w1p = inout(reg) w1.as_mut_ptr() => _,
-                    w0p = inout(reg) wp => _,
+                    wp = inout(reg) w.as_mut_ptr() => _,
+                    op = inout(reg) packed.as_mut_ptr() => _,
                     n = inout(reg) N / 2 => _,
                     q = in(reg) Q as i32,
                     half = in(reg) (Q as i32 - 1) / 2,
@@ -266,6 +281,7 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
                     h0 = out(reg) _,
                     h1 = out(reg) _,
                     t = out(reg) _,
+                    x = out(reg) _,
                     options(nostack),
                 );
             }
@@ -274,7 +290,7 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
 
     #[cfg(not(target_arch = "arm"))]
     {
-        for (w1, w) in w1.iter_mut().zip(w.iter_mut()) {
+        for (i, w) in w.iter_mut().enumerate() {
             // `w` is the inverse transform's output, which is below q in
             // magnitude, so `caddq` alone lifts it into [0, q) -- `reduce32`
             // first would only map it to the same value.
@@ -291,8 +307,8 @@ fn decompose_pass<const G: u32>(w1: &mut Poly, w: &mut Poly) {
             let mut a0 = a - a1 * 2 * G as i32;
             a0 -= (((Q as i32 - 1) / 2 - a0) >> 31) & Q as i32;
 
-            *w1 = a1;
             *w = (a0 << 6) | a1;
+            super::packing::repack_w1(packed, i, a1, G);
         }
     }
 }
