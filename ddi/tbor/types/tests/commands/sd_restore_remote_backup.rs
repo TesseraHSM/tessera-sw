@@ -41,6 +41,9 @@ use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::part_info::assert_part_state;
+use crate::commands::part_info::PART_STATE_INITIALIZED;
+use crate::commands::part_info::PART_STATE_SD_PROVISIONED;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
@@ -209,11 +212,13 @@ fn sd_restore_remote_backup_roundtrip() {
         &chain.der_items(),
     )
     .expect("PartFinal must restore PartLocalMK from the prior backup");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED);
 
     let req = restore_remote_req(session.session_id, &backup);
     let resp = ctx
         .tbor_oob(&req, &backup.evidence.oob())
         .expect("SdRestoreRemoteBackup roundtrip");
+    assert_part_state(&ctx, PART_STATE_SD_PROVISIONED);
 
     // Local backup (BKS3 masked under PartLocalMK), 276 B, non-zero.
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);

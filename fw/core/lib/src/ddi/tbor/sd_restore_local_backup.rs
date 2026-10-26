@@ -50,7 +50,6 @@ use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::PartState;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::sd_backup;
@@ -77,8 +76,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
         // The SD masking keys / policy hash are provisioned by `PartFinal`,
-        // so the partition must be finalized (`Initialized`).
-        if part_state::part_state(pal, io)? != PartState::Initialized {
+        // so the partition must be finalized.
+        if !part_state::part_state(pal, io)?.is_finalized() {
             return Err(HsmError::InvalidArg);
         }
 

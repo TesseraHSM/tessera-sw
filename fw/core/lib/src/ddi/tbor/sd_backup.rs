@@ -39,6 +39,7 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::PartPropId;
+use tsra_fw_hsm_pal_traits::PartState;
 use tsra_fw_hsm_undo::UndoLog;
 
 use crate::part_state;
@@ -331,9 +332,9 @@ pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
     res
 }
 
-/// Commit the security domain: mark it initialized, vault the `SDMK`, and
-/// record its key id.  Every mutation is pushed to `undo` so a failure
-/// rolls back all changes.
+/// Commit the security domain: claim initialization, vault the `SDMK`,
+/// record its key id, and advance to [`PartState::SdProvisioned`]. Every
+/// mutation is pushed to `undo` so a failure rolls back all changes.
 pub(super) async fn commit_sd_to_vault<'p, P: HsmPal>(
     pal: &P,
     io: &impl HsmIo,
@@ -368,5 +369,7 @@ pub(super) async fn commit_sd_to_vault<'p, P: HsmPal>(
     }
     undo.push_prop_restore_absent(part_state::part_sd_mk_key_id_prop_id())?;
     part_state::part_set_sd_mk_key_id(pal, io, sdmk_id)?;
-    Ok(())
+    let previous_state = part_state::part_state(pal, io)?;
+    undo.push_prop_restore_scalar(PartPropId::STATE, previous_state as u32)?;
+    part_state::part_set_state(pal, io, PartState::SdProvisioned)
 }

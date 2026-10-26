@@ -39,7 +39,6 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::resolve_masking_key;
 use super::validate_active_session;
@@ -124,8 +123,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // Session-scoped keys are masked under the per-session masking key,
     // available to any Active session.  Every other scope's masking key is
     // provisioned by `PartFinal` / the SD lifecycle, so require an
-    // `Initialized` partition to fail cheaply and clearly before keygen.
-    if scope != HsmKeyScope::Session && part_state::part_state(pal, io)? != PartState::Initialized {
+    // already-finalized partition to fail cheaply and clearly before keygen.
+    if scope != HsmKeyScope::Session && !part_state::part_state(pal, io)?.is_finalized() {
         return Err(HsmError::InvalidArg);
     }
 

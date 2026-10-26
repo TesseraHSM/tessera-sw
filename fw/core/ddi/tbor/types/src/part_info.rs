@@ -58,6 +58,15 @@ pub enum PartStateId {
 
     /// `PartInit` bound; finalization pending.
     Initializing = 4,
+
+    /// `PartFinal` completed; no live security domain is provisioned.
+    Initialized = 5,
+
+    /// Finalized partition with its security-domain masking key installed.
+    SdProvisioned = 6,
+
+    /// Partition quarantined after a consistency-critical rollback failure.
+    Faulted = 7,
 }
 
 /// TBOR opcode for `PartInfo`.

@@ -467,7 +467,7 @@ impl UnoHsmPal {
     ///   recorded and key provisioning is *deferred* to [`part_alloc`], which
     ///   runs when `SetResource` arrives.
     ///
-    /// Re-enabling an already-`Enabled` partition preserves its keys and nonce.
+    /// Re-enabling an already-serving partition preserves its keys and nonce.
     /// Certificates and BK_BOOT are out of scope.
     ///
     /// Returns [`HsmError::InvalidArg`] for an illegal transition.
@@ -490,12 +490,12 @@ impl UnoHsmPal {
                 Ok(())
             }
             // Idempotent re-enable (e.g. an Admin/driver retry).
-            PartState::Enabled => Ok(()),
+            state if state.is_serving() => Ok(()),
             _ => Err(HsmError::InvalidArg),
         }
     }
 
-    /// Disables partition `pid`: `Enabled` → `Disabled`.
+    /// Disables a serving partition `pid`, transitioning it to `Disabled`.
     ///
     /// Deletes the enable-time keys and clears their handles and public
     /// keys.
@@ -504,7 +504,7 @@ impl UnoHsmPal {
     pub(crate) async fn part_disable(&self, pid: HsmPartId) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
         match part.state()? {
-            PartState::Enabled => {
+            state if state.is_serving() => {
                 self.with_admin_io(pid, async |admin_io, _alloc| {
                     self.clear_enabled_state(admin_io, pid).await;
                 })

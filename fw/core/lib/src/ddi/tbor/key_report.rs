@@ -51,7 +51,6 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::resolve_masking_key;
 use super::validate_crypto_officer_active_session;
@@ -186,8 +185,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     validate_crypto_officer_active_session(pal, io, sess_id)?;
 
     // Reports bind the finalized partition policy, so the partition must
-    // be in the `Initialized` state even for session-scoped keys.
-    if part_state::part_state(pal, io)? != PartState::Initialized {
+    // be finalized even for session-scoped keys.
+    if !part_state::part_state(pal, io)?.is_finalized() {
         return Err(HsmError::InvalidArg);
     }
 

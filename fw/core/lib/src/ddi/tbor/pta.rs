@@ -19,7 +19,6 @@ use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use crate::part_state;
 
@@ -216,7 +215,7 @@ pub(crate) async fn pid_certificate<'p, P: HsmPal>(
     pal: &'p P,
     io: &impl HsmIo,
 ) -> HsmResult<&'p DmaBuf> {
-    if part_state::part_state(pal, io)? != PartState::Initialized {
+    if !part_state::part_state(pal, io)?.is_finalized() {
         return Err(HsmError::InvalidArg);
     }
     let out = pal.dma_alloc(io, CERT_MAX_LEN)?;

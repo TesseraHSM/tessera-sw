@@ -30,11 +30,25 @@ const DEVICE_KIND_PHYSICAL: u8 = 2;
 
 /// `PartState::Enabled` discriminant — the default provisioned state of
 /// the emulator partition before any `PartInit`.
-const PART_STATE_ENABLED: u8 = 2;
+pub(crate) const PART_STATE_ENABLED: u8 = 2;
 
 /// `PartState::Initializing` discriminant — the state a partition enters
 /// after a successful `PartInit` binds its PTA / policy / POTA thumb.
 pub(crate) const PART_STATE_INITIALIZING: u8 = 4;
+
+/// `PartState::Initialized` discriminant, after `PartFinal` and before SD provisioning.
+pub(crate) const PART_STATE_INITIALIZED: u8 = 5;
+
+/// `PartState::SdProvisioned` discriminant, after SD creation or restoration.
+pub(crate) const PART_STATE_SD_PROVISIONED: u8 = 6;
+
+pub(crate) fn assert_part_state(ctx: &TestCtx, expected: u8) {
+    let info = ctx.tbor(&TborPartInfoReq::new()).expect("PartInfo");
+    assert_eq!(
+        info.part_state, expected,
+        "unexpected partition lifecycle state"
+    );
+}
 
 /// Assert the invariant device-level fields PartInfo reports for the
 /// default provisioned partition, plus that the identity public key is

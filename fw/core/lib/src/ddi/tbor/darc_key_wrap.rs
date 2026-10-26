@@ -57,7 +57,6 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::masking_key_id_for_scope;
 use super::validate_crypto_officer_active_session;
@@ -155,7 +154,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // The TMK and the local key are masked under partition-provisioned
         // masking keys, available only once the SD is initialized.
-        if part_state::part_state(pal, io)? != PartState::Initialized {
+        if !part_state::part_state(pal, io)?.is_finalized() {
             return Err(HsmError::InvalidArg);
         }
         if !part_state::part_is_sd_initialized(pal, io)? {
