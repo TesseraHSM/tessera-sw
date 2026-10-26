@@ -828,11 +828,13 @@ fn main() -> ! {
         // 0x2002_1C60 (cp/hsm/mem-map/src/soc.rs). The SP's crash dumps in
         // these blocks are only ever read, after a core has crashed.
         //
-        // FP2, left the least, also takes the start of the block it reaches
-        // at 0x2003_0000, the one FP1 shares with it. FP1 keeps its own
-        // fast memory elsewhere and so never touches that block below the
-        // admin core's AES-GCM IV queue at 0x1A1C (FP1's 0x2002_1A1C, global
-        // 0xA322_1A1C). No other core reaches through 0x2003_0000.
+        // FP2, left the least, also takes the block it reaches at
+        // 0x2003_0000, the one FP1 shares with it, around the admin core's
+        // AES-GCM IV queue: 0x1A1C to 0x2050 there (FP1's 0x2002_1A1C, global
+        // 0xA322_1A1C; cp/hsm/mem-map/src/soc.rs), and below FP1's own
+        // liveliness word at 0x3DDC. FP1 keeps its fast memory in its own
+        // upper dTCM and so never touches that block otherwise, and no
+        // other core reaches through 0x2003_0000.
         let (near, bytes) = match id {
             1 => (0x2000_8000usize, 0x8000usize),
             2 => (0x2002_0000, 0x1C60),
@@ -841,6 +843,7 @@ fn main() -> ! {
         pqc_ml::spill::init_near(near as *mut i32, bytes / 4);
         if id == 2 {
             pqc_ml::spill::init_near(0x2003_0000 as *mut i32, 0x1A1C / 4);
+            pqc_ml::spill::init_near(0x2003_2050 as *mut i32, (0x3DDC - 0x2050) / 4);
         }
     }
 
