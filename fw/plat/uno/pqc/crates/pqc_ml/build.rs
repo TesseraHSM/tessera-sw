@@ -24,7 +24,7 @@ fn main() {
             .file("asm/dsa_unpack_z.S")
             .file("asm/dsa_check.S")
             .file("asm/dsa_decompose.S")
-            .file("asm/dsa_unpack_eta.S")
+            .file("asm/dsa_unpack_key.S")
             .compile("pqc_ml_asm");
 
         println!("cargo:rerun-if-changed=asm/keccakf1600.S");
@@ -38,6 +38,6 @@ fn main() {
         println!("cargo:rerun-if-changed=asm/dsa_unpack_z.S");
         println!("cargo:rerun-if-changed=asm/dsa_check.S");
         println!("cargo:rerun-if-changed=asm/dsa_decompose.S");
-        println!("cargo:rerun-if-changed=asm/dsa_unpack_eta.S");
+        println!("cargo:rerun-if-changed=asm/dsa_unpack_key.S");
     }
 }

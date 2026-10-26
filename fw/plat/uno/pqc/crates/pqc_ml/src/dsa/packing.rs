@@ -100,19 +100,27 @@ pub(crate) fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
         }
     }
 
-    // s1 and s2, eta - f in 3 or 4 bits: eight fields to every d bytes, a
-    // word load each (asm/dsa_unpack_eta.S), not a test a coefficient for
-    // the word running out.
+    // The secret key's s1 and s2, eta - f in 3 or 4 bits, and t0, 2^12 - f
+    // in 13: eight fields to every d bytes, each group a word load or a few
+    // (asm/dsa_unpack_key.S), not a test a coefficient for the word running
+    // out.
     #[cfg(target_arch = "arm")]
-    if d <= 4 {
+    if d <= 4 || d == 13 {
         extern "C" {
             fn pqc_ml_dsa_unpack_eta(r: *mut i32, s: *const u8, eta: i32, d: u32);
+            fn pqc_ml_dsa_unpack_t0(r: *mut i32, s: *const u8);
         }
         // SAFETY: `a` is 256 coefficients with the 8d-word stream staged at
-        // its end, which the routine reads from there, as it may.
+        // its end, which the routines read from there, as they may.
         unsafe {
             let a = a.as_mut_ptr();
-            pqc_ml_dsa_unpack_eta(a, a.add(top).cast(), bias, d);
+            let s = a.add(top).cast();
+            if d == 13 {
+                debug_assert_eq!(bias, 1 << 12);
+                pqc_ml_dsa_unpack_t0(a, s);
+            } else {
+                pqc_ml_dsa_unpack_eta(a, s, bias, d);
+            }
         }
         return;
     }
