@@ -6,6 +6,9 @@
 #[path = "../../common.rs"]
 mod common;
 
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -19,12 +22,9 @@ use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::PolicyKeyKind;
 use tsra_ddi_tbor_types::PolicyPubKey;
-use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::SAPOTA_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::TborPartInitReq;
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 
 /// Fixed valid POTA thumbprint, mirroring the canonical fixture used by
 /// the `PartInit` integration suite.

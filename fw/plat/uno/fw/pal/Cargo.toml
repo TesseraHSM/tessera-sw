@@ -38,10 +38,13 @@ tsra_fw_uno_drivers_rng = { workspace = true }
 tsra_fw_uno_drivers_semihosting = { optional = true, workspace = true }
 tsra_fw_uno_drivers_session_store = { workspace = true }
 tsra_fw_uno_drivers_sha = { workspace = true }
+tsra_fw_uno_drivers_soc = { workspace = true }
 tsra_fw_uno_drivers_systick = { workspace = true }
+tsra_fw_uno_drivers_tcon = { workspace = true }
 tsra_fw_uno_drivers_upka = { workspace = true }
 tsra_fw_uno_drivers_vault = { workspace = true }
 tsra_fw_uno_error = { workspace = true }
+tsra_fw_uno_fault = { workspace = true }
 tsra_fw_uno_key_vault = { workspace = true }
 tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }

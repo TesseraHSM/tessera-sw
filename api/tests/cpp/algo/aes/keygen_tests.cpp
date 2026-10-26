@@ -566,6 +566,7 @@ TEST_F(tsra_aes_keygen, aes_key_derive_rejects_unsupported_algorithm)
 // AES XTS Tests
 // ================================
 
+#if !SESSION_EX_TESTS
 /// verifies AES-XTS 512-bit key generation succeeds with correct properties and capabilities
 TEST_F(tsra_aes_keygen, session_aes_xts_512_key_generation)
 {
@@ -1460,6 +1461,8 @@ TEST_F(tsra_aes_keygen, aes_gcm_key_gen_multiple_invalid_capabilities)
     });
 }
 
+#endif
+
 /// verifies AES key generation rejects null algorithm, property list, and output handle
 TEST_F(tsra_aes_keygen, aes_key_gen_rejects_null_arguments)
 {
@@ -1651,6 +1654,7 @@ TEST_F(tsra_aes_keygen, aes_key_gen_missing_session_property_uses_default)
     });
 }
 
+#if !SESSION_EX_TESTS
 /// verifies key generation result kind follows the requested key properties
 TEST_F(tsra_aes_keygen, aes_key_gen_kind_property_controls_generated_key_kind)
 {
@@ -1828,6 +1832,8 @@ TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_derive_flag_fails)
         );
     });
 }
+
+#endif
 
 /// verifies AES key generation rejects missing required KIND property
 TEST_F(tsra_aes_keygen, aes_key_gen_missing_kind_property_fails)
@@ -2075,7 +2081,11 @@ TEST_F(tsra_aes_keygen, aes_key_unmask_rejects_null_arguments)
 
         tsra_buffer valid_ptr_zero_len_buf{ dummy_masked_blob.data(), 0 };
         err = tsra_key_unmask(session, TSRA_KEY_KIND_AES, &valid_ptr_zero_len_buf, key.get_ptr());
+#if SESSION_EX_TESTS
+        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+#else
         ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+#endif
         ASSERT_EQ(key.get(), 0u);
     });
 }
