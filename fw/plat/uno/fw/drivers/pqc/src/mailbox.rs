@@ -152,24 +152,25 @@ pub const SLOT_CT_IN_OFFSET: usize = SLOT_PK_OFFSET;
 
 /// Offset of the expanded secret key supplied to **signing**, mirroring
 /// the FP side: signing packs its message at [`SLOT_MSG_OFFSET`], its
-/// context string straight after it, and the key straight after that, word
-/// aligned.
+/// context string straight after it, and the key straight after that, on a
+/// 32-byte boundary so its rows are read in whole bursts.
 ///
 /// Signing keeps its signature at the far end of the slot (see
 /// [`sign_sig_offset`]), so when the inputs are short enough -- a message
-/// and context up to 720 bytes together, for ML-DSA-65 -- a signature
+/// and context up to 704 bytes together, for ML-DSA-65 -- a signature
 /// waiting to be read and the next signing request's inputs fit side by
 /// side, and the core can start on that request while the signature is
 /// read ([`PqcEngine::release_early`](crate::PqcEngine)). ML-DSA-87's never
 /// do, and wait their turn.
 pub const fn sign_key_offset(msg_len: usize, ctx_len: usize) -> usize {
-    (SLOT_MSG_OFFSET + msg_len + ctx_len + 3) & !3
+    (SLOT_MSG_OFFSET + msg_len + ctx_len + 31) & !31
 }
 
-/// Offset of a `sig_len`-byte signature **produced by signing**: the end of
-/// the slot.
+/// Offset of a `sig_len`-byte signature **produced by signing**: the end
+/// of the slot, rounded down to a 32-byte boundary so it is read and
+/// written in whole bursts rather than a word at a time.
 pub const fn sign_sig_offset(sig_len: usize) -> usize {
-    SLOT_SIZE - sig_len
+    (SLOT_SIZE - sig_len) & !31
 }
 
 /// Length of the ML-KEM shared secret.

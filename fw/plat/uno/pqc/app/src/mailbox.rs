@@ -180,22 +180,23 @@ pub const SLOT_KEY_OUT_OFFSET: usize = SLOT_MSG_OFFSET;
 
 /// Offset of the expanded secret key **supplied to signing**, mirroring
 /// the HSM side: signing packs its message at [`SLOT_MSG_OFFSET`], its
-/// context string straight after it, and the key straight after that, word
-/// aligned.
+/// context string straight after it, and the key straight after that, on a
+/// 32-byte boundary so its rows are read in whole bursts.
 ///
 /// The signature goes back at the far end of the slot
-/// ([`sign_sig_offset`]), so when the inputs are short enough -- any
-/// message and context up to 723 bytes together, for ML-DSA-65 -- the HSM
+/// ([`sign_sig_offset`]), so when the inputs are short enough -- a
+/// message and context up to 704 bytes together, for ML-DSA-65 -- the HSM
 /// can stage the next signing request while this one's signature is still
 /// being read.
 pub const fn sign_key_offset(msg_len: usize, ctx_len: usize) -> usize {
-    (SLOT_MSG_OFFSET + msg_len + ctx_len + 3) & !3
+    (SLOT_MSG_OFFSET + msg_len + ctx_len + 31) & !31
 }
 
 /// Offset of a `sig_len`-byte signature **produced by signing**: the end
-/// of the slot.
+/// of the slot, rounded down to a 32-byte boundary so it is read and
+/// written in whole bursts rather than a word at a time.
 pub const fn sign_sig_offset(sig_len: usize) -> usize {
-    SLOT_SIZE - sig_len
+    (SLOT_SIZE - sig_len) & !31
 }
 
 /// Offset of the private key **supplied to decapsulation**.
