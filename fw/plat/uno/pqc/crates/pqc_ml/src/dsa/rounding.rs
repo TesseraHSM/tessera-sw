@@ -151,11 +151,8 @@ pub fn poly_decompose(w1: &mut Poly, w0: &mut Poly, w: &Poly, gamma2: u32) {
 /// `w` must be an inverse-NTT output (magnitude below q), as both callers'
 /// are.
 pub fn poly_decompose_pack(packed: &mut [u8], w: &mut Poly, gamma2: u32) {
-    // Dispatch once, not once per coefficient. `decompose` selects on
-    // gamma2 internally, and inlined into a 256-iteration loop that put the
-    // test and a pair of magic constants inside the loop body. Choosing the
-    // variant here makes gamma2 a compile-time constant, so the test
-    // disappears and the multipliers fold into immediates.
+    // Dispatch once, not once per coefficient: each gamma2 has its own
+    // routine, its constants fixed.
     match gamma2 {
         261888 => decompose_pack::<261888>(&mut packed[..N / 2], w),
         95232 => decompose_pack::<95232>(&mut packed[..3 * N / 4], w),
@@ -164,126 +161,24 @@ pub fn poly_decompose_pack(packed: &mut [u8], w: &mut Poly, gamma2: u32) {
 }
 
 fn decompose_pack<const G: u32>(packed: &mut [u8], w: &mut Poly) {
-    // Two coefficients at a time; the per-coefficient arithmetic is the
-    // same as the scalar loop below, `a1 * 2 * G` folded into an `mls`.
-    // 4-bit w1 packs a byte a pair; 6-bit, three bytes every two pairs.
+    // asm/dsa_decompose.S: r1 by a multiply by its divisor's reciprocal
+    // rather than the reference's shifts, and the wrap at the top of [0, q)
+    // by the identity 16 * 2 * gamma2 = q - 1 (44 * 2 * gamma2 for the
+    // other gamma2), the same results bit for bit.
     #[cfg(target_arch = "arm")]
     {
+        extern "C" {
+            fn pqc_ml_dsa_decompose_pack32(w: *mut i32, packed: *mut u8);
+            fn pqc_ml_dsa_decompose_pack88(w: *mut i32, packed: *mut u8);
+        }
         // SAFETY: `w` is one word-aligned `[i32; N]`, each pair read before
         // it is written back; `packed` is N / 2 or 3N / 4 bytes, exactly
-        // what the loop stores.
+        // what each routine stores.
         unsafe {
             if G == 261888 {
-                core::arch::asm!(
-                    "2:",
-                    "ldrd   {w0}, {w1}, [{wp}]",
-                    "and    {t}, {q}, {w0}, asr #31",
-                    "add    {w0}, {w0}, {t}",
-                    "and    {t}, {q}, {w1}, asr #31",
-                    "add    {w1}, {w1}, {t}",
-                    "add    {h0}, {w0}, #127",
-                    "add    {h1}, {w1}, #127",
-                    "lsr    {h0}, {h0}, #7",
-                    "lsr    {h1}, {h1}, #7",
-                    "add    {h0}, {h0}, {h0}, lsl #10",
-                    "add    {h1}, {h1}, {h1}, lsl #10",
-                    "add    {h0}, {h0}, #0x200000",
-                    "add    {h1}, {h1}, #0x200000",
-                    "ubfx   {h0}, {h0}, #22, #4",
-                    "ubfx   {h1}, {h1}, #22, #4",
-                    "mls    {w0}, {h0}, {g2x2}, {w0}",
-                    "mls    {w1}, {h1}, {g2x2}, {w1}",
-                    "sub    {t}, {half}, {w0}",
-                    "and    {t}, {q}, {t}, asr #31",
-                    "sub    {w0}, {w0}, {t}",
-                    "sub    {t}, {half}, {w1}",
-                    "and    {t}, {q}, {t}, asr #31",
-                    "sub    {w1}, {w1}, {t}",
-                    "orr    {w0}, {h0}, {w0}, lsl #6",
-                    "orr    {w1}, {h1}, {w1}, lsl #6",
-                    "strd   {w0}, {w1}, [{wp}], #8",
-                    "orr    {t}, {h0}, {h1}, lsl #4",
-                    "strb   {t}, [{op}], #1",
-                    "subs   {n}, {n}, #1",
-                    "bne    2b",
-                    wp = inout(reg) w.as_mut_ptr() => _,
-                    op = inout(reg) packed.as_mut_ptr() => _,
-                    n = inout(reg) N / 2 => _,
-                    q = in(reg) Q as i32,
-                    half = in(reg) (Q as i32 - 1) / 2,
-                    g2x2 = in(reg) 2 * G as i32,
-                    w0 = out(reg) _,
-                    w1 = out(reg) _,
-                    h0 = out(reg) _,
-                    h1 = out(reg) _,
-                    t = out(reg) _,
-                    options(nostack),
-                );
+                pqc_ml_dsa_decompose_pack32(w.as_mut_ptr(), packed.as_mut_ptr());
             } else {
-                core::arch::asm!(
-                    "2:",
-                    "ldrd   {w0}, {w1}, [{wp}]",
-                    "and    {t}, {q}, {w0}, asr #31",
-                    "add    {w0}, {w0}, {t}",
-                    "and    {t}, {q}, {w1}, asr #31",
-                    "add    {w1}, {w1}, {t}",
-                    "add    {h0}, {w0}, #127",
-                    "add    {h1}, {w1}, #127",
-                    "lsr    {h0}, {h0}, #7",
-                    "lsr    {h1}, {h1}, #7",
-                    "mul    {h0}, {h0}, {k}",
-                    "mul    {h1}, {h1}, {k}",
-                    "add    {h0}, {h0}, #0x800000",
-                    "add    {h1}, {h1}, #0x800000",
-                    "asr    {h0}, {h0}, #24",
-                    "asr    {h1}, {h1}, #24",
-                    "rsb    {t}, {h0}, #43",
-                    "and    {t}, {h0}, {t}, asr #31",
-                    "eor    {h0}, {h0}, {t}",
-                    "rsb    {t}, {h1}, #43",
-                    "and    {t}, {h1}, {t}, asr #31",
-                    "eor    {h1}, {h1}, {t}",
-                    "mls    {w0}, {h0}, {g2x2}, {w0}",
-                    "mls    {w1}, {h1}, {g2x2}, {w1}",
-                    "sub    {t}, {half}, {w0}",
-                    "and    {t}, {q}, {t}, asr #31",
-                    "sub    {w0}, {w0}, {t}",
-                    "sub    {t}, {half}, {w1}",
-                    "and    {t}, {q}, {t}, asr #31",
-                    "sub    {w1}, {w1}, {t}",
-                    "orr    {w0}, {h0}, {w0}, lsl #6",
-                    "orr    {w1}, {h1}, {w1}, lsl #6",
-                    "strd   {w0}, {w1}, [{wp}], #8",
-                    // Even pairs start the 24 bits of four coefficients,
-                    // odd pairs finish and store them.
-                    "tst    {n}, #1",
-                    "orr    {h0}, {h0}, {h1}, lsl #6",
-                    "bne    4f",
-                    "mov    {x}, {h0}",
-                    "b      3f",
-                    "4:",
-                    "orr    {x}, {x}, {h0}, lsl #12",
-                    "strh   {x}, [{op}], #2",
-                    "lsr    {x}, {x}, #16",
-                    "strb   {x}, [{op}], #1",
-                    "3:",
-                    "subs   {n}, {n}, #1",
-                    "bne    2b",
-                    wp = inout(reg) w.as_mut_ptr() => _,
-                    op = inout(reg) packed.as_mut_ptr() => _,
-                    n = inout(reg) N / 2 => _,
-                    q = in(reg) Q as i32,
-                    half = in(reg) (Q as i32 - 1) / 2,
-                    g2x2 = in(reg) 2 * G as i32,
-                    k = in(reg) 11275,
-                    w0 = out(reg) _,
-                    w1 = out(reg) _,
-                    h0 = out(reg) _,
-                    h1 = out(reg) _,
-                    t = out(reg) _,
-                    x = out(reg) _,
-                    options(nostack),
-                );
+                pqc_ml_dsa_decompose_pack88(w.as_mut_ptr(), packed.as_mut_ptr());
             }
         }
     }
