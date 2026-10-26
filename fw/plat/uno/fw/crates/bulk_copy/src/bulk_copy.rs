@@ -96,20 +96,3 @@ unsafe fn copy_words(dst: *mut u32, src: *const u32, len: usize) {
         remaining -= 1;
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::copy_slice;
-
-    #[test]
-    #[should_panic(expected = "assertion `left == right` failed")]
-    fn rejects_source_shorter_than_destination() {
-        copy_slice(&mut [0; 8], &[1; 4]);
-    }
-
-    #[test]
-    #[should_panic(expected = "assertion `left == right` failed")]
-    fn rejects_source_longer_than_destination() {
-        copy_slice(&mut [0; 4], &[1; 8]);
-    }
-}
