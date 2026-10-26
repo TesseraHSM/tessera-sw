@@ -225,7 +225,6 @@ pub fn sign_internal(
             }
         }
         let c_sparse = &c_sparse[..c_n];
-        ntt::ntt(&mut c_hat);
 
         // ---- the norm checks, exactly, without the products ----
         // An attempt must keep every coefficient of w0 - c*s2 inside
@@ -286,6 +285,9 @@ pub fn sign_internal(
             kappa += l as u16;
             continue;
         }
+        // Only the products below want c transformed, so only an attempt
+        // that passes the checks above pays for it.
+        ntt::ntt(&mut c_hat);
 
         // ---- hint pass: r0 and c*t0 row by row, hints incrementally ----
         let hint_offset = ctilde_len + l * params.z_pack_bytes();
