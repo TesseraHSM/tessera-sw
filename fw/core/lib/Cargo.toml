@@ -39,3 +39,6 @@ zerocopy.workspace = true
 default = ["std"]
 std = []
 tracing = []
+
+[lints]
+workspace = true

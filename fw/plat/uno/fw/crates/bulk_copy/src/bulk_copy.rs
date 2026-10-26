@@ -13,13 +13,12 @@
 ///
 /// # Panics
 ///
-/// Debug-asserts that `dst.len() == src.len()`. In release builds,
-/// mismatched lengths cause undefined behavior on ARM (unsafe asm).
-/// All callers in this crate pass const-generic fixed-size arrays.
+/// Panics if `dst.len() != src.len()`.
 #[inline(always)]
 pub fn copy_slice(dst: &mut [u32], src: &[u32]) {
-    debug_assert_eq!(dst.len(), src.len());
+    assert_eq!(dst.len(), src.len());
     #[cfg(target_arch = "arm")]
+    // SAFETY: Equally sized, disjoint u32 slices provide aligned, valid memory for every word.
     unsafe {
         copy_words(dst.as_mut_ptr(), src.as_ptr(), dst.len());
     }
@@ -41,6 +40,7 @@ unsafe fn copy_words(dst: *mut u32, src: *const u32, len: usize) {
 
     // Bulk: 8 words (32 bytes) per iteration via LDM/STM
     while remaining >= 8 {
+        // SAFETY: The caller guarantees valid, aligned, disjoint buffers; at least 8 words remain.
         unsafe {
             asm!(
                 "ldm {src}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
@@ -63,6 +63,7 @@ unsafe fn copy_words(dst: *mut u32, src: *const u32, len: usize) {
 
     // Tail: 4 words via LDM/STM
     if remaining >= 4 {
+        // SAFETY: The pointers have advanced together within the buffers; at least 4 words remain.
         unsafe {
             asm!(
                 "ldm {src}!, {{r2, r3, r4, r5}}",
@@ -81,6 +82,7 @@ unsafe fn copy_words(dst: *mut u32, src: *const u32, len: usize) {
 
     // Final tail: scalar copy for remaining 0-3 words
     while remaining > 0 {
+        // SAFETY: Both aligned pointers remain within their buffers while a word remains.
         unsafe {
             asm!(
                 "ldr {tmp}, [{src}], #4",

@@ -58,7 +58,7 @@ pub(crate) async fn reopen_session<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let mut body: DdiReopenSessionReq = decoder.decode_data()?;
+    let mut body: DdiReopenSessionReq<'_> = decoder.decode_data()?;
     let reopen_id = HsmSessId::from(hdr.sess_id.ok_or(HsmError::SessionExpected)?);
 
     let _lock = pal.partition_lock(io).await?;

@@ -76,7 +76,7 @@ pub(crate) async fn attest_key<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let body: DdiAttestKeyReq = decoder.decode_data()?;
+    let body: DdiAttestKeyReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let key_id = HsmKeyId::from(body.key_id);
 

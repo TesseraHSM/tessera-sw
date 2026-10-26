@@ -76,7 +76,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
-    let mut body: DdiEstablishCredentialReq = decoder.decode_data()?;
+    let mut body: DdiEstablishCredentialReq<'_> = decoder.decode_data()?;
 
     let _lock = pal.partition_lock(io).await?;
 

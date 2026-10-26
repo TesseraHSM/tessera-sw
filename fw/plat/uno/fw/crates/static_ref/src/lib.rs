@@ -9,6 +9,7 @@
 //! Vendored from [tock](https://github.com/tock/tock) kernel utilities.
 
 #![no_std]
+#![allow(unsafe_code)]
 
 use core::ops::Deref;
 use core::ptr::NonNull;

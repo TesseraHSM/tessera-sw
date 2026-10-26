@@ -8,5 +8,6 @@
 //!
 //! Falls back to `copy_from_slice` on non-ARM targets.
 
+#[allow(unsafe_code)]
 mod bulk_copy;
 pub use bulk_copy::*;

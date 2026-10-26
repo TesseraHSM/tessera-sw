@@ -24,3 +24,6 @@ critical-section = { workspace = true }
 embassy-time-driver = { workspace = true }
 embassy-time-queue-utils = { workspace = true }
 portable-atomic = { workspace = true }
+
+[lints]
+workspace = true

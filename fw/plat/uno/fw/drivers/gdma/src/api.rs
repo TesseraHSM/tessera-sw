@@ -1,9 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(unsafe_code)]
+
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::ReadWriteable;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
@@ -20,10 +26,6 @@ use tsra_fw_uno_reg_soc::io_gsram::GdmaSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_STATUS;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_SQ_COUNT;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::ReadWriteable;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::ChannelConfig;
 use crate::GdmaBuf;
@@ -85,6 +87,7 @@ pub struct GdmaDriver<const DEPTH: usize> {
 // cooperative scheduling. The raw pointers reference MMIO or DTCM memory with
 // a single owner in practice; Send/Sync are needed for Embassy's static tasks.
 unsafe impl<const DEPTH: usize> Send for GdmaDriver<DEPTH> {}
+// SAFETY: Single-core cooperative scheduling serializes access to the owned queues and state.
 unsafe impl<const DEPTH: usize> Sync for GdmaDriver<DEPTH> {}
 
 impl<const DEPTH: usize> core::fmt::Debug for GdmaDriver<DEPTH> {
@@ -140,6 +143,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             let _ = Self::_ASSERT_SQ_ENTRY_ALIGN;
         }
 
+        // SAFETY: GDMA_BASE is the aligned, permanently mapped GDMA register block.
         let regs = unsafe { StaticRef::new(GDMA_BASE as *const GdmaRegs) };
 
         let tags = core::array::from_fn(|_| TagSlot {
@@ -193,7 +197,9 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         cq.head.write(CQ_CHANNEL_HEAD::HEAD.val(0));
         self.regs.cq_ctrl[ch].write(CQ_CTRL::DEPTH.val(DEPTH as u32));
 
+        // SAFETY: Configuration reserves an aligned, writable CQ shadow word before enable.
         unsafe { (self.config.cq_tail_shadow as *mut u32).write_volatile(0) };
+        // SAFETY: Configuration reserves an aligned, writable SQ shadow word before enable.
         unsafe { (self.config.sq_head_shadow as *mut u32).write_volatile(0) };
 
         // Enable
@@ -232,6 +238,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
 
             let next_tail = (s.sq_tail + 1) & Self::MASK;
             if next_tail == s.sq_head_cached {
+                // SAFETY: The configured SQ shadow word remains aligned and mapped for the driver.
                 s.sq_head_cached = unsafe { self.sq_head_shadow.read_volatile() } as u16;
                 if next_tail == s.sq_head_cached {
                     s.sq_head_cached = self.regs.sq[self.channel as usize]
@@ -245,6 +252,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             }
 
             let slot = (s.sq_tail & Self::MASK) as usize;
+            // SAFETY: The masked producer index selects an unused entry in the configured SQ ring.
             let sq = unsafe { &mut *self.sq_ring.add(slot) };
 
             // Build the 16-DW SQ entry locally, then bulk-copy to MMIO.
@@ -278,6 +286,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             ];
 
             let sq_ptr = sq as *mut GdmaSqEntry as *mut u32;
+            // SAFETY: The asserted SQ layout is sixteen aligned u32 words exclusively borrowed here.
             let sq_words = unsafe { core::slice::from_raw_parts_mut(sq_ptr, entry.len()) };
             tsra_fw_bulk_copy::copy_slice(sq_words, &entry);
 
@@ -346,10 +355,12 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         self.state.with(|s| {
             // Clear NVIC pending bit for this interrupt
 
+            // SAFETY: The configured CQ shadow word remains aligned and mapped for the driver.
             let tail = unsafe { self.cq_tail_shadow.read_volatile() } as u16;
 
             while s.cq_head != tail {
                 let cq_slot = (s.cq_head & Self::MASK) as usize;
+                // SAFETY: The masked consumer index selects an available entry in the CQ ring.
                 let cq_entry = unsafe { &*self.cq_ring.add(cq_slot) };
 
                 let tag = cq_entry.status.read(GDMA_CQ_STATUS::TAG) as u16;

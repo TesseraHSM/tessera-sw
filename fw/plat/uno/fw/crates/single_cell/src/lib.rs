@@ -14,6 +14,7 @@
 //!   back into `with` on the same instance).
 
 #![no_std]
+#![allow(unsafe_code)]
 
 use core::cell::UnsafeCell;
 

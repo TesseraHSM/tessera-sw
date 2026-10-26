@@ -57,7 +57,7 @@ struct ParsedCertificate<'a> {
 
 /// Verify a non-empty root-first DER chain and return certificate summaries.
 ///
-/// Checks the supplied order, certificate validity at the current time, and
+/// Checks each adjacent signature, supplied order, validity at the current time, and
 /// the certificate path using the repository's cross-platform X.509 verifier.
 /// The first certificate is the caller-supplied trust anchor; this does not
 /// independently establish its trust, verify its self-signature, or check
@@ -108,6 +108,15 @@ pub fn verify_certificate_chain(chain: &[Vec<u8>]) -> Result<Vec<CertificateSumm
                 .with_context(|| format!("load certificate {}", index + 1))
         })
         .collect::<Result<Vec<_>>>()?;
+    for (index, pair) in certificates.windows(2).enumerate() {
+        anyhow::ensure!(
+            pair[1]
+                .verify_signature(&pair[0])
+                .with_context(|| format!("verify certificate {} signature", index + 2))?,
+            "certificate {} signature does not match the preceding certificate",
+            index + 2,
+        );
+    }
     // Path builders can skip unused issuers, so verify every supplied certificate.
     for (index, certificate) in certificates.iter().enumerate() {
         let issuers = if index == 0 {

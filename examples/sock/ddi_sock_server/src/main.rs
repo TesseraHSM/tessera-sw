@@ -66,6 +66,12 @@ mod linux {
             Ok(socket)
         }
 
+        #[allow(unsafe_code)]
+        fn into_async_fd(self) -> io::Result<AsyncFd<Self>> {
+            // SAFETY: Socket owns its descriptor, never replaces it, and closes it only on drop.
+            unsafe { AsyncFd::register(self) }.map_err(Into::into)
+        }
+
         fn accept(&self) -> io::Result<Self> {
             Self::new_nonblocking(sys::accept(self.fd))
         }
@@ -317,7 +323,8 @@ mod linux {
     }
 
     async fn run_server(hsm: Arc<StdHsm>, listener: Socket) -> Result<(), String> {
-        let listener = AsyncFd::new(listener)
+        let listener = listener
+            .into_async_fd()
             .map_err(|error| format!("failed to register vsock listener: {error}"))?;
         hsm.part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
             .await
@@ -339,7 +346,8 @@ mod linux {
                     Err(_) => {}
                 }
             };
-            let stream = AsyncFd::new(stream)
+            let stream = stream
+                .into_async_fd()
                 .map_err(|error| format!("failed to register vsock connection: {error}"))?;
             println!("DDI client connected");
             let hsm = Arc::clone(&hsm);
@@ -449,7 +457,7 @@ mod linux {
                     .set_write_timeout(Some(Duration::from_secs(10)))
                     .expect("write timeout");
                 let server = Socket::new_nonblocking(server.into_raw_fd()).expect("server socket");
-                let server = AsyncFd::new(server).expect("async server");
+                let server = server.into_async_fd().expect("async server");
                 let serving = tokio::spawn(serve_connection(server, hsm));
 
                 tokio::task::spawn_blocking(move || {

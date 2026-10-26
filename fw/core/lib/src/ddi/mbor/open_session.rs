@@ -75,7 +75,7 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<DispatchResult<'p>> {
-    let mut body: DdiOpenSessionReq = decoder.decode_data()?;
+    let mut body: DdiOpenSessionReq<'_> = decoder.decode_data()?;
 
     let _lock = pal.partition_lock(io).await?;
 

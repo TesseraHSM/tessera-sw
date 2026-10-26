@@ -120,6 +120,7 @@ pub mod interrupt {
         INTC_IPC = 129,
     }
 
+    // SAFETY: Each variant is a valid Uno NVIC interrupt number.
     unsafe impl cortex_m::interrupt::InterruptNumber for Interrupt {
         fn number(self) -> u16 {
             self as u16

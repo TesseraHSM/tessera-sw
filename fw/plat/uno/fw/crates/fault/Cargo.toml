@@ -32,3 +32,6 @@ tsra_fw_hsm_core_tracing.workspace = true
 tsra_fw_uno_drivers_semihosting = { optional = true, workspace = true }
 tsra_fw_uno_error.workspace = true
 tsra_fw_uno_reg_cortex_m.workspace = true
+
+[lints]
+workspace = true

@@ -23,3 +23,6 @@ tsra_fw_uno_error = { workspace = true }
 tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
 zerocopy = { features = ["derive"], workspace = true }
+
+[lints]
+workspace = true

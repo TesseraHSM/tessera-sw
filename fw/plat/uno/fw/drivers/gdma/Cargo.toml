@@ -22,3 +22,6 @@ tsra_fw_static_ref = { workspace = true }
 tsra_fw_uno_drivers_nvic = { workspace = true }
 tsra_fw_uno_error = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
+
+[lints]
+workspace = true

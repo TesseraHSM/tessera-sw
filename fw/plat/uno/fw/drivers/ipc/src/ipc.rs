@@ -8,13 +8,13 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_reg_soc::intc::regs::IntcRegs;
 use tsra_fw_uno_reg_soc::intc::INTC_BASE;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 /// IPC message length in DWORDs (16 × 4 = 64 bytes).
 pub const IPC_MSG_DWORDS: usize = 16;
@@ -199,6 +199,7 @@ impl PairState {
         let entry_offset = pi as usize * self.msg_len as usize;
         let words = src.len().min(self.msg_len as usize);
         for (i, item) in src.iter().enumerate().take(words) {
+            // SAFETY: The caller supplies an in-bounds ring slot; words is capped at its length.
             unsafe { self.tx_ring.add(entry_offset + i).write_volatile(*item) };
         }
     }
@@ -210,6 +211,7 @@ impl PairState {
         let entry_offset = ci as usize * self.msg_len as usize;
         let words = dst.len().min(self.msg_len as usize);
         for (i, item) in dst.iter_mut().enumerate().take(words) {
+            // SAFETY: The caller supplies an in-bounds ring slot; words is capped at its length.
             *item = unsafe { self.rx_ring.add(entry_offset + i).read_volatile() };
         }
     }
@@ -249,6 +251,7 @@ impl<const MAX_PAIRS: usize> IpcDriver<MAX_PAIRS> {
     pub fn new(config: IpcConfig<'_>) -> Self {
         assert!(config.pairs.len() <= MAX_PAIRS);
 
+        // SAFETY: INTC_BASE is the aligned, permanently mapped interrupt-controller block.
         let regs = unsafe { StaticRef::new(INTC_BASE as *const IntcRegs) };
 
         let mut desc_to_pair = [0xFFu8; 32];
@@ -376,8 +379,13 @@ impl<const MAX_PAIRS: usize> IpcDriver<MAX_PAIRS> {
             self.state.with(|s| {
                 let p = &mut s.pairs[pair as usize];
 
-                let pi = unsafe { p.rx_pi.read_volatile() } as u16;
-                let ci = unsafe { p.rx_ci.read_volatile() } as u16;
+                // SAFETY: The pair configuration supplies aligned, mapped RX index words.
+                let (pi, ci) = unsafe {
+                    (
+                        p.rx_pi.read_volatile() as u16,
+                        p.rx_ci.read_volatile() as u16,
+                    )
+                };
 
                 if pi == ci {
                     p.waker.register(cx.waker());
@@ -385,8 +393,10 @@ impl<const MAX_PAIRS: usize> IpcDriver<MAX_PAIRS> {
                 }
 
                 // Copy message from RX ring and advance CI
+                // SAFETY: The configured consumer index selects a published message slot.
                 unsafe { p.copy_from_rx(ci, buf) };
                 let new_ci = (ci + 1) % p.depth;
+                // SAFETY: The pair owns the aligned, mapped RX consumer-index word.
                 unsafe { p.rx_ci.write_volatile(new_ci as u32) };
 
                 Poll::Ready(0)
@@ -402,11 +412,14 @@ impl<const MAX_PAIRS: usize> IpcDriver<MAX_PAIRS> {
         self.state.with(|s| {
             let p = &mut s.pairs[pair as usize];
 
+            // SAFETY: The pair configuration supplies an aligned, mapped TX producer-index word.
             let pi = unsafe { p.tx_pi.read_volatile() } as u16;
 
             // Copy message into TX ring and advance PI
+            // SAFETY: The pair's producer index selects the response slot reserved by the protocol.
             unsafe { p.copy_to_tx(pi, msg) };
             let new_pi = (pi + 1) % p.depth;
+            // SAFETY: The pair owns the aligned, mapped TX producer-index word.
             unsafe { p.tx_pi.write_volatile(new_pi as u32) };
 
             // Ring outbound descriptor
@@ -456,13 +469,16 @@ impl<const MAX_PAIRS: usize> IpcDriver<MAX_PAIRS> {
                         slot_id = Some(sid);
                     }
 
-                    let sid = slot_id.unwrap();
+                    let sid = slot_id.expect("send slot allocated above");
                     p.in_flight = Some(sid);
 
                     // Send the message
+                    // SAFETY: The pair configuration supplies an aligned, mapped producer index.
                     let pi = unsafe { p.tx_pi.read_volatile() } as u16;
+                    // SAFETY: This in-flight sender owns the protocol's next TX slot.
                     unsafe { p.copy_to_tx(pi, msg) };
                     let new_pi = (pi + 1) % p.depth;
+                    // SAFETY: The pair owns the aligned, mapped producer-index word.
                     unsafe { p.tx_pi.write_volatile(new_pi as u32) };
 
                     cortex_m::asm::dmb();
@@ -472,7 +488,7 @@ impl<const MAX_PAIRS: usize> IpcDriver<MAX_PAIRS> {
                 }
 
                 // Phase 2: wait for response
-                let sid = slot_id.unwrap();
+                let sid = slot_id.expect("send slot allocated before sending");
                 let slot = &mut s.send_slots[sid as usize];
                 if !slot.completed {
                     slot.waker.register(cx.waker());
@@ -480,12 +496,19 @@ impl<const MAX_PAIRS: usize> IpcDriver<MAX_PAIRS> {
                 }
 
                 // Response arrived — read from RX ring
-                let pi = unsafe { p.rx_pi.read_volatile() } as u16;
-                let ci = unsafe { p.rx_ci.read_volatile() } as u16;
+                // SAFETY: The pair configuration supplies aligned, mapped RX index words.
+                let (pi, ci) = unsafe {
+                    (
+                        p.rx_pi.read_volatile() as u16,
+                        p.rx_ci.read_volatile() as u16,
+                    )
+                };
 
                 if pi != ci {
+                    // SAFETY: The consumer index selects a response published by the peer.
                     unsafe { p.copy_from_rx(ci, resp) };
                     let new_ci = (ci + 1) % p.depth;
+                    // SAFETY: The pair owns the aligned, mapped consumer-index word.
                     unsafe { p.rx_ci.write_volatile(new_ci as u32) };
                 }
 

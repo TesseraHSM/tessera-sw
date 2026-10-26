@@ -71,8 +71,8 @@ TEST_F(init_resiliency_stress, cert_chain_under_reset)
 }
 
 /// A single worker thread repeatedly calls init() with resiliency enabled
-/// while a dedicated thread fires resets. Every init() call must
-/// eventually succeed.
+/// while a dedicated thread fires resets. At most five transient
+/// DDI_CMD_FAILURE errors are tolerated.
 ///
 TEST_F(init_resiliency_stress, init_part_under_reset)
 {
@@ -82,6 +82,21 @@ TEST_F(init_resiliency_stress, init_part_under_reset)
         ASSERT_NE(r.part, 0u);
         auto part_guard = scope_guard::make_scope_exit([&] { tsra_part_close(r.part); });
         auto sess_guard = scope_guard::make_scope_exit([&] { tsra_sess_close(r.session); });
+
+        // The PID public key is stable across resets. Prepare POTA before
+        // starting resets so its public-key query cannot race with them.
+        PartInitConfig init_config{};
+        make_part_init_config(r.part, init_config);
+        if (init_config.backup_config.source == TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER)
+        {
+            // init_bk3 is one-shot across resets; re-init must reuse MOBK.
+            init_config.mobk_cache = query_mobk_property(r.part);
+            ASSERT_FALSE(init_config.mobk_cache.empty()) << "Baseline init must provide MOBK";
+            init_config.obk_buf = { init_config.mobk_cache.data(),
+                                    static_cast<uint32_t>(init_config.mobk_cache.size()) };
+            init_config.backup_config.owner_backup_key = nullptr;
+            init_config.backup_config.masked_owner_backup_key = &init_config.obk_buf;
+        }
 
         auto reset_h = open_reset_handle(path);
         auto reset_guard = scope_guard::make_scope_exit([&] { tsra_part_close(reset_h); });
@@ -95,9 +110,6 @@ TEST_F(init_resiliency_stress, init_part_under_reset)
                     tsra_credentials creds{};
                     std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
                     std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
-
-                    PartInitConfig init_config{};
-                    make_part_init_config(r.part, init_config);
 
                     tsra_resiliency_config res_config{};
                     make_resiliency_config_in(*r.resiliency_ctx, res_config);
@@ -113,6 +125,8 @@ TEST_F(init_resiliency_stress, init_part_under_reset)
                     );
                     if (err != TSRA_STATUS_SUCCESS)
                     {
+                        EXPECT_EQ(err, TSRA_STATUS_DDI_CMD_FAILURE)
+                            << "init iteration " << i << " failed with unexpected status";
                         // DDI_CMD_FAILURE (-8) is a known transient error when
                         // a reset races with the DDI call. Tolerated by the
                         // max_allowed_fails parameter below.

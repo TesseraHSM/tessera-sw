@@ -1,9 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(unsafe_code)]
+
 use core::future::poll_fn;
 use core::task::Poll;
 
+use embassy_sync::waitqueue::WakerRegistration;
+use tock_registers::interfaces::ReadWriteable;
+use tock_registers::interfaces::Readable;
+use tock_registers::interfaces::Writeable;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
@@ -18,10 +24,6 @@ use tsra_fw_uno_reg_soc::io_gsram::OSQ_TAG;
 use tsra_fw_uno_reg_soc::oic::regs::OicRegs;
 use tsra_fw_uno_reg_soc::oic::*;
 use tsra_fw_uno_trace::tracing::*;
-use embassy_sync::waitqueue::WakerRegistration;
-use tock_registers::interfaces::ReadWriteable;
-use tock_registers::interfaces::Readable;
-use tock_registers::interfaces::Writeable;
 
 use crate::ChannelConfig;
 use crate::OicError;
@@ -82,6 +84,7 @@ pub struct OicDriver<const DEPTH: usize> {
 
 // SAFETY: Single-core Cortex-M with cooperative scheduling.
 unsafe impl<const DEPTH: usize> Send for OicDriver<DEPTH> {}
+// SAFETY: Single-core cooperative scheduling serializes access to the owned queues and state.
 unsafe impl<const DEPTH: usize> Sync for OicDriver<DEPTH> {}
 
 impl<const DEPTH: usize> core::fmt::Debug for OicDriver<DEPTH> {
@@ -120,6 +123,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             let _ = Self::_ASSERT_MIN;
         }
 
+        // SAFETY: OIC_BASE is the aligned, permanently mapped OIC register block.
         let regs = unsafe { StaticRef::new(OIC_BASE as *const OicRegs) };
 
         let tags = core::array::from_fn(|_| TagSlot {
@@ -176,6 +180,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         }
 
         // ── Step 1: Reset TX queue shadow PI ───────────────────────
+        // SAFETY: Configuration reserves an aligned, writable shadow word before channel enable.
         unsafe { (config.ocq_tail_shadow as *mut u32).write_volatile(0) };
 
         // ── Step 2: Program OCQ channel ────────────────────────────
@@ -215,8 +220,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     /// Allocate a tag, post an OSQ entry for the given IO index,
     /// and ring the doorbell.
     fn submit(&self, index: u16) -> HsmResult<u16> {
+        // SAFETY: The caller supplies an active IO slot whose completion remains live until send.
         let io_cq_entry = unsafe { &*self.io_cq.add(index as usize) };
         let data_addr = io_cq_entry as *const _ as u32;
+        // SAFETY: The active IO slot has a corresponding initialized metadata entry.
         let meta = unsafe { &*self.io_meta.add(index as usize) };
         let queue_id = meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u8;
 
@@ -239,6 +246,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             // axi_id is always 0 (SoC) — HW routes via the queue manager
             // based on tx_queue_id, not via AXI port.
             let slot = (s.osq_tail & Self::MASK) as usize;
+            // SAFETY: The masked producer index selects a free entry in the configured OSQ ring.
             let entry = unsafe { &mut *self.osq_ring.add(slot) };
             entry.addr_lo.set(data_addr);
             entry.addr_hi.set(0);
@@ -306,10 +314,12 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     /// Drain all available OCQ entries and wake their awaiters.
     pub fn wake(&self, irq: u16) {
         self.state.with(|s| {
+            // SAFETY: The configured shadow word remains aligned and mapped for the driver.
             let tail = unsafe { self.ocq_tail_shadow.read_volatile() } as u16;
 
             while s.ocq_head != tail {
                 let ocq_slot = (s.ocq_head & Self::MASK) as usize;
+                // SAFETY: The masked consumer index selects an available entry in the OCQ ring.
                 let ocq_entry = unsafe { &*self.ocq_ring.add(ocq_slot) };
 
                 let tag = ocq_entry.tag.read(OCQ_TAG::TAG) as u16;
