@@ -272,7 +272,6 @@ fn service(core_id: u8, req: &mailbox::Request) {
 fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
     let ek_len = variant.pk_size();
     let dk_len = variant.sk_size();
-    mailbox::inputs_taken(core_id, req.seq);
 
     // Both cleared through `fast_zero` rather than the array initialiser.
     //
@@ -492,7 +491,6 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     let params = variant.params();
     let pk_len = params.pk_bytes();
     let sk_len = params.sk_bytes();
-    mailbox::inputs_taken(core_id, req.seq);
 
     // SAFETY: written in full by `fast_zero` before any read.
     let mut work = core::mem::MaybeUninit::<[[i32; 256]; pqc_ml::DSA_WORK_POLYS_SHORT]>::uninit();
@@ -594,7 +592,7 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
             return;
         };
 
-        pqc_ml::ml_dsa_sign(
+        pqc_ml::ml_dsa_sign_guarded(
             variant,
             &mut sig_buf[..sig_len],
             msg,
@@ -602,6 +600,7 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
             sk,
             &req.rnd,
             work,
+            || mailbox::await_t0(core_id, req.seq),
         )
     };
 

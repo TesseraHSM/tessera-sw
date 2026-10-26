@@ -184,7 +184,7 @@ pub(crate) unsafe fn load_packed_words(dst: &mut [i32], src: *const i32) {
 /// Both pointers must be valid for `words` words and word aligned, and
 /// `words` must be a multiple of eight.
 #[inline(always)]
-pub(crate) unsafe fn burst(dst: *mut i32, src: *const i32, words: usize) {
+pub unsafe fn burst(dst: *mut i32, src: *const i32, words: usize) {
     // Eight words per transaction rather than four. GSRAM costs 121.6
     // cycles for a single-word load and 35.4 per word in a four-word
     // burst, so most of it is per-transaction overhead -- which a wider

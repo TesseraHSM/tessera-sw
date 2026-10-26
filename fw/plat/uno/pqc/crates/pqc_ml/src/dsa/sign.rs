@@ -21,6 +21,11 @@ use crate::keccak::XofPrefix;
 use crate::spill::PACKED_WORDS;
 use crate::DsaWorkBuf;
 
+/// Sign `mu` under the expanded key `sk` (FIPS 204 ML-DSA.Sign_internal).
+///
+/// Nothing reads `t0` (the tail of `sk`) before `before_t0` returns, which
+/// is called once, by the first attempt to pass the norm checks: a caller
+/// whose `t0` may still be arriving waits in it.
 pub fn sign_internal(
     params: &MlDsaParams,
     sig: &mut [u8],
@@ -28,7 +33,9 @@ pub fn sign_internal(
     sk: &[u8],
     rnd: &[u8; 32],
     work: &mut DsaWorkBuf,
+    before_t0: impl FnOnce(),
 ) -> bool {
+    let mut before_t0 = Some(before_t0);
     let k = params.k as usize;
     let l = params.l as usize;
 
@@ -71,17 +78,10 @@ pub fn sign_internal(
     // borrow of them.
     let near = &mut unsafe { crate::spill::near() };
     let near_slots: usize = near.iter().map(|r| r.len() / PACKED_WORDS).sum();
-    // The work slots keep their elements whole, a word to a coefficient, if
-    // the whole matrix still fits without the spill that way: a cached
-    // product is then the plain multiply-accumulate. Otherwise they pack
-    // them too, fitting a third more, and the multiply-accumulate unpacks
-    // as it reads.
-    let whole = a_polys.len() + near_slots >= k * l;
-    let cache_slots = if whole {
-        a_polys.len()
-    } else {
-        a_polys.len() * N / PACKED_WORDS
-    };
+    // The work slots pack their elements the same way: a third more of the
+    // matrix fits, and the multiply-accumulate unpacks as it reads, in the
+    // time its multiplies take anyway.
+    let cache_slots = a_polys.len() * N / PACKED_WORDS;
     let held = cache_slots + (k * l).saturating_sub(cache_slots).min(near_slots);
     let mut a_cached = false;
 
@@ -133,22 +133,16 @@ pub fn sign_internal(
                 } else {
                     crate::spill::matrix_slot(t - held)
                 };
-                // Kept whole: derived straight into its slot the first
-                // time, and used from there.
-                let kept_whole = whole && t < cache_slots;
-                if kept_whole || !a_cached || (t >= held && spill.is_none()) {
-                    // Otherwise the first attempt, or an element with
-                    // nowhere to be kept: derive it.
-                    let a = if kept_whole { &mut a_polys[t] } else { &mut c_hat };
-                    if !(kept_whole && a_cached) {
-                        sampling::poly_uniform(a, rho, i as u8, j as u8);
-                    }
+                if !a_cached || (t >= held && spill.is_none()) {
+                    // The first attempt, or an element with nowhere to be
+                    // kept: derive it.
+                    sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
                     if j == 0 {
-                        ntt::poly_pointwise_montgomery(&mut w[i], a, y_hat);
+                        ntt::poly_pointwise_montgomery(&mut w[i], &c_hat, y_hat);
                     } else {
-                        ntt::poly_pointwise_acc_montgomery(&mut w[i], a, y_hat);
+                        ntt::poly_pointwise_acc_montgomery(&mut w[i], &c_hat, y_hat);
                     }
-                    if !a_cached && !kept_whole {
+                    if !a_cached {
                         if t < cache_slots {
                             crate::spill::pack(
                                 &mut a_polys.as_flattened_mut()[t * PACKED_WORDS..],
@@ -303,6 +297,9 @@ pub fn sign_internal(
         // s2). ML-DSA-44's c*t0 can exceed gamma2, so it forms r0 = w0 -
         // c*s2 in w_i and checks c*t0 on its own.
         let ct0_checked = params.tau as u32 * (1 << 12) >= params.gamma2;
+        if let Some(f) = before_t0.take() {
+            f();
+        }
         for i in 0..k {
             let s2 = &sk[sk_s2_offset + i * params.eta_pack_bytes()..];
             let t0 = &sk[sk_t0_offset + i * 416..];

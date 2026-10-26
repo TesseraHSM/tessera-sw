@@ -178,7 +178,15 @@ pub(crate) fn sign_request(
     staged.ctx_len = ctx.len() as u32;
     staged.operands[0] = Operand::new(msg, mailbox::SLOT_MSG_OFFSET);
     staged.operands[1] = Operand::new(ctx, mailbox::SLOT_MSG_OFFSET + msg.len());
-    staged.operands[2] = Operand::new(sec_key, mailbox::sign_key_offset(msg.len(), ctx.len()));
+    // The key's t0 -- k rows of 416 bytes at its end -- is not read until an
+    // attempt passes, so it may follow the rest (see `Staged::deferred`):
+    // without it the key fits beside the last signature, and the core can
+    // start while that is read.
+    let key_at = mailbox::sign_key_offset(msg.len(), ctx.len());
+    let t0_at = sec_key.len() - (mldsa_pub_key_len(kind)? - 32) / 320 * 416;
+    let (head, t0) = sec_key.split_at(t0_at);
+    staged.operands[2] = Operand::new(head, key_at);
+    staged.deferred = Operand::new(t0, key_at + t0_at);
     staged.outputs[0] = (mailbox::sign_sig_offset(sig.len()), sig.len());
     Ok(staged)
 }
@@ -441,11 +449,14 @@ impl PqcEngine<'_> {
         }
     }
 
-    /// Tell the core the last request's outputs have been read.
+    /// Tell the core the last request's outputs have been read, and write
+    /// any input the request handed on ahead of that held back.
     fn collected(&self) {
         if self.seq != 0 {
             mailbox::mark_collected(self.id, self.seq);
         }
+        let id = self.id;
+        self.driver.state.with(|s| s.flush_deferred(id));
     }
 
     /// Collect the signature signing request `seq` left in this core's

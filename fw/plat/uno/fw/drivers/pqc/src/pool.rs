@@ -14,6 +14,7 @@ use embassy_sync::waitqueue::WakerRegistration;
 use crate::doorbell;
 use crate::mailbox;
 use crate::mailbox::SEED_LEN;
+use crate::request::PqcOp;
 use crate::types::EngineId;
 use crate::types::EngineState;
 use crate::types::QueueSlotState;
@@ -46,8 +47,17 @@ pub(crate) struct EngineSlot {
     pub(crate) prestaged: u8,
 
     /// Whether the running request's core will mark its inputs taken:
-    /// signing reads its key in place to the end, and never does.
+    /// signing reads its key in place to the end, and key generation has
+    /// none to give back.
     pub(crate) gives_inputs_back: bool,
+
+    /// While set, a request posted here is handed on ahead of the reading of
+    /// the last one's outputs, and its deferred input waits in `deferred`
+    /// (see [`PqcState::flush_deferred`]).
+    pub(crate) holding_outputs: bool,
+
+    /// The running request's deferred input, not yet written.
+    pub(crate) deferred: Operand,
 }
 
 impl EngineSlot {
@@ -58,6 +68,8 @@ impl EngineSlot {
             outputs: [(0, 0); 2],
             prestaged: NO_SLOT,
             gives_inputs_back: false,
+            holding_outputs: false,
+            deferred: Operand::NONE,
         }
     }
 }
@@ -128,6 +140,18 @@ impl Operand {
             offset,
         }
     }
+
+    /// Copy this into engine `id`'s operand slot.
+    fn stage(&self, id: EngineId) {
+        if self.len != 0 {
+            // SAFETY: see `Staged`: the buffer behind the pointer is still
+            // borrowed by the suspended task that staged it.
+            let data = unsafe { core::slice::from_raw_parts(self.ptr, self.len) };
+            // Cannot fail: every operand was checked against its region's
+            // maximum before it was staged.
+            let _ = mailbox::write_slot(id, self.offset, data);
+        }
+    }
 }
 
 /// A request left by a task queued for an engine so the engine can start on
@@ -150,6 +174,9 @@ pub(crate) struct Staged {
     pub(crate) sig_len: u32,
     pub(crate) pub_key_len: u32,
     pub(crate) operands: [Operand; 4],
+    /// An input the core reads late -- signing's t0 -- which may follow the
+    /// request into the slot once the last request's outputs are read.
+    pub(crate) deferred: Operand,
     /// Where the outputs will go, which a request staged behind this one
     /// must keep clear of.
     pub(crate) outputs: Outputs,
@@ -173,6 +200,7 @@ impl Staged {
             sig_len: 0,
             pub_key_len: 0,
             operands: [Operand::NONE; 4],
+            deferred: Operand::NONE,
             outputs: [(0, 0); 2],
         }
     }
@@ -201,17 +229,11 @@ impl Staged {
         })
     }
 
-    /// Copy the bulk inputs into engine `id`'s operand slot.
+    /// Copy the bulk inputs, but for the deferred one, into engine `id`'s
+    /// operand slot.
     fn stage_operands(&self, id: EngineId) {
         for o in &self.operands {
-            if o.len != 0 {
-                // SAFETY: see `Staged`: the buffer behind the pointer is
-                // still borrowed by the suspended task that staged it.
-                let data = unsafe { core::slice::from_raw_parts(o.ptr, o.len) };
-                // Cannot fail: every operand was checked against its
-                // region's maximum before it was staged.
-                let _ = mailbox::write_slot(id, o.offset, data);
-            }
+            o.stage(id);
         }
     }
 
@@ -222,6 +244,7 @@ impl Staged {
             unsafe { core::ptr::write_volatile(b, 0) };
         }
         self.operands = [Operand::NONE; 4];
+        self.deferred = Operand::NONE;
     }
 }
 
@@ -288,6 +311,15 @@ impl Responses {
         }
     }
 
+    /// The number the next request posted will carry: never zero, which
+    /// both sides take for no request at all.
+    fn next_seq(&self) -> u32 {
+        match self.request_seq.wrapping_add(1) {
+            0 => 1,
+            seq => seq,
+        }
+    }
+
     /// Post `request`, whose bulk inputs are already in engine `id`'s
     /// operand slot, ring the doorbell, and mark its response awaited.
     ///
@@ -295,7 +327,7 @@ impl Responses {
     fn post(&mut self, id: EngineId, request: &Staged) -> u32 {
         // Monotonic across all engines, so a response can never be mistaken
         // for one to an earlier request on the same core.
-        self.request_seq = self.request_seq.wrapping_add(1);
+        self.request_seq = self.next_seq();
         let seq = self.request_seq;
         mailbox::post_request(id, seq, &request.params());
         doorbell::ring(id, seq);
@@ -442,12 +474,43 @@ impl PqcState {
         if !inputs_staged {
             request.stage_operands(id);
         }
+        let e = id.raw() as usize;
+        let defer = self.engines[e].holding_outputs && request.deferred.len != 0;
+        if request.deferred.len != 0 {
+            if !defer {
+                request.deferred.stage(id);
+            }
+            // The core waits for its request's number here before it reads
+            // the deferred input; the number before it holds it back until
+            // `flush_deferred`, whatever the word held before (PSRAM keeps
+            // its contents across a reset).
+            let seq = self.responses.next_seq();
+            mailbox::set_t0_ready(id, if defer { seq.wrapping_sub(1) } else { seq });
+        }
         let seq = self.responses.post(id, request);
-        let engine = &mut self.engines[id.raw() as usize];
+        let engine = &mut self.engines[e];
         engine.inflight = seq;
         engine.outputs = request.outputs;
-        engine.gives_inputs_back = request.op != crate::request::PqcOp::MlDsaSign as u32;
+        let op = request.op;
+        engine.gives_inputs_back = op != PqcOp::MlDsaSign as u32
+            && op != PqcOp::MlDsaGenerateKey as u32
+            && op != PqcOp::MlKemGenerateKey as u32;
+        if defer {
+            engine.deferred = request.deferred;
+        }
         seq
+    }
+
+    /// Write the input held back from the request handed on to engine `id`
+    /// ahead of the reading of the last one's outputs, now they are read,
+    /// and tell the core. Nothing if there is none.
+    pub(crate) fn flush_deferred(&mut self, id: EngineId) {
+        let engine = &mut self.engines[id.raw() as usize];
+        if engine.deferred.len != 0 {
+            engine.deferred.stage(id);
+            engine.deferred = Operand::NONE;
+            mailbox::set_t0_ready(id, engine.inflight);
+        }
     }
 
     /// Stage the next waiting request's inputs in the operand slot of each
@@ -549,7 +612,9 @@ impl PqcState {
             None => false,
         };
         if clear {
+            self.engines[id.raw() as usize].holding_outputs = true;
             self.release_engine(id);
+            self.engines[id.raw() as usize].holding_outputs = false;
         }
         clear
     }

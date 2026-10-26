@@ -126,6 +126,9 @@ mod word {
     /// The last request whose inputs this core has taken out of the
     /// operand slot (see [`inputs_taken`](super::inputs_taken)).
     pub const INPUTS_TAKEN: usize = 27;
+    /// The last signing request whose t0 is in the operand slot (see
+    /// [`await_t0`](super::await_t0)).
+    pub const T0_READY: usize = 28;
 }
 
 /// Operand slot layout.
@@ -394,21 +397,7 @@ pub fn stage(dst: &mut [u8], src: &[u8]) {
 
     // SAFETY: both sides are word aligned and valid for `bursts * 8` words,
     // and the slot never overlaps a dTCM staging buffer.
-    unsafe {
-        core::arch::asm!(
-            "2:",
-            "ldmia {s}!, {{r0, r1, r2, r3, r4, r5, r8, r9}}",
-            "stmia {d}!, {{r0, r1, r2, r3, r4, r5, r8, r9}}",
-            "subs  {n}, {n}, #1",
-            "bne   2b",
-            s = inout(reg) sp => _,
-            d = inout(reg) dp => _,
-            n = inout(reg) bursts => _,
-            out("r0") _, out("r1") _, out("r2") _, out("r3") _,
-            out("r4") _, out("r5") _, out("r8") _, out("r9") _,
-            options(nostack),
-        );
-    }
+    unsafe { pqc_ml::spill::burst(dp.cast(), sp.cast(), bursts * 8) };
 
     let done = bursts * 32;
     dst[done..].copy_from_slice(&src[done..]);
@@ -469,13 +458,32 @@ pub fn take_request(core_id: u8) -> Option<Request> {
 /// writing outputs. Request numbers only grow, so any number at or past
 /// `prev` will do; zero means there was no previous request.
 pub fn await_collected(core_id: u8, prev: u32) {
-    if prev == 0 {
+    await_seq(core_id, word::COLLECTED, prev);
+}
+
+/// Wait until signing request `seq`'s t0 -- the end of its secret key -- is
+/// in the operand slot.
+///
+/// The HSM may post a signing request before the previous signature has
+/// been read out from where the key's t0 goes, so the core starts at once:
+/// it then writes t0 once the signature is read, long before an attempt
+/// passes its norm checks and wants it.
+pub fn await_t0(core_id: u8, seq: u32) {
+    await_seq(core_id, word::T0_READY, seq);
+}
+
+/// Wait until mailbox word `w` reads `seq` or later; zero is no request.
+/// Request numbers only grow, so a request the HSM gave up on cannot wedge
+/// the core.
+#[inline(never)]
+fn await_seq(core_id: u8, w: usize, seq: u32) {
+    if seq == 0 {
         return;
     }
     let mb = mailbox(core_id);
     // SAFETY: as `take_request`.
-    while (unsafe { read_volatile(mb.add(word::COLLECTED)) }.wrapping_sub(prev) as i32) < 0 {}
-    // The outputs' writes must not be observed before the read above.
+    while (unsafe { read_volatile(mb.add(w)) }.wrapping_sub(seq) as i32) < 0 {}
+    // Accesses after this must not be observed before the read above.
     cortex_m::asm::dmb();
 }
 

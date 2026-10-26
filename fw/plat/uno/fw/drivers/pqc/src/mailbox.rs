@@ -94,6 +94,7 @@ mod word {
     pub const PUB_KEY_LEN: usize = 25;
     pub const COLLECTED: usize = 26;
     pub const INPUTS_TAKEN: usize = 27;
+    pub const T0_READY: usize = 28;
 }
 
 /// Operand slot layout, mirroring the FP side.
@@ -460,6 +461,17 @@ pub(crate) fn mark_collected(engine: EngineId, seq: u32) {
         // The slot reads before must complete before the core can see this.
         dmb();
         write_volatile(mailbox(engine).add(word::COLLECTED), seq);
+    }
+}
+
+/// Tell `engine`'s core that signing request `seq`'s t0 is in its operand
+/// slot (see [`PqcState::flush_deferred`](crate::pool::PqcState::flush_deferred)).
+pub(crate) fn set_t0_ready(engine: EngineId, seq: u32) {
+    // SAFETY: as `post_request`.
+    unsafe {
+        // The writes of t0 must be visible before this.
+        dmb();
+        write_volatile(mailbox(engine).add(word::T0_READY), seq);
     }
 }
 

@@ -155,11 +155,29 @@ pub fn ml_dsa_sign(
     rnd: &[u8; 32],
     work: &mut DsaWorkBuf,
 ) -> bool {
+    ml_dsa_sign_guarded(variant, sig, msg, ctx, sk, rnd, work, || {})
+}
+
+/// As [`ml_dsa_sign`], but reading nothing of `t0` -- the part of `sk`
+/// after s2 -- before `before_t0` returns, which is called once, by the
+/// first attempt to pass the norm checks: a caller whose `t0` may still be
+/// arriving waits in it.
+#[allow(clippy::too_many_arguments)]
+pub fn ml_dsa_sign_guarded(
+    variant: MlDsaVariant,
+    sig: &mut [u8],
+    msg: &[u8],
+    ctx: &[u8],
+    sk: &[u8],
+    rnd: &[u8; 32],
+    work: &mut DsaWorkBuf,
+    before_t0: impl FnOnce(),
+) -> bool {
     let p = variant.params();
     let tr = &sk[64..128];
     let mut mu = [0u8; 64];
     compute_mu_pure(&mut mu, tr, ctx, msg);
-    dsa::sign::sign_internal(p, sig, &mu, sk, rnd, work)
+    dsa::sign::sign_internal(p, sig, &mu, sk, rnd, work, before_t0)
 }
 
 /// Verify a signature (external interface, pure mode).
@@ -192,7 +210,7 @@ pub fn ml_dsa_sign_internal(
     rnd: &[u8; 32],
     work: &mut DsaWorkBuf,
 ) -> bool {
-    dsa::sign::sign_internal(variant.params(), sig, mu, sk, rnd, work)
+    dsa::sign::sign_internal(variant.params(), sig, mu, sk, rnd, work, || {})
 }
 
 /// Verify with pre-computed mu (internal interface, externalMu=true).
@@ -218,7 +236,7 @@ pub fn ml_dsa_sign_internal_msg(
     let tr = &sk[64..128];
     let mut mu = [0u8; 64];
     compute_mu_internal(&mut mu, tr, msg);
-    dsa::sign::sign_internal(variant.params(), sig, &mu, sk, rnd, work)
+    dsa::sign::sign_internal(variant.params(), sig, &mu, sk, rnd, work, || {})
 }
 
 /// Verify with internal interface, externalMu=false.
