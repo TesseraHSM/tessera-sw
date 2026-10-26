@@ -78,10 +78,17 @@ pub fn sign_internal(
     // borrow of them.
     let near = &mut unsafe { crate::spill::near() };
     let near_slots: usize = near.iter().map(|r| r.len() / PACKED_WORDS).sum();
-    // The work slots pack their elements the same way: a third more of the
-    // matrix fits, and the multiply-accumulate unpacks as it reads, in the
-    // time its multiplies take anyway.
-    let cache_slots = a_polys.len() * N / PACKED_WORDS;
+    // The work slots keep their elements whole, a word to a coefficient, if
+    // the whole matrix still fits without the spill that way: each is then
+    // derived straight into its slot, never packed. Otherwise they pack
+    // them too, fitting a third more, and the multiply-accumulate unpacks
+    // as it reads.
+    let whole = a_polys.len() + near_slots >= k * l;
+    let cache_slots = if whole {
+        a_polys.len()
+    } else {
+        a_polys.len() * N / PACKED_WORDS
+    };
     let held = cache_slots + (k * l).saturating_sub(cache_slots).min(near_slots);
     let mut a_cached = false;
 
@@ -133,16 +140,22 @@ pub fn sign_internal(
                 } else {
                     crate::spill::matrix_slot(t - held)
                 };
-                if !a_cached || (t >= held && spill.is_none()) {
-                    // The first attempt, or an element with nowhere to be
-                    // kept: derive it.
-                    sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
-                    if j == 0 {
-                        ntt::poly_pointwise_montgomery(&mut w[i], &c_hat, y_hat);
-                    } else {
-                        ntt::poly_pointwise_acc_montgomery(&mut w[i], &c_hat, y_hat);
+                // Kept whole: derived straight into its slot the first
+                // time, and used from there.
+                let kept_whole = whole && t < cache_slots;
+                if kept_whole || !a_cached || (t >= held && spill.is_none()) {
+                    // Otherwise the first attempt, or an element with
+                    // nowhere to be kept: derive it.
+                    let a = if kept_whole { &mut a_polys[t] } else { &mut c_hat };
+                    if !(kept_whole && a_cached) {
+                        sampling::poly_uniform(a, rho, i as u8, j as u8);
                     }
-                    if !a_cached {
+                    if j == 0 {
+                        ntt::poly_pointwise_montgomery(&mut w[i], a, y_hat);
+                    } else {
+                        ntt::poly_pointwise_acc_montgomery(&mut w[i], a, y_hat);
+                    }
+                    if !a_cached && !kept_whole {
                         if t < cache_slots {
                             crate::spill::pack(
                                 &mut a_polys.as_flattened_mut()[t * PACKED_WORDS..],
