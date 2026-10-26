@@ -98,20 +98,23 @@ mod word {
 
 /// Operand slot layout, mirroring the FP side.
 ///
-/// One packing serves every operation. Signing and verification carry the
-/// 64-byte message representative `mu` in the message region, hashed here
-/// from the message and context string (see [`crate::hash`]), so the
-/// context region is unused.
+/// One packing serves every operation but signing. Verify forces it to be
+/// tight: it is the only command carrying all four operands at once, and at
+/// 586 + 255 + 4627 + 2592 = 8060 B it fills the slot exactly.
 ///
 /// ```text
 ///   offset      max    operand
-///        0      586    message (64-byte mu for signing and verification)
-///      588      255    context string (unused)
+///        0      586    message
+///      588      255    context string
 ///      844     4627    signature
 ///     5472     2592    public key
 ///                      = 8064, the whole slot
 /// ```
+///
+/// Signing packs its inputs tighter instead (see [`sign_key_offset`]).
 pub const SLOT_MSG_OFFSET: usize = 0;
+/// Offset of the context string within the operand slot (verification).
+pub const SLOT_CTX_OFFSET: usize = 588;
 /// Offset of the signature within the operand slot.
 pub const SLOT_SIG_OFFSET: usize = 844;
 
@@ -148,15 +151,20 @@ pub const SLOT_KEY_IN_OFFSET: usize = SLOT_SIG_OFFSET;
 pub const SLOT_CT_IN_OFFSET: usize = SLOT_PK_OFFSET;
 
 /// Offset of the expanded secret key supplied to **signing**, mirroring
-/// the FP side: straight after the 64-byte `mu` in the message region.
+/// the FP side: signing packs its message at [`SLOT_MSG_OFFSET`], its
+/// context string straight after it, and the key straight after that, word
+/// aligned.
 ///
 /// Signing keeps its signature at the far end of the slot (see
-/// [`sign_sig_offset`]), so for ML-DSA-44 and -65 a signature waiting to be
-/// read and the next signing request's inputs fit side by side, and the
-/// core can start on that request while the signature is read
-/// ([`PqcEngine::release_early`](crate::PqcEngine)). ML-DSA-87's do not,
-/// and wait their turn.
-pub const SLOT_SIGN_KEY_OFFSET: usize = SLOT_MSG_OFFSET + 64;
+/// [`sign_sig_offset`]), so when the inputs are short enough -- a message
+/// and context up to 720 bytes together, for ML-DSA-65 -- a signature
+/// waiting to be read and the next signing request's inputs fit side by
+/// side, and the core can start on that request while the signature is
+/// read ([`PqcEngine::release_early`](crate::PqcEngine)). ML-DSA-87's never
+/// do, and wait their turn.
+pub const fn sign_key_offset(msg_len: usize, ctx_len: usize) -> usize {
+    (SLOT_MSG_OFFSET + msg_len + ctx_len + 3) & !3
+}
 
 /// Offset of a `sig_len`-byte signature **produced by signing**: the end of
 /// the slot.

@@ -14,7 +14,6 @@ test = false
 embassy-futures = { workspace = true }
 embassy-sync = { workspace = true }
 embassy-time = { workspace = true }
-pqc_ml = { workspace = true }
 tsra_fw_bulk_copy = { workspace = true }
 tsra_fw_hsm_pal_traits = { workspace = true }
 tsra_fw_single_cell = { workspace = true }

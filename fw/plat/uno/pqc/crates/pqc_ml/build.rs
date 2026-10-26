@@ -4,7 +4,7 @@
 // crate -- pqm4's Keccak-f[1600] (https://github.com/mupq/pqm4) and ML-DSA
 // inverse NTT, both as scheduled for the Cortex-M7 by SLOTHY, the ML-DSA
 // forward NTT, the ML-KEM transforms, products, compression and CBD
-// sampling, and the rejection samplers' parsing.
+// sampling, and ML-DSA's rejection sampling.
 // Set CC_thumbv7em_none_eabi to your arm-none-eabi-gcc path if needed.
 
 fn main() {

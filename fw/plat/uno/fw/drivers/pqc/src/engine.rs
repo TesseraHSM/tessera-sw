@@ -9,8 +9,6 @@ use tsra_fw_uno_trace::tracing::*;
 
 use crate::api::PqcDriver;
 use crate::error::PqcError;
-use crate::hash;
-use crate::hash::HASH_LEN;
 use crate::mailbox;
 use crate::pool::Operand;
 use crate::pool::Staged;
@@ -157,17 +155,15 @@ pub(crate) fn gen_key_request(
     Ok(staged)
 }
 
-/// Check a signing request's buffers against parameter set `kind`, hash
-/// its message into `mu`, and build it carrying `mu` in the message's
-/// place; `sig` is only sized here.
-pub(crate) async fn sign_request(
+/// Check a signing request's buffers against parameter set `kind` and
+/// build it; `sig` is only sized here.
+pub(crate) fn sign_request(
     kind: HsmVaultKeyKind,
     sec_key: &[u8],
     rnd: &[u8; MLDSA_SEED_LEN],
     msg: &[u8],
     ctx: &[u8],
     sig: &[u8],
-    mu: &mut [u8; HASH_LEN],
 ) -> HsmResult<Staged> {
     if sig.len() != mldsa_sig_len(kind)?
         || sec_key.len() != mldsa_sec_key_len(kind)?
@@ -176,26 +172,25 @@ pub(crate) async fn sign_request(
     {
         return Err(PqcError::INVALID_BUFFER_SIZE);
     }
-    hash::message_representative(&sec_key[hash::SEC_KEY_TR], ctx, msg, mu).await;
     let mut staged = Staged::new(PqcOp::MlDsaSign as u32, kind.0 as u32);
     staged.rnd = *rnd;
-    staged.msg_len = HASH_LEN as u32;
-    staged.operands[0] = Operand::new(&mu[..], mailbox::SLOT_MSG_OFFSET);
-    staged.operands[1] = Operand::new(sec_key, mailbox::SLOT_SIGN_KEY_OFFSET);
+    staged.msg_len = msg.len() as u32;
+    staged.ctx_len = ctx.len() as u32;
+    staged.operands[0] = Operand::new(msg, mailbox::SLOT_MSG_OFFSET);
+    staged.operands[1] = Operand::new(ctx, mailbox::SLOT_MSG_OFFSET + msg.len());
+    staged.operands[2] = Operand::new(sec_key, mailbox::sign_key_offset(msg.len(), ctx.len()));
     staged.outputs[0] = (mailbox::sign_sig_offset(sig.len()), sig.len());
     Ok(staged)
 }
 
-/// Check a verification request's buffers against parameter set `kind`,
-/// hash its public key and message into `mu`, and build it carrying `mu` in
-/// the message's place.
-pub(crate) async fn verify_request(
+/// Check a verification request's buffers against parameter set `kind` and
+/// build it.
+pub(crate) fn verify_request(
     kind: HsmVaultKeyKind,
     pub_key: &[u8],
     msg: &[u8],
     ctx: &[u8],
     sig: &[u8],
-    mu: &mut [u8; HASH_LEN],
 ) -> HsmResult<Staged> {
     if pub_key.len() != mldsa_pub_key_len(kind)?
         || sig.len() != mldsa_sig_len(kind)?
@@ -204,25 +199,18 @@ pub(crate) async fn verify_request(
     {
         return Err(PqcError::INVALID_BUFFER_SIZE);
     }
-    let mut tr = [0u8; HASH_LEN];
-    hash::public_key_hash(pub_key, &mut tr).await;
-    hash::message_representative(&tr, ctx, msg, mu).await;
     let mut staged = Staged::new(PqcOp::MlDsaVerify as u32, kind.0 as u32);
-    staged.msg_len = HASH_LEN as u32;
+    staged.msg_len = msg.len() as u32;
+    staged.ctx_len = ctx.len() as u32;
     staged.sig_len = sig.len() as u32;
     staged.pub_key_len = pub_key.len() as u32;
-    staged.operands[0] = Operand::new(&mu[..], mailbox::SLOT_MSG_OFFSET);
-    staged.operands[1] = Operand::new(sig, mailbox::SLOT_SIG_OFFSET);
-    staged.operands[2] = Operand::new(pub_key, mailbox::SLOT_PK_OFFSET);
+    staged.operands = [
+        Operand::new(msg, mailbox::SLOT_MSG_OFFSET),
+        Operand::new(ctx, mailbox::SLOT_CTX_OFFSET),
+        Operand::new(sig, mailbox::SLOT_SIG_OFFSET),
+        Operand::new(pub_key, mailbox::SLOT_PK_OFFSET),
+    ];
     Ok(staged)
-}
-
-/// Fill in the public-key hash `tr` an ML-DSA key generation leaves out of
-/// the expanded secret key (see [`crate::hash`]).
-pub(crate) async fn complete_mldsa_sec_key(pub_key: &[u8], sec_key: &mut [u8]) {
-    let mut tr = [0u8; HASH_LEN];
-    hash::public_key_hash(pub_key, &mut tr).await;
-    sec_key[hash::SEC_KEY_TR].copy_from_slice(&tr);
 }
 
 /// Check an encapsulation request's buffers against parameter set `kind`
@@ -342,8 +330,7 @@ impl PqcEngine<'_> {
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
-        let mut mu = [0u8; HASH_LEN];
-        let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig, &mut mu).await?;
+        let mut staged = sign_request(kind, sec_key, rnd, msg, ctx, sig)?;
         let seq = self.post(&mut staged);
         self.finish_sign(seq, sig, false).await
     }
@@ -422,8 +409,7 @@ impl PqcEngine<'_> {
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
-        let mut mu = [0u8; HASH_LEN];
-        let mut staged = verify_request(kind, pub_key, msg, ctx, sig, &mut mu).await?;
+        let mut staged = verify_request(kind, pub_key, msg, ctx, sig)?;
         let seq = self.post(&mut staged);
         self.finish_verify(seq).await
     }
@@ -553,13 +539,8 @@ impl PqcEngine<'_> {
         pub_key: &mut [u8],
         sec_key: &mut [u8],
     ) -> HsmResult<()> {
-        let dsa = staged.op == PqcOp::MlDsaGenerateKey as u32;
         let seq = self.post(staged);
-        self.finish_gen_key(seq, pub_key, sec_key, false).await?;
-        if dsa {
-            complete_mldsa_sec_key(pub_key, sec_key).await;
-        }
-        Ok(())
+        self.finish_gen_key(seq, pub_key, sec_key, false).await
     }
 
     /// Collect the keys key generation request `seq` left in this core's

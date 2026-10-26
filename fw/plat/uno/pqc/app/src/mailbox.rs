@@ -134,21 +134,25 @@ mod word {
 /// a request never has to describe where its parts are, and inputs and
 /// outputs of the same operation never overlap.
 ///
-/// Signing and verification carry the message representative `mu` in the
-/// message region rather than the message itself: the HSM hashes the
-/// message and context string into it (see `message_representative` in
-/// `main.rs`), so neither reaches this core and the context region is
-/// unused.
+/// Verify is what forces the packing to be tight -- it is the only command
+/// carrying all four operands at once, and at 586 + 255 + 4627 + 2592 =
+/// 8060 B it fills the slot exactly. Adding an operand, or raising any
+/// cap, needs the slot to grow.
 ///
 /// ```text
 ///   offset      max    operand
-///        0      586    message (64-byte mu for signing and verification)
-///      588      255    context string (unused)
+///        0      586    message
+///      588      255    context string
 ///      844     4627    signature
 ///     5472     2592    public key
 ///                      = 8064, the whole slot
 /// ```
+///
+/// Signing packs its inputs tighter instead (see [`sign_key_offset`]).
 pub const SLOT_MSG_OFFSET: usize = 0;
+
+/// Offset of the context string within the operand slot (verification).
+pub const SLOT_CTX_OFFSET: usize = 588;
 
 /// Offset of the signature within the operand slot.
 pub const SLOT_SIG_OFFSET: usize = 844;
@@ -174,13 +178,19 @@ pub const SLOT_CT_OFFSET: usize = SLOT_SIG_OFFSET;
 /// ```
 pub const SLOT_KEY_OUT_OFFSET: usize = SLOT_MSG_OFFSET;
 
-/// Offset of the expanded secret key **supplied to signing**: straight
-/// after the 64-byte `mu`, mirroring the HSM side.
+/// Offset of the expanded secret key **supplied to signing**, mirroring
+/// the HSM side: signing packs its message at [`SLOT_MSG_OFFSET`], its
+/// context string straight after it, and the key straight after that, word
+/// aligned.
 ///
 /// The signature goes back at the far end of the slot
-/// ([`sign_sig_offset`]), so for ML-DSA-44 and -65 the HSM can stage the
-/// next signing request while this one's signature is still being read.
-pub const SLOT_SIGN_KEY_OFFSET: usize = SLOT_MSG_OFFSET + 64;
+/// ([`sign_sig_offset`]), so when the inputs are short enough -- any
+/// message and context up to 723 bytes together, for ML-DSA-65 -- the HSM
+/// can stage the next signing request while this one's signature is still
+/// being read.
+pub const fn sign_key_offset(msg_len: usize, ctx_len: usize) -> usize {
+    (SLOT_MSG_OFFSET + msg_len + ctx_len + 3) & !3
+}
 
 /// Offset of a `sig_len`-byte signature **produced by signing**: the end
 /// of the slot.

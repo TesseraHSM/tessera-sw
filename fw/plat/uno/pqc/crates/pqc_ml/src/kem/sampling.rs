@@ -27,27 +27,6 @@ pub fn poly_uniform(a: &mut Poly, rho: &XofPrefix, i: u8, j: u8) {
         ctx.squeeze_words(&mut buf);
         let groups = buf.as_chunks::<3>().0;
 
-        // As in `dsa::sampling::poly_uniform`: `asm/rej.S` takes every
-        // group sure to fit, the loop below the rest.
-        #[cfg(target_arch = "arm")]
-        let groups = {
-            extern "C" {
-                fn pqc_ml_kem_rej(a: *mut i16, ctr: u32, buf: *const u32, groups: u32) -> u32;
-            }
-            // SAFETY: `a` has room for N coefficients and the routine stores
-            // at most N - ctr of them; `buf` holds the groups it reads.
-            let r = unsafe {
-                pqc_ml_kem_rej(
-                    a.as_mut_ptr(),
-                    ctr as u32,
-                    buf.as_ptr(),
-                    groups.len() as u32,
-                )
-            };
-            ctr = (r & 0xFFFF) as usize;
-            &groups[(r >> 16) as usize..]
-        };
-
         for w in groups {
             let (w0, w1, w2) = (u32::from_le(w[0]), u32::from_le(w[1]), u32::from_le(w[2]));
             let mut take = |d: u32| {

@@ -74,52 +74,77 @@ pub fn poly_sample_eta(a: &mut Poly, seed: &XofPrefix, nonce: u16, eta: u8) {
     let mut ctx = shake256_init();
     ctx.absorb_xof(seed, nonce, 2);
 
-    sample_eta(&mut ctx, a, eta);
+    match eta {
+        2 => sample_eta2(&mut ctx, a),
+        4 => sample_eta4(&mut ctx, a),
+        _ => {}
+    }
 }
 
-/// FIPS 204 RejBoundedPoly: each nibble n of the stream, low then high of
-/// every byte, gives eta - (n mod (2 eta + 1)) if n < 15 (eta = 2) or n < 9
-/// (eta = 4), and is skipped otherwise.
-fn sample_eta(ctx: &mut ShakeCtx, a: &mut Poly, eta: u8) {
-    // The value each nibble gives, -128 where it is skipped.
-    const R: i8 = -128;
-    const ETA2: [i8; 16] = [2, 1, 0, -1, -2, 2, 1, 0, -1, -2, 2, 1, 0, -1, -2, R];
-    const ETA4: [i8; 16] = [4, 3, 2, 1, 0, -1, -2, -3, -4, R, R, R, R, R, R, R];
-    let tab = if eta == 2 { &ETA2 } else { &ETA4 };
-
-    let mut buf = [0u32; SHAKE256_RATE / 4];
+fn sample_eta2(ctx: &mut ShakeCtx, a: &mut Poly) {
+    // eta=2: sample from {0,1,2,3,4}, map to {-2,-1,0,1,2}
+    // Each byte gives 2 samples: low nibble and high nibble
+    // t0 mod 5 - 2 where t0 is a 3-bit value... no, for eta=2:
+    // Use rejection: sample 4-bit values, accept if < 5 (but simpler below)
+    // Actually FIPS 204 uses: each byte → 2 samples via t0 = byte & 0xF, t1 = byte >> 4
+    // Then: s = t0 mod 5 ... no.
+    //
+    // FIPS 204 eta=2 sampling (Algorithm 14 "CoeffFromHalfByte"):
+    // if eta=2 and b < 15: return b mod 5 - eta
+    // But simpler approach used by reference implementation:
+    // Extract nibbles, reject if >= 15
     let mut ctr = 0;
+    let mut buf = [0u8; SHAKE256_RATE];
+    let mut pos = SHAKE256_RATE;
     while ctr < N {
-        ctx.squeeze_words(&mut buf);
+        if pos == SHAKE256_RATE {
+            ctx.squeeze(&mut buf);
+            pos = 0;
+        }
+        let byte = buf[pos];
+        pos += 1;
+        let t0 = byte & 0x0F;
+        let t1 = byte >> 4;
+        if t0 < 15 {
+            a[ctr] = 2 - (t0 as i32 % 5);
+            // Actually the formula is: (t0 % 5) gives 0..4, then eta - result
+            // which is 2 - (t0 % 5), range: -2..2 ✓
+            // Correction: the FIPS says return (b mod 5) and then sign is embedded
+            // Actually for eta=2: return 2 - (b mod 5), range [−2, 2]
+            // Wait, let me re-check: b mod 5 ∈ {0,1,2,3,4}, so eta - (b mod 5) = 2 - {0,1,2,3,4} = {2,1,0,-1,-2}
+            ctr += 1;
+        }
+        if ctr < N && t1 < 15 {
+            a[ctr] = 2 - (t1 as i32 % 5);
+            ctr += 1;
+        }
+    }
+}
 
-        // On ARM `asm/rej.S` takes the block while eight more still fit,
-        // and the loop below only the few past that.
-        #[cfg(target_arch = "arm")]
-        let used = {
-            extern "C" {
-                fn pqc_ml_dsa_eta(a: *mut i32, ctr: u32, buf: *const u32, tab: *const i8) -> u32;
-            }
-            // SAFETY: `a` has room for N coefficients and the routine stops
-            // while eight more fit; `buf` is one 34-word block and `tab` 16
-            // entries.
-            let r = unsafe { pqc_ml_dsa_eta(a.as_mut_ptr(), ctr as u32, buf.as_ptr(), tab.as_ptr()) };
-            ctr = (r & 0xFFFF) as usize;
-            (r >> 16) as usize
-        };
-        #[cfg(not(target_arch = "arm"))]
-        let used = 0;
-
-        for &w in &buf[used..] {
-            for k in 0..8 {
-                if ctr == N {
-                    return;
-                }
-                let v = tab[((w >> (4 * k)) & 15) as usize];
-                if v != R {
-                    a[ctr] = i32::from(v);
-                    ctr += 1;
-                }
-            }
+fn sample_eta4(ctx: &mut ShakeCtx, a: &mut Poly) {
+    // eta=4: each nibble directly gives value in {0..8}, map to 4 - nibble = {-4..4}
+    // No rejection needed since all 4-bit values 0..8 are valid... wait:
+    // Actually for eta=4, b < 9: return 4 - b. 4-bit nibble is 0..15.
+    // Reject if nibble >= 9.
+    let mut ctr = 0;
+    let mut buf = [0u8; SHAKE256_RATE];
+    let mut pos = SHAKE256_RATE;
+    while ctr < N {
+        if pos == SHAKE256_RATE {
+            ctx.squeeze(&mut buf);
+            pos = 0;
+        }
+        let byte = buf[pos];
+        pos += 1;
+        let t0 = byte & 0x0F;
+        let t1 = byte >> 4;
+        if t0 < 9 {
+            a[ctr] = 4 - t0 as i32;
+            ctr += 1;
+        }
+        if ctr < N && t1 < 9 {
+            a[ctr] = 4 - t1 as i32;
+            ctr += 1;
         }
     }
 }

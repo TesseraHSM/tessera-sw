@@ -44,6 +44,10 @@ pub(crate) struct EngineSlot {
     /// engine's operand slot, [`NO_SLOT`] for none (see
     /// [`PqcState::prestage`]).
     pub(crate) prestaged: u8,
+
+    /// Whether the running request's core will mark its inputs taken:
+    /// signing reads its key in place to the end, and never does.
+    pub(crate) gives_inputs_back: bool,
 }
 
 impl EngineSlot {
@@ -53,6 +57,7 @@ impl EngineSlot {
             inflight: 0,
             outputs: [(0, 0); 2],
             prestaged: NO_SLOT,
+            gives_inputs_back: false,
         }
     }
 }
@@ -441,6 +446,7 @@ impl PqcState {
         let engine = &mut self.engines[id.raw() as usize];
         engine.inflight = seq;
         engine.outputs = request.outputs;
+        engine.gives_inputs_back = request.op != crate::request::PqcOp::MlDsaSign as u32;
         seq
     }
 
@@ -457,7 +463,9 @@ impl PqcState {
     pub(crate) fn prestage(&mut self) {
         for e in 0..ENGINES {
             let engine = &self.engines[e];
-            if engine.inflight == 0 || engine.prestaged != NO_SLOT {
+            // Checking costs a PSRAM read every pass, which a signing core,
+            // reading its key out of PSRAM throughout, would be slowed by.
+            if engine.inflight == 0 || engine.prestaged != NO_SLOT || !engine.gives_inputs_back {
                 continue;
             }
             let id = EngineId::new(e as u8);

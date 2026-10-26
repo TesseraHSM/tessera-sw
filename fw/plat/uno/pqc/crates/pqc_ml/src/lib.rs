@@ -120,19 +120,14 @@ pub fn ml_dsa_keygen(
     sk: &mut [u8],
     work: &mut [[i32; DSA_N]],
 ) {
-    ml_dsa_keygen_external_tr(variant, xi, pk, sk, work, || {});
-    let mut tr = [0u8; 64];
-    shake256(&pk[..variant.params().pk_bytes()], &mut tr);
-    sk[64..128].copy_from_slice(&tr);
+    ml_dsa_keygen_guarded(variant, xi, pk, sk, work, || {});
 }
 
-/// As [`ml_dsa_keygen`], but leaving the public-key hash `tr = H(pk)`
-/// (bytes 64..128 of `sk`) unwritten, for a caller that computes it
-/// elsewhere.
-///
-/// Nothing is written to `sk` before `before_sk` returns, which is called
-/// once, after the first row of the matrix product.
-pub fn ml_dsa_keygen_external_tr(
+/// As [`ml_dsa_keygen`], but writing nothing to `sk` before `before_sk`
+/// returns, which is called once, after the first row of the matrix
+/// product: a caller whose `sk` may still hold the previous key, being read
+/// out, waits in it.
+pub fn ml_dsa_keygen_guarded(
     variant: MlDsaVariant,
     xi: &[u8; 32],
     pk: &mut [u8],
@@ -141,6 +136,9 @@ pub fn ml_dsa_keygen_external_tr(
     before_sk: impl FnOnce(),
 ) {
     dsa::keygen::keygen_internal(variant.params(), xi, pk, sk, work, before_sk);
+    let mut tr = [0u8; 64];
+    shake256(&pk[..variant.params().pk_bytes()], &mut tr);
+    sk[64..128].copy_from_slice(&tr);
 }
 
 // ================================================================
@@ -242,6 +240,16 @@ pub fn ml_dsa_verify_internal_msg(
 // ================================================================
 // mu computation helpers
 // ================================================================
+
+/// Pure ML-DSA's message representative: the public-key hash
+/// `tr = H(pk)` of `pk`, then `mu = H(tr || 0 || |ctx| || ctx || msg)`.
+pub fn ml_dsa_mu(variant: MlDsaVariant, pk: &[u8], ctx: &[u8], msg: &[u8]) -> [u8; 64] {
+    let mut tr = [0u8; 64];
+    shake256(&pk[..variant.params().pk_bytes()], &mut tr);
+    let mut mu = [0u8; 64];
+    compute_mu_pure(&mut mu, &tr, ctx, msg);
+    mu
+}
 
 /// Pure mode: mu = SHAKE256(tr || 0x00 || len(ctx) || ctx || msg)
 fn compute_mu_pure(mu: &mut [u8; 64], tr: &[u8], ctx: &[u8], msg: &[u8]) {
