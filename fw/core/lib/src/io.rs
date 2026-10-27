@@ -243,7 +243,7 @@ impl<P: HsmPal> Hsm<P> {
             )?;
 
         // ── Phase 2: decode + validate + dispatch (no yield) ───────
-        let (resp, session_ctrl, cqe_sess_id, cqe_app_vault_id, cqe_closed) = {
+        let (resp, session_ctrl, cqe_sess_id, cqe_closed) = {
             let req = &mut req_buf[..params.src_len];
             let mut decoder = DdiDecoder::new(req);
             let hdr: DdiReqHdr = decoder.decode_hdr().op_err(
@@ -298,17 +298,13 @@ impl<P: HsmPal> Hsm<P> {
             // a successful CloseSession additionally sets `session_closed`.
             // Both are left cleared on any dispatch failure so the fields are
             // only populated on success.
-            let (cqe_sess_id, cqe_app_vault_id, cqe_closed) = match &dispatch_result {
+            let (cqe_sess_id, cqe_closed) = match &dispatch_result {
                 Ok(out) => match session_ctrl {
-                    SessionCtrl::Open => (
-                        out.session_id,
-                        Some(ddi::mbor::open_session::SESSION_SHORT_APP_ID),
-                        false,
-                    ),
-                    SessionCtrl::Close => (hdr.sess_id, None, true),
-                    _ => (None, None, false),
+                    SessionCtrl::Open => (out.session_id, false),
+                    SessionCtrl::Close => (hdr.sess_id, true),
+                    _ => (None, false),
                 },
-                Err(_) => (None, None, false),
+                Err(_) => (None, false),
             };
 
             let resp: &DmaBuf = dispatch_result.map(|out| out.resp).or_else(|status| {
@@ -318,13 +314,7 @@ impl<P: HsmPal> Hsm<P> {
                     .map(|b| &*b)
             })?;
 
-            (
-                resp,
-                session_ctrl,
-                cqe_sess_id,
-                cqe_app_vault_id,
-                cqe_closed,
-            )
+            (resp, session_ctrl, cqe_sess_id, cqe_closed)
         };
 
         let resp_len = resp.len();
@@ -343,7 +333,7 @@ impl<P: HsmPal> Hsm<P> {
             resp_len,
             session_ctrl,
             cqe_sess_id,
-            cqe_app_vault_id,
+            None,
             cqe_closed,
         ))
     }

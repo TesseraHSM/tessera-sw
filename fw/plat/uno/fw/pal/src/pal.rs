@@ -32,8 +32,6 @@ use core::cell::Cell;
 
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::mutex::Mutex;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -143,7 +141,8 @@ pub enum IpcChannel {
     AdminMessage = 0,
     /// Admin → HSM event notifications.
     AdminEvent = 1,
-    /// HSM → FP bulk-key requests (with response).
+    /// HSM → FP requests over the PSRAM rings. Only the test hooks' crash
+    /// injection sends on it: bulk keys are not handed to the FP cores.
     FpMessage = 2,
     /// HSM → Admin requests (HSM is the requestor, Admin the responder).
     AdminRequest = 3,
@@ -327,12 +326,6 @@ pub struct UnoHsmPal {
     /// it; initialise this table saturated (any value `>= ` capacity) to make
     /// the first scrub cover the whole slot instead.
     pub(crate) io_peak: IoAllocTable,
-
-    /// Serializes bulk-key registration with the fast-path engine against
-    /// bulk-key deletion and session teardown, so a key for a session that is
-    /// being torn down can't be registered with the engine after the
-    /// session's engine-side delete (see `vault.rs`).
-    pub(crate) fp_bulk_lock: Mutex<NoopRawMutex, ()>,
 }
 
 // SAFETY: UnoHsmPal is only accessed from a single-threaded Embassy
@@ -406,9 +399,9 @@ impl Default for UnoHsmPal {
                     depth: 0,
                     msg_len: 0,
                 },
-                // Pair 2: send bulk-key requests to the bulk-crypto
-                // backend and await the response (desc 15 out, 16 in)
-                // over the PSRAM HSM↔backend IPC rings.
+                // Pair 2: send requests to the fast-path cores (desc 15
+                // out, 16 in) over the PSRAM HSM↔FP IPC rings. Only the
+                // test hooks' crash injection uses it.
                 IpcPairConfig {
                     kind: IpcPairKind::SendMessage,
                     inbound_desc: 16,
@@ -470,7 +463,6 @@ impl Default for UnoHsmPal {
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
             io_alloc: IO_ALLOC_INIT,
             io_peak: IO_ALLOC_INIT,
-            fp_bulk_lock: Mutex::new(()),
         }
     }
 }
