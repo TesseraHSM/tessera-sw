@@ -579,7 +579,7 @@ enum tsra_part_prop_id
      */
     TSRA_PART_PROP_ID_PART_EX_PUB_KEY = 14,
     /*
-     Live security-domain initialization state; false when reporting is unsupported.
+     Live security-domain initialization state as tsra_bool; TSRA_BOOL_FALSE when unsupported.
      */
     TSRA_PART_PROP_ID_SD_INITIALIZED = 15,
 };
@@ -1578,6 +1578,11 @@ struct tsra_session_prop
 };
 
 /*
+ Native C boolean represented as an 8-bit unsigned integer.
+ */
+typedef uint8_t tsra_bool;
+
+/*
  AES CBC parameters.
  */
 struct tsra_algo_aes_cbc_params
@@ -1740,6 +1745,16 @@ struct tsra_algo_rsa_pkcs_pss_params
      */
     uint32_t salt_len;
 };
+
+/*
+ Native C boolean false value.
+ */
+#define TSRA_BOOL_FALSE 0
+
+/*
+ Native C boolean true value.
+ */
+#define TSRA_BOOL_TRUE 1
 
 #ifdef __cplusplus
 extern "C"
