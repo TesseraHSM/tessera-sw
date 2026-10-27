@@ -35,6 +35,7 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::PartState;
 
 use super::resolve_masking_key;
 use super::validate_active_session;
@@ -186,7 +187,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // The derived key is masked under `target_scope`; a non-`Session` scope
     // needs a masking key provisioned by `PartFinal` / the SD lifecycle.
     // Fail cheaply before any crypto work.
-    if target_scope != HsmKeyScope::Session && !part_state::part_state(pal, io)?.is_finalized() {
+    if target_scope != HsmKeyScope::Session
+        && part_state::part_state(pal, io)? != PartState::Initialized
+    {
         return Err(HsmError::InvalidArg);
     }
 

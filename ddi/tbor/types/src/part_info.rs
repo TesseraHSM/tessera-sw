@@ -81,4 +81,7 @@ pub struct TborPartInfoResp {
 
     /// Raw ECC-P384 identity public-key coordinates (`x ‖ y`, 96 B).
     pub pid_pub_key: [u8; PID_PUB_KEY_LEN],
+
+    /// Whether this partition is a security-domain member (0 = no, 1 = yes).
+    pub is_sd_member: u8,
 }

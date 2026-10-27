@@ -36,17 +36,19 @@ pub(crate) const PART_STATE_ENABLED: u8 = 2;
 /// after a successful `PartInit` binds its PTA / policy / POTA thumb.
 pub(crate) const PART_STATE_INITIALIZING: u8 = 4;
 
-/// `PartState::Initialized` discriminant, after `PartFinal` and before SD provisioning.
+/// `PartState::Initialized` discriminant, after `PartFinal`, independent of SD membership.
 pub(crate) const PART_STATE_INITIALIZED: u8 = 5;
 
-/// `PartState::SdProvisioned` discriminant, after SD creation or restoration.
-pub(crate) const PART_STATE_SD_PROVISIONED: u8 = 6;
-
-pub(crate) fn assert_part_state(ctx: &TestCtx, expected: u8) {
+pub(crate) fn assert_part_state(ctx: &TestCtx, expected: u8, expected_sd_member: bool) {
     let info = ctx.tbor(&TborPartInfoReq::new()).expect("PartInfo");
     assert_eq!(
         info.part_state, expected,
         "unexpected partition lifecycle state"
+    );
+    assert_eq!(
+        info.is_sd_member,
+        u8::from(expected_sd_member),
+        "unexpected security-domain membership"
     );
 }
 
@@ -61,6 +63,11 @@ fn assert_default_part_info(resp: &tsra_ddi_tbor_types::TborPartInfoResp) {
     assert_eq!(
         resp.part_state, PART_STATE_ENABLED,
         "default provisioned partition must be Enabled",
+    );
+    assert_eq!(
+        resp.is_sd_member,
+        u8::from(false),
+        "default partition must not be a security-domain member",
     );
     assert!(
         resp.pid_pub_key.iter().any(|&b| b != 0),

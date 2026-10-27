@@ -160,18 +160,12 @@ pub enum PartState {
     /// cycle); the partition continues to serve DDI traffic.
     Initialized = 5,
 
-    /// The partition is finalized and its security-domain masking key
-    /// is installed. Reached from [`Initialized`](Self::Initialized)
-    /// after a successful SD create or restore. Resetting the partition
-    /// removes the live SD key and its provisioned status.
-    SdProvisioned = 6,
-
     /// The partition is **quarantined**: an undo-log rollback failed a
     /// consistency-critical restore, so the in-memory state is incoherent.
     /// Host IO is dropped (the dispatcher's enable gate excludes this state)
     /// and the partition cannot be re-enabled — only a free/realloc cycle
     /// (or reboot) clears the fault.
-    Faulted = 7,
+    Faulted = 6,
 }
 
 impl PartState {
@@ -199,25 +193,9 @@ impl PartState {
             3 => Some(Self::Disabled),
             4 => Some(Self::Initializing),
             5 => Some(Self::Initialized),
-            6 => Some(Self::SdProvisioned),
-            7 => Some(Self::Faulted),
+            6 => Some(Self::Faulted),
             _ => None,
         }
-    }
-
-    /// Whether the partition may serve host DDI traffic.
-    #[inline]
-    pub const fn is_serving(self) -> bool {
-        matches!(
-            self,
-            Self::Enabled | Self::Initializing | Self::Initialized | Self::SdProvisioned
-        )
-    }
-
-    /// Whether `PartFinal` has completed, with or without a live security domain.
-    #[inline]
-    pub const fn is_finalized(self) -> bool {
-        matches!(self, Self::Initialized | Self::SdProvisioned)
     }
 }
 

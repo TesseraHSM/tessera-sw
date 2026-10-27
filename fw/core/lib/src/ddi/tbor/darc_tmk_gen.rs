@@ -41,6 +41,7 @@ use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::PartState;
 
 use super::masking_key_id_for_scope;
 use super::sd_backup;
@@ -67,7 +68,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // The SDMK the output is masked under is provisioned by SD setup,
         // which requires a finalized partition.
-        if !part_state::part_state(pal, io)?.is_finalized() {
+        if part_state::part_state(pal, io)? != PartState::Initialized {
             return Err(HsmError::InvalidArg);
         }
         if !part_state::part_is_sd_initialized(pal, io)? {

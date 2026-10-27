@@ -58,15 +58,6 @@ pub enum PartStateId {
 
     /// `PartInit` bound; finalization pending.
     Initializing = 4,
-
-    /// `PartFinal` completed; no live security domain is provisioned.
-    Initialized = 5,
-
-    /// Finalized partition with its security-domain masking key installed.
-    SdProvisioned = 6,
-
-    /// Partition quarantined after a consistency-critical rollback failure.
-    Faulted = 7,
 }
 
 /// TBOR opcode for `PartInfo`.
@@ -128,4 +119,7 @@ pub struct TborPartInfoResp<'a> {
     /// natural big-endian (SEC1) order.
     #[tbor(buffer, len = 96)]
     pub pid_pub_key: &'a [u8],
+
+    /// Whether this partition is a security-domain member (0 = no, 1 = yes).
+    pub is_sd_member: u8,
 }

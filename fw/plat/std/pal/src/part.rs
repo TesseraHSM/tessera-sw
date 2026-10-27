@@ -617,19 +617,30 @@ impl StdHsmPal {
 
     /// Borrow a partition that is actively serving host traffic.
     ///
-    /// "Serving" means [`PartState::is_serving`] — i.e. the partition is bound to a
+    /// "Serving" means [`PartState::Enabled`] or
+    /// [`PartState::Initializing`] — i.e. the partition is bound to a
     /// caller's incarnation and may legitimately expose per-incarnation
     /// secrets (PSK).  Stricter than [`Self::active_part`] (which
     /// permits Allocated and Disabled too) so that PSK reads cannot
     /// leak across the allocate/enable boundary.
     fn serving_part(&self, pid: HsmPartId) -> HsmResult<&PartitionEntry> {
-        self.part_if(pid, PartState::is_serving)
+        self.part_if(pid, |s| {
+            matches!(
+                s,
+                PartState::Enabled | PartState::Initializing | PartState::Initialized
+            )
+        })
     }
 
     /// Mutable counterpart to [`Self::serving_part`].
     #[allow(clippy::mut_from_ref)]
     fn serving_part_mut(&self, pid: HsmPartId) -> HsmResult<&mut PartitionEntry> {
-        self.part_if_mut(pid, PartState::is_serving)
+        self.part_if_mut(pid, |s| {
+            matches!(
+                s,
+                PartState::Enabled | PartState::Initializing | PartState::Initialized
+            )
+        })
     }
 }
 
@@ -878,14 +889,17 @@ impl StdHsmPal {
 
     /// Disable a partition: clear internal keys, nonce, vault, sessions.
     ///
-    /// Transitions a serving partition to `Disabled`.
+    /// Transitions `Enabled → Disabled`.
     pub fn part_disable_internal(&self, pid: u8) -> HsmResult<()> {
         let table = self.table_mut();
         let idx = pid as usize;
         if idx >= NUM_PARTITIONS {
             return Err(HsmError::InvalidArg);
         }
-        if !table.entries[idx].state.is_serving() {
+        if !matches!(
+            table.entries[idx].state,
+            PartState::Enabled | PartState::Initializing | PartState::Initialized
+        ) {
             return Err(HsmError::InvalidArg);
         }
 
@@ -923,7 +937,10 @@ impl StdHsmPal {
         entry.gen = entry.gen.wrapping_add(1);
 
         // If enabled, clear internal keys/nonce/vault/sessions first.
-        if entry.state.is_serving() {
+        if matches!(
+            entry.state,
+            PartState::Enabled | PartState::Initializing | PartState::Initialized
+        ) {
             Self::clear_enabled_state(entry);
         }
 
@@ -1851,26 +1868,16 @@ mod tests {
     #[test]
     fn scalar_state_round_trip() {
         let mut e = fresh_entry();
+        assert_eq!(e.prop_get_scalar(PartPropId::STATE).unwrap(), 0); // Unallocated
+                                                                      // The generic prop setter is a raw mechanism: any valid state byte
+                                                                      // is written directly (transition policy lives in
+                                                                      // `part_state::part_set_state`, exercised by the PartInit emu tests).
+        e.prop_set_scalar(PartPropId::STATE, PartState::Enabled as u32)
+            .unwrap();
         assert_eq!(
             e.prop_get_scalar(PartPropId::STATE).unwrap(),
-            PartState::Unallocated as u32
+            PartState::Enabled as u32
         );
-        for (state, serving, finalized) in [
-            (PartState::Unallocated, false, false),
-            (PartState::Allocated, false, false),
-            (PartState::Enabled, true, false),
-            (PartState::Disabled, false, false),
-            (PartState::Initializing, true, false),
-            (PartState::Initialized, true, true),
-            (PartState::Faulted, false, false),
-            (PartState::SdProvisioned, true, true),
-        ] {
-            e.prop_set_scalar(PartPropId::STATE, state as u32).unwrap();
-            assert_eq!(e.prop_get_scalar(PartPropId::STATE).unwrap(), state as u32);
-            assert_eq!(PartState::from_u8(state as u8), Some(state));
-            assert_eq!(state.is_serving(), serving, "{state:?}");
-            assert_eq!(state.is_finalized(), finalized, "{state:?}");
-        }
         // An invalid state byte is still rejected.
         assert!(matches!(
             e.prop_set_scalar(PartPropId::STATE, 250),

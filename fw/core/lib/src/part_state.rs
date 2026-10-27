@@ -159,13 +159,11 @@ pub(crate) fn prop_present<T>(result: HsmResult<T>) -> HsmResult<bool> {
 /// Wraps [`PartPropId::STATE`].  **Transition policy lives here, in the
 /// upper layer:** the generic PAL `part_prop_set_u8(STATE)` is a raw
 /// mechanism (it writes the discriminant directly), so the undo log can
-/// restore any prior state through it.  This wrapper accepts only the three
-/// caller-facing transitions: `Enabled -> Initializing` (`PartInit`,
+/// restore any prior state through it.  This wrapper accepts only the two
+/// caller-facing transitions — `Enabled → Initializing` (`PartInit`,
 /// which additionally requires the four write-once provisioning fields —
-/// PTA key, UPS key, policy hash, POTA thumbprint — to be present),
-/// `Initializing -> Initialized` (`PartFinal`), and
-/// `Initialized -> SdProvisioned` (SD create/restore, requiring the SD claim
-/// and masking-key id). A same-state write is a
+/// PTA key, UPS key, policy hash, POTA thumbprint — to be present) and
+/// `Initializing → Initialized` (`PartFinal`).  A same-state write is a
 /// no-op; any other pair is rejected with [`HsmError::InvalidArg`].
 pub fn part_set_state(
     pal: &impl HsmPartitionManager,
@@ -184,11 +182,6 @@ pub fn part_set_state(
             }
         }
         (PartState::Initializing, PartState::Initialized) => {}
-        (PartState::Initialized, PartState::SdProvisioned) => {
-            if !part_is_sd_initialized(pal, io)? || !prop_present(part_sd_mk_key_id(pal, io))? {
-                return Err(HsmError::InvalidArg);
-            }
-        }
         (cur, tgt) if cur == tgt => return Ok(()),
         _ => return Err(HsmError::InvalidArg),
     }

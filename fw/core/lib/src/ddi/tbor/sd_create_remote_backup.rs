@@ -81,6 +81,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::PartState;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::masking_key_id_for_scope;
@@ -141,8 +142,8 @@ fn gate_request<P: HsmPal>(pal: &P, io: &impl HsmIo, req_buf: &DmaBuf) -> HsmRes
     validate_crypto_officer_active_session(pal, io, sess_id)?;
 
     // The SD masking keys / policy hash are provisioned by `PartFinal`,
-    // so the partition must be finalized.
-    if !part_state::part_state(pal, io)?.is_finalized() {
+    // so the partition must be finalized (`Initialized`).
+    if part_state::part_state(pal, io)? != PartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
 

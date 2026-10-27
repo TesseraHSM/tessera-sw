@@ -76,7 +76,6 @@ use zerocopy::TryFromBytes;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_ENABLED;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
-use crate::commands::part_info::PART_STATE_SD_PROVISIONED;
 use crate::commands::part_init::known_good_part_policy;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::part_policy_with_pota;
@@ -433,7 +432,7 @@ fn sd_create_remote_backup_roundtrip() {
     let ctx = TestCtx::new();
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&ctx, &sata_key);
-    assert_part_state(&ctx, PART_STATE_INITIALIZED);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
     let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
     let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
 
@@ -441,7 +440,7 @@ fn sd_create_remote_backup_roundtrip() {
     let resp = ctx
         .tbor_oob(&req, &evidence.oob())
         .expect("SdCreateRemoteBackup roundtrip");
-    assert_part_state(&ctx, PART_STATE_SD_PROVISIONED);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
     let _ = masked_key_report_and_pub(&ctx, session.session_id);
     ctx.tbor(&TborDarcKexKeyGenReq {
         session_id: session.session_id,
@@ -490,7 +489,7 @@ fn sd_create_remote_backup_is_one_shot() {
     // The security domain is now initialized (SDMK provisioned); a second
     // create on the same partition is rejected by the one-shot gate.
     ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::SdAlreadyInitialized);
-    assert_part_state(&ctx, PART_STATE_SD_PROVISIONED);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 }
 
 #[test]
@@ -499,20 +498,20 @@ fn sd_create_remote_backup_state_clears_on_erase() {
     let sata_key = CaKey::generate();
 
     for _ in 0..2 {
-        assert_part_state(&ctx, PART_STATE_ENABLED);
+        assert_part_state(&ctx, PART_STATE_ENABLED, false);
         let (session, policy, pid_pub) = finalized_backing_session(&ctx, &sata_key);
-        assert_part_state(&ctx, PART_STATE_INITIALIZED);
+        assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
         let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, session.session_id);
         let evidence = build_receiver_evidence(&pid_pub, &rcvr_pub, &sata_key, &report);
         let req = backup_request(session.session_id, masked, &evidence, &policy);
         ctx.tbor_oob(&req, &evidence.oob())
             .expect("SdCreateRemoteBackup after reset");
-        assert_part_state(&ctx, PART_STATE_SD_PROVISIONED);
+        assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
         ctx.session_close(session.session_id)
             .expect("close CO session before erase");
         ctx.erase().expect("erase an SD-provisioned partition");
     }
-    assert_part_state(&ctx, PART_STATE_ENABLED);
+    assert_part_state(&ctx, PART_STATE_ENABLED, false);
 }
 
 #[test]

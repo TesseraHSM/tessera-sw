@@ -23,7 +23,7 @@
 //!   [`PartitionLocalMaskingKey`](HsmVaultKeyKind::PartitionLocalMaskingKey).
 //!
 //! Both masking keys are provisioned by `PartFinal`, so this command
-//! requires a finalized partition (with or without a live security domain)
+//! requires a partition in the [`Initialized`](PartState::Initialized)
 //! lifecycle state.  The [`Session`](HsmKeyScope::Session) and
 //! [`SecurityDomain`](HsmKeyScope::SecurityDomain) scopes (and any other)
 //! are rejected with [`HsmError::UnsupportedKeyScope`] until their
@@ -51,6 +51,7 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::PartState;
 
 use super::masking_key_id_for_scope;
 use super::validate_crypto_officer_active_session;
@@ -199,8 +200,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     validate_crypto_officer_active_session(pal, io, sess_id)?;
 
     // The scope's masking key is provisioned by `PartFinal`, so the
-    // partition must be finalized.
-    if !part_state::part_state(pal, io)?.is_finalized() {
+    // partition must be finalized (`Initialized`).
+    if part_state::part_state(pal, io)? != PartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
 
