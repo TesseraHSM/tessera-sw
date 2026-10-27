@@ -19,7 +19,7 @@ env:
   CACHE_KEY_ID: dummy # dummy value to force cache miss
 
 jobs:
-  build_ubuntu:
+  build_firmware_uno:
 
     runs-on: ubuntu-24.04
 
