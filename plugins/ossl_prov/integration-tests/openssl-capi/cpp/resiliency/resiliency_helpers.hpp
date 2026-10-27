@@ -75,7 +75,7 @@ struct hsm_part_info
     hsm_str path;
     hsm_api_rev api_rev_min;
     hsm_api_rev api_rev_max;
-    uint8_t sd_initialized;
+    bool sd_initialized;
 };
 
 using fn_get_list = hsm_status (*)(hsm_handle *);

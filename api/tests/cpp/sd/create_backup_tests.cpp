@@ -30,7 +30,7 @@
 
 namespace
 {
-void assert_sd_initialized(const std::vector<tsra_char> &path, uint8_t expected)
+void assert_sd_initialized(const std::vector<tsra_char> &path, bool expected)
 {
     auto parts = PartitionListHandle();
     for (auto index = 0u; index < parts.count(); ++index)
@@ -176,7 +176,7 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
         }
         auto sess_guard = scope_guard::make_scope_exit([&ctx] { tsra_sess_close(ctx.session); });
 
-        ASSERT_NO_FATAL_FAILURE(assert_sd_initialized(path, static_cast<uint8_t>(false)));
+        ASSERT_NO_FATAL_FAILURE(assert_sd_initialized(path, false));
 
         SealingKeyMaterial sealing = sealing_key_and_report(ctx.session);
         ASSERT_EQ(sealing.masked.size(), kMaskedSealingKeyLen);
@@ -200,7 +200,7 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
         auto err = create_backup_fill(ctx.session, &params, pok_remote, pok_local, sd_mk);
         ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
 
-        ASSERT_NO_FATAL_FAILURE(assert_sd_initialized(path, static_cast<uint8_t>(true)));
+        ASSERT_NO_FATAL_FAILURE(assert_sd_initialized(path, true));
 
         // Remote backup: HPKE-Auth seal of BKS3, 161 B, non-zero.
         ASSERT_EQ(pok_remote.size(), kPokRemoteBackupLen);

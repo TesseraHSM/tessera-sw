@@ -145,8 +145,8 @@ pub struct TsraPartInfo {
     /// Maximum supported API revision
     pub api_rev_max: TsraApiRev,
 
-    /// Security-domain initialization when the list was created: 0 = false or unsupported, 1 = true.
-    pub sd_initialized: u8,
+    /// Whether the security domain was initialized when the list was created; false when unsupported.
+    pub sd_initialized: bool,
 }
 
 impl TsraPartInfo {

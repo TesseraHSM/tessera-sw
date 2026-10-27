@@ -59,9 +59,9 @@ pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
 
 /// Queries security-domain initialization over the out-of-session TBOR `PartInfo` command.
 ///
-/// Returns `0` when the backend or device does not support the command.
+/// Returns `false` when the backend or device does not support the command.
 /// Other device failures and invalid initialization values return an error.
-pub(crate) fn get_sd_initialized(dev: &HsmDev) -> HsmResult<u8> {
+pub(crate) fn get_sd_initialized(dev: &HsmDev) -> HsmResult<bool> {
     let resp = match dev.exec_op_tbor(&TborPartInfoReq::new(), None, &mut None) {
         Ok(resp) => resp,
         Err(
@@ -69,12 +69,13 @@ pub(crate) fn get_sd_initialized(dev: &HsmDev) -> HsmResult<u8> {
             | DdiError::DdiStatus(DdiStatus::UnsupportedCmd)
             | DdiError::TborStatus(TborStatus::UnsupportedCmd),
         ) => {
-            return Ok(0);
+            return Ok(false);
         }
         Err(err) => return Err(HsmError::from(err)),
     };
     match resp.sd_initialized {
-        0 | 1 => Ok(resp.sd_initialized),
+        0 => Ok(false),
+        1 => Ok(true),
         _ => Err(HsmError::InternalError),
     }
 }

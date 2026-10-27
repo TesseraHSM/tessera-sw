@@ -433,7 +433,7 @@ struct tsra_part_info {
     struct tsra_str path;
     struct tsra_api_rev api_rev_min;
     struct tsra_api_rev api_rev_max;
-    uint8_t sd_initialized;
+    bool sd_initialized;
 };
 ```
 
@@ -444,7 +444,7 @@ struct tsra_part_info {
  | path        | [struct tsra_str](#tsra_str)         | device path (caller-owned buffer, filled by the API) |
  | api_rev_min | [struct tsra_api_rev](#tsra_api_rev) | minimum supported API revision                      |
  | api_rev_max | [struct tsra_api_rev](#tsra_api_rev) | maximum supported API revision                      |
- | sd_initialized | uint8_t                               | security-domain initialization: 0 = false or unsupported, 1 = true |
+ | sd_initialized | bool                                  | whether the security domain is initialized; false when unsupported |
 
 On input, `path.len` is the capacity of the caller-allocated buffer pointed to by `path.str`,
 in `tsra_char` elements (including the null terminator).

@@ -76,9 +76,16 @@ fn test_partition_info_list_has_sd_initialized() {
             part_info.api_rev_range.is_some(),
             "Partition metadata should remain accessible"
         );
+        let part = HsmPartitionManager::open_partition(&part_info.path, test_api_rev())
+            .expect("Failed to open the partition");
+        part.reset().expect("Partition reset failed");
+        let refreshed_info = HsmPartitionManager::partition_info_list()
+            .into_iter()
+            .find(|info| info.path == part_info.path)
+            .expect("Reset partition should remain discoverable");
         assert!(
-            matches!(part_info.sd_initialized, 0 | 1),
-            "SD initialization must be 0 or 1 for {}",
+            !refreshed_info.sd_initialized,
+            "SD must not be initialized after resetting {}",
             part_info.path
         );
     }

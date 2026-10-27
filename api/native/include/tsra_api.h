@@ -1058,9 +1058,9 @@ struct tsra_part_info
      */
     struct tsra_api_rev api_rev_max;
     /*
-     Security-domain initialization when the list was created: 0 = false or unsupported, 1 = true.
+     Whether the security domain was initialized when the list was created; false when unsupported.
      */
-    uint8_t sd_initialized;
+    bool sd_initialized;
 };
 
 /*

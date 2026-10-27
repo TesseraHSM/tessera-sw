@@ -87,8 +87,9 @@ On output, `part_info.path.len` is set to the required/written count of `tsra_ch
 `part_info.api_rev_min`, `part_info.api_rev_max`, and `part_info.sd_initialized` are only
 valid when the return status is `TSRA_STATUS_SUCCESS`.
 
-`part_info.sd_initialized` is `0` for false or when initialization-state reporting is unsupported,
-and `1` for true. It reflects initialization when [`tsra_part_get_list`](#tsra_part_get_list)
+`part_info.sd_initialized` is `true` when the security domain is initialized and `false`
+otherwise, including when initialization-state reporting is unsupported.
+It reflects initialization when [`tsra_part_get_list`](#tsra_part_get_list)
 created the list; create a new list to refresh the value.
 
 **Returns**

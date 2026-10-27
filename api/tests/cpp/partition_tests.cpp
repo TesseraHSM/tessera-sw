@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 #include <gtest/gtest.h>
-#include <limits>
 #include <scope_guard.hpp>
 #include <thread>
 #include <tsra_api.h>
@@ -204,7 +203,6 @@ TEST(tsra_part, get_info)
     for (auto i = 0u; i < count; ++i)
     {
         tsra_part_info info = {};
-        info.sd_initialized = std::numeric_limits<uint8_t>::max();
         info.path = { nullptr, 0 };
         auto err = tsra_part_get_info(handle.get(), i, &info);
         ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
@@ -219,7 +217,6 @@ TEST(tsra_part, get_info)
         ASSERT_EQ(info.path.len, path_len);
         ASSERT_GT(info.api_rev_min.major, 0);
         ASSERT_GT(info.api_rev_max.major, 0);
-        ASSERT_LE(info.sd_initialized, uint8_t{ 1 });
     }
 }
 

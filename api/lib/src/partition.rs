@@ -75,9 +75,9 @@ pub struct HsmPartitionInfo {
     /// Supported API revision range for this partition.
     pub api_rev_range: Option<HsmApiRevRange>,
 
-    /// Security-domain initialization: `0` for false or unsupported, `1` for true.
+    /// Whether the security domain is initialized; `false` when unsupported.
     /// Only valid when `api_rev_range` is available.
-    pub sd_initialized: u8,
+    pub sd_initialized: bool,
 }
 
 /// HSM application credentials.
@@ -326,8 +326,8 @@ impl HsmPartitionManager {
     /// about each discovered partition, including its device path,
     /// supported API revision range, and security-domain initialization state.
     /// If the device cannot be opened or either metadata query fails,
-    /// `api_rev_range` is `None` for that partition and `sd_initialized` is `0`.
-    /// Unsupported initialization-state queries report `sd_initialized` as `0` without
+    /// `api_rev_range` is `None` for that partition and `sd_initialized` is `false`.
+    /// Unsupported initialization-state queries report `sd_initialized` as `false` without
     /// making the partition inaccessible.
     ///
     /// # Returns
