@@ -18,6 +18,11 @@
 class tsra_ecc_keyunwrap_semantic : public ::testing::Test
 {
   protected:
+#if SESSION_EX_TESTS
+    static constexpr tsra_status malformed_blob_status = TSRA_STATUS_INVALID_ARGUMENT;
+#else
+    static constexpr tsra_status malformed_blob_status = TSRA_STATUS_DDI_CMD_FAILURE;
+#endif
     PartitionListHandle part_list_ = PartitionListHandle{};
 };
 
@@ -59,7 +64,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_wrapped_key_nonnull_ptr_
         wrapped_key_buf.len = 0;
 
         auto result = ctx.try_unwrap_with(&unwrap_inputs.unwrap_algo, &wrapped_key_buf);
-        ASSERT_EQ(result.status, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(result.status, malformed_blob_status);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });
@@ -79,7 +84,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_minimal_one_byte_blob)
         wrapped_key_buf.len = 1;
 
         auto result = ctx.try_unwrap_with(&unwrap_inputs.unwrap_algo, &wrapped_key_buf);
-        ASSERT_EQ(result.status, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(result.status, malformed_blob_status);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });
@@ -167,6 +172,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_wrapped_single_key_paylo
     });
 }
 
+#if !SESSION_EX_TESTS
 // Verifies unwrap rejects blobs wrapped by a different RSA wrapping key.
 TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_blob_wrapped_by_different_wrapping_key)
 {
@@ -238,6 +244,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_blob_wrapped_by_differen
     ASSERT_EQ(result.private_key, 0);
     ASSERT_EQ(result.public_key, 0);
 }
+#endif
 
 // Verifies unwrap does not mutate caller-provided wrapped blob on failure.
 TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_preserves_input_wrapped_blob_on_failure)
@@ -255,7 +262,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_preserves_input_wrapped_blob_on_
         ctx.wrapped_key_buf.len = static_cast<uint32_t>(wrapped_data.size());
 
         auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(result.status, malformed_blob_status);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
         ASSERT_EQ(wrapped_data, before);
@@ -326,7 +333,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_wrapped_content_kind_mis
         ctx.wrapped_key_buf.len = static_cast<uint32_t>(wrapped_blob.size());
 
         auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(result.status, malformed_blob_status);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });
@@ -452,7 +459,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_truncated_valid_wrapped_
         ctx.wrapped_key_buf.len = static_cast<uint32_t>(truncated_blob.size());
 
         auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(result.status, malformed_blob_status);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });
@@ -610,7 +617,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_wrapped_key_null_ptr_zer
             &pub_prop_list
         );
 
-        ASSERT_EQ(result.status, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(result.status, malformed_blob_status);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });
@@ -638,7 +645,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_valid_blob_with_extra_tr
 
         auto result = ctx.try_unwrap();
 
-        ASSERT_EQ(result.status, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(result.status, malformed_blob_status);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });

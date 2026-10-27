@@ -6,6 +6,10 @@
 #[path = "../../common.rs"]
 mod common;
 
+use common::EccCurve;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_crypto::EccAlgo;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::Verifier;
@@ -14,10 +18,6 @@ use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_types::*;
-use common::EccCurve;
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 
 /// MBOR key availability. TBOR key-generation responses are masked blobs,
 /// not persistent key IDs, so only session-scoped valid keys are generated.
@@ -77,8 +77,6 @@ struct FuzzEccSignReq {
     /// Arbitrary masked-key bytes used when a valid key is not generated.
     masked_key: Vec<u8>,
 }
-
-const KEY_SCOPE_SESSION: u8 = 0b001;
 
 fn wire_digest(input: &FuzzEccSignReq) -> Vec<u8> {
     let digest_len = input.digest_algo.digest_len();
@@ -143,7 +141,7 @@ fuzz_target!(|input: FuzzInput| {
             let resp = ctx
                 .tbor(&TborEccGenerateKeyReq {
                     session_id: session.session_id,
-                    scope: KEY_SCOPE_SESSION,
+                    scope: common::KEY_SCOPE_SESSION,
                     curve: input.curve.to_tbor(),
                     key_usage: KEY_USAGE_SIGN,
                     key_label: Vec::new(),

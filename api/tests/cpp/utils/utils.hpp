@@ -9,6 +9,10 @@
 #include <tsra_api.h>
 #include <vector>
 
+inline constexpr uint32_t kReportDataSize = 128;
+inline constexpr uint32_t kShortReportDataSize = kReportDataSize / 2;
+inline constexpr uint32_t kValidReportDataSize = kReportDataSize;
+
 /// Returns the standard test API revision (1.0) used by MBOR tests.
 inline tsra_api_rev test_api_rev()
 {

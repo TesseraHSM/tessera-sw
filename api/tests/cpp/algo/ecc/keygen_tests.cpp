@@ -84,6 +84,12 @@ static void run_unmask_ecc_keypair_for_curve(tsra_handle session, tsra_ecc_curve
         unmasked_priv_key.get_ptr(),
         unmasked_pub_key.get_ptr()
     );
+#if SESSION_EX_TESTS
+    ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+    ASSERT_EQ(unmasked_priv_key.get(), 0u);
+    ASSERT_EQ(unmasked_pub_key.get(), 0u);
+    return;
+#endif
     ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
     ASSERT_NE(unmasked_priv_key.get(), 0u);
     ASSERT_NE(unmasked_pub_key.get(), 0u);
@@ -188,6 +194,12 @@ static void run_unmask_after_original_keys_deleted(tsra_handle session, tsra_ecc
         unmasked_pub_key.get_ptr()
     );
 
+#if SESSION_EX_TESTS
+    ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+    ASSERT_EQ(unmasked_priv_key.get(), 0u);
+    ASSERT_EQ(unmasked_pub_key.get(), 0u);
+    return;
+#endif
     ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
     ASSERT_NE(unmasked_priv_key.get(), 0u);
     ASSERT_NE(unmasked_pub_key.get(), 0u);
@@ -233,6 +245,12 @@ static void run_unmasked_handles_are_distinct_from_original(
         unmasked_pub_key.get_ptr()
     );
 
+#if SESSION_EX_TESTS
+    ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+    ASSERT_EQ(unmasked_priv_key.get(), 0u);
+    ASSERT_EQ(unmasked_pub_key.get(), 0u);
+    return;
+#endif
     ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
     ASSERT_NE(unmasked_priv_key.get(), 0u);
     ASSERT_NE(unmasked_pub_key.get(), 0u);
@@ -599,7 +617,11 @@ TEST_F(tsra_ecc_keygen, unmask_ecc_rejects_corrupted_data)
             unmasked_pub_key.get_ptr()
         );
 
+#if SESSION_EX_TESTS
+        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+#else
         ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+#endif
         ASSERT_EQ(unmasked_priv_key.get(), 0u);
         ASSERT_EQ(unmasked_pub_key.get(), 0u);
     });
@@ -695,7 +717,11 @@ TEST_F(tsra_ecc_keygen, unmask_rejects_empty_masked_key_buffer)
             pub_key.get_ptr()
         );
 
+#if SESSION_EX_TESTS
+        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+#else
         ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+#endif
         ASSERT_EQ(priv_key.get(), 0u);
         ASSERT_EQ(pub_key.get(), 0u);
     });
@@ -739,7 +765,11 @@ TEST_F(tsra_ecc_keygen, unmask_rejects_wrong_key_kind_for_real_ecc_masked_key)
             unmasked_pub_key.get_ptr()
         );
 
+#if SESSION_EX_TESTS
+        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+#else
         ASSERT_EQ(err, TSRA_STATUS_INTERNAL_ERROR);
+#endif
         ASSERT_EQ(unmasked_priv_key.get(), 0u);
         ASSERT_EQ(unmasked_pub_key.get(), 0u);
     });

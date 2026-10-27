@@ -13,11 +13,11 @@ const tsra_byte *tsra_generate_key_report(
 ```
 **Parameters**
 
-| Parameter        | Name                              | Description                                  |
-| ---------------- | --------------------------------- | -------------------------------------------- |
-| [in] key_handle  | [tsra_handle](#tsra_handle)       | key handle to attest                         |
-| [in] report_data | [tsra_buffer*](#tsra_buffer)      | additional data to be included in report     |
-| [in, out] report | [tsra_buffer *](#tsra_buffer)     | attestation report for the key        &nbsp; |
+| Parameter        | Name                        | Description                                                 |
+| ---------------- | --------------------------- | ----------------------------------------------------------- |
+| [in] key_handle  | [tsra_handle](#tsra_handle)   | key handle to attest                                        |
+| [in] report_data | [tsra_buffer*](#tsra_buffer)  | exactly 128 bytes of additional data to be included in report |
+| [in, out] report | [tsra_buffer *](#tsra_buffer) | attestation report for the key                               |
 
 **Returns**
 
