@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::*;
 use tsra_ddi::*;
@@ -14,13 +16,22 @@ use tsra_ddi_tbor_codec::header::Header;
 use tsra_ddi_tbor_codec::*;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
+use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::coord_sizes;
+use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
+use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
+use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
+use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
+use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
+use tsra_ddi_tbor_types::CertDescriptor;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
+use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MACH_SEED_ENVELOPE_MAX_LEN;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
 use tsra_ddi_tbor_types::PART_POLICY_LEN;
@@ -32,11 +43,61 @@ use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::PolicyKeyKind;
 use tsra_ddi_tbor_types::PolicyPubKey;
 use tsra_ddi_tbor_types::PolicyVer;
+use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::SessionType;
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
+use tsra_ddi_tbor_types::TborKeyReportReq;
+use tsra_ddi_tbor_types::TborPartInfoReq;
+use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
+use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
+use tsra_ddi_tbor_types::TborStatus;
+use zerocopy::TryFromBytes;
 
 pub type DdiTest = TsraDdi;
+
+pub const COORD_LEN: usize = RAW_PUB_LEN / 2;
+
+const MACH_SEED_PATTERN_BASE: u8 = 0x40;
+const POTA_THUMBPRINT_PATTERN_BASE: u8 = 0x80;
+const PUBKEY_PATTERN_HIGH_BIT: u8 = 0x80;
+const SATA_PUBKEY_PATTERN_BASE: u8 = 0x20;
+const POLICY_INFO_FILL: u8 = 0xAB;
+
+/// Wire discriminants for the TBOR `KeyScope` enum.
+pub const KEY_SCOPE_UNSPECIFIED: u8 = 0b000;
+pub const KEY_SCOPE_SESSION: u8 = 0b001;
+pub const KEY_SCOPE_EPHEMERAL: u8 = 0b010;
+pub const KEY_SCOPE_LOCAL: u8 = 0b011;
+pub const KEY_SCOPE_SECURITY_DOMAIN: u8 = 0b100;
+pub const KEY_SCOPE_INTERNAL: u8 = 0b101;
+
+/// Map an arbitrary byte to a known TBOR `KeyScope` wire discriminant.
+pub fn derive_valid_key_scope(key_scope: u8) -> u8 {
+    key_scope % (KEY_SCOPE_INTERNAL + 1)
+}
+
+/// TBOR key scopes (wire `KeyScope` discriminants) used by fuzz targets.
+#[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyScope {
+    Unspecified,
+    Session,
+    Ephemeral,
+    Local,
+    SecurityDomain,
+    Internal,
+}
+
+impl KeyScope {
+    pub fn to_tbor(self) -> u8 {
+        match self {
+            Self::Unspecified => KEY_SCOPE_UNSPECIFIED,
+            Self::Session => KEY_SCOPE_SESSION,
+            Self::Ephemeral => KEY_SCOPE_EPHEMERAL,
+            Self::Local => KEY_SCOPE_LOCAL,
+            Self::SecurityDomain => KEY_SCOPE_SECURITY_DOMAIN,
+            Self::Internal => KEY_SCOPE_INTERNAL,
+        }
+    }
+}
 
 /// Fuzz operations corresponding to the TOC builder methods on
 /// [`Encoder`].
@@ -102,11 +163,7 @@ impl EccCurve {
     /// Raw (unpadded) coordinate length in bytes; also the length of an
     /// ECDH shared secret (the X coordinate).
     pub fn coord_len(self) -> usize {
-        match self {
-            Self::P256 => 32,
-            Self::P384 => 48,
-            Self::P521 => 66,
-        }
+        coord_sizes(self.wire_pub_key_len()).1
     }
 
     /// Largest digest the firmware zero-extends into the ECDSA field.
@@ -120,11 +177,7 @@ impl EccCurve {
 
     /// Wire `r ‖ s` length, each component padded to the coordinate width.
     pub fn wire_sig_len(self) -> usize {
-        match self {
-            Self::P256 => 64,
-            Self::P384 => 96,
-            Self::P521 => 136,
-        }
+        coord_sizes(self.wire_pub_key_len()).0 * 2
     }
 
     /// Wire `x ‖ y` public-key length, each coordinate padded to the wire
@@ -349,13 +402,13 @@ pub fn validate_toc_entry(op: &EncoderTOCBuilders, entry: TocEntry<'_>) {
 /// Fixed `PartInit` machine seed (`0x40 + i`), mirroring the canonical
 /// fixture used by the `PartInit` integration suite.
 pub fn mach_seed() -> [u8; MACH_SEED_LEN] {
-    core::array::from_fn(|i| 0x40 + i as u8)
+    core::array::from_fn(|i| MACH_SEED_PATTERN_BASE + i as u8)
 }
 
 /// Fixed `PartInit` POTA thumbprint (`0x80 ^ i`), mirroring the canonical
 /// fixture used by the `PartInit` integration suite.
 pub fn pota_thumbprint() -> [u8; POTA_THUMBPRINT_LEN] {
-    core::array::from_fn(|i| 0x80 ^ i as u8)
+    core::array::from_fn(|i| POTA_THUMBPRINT_PATTERN_BASE ^ i as u8)
 }
 
 /// Fill a 96-byte `PolicyPubKey::data` slot with a deterministic
@@ -368,7 +421,7 @@ pub fn pota_thumbprint() -> [u8; POTA_THUMBPRINT_LEN] {
 pub fn fill_ecc384_pubkey_pattern(fill: u8) -> [u8; POLICY_MAX_KEY_LEN] {
     let mut data = [0u8; POLICY_MAX_KEY_LEN];
     for (i, b) in data.iter_mut().enumerate() {
-        *b = (fill.wrapping_add(i as u8)) | 0x80;
+        *b = (fill.wrapping_add(i as u8)) | PUBKEY_PATTERN_HIGH_BIT;
     }
     data
 }
@@ -402,16 +455,186 @@ pub fn known_good_part_policy(pota_pub_key: [u8; POLICY_MAX_KEY_LEN]) -> [u8; PA
         major: POLICY_VERSION_MAJOR,
         minor: 0,
     };
-    policy.pota_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, pota_pub_key);
+    policy.pota_pub_key = PolicyPubKey::new(
+        PolicyKeyKind::Ecc384,
+        POLICY_MAX_KEY_LEN as u16,
+        pota_pub_key,
+    );
     policy.sata_pub_key = PolicyPubKey::new(
         PolicyKeyKind::Ecc384,
         POLICY_MAX_KEY_LEN as u16,
-        fill_ecc384_pubkey_pattern(0x20),
+        fill_ecc384_pubkey_pattern(SATA_PUBKEY_PATTERN_BASE),
     );
-    policy.info = [0xAB; POLICY_INFO_LEN];
+    policy.info = [POLICY_INFO_FILL; POLICY_INFO_LEN];
 
     let mut bytes = [0u8; PART_POLICY_LEN];
     bytes.copy_from_slice(policy.as_bytes());
     bytes
+}
+
+/// Drive `PartInit` → `PartFinal` so partition-local masking keys are available.
+pub fn finalize_partition(ctx: &TestCtx, session: &SessionHandshake) {
+    let pota = CaKey::generate();
+    let policy = known_good_part_policy(pota.raw_pub());
+    let init = ctx
+        .part_init(session, &mach_seed(), &policy, &pota_thumbprint())
+        .expect("PartInit should succeed");
+    let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    ctx.part_final(session, &policy, &[], &chain.der_items())
+        .expect("PartFinal should succeed");
+}
+
+pub fn add_evidence_item(oob_items: &mut Vec<Vec<u8>>, der: &[u8]) -> CertDescriptor {
+    let index = u8::try_from(oob_items.len()).expect("evidence count fits descriptor index");
+    let length = u16::try_from(der.len()).expect("evidence item length fits descriptor");
+    oob_items.push(der.to_vec());
+    CertDescriptor {
+        index,
+        length: length.into(),
+    }
+}
+
+/// Initialize a partition and security domain so security-domain masking is available.
+pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
+    use zerocopy::IntoBytes;
+
+    let info = ctx
+        .tbor(&TborPartInfoReq::new())
+        .expect("PartInfo should succeed");
+    let pid_pub: [u8; RAW_PUB_LEN] = info
+        .pid_pub_key
+        .as_slice()
+        .try_into()
+        .expect("PartInfo PID public key should have the expected length");
+    let pota = CaKey::generate();
+    let sata = CaKey::generate();
+    let mut policy =
+        <PartPolicy as TryFromBytes>::try_read_from_bytes(&known_good_part_policy(pota.raw_pub()))
+            .expect("known-good partition policy should decode");
+    policy.sata_pub_key = PolicyPubKey::new(
+        PolicyKeyKind::Ecc384,
+        POLICY_MAX_KEY_LEN as u16,
+        sata.raw_pub(),
+    );
+    assert_eq!(
+        info.pid.len(),
+        policy.backup_part_id.len(),
+        "PartInfo PID should have the expected length",
+    );
+    policy.backup_part_id.copy_from_slice(&info.pid);
+    let mut backup_part_pub = [0u8; POLICY_MAX_KEY_LEN];
+    assert_eq!(
+        info.pid_pub_key.len(),
+        backup_part_pub.len(),
+        "PartInfo PID public key should have the expected length",
+    );
+    backup_part_pub.copy_from_slice(&info.pid_pub_key);
+    policy.backup_part_pub_key = PolicyPubKey::new(
+        PolicyKeyKind::Ecc384,
+        POLICY_MAX_KEY_LEN as u16,
+        backup_part_pub,
+    );
+    let mut policy_bytes = [0u8; PART_POLICY_LEN];
+    policy_bytes.copy_from_slice(policy.as_bytes());
+
+    let init = ctx
+        .part_init(session, &mach_seed(), &policy_bytes, &pota_thumbprint())
+        .expect("PartInit should succeed");
+    let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
+    ctx.part_final(session, &policy_bytes, &[], &pta_chain.der_items())
+        .expect("PartFinal should succeed");
+
+    let sealing_key = ctx
+        .tbor(&TborSdSealingKeyGenReq {
+            session_id: session.session_id,
+            scope: KEY_SCOPE_LOCAL,
+        })
+        .expect("local SD sealing-key generation should succeed");
+    let report = ctx
+        .tbor(&TborKeyReportReq {
+            session_id: session.session_id,
+            masked_key: sealing_key.masked_key.to_vec(),
+            report_data: [0u8; KEY_REPORT_DATA_LEN],
+        })
+        .expect("sealing-key report generation should succeed");
+
+    let mut receiver_pub = [0u8; RAW_PUB_LEN];
+    let coord_len = EccCurve::P384.coord_len();
+    for (dst, src) in receiver_pub[..coord_len]
+        .iter_mut()
+        .zip(sealing_key.pub_key[..coord_len].iter().rev())
+    {
+        *dst = *src;
+    }
+    for (dst, src) in receiver_pub[coord_len..]
+        .iter_mut()
+        .zip(sealing_key.pub_key[coord_len..].iter().rev())
+    {
+        *dst = *src;
+    }
+    let receiver = make_chain(&sata, &receiver_pub);
+    let mfgr = make_chain(&CaKey::generate(), &pid_pub);
+    let owner = make_chain(&CaKey::generate(), &pid_pub);
+    let partition_owner = make_chain(&sata, &pid_pub);
+    let mut oob_items = Vec::new();
+    let receiver_chain = vec![
+        add_evidence_item(&mut oob_items, &receiver.root_der),
+        add_evidence_item(&mut oob_items, &receiver.leaf_der),
+    ];
+    let mfgr_chain = vec![
+        add_evidence_item(&mut oob_items, &mfgr.root_der),
+        add_evidence_item(&mut oob_items, &mfgr.leaf_der),
+    ];
+    let owner_chain = vec![
+        add_evidence_item(&mut oob_items, &owner.root_der),
+        add_evidence_item(&mut oob_items, &owner.leaf_der),
+    ];
+    let partition_owner_chain = vec![
+        add_evidence_item(&mut oob_items, &partition_owner.root_der),
+        add_evidence_item(&mut oob_items, &partition_owner.leaf_der),
+    ];
+    let report_descriptor = add_evidence_item(&mut oob_items, &report.report);
+    let oob = oob_items.iter().map(Vec::as_slice).collect::<Vec<_>>();
+
+    let req = TborSdCreateRemoteBackupReq {
+        session_id: session.session_id,
+        masked_sealing_key: sealing_key.masked_key,
+        receiver_cert_chain: receiver_chain,
+        receiver_mfgr_cert_chain: mfgr_chain,
+        receiver_owner_cert_chain: owner_chain,
+        receiver_part_owner_cert_chain: partition_owner_chain,
+        receiver_report: ReportDescriptor {
+            index: report_descriptor.index,
+            length: report_descriptor.length,
+        },
+        policy,
+    };
+    ctx.tbor_oob(&req, &oob)
+        .expect("test security-domain creation should succeed");
+}
+
+/// Exercise key scopes that cannot be used by the backup fixtures' custom partition.
+pub fn exercise_non_partition_key_scope(
+    ctx: &TestCtx,
+    session: &SessionHandshake,
+    scope: KeyScope,
+) {
+    let req = TborSdSealingKeyGenReq {
+        session_id: session.session_id,
+        scope: scope.to_tbor(),
+    };
+    match scope {
+        KeyScope::SecurityDomain => {
+            create_test_security_domain(ctx, session);
+            ctx.tbor(&req)
+                .expect("security-domain-scoped sealing-key generation should succeed");
+        }
+        KeyScope::Unspecified | KeyScope::Session | KeyScope::Internal => {
+            finalize_partition(ctx, session);
+            ctx.expect_fw_reject(&req, TborStatus::UnsupportedKeyScope);
+        }
+        KeyScope::Ephemeral | KeyScope::Local => {
+            unreachable!("partition scopes are exercised by the backup fixture");
+        }
+    }
 }

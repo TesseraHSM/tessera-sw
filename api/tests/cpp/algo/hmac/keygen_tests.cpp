@@ -14,6 +14,11 @@
 class tsra_hmac_keygen : public ::testing::Test
 {
   protected:
+#if SESSION_EX_TESTS
+    static constexpr tsra_status unmask_decode_status = TSRA_STATUS_UNSUPPORTED_KEY_OPERATION;
+#else
+    static constexpr tsra_status unmask_decode_status = TSRA_STATUS_MASKED_KEY_DECODE_FAILED;
+#endif
     PartitionListHandle part_list_ = PartitionListHandle{};
 };
 
@@ -220,6 +225,11 @@ static void test_hmac_key_unmask(
 
     auto_key unmasked_hmac_key;
     err = tsra_key_unmask(session, hmac_key_kind, &masked_key_buf, unmasked_hmac_key.get_ptr());
+#if SESSION_EX_TESTS
+    ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+    ASSERT_EQ(unmasked_hmac_key.get(), 0);
+    return;
+#endif
     ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
     ASSERT_NE(unmasked_hmac_key.get(), 0);
 
@@ -534,6 +544,11 @@ TEST_F(tsra_hmac_keygen, unmask_and_use_hmac_key)
             &masked_key_buf,
             unmasked_hmac_key.get_ptr()
         );
+#if SESSION_EX_TESTS
+        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+        ASSERT_EQ(unmasked_hmac_key.get(), 0);
+        return;
+#endif
         ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
 
         // Use unmasked key for sign operation
@@ -595,7 +610,8 @@ TEST_F(tsra_hmac_keygen, unmask_invalid_data)
             &invalid_buf,
             unmasked_key.get_ptr()
         );
-        ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+        ASSERT_EQ(err, unmask_decode_status);
+        ASSERT_EQ(unmasked_key.get(), 0);
     });
 }
 
@@ -678,7 +694,7 @@ TEST_F(tsra_hmac_keygen, unmask_empty_buffer)
         auto_key unmasked_key;
         tsra_status err =
             tsra_key_unmask(session, TSRA_KEY_KIND_HMAC_SHA256, &empty_buf, unmasked_key.get_ptr());
-        ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+        ASSERT_EQ(err, unmask_decode_status);
 
         ASSERT_EQ(unmasked_key.get(), 0);
     });
@@ -736,6 +752,11 @@ TEST_F(tsra_hmac_keygen, unmask_and_use_hmac_key_all_algorithms)
                 &masked_key_buf,
                 unmasked_hmac_key.get_ptr()
             );
+#if SESSION_EX_TESTS
+            ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+            ASSERT_EQ(unmasked_hmac_key.get(), 0);
+            return;
+#endif
             ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
             ASSERT_NE(unmasked_hmac_key.get(), 0);
 
@@ -1260,7 +1281,7 @@ TEST_F(tsra_hmac_keygen, unmask_rejects_truncated_masked_key_blob)
             unmasked_key.get_ptr()
         );
 
-        ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+        ASSERT_EQ(err, unmask_decode_status);
 
         ASSERT_EQ(unmasked_key.get(), 0);
     });
@@ -1310,7 +1331,7 @@ TEST_F(tsra_hmac_keygen, unmask_rejects_corrupted_masked_key_blob)
             unmasked_key.get_ptr()
         );
 
-        ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+        ASSERT_EQ(err, unmask_decode_status);
 
         ASSERT_EQ(unmasked_key.get(), 0);
     });
@@ -1398,7 +1419,11 @@ TEST_F(tsra_hmac_keygen, unmask_rejects_unsupported_key_kind)
         auto_key unmasked_key;
         err = tsra_key_unmask(session, TSRA_KEY_KIND_AES, &masked_key_buf, unmasked_key.get_ptr());
 
+#if SESSION_EX_TESTS
+        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
+#else
         ASSERT_EQ(err, TSRA_STATUS_INVALID_KEY_PROPS);
+#endif
         ASSERT_EQ(unmasked_key.get(), 0);
     });
 }

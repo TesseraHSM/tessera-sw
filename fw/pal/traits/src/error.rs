@@ -472,6 +472,11 @@ pub enum HsmError {
     /// `DefaultHandler`.
     UnexpectedException = 0x08F00003,
 
+    /// A crash was raised deliberately through the explicit-crash path
+    /// (`tsra_fw_uno_fault::explicit_crash`), rather than by a Rust
+    /// `panic!` or a CPU exception.
+    ExplicitCrash = 0x08F00004,
+
     // -- CPT (CryptoController) errors --------------------------------
     // Mirror of tiger-collab's `DeviceErrorCodes::CryptoController` range
     // (fw/crates/error/src/device.rs, subopcode 0x0a). Values are copied
