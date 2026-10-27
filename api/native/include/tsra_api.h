@@ -1041,7 +1041,7 @@ struct tsra_api_rev
 
  C-compatible representation of `HsmPartitionInfo` with the path
  expressed as an `TsraStr` (pointer + length) instead of a Rust `String`,
- and the supported API revision range as min/max fields.
+ the supported API revision range as min/max fields, and security-domain initialization state.
  */
 struct tsra_part_info
 {
@@ -1057,6 +1057,10 @@ struct tsra_part_info
      Maximum supported API revision
      */
     struct tsra_api_rev api_rev_max;
+    /*
+     Security-domain initialization when the list was created: 0 = false or unsupported, 1 = true.
+     */
+    uint8_t sd_initialized;
 };
 
 /*
@@ -2825,8 +2829,8 @@ tsra_status tsra_part_get_count(tsra_handle handle, uint32_t *count);
  @param[in/out] part_info Pointer to an `TsraPartInfo` structure.
                 On input, `part_info.path.len` is the size of the buffer pointed to by
  `part_info.path.str`. On output, `part_info.path.len` is set to the required/written size.
-                `part_info.api_rev_min` / `part_info.api_rev_max` are only valid on
-                `TSRA_STATUS_SUCCESS`.
+                `part_info.api_rev_min`, `part_info.api_rev_max`, and `part_info.sd_initialized` are
+ only valid on `TSRA_STATUS_SUCCESS`.
 
  @return 0 on success, TSRA_STATUS_BUFFER_TOO_SMALL if the path buffer is too small
          (part_info.path.len is updated to the required size), or a negative error code on failure.

@@ -68,6 +68,23 @@ fn test_partition_info_list() {
 }
 
 #[api_test]
+fn test_partition_info_list_has_sd_initialized() {
+    let part_mgr = HsmPartitionManager::partition_info_list();
+    assert!(!part_mgr.is_empty(), "No partitions found.");
+    for part_info in &part_mgr {
+        assert!(
+            part_info.api_rev_range.is_some(),
+            "Partition metadata should remain accessible"
+        );
+        assert!(
+            matches!(part_info.sd_initialized, 0 | 1),
+            "SD initialization must be 0 or 1 for {}",
+            part_info.path
+        );
+    }
+}
+
+#[api_test]
 fn test_open_partition() {
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");

@@ -120,6 +120,6 @@ pub struct TborPartInfoResp<'a> {
     #[tbor(buffer, len = 96)]
     pub pid_pub_key: &'a [u8],
 
-    /// Whether this partition is a security-domain member (0 = no, 1 = yes).
-    pub is_sd_member: u8,
+    /// Whether this partition's security domain is initialized (0 = no, 1 = yes).
+    pub sd_initialized: u8,
 }

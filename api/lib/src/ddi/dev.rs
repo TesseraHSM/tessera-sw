@@ -11,6 +11,9 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 use std::sync::LazyLock;
 
+use tsra_ddi_tbor_types::TborPartInfoReq;
+use tsra_ddi_tbor_types::TborStatus;
+
 use super::*;
 use crate::resiliency::HsmDdi;
 
@@ -52,6 +55,28 @@ pub(crate) fn get_api_rev(dev: &HsmDev) -> HsmResult<(HsmApiRev, HsmApiRev)> {
     let resp: DdiGetApiRevCmdResp = dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from)?;
 
     Ok((resp.data.min.into(), resp.data.max.into()))
+}
+
+/// Queries security-domain initialization over the out-of-session TBOR `PartInfo` command.
+///
+/// Returns `0` when the backend or device does not support the command.
+/// Other device failures and invalid initialization values return an error.
+pub(crate) fn get_sd_initialized(dev: &HsmDev) -> HsmResult<u8> {
+    let resp = match dev.exec_op_tbor(&TborPartInfoReq::new(), None, &mut None) {
+        Ok(resp) => resp,
+        Err(
+            DdiError::UnsupportedEncoding
+            | DdiError::DdiStatus(DdiStatus::UnsupportedCmd)
+            | DdiError::TborStatus(TborStatus::UnsupportedCmd),
+        ) => {
+            return Ok(0);
+        }
+        Err(err) => return Err(HsmError::from(err)),
+    };
+    match resp.sd_initialized {
+        0 | 1 => Ok(resp.sd_initialized),
+        _ => Err(HsmError::InternalError),
+    }
 }
 
 /// Converts a DDI API revision to an HSM API revision.

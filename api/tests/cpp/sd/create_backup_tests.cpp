@@ -30,6 +30,26 @@
 
 namespace
 {
+void assert_sd_initialized(const std::vector<tsra_char> &path, uint8_t expected)
+{
+    auto parts = PartitionListHandle();
+    for (auto index = 0u; index < parts.count(); ++index)
+    {
+        if (parts.get_path(index) != path)
+        {
+            continue;
+        }
+
+        std::vector<tsra_char> buffer(path.size());
+        tsra_part_info info = {};
+        info.path = { buffer.data(), static_cast<uint32_t>(buffer.size()) };
+        ASSERT_EQ(tsra_part_get_info(parts.get(), index, &info), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(info.sd_initialized, expected);
+        return;
+    }
+    FAIL() << "Provisioned partition was not found";
+}
+
 // Run the create-backup call, sizing the three output buffers via the
 // probe/fill convention. The FFI validates each output buffer in sequence
 // and reports the first that is too small, so a single len=0 probe only
@@ -156,6 +176,8 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
         }
         auto sess_guard = scope_guard::make_scope_exit([&ctx] { tsra_sess_close(ctx.session); });
 
+        ASSERT_NO_FATAL_FAILURE(assert_sd_initialized(path, static_cast<uint8_t>(false)));
+
         SealingKeyMaterial sealing = sealing_key_and_report(ctx.session);
         ASSERT_EQ(sealing.masked.size(), kMaskedSealingKeyLen);
         ASSERT_FALSE(sealing.report.empty());
@@ -177,6 +199,8 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
         std::vector<uint8_t> sd_mk;
         auto err = create_backup_fill(ctx.session, &params, pok_remote, pok_local, sd_mk);
         ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
+
+        ASSERT_NO_FATAL_FAILURE(assert_sd_initialized(path, static_cast<uint8_t>(true)));
 
         // Remote backup: HPKE-Auth seal of BKS3, 161 B, non-zero.
         ASSERT_EQ(pok_remote.size(), kPokRemoteBackupLen);

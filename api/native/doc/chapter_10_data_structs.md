@@ -433,6 +433,7 @@ struct tsra_part_info {
     struct tsra_str path;
     struct tsra_api_rev api_rev_min;
     struct tsra_api_rev api_rev_max;
+    uint8_t sd_initialized;
 };
 ```
 
@@ -443,12 +444,18 @@ struct tsra_part_info {
  | path        | [struct tsra_str](#tsra_str)         | device path (caller-owned buffer, filled by the API) |
  | api_rev_min | [struct tsra_api_rev](#tsra_api_rev) | minimum supported API revision                      |
  | api_rev_max | [struct tsra_api_rev](#tsra_api_rev) | maximum supported API revision                      |
+ | sd_initialized | uint8_t                               | security-domain initialization: 0 = false or unsupported, 1 = true |
 
 On input, `path.len` is the capacity of the caller-allocated buffer pointed to by `path.str`,
 in `tsra_char` elements (including the null terminator).
 On output, `path.len` is set to the number of `tsra_char` elements written
 (or the required count when `TSRA_STATUS_BUFFER_TOO_SMALL` is returned).
-`api_rev_min` and `api_rev_max` are only valid when the return status is `TSRA_STATUS_SUCCESS`.
+`api_rev_min`, `api_rev_max`, and `sd_initialized` are only valid when the return status is
+`TSRA_STATUS_SUCCESS`. Initialization is captured when `tsra_part_get_list` creates the list;
+create a new list to refresh it.
+
+Adding `sd_initialized` changes the structure layout. C callers must be recompiled against
+the updated header.
 
 ### tsra_api_rev
 

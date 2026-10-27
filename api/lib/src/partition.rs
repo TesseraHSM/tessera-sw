@@ -66,8 +66,7 @@ impl HsmApiRevRange {
 
 /// HSM partition information.
 ///
-/// Contains metadata about an HSM partition, including its device path
-/// and supported API revision range.
+/// Contains the device path, supported API revision range, and security-domain initialization state.
 #[derive(Debug, Clone)]
 pub struct HsmPartitionInfo {
     /// Device path for accessing the partition.
@@ -75,6 +74,10 @@ pub struct HsmPartitionInfo {
 
     /// Supported API revision range for this partition.
     pub api_rev_range: Option<HsmApiRevRange>,
+
+    /// Security-domain initialization: `0` for false or unsupported, `1` for true.
+    /// Only valid when `api_rev_range` is available.
+    pub sd_initialized: u8,
 }
 
 /// HSM application credentials.
@@ -320,10 +323,12 @@ impl HsmPartitionManager {
     /// Retrieves a list of all available HSM partitions.
     ///
     /// Queries the system for available HSM devices and returns information
-    /// about each discovered partition, including its device path and
-    /// supported API revision range. If the device cannot be opened or
-    /// the API revision range cannot be retrieved, `api_rev_range` is
-    /// set to `None` for that partition.
+    /// about each discovered partition, including its device path,
+    /// supported API revision range, and security-domain initialization state.
+    /// If the device cannot be opened or either metadata query fails,
+    /// `api_rev_range` is `None` for that partition and `sd_initialized` is `0`.
+    /// Unsupported initialization-state queries report `sd_initialized` as `0` without
+    /// making the partition inaccessible.
     ///
     /// # Returns
     ///
@@ -333,13 +338,17 @@ impl HsmPartitionManager {
         let vec = ddi::dev_paths()
             .into_iter()
             .map(|path| {
-                let api_rev_range = ddi::open_dev(&path)
-                    .and_then(|dev| ddi::get_api_rev(&dev))
-                    .ok()
-                    .map(|(min, max)| HsmApiRevRange::new(min, max));
+                let (api_rev_range, sd_initialized) = ddi::open_dev(&path)
+                    .and_then(|dev| {
+                        let (min, max) = ddi::get_api_rev(&dev)?;
+                        let sd_initialized = ddi::get_sd_initialized(&dev)?;
+                        Ok((Some(HsmApiRevRange::new(min, max)), sd_initialized))
+                    })
+                    .unwrap_or_default();
                 HsmPartitionInfo {
                     path,
                     api_rev_range,
+                    sd_initialized,
                 }
             })
             .collect::<Vec<HsmPartitionInfo>>();
