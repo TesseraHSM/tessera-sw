@@ -35,6 +35,8 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 
+use crate::commands::part_info::assert_part_state;
+use crate::commands::part_info::PART_STATE_INITIALIZED;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
@@ -133,6 +135,7 @@ fn sd_restore_local_backup_roundtrip() {
     // Device 2 (reboot): restore PartLocalMK, then restore the SD locally.
     let ctx = TestCtx::new();
     let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
 
     let resp = ctx
         .tbor(&TborSdRestoreLocalBackupReq {
@@ -141,6 +144,7 @@ fn sd_restore_local_backup_roundtrip() {
             sd_mk_backup: created.sd_mk_backup.clone(),
         })
         .expect("SdRestoreLocalBackup roundtrip");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 
     // Refreshed local backup (BKS3 re-masked under PartLocalMK), 276 B.
     assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);
@@ -244,4 +248,12 @@ fn sd_restore_local_backup_rejects_tampered_pok() {
         },
         TborStatus::AesGcmDecryptTagDoesNotMatch,
     );
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+    ctx.tbor(&TborSdRestoreLocalBackupReq {
+        session_id: session.session_id,
+        pok_local_backup: created.pok_local_backup,
+        sd_mk_backup: created.sd_mk_backup,
+    })
+    .expect("valid restore must remain possible after a rejected backup");
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 }

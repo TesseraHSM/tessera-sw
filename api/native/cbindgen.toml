@@ -39,6 +39,8 @@ include = [
   "HsmKeyClass",
   "HsmKeyKind",
   "HsmPartType",
+  "TSRA_BOOL_FALSE",
+  "TSRA_BOOL_TRUE",
   "TsraAlgoAesCbcParams",
   "TsraAlgoAesGcmParams",
   "TsraAlgoAesXtsParams",
@@ -49,6 +51,7 @@ include = [
   "TsraAlgoRsaAesWrapParams",
   "TsraAlgoRsaPkcsOaepParams",
   "TsraAlgoRsaPkcsPssParams",
+  "TsraBool",
   "TsraDarcCertChain",
   "TsraDarcKeyUnwrapParams",
   "TsraDarcKeyWrapParams",
@@ -106,6 +109,7 @@ item_types = [
 "TsraAlgoRsaPkcsOaepParams" = "tsra_algo_rsa_pkcs_oaep_params"
 "TsraAlgoRsaPkcsPssParams" = "tsra_algo_rsa_pkcs_pss_params"
 "TsraApiRev" = "tsra_api_rev"
+"TsraBool" = "tsra_bool"
 "TsraBuffer" = "tsra_buffer"
 "TsraChar" = "tsra_char"
 "TsraCredentials" = "tsra_credentials"
