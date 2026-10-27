@@ -133,7 +133,7 @@ impl<'a> TryFrom<&'a TsraPotaEndorsement> for api::HsmPotaEndorsement {
 ///
 /// C-compatible representation of `HsmPartitionInfo` with the path
 /// expressed as an `TsraStr` (pointer + length) instead of a Rust `String`,
-/// the supported API revision range as min/max fields, and security-domain initialization state.
+/// and the supported API revision range as min/max fields.
 #[repr(C)]
 pub struct TsraPartInfo {
     /// Device path (caller-owned buffer, filled by the API)
@@ -144,9 +144,6 @@ pub struct TsraPartInfo {
 
     /// Maximum supported API revision
     pub api_rev_max: TsraApiRev,
-
-    /// Whether the security domain was initialized when the list was created; false when unsupported.
-    pub sd_initialized: bool,
 }
 
 impl TsraPartInfo {
@@ -180,7 +177,6 @@ impl TsraPartInfo {
         let range = src.api_rev_range.ok_or(TsraStatus::DeviceNotAccessible)?;
         self.api_rev_min = TsraApiRev::from(range.min());
         self.api_rev_max = TsraApiRev::from(range.max());
-        self.sd_initialized = src.sd_initialized;
 
         Ok(())
     }
@@ -282,7 +278,7 @@ pub unsafe extern "C" fn tsra_part_get_count(handle: TsraHandle, count: *mut u32
 /// @param[in/out] part_info Pointer to an `TsraPartInfo` structure.
 ///                On input, `part_info.path.len` is the size of the buffer pointed to by `part_info.path.str`.
 ///                On output, `part_info.path.len` is set to the required/written size.
-///                `part_info.api_rev_min`, `part_info.api_rev_max`, and `part_info.sd_initialized` are only valid on
+///                `part_info.api_rev_min` / `part_info.api_rev_max` are only valid on
 ///                `TSRA_STATUS_SUCCESS`.
 ///
 /// @return 0 on success, TSRA_STATUS_BUFFER_TOO_SMALL if the path buffer is too small

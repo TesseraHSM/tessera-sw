@@ -68,7 +68,7 @@ fn test_partition_info_list() {
 }
 
 #[api_test]
-fn test_partition_info_list_has_sd_initialized() {
+fn test_partition_sd_initialized() {
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in &part_mgr {
@@ -79,12 +79,10 @@ fn test_partition_info_list_has_sd_initialized() {
         let part = HsmPartitionManager::open_partition(&part_info.path, test_api_rev())
             .expect("Failed to open the partition");
         part.reset().expect("Partition reset failed");
-        let refreshed_info = HsmPartitionManager::partition_info_list()
-            .into_iter()
-            .find(|info| info.path == part_info.path)
-            .expect("Reset partition should remain discoverable");
         assert!(
-            !refreshed_info.sd_initialized,
+            !part
+                .sd_initialized()
+                .expect("Failed to query SD initialization"),
             "SD must not be initialized after resetting {}",
             part_info.path
         );

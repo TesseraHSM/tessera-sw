@@ -578,6 +578,10 @@ enum tsra_part_prop_id
      Raw ECC-P384 partition identity public key (`x ‖ y`, 96 bytes).
      */
     TSRA_PART_PROP_ID_PART_EX_PUB_KEY = 14,
+    /*
+     Live security-domain initialization state; false when reporting is unsupported.
+     */
+    TSRA_PART_PROP_ID_SD_INITIALIZED = 15,
 };
 #ifndef __cplusplus
 typedef uint32_t tsra_part_prop_id;
@@ -1041,7 +1045,7 @@ struct tsra_api_rev
 
  C-compatible representation of `HsmPartitionInfo` with the path
  expressed as an `TsraStr` (pointer + length) instead of a Rust `String`,
- the supported API revision range as min/max fields, and security-domain initialization state.
+ and the supported API revision range as min/max fields.
  */
 struct tsra_part_info
 {
@@ -1057,10 +1061,6 @@ struct tsra_part_info
      Maximum supported API revision
      */
     struct tsra_api_rev api_rev_max;
-    /*
-     Whether the security domain was initialized when the list was created; false when unsupported.
-     */
-    bool sd_initialized;
 };
 
 /*
@@ -2829,8 +2829,8 @@ tsra_status tsra_part_get_count(tsra_handle handle, uint32_t *count);
  @param[in/out] part_info Pointer to an `TsraPartInfo` structure.
                 On input, `part_info.path.len` is the size of the buffer pointed to by
  `part_info.path.str`. On output, `part_info.path.len` is set to the required/written size.
-                `part_info.api_rev_min`, `part_info.api_rev_max`, and `part_info.sd_initialized` are
- only valid on `TSRA_STATUS_SUCCESS`.
+                `part_info.api_rev_min` / `part_info.api_rev_max` are only valid on
+                `TSRA_STATUS_SUCCESS`.
 
  @return 0 on success, TSRA_STATUS_BUFFER_TOO_SMALL if the path buffer is too small
          (part_info.path.len is updated to the required size), or a negative error code on failure.

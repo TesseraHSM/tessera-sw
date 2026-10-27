@@ -69,13 +69,12 @@ struct hsm_str
     uint32_t len;
 };
 
-/// Matches the C layout of tsra_part_info, including the SD initialization state.
+/// Matches the C layout of tsra_part_info.
 struct hsm_part_info
 {
     hsm_str path;
     hsm_api_rev api_rev_min;
     hsm_api_rev api_rev_max;
-    bool sd_initialized;
 };
 
 using fn_get_list = hsm_status (*)(hsm_handle *);

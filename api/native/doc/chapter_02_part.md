@@ -63,7 +63,7 @@ tsra_u32 tsra_part_get_count(
 ## tsra_part_get_info
 
 Retrieves partition information at the given index, including the OS device path
-and the supported API revision range and security-domain initialization state.
+and the supported API revision range.
 
 ```cpp
 tsra_status tsra_part_get_info(
@@ -84,13 +84,8 @@ tsra_status tsra_part_get_info(
 On input, `part_info.path.len` is the capacity of the buffer pointed to by `part_info.path.str`,
 expressed as a count of `tsra_char` elements (including the null terminator).
 On output, `part_info.path.len` is set to the required/written count of `tsra_char` elements.
-`part_info.api_rev_min`, `part_info.api_rev_max`, and `part_info.sd_initialized` are only
-valid when the return status is `TSRA_STATUS_SUCCESS`.
-
-`part_info.sd_initialized` is `true` when the security domain is initialized and `false`
-otherwise, including when initialization-state reporting is unsupported.
-It reflects initialization when [`tsra_part_get_list`](#tsra_part_get_list)
-created the list; create a new list to refresh the value.
+`part_info.api_rev_min` and `part_info.api_rev_max` are only valid when the
+return status is `TSRA_STATUS_SUCCESS`.
 
 **Returns**
 
@@ -306,6 +301,18 @@ Retrieve partition property
 | max api revision supported by the device           | [struct tsra_api_rev](#tsra_api_rev) | \scriptsize TSRA_PART_PROP_ID_MAX_API_REV       |
 | manufacturer cert chain in PEM format              | [tsra_char*](#tsra_char)             | \scriptsize TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN |
 | partition identity (PID) public key in DER format  | uint8_t*                                 | \scriptsize TSRA_PART_PROP_ID_PART_PUB_KEY    |
+| current security-domain initialization state      | [tsra_bool](#tsra_bool)                   | \scriptsize TSRA_PART_PROP_ID_SD_INITIALIZED |
+
+`TSRA_PART_PROP_ID_SD_INITIALIZED` performs an out-of-session device query on every
+call; it does not use a partition-list snapshot or cache. It returns `TSRA_BOOL_TRUE` when
+the security domain is initialized and `TSRA_BOOL_FALSE` otherwise, including when the
+device or backend does not support reporting this state. Other query failures
+are returned as errors.
+
+For this property, `prop.val` points to a `tsra_bool` (`uint8_t`) and `prop.len` is its capacity in
+bytes. A size query with `prop.len = 0` returns `TSRA_STATUS_BUFFER_TOO_SMALL` and
+sets `prop.len` to `sizeof(tsra_bool)`. On success, the API writes the current value and
+sets `prop.len` to `sizeof(tsra_bool)`. No session is required.
 
 ```cpp
 tsra_status tsra_part_get_prop(

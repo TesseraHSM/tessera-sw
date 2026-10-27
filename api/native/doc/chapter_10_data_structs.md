@@ -55,7 +55,7 @@ typedef void tsra_void;
 Boolean type
 
 ```cpp
-typedef uint32_t tsra_bool;
+typedef uint8_t tsra_bool;
 ```
 Possible values are defined by [TSRA_BOOL_XXX](#tsra_bool_xxx)
 
@@ -232,6 +232,7 @@ Device property identifiers
 #define TSRA_PART_PROP_ID_BACKUP_MASKING_KEY 10
 #define TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY 11
 #define TSRA_PART_PROP_ID_PART_PUB_KEY 12
+#define TSRA_PART_PROP_ID_SD_INITIALIZED 15
 ```
 
 ### TSRA_PART_TYPE_XXX
@@ -433,7 +434,6 @@ struct tsra_part_info {
     struct tsra_str path;
     struct tsra_api_rev api_rev_min;
     struct tsra_api_rev api_rev_max;
-    bool sd_initialized;
 };
 ```
 
@@ -444,18 +444,16 @@ struct tsra_part_info {
  | path        | [struct tsra_str](#tsra_str)         | device path (caller-owned buffer, filled by the API) |
  | api_rev_min | [struct tsra_api_rev](#tsra_api_rev) | minimum supported API revision                      |
  | api_rev_max | [struct tsra_api_rev](#tsra_api_rev) | maximum supported API revision                      |
- | sd_initialized | bool                                  | whether the security domain is initialized; false when unsupported |
 
 On input, `path.len` is the capacity of the caller-allocated buffer pointed to by `path.str`,
 in `tsra_char` elements (including the null terminator).
 On output, `path.len` is set to the number of `tsra_char` elements written
 (or the required count when `TSRA_STATUS_BUFFER_TOO_SMALL` is returned).
-`api_rev_min`, `api_rev_max`, and `sd_initialized` are only valid when the return status is
-`TSRA_STATUS_SUCCESS`. Initialization is captured when `tsra_part_get_list` creates the list;
-create a new list to refresh it.
+`api_rev_min` and `api_rev_max` are only valid when the return status is `TSRA_STATUS_SUCCESS`.
 
-Adding `sd_initialized` changes the structure layout. C callers must be recompiled against
-the updated header.
+Security-domain initialization is queried live through
+[`tsra_part_get_prop`](#tsra_part_get_prop) with `TSRA_PART_PROP_ID_SD_INITIALIZED`,
+which returns a [`tsra_bool`](#tsra_bool); it is not part of this structure.
 
 ### tsra_api_rev
 
