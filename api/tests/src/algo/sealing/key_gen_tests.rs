@@ -413,10 +413,10 @@ fn sealing_key_gen_sd_scope_reopen() {
     );
 }
 
-/// A rotated-PSK bootstrap session cannot generate an SD-scoped key before
-/// partition finalization or SD provisioning.
+/// SD-scoped key generation must fail on a bootstrap (unfinalized) partition.
+/// The CO PSK is rotated so the credential gate cannot mask this state check.
 #[test]
-fn sealing_key_gen_rejects_sd_bootstrap() {
+fn sd_scoped_keygen_rejects_bootstrap_partition() {
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
     let rotated_psk = [0x5Au8; PSK_LEN];
