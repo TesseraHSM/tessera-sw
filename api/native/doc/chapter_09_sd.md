@@ -24,6 +24,23 @@ Generating a replacement key cannot recover backups sealed to the original
 receiver. This decoder support does not add a public key-import API or a
 native C entry point.
 
+### Sealing-key masking scope
+
+Rust sealing-key generation accepts explicit `HsmKeyScope::Ephemeral`,
+`Local`, or `SecurityDomain` scope. The default remains `Local`; `Session`
+scope is rejected. SecurityDomain scope requires the SD masking key to
+have been provisioned by SD creation or restoration.
+
+Keep a Local- or Ephemeral-scoped key for SD bootstrap. An SD-scoped key
+cannot create or restore its own SD because its masking key must already
+be available. After a reset, restore the SD independently before using an
+SD-scoped sealing key. The caller must retain the masked blob; it is not
+stored on-device. Copies are usable wherever the same SD masking key is
+available, subject to command authorization.
+
+Key attestation does not distinguish Local scope from SecurityDomain
+scope; the report alone does not establish partition-local custody.
+
 ### Attestation certificate chains
 
 SD attestation requires a non-empty manufacturer chain, a non-empty

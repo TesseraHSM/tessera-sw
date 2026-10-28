@@ -227,9 +227,10 @@ pub enum HsmVaultKeyKind {
     /// **not** stored on-device: it is returned to the caller masked under
     /// the requested scope's masking key, and this kind is recorded only
     /// as the masked blob's `key_kind` metadata.  Tagged with the caller's
-    /// requested [`HsmKeyScope`] (currently `Ephemeral` or `Local`;
-    /// `SecurityDomain` is not yet supported) via its attribute `scope`
-    /// field.  Represented as the 48-byte raw private scalar, mirroring
+    /// requested [`HsmKeyScope`] (`Ephemeral`, `Local`, or
+    /// `SecurityDomain`) via its attribute `scope` field. SecurityDomain
+    /// requires an already-provisioned SD masking key. Represented as the
+    /// 48-byte raw private scalar, mirroring
     /// [`PartitionTrustAnchor`](Self::PartitionTrustAnchor).
     SdSealing = 41,
 

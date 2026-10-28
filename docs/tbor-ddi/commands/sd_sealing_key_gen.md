@@ -26,14 +26,21 @@ firmware `HsmKeyScope`.  Scope → masking key:
 
 - `Ephemeral` → the partition `PartitionEphemeralMaskingKey`.
 - `Local` → the partition `PartitionLocalMaskingKey`.
+- `SecurityDomain` uses the `SdMasking` key provisioned by SD creation or
+	restoration.
 
-Both masking keys are provisioned by `PartFinal`, so the partition must
-be in the `Initialized` lifecycle state.  The `Session` and
-`SecurityDomain` scopes (and any other) are rejected with
-`UnsupportedKeyScope` until their masking keys exist (session-key
-masking / `CreateSD`'s `SDKMK`).  The masked key's metadata records the
+`PartFinal` provisions the Ephemeral and Local masking keys, and the
+partition must be in the `Initialized` lifecycle state. SecurityDomain
+additionally requires a provisioned SD masking key; otherwise it returns
+`UnsupportedKeyScope`. Session and other unsupported scopes return the
+same error. The masked key's metadata records the
 sealing key as `derive`-only, `local`, `private`, and never-extractable,
 plus the requested scope.
+
+An SD-scoped sealing key cannot bootstrap SD creation or restoration on
+the partition: those commands require an uninitialized SD, while using
+the key requires the SD masking key to be available already. Use Local
+or Ephemeral scope for the partition's bootstrap sealing key.
 
 This command is **Crypto-Officer-only**: a Crypto-User session is
 rejected with `InvalidPermissions`.
@@ -48,7 +55,7 @@ Wire layout: 4-byte header, followed by the TOC entries, then the
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 4 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `0` = Unspecified, `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain, `5` = Internal. Only `Ephemeral` and `Local` are supported; others return `UnsupportedKeyScope`. |
+| 8 | `scope` | `uint8` (inline) | Requested key scope (`KeyScope` discriminant): `0` = Unspecified, `1` = Session, `2` = Ephemeral, `3` = Local, `4` = SecurityDomain, `5` = Internal. Supports Ephemeral, Local, and SecurityDomain when its masking key is provisioned. Other scopes return `UnsupportedKeyScope`. |
 
 ### Data section
 
@@ -77,7 +84,7 @@ Carries the 276-byte `masked_key` followed by the 96-byte `pub_key`.
 | `InvalidPermissions` | The calling session is a Crypto User (this command is Crypto-Officer-only) |
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
 | `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first) |
-| `UnsupportedKeyScope` | The requested scope (`Session`, `SecurityDomain`, or other) has no masking key yet |
+| `UnsupportedKeyScope` | The scope is unsupported, or its masking key has not been provisioned |
 | `DdiDecodeFailed` | Malformed request body |
 
 ## See also

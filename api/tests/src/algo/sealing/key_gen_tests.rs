@@ -6,15 +6,18 @@
 //! the emulator or hardware backend.
 //!
 //! Property-validation guards run before the device round-trip, so they are
-//! deterministic. The `roundtrip_*` tests provision the partition to
-//! `Initialized` via [`crate::utils::sd_provision::finalized_co_session`], then
-//! generate a sealing key end to end and validate the masked blob and
-//! public key.
+//! deterministic. Round-trip tests finalize the partition, then generate a
+//! sealing key and validate the masked blob and public key. SecurityDomain
+//! coverage additionally provisions the SD before generation and attestation.
 
 use tsra_api::*;
+use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
+use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 
 use crate::utils::partition_ex_helpers::*;
+use crate::utils::sd_provision;
+use crate::utils::sd_provision::SEALING_KEY_BITS;
 
 /// Well-formed sealing key props: a `Sealing`-kind P-384 secret key
 /// permitted for derivation only, matching the wire contract.
@@ -22,7 +25,7 @@ fn sealing_props() -> HsmKeyProps {
     HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(SEALING_KEY_BITS)
         .can_derive(true)
         .build()
         .expect("build sealing props")
@@ -59,7 +62,7 @@ fn sealing_key_gen_rejects_missing_derive() {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(SEALING_KEY_BITS)
         .build()
         .expect("build props");
 
@@ -97,7 +100,7 @@ fn sealing_key_gen_rejects_wrong_class() {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Public)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(SEALING_KEY_BITS)
         .can_derive(true)
         .build()
         .expect("build props");
@@ -117,7 +120,7 @@ fn sealing_key_gen_rejects_extra_capability() {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(SEALING_KEY_BITS)
         .can_derive(true)
         .can_sign(true)
         .build()
@@ -166,7 +169,7 @@ fn sealing_key_gen_roundtrip_generates_usable_sealing_key() {
     // Typed properties describe a P-384 `Sealing` secret derive key.
     assert_eq!(key.kind(), HsmKeyKind::Sealing);
     assert_eq!(key.class(), HsmKeyClass::Secret);
-    assert_eq!(key.bits(), 384);
+    assert_eq!(key.bits(), SEALING_KEY_BITS);
     assert!(key.can_derive());
 
     // The masked private-key blob is the pinned wire length and non-zero.
@@ -225,32 +228,24 @@ fn sealing_key_gen_roundtrip_yields_distinct_keys() {
     assert_ne!(pub1, pub2);
 }
 
-/// Sealing keys support only the `Ephemeral` and `Local` masking scopes
-/// (`SdSealingKeyGen` firmware contract). An explicit `SecurityDomain` or
-/// `Session` scope is rejected up front by the host guard, before any
-/// device round-trip.
+/// Session scope is rejected by the host before any device round-trip.
 #[test]
-fn sealing_key_gen_rejects_unsupported_scopes() {
+fn sealing_key_gen_rejects_session_scope() {
     let _guard = PARTITION_LOCK.lock();
     let session = new_co_session();
 
-    for scope in [HsmKeyScope::SecurityDomain, HsmKeyScope::Session] {
-        let props = HsmKeyPropsBuilder::default()
-            .class(HsmKeyClass::Secret)
-            .key_kind(HsmKeyKind::Sealing)
-            .bits(384)
-            .can_derive(true)
-            .scope(scope)
-            .build()
-            .expect("build props");
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Sealing)
+        .bits(SEALING_KEY_BITS)
+        .can_derive(true)
+        .scope(HsmKeyScope::Session)
+        .build()
+        .expect("build props");
 
-        let mut algo = HsmSealingKeyGenAlgo::default();
-        let res = HsmKeyManager::generate_key(&session, &mut algo, props);
-        assert!(
-            matches!(res, Err(HsmError::InvalidKeyProps)),
-            "scope {scope:?} must be rejected"
-        );
-    }
+    let mut algo = HsmSealingKeyGenAlgo::default();
+    let res = HsmKeyManager::generate_key(&session, &mut algo, props);
+    assert!(matches!(res, Err(HsmError::InvalidKeyProps)));
 }
 
 /// An explicit `Local` scope round-trips: the device masks under the
@@ -264,7 +259,7 @@ fn sealing_key_gen_roundtrip_honors_explicit_local_scope() {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(SEALING_KEY_BITS)
         .can_derive(true)
         .scope(HsmKeyScope::Local)
         .build()
@@ -289,7 +284,7 @@ fn sealing_key_gen_roundtrip_honors_ephemeral_scope() {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(SEALING_KEY_BITS)
         .can_derive(true)
         .scope(HsmKeyScope::Ephemeral)
         .build()
@@ -301,4 +296,163 @@ fn sealing_key_gen_roundtrip_honors_ephemeral_scope() {
 
     let masked = key.masked_key_vec().expect("masked key");
     assert_eq!(masked.len(), MASKED_SEALING_KEY_LEN);
+}
+
+/// SecurityDomain scope requires a provisioned SD masking key, after which
+/// generation and attestation both succeed on the same session.
+#[test]
+fn sealing_key_gen_sd_scope() {
+    let _guard = PARTITION_LOCK.lock();
+    let sata = sd_provision::CaKey::generate();
+    let (session, policy, pid_pub) = sd_provision::finalized_backing_session(&sata);
+
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Sealing)
+        .bits(SEALING_KEY_BITS)
+        .can_derive(true)
+        .scope(HsmKeyScope::SecurityDomain)
+        .build()
+        .expect("build props");
+    let mut algo = HsmSealingKeyGenAlgo::default();
+    let res = HsmKeyManager::generate_key(&session, &mut algo, props.clone());
+    assert!(
+        matches!(res.as_ref().err(), Some(HsmError::DdiCmdFailure)),
+        "an absent SD masking key must be rejected by firmware, got {:?}",
+        res.err(),
+    );
+
+    let (masked, receiver_pub, report) = sd_provision::masked_key_and_report(&session);
+    let evidence = sd_provision::build_receiver_evidence(&pid_pub, &receiver_pub, &sata, &report);
+    evidence
+        .with_create_backup(|receiver_chain, receiver| {
+            session.sd_create_remote_backup(&policy, &masked, receiver_chain, receiver)
+        })
+        .expect("provision security domain with a Local-scoped sealing key");
+
+    let key = HsmKeyManager::generate_key(&session, &mut algo, props)
+        .expect("generate SecurityDomain-scoped sealing key");
+    assert_eq!(key.kind(), HsmKeyKind::Sealing);
+    assert_eq!(key.class(), HsmKeyClass::Secret);
+    assert_eq!(key.bits(), SEALING_KEY_BITS);
+    assert!(key.can_derive());
+    assert!(!key.is_session());
+    assert_eq!(
+        key.masked_key_vec().expect("masked key").len(),
+        MASKED_SEALING_KEY_LEN,
+    );
+    assert!(!key.pub_key_der_vec().expect("public key der").is_empty());
+
+    let report_data = [0u8; KEY_REPORT_DATA_LEN];
+    let report_len = key
+        .generate_key_report(&report_data, None)
+        .expect("key report size");
+    let mut report = vec![0u8; report_len];
+    let written = key
+        .generate_key_report(&report_data, Some(&mut report))
+        .expect("attest SecurityDomain-scoped sealing key");
+    assert!(written > 0);
+    assert!(written <= report.len());
+}
+
+/// An SD-scoped sealing key remains usable after closing and reopening the
+/// session without resetting or re-provisioning the partition or SD.
+#[test]
+fn sealing_key_gen_sd_scope_reopen() {
+    let _guard = PARTITION_LOCK.lock();
+    let sata = sd_provision::CaKey::generate();
+    let (session, policy, pid_pub) = sd_provision::finalized_backing_session(&sata);
+    let (local_masked, receiver_pub, report) = sd_provision::masked_key_and_report(&session);
+    let evidence = sd_provision::build_receiver_evidence(&pid_pub, &receiver_pub, &sata, &report);
+    let created = evidence
+        .with_create_backup(|receiver_chain, receiver| {
+            session.sd_create_remote_backup(&policy, &local_masked, receiver_chain, receiver)
+        })
+        .expect("provision security domain");
+
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Sealing)
+        .bits(SEALING_KEY_BITS)
+        .can_derive(true)
+        .scope(HsmKeyScope::SecurityDomain)
+        .build()
+        .expect("build props");
+    let mut algo = HsmSealingKeyGenAlgo::default();
+    let key = HsmKeyManager::generate_key(&session, &mut algo, props)
+        .expect("generate SD-scoped sealing key");
+    let masked = key.masked_key_vec().expect("SD-scoped masked key");
+    let part_info = HsmPartitionManager::partition_info_list()
+        .into_iter()
+        .next()
+        .expect("backend should advertise a partition");
+    let rev = session.api_rev();
+    drop(key);
+    drop(session);
+
+    let part = HsmPartitionManager::open_partition(&part_info.path, rev)
+        .expect("reopen existing partition without reset");
+    assert!(part.sd_initialized().expect("SD initialization state"));
+    let reopened = part
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::with_psk(HsmPskId::CO, &sd_provision::ROTATED_CO_PSK),
+            HsmSessionExType::Authenticated,
+        )
+        .expect("reopen CO session");
+
+    let peer = evidence
+        .with_hsm_evidence(|destination| {
+            reopened.sd_create_peer_backup(&policy, &masked, destination, &created.pok_local_backup)
+        })
+        .expect("reuse original SD-scoped sealing key on reopened session");
+    assert_eq!(peer.len(), POK_REMOTE_BACKUP_LEN);
+    assert!(
+        peer.iter().any(|&byte| byte != 0),
+        "peer backup must not be all-zero",
+    );
+}
+
+/// SD-scoped key generation must fail on a bootstrap (unfinalized) partition.
+/// The CO PSK is rotated so the credential gate cannot mask this state check.
+#[test]
+fn sd_scoped_keygen_rejects_bootstrap_partition() {
+    let _guard = PARTITION_LOCK.lock();
+    let (part, rev) = new_partition();
+    let rotated_psk = [0x5Au8; PSK_LEN];
+
+    {
+        let bootstrap = part
+            .open_session_ex(
+                rev,
+                HsmSessionPsk::new(HsmPskId::CO),
+                HsmSessionExType::Authenticated,
+            )
+            .expect("open bootstrap CO session");
+        bootstrap.change_psk(&rotated_psk).expect("rotate CO PSK");
+    }
+
+    let session = part
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::with_psk(HsmPskId::CO, &rotated_psk),
+            HsmSessionExType::Authenticated,
+        )
+        .expect("open rotated CO session");
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Sealing)
+        .bits(SEALING_KEY_BITS)
+        .can_derive(true)
+        .scope(HsmKeyScope::SecurityDomain)
+        .build()
+        .expect("build props");
+
+    let mut algo = HsmSealingKeyGenAlgo::default();
+    let res = HsmKeyManager::generate_key(&session, &mut algo, props);
+    assert!(
+        matches!(res.as_ref().err(), Some(HsmError::InvalidArgument)),
+        "SD-scoped generation must reject an unfinalized partition, got {:?}",
+        res.err(),
+    );
 }

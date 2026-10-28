@@ -361,13 +361,11 @@ pub enum HsmError {
     UndoLogFull = 0x08700101,
 
     /// A command was asked to operate on a [`HsmKeyScope`](crate::HsmKeyScope)
-    /// whose backing key material does not (yet) exist on the partition.
-    /// Returned by `SdSealingKeyGen` for the `Session` and
-    /// `SecurityDomain` scopes: their masking keys are provisioned by
-    /// commands that are not yet implemented (session-key masking /
-    /// `CreateSD`'s `SDKMK`).  Distinct from
-    /// [`InvalidArg`](Self::InvalidArg) (a malformed request) — the
-    /// request is well-formed, the scope is simply unsupported for now.
+    /// that it does not support or whose backing key material is absent.
+    /// `SdSealingKeyGen` rejects Session scope and rejects SecurityDomain
+    /// scope until SD creation or restoration provisions the SD masking
+    /// key. Distinct from [`InvalidArg`](Self::InvalidArg): the request
+    /// is well-formed, but its scope is unsupported or unavailable.
     UnsupportedKeyScope = 0x08700102,
 
     /// Returned by `KeyReport` when the masked key's kind cannot be

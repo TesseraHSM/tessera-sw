@@ -21,13 +21,15 @@
 //!   [`PartitionEphemeralMaskingKey`](HsmVaultKeyKind::PartitionEphemeralMaskingKey).
 //! * [`Local`](HsmKeyScope::Local) → the partition
 //!   [`PartitionLocalMaskingKey`](HsmVaultKeyKind::PartitionLocalMaskingKey).
+//! * [`SecurityDomain`](HsmKeyScope::SecurityDomain) uses the
+//!   [`SdMasking`](HsmVaultKeyKind::SdMasking) key provisioned by SD creation
+//!   or restoration.
 //!
-//! Both masking keys are provisioned by `PartFinal`, so this command
-//! requires a partition in the [`Initialized`](PartState::Initialized)
-//! lifecycle state.  The [`Session`](HsmKeyScope::Session) and
-//! [`SecurityDomain`](HsmKeyScope::SecurityDomain) scopes (and any other)
-//! are rejected with [`HsmError::UnsupportedKeyScope`] until their
-//! masking keys exist (session-key masking / `CreateSD`'s `SDKMK`).
+//! `PartFinal` provisions the Ephemeral and Local masking keys, and this
+//! command requires an [`Initialized`](PartState::Initialized) partition.
+//! SecurityDomain additionally requires a provisioned SD masking key;
+//! otherwise it returns [`HsmError::UnsupportedKeyScope`]. Session and
+//! other unsupported scopes are rejected with the same error.
 //!
 //! This command is **Crypto-Officer-only**: a Crypto-User session is
 //! rejected with [`HsmError::InvalidPermissions`].
