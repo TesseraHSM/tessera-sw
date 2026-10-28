@@ -164,6 +164,18 @@ impl Xtask for Precheck {
         }
 
         if stage.build {
+            // The bulk-crypto fastpath flavor first, so the default flavor is what
+            // remains in `target/` afterwards.
+            log::info!("=== build (firmware, bulk_crypto) ===");
+            if let Err(e) = (crate::build::Build {
+                features: Some(crate::fw_util::BULK_CRYPTO_FEATURE.to_string()),
+                no_default_features: false,
+            })
+            .run(ctx.clone())
+            {
+                errors.push(("build (bulk_crypto)", e));
+            }
+
             log::info!("=== build (firmware) ===");
             if let Err(e) = (crate::build::Build {
                 features: None,
