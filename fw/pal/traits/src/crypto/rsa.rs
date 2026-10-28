@@ -169,7 +169,7 @@ pub enum HsmRsaPct {
 /// PAL implementations provide this to the core for RSA key generation
 /// and modular exponentiation. The async signatures allow hardware-backed
 /// implementations to yield while the PKA engine processes operations.
-pub trait HsmRsa {
+pub trait HsmRsa: HsmIoTypes {
     /// Generate an RSA key pair.
     ///
     /// # Parameters
@@ -193,7 +193,7 @@ pub trait HsmRsa {
     ///   pair is rejected).
     async fn rsa_gen_keypair(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         priv_key: &mut DmaBuf,
         pub_key: &mut DmaBuf,
@@ -227,7 +227,7 @@ pub trait HsmRsa {
     /// - `Err(HsmError)` — PKA driver failure.
     async fn mod_exp_priv(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         key: &DmaBuf,
         y: &DmaBuf,
@@ -258,7 +258,7 @@ pub trait HsmRsa {
     /// - `Err(HsmError)` — PKA driver failure.
     async fn mod_exp_pub(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         key: &DmaBuf,
         x: &DmaBuf,
@@ -298,7 +298,7 @@ pub trait HsmRsa {
     ///   public key failed for another reason.
     fn rsa_priv_pub_key(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         priv_key: &DmaBuf,
         pub_out: Option<&mut DmaBuf>,
     ) -> HsmResult<usize>;
@@ -332,7 +332,7 @@ pub trait HsmRsa {
     /// - `Err(HsmError::InvalidArg)` — `der` is not a valid RSA private key.
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         der: &'a mut DmaBuf,
         crt: bool,
     ) -> HsmResult<(&'a DmaBuf, usize)>;
@@ -363,7 +363,7 @@ pub trait HsmRsa {
     /// - `Err(HsmError)` — RNG / PKA failure.
     async fn rsa_pkcs1_encrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         pub_key: &DmaBuf,
         message: &DmaBuf,
@@ -400,7 +400,7 @@ pub trait HsmRsa {
     /// - `Err(HsmError)` — PKA failure.
     async fn rsa_pkcs1_decrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         priv_key: &DmaBuf,
         ciphertext: &DmaBuf,
@@ -437,7 +437,7 @@ pub trait HsmRsa {
     #[allow(clippy::too_many_arguments)]
     async fn rsa_pkcs1_sign<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &DmaBuf,
@@ -474,7 +474,7 @@ pub trait HsmRsa {
     #[allow(clippy::too_many_arguments)]
     async fn rsa_pkcs1_verify<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         pub_key: &DmaBuf,
@@ -510,7 +510,7 @@ pub trait HsmRsa {
     #[allow(clippy::too_many_arguments)]
     async fn rsa_oaep_encrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         pub_key: &DmaBuf,
@@ -555,7 +555,7 @@ pub trait HsmRsa {
     #[allow(clippy::too_many_arguments)]
     async fn rsa_oaep_decrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &DmaBuf,
@@ -592,7 +592,7 @@ pub trait HsmRsa {
     #[allow(clippy::too_many_arguments)]
     async fn rsa_pss_sign<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &DmaBuf,
@@ -629,7 +629,7 @@ pub trait HsmRsa {
     #[allow(clippy::too_many_arguments)]
     async fn rsa_pss_verify<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         pub_key: &DmaBuf,

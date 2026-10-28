@@ -17,7 +17,6 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::mutex::MutexGuard;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_uno_drivers_part_store::NUM_PARTITIONS;
@@ -36,7 +35,7 @@ static PART_LOCKS: PartLocks = PartLocks([const { Mutex::new(()) }; NUM_PARTITIO
 impl HsmPartitionLock for UnoHsmPal {
     type PartitionGuard<'a> = MutexGuard<'a, NoopRawMutex, ()>;
 
-    async fn partition_lock(&self, io: &impl HsmIo) -> HsmResult<Self::PartitionGuard<'_>> {
+    async fn partition_lock(&self, io: &Self::Io) -> HsmResult<Self::PartitionGuard<'_>> {
         let idx = usize::from(u8::from(io.pid()));
         let slot = PART_LOCKS.0.get(idx).ok_or(HsmError::InvalidArg)?;
         Ok(slot.lock().await)

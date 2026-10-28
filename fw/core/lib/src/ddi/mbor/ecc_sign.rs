@@ -16,7 +16,7 @@ use super::*;
 /// Handle `DdiEccSignCmd`.
 pub(crate) async fn ecc_sign<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

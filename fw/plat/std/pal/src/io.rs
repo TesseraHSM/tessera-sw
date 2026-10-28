@@ -9,8 +9,14 @@
 //! [`StdOic`](crate::drivers::oic::StdOic) for completing IOs.
 
 use tokio::sync::oneshot::Sender as ReplySender;
+use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::RawCqe;
+use tsra_fw_hsm_io::RawSqe;
+use tsra_fw_hsm_io::CQE_DWORDS;
+use tsra_fw_hsm_io::SQE_DWORDS;
 use tsra_fw_hsm_pal_traits::*;
 
+use crate::HsmPartId;
 use crate::StdHsmPal;
 
 /// An IO submit request sent from the user thread to the Embassy thread.
@@ -30,10 +36,10 @@ pub struct HsmIoRequest {
     pub qidx: u16,
 
     /// The 64-byte submission queue entry.
-    pub sqe: HsmSqe,
+    pub sqe: RawSqe,
 
     /// Oneshot channel for sending the CQE back to the submitter.
-    pub tx: ReplySender<HsmCqe>,
+    pub tx: ReplySender<RawCqe>,
 }
 
 /// An IO work item backed by a pool-allocated buffer slot.
@@ -47,7 +53,7 @@ pub struct HsmIoRequest {
 /// `StdHsmIo` holds the index of its slot in the
 /// [`BufferPool`](crate::buf_pool::BufferPool); the
 /// [`HsmAlloc`](tsra_fw_hsm_pal_traits::HsmAlloc) implementation on
-/// [`StdHsmPal`] uses [`HsmIo::index`] to address per-slot bump
+/// [`StdHsmPal`] uses the private slot to address per-slot bump
 /// allocators backed by the pool's pre-allocated NonDma + Dma buffers.
 pub struct StdHsmIo {
     /// Source partition identifier.
@@ -59,9 +65,8 @@ pub struct StdHsmIo {
     /// Index within the source queue.
     pub(crate) qidx: u16,
 
-    /// Index into the buffer pool (also the [`HsmIo::index`] value
-    /// used by [`HsmAlloc`](tsra_fw_hsm_pal_traits::HsmAlloc) to
-    /// address per-IO bump heaps).
+    /// Index into the buffer pool, used by
+    /// [`HsmAlloc`](tsra_fw_hsm_pal_traits::HsmAlloc) to address per-IO bump heaps.
     pub(crate) slot: u16,
 
     /// Oneshot channel for the CQE reply.
@@ -70,19 +75,23 @@ pub struct StdHsmIo {
     /// `take()` the oneshot sender (which is consumed on send) through a
     /// `&mut` borrow, leaving the rest of `io` intact for the
     /// post-completion walk.
-    pub(crate) tx: Option<ReplySender<HsmCqe>>,
+    pub(crate) tx: Option<ReplySender<RawCqe>>,
 
     /// The 64-byte submission queue entry.
-    pub(crate) sqe: HsmSqe,
+    pub(crate) sqe: RawSqe,
 
     /// The 16-byte completion queue entry to be populated by the core.
-    pub(crate) cqe: HsmCqe,
+    pub(crate) cqe: RawCqe,
 }
 
 // SAFETY: StdHsmIo is only used on the single-threaded Embassy executor.
 unsafe impl Send for StdHsmIo {}
 
 impl StdHsmIo {
+    pub(crate) fn pid(&self) -> HsmPartId {
+        self.pid
+    }
+
     /// Construct a new IO work item from a request and an allocated slot.
     fn new(req: HsmIoRequest, slot: u16) -> Self {
         Self {
@@ -100,7 +109,7 @@ impl StdHsmIo {
     /// (e.g. masking `BK_BOOT` at partition allocation), backed by a
     /// caller-borrowed buffer-pool `slot`.  `tx` is a throwaway reply
     /// channel — no host awaits the completion.
-    pub(crate) fn admin(pid: HsmPartId, slot: u16, tx: ReplySender<HsmCqe>) -> Self {
+    pub(crate) fn admin(pid: HsmPartId, slot: u16, tx: ReplySender<RawCqe>) -> Self {
         Self {
             pid,
             qid: 0,
@@ -118,28 +127,13 @@ impl core::fmt::Debug for StdHsmIo {
         f.debug_struct("StdHsmIo")
             .field("partition_id", &self.pid)
             .field("queue_id", &self.qid)
+            .field("queue_index", &self.qidx)
             .field("slot", &self.slot)
             .finish()
     }
 }
 
 impl HsmIo for StdHsmIo {
-    fn index(&self) -> u16 {
-        self.slot
-    }
-
-    fn pid(&self) -> HsmPartId {
-        self.pid
-    }
-
-    fn queue_id(&self) -> u16 {
-        self.qid
-    }
-
-    fn queue_idx(&self) -> u16 {
-        self.qidx
-    }
-
     fn sqe(&self) -> &HsmSqe {
         &self.sqe
     }
@@ -149,9 +143,11 @@ impl HsmIo for StdHsmIo {
     }
 }
 
-impl HsmIoController for StdHsmPal {
+impl HsmIoTypes for StdHsmPal {
     type Io = StdHsmIo;
+}
 
+impl HsmIoController for StdHsmPal {
     /// Wait for the next IO request and allocate a buffer slot.
     ///
     /// Delegates to [`StdIic::recv`](crate::drivers::iic::StdIic::recv)
@@ -176,6 +172,7 @@ impl HsmIoController for StdHsmPal {
     /// the CQE cannot be posted (dropped receiver or double-complete) so
     /// core can treat it as `cqe_ok = false` and roll back.
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
+        Cqe::from(&mut io.cqe).set_sq_id(io.qid);
         self.oic.send(io)
     }
 

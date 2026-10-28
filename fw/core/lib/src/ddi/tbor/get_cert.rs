@@ -6,8 +6,8 @@
 //! Out-of-session command — the TBOR analogue of MBOR `GetCertificate`.
 //! Returns a single DER-encoded X.509 certificate from the caller's
 //! partition at the requested `(slot_id, cert_id)`.  No session is
-//! required; the chain is read for the caller's own bound partition
-//! (`io.pid()`), mirroring the MBOR handler.
+//! required; the PAL resolves the chain from the caller's bound IO
+//! context, mirroring the MBOR handler.
 //!
 //! Uses the reserve-then-fill pattern: query the certificate size first,
 //! reserve the response `certificate` slot sized to it, then have the PAL
@@ -22,7 +22,6 @@ use tsra_fw_ddi_tbor_types::TborGetCertResp;
 use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -33,7 +32,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// needed.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborGetCertReq::decode(req_buf)?;
@@ -55,7 +54,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     }
 
     // Query the certificate size (no copy).
-    let len = pal.get_cert(io, io.pid(), slot_id, cert_id, None).await?;
+    let len = pal.get_cert(io, slot_id, cert_id, None).await?;
 
     // A provisioned certificate that overflows the wire bound is an
     // internal provisioning invariant violation, not a caller-input error.
@@ -78,7 +77,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     {
         let out = TborGetCertResp::decode_mut(resp)?;
         let actual = pal
-            .get_cert(io, io.pid(), slot_id, cert_id, Some(out.certificate))
+            .get_cert(io, slot_id, cert_id, Some(out.certificate))
             .await?;
         if actual != len {
             return Err(HsmError::InternalError);

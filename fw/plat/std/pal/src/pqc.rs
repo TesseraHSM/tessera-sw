@@ -193,9 +193,9 @@ impl HsmMlDsa for StdHsmPal {
 #[cfg(test)]
 mod tests {
     use tokio::runtime::Handle;
-    use tsra_fw_hsm_pal_traits::HsmPartId;
 
     use super::*;
+    use crate::HsmPartId;
     use crate::StdHsmIo;
     use crate::StdHsmPal;
 

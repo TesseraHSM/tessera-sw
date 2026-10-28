@@ -36,11 +36,14 @@
 //!       └── HsmKdf         — HKDF and KBKDF key derivation
 //! ```
 //!
+//! Capabilities that use the platform's IO type share [`HsmIoTypes`].
+//! This type-only trait does not require polling or completion methods;
+//! only [`HsmPal`] requires [`HsmIoController`] alongside those capabilities.
+//!
 //! # Identifier newtypes
 //!
-//! Three lightweight newtypes — [`HsmPartId`], [`HsmKeyId`], and
-//! [`HsmSessId`] — prevent accidental mixing of partition, key, and
-//! session indices.  Each wraps a small integer, is
+//! Two lightweight newtypes — [`HsmKeyId`] and [`HsmSessId`] — prevent
+//! accidental mixing of key and session indices. Each wraps a small integer, is
 //! `#[repr(transparent)]`, and provides zero-cost [`From`] / [`Into`]
 //! conversions to/from its underlying primitive.
 //!
@@ -69,10 +72,10 @@
 //!
 //! Methods that operate on partition-scoped state (sessions, vault
 //! keys, certificate chains, partition metadata) take an
-//! `&impl HsmIo` handle rather than an explicit [`HsmPartId`].  The
-//! partition is resolved internally via [`HsmIo::pid`].  This makes
-//! cross-partition access impossible by construction and keeps the
-//! call sites uniform.
+//! `&Self::Io` handle from [`HsmIoTypes`] rather than an explicit
+//! partition identifier. The platform resolves the partition from private IO
+//! metadata, keeping partition selection out of generic command handlers
+//! and the call sites uniform.
 //!
 //! ## Query/copy pattern for variable-length output
 //!
@@ -124,64 +127,6 @@ pub use part::*;
 pub use seed::*;
 pub use session::*;
 pub use vault::*;
-
-/// Partition identifier — an opaque `u8` index into the HSM's
-/// partition table.
-///
-/// Each HSM build supports a fixed number of partitions (typically up
-/// to 65).  A `HsmPartId` uniquely selects one partition for session,
-/// vault, and certificate operations.  Within the firmware, partition
-/// IDs are usually obtained indirectly through [`HsmIo::pid`] rather
-/// than being constructed directly.
-///
-/// `#[repr(transparent)]` over `u8` so a slice of `HsmPartId` is
-/// layout-compatible with `&[u8]`.
-///
-/// # Conversions
-///
-/// ```
-/// # use tsra_fw_hsm_pal_traits::HsmPartId;
-/// let pid = HsmPartId::from(3u8);
-/// assert_eq!(u8::from(pid), 3);
-/// ```
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HsmPartId(u8);
-
-impl From<u8> for HsmPartId {
-    /// Wraps a raw `u8` index into a [`HsmPartId`].
-    ///
-    /// # Parameters
-    ///
-    /// - `v` — partition index in `0..HSM_NUM_PARTITIONS`.  Out-of-range
-    ///   values are accepted here and rejected later by the trait
-    ///   method that consumes them (typically with
-    ///   [`HsmError::InvalidArg`]).
-    ///
-    /// # Returns
-    ///
-    /// A [`HsmPartId`] wrapping `v`.
-    #[inline]
-    fn from(v: u8) -> Self {
-        Self(v)
-    }
-}
-
-impl From<HsmPartId> for u8 {
-    /// Unwraps a [`HsmPartId`] to its raw `u8` index.
-    ///
-    /// # Parameters
-    ///
-    /// - `id` — partition identifier.
-    ///
-    /// # Returns
-    ///
-    /// The underlying `u8` slot index.
-    #[inline]
-    fn from(id: HsmPartId) -> Self {
-        id.0
-    }
-}
 
 /// Key identifier — an opaque `u16` index into the vault's key table.
 ///

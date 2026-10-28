@@ -12,7 +12,7 @@ use crate::StdHsmPal;
 
 impl HsmGdmaController for StdHsmPal {
     /// Copy data between HSM-local buffers.
-    async fn copy_mem(&self, _io: &impl HsmIo, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn copy_mem(&self, _io: &Self::Io, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
         self.gdma.copy_mem(src, dst);
         Ok(())
     }
@@ -20,7 +20,7 @@ impl HsmGdmaController for StdHsmPal {
     /// Zero an HSM-local buffer (software volatile wipe on the std
     /// platform). [`DmaBuf::zeroize`] guarantees the writes are not
     /// optimized away so key material is actually scrubbed.
-    async fn zeroize_mem(&self, _io: &impl HsmIo, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut DmaBuf) -> HsmResult<()> {
         dst.zeroize();
         Ok(())
     }
@@ -35,7 +35,7 @@ impl HsmGdmaController for StdHsmPal {
     /// that PRP2 fixes was invisible under `--features emu`.
     async fn copy_mem_from_host(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         src: HsmDmaAddr,
         _src2: HsmDmaAddr,
         dst: &mut DmaBuf,
@@ -54,7 +54,7 @@ impl HsmGdmaController for StdHsmPal {
     /// pointer, `length` field = transfer size).
     async fn copy_mem_from_host_raw(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         desc: &[u8; 16],
         dst: &mut DmaBuf,
         prp: bool,
@@ -83,7 +83,7 @@ impl HsmGdmaController for StdHsmPal {
     /// `_dst2` is ignored — see [`Self::copy_mem_from_host`].
     async fn copy_mem_to_host(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         src: &DmaBuf,
         dst: HsmDmaAddr,
         _dst2: HsmDmaAddr,

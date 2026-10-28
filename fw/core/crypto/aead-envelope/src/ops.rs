@@ -31,7 +31,6 @@
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 pub use crate::alg::AeadAlg;
@@ -87,9 +86,9 @@ use crate::gcm::seal_gcm_in_place;
 /// * `Err(_)` — see [`AeadError`] for the precise failure modes;
 ///   mapped to [`HsmError`](tsra_fw_hsm_pal_traits::HsmError) via
 ///   [`From`].
-pub async fn seal(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn seal<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
     key: &DmaBuf,
     iv: &DmaBuf,
@@ -123,9 +122,9 @@ pub async fn seal(
 /// `payload_offset` gives the offset the caller must have written to.
 /// See [`seal`] for the copying form; everything else is identical.
 #[allow(clippy::too_many_arguments)]
-pub async fn seal_in_place(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn seal_in_place<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
     key: &DmaBuf,
     iv: &DmaBuf,
@@ -173,9 +172,9 @@ pub const fn payload_offset(alg: AeadAlg, aad_len: usize) -> usize {
 /// * `Err(_)` — see [`AeadError`]. A tag mismatch surfaces as
 ///   [`AeadError::AuthFailed`] mapped to
 ///   [`HsmError::AesGcmDecryptTagDoesNotMatch`](tsra_fw_hsm_pal_traits::HsmError::AesGcmDecryptTagDoesNotMatch).
-pub async fn open<'a>(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn open<'a, P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     key: &DmaBuf,
     buf: &'a mut DmaBuf,
 ) -> HsmResult<AeadEnvelope<'a>> {

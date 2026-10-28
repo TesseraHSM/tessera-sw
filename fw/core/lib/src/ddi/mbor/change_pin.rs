@@ -35,7 +35,7 @@ const CRED_FIELD_LEN: usize = 16;
 /// multi-step fail-fast checks with the credential update at the end.
 pub(crate) async fn change_pin<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
@@ -152,7 +152,7 @@ pub(crate) async fn change_pin<'p, P: HsmPal>(
 /// derives a different key).
 async fn verify_change_pin_hmac<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     new_pin: &DdiEncryptedPin<'_>,
     hmac_key: &DmaBuf,
 ) -> HsmResult<()> {

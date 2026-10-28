@@ -17,7 +17,6 @@
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -29,7 +28,7 @@ use super::DecodedKey;
 /// kind (and, on real hardware, the CRT vault layout).
 pub(super) async fn decode<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     material: &'p mut DmaBuf,
     crt: bool,
 ) -> HsmResult<DecodedKey<'p>> {

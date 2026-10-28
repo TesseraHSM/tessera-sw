@@ -35,6 +35,7 @@ use tsra_fw_hsm_pal_traits::*;
 use crate::buf_pool::BufferPool;
 use crate::buf_pool::DMA_BUF_SIZE;
 use crate::buf_pool::NONDMA_BUF_SIZE;
+use crate::StdHsmIo;
 use crate::StdHsmPal;
 
 // ── Heap identifiers (PAL-internal) ───────────────────────────────
@@ -181,22 +182,22 @@ impl HsmAlloc for StdHsmPal {
     type Scoped<'a> = StdScopedAlloc<'a>;
 
     #[inline(always)]
-    fn alloc(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut [u8]> {
-        bump(self.iic.pool(), io.index(), Heap::NonDma, size, 4)
+    fn alloc(&self, io: &StdHsmIo, size: usize) -> HsmResult<&mut [u8]> {
+        bump(self.iic.pool(), io.slot, Heap::NonDma, size, 4)
     }
 
     #[inline(always)]
-    fn alloc_zeroed(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut [u8]> {
+    fn alloc_zeroed(&self, io: &StdHsmIo, size: usize) -> HsmResult<&mut [u8]> {
         let s = self.alloc(io, size)?;
         s.fill(0);
         Ok(s)
     }
 
     #[inline(always)]
-    fn alloc_val<T: Sized>(&self, io: &impl HsmIo, value: T) -> HsmResult<&mut T> {
+    fn alloc_val<T: Sized>(&self, io: &StdHsmIo, value: T) -> HsmResult<&mut T> {
         let s = bump(
             self.iic.pool(),
-            io.index(),
+            io.slot,
             Heap::NonDma,
             mem::size_of::<T>(),
             mem::align_of::<T>().max(1),
@@ -210,25 +211,25 @@ impl HsmAlloc for StdHsmPal {
     }
 
     #[inline(always)]
-    fn dma_alloc(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
-        let s = bump(self.iic.pool(), io.index(), Heap::Dma, size, 4)?;
+    fn dma_alloc(&self, io: &StdHsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
+        let s = bump(self.iic.pool(), io.slot, Heap::Dma, size, 4)?;
         // SAFETY: the Dma heap is DMA-accessible by construction.
         Ok(unsafe { DmaBuf::from_raw_mut(s) })
     }
 
     #[inline(always)]
-    fn dma_alloc_zeroed(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
+    fn dma_alloc_zeroed(&self, io: &StdHsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
         let s = self.dma_alloc(io, size)?;
         s.fill(0);
         Ok(s)
     }
 
-    fn dma_alloc_var<F>(&self, io: &impl HsmIo, f: F) -> HsmResult<&mut DmaBuf>
+    fn dma_alloc_var<F>(&self, io: &StdHsmIo, f: F) -> HsmResult<&mut DmaBuf>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>,
     {
         let pool = self.iic.pool();
-        let slot = io.index();
+        let slot = io.slot;
         let cap = Heap::Dma.capacity();
         let mark_cell = pool.dma_mark(slot);
         let saved_mark = mark_cell.get().min(cap);
@@ -259,12 +260,12 @@ impl HsmAlloc for StdHsmPal {
         }
     }
 
-    fn dma_alloc_var_with<F, T>(&self, io: &impl HsmIo, f: F) -> HsmResult<(&mut DmaBuf, T)>
+    fn dma_alloc_var_with<F, T>(&self, io: &StdHsmIo, f: F) -> HsmResult<(&mut DmaBuf, T)>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>,
     {
         let pool = self.iic.pool();
-        let slot = io.index();
+        let slot = io.slot;
         let cap = Heap::Dma.capacity();
         let mark_cell = pool.dma_mark(slot);
         let saved_mark = mark_cell.get().min(cap);
@@ -294,9 +295,9 @@ impl HsmAlloc for StdHsmPal {
     }
 
     #[inline]
-    fn alloc_scoped<R>(&self, io: &impl HsmIo, f: impl FnOnce(&Self::Scoped<'_>) -> R) -> R {
+    fn alloc_scoped<R>(&self, io: &StdHsmIo, f: impl FnOnce(&Self::Scoped<'_>) -> R) -> R {
         let pool = self.iic.pool();
-        let slot = io.index();
+        let slot = io.slot;
         let scope = StdScopedAlloc {
             pool,
             slot,
@@ -306,12 +307,12 @@ impl HsmAlloc for StdHsmPal {
         f(&scope)
     }
 
-    async fn alloc_scoped_async<R, F>(&self, io: &impl HsmIo, f: F) -> R
+    async fn alloc_scoped_async<R, F>(&self, io: &StdHsmIo, f: F) -> R
     where
         F: for<'a> AsyncFnOnce(&'a Self::Scoped<'a>) -> R,
     {
         let pool = self.iic.pool();
-        let slot = io.index();
+        let slot = io.slot;
         let scope = StdScopedAlloc {
             pool,
             slot,

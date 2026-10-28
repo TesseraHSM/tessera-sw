@@ -462,13 +462,8 @@ impl StdHsmPal {
 // ---------------------------------------------------------------------------
 
 impl HsmCertStore for StdHsmPal {
-    async fn get_cert_chain_info(
-        &self,
-        _io: &impl HsmIo,
-        part_id: HsmPartId,
-        slot_id: u8,
-    ) -> HsmResult<CertChainInfo> {
-        let pid = u8::from(part_id);
+    async fn get_cert_chain_info(&self, io: &StdHsmIo, slot_id: u8) -> HsmResult<CertChainInfo> {
+        let pid = u8::from(io.pid());
         if slot_id != 0 {
             return Err(HsmError::InvalidArg);
         }
@@ -515,13 +510,12 @@ impl HsmCertStore for StdHsmPal {
 
     async fn get_cert(
         &self,
-        _io: &impl HsmIo,
-        part_id: HsmPartId,
+        io: &StdHsmIo,
         slot_id: u8,
         idx: u8,
         cert: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
-        let pid = u8::from(part_id);
+        let pid = u8::from(io.pid());
         if slot_id != 0 {
             return Err(HsmError::InvalidArg);
         }

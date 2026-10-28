@@ -42,10 +42,11 @@ use zerocopy::FromBytes;
 use zerocopy::IntoBytes;
 use zeroize::Zeroizing;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 #[inline]
-pub(crate) fn vault(io: &impl HsmIo) -> KeyVault<VaultStorage> {
+pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
     // Out-of-range partitions own no tables (empty mask → no storage).
     let res_mask = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask());
     KeyVault::new(VaultStorage::new(res_mask))
@@ -68,11 +69,11 @@ fn blob_ref(table: usize, off: usize, len: usize) -> &'static DmaBuf {
 impl UnoHsmPal {
     /// Reject cross-session access to a `Session`-scoped key with
     /// [`HsmError::KeyNotFound`]; partition-scoped keys are unaffected.
-    fn enforce_session_key_isolation(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn enforce_session_key_isolation(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let Some(bound) = vault(io).key_session(key_id)? else {
             return Ok(());
         };
-        let sqe = Sqe::from(io.sqe());
+        let sqe = Sqe::try_from(io.sqe())?;
         let current = sqe.session_flags().id_valid().then(|| sqe.session_id());
         if current == Some(bound) {
             Ok(())
@@ -85,7 +86,7 @@ impl UnoHsmPal {
 impl HsmVault for UnoHsmPal {
     async fn vault_key_create(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
@@ -104,7 +105,7 @@ impl HsmVault for UnoHsmPal {
         v.create(self, io, app_id, key, kind, session, attrs).await
     }
 
-    fn bulk_key_id(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<Option<u16>> {
+    fn bulk_key_id(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<Option<u16>> {
         if !is_bulk_kind(self.vault_key_kind(io, key_id)?) {
             return Ok(None);
         }
@@ -116,7 +117,7 @@ impl HsmVault for UnoHsmPal {
         Ok(Some(u16::from_le_bytes([bytes[0], bytes[1]])))
     }
 
-    async fn vault_key_delete(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    async fn vault_key_delete(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         // Serialized against bulk-key creation and session teardown (see
         // `UnoHsmPal::fp_bulk_lock`).
         let _guard = self.fp_bulk_lock.lock().await;
@@ -166,26 +167,26 @@ impl HsmVault for UnoHsmPal {
         Ok(())
     }
 
-    fn vault_key_disable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn vault_key_disable(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let mut v = vault(io);
         v.disable(key_id)
     }
 
-    fn vault_key_enable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn vault_key_enable(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let mut v = vault(io);
         v.enable(key_id)
     }
 
     async fn vault_key_delete_by_session(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         session_id: HsmSessId,
     ) -> HsmResult<()> {
         let _guard = self.fp_bulk_lock.lock().await;
         delete_session_keys(self, io, session_id).await
     }
 
-    async fn vault_clear(&self, io: &impl HsmIo) -> HsmResult<()> {
+    async fn vault_clear(&self, io: &UnoHsmIo) -> HsmResult<()> {
         // Partition reset (`part_migrate` for Migrate / NSSR, `part_free` for
         // SetResource(0)).  The engine-side keys are removed by the engine
         // itself: the admin core sends it a PFN disable for the function
@@ -201,22 +202,22 @@ impl HsmVault for UnoHsmPal {
         Ok(())
     }
 
-    fn vault_key(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
         self.enforce_session_key_isolation(io, key_id)?;
         let (table, off, len) = vault(io).key_location(key_id)?;
         Ok(blob_ref(table, off, len))
     }
 
-    fn vault_key_len(&self, _io: &impl HsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {
+    fn vault_key_len(&self, _io: &UnoHsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {
         KeyVault::<VaultStorage>::key_len(kind)
     }
 
-    fn vault_key_kind(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind> {
+    fn vault_key_kind(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind> {
         self.enforce_session_key_isolation(io, key_id)?;
         vault(io).key_kind(key_id)
     }
 
-    fn vault_key_attrs(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs> {
+    fn vault_key_attrs(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs> {
         self.enforce_session_key_isolation(io, key_id)?;
         vault(io).key_attrs(key_id)
     }
@@ -228,7 +229,7 @@ impl HsmVault for UnoHsmPal {
 /// delete and the vault delete.
 pub(crate) async fn delete_session_keys(
     pal: &UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     session_id: HsmSessId,
 ) -> HsmResult<()> {
     // Validate and collect the session's bulk slots first, so a corrupt entry
@@ -259,7 +260,7 @@ pub(crate) async fn delete_session_keys(
 /// Collect the FP slots (one bitmap byte per table) referenced by the bulk
 /// keys bound to `session`, live or disabled.  A malformed stored handle is
 /// [`HsmError::InternalError`].
-fn session_bulk_slots(io: &impl HsmIo, session: u16) -> HsmResult<[u8; NUM_FP_TABLES]> {
+fn session_bulk_slots(io: &UnoHsmIo, session: u16) -> HsmResult<[u8; NUM_FP_TABLES]> {
     let mut slots = [0u8; NUM_FP_TABLES];
     vault(io).for_each_session_key(session, |_key_id, kind, blob| {
         if is_bulk_kind(kind) {
@@ -333,7 +334,7 @@ const NUM_FP_TABLES: usize = 65;
 /// addresses bulk keys by `(vault_id = table, key_index = slot)`.
 static FP_SLOTS: SingleCell<[u8; NUM_FP_TABLES]> = SingleCell::new([0u8; NUM_FP_TABLES]);
 
-/// Validate a partition id ([`HsmIo::pid`]) as the PCIe function number the
+/// Validate the IO's private partition ID as the PCIe function number the
 /// fast-path engine matches against.
 ///
 /// The FP engine scopes a bulk key by PCIe function; the host's GCM SQE
@@ -416,7 +417,7 @@ fn fp_slots_free_mask(res_mask: u128) {
 /// torn down, so session teardown never misses a registration.
 async fn fp_bulk_create(
     pal: &UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     key: &DmaBuf,
     kind: HsmVaultKeyKind,
     session_id: Option<HsmSessId>,
@@ -523,7 +524,7 @@ async fn fp_bulk_create(
 /// matches create against delete); callers read them from the vault entry.
 async fn fp_bulk_delete(
     pal: &UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     bulk_id: u16,
     fp_session_id: u16,
     session_only: bool,
@@ -549,11 +550,7 @@ async fn fp_bulk_delete(
 /// fast-path engine in a single message — the engine iterates its table and
 /// matches by session id + app id, mirroring the reference firmware's
 /// close-session path.
-async fn fp_delete_session_only(
-    pal: &UnoHsmPal,
-    io: &impl HsmIo,
-    session_id: u16,
-) -> HsmResult<()> {
+async fn fp_delete_session_only(pal: &UnoHsmPal, io: &UnoHsmIo, session_id: u16) -> HsmResult<()> {
     let pcie_fn = part_id_to_pcie_fn(u8::from(io.pid()))?;
     let info = KeyUpdateInfo {
         key_index: 0,
@@ -623,7 +620,7 @@ impl UnoHsmPal {
     #[cfg(feature = "fips_validation_hooks")]
     pub(crate) fn vault_key_session_binding(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_id: HsmKeyId,
     ) -> HsmResult<Option<u16>> {
         vault(io).key_session_binding(key_id)

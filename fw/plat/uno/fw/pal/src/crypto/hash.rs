@@ -42,11 +42,11 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_sha::ShaRequest;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 /// Multi-step hash context for the Uno SHA hardware accelerator.
@@ -193,7 +193,7 @@ impl HsmHash for UnoHsmPal {
     /// `u32::MAX` or the hardware submission fails.
     async fn hash(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         data: &DmaBuf,
         digest: &mut DmaBuf,
@@ -230,7 +230,7 @@ impl HsmHash for UnoHsmPal {
     /// allocation.
     fn hash_begin<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         algo: HsmHashAlgo,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HashCtx<'a>>
@@ -261,7 +261,7 @@ impl HsmHash for UnoHsmPal {
     /// length overflows `u32` or the hardware submission fails.
     async fn hash_continue(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         ctx: &mut Self::HashCtx<'_>,
         data: &DmaBuf,
     ) -> HsmResult<()> {
@@ -290,7 +290,7 @@ impl HsmHash for UnoHsmPal {
     /// hardware submission fails.
     async fn hash_finish(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         mut ctx: Self::HashCtx<'_>,
         digest: &mut DmaBuf,
         big_endian: bool,

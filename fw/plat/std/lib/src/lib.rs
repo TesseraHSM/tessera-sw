@@ -27,6 +27,8 @@ use std::thread::JoinHandle;
 
 use embassy_sync::once_lock::OnceLock;
 use tsra_fw_hsm_core::Hsm;
+use tsra_fw_hsm_io::RawCqe;
+use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_pal_std::*;
 use tsra_fw_hsm_pal_traits::*;
 
@@ -287,7 +289,7 @@ impl StdHsm {
     /// Returns [`HsmError::InternalError`] if the core discards the IO (e.g. the
     /// partition is not enabled). Returns [`HsmError::InternalError`] if the
     /// Embassy thread has stopped.
-    pub async fn io(&self, sqe: HsmSqe, pid: u8, qid: u16, qidx: u16) -> HsmResult<HsmCqe> {
+    pub async fn io(&self, sqe: RawSqe, pid: u8, qid: u16, qidx: u16) -> HsmResult<RawCqe> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let req = HsmIoRequest {
             pid: HsmPartId::from(pid),

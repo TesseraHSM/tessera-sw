@@ -5,12 +5,12 @@
 
 //! Typed SQE / CQE layout — the HSM I/O ABI.
 //!
-//! Submission and completion queue entries are fixed-size dword arrays
-//! ([`HsmSqe`] = `[u32; 16]`, [`HsmCqe`] = `[u32; 4]`) whose *raw shape*
-//! is defined by the platform-abstraction crate
-//! [`tsra_fw_hsm_pal_traits`]. This crate adds the *semantic layout* on
-//! top: typed, zero-cost accessors and builders for the individual
-//! fields, shared by every party that sits on the SQE/CQE boundary:
+//! The PAL exposes submission and completion entries as dword slices
+//! ([`HsmSqe`] and [`HsmCqe`]). This codec supports 16-word submissions
+//! ([`RawSqe`]) and 4-word completions ([`RawCqe`]), validating slice
+//! lengths before decoding. It provides typed, zero-cost accessors and
+//! builders for the individual fields, shared by every party that sits
+//! on the SQE/CQE boundary:
 //!
 //! - the firmware core reads the SQE and writes the CQE,
 //! - host transports (in-process emulator, socket server) build the SQE
@@ -52,7 +52,20 @@
 use bitfield_struct::bitfield;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmSqe;
+
+/// Number of dwords in this protocol's submission queue entry.
+pub const SQE_DWORDS: usize = 16;
+
+/// Number of dwords in this protocol's completion queue entry.
+pub const CQE_DWORDS: usize = 4;
+
+/// Owned submission queue entry for this protocol.
+pub type RawSqe = [u32; SQE_DWORDS];
+
+/// Owned completion queue entry for this protocol.
+pub type RawCqe = [u32; CQE_DWORDS];
 
 // ── Opcode constants ────────────────────────────────────────────────
 
@@ -208,14 +221,25 @@ pub struct CqeDw3 {
 /// Typed read-only wrapper around an [`HsmSqe`].
 ///
 /// Zero-cost — borrows the underlying `[u32; 16]` and reads fields on
-/// demand via bitfield parsing or direct indexing.
+/// demand via bitfield parsing or direct indexing. Slice conversion
+/// rejects lengths other than [`SQE_DWORDS`] with [`HsmError::InvalidArg`].
 #[derive(Debug)]
-pub struct Sqe<'a>(&'a HsmSqe);
+pub struct Sqe<'a>(&'a RawSqe);
 
-impl<'a> From<&'a HsmSqe> for Sqe<'a> {
+impl<'a> From<&'a RawSqe> for Sqe<'a> {
     #[inline]
-    fn from(sqe: &'a HsmSqe) -> Self {
+    fn from(sqe: &'a RawSqe) -> Self {
         Self(sqe)
+    }
+}
+
+impl<'a> TryFrom<&'a HsmSqe> for Sqe<'a> {
+    type Error = HsmError;
+
+    #[inline]
+    fn try_from(sqe: &'a HsmSqe) -> Result<Self, Self::Error> {
+        let raw = sqe.try_into().map_err(|_| HsmError::InvalidArg)?;
+        Ok(Self(raw))
     }
 }
 
@@ -344,19 +368,19 @@ impl Sqe<'_> {
 
 // ── SQE builder (host side) ─────────────────────────────────────────
 
-/// Fluent builder for an [`HsmSqe`].
+/// Fluent builder for a [`RawSqe`].
 ///
 /// Host transports use this to construct a submission entry referencing
 /// host DMA buffers, exactly as the IIC DMA engine would deliver one to
 /// the firmware.
 #[derive(Debug, Default)]
-pub struct SqeBuilder(HsmSqe);
+pub struct SqeBuilder(RawSqe);
 
 impl SqeBuilder {
     /// Start a new zeroed SQE.
     #[inline]
     pub fn new() -> Self {
-        Self([0u32; 16])
+        Self([0u32; SQE_DWORDS])
     }
 
     /// Set the command dword (DW0: op, set, psdt, cmd id).
@@ -419,9 +443,9 @@ impl SqeBuilder {
         self
     }
 
-    /// Finish and return the raw [`HsmSqe`].
+    /// Finish and return the owned [`RawSqe`].
     #[inline]
-    pub fn build(self) -> HsmSqe {
+    pub fn build(self) -> RawSqe {
         self.0
     }
 }
@@ -435,13 +459,25 @@ impl SqeBuilder {
 /// uses the setters to populate a completion; host transports use the
 /// read accessors ([`dst_len`](Self::dst_len), [`status`](Self::status),
 /// [`cmd_id`](Self::cmd_id)) on a returned completion.
+/// Slice conversion rejects lengths other than [`CQE_DWORDS`] with
+/// [`HsmError::InvalidArg`].
 #[derive(Debug)]
-pub struct Cqe<'a>(&'a mut HsmCqe);
+pub struct Cqe<'a>(&'a mut RawCqe);
 
-impl<'a> From<&'a mut HsmCqe> for Cqe<'a> {
+impl<'a> From<&'a mut RawCqe> for Cqe<'a> {
     #[inline]
-    fn from(cqe: &'a mut HsmCqe) -> Self {
+    fn from(cqe: &'a mut RawCqe) -> Self {
         Self(cqe)
+    }
+}
+
+impl<'a> TryFrom<&'a mut HsmCqe> for Cqe<'a> {
+    type Error = HsmError;
+
+    #[inline]
+    fn try_from(cqe: &'a mut HsmCqe) -> Result<Self, Self::Error> {
+        let raw = cqe.try_into().map_err(|_| HsmError::InvalidArg)?;
+        Ok(Self(raw))
     }
 }
 
@@ -600,5 +636,52 @@ impl Cqe<'_> {
     #[inline]
     pub fn set_status(&mut self, status: u16) {
         self.0[3] = self.dw3().with_status(status).into();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slice_views_read_and_write_current_format() {
+        let raw_sqe = SqeBuilder::new()
+            .cmd(CmdDword::new().with_id(42))
+            .oob_len(128)
+            .build();
+        let sqe = Sqe::try_from(raw_sqe.as_slice()).expect("current-format SQE");
+        assert_eq!(sqe.cmd_id(), 42);
+        assert_eq!(sqe.oob_len(), 128);
+
+        let mut raw_cqe = [0; CQE_DWORDS];
+        let mut cqe = Cqe::try_from(raw_cqe.as_mut_slice()).expect("current-format CQE");
+        cqe.set_cmd_id(sqe.cmd_id());
+        cqe.set_status(2);
+        let cqe = Cqe::from(&mut raw_cqe);
+        assert_eq!(cqe.cmd_id(), 42);
+        assert_eq!(cqe.status(), 2);
+    }
+
+    #[test]
+    fn sqe_slice_rejects_unsupported_lengths() {
+        let words = [0; SQE_DWORDS + 1];
+        for len in [0, SQE_DWORDS - 1, SQE_DWORDS + 1] {
+            assert_eq!(
+                Sqe::try_from(&words[..len]).expect_err("unsupported SQE length"),
+                HsmError::InvalidArg
+            );
+        }
+    }
+
+    #[test]
+    fn cqe_slice_rejects_unsupported_lengths_without_writes() {
+        let mut words = [u32::MAX; CQE_DWORDS + 1];
+        for len in [0, CQE_DWORDS - 1, CQE_DWORDS + 1] {
+            assert_eq!(
+                Cqe::try_from(&mut words[..len]).expect_err("unsupported CQE length"),
+                HsmError::InvalidArg
+            );
+            assert_eq!(words, [u32::MAX; CQE_DWORDS + 1]);
+        }
     }
 }

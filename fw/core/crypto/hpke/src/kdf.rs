@@ -18,7 +18,6 @@
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -94,7 +93,7 @@ fn concat_alloc<'a>(parts: &[&[u8]], alloc: &'a impl HsmScopedAlloc) -> HsmResul
 ///   [`HsmKdf::hkdf_extract`].
 pub async fn labeled_extract<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     algo: HsmHashAlgo,
     suite_id: &[u8],
     salt: Option<&DmaBuf>,
@@ -151,7 +150,7 @@ where
 ///   [`HsmKdf::hkdf_expand`].
 pub async fn labeled_expand<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     algo: HsmHashAlgo,
     suite_id: &[u8],
     prk: &DmaBuf,

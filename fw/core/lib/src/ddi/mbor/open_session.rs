@@ -71,7 +71,7 @@ pub(crate) const SESSION_SHORT_APP_ID: u8 = 0;
 /// `ReopenSession` against the same credential lineage.
 pub(crate) async fn open_session<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<DispatchResult<'p>> {
@@ -143,7 +143,7 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
 /// are not re-checked here.
 pub(super) fn check_fail_fast<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     nonce: &DmaBuf,
     pub_key: &DdiPublicKey<'_>,
     is_reopen: bool,
@@ -206,7 +206,7 @@ pub(super) fn check_fail_fast<P: HsmPal>(
 /// masks under it is exactly what `ReopenSession` unmasks with it.
 pub(super) async fn authenticate_and_derive_bk_session<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     enc_cred: &mut DdiEncryptedSessionCredential<'_>,
     pub_key_raw: &DmaBuf,
 ) -> HsmResult<&'p mut DmaBuf> {
@@ -270,7 +270,7 @@ pub(super) async fn authenticate_and_derive_bk_session<'p, P: HsmPal>(
 /// session-encryption key.
 pub(super) async fn derive_session_credential_keys<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     host_eph_pub_key_raw: &DmaBuf,
     nonce: &DmaBuf,
     okm_out: &mut DmaBuf,
@@ -321,7 +321,7 @@ pub(super) async fn derive_session_credential_keys<P: HsmPal>(
 /// `enc_id ‖ enc_pin ‖ enc_seed ‖ iv ‖ nonce`.
 async fn verify_credential_hmac<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     enc_cred: &tsra_fw_ddi_mbor_types::open_session::DdiEncryptedSessionCredential<'_>,
     hmac_key: &DmaBuf,
 ) -> HsmResult<()> {
@@ -366,7 +366,7 @@ async fn verify_credential_hmac<P: HsmPal>(
 ///   output IV.  No further chaining is needed.
 async fn decrypt_session_credential<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     enc_cred: &mut tsra_fw_ddi_mbor_types::open_session::DdiEncryptedSessionCredential<'_>,
     aes_key: &DmaBuf,
 ) -> HsmResult<()> {
@@ -420,7 +420,7 @@ async fn decrypt_session_credential<P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     hdr: &DdiReqHdr,
     sess_id: HsmSessId,
     bk_session: &DmaBuf,

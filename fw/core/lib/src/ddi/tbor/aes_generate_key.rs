@@ -29,7 +29,6 @@ use tsra_fw_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_fw_ddi_tbor_types::TborAesGenerateKeyResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -81,7 +80,7 @@ fn aes_key_attrs(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAt
 /// scratch copy) and the raw key is wiped once masked.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborAesGenerateKeyReq::decode(req_buf)?;

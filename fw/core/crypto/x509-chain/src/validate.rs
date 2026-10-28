@@ -27,7 +27,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -142,7 +141,7 @@ impl ChainValidator {
     pub async fn step<'a, P>(
         &mut self,
         pal: &P,
-        io: &impl HsmIo,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
         prev: Option<&CertInfo<'_>>,
         curr: &'a CertInfo<'a>,
@@ -332,7 +331,7 @@ impl ChainValidator {
     async fn verify_signature<P>(
         &self,
         pal: &P,
-        io: &impl HsmIo,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
         verify_key: &EcPubKey<'_>,
         curr: &CertInfo<'_>,
@@ -451,7 +450,7 @@ pub const MAX_CERT_DER_LEN: usize = 2048;
 ///   verification.
 pub async fn validate_chain<P, F>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8]>,
@@ -479,7 +478,7 @@ where
 /// certificate's public key.
 pub async fn validate_issuing_chain<P, F>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8]>,
@@ -496,7 +495,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn validate_chain_inner<P, F>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8]>,

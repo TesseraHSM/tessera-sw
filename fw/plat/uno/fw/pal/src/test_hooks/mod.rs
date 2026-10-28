@@ -70,9 +70,9 @@ use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborMap;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
+use crate::UnoHsmIo;
 use crate::pal::UnoHsmPal;
 
 /// `DdiOp::TestAction` — the fixed discriminant the host tooling uses.
@@ -108,7 +108,7 @@ fn handles_opcode(opcode: u32) -> bool {
 ///   request data is malformed.
 pub(crate) async fn mbor_dispatch<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     req: &mut DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let request_len = req.len();

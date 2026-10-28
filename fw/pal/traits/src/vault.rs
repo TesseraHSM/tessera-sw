@@ -500,7 +500,7 @@ pub struct HsmVaultKeyAttrs {
 /// is invisible to other partitions.  Methods returning `&[u8]`
 /// borrow directly from vault storage; the borrow lives no longer
 /// than the `&self` borrow on the vault.
-pub trait HsmVault {
+pub trait HsmVault: HsmIoTypes {
     /// Stores a new key in the vault under a freshly assigned
     /// [`HsmKeyId`].
     ///
@@ -529,7 +529,7 @@ pub trait HsmVault {
     ///   `kind`, or `attrs` are inconsistent.
     async fn vault_key_create(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
@@ -555,7 +555,7 @@ pub trait HsmVault {
     /// - `Ok(Some(bulk_key_id))` — `key_id` is a bulk key.
     /// - `Ok(None)` — `key_id` is an ordinary vault key, or the platform has
     ///   no bulk backend.
-    fn bulk_key_id(&self, _io: &impl HsmIo, _key_id: HsmKeyId) -> HsmResult<Option<u16>> {
+    fn bulk_key_id(&self, _io: &Self::Io, _key_id: HsmKeyId) -> HsmResult<Option<u16>> {
         Ok(None)
     }
 
@@ -584,7 +584,7 @@ pub trait HsmVault {
     ///   present (live or soft-deleted) key in the caller's partition.
     /// - `Err(HsmError::NotPermitted)` if the key's `destroyable` bit
     ///   is unset (e.g. internal device keys).
-    async fn vault_key_delete(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()>;
+    async fn vault_key_delete(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<()>;
 
     /// Marks a key as **disabled** without freeing its slot or zeroizing
     /// its material — the staging half of a reversible delete.
@@ -607,7 +607,7 @@ pub trait HsmVault {
     ///
     /// - [`HsmError::KeyNotFound`] — `key_id` does not refer to a live
     ///   (present, not-already-disabled) key in the caller's partition.
-    fn vault_key_disable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()>;
+    fn vault_key_disable(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<()>;
 
     /// Re-enables a [`vault_key_disable`](Self::vault_key_disable)d key,
     /// making it visible to lookups again.  The inverse of
@@ -617,7 +617,7 @@ pub trait HsmVault {
     ///
     /// - [`HsmError::KeyNotFound`] — `key_id` does not refer to a present
     ///   slot in the caller's partition.
-    fn vault_key_enable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()>;
+    fn vault_key_enable(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<()>;
 
     /// Deletes every key whose `session_id` matches `session_id`.
     ///
@@ -634,7 +634,7 @@ pub trait HsmVault {
     /// - `Ok(())` always; deleting zero keys is not an error.
     async fn vault_key_delete_by_session(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         session_id: HsmSessId,
     ) -> HsmResult<()>;
 
@@ -648,7 +648,7 @@ pub trait HsmVault {
     /// # Returns
     ///
     /// - `Ok(())` always; an already-empty vault is not an error.
-    async fn vault_clear(&self, io: &impl HsmIo) -> HsmResult<()>;
+    async fn vault_clear(&self, io: &Self::Io) -> HsmResult<()>;
 
     /// Borrows the raw key material for `key_id`.
     ///
@@ -666,7 +666,7 @@ pub trait HsmVault {
     ///   [`vault_key_len`](Self::vault_key_len) for the key's `kind`.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf>;
+    fn vault_key(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<&DmaBuf>;
 
     /// Returns the canonical byte length of a key of the given kind.
     ///
@@ -686,7 +686,7 @@ pub trait HsmVault {
     ///   `kind`.
     /// - `Err(HsmError::InvalidArg)` — `kind` is `Free` or otherwise
     ///   not a real key type.
-    fn vault_key_len(&self, io: &impl HsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16>;
+    fn vault_key_len(&self, io: &Self::Io, kind: HsmVaultKeyKind) -> HsmResult<u16>;
 
     /// Returns the [`HsmVaultKeyKind`] tag stored alongside the key.
     ///
@@ -700,7 +700,7 @@ pub trait HsmVault {
     /// - `Ok(kind)` — algorithm/size tag.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key_kind(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind>;
+    fn vault_key_kind(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind>;
 
     /// Returns the attribute bitfield stored alongside the key.
     ///
@@ -714,7 +714,7 @@ pub trait HsmVault {
     /// - `Ok(attrs)` — the [`HsmVaultKeyAttrs`] supplied at creation.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key_attrs(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs>;
+    fn vault_key_attrs(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs>;
 }
 
 #[cfg(test)]

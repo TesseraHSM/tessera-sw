@@ -25,7 +25,6 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -103,7 +102,7 @@ pub fn entry_addr(oob: &OobPtr, index: usize) -> HsmResult<HsmDmaAddr> {
 /// * [`HsmError`] — propagated from the GDMA / allocator.
 pub async fn copy_oob<P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     oob: &OobPtr,
     index: usize,
     dst: &mut DmaBuf,

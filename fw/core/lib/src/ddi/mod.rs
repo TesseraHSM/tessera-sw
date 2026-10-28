@@ -38,7 +38,7 @@ use super::*;
 /// provisioned (i.e. before `InitBk3`).
 pub(crate) async fn recover_bk_boot<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     out: &mut DmaBuf,
 ) -> HsmResult<()> {
     // Copy the persisted masked BK_BOOT into a working buffer and

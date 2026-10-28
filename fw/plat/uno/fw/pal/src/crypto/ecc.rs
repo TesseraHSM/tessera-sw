@@ -28,7 +28,6 @@ use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
@@ -40,6 +39,7 @@ use super::ecc_det::ORDER384_BE;
 use super::ecc_det::ct_in_range;
 use super::ecc_det::ct_in_range_le;
 use super::reverse_copy;
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 use crate::asn1::parse_ec_private_key;
 
@@ -305,7 +305,7 @@ impl HsmEcc for UnoHsmPal {
     ///   or the scoped allocator.
     async fn ecc_gen_keypair(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         out: Option<(&mut DmaBuf, &mut DmaBuf)>,
@@ -383,7 +383,7 @@ impl HsmEcc for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the HKDF / SHA / PKA drivers.
     async fn ecc_gen_keypair_from_root(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         _alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         root: &DmaBuf,
@@ -447,7 +447,7 @@ impl HsmEcc for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the PKA driver.
     async fn ecc_sign(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         hash: &DmaBuf,
@@ -477,7 +477,7 @@ impl HsmEcc for UnoHsmPal {
     ///   inputs, hardware fault).
     async fn ecc_verify(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         curve: HsmEccCurve,
         pub_key: &DmaBuf,
         hash: &DmaBuf,
@@ -554,7 +554,7 @@ impl HsmEcc for UnoHsmPal {
     ///   hardware fault).
     async fn ecdh_derive(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         pub_key: &DmaBuf,
@@ -616,7 +616,7 @@ impl HsmEcc for UnoHsmPal {
 
     fn ecc_priv_der_to_vault(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         der: &DmaBuf,
         out: Option<&mut DmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)> {
@@ -653,7 +653,7 @@ impl HsmEcc for UnoHsmPal {
 
     fn ecc_priv_to_vault(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         curve: HsmEccCurve,
         d: &DmaBuf,
         out: Option<&mut DmaBuf>,
@@ -685,7 +685,7 @@ impl HsmEcc for UnoHsmPal {
 
     fn ecc_vault_to_priv(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         curve: HsmEccCurve,
         vault: &DmaBuf,
         out: Option<&mut DmaBuf>,
@@ -721,7 +721,7 @@ impl HsmEcc for UnoHsmPal {
 
     async fn ecc_priv_pub_key(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         priv_key: &DmaBuf,
         pub_out: Option<&mut DmaBuf>,
     ) -> HsmResult<usize> {
@@ -824,7 +824,7 @@ impl HsmEcc for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the PKA driver.
     async fn ecc_pub_from_priv(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         pub_key: &mut DmaBuf,

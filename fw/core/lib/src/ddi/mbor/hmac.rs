@@ -26,7 +26,7 @@ use super::*;
 /// mutation.
 pub(crate) async fn hmac<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

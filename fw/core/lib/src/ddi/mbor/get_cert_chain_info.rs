@@ -15,17 +15,17 @@ use super::*;
 ///
 /// 1. **Body decode** — Decodes `DdiGetCertChainInfoReq { slot_id }`.
 ///
-/// 2. **Response** — Calls `pal.get_cert_chain_info(io, io.pid(), slot_id)`,
+/// 2. **Response** — Calls `pal.get_cert_chain_info(io, slot_id)`,
 ///    encodes `DdiGetCertChainInfoResp { num_certs, thumbprint }`.
 pub(crate) async fn get_cert_chain_info<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
     let body: DdiGetCertChainInfoReq = decoder.decode_data()?;
 
-    let info = pal.get_cert_chain_info(io, io.pid(), body.slot_id).await?;
+    let info = pal.get_cert_chain_info(io, body.slot_id).await?;
 
     let resp_data = DdiGetCertChainInfoResp {
         num_certs: info.count,

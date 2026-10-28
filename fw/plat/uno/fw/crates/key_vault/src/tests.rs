@@ -26,8 +26,8 @@ use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmIo;
+use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -130,8 +130,12 @@ struct FakeGdma {
     fail_copy: Cell<bool>,
 }
 
+impl HsmIoTypes for FakeGdma {
+    type Io = FakeIo;
+}
+
 impl HsmGdmaController for FakeGdma {
-    async fn copy_mem(&self, _io: &impl HsmIo, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn copy_mem(&self, _io: &Self::Io, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
         self.copies.set(self.copies.get() + 1);
         if self.fail_copy.get() {
             return Err(HsmError::FailedToStartDmaTransaction);
@@ -139,7 +143,7 @@ impl HsmGdmaController for FakeGdma {
         dst.copy_from_slice(src);
         Ok(())
     }
-    async fn zeroize_mem(&self, _io: &impl HsmIo, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut DmaBuf) -> HsmResult<()> {
         self.zeroizes.set(self.zeroizes.get() + 1);
         for b in dst.iter_mut() {
             *b = 0;
@@ -148,7 +152,7 @@ impl HsmGdmaController for FakeGdma {
     }
     async fn copy_mem_from_host(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         _src: HsmDmaAddr,
         _src2: HsmDmaAddr,
         _dst: &mut DmaBuf,
@@ -158,7 +162,7 @@ impl HsmGdmaController for FakeGdma {
     }
     async fn copy_mem_from_host_raw(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         _desc: &[u8; 16],
         _dst: &mut DmaBuf,
         _prp: bool,
@@ -167,7 +171,7 @@ impl HsmGdmaController for FakeGdma {
     }
     async fn copy_mem_to_host(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         _src: &DmaBuf,
         _dst: HsmDmaAddr,
         _dst2: HsmDmaAddr,
@@ -181,23 +185,11 @@ impl HsmGdmaController for FakeGdma {
 
 #[derive(Default)]
 struct FakeIo {
-    sqe: HsmSqe,
-    cqe: HsmCqe,
+    sqe: [u32; 16],
+    cqe: [u32; 4],
 }
 
 impl HsmIo for FakeIo {
-    fn index(&self) -> u16 {
-        0
-    }
-    fn pid(&self) -> HsmPartId {
-        HsmPartId::from(0u8)
-    }
-    fn queue_id(&self) -> u16 {
-        0
-    }
-    fn queue_idx(&self) -> u16 {
-        0
-    }
     fn sqe(&self) -> &HsmSqe {
         &self.sqe
     }

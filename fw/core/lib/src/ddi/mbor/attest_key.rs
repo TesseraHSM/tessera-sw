@@ -72,7 +72,7 @@ fn reverse_copy(dst: &mut [u8], src: &[u8]) {
 /// Handle `DdiAttestKeyCmd`.
 pub(crate) async fn attest_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

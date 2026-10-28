@@ -37,9 +37,7 @@ use embassy_sync::mutex::Mutex;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
@@ -58,6 +56,7 @@ use tsra_fw_uno_drivers_ipc::IpcPairKind;
 use tsra_fw_uno_drivers_nvic::Nvic;
 use tsra_fw_uno_drivers_oic::ChannelConfig as OicChannelConfig;
 use tsra_fw_uno_drivers_oic::OicDriver;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_pqc::PqcDriver;
 use tsra_fw_uno_drivers_rng::RngDriver;
 use tsra_fw_uno_drivers_sha::ShaDriver;
@@ -106,6 +105,7 @@ use tsra_fw_uno_reg_soc::psram::HSM_TO_FP_IPC_TX_RING_STRIDE;
 use tsra_fw_uno_reg_soc::psram::PSRAM_BASE;
 use tsra_fw_uno_trace::tracing::*;
 
+use crate::UnoHsmIo;
 use crate::alloc::IO_ALLOC_INIT;
 use crate::alloc::IoAllocTable;
 use crate::ipc::*;
@@ -829,18 +829,18 @@ impl UnoHsmPal {
 /// claims nothing.
 impl HsmCustomDispatch for UnoHsmPal {
     #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
-    async fn mbor_dispatch(&self, io: &impl HsmIo, req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
+    async fn mbor_dispatch(&self, io: &UnoHsmIo, req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
         crate::test_hooks::mbor_dispatch(self, io, req).await
     }
 
     #[cfg(not(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks")))]
-    async fn mbor_dispatch(&self, _io: &impl HsmIo, _req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
+    async fn mbor_dispatch(&self, _io: &UnoHsmIo, _req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
         Err(HsmError::UnsupportedCmd)
     }
 
     async fn tbor_dispatch(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         _opcode: u8,
         _req: &DmaBuf,
     ) -> HsmResult<&DmaBuf> {

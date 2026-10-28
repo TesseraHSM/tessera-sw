@@ -17,7 +17,6 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
@@ -29,6 +28,7 @@ use tsra_fw_uno_drivers_upka::UpkaModSize;
 use tsra_fw_uno_drivers_upka::UpkaRsaKeyType;
 
 use super::reverse_copy;
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 use crate::asn1::parse_rsa_private_key;
 
@@ -239,7 +239,7 @@ fn mod_exp_input_in_range(n: &[u8], m: &[u8]) -> bool {
 impl UnoHsmPal {
     async fn pss_message_digest<'a>(
         &'a self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         message_hash: &DmaBuf,
         salt: &DmaBuf,
@@ -276,7 +276,7 @@ impl UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     async fn compute_crt_params(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         modulus_len: usize,
         p_be: &[u8],
         q_be: &[u8],
@@ -399,7 +399,7 @@ impl UnoHsmPal {
 impl HsmRsa for UnoHsmPal {
     async fn rsa_gen_keypair(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         _key_size: HsmRsaKey,
         _priv_key: &mut DmaBuf,
         _pub_key: &mut DmaBuf,
@@ -410,7 +410,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn mod_exp_priv(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         key_size: HsmRsaKey,
         key: &DmaBuf,
         y: &DmaBuf,
@@ -430,7 +430,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn mod_exp_pub(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         key_size: HsmRsaKey,
         key: &DmaBuf,
         x: &DmaBuf,
@@ -442,7 +442,7 @@ impl HsmRsa for UnoHsmPal {
 
     fn rsa_priv_pub_key(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         priv_key: &DmaBuf,
         pub_out: Option<&mut DmaBuf>,
     ) -> HsmResult<usize> {
@@ -482,7 +482,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         der: &'a mut DmaBuf,
         crt: bool,
     ) -> HsmResult<(&'a DmaBuf, usize)> {
@@ -577,7 +577,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pkcs1_encrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         pub_key: &DmaBuf,
         message: &DmaBuf,
@@ -620,7 +620,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pkcs1_decrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         priv_key: &DmaBuf,
         ciphertext: &DmaBuf,
@@ -664,7 +664,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pkcs1_sign<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &DmaBuf,
@@ -704,7 +704,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pkcs1_verify<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         pub_key: &DmaBuf,
@@ -762,7 +762,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_oaep_encrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         pub_key: &DmaBuf,
@@ -819,7 +819,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_oaep_decrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &DmaBuf,
@@ -902,7 +902,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pss_sign<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &DmaBuf,
@@ -959,7 +959,7 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pss_verify<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         pub_key: &DmaBuf,

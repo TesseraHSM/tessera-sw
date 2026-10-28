@@ -28,7 +28,6 @@ use tsra_fw_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaVerifyResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -60,7 +59,7 @@ fn mldsa_sig_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
 /// Persists nothing, holds no lock, and handles no secret material.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborMlDsaVerifyReq::decode(req_buf)?;

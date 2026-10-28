@@ -81,7 +81,7 @@ const _: () = assert!(PENDING_BLOB_LEN <= SESSION_PENDING_BLOB_MAX);
 /// Handle a TBOR `SessionOpenInit` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
     undo: &mut UndoLog<'p>,
     cqe_sess_id: &mut Option<u16>,
@@ -201,7 +201,7 @@ fn parse_request<'a>(req_buf: &'a DmaBuf) -> HsmResult<ParsedRequest<'a>> {
 /// Load the partition's PSK into a freshly-allocated scoped buffer.
 fn load_psk<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     psk_id: u8,
 ) -> HsmResult<&'a mut DmaBuf> {
@@ -226,7 +226,7 @@ fn load_psk<'a, P: HsmPal>(
 /// `send_export` time, not here.
 fn load_pk_hsm_sec1<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<&'a mut DmaBuf> {
     let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
@@ -270,7 +270,7 @@ fn build_hpke_info(
 #[allow(clippy::too_many_arguments)]
 async fn hpke_auth_psk_export<'a, P: HsmPal>(
     pal: &'a P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     suite: HpkeSuite,
     pk_init: &DmaBuf,
@@ -313,7 +313,7 @@ async fn hpke_auth_psk_export<'a, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn create_pending_slot<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     role: SessionRole,
     session_type: SessionType,
@@ -350,7 +350,7 @@ async fn create_pending_slot<P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn compute_phase1_mac<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     suite: HpkeSuite,
     exported: &DmaBuf,
@@ -379,7 +379,7 @@ async fn compute_phase1_mac<'a, P: HsmPal>(
 /// Encode the `SessionOpenInit` response into a fresh IO-scoped DmaBuf.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     session_id: u16,
     pk_resp: &DmaBuf,
     mac_resp: &DmaBuf,

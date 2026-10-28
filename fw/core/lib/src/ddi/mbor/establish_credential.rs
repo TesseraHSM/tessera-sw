@@ -72,7 +72,7 @@ const MK_VAULT_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 /// request).
 pub(crate) async fn establish_credential<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
@@ -252,7 +252,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
 ///   `MK` mismatch.
 async fn reimport_unwrapping_key<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     mk_key_id: HsmKeyId,
     masked: &mut DmaBuf,
 ) -> HsmResult<Option<HsmKeyId>> {
@@ -330,7 +330,7 @@ async fn reimport_unwrapping_key<P: HsmPal>(
 ///   needed for those.
 fn check_fail_fast<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     body: &DdiEstablishCredentialReq<'_>,
 ) -> HsmResult<()> {
     crate::part_state::part_verify_nonce(pal, io, body.encrypted_credential.nonce)?;
@@ -369,7 +369,7 @@ fn check_fail_fast<P: HsmPal>(
 /// and verify the supplied signature against it.
 async fn verify_pota_signature<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     signer_pub_key_raw: &DmaBuf,
     signature_raw: &DmaBuf,
 ) -> HsmResult<()> {
@@ -428,7 +428,7 @@ async fn verify_pota_signature<P: HsmPal>(
 /// `okm_out` must be exactly [`BK_LEN`] (80) bytes.
 async fn derive_credential_keys<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     host_eph_pub_key_raw: &DmaBuf,
     nonce: &DmaBuf,
     okm_out: &mut DmaBuf,
@@ -485,7 +485,7 @@ async fn derive_credential_keys<P: HsmPal>(
 /// `hmac_key` must be at least 48 bytes (the HMAC-SHA-384 key).
 async fn verify_credential_hmac<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     enc_cred: &DdiEncryptedEstablishCredential<'_>,
     hmac_key: &DmaBuf,
 ) -> HsmResult<()> {
@@ -530,7 +530,7 @@ async fn verify_credential_hmac<P: HsmPal>(
 /// request buffer — no scratch buffer for ciphertext is needed.
 async fn decrypt_credential<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     enc_cred: &mut DdiEncryptedEstablishCredential<'_>,
     aes_key: &DmaBuf,
 ) -> HsmResult<()> {
@@ -578,7 +578,7 @@ async fn decrypt_credential<P: HsmPal>(
 /// `bk3_out` must be exactly [`BK3_LEN`] (48) bytes.
 async fn unmask_partition_bk3<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     masked_bk3: &mut DmaBuf,
     bk3_out: &mut DmaBuf,
 ) -> HsmResult<()> {
@@ -602,7 +602,7 @@ async fn unmask_partition_bk3<P: HsmPal>(
 /// `bk3_session_out` must be exactly [`BK3_LEN`] (48) bytes.
 async fn derive_bk3_session<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     bk3: &DmaBuf,
     bk3_session_out: &mut DmaBuf,
 ) -> HsmResult<()> {
@@ -634,7 +634,7 @@ async fn derive_bk3_session<P: HsmPal>(
 /// `bk_out` must be exactly [`BK_LEN`] (80) bytes.
 async fn derive_partition_bk<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     bk3: &DmaBuf,
     signer_pub_key: &DmaBuf,
     svn: u64,
@@ -667,7 +667,7 @@ async fn derive_partition_bk<P: HsmPal>(
 /// immediately (rollback of a later failure is future undo-log work).
 async fn provision_mk<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     bmk: &mut DmaBuf,
     bk: &DmaBuf,
 ) -> HsmResult<HsmKeyId> {
@@ -709,7 +709,7 @@ async fn provision_mk<P: HsmPal>(
 /// - `key_length = BK_LEN` — plaintext length before AES-CBC pad.
 async fn encode_bmk_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     hdr: &DdiReqHdr,
     bk: &DmaBuf,
     mk_key_id: HsmKeyId,

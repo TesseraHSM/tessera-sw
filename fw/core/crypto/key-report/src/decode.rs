@@ -15,7 +15,6 @@ use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -216,7 +215,7 @@ pub fn parse_key_report(report: &DmaBuf) -> HsmResult<KeyReportView<'_>> {
 /// * Other [`HsmError`] values propagated from the PAL.
 pub async fn verify_key_report<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     report: &DmaBuf,
     signer_pub: &DmaBuf,

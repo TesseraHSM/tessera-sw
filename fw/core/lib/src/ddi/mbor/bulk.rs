@@ -41,7 +41,7 @@ pub(crate) fn is_bulk(kind: HsmVaultKeyKind) -> bool {
 /// `UnsupportedCmd`.
 pub(crate) async fn commit_key<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     material: &DmaBuf,
     kind: HsmVaultKeyKind,
     sess_id: HsmSessId,
@@ -78,7 +78,7 @@ pub(crate) async fn commit_key<P: HsmPal>(
 /// for.
 pub(crate) async fn rollback_on_err<P: HsmPal, T>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     handle: HsmKeyId,
     result: HsmResult<T>,
 ) -> HsmResult<T> {

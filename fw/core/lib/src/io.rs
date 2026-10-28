@@ -61,7 +61,7 @@ impl<P: HsmPal> Hsm<P> {
     pub async fn handle_io(&self, mut io: P::Io) {
         // Gate on partition state — drop IOs for non-enabled partitions.
         if !self.partition_enabled(&io) {
-            debug!("core", "dropping IO for disabled partition {:?}", io.pid());
+            debug!("core", "dropping IO for disabled partition");
             if let Err(_e) = self.pal().drop_io(io).await {
                 error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
             }
@@ -70,7 +70,16 @@ impl<P: HsmPal> Hsm<P> {
 
         // Single SQE parse — extract all fields once, populate CQE, validate,
         // and dispatch.
-        let (op, validated) = Self::init_cqe_from_sqe(&mut io);
+        let (op, validated) = match Self::init_cqe_from_sqe(&mut io) {
+            Ok(decoded) => decoded,
+            Err(_e) => {
+                error!("core", _e, "unsupported SQE or CQE length");
+                if let Err(_e) = self.pal().drop_io(io).await {
+                    error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
+                }
+                return;
+            }
+        };
 
         // The per-command undo log (TBOR only), owned here so it outlives
         // `complete_io` and the post-completion walk.  Stays `None` for
@@ -94,19 +103,22 @@ impl<P: HsmPal> Hsm<P> {
             },
         };
         let handler_ok = op_result.is_ok();
-        Self::finalize_cqe(&mut io, op_result);
 
         // Post the completion (CQE) to the host, then run the undo/commit
         // walk, then free the slot.  Splitting `complete_io` from
         // `drop_io` lets the walk run over `io` *after* the CQE post, so a
         // failed post reverts too.
-        let cqe_ok = match self.pal().complete_io(&mut io).await {
+        let completion = match Self::finalize_cqe(&mut io, op_result) {
+            Ok(()) => self.pal().complete_io(&mut io).await,
+            Err(e) => Err(e),
+        };
+        let cqe_ok = match completion {
             Ok(()) => true,
             Err(_e) => {
                 error!(
                     "core",
                     HsmError::CompleteIoFailure,
-                    "complete_io failed: {:?}",
+                    "CQE finalization or completion failed: {:?}",
                     _e
                 );
                 false
@@ -131,15 +143,13 @@ impl<P: HsmPal> Hsm<P> {
                 error!(
                     "core",
                     HsmError::InternalError,
-                    "undo walk poisoned partition {:?}",
-                    io.pid()
+                    "undo walk poisoned the IO's partition"
                 );
                 if crate::part_state::part_set_faulted(self.pal(), &io).is_err() {
                     error!(
                         "core",
                         HsmError::InternalError,
-                        "failed to fault poisoned partition {:?}",
-                        io.pid()
+                        "failed to fault the IO's poisoned partition"
                     );
                 }
             }
@@ -182,23 +192,21 @@ impl<P: HsmPal> Hsm<P> {
     /// Parses the SQE once, populates the CQE header, and returns the
     /// op code along with the SQE-validation result.
     #[inline]
-    fn init_cqe_from_sqe(io: &mut P::Io) -> (u16, Result<(), OpError>) {
+    fn init_cqe_from_sqe(io: &mut P::Io) -> HsmResult<(u16, Result<(), OpError>)> {
         let (cmd_id, op, validated) = {
-            let sqe = Sqe::from(io.sqe());
+            let sqe = Sqe::try_from(io.sqe())?;
             (sqe.cmd_id(), sqe.op(), sqe.validate())
         };
-        let sq_id = io.queue_id();
-        let mut cqe = Cqe::from(io.cqe());
+        let mut cqe = Cqe::try_from(io.cqe())?;
         cqe.clear();
         cqe.set_cmd_id(cmd_id);
-        cqe.set_sq_id(sq_id);
-        (op, validated)
+        Ok((op, validated))
     }
 
     /// Writes the final CQE status from the dispatch result.
     #[inline]
-    fn finalize_cqe(io: &mut P::Io, op_result: Result<HsmOpStatus, OpError>) {
-        let mut cqe = Cqe::from(io.cqe());
+    fn finalize_cqe(io: &mut P::Io, op_result: Result<HsmOpStatus, OpError>) -> HsmResult<()> {
+        let mut cqe = Cqe::try_from(io.cqe())?;
         match op_result {
             Ok(status) => {
                 cqe.set_dw0(CqeDw0::from(status.cqe_dw0_session).with_dst_len(status.resp_len));
@@ -209,6 +217,7 @@ impl<P: HsmPal> Hsm<P> {
                 error!("core", e.err, "handle_op failed");
             }
         }
+        Ok(())
     }
 
     /// Handles an [`OP_MBOR`] IO command.
@@ -503,7 +512,7 @@ impl<P: HsmPal> Hsm<P> {
     /// fields used by [`Self::handle_mbor_op`] / [`Self::handle_tbor_op`].
     #[inline]
     fn decode_io_sqe(io: &P::Io) -> Result<IoSqeParams, OpError> {
-        let sqe = Sqe::from(io.sqe());
+        let sqe = Sqe::try_from(io.sqe()).op_status(HostStatus::INVALID_FIELD_IN_COMMAND)?;
         sqe.validate_io_op()?;
         // Out-of-band SGL descriptor array (side-band bulk transfers such
         // as PartFinal's PTA cert chain); `None` when the SQE carries no
@@ -634,8 +643,8 @@ impl<P: HsmPal> Hsm<P> {
     /// Tears down the SQE's session without DMA or a DDI response body.
     /// An already-free slot is an idempotent cleanup.
     async fn handle_flush_op(&self, io: &mut P::Io) -> Result<HsmOpStatus, OpError> {
-        let sess_id = flush_session_id(&Sqe::from(io.sqe()))
-            .op_status(HostStatus::INVALID_FIELD_IN_COMMAND)?;
+        let sqe = Sqe::try_from(io.sqe()).op_status(HostStatus::INVALID_FIELD_IN_COMMAND)?;
+        let sess_id = flush_session_id(&sqe).op_status(HostStatus::INVALID_FIELD_IN_COMMAND)?;
         let _lock = self
             .pal()
             .partition_lock(io)

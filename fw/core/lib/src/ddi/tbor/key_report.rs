@@ -44,7 +44,6 @@ use tsra_fw_ddi_tbor_types::TborKeyReportResp;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_MAX_LEN;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -96,7 +95,7 @@ fn reverse_copy(dst: &mut [u8], src: &[u8]) {
 /// storage; `report_data` and `vm_launch_id` are borrowed in place.
 fn build_app_uuid<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     sess_id: HsmSessId,
 ) -> HsmResult<&'a mut DmaBuf> {
@@ -109,7 +108,7 @@ fn build_app_uuid<'a, P: HsmPal>(
 /// Convert the recovered private key into attestable public-key material.
 async fn attested_pub_key<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     key_kind: HsmVaultKeyKind,
     priv_key: &DmaBuf,
@@ -177,7 +176,7 @@ async fn attested_pub_key<'a, P: HsmPal>(
 /// in the request buffer and wiped after public-key derivation.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborKeyReportReq::decode_mut(req_buf)?;
@@ -221,7 +220,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// its exact length; the caller copies them into the IO-scoped response.
 async fn build_key_report<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     masked_key: &mut DmaBuf,
     masking_key: &DmaBuf,
@@ -249,7 +248,7 @@ async fn build_key_report<'a, P: HsmPal>(
 /// Encode the `KeyReport` response frame around the finished report.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     report_bytes: &[u8],
 ) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {
@@ -265,7 +264,7 @@ fn encode_response<'p, P: HsmPal>(
 /// via the key-report crate's two-pass builder.
 async fn build_signed_report<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     sess_id: HsmSessId,
     key: AttestedPubKey<'_>,

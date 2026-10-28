@@ -21,7 +21,7 @@ const AES_BLOCK_LEN: usize = 16;
 /// Handle `DdiAesEncryptDecryptCmd`.
 pub(crate) async fn aes_encrypt_decrypt<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

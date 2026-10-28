@@ -28,7 +28,6 @@ use tsra_fw_ddi_tbor_types::TborPskChangeResp;
 use tsra_fw_ddi_tbor_types::PSK_CHANGE_AAD_LEN;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -46,7 +45,7 @@ const PSK_ID_CU: u8 = 1;
 /// Handle a TBOR `PskChange` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -162,7 +161,7 @@ fn target_psk_for_role(role: SessionRole) -> u8 {
 
 /// Encode the `PskChange` empty acknowledgement into a fresh
 /// IO-scoped DmaBuf.
-fn encode_response<'p, P: HsmPal>(pal: &'p P, io: &impl HsmIo) -> HsmResult<&'p DmaBuf> {
+fn encode_response<'p, P: HsmPal>(pal: &'p P, io: &P::Io) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {
         let frame = TborPskChangeResp::encode(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())

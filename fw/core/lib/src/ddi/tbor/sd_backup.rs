@@ -31,7 +31,6 @@ use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -105,7 +104,7 @@ pub(super) fn platform_svn_owner<P: HsmPal>(pal: &P) -> HsmResult<(u64, u16)> {
 /// caller wipes `pok_scratch`.
 pub(super) async fn recover_bks3_from_pok_local<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     svn: u64,
     pok_scratch: &'a mut DmaBuf,
 ) -> HsmResult<&'a DmaBuf> {
@@ -136,7 +135,7 @@ pub(super) async fn recover_bks3_from_pok_local<'a, P: HsmPal>(
 /// key on the same label so the derived key round-trips.
 pub(super) async fn derive_sdbmk<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     bks3: &DmaBuf,
     svn: u64,
@@ -170,7 +169,7 @@ pub(super) async fn derive_sdbmk<'a, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn mask_sd_mk_backup<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     sdbmk: &DmaBuf,
     sdmk: &DmaBuf,
@@ -209,7 +208,7 @@ pub(super) async fn mask_sd_mk_backup<P: HsmPal>(
 /// [`MASKED_SD_LEN`], 276 B).
 pub(super) async fn mask_pok_local_backup<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     bks3: &DmaBuf,
     svn: u64,
@@ -263,7 +262,7 @@ pub(super) async fn mask_pok_local_backup<P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     undo: &mut UndoLog<'p>,
     svn: u64,
@@ -336,7 +335,7 @@ pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
 /// rolls back all changes.
 pub(super) async fn commit_sd_to_vault<'p, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     undo: &mut UndoLog<'p>,
     sdmk: &DmaBuf,
 ) -> HsmResult<()> {

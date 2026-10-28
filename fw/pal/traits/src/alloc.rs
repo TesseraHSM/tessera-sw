@@ -426,8 +426,20 @@ pub trait HsmScopedAlloc {
 /// |--------|-------------|
 /// | [`alloc_scoped`](Self::alloc_scoped) | Synchronous scope; all scope allocations freed on return |
 /// | [`alloc_scoped_async`](Self::alloc_scoped_async) | Async scope; same lifetime semantics across awaits |
+///
+/// Allocation requires the platform's own IO type, so a caller cannot
+/// substitute an arbitrary IO context to select platform-private heaps.
+///
+/// ```compile_fail,E0308
+/// use tsra_fw_hsm_pal_traits::{HsmAlloc, HsmIo, HsmResult};
+///
+/// fn allocate<P: HsmAlloc>(pal: &P, io: &impl HsmIo) -> HsmResult<()> {
+///     pal.alloc(io, 4)?;
+///     Ok(())
+/// }
+/// ```
 #[allow(clippy::mut_from_ref)]
-pub trait HsmAlloc {
+pub trait HsmAlloc: HsmIoTypes {
     /// PAL-specific scoped allocator handle.
     ///
     /// The associated lifetime ties the handle to the enclosing
@@ -455,7 +467,7 @@ pub trait HsmAlloc {
     /// - `Ok(&mut [u8])` — slice of length exactly `size`, 4-byte
     ///   aligned.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn alloc(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut [u8]>;
+    fn alloc(&self, io: &Self::Io, size: usize) -> HsmResult<&mut [u8]>;
 
     /// Allocates `size` bytes from `io`'s NonDma pool and
     /// zero-fills them.
@@ -469,7 +481,7 @@ pub trait HsmAlloc {
     ///
     /// - `Ok(&mut [u8])` — zero-initialised slice.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn alloc_zeroed(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut [u8]>;
+    fn alloc_zeroed(&self, io: &Self::Io, size: usize) -> HsmResult<&mut [u8]>;
 
     /// Allocates space for a `T` on `io`'s NonDma pool and moves
     /// `value` into it.
@@ -489,7 +501,7 @@ pub trait HsmAlloc {
     ///
     /// - `Ok(&mut T)` — exclusive reference to the placed value.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn alloc_val<T: Sized>(&self, io: &impl HsmIo, value: T) -> HsmResult<&mut T>;
+    fn alloc_val<T: Sized>(&self, io: &Self::Io, value: T) -> HsmResult<&mut T>;
 
     // ── Dma (SRAM) ────────────────────────────────────────────
 
@@ -511,7 +523,7 @@ pub trait HsmAlloc {
     /// - `Ok(&mut [u8])` — DMA-capable slice of length exactly
     ///   `size`, 4-byte aligned.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn dma_alloc(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut DmaBuf>;
+    fn dma_alloc(&self, io: &Self::Io, size: usize) -> HsmResult<&mut DmaBuf>;
 
     /// Allocates `size` bytes from `io`'s Dma pool and zero-fills
     /// them.
@@ -525,7 +537,7 @@ pub trait HsmAlloc {
     ///
     /// - `Ok(&mut [u8])` — zero-initialised DMA-capable slice.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn dma_alloc_zeroed(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut DmaBuf>;
+    fn dma_alloc_zeroed(&self, io: &Self::Io, size: usize) -> HsmResult<&mut DmaBuf>;
 
     /// Variable-size DMA allocation populated by a closure.
     ///
@@ -558,7 +570,7 @@ pub trait HsmAlloc {
     /// - `Err(HsmError::NotEnoughSpace)` — Dma pool was empty before
     ///   `f` ran.
     /// - `Err(e)` — propagated unchanged from `f`.
-    fn dma_alloc_var<F>(&self, io: &impl HsmIo, f: F) -> HsmResult<&mut DmaBuf>
+    fn dma_alloc_var<F>(&self, io: &Self::Io, f: F) -> HsmResult<&mut DmaBuf>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>;
 
@@ -588,7 +600,7 @@ pub trait HsmAlloc {
     /// - `Err(HsmError::NotEnoughSpace)` — Dma pool empty before
     ///   `f` ran.
     /// - `Err(e)` — propagated unchanged from `f`.
-    fn dma_alloc_var_with<F, T>(&self, io: &impl HsmIo, f: F) -> HsmResult<(&mut DmaBuf, T)>
+    fn dma_alloc_var_with<F, T>(&self, io: &Self::Io, f: F) -> HsmResult<(&mut DmaBuf, T)>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>;
 
@@ -616,7 +628,7 @@ pub trait HsmAlloc {
     ///
     /// Whatever `f` returned (`R`); `f` is expected to encode any
     /// fallibility into `R` itself (typically `R = HsmResult<…>`).
-    fn alloc_scoped<R>(&self, io: &impl HsmIo, f: impl FnOnce(&Self::Scoped<'_>) -> R) -> R;
+    fn alloc_scoped<R>(&self, io: &Self::Io, f: impl FnOnce(&Self::Scoped<'_>) -> R) -> R;
 
     /// Async variant of [`alloc_scoped`](Self::alloc_scoped).
     ///
@@ -637,7 +649,7 @@ pub trait HsmAlloc {
     /// # Returns
     ///
     /// Whatever `f` returned (`R`).
-    async fn alloc_scoped_async<R, F>(&self, io: &impl HsmIo, f: F) -> R
+    async fn alloc_scoped_async<R, F>(&self, io: &Self::Io, f: F) -> R
     where
         F: for<'a> AsyncFnOnce(&'a Self::Scoped<'a>) -> R;
 }

@@ -41,7 +41,7 @@ use super::*;
 /// Handle `DdiUnmaskKeyCmd`.
 pub(crate) async fn unmask_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

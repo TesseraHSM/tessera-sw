@@ -37,13 +37,13 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_sha::ShaRequest;
 
 use super::hash::ShaDigestContext;
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 // =============================================================================
@@ -176,7 +176,7 @@ impl HsmHmac for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the RNG driver.
     async fn hmac_gen_key(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         _algo: HsmHashAlgo,
         key: &mut DmaBuf,
     ) -> HsmResult<()> {
@@ -206,7 +206,7 @@ impl HsmHmac for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn hmac_sign(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         data: &DmaBuf,
@@ -243,7 +243,7 @@ impl HsmHmac for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn hmac_verify(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         data: &DmaBuf,
@@ -284,7 +284,7 @@ impl HsmHmac for UnoHsmPal {
     ///   conditioning or opad pre-hashing.
     async fn hmac_begin<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         alloc: &'a impl HsmScopedAlloc,
@@ -317,7 +317,7 @@ impl HsmHmac for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn hmac_continue(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         ctx: &mut Self::HmacCtx<'_>,
         data: &DmaBuf,
     ) -> HsmResult<()> {
@@ -338,7 +338,7 @@ impl HsmHmac for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn hmac_finish(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         mut ctx: Self::HmacCtx<'_>,
         tag: &mut DmaBuf,
     ) -> HsmResult<()> {
@@ -370,7 +370,7 @@ impl HsmHmac for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn hmac_finish_into(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         mut ctx: Self::HmacCtx<'_>,
         dest: &mut DmaBuf,
     ) -> HsmResult<()> {
@@ -410,7 +410,7 @@ impl HsmHmac for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn hmac_finish_verify(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         mut ctx: Self::HmacCtx<'_>,
         tag: &DmaBuf,
     ) -> HsmResult<bool> {
@@ -470,7 +470,7 @@ impl UnoHsmPal {
 
     pub(crate) async fn hmac_begin_in_buf<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         buf: &'a mut DmaBuf,

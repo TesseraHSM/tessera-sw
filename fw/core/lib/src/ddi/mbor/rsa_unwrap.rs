@@ -48,7 +48,7 @@ use super::*;
 /// Handle `DdiRsaUnwrapCmd`.
 pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

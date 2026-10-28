@@ -21,7 +21,6 @@
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 
 use crate::alg::AeadAlg;
 use crate::envelope::region_offsets;
@@ -36,9 +35,9 @@ use crate::format::Header;
 ///
 /// Assumes `alg == AeadAlg::AesGcm256`; the dispatcher in
 /// [`crate::ops`] is the only caller and guarantees this.
-pub(crate) async fn seal_gcm(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub(crate) async fn seal_gcm<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
     key: &DmaBuf,
     iv: &DmaBuf,
@@ -56,9 +55,9 @@ pub(crate) async fn seal_gcm(
 /// response slot avoid a second live copy of it.  For an ML-DSA-87 key
 /// that is 4928 bytes of the per-IO DMA heap, which is the difference
 /// between fitting and `NotEnoughSpace`.
-pub(crate) async fn seal_gcm_in_place(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub(crate) async fn seal_gcm_in_place<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
     key: &DmaBuf,
     iv: &DmaBuf,
@@ -70,9 +69,9 @@ pub(crate) async fn seal_gcm_in_place(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn seal_gcm_inner(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+async fn seal_gcm_inner<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
     key: &DmaBuf,
     iv: &DmaBuf,
@@ -155,9 +154,9 @@ async fn seal_gcm_inner(
 ///
 /// `header` has already been parsed and the alg has been verified
 /// to be `AeadAlg::AesGcm256` by the dispatcher.
-pub(crate) async fn open_gcm<'a>(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub(crate) async fn open_gcm<'a, P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     key: &DmaBuf,
     buf: &'a mut DmaBuf,
     header: Header,

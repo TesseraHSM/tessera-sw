@@ -67,6 +67,44 @@ use crate::drivers::vault::KeyVault;
 /// Total number of partitions supported by the HSM.
 pub const NUM_PARTITIONS: usize = 65;
 
+/// Opaque partition-table index for the standard PAL.
+///
+/// Transparent over `u8`, with checked construction from `u16`.
+/// Partition operations validate the index against the platform's partition count.
+///
+/// ```
+/// use tsra_fw_hsm_pal_std::HsmPartId;
+///
+/// assert_eq!(u8::from(HsmPartId::from(3u8)), 3);
+/// assert!(HsmPartId::try_from(300u16).is_err());
+/// ```
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HsmPartId(u8);
+
+impl From<u8> for HsmPartId {
+    #[inline]
+    fn from(v: u8) -> Self {
+        Self(v)
+    }
+}
+
+impl From<HsmPartId> for u8 {
+    #[inline]
+    fn from(id: HsmPartId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<u16> for HsmPartId {
+    type Error = core::num::TryFromIntError;
+
+    #[inline]
+    fn try_from(v: u16) -> Result<Self, Self::Error> {
+        u8::try_from(v).map(Self)
+    }
+}
+
 /// Maximum total resources across all partitions.
 pub const MAX_RESOURCES: u8 = 65;
 
@@ -445,15 +483,15 @@ impl HsmPartitionManager for StdHsmPal {
     // that module; the methods below exist solely to attach the
     // implementation to the trait.
 
-    fn part_prop_get_u8(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u8> {
+    fn part_prop_get_u8(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<u8> {
         self.prop_get_u8(io, id)
     }
 
-    fn part_prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+    fn part_prop_set_u8(&self, io: &StdHsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
         self.prop_set_u8(io, id, value)
     }
 
-    fn part_prop_get_u16(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u16> {
+    fn part_prop_get_u16(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<u16> {
         // The partition's RSA-2048 unwrapping key is provisioned lazily
         // the first time its id is read.  Real PKA hardware generates it
         // in the background from partition init (reporting
@@ -466,35 +504,35 @@ impl HsmPartitionManager for StdHsmPal {
         self.prop_get_u16(io, id)
     }
 
-    fn part_prop_set_u16(&self, io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
+    fn part_prop_set_u16(&self, io: &StdHsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
         self.prop_set_u16(io, id, value)
     }
 
-    fn part_prop_get_u32(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u32> {
+    fn part_prop_get_u32(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<u32> {
         self.prop_get_u32(io, id)
     }
 
-    fn part_prop_set_u32(&self, io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()> {
+    fn part_prop_set_u32(&self, io: &StdHsmIo, id: PartPropId, value: u32) -> HsmResult<()> {
         self.prop_set_u32(io, id, value)
     }
 
-    fn part_prop_get_bool(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<bool> {
+    fn part_prop_get_bool(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<bool> {
         self.prop_get_bool(io, id)
     }
 
-    fn part_prop_set_bool(&self, io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
+    fn part_prop_set_bool(&self, io: &StdHsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
         self.prop_set_bool(io, id, value)
     }
 
-    fn part_prop_get_bytes<'a>(&'a self, io: &impl HsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf> {
+    fn part_prop_get_bytes<'a>(&'a self, io: &StdHsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf> {
         self.prop_get_bytes(io, id)
     }
 
-    fn part_prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+    fn part_prop_set_bytes(&self, io: &StdHsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
         self.prop_set_bytes(io, id, data)
     }
 
-    fn part_prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()> {
+    fn part_prop_clear(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<()> {
         self.prop_clear(io, id)
     }
 }
@@ -521,7 +559,7 @@ impl StdHsmPal {
     /// Validate `pid` and return its array index, or `InvalidArg`.
     #[inline]
     fn part_idx(pid: HsmPartId) -> HsmResult<usize> {
-        let idx = u8::from(pid) as usize;
+        let idx = usize::from(u8::from(pid));
         if idx >= NUM_PARTITIONS {
             return Err(HsmError::InvalidArg);
         }
@@ -1643,7 +1681,7 @@ impl StdHsmPal {
     ///   (via `active_part`).
     fn prop_borrow_get(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         id: PartPropId,
         meta: &PartPropMeta,
     ) -> HsmResult<&PartitionEntry> {
@@ -1663,7 +1701,7 @@ impl StdHsmPal {
     #[allow(clippy::mut_from_ref)]
     fn prop_borrow_set(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         id: PartPropId,
         meta: &PartPropMeta,
     ) -> HsmResult<&mut PartitionEntry> {
@@ -1678,53 +1716,43 @@ impl StdHsmPal {
         }
     }
 
-    pub(crate) fn prop_get_u8(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u8> {
+    pub(crate) fn prop_get_u8(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<u8> {
         let meta = validate_meta(id, ExpectedKind::U8)?;
         let entry = self.prop_borrow_get(io, id, &meta)?;
         Ok(entry.prop_get_scalar(id)? as u8)
     }
 
-    pub(crate) fn prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+    pub(crate) fn prop_set_u8(&self, io: &StdHsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
         let meta = validate_set(id, ExpectedKind::U8, None)?;
         let entry = self.prop_borrow_set(io, id, &meta)?;
         entry.prop_set_scalar(id, u32::from(value))
     }
 
-    pub(crate) fn prop_get_u16(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u16> {
+    pub(crate) fn prop_get_u16(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<u16> {
         let meta = validate_meta(id, ExpectedKind::U16)?;
         let entry = self.prop_borrow_get(io, id, &meta)?;
         Ok(entry.prop_get_scalar(id)? as u16)
     }
 
-    pub(crate) fn prop_set_u16(
-        &self,
-        io: &impl HsmIo,
-        id: PartPropId,
-        value: u16,
-    ) -> HsmResult<()> {
+    pub(crate) fn prop_set_u16(&self, io: &StdHsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
         let meta = validate_set(id, ExpectedKind::U16, None)?;
         let entry = self.prop_borrow_set(io, id, &meta)?;
         entry.prop_set_scalar(id, u32::from(value))
     }
 
-    pub(crate) fn prop_get_u32(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u32> {
+    pub(crate) fn prop_get_u32(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<u32> {
         let meta = validate_meta(id, ExpectedKind::U32)?;
         let entry = self.prop_borrow_get(io, id, &meta)?;
         entry.prop_get_scalar(id)
     }
 
-    pub(crate) fn prop_set_u32(
-        &self,
-        io: &impl HsmIo,
-        id: PartPropId,
-        value: u32,
-    ) -> HsmResult<()> {
+    pub(crate) fn prop_set_u32(&self, io: &StdHsmIo, id: PartPropId, value: u32) -> HsmResult<()> {
         let meta = validate_set(id, ExpectedKind::U32, None)?;
         let entry = self.prop_borrow_set(io, id, &meta)?;
         entry.prop_set_scalar(id, value)
     }
 
-    pub(crate) fn prop_get_bool(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<bool> {
+    pub(crate) fn prop_get_bool(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<bool> {
         let meta = validate_meta(id, ExpectedKind::Bool)?;
         let entry = self.prop_borrow_get(io, id, &meta)?;
         Ok(entry.prop_get_scalar(id)? != 0)
@@ -1732,7 +1760,7 @@ impl StdHsmPal {
 
     pub(crate) fn prop_set_bool(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         id: PartPropId,
         value: bool,
     ) -> HsmResult<()> {
@@ -1743,7 +1771,7 @@ impl StdHsmPal {
 
     pub(crate) fn prop_get_bytes<'a>(
         &'a self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         id: PartPropId,
     ) -> HsmResult<&'a DmaBuf> {
         let meta = validate_meta(id, ExpectedKind::Bytes)?;
@@ -1759,7 +1787,7 @@ impl StdHsmPal {
 
     pub(crate) fn prop_set_bytes(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         id: PartPropId,
         data: &DmaBuf,
     ) -> HsmResult<()> {
@@ -1768,7 +1796,7 @@ impl StdHsmPal {
         entry.prop_set_bytes(id, data)
     }
 
-    pub(crate) fn prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()> {
+    pub(crate) fn prop_clear(&self, io: &StdHsmIo, id: PartPropId) -> HsmResult<()> {
         let meta = validate_clear(id)?;
         let entry = self.prop_borrow_set(io, id, &meta)?;
         entry.prop_clear(id)
@@ -1778,6 +1806,20 @@ impl StdHsmPal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_index_rejects_wide_ids_without_aliasing() {
+        assert_eq!(StdHsmPal::part_idx(HsmPartId::from(64u8)), Ok(64));
+        for id in [65u8, u8::MAX] {
+            assert_eq!(
+                StdHsmPal::part_idx(HsmPartId::from(id)),
+                Err(HsmError::InvalidArg)
+            );
+        }
+        for id in [256u16, 257, 320, u16::MAX] {
+            assert!(HsmPartId::try_from(id).is_err());
+        }
+    }
 
     fn fresh_entry() -> PartitionEntry {
         PartitionEntry::default()

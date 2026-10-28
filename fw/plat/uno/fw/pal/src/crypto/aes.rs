@@ -18,7 +18,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -28,6 +27,7 @@ use tsra_fw_uno_drivers_aes::AesRequest;
 
 use super::gcm::GCM_IV_LEN;
 use super::gcm::GCM_TAG_LEN;
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 // =============================================================================
@@ -238,7 +238,7 @@ impl HsmAes for UnoHsmPal {
     /// # Errors
     /// * [`HsmError::InvalidArg`] — `key.len()` is not 16, 24, or 32.
     /// * Any [`HsmError`] surfaced by the RNG driver.
-    async fn aes_gen_key(&self, io: &impl HsmIo, key: &mut [u8]) -> HsmResult<()> {
+    async fn aes_gen_key(&self, io: &UnoHsmIo, key: &mut [u8]) -> HsmResult<()> {
         match key.len() {
             16 | 24 | 32 => {}
             _ => return Err(HsmError::InvalidArg),
@@ -251,7 +251,7 @@ impl HsmAes for UnoHsmPal {
     /// submission via [`Self::aes_run`].
     async fn aes_cbc_enc_dec(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         op: PalAesOp,
         key: &DmaBuf,
         input: &DmaBuf,
@@ -284,7 +284,7 @@ impl HsmAes for UnoHsmPal {
     /// via [`Self::aes_run_in_place`].
     async fn aes_cbc_enc_dec_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         op: PalAesOp,
         key: &DmaBuf,
         data: &mut DmaBuf,
@@ -315,7 +315,7 @@ impl HsmAes for UnoHsmPal {
     /// then dispatches a single ECB submission via [`Self::aes_run`].
     async fn aes_ecb_enc_dec(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         op: PalAesOp,
         key: &DmaBuf,
         input: &DmaBuf,
@@ -330,7 +330,7 @@ impl HsmAes for UnoHsmPal {
     /// single in-place ECB submission via [`Self::aes_run_in_place`].
     async fn aes_ecb_enc_dec_in_place(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         op: PalAesOp,
         key: &DmaBuf,
         data: &mut DmaBuf,
@@ -344,7 +344,7 @@ impl HsmAes for UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     async fn gcm_encrypt(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -362,7 +362,7 @@ impl HsmAes for UnoHsmPal {
     /// AES-GCM encrypt in-place using AES-CTR plus software GHASH.
     async fn gcm_encrypt_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -380,7 +380,7 @@ impl HsmAes for UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     async fn gcm_decrypt(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -398,7 +398,7 @@ impl HsmAes for UnoHsmPal {
     /// AES-GCM decrypt in-place using AES-CTR plus software GHASH.
     async fn gcm_decrypt_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -436,7 +436,7 @@ impl HsmAes for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     async fn aes_kw_wrap(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -467,7 +467,7 @@ impl HsmAes for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     async fn aes_kw_unwrap(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -496,7 +496,7 @@ impl HsmAes for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     async fn aes_kwp_wrap(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -528,7 +528,7 @@ impl HsmAes for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     async fn aes_kwp_unwrap(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,

@@ -67,7 +67,6 @@ use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -108,7 +107,7 @@ const _: () = assert!(SD_ENC_LEN + (BKS3_LEN + 16) == POK_REMOTE_BACKUP_LEN);
 /// the race-winner gate against a concurrently-dispatched create/restore.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
@@ -332,7 +331,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// Encode the `SdRestoreRemoteBackup` response around the local backups.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     pok_local: &DmaBuf,
     sd_mk: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {

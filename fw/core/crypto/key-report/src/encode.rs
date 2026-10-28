@@ -20,7 +20,6 @@ use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -98,7 +97,7 @@ impl KeyReportParams<'_> {
 /// * Other [`HsmError`] values propagated from the PAL.
 pub async fn key_report<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &KeyReportParams<'_>,
     priv_key: &DmaBuf,
@@ -173,7 +172,7 @@ fn report_size(scoped: &impl HsmScopedAlloc, params: &KeyReportParams<'_>) -> Hs
 
 async fn do_build<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &KeyReportParams<'_>,
     priv_key: &DmaBuf,

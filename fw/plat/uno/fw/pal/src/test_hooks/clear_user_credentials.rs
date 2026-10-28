@@ -5,7 +5,6 @@
 
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_hsm_pal_traits::DmaBuf;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -14,12 +13,13 @@ use tsra_fw_hsm_pal_traits::PartPropId;
 use super::common::ReqHdr;
 use super::test_action::encode_success;
 use super::test_action::expect_empty_payload;
+use crate::UnoHsmIo;
 use crate::pal::UnoHsmPal;
 
 /// Validate and execute `TestAction::ClearUserCredentials`.
 pub(super) async fn dispatch<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_field_count: u8,
@@ -29,7 +29,7 @@ pub(super) async fn dispatch<'p>(
     execute(pal, io, hdr).await
 }
 
-async fn execute<'p>(pal: &'p UnoHsmPal, io: &impl HsmIo, hdr: &ReqHdr) -> HsmResult<&'p DmaBuf> {
+async fn execute<'p>(pal: &'p UnoHsmPal, io: &UnoHsmIo, hdr: &ReqHdr) -> HsmResult<&'p DmaBuf> {
     // Serialize with EstablishCredential/ChangePin, which hold this lock
     // across their own validation and CREDENTIAL commit: without it, a
     // concurrent request could interleave with the clear below and leave

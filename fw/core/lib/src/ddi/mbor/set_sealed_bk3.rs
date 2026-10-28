@@ -34,7 +34,7 @@ use super::*;
 ///    heap-allocated response buffer.
 pub(crate) fn set_sealed_bk3<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

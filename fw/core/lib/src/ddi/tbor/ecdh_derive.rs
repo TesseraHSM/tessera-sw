@@ -25,7 +25,6 @@ use tsra_fw_ddi_tbor_types::TborEcdhDeriveReq;
 use tsra_fw_ddi_tbor_types::TborEcdhDeriveResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -59,7 +58,7 @@ fn ecdh_secret_attrs(scope: HsmKeyScope) -> HsmVaultKeyAttrs {
 /// unmasked in place (`decode_mut`).
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborEcdhDeriveReq::decode_mut(req_buf)?;

@@ -92,7 +92,7 @@ impl HsmEcc for StdHsmPal {
     /// (both deterministic for raw HSM bytes).
     async fn ecc_gen_keypair(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         out: Option<(&mut DmaBuf, &mut DmaBuf)>,
@@ -150,7 +150,7 @@ impl HsmEcc for StdHsmPal {
     /// keypair there. Determinism is per-platform; see the trait doc.
     async fn ecc_gen_keypair_from_root(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         root: &DmaBuf,
@@ -236,7 +236,7 @@ impl HsmEcc for StdHsmPal {
     /// performs the BE↔LE conversions internally.
     async fn ecc_sign(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         hash: &DmaBuf,
@@ -259,7 +259,7 @@ impl HsmEcc for StdHsmPal {
     /// coordinates and performs BE↔LE conversions internally.
     async fn ecc_verify(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         curve: HsmEccCurve,
         pub_key: &DmaBuf,
         hash: &DmaBuf,
@@ -293,7 +293,7 @@ impl HsmEcc for StdHsmPal {
     /// worker pool and emits the little-endian DDI wire form.
     async fn ecc_pub_from_priv(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         pub_key: &mut DmaBuf,
@@ -321,7 +321,7 @@ impl HsmEcc for StdHsmPal {
     /// for P-521).
     async fn ecdh_derive(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         pub_key: &DmaBuf,
@@ -344,7 +344,7 @@ impl HsmEcc for StdHsmPal {
 
     fn ecc_priv_der_to_vault(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         der: &DmaBuf,
         out: Option<&mut DmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)> {
@@ -365,7 +365,7 @@ impl HsmEcc for StdHsmPal {
 
     fn ecc_priv_to_vault(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         curve: HsmEccCurve,
         d: &DmaBuf,
         out: Option<&mut DmaBuf>,
@@ -393,7 +393,7 @@ impl HsmEcc for StdHsmPal {
 
     fn ecc_vault_to_priv(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         curve: HsmEccCurve,
         vault: &DmaBuf,
         out: Option<&mut DmaBuf>,
@@ -428,7 +428,7 @@ impl HsmEcc for StdHsmPal {
 
     async fn ecc_priv_pub_key(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         priv_key: &DmaBuf,
         pub_out: Option<&mut DmaBuf>,
     ) -> HsmResult<usize> {

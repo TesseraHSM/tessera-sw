@@ -64,7 +64,6 @@ use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -146,7 +145,7 @@ pub struct TrustAnchors<'a> {
 ///   linkage is invalid (propagated from the chain validator).
 pub async fn verify_receiver_cert_chain<P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     oob: &OobPtr,
     chain: &[CertDescriptor],
     sata_anchor: &[u8],
@@ -196,7 +195,7 @@ where
 /// * Other [`HsmError`] values propagated from the PAL / OOB copy.
 pub async fn verify_evidence<P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     oob: &OobPtr,
     refs: &EvidenceRefs<'_>,
     anchors: &TrustAnchors<'_>,
@@ -310,7 +309,7 @@ where
 /// A chain with no matching anchor is rejected with [`HsmError::InvalidArg`].
 async fn validate_chain<P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     oob: &OobPtr,
     chain: &[CertDescriptor],
     anchor: Option<&[u8]>,
