@@ -109,6 +109,8 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
     ///
     /// Only valid on a V2 (security-domain) session; a V1 session yields
     /// [`HsmError::InvalidSession`].
+    /// [`HsmKeyScope::SecurityDomain`] requires an already-provisioned
+    /// security domain and cannot bootstrap SD creation or restoration.
     fn generate_key(
         &mut self,
         session: &Self::Session,
@@ -117,24 +119,21 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
         // Validate key properties before generating the key.
         HsmSealingKey::validate_props(&props)?;
 
-        // Sealing keys are session-lifetime keys bound to a persistent
-        // masking key. The `SdSealingKeyGen` firmware contract supports
-        // only `Ephemeral` and `Local`; `Session`, `SecurityDomain` (and
-        // any other) are rejected up front so the host never sends a
-        // request guaranteed to fail on-device. An unset scope defaults
-        // to `Local` for backward compatibility.
+        // Session-scoped sealing keys are unsupported. SecurityDomain
+        // requires a provisioned SD masking key; an unset scope defaults
+        // to Local for backward compatibility.
         let scope = match props.scope() {
             None | Some(HsmKeyScope::Local) => KeyScope::Local,
             Some(HsmKeyScope::Ephemeral) => KeyScope::Ephemeral,
-            Some(HsmKeyScope::Session) | Some(HsmKeyScope::SecurityDomain) => {
+            Some(HsmKeyScope::SecurityDomain) => KeyScope::SecurityDomain,
+            Some(HsmKeyScope::Session) => {
                 return Err(HsmError::InvalidKeyProps);
             }
         };
 
         // Cache the masked blob and public key in props. The key is
-        // unpinned (`Unpinned`) until unmasked on-use. Masked under
-        // the partition-local masking key so the blob survives across
-        // launches for unmask-on-use.
+        // unpinned (`Unpinned`) until unmasked on-use under the requested
+        // scope's masking key.
         let (masked_key, pub_key_der) = ddi::sd_sealing_key_gen(session, scope as u8)?;
         let mut props = props;
         props.set_masked_key(&masked_key);
