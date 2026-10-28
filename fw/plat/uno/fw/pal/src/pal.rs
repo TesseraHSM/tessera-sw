@@ -141,8 +141,8 @@ pub enum IpcChannel {
     AdminMessage = 0,
     /// Admin → HSM event notifications.
     AdminEvent = 1,
-    /// HSM → FP requests over the PSRAM rings. Only the test hooks' crash
-    /// injection sends on it: bulk keys are not handed to the FP cores.
+    /// HSM-to-accelerator requests over shared-memory rings.
+    /// Used only by crash-injection test hooks; bulk keys are not offloaded.
     FpMessage = 2,
     /// HSM → Admin requests (HSM is the requestor, Admin the responder).
     AdminRequest = 3,
@@ -399,9 +399,8 @@ impl Default for UnoHsmPal {
                     depth: 0,
                     msg_len: 0,
                 },
-                // Pair 2: send requests to the fast-path cores (desc 15
-                // out, 16 in) over the PSRAM HSM↔FP IPC rings. Only the
-                // test hooks' crash injection uses it.
+                // Pair 2: send requests to the accelerator cores over shared-memory
+                // rings (desc 15 out, 16 in). Used only by crash-injection test hooks.
                 IpcPairConfig {
                     kind: IpcPairKind::SendMessage,
                     inbound_desc: 16,
