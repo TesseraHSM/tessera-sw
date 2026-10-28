@@ -464,6 +464,20 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
         });
     }
 
+    // Run the full emu DDI suite, including non-smoke tests.
+    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
+        tests.push(Nextest {
+            features: Some("emu".to_string()),
+            package: Some("tsra_ddi_mbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-emu-ddi".to_string())),
+            exclude: exclude.to_owned(),
+            test: Some("tsra_ddi_tests".to_string()),
+            filter: vec![],
+        });
+    }
+
     // SDK Run azihsm_ddi_tbor_types tests through the emu
     // backend (in-process firmware).
     #[cfg(not(target_os = "windows"))]
