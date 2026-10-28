@@ -7,8 +7,8 @@
 //! `GetCertChainInfo`.  Returns the number of certificates and the
 //! leaf-certificate SHA-256 thumbprint for the caller's partition at the
 //! requested chain slot.  No session is required; the chain is read for
-//! the caller's own bound partition (`io.pid()`), mirroring the MBOR
-//! handler.
+//! the caller's own bound partition, resolved internally by the PAL,
+//! mirroring the MBOR handler.
 //!
 //! The handler is `async` because the underlying
 //! [`HsmCertStore::get_cert_chain_info`](tsra_fw_hsm_pal_traits::HsmCertStore::get_cert_chain_info)
@@ -17,7 +17,6 @@
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -28,7 +27,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// log is needed.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborGetCertChainInfoReq::decode(req_buf)?;
@@ -37,7 +36,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let info = if slot_id == 2 {
         super::pta::chain_info(pal, io).await?
     } else {
-        pal.get_cert_chain_info(io, io.pid(), slot_id).await?
+        pal.get_cert_chain_info(io, slot_id).await?
     };
 
     let resp = pal.dma_alloc_var(io, |buf| {

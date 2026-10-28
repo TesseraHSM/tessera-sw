@@ -213,9 +213,9 @@ pub fn pad_sn(sn: &str) -> Option<[u8; SN_LEN]> {
 ///
 /// See the crate-level docs for the shared `(pal, io, alloc, params,
 /// priv_key, out)` contract and query/copy semantics.
-pub async fn build_root_cert<'a>(
-    pal: &(impl HsmCrypto + HsmAlloc + 'a),
-    io: &impl HsmIo,
+pub async fn build_root_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
+    pal: &P,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &RootCertParams<'_>,
     priv_key: &DmaBuf,
@@ -245,9 +245,9 @@ pub async fn build_root_cert<'a>(
 /// P-384 [`TbsSigner`] (`pal.ecc_sign` + `priv_key`) and delegates. The
 /// public contract — `(pal, io, alloc, params, priv_key, out)` with the
 /// query/copy semantics from the crate-level docs — is unchanged.
-pub async fn build_leaf_cert<'a>(
-    pal: &(impl HsmCrypto + HsmAlloc + 'a),
-    io: &impl HsmIo,
+pub async fn build_leaf_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
+    pal: &P,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &LeafCertParams<'_>,
     priv_key: &DmaBuf,
@@ -277,17 +277,12 @@ pub async fn build_leaf_cert<'a>(
 ///
 /// [`HsmEcc::ecc_sign`]: tsra_fw_hsm_pal_traits::HsmEcc::ecc_sign
 #[allow(async_fn_in_trait)]
-pub trait TbsSigner {
+pub trait TbsSigner<I: HsmIo> {
     /// Sign `digest` (48-byte SHA-384, natural big-endian) into `sig`
     /// (`r || s`, LE-by-half, 96 B). The signer converts the digest to its
     /// backend's operand order (a PKA/`ecc_sign_deterministic` signer reverses
     /// it to little-endian).
-    async fn sign_digest(
-        &self,
-        io: &impl HsmIo,
-        digest: &DmaBuf,
-        sig: &mut DmaBuf,
-    ) -> HsmResult<()>;
+    async fn sign_digest(&self, io: &I, digest: &DmaBuf, sig: &mut DmaBuf) -> HsmResult<()>;
 }
 
 /// Build a Leaf certificate whose TBS signature is produced by `signer`
@@ -298,12 +293,12 @@ pub trait TbsSigner {
 /// across regenerations. `pal` is still used for the SHA-384 over the TBS.
 ///
 /// Query/copy: `out = None` returns the worst-case size; `Some(buf)` builds.
-pub async fn build_leaf_cert_with_signer<'a>(
-    pal: &(impl HsmCrypto + HsmAlloc + 'a),
-    io: &impl HsmIo,
+pub async fn build_leaf_cert_with_signer<'a, P: HsmCrypto + HsmAlloc + 'a>(
+    pal: &P,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &LeafCertParams<'_>,
-    signer: &impl TbsSigner,
+    signer: &impl TbsSigner<P::Io>,
     out: Option<&mut [u8]>,
 ) -> HsmResult<usize> {
     build_signed_from_template(
@@ -326,13 +321,13 @@ pub async fn build_leaf_cert_with_signer<'a>(
 /// this plumbing in one place avoids duplicating it per certificate profile.
 /// In query mode (`out = None`) it returns the worst-case signed size without
 /// allocating or patching.
-async fn build_signed_from_template<'a>(
-    pal: &(impl HsmCrypto + HsmAlloc + 'a),
-    io: &impl HsmIo,
+async fn build_signed_from_template<'a, P: HsmCrypto + HsmAlloc + 'a>(
+    pal: &P,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     template_len: usize,
     patch: impl FnOnce(&mut [u8]) -> HsmResult<()>,
-    signer: &impl TbsSigner,
+    signer: &impl TbsSigner<P::Io>,
     out: Option<&mut [u8]>,
 ) -> HsmResult<usize> {
     if template_len > MAX_TBS_LEN {
@@ -368,13 +363,8 @@ struct EccP384Signer<'a, P: HsmCrypto, A: HsmScopedAlloc> {
     priv_key: &'a DmaBuf,
 }
 
-impl<P: HsmCrypto, A: HsmScopedAlloc> TbsSigner for EccP384Signer<'_, P, A> {
-    async fn sign_digest(
-        &self,
-        io: &impl HsmIo,
-        digest: &DmaBuf,
-        sig: &mut DmaBuf,
-    ) -> HsmResult<()> {
+impl<P: HsmCrypto, A: HsmScopedAlloc> TbsSigner<P::Io> for EccP384Signer<'_, P, A> {
+    async fn sign_digest(&self, io: &P::Io, digest: &DmaBuf, sig: &mut DmaBuf) -> HsmResult<()> {
         // `ecc_sign` consumes the message hash in PKA-native little-endian: the
         // full byte reversal of the natural big-endian SHA-384 digest that
         // `build_signed_from_template` produces (per the `TbsSigner` contract).
@@ -402,9 +392,9 @@ fn preflight(priv_key: &DmaBuf, tbs_len: usize) -> HsmResult<()> {
 /// closure, run `SHA-384 → ECDSA-P384 sign` against the supplied
 /// private key, and return the DMA buffers holding the patched TBS
 /// and the LE-by-half signature.
-async fn sign<'a, F>(
-    pal: &(impl HsmCrypto + HsmAlloc + 'a),
-    io: &impl HsmIo,
+async fn sign<'a, P: HsmCrypto + HsmAlloc + 'a, F>(
+    pal: &P,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     priv_key: &DmaBuf,
     tbs_len: usize,

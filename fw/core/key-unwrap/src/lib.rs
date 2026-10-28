@@ -44,7 +44,6 @@
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -97,7 +96,7 @@ pub struct UnwrapParams<'a> {
 /// - Propagated OAEP / KWP failures.
 pub async fn unwrap_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     params: UnwrapParams<'_>,
 ) -> HsmResult<&'p mut DmaBuf> {
     // The unwrapping key must be the partition's device-internal, locally

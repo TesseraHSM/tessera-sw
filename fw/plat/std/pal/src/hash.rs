@@ -37,7 +37,7 @@ impl HsmHash for StdHsmPal {
 
     async fn hash(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         data: &DmaBuf,
         digest: &mut DmaBuf,
@@ -61,7 +61,7 @@ impl HsmHash for StdHsmPal {
 
     fn hash_begin<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _algo: HsmHashAlgo,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HashCtx<'a>>
@@ -73,7 +73,7 @@ impl HsmHash for StdHsmPal {
 
     async fn hash_continue(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _ctx: &mut Self::HashCtx<'_>,
         _data: &DmaBuf,
     ) -> HsmResult<()> {
@@ -82,7 +82,7 @@ impl HsmHash for StdHsmPal {
 
     async fn hash_finish(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _ctx: Self::HashCtx<'_>,
         _digest: &mut DmaBuf,
         _big_endian: bool,

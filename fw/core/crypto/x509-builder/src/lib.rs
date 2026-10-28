@@ -25,7 +25,7 @@
 //! ```ignore
 //! pub async fn build_X<'a, P>(
 //!     pal: &P,
-//!     io: &impl HsmIo,
+//!     io: &P::Io,
 //!     alloc: &'a impl HsmScopedAlloc,
 //!     params: &XParams<'_>,
 //!     priv_key: &DmaBuf,

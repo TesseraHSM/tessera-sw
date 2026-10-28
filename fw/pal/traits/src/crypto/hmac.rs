@@ -46,7 +46,7 @@ use super::*;
 /// [`hmac_verify`](Self::hmac_verify)) and multi-step
 /// ([`hmac_begin`](Self::hmac_begin) / [`hmac_continue`](Self::hmac_continue)
 /// / [`hmac_finish`](Self::hmac_finish)) forms are provided.
-pub trait HsmHmac {
+pub trait HsmHmac: HsmIoTypes {
     /// Platform-specific multi-step HMAC context.
     ///
     /// Created by [`hmac_begin`](Self::hmac_begin) and consumed by
@@ -76,7 +76,7 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — propagated from the CSPRNG.
     async fn hmac_gen_key(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         key: &mut DmaBuf,
     ) -> HsmResult<()>;
@@ -105,7 +105,7 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_sign(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         data: &DmaBuf,
@@ -132,7 +132,7 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_verify(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         data: &DmaBuf,
@@ -164,7 +164,7 @@ pub trait HsmHmac {
     ///   prelude.
     async fn hmac_begin<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         alloc: &'a impl HsmScopedAlloc,
@@ -192,7 +192,7 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_continue(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: &mut Self::HmacCtx<'_>,
         data: &DmaBuf,
     ) -> HsmResult<()>;
@@ -215,7 +215,7 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_finish(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
         tag: &mut DmaBuf,
     ) -> HsmResult<()>;
@@ -243,7 +243,7 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_finish_into(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
         dest: &mut DmaBuf,
     ) -> HsmResult<()>;
@@ -265,7 +265,7 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_finish_verify(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
         tag: &DmaBuf,
     ) -> HsmResult<bool>;

@@ -47,7 +47,7 @@ pub(crate) const SESSION_CU_AUTH_BLOB_SIZE: usize =
 
 impl HsmSessionManager for StdHsmPal {
     /// Check whether the partition's session table is full.
-    fn session_limit_reached(&self, io: &impl HsmIo) -> bool {
+    fn session_limit_reached(&self, io: &StdHsmIo) -> bool {
         let Ok(entry) = self.active_part(io.pid()) else {
             return true;
         };
@@ -63,7 +63,7 @@ impl HsmSessionManager for StdHsmPal {
     /// The session is committed immediately.
     async fn session_create(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         api_rev: &[u8],
         masking_key: &[u8],
         id: Option<HsmSessId>,
@@ -132,7 +132,7 @@ impl HsmSessionManager for StdHsmPal {
     /// [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation) slots
     /// have no backing vault key after partition disable and likewise
     /// only require freeing the logical slot.
-    async fn session_destroy(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+    async fn session_destroy(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
 
         if matches!(
@@ -158,7 +158,7 @@ impl HsmSessionManager for StdHsmPal {
     }
 
     /// Query the lifecycle state of a session.
-    fn session_state(&self, io: &impl HsmIo, id: HsmSessId) -> HsmSessionState {
+    fn session_state(&self, io: &StdHsmIo, id: HsmSessId) -> HsmSessionState {
         let Ok(entry) = self.active_part(io.pid()) else {
             return HsmSessionState::Invalid;
         };
@@ -167,7 +167,7 @@ impl HsmSessionManager for StdHsmPal {
 
     async fn session_create_pending(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         role: SessionRole,
         handshake_state: &DmaBuf,
     ) -> HsmResult<HsmSessId> {
@@ -177,7 +177,7 @@ impl HsmSessionManager for StdHsmPal {
 
     fn session_pending_state(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         id: HsmSessId,
         out: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
@@ -197,7 +197,7 @@ impl HsmSessionManager for StdHsmPal {
 
     async fn session_promote(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         id: HsmSessId,
         api_rev: &[u8],
         param_key: &[u8],
@@ -269,7 +269,7 @@ impl HsmSessionManager for StdHsmPal {
         Ok(())
     }
 
-    fn session_param_key(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_param_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
         let blob = entry.vault.key(kid)?;
@@ -283,7 +283,7 @@ impl HsmSessionManager for StdHsmPal {
         Ok(unsafe { DmaBuf::from_raw(key_bytes) })
     }
 
-    fn session_masking_key(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_masking_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
         let blob = entry.vault.key(kid)?;
@@ -307,7 +307,7 @@ impl HsmSessionManager for StdHsmPal {
         Ok(unsafe { DmaBuf::from_raw(key_bytes) })
     }
 
-    fn session_try_consume_psk_change(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+    fn session_try_consume_psk_change(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
         entry.session_table.try_consume_psk_change(id)
     }

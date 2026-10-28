@@ -55,7 +55,6 @@ use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -95,7 +94,7 @@ const _: () = assert!(DARC_ENC_LEN + (TMK_LEN + 16) == tsra_fw_ddi_tbor_types::S
 /// (`0x04 ‖ X ‖ Y`) sender public key.
 async fn recover_sender_pub<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     oob: &OobPtr,
     req_buf: &DmaBuf,
@@ -146,7 +145,7 @@ async fn recover_sender_pub<P: HsmPal>(
 /// does not clear DMA memory.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
     oob: Option<OobPtr>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -278,7 +277,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// Encode the `DarcTmkImport` response around the masked TMK.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     masked_tmk: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {

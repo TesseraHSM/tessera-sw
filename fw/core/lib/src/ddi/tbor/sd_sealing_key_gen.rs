@@ -42,7 +42,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -80,7 +79,7 @@ fn sealing_key_attrs(scope: HsmKeyScope) -> HsmVaultKeyAttrs {
 
 async fn generate_sealing_keypair<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
 ) -> HsmResult<(&'p mut DmaBuf, &'p mut DmaBuf)> {
     // Generate the P-384 keypair for ECDH.  The buffers must outlive the
     // scoped keygen-scratch allocator, so allocate them between the two
@@ -121,7 +120,7 @@ async fn generate_sealing_keypair<'p, P: HsmPal>(
 
 async fn mask_sealing_private_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     mk_key_id: HsmKeyId,
     attrs: HsmVaultKeyAttrs,
     svn: u64,
@@ -163,7 +162,7 @@ async fn mask_sealing_private_key<'p, P: HsmPal>(
 
 fn encode_sealing_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     masked_key: &DmaBuf,
     pub_key: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
@@ -188,7 +187,7 @@ fn encode_sealing_response<'p, P: HsmPal>(
 /// DMA pool once it has been masked.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborSdSealingKeyGenReq::decode(req_buf)?;

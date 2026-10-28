@@ -20,7 +20,7 @@ use super::*;
 /// Handle DdiGetEstablishCredEncryptionKeyCmd.
 pub(crate) async fn get_establish_cred_encryption_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

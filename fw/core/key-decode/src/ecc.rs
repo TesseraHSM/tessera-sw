@@ -16,7 +16,6 @@
 
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -27,7 +26,7 @@ use super::DecodedKey;
 /// derive its wire public key.
 pub(super) async fn decode<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     material: &DmaBuf,
 ) -> HsmResult<DecodedKey<'p>> {
     // Convert the recovered PKCS#8 DER into the vault representation (the

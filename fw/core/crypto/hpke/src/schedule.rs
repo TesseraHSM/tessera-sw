@@ -20,7 +20,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -75,7 +74,7 @@ fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut DmaBuf
 /// * `Err(HsmError)` — propagated from the HKDF Extract calls.
 async fn derive_secret_and_ksc<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     mode: u8,
     shared_secret: &DmaBuf,
@@ -187,7 +186,7 @@ where
 ///   calls.
 pub async fn key_schedule<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     mode: u8,
     shared_secret: &DmaBuf,
@@ -263,7 +262,7 @@ where
 ///   calls.
 pub async fn key_schedule_export<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     mode: u8,
     shared_secret: &DmaBuf,

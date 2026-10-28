@@ -28,7 +28,7 @@ use super::*;
 /// an await for an interleaved handler to corrupt.
 pub(crate) async fn close_session<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

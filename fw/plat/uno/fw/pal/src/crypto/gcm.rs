@@ -46,13 +46,13 @@
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
 
 use super::aes::AES_BLOCK_SIZE;
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 // =============================================================================
@@ -453,7 +453,7 @@ impl UnoHsmPal {
     /// Both `block` and `output` must be exactly [`AES_BLOCK_SIZE`].
     async fn ecb_encrypt_block(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         block: &DmaBuf,
         output: &mut DmaBuf,
@@ -477,7 +477,7 @@ impl UnoHsmPal {
     /// a no-op.
     async fn ctr_crypt(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         input: &DmaBuf,
@@ -517,7 +517,7 @@ impl UnoHsmPal {
     /// input block before writing the corresponding output block.
     async fn ctr_crypt_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         data: &mut DmaBuf,
@@ -542,7 +542,7 @@ impl UnoHsmPal {
     /// where `H = AES_K(0¹²⁸)` and `J₀ = IV ‖ 0x00000001`.
     async fn compute_tag(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad: &DmaBuf,
@@ -581,7 +581,7 @@ impl UnoHsmPal {
     /// Returns [`HsmError::AesGcmDecryptTagDoesNotMatch`] on mismatch.
     async fn verify_tag(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad: &DmaBuf,
@@ -613,7 +613,7 @@ impl UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn gcm_encrypt_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -651,7 +651,7 @@ impl UnoHsmPal {
     /// computed over the AAD + resulting ciphertext.
     pub(super) async fn gcm_encrypt_in_place_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -679,7 +679,7 @@ impl UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn gcm_decrypt_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -715,7 +715,7 @@ impl UnoHsmPal {
     /// mismatch the data buffer is not modified.
     pub(super) async fn gcm_decrypt_in_place_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,

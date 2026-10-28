@@ -74,7 +74,7 @@ pub enum AesOp {
 ///
 /// All methods take `io` as their second parameter so callers can forward
 /// the operation-scoped [`HsmIo`] context through the PAL crypto stack.
-pub trait HsmAes {
+pub trait HsmAes: HsmIoTypes {
     /// Generate a random AES key.
     ///
     /// # Parameters
@@ -89,7 +89,7 @@ pub trait HsmAes {
     /// - `Ok(())` — `key` populated.
     /// - `Err(HsmError::InvalidArg)` — `key.len()` is not 16, 24, or 32.
     /// - `Err(HsmError)` — propagated from the CSPRNG.
-    async fn aes_gen_key(&self, io: &impl HsmIo, key: &mut [u8]) -> HsmResult<()>;
+    async fn aes_gen_key(&self, io: &Self::Io, key: &mut [u8]) -> HsmResult<()>;
 
     /// AES-CBC encrypt or decrypt with separate input / output buffers.
     ///
@@ -113,7 +113,7 @@ pub trait HsmAes {
     #[allow(clippy::too_many_arguments)]
     async fn aes_cbc_enc_dec(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         op: AesOp,
         key: &DmaBuf,
         input: &DmaBuf,
@@ -148,7 +148,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_cbc_enc_dec_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         op: AesOp,
         key: &DmaBuf,
         data: &mut DmaBuf,
@@ -177,7 +177,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_ecb_enc_dec(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         op: AesOp,
         key: &DmaBuf,
         input: &DmaBuf,
@@ -202,7 +202,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_ecb_enc_dec_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         op: AesOp,
         key: &DmaBuf,
         data: &mut DmaBuf,
@@ -258,7 +258,7 @@ pub trait HsmAes {
     #[allow(clippy::too_many_arguments)]
     async fn gcm_encrypt(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -301,7 +301,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn gcm_encrypt_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -344,7 +344,7 @@ pub trait HsmAes {
     #[allow(clippy::too_many_arguments)]
     async fn gcm_decrypt(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -390,7 +390,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn gcm_decrypt_in_place(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -423,7 +423,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_kw_wrap(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -453,7 +453,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_kw_unwrap(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -484,7 +484,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_kwp_wrap(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -514,7 +514,7 @@ pub trait HsmAes {
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_kwp_unwrap(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -541,7 +541,7 @@ pub trait HsmAes {
     // /// - `Ok(())` — `key` populated, `K1 ≠ K2`.
     // /// - `Err(HsmError::InvalidArg)` — `key.len() != 64`.
     // /// - `Err(HsmError)` — propagated from the CSPRNG.
-    // async fn aes_xts_gen_key(&self, io: &impl HsmIo, key: &mut [u8]) -> HsmResult<()>;
+    // async fn aes_xts_gen_key(&self, io: &Self::Io, key: &mut [u8]) -> HsmResult<()>;
     //
     // /// AES-XTS encrypt with separate input / output buffers
     // /// (IEEE 1619 / NIST SP 800-38E).
@@ -568,7 +568,7 @@ pub trait HsmAes {
     // /// - `Err(HsmError)` — AES driver failure.
     // async fn aes_xts_encrypt(
     //     &self,
-    //     io: &impl HsmIo,
+    //     io: &Self::Io,
     //     key: &DmaBuf,
     //     tweak: &DmaBuf,
     //     dul: XtsDataUnitLen,
@@ -584,7 +584,7 @@ pub trait HsmAes {
     // /// receives plaintext.
     // async fn aes_xts_decrypt(
     //     &self,
-    //     io: &impl HsmIo,
+    //     io: &Self::Io,
     //     key: &DmaBuf,
     //     tweak: &DmaBuf,
     //     dul: XtsDataUnitLen,
@@ -612,7 +612,7 @@ pub trait HsmAes {
     // /// - `Err(HsmError)` — AES driver failure.
     // async fn aes_xts_encrypt_in_place(
     //     &self,
-    //     io: &impl HsmIo,
+    //     io: &Self::Io,
     //     key: &DmaBuf,
     //     tweak: &DmaBuf,
     //     dul: XtsDataUnitLen,
@@ -627,7 +627,7 @@ pub trait HsmAes {
     // /// entry and plaintext on return.
     // async fn aes_xts_decrypt_in_place(
     //     &self,
-    //     io: &impl HsmIo,
+    //     io: &Self::Io,
     //     key: &DmaBuf,
     //     tweak: &DmaBuf,
     //     dul: XtsDataUnitLen,

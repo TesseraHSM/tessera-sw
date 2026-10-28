@@ -114,7 +114,7 @@ const EPHEMERAL_MK_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 /// Handle a TBOR `PartFinal` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
@@ -284,7 +284,7 @@ fn parse_request<'a>(req_buf: &'a mut DmaBuf) -> HsmResult<ParsedRequest<'a>> {
 ///   verification.
 async fn validate_pta_chain<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     oob: Option<OobPtr>,
     cert_descriptors: &[CertDescriptor],
@@ -399,7 +399,7 @@ async fn validate_pta_chain<P: HsmPal>(
 /// and empty extra context; this helper avoids repeating that boilerplate.
 async fn derive_local_bmk<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     ups: &DmaBuf,
     svn: u64,
@@ -424,7 +424,7 @@ async fn derive_local_bmk<'a, P: HsmPal>(
 /// `policy_hash` (bound at `PartInit`).
 pub(crate) async fn verify_policy_hash<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     part_policy: &DmaBuf,
 ) -> HsmResult<()> {
@@ -450,7 +450,7 @@ pub(crate) async fn verify_policy_hash<P: HsmPal>(
 /// the AEAD tag rather than spoofing the rollback error.
 async fn restore_part_local_mk<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     ups: &DmaBuf,
     cur_svn: u64,
@@ -505,7 +505,7 @@ async fn restore_part_local_mk<P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn mask_part_local_mk<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     ups: &DmaBuf,
     svn: u64,
@@ -566,7 +566,7 @@ fn peek_backup_svn_owner(blob: &DmaBuf) -> HsmResult<(u64, u16)> {
 /// fails-fast and its just-staged keys are reaped by the recorded inverses.
 async fn stage_final_keys<'p, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     ups: &DmaBuf,
     part_local_mk: &DmaBuf,
     ephemeral_mk: &DmaBuf,
@@ -627,7 +627,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
 /// commit.
 fn commit_final<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     ums_key_id: HsmKeyId,
     local_id: HsmKeyId,
     ephemeral_id: HsmKeyId,
@@ -670,7 +670,7 @@ fn commit_final<P: HsmPal>(
 /// Encode the `TborPartFinalResp` into a fresh IO-scoped DmaBuf.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     backup: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {

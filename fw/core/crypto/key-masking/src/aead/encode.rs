@@ -19,7 +19,6 @@ use tsra_fw_core_crypto_aead_envelope::AeadAlg;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -109,9 +108,9 @@ pub struct MaskParams<'a> {
 /// the partial seal is zeroed before returning so the caller's
 /// response staging area never retains `target_key` bytes or an
 /// unauthenticated partial blob.
-pub async fn mask(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn mask<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     alg: AeadAlg,
     key: &DmaBuf,
@@ -196,9 +195,9 @@ pub const fn payload_offset(alg: AeadAlg) -> usize {
 /// On any error the whole envelope region is zeroed, so a partial or
 /// unauthenticated blob -- or the bare plaintext the caller staged --
 /// is never observable in the response buffer.
-pub async fn mask_in_place(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn mask_in_place<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     alg: AeadAlg,
     key: &DmaBuf,

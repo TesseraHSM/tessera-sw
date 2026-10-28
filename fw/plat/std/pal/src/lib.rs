@@ -76,5 +76,6 @@ pub use alloc::StdScopedAlloc;
 pub use io::HsmIoRequest;
 pub use io::StdHsmIo;
 pub use pal::StdHsmPal;
+pub use part::HsmPartId;
 pub use part::PartCommand;
 use tsra_fw_hsm_pal_traits::*;

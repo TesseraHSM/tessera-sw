@@ -23,7 +23,6 @@ use tsra_fw_ddi_tbor_types::PartStateId;
 use tsra_fw_ddi_tbor_types::TborPartInfoResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -46,7 +45,7 @@ const P384_PUB_RAW_LEN: usize = 2 * 48;
 /// response.
 pub(crate) fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     _req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let part_state_val = part_state::part_state(pal, io)? as u8;

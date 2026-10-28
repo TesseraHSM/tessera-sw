@@ -6,7 +6,7 @@
 //! Defines the [`HsmSessionManager`] trait that PAL implementations use
 //! to manage authenticated user sessions within a partition.  Each
 //! session is identified by a logical [`HsmSessId`] (slot index 0–7)
-//! and is scoped to a partition ([`HsmPartId`]).
+//! and is scoped to the IO's bound partition.
 //!
 //! ## Session storage
 //!
@@ -219,7 +219,7 @@ impl SessionSuite {
 /// implementations are expected to use interior mutability for the
 /// session table (the firmware is single-core, cooperatively
 /// scheduled, so a plain `Cell`/`RefCell` suffices).
-pub trait HsmSessionManager {
+pub trait HsmSessionManager: HsmIoTypes {
     /// Returns `true` if the calling partition has no free session
     /// slots.
     ///
@@ -237,7 +237,7 @@ pub trait HsmSessionManager {
     /// - `false` — at least one slot is free; a subsequent
     ///   [`session_create`](Self::session_create) with `id == None`
     ///   may succeed.
-    fn session_limit_reached(&self, io: &impl HsmIo) -> bool;
+    fn session_limit_reached(&self, io: &Self::Io) -> bool;
 
     /// Creates a new session, or re-keys an existing one in place.
     ///
@@ -272,7 +272,7 @@ pub trait HsmSessionManager {
     ///   store the masking blob.
     async fn session_create(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         api_rev: &[u8],
         masking_key: &[u8],
         id: Option<HsmSessId>,
@@ -299,7 +299,7 @@ pub trait HsmSessionManager {
     /// - `Ok(())` on success.
     /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to an allocated
     ///   session in the caller's partition.
-    async fn session_destroy(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()>;
+    async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 
     /// Queries the lifecycle state of a session slot.
     ///
@@ -317,7 +317,7 @@ pub trait HsmSessionManager {
     /// One of [`HsmSessionState::Active`],
     /// [`HsmSessionState::NeedsRenegotiation`], or
     /// [`HsmSessionState::Invalid`].
-    fn session_state(&self, io: &impl HsmIo, id: HsmSessId) -> HsmSessionState;
+    fn session_state(&self, io: &Self::Io, id: HsmSessId) -> HsmSessionState;
 
     /// Reserves a session slot in the [`Pending`](HsmSessionState::Pending)
     /// state for an in-flight session-establishment handshake.
@@ -361,13 +361,13 @@ pub trait HsmSessionManager {
     /// # Returns
     ///
     /// - `Ok(id)` — allocated Pending slot.
-    /// - `Err(HsmError::InvalidArg)` — `io.pid()` out of range, or
+    /// - `Err(HsmError::InvalidArg)` — IO's bound partition out of range, or
     ///   `handshake_state.len() > SESSION_PENDING_BLOB_MAX`.
     /// - `Err(HsmError::VaultSessionLimitReached)` — no eligible slot
     ///   available for `role`.
     async fn session_create_pending(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         role: SessionRole,
         handshake_state: &DmaBuf,
     ) -> HsmResult<HsmSessId>;
@@ -394,7 +394,7 @@ pub trait HsmSessionManager {
     ///   in [`Pending`](HsmSessionState::Pending) state.
     fn session_pending_state(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         id: HsmSessId,
         out: Option<&mut [u8]>,
     ) -> HsmResult<usize>;
@@ -452,7 +452,7 @@ pub trait HsmSessionManager {
     #[allow(clippy::too_many_arguments)]
     async fn session_promote(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         id: HsmSessId,
         api_rev: &[u8],
         param_key: &[u8],
@@ -488,7 +488,7 @@ pub trait HsmSessionManager {
     ///   destroyed, or still Pending).
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
-    fn session_param_key(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<&DmaBuf>;
+    fn session_param_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&DmaBuf>;
 
     /// Returns a borrowed view of the active session's masking key.  Its
     /// length depends on the session's schedule-blob format:
@@ -527,7 +527,7 @@ pub trait HsmSessionManager {
     ///   destroyed, or still Pending).
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
-    fn session_masking_key(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<&DmaBuf>;
+    fn session_masking_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&DmaBuf>;
 
     /// Atomically reserves the session's one-shot "PSK change"
     /// budget.  Each session may successfully consume this budget at
@@ -556,5 +556,5 @@ pub trait HsmSessionManager {
     /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to a
     ///   live Active session in the caller's partition (slot free,
     ///   destroyed, or still Pending).
-    fn session_try_consume_psk_change(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()>;
+    fn session_try_consume_psk_change(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 }

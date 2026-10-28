@@ -4,23 +4,24 @@
 //! I/O controller and per-IO traits for the HSM platform abstraction
 //! layer.
 //!
-//! Defines the two traits the core uses to receive and complete host
-//! commands:
+//! Defines the shared IO type and the traits the core uses to receive
+//! and complete host commands:
 //!
+//! - [`HsmIoTypes`] — the platform's IO type, shared by PAL capabilities
+//!   without requiring controller operations.
 //! - [`HsmIoController`] — the platform's I/O fabric.  Drives the
 //!   submission/completion queue lifecycle and produces individual
 //!   [`HsmIo`] handles.
-//! - [`HsmIo`] — a single in-flight command: borrows of its SQE/CQE,
-//!   plus the partition / queue / slot identifiers used to scope
-//!   per-IO state (partition, allocator scope, vault, session).
+//! - [`HsmIo`] — a single in-flight command: borrows of its SQE/CQE.
+//!   Partition binding, queue routing, and resource-slot management stay
+//!   private to each platform.
 //!
 //! ## SQE / CQE layout
 //!
-//! Submission and completion queue entries are fixed-size dword
-//! arrays with platform-defined contents.  This crate exposes only
-//! the raw shape ([`HsmSqe`], [`HsmCqe`], [`SQE_DWORDS`],
-//! [`CQE_DWORDS`]); the semantic decode (opcode, PRP fields, session
-//! flags, status word, …) lives in the core (`tsra_fw_hsm_core`).
+//! Submission and completion queue entries are dword slices with
+//! platform-defined lengths and contents. This crate exposes only
+//! the raw views ([`HsmSqe`], [`HsmCqe`]); supported sizes and field
+//! layouts belong to the protocol codec (`tsra_fw_hsm_io`).
 //!
 //! ## Pipeline
 //!
@@ -28,7 +29,7 @@
 //! poll_io().await        — receive next request
 //!   ↓
 //! io.sqe() / io.cqe()    — decode SQE, populate CQE
-//! io.pid()               — resolve partition for downstream PAL calls
+//! PAL operations         — resolve partition from private IO context
 //!   ↓
 //! complete_io(io).await  — emit CQE; or
 //! drop_io(io).await      — silently discard (e.g. disabled partition)
@@ -36,37 +37,25 @@
 
 use super::*;
 
-/// Number of dwords in a submission queue entry.
+/// A submission queue entry as a raw dword slice.
 ///
-/// The total SQE size in bytes is `SQE_DWORDS * 4`.
-pub const SQE_DWORDS: usize = 16;
+/// Length and layout are platform-defined and validated by the protocol codec.
+pub type HsmSqe = [u32];
 
-/// Number of dwords in a completion queue entry.
+/// A completion queue entry as a raw dword slice.
 ///
-/// The total CQE size in bytes is `CQE_DWORDS * 4`.
-pub const CQE_DWORDS: usize = 4;
-
-/// A submission queue entry as a raw dword array.
-///
-/// Layout is platform-defined and decoded by the core's `Sqe` wrapper.
-pub type HsmSqe = [u32; SQE_DWORDS];
-
-/// A completion queue entry as a raw dword array.
-///
-/// Layout is platform-defined and decoded by the core's `Cqe` wrapper.
-pub type HsmCqe = [u32; CQE_DWORDS];
+/// Length and layout are platform-defined and validated by the protocol codec.
+pub type HsmCqe = [u32];
 
 /// Handle to a single in-flight I/O.
 ///
 /// Represents a submission/completion pair: the caller reads the
 /// submission queue entry via [`sqe`](Self::sqe) to determine the
 /// requested operation and writes the result into the completion
-/// queue entry via [`cqe`](Self::cqe).  The handle also exposes the
-/// partition, queue, and slot identifiers used to scope per-IO state
-/// (allocator scope, vault, sessions, certificate store) across the
-/// rest of the PAL traits.
+/// queue entry via [`cqe`](Self::cqe). Partition binding, queue routing,
+/// and per-IO allocator slots are private platform state.
 ///
-/// `HsmIo` is `Send` (via [`HsmIoController::Io`]) so an IO can be
+/// `HsmIo` is `Send` (via [`HsmIoTypes::Io`]) so an IO can be
 /// moved between Embassy executor tasks during processing.  It is
 /// **not** `Sync`: each IO is owned by exactly one task at a time.
 ///
@@ -75,49 +64,6 @@ pub type HsmCqe = [u32; CQE_DWORDS];
 /// [`HsmIoController::drop_io`]; failing to do so leaks the
 /// underlying queue slot.
 pub trait HsmIo {
-    /// Returns the IO slot index used to address per-IO resources
-    /// (e.g. the per-IO bump-allocator scope).
-    ///
-    /// # Returns
-    ///
-    /// A `u16` in the range `0..N`, where `N` is the platform's IO
-    /// concurrency (e.g. number of preallocated SQE/CQE buffer
-    /// slots).  Stable across the lifetime of this `HsmIo`.
-    fn index(&self) -> u16;
-
-    /// Returns the partition that owns this IO.
-    ///
-    /// All partition-scoped PAL calls (vault, session, partition
-    /// metadata, certificate store) resolve their target partition
-    /// by calling this method on the IO handle they're given.
-    ///
-    /// # Returns
-    ///
-    /// The [`HsmPartId`] of the partition whose submission queue
-    /// produced this IO.  Stable across the lifetime of this
-    /// `HsmIo`.
-    fn pid(&self) -> HsmPartId;
-
-    /// Returns the controller queue this IO belongs to.
-    ///
-    /// A partition may be backed by multiple SQ/CQ pairs; this
-    /// identifies which one delivered the request and to which the
-    /// completion will be posted.
-    ///
-    /// # Returns
-    ///
-    /// The queue identifier as a `u16`.  Stable across the lifetime
-    /// of this `HsmIo`.
-    fn queue_id(&self) -> u16;
-
-    /// Returns the slot index of this IO within its controller queue.
-    ///
-    /// # Returns
-    ///
-    /// The intra-queue index as a `u16`.  Stable across the lifetime
-    /// of this `HsmIo`.
-    fn queue_idx(&self) -> u16;
-
     /// Borrows the submission queue entry.
     ///
     /// The SQE is read-only from the firmware's perspective: the
@@ -126,7 +72,7 @@ pub trait HsmIo {
     ///
     /// # Returns
     ///
-    /// An immutable reference to the [`HsmSqe`] dword array.  Borrow
+    /// An immutable reference to the [`HsmSqe`] dword slice. Borrow
     /// lives for the duration of the `&self` borrow.
     fn sqe(&self) -> &HsmSqe;
 
@@ -139,9 +85,32 @@ pub trait HsmIo {
     ///
     /// # Returns
     ///
-    /// A mutable reference to the [`HsmCqe`] dword array.  Borrow
+    /// A mutable reference to the [`HsmCqe`] dword slice. Borrow
     /// lives for the duration of the `&mut self` borrow.
     fn cqe(&mut self) -> &mut HsmCqe;
+}
+
+/// Shared IO type for platform capabilities.
+///
+/// Each platform declares its IO type once. Allocator, crypto, and state
+/// traits use this type without requiring queue lifecycle operations;
+/// only [`HsmPal`] combines them with [`HsmIoController`].
+///
+/// Capability bounds alone do not provide controller operations:
+///
+/// ```compile_fail,E0599
+/// use tsra_fw_hsm_pal_traits::{HsmAlloc, HsmHash, HsmIoController};
+///
+/// async fn poll_from_capabilities<P: HsmAlloc + HsmHash>(pal: &P) {
+///     let _ = pal.poll_io().await;
+/// }
+/// ```
+pub trait HsmIoTypes {
+    /// Platform-specific IO type.
+    ///
+    /// Bound to be `Send` so that the core can move IOs across
+    /// Embassy executor tasks during async processing.
+    type Io: HsmIo + Send;
 }
 
 /// Asynchronous I/O controller that produces and completes IOs.
@@ -158,17 +127,11 @@ pub trait HsmIo {
 /// [`complete_io`](Self::complete_io) or
 /// [`drop_io`](Self::drop_io) — dropping the IO without either call
 /// leaks the underlying queue slot.
-pub trait HsmIoController {
-    /// Platform-specific IO type.
-    ///
-    /// Bound to be `Send` so that the core can move IOs across
-    /// Embassy executor tasks during async processing.
-    type Io: HsmIo + Send;
-
+pub trait HsmIoController: HsmIoTypes {
     /// Awaits the next IO from any submission queue.
     ///
     /// Yields until at least one queue has a pending entry, then
-    /// returns the corresponding [`Self::Io`] handle.
+    /// returns the corresponding [`Self::Io`](HsmIoTypes::Io) handle.
     ///
     /// # Returns
     ///
@@ -184,8 +147,9 @@ pub trait HsmIoController {
     /// the caller can run post-completion work — e.g. an undo/commit walk
     /// that DMAs through `io` — before releasing the slot with
     /// [`drop_io`](Self::drop_io).  Callers must have written the desired
-    /// CQE contents via [`HsmIo::cqe`] before invoking this method; the
-    /// contents are flushed to the host as part of the post.
+    /// CQE contents via [`HsmIo::cqe`] before invoking this method.
+    /// The platform fills transport-specific fields, such as the source
+    /// queue identifier, before posting the completion to the host.
     ///
     /// # Parameters
     ///

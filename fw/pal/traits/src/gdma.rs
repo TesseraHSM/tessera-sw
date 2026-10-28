@@ -83,13 +83,13 @@ impl HsmDmaAddr {
 /// All three methods are `async`: they queue a DMA descriptor with
 /// the GDMA hardware and yield until the engine signals completion.
 /// They are partition-scoped via the [`HsmIo`] handle (the GDMA
-/// driver uses `io.pid()` to apply per-partition policy and
-/// throttling) and consume no per-IO allocator scope.
+/// driver resolves partition ownership from private IO metadata) and
+/// consume no per-IO allocator scope.
 ///
 /// PAL implementations may serialize concurrent calls through an
 /// internal async mutex; callers should treat the await as
 /// potentially long-running.
-pub trait HsmGdmaController {
+pub trait HsmGdmaController: HsmIoTypes {
     /// Copies bytes between two HSM-local buffers.
     ///
     /// Both endpoints live in HSM-local memory.  At least one — and
@@ -118,7 +118,7 @@ pub trait HsmGdmaController {
     ///   could not be queued (e.g. engine in error state).
     /// - `Err(HsmError)` — propagated from the GDMA driver on
     ///   completion errors.
-    async fn copy_mem(&self, io: &impl HsmIo, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()>;
+    async fn copy_mem(&self, io: &Self::Io, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()>;
 
     /// Zeroes an HSM-local buffer in place.
     ///
@@ -141,7 +141,7 @@ pub trait HsmGdmaController {
     ///   the GDMA can address.
     /// - `Err(HsmError)` — propagated from the GDMA driver on
     ///   completion errors.
-    async fn zeroize_mem(&self, io: &impl HsmIo, dst: &mut DmaBuf) -> HsmResult<()>;
+    async fn zeroize_mem(&self, io: &Self::Io, dst: &mut DmaBuf) -> HsmResult<()>;
 
     /// Copies bytes from host memory into an HSM-local DMA buffer.
     ///
@@ -180,7 +180,7 @@ pub trait HsmGdmaController {
     ///   completion errors (e.g. host bus fault).
     async fn copy_mem_from_host(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         src: HsmDmaAddr,
         src2: HsmDmaAddr,
         dst: &mut DmaBuf,
@@ -226,7 +226,7 @@ pub trait HsmGdmaController {
     /// - `Err(HsmError)` — propagated from the GDMA driver.
     async fn copy_mem_from_host_raw(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         desc: &[u8; 16],
         dst: &mut DmaBuf,
         prp: bool,
@@ -263,7 +263,7 @@ pub trait HsmGdmaController {
     ///   completion errors.
     async fn copy_mem_to_host(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         src: &DmaBuf,
         dst: HsmDmaAddr,
         dst2: HsmDmaAddr,

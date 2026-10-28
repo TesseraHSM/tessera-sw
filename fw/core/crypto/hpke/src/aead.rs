@@ -32,7 +32,6 @@ use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmError;
 #[cfg(feature = "cbc")]
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -91,7 +90,7 @@ const MAX_DIGEST_LEN: usize = 64;
 ///   driver.
 pub async fn seal<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     key: &DmaBuf,
     base_nonce: &DmaBuf,
@@ -149,7 +148,7 @@ where
 /// * `Err(HsmError)` — propagated from the AES or HMAC driver.
 pub async fn open<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     key: &[u8],
     base_nonce: &[u8],
@@ -190,7 +189,7 @@ where
 /// * `Err(HsmError)` — propagated from `gcm_encrypt`.
 async fn seal_gcm<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     key: &DmaBuf,
     nonce: &DmaBuf,
     aad: &[u8],
@@ -250,7 +249,7 @@ where
 /// * `Err(HsmError)` — propagated from `gcm_decrypt`.
 async fn open_gcm<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     key: &[u8],
     nonce: &[u8],
     aad: &[u8],
@@ -327,7 +326,7 @@ mod cbc_impl {
     ///   driver.
     pub(super) async fn seal_cbc<'a, P>(
         pal: &P,
-        io: &impl HsmIo,
+        io: &P::Io,
         suite: HpkeSuite,
         key: &[u8],
         aad: &[u8],
@@ -406,7 +405,7 @@ mod cbc_impl {
     /// * `Err(HsmError)` — propagated from the AES-CBC or HMAC driver.
     pub(super) async fn open_cbc<'a, P>(
         pal: &P,
-        io: &impl HsmIo,
+        io: &P::Io,
         suite: HpkeSuite,
         key: &[u8],
         aad: &[u8],
@@ -533,7 +532,7 @@ mod cbc_impl {
     /// * `Err(HsmError)` — propagated from the HMAC engine.
     async fn compute_hmac_into<'a, P>(
         pal: &P,
-        io: &impl HsmIo,
+        io: &P::Io,
         algo: HsmHashAlgo,
         mac_key: &[u8],
         aad: &[u8],

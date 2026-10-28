@@ -24,7 +24,6 @@
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -73,7 +72,7 @@ impl<S: TableStorage> KeyVault<S> {
     pub async fn create<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         app_id: u8,
         key: &DmaBuf,
         kind: HsmVaultKeyKind,
@@ -208,7 +207,7 @@ impl<S: TableStorage> KeyVault<S> {
     pub async fn delete<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         key_id: HsmKeyId,
     ) -> HsmResult<()> {
         let (table, slot) = split_key_id(key_id);
@@ -277,7 +276,7 @@ impl<S: TableStorage> KeyVault<S> {
     pub async fn delete_by_session<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         session: u16,
     ) -> HsmResult<()> {
         for table in 0..self.storage.table_count() {
@@ -325,11 +324,7 @@ impl<S: TableStorage> KeyVault<S> {
     }
 
     /// Deletes every key in every owned table, zeroing all material.
-    pub async fn clear<G: HsmGdmaController>(
-        &mut self,
-        gdma: &G,
-        io: &impl HsmIo,
-    ) -> HsmResult<()> {
+    pub async fn clear<G: HsmGdmaController>(&mut self, gdma: &G, io: &G::Io) -> HsmResult<()> {
         for table in 0..self.storage.table_count() {
             if !self.storage.is_valid_table(table) {
                 continue;
@@ -561,7 +556,7 @@ impl<S: TableStorage> KeyVault<S> {
     async fn write_key<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         table: usize,
         block: u16,
         key: &DmaBuf,
@@ -582,7 +577,7 @@ impl<S: TableStorage> KeyVault<S> {
     async fn evict<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         table: usize,
         slot: usize,
         entry: Entry,

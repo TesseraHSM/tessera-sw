@@ -24,7 +24,7 @@ use super::*;
 /// 3. **Response** — Encodes header + frame, fills blob in-place.
 pub(crate) fn get_sealed_bk3<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

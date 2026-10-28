@@ -31,7 +31,6 @@ use tsra_fw_ddi_tbor_types::TborMlKemDecapsulateReq;
 use tsra_fw_ddi_tbor_types::TborMlKemDecapsulateResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -62,7 +61,7 @@ fn shared_secret_attrs(scope: HsmKeyScope) -> HsmVaultKeyAttrs {
 /// Handle a TBOR `MlKemDecapsulate` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborMlKemDecapsulateReq::decode_mut(req_buf)?;

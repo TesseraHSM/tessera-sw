@@ -33,7 +33,6 @@ use tsra_fw_ddi_mbor_types::masked_key::DdiMaskedKeyMetadata;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -48,6 +47,7 @@ use super::common::ReqHdr;
 use super::common::encode_resp;
 use super::common::success_hdr;
 use super::get_priv_key::vault_kind_ddi;
+use crate::UnoHsmIo;
 use crate::pal::UnoHsmPal;
 
 /// DDI `RawKeyImport` request data.
@@ -110,7 +110,7 @@ struct DdiRawKeyImportResp<'a> {
 /// plaintext field has been borrowed.
 pub(super) async fn dispatch<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_len: usize,
@@ -134,7 +134,7 @@ pub(super) async fn dispatch<'p>(
 
 async fn dispatch_request<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     hdr: &ReqHdr,
     sess_id: u16,
     request: &mut DdiRawKeyImportReq<'_>,
@@ -244,7 +244,7 @@ async fn dispatch_request<'p>(
 /// `UnmaskKey` command intentionally rejects this key type.
 async fn raw_import_unwrapping_key<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     hdr: &ReqHdr,
     sess_id: u16,
     request: &mut DdiRawKeyImportReq<'_>,
@@ -348,7 +348,7 @@ struct UnwrappingKeySourceState {
 /// armed (`required`) but has not yet completed publication
 /// (`!backup_valid`) is rejected, since racing that in-flight
 /// materialization would be unsafe.
-fn prepare_initial_unwrapping_key_import(io: &impl HsmIo) -> HsmResult<UnwrappingKeySourceState> {
+fn prepare_initial_unwrapping_key_import(io: &UnoHsmIo) -> HsmResult<UnwrappingKeySourceState> {
     let partition = PartStore::partition(io.pid())?;
 
     if partition.unwrapping_key_id().is_some() {
@@ -384,7 +384,7 @@ fn prepare_initial_unwrapping_key_import(io: &impl HsmIo) -> HsmResult<Unwrappin
 /// checks and `set_unwrapping_key_id`, so concurrent imports cannot both
 /// publish their IDs.
 fn publish_initial_unwrapping_key(
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     key_id: HsmKeyId,
     expected: UnwrappingKeySourceState,
 ) -> HsmResult<()> {
@@ -614,7 +614,7 @@ fn validate_pairs(metadata: &DdiTargetKeyMetadata) -> HsmResult<()> {
 #[allow(clippy::too_many_arguments)]
 async fn mask_blob<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     attrs: HsmVaultKeyAttrs,
     key_type: DdiKeyType,
     key_label: &[u8],
@@ -646,7 +646,7 @@ async fn mask_blob<'p>(
 /// Read the partition masking key (`MK`) id, or fail if the partition
 /// has none (a persistent masked blob requested before
 /// `EstablishCredential`).
-fn part_mk_key_id(pal: &UnoHsmPal, io: &impl HsmIo) -> HsmResult<HsmKeyId> {
+fn part_mk_key_id(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<HsmKeyId> {
     let raw = pal.part_prop_get_u16(io, PartPropId::MK_KEY_ID)?;
     Ok(HsmKeyId::from(raw))
 }

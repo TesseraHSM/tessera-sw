@@ -20,9 +20,7 @@ use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -32,6 +30,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::PartPropId;
 use tsra_fw_hsm_pal_traits::PartState;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_session_store::SessionStore;
@@ -706,7 +705,7 @@ impl UnoHsmPal {
     /// to the cooperative scheduler: two concurrent first-use reads cannot both
     /// import. The `&'static` GSRAM blob is fed straight into the vault, so there
     /// is no transient DMA-scratch copy of the private key to scrub.
-    fn ensure_unwrapping_key_imported(&self, io: &impl HsmIo) -> HsmResult<()> {
+    fn ensure_unwrapping_key_imported(&self, io: &UnoHsmIo) -> HsmResult<()> {
         let pid = io.pid();
         let bk = {
             let part = PartStore::partition(pid)?;
@@ -757,7 +756,7 @@ impl UnoHsmPal {
 }
 
 impl HsmPartitionManager for UnoHsmPal {
-    fn part_prop_get_u8(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u8> {
+    fn part_prop_get_u8(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<u8> {
         let part = PartStore::partition(io.pid())?;
         match id {
             PartPropId::STATE => Ok(part.state()? as u8),
@@ -766,7 +765,7 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+    fn part_prop_set_u8(&self, io: &UnoHsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
         let part = PartStore::partition(io.pid())?;
         match id {
             PartPropId::STATE => {
@@ -783,7 +782,7 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_get_u16(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u16> {
+    fn part_prop_get_u16(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<u16> {
         // The unwrapping key is materialised lazily on first read: if the HSP
         // has published it into the GSRAM backup slot but it is not yet in the
         // vault, import it now (synchronously) and record its id. An absent id
@@ -809,7 +808,7 @@ impl HsmPartitionManager for UnoHsmPal {
         key.map(u16::from).ok_or(HsmError::PartPropNotFound)
     }
 
-    fn part_prop_set_u16(&self, io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
+    fn part_prop_set_u16(&self, io: &UnoHsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
         let part = PartStore::partition(io.pid())?;
         let key = HsmKeyId::from(value);
         match id {
@@ -831,7 +830,7 @@ impl HsmPartitionManager for UnoHsmPal {
         Ok(())
     }
 
-    fn part_prop_get_u32(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u32> {
+    fn part_prop_get_u32(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<u32> {
         let part = PartStore::partition(io.pid())?;
         match id {
             PartPropId::GEN => Ok(part.generation()),
@@ -839,11 +838,11 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_set_u32(&self, _io: &impl HsmIo, _id: PartPropId, _value: u32) -> HsmResult<()> {
+    fn part_prop_set_u32(&self, _io: &UnoHsmIo, _id: PartPropId, _value: u32) -> HsmResult<()> {
         Err(HsmError::UnsupportedCmd)
     }
 
-    fn part_prop_get_bool(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<bool> {
+    fn part_prop_get_bool(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<bool> {
         let part = PartStore::partition(io.pid())?;
         match id {
             PartPropId::BK3_INITIALIZED => Ok(part.bk3_initialized()),
@@ -852,7 +851,7 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_set_bool(&self, io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
+    fn part_prop_set_bool(&self, io: &UnoHsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
         let part = PartStore::partition(io.pid())?;
         match id {
             // One-shot gate: false→true is the only legal transition.
@@ -881,7 +880,7 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_get_bytes<'a>(&'a self, io: &impl HsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf> {
+    fn part_prop_get_bytes<'a>(&'a self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf> {
         let p = PartStore::partition(io.pid())?;
         match id {
             // Identity / public keys — present once the backing key has
@@ -940,7 +939,7 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+    fn part_prop_set_bytes(&self, io: &UnoHsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
         let p = PartStore::partition(io.pid())?;
         match id {
             PartPropId::NONCE => p.set_nonce(data),
@@ -959,7 +958,7 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()> {
+    fn part_prop_clear(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<()> {
         let p = PartStore::partition(io.pid())?;
         match id {
             // Read-write vault-ref key ids reset to absent.

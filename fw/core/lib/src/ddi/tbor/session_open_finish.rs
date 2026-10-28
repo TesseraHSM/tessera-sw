@@ -115,7 +115,7 @@ struct HandshakeState<'a> {
 /// Handle a TBOR `SessionOpenFinish` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -219,7 +219,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// Best-effort: the [`UndoLog`] `session_destroy` entry pushed up front is
 /// the authoritative backstop (its walk step is best-effort), so a failure
 /// here — or the walk's later redundant destroy — is harmless.
-async fn destroy_pending_on_auth_failure<P: HsmPal>(pal: &P, io: &impl HsmIo, id: HsmSessId) {
+async fn destroy_pending_on_auth_failure<P: HsmPal>(pal: &P, io: &P::Io, id: HsmSessId) {
     let _ = pal.session_destroy(io, id).await;
 }
 
@@ -245,7 +245,7 @@ fn parse_request<'a>(req_buf: &'a mut DmaBuf) -> HsmResult<ParsedRequest<'a>> {
 /// matches the canonical layout.  Done before entering the scoped
 /// allocator so a malformed request rejects without consuming any
 /// scratch.
-fn ensure_pending_blob_len<P: HsmPal>(pal: &P, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+fn ensure_pending_blob_len<P: HsmPal>(pal: &P, io: &P::Io, id: HsmSessId) -> HsmResult<()> {
     let pending_len = pal.session_pending_state(io, id, None)?;
     if pending_len != PENDING_BLOB_LEN {
         return Err(HsmError::InvalidArg);
@@ -257,7 +257,7 @@ fn ensure_pending_blob_len<P: HsmPal>(pal: &P, io: &impl HsmIo, id: HsmSessId) -
 /// pk_init, pk_resp, session_type, suite)` scoped buffers.
 fn load_pending_state<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     id: HsmSessId,
 ) -> HsmResult<HandshakeState<'a>> {
@@ -296,7 +296,7 @@ fn load_pending_state<'a, P: HsmPal>(
 /// identity public key, in a freshly-allocated scoped buffer.
 fn load_pk_hsm<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<&'a mut DmaBuf> {
     let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
@@ -317,7 +317,7 @@ fn load_pk_hsm<'a, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn verify_mac<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     id: HsmSessId,
     mac_fin: &DmaBuf,
@@ -357,7 +357,7 @@ async fn verify_mac<P: HsmPal>(
 /// same slot.
 async fn open_seed_envelope<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     param_key: &DmaBuf,
     seed_envelope: &'a mut DmaBuf,
 ) -> HsmResult<&'a DmaBuf> {
@@ -387,7 +387,7 @@ async fn open_seed_envelope<'a, P: HsmPal>(
 /// into the [`DerivedKeys`] carrier without re-deriving.
 async fn derive_remaining_keys<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     exported: &DmaBuf,
     session_type: SessionType,
@@ -452,7 +452,7 @@ async fn derive_remaining_keys<'a, P: HsmPal>(
 /// scoped buffer of size `out_len`.
 async fn hkdf_expand_labeled<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     prk: &DmaBuf,
     label: &[u8],
@@ -481,7 +481,7 @@ async fn hkdf_expand_labeled<'a, P: HsmPal>(
 /// secrecy for every promoted session.
 async fn build_bmk_session<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     seed: &DmaBuf,
     masking_key: &DmaBuf,
@@ -526,7 +526,7 @@ async fn build_bmk_session<'a, P: HsmPal>(
 /// scoped buffer.
 async fn derive_bk_session<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     seed: &DmaBuf,
 ) -> HsmResult<&'a mut DmaBuf> {
@@ -553,7 +553,7 @@ async fn derive_bk_session<'a, P: HsmPal>(
 /// into a fresh IO-scoped DmaBuf.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     bmk_session: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {
@@ -569,7 +569,7 @@ fn encode_response<'p, P: HsmPal>(
 /// `session_promote` to flip the slot from Pending to Active.
 async fn promote_to_active<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     id: HsmSessId,
     derived: DerivedKeys<'_>,

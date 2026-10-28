@@ -11,7 +11,6 @@
 
 use tsra_fw_ddi_tbor_types::TborApiRevResp;
 use tsra_fw_hsm_pal_traits::DmaBuf;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -30,7 +29,7 @@ pub(crate) const MAX_PROTOCOL_VERSION: u8 = 1;
 /// `(MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION)` response.
 pub(crate) fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     // Defense-in-depth: verify the opcode matches without a full

@@ -76,7 +76,6 @@ use tsra_fw_ddi_tbor::PROTOCOL_VERSION;
 use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -385,7 +384,7 @@ pub(crate) mod opcode {
 /// Validate that `sess_id` belongs to an active Crypto-Officer session.
 fn validate_crypto_officer_active_session<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
 ) -> HsmResult<()> {
     if sess_id.role() != SessionRole::CryptoOfficer {
@@ -406,11 +405,7 @@ fn validate_crypto_officer_active_session<P: HsmPal>(
 /// — unlike the security-domain administrative commands — are available
 /// to both CO and CU sessions.  The default-PSK gate (applied by the
 /// dispatcher) still requires the calling role's PSK to be rotated.
-fn validate_active_session<P: HsmPal>(
-    pal: &P,
-    io: &impl HsmIo,
-    sess_id: HsmSessId,
-) -> HsmResult<()> {
+fn validate_active_session<P: HsmPal>(pal: &P, io: &P::Io, sess_id: HsmSessId) -> HsmResult<()> {
     if !matches!(pal.session_state(io, sess_id), HsmSessionState::Active) {
         return Err(HsmError::SessionNotFound);
     }
@@ -420,7 +415,7 @@ fn validate_active_session<P: HsmPal>(
 /// Resolve the vault id of the masking key associated with `scope`.
 fn masking_key_id_for_scope<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     scope: HsmKeyScope,
 ) -> HsmResult<HsmKeyId> {
     // Every provisioned scope's masking-key id is stored in an
@@ -469,7 +464,7 @@ fn masking_key_id_for_scope<P: HsmPal>(
 /// lifecycle.
 fn resolve_masking_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     scope: HsmKeyScope,
     sess_id: HsmSessId,
 ) -> HsmResult<&'p DmaBuf> {
@@ -540,7 +535,7 @@ pub(crate) struct DispatchResult<'p> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn dispatch<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     opcode: u8,
     sqe_session_id: u16,

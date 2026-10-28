@@ -24,7 +24,6 @@ use tsra_fw_ddi_tbor_types::TborGetUnwrappingKeyResp;
 use tsra_fw_ddi_tbor_types::UNWRAPPING_PUB_KEY_LEN;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -39,7 +38,7 @@ use crate::part_state;
 /// observable state change.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let req = TborGetUnwrappingKeyReq::decode(req_buf)?;

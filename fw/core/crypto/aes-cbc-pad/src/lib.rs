@@ -26,7 +26,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 // =============================================================================
@@ -123,7 +122,7 @@ fn strip_pkcs7_padding(decrypted: &[u8]) -> HsmResult<usize> {
 /// * Any [`HsmError`] surfaced by the PAL's CBC engine.
 pub async fn aes_cbc_pkcs7_encrypt<P: HsmAes + HsmAlloc>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     key: &DmaBuf,
     iv: &mut [u8],
     pt: &[u8],
@@ -181,7 +180,7 @@ pub async fn aes_cbc_pkcs7_encrypt<P: HsmAes + HsmAlloc>(
 /// * Any [`HsmError`] surfaced by the PAL's CBC engine.
 pub async fn aes_cbc_pkcs7_decrypt<P: HsmAes + HsmAlloc>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     key: &DmaBuf,
     iv: &mut [u8],
     ct: &DmaBuf,

@@ -30,7 +30,7 @@ fn key_size_bits(key_size: HsmRsaKey) -> usize {
 impl HsmRsa for StdHsmPal {
     async fn rsa_gen_keypair(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key_size: HsmRsaKey,
         priv_key: &mut DmaBuf,
         pub_key: &mut DmaBuf,
@@ -59,7 +59,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn mod_exp_priv(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         key: &DmaBuf,
         y: &DmaBuf,
@@ -71,7 +71,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn mod_exp_pub(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         key: &DmaBuf,
         x: &DmaBuf,
@@ -83,7 +83,7 @@ impl HsmRsa for StdHsmPal {
 
     fn rsa_priv_pub_key(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         priv_key: &DmaBuf,
         pub_out: Option<&mut DmaBuf>,
     ) -> HsmResult<usize> {
@@ -98,7 +98,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         der: &'a mut DmaBuf,
         crt: bool,
     ) -> HsmResult<(&'a DmaBuf, usize)> {
@@ -119,7 +119,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_pkcs1_encrypt<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _pub_key: &DmaBuf,
         _message: &DmaBuf,
@@ -134,7 +134,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_pkcs1_decrypt<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _priv_key: &DmaBuf,
         _ciphertext: &DmaBuf,
@@ -149,7 +149,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_pkcs1_sign<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
         _priv_key: &DmaBuf,
@@ -165,7 +165,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_pkcs1_verify<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
         _pub_key: &DmaBuf,
@@ -181,7 +181,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_oaep_encrypt<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
         _pub_key: &DmaBuf,
@@ -198,7 +198,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_oaep_decrypt<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
         priv_key: &DmaBuf,
@@ -235,7 +235,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_pss_sign<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
         _priv_key: &DmaBuf,
@@ -252,7 +252,7 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_pss_verify<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
         _pub_key: &DmaBuf,

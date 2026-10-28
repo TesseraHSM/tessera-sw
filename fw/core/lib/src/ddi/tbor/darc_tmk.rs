@@ -15,7 +15,6 @@ use tsra_fw_core_crypto_key_masking::aead::mask;
 use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_hsm_pal_traits::DmaBuf;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -49,7 +48,7 @@ pub(super) fn tmk_key_attrs() -> HsmVaultKeyAttrs {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn mask_tmk<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     sdmk: &DmaBuf,
     svn: u64,

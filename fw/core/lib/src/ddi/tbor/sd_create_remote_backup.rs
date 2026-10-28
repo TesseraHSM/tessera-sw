@@ -74,7 +74,6 @@ use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -109,11 +108,7 @@ const SEC1_UNCOMPRESSED: u8 = 0x04;
 /// fields were populated by the caller from `PartInfo` before `PartInit`
 /// (same `part_state` source), so this is a direct byte comparison — no
 /// endianness conversion.
-fn verify_backing_partition<P: HsmPal>(
-    pal: &P,
-    io: &impl HsmIo,
-    policy: &PartPolicy,
-) -> HsmResult<()> {
+fn verify_backing_partition<P: HsmPal>(pal: &P, io: &P::Io, policy: &PartPolicy) -> HsmResult<()> {
     let pid = part_state::part_id(pal, io)?;
     if pid[..] != policy.backup_part_id[..] {
         return Err(HsmError::InvalidArg);
@@ -136,7 +131,7 @@ fn verify_backing_partition<P: HsmPal>(
 /// Validates that the session is an active Crypto-Officer session, that the
 /// partition is `Initialized`, that the security domain is not yet
 /// initialized, and routes the masked sealing key to its masking key.
-fn gate_request<P: HsmPal>(pal: &P, io: &impl HsmIo, req_buf: &DmaBuf) -> HsmResult<HsmKeyId> {
+fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &DmaBuf) -> HsmResult<HsmKeyId> {
     let req = TborSdCreateRemoteBackupReq::decode(req_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
     validate_crypto_officer_active_session(pal, io, sess_id)?;
@@ -177,7 +172,7 @@ fn gate_request<P: HsmPal>(pal: &P, io: &impl HsmIo, req_buf: &DmaBuf) -> HsmRes
 /// `RcvrPub` (spec `Option<RcvrEvidence>`).
 async fn verify_policy_and_receiver_evidence<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     req_buf: &DmaBuf,
     oob: &OobPtr,
@@ -264,7 +259,7 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
 /// concurrently-dispatched second create).
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
@@ -386,7 +381,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// `bks3`).
 async fn provision_security_domain<'p, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     undo: &mut UndoLog<'p>,
     bks3: &DmaBuf,
@@ -417,7 +412,7 @@ async fn provision_security_domain<'p, P: HsmPal>(
 /// Encode the `SdCreateRemoteBackup` response around the three backups.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     pok: &DmaBuf,
     pok_local: &DmaBuf,
     sd_mk_backup: &DmaBuf,

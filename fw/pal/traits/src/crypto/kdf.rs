@@ -98,7 +98,7 @@ impl<'a> HsmKdfState<'a> {
 /// cryptographic key material from existing keys using standardized
 /// KDF algorithms. The async signatures allow hardware-backed
 /// implementations to yield while the hash/HMAC engine processes data.
-pub trait HsmKdf {
+pub trait HsmKdf: HsmIoTypes {
     /// HKDF-Extract (RFC 5869 §2.2): condense `ikm` and `salt` into
     /// a fixed-length pseudorandom key.
     ///
@@ -124,7 +124,7 @@ pub trait HsmKdf {
     /// - `Err(HsmError)` — SHA / HMAC driver failure.
     async fn hkdf_extract(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         salt: Option<&DmaBuf>,
         ikm: &DmaBuf,
@@ -160,7 +160,7 @@ pub trait HsmKdf {
     /// - `Err(HsmError)` — SHA / HMAC driver failure.
     async fn hkdf_expand(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         prk: &DmaBuf,
         info: Option<&DmaBuf>,
@@ -191,7 +191,7 @@ pub trait HsmKdf {
     /// - `Err(HsmError)` — SHA / HMAC driver failure.
     async fn sp800_108_kdf(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         label: Option<&DmaBuf>,
@@ -219,7 +219,7 @@ pub trait HsmKdf {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn mgf1(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         seed: &DmaBuf,
         mask: &mut DmaBuf,
@@ -247,7 +247,7 @@ pub trait HsmKdf {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn mgf1_xor(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         seed: &DmaBuf,
         mask: &mut DmaBuf,
@@ -275,7 +275,7 @@ pub trait HsmKdf {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn x963_kdf(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         z: &DmaBuf,
         shared_info: &DmaBuf,
@@ -304,7 +304,7 @@ pub trait HsmKdf {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn sp800_56a_kdf(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         z: &DmaBuf,
         other_info: &DmaBuf,

@@ -136,7 +136,7 @@ const PART_ROOT_VAULT_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 /// Handle a TBOR `PartInit` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -307,7 +307,7 @@ struct PtaKeypair<'a> {
 /// which is operationally indistinguishable from a forgery attempt.
 async fn open_mach_seed_envelope<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
     envelope: &'a mut DmaBuf,
 ) -> HsmResult<&'a DmaBuf> {
@@ -348,7 +348,7 @@ async fn open_mach_seed_envelope<'a, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn derive_part_root<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     mach_seed: &DmaBuf,
     policy: &DmaBuf,
@@ -390,7 +390,7 @@ async fn derive_part_root<'a, P: HsmPal>(
 /// already in place), avoiding any later reshape.
 async fn derive_pta_keypair_buf<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     root: &DmaBuf,
 ) -> HsmResult<PtaKeypair<'a>> {
@@ -419,7 +419,7 @@ async fn derive_pta_keypair_buf<'a, P: HsmPal>(
 /// boundary in `handle`.
 async fn build_signed_csr<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     pub_sec1: &DmaBuf,
     pta_priv: &DmaBuf,
@@ -456,7 +456,7 @@ async fn build_signed_csr<'a, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn build_pta_report<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     sess_id: HsmSessId,
     pub_sec1: &DmaBuf,
@@ -542,7 +542,7 @@ async fn build_pta_report<'a, P: HsmPal>(
 /// required zero pad.
 async fn build_report_data<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     policy: &DmaBuf,
     pota_thumb: &DmaBuf,
@@ -601,7 +601,7 @@ struct CommitInputs<'a> {
 /// fails-fast; its just-staged keys are reaped by the recorded inverses.
 async fn stage_part_keys<'p, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     root: &DmaBuf,
     pta_priv: &DmaBuf,
     undo: &mut UndoLog<'p>,
@@ -648,7 +648,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
 /// commit.
 fn commit_partition_state<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     inputs: CommitInputs<'_>,
     root_key_id: HsmKeyId,
     pta_key_id: HsmKeyId,
@@ -704,7 +704,7 @@ fn record_field_undo(undo: &mut UndoLog<'_>, has_sapota: bool) -> HsmResult<()> 
 /// Encode the `TborPartInitResp` into a fresh IO-scoped DmaBuf.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     pta_csr_bytes: &[u8],
     pta_report_bytes: &[u8],
 ) -> HsmResult<&'p DmaBuf> {
@@ -837,7 +837,6 @@ pub(crate) mod kdf {
     use tsra_fw_hsm_pal_traits::HsmEccPct;
     use tsra_fw_hsm_pal_traits::HsmError;
     use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-    use tsra_fw_hsm_pal_traits::HsmIo;
     use tsra_fw_hsm_pal_traits::HsmPal;
     use tsra_fw_hsm_pal_traits::HsmResult;
     use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -911,9 +910,9 @@ pub(crate) mod kdf {
     /// - `Err(HsmError::NotEnoughSpace)` — scoped alloc exhausted.
     /// - `Err(HsmError)` — PAL KDF driver failure.
     #[allow(clippy::too_many_arguments)]
-    pub async fn derive_part_root(
-        pal: &impl HsmPal,
-        io: &impl HsmIo,
+    pub async fn derive_part_root<P: HsmPal>(
+        pal: &P,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
         uds: &DmaBuf,
         machine_seed: &DmaBuf,
@@ -1027,9 +1026,9 @@ pub(crate) mod kdf {
     ///   an output buffer too small.
     /// - `Err(HsmError::NotEnoughSpace)` — scoped alloc exhausted.
     /// - `Err(HsmError)` — PAL KDF / ECC driver failure.
-    pub async fn derive_pta_keypair(
-        pal: &impl HsmPal,
-        io: &impl HsmIo,
+    pub async fn derive_pta_keypair<P: HsmPal>(
+        pal: &P,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
         root: &DmaBuf,
         out: Option<(&mut DmaBuf, &mut DmaBuf)>,

@@ -18,7 +18,6 @@ use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -113,9 +112,9 @@ impl CsrInput<'_> {
 ///   template exceeds the internal scratch bound, or `buf.len()`
 ///   would not hold the worst-case output.
 /// * Other [`HsmError`] values propagated from the PAL.
-pub async fn build_csr<'a>(
-    pal: &(impl HsmCrypto + HsmAlloc + 'a),
-    io: &impl HsmIo,
+pub async fn build_csr<'a, P: HsmCrypto + HsmAlloc + 'a>(
+    pal: &P,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     input: &CsrInput<'_>,
     priv_key: &DmaBuf,

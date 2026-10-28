@@ -34,13 +34,13 @@ fn gcm_tag_mut(tag: &mut DmaBuf) -> HsmResult<&mut [u8; 16]> {
 }
 
 impl HsmAes for StdHsmPal {
-    async fn aes_gen_key(&self, _io: &impl HsmIo, key: &mut [u8]) -> HsmResult<()> {
+    async fn aes_gen_key(&self, _io: &StdHsmIo, key: &mut [u8]) -> HsmResult<()> {
         self.aes.gen_key(key).await
     }
 
     async fn aes_cbc_enc_dec(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         op: AesOp,
         key: &DmaBuf,
         input: &DmaBuf,
@@ -60,7 +60,7 @@ impl HsmAes for StdHsmPal {
 
     async fn aes_cbc_enc_dec_in_place(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         op: AesOp,
         key: &DmaBuf,
         data: &mut DmaBuf,
@@ -80,7 +80,7 @@ impl HsmAes for StdHsmPal {
 
     async fn aes_ecb_enc_dec(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         op: AesOp,
         key: &DmaBuf,
         input: &DmaBuf,
@@ -93,7 +93,7 @@ impl HsmAes for StdHsmPal {
 
     async fn aes_ecb_enc_dec_in_place(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         op: AesOp,
         key: &DmaBuf,
         data: &mut DmaBuf,
@@ -106,7 +106,7 @@ impl HsmAes for StdHsmPal {
 
     async fn gcm_encrypt(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -135,7 +135,7 @@ impl HsmAes for StdHsmPal {
 
     async fn gcm_encrypt_in_place(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -161,7 +161,7 @@ impl HsmAes for StdHsmPal {
 
     async fn gcm_decrypt(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -188,7 +188,7 @@ impl HsmAes for StdHsmPal {
 
     async fn gcm_decrypt_in_place(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key: &DmaBuf,
         iv: &DmaBuf,
         aad_len: usize,
@@ -214,7 +214,7 @@ impl HsmAes for StdHsmPal {
 
     async fn aes_kw_wrap(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key: &DmaBuf,
         _input: &DmaBuf,
         _output: &mut DmaBuf,
@@ -224,7 +224,7 @@ impl HsmAes for StdHsmPal {
 
     async fn aes_kw_unwrap(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _key: &DmaBuf,
         _input: &DmaBuf,
         _output: &mut DmaBuf,
@@ -234,7 +234,7 @@ impl HsmAes for StdHsmPal {
 
     async fn aes_kwp_wrap(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -244,7 +244,7 @@ impl HsmAes for StdHsmPal {
 
     async fn aes_kwp_unwrap(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -255,13 +255,13 @@ impl HsmAes for StdHsmPal {
     // AES-XTS support is currently disabled; the stub entry points are
     // retained here, commented out, for future re-enablement.
     //
-    // async fn aes_xts_gen_key(&self, _io: &impl HsmIo, _key: &mut [u8]) -> HsmResult<()> {
+    // async fn aes_xts_gen_key(&self, _io: &StdHsmIo, _key: &mut [u8]) -> HsmResult<()> {
     //     todo!()
     // }
     //
     // async fn aes_xts_encrypt(
     //     &self,
-    //     _io: &impl HsmIo,
+    //     _io: &StdHsmIo,
     //     _key: &DmaBuf,
     //     _tweak: &DmaBuf,
     //     _dul: XtsDataUnitLen,
@@ -273,7 +273,7 @@ impl HsmAes for StdHsmPal {
     //
     // async fn aes_xts_decrypt(
     //     &self,
-    //     _io: &impl HsmIo,
+    //     _io: &StdHsmIo,
     //     _key: &DmaBuf,
     //     _tweak: &DmaBuf,
     //     _dul: XtsDataUnitLen,
@@ -285,7 +285,7 @@ impl HsmAes for StdHsmPal {
     //
     // async fn aes_xts_encrypt_in_place(
     //     &self,
-    //     _io: &impl HsmIo,
+    //     _io: &StdHsmIo,
     //     _key: &DmaBuf,
     //     _tweak: &DmaBuf,
     //     _dul: XtsDataUnitLen,
@@ -296,7 +296,7 @@ impl HsmAes for StdHsmPal {
     //
     // async fn aes_xts_decrypt_in_place(
     //     &self,
-    //     _io: &impl HsmIo,
+    //     _io: &StdHsmIo,
     //     _key: &DmaBuf,
     //     _tweak: &DmaBuf,
     //     _dul: XtsDataUnitLen,

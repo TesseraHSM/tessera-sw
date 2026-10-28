@@ -9,7 +9,6 @@ use core::mem::size_of;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::PartState;
 use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CO;
@@ -19,6 +18,45 @@ use tsra_fw_uno_reg_soc::part_store_t::PART_STORE_T_BASE;
 
 /// Number of partition slots in the persistent store.
 pub const NUM_PARTITIONS: usize = 65;
+
+/// Logical partition ID shared by Uno's PAL and persistent-store drivers.
+///
+/// Transparent over `u8`, with checked construction from `u16`.
+/// Partition operations validate the index against [`NUM_PARTITIONS`].
+/// This is not a hardware AXI routing ID.
+///
+/// ```
+/// use tsra_fw_uno_drivers_part_store::HsmPartId;
+///
+/// assert_eq!(u8::from(HsmPartId::from(3u8)), 3);
+/// assert!(HsmPartId::try_from(300u16).is_err());
+/// ```
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HsmPartId(u8);
+
+impl From<u8> for HsmPartId {
+    #[inline]
+    fn from(v: u8) -> Self {
+        Self(v)
+    }
+}
+
+impl From<HsmPartId> for u8 {
+    #[inline]
+    fn from(id: HsmPartId) -> Self {
+        id.0
+    }
+}
+
+impl TryFrom<u16> for HsmPartId {
+    type Error = core::num::TryFromIntError;
+
+    #[inline]
+    fn try_from(v: u16) -> Result<Self, Self::Error> {
+        u8::try_from(v).map(Self)
+    }
+}
 
 /// Persistent-store schema version stamped by this driver.
 pub const STORE_VERSION: u8 = 1;
@@ -336,7 +374,7 @@ impl PartStore {
     /// - [`HsmError::InvalidArg`] — `pid >= NUM_PARTITIONS`.
     #[inline]
     pub fn partition(pid: HsmPartId) -> HsmResult<Partition> {
-        let idx = u8::from(pid) as usize;
+        let idx = usize::from(u8::from(pid));
         if idx < NUM_PARTITIONS {
             Ok(Partition(idx))
         } else {

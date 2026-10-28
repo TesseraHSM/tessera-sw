@@ -27,7 +27,6 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -35,6 +34,7 @@ use tsra_fw_uno_drivers_sha::ShaExclusive;
 use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_sha::ShaRequest;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 impl HsmKdf for UnoHsmPal {
@@ -58,7 +58,7 @@ impl HsmKdf for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the HMAC trait calls.
     async fn hkdf_extract(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         salt: Option<&DmaBuf>,
         ikm: &DmaBuf,
@@ -112,7 +112,7 @@ impl HsmKdf for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the HMAC trait calls.
     async fn hkdf_expand(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         prk: &DmaBuf,
         info: Option<&DmaBuf>,
@@ -183,7 +183,7 @@ impl HsmKdf for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the HMAC trait calls.
     async fn sp800_108_kdf(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         label: Option<&DmaBuf>,
@@ -253,7 +253,7 @@ impl HsmKdf for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn mgf1(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         seed: &DmaBuf,
         mask: &mut DmaBuf,
@@ -280,7 +280,7 @@ impl HsmKdf for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn mgf1_xor(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         seed: &DmaBuf,
         mask: &mut DmaBuf,
@@ -319,7 +319,7 @@ impl HsmKdf for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn x963_kdf(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         z: &DmaBuf,
         shared_info: &DmaBuf,
@@ -349,7 +349,7 @@ impl HsmKdf for UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the SHA driver.
     async fn sp800_56a_kdf(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         z: &DmaBuf,
         other_info: &DmaBuf,
@@ -385,7 +385,7 @@ impl UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     async fn run_concat_kdf(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
         kdf: ConcatKdf,
         z: &DmaBuf,

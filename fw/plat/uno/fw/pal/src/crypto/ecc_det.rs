@@ -28,7 +28,6 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -41,6 +40,7 @@ use super::ecc::BASE384_X_LE;
 use super::ecc::BASE384_Y_LE;
 use super::ecc::PRIME384_LE;
 use super::reverse_copy;
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 // =============================================================================
@@ -271,7 +271,7 @@ impl UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn ecc_sign_with_k(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         curve: UpkaEccCurve,
         k: &DmaBuf,
         digest: &DmaBuf,
@@ -462,7 +462,7 @@ impl UnoHsmPal {
     #[allow(dead_code)] // consumed by ecc_sign_deterministic (A6) / PID cert gen (B)
     pub(crate) async fn ecc_generate_k_rfc6979(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         curve: UpkaEccCurve,
         d: &DmaBuf,
         digest: &DmaBuf,
@@ -541,7 +541,7 @@ impl UnoHsmPal {
     #[allow(dead_code)] // consumed by PID cert gen (B)
     pub(crate) async fn ecc_sign_deterministic(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         curve: UpkaEccCurve,
         digest: &DmaBuf,
         d: &DmaBuf,
@@ -611,7 +611,7 @@ impl UnoHsmPal {
     /// Assumes `drbg.n_be` is already set.
     async fn rfc6979_seed(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         drbg: &mut Rfc6979Drbg<'_>,
         d: &DmaBuf,
         digest: &DmaBuf,
@@ -652,13 +652,13 @@ impl UnoHsmPal {
     /// RFC 6979 §3.2 (h) one generate block: `V = HMAC_K(V)`. Because
     /// `hlen == qlen == 384`, `T = V`, so the candidate is `drbg.v`
     /// (big-endian) on return.
-    async fn rfc6979_generate(&self, io: &impl HsmIo, drbg: &mut Rfc6979Drbg<'_>) -> HsmResult<()> {
+    async fn rfc6979_generate(&self, io: &UnoHsmIo, drbg: &mut Rfc6979Drbg<'_>) -> HsmResult<()> {
         self.rfc6979_update_v(io, drbg).await
     }
 
     /// RFC 6979 §3.2 (h) reseed after a rejected candidate:
     /// `K = HMAC_K(V ‖ 0x00)` then `V = HMAC_K(V)`.
-    async fn rfc6979_reseed(&self, io: &impl HsmIo, drbg: &mut Rfc6979Drbg<'_>) -> HsmResult<()> {
+    async fn rfc6979_reseed(&self, io: &UnoHsmIo, drbg: &mut Rfc6979Drbg<'_>) -> HsmResult<()> {
         let field = PRIME384_LE.len();
         drbg.msg[..field].copy_from_slice(&drbg.v[..field]);
         drbg.msg[field] = 0x00;
@@ -672,7 +672,7 @@ impl UnoHsmPal {
     /// `drbg.key` holds the new `K` with no copy. The caller stages `msg`.
     async fn rfc6979_update_key(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         drbg: &mut Rfc6979Drbg<'_>,
         len: usize,
     ) -> HsmResult<()> {
@@ -689,7 +689,7 @@ impl UnoHsmPal {
     /// `V = HMAC_K(V)` (RFC 6979 §3.2 (e)/(g)/(h2)). Writes the tag into the
     /// DMA `tag` slot, then rotates `v`/`tag` *by reference* so `drbg.v` holds
     /// the new `V` (the next candidate, big-endian) with no copy.
-    async fn rfc6979_update_v(&self, io: &impl HsmIo, drbg: &mut Rfc6979Drbg<'_>) -> HsmResult<()> {
+    async fn rfc6979_update_v(&self, io: &UnoHsmIo, drbg: &mut Rfc6979Drbg<'_>) -> HsmResult<()> {
         self.hmac_sign(
             io,
             HsmHashAlgo::Sha384,
@@ -731,7 +731,7 @@ impl UnoHsmPal {
     #[allow(dead_code)] // consumed by ecc_gen_keypair_deterministic (keygen)
     async fn derive_pta_scalar_be(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         part_root: &DmaBuf,
         d_be: &mut DmaBuf,
     ) -> HsmResult<()> {
@@ -838,7 +838,7 @@ impl UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the HKDF / SHA / PKA drivers.
     pub(crate) async fn ecc_gen_keypair_deterministic(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         curve: UpkaEccCurve,
         part_root: &DmaBuf,
         d_le: &mut DmaBuf,
