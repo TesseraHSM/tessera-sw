@@ -86,5 +86,9 @@ profile = [
   "tsra_fw_uno_drivers_profile/trace",
 ]
 
+# Target the bulk-crypto fastpath firmware rather than the PQC one; see
+# `tsra_fw_uno_pal/bulk_crypto`.
+bulk_crypto = ["tsra_fw_uno_pal/bulk_crypto"]
+
 [lints]
 workspace = true

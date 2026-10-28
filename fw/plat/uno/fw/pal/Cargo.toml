@@ -80,5 +80,14 @@ fips_validation_hooks = [
 ]
 tsra_test_hooks = ["dep:tsra_fw_ddi_mbor", "dep:tsra_fw_ddi_mbor_derive"]
 
+# Build for the C bulk-crypto fastpath firmware (manticore `fp/qmgr`)
+# instead of the Rust PQC fastpath firmware (`fw/plat/uno/pqc`). The
+# fastpath cores then host the bulk AES-GCM/XTS engine, so bulk keys are
+# registered with it over the HSM→FP IPC channel, and ML-DSA / ML-KEM are
+# refused because there is no PQC engine. The two firmwares use the same
+# PSRAM window differently (IPC rings vs PQC mailboxes), so the PAL must
+# match the FP image; `make_manticore.sh --bulk_crypto` selects both.
+bulk_crypto = []
+
 [lints]
 workspace = true

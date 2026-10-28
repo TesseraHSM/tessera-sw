@@ -143,7 +143,10 @@ pub enum IpcChannel {
     AdminMessage = 0,
     /// Admin → HSM event notifications.
     AdminEvent = 1,
-    /// HSM → FP bulk-key requests (with response).
+    /// HSM → FP requests (with response) over the PSRAM rings: bulk-key
+    /// updates and test-hook crash injection.  Only the bulk-crypto
+    /// fast-path firmware (`bulk_crypto`) listens; the PQC build never
+    /// enables it.
     FpMessage = 2,
     /// HSM → Admin requests (HSM is the requestor, Admin the responder).
     AdminRequest = 3,
@@ -408,7 +411,8 @@ impl Default for UnoHsmPal {
                 },
                 // Pair 2: send bulk-key requests to the bulk-crypto
                 // backend and await the response (desc 15 out, 16 in)
-                // over the PSRAM HSM↔backend IPC rings.
+                // over the PSRAM HSM↔backend IPC rings.  Enabled only with
+                // `bulk_crypto`: the PQC mailboxes reuse these rings' PSRAM.
                 IpcPairConfig {
                     kind: IpcPairKind::SendMessage,
                     inbound_desc: 16,
@@ -873,10 +877,13 @@ impl HsmPal for UnoHsmPal {
         systick_driver::init();
         // The PQC operand slots are read back with an engine reserved, so how
         // fast CP1 can read them is throughput. The default memory map makes
-        // that window Device, which serialises reads; remap it Normal.
-        //
-        // SAFETY: at boot, before any request can be submitted.
-        unsafe { tsra_fw_uno_drivers_pqc::map_mailbox_normal() };
+        // that window Device, which serialises reads; remap it Normal. The
+        // bulk-crypto fast-path firmware keeps its HSM↔FP IPC rings in the
+        // same window, so with `bulk_crypto` it stays Device.
+        if !cfg!(feature = "bulk_crypto") {
+            // SAFETY: at boot, before any request can be submitted.
+            unsafe { tsra_fw_uno_drivers_pqc::map_mailbox_normal() };
+        }
         self.rng.init();
         self.ipc.init();
         // Zero the indices of the HSM→Admin queue this core produces into.
@@ -893,18 +900,23 @@ impl HsmPal for UnoHsmPal {
         }
         self.ipc.enable(IpcChannel::AdminMessage as u8);
         self.ipc.enable(IpcChannel::AdminEvent as u8);
-        self.ipc.enable(IpcChannel::FpMessage as u8);
-        // The HSM owns initialization of the HSM↔backend ring indices (the
-        // reference firmware zeroes them at channel setup).  Clear all
-        // four so the send/recv PI/CI comparisons start from a known
-        // state regardless of prior PSRAM contents.
-        // SAFETY: these are the fixed HSM↔backend PSRAM index words; writing
-        // 0 is the documented reset value and no aliasing borrow exists.
-        unsafe {
-            ((PSRAM_BASE + HSM_TO_FP_IPC_TX_PI_OFFSET) as *mut u32).write_volatile(0);
-            ((PSRAM_BASE + HSM_TO_FP_IPC_TX_CI_OFFSET) as *mut u32).write_volatile(0);
-            ((PSRAM_BASE + HSM_TO_FP_IPC_RX_PI_OFFSET) as *mut u32).write_volatile(0);
-            ((PSRAM_BASE + HSM_TO_FP_IPC_RX_CI_OFFSET) as *mut u32).write_volatile(0);
+        // Only the bulk-crypto fast-path firmware serves the HSM↔FP rings. The
+        // PQC firmware never replies on them, and its mailboxes and status
+        // words occupy that PSRAM, so the PQC build leaves both untouched.
+        if cfg!(feature = "bulk_crypto") {
+            self.ipc.enable(IpcChannel::FpMessage as u8);
+            // The HSM owns initialization of the HSM↔backend ring indices (the
+            // reference firmware zeroes them at channel setup).  Clear all
+            // four so the send/recv PI/CI comparisons start from a known
+            // state regardless of prior PSRAM contents.
+            // SAFETY: these are the fixed HSM↔backend PSRAM index words; writing
+            // 0 is the documented reset value and no aliasing borrow exists.
+            unsafe {
+                ((PSRAM_BASE + HSM_TO_FP_IPC_TX_PI_OFFSET) as *mut u32).write_volatile(0);
+                ((PSRAM_BASE + HSM_TO_FP_IPC_TX_CI_OFFSET) as *mut u32).write_volatile(0);
+                ((PSRAM_BASE + HSM_TO_FP_IPC_RX_PI_OFFSET) as *mut u32).write_volatile(0);
+                ((PSRAM_BASE + HSM_TO_FP_IPC_RX_CI_OFFSET) as *mut u32).write_volatile(0);
+            }
         }
 
         self.ipc.enable(IpcChannel::AdminRequest as u8);
