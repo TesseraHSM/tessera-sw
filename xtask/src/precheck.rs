@@ -15,6 +15,7 @@ use crate::copyright::Copyright;
 use crate::coverage::Coverage;
 use crate::coverage_report::CoverageReport;
 use crate::fmt::Fmt;
+use crate::fw_precheck::FwPrecheck;
 use crate::nextest::Nextest;
 use crate::nextest_report::NextestReport;
 use crate::setup::Setup;
@@ -54,7 +55,7 @@ struct Stage {
     /// Run nextest with cli options (features, package, profile, exclude)
     #[clap(long, conflicts_with_all = ["nextest_min", "nextest_full"])]
     nextest: bool,
-    /// Run minimal nextest tests (skips resiliency, openssl, and native/cpp tests)
+    /// Run default nextest tests with a 64-table workspace mock run (skip other table counts)
     #[clap(long, conflicts_with_all = ["nextest", "nextest_full"])]
     nextest_min: bool,
     /// Run the full nextest tests
@@ -63,6 +64,9 @@ struct Stage {
     /// Run nextest-report
     #[clap(long)]
     nextest_report: bool,
+    /// Run firmware precheck after all other stages
+    #[clap(long)]
+    fw_precheck: bool,
 }
 
 impl Stage {
@@ -81,9 +85,10 @@ impl Stage {
         self.nextest_min = self.nextest_min || other.nextest_min;
         self.nextest_full = self.nextest_full || other.nextest_full;
         self.nextest_report = self.nextest_report || other.nextest_report;
+        self.fw_precheck = self.fw_precheck || other.fw_precheck;
     }
 
-    /// Return a Stage instance with minimal checks enabled (fmt and nextest_min)
+    /// Return a Stage instance with minimal checks enabled (fmt, clippy, nextest_min and fw_precheck)
     fn min() -> Stage {
         Stage {
             setup: false,
@@ -92,13 +97,14 @@ impl Stage {
             validate_members: false,
             audit: false,
             fmt: true,
-            clippy: false,
+            clippy: true,
             coverage: false,
             coverage_report: false,
             nextest: false,
             nextest_min: true,
             nextest_full: false,
             nextest_report: false,
+            fw_precheck: true,
         }
     }
 
@@ -121,6 +127,7 @@ impl Stage {
             nextest_min: false,
             nextest_full: true,
             nextest_report: false, // nextest report is optional (intended only for CI)
+            fw_precheck: true,
         }
     }
 
@@ -141,6 +148,7 @@ impl Stage {
             nextest_min: false, // subset of nextest_full
             nextest_full: true,
             nextest_report: true,
+            fw_precheck: true,
         }
     }
 }
@@ -153,7 +161,7 @@ pub struct Precheck {
     #[clap(flatten)]
     stage: Option<Stage>,
     /// Run the full set of checks:
-    /// setup, copyright, validate_members, audit, fmt, clippy, nextest_full
+    /// setup, copyright, validate_members, audit, fmt, clippy, nextest_full, fw_precheck
     #[clap(
         long,
         conflicts_with = "all",
@@ -312,21 +320,20 @@ impl Xtask for Precheck {
         }
 
         if stage.nextest_min {
-            // Run min tests
-            let tests = min_tests(&self.exclude, self.profile.clone());
+            let tests = default_tests(&self.exclude, self.profile.clone(), true);
             run_tests(tests, false, self.skip_clean, ctx.clone())?;
         }
 
         if stage.nextest_full {
             // Run default tests
-            let tests = default_tests(&self.exclude, self.profile.clone());
+            let tests = default_tests(&self.exclude, self.profile.clone(), false);
             run_tests(tests, false, self.skip_clean, ctx.clone())?;
 
             #[cfg(not(target_os = "windows"))]
             {
-                // Run tsra_ddi mock tests
-                let ddi_test_runs = ddi_tests(&self.exclude, self.profile.clone());
-                run_tests(ddi_test_runs, false, self.skip_clean, ctx.clone())?;
+                // Run mock tests with all table count combinations
+                let table_count_test_runs = table_count_tests(&self.exclude, self.profile.clone());
+                run_tests(table_count_test_runs, false, self.skip_clean, ctx.clone())?;
             }
         }
 
@@ -339,7 +346,7 @@ impl Xtask for Precheck {
                 && self.filter.is_empty()
             {
                 // Run default tests with coverage
-                let tests = default_tests(&self.exclude, self.profile.clone());
+                let tests = default_tests(&self.exclude, self.profile.clone(), false);
                 run_tests(tests, true, self.skip_clean, ctx.clone())?;
             } else {
                 Coverage {
@@ -371,50 +378,20 @@ impl Xtask for Precheck {
             .run(ctx.clone())?;
         }
 
+        if stage.fw_precheck {
+            FwPrecheck {
+                skip_audit: self.skip_audit,
+            }
+            .run(ctx)?;
+        }
+
         log::trace!("done precheck");
         Ok(())
     }
 }
 
-// Helper function to define test parameters for --nextest-min
-fn min_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
-    let mut tests = Vec::new();
-
-    let mut mock_exclude = exclude.to_owned();
-
-    for pkg in [
-        "tsra_api_tests",
-        "tsra_ossl_provider",
-        "tsra_res_test_dev",
-        "tsra_resiliency_test_helpers",
-        "provider-integration-tests-cli",
-        "provider-integration-tests-capi",
-        "provider-integration-tests-nginx",
-        "resiliency_stress",
-        "resiliency_macro",
-    ] {
-        if !mock_exclude.iter().any(|e| e == pkg) {
-            mock_exclude.push(pkg.to_string());
-        }
-    }
-
-    // SDK Run min mock tests
-    tests.push(Nextest {
-        features: Some("mock".to_string()),
-        package: None,
-        no_default_features: false,
-        filterset: None,
-        profile: profile.clone().or_else(|| Some("ci-mock".to_string())),
-        exclude: mock_exclude,
-        test: None,
-        filter: vec![],
-    });
-
-    tests
-}
-
-// Helper function to define default test parameters for --nextest-full and --coverage
-fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
+// Helper function to define test parameters for --nextest-min, --nextest-full and --coverage
+fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<Nextest> {
     let mut tests = Vec::new();
 
     let mut mock_exclude = exclude.to_owned();
@@ -431,7 +408,11 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
 
     // SDK Run all mock tests
     tests.push(Nextest {
-        features: Some("mock".to_string()),
+        features: Some(if min {
+            "mock,table-64".to_string()
+        } else {
+            "mock".to_string()
+        }),
         package: None,
         no_default_features: false,
         filterset: None,
@@ -483,12 +464,28 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
         });
     }
 
+    // SDK Run azihsm_ddi_tbor_types tests through the emu
+    // backend (in-process firmware).
+    #[cfg(not(target_os = "windows"))]
+    if !exclude.iter().any(|e| e == "tsra_ddi_tbor_types") {
+        tests.push(Nextest {
+            features: Some("emu".to_string()),
+            package: Some("tsra_ddi_tbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-tbor-emu".to_string())),
+            exclude: exclude.to_owned(),
+            test: None,
+            filter: vec![],
+        });
+    }
+
     tests
 }
 
 // Helper function to define test parameters for Linux-specific tsra_ddi mock tests
 #[cfg(not(target_os = "windows"))]
-fn ddi_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
+fn table_count_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
     let mut tests = Vec::new();
 
     if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
@@ -511,21 +508,6 @@ fn ddi_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
             no_default_features: false,
             filterset: None,
             profile: profile.clone().or(Some("ci-mock-table-64".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
-    }
-
-    if !exclude.iter().any(|e| e == "tsra_ddi_tbor_types") {
-        // SDK Run tsra_ddi_tbor_types tests through the emu
-        // backend (in-process firmware).
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_tbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-tbor-emu".to_string())),
             exclude: exclude.to_owned(),
             test: None,
             filter: vec![],
