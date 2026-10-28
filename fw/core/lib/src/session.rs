@@ -8,7 +8,6 @@
 //! to a given session.  See [`tsra_fw_hsm_pal_traits::PSK_LEN`]
 //! for the `app_id ‖ app_pin` PSK layout.
 
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -45,7 +44,7 @@ use tsra_fw_hsm_pal_traits::APP_ID_LEN;
 ///   is no longer active.
 pub fn session_app_id<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
 ) -> HsmResult<[u8; APP_ID_LEN]> {
     let psk_id = u8::from(sess_id.role() == tsra_fw_hsm_pal_traits::SessionRole::CryptoUser);

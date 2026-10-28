@@ -31,7 +31,6 @@ use tsra_fw_ddi_mbor_types::DdiKeyType;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -69,7 +68,7 @@ fn bk_boot_metadata(svn: u64, owner: u16) -> DdiMaskedKeyMetadata<'static> {
 /// [`HsmSeedStore`].  `output` receives the derived key.
 pub async fn derive_masking_key<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     kdk: &DmaBuf,
     label: &[u8],
     extra_context: &[u8],
@@ -119,7 +118,7 @@ pub async fn derive_masking_key<P: HsmPal>(
 
 /// Derives the partition's `BKx` (the `BK_BOOT` masking key) into
 /// `bkx`, which must be [`BK_BOOT_LEN`] bytes.
-async fn derive_bkx<P: HsmPal>(pal: &P, io: &impl HsmIo, bkx: &mut DmaBuf) -> HsmResult<()> {
+async fn derive_bkx<P: HsmPal>(pal: &P, io: &P::Io, bkx: &mut DmaBuf) -> HsmResult<()> {
     let svn = pal.mfgr_svn();
     let owner = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
     let fw_seed = pal.fw_seed();
@@ -133,7 +132,7 @@ async fn derive_bkx<P: HsmPal>(pal: &P, io: &impl HsmIo, bkx: &mut DmaBuf) -> Hs
 ///
 /// Called once at partition allocation; the caller persists the
 /// returned blob.  The raw `BK_BOOT` never leaves this function.
-pub async fn mask_bk_boot<'a, P: HsmPal>(pal: &'a P, io: &impl HsmIo) -> HsmResult<&'a mut DmaBuf> {
+pub async fn mask_bk_boot<'a, P: HsmPal>(pal: &'a P, io: &P::Io) -> HsmResult<&'a mut DmaBuf> {
     let svn = pal.mfgr_svn();
     let owner = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
 
@@ -157,7 +156,7 @@ pub async fn mask_bk_boot<'a, P: HsmPal>(pal: &'a P, io: &impl HsmIo) -> HsmResu
 /// [`BK_BOOT_LEN`] bytes).
 pub async fn unmask_bk_boot<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     masked: &DmaBuf,
     out: &mut DmaBuf,
 ) -> HsmResult<()> {

@@ -65,7 +65,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -99,7 +98,7 @@ const SEC1_UNCOMPRESSED: u8 = 0x04;
 /// mutation, no undo log.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     oob: Option<OobPtr>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -274,7 +273,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// available), then routes the masked sealing key to its masking key.
 /// Unlike the create/restore provisioning commands, this is **not**
 /// one-shot: it neither requires nor sets the SD-initialized flag.
-fn gate_request<P: HsmPal>(pal: &P, io: &impl HsmIo, req_buf: &DmaBuf) -> HsmResult<HsmKeyId> {
+fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &DmaBuf) -> HsmResult<HsmKeyId> {
     let req = TborSdCreatePeerBackupReq::decode(req_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
     validate_crypto_officer_active_session(pal, io, sess_id)?;
@@ -296,7 +295,7 @@ fn gate_request<P: HsmPal>(pal: &P, io: &impl HsmIo, req_buf: &DmaBuf) -> HsmRes
 /// Encode the `SdCreatePeerBackup` response around the peer backup.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     pok_peer: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {

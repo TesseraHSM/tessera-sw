@@ -10,6 +10,20 @@
 
 use super::*;
 
+#[test]
+fn partition_lookup_rejects_wide_ids_without_aliasing() {
+    assert!(PartStore::partition(HsmPartId::from(64u8)).is_ok());
+    for id in [65u8, u8::MAX] {
+        assert!(matches!(
+            PartStore::partition(HsmPartId::from(id)),
+            Err(HsmError::InvalidArg)
+        ));
+    }
+    for id in [256u16, 257, 320, u16::MAX] {
+        assert!(HsmPartId::try_from(id).is_err());
+    }
+}
+
 /// Views a fixed-length test pattern as a `&DmaBuf` for the setters.
 fn buf(bytes: &[u8]) -> &DmaBuf {
     // SAFETY: `DmaBuf::from_raw` requires `bytes` to lie in a DMA-addressable

@@ -17,10 +17,9 @@
 //!   [`SEALED_BK3_MAX_LEN`], [`MASKED_BK_BOOT_LEN`]) that pin the
 //!   byte sizes shared between core, the PAL, and host-side tools.
 //!
-//! Each partition is a host-facing controller interface identified
-//! by [`HsmPartId`]; the firmware supports up to `HSM_NUM_PARTITIONS`
-//! of them.  Every trait method takes an [`HsmIo`] handle and
-//! operates on the partition resolved from `io.pid()` — partitions
+//! Each partition is a host-facing controller interface identified in
+//! platform-private IO metadata. Every trait method takes an [`HsmIo`]
+//! handle and operates on its bound partition — partitions
 //! are never named explicitly at the trait boundary, which prevents
 //! accidental cross-partition queries.
 //!
@@ -204,7 +203,7 @@ impl PartState {
 /// PAL impls back per-partition state and expose it to core through
 /// the **property surface** documented in the module-level overview
 /// above.  Every method takes an [`HsmIo`] handle and operates on the
-/// partition resolved from `io.pid()`; the trait is `&self`, so PAL
+/// partition resolved from private IO metadata; the trait is `&self`, so PAL
 /// implementations are expected to use interior mutability.
 ///
 /// # Error contract
@@ -226,15 +225,13 @@ impl PartState {
 ///   [`HsmError::Bk3AlreadyInitialized`] on the one-shot
 ///   [`PartPropId::BK3_INITIALIZED`] guard).
 ///
-/// Partition scoping is implicit via `io.pid()`, as elsewhere on
-/// this trait.
-pub trait HsmPartitionManager {
+/// Partition scoping is implicit via the platform's private IO metadata.
+pub trait HsmPartitionManager: HsmIoTypes {
     /// Read a [`PartPropKind::U8`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::U8`].
     ///
@@ -243,14 +240,13 @@ pub trait HsmPartitionManager {
     /// [`HsmResult<u8>`] — the stored byte on success.  See the
     /// [`HsmPartitionManager`] doc-comment for the shared error
     /// contract.
-    fn part_prop_get_u8(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u8>;
+    fn part_prop_get_u8(&self, io: &Self::Io, id: PartPropId) -> HsmResult<u8>;
 
     /// Write a [`PartPropKind::U8`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::U8`] and `access` must be
     ///   [`PartPropAccess::Rw`].
@@ -263,28 +259,26 @@ pub trait HsmPartitionManager {
     /// [`HsmResult<()>`] — `Ok(())` on success.  See the
     /// [`HsmPartitionManager`] doc-comment for the shared error
     /// contract.
-    fn part_prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()>;
+    fn part_prop_set_u8(&self, io: &Self::Io, id: PartPropId, value: u8) -> HsmResult<()>;
 
     /// Read a [`PartPropKind::U16`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::U16`].
     ///
     /// # Returns
     ///
     /// [`HsmResult<u16>`] — the stored value on success.
-    fn part_prop_get_u16(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u16>;
+    fn part_prop_get_u16(&self, io: &Self::Io, id: PartPropId) -> HsmResult<u16>;
 
     /// Write a [`PartPropKind::U16`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::U16`] and `access` must be
     ///   [`PartPropAccess::Rw`].
@@ -295,28 +289,26 @@ pub trait HsmPartitionManager {
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_u16(&self, io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()>;
+    fn part_prop_set_u16(&self, io: &Self::Io, id: PartPropId, value: u16) -> HsmResult<()>;
 
     /// Read a [`PartPropKind::U32`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::U32`].
     ///
     /// # Returns
     ///
     /// [`HsmResult<u32>`] — the stored value on success.
-    fn part_prop_get_u32(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<u32>;
+    fn part_prop_get_u32(&self, io: &Self::Io, id: PartPropId) -> HsmResult<u32>;
 
     /// Write a [`PartPropKind::U32`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::U32`] and `access` must be
     ///   [`PartPropAccess::Rw`].
@@ -325,28 +317,26 @@ pub trait HsmPartitionManager {
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_u32(&self, io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()>;
+    fn part_prop_set_u32(&self, io: &Self::Io, id: PartPropId, value: u32) -> HsmResult<()>;
 
     /// Read a [`PartPropKind::Bool`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::Bool`].
     ///
     /// # Returns
     ///
     /// [`HsmResult<bool>`] — the stored flag on success.
-    fn part_prop_get_bool(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<bool>;
+    fn part_prop_get_bool(&self, io: &Self::Io, id: PartPropId) -> HsmResult<bool>;
 
     /// Write a [`PartPropKind::Bool`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::Bool`] and `access` must be
     ///   [`PartPropAccess::Rw`].  Per-slot semantics may further
@@ -357,15 +347,14 @@ pub trait HsmPartitionManager {
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_bool(&self, io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()>;
+    fn part_prop_set_bool(&self, io: &Self::Io, id: PartPropId, value: bool) -> HsmResult<()>;
 
     /// Read a [`PartPropKind::FixedBytes`] or [`PartPropKind::VarBytes`]
     /// slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::FixedBytes`] or
     ///   [`PartPropKind::VarBytes`].
@@ -382,15 +371,14 @@ pub trait HsmPartitionManager {
     /// The returned view is valid for the duration of the `&self`
     /// borrow on the [`HsmPartitionManager`] implementation; PAL
     /// impls must not invalidate it before the borrow ends.
-    fn part_prop_get_bytes<'a>(&'a self, io: &impl HsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf>;
+    fn part_prop_get_bytes<'a>(&'a self, io: &Self::Io, id: PartPropId) -> HsmResult<&'a DmaBuf>;
 
     /// Write a [`PartPropKind::FixedBytes`] or
     /// [`PartPropKind::VarBytes`] slot.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier; its [`meta`](PartPropId::meta)
     ///   `kind` must be [`PartPropKind::FixedBytes`] or
     ///   [`PartPropKind::VarBytes`], and `access` must be
@@ -406,14 +394,13 @@ pub trait HsmPartitionManager {
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
+    fn part_prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
 
     /// Reset a property slot to its absent state.
     ///
     /// # Parameters
     ///
-    /// - `io` — IO handle; the target partition is resolved from
-    ///   [`io.pid()`](HsmIo::pid).
+    /// - `io` — IO handle bound to the target partition.
     /// - `id` — property identifier.  Its [`meta`](PartPropId::meta)
     ///   `default` must be [`PartPropDefault::AbsentUntilSet`] and
     ///   `access` must be [`PartPropAccess::Rw`];
@@ -429,7 +416,7 @@ pub trait HsmPartitionManager {
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.  Idempotent on an
     /// already-absent slot (also returns `Ok(())`).
-    fn part_prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()>;
+    fn part_prop_clear(&self, io: &Self::Io, id: PartPropId) -> HsmResult<()>;
 }
 
 /// Length of the per-partition `BK_BOOT` boot-key material in bytes.

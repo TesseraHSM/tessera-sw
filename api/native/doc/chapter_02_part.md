@@ -301,6 +301,18 @@ Retrieve partition property
 | max api revision supported by the device           | [struct tsra_api_rev](#tsra_api_rev) | \scriptsize TSRA_PART_PROP_ID_MAX_API_REV       |
 | manufacturer cert chain in PEM format              | [tsra_char*](#tsra_char)             | \scriptsize TSRA_PART_PROP_ID_MANUFACTURER_CERT_CHAIN |
 | partition identity (PID) public key in DER format  | uint8_t*                                 | \scriptsize TSRA_PART_PROP_ID_PART_PUB_KEY    |
+| current security-domain initialization state      | [tsra_bool](#tsra_bool)                   | \scriptsize TSRA_PART_PROP_ID_SD_INITIALIZED |
+
+`TSRA_PART_PROP_ID_SD_INITIALIZED` performs an out-of-session device query on every
+call; it does not use a partition-list snapshot or cache. It returns `TSRA_BOOL_TRUE` when
+the security domain is initialized and `TSRA_BOOL_FALSE` otherwise, including when the
+device or backend does not support reporting this state. Other query failures
+are returned as errors.
+
+For this property, `prop.val` points to a `tsra_bool` (`uint8_t`) and `prop.len` is its capacity in
+bytes. A size query with `prop.len = 0` returns `TSRA_STATUS_BUFFER_TOO_SMALL` and
+sets `prop.len` to `sizeof(tsra_bool)`. On success, the API writes the current value and
+sets `prop.len` to `sizeof(tsra_bool)`. No session is required.
 
 ```cpp
 tsra_status tsra_part_get_prop(

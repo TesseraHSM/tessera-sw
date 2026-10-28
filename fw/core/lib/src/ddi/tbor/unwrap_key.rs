@@ -36,7 +36,6 @@ use tsra_fw_hsm_key_unwrap::UnwrapParams;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -204,7 +203,7 @@ struct MaskCtx<'a> {
 /// nothing.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &DmaBuf,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -304,7 +303,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// into its slot — no scratch buffers, no copies.
 async fn encode_and_mask<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     key_id: HsmKeyId,
     ctx: &MaskCtx<'_>,
 ) -> HsmResult<&'p DmaBuf> {

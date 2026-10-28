@@ -35,10 +35,11 @@ use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_vault::VaultStorage;
 use tsra_fw_uno_key_vault::KeyVault;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 #[inline]
-pub(crate) fn vault(io: &impl HsmIo) -> KeyVault<VaultStorage> {
+pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
     // Out-of-range partitions own no tables (empty mask → no storage).
     let res_mask = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask());
     KeyVault::new(VaultStorage::new(res_mask))
@@ -47,11 +48,11 @@ pub(crate) fn vault(io: &impl HsmIo) -> KeyVault<VaultStorage> {
 impl UnoHsmPal {
     /// Reject cross-session access to a `Session`-scoped key with
     /// [`HsmError::KeyNotFound`]; partition-scoped keys are unaffected.
-    fn enforce_session_key_isolation(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn enforce_session_key_isolation(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let Some(bound) = vault(io).key_session(key_id)? else {
             return Ok(());
         };
-        let sqe = Sqe::from(io.sqe());
+        let sqe = Sqe::try_from(io.sqe())?;
         let current = sqe.session_flags().id_valid().then(|| sqe.session_id());
         if current == Some(bound) {
             Ok(())
@@ -64,7 +65,7 @@ impl UnoHsmPal {
 impl HsmVault for UnoHsmPal {
     async fn vault_key_create(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
@@ -76,36 +77,36 @@ impl HsmVault for UnoHsmPal {
         v.create(self, io, app_id, key, kind, session, attrs).await
     }
 
-    async fn vault_key_delete(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    async fn vault_key_delete(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let mut v = vault(io);
         v.delete(self, io, key_id).await
     }
 
-    fn vault_key_disable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn vault_key_disable(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let mut v = vault(io);
         v.disable(key_id)
     }
 
-    fn vault_key_enable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn vault_key_enable(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let mut v = vault(io);
         v.enable(key_id)
     }
 
     async fn vault_key_delete_by_session(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         session_id: HsmSessId,
     ) -> HsmResult<()> {
         let mut v = vault(io);
         v.delete_by_session(self, io, u16::from(session_id)).await
     }
 
-    async fn vault_clear(&self, io: &impl HsmIo) -> HsmResult<()> {
+    async fn vault_clear(&self, io: &UnoHsmIo) -> HsmResult<()> {
         let mut v = vault(io);
         v.clear(self, io).await
     }
 
-    fn vault_key(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
         self.enforce_session_key_isolation(io, key_id)?;
         let (table, off, len) = vault(io).key_location(key_id)?;
         let addr = VaultStorage::blob_addr(table) + off;
@@ -114,16 +115,16 @@ impl HsmVault for UnoHsmPal {
         Ok(unsafe { DmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) })
     }
 
-    fn vault_key_len(&self, _io: &impl HsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {
+    fn vault_key_len(&self, _io: &UnoHsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {
         KeyVault::<VaultStorage>::key_len(kind)
     }
 
-    fn vault_key_kind(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind> {
+    fn vault_key_kind(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind> {
         self.enforce_session_key_isolation(io, key_id)?;
         vault(io).key_kind(key_id)
     }
 
-    fn vault_key_attrs(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs> {
+    fn vault_key_attrs(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs> {
         self.enforce_session_key_isolation(io, key_id)?;
         vault(io).key_attrs(key_id)
     }
@@ -133,7 +134,7 @@ impl UnoHsmPal {
     #[cfg(feature = "fips_validation_hooks")]
     pub(crate) fn vault_key_session_binding(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_id: HsmKeyId,
     ) -> HsmResult<Option<u16>> {
         vault(io).key_session_binding(key_id)

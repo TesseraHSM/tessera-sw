@@ -45,7 +45,6 @@ use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -65,7 +64,7 @@ use crate::part_state;
 /// the race-winner gate against a concurrently-dispatched create/restore.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -148,7 +147,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// Encode the `SdRestoreLocalBackup` response around the refreshed backups.
 fn encode_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     pok_local: &DmaBuf,
     sd_mk: &DmaBuf,
 ) -> HsmResult<&'p DmaBuf> {

@@ -29,12 +29,11 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
-use tsra_fw_hsm_pal_traits::HsmIo;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_uno_drivers_gdma::GdmaAddr;
 use tsra_fw_uno_drivers_gdma::GdmaBuf;
 use tsra_fw_uno_drivers_gdma::MemInterface;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_reg_soc::zero::ZERO_BASE;
 use tsra_fw_uno_reg_soc::zero::ZERO_SIZE;
 use tsra_fw_uno_trace::tracing::*;
@@ -123,13 +122,14 @@ fn sgl_desc_buf(desc: &[u8; 16]) -> GdmaBuf {
 /// yields 0, which selects device memory.
 #[inline(always)]
 fn host_interface(part_id: HsmPartId) -> HsmResult<MemInterface> {
-    let ctrl_id = crate::pal::pfn_to_axi_id(u8::from(part_id)).ok_or(HsmError::InvalidArg)?;
+    let pfn = u8::from(part_id);
+    let ctrl_id = crate::pal::pfn_to_axi_id(pfn).ok_or(HsmError::InvalidArg)?;
     Ok(MemInterface::Host { ctrl_id })
 }
 
 /// Uno platform implementation of [`HsmGdmaController`].
 impl HsmGdmaController for UnoHsmPal {
-    async fn copy_mem(&self, _io: &impl HsmIo, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn copy_mem(&self, _io: &Self::Io, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
         let src_addr = device_dma_buf(src.as_ptr(), src.len() as u32);
         let dst_addr = device_dma_buf(dst.as_mut_ptr(), dst.len() as u32);
         self.gdma
@@ -157,7 +157,7 @@ impl HsmGdmaController for UnoHsmPal {
     /// Falls back to [`DmaBuf::zeroize`] if the engine has no free tag or the
     /// transfer fails, so the buffer is scrubbed either way; both paths use
     /// writes that cannot be optimized away.
-    async fn zeroize_mem(&self, _io: &impl HsmIo, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut DmaBuf) -> HsmResult<()> {
         let len = dst.len();
         if len == 0 {
             return Ok(());
@@ -170,7 +170,7 @@ impl HsmGdmaController for UnoHsmPal {
 
     async fn copy_mem_from_host(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         src: HsmDmaAddr,
         src2: HsmDmaAddr,
         dst: &mut DmaBuf,
@@ -193,7 +193,7 @@ impl HsmGdmaController for UnoHsmPal {
 
     async fn copy_mem_from_host_raw(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         desc: &[u8; 16],
         dst: &mut DmaBuf,
         prp: bool,
@@ -281,7 +281,7 @@ impl HsmGdmaController for UnoHsmPal {
 
     async fn copy_mem_to_host(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         src: &DmaBuf,
         dst: HsmDmaAddr,
         dst2: HsmDmaAddr,

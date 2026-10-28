@@ -41,7 +41,7 @@ use super::*;
 /// - any error from the session / vault PAL calls.
 pub(crate) fn resolve_masking_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
     session_scoped: bool,
 ) -> HsmResult<&'p DmaBuf> {
@@ -111,7 +111,7 @@ pub(crate) struct MaskSpec<'a> {
 /// that field at the returned slice.
 pub(crate) async fn mask_blob<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
     spec: MaskSpec<'_>,
     plaintext: &[u8],

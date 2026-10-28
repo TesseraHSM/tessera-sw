@@ -14,7 +14,6 @@ use core::ops::AsyncFnOnce;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_single_cell::SingleCell;
@@ -23,6 +22,7 @@ use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_STRIDE;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 // ── Heap identifiers (PAL-internal) ───────────────────────────────
@@ -383,7 +383,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Mutable byte slice, or [`HsmError::NotEnoughSpace`].
-    fn alloc(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut [u8]> {
+    fn alloc(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut [u8]> {
         bump(self, io.index(), NONDMA, size, 4).map(|(_, s)| s)
     }
 
@@ -396,7 +396,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Mutable zeroed byte slice, or [`HsmError::NotEnoughSpace`].
-    fn alloc_zeroed(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut [u8]> {
+    fn alloc_zeroed(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut [u8]> {
         let s = self.alloc(io, size)?;
         s.fill(0);
         Ok(s)
@@ -411,7 +411,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Mutable reference to stored value, or [`HsmError::NotEnoughSpace`].
-    fn alloc_val<T: Sized>(&self, io: &impl HsmIo, value: T) -> HsmResult<&mut T> {
+    fn alloc_val<T: Sized>(&self, io: &UnoHsmIo, value: T) -> HsmResult<&mut T> {
         let (_, s) = bump(
             self,
             io.index(),
@@ -436,7 +436,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Mutable [`DmaBuf`], or [`HsmError::NotEnoughSpace`].
-    fn dma_alloc(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
+    fn dma_alloc(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
         let s = bump(self, io.index(), DMA, size, 4).map(|(_, s)| s)?;
         // SAFETY: SRAM region returned by `bump` is DMA-accessible.
         Ok(unsafe { DmaBuf::from_raw_mut(s) })
@@ -451,7 +451,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Mutable zeroed [`DmaBuf`], or [`HsmError::NotEnoughSpace`].
-    fn dma_alloc_zeroed(&self, io: &impl HsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
+    fn dma_alloc_zeroed(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
         let s = self.dma_alloc(io, size)?;
         s.fill(0);
         Ok(s)
@@ -488,7 +488,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Mutable [`DmaBuf`] of length selected by `f`, or error from `f`/allocator.
-    fn dma_alloc_var<F>(&self, io: &impl HsmIo, f: F) -> HsmResult<&mut DmaBuf>
+    fn dma_alloc_var<F>(&self, io: &UnoHsmIo, f: F) -> HsmResult<&mut DmaBuf>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>,
     {
@@ -549,7 +549,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Tuple `(&mut DmaBuf, T)` on success, or error from `f`/allocator.
-    fn dma_alloc_var_with<F, T>(&self, io: &impl HsmIo, f: F) -> HsmResult<(&mut DmaBuf, T)>
+    fn dma_alloc_var_with<F, T>(&self, io: &UnoHsmIo, f: F) -> HsmResult<(&mut DmaBuf, T)>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>,
     {
@@ -596,7 +596,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Returns whatever value `f` returns.
-    fn alloc_scoped<R>(&self, io: &impl HsmIo, f: impl FnOnce(&Self::Scoped<'_>) -> R) -> R {
+    fn alloc_scoped<R>(&self, io: &UnoHsmIo, f: impl FnOnce(&Self::Scoped<'_>) -> R) -> R {
         let scope = UnoScopedAlloc {
             pal: self,
             io_index: io.index(),
@@ -616,7 +616,7 @@ impl HsmAlloc for UnoHsmPal {
     ///
     /// # Returns
     /// Resolves to whatever value `f` returns.
-    async fn alloc_scoped_async<R, F>(&self, io: &impl HsmIo, f: F) -> R
+    async fn alloc_scoped_async<R, F>(&self, io: &UnoHsmIo, f: F) -> R
     where
         F: for<'a> AsyncFnOnce(&'a Self::Scoped<'a>) -> R,
     {

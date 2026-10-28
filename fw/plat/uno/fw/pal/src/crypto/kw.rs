@@ -40,7 +40,6 @@ use core::ops::RangeInclusive;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_aes::AesExclusive;
@@ -48,6 +47,7 @@ use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
 use tsra_fw_uno_drivers_aes::AesRequest;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 // =============================================================================
@@ -329,7 +329,7 @@ impl UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     async fn run_kw_wrap(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         mut state: WrapState<'_>,
     ) -> HsmResult<()> {
@@ -382,7 +382,7 @@ impl UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     async fn run_kw_unwrap(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         mut state: UnwrapState<'_, '_>,
     ) -> HsmResult<()> {
@@ -441,7 +441,7 @@ impl UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     pub(super) async fn kw_wrap_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -493,7 +493,7 @@ impl UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     pub(super) async fn kw_unwrap_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -552,7 +552,7 @@ impl UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     pub(super) async fn kwp_wrap_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,
@@ -643,7 +643,7 @@ impl UnoHsmPal {
     /// * Any [`HsmError`] surfaced by the AES driver.
     pub(super) async fn kwp_unwrap_impl(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key: &DmaBuf,
         input: &DmaBuf,
         output: &mut DmaBuf,

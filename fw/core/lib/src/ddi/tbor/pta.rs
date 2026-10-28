@@ -15,7 +15,6 @@ use tsra_fw_hsm_pal_traits::CertChainInfo;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -77,7 +76,7 @@ fn sec1_public_key<'a>(
 
 async fn hash<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     algorithm: HsmHashAlgo,
     input: &DmaBuf,
@@ -89,7 +88,7 @@ async fn hash<'a, P: HsmPal>(
 
 async fn issuer_cn<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     pta_public_key: &DmaBuf,
 ) -> HsmResult<[u8; csr::SUBJECT_CN_LEN]> {
@@ -119,7 +118,7 @@ async fn issuer_cn<P: HsmPal>(
 /// check; here it is used to recompute the expected subject DN and SKID.
 pub(crate) async fn validate_pta_profile<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     pta_cert: &CertInfo<'_>,
 ) -> HsmResult<()> {
@@ -158,7 +157,7 @@ pub(crate) async fn validate_pta_profile<P: HsmPal>(
 
 async fn build_pid_certificate<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     private_key: &DmaBuf,
     output: &mut DmaBuf,
@@ -214,7 +213,7 @@ pub fn subject_cn(digest: &[u8; 48]) -> [u8; csr::SUBJECT_CN_LEN] {
 /// Generate one PTA-signed PID leaf for this request, without caching it.
 pub(crate) async fn pid_certificate<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
 ) -> HsmResult<&'p DmaBuf> {
     if part_state::part_state(pal, io)? != PartState::Initialized {
         return Err(HsmError::InvalidArg);
@@ -238,7 +237,7 @@ pub(crate) async fn pid_certificate<'p, P: HsmPal>(
 }
 
 /// Fingerprint of a newly generated leaf; later reads generate different DER.
-pub(crate) async fn chain_info<P: HsmPal>(pal: &P, io: &impl HsmIo) -> HsmResult<CertChainInfo> {
+pub(crate) async fn chain_info<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<CertChainInfo> {
     let cert = pid_certificate(pal, io).await?;
     let digest = pal.dma_alloc(io, SHA256_DIGEST_LEN)?;
     pal.hash(io, HsmHashAlgo::Sha256, cert, digest, true)

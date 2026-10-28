@@ -107,7 +107,7 @@ impl HsmHashAlgo {
 /// next consumer (DDI response framing, KDF input, etc.) expects. The
 /// little-endian form is the full byte reversal of the big-endian
 /// digest.
-pub trait HsmHash {
+pub trait HsmHash: HsmIoTypes {
     /// Platform-specific multi-step hash context.
     ///
     /// Created by [`hash_begin`](Self::hash_begin) and consumed by
@@ -144,7 +144,7 @@ pub trait HsmHash {
     /// - `Err(HsmError)` — propagated from the SHA driver.
     async fn hash(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         data: &DmaBuf,
         digest: &mut DmaBuf,
@@ -174,7 +174,7 @@ pub trait HsmHash {
     ///   ([`HsmHashAlgo::hash_state_len`] bytes).
     fn hash_begin<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HashCtx<'a>>
@@ -203,7 +203,7 @@ pub trait HsmHash {
     /// - `Err(HsmError)` — propagated from the SHA driver.
     async fn hash_continue(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: &mut Self::HashCtx<'_>,
         data: &DmaBuf,
     ) -> HsmResult<()>;
@@ -231,7 +231,7 @@ pub trait HsmHash {
     /// - `Err(HsmError)` — propagated from the SHA driver.
     async fn hash_finish(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: Self::HashCtx<'_>,
         digest: &mut DmaBuf,
         big_endian: bool,

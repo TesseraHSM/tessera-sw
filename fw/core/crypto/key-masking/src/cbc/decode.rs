@@ -16,7 +16,6 @@ use tsra_fw_hsm_pal_traits::HsmAes;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 use crate::cbc::format::MaskedKeyAesHeader;
@@ -117,7 +116,7 @@ pub fn peek_metadata(blob: &DmaBuf) -> HsmResult<&[u8]> {
 ///   returning so partial plaintext does not leak.
 pub async fn unmask<P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     masking_key: &DmaBuf,
     blob: &mut DmaBuf,
 ) -> HsmResult<UnmaskLayout>

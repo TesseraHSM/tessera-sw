@@ -30,7 +30,7 @@ impl StdHsmPal {
     /// behaviour. Partition-scoped (`App`/persistent) keys carry no
     /// binding and stay accessible from any context, including internal
     /// firmware IOs whose SQE has no session.
-    fn assert_key_session_access(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn assert_key_session_access(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let entry = self.active_part(io.pid())?;
         let Some(bound) = entry.vault.key_session_binding(key_id)? else {
             return Ok(());
@@ -38,7 +38,7 @@ impl StdHsmPal {
         // Session-bound key: the current session (from the SQE) must map to
         // the same physical vault key id (the session key id) that the key
         // is bound to, else the key is not visible here.
-        let sqe = Sqe::from(io.sqe());
+        let sqe = Sqe::try_from(io.sqe())?;
         let current = if sqe.session_flags().id_valid() {
             entry
                 .session_table
@@ -63,7 +63,7 @@ impl HsmVault for StdHsmPal {
     /// The key is committed immediately.
     async fn vault_key_create(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         key: &DmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
@@ -78,7 +78,7 @@ impl HsmVault for StdHsmPal {
     }
 
     /// Delete a key from the partition's vault.
-    async fn vault_key_delete(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    async fn vault_key_delete(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
         entry.vault.delete(key_id)
     }
@@ -86,13 +86,13 @@ impl HsmVault for StdHsmPal {
     /// Disable (soft-delete) a key — the undo log's reversible-delete
     /// staging step.  Hidden from lookups; `enable` rolls back, `delete`
     /// commits.
-    fn vault_key_disable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn vault_key_disable(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
         entry.vault.disable(key_id)
     }
 
     /// Re-enable a disabled key — the undo side of a reversible delete.
-    fn vault_key_enable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()> {
+    fn vault_key_enable(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
         entry.vault.enable(key_id)
     }
@@ -103,7 +103,7 @@ impl HsmVault for StdHsmPal {
     /// removes all vault entries bound to that physical ID.
     async fn vault_key_delete_by_session(
         &self,
-        io: &impl HsmIo,
+        io: &StdHsmIo,
         session_id: HsmSessId,
     ) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
@@ -112,14 +112,14 @@ impl HsmVault for StdHsmPal {
     }
 
     /// Clear all keys from the partition's vault.
-    async fn vault_clear(&self, io: &impl HsmIo) -> HsmResult<()> {
+    async fn vault_clear(&self, io: &StdHsmIo) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
         entry.vault.clear();
         Ok(())
     }
 
     /// Retrieve key material by ID.
-    fn vault_key(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    fn vault_key(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
         self.assert_key_session_access(io, key_id)?;
         let entry = self.active_part(io.pid())?;
         let bytes = entry.vault.key(key_id)?;
@@ -131,19 +131,19 @@ impl HsmVault for StdHsmPal {
     }
 
     /// Return the firmware raw key size for a given kind.
-    fn vault_key_len(&self, _io: &impl HsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {
+    fn vault_key_len(&self, _io: &StdHsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16> {
         KeyVault::key_len(kind)
     }
 
     /// Query key kind.
-    fn vault_key_kind(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind> {
+    fn vault_key_kind(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind> {
         self.assert_key_session_access(io, key_id)?;
         let entry = self.active_part(io.pid())?;
         entry.vault.key_kind(key_id)
     }
 
     /// Query key attributes.
-    fn vault_key_attrs(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs> {
+    fn vault_key_attrs(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs> {
         self.assert_key_session_access(io, key_id)?;
         let entry = self.active_part(io.pid())?;
         entry.vault.key_attrs(key_id)

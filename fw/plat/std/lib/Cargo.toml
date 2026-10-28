@@ -19,6 +19,7 @@ tokio = { features = ["rt-multi-thread", "time"], workspace = true }
 tsra_fw_ddi_mbor_types.workspace = true
 tsra_fw_hsm_core = { features = ["tracing"], workspace = true }
 tsra_fw_hsm_core_tracing = { features = ["level-warn"], workspace = true }
+tsra_fw_hsm_io.workspace = true
 tsra_fw_hsm_pal_std.workspace = true
 tsra_fw_hsm_pal_traits = { workspace = true }
 

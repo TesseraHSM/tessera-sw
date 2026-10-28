@@ -28,7 +28,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -527,7 +526,7 @@ fn aead_ct_len(suite: HpkeSuite, pt_len: usize) -> usize {
 /// the required [`SealSizes`] without writing anything.
 pub async fn seal<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     cfg: &HpkeSealConfig<'_>,
     pt: &DmaBuf,
     enc_out: Option<&mut [u8]>,
@@ -565,7 +564,7 @@ where
 
 async fn do_seal<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     cfg: &HpkeSealConfig<'_>,
     pt: &DmaBuf,
     enc_out: &mut [u8],
@@ -620,7 +619,7 @@ where
 /// `pt_out = None` returns the upper-bound plaintext length (= `ct.len()`).
 pub async fn open<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     cfg: &HpkeOpenConfig<'_>,
     enc: &[u8],
     ct: &[u8],
@@ -685,7 +684,7 @@ where
 /// pre-computed).
 pub async fn send_export<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     cfg: &HpkeSendExportConfig<'_>,
     enc_out: Option<&mut [u8]>,
     exported_out: Option<&mut [u8]>,
@@ -716,7 +715,7 @@ where
 
 async fn do_send_export<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     cfg: &HpkeSendExportConfig<'_>,
     enc_out: &mut [u8],
     exported_out: &mut [u8],
@@ -762,7 +761,7 @@ where
 /// caller-chosen and not pre-computed.
 pub async fn receive_export<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     cfg: &HpkeReceiveExportConfig<'_>,
     enc: &[u8],
     exported_out: Option<&mut [u8]>,
@@ -808,7 +807,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn derive_exported<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     mode: Mode,
     shared_secret: &DmaBuf,

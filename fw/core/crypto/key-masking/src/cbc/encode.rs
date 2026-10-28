@@ -42,7 +42,6 @@ use tsra_fw_hsm_pal_traits::HsmAes;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 
@@ -112,7 +111,7 @@ use crate::cbc::format::MASKING_KEY_AES_CBC_256_HMAC_384_LEN;
 /// * Any [`HsmError`] surfaced by the PAL RNG, AES, or HMAC drivers.
 pub async fn mask<P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     masking_key: &DmaBuf,
     plaintext: &[u8],
     metadata: &DdiMaskedKeyMetadata<'_>,

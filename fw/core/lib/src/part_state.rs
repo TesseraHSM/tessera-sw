@@ -49,9 +49,9 @@
 //!
 //! ## Arguments
 //!
-//! Every accessor takes `pal: &impl HsmPartitionManager` and
-//! `io: &impl HsmIo`, in that order.  The PAL resolves the target
-//! partition from `io.pid()`; this module never names a partition
+//! Every accessor takes `pal: &P` where `P: HsmPartitionManager` and
+//! `io: &P::Io`, in that order.  The PAL resolves the target
+//! partition from private IO metadata; this module never names a partition
 //! id directly.
 //!
 //! ## Byte-valued properties use [`DmaBuf`]
@@ -132,7 +132,7 @@ use super::*;
 /// [`HsmError::PartPropNotFound`].  A stored byte that does not name
 /// a known [`PartState`] is treated as PAL-side corruption and
 /// surfaces as [`HsmError::InternalError`].
-pub fn part_state(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<PartState> {
+pub fn part_state<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<PartState> {
     let raw = pal.part_prop_get_u8(io, PartPropId::STATE)?;
     PartState::from_u8(raw).ok_or(HsmError::InternalError)
 }
@@ -165,11 +165,7 @@ pub(crate) fn prop_present<T>(result: HsmResult<T>) -> HsmResult<bool> {
 /// PTA key, UPS key, policy hash, POTA thumbprint — to be present) and
 /// `Initializing → Initialized` (`PartFinal`).  A same-state write is a
 /// no-op; any other pair is rejected with [`HsmError::InvalidArg`].
-pub fn part_set_state(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
-    s: PartState,
-) -> HsmResult<()> {
+pub fn part_set_state<P: HsmPartitionManager>(pal: &P, io: &P::Io, s: PartState) -> HsmResult<()> {
     let current = part_state(pal, io)?;
     match (current, s) {
         (PartState::Enabled, PartState::Initializing) => {
@@ -203,7 +199,7 @@ pub const fn part_state_prop_id() -> PartPropId {
 /// `PfnEnable` can transition out of `Faulted`.  Only a free/realloc cycle
 /// (or reboot) clears it.  Uses the raw STATE setter because this is an
 /// out-of-band fault transition, not a normal lifecycle step.
-pub fn part_set_faulted(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<()> {
+pub fn part_set_faulted<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<()> {
     pal.part_prop_set_u8(io, PartPropId::STATE, PartState::Faulted as u8)
 }
 
@@ -213,7 +209,7 @@ pub fn part_set_faulted(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmR
 /// Incremented by the PAL on every allocate/free cycle; used by
 /// lifetime guards (e.g. session handles) to detect partition reuse
 /// across a free/realloc and refuse to operate on a stale generation.
-pub fn part_gen(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<u32> {
+pub fn part_gen<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<u32> {
     pal.part_prop_get_u32(io, PartPropId::GEN)
 }
 
@@ -242,7 +238,7 @@ pub fn part_mfgr_svn(pal: &impl HsmSeedStore) -> u64 {
 /// Wraps [`PartPropId::RES_COUNT`] (`U8`, `RequiredPresent`,
 /// read-only).  Read-only from the caller's perspective; set by the
 /// PAL at partition allocation time from the resource grant.
-pub fn part_res_count(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<u8> {
+pub fn part_res_count<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<u8> {
     pal.part_prop_get_u8(io, PartPropId::RES_COUNT)
 }
 
@@ -259,7 +255,7 @@ pub const fn part_res_count_prop_id() -> PartPropId {
 /// [`HsmError::PartPropNotFound`] before the PAL has populated it
 /// for this partition.  The bytes are opaque to core; only the host
 /// management layer interprets them.
-pub fn part_id<'a>(pal: &'a impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<&'a DmaBuf> {
+pub fn part_id<'a, P: HsmPartitionManager>(pal: &'a P, io: &P::Io) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::ID)
 }
 
@@ -306,20 +302,16 @@ pub fn part_fw_seed(pal: &impl HsmSeedStore) -> &[u8] {
 /// callers handle the absence/error split per the presence
 /// semantics in the module docs.
 #[inline]
-fn key_id_get(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
-    id: PartPropId,
-) -> HsmResult<HsmKeyId> {
+fn key_id_get<P: HsmPartitionManager>(pal: &P, io: &P::Io, id: PartPropId) -> HsmResult<HsmKeyId> {
     let raw = pal.part_prop_get_u16(io, id)?;
     Ok(HsmKeyId::from(raw))
 }
 
 /// Write a vault key reference (`HsmKeyId` is a `u16`).
 #[inline]
-fn key_id_set(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+fn key_id_set<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     id: PartPropId,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
@@ -333,9 +325,9 @@ fn key_id_set(
 /// prior id), so the typed setters that must be write-once gate on the
 /// current presence here.  Returns `err` if the slot is already
 /// populated, and propagates any non-absent read error.
-fn ensure_key_id_unset(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+fn ensure_key_id_unset<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     id: PartPropId,
     err: HsmError,
 ) -> HsmResult<()> {
@@ -349,7 +341,7 @@ fn ensure_key_id_unset(
 ///
 /// Wraps [`PartPropId::ID_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`, **read-only**).
-pub fn part_id_key_id(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<HsmKeyId> {
+pub fn part_id_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::ID_KEY_ID)
 }
 
@@ -363,14 +355,14 @@ pub const fn part_id_key_id_prop_id() -> PartPropId {
 ///
 /// Wraps [`PartPropId::MK_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`).
-pub fn part_mk_key_id(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<HsmKeyId> {
+pub fn part_mk_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::MK_KEY_ID)
 }
 
 /// Set the partition masking key id.
-pub fn part_set_mk_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_mk_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     key_id_set(pal, io, PartPropId::MK_KEY_ID, key_id)
@@ -391,7 +383,7 @@ pub const fn part_mk_key_id_prop_id() -> PartPropId {
 /// `OpenSession` uses to require provisioning before a session can
 /// be opened.  Derived from [`PartPropId::MK_KEY_ID`] presence
 /// (`AbsentUntilSet`).
-pub fn part_is_provisioned(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<bool> {
+pub fn part_is_provisioned<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<bool> {
     match part_mk_key_id(pal, io) {
         Ok(_) => Ok(true),
         Err(HsmError::PartPropNotFound) => Ok(false),
@@ -403,14 +395,14 @@ pub fn part_is_provisioned(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> H
 ///
 /// Wraps [`PartPropId::UPS_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`).
-pub fn part_ups_key_id(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<HsmKeyId> {
+pub fn part_ups_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::UPS_KEY_ID)
 }
 
 /// Set the partition UPS-derived key id.
-pub fn part_set_ups_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_ups_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     ensure_key_id_unset(pal, io, PartPropId::UPS_KEY_ID, HsmError::UpsKeyAlreadySet)?;
@@ -427,14 +419,14 @@ pub const fn part_ups_key_id_prop_id() -> PartPropId {
 ///
 /// Wraps [`PartPropId::PTA_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`).  Bound by the TBOR `PartInit` handler.
-pub fn part_pta_key_id(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<HsmKeyId> {
+pub fn part_pta_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::PTA_KEY_ID)
 }
 
 /// Set the PTA key id.
-pub fn part_set_pta_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_pta_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     ensure_key_id_unset(pal, io, PartPropId::PTA_KEY_ID, HsmError::PtaKeyAlreadySet)?;
@@ -451,17 +443,14 @@ pub const fn part_pta_key_id_prop_id() -> PartPropId {
 ///
 /// Wraps [`PartPropId::LOCAL_MK_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`).  Bound by the TBOR `PartFinal` handler.
-pub fn part_local_mk_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
-) -> HsmResult<HsmKeyId> {
+pub fn part_local_mk_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::LOCAL_MK_KEY_ID)
 }
 
 /// Set the partition-local masking-key id.
-pub fn part_set_local_mk_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_local_mk_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     key_id_set(pal, io, PartPropId::LOCAL_MK_KEY_ID, key_id)
@@ -479,17 +468,17 @@ pub const fn part_local_mk_key_id_prop_id() -> PartPropId {
 ///
 /// Wraps [`PartPropId::EPHEMERAL_MK_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`).  Bound by the TBOR `PartFinal` handler.
-pub fn part_ephemeral_mk_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_ephemeral_mk_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
 ) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::EPHEMERAL_MK_KEY_ID)
 }
 
 /// Set the partition ephemeral masking-key id.
-pub fn part_set_ephemeral_mk_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_ephemeral_mk_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     key_id_set(pal, io, PartPropId::EPHEMERAL_MK_KEY_ID, key_id)
@@ -508,14 +497,14 @@ pub const fn part_ephemeral_mk_key_id_prop_id() -> PartPropId {
 /// `AbsentUntilSet`).  Bound by the TBOR `SdCreateRemoteBackup` handler;
 /// resolves the [`SecurityDomain`](tsra_fw_hsm_pal_traits::HsmKeyScope::SecurityDomain)
 /// scope to its live masking key.
-pub fn part_sd_mk_key_id(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<HsmKeyId> {
+pub fn part_sd_mk_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::SD_MK_KEY_ID)
 }
 
 /// Set the security-domain masking-key id.
-pub fn part_set_sd_mk_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_sd_mk_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     key_id_set(pal, io, PartPropId::SD_MK_KEY_ID, key_id)
@@ -532,10 +521,7 @@ pub const fn part_sd_mk_key_id_prop_id() -> PartPropId {
 ///
 /// Wraps [`PartPropId::RSA_UNWRAPPING_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`).
-pub fn part_unwrapping_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
-) -> HsmResult<HsmKeyId> {
+pub fn part_unwrapping_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::RSA_UNWRAPPING_KEY_ID)
 }
 
@@ -543,9 +529,9 @@ pub fn part_unwrapping_key_id(
 ///
 /// Used by `EstablishCredential` to re-import the host-persisted key
 /// after a live migration.
-pub fn part_set_unwrapping_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_unwrapping_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     key_id_set(pal, io, PartPropId::RSA_UNWRAPPING_KEY_ID, key_id)
@@ -561,17 +547,14 @@ pub const fn part_unwrapping_key_id_prop_id() -> PartPropId {
 ///
 /// Wraps [`PartPropId::SESSION_ENC_KEY_ID`] (`U16 → HsmKeyId`,
 /// `AbsentUntilSet`).
-pub fn part_session_enc_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
-) -> HsmResult<HsmKeyId> {
+pub fn part_session_enc_key_id<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::SESSION_ENC_KEY_ID)
 }
 
 /// Set the session-encryption key id.
-pub fn part_set_session_enc_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_session_enc_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     key_id_set(pal, io, PartPropId::SESSION_ENC_KEY_ID, key_id)
@@ -591,17 +574,17 @@ pub const fn part_session_enc_key_id_prop_id() -> PartPropId {
 /// handler clears the slot with [`part_clear_establish_cred_key`] as
 /// soon as the credential has been unwrapped, so a successful return
 /// here means the key is still consumable.
-pub fn part_establish_cred_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_establish_cred_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
 ) -> HsmResult<HsmKeyId> {
     key_id_get(pal, io, PartPropId::ESTABLISH_CRED_KEY_ID)
 }
 
 /// Set the establish-credential key id.
-pub fn part_set_establish_cred_key_id(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_establish_cred_key_id<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
 ) -> HsmResult<()> {
     key_id_set(pal, io, PartPropId::ESTABLISH_CRED_KEY_ID, key_id)
@@ -614,10 +597,7 @@ pub fn part_set_establish_cred_key_id(
 /// absent slot (returns `Ok(())`).  After this call,
 /// [`part_establish_cred_key_id`] returns
 /// [`HsmError::PartPropNotFound`].
-pub fn part_clear_establish_cred_key(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
-) -> HsmResult<()> {
+pub fn part_clear_establish_cred_key<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<()> {
     pal.part_prop_clear(io, PartPropId::ESTABLISH_CRED_KEY_ID)
 }
 
@@ -649,9 +629,9 @@ pub const fn part_establish_cred_key_id_prop_id() -> PartPropId {
 /// `RequiredPresent` (default-baked at allocation time from
 /// [`DEFAULT_PSK_CO`] / [`DEFAULT_PSK_CU`]) so a successful call
 /// always yields exactly [`PSK_LEN`] bytes.
-pub fn part_psk<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_psk<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
     psk_id: u8,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, part_psk_prop_id(psk_id)?)
@@ -662,9 +642,9 @@ pub fn part_psk<'a>(
 /// `data` must be exactly [`PSK_LEN`] bytes; see [`part_psk`] for the
 /// `psk_id → slot` mapping.  Rotating from the default PSK is required
 /// before exposing the partition to untrusted traffic.
-pub fn part_set_psk(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_psk<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     psk_id: u8,
     data: &DmaBuf,
 ) -> HsmResult<()> {
@@ -694,9 +674,9 @@ pub fn part_psk_prop_id(psk_id: u8) -> HsmResult<PartPropId> {
 /// been called.  Verified by the upper layer via constant-time
 /// compare against the returned bytes — callers must not branch on
 /// the contents themselves.
-pub fn part_credential<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_credential<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::CREDENTIAL)
 }
@@ -708,9 +688,9 @@ pub fn part_credential<'a>(
 /// [`PartPropId::CREDENTIAL`] clear returns
 /// [`HsmError::VaultAppLimitReached`]; an all-zero `id` or `pin` half
 /// is rejected with [`HsmError::InvalidAppCredentials`].
-pub fn part_set_credential(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_credential<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::CREDENTIAL, data)
@@ -732,9 +712,9 @@ pub fn part_set_credential(
 ///   a length other than 32 bytes — that signals a property
 ///   catalogue / PAL storage corruption bug, not an authentication
 ///   failure, and must not be masked as one.
-pub fn part_verify_credential(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_verify_credential<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     id: &[u8],
     pin: &[u8],
 ) -> HsmResult<()> {
@@ -778,7 +758,7 @@ pub const NONCE_LEN: usize = 32;
 /// `RequiredPresent`, sensitive).  Always present; the PAL
 /// initialises it on partition allocation.  Refresh by writing fresh
 /// PAL-RNG bytes via [`part_set_nonce`].
-pub fn part_nonce<'a>(pal: &'a impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<&'a DmaBuf> {
+pub fn part_nonce<'a, P: HsmPartitionManager>(pal: &'a P, io: &P::Io) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::NONCE)
 }
 
@@ -787,9 +767,9 @@ pub fn part_nonce<'a>(pal: &'a impl HsmPartitionManager, io: &impl HsmIo) -> Hsm
 /// Wraps [`PartPropId::NONCE`] setter.  Callers must source the
 /// bytes from the PAL RNG (e.g. [`HsmRng::rng_fill_bytes`]) so the
 /// new nonce is unpredictable to the host.
-pub fn part_set_nonce(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_nonce<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     nonce: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::NONCE, nonce)
@@ -808,9 +788,9 @@ pub const fn part_nonce_prop_id() -> PartPropId {
 /// The comparison runs over the full 32-byte width regardless of
 /// where bytes first diverge, so a timing side-channel cannot
 /// localize the mismatch.  Length mismatch is also a mismatch.
-pub fn part_verify_nonce(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_verify_nonce<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     nonce: &[u8],
 ) -> HsmResult<()> {
     let stored = part_nonce(pal, io)?;
@@ -872,9 +852,9 @@ pub fn part_owner_seed(pal: &impl HsmSeedStore, svn: u64) -> HsmResult<&[u8]> {
 /// sensitive).  Returns [`HsmError::PartPropNotFound`] before the
 /// host has supplied it this power cycle.  Set at most once per
 /// power cycle.
-pub fn part_sealed_bk3<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_sealed_bk3<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SEALED_BK3)
 }
@@ -885,9 +865,9 @@ pub fn part_sealed_bk3<'a>(
 /// is write-once per power cycle and returns
 /// [`HsmError::SealedBk3AlreadySet`] if invoked a second time
 /// without an intervening clear (free / NSSR).
-pub fn part_set_sealed_bk3(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_sealed_bk3<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::SEALED_BK3, data)
@@ -905,9 +885,9 @@ pub const fn part_sealed_bk3_prop_id() -> PartPropId {
 /// Wraps [`PartPropId::MASKED_BK_BOOT`]
 /// (`VarBytes { max: MASKED_BK_BOOT_LEN }`, `AbsentUntilSet`,
 /// sensitive).
-pub fn part_masked_bk_boot<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_masked_bk_boot<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::MASKED_BK_BOOT)
 }
@@ -915,9 +895,9 @@ pub fn part_masked_bk_boot<'a>(
 /// Write the masked BK_BOOT blob.  **Sensitive.**
 ///
 /// `data` must be ≤ [`MASKED_BK_BOOT_LEN`] bytes.
-pub fn part_set_masked_bk_boot(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_masked_bk_boot<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::MASKED_BK_BOOT, data)
@@ -936,9 +916,9 @@ pub const fn part_masked_bk_boot_prop_id() -> PartPropId {
 /// `AbsentUntilSet`, **read-only**).  Returns
 /// [`HsmError::PartPropNotFound`] before session establishment has
 /// bound the value for the current launch.  Populated by the PAL.
-pub fn part_vm_launch_guid<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_vm_launch_guid<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::VM_LAUNCH_GUID)
 }
@@ -956,9 +936,9 @@ pub const fn part_vm_launch_guid_prop_id() -> PartPropId {
 /// Set by the TBOR `PartInit` handler from the hash of the request's
 /// `part_policy`, and consulted by DDI handlers that gate on policy
 /// identity.
-pub fn part_policy_hash<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_policy_hash<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::POLICY_HASH)
 }
@@ -967,9 +947,9 @@ pub fn part_policy_hash<'a>(
 ///
 /// `data` must be exactly the 48-byte SHA-384 digest of the PartPolicy
 /// blob.
-pub fn part_set_policy_hash(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_policy_hash<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::POLICY_HASH, data)
@@ -985,9 +965,9 @@ pub const fn part_policy_hash_prop_id() -> PartPropId {
 ///
 /// Wraps [`PartPropId::POTA_THUMBPRINT`] (`FixedBytes { len: 48 }`,
 /// `AbsentUntilSet`).
-pub fn part_pota_thumbprint<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_pota_thumbprint<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::POTA_THUMBPRINT)
 }
@@ -995,9 +975,9 @@ pub fn part_pota_thumbprint<'a>(
 /// Write the POTA thumbprint.
 ///
 /// `data` must be exactly 48 bytes.
-pub fn part_set_pota_thumbprint(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_pota_thumbprint<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::POTA_THUMBPRINT, data)
@@ -1011,34 +991,34 @@ pub const fn part_pota_thumbprint_prop_id() -> PartPropId {
 }
 
 /// Read the SATA (Sealing Authority Trust Anchor) thumbprint.
-pub fn part_sata_thumbprint<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_sata_thumbprint<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SATA_THUMBPRINT)
 }
 
 /// Write the SATA thumbprint.  `data` must be exactly 48 bytes.
-pub fn part_set_sata_thumbprint(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_sata_thumbprint<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::SATA_THUMBPRINT, data)
 }
 
 /// Read the SAPOTA (Sealing Authority's POTA) thumbprint.
-pub fn part_sapota_thumbprint<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_sapota_thumbprint<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SAPOTA_THUMBPRINT)
 }
 
 /// Write the SAPOTA thumbprint.  `data` must be exactly 48 bytes.
-pub fn part_set_sapota_thumbprint(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_sapota_thumbprint<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::SAPOTA_THUMBPRINT, data)
@@ -1050,9 +1030,9 @@ pub fn part_set_sapota_thumbprint(
 /// Reads the PSK via [`part_psk`] and compares against
 /// [`DEFAULT_PSK_CO`] / [`DEFAULT_PSK_CU`] in constant time.  Returns
 /// `Ok(true)` only when the stored bytes match the default.
-pub fn part_psk_is_default(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_psk_is_default<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     psk_id: u8,
 ) -> HsmResult<bool> {
     let stored = part_psk(pal, io, psk_id)?;
@@ -1080,7 +1060,7 @@ pub fn part_psk_is_default(
 /// Wraps `part_prop_get_bytes(CREDENTIAL)` and maps
 /// [`HsmError::PartPropNotFound`] to `Ok(false)`; any other PAL error
 /// propagates.
-pub fn part_is_credential_set(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<bool> {
+pub fn part_is_credential_set<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<bool> {
     match pal.part_prop_get_bytes(io, PartPropId::CREDENTIAL) {
         Ok(_) => Ok(true),
         Err(HsmError::PartPropNotFound) => Ok(false),
@@ -1091,34 +1071,34 @@ pub fn part_is_credential_set(pal: &impl HsmPartitionManager, io: &impl HsmIo) -
 // ─── Public keys, BKS2, BK3 session (Phase A property additions) ─────
 
 /// Raw ECC-P384 public key (x ∥ y, 96 B) for the partition identity key.
-pub fn part_id_pub_key<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_id_pub_key<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::ID_PUB_KEY)
 }
 
 /// Raw ECC-P384 public key (x ∥ y, 96 B) for the session encryption key.
-pub fn part_session_enc_pub_key<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_session_enc_pub_key<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SESSION_ENC_PUB_KEY)
 }
 
 /// Raw ECC-P384 public key (x ∥ y, 96 B) for the establish-credential key.
-pub fn part_establish_cred_pub_key<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_establish_cred_pub_key<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::ESTABLISH_CRED_PUB_KEY)
 }
 
 /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) of the Partition
 /// Trust Anchor.
-pub fn part_pta_pub_key<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_pta_pub_key<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::PTA_PUB_KEY)
 }
@@ -1136,9 +1116,9 @@ fn pta_sec1_to_raw(sec1: &DmaBuf) -> HsmResult<&DmaBuf> {
 
 /// Store the PTA public key from its host-supplied SEC1 form: validates
 /// the `0x04` prefix and persists the 96-byte raw coordinates.
-pub fn part_set_pta_pub_key(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_pta_pub_key<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     sec1: &DmaBuf,
 ) -> HsmResult<()> {
     let raw = pta_sec1_to_raw(sec1)?;
@@ -1148,9 +1128,9 @@ pub fn part_set_pta_pub_key(
 /// Bind both halves of the Partition Trust Anchor — the vault key id
 /// and the public key — in a single composite write.  `pub_sec1` is the
 /// host-supplied SEC1 form; its raw coordinates are stored.
-pub fn part_set_pta_key(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_pta_key<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     key_id: HsmKeyId,
     pub_sec1: &DmaBuf,
 ) -> HsmResult<()> {
@@ -1160,24 +1140,24 @@ pub fn part_set_pta_key(
 }
 
 /// BK3 session key (48 B). **Sensitive.**
-pub fn part_bk3_session<'a>(
-    pal: &'a impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_bk3_session<'a, P: HsmPartitionManager>(
+    pal: &'a P,
+    io: &P::Io,
 ) -> HsmResult<&'a DmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::BK3_SESSION)
 }
 
 /// Set the BK3 session key (48 B).
-pub fn part_set_bk3_session(
-    pal: &impl HsmPartitionManager,
-    io: &impl HsmIo,
+pub fn part_set_bk3_session<P: HsmPartitionManager>(
+    pal: &P,
+    io: &P::Io,
     data: &DmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::BK3_SESSION, data)
 }
 
 /// Whether the partition has completed one-shot BK3 initialization.
-pub fn part_is_bk3_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<bool> {
+pub fn part_is_bk3_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<bool> {
     pal.part_prop_get_bool(io, PartPropId::BK3_INITIALIZED)
 }
 
@@ -1185,13 +1165,13 @@ pub fn part_is_bk3_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo) 
 /// `true`.  Returns [`HsmError::Bk3AlreadyInitialized`] if the flag
 /// was already set in the current partition incarnation.  This is the
 /// authoritative race-winner gate for `DdiInitBk3`.
-pub fn part_mark_bk3_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<()> {
+pub fn part_mark_bk3_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<()> {
     pal.part_prop_set_bool(io, PartPropId::BK3_INITIALIZED, true)
 }
 
 /// Whether the partition has completed one-shot security-domain
 /// initialization (its `SDMK` is provisioned).
-pub fn part_is_sd_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<bool> {
+pub fn part_is_sd_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<bool> {
     pal.part_prop_get_bool(io, PartPropId::SD_INITIALIZED)
 }
 
@@ -1199,7 +1179,7 @@ pub fn part_is_sd_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo) -
 /// state to `true`.  Returns [`HsmError::SdAlreadyInitialized`] if the
 /// flag was already set in the current partition incarnation.  This is
 /// the authoritative race-winner gate for `SdCreateRemoteBackup`.
-pub fn part_mark_sd_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<()> {
+pub fn part_mark_sd_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<()> {
     pal.part_prop_set_bool(io, PartPropId::SD_INITIALIZED, true)
 }
 
@@ -1209,7 +1189,7 @@ pub fn part_mark_sd_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo)
 /// inverse could not be recorded, so a full undo log cannot permanently
 /// wedge the partition's SD gate.  (The one-shot setter permits
 /// `→ false`; the normal rollback path is the undo log.)
-pub fn part_clear_sd_initialized(pal: &impl HsmPartitionManager, io: &impl HsmIo) -> HsmResult<()> {
+pub fn part_clear_sd_initialized<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> HsmResult<()> {
     pal.part_prop_set_bool(io, PartPropId::SD_INITIALIZED, false)
 }
 

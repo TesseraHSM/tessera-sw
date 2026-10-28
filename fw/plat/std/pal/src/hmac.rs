@@ -102,7 +102,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_gen_key(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _algo: HsmHashAlgo,
         key: &mut DmaBuf,
     ) -> HsmResult<()> {
@@ -111,7 +111,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_sign(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         data: &DmaBuf,
@@ -122,7 +122,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_verify(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         data: &DmaBuf,
@@ -133,7 +133,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_begin<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
@@ -161,7 +161,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_continue(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         ctx: &mut Self::HmacCtx<'_>,
         data: &DmaBuf,
     ) -> HsmResult<()> {
@@ -170,7 +170,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_finish(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         mut ctx: Self::HmacCtx<'_>,
         tag: &mut DmaBuf,
     ) -> HsmResult<()> {
@@ -179,7 +179,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_finish_into(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         mut ctx: Self::HmacCtx<'_>,
         dest: &mut DmaBuf,
     ) -> HsmResult<()> {
@@ -188,7 +188,7 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_finish_verify(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         mut ctx: Self::HmacCtx<'_>,
         tag: &DmaBuf,
     ) -> HsmResult<bool> {

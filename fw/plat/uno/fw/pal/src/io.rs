@@ -29,13 +29,17 @@ use core::ops::AsyncFnOnce;
 
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
+use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::RawCqe;
+use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
-use tsra_fw_hsm_pal_traits::HsmPartId;
+use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
@@ -68,6 +72,16 @@ pub struct UnoHsmIo {
 }
 
 impl UnoHsmIo {
+    /// Returns the platform-private resource slot for this IO.
+    pub(crate) fn index(&self) -> u16 {
+        self.index
+    }
+
+    /// Returns the queue ID from IO_META.
+    fn queue_id(&self) -> u16 {
+        self.io_meta().queue.read(IO_META_QUEUE::QUEUE_ID) as u16
+    }
+
     /// Constructs a **bare, unscrubbed** IO handle over the dedicated admin
     /// slot ([`ADMIN_IO_INDEX`]), targeting partition `pid`.
     ///
@@ -76,7 +90,7 @@ impl UnoHsmIo {
     /// [`UnoScopedAlloc`] types — rather than a bespoke admin IO type —
     /// avoids re-monomorphizing the generic vault / crypto / DMA paths.
     /// The target `pid` is written into the admin slot's `IO_META` so
-    /// [`pid`](HsmIo::pid) resolves correctly.
+    /// [`pid`](Self::pid) resolves correctly.
     ///
     /// # Prefer [`with_admin_io`](UnoHsmPal::with_admin_io)
     ///
@@ -111,13 +125,6 @@ impl UnoHsmIo {
     fn io_meta(&self) -> &IoMetaEntry {
         &IO_Q.io_meta[self.index as usize]
     }
-}
-
-impl HsmIo for UnoHsmIo {
-    /// Returns the IO slot index.
-    fn index(&self) -> u16 {
-        self.index
-    }
 
     /// Returns the partition ID for this IO.
     ///
@@ -125,34 +132,26 @@ impl HsmIo for UnoHsmIo {
     /// are indexed by the dense PcieFunction id, so translate here. An axi_id
     /// naming no function yields an out-of-range id, which the partition
     /// lookup rejects with `InvalidArg` rather than aliasing a valid slot.
-    fn pid(&self) -> HsmPartId {
+    pub(crate) fn pid(&self) -> HsmPartId {
         let axi_id = self.io_meta().ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
         HsmPartId::from(crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION))
     }
+}
 
-    /// Returns the queue ID from IO_META.
-    fn queue_id(&self) -> u16 {
-        self.io_meta().queue.read(IO_META_QUEUE::QUEUE_ID) as u16
-    }
-
-    /// Returns the queue index from IO_META.
-    fn queue_idx(&self) -> u16 {
-        self.io_meta().queue.read(IO_META_QUEUE::QUEUE_INDEX) as u16
-    }
-
+impl HsmIo for UnoHsmIo {
     /// Returns the SQE from `IO_SQ[index]`.
     ///
     /// IIC DMAs the host-side 64-byte SQE directly into this slot, so it
     /// can be read in-place without a copy.
     fn sqe(&self) -> &HsmSqe {
         const _ASSERT_SQE_SIZE: () =
-            assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<HsmSqe>());
+            assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<RawSqe>());
         const _ASSERT_SQE_ALIGN: () =
-            assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<HsmSqe>());
+            assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<RawSqe>());
 
         let io_sq = &IO_Q.io_sq[self.index as usize];
-        // SAFETY: The queue entry and HsmSqe share the asserted layout; this IO owns the slot.
-        unsafe { &*(io_sq as *const IoSqEntry as *const HsmSqe) }
+        // SAFETY: The queue entry and RawSqe share the asserted layout; this IO owns the slot.
+        unsafe { &*(io_sq as *const IoSqEntry as *const RawSqe) }
     }
 
     /// Returns a mutable reference to the CQE at `IO_CQ[index]`.
@@ -161,21 +160,23 @@ impl HsmIo for UnoHsmIo {
     /// reads it when sending the completion back to the host.
     fn cqe(&mut self) -> &mut HsmCqe {
         const _ASSERT_CQE_SIZE: () =
-            assert!(mem::size_of::<IoCqEntry>() == mem::size_of::<HsmCqe>());
+            assert!(mem::size_of::<IoCqEntry>() == mem::size_of::<RawCqe>());
         const _ASSERT_CQE_ALIGN: () =
-            assert!(mem::align_of::<IoCqEntry>() == mem::align_of::<HsmCqe>());
+            assert!(mem::align_of::<IoCqEntry>() == mem::align_of::<RawCqe>());
 
-        // SAFETY: The asserted layout matches HsmCqe; the mutable IO borrow owns its CQ slot.
+        // SAFETY: The asserted layout matches RawCqe; the mutable IO borrow owns its CQ slot.
         unsafe {
-            let ptr = core::ptr::addr_of!(IO_Q.io_cq[self.index as usize]) as *mut HsmCqe;
+            let ptr = core::ptr::addr_of!(IO_Q.io_cq[self.index as usize]) as *mut RawCqe;
             &mut *ptr
         }
     }
 }
 
-impl HsmIoController for UnoHsmPal {
+impl HsmIoTypes for UnoHsmPal {
     type Io = UnoHsmIo;
+}
 
+impl HsmIoController for UnoHsmPal {
     /// Awaits the next inbound IO from the IIC driver.
     async fn poll_io(&self) -> HsmResult<Self::Io> {
         let index = self.iic.recv().await;
@@ -189,6 +190,8 @@ impl HsmIoController for UnoHsmPal {
     /// separately by [`drop_io`](HsmIoController::drop_io) so the caller
     /// can run post-completion work over `io` first.
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
+        let queue_id = io.queue_id();
+        Cqe::try_from(io.cqe())?.set_sq_id(queue_id);
         self.oic.send(io.index)?.await
     }
 
@@ -237,7 +240,7 @@ impl UnoHsmPal {
     ///
     /// # Parameters
     /// - `pid`: partition the session targets; written into the admin
-    ///   slot's `IO_META` so [`pid`](HsmIo::pid) resolves correctly.
+    ///   slot's `IO_META` so [`UnoHsmIo::pid`] resolves correctly.
     /// - `f`: async closure run with the admin IO handle and a rewound
     ///   scoped allocator.
     ///

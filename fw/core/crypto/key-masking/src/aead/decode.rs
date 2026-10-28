@@ -11,7 +11,6 @@ use tsra_fw_core_crypto_aead_envelope::peek as aead_peek;
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -83,9 +82,9 @@ pub struct UnmaskedView<'a> {
 ///   the label, or non-zero reserved tail.
 /// * Any [`HsmError`] surfaced by
 ///   [`aead_envelope::open`](aead_open).
-pub async fn unmask<'a>(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn unmask<'a, P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     key: &DmaBuf,
     blob: &'a mut DmaBuf,
 ) -> HsmResult<UnmaskedView<'a>> {

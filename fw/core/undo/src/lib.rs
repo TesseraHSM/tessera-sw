@@ -413,7 +413,7 @@ impl<'a> UndoLog<'a> {
     /// `Poison`-class step failed; the walk always runs to completion
     /// (best-effort for the rest).  Zeroizes the backing buffer last, so
     /// any captured secret pre-image (e.g. a prior PSK) does not linger.
-    pub async fn apply_undo<V: UndoVerbs>(mut self, verbs: &V, io: &impl HsmIo) -> WalkOutcome {
+    pub async fn apply_undo<V: UndoVerbs>(mut self, verbs: &V, io: &V::Io) -> WalkOutcome {
         let mut outcome = WalkOutcome::Ok;
         let mut i = self.nentries;
         while i > 0 {
@@ -436,7 +436,7 @@ impl<'a> UndoLog<'a> {
     /// return type mirrors [`apply_undo`](Self::apply_undo) for a uniform
     /// dispatcher.  Zeroizes the backing buffer last, so any captured
     /// secret pre-image (e.g. a prior PSK) does not linger.
-    pub async fn apply_commit<V: UndoVerbs>(mut self, verbs: &V, io: &impl HsmIo) -> WalkOutcome {
+    pub async fn apply_commit<V: UndoVerbs>(mut self, verbs: &V, io: &V::Io) -> WalkOutcome {
         for i in 0..self.nentries {
             let entry = self.entry_at(i);
             // Best-effort: a failed zeroise leaves a benign orphan.
@@ -462,7 +462,7 @@ impl<'a> UndoLog<'a> {
         &self,
         entry: &UndoEntry,
         verbs: &V,
-        io: &impl HsmIo,
+        io: &V::Io,
     ) -> HsmResult<()> {
         match entry.kind() {
             KIND_VAULT_CREATE => verbs.vault_delete(io, HsmKeyId::from(entry.id)).await,
@@ -497,7 +497,7 @@ impl<'a> UndoLog<'a> {
         &self,
         entry: &UndoEntry,
         verbs: &V,
-        io: &impl HsmIo,
+        io: &V::Io,
     ) -> HsmResult<()> {
         match entry.kind() {
             // Finalise a soft-delete: zeroise the retired key.
@@ -531,66 +531,71 @@ fn undo_policy(kind: u8) -> FailurePolicy {
 /// supply a tiny mock.  The PAL stays undo-unaware — these map onto the
 /// same id-keyed verbs handlers already use.
 pub trait UndoVerbs {
+    /// IO context accepted by these PAL verbs.
+    type Io: HsmIo;
+
     /// Delete (zeroise) a vault key.
-    async fn vault_delete(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()>;
+    async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()>;
     /// Re-enable a soft-deleted (disabled) vault key.
-    fn vault_enable(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()>;
+    fn vault_enable(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()>;
     /// Clear a property slot (restore-to-absent).
-    fn prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()>;
+    fn prop_clear(&self, io: &Self::Io, id: PartPropId) -> HsmResult<()>;
     /// Restore a `U8` property.
-    fn prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()>;
+    fn prop_set_u8(&self, io: &Self::Io, id: PartPropId, value: u8) -> HsmResult<()>;
     /// Restore a `U16` property.
-    fn prop_set_u16(&self, io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()>;
+    fn prop_set_u16(&self, io: &Self::Io, id: PartPropId, value: u16) -> HsmResult<()>;
     /// Restore a `U32` property.
-    fn prop_set_u32(&self, io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()>;
+    fn prop_set_u32(&self, io: &Self::Io, id: PartPropId, value: u32) -> HsmResult<()>;
     /// Restore a `Bool` property.
-    fn prop_set_bool(&self, io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()>;
+    fn prop_set_bool(&self, io: &Self::Io, id: PartPropId, value: bool) -> HsmResult<()>;
     /// Restore a byte property from arena bytes.
-    fn prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
+    fn prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
     /// Destroy a session (its slot + backing vault keys) — the coarse
     /// inverse of session create/promote.
-    async fn session_destroy(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()>;
+    async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 }
 
 impl<P> UndoVerbs for P
 where
     P: HsmVault + HsmPartitionManager + HsmSessionManager,
 {
-    async fn vault_delete(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+    type Io = P::Io;
+
+    async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
         HsmVault::vault_key_delete(self, io, id).await
     }
 
-    fn vault_enable(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+    fn vault_enable(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
         HsmVault::vault_key_enable(self, io, id)
     }
 
-    fn prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()> {
+    fn prop_clear(&self, io: &Self::Io, id: PartPropId) -> HsmResult<()> {
         HsmPartitionManager::part_prop_clear(self, io, id)
     }
 
-    fn prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+    fn prop_set_u8(&self, io: &Self::Io, id: PartPropId, value: u8) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_u8(self, io, id, value)
     }
 
-    fn prop_set_u16(&self, io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
+    fn prop_set_u16(&self, io: &Self::Io, id: PartPropId, value: u16) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_u16(self, io, id, value)
     }
 
-    fn prop_set_u32(&self, io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()> {
+    fn prop_set_u32(&self, io: &Self::Io, id: PartPropId, value: u32) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_u32(self, io, id, value)
     }
 
-    fn prop_set_bool(&self, io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
+    fn prop_set_bool(&self, io: &Self::Io, id: PartPropId, value: bool) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_bool(self, io, id, value)
     }
 
-    fn prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+    fn prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
         // `data` is already a `&DmaBuf` sub-view of the per-IO undo arena
         // (itself carved from the DMA heap), so no re-branding is needed.
         HsmPartitionManager::part_prop_set_bytes(self, io, id, data)
     }
 
-    async fn session_destroy(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+    async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
         HsmSessionManager::session_destroy(self, io, id).await
     }
 }
@@ -612,7 +617,6 @@ mod tests {
     use core::task::Waker;
 
     use tsra_fw_hsm_pal_traits::HsmCqe;
-    use tsra_fw_hsm_pal_traits::HsmPartId;
     use tsra_fw_hsm_pal_traits::HsmSqe;
     use tsra_fw_hsm_pal_traits::PartState;
 
@@ -639,23 +643,11 @@ mod tests {
 
     #[derive(Default)]
     struct FakeIo {
-        sqe: HsmSqe,
-        cqe: HsmCqe,
+        sqe: [u32; 16],
+        cqe: [u32; 4],
     }
 
     impl HsmIo for FakeIo {
-        fn index(&self) -> u16 {
-            0
-        }
-        fn pid(&self) -> HsmPartId {
-            HsmPartId::from(0u8)
-        }
-        fn queue_id(&self) -> u16 {
-            0
-        }
-        fn queue_idx(&self) -> u16 {
-            0
-        }
         fn sqe(&self) -> &HsmSqe {
             &self.sqe
         }
@@ -738,7 +730,9 @@ mod tests {
     }
 
     impl UndoVerbs for MockVerbs {
-        async fn vault_delete(&self, _io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+        type Io = FakeIo;
+
+        async fn vault_delete(&self, _io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
             self.record(OP_DELETE, u16::from(id), 0);
             if self.fail_delete.get() {
                 Err(HsmError::KeyNotFound)
@@ -746,7 +740,7 @@ mod tests {
                 Ok(())
             }
         }
-        fn vault_enable(&self, _io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+        fn vault_enable(&self, _io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
             self.record(OP_ENABLE, u16::from(id), 0);
             if self.fail_enable.get() {
                 Err(HsmError::KeyNotFound)
@@ -754,33 +748,33 @@ mod tests {
                 Ok(())
             }
         }
-        fn prop_clear(&self, _io: &impl HsmIo, id: PartPropId) -> HsmResult<()> {
+        fn prop_clear(&self, _io: &Self::Io, id: PartPropId) -> HsmResult<()> {
             self.record(OP_CLEAR, id.raw(), 0);
             Ok(())
         }
-        fn prop_set_u8(&self, _io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+        fn prop_set_u8(&self, _io: &Self::Io, id: PartPropId, value: u8) -> HsmResult<()> {
             self.record(OP_SET_U8, id.raw(), u32::from(value));
             Ok(())
         }
-        fn prop_set_u16(&self, _io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
+        fn prop_set_u16(&self, _io: &Self::Io, id: PartPropId, value: u16) -> HsmResult<()> {
             self.record(OP_SET_U16, id.raw(), u32::from(value));
             Ok(())
         }
-        fn prop_set_u32(&self, _io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()> {
+        fn prop_set_u32(&self, _io: &Self::Io, id: PartPropId, value: u32) -> HsmResult<()> {
             self.record(OP_SET_U32, id.raw(), value);
             Ok(())
         }
-        fn prop_set_bool(&self, _io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
+        fn prop_set_bool(&self, _io: &Self::Io, id: PartPropId, value: bool) -> HsmResult<()> {
             self.record(OP_SET_BOOL, id.raw(), u32::from(value));
             Ok(())
         }
-        fn prop_set_bytes(&self, _io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+        fn prop_set_bytes(&self, _io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
             self.record(OP_SET_BYTES, id.raw(), data.len() as u32);
             self.last_bytes.borrow_mut()[..data.len()].copy_from_slice(data);
             self.last_bytes_len.set(data.len());
             Ok(())
         }
-        async fn session_destroy(&self, _io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+        async fn session_destroy(&self, _io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
             self.record(OP_SESSION_DESTROY, u16::from(id), 0);
             if self.fail_session_destroy.get() {
                 Err(HsmError::InvalidArg)

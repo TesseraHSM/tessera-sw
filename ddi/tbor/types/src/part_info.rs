@@ -81,4 +81,7 @@ pub struct TborPartInfoResp {
 
     /// Raw ECC-P384 identity public-key coordinates (`x ‖ y`, 96 B).
     pub pid_pub_key: [u8; PID_PUB_KEY_LEN],
+
+    /// Whether this partition's security domain is initialized (0 = no, 1 = yes).
+    pub sd_initialized: u8,
 }

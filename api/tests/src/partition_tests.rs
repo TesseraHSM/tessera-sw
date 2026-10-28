@@ -68,6 +68,28 @@ fn test_partition_info_list() {
 }
 
 #[api_test]
+fn test_partition_sd_initialized() {
+    let part_mgr = HsmPartitionManager::partition_info_list();
+    assert!(!part_mgr.is_empty(), "No partitions found.");
+    for part_info in &part_mgr {
+        assert!(
+            part_info.api_rev_range.is_some(),
+            "Partition metadata should remain accessible"
+        );
+        let part = HsmPartitionManager::open_partition(&part_info.path, test_api_rev())
+            .expect("Failed to open the partition");
+        part.reset().expect("Partition reset failed");
+        assert!(
+            !part
+                .sd_initialized()
+                .expect("Failed to query SD initialization"),
+            "SD must not be initialized after resetting {}",
+            part_info.path
+        );
+    }
+}
+
+#[api_test]
 fn test_open_partition() {
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");

@@ -23,14 +23,10 @@
 //!
 //! ## Addressing
 //!
-//! Every method takes both an [`HsmIo`] handle and an explicit
-//! [`HsmPartId`].  Unlike most PAL traits, the partition is *not*
-//! resolved from `io.pid()` here: the cert store is read by core
-//! partition-management paths that need to inspect *another*
-//! partition's chains (for example, returning the host's own
-//! identity-cert metadata in a query that arrived on partition 0).
-//! The [`HsmIo`] handle is still passed for per-IO scope (allocator,
-//! logging, throttling).
+//! Every method takes the platform's IO handle. The platform resolves
+//! the target partition from its private IO context; callers cannot
+//! select another partition's chain. The handle also provides per-IO
+//! scope for allocation, logging, and throttling.
 
 use super::*;
 
@@ -61,18 +57,16 @@ pub struct CertChainInfo {
 /// blocking the core's IO loop.  Implementations backed by RAM may
 /// resolve immediately; callers should still treat the await as
 /// potentially yielding.
-pub trait HsmCertStore {
+pub trait HsmCertStore: HsmIoTypes {
     /// Returns metadata for the certificate chain at
-    /// `(part_id, slot_id)`.
+    /// `slot_id` in the IO's bound partition.
     ///
     /// Cheap query that lets the host decide whether to fetch
     /// individual certificates; performs no buffer allocation.
     ///
     /// # Parameters
     ///
-    /// - `io` — caller's I/O context (per-IO scope).
-    /// - `part_id` — partition whose chain is being queried (not
-    ///   necessarily `io.pid()`).
+    /// - `io` — caller's I/O context, bound to the target partition.
     /// - `slot_id` — chain slot within the partition.  Valid range
     ///   is platform-defined; the standard PAL currently treats this
     ///   as advisory.
@@ -80,17 +74,12 @@ pub trait HsmCertStore {
     /// # Returns
     ///
     /// - `Ok(info)` — populated [`CertChainInfo`].
-    /// - `Err(HsmError::InvalidArg)` — `part_id` or `slot_id` is out
-    ///   of range, or the partition has no chain installed at this
+    /// - `Err(HsmError::InvalidArg)` — the bound partition or `slot_id`
+    ///   is out of range, or the partition has no chain installed at this
     ///   slot.
     /// - `Err(HsmError)` — propagated from the underlying storage
     ///   driver.
-    async fn get_cert_chain_info(
-        &self,
-        io: &impl HsmIo,
-        part_id: HsmPartId,
-        slot_id: u8,
-    ) -> HsmResult<CertChainInfo>;
+    async fn get_cert_chain_info(&self, io: &Self::Io, slot_id: u8) -> HsmResult<CertChainInfo>;
 
     /// Reads one certificate from a chain, optionally copying its
     /// bytes into a caller-supplied buffer.
@@ -103,12 +92,11 @@ pub trait HsmCertStore {
     ///
     /// # Parameters
     ///
-    /// - `io` — caller's I/O context (per-IO scope).
-    /// - `part_id` — partition whose chain is being read.
+    /// - `io` — caller's I/O context, bound to the target partition.
     /// - `slot_id` — chain slot within the partition.
     /// - `idx` — zero-based certificate index; must satisfy
-    ///   `idx < CertChainInfo::count` for the same `(part_id,
-    ///   slot_id)`.  By convention `idx == 0` is the root and the
+    ///   `idx < CertChainInfo::count` for the same bound partition and
+    ///   `slot_id`. By convention `idx == 0` is the root and the
     ///   last index (`count - 1`) is the partition leaf.
     /// - `cert` — `None` to query the size, or `Some(buf)` to copy
     ///   the DER-encoded certificate into `buf[..size]`.  `buf.len()`
@@ -118,15 +106,14 @@ pub trait HsmCertStore {
     ///
     /// - `Ok(size)` — number of bytes that were (or would be)
     ///   written.
-    /// - `Err(HsmError::InvalidArg)` — `part_id`, `slot_id`, or
-    ///   `idx` is out of range, or `cert = Some(buf)` and
+    /// - `Err(HsmError::InvalidArg)` — the bound partition, `slot_id`,
+    ///   or `idx` is out of range, or `cert = Some(buf)` and
     ///   `buf.len() < size`.
     /// - `Err(HsmError)` — propagated from the underlying storage
     ///   driver.
     async fn get_cert(
         &self,
-        io: &impl HsmIo,
-        part_id: HsmPartId,
+        io: &Self::Io,
         slot_id: u8,
         idx: u8,
         cert: Option<&mut [u8]>,

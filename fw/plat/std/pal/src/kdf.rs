@@ -30,7 +30,7 @@ fn to_hash_algo(algo: HsmHashAlgo) -> HashAlgo {
 impl HsmKdf for StdHsmPal {
     async fn hkdf_extract(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         salt: Option<&DmaBuf>,
         ikm: &DmaBuf,
@@ -50,7 +50,7 @@ impl HsmKdf for StdHsmPal {
 
     async fn hkdf_expand(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         prk: &DmaBuf,
         info: Option<&DmaBuf>,
@@ -70,7 +70,7 @@ impl HsmKdf for StdHsmPal {
 
     async fn sp800_108_kdf(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         key: &DmaBuf,
         label: Option<&DmaBuf>,
@@ -90,7 +90,7 @@ impl HsmKdf for StdHsmPal {
 
     async fn mgf1(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _algo: HsmHashAlgo,
         _seed: &DmaBuf,
         _mask: &mut DmaBuf,
@@ -100,7 +100,7 @@ impl HsmKdf for StdHsmPal {
 
     async fn mgf1_xor(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _algo: HsmHashAlgo,
         _seed: &DmaBuf,
         _mask: &mut DmaBuf,
@@ -110,7 +110,7 @@ impl HsmKdf for StdHsmPal {
 
     async fn x963_kdf(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         z: &DmaBuf,
         shared_info: &DmaBuf,
@@ -129,7 +129,7 @@ impl HsmKdf for StdHsmPal {
 
     async fn sp800_56a_kdf(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
         z: &DmaBuf,
         other_info: &DmaBuf,

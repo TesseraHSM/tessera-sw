@@ -23,7 +23,6 @@
 use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
@@ -38,6 +37,7 @@ use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
 use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_uno_drivers_session_store::SessionStore;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 /// API-revision portion of the session blob (bytes).
@@ -62,7 +62,7 @@ const SESSION_CU_BLOB_SIZE: usize =
 const SESSION_CU_AUTH_BLOB_SIZE: usize = SESSION_CU_BLOB_SIZE + 2 * SESSION_MAC_DIR_KEY_LEN;
 
 impl HsmSessionManager for UnoHsmPal {
-    fn session_limit_reached(&self, io: &impl HsmIo) -> bool {
+    fn session_limit_reached(&self, io: &UnoHsmIo) -> bool {
         let Ok(table) = SessionStore::partition(io.pid()) else {
             return true;
         };
@@ -71,7 +71,7 @@ impl HsmSessionManager for UnoHsmPal {
 
     async fn session_create(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         api_rev: &[u8],
         masking_key: &[u8],
         id: Option<HsmSessId>,
@@ -146,7 +146,7 @@ impl HsmSessionManager for UnoHsmPal {
         }
     }
 
-    async fn session_destroy(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+    async fn session_destroy(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<()> {
         let mut table = SessionStore::partition(io.pid())?;
 
         // A renegotiating slot has no live vault state: the partition reset
@@ -177,7 +177,7 @@ impl HsmSessionManager for UnoHsmPal {
         Ok(())
     }
 
-    fn session_state(&self, io: &impl HsmIo, id: HsmSessId) -> HsmSessionState {
+    fn session_state(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmSessionState {
         let Ok(table) = SessionStore::partition(io.pid()) else {
             return HsmSessionState::Invalid;
         };
@@ -186,7 +186,7 @@ impl HsmSessionManager for UnoHsmPal {
 
     async fn session_create_pending(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         role: SessionRole,
         handshake_state: &DmaBuf,
     ) -> HsmResult<HsmSessId> {
@@ -234,7 +234,7 @@ impl HsmSessionManager for UnoHsmPal {
 
     fn session_pending_state(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         id: HsmSessId,
         out: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
@@ -256,7 +256,7 @@ impl HsmSessionManager for UnoHsmPal {
 
     async fn session_promote(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         id: HsmSessId,
         api_rev: &[u8],
         param_key: &[u8],
@@ -336,7 +336,7 @@ impl HsmSessionManager for UnoHsmPal {
         Ok(())
     }
 
-    fn session_param_key(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_param_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.physical_id(id)?;
         // The param_key is the 32-byte field following the 8-byte api_rev
@@ -356,7 +356,7 @@ impl HsmSessionManager for UnoHsmPal {
             .0)
     }
 
-    fn session_masking_key(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_masking_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.physical_id(id)?;
         let blob = self.vault_key(io, physical_id)?;
@@ -380,7 +380,7 @@ impl HsmSessionManager for UnoHsmPal {
         Ok(blob.split_at(offset).1.split_at(size).0)
     }
 
-    fn session_try_consume_psk_change(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+    fn session_try_consume_psk_change(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<()> {
         let mut table = SessionStore::partition(io.pid())?;
         table.try_consume_psk_change(id)
     }

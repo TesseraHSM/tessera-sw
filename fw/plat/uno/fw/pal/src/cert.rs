@@ -24,13 +24,13 @@ use tsra_fw_hsm_pal_traits::HsmCertStore;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 use crate::dev_id_cblob;
 use crate::gsram_alias;
@@ -77,13 +77,8 @@ struct AliasSigner<'a> {
     alias_key: &'a [u8],
 }
 
-impl TbsSigner for AliasSigner<'_> {
-    async fn sign_digest(
-        &self,
-        io: &impl HsmIo,
-        digest: &DmaBuf,
-        sig: &mut DmaBuf,
-    ) -> HsmResult<()> {
+impl TbsSigner<UnoHsmIo> for AliasSigner<'_> {
+    async fn sign_digest(&self, io: &UnoHsmIo, digest: &DmaBuf, sig: &mut DmaBuf) -> HsmResult<()> {
         // The GSRAM alias key is a SEC1 `ECPrivateKey` DER blob
         // (`ECC_DER_P384_PRIVATE_NO_PUB_LENGTH`), not a raw scalar: the private
         // key is the OCTET STRING value, stored big-endian.
@@ -158,7 +153,7 @@ impl UnoHsmPal {
     /// deterministic ECDSA-P384.
     async fn generate_pid_cert(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         part_id: HsmPartId,
         out: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
@@ -243,7 +238,7 @@ impl UnoHsmPal {
     }
 
     /// SHA-1 over `data`, returning the 20-byte digest.
-    async fn sha1_20(&self, io: &impl HsmIo, data: &[u8]) -> HsmResult<[u8; SKI_LEN]> {
+    async fn sha1_20(&self, io: &UnoHsmIo, data: &[u8]) -> HsmResult<[u8; SKI_LEN]> {
         self.alloc_scoped_async(io, async |scope| {
             let inp = scope.dma_alloc(data.len())?;
             inp.copy_from_slice(data);
@@ -260,7 +255,7 @@ impl UnoHsmPal {
     }
 
     /// SHA-256 over `data`, returning the 32-byte digest.
-    async fn sha256_32(&self, io: &impl HsmIo, data: &[u8]) -> HsmResult<[u8; SHA256_LEN]> {
+    async fn sha256_32(&self, io: &UnoHsmIo, data: &[u8]) -> HsmResult<[u8; SHA256_LEN]> {
         self.alloc_scoped_async(io, async |scope| {
             let inp = scope.dma_alloc(data.len())?;
             inp.copy_from_slice(data);
@@ -443,20 +438,15 @@ impl HsmCertStore for UnoHsmPal {
     /// matches the bytes [`get_cert`] serves.
     ///
     /// # Parameters
-    /// * `io` — operation-scoped I/O context.
-    /// * `part_id` — partition whose chain is queried.
+    /// * `io` — operation-scoped I/O context bound to the target partition.
     /// * `slot_id` — chain slot; only slot 0 is supported.
     ///
     /// # Returns
     /// * `Ok(CertChainInfo)` — chain length + thumbprint.
     /// * `Err(HsmError::InvalidArg)` — non-zero slot, missing/invalid device-id
     ///   CBLOB, missing GSRAM alias certificate, or unprovisioned partition.
-    async fn get_cert_chain_info(
-        &self,
-        io: &impl HsmIo,
-        part_id: HsmPartId,
-        slot_id: u8,
-    ) -> HsmResult<CertChainInfo> {
+    async fn get_cert_chain_info(&self, io: &UnoHsmIo, slot_id: u8) -> HsmResult<CertChainInfo> {
+        let part_id = io.pid();
         if slot_id != 0 {
             return Err(HsmError::InvalidArg);
         }
@@ -504,8 +494,7 @@ impl HsmCertStore for UnoHsmPal {
     /// returns the size; `Some(buf)` copies the DER into `buf`.
     ///
     /// # Parameters
-    /// * `io` — operation-scoped I/O context.
-    /// * `part_id` — partition whose chain is read.
+    /// * `io` — operation-scoped I/O context bound to the target partition.
     /// * `slot_id` — chain slot; only slot 0 is supported.
     /// * `idx` — zero-based certificate index (`< count`).
     /// * `cert` — `None` to query size, `Some(buf)` to copy.
@@ -516,12 +505,12 @@ impl HsmCertStore for UnoHsmPal {
     ///   CBLOB/alias cert, or unprovisioned partition.
     async fn get_cert(
         &self,
-        io: &impl HsmIo,
-        part_id: HsmPartId,
+        io: &UnoHsmIo,
         slot_id: u8,
         idx: u8,
         cert: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
+        let part_id = io.pid();
         if slot_id != 0 {
             return Err(HsmError::InvalidArg);
         }

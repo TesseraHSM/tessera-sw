@@ -117,7 +117,7 @@
 //! considered it.
 
 use crate::DmaBuf;
-use crate::HsmIo;
+use crate::HsmIoTypes;
 use crate::HsmResult;
 
 /// Platform hook for opcodes the core does not implement.
@@ -127,7 +127,7 @@ use crate::HsmResult;
 /// the two core dispatchers apply different pre-gating before they reach
 /// the fall-through, and a platform may want to extend one protocol
 /// without touching the other.
-pub trait HsmCustomDispatch {
+pub trait HsmCustomDispatch: HsmIoTypes {
     /// Handle an MBOR opcode the core does not implement.
     ///
     /// `req` is the whole request, exactly as it arrived. The core has
@@ -152,7 +152,7 @@ pub trait HsmCustomDispatch {
     ///   per-IO allocator and valid until the IO completes.
     /// - `Err(HsmError::UnsupportedCmd)` — opcode not handled here
     ///   either; the core surfaces this to the host unchanged.
-    async fn mbor_dispatch(&self, io: &impl HsmIo, req: &mut DmaBuf) -> HsmResult<&DmaBuf>;
+    async fn mbor_dispatch(&self, io: &Self::Io, req: &mut DmaBuf) -> HsmResult<&DmaBuf>;
 
     /// Handle a TBOR opcode the core does not implement.
     ///
@@ -177,5 +177,5 @@ pub trait HsmCustomDispatch {
     ///   per-IO allocator and valid until the IO completes.
     /// - `Err(HsmError::UnsupportedCmd)` — opcode not handled here
     ///   either; the core surfaces this to the host unchanged.
-    async fn tbor_dispatch(&self, io: &impl HsmIo, opcode: u8, req: &DmaBuf) -> HsmResult<&DmaBuf>;
+    async fn tbor_dispatch(&self, io: &Self::Io, opcode: u8, req: &DmaBuf) -> HsmResult<&DmaBuf>;
 }

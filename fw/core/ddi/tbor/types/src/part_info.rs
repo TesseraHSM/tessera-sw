@@ -119,4 +119,7 @@ pub struct TborPartInfoResp<'a> {
     /// natural big-endian (SEC1) order.
     #[tbor(buffer, len = 96)]
     pub pid_pub_key: &'a [u8],
+
+    /// Whether this partition's security domain is initialized (0 = no, 1 = yes).
+    pub sd_initialized: u8,
 }

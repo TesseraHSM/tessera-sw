@@ -152,7 +152,7 @@ impl<'p> DispatchResult<'p> {
 /// `HsmCertStore::get_cert` which is async.
 pub(crate) async fn dispatch<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<DispatchResult<'p>> {

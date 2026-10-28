@@ -18,7 +18,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 #[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 #[cfg(feature = "tsra_test_hooks")]
@@ -34,6 +33,7 @@ use super::get_priv_key;
 use super::raw_key_import;
 #[cfg(feature = "tsra_test_hooks")]
 use super::trigger_crash;
+use crate::UnoHsmIo;
 use crate::pal::UnoHsmPal;
 
 /// Maximum encoded size of one action-specific opaque payload.
@@ -109,7 +109,7 @@ impl TryFrom<u32> for SupportedTestAction {
 /// Decode the action selector and route the action-specific request.
 pub(super) async fn dispatch<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_len: usize,
@@ -243,7 +243,7 @@ fn decode_payload_bytes<'a>(
 #[cfg(feature = "tsra_test_hooks")]
 pub(super) fn encode_success<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     hdr: &ReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {

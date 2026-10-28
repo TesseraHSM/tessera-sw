@@ -8,11 +8,11 @@
 
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::SessionRole;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_part_store::Partition;
 

@@ -198,7 +198,7 @@ pub enum HsmEccPct {
 /// Key parameters are byte slices in raw `priv || pub_x || pub_y`
 /// format — not DER — sized per [`HsmEccCurve::priv_key_len`] /
 /// [`HsmEccCurve::pub_key_len`].
-pub trait HsmEcc {
+pub trait HsmEcc: HsmIoTypes {
     /// Generates an ECC key pair on the chosen curve, optionally
     /// writing the keys into caller-provided buffers.
     ///
@@ -245,7 +245,7 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — PKA / RNG / PCT / DMA failure.
     async fn ecc_gen_keypair(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         out: Option<(&mut DmaBuf, &mut DmaBuf)>,
@@ -293,7 +293,7 @@ pub trait HsmEcc {
     ///   mode agree.
     async fn ecc_gen_keypair_from_root(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         root: &DmaBuf,
@@ -340,7 +340,7 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — PKA / RNG failure.
     async fn ecc_sign(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         hash: &DmaBuf,
@@ -390,7 +390,7 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — propagated from the PKA driver.
     async fn ecc_verify(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
         pub_key: &DmaBuf,
         hash: &DmaBuf,
@@ -412,7 +412,7 @@ pub trait HsmEcc {
     ///   private key, or `out` is too small.
     fn ecc_priv_der_to_vault(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         der: &DmaBuf,
         out: Option<&mut DmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)>;
@@ -444,7 +444,7 @@ pub trait HsmEcc {
     ///   width, is out of range (`0` or `>= n`), or `out` is too small.
     fn ecc_priv_to_vault(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
         d: &DmaBuf,
         out: Option<&mut DmaBuf>,
@@ -476,7 +476,7 @@ pub trait HsmEcc {
     ///   scalar, or `out` is too small.
     fn ecc_vault_to_priv(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
         vault: &DmaBuf,
         out: Option<&mut DmaBuf>,
@@ -498,7 +498,7 @@ pub trait HsmEcc {
     ///   ECC private key, or `pub_out` is too small.
     async fn ecc_priv_pub_key(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         priv_key: &DmaBuf,
         pub_out: Option<&mut DmaBuf>,
     ) -> HsmResult<usize>;
@@ -535,7 +535,7 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — propagated from the PKA driver.
     async fn ecc_pub_from_priv(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         pub_key: &mut DmaBuf,
@@ -573,7 +573,7 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — PKA driver failure.
     async fn ecdh_derive(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
         priv_key: &DmaBuf,
         pub_key: &DmaBuf,

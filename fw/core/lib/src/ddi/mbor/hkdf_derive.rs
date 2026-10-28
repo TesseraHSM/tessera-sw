@@ -35,7 +35,7 @@ use super::*;
 /// corrupt.
 pub(crate) async fn hkdf_derive<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {

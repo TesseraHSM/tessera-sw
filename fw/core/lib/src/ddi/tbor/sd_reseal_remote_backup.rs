@@ -63,7 +63,6 @@ use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -101,7 +100,7 @@ const _: () = assert!(SD_ENC_LEN + (BKS3_LEN + 16) == POK_REMOTE_BACKUP_LEN);
 /// backup.  It makes no observable state change.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     req_buf: &mut DmaBuf,
     oob: Option<OobPtr>,
 ) -> HsmResult<&'p DmaBuf> {
@@ -323,11 +322,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 }
 
 /// Encode the `SdResealRemoteBackup` response around the resealed backup.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
-    pok: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
+fn encode_response<'p, P: HsmPal>(pal: &'p P, io: &P::Io, pok: &DmaBuf) -> HsmResult<&'p DmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {
         let frame = TborSdResealRemoteBackupResp::encode(buf, 0, false)?
             .dst_remote_backup(pok)?

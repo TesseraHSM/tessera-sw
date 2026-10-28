@@ -54,7 +54,7 @@ use super::*;
 /// reference firmware's `is_reopen` path in the OpenSession FSM.
 pub(crate) async fn reopen_session<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
 ) -> HsmResult<&'p DmaBuf> {
@@ -131,7 +131,7 @@ pub(crate) async fn reopen_session<'p, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn encode_reopen_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     hdr: &DdiReqHdr,
     sess_id: HsmSessId,
     bk_session: &DmaBuf,
