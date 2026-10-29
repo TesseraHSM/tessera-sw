@@ -16,8 +16,6 @@
 //! `y` input and `x` output; `tsra_crypto` (OpenSSL) is big-endian
 //! native, so the tests reverse each operand at the boundary.
 
-#![cfg(feature = "emu")]
-
 use tsra_crypto::Encrypter;
 use tsra_crypto::ExportableKey;
 use tsra_crypto::Key;

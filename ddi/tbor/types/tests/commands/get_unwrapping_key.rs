@@ -13,8 +13,6 @@
 //! * Stability — a second call returns the same (stable) key.
 //! * Role access — Crypto-User sessions can also fetch the key.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;

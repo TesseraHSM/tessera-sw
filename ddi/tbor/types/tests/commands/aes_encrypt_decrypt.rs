@@ -21,8 +21,6 @@
 //! * Imported AES-128/192/256 keys encrypt/decrypt successfully.
 //! * Non-block-aligned encrypt/decrypt messages are rejected.
 
-#![cfg(feature = "emu")]
-
 use rand::RngExt;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
@@ -37,7 +35,7 @@ use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_CLASS_AES;
 
 use crate::commands::aes_generate_key::generate_key;
-use crate::commands::aes_generate_key::SCOPE_LOCAL;
+use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 
