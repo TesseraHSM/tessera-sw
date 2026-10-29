@@ -19,6 +19,7 @@ use std::task::Poll;
 use std::task::Waker;
 use std::time::Duration;
 
+use tsra_fw_hsm_std::test_hooks;
 use tsra_fw_hsm_std::StdHsm;
 
 const IO_PID: u8 = 1;
@@ -90,6 +91,84 @@ fn shutdown_completes_after_draining_in_flight_ios() {
     done_rx
         .recv_timeout(Duration::from_secs(10))
         .expect("shutdown did not complete — Embassy thread hung");
+
+    drop(rt);
+}
+
+/// Regression test for the drain actually blocking on genuinely
+/// in-flight work, not just on the submitter's own `io()` future having
+/// returned: holds one IO inside the Embassy executor (past the point
+/// its CQE reply has already reached the submitter, but before its
+/// Embassy task reports itself done) via [`test_hooks`], confirms
+/// `shutdown_async` does *not* complete while that hold is in effect,
+/// then releases it and confirms `shutdown_async` completes promptly.
+#[tokio::test]
+async fn shutdown_async_waits_for_a_genuinely_in_flight_io_before_completing() {
+    let hsm = Arc::new(StdHsm::new());
+    let _ = hsm.part_alloc(IO_PID, 1u128 << IO_PID).await;
+    let _ = hsm.part_enable(IO_PID).await;
+
+    test_hooks::hold_next_io();
+    hsm.io(sqe(0), IO_PID, 0, 0).await.expect("io");
+    // The submitter-visible `io()` above has already completed (its CQE
+    // reply was sent before the hold point), but the corresponding
+    // Embassy task hasn't yet reported itself done — wait for it to
+    // actually reach the hold before asserting on shutdown's behavior.
+    test_hooks::wait_until_io_blocked().await;
+
+    let hsm = Arc::try_unwrap(hsm).unwrap_or_else(|_| panic!("StdHsm still shared"));
+    let mut shutdown = tokio::spawn(hsm.shutdown_async());
+
+    // Deterministic, not timing-dependent: the held task cannot report
+    // itself done until `release_held_io` is called below, so this can
+    // never flakily observe completion early.
+    tokio::time::timeout(Duration::from_millis(200), &mut shutdown)
+        .await
+        .expect_err("shutdown_async completed while an IO was still genuinely in-flight");
+
+    test_hooks::release_held_io();
+    tokio::time::timeout(Duration::from_secs(10), shutdown)
+        .await
+        .expect("shutdown_async did not complete after the held IO was released")
+        .expect("shutdown_async task panicked");
+}
+
+/// Same as [`shutdown_async_waits_for_a_genuinely_in_flight_io_before_completing`]
+/// but for the blocking `shutdown()` path, called from a plain OS thread
+/// outside the tokio runtime backing the HSM.
+#[test]
+fn shutdown_waits_for_a_genuinely_in_flight_io_before_completing() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    let hsm = Arc::new(StdHsm::with_tokio(rt.handle().clone()));
+    rt.block_on(async {
+        let _ = hsm.part_alloc(IO_PID, 1u128 << IO_PID).await;
+        let _ = hsm.part_enable(IO_PID).await;
+
+        test_hooks::hold_next_io();
+        hsm.io(sqe(0), IO_PID, 0, 0).await.expect("io");
+        test_hooks::wait_until_io_blocked().await;
+    });
+
+    let hsm = Arc::try_unwrap(hsm).unwrap_or_else(|_| panic!("StdHsm still shared"));
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        hsm.shutdown();
+        let _ = done_tx.send(());
+    });
+
+    done_rx
+        .recv_timeout(Duration::from_millis(200))
+        .expect_err("shutdown completed while an IO was still genuinely in-flight");
+
+    test_hooks::release_held_io();
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("shutdown did not complete after the held IO was released");
 
     drop(rt);
 }

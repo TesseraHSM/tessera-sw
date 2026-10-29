@@ -47,14 +47,22 @@ use tsra_fw_hsm_pal_traits::*;
 
 /// Global HSM singleton — concrete type with StdHsmPal.
 ///
-/// [`OnceLock::init`] atomically succeeds at most once, so it also serves
-/// as the one-instance-ever [`StdHsm`] lifecycle reservation: no separate
-/// flag is needed. Note that unlike the previous `AtomicBool`-based guard,
-/// this reservation is *not* rolled back if the Embassy thread fails to
-/// spawn afterward — a transient startup failure permanently prevents any
-/// further `StdHsm` in the process. This is an accepted trade-off for
-/// avoiding a redundant synchronization primitive.
+/// Published only once [`StdHsmBuilder::build`] has confirmed the Embassy
+/// thread actually started (see [`BUILD_RESERVED`]): every Embassy task
+/// reaches it via `HSM.get().await`, which simply waits (polls) until this
+/// is set, so publishing it slightly after the thread spawns is safe.
 static HSM: OnceLock<Hsm<StdHsmPal>> = OnceLock::new();
+
+/// Guards the one-instance-ever [`StdHsm`] build reservation.
+///
+/// Claimed via compare-exchange at the very start of
+/// [`StdHsmBuilder::build`], before any other setup. Unlike initializing
+/// [`HSM`] itself (which cannot be rolled back — [`OnceLock::init`] has no
+/// corresponding "uninit"), this reservation *is* released if a later step
+/// — currently, spawning the Embassy thread — fails, so a transient
+/// startup failure does not permanently prevent a later `build()` retry
+/// from succeeding.
+static BUILD_RESERVED: AtomicBool = AtomicBool::new(false);
 
 /// Number of long-running Embassy loops [`ShutdownTracker`] must wait to
 /// exit before it is drained: [`poll_io`] and [`ipc_task`].
@@ -227,7 +235,77 @@ async fn poll_io(spawner: embassy_executor::Spawner, tracker: Arc<ShutdownTracke
 async fn handle_io(io: StdHsmIo, tracker: Arc<ShutdownTracker>) {
     HSM.get().await.handle_io(io).await;
     tracker.release_handle_io_slot();
+    // Placed *after* the CQE reply has already been sent to the
+    // submitter (so a held IO doesn't also wedge the submitter's own
+    // `io()` future — see the `test_hooks` doc comment) but *before*
+    // `task_done`, so a test can prove shutdown's drain genuinely waits
+    // on the Embassy-internal task count rather than merely on the
+    // submitter-observable completion of `io()`.
+    test_hooks::wait_if_held().await;
     tracker.task_done();
+}
+
+/// Test-only instrumentation letting integration tests (see
+/// `tests/shutdown_test.rs`) deterministically hold one in-flight IO
+/// mid-processing — proving `shutdown`/`shutdown_async` actually block
+/// on [`ShutdownTracker`]'s internal task count rather than merely on
+/// the submitter-observable completion of
+/// [`StdHsm::io`](crate::StdHsm::io): the hold point in [`handle_io`] is
+/// placed *after* the CQE reply has already been sent to the submitter
+/// (so a held IO can't also wedge the submitter's own `io()` future —
+/// which would otherwise make a shutdown-ownership transfer like
+/// `Arc::try_unwrap` impossible while the hold is active) but *before*
+/// `task_done`, so the Embassy-internal bookkeeping stays elevated for a
+/// test-controlled duration even once the submitter has moved on.
+///
+/// Always compiled (not feature-gated): the hook is a no-op whenever a
+/// test hasn't armed it (a single relaxed atomic load on the hot path),
+/// and keeping it unconditional avoids every integration test needing a
+/// matching `--features` flag just to exercise this one test.
+pub mod test_hooks {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    use tokio::sync::Notify;
+
+    static ARMED: AtomicBool = AtomicBool::new(false);
+    static RELEASE: Notify = Notify::const_new();
+    static ABOUT_TO_BLOCK: Notify = Notify::const_new();
+
+    /// Arms the hold: the next [`handle_io`](super::handle_io) task to
+    /// run blocks in [`wait_if_held`] until [`release_held_io`] is
+    /// called. Only one hold may be outstanding at a time.
+    pub fn hold_next_io() {
+        ARMED.store(true, Ordering::Release);
+    }
+
+    /// Releases a hold armed by [`hold_next_io`], letting the blocked
+    /// `handle_io` task proceed. A no-op if nothing is currently held.
+    pub fn release_held_io() {
+        RELEASE.notify_one();
+    }
+
+    /// Awaits until a held IO has actually reached its blocking point in
+    /// [`wait_if_held`] — i.e. the corresponding `handle_io` task is
+    /// genuinely paused, not merely armed-but-not-yet-scheduled. Callers
+    /// should await this before triggering shutdown, so shutdown is
+    /// guaranteed to observe real in-flight work rather than possibly
+    /// racing ahead of the hold. Safe to call either before or after the
+    /// hold actually blocks — `Notify` stores a wakeup permit if no one
+    /// is waiting yet, so no ordering between the two tasks is required.
+    pub async fn wait_until_io_blocked() {
+        ABOUT_TO_BLOCK.notified().await;
+    }
+
+    /// Awaits release if a hold is currently armed; otherwise returns
+    /// immediately. Consumes the arming so only the next `handle_io`
+    /// invocation is held, not every subsequent one.
+    pub(crate) async fn wait_if_held() {
+        if ARMED.swap(false, Ordering::AcqRel) {
+            ABOUT_TO_BLOCK.notify_one();
+            RELEASE.notified().await;
+        }
+    }
 }
 
 /// Embassy task that processes sideband partition commands.
@@ -304,13 +382,14 @@ impl StdHsmBuilder {
     ///
     /// # Panics
     ///
-    /// Panics if a [`StdHsm`] has already been built in this process, or if the
-    /// Embassy thread or tokio runtime fails to start. Also panics if the
-    /// supplied Tokio handle belongs to a current-thread runtime.
+    /// Panics if a [`StdHsm`] has already been built in this process (and
+    /// not yet rolled back by a failed build — see [`BUILD_RESERVED`]), or
+    /// if the Embassy thread or tokio runtime fails to start. Also panics
+    /// if the supplied Tokio handle belongs to a current-thread runtime.
     ///
-    /// A failure to spawn the Embassy thread after the one-instance-ever
-    /// reservation succeeds (see the [`HSM`] doc comment) permanently
-    /// prevents any further `StdHsm` from being built in this process.
+    /// A failure to spawn the Embassy thread releases the reservation (see
+    /// [`BUILD_RESERVED`]), so a later `build()` call in the same process
+    /// can still succeed.
     pub fn build(self) -> StdHsm {
         if let Some(handle) = &self.tokio_handle {
             assert!(
@@ -321,6 +400,18 @@ impl StdHsmBuilder {
                 "StdHsm requires a multi-thread Tokio runtime"
             );
         }
+
+        // Claim the one-instance-ever reservation before any other setup.
+        // See the `BUILD_RESERVED` doc comment for why this is a separate
+        // atomic rather than relying on `HSM.init` for both the
+        // reservation and the data.
+        if BUILD_RESERVED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            panic!("StdHsm can only be built once per process");
+        }
+
         let (owned_rt, handle) = if let Some(h) = self.tokio_handle {
             (None, h)
         } else {
@@ -337,33 +428,8 @@ impl StdHsmBuilder {
         let (ipc_tx, ipc_rx) = async_channel::bounded(4);
 
         let pool_handle = handle.clone();
-
-        // `HSM.init` doubles as the one-instance-ever reservation (see the
-        // `HSM` doc comment): it can only succeed once per process.
         let pal = StdHsmPal::new(io_rx, pool_handle);
-        if HSM.init(Hsm::new(pal)).is_err() {
-            // `owned_rt` is still in scope here, so unwinding this panic
-            // would drop it. Plain `drop` blocks, and would additionally
-            // panic outright if this `build()` call is itself executing
-            // inside a Tokio context (e.g. a second `StdHsm::build()`
-            // from a `#[tokio::test]`), since Tokio disallows blocking-dropping
-            // a runtime from within another runtime's context. Tokio
-            // happens to suppress that inner panic while already
-            // unwinding (see `tokio::runtime::blocking::shutdown`'s
-            // `std::thread::panicking()` check), so this specific case
-            // does not currently escalate to a process abort — but that
-            // is an internal implementation detail, not part of Tokio's
-            // documented contract, and would be easy to regress either
-            // in this crate or in a future Tokio version. Dispose of
-            // `owned_rt` explicitly via `shutdown_background` (which
-            // never blocks and is documented as safe from any context)
-            // before panicking, so correctness here does not depend on
-            // that undocumented behavior.
-            if let Some(rt) = owned_rt {
-                rt.shutdown_background();
-            }
-            panic!("StdHsm can only be built once per process");
-        }
+        let hsm = Hsm::new(pal);
 
         // Reserves one slot each for `poll_io` and `ipc_task`; decremented
         // as those loops (and any in-flight `handle_io`) permanently exit.
@@ -380,7 +446,7 @@ impl StdHsmBuilder {
         // RSS until pages are touched.
         const EMBASSY_STACK_SIZE: usize = 8 * 1024 * 1024;
 
-        let embassy_thread = std::thread::Builder::new()
+        let embassy_thread = match std::thread::Builder::new()
             .name("hsm-embassy".into())
             .stack_size(EMBASSY_STACK_SIZE)
             .spawn(move || {
@@ -402,8 +468,40 @@ impl StdHsmBuilder {
                     },
                     || executor_shutdown.deinitialized.load(Ordering::Acquire),
                 );
-            })
-            .expect("failed to spawn Embassy thread");
+            }) {
+            Ok(thread) => thread,
+            Err(e) => {
+                // Roll back the reservation so a later retry can succeed.
+                // `owned_rt` is still in scope here, so unwinding this
+                // panic would drop it. Plain `drop` blocks, and would
+                // additionally panic outright if this `build()` call is
+                // itself executing inside a Tokio context (e.g. a second
+                // `StdHsm::build()` from a `#[tokio::test]`), since Tokio
+                // disallows blocking-dropping a runtime from within
+                // another runtime's context. Dispose of `owned_rt`
+                // explicitly via `shutdown_background` (which never
+                // blocks and is documented as safe from any context)
+                // before panicking, so correctness here does not depend
+                // on Tokio's undocumented panic-while-unwinding
+                // suppression.
+                if let Some(rt) = owned_rt {
+                    rt.shutdown_background();
+                }
+                BUILD_RESERVED.store(false, Ordering::Release);
+                panic!("failed to spawn Embassy thread: {e}");
+            }
+        };
+
+        // Publish the `Hsm` core only now that the Embassy thread has
+        // actually started successfully: Embassy tasks on that thread
+        // reach it via `HSM.get().await`, which simply waits (polls)
+        // until this completes, so publishing it slightly afterward is
+        // safe. `BUILD_RESERVED` guarantees this `build()` call is the
+        // only one that can reach this point, so `HSM.init` cannot fail.
+        assert!(
+            HSM.init(hsm).is_ok(),
+            "unreachable: BUILD_RESERVED guarantees HSM.init is only ever called once"
+        );
 
         StdHsm {
             io_tx,
