@@ -182,6 +182,122 @@ jobs:
         echo "One or more tests failed."
         exit 1
 
+  test_ubuntu_sock_ddi:
+
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/ubuntu-setup
+    - name: Build vsocksrv
+      # tsra_ddi_sock's integration test spawns this binary directly (it
+      # has no lib target, so Cargo can't wire it up as a dev-dependency);
+      # build it explicitly so the test finds it under target/debug.
+      run: cargo build --package vsocksrv
+    - name: Run socket DDI tests against vsocksrv
+      id: test-sock-ddi
+      run: cargo xtask precheck --nextest --package tsra_ddi_sock --test vsocksrv_integration --profile ci-sock-ddi
+      continue-on-error: true
+    - name: Generate nextest report
+      id: nextest-report
+      run: cargo xtask precheck --nextest-report
+    - name: Fail if any tests failed
+      if: ${{ steps.test-sock-ddi.outcome == 'failure' }}
+      run: |
+        echo "One or more tests failed."
+        exit 1
+
+  test_ubuntu_api_sock:
+
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/ubuntu-setup
+    - name: Build vsocksrv
+      # tsra_api_tests's vsocksrv session regression test spawns this
+      # binary directly (it has no lib target, so Cargo can't wire it up
+      # as a dev-dependency); build it explicitly so the test finds it
+      # under target/debug.
+      run: cargo build --package vsocksrv
+    - name: Run tsra_api_tests's vsocksrv session regression test
+      id: test-api-sock
+      run: cargo xtask precheck --nextest --package tsra_api_tests --features sock --profile ci-api-sock --filterset 'test(vsocksrv_session_tests::)'
+      continue-on-error: true
+    - name: Generate nextest report
+      id: nextest-report
+      run: cargo xtask precheck --nextest-report
+    - name: Fail if any tests failed
+      if: ${{ steps.test-api-sock.outcome == 'failure' }}
+      run: |
+        echo "One or more tests failed."
+        exit 1
+
+  test_ubuntu_vsock_ddi:
+
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/ubuntu-setup
+    - name: Load vsock_loopback kernel module
+      # AF_VSOCK loopback (connecting to VMADDR_CID_LOCAL from the same
+      # host) requires this module; it isn't loaded by default on
+      # GitHub-hosted runners, and per the AF_VSOCK tests' own doc
+      # comment, isn't guaranteed to be loadable at all on standard
+      # `ubuntu-latest` images. Don't let that unverified kernel
+      # prerequisite fail the whole job before the binary even builds:
+      # probe it here, and only make the tests mandatory (below) when
+      # it's confirmed available on this runner.
+      id: load-vsock-loopback
+      run: |
+        if sudo modprobe vsock_loopback; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::vsock_loopback kernel module unavailable on this runner; AF_VSOCK tests will run in their normal skip-if-unavailable mode instead of being enforced."
+          echo "available=false" >> "$GITHUB_OUTPUT"
+        fi
+    - name: Build vsocksrv
+      # tsra_ddi_vsock's integration test spawns this binary directly
+      # (it has no lib target, so Cargo can't wire it up as a
+      # dev-dependency); build it explicitly so the test finds it under
+      # target/debug.
+      run: cargo build --package vsocksrv
+    - name: Run AF_VSOCK DDI tests against vsocksrv
+      id: test-vsock-ddi
+      # TSRA_VSOCK_CI_REQUIRED turns the tests' usual
+      # skip-if-unavailable fallback into a hard failure: this job is
+      # supposed to guarantee both prerequisites above, so a skip here
+      # would silently stop exercising the AF_VSOCK transport and its
+      # session-reset tests instead of catching a real regression. Only
+      # set it when `vsock_loopback` was actually confirmed loaded above,
+      # so a runner image lacking the module doesn't fail this job for
+      # an infrastructure reason unrelated to the code under test.
+      run: cargo xtask precheck --nextest --package tsra_ddi_vsock --features real-session-tests --test vsocksrv_integration --profile ci-vsock-ddi
+      env:
+        TSRA_VSOCK_CI_REQUIRED: ${{ steps.load-vsock-loopback.outputs.available == 'true' && '1' || '' }}
+      continue-on-error: true
+    - name: Generate nextest report
+      id: nextest-report
+      run: cargo xtask precheck --nextest-report
+    - name: Fail if any tests failed
+      if: ${{ steps.test-vsock-ddi.outcome == 'failure' }}
+      run: |
+        echo "One or more tests failed."
+        exit 1
+
   build_windows:
 
     runs-on: windows-2025-vs2026
