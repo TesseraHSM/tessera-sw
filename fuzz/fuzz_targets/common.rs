@@ -5,8 +5,6 @@
 
 #![allow(dead_code)]
 
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::*;
 use tsra_ddi::*;
@@ -16,40 +14,11 @@ use tsra_ddi_tbor_codec::header::Header;
 use tsra_ddi_tbor_codec::*;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
-use tsra_ddi_tbor_test_harness::SessionHandshake;
-use tsra_ddi_tbor_test_harness::TestCtx;
-use tsra_ddi_tbor_test_harness::coord_sizes;
-use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
-use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
-use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
-use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
-use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
-use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
-use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
-use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
-use tsra_ddi_tbor_types::CertDescriptor;
-use tsra_ddi_tbor_types::ECC_CURVE_P256;
-use tsra_ddi_tbor_types::ECC_CURVE_P384;
-use tsra_ddi_tbor_types::ECC_CURVE_P521;
-use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
-use tsra_ddi_tbor_types::MACH_SEED_ENVELOPE_MAX_LEN;
-use tsra_ddi_tbor_types::MACH_SEED_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POLICY_INFO_LEN;
-use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
-use tsra_ddi_tbor_types::POLICY_VERSION_MAJOR;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
-use tsra_ddi_tbor_types::PartPolicy;
-use tsra_ddi_tbor_types::PolicyKeyKind;
-use tsra_ddi_tbor_types::PolicyPubKey;
-use tsra_ddi_tbor_types::PolicyVer;
-use tsra_ddi_tbor_types::ReportDescriptor;
-use tsra_ddi_tbor_types::SessionType;
-use tsra_ddi_tbor_types::TborKeyReportReq;
-use tsra_ddi_tbor_types::TborPartInfoReq;
-use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
-use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
-use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_test_harness::x509_fixture::*;
+use tsra_ddi_tbor_test_harness::*;
+use tsra_ddi_tbor_types::*;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
 use zerocopy::TryFromBytes;
 
 pub type DdiTest = TsraDdi;
@@ -164,6 +133,11 @@ impl EccCurve {
     /// ECDH shared secret (the X coordinate).
     pub fn coord_len(self) -> usize {
         coord_sizes(self.wire_pub_key_len()).1
+    }
+
+    /// Wire coordinate length in bytes, including padding (P-521: 66 -> 68 bytes).
+    pub fn wire_coord_len(self) -> usize {
+        coord_sizes(self.wire_pub_key_len()).0
     }
 
     /// Largest digest the firmware zero-extends into the ECDSA field.
