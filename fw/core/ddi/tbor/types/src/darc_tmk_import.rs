@@ -97,7 +97,7 @@ const _: () = assert!(crate::evidence::CERT_DESCRIPTORS_MAX_LEN == 6);
 ///
 /// Imports a DARC Transfer Masking Key sealed off-device to a DARC
 /// key-exchange key and re-masks it under the partition SDMK.
-#[tbor(opcode = 0x21)]
+#[tbor(opcode = 0x21, pair = TborDarcTmkImportResp)]
 pub struct TborDarcTmkImportReq<'a> {
     /// CO/CU session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -139,7 +139,7 @@ pub struct TborDarcTmkImportReq<'a> {
 /// `DarcTmkImport` response schema.
 ///
 /// Carries the imported TMK re-masked under the partition SDMK.
-#[tbor(response)]
+#[tbor(response, pair = TborDarcTmkImportReq)]
 pub struct TborDarcTmkImportResp<'a> {
     /// The imported TMK, masked (AEAD-GCM-256) under the partition SDMK.
     /// Always exactly [`MASKED_TMK_LEN`] (260 B).

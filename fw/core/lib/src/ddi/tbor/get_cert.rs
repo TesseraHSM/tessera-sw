@@ -20,7 +20,7 @@
 use tsra_fw_ddi_tbor_types::TborGetCertReq;
 use tsra_fw_ddi_tbor_types::TborGetCertResp;
 use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -30,12 +30,12 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// Slot 2 generates one fresh PTA-issued PID certificate from the
 /// partition's PTA/PID keys and copies it into the response. No undo log is
 /// needed.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborGetCertReq::decode(req_buf)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    let req = TborGetCertReq::decode(cmd_buf.request())?;
     let slot_id = req.slot_id();
     let cert_id = req.cert_id();
 
@@ -44,7 +44,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             return Err(HsmError::InvalidArg);
         }
         let cert = super::pta::pid_certificate(pal, io).await?;
-        let resp = pal.dma_alloc_var(io, |buf| {
+        let resp = cmd_buf.encode_response(|buf| {
             let frame = TborGetCertResp::encode(buf, 0, false)?
                 .certificate(cert)?
                 .finish();
@@ -65,7 +65,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // Build the response with the `certificate` slot reserved (sized but
     // unwritten), then have the PAL copy the DER bytes straight into the
     // reserved slot — no scratch buffer and no copy.
-    let resp = pal.dma_alloc_var(io, |buf| {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborGetCertResp::encode(buf, 0, false)?
             .certificate_reserve(len)?
             .finish();
@@ -75,7 +75,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // `decode_mut` hands out a `&mut` view into the reserved slot; the view
     // is scoped so its borrow of `resp` ends before `resp` is returned.
     {
-        let out = TborGetCertResp::decode_mut(resp)?;
+        let out = TborGetCertResp::decode_mut(&mut cmd_buf.buffer_mut()[..resp])?;
         let actual = pal
             .get_cert(io, slot_id, cert_id, Some(out.certificate))
             .await?;

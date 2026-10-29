@@ -41,8 +41,8 @@
 //!    masking key (`PartLocalMK`) into `pok_local_backup` (276 B).
 //! 7. **Commit** (undo-guarded): claim the one-shot `SD_INITIALIZED`
 //!    gate, `vault_key_create` the `SDMK` (SecurityDomain scope), and
-//!    record its id in `SD_MK_KEY_ID`.  BKS3, `SDMK`, `SDBMK`, and
-//!    `SndrPriv` are zeroized before returning.
+//!    record its id in `SD_MK_KEY_ID`. BKS3, `SDMK`, and `SDBMK` scratch
+//!    and `SndrPriv` are scrubbed during IO teardown.
 //!
 //! **Stateful:** provisions `SDMK` in the vault and marks the partition
 //! security-domain-initialized, guarded by the per-command undo log so a
@@ -71,7 +71,8 @@ use tsra_fw_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -131,7 +132,7 @@ fn verify_backing_partition<P: HsmPal>(pal: &P, io: &P::Io, policy: &PartPolicy)
 /// Validates that the session is an active Crypto-Officer session, that the
 /// partition is `Initialized`, that the security domain is not yet
 /// initialized, and routes the masked sealing key to its masking key.
-fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &DmaBuf) -> HsmResult<HsmKeyId> {
+fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &HsmDmaBuf) -> HsmResult<HsmKeyId> {
     let req = TborSdCreateRemoteBackupReq::decode(req_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
     validate_crypto_officer_active_session(pal, io, sess_id)?;
@@ -174,9 +175,9 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    req_buf: &DmaBuf,
+    req_buf: &HsmDmaBuf,
     oob: &OobPtr,
-    pk_r: &mut DmaBuf,
+    pk_r: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let req = TborSdCreateRemoteBackupReq::decode(req_buf)?;
     let policy = req.policy();
@@ -260,11 +261,11 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
-    let mk_key_id = gate_request(pal, io, req_buf)?;
+) -> HsmResult<usize> {
+    let mk_key_id = gate_request(pal, io, cmd_buf.request_mut())?;
 
     // Receiver certificates and any required attestation travel out of band.
     let oob = oob.ok_or(HsmError::InvalidArg)?;
@@ -284,18 +285,15 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
 
         // Phase 1: verify policy binding and receiver attestation evidence.
-        verify_policy_and_receiver_evidence(pal, io, alloc, req_buf, &oob, pk_r).await?;
+        verify_policy_and_receiver_evidence(pal, io, alloc, cmd_buf.request_mut(), &oob, pk_r)
+            .await?;
 
         // ── Phase 2: unmask SndrPriv in place, derive SndrPub, and
         // HPKE-Auth seal a fresh BKS3 to RcvrPub.  `unmask` decrypts the
-        // sealing key in place in the request buffer and BKS3 is fresh
-        // secret material; scope rewind does not clear DMA memory, so both
-        // are scrubbed on EVERY exit path below.  The crypto runs in an
-        // inner scope so `SndrPriv`'s borrow of the request buffer ends
-        // before it is re-borrowed mutably to wipe the decrypted region.
-        let crypto_res = async {
+        // sealing key in the IO-scoped request buffer.
+        async {
             let sndr_priv = {
-                let req_mut = TborSdCreateRemoteBackupReq::decode_mut(req_buf)?;
+                let req_mut = TborSdCreateRemoteBackupReq::decode_mut(cmd_buf.request_mut())?;
                 let masking_key = pal.vault_key(io, mk_key_id)?;
                 let view = unmask(pal, io, masking_key, req_mut.masked_sealing_key).await?;
                 if !matches!(view.key_kind, HsmVaultKeyKind::SdSealing) {
@@ -349,26 +347,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             }
             .await;
 
-            // Wipe the fresh BKS3 on both success and failure before the
-            // borrow of the request buffer (via `SndrPriv`) is released.
-            bks3.zeroize();
+            // Wipe the fresh BKS3 before its scratch allocation is reclaimed.
             provision_res
         }
-        .await;
-
-        // Scrub the in-place-decrypted SndrPriv from the request buffer on
-        // every path (success, unsupported-kind, or seal failure) — the
-        // borrow held by `SndrPriv` has now ended.
-        if let Ok(req_mut) = TborSdCreateRemoteBackupReq::decode_mut(req_buf) {
-            req_mut.masked_sealing_key.zeroize();
-        }
-        crypto_res?;
-
-        Ok(())
+        .await
     })
     .await?;
 
-    encode_response(pal, io, pok, pok_local, sd_mk_backup)
+    encode_response(cmd_buf, pok, pok_local, sd_mk_backup)
 }
 
 /// Provision the security domain from a freshly minted `bks3`.
@@ -376,17 +362,16 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// Mints a random `SDMK`, derives `SDBMK`, and writes the two backups —
 /// `sd_mk_out` (`SDMK` masked under `SDBMK`, 260 B) and `pok_local_out`
 /// (`bks3` masked under `PartLocalMK`, 276 B) — then commits the SD to the
-/// vault (see [`sd_backup::commit_sd_to_vault`]).  The minted `SDMK` /
-/// derived `SDBMK` scratch is zeroized on all paths (the caller wipes
-/// `bks3`).
+/// vault (see [`sd_backup::commit_sd_to_vault`]). IO teardown scrubs the
+/// minted `SDMK` and derived `SDBMK` scratch.
 async fn provision_security_domain<'p, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     undo: &mut UndoLog<'p>,
-    bks3: &DmaBuf,
-    sd_mk_out: &mut DmaBuf,
-    pok_local_out: &mut DmaBuf,
+    bks3: &HsmDmaBuf,
+    sd_mk_out: &mut HsmDmaBuf,
+    pok_local_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let (svn, owner) = sd_backup::platform_svn_owner(pal)?;
     let sdbmk = sd_backup::derive_sdbmk(pal, io, alloc, bks3, svn, owner).await?;
@@ -404,20 +389,17 @@ async fn provision_security_domain<'p, P: HsmPal>(
 
     // Scrub the minted SDMK and derived SDBMK on every path — scope rewind
     // does not clear DMA memory.
-    sdmk.zeroize();
-    sdbmk.zeroize();
     res
 }
 
 /// Encode the `SdCreateRemoteBackup` response around the three backups.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    pok: &DmaBuf,
-    pok_local: &DmaBuf,
-    sd_mk_backup: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(
+    cmd_buf: &mut HsmCmdBuf<'_>,
+    pok: &HsmDmaBuf,
+    pok_local: &HsmDmaBuf,
+    sd_mk_backup: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSdCreateRemoteBackupResp::encode(buf, 0, false)?
             .pok_remote_backup(pok)?
             .pok_local_backup(pok_local)?

@@ -6,7 +6,7 @@
 
 use core::mem::size_of;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -623,16 +623,16 @@ impl Partition {
 
     /// Borrows the partition's 16-byte identity.
     #[inline(never)]
-    pub fn id(self) -> &'static DmaBuf {
+    pub fn id(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().partition_identifier.id) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().partition_identifier.id) }
     }
 
     /// Mutably borrows the partition's 16-byte identity.
     #[inline(never)]
-    pub fn id_mut(&mut self) -> &mut DmaBuf {
+    pub fn id_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `id`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().partition_identifier.id) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().partition_identifier.id) }
     }
 
     /// Sets the partition's 16-byte identity.
@@ -641,7 +641,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `ID_LEN` bytes.
     #[inline(never)]
-    pub fn set_id(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_id(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != ID_LEN {
             return Err(HsmError::InvalidArg);
@@ -655,17 +655,19 @@ impl Partition {
     /// The backing field is 97 B (reference SEC1 layout); Uno uses the
     /// first 96 B (raw X ‖ Y, no SEC1 prefix).
     #[inline(never)]
-    pub fn id_pub_key(self) -> &'static DmaBuf {
+    pub fn id_pub_key(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().partition_identifier.pub_key[..PUB_KEY_LEN]) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().partition_identifier.pub_key[..PUB_KEY_LEN]) }
     }
 
     /// Mutably borrows the partition's identity public key (96 B).
     #[inline(never)]
-    pub fn id_pub_key_mut(&mut self) -> &mut DmaBuf {
+    pub fn id_pub_key_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `id_pub_key`, exclusively borrowed.
         unsafe {
-            DmaBuf::from_raw_mut(&mut self.slot_mut().partition_identifier.pub_key[..PUB_KEY_LEN])
+            HsmDmaBuf::from_raw_mut(
+                &mut self.slot_mut().partition_identifier.pub_key[..PUB_KEY_LEN],
+            )
         }
     }
 
@@ -675,7 +677,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
     #[inline(never)]
-    pub fn set_id_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_id_pub_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != PUB_KEY_LEN {
             return Err(HsmError::InvalidArg);
@@ -700,16 +702,16 @@ impl Partition {
 
     /// Borrows the partition's 32-byte anti-replay nonce.
     #[inline(never)]
-    pub fn nonce(self) -> &'static DmaBuf {
+    pub fn nonce(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().nonce) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().nonce) }
     }
 
     /// Mutably borrows the partition's nonce.
     #[inline(never)]
-    pub fn nonce_mut(&mut self) -> &mut DmaBuf {
+    pub fn nonce_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `nonce`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().nonce) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().nonce) }
     }
 
     /// Sets the partition's nonce.
@@ -718,7 +720,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `NONCE_LEN` bytes.
     #[inline(never)]
-    pub fn set_nonce(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_nonce(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != NONCE_LEN {
             return Err(HsmError::InvalidArg);
@@ -731,16 +733,16 @@ impl Partition {
 
     /// Borrows the host-set VM-launch GUID (16 B).
     #[inline(never)]
-    pub fn vm_launch_guid(self) -> &'static DmaBuf {
+    pub fn vm_launch_guid(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().vm_launch_guid) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().vm_launch_guid) }
     }
 
     /// Mutably borrows the VM-launch GUID.
     #[inline(never)]
-    pub fn vm_launch_guid_mut(&mut self) -> &mut DmaBuf {
+    pub fn vm_launch_guid_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `vm_launch_guid`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().vm_launch_guid) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().vm_launch_guid) }
     }
 
     /// Sets the VM-launch GUID.
@@ -749,7 +751,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `GUID_LEN` bytes.
     #[inline(never)]
-    pub fn set_vm_launch_guid(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_vm_launch_guid(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != GUID_LEN {
             return Err(HsmError::InvalidArg);
@@ -762,13 +764,13 @@ impl Partition {
 
     /// Borrows the masked boot key, trimmed to its stored length.
     #[inline(never)]
-    pub fn masked_bk_boot(self) -> &'static DmaBuf {
+    pub fn masked_bk_boot(self) -> &'static HsmDmaBuf {
         let slot = self.slot();
         // Read the packed length field by value (no reference to it).
         let len = (slot.masked_bk_boot.len as usize).min(MASKED_BK_BOOT_DATA_LEN);
         // SAFETY: GSRAM bytes branded as DMA-accessible; `len` is clamped
         // in-bounds; valid for 'static.
-        unsafe { DmaBuf::from_raw(&slot.masked_bk_boot.data[..len]) }
+        unsafe { HsmDmaBuf::from_raw(&slot.masked_bk_boot.data[..len]) }
     }
 
     /// Writes the masked boot key (stores length + data).
@@ -777,7 +779,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` exceeds `MASKED_BK_BOOT_DATA_LEN`.
     #[inline(never)]
-    pub fn set_masked_bk_boot(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_masked_bk_boot(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() > MASKED_BK_BOOT_DATA_LEN {
             return Err(HsmError::InvalidArg);
@@ -795,12 +797,12 @@ impl Partition {
 
     /// Borrows the sealed BK3 blob, trimmed to its stored length.
     #[inline(never)]
-    pub fn sealed_bk3(self) -> &'static DmaBuf {
+    pub fn sealed_bk3(self) -> &'static HsmDmaBuf {
         let slot = self.slot();
         let len = (slot.sealed_bk3.len as usize).min(SEALED_BK3_DATA_LEN);
         // SAFETY: GSRAM bytes branded as DMA-accessible; `len` clamped
         // in-bounds; valid for 'static.
-        unsafe { DmaBuf::from_raw(&slot.sealed_bk3.data[..len]) }
+        unsafe { HsmDmaBuf::from_raw(&slot.sealed_bk3.data[..len]) }
     }
 
     /// Stores a sealed BK3 blob once until explicitly cleared.
@@ -810,7 +812,7 @@ impl Partition {
     /// - [`HsmError::InvalidArg`] — `v` exceeds `SEALED_BK3_DATA_LEN`.
     /// - [`HsmError::SealedBk3AlreadySet`] — a non-empty blob is already stored.
     #[inline(never)]
-    pub fn set_sealed_bk3(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_sealed_bk3(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() > SEALED_BK3_DATA_LEN {
             return Err(HsmError::InvalidArg);
@@ -830,10 +832,10 @@ impl Partition {
 
     /// Borrows the 48-byte BK3 session key.
     #[inline(never)]
-    pub fn bk3_session(self) -> &'static DmaBuf {
+    pub fn bk3_session(self) -> &'static HsmDmaBuf {
         // SAFETY: `key` is an align-1 packed field; GSRAM bytes branded as
         // DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().bk3_session_key.key) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().bk3_session_key.key) }
     }
 
     /// Sets the BK3 session key and marks it valid.
@@ -842,7 +844,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `BK3_KEY_LEN` bytes.
     #[inline(never)]
-    pub fn set_bk3_session(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_bk3_session(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != BK3_KEY_LEN {
             return Err(HsmError::InvalidArg);
@@ -936,16 +938,16 @@ impl Partition {
 
     /// Borrows the partition policy hash (48 B).
     #[inline(never)]
-    pub fn policy_hash(self) -> &'static DmaBuf {
+    pub fn policy_hash(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().policy_hash) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().policy_hash) }
     }
 
     /// Mutably borrows the partition policy hash.
     #[inline(never)]
-    pub fn policy_hash_mut(&mut self) -> &mut DmaBuf {
+    pub fn policy_hash_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `policy_hash`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().policy_hash) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().policy_hash) }
     }
 
     /// Sets the partition policy hash (marks it present).
@@ -954,7 +956,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `POLICY_HASH_LEN` bytes.
     #[inline(never)]
-    pub fn set_policy_hash(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_policy_hash(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != POLICY_HASH_LEN {
             return Err(HsmError::InvalidArg);
@@ -981,16 +983,16 @@ impl Partition {
 
     /// Borrows the POTA public-key thumbprint (48 B).
     #[inline(never)]
-    pub fn pota_thumbprint(self) -> &'static DmaBuf {
+    pub fn pota_thumbprint(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().pota_thumbprint) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().pota_thumbprint) }
     }
 
     /// Mutably borrows the POTA thumbprint.
     #[inline(never)]
-    pub fn pota_thumbprint_mut(&mut self) -> &mut DmaBuf {
+    pub fn pota_thumbprint_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `pota_thumbprint`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().pota_thumbprint) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().pota_thumbprint) }
     }
 
     /// Sets the POTA thumbprint.
@@ -1000,7 +1002,7 @@ impl Partition {
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `POTA_THUMBPRINT_LEN`
     ///   bytes.
     #[inline(never)]
-    pub fn set_pota_thumbprint(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_pota_thumbprint(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != POTA_THUMBPRINT_LEN {
             return Err(HsmError::InvalidArg);
@@ -1027,9 +1029,9 @@ impl Partition {
 
     /// Borrows the SATA thumbprint (48 B).
     #[inline(never)]
-    pub fn sata_thumbprint(self) -> &'static DmaBuf {
+    pub fn sata_thumbprint(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().sata_thumbprint) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().sata_thumbprint) }
     }
 
     /// Sets the SATA thumbprint.
@@ -1039,7 +1041,7 @@ impl Partition {
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `SATA_THUMBPRINT_LEN`
     ///   bytes.
     #[inline(never)]
-    pub fn set_sata_thumbprint(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_sata_thumbprint(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != SATA_THUMBPRINT_LEN {
             return Err(HsmError::InvalidArg);
@@ -1066,9 +1068,9 @@ impl Partition {
 
     /// Borrows the SAPOTA thumbprint (48 B).
     #[inline(never)]
-    pub fn sapota_thumbprint(self) -> &'static DmaBuf {
+    pub fn sapota_thumbprint(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().sapota_thumbprint) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().sapota_thumbprint) }
     }
 
     /// Sets the SAPOTA thumbprint.
@@ -1078,7 +1080,7 @@ impl Partition {
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `SAPOTA_THUMBPRINT_LEN`
     ///   bytes.
     #[inline(never)]
-    pub fn set_sapota_thumbprint(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_sapota_thumbprint(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != SAPOTA_THUMBPRINT_LEN {
             return Err(HsmError::InvalidArg);
@@ -1299,10 +1301,10 @@ impl Partition {
     /// the HSP. Only meaningful when
     /// [`unwrapping_key_bk_valid`](Self::unwrapping_key_bk_valid) is true.
     #[inline(never)]
-    pub fn unwrapping_key_bk(self) -> &'static DmaBuf {
+    pub fn unwrapping_key_bk(self) -> &'static HsmDmaBuf {
         // SAFETY: `unwrapping_key_bk` is an align-1 packed field; GSRAM bytes
         // branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().unwrapping_key_bk) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().unwrapping_key_bk) }
     }
 
     /// Resets the SP↔CP unwrapping-key slot on partition teardown: disarms
@@ -1316,7 +1318,10 @@ impl Partition {
         // payload is volatile-wiped. SAFETY: valid, aligned bytes in this slot.
         unsafe {
             core::ptr::write_volatile(&mut slot.unwrapping_key_required, false);
-            DmaBuf::from_raw_mut(&mut slot.unwrapping_key_bk).zeroize();
+            for byte in &mut slot.unwrapping_key_bk {
+                core::ptr::write_volatile(byte, 0);
+            }
+            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             core::ptr::write_volatile(&mut slot.unwrapping_key_bk_valid, 0);
         }
     }
@@ -1361,16 +1366,16 @@ impl Partition {
 
     /// Borrows the establish-credential public key (X ‖ Y, 96 B).
     #[inline(never)]
-    pub fn ec_pub_key(self) -> &'static DmaBuf {
+    pub fn ec_pub_key(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().ec_pub_key) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().ec_pub_key) }
     }
 
     /// Mutably borrows the establish-credential public key.
     #[inline(never)]
-    pub fn ec_pub_key_mut(&mut self) -> &mut DmaBuf {
+    pub fn ec_pub_key_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `ec_pub_key`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().ec_pub_key) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().ec_pub_key) }
     }
 
     /// Sets the establish-credential public key.
@@ -1379,7 +1384,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
     #[inline(never)]
-    pub fn set_ec_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_ec_pub_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != PUB_KEY_LEN {
             return Err(HsmError::InvalidArg);
@@ -1390,16 +1395,16 @@ impl Partition {
 
     /// Borrows the session-encryption public key (X ‖ Y, 96 B).
     #[inline(never)]
-    pub fn se_pub_key(self) -> &'static DmaBuf {
+    pub fn se_pub_key(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().se_pub_key) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().se_pub_key) }
     }
 
     /// Mutably borrows the session-encryption public key.
     #[inline(never)]
-    pub fn se_pub_key_mut(&mut self) -> &mut DmaBuf {
+    pub fn se_pub_key_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `se_pub_key`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().se_pub_key) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().se_pub_key) }
     }
 
     /// Sets the session-encryption public key.
@@ -1408,7 +1413,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
     #[inline(never)]
-    pub fn set_se_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_se_pub_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != PUB_KEY_LEN {
             return Err(HsmError::InvalidArg);
@@ -1421,9 +1426,9 @@ impl Partition {
 
     /// Borrows the platform trust-anchor public key (X ‖ Y, 96 B).
     #[inline(never)]
-    pub fn pta_pub_key(self) -> &'static DmaBuf {
+    pub fn pta_pub_key(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().pta_pub_key) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().pta_pub_key) }
     }
 
     /// Sets the platform trust-anchor public key (write-once via caller gate).
@@ -1432,7 +1437,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
     #[inline(never)]
-    pub fn set_pta_pub_key(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_pta_pub_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != PUB_KEY_LEN {
             return Err(HsmError::InvalidArg);
@@ -1459,16 +1464,16 @@ impl Partition {
 
     /// Borrows the crypto-officer PSK (32 B).
     #[inline(never)]
-    pub fn psk_co(self) -> &'static DmaBuf {
+    pub fn psk_co(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().psk_co) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().psk_co) }
     }
 
     /// Mutably borrows the crypto-officer PSK.
     #[inline(never)]
-    pub fn psk_co_mut(&mut self) -> &mut DmaBuf {
+    pub fn psk_co_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `psk_co`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().psk_co) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().psk_co) }
     }
 
     /// Sets the crypto-officer PSK.
@@ -1477,7 +1482,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `PSK_LEN` bytes.
     #[inline(never)]
-    pub fn set_psk_co(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_psk_co(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != PSK_LEN {
             return Err(HsmError::InvalidArg);
@@ -1488,16 +1493,16 @@ impl Partition {
 
     /// Borrows the crypto-user PSK (32 B).
     #[inline(never)]
-    pub fn psk_cu(self) -> &'static DmaBuf {
+    pub fn psk_cu(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().psk_cu) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().psk_cu) }
     }
 
     /// Mutably borrows the crypto-user PSK.
     #[inline(never)]
-    pub fn psk_cu_mut(&mut self) -> &mut DmaBuf {
+    pub fn psk_cu_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `psk_cu`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().psk_cu) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().psk_cu) }
     }
 
     /// Sets the crypto-user PSK.
@@ -1506,7 +1511,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `PSK_LEN` bytes.
     #[inline(never)]
-    pub fn set_psk_cu(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_psk_cu(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != PSK_LEN {
             return Err(HsmError::InvalidArg);
@@ -1519,16 +1524,16 @@ impl Partition {
 
     /// Borrows the user credential (id ‖ pin, 32 B).
     #[inline(never)]
-    pub fn credential(self) -> &'static DmaBuf {
+    pub fn credential(self) -> &'static HsmDmaBuf {
         // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { DmaBuf::from_raw(&self.slot().credential) }
+        unsafe { HsmDmaBuf::from_raw(&self.slot().credential) }
     }
 
     /// Mutably borrows the user credential.
     #[inline(never)]
-    pub fn credential_mut(&mut self) -> &mut DmaBuf {
+    pub fn credential_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: as `credential`, exclusively borrowed.
-        unsafe { DmaBuf::from_raw_mut(&mut self.slot_mut().credential) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().credential) }
     }
 
     /// Sets the user credential.
@@ -1537,7 +1542,7 @@ impl Partition {
     ///
     /// - [`HsmError::InvalidArg`] — `v` is not exactly `CREDENTIAL_LEN` bytes.
     #[inline(never)]
-    pub fn set_credential(mut self, v: &DmaBuf) -> HsmResult<()> {
+    pub fn set_credential(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
         let src: &[u8] = v;
         if src.len() != CREDENTIAL_LEN {
             return Err(HsmError::InvalidArg);

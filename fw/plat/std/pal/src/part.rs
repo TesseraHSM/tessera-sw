@@ -524,11 +524,20 @@ impl HsmPartitionManager for StdHsmPal {
         self.prop_set_bool(io, id, value)
     }
 
-    fn part_prop_get_bytes<'a>(&'a self, io: &StdHsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf> {
+    fn part_prop_get_bytes<'a>(
+        &'a self,
+        io: &StdHsmIo,
+        id: PartPropId,
+    ) -> HsmResult<&'a HsmDmaBuf> {
         self.prop_get_bytes(io, id)
     }
 
-    fn part_prop_set_bytes(&self, io: &StdHsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+    fn part_prop_set_bytes(
+        &self,
+        io: &StdHsmIo,
+        id: PartPropId,
+        data: &HsmDmaBuf,
+    ) -> HsmResult<()> {
         self.prop_set_bytes(io, id, data)
     }
 
@@ -1239,15 +1248,15 @@ impl ExpectedKind {
 
 // ─── std PAL constants mirrored by RO props ──────────────────────────────
 
-// ─── DmaBuf branding ─────────────────────────────────────────────────────
+// ─── HsmDmaBuf branding ─────────────────────────────────────────────────────
 
 /// Brand a borrowed byte slice from the partition table as a
-/// `&DmaBuf`.  Safe on the std PAL because the partition table is
+/// `&HsmDmaBuf`.  Safe on the std PAL because the partition table is
 /// host-heap-resident; no real DMA constraints apply.
 #[inline(always)]
-fn dma(buf: &[u8]) -> &DmaBuf {
+fn dma(buf: &[u8]) -> &HsmDmaBuf {
     // SAFETY: std PAL has no DMA-region constraint.
-    unsafe { DmaBuf::from_raw(buf) }
+    unsafe { HsmDmaBuf::from_raw(buf) }
 }
 
 // ─── PartitionEntry property dispatch ────────────────────────────────────
@@ -1773,7 +1782,7 @@ impl StdHsmPal {
         &'a self,
         io: &StdHsmIo,
         id: PartPropId,
-    ) -> HsmResult<&'a DmaBuf> {
+    ) -> HsmResult<&'a HsmDmaBuf> {
         let meta = validate_meta(id, ExpectedKind::Bytes)?;
         let entry = self.prop_borrow_get(io, id, &meta)?;
         let bytes = entry.prop_get_bytes(id)?;
@@ -1789,7 +1798,7 @@ impl StdHsmPal {
         &self,
         io: &StdHsmIo,
         id: PartPropId,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let meta = validate_set(id, ExpectedKind::Bytes, Some(data.len()))?;
         let entry = self.prop_borrow_set(io, id, &meta)?;

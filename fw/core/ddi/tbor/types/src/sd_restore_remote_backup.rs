@@ -80,7 +80,7 @@ const _: () = assert!(MASKED_SD_LEN == 276);
 const _: () = assert!(SD_MK_BACKUP_LEN == 260);
 
 /// `SdRestoreRemoteBackup` request schema.
-#[tbor(opcode = 0x0C)]
+#[tbor(opcode = 0x0C, pair = TborSdRestoreRemoteBackupResp)]
 pub struct TborSdRestoreRemoteBackupReq<'a> {
     /// Session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -137,7 +137,7 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
 }
 
 /// `SdRestoreRemoteBackup` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborSdRestoreRemoteBackupReq)]
 pub struct TborSdRestoreRemoteBackupResp<'a> {
     /// Partition-owner-key backup re-wrapped under the device-local key.
     /// Always exactly [`MASKED_SD_LEN`] (276 B).

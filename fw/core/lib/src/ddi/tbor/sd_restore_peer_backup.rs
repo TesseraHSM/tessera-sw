@@ -37,7 +37,7 @@
 //! 5. Recover `SDMK` from `prev_sd_mk_backup`, re-mask both backups, vault
 //!    `SDMK`, and mark the partition SD-initialized — undo-guarded (shared
 //!    [`reprovision_sd_from_bks3`](super::sd_backup::reprovision_sd_from_bks3)).
-//!    `RcvrPriv`, BKS3, SDMK, and SDBMK are zeroized before returning.
+//!    IO teardown scrubs `RcvrPriv`, BKS3, SDMK, and SDBMK scratch.
 //!
 //! **Stateful & one-shot** (parity with the other SD-provisioning
 //! commands).  This command is **Crypto-Officer-only**.
@@ -63,7 +63,8 @@ use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -108,14 +109,14 @@ const _: () = assert!(SD_ENC_LEN + (BKS3_LEN + 16) == POK_REMOTE_BACKUP_LEN);
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  `mk_key_id` is `Copy`, so it outlives the view.
     let mk_key_id = {
-        let req = TborSdRestorePeerBackupReq::decode(&*req_buf)?;
+        let req = TborSdRestorePeerBackupReq::decode(&*cmd_buf.request_mut())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -159,7 +160,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // ── Phase 1: policy binding + peer-cloning gate + sender evidence ──
         {
-            let req = TborSdRestorePeerBackupReq::decode(&*req_buf)?;
+            let req = TborSdRestorePeerBackupReq::decode(&*cmd_buf.request_mut())?;
             let policy = req.policy();
 
             // The re-supplied policy must match the one bound at `PartInit`.
@@ -210,22 +211,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // ── Phase 2: recover RcvrPriv, HPKE-open the peer backup, and
         // re-provision the SD.  The masked key, peer backup, and previous
         // masking-key backup are copied into crypto scratch so the
-        // request-buffer borrow is confined; every recovered secret is
-        // scrubbed on EVERY exit path (scope rewind does not clear DMA).
+        // request-buffer borrow is confined.
         let masking_key = pal.vault_key(io, mk_key_id)?;
 
         let blob = alloc.dma_alloc(MASKED_SEALING_KEY_LEN)?;
         let peer_backup = alloc.dma_alloc(POK_REMOTE_BACKUP_LEN)?;
         let prev_sd_mk = alloc.dma_alloc(SD_MK_BACKUP_LEN)?;
         {
-            let req = TborSdRestorePeerBackupReq::decode(&*req_buf)?;
+            let req = TborSdRestorePeerBackupReq::decode(&*cmd_buf.request_mut())?;
             blob.copy_from_slice(req.masked_sealing_key());
             peer_backup.copy_from_slice(req.pok_peer_backup());
             prev_sd_mk.copy_from_slice(req.prev_sd_mk_backup());
         }
 
         // Unmask into `blob`, copy the recovered private key out into its
-        // own scratch, then scrub `blob` immediately.
+        // own scratch.
         let unmask_res = async {
             let view = unmask(pal, io, masking_key, blob).await?;
             let rcvr_priv = alloc.dma_alloc(view.target_key.len())?;
@@ -233,7 +233,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             Ok::<_, HsmError>((view.key_kind, rcvr_priv))
         }
         .await;
-        blob.zeroize();
         let (key_kind, rcvr_priv) = unmask_res?;
 
         let crypto_res = async {
@@ -252,8 +251,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = BKS3 + GCM tag = 64 B); the recovered BKS3
-            // occupies its first `BKS3_LEN` bytes.  Both hold secret
-            // material and are scrubbed on all paths.
+            // occupies its first `BKS3_LEN` bytes.
             let pt_buf = alloc.dma_alloc(POK_REMOTE_BACKUP_LEN - SD_ENC_LEN)?;
             let bks3 = alloc.dma_alloc(BKS3_LEN)?;
             let inner = async {
@@ -286,32 +284,27 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             }
             .await;
 
-            bks3.zeroize();
-            pt_buf.zeroize();
-            prev_sd_mk.zeroize();
             inner
         }
         .await;
 
         // Scrub the recovered receiver private key on every path.
-        rcvr_priv.zeroize();
         crypto_res?;
 
         Ok(())
     })
     .await?;
 
-    encode_response(pal, io, pok_local_out, sd_mk_out)
+    encode_response(cmd_buf, pok_local_out, sd_mk_out)
 }
 
 /// Encode the `SdRestorePeerBackup` response around the local backups.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    pok_local: &DmaBuf,
-    sd_mk: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(
+    cmd_buf: &mut HsmCmdBuf<'_>,
+    pok_local: &HsmDmaBuf,
+    sd_mk: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSdRestorePeerBackupResp::encode(buf, 0, false)?
             .pok_local_backup(pok_local)?
             .sd_mk_backup(sd_mk)?

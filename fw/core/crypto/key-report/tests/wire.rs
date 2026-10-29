@@ -6,7 +6,7 @@
 //! These build a reference report with an inline [`minicbor`] encoder
 //! (independent of the crate's own builder) and exercise the public
 //! [`parse_key_report`] API, asserting every field decodes to a
-//! zero-copy `&DmaBuf` sub-view of the input buffer.
+//! zero-copy `&HsmDmaBuf` sub-view of the input buffer.
 //!
 //! Encoder byte-identity is covered end-to-end by the `part_init`
 //! emulator tests (which build a report here and verify it through the
@@ -24,7 +24,7 @@ use tsra_fw_core_crypto_key_report::PUBLIC_KEY_MAX_SIZE;
 use tsra_fw_core_crypto_key_report::REPORT_DATA_LEN;
 use tsra_fw_core_crypto_key_report::SIGNATURE_LEN;
 use tsra_fw_core_crypto_key_report::VM_LAUNCH_ID_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 const P384_COORD: usize = 48;
 const PROTECTED_HEADER: [u8; 22] = [
@@ -217,8 +217,8 @@ fn parse_decodes_all_fields_zero_copy() {
     let (report, pubkey_525, uuid, rd, vm, sig) = build_report(flags);
 
     // SAFETY: `report` is an ordinary heap buffer used only within this
-    // in-process test; branding it as a `DmaBuf` view is sound here.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // in-process test; branding it as a `HsmDmaBuf` view is sound here.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     let view = parse_key_report(dma).unwrap();
 
     assert_eq!(view.version, 1);
@@ -264,8 +264,8 @@ fn parse_decodes_all_fields_zero_copy() {
 fn parse_handles_all_flags_widths() {
     for flags in [0u32, 23, 0xAB, 0x1234, 0x0010_0000, u32::MAX] {
         let (report, _, _, _, _, _) = build_report(flags);
-        // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-        let dma = unsafe { DmaBuf::from_raw(&report) };
+        // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+        let dma = unsafe { HsmDmaBuf::from_raw(&report) };
         let view = parse_key_report(dma).unwrap();
         assert_eq!(view.flags, flags, "flags={flags:#x}");
     }
@@ -314,8 +314,8 @@ fn parse_decodes_v2_policy_hash() {
         report.len(),
     );
 
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     let view = parse_key_report(dma).unwrap();
 
     assert_eq!(view.version, 2);
@@ -337,8 +337,8 @@ fn parse_rejects_v2_wrong_policy_hash_len() {
     // A policy hash that isn't exactly POLICY_HASH_LEN bytes is rejected.
     let short = [0x5Au8; POLICY_HASH_LEN - 1];
     let report = build_report_v2(&short);
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     assert!(parse_key_report(dma).is_err());
 }
 
@@ -398,8 +398,8 @@ fn parse_rejects_version_presence_mismatch() {
     };
     buf.truncate(n);
     let report = cose_sign1(&buf, &sig);
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     assert!(parse_key_report(dma).is_err());
 }
 
@@ -407,8 +407,8 @@ fn parse_rejects_version_presence_mismatch() {
 fn parse_rejects_bad_tag() {
     let mut report = build_report(0).0;
     report[0] = 0x00;
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     assert!(parse_key_report(dma).is_err());
 }
 
@@ -416,8 +416,8 @@ fn parse_rejects_bad_tag() {
 fn parse_rejects_truncated() {
     let report = build_report(0).0;
     let short = &report[..report.len() / 2];
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(short) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(short) };
     assert!(parse_key_report(dma).is_err());
 }
 
@@ -450,8 +450,8 @@ fn payload_custom(pubkey: &[u8], entries: u64) -> Vec<u8> {
 fn parse_rejects_trailing_bytes() {
     let mut report = build_report(0).0;
     report.push(0xFF);
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     assert!(parse_key_report(dma).is_err());
 }
 
@@ -461,8 +461,8 @@ fn parse_rejects_wrong_public_key_length() {
     let pubkey = vec![0u8; PUBLIC_KEY_MAX_SIZE - 1];
     let pl = payload_custom(&pubkey, 7);
     let report = cose_sign1(&pl, &[0u8; SIGNATURE_LEN]);
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     assert!(parse_key_report(dma).is_err());
 }
 
@@ -472,7 +472,7 @@ fn parse_rejects_incomplete_payload_map() {
     let pubkey = vec![0u8; PUBLIC_KEY_MAX_SIZE];
     let pl = payload_custom(&pubkey, 6);
     let report = cose_sign1(&pl, &[0u8; SIGNATURE_LEN]);
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&report) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&report) };
     assert!(parse_key_report(dma).is_err());
 }

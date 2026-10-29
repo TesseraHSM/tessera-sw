@@ -19,7 +19,8 @@ masking key.
 The device unmasks the local key **in place** in the request buffer
 (recovering its curve from the blob's key kind), checks the `derive`
 usage attribute, derives the secret, re-masks it under the target scope,
-and scrubs both the recovered local key and the raw secret on every path.
+and returns the masked result. IO teardown scrubs the recovered local key
+and raw-secret scratch.
 This is the TBOR analogue of MBOR `EcdhKeyExchange`, but re-masking the
 secret instead of vaulting it.
 

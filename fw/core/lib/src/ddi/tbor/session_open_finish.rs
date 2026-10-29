@@ -72,12 +72,12 @@ const BMK_SESSION_KEY_LABEL: &[u8] = b"SESSION_BMK";
 struct ParsedRequest<'a> {
     /// Session Id
     sess_id: HsmSessId,
-    /// Codec-supplied `&DmaBuf` sub-view of the inbound request
+    /// Codec-supplied `&HsmDmaBuf` sub-view of the inbound request
     /// buffer; flows straight into the constant-time MAC compare.
-    mac_fin: &'a DmaBuf,
-    /// Codec-supplied `&mut DmaBuf` sub-view of the inbound request
+    mac_fin: &'a HsmDmaBuf,
+    /// Codec-supplied `&mut HsmDmaBuf` sub-view of the inbound request
     /// buffer.  Decrypted in place by [`aead_open`] — no scratch copy.
-    seed_envelope: &'a mut DmaBuf,
+    seed_envelope: &'a mut HsmDmaBuf,
 }
 
 /// Per-session keys derived from the HPKE `exported` secret.
@@ -92,20 +92,20 @@ struct ParsedRequest<'a> {
 /// * `mac_rx_key` — 48 B HMAC-SHA-384 key for inbound (host → HSM)
 ///   message MACs.  `Some` iff `session_type` is `Authenticated`.
 struct DerivedKeys<'a> {
-    param_key: &'a mut DmaBuf,
-    masking_key: &'a mut DmaBuf,
-    mac_tx_key: Option<&'a mut DmaBuf>,
-    mac_rx_key: Option<&'a mut DmaBuf>,
+    param_key: &'a mut HsmDmaBuf,
+    masking_key: &'a mut HsmDmaBuf,
+    mac_tx_key: Option<&'a mut HsmDmaBuf>,
+    mac_rx_key: Option<&'a mut HsmDmaBuf>,
 }
 
 /// Decoded Pending handshake state, split into the regions the PAL
-/// crypto APIs need as distinct `&DmaBuf` arguments (HMAC `key` and
+/// crypto APIs need as distinct `&HsmDmaBuf` arguments (HMAC `key` and
 /// `data` must not alias, so the regions cannot be slices of a single
 /// backing buffer).
 struct HandshakeState<'a> {
-    exported: &'a mut DmaBuf,
-    pk_init: &'a mut DmaBuf,
-    pk_resp: &'a mut DmaBuf,
+    exported: &'a mut HsmDmaBuf,
+    pk_init: &'a mut HsmDmaBuf,
+    pk_resp: &'a mut HsmDmaBuf,
     session_type: SessionType,
     /// Cryptographic suite recorded by Phase 1.  Drives every
     /// suite-derived size in this handler (Nh, Npk, AEAD parameters).
@@ -116,17 +116,17 @@ struct HandshakeState<'a> {
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
-    let ParsedRequest {
-        sess_id,
-        mac_fin,
-        seed_envelope,
-    } = parse_request(req_buf)?;
-    ensure_pending_blob_len(pal, io, sess_id)?;
-
+) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
+        let ParsedRequest {
+            sess_id,
+            mac_fin,
+            seed_envelope,
+        } = parse_request(cmd_buf.request_mut())?;
+        ensure_pending_blob_len(pal, io, sess_id)?;
+
         // ── Load Pending handshake state ──────────────────────────
         let HandshakeState {
             exported,
@@ -202,7 +202,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // ── Promote Pending → Active ──────────────────────────────
         promote_to_active(pal, io, alloc, sess_id, derived).await?;
 
-        encode_response(pal, io, bmk_session)
+        encode_response(cmd_buf, bmk_session)
     })
     .await
 }
@@ -224,13 +224,13 @@ async fn destroy_pending_on_auth_failure<P: HsmPal>(pal: &P, io: &P::Io, id: Hsm
 }
 
 /// Decode and validate the wire request.
-fn parse_request<'a>(req_buf: &'a mut DmaBuf) -> HsmResult<ParsedRequest<'a>> {
+fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     let req = TborSessionOpenFinishReq::decode_mut(req_buf)?;
     let id = HsmSessId::from(u16::from(req.session_id));
     // `mac_fin` length is checked once the negotiated suite is known
     // (see [`handle`]); the schema already pins the wire field to 48 B.
-    let mac_fin: &DmaBuf = req.mac_fin;
-    let seed_envelope: &mut DmaBuf = req.seed_envelope;
+    let mac_fin: &HsmDmaBuf = req.mac_fin;
+    let seed_envelope: &mut HsmDmaBuf = req.seed_envelope;
     if seed_envelope.len() != SEED_ENVELOPE_LEN {
         return Err(HsmError::InvalidArg);
     }
@@ -298,7 +298,7 @@ fn load_pk_hsm<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
     let pk_hsm = alloc.dma_alloc(xy_len + 1)?;
     pk_hsm[0] = 0x04;
@@ -320,11 +320,11 @@ async fn verify_mac<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     id: HsmSessId,
-    mac_fin: &DmaBuf,
-    exported: &DmaBuf,
-    pk_init: &DmaBuf,
-    pk_hsm: &DmaBuf,
-    pk_resp: &DmaBuf,
+    mac_fin: &HsmDmaBuf,
+    exported: &HsmDmaBuf,
+    pk_init: &HsmDmaBuf,
+    pk_hsm: &HsmDmaBuf,
+    pk_resp: &HsmDmaBuf,
 ) -> HsmResult<()> {
     debug_assert_eq!(SESSION_PHASE2_LABEL.len(), 14);
     let session_id_be = u16::from(id).to_be_bytes();
@@ -335,7 +335,7 @@ async fn verify_mac<P: HsmPal>(
     let mut hmac_ctx = pal
         .hmac_begin(io, HsmHashAlgo::Sha384, exported, alloc)
         .await?;
-    for chunk in &[label_sid as &DmaBuf, pk_init, pk_hsm, pk_resp] {
+    for chunk in &[label_sid as &HsmDmaBuf, pk_init, pk_hsm, pk_resp] {
         pal.hmac_continue(io, &mut hmac_ctx, chunk).await?;
     }
     let mac_verified = pal.hmac_finish_verify(io, hmac_ctx, mac_fin).await?;
@@ -346,7 +346,7 @@ async fn verify_mac<P: HsmPal>(
 }
 
 /// AEAD-open the host's `seed_envelope` under the freshly-derived
-/// `param_key`.  Returns the 32-byte plaintext seed as a `&DmaBuf`
+/// `param_key`.  Returns the 32-byte plaintext seed as a `&HsmDmaBuf`
 /// sub-view of the envelope buffer (which was decrypted in place).
 ///
 /// Any AEAD failure (bad magic, unsupported alg, tag mismatch) or a
@@ -358,11 +358,11 @@ async fn verify_mac<P: HsmPal>(
 async fn open_seed_envelope<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    param_key: &DmaBuf,
-    seed_envelope: &'a mut DmaBuf,
-) -> HsmResult<&'a DmaBuf> {
+    param_key: &HsmDmaBuf,
+    seed_envelope: &'a mut HsmDmaBuf,
+) -> HsmResult<&'a HsmDmaBuf> {
     // Decrypt the envelope **in place** on the inbound request
-    // buffer; the destructured `seed_envelope` is a `&mut DmaBuf`
+    // buffer; the destructured `seed_envelope` is a `&mut HsmDmaBuf`
     // sub-view of the parent `req_buf`, so no scratch copy is
     // needed.
     let result = aead_open(pal, io, param_key, seed_envelope).await;
@@ -389,9 +389,9 @@ async fn derive_remaining_keys<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    exported: &DmaBuf,
+    exported: &HsmDmaBuf,
     session_type: SessionType,
-    param_key: &'a mut DmaBuf,
+    param_key: &'a mut HsmDmaBuf,
 ) -> HsmResult<DerivedKeys<'a>> {
     // The masking key is **random**, not derived from `exported`.
     //
@@ -454,10 +454,10 @@ async fn hkdf_expand_labeled<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    prk: &DmaBuf,
+    prk: &HsmDmaBuf,
     label: &[u8],
     out_len: usize,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let info = alloc.dma_alloc(label.len() + 2)?;
     info[..label.len()].copy_from_slice(label);
     info[label.len()..].copy_from_slice(&(out_len as u16).to_be_bytes());
@@ -483,16 +483,16 @@ async fn build_bmk_session<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    seed: &DmaBuf,
-    masking_key: &DmaBuf,
-) -> HsmResult<&'a mut DmaBuf> {
+    seed: &HsmDmaBuf,
+    masking_key: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let bk_session = derive_bk_session(pal, io, alloc, seed).await?;
 
     let svn = crate::part_state::part_mfgr_svn(pal);
     let owner_seed_id =
         u16::try_from(crate::part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
 
-    // `key_label` must be a DmaBuf per the masking-lib API; stage
+    // `key_label` must be a HsmDmaBuf per the masking-lib API; stage
     // the constant label into one.
     let key_label = alloc.dma_alloc(BMK_SESSION_KEY_LABEL.len())?;
     key_label.copy_from_slice(BMK_SESSION_KEY_LABEL);
@@ -528,8 +528,8 @@ async fn derive_bk_session<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    seed: &DmaBuf,
-) -> HsmResult<&'a mut DmaBuf> {
+    seed: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let bk_boot = alloc.dma_alloc(BK_BOOT_LEN)?;
     crate::ddi::recover_bk_boot(pal, io, bk_boot).await?;
 
@@ -550,13 +550,9 @@ async fn derive_bk_session<'a, P: HsmPal>(
 }
 
 /// Encode the `SessionOpenFinish` response (carrying `bmk_session`)
-/// into a fresh IO-scoped DmaBuf.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    bmk_session: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+/// into a fresh IO-scoped HsmDmaBuf.
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, bmk_session: &HsmDmaBuf) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSessionOpenFinishResp::encode(buf, 0, false)?
             .bmk_session(bmk_session)?
             .finish();
@@ -565,7 +561,7 @@ fn encode_response<'p, P: HsmPal>(
     Ok(resp)
 }
 
-/// Materialise the api-rev tag in a scoped DmaBuf and call
+/// Materialise the api-rev tag in a scoped HsmDmaBuf and call
 /// `session_promote` to flip the slot from Pending to Active.
 async fn promote_to_active<P: HsmPal>(
     pal: &P,

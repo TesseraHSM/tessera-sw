@@ -32,7 +32,7 @@
 //! 5. **Commit** ([`commit_sd_to_vault`](super::sd_backup::commit_sd_to_vault)):
 //!    vault `SDMK` (SecurityDomain scope), record `SD_MK_KEY_ID`, and mark
 //!    the partition SD-initialized — undo-guarded.  BKS3, SDMK, and SDBMK
-//!    are zeroized before returning.
+//!    scratch is scrubbed during IO teardown.
 //!
 //! **Stateful & one-shot** (parity with `SdCreateRemoteBackup`): a second
 //! restore/create on the same partition incarnation is rejected.
@@ -43,7 +43,8 @@ use tsra_fw_ddi_tbor_types::TborSdRestoreLocalBackupReq;
 use tsra_fw_ddi_tbor_types::TborSdRestoreLocalBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -65,13 +66,13 @@ use crate::part_state;
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<usize> {
     // Session/state gating uses only the shared `decode` view; confine the
     // borrow so the request buffer is free afterwards.
     {
-        let req = TborSdRestoreLocalBackupReq::decode(&*req_buf)?;
+        let req = TborSdRestoreLocalBackupReq::decode(&*cmd_buf.request_mut())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -103,14 +104,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let pok_scratch = alloc.dma_alloc(MASKED_SD_LEN)?;
         let mk_scratch = alloc.dma_alloc(SD_MK_BACKUP_LEN)?;
         {
-            let req = TborSdRestoreLocalBackupReq::decode(&*req_buf)?;
+            let req = TborSdRestoreLocalBackupReq::decode(&*cmd_buf.request_mut())?;
             pok_scratch.copy_from_slice(req.pok_local_backup());
             mk_scratch.copy_from_slice(req.sd_mk_backup());
         }
 
-        // BKS3 and SDMK are recovered into `pok_scratch` / `mk_scratch`;
-        // scope rewind does not clear DMA memory, so both are scrubbed on
-        // EVERY exit path below.
+        // BKS3 and SDMK are recovered into `pok_scratch` / `mk_scratch`.
         let res = async {
             // ── Recover BKS3 from pok_local_backup under PartLocalMK ──
             let bks3 = sd_backup::recover_bks3_from_pok_local(pal, io, svn, pok_scratch).await?;
@@ -135,23 +134,20 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // Scrub the recovered BKS3 / SDMK plaintext from scratch on every
         // path before the buffers return to the per-IO pool.
-        pok_scratch.zeroize();
-        mk_scratch.zeroize();
         res
     })
     .await?;
 
-    encode_response(pal, io, pok_local_out, sd_mk_out)
+    encode_response(cmd_buf, pok_local_out, sd_mk_out)
 }
 
 /// Encode the `SdRestoreLocalBackup` response around the refreshed backups.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    pok_local: &DmaBuf,
-    sd_mk: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(
+    cmd_buf: &mut HsmCmdBuf<'_>,
+    pok_local: &HsmDmaBuf,
+    sd_mk: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSdRestoreLocalBackupResp::encode(buf, 0, false)?
             .pok_local_backup(pok_local)?
             .sd_mk_backup(sd_mk)?

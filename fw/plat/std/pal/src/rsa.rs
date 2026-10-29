@@ -32,8 +32,8 @@ impl HsmRsa for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         key_size: HsmRsaKey,
-        priv_key: &mut DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &mut HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
         _pct: HsmRsaPct,
     ) -> Result<(), HsmError> {
         let (pk, pubk) = self.rsa.gen_keypair(key_size_bits(key_size)).await?;
@@ -61,21 +61,35 @@ impl HsmRsa for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
-        key: &DmaBuf,
-        y: &DmaBuf,
-        x: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        y: &HsmDmaBuf,
+        x: &mut HsmDmaBuf,
     ) -> Result<(), HsmError> {
         let priv_key = RsaPrivateKey::from_hsm_bytes(key).map_err(|_| HsmError::InvalidArg)?;
         self.rsa.mod_exp_priv(&priv_key, y, x).await
+    }
+
+    async fn mod_exp_priv_in_place(
+        &self,
+        _io: &StdHsmIo,
+        key_type: HsmRsaKey,
+        key: &HsmDmaBuf,
+        y_x: &mut HsmDmaBuf,
+    ) -> Result<(), HsmError> {
+        if y_x.len() != key_type.modulus_len() {
+            return Err(HsmError::InvalidArg);
+        }
+        let private_key = RsaPrivateKey::from_hsm_bytes(key).map_err(|_| HsmError::InvalidArg)?;
+        self.rsa.mod_exp_priv_in_place(&private_key, y_x).await
     }
 
     async fn mod_exp_pub(
         &self,
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
-        key: &DmaBuf,
-        x: &DmaBuf,
-        y: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        x: &HsmDmaBuf,
+        y: &mut HsmDmaBuf,
     ) -> Result<(), HsmError> {
         let pub_key = RsaPublicKey::from_bytes(key).map_err(|_| HsmError::InvalidArg)?;
         self.rsa.mod_exp_pub(&pub_key, x, y).await
@@ -84,8 +98,8 @@ impl HsmRsa for StdHsmPal {
     fn rsa_priv_pub_key(
         &self,
         _io: &StdHsmIo,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The std PAL's vault representation is HSM byte format (raw
         // components): parse it, derive the public key, and emit the raw
@@ -99,9 +113,9 @@ impl HsmRsa for StdHsmPal {
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
         _io: &StdHsmIo,
-        der: &'a mut DmaBuf,
+        der: &'a mut HsmDmaBuf,
         crt: bool,
-    ) -> HsmResult<(&'a DmaBuf, usize)> {
+    ) -> HsmResult<(&'a HsmDmaBuf, usize)> {
         // Parse the recovered DER and re-serialize it in place into the vault
         // HSM byte format: the CRT layout (`n|e|d|p|q|dp|dq|qinv`) when `crt`,
         // else non-CRT (`n|e|p|q`). Both HSM layouts are no larger than the
@@ -121,9 +135,9 @@ impl HsmRsa for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
-        _pub_key: &DmaBuf,
-        _message: &DmaBuf,
-        _output: &mut DmaBuf,
+        _pub_key: &HsmDmaBuf,
+        _message: &HsmDmaBuf,
+        _output: &mut HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -136,9 +150,9 @@ impl HsmRsa for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
-        _priv_key: &DmaBuf,
-        _ciphertext: &DmaBuf,
-        _output: &mut DmaBuf,
+        _priv_key: &HsmDmaBuf,
+        _ciphertext: &HsmDmaBuf,
+        _output: &mut HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
@@ -152,9 +166,9 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
-        _priv_key: &DmaBuf,
-        _message_hash: &DmaBuf,
-        _signature: &mut DmaBuf,
+        _priv_key: &HsmDmaBuf,
+        _message_hash: &HsmDmaBuf,
+        _signature: &mut HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -168,9 +182,9 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
-        _pub_key: &DmaBuf,
-        _message_hash: &DmaBuf,
-        _signature: &DmaBuf,
+        _pub_key: &HsmDmaBuf,
+        _message_hash: &HsmDmaBuf,
+        _signature: &HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
@@ -184,10 +198,10 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
-        _pub_key: &DmaBuf,
-        _message: &DmaBuf,
-        _label: &DmaBuf,
-        _output: &mut DmaBuf,
+        _pub_key: &HsmDmaBuf,
+        _message: &HsmDmaBuf,
+        _label: &HsmDmaBuf,
+        _output: &mut HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -201,10 +215,10 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        ciphertext: &DmaBuf,
-        label: &DmaBuf,
-        output: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
@@ -238,10 +252,10 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
-        _priv_key: &DmaBuf,
-        _message_hash: &DmaBuf,
+        _priv_key: &HsmDmaBuf,
+        _message_hash: &HsmDmaBuf,
         _salt_len: usize,
-        _signature: &mut DmaBuf,
+        _signature: &mut HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -255,10 +269,10 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         _key_size: HsmRsaKey,
         _algo: HsmHashAlgo,
-        _pub_key: &DmaBuf,
-        _message_hash: &DmaBuf,
+        _pub_key: &HsmDmaBuf,
+        _message_hash: &HsmDmaBuf,
         _salt_len: usize,
-        _signature: &DmaBuf,
+        _signature: &HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where

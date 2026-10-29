@@ -27,7 +27,7 @@ pub(crate) fn get_sealed_bk3<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetSealedBk3Req = decoder.decode_data()?;
 
     let sealed_len = match crate::part_state::part_sealed_bk3(pal, io) {

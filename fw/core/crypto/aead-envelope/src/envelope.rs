@@ -4,12 +4,12 @@
 //! Borrowed view of a parsed envelope.
 //!
 //! Returned by [`open`](crate::open) after the PAL has decrypted
-//! the envelope in place.  All fields are sub-views (`&DmaBuf`)
+//! the envelope in place.  All fields are sub-views (`&HsmDmaBuf`)
 //! of the same source buffer so the parsed regions retain their
 //! DMA provenance and can flow into further PAL crypto primitives
 //! without a re-allocation.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 use crate::alg::AeadAlg;
 use crate::error::Error;
@@ -18,7 +18,7 @@ use crate::format::Header;
 use crate::format::HEADER_LEN;
 
 /// Borrowed view over the regions of an envelope sitting in a
-/// caller-owned [`DmaBuf`].
+/// caller-owned [`HsmDmaBuf`].
 ///
 /// All fields are sub-views of the input buffer; constructing an
 /// `AeadEnvelope` performs no copies. The `'a` lifetime ties every
@@ -28,14 +28,14 @@ pub struct AeadEnvelope<'a> {
     /// AEAD algorithm read from the envelope header.
     pub alg: AeadAlg,
     /// The 12-byte GCM nonce.
-    pub iv: &'a DmaBuf,
+    pub iv: &'a HsmDmaBuf,
     /// Additional authenticated data (may be empty).
-    pub aad: &'a DmaBuf,
+    pub aad: &'a HsmDmaBuf,
     /// Plaintext payload (decrypted in place by [`open`](crate::open)).
     /// Length always equals `envelope_total - header - iv - aad - tag`.
-    pub payload: &'a DmaBuf,
+    pub payload: &'a HsmDmaBuf,
     /// The 16-byte GCM authentication tag.
-    pub tag: &'a DmaBuf,
+    pub tag: &'a HsmDmaBuf,
 }
 
 /// Borrowed view over the *cleartext* regions of an envelope that can
@@ -55,10 +55,10 @@ pub struct AeadPeek<'a> {
     /// AEAD algorithm read from the envelope header.
     pub alg: AeadAlg,
     /// The GCM nonce (`alg.iv_len()` bytes).
-    pub iv: &'a DmaBuf,
+    pub iv: &'a HsmDmaBuf,
     /// Additional authenticated data (may be empty). Cleartext but
     /// unauthenticated until [`open`](crate::open) verifies the tag.
-    pub aad: &'a DmaBuf,
+    pub aad: &'a HsmDmaBuf,
 }
 
 /// Compute the byte offsets of the IV, AAD, payload, and tag

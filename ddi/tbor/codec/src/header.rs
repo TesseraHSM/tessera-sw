@@ -53,13 +53,14 @@ impl Request {
 impl sealed::Sealed for Request {}
 
 impl Header for Request {
-    const LEN: usize = 4;
+    const LEN: usize = 8;
     const TOC_COUNT_BYTE: usize = 2;
 
     fn write_header(buf: &mut [u8], hdr: &Self, toc_count: usize) {
         // Wire layout (LE u32): [version, 0x00, toc_count-1, opcode].
         let word = u32::from_le_bytes([hdr.version, 0x00, (toc_count - 1) as u8, hdr.opcode]);
-        buf[..Self::LEN].copy_from_slice(&word.to_le_bytes());
+        buf[..4].copy_from_slice(&word.to_le_bytes());
+        buf[4..8].fill(0);
     }
 }
 
@@ -96,12 +97,12 @@ impl sealed::Sealed for Response {}
 
 impl Header for Response {
     const LEN: usize = 8;
-    const TOC_COUNT_BYTE: usize = 3;
+    const TOC_COUNT_BYTE: usize = 2;
 
     fn write_header(buf: &mut [u8], hdr: &Self, toc_count: usize) {
         // Wire layout (two LE u32 words):
-        //   [version, flags, 0x00, toc_count-1] [status u32 LE]
-        let word0 = u32::from_le_bytes([hdr.version, hdr.flags, 0x00, (toc_count - 1) as u8]);
+        //   [version, flags, toc_count-1, reserved] [status u32 LE]
+        let word0 = u32::from_le_bytes([hdr.version, hdr.flags, (toc_count - 1) as u8, 0x00]);
         buf[..4].copy_from_slice(&word0.to_le_bytes());
         buf[4..8].copy_from_slice(&hdr.status.to_le_bytes());
     }

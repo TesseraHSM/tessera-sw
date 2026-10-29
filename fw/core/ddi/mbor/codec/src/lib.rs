@@ -15,7 +15,7 @@ pub use encode::MborEncodeError;
 pub use encode::MborEncoder;
 pub use len::MborLen;
 pub use len::MborLenAccumulator;
-pub use tsra_fw_hsm_pal_traits::DmaBuf;
+pub use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 /// MBOR field identifier type.
 pub type MborId = u8;

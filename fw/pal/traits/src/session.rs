@@ -369,7 +369,7 @@ pub trait HsmSessionManager: HsmIoTypes {
         &self,
         io: &Self::Io,
         role: SessionRole,
-        handshake_state: &DmaBuf,
+        handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId>;
 
     /// Borrows the opaque handshake state of a
@@ -465,7 +465,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// (a 32-byte AES-256 key used by
     /// [`tsra_fw_core_crypto_aead_envelope`]).
     ///
-    /// Zero-copy: the returned `&DmaBuf` borrows directly from the
+    /// Zero-copy: the returned `&HsmDmaBuf` borrows directly from the
     /// PAL's session-schedule storage, so callers can hand it to
     /// PAL crypto primitives without an intermediate allocation.
     /// This hides the layout of the session schedule blob from
@@ -481,14 +481,14 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// # Returns
     ///
-    /// - `Ok(&DmaBuf)` — a sub-view of the schedule blob, exactly
+    /// - `Ok(&HsmDmaBuf)` — a sub-view of the schedule blob, exactly
     ///   [`SESSION_PARAM_KEY_LEN`] bytes long.
     /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to a
     ///   live Active session in the caller's partition (slot free,
     ///   destroyed, or still Pending).
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
-    fn session_param_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&DmaBuf>;
+    fn session_param_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
 
     /// Returns a borrowed view of the active session's masking key.  Its
     /// length depends on the session's schedule-blob format:
@@ -503,7 +503,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// rather than assuming a single fixed size.
     ///
     /// Zero-copy: like [`session_param_key`](Self::session_param_key)
-    /// the returned `&DmaBuf` borrows directly from the PAL's
+    /// the returned `&HsmDmaBuf` borrows directly from the PAL's
     /// session-schedule storage, so in-session key-creating handlers
     /// can hand it to the masking primitive without an intermediate
     /// allocation to envelope a session-scoped key into a
@@ -518,7 +518,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// # Returns
     ///
-    /// - `Ok(&DmaBuf)` — a sub-view of the schedule blob whose length
+    /// - `Ok(&HsmDmaBuf)` — a sub-view of the schedule blob whose length
     ///   depends on the blob format: 32 B ([`SESSION_MASKING_KEY_LEN`])
     ///   for a TBOR `SessionEx` session, or 80 B for a legacy MBOR
     ///   `Session` blob.
@@ -527,7 +527,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///   destroyed, or still Pending).
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
-    fn session_masking_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&DmaBuf>;
+    fn session_masking_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
 
     /// Atomically reserves the session's one-shot "PSK change"
     /// budget.  Each session may successfully consume this budget at

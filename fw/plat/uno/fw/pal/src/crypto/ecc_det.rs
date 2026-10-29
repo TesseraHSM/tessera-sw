@@ -23,8 +23,8 @@
 //!
 //! [`HsmEcc`]: tsra_fw_hsm_pal_traits::HsmEcc
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
@@ -171,24 +171,14 @@ const RFC6979_SEED_MSG_LEN: usize = 48 + 1 + 48 + 48;
 /// state DMA-resident lets the SHA engine read and write it in place, so each
 /// HMAC step avoids per-call staging copies and allocations: `V = HMAC_K(V)`
 /// writes into `tag`, then rotates `v`/`tag` *by reference* (zero-copy). All
-/// four buffers hold key-derived material and are wiped by [`Self::scrub`].
+/// four buffers hold key-derived material and are scrubbed during IO teardown.
 /// `n_be` is the curve order `n` (big-endian) for the candidate-range test.
 struct Rfc6979Drbg<'a> {
-    key: &'a mut DmaBuf,
-    v: &'a mut DmaBuf,
-    tag: &'a mut DmaBuf,
-    msg: &'a mut DmaBuf,
+    key: &'a mut HsmDmaBuf,
+    v: &'a mut HsmDmaBuf,
+    tag: &'a mut HsmDmaBuf,
+    msg: &'a mut HsmDmaBuf,
     n_be: [u8; 48],
-}
-
-impl Rfc6979Drbg<'_> {
-    /// Volatile-scrub every key-derived DMA buffer.
-    fn scrub(&mut self) {
-        self.key.zeroize();
-        self.v.zeroize();
-        self.tag.zeroize();
-        self.msg.zeroize();
-    }
 }
 
 /// Upper bound on RFC 6979 candidate attempts before giving up.
@@ -273,11 +263,11 @@ impl UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         curve: UpkaEccCurve,
-        k: &DmaBuf,
-        digest: &DmaBuf,
-        d: &DmaBuf,
-        r: &mut DmaBuf,
-        s: &mut DmaBuf,
+        k: &HsmDmaBuf,
+        digest: &HsmDmaBuf,
+        d: &HsmDmaBuf,
+        r: &mut HsmDmaBuf,
+        s: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Implemented for P-384 only (the cert-chain PID leaf is signed with the
         // P-384 alias key). Other curves are rejected until their constants /
@@ -404,32 +394,13 @@ impl UnoHsmPal {
             // (previously mid-sequence) lets phase 2 run as one uninterrupted
             // command loop; a zero `r` only wastes the remaining, astronomically
             // rare PKA ops before this rejects.
-            let res = res.and_then(|()| {
+            res.and_then(|()| {
                 if r[..field].iter().all(|&b| b == 0) || s[..field].iter().all(|&b| b == 0) {
                     Err(HsmError::InvalidArg)
                 } else {
                     Ok(())
                 }
-            });
-
-            // Scrub secret-bearing internal scratch on EVERY exit path (success,
-            // degenerate r/s, or a mid-sequence PKA error): the scoped allocator
-            // only rewinds a watermark on release — it does not clear freed DMA,
-            // so key-derived bytes must be wiped here. `DmaBuf::zeroize` uses
-            // volatile writes + a compiler fence (not an elidable `fill`). `xr` /
-            // `xr_wide` hold (k·G).x — public as `r`, but k-derived, so they are
-            // scrubbed as defense-in-depth. The caller owns scrubbing the k/d it
-            // supplied; r/s are the public signature.
-            xr.zeroize();
-            xr_wide.zeroize();
-            k_mont.zeroize();
-            d_mont.zeroize();
-            k_inv.zeroize();
-            s_mont.zeroize();
-            t_mont.zeroize();
-            t_dot_r.zeroize();
-            s_plus_t.zeroize();
-            res
+            })
         })
         .await
     }
@@ -464,9 +435,9 @@ impl UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         curve: UpkaEccCurve,
-        d: &DmaBuf,
-        digest: &DmaBuf,
-        k: &mut DmaBuf,
+        d: &HsmDmaBuf,
+        digest: &HsmDmaBuf,
+        k: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if curve != UpkaEccCurve::P384 {
             return Err(HsmError::UnsupportedCmd);
@@ -484,12 +455,7 @@ impl UnoHsmPal {
                 msg: scope.dma_alloc(RFC6979_SEED_MSG_LEN)?,
                 n_be: ORDER384_BE,
             };
-            // Run the fallible DRBG sequence in an inner block so the secret
-            // state (`K`, `V`, and the assembled `x ‖ h1` in `msg`) is scrubbed
-            // on EVERY exit path — including an early `?` from
-            // seed/generate/reseed. The scoped allocator only rewinds its
-            // watermark on release; it does not clear freed DMA.
-            let outcome = async {
+            async {
                 self.rfc6979_seed(io, &mut drbg, d, digest).await?;
 
                 // RFC 6979 §3.2 (h): generate candidates until 1 <= k < n.
@@ -505,10 +471,7 @@ impl UnoHsmPal {
                 }
                 Err(HsmError::InvalidArg)
             }
-            .await;
-
-            drbg.scrub();
-            outcome
+            .await
         })
         .await
     }
@@ -543,10 +506,10 @@ impl UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         curve: UpkaEccCurve,
-        digest: &DmaBuf,
-        d: &DmaBuf,
-        r: &mut DmaBuf,
-        s: &mut DmaBuf,
+        digest: &HsmDmaBuf,
+        d: &HsmDmaBuf,
+        r: &mut HsmDmaBuf,
+        s: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if curve != UpkaEccCurve::P384 {
             return Err(HsmError::UnsupportedCmd);
@@ -566,11 +529,7 @@ impl UnoHsmPal {
             };
             let k = scope.dma_alloc(field)?;
 
-            // Run the fallible derive+sign in an inner block so `k` and the DRBG
-            // state are wiped on EVERY exit path — including an early `?` from
-            // seed/generate/reseed. The scoped allocator only rewinds its
-            // watermark on release; it does not clear freed DMA.
-            let outcome = async {
+            async {
                 self.rfc6979_seed(io, &mut drbg, d, digest).await?;
 
                 for _ in 0..RFC6979_MAX_TRIES {
@@ -590,11 +549,7 @@ impl UnoHsmPal {
                 }
                 Err(HsmError::InvalidArg)
             }
-            .await;
-
-            k.zeroize();
-            drbg.scrub();
-            outcome
+            .await
         })
         .await
     }
@@ -613,8 +568,8 @@ impl UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         drbg: &mut Rfc6979Drbg<'_>,
-        d: &DmaBuf,
-        digest: &DmaBuf,
+        d: &HsmDmaBuf,
+        digest: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let field = PRIME384_LE.len();
 
@@ -732,8 +687,8 @@ impl UnoHsmPal {
     async fn derive_pta_scalar_be(
         &self,
         io: &UnoHsmIo,
-        part_root: &DmaBuf,
-        d_be: &mut DmaBuf,
+        part_root: &HsmDmaBuf,
+        d_be: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let field = PRIME384_LE.len(); // 48
         // `d_be` must hold the field-width scalar (may be oversized), and
@@ -758,9 +713,6 @@ impl UnoHsmPal {
             // an accepted candidate is already the scalar in place — no separate
             // DMA buffer and no copy on the keygen hot path.
             //
-            // Run the loop in an inner block so a rejected candidate (still
-            // sensitive HKDF output) is scrubbed on every error exit, including
-            // an early `?`.
             let outcome = async {
                 for attempt in 0..PTA_KEYGEN_MAX_TRIES {
                     info[KEYPAIR_LABEL_PTA.len()] = attempt;
@@ -791,16 +743,11 @@ impl UnoHsmPal {
                     // output buffer is fully deterministic and leaves no stale
                     // material next to the key. No-op when `d_be` is exact-sized.
                     if d_be.len() > PTA_OKM_LEN {
-                        d_be[PTA_OKM_LEN..].zeroize();
+                        d_be[PTA_OKM_LEN..].fill(0);
                     }
                     Ok(())
                 }
-                Err(e) => {
-                    // Scrub the rejected candidate left in the output buffer; on
-                    // success the accepted scalar is retained as the output.
-                    d_be.zeroize();
-                    Err(e)
-                }
+                Err(e) => Err(e),
             }
         })
         .await
@@ -840,9 +787,9 @@ impl UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         curve: UpkaEccCurve,
-        part_root: &DmaBuf,
-        d_le: &mut DmaBuf,
-        pub_key: &mut DmaBuf,
+        part_root: &HsmDmaBuf,
+        d_le: &mut HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if curve != UpkaEccCurve::P384 {
             return Err(HsmError::UnsupportedCmd);
@@ -896,17 +843,11 @@ impl UnoHsmPal {
                 // material. No-op when `pub_key` is exact-sized. (`d_le`'s tail
                 // is already zeroed by `derive_pta_scalar_be`.)
                 if pub_key.len() > field * 2 {
-                    pub_key[field * 2..].zeroize();
+                    pub_key[field * 2..].fill(0);
                 }
                 Ok(())
             }
-            Err(e) => {
-                // The private scalar is already derived and flipped to LE in
-                // `d_le` before the point multiply; scrub it so it does not
-                // linger in the caller's output buffer after a PKA failure.
-                d_le.zeroize();
-                Err(e)
-            }
+            Err(e) => Err(e),
         }
     }
 }

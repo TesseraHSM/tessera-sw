@@ -122,14 +122,14 @@ fn check_api_rev(hdr: &DdiReqHdr) -> HsmResult<()> {
 /// command leaves `session_id` as `None`.
 pub(crate) struct DispatchResult<'p> {
     /// Encoded response slice (borrows `pal`'s per-IO allocator).
-    pub(crate) resp: &'p DmaBuf,
+    pub(crate) resp: &'p HsmDmaBuf,
     /// Session id to place in the CQE; set only by `OpenSession`.
     pub(crate) session_id: Option<u16>,
 }
 
 impl<'p> DispatchResult<'p> {
     /// Wraps a plain response that carries no session id (the common case).
-    pub(crate) fn from_resp(resp: &'p DmaBuf) -> Self {
+    pub(crate) fn from_resp(resp: &'p HsmDmaBuf) -> Self {
         Self {
             resp,
             session_id: None,

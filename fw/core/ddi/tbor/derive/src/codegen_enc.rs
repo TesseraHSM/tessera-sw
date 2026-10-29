@@ -32,7 +32,7 @@ pub fn gen_encoder_and_frame(schema: &Schema) -> TokenStream {
     let frame_name = format_ident!("{}Frame", schema.name);
     let layout = TocLayout::compute(&schema.fields);
 
-    let toc_count_expr = build_toc_count_expr(&layout, &schema.fields);
+    let toc_count_expr = schema.toc_count_expr();
     let (marker_defs, state_markers) = gen_state_markers(schema);
     let s0 = &state_markers[0];
     let encoder_alias = format_ident!("{}Encoder", schema.name);
@@ -81,18 +81,6 @@ pub fn gen_encoder_and_frame(schema: &Schema) -> TokenStream {
     }
 }
 
-// ── Helper: TOC count expression ──────────────────────────────────────
-
-/// Build the compile-time `TOC_COUNT` expression including nested groups.
-fn build_toc_count_expr(layout: &TocLayout, fields: &[SchemaField]) -> TokenStream {
-    let local_toc_count = layout.total_toc_count;
-    let group_addends: Vec<_> = fields
-        .iter()
-        .filter_map(|f| f.include_group.as_ref().map(|g| quote! { + #g::TOC_COUNT }))
-        .collect();
-    quote! { #local_toc_count #(#group_addends)* }
-}
-
 // ── Helper: state marker types ────────────────────────────────────────
 
 /// Generate the `#[doc(hidden)]` marker enums used as typestate tags
@@ -130,6 +118,7 @@ fn gen_header_parts(schema: &Schema) -> (TokenStream, TokenStream, TokenStream, 
                     #opcode,
                 ]);
                 self.buf[..4].copy_from_slice(&hdr.to_le_bytes());
+                self.buf[4..8].fill(0);
             },
         ),
         MessageKind::Response => (
@@ -138,8 +127,8 @@ fn gen_header_parts(schema: &Schema) -> (TokenStream, TokenStream, TokenStream, 
                 let hdr0 = u32::from_le_bytes([
                     tsra_fw_ddi_tbor::PROTOCOL_VERSION,
                     self.flags,
-                    0x00,
                     (TOC_COUNT - 1) as u8,
+                    0x00,
                 ]);
                 self.buf[..4].copy_from_slice(&hdr0.to_le_bytes());
                 self.buf[4..8].copy_from_slice(&self.status.to_le_bytes());
@@ -179,17 +168,20 @@ fn gen_new_fn(
     // initial state writes a synthetic `None` placeholder at TOC[0] so
     // that `finish()` can produce a valid frame without exposing any
     // field methods.
-    let write_empty_placeholder = if schema.fields.is_empty() {
-        quote! {
+    let first_unused = if schema.fields.is_empty() {
+        quote! { 0 }
+    } else {
+        schema.field_toc_count_expr()
+    };
+    let write_empty_placeholder = quote! {
+        for entry in buf[HEADER_LEN + (#first_unused) * 4..MIN_SIZE].chunks_exact_mut(4) {
             tsra_fw_ddi_tbor::toc::write_toc_word(
-                buf,
-                HEADER_LEN,
+                entry,
+                0,
                 0,
                 tsra_fw_ddi_tbor::toc::build_toc_none(),
             );
         }
-    } else {
-        quote! {}
     };
 
     match schema.kind {
@@ -444,12 +436,15 @@ fn gen_field_write(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream
 
 /// Generate the token stream that reserves a buffer / sealed_key field's
 /// `len` bytes **without** copying data — the TOC entry and data-section
-/// offset are advanced, but the region is left for the caller to fill in
-/// place later (via `decode_mut`).  Mirrors [`gen_field_write`]'s buffer
-/// arm minus the `copy_from_slice`.  Only emitted for `#[tbor(mutable)]`
-/// fields, which the schema parser guarantees are non-optional buffer /
-/// sealed_key fields.
-fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream {
+/// offset are advanced. Reserve setters initialize the region to zero
+/// for filling later via `decode_mut`; existing-data setters preserve it.
+/// Only emitted for non-optional `#[tbor(mutable)]` buffer / sealed_key fields.
+fn gen_field_reserve(
+    i: usize,
+    schema: &Schema,
+    layout: &TocLayout,
+    initialize: bool,
+) -> TokenStream {
     let f = &schema.fields[i];
     let toc_type_id = f.toc_type_id;
     let field_toc_idx = effective_toc_idx(i, layout, &schema.fields);
@@ -508,6 +503,12 @@ fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStre
         quote! {}
     };
 
+    let initialize_region = if initialize {
+        quote! { self.buf[DATA_START + off..end].fill(0); }
+    } else {
+        quote! {}
+    };
+
     quote! {
         #pad_write
         let off = self.data_offset;
@@ -519,13 +520,7 @@ fn gen_field_reserve(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStre
         if self.data_offset + len > tsra_fw_ddi_tbor::MAX_DATA_SIZE {
             return Err(tsra_fw_hsm_pal_traits::HsmError::TborDataTooLarge);
         }
-        // Zero the reserved region: a `<field>_reserve(len)` caller fills it
-        // separately (e.g. `decode_mut`), so a partially-filled slot — or an
-        // early return on an error path after reserving — must not leak prior
-        // DMA-arena contents into the response.
-        for __b in &mut self.buf[DATA_START + off..end] {
-            *__b = 0;
-        }
+        #initialize_region
         self.data_offset += len;
         let word = tsra_fw_ddi_tbor::toc::build_toc_offset_len(#toc_type_id, len, off);
         tsra_fw_ddi_tbor::toc::write_toc_word(self.buf, HEADER_LEN, #field_toc_idx, word);
@@ -618,10 +613,10 @@ fn gen_state_impls(
                 // via `decode_mut` (zero-copy "reserve + fill").
                 if f.mutable {
                     let reserve_name = format_ident!("{}_reserve", field_name);
-                    let reserve_code = gen_field_reserve(j, schema, layout);
+                    let reserve_code = gen_field_reserve(j, schema, layout, true);
                     methods.push(quote! {
                         /// Reserve this field's `len` data bytes without
-                        /// copying; fill the region in place afterwards via
+                        /// copying, initialized to zero; fill it afterwards via
                         /// [`decode_mut`].  Advances the encoder to the next
                         /// field exactly like the value setter.
                         pub fn #reserve_name(mut self, len: usize) -> Result<#enc_name<'a, #target_state>, tsra_fw_hsm_pal_traits::HsmError> {
@@ -630,6 +625,21 @@ fn gen_state_impls(
                             const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
                             #skip_nones
                             #reserve_code
+                            Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
+                        }
+                    });
+                    let existing_name = format_ident!("{}_existing", field_name);
+                    let existing_code = gen_field_reserve(j, schema, layout, false);
+                    methods.push(quote! {
+                        /// Describe bytes already present at this field's final
+                        /// offset, without copying or clearing them. The caller
+                        /// must ensure all described bytes are valid output.
+                        pub fn #existing_name(mut self, len: usize) -> Result<#enc_name<'a, #target_state>, tsra_fw_hsm_pal_traits::HsmError> {
+                            const HEADER_LEN: usize = #header_len_tokens;
+                            const TOC_COUNT: usize = #toc_count_expr;
+                            const DATA_START: usize = HEADER_LEN + TOC_COUNT * 4;
+                            #skip_nones
+                            #existing_code
                             Ok(#enc_name { buf: self.buf, data_offset: self.data_offset, #resp_extra_pass _state: core::marker::PhantomData })
                         }
                     });
@@ -954,8 +964,7 @@ fn gen_frame_accessor(field: &SchemaField, toc_index: TokenStream, schema: &Sche
         WireType::Uint32 | WireType::Uint64 | WireType::Buffer | WireType::SealedKey => {
             let ds = quote! {
                 {
-                    let toc_count_idx: usize = if #header_len == 4usize { 2 } else { 3 };
-                    let tc = (self.buf[toc_count_idx] & 0x1F) as usize + 1;
+                    let tc = (self.buf[2] & 0x1F) as usize + 1;
                     #header_len + tc * 4
                 }
             };
@@ -970,7 +979,7 @@ fn gen_frame_accessor(field: &SchemaField, toc_index: TokenStream, schema: &Sche
                     // Frame.buf is `&[u8]` (the encoder's raw backing
                     // buffer is not DMA-branded), so inline the slice
                     // extraction rather than calling the codec's
-                    // `&DmaBuf`-typed `read_toc_buffer`.
+                    // `&HsmDmaBuf`-typed `read_toc_buffer`.
                     quote! {
                         {
                             let word = tsra_fw_ddi_tbor::toc::read_toc_word(self.buf, #header_len, #toc_index);

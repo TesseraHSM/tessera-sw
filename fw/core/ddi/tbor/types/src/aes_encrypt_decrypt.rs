@@ -70,22 +70,12 @@ pub enum AesOp {
 /// `AesEncryptDecrypt` request schema.
 ///
 /// AES-CBC encrypts or decrypts `msg` under the masked AES key and `iv`.
-#[tbor(opcode = 0x16)]
+#[tbor(opcode = 0x16, pair = TborAesEncryptDecryptResp)]
 pub struct TborAesEncryptDecryptReq<'a> {
     /// CO/CU session id this request is bound to.  The dispatcher
     /// cross-checks it against the SQE-carried session id.
     #[tbor(session_id)]
     pub session_id: SessionId,
-
-    /// The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an
-    /// AEAD-GCM-256 envelope of 244..=260 B.  Unmasked on-device to
-    /// recover the key and confirm its AES kind and direction permission.
-    ///
-    /// Marked `#[tbor(mutable)]` so the handler can `unmask` it **in place**
-    /// in the request buffer (via `decode_mut`) — no scratch copy of the
-    /// blob, and the recovered key is used straight from `target_key`.
-    #[tbor(buffer, min_len = 244, max_len = 260, mutable)]
-    pub masked_key: &'a [u8],
 
     /// The direction, carried as the 1-byte [`AesOp`] discriminant.
     #[tbor(U8)]
@@ -93,22 +83,27 @@ pub struct TborAesEncryptDecryptReq<'a> {
 
     /// The message to transform: a non-empty multiple of the 16-byte AES
     /// block, up to [`AES_MSG_MAX_LEN`] (1024) bytes.
-    #[tbor(buffer, max_len = 1024)]
+    #[tbor(buffer, max_len = 1024, mutable)]
     pub msg: &'a [u8],
 
     /// The 16-byte CBC initialization vector.
-    #[tbor(buffer, len = 16)]
+    #[tbor(buffer, len = 16, mutable)]
     pub iv: &'a [u8],
+
+    /// The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an
+    /// AEAD-GCM-256 envelope of 244..=260 B, unmasked and wiped in place.
+    /// Placed after `msg` / `iv` so those fields can become the compact
+    /// response without overlapping the live key.
+    #[tbor(buffer, min_len = 244, max_len = 260, mutable)]
+    pub masked_key: &'a [u8],
 }
 
 /// `AesEncryptDecrypt` response schema.
 ///
-/// The `msg` / `iv` fields are `#[tbor(mutable)]` so the handler can build
-/// the response with the two slots **reserved** (via `msg_reserve` /
-/// `iv_reserve`) and then have the AES engine write the ciphertext and
-/// chaining IV straight into them (`decode_mut`) — no scratch buffer and
-/// no copy of the message.
-#[tbor(response)]
+/// The `msg` / `iv` slots occupy the same payload offsets as the request.
+/// The handler transforms them in place, then describes the existing bytes
+/// with `msg_existing` / `iv_existing` without clearing or copying them.
+#[tbor(response, pair = TborAesEncryptDecryptReq)]
 pub struct TborAesEncryptDecryptResp<'a> {
     /// The transformed message (same length as the input `msg`).
     #[tbor(buffer, max_len = 1024, mutable)]
@@ -138,13 +133,13 @@ mod tests {
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
-            .masked_key(&masked)
-            .unwrap()
             .op(AesOp::Encrypt)
             .unwrap()
             .msg(&msg)
             .unwrap()
             .iv(&iv)
+            .unwrap()
+            .masked_key(&masked)
             .unwrap()
             .finish();
 

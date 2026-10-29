@@ -21,7 +21,7 @@ use tsra_fw_ddi_tbor_types::EccCurve;
 use tsra_fw_ddi_tbor_types::KeyUsage;
 use tsra_fw_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_fw_ddi_tbor_types::TborEccGenerateKeyResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -72,46 +72,40 @@ fn ecc_key_attrs(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAt
 ///
 /// No partition lock or undo log is required: the command **persists
 /// nothing** — it generates a keypair, masks the private key, and returns
-/// the blob plus the public key.  The raw private key is wiped once masked.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// the blob plus the public key. IO teardown scrubs the raw private key.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborEccGenerateKeyReq::decode(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id()));
-    let scope = HsmKeyScope(req.scope().0);
-    validate_active_session(pal, io, sess_id)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<usize> {
+        let req = TborEccGenerateKeyReq::decode(cmd_buf.request())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id()));
+        let scope = HsmKeyScope(req.scope().0);
+        validate_active_session(pal, io, sess_id)?;
 
-    // No partition-state pre-check: the masking key for `scope` is resolved
-    // (and its availability validated per-scope) at mask time by
-    // `resolve_masking_key`, which returns `UnsupportedKeyScope` for a scope
-    // whose masking key has not been provisioned yet.  This mirrors
-    // `EccSign` / `UnwrapKey`, which likewise defer scope validation to
-    // masking-key resolution rather than gating on a coarse `part_state`.
+        // No partition-state pre-check: the masking key for `scope` is resolved
+        // (and its availability validated per-scope) at mask time by
+        // `resolve_masking_key`, which returns `UnsupportedKeyScope` for a scope
+        // whose masking key has not been provisioned yet.  This mirrors
+        // `EccSign` / `UnwrapKey`, which likewise defer scope validation to
+        // masking-key resolution rather than gating on a coarse `part_state`.
 
-    let curve: HsmEccCurve = curve_from_wire(req.curve())?;
-    let kind = ecc_private(curve);
-    let svn = part_state::part_mfgr_svn(pal);
-    let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
-    let attrs = ecc_key_attrs(scope, req.key_usage())?;
-    // Caller-supplied label stamped into the masked metadata (≤ 128 B,
-    // bounded by the wire `max_len`); empty for an unlabeled key.
-    let caller_label = req.key_label();
+        let curve: HsmEccCurve = curve_from_wire(req.curve())?;
+        let kind = ecc_private(curve);
+        let svn = part_state::part_mfgr_svn(pal);
+        let owner =
+            u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
+        let attrs = ecc_key_attrs(scope, req.key_usage())?;
+        // Caller-supplied label stamped into the masked metadata (≤ 128 B,
+        // bounded by the wire `max_len`); empty for an unlabeled key.
+        let caller_label = req.key_label();
 
-    // Generate the keypair into IO-scoped buffers sized from the curve's
-    // wire lengths (the single source of truth for PAL-boundary buffers).
-    let priv_key = pal.dma_alloc(io, curve.wire_priv_key_len())?;
-    let pub_key = pal.dma_alloc(io, curve.wire_pub_key_len())?;
-
-    // Generate the keypair and mask the private key into the response
-    // inside a block that yields a `Result`, so **every** path (success or
-    // error — keygen, length check, encode, or mask failure) falls through
-    // to the `priv_key` wipe below.  The raw private scalar must never
-    // survive in DMA scratch: scope exit only resets the bump watermark, it
-    // does not zero freed memory.
-    let outcome: HsmResult<&'p DmaBuf> = async {
-        let (priv_len, pub_len) = pal
+        // Generate the keypair into IO-scoped buffers sized from the curve's
+        // wire lengths (the single source of truth for PAL-boundary buffers).
+        let priv_key = pal.dma_alloc(io, curve.wire_priv_key_len())?;
+        let pub_key = pal.dma_alloc(io, curve.wire_pub_key_len())?;
+        let generated = pal
             .alloc_scoped_async(io, async |a| -> HsmResult<(usize, usize)> {
                 pal.ecc_gen_keypair(
                     io,
@@ -122,31 +116,41 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 )
                 .await
             })
-            .await?;
-        // The wire lengths are fixed per curve; a mismatch is an internal bug.
-        if priv_len != curve.wire_priv_key_len() || pub_len != curve.wire_pub_key_len() {
-            return Err(HsmError::InternalError);
-        }
+            .await;
+        // End the last request borrow before entering the response phase.
+        let key_label = (|| -> HsmResult<_> {
+            let label = alloc.dma_alloc(caller_label.len())?;
+            label.copy_from_slice(caller_label);
+            Ok(label)
+        })();
 
-        let masked_len = masked_blob_len(AeadAlg::AesGcm256, priv_len);
+        // Generate the keypair and mask the private key into the response
+        // inside a block that yields the compact response length.
+        let outcome: HsmResult<usize> = async {
+            let (priv_len, pub_len) = generated?;
+            // The wire lengths are fixed per curve; a mismatch is an internal bug.
+            if priv_len != curve.wire_priv_key_len() || pub_len != curve.wire_pub_key_len() {
+                return Err(HsmError::InternalError);
+            }
+            let key_label = key_label?;
 
-        // Build the response with the masked-key slot reserved and the
-        // public key copied in; the masked private key is filled in place.
-        let resp = pal.dma_alloc_var(io, |buf| {
-            let frame = TborEccGenerateKeyResp::encode(buf, 0, false)?
-                .masked_key_reserve(masked_len)?
-                .pub_key(&pub_key[..pub_len])?
-                .finish();
-            Ok(frame.as_bytes().len())
-        })?;
+            let masked_len = masked_blob_len(AeadAlg::AesGcm256, priv_len);
 
-        // Mask the private key straight into the reserved response slot.
-        {
-            let out = TborEccGenerateKeyResp::decode_mut(resp)?;
-            pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
+            // Build the response with the masked-key slot reserved and the
+            // public key copied in; the masked private key is filled in place.
+            let len = cmd_buf.encode_response(|buf| {
+                Ok(TborEccGenerateKeyResp::encode(buf, 0, false)?
+                    .masked_key_reserve(masked_len)?
+                    .pub_key(&pub_key[..pub_len])?
+                    .finish()
+                    .as_bytes()
+                    .len())
+            })?;
+
+            // Mask the private key straight into the reserved response slot.
+            {
+                let out = TborEccGenerateKeyResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
                 let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-                let key_label = alloc.dma_alloc(caller_label.len())?;
-                key_label.copy_from_slice(caller_label);
                 let params = MaskParams {
                     key_kind: kind,
                     key_attrs: attrs,
@@ -171,20 +175,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 if written != masked_len {
                     return Err(HsmError::InternalError);
                 }
-                Ok(())
-            })
-            .await?;
+            }
+
+            Ok(len)
         }
+        .await;
 
-        // Coerce the `&mut` response buffer to a shared `&DmaBuf` (preserving
-        // the `'p` allocator lifetime) so the async block's output matches
-        // the handler's `&'p DmaBuf` return.
-        let resp: &'p DmaBuf = resp;
-        Ok(resp)
-    }
-    .await;
-
-    // Scrub the raw private key from DMA scratch on every path.
-    priv_key.zeroize();
-    outcome
+        // Scrub the raw private key from DMA scratch on every path.
+        outcome
+    })
+    .await
 }

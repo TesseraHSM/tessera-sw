@@ -38,7 +38,7 @@ pub(crate) async fn change_pin<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiChangePinReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 
@@ -154,7 +154,7 @@ async fn verify_change_pin_hmac<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     new_pin: &DdiEncryptedPin<'_>,
-    hmac_key: &DmaBuf,
+    hmac_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let pin_len = new_pin.encrypted_pin.len();
     let iv_len = new_pin.iv.len();

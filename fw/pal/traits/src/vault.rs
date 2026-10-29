@@ -531,7 +531,7 @@ pub trait HsmVault: HsmIoTypes {
     async fn vault_key_create(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
@@ -667,7 +667,7 @@ pub trait HsmVault: HsmIoTypes {
     ///   [`vault_key_len`](Self::vault_key_len) for the key's `kind`.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<&DmaBuf>;
+    fn vault_key(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf>;
 
     /// Returns the canonical byte length of a key of the given kind.
     ///

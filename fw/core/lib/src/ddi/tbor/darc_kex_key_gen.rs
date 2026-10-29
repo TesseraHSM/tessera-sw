@@ -37,7 +37,8 @@ use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_fw_ddi_tbor_types::TborDarcKexKeyGenResp;
 use tsra_fw_ddi_tbor_types::MASKED_KEX_KEY_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -80,7 +81,7 @@ fn kex_key_attrs(scope: HsmKeyScope) -> HsmVaultKeyAttrs {
 async fn generate_kex_keypair<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-) -> HsmResult<(&'p mut DmaBuf, &'p mut DmaBuf)> {
+) -> HsmResult<(&'p mut HsmDmaBuf, &'p mut HsmDmaBuf)> {
     // Generate the P-384 keypair for ECDH.  The buffers must outlive the
     // scoped keygen-scratch allocator, so allocate them between the two
     // query/use calls rather than inside one scope.
@@ -92,7 +93,7 @@ async fn generate_kex_keypair<'p, P: HsmPal>(
         .await?;
     let priv_key = pal.dma_alloc(io, priv_key_size)?;
     let pub_key = pal.dma_alloc(io, pub_key_size)?;
-    let gen_res = pal
+    let (priv_key_len, pub_key_len) = pal
         .alloc_scoped_async(io, async |a| -> HsmResult<_> {
             pal.ecc_gen_keypair(
                 io,
@@ -103,17 +104,7 @@ async fn generate_kex_keypair<'p, P: HsmPal>(
             )
             .await
         })
-        .await;
-    let (priv_key_len, pub_key_len) = match gen_res {
-        Ok(lens) => lens,
-        Err(e) => {
-            // Keygen may have partially written the private scalar into the
-            // already-allocated buffer.  Scope rewind does not clear DMA
-            // memory, so wipe it before it returns to the per-IO pool.
-            priv_key.zeroize();
-            return Err(e);
-        }
-    };
+        .await?;
 
     Ok((&mut priv_key[..priv_key_len], &mut pub_key[..pub_key_len]))
 }
@@ -125,8 +116,8 @@ async fn mask_kex_private_key<'p, P: HsmPal>(
     attrs: HsmVaultKeyAttrs,
     svn: u64,
     owner: u16,
-    priv_key: &DmaBuf,
-) -> HsmResult<&'p mut DmaBuf> {
+    priv_key: &HsmDmaBuf,
+) -> HsmResult<&'p mut HsmDmaBuf> {
     let masked_key = pal.dma_alloc(io, MASKED_KEX_KEY_LEN)?;
 
     // The masked blob lives in an IO-scoped buffer allocated before the
@@ -160,13 +151,12 @@ async fn mask_kex_private_key<'p, P: HsmPal>(
     Ok(masked_key)
 }
 
-fn encode_kex_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    masked_key: &DmaBuf,
-    pub_key: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_kex_response(
+    cmd_buf: &mut HsmCmdBuf<'_>,
+    masked_key: &HsmDmaBuf,
+    pub_key: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborDarcKexKeyGenResp::encode(buf, 0, false)?
             .masked_key(masked_key)?
             .pub_key(pub_key)?
@@ -184,13 +174,13 @@ fn encode_kex_response<'p, P: HsmPal>(
 /// concurrently-dispatched command (IOs run in a task pool and interleave
 /// at await points) can neither observe it half-done nor require its
 /// rollback on failure.  The raw private scalar is wiped from the per-IO
-/// DMA pool once it has been masked.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// DMA pool during IO teardown.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborDarcKexKeyGenReq::decode(req_buf)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    let req = TborDarcKexKeyGenReq::decode(cmd_buf.request())?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
 
     // Losslessly map the wire `KeyScope` onto the PAL `HsmKeyScope`
@@ -214,19 +204,11 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
     let attrs = kex_key_attrs(scope);
     let (priv_key, pub_key) = generate_kex_keypair(pal, io).await?;
-    let masked_res =
-        mask_kex_private_key(pal, io, mk_key_id, attrs, svn, owner, &priv_key[..]).await;
-
-    // The raw private scalar is no longer needed once masking has been
-    // attempted.  Scope rewind does not clear DMA memory, so wipe it
-    // explicitly (volatile per-byte writes) on every path — success or
-    // masking failure — to keep it from lingering in, and leaking through,
-    // a later per-IO allocation.
-    priv_key.zeroize();
-    let masked_key = masked_res?;
+    let masked_key =
+        mask_kex_private_key(pal, io, mk_key_id, attrs, svn, owner, &priv_key[..]).await?;
 
     // Encode the response: the masked private key plus the public key.
     // The PAL already emitted the public key in wire format (little-endian),
     // so copy it through unchanged.
-    encode_kex_response(pal, io, masked_key, pub_key)
+    encode_kex_response(cmd_buf, masked_key, pub_key)
 }

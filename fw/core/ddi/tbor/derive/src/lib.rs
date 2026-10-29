@@ -30,6 +30,7 @@ use syn::spanned::Spanned;
 /// - `#[tbor(opcode = 0x09)]` — request message with the given opcode
 /// - `#[tbor(response)]` — response message
 /// - `#[tbor(fields)]` — reusable field group (no top-level codec)
+/// - `pair = T` — matching request/response type sharing the TOC footprint
 #[proc_macro_attribute]
 pub fn tbor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input: syn::Item = syn::parse_macro_input!(item as syn::Item);
@@ -74,7 +75,7 @@ fn on_struct(
     let validation = codegen_view::gen_validation_standalone(&schema);
 
     let decode_fn = quote! {
-        pub fn decode(buf: &tsra_fw_hsm_pal_traits::DmaBuf) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+        pub fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
             #validation
             Ok(#view_name::from_validated(buf))
         }
@@ -87,7 +88,7 @@ fn on_struct(
     // per-field borrows at the parent buffer's lifetime.
     let decode_mut_fn = if let Some(body) = codegen_view_mut::gen_decode_mut_body(&schema) {
         quote! {
-            pub fn decode_mut(buf: &mut tsra_fw_hsm_pal_traits::DmaBuf) -> Result<#view_mut_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+            pub fn decode_mut(buf: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_mut_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
                 #body
             }
         }
@@ -110,6 +111,8 @@ fn on_struct(
     };
 
     let max_encoded_size = schema.max_encoded_size();
+    let field_toc_count = schema.field_toc_count_expr();
+    let toc_count = schema.toc_count_expr();
 
     // Generate trait impl for dispatch.
     let trait_impl = match schema.kind {
@@ -118,7 +121,7 @@ fn on_struct(
                 const OPCODE: u8 = #opcode;
                 type View<'a> = #view_name<'a>;
 
-                fn decode(buf: &tsra_fw_hsm_pal_traits::DmaBuf) -> Result<Self::View<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<Self::View<'_>, tsra_fw_hsm_pal_traits::HsmError> {
                     #name::decode(buf)
                 }
             }
@@ -127,7 +130,7 @@ fn on_struct(
             impl tsra_fw_ddi_tbor::TborResponse for #name {
                 type View<'a> = #view_name<'a>;
 
-                fn decode(buf: &tsra_fw_hsm_pal_traits::DmaBuf) -> Result<Self::View<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<Self::View<'_>, tsra_fw_hsm_pal_traits::HsmError> {
                     #name::decode(buf)
                 }
             }
@@ -141,12 +144,19 @@ fn on_struct(
         #align_assertions
 
         impl #name {
+            /// Number of entries occupied by this message's fields.
+            pub const FIELD_TOC_COUNT: usize = #field_toc_count;
+            /// Number of wire TOC slots, shared with the paired message.
+            pub const TOC_COUNT: usize = #toc_count;
             /// Maximum possible encoded message size for this type.
             pub const MAX_ENCODED_SIZE: usize = #max_encoded_size;
             #decode_fn
             #decode_mut_fn
             #encode_fn
         }
+
+        const _: () = assert!(#name::TOC_COUNT <= tsra_fw_ddi_tbor::MAX_TOC_ENTRIES);
+        const _: () = assert!(#name::MAX_ENCODED_SIZE <= 8192, "TBOR frame exceeds transport capacity");
 
         #trait_impl
 

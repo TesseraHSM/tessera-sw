@@ -237,9 +237,52 @@ impl PqcEngine<'_> {
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
+        if sig.len() != mldsa_sig_len(kind)? {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        self.mldsa_sign_submit(kind, sec_key, rnd, msg, ctx).await?;
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
+    }
+
+    /// Consume a tail-aligned expanded key before signature readback at the front.
+    pub async fn mldsa_sign_in_place(
+        &mut self,
+        kind: HsmVaultKeyKind,
+        key_signature: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        rnd: &[u8; MLDSA_SEED_LEN],
+        msg: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        ctx: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let key_at = key_signature
+            .len()
+            .checked_sub(mldsa_sec_key_len(kind)?)
+            .ok_or(PqcError::INVALID_BUFFER_SIZE)?;
+        let sig_len = mldsa_sig_len(kind)?;
+        if key_signature.len() < sig_len {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        self.mldsa_sign_submit(kind, &key_signature[key_at..], rnd, msg, ctx)
+            .await?;
+        let output = &mut key_signature[..sig_len];
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, output) {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
+    }
+
+    async fn mldsa_sign_submit(
+        &mut self,
+        kind: HsmVaultKeyKind,
+        sec_key: &[u8],
+        rnd: &[u8; MLDSA_SEED_LEN],
+        msg: &[u8],
+        ctx: &[u8],
+    ) -> HsmResult<()> {
         let expected_sig = mldsa_sig_len(kind)?;
-        if sig.len() != expected_sig
-            || sec_key.len() != mldsa_sec_key_len(kind)?
+        if sec_key.len() != mldsa_sec_key_len(kind)?
             || msg.len() > MLDSA_MSG_MAX
             || ctx.len() > MLDSA_CTX_MAX
         {
@@ -271,10 +314,6 @@ impl PqcEngine<'_> {
         if resp.out_len as usize != expected_sig {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
         Ok(())
     }
 
@@ -354,12 +393,55 @@ impl PqcEngine<'_> {
         ciphertext: &mut [u8],
         shared_secret: &mut [u8],
     ) -> HsmResult<()> {
-        let expected_pub = mlkem_pub_key_len(kind)?;
-        let expected_ct = mlkem_ct_len(kind)?;
-        if pub_key.len() != expected_pub
-            || ciphertext.len() != expected_ct
+        if ciphertext.len() != mlkem_ct_len(kind)?
             || shared_secret.len() != mailbox::SHARED_SECRET_LEN
         {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        self.mlkem_encaps_submit(kind, pub_key, m).await?;
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ciphertext)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
+        {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
+    }
+
+    /// Read ciphertext back only after the FP has consumed the public key.
+    pub async fn mlkem_encaps_in_place(
+        &mut self,
+        kind: HsmVaultKeyKind,
+        pub_key_ciphertext: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        m: &[u8; MLDSA_SEED_LEN],
+        shared_secret: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let ct_len = mlkem_ct_len(kind)?;
+        if pub_key_ciphertext.len() != mlkem_pub_key_len(kind)?
+            || pub_key_ciphertext.len() < ct_len
+            || shared_secret.len() != mailbox::SHARED_SECRET_LEN
+        {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        self.mlkem_encaps_submit(kind, pub_key_ciphertext, m)
+            .await?;
+        let output = &mut pub_key_ciphertext[..ct_len];
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, output)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
+        {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
+    }
+
+    async fn mlkem_encaps_submit(
+        &mut self,
+        kind: HsmVaultKeyKind,
+        pub_key: &[u8],
+        m: &[u8; MLDSA_SEED_LEN],
+    ) -> HsmResult<()> {
+        let expected_pub = mlkem_pub_key_len(kind)?;
+        let expected_ct = mlkem_ct_len(kind)?;
+        if pub_key.len() != expected_pub {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -383,12 +465,6 @@ impl PqcEngine<'_> {
         if resp.out_len as usize != expected_ct {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ciphertext)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
-        }
-
         Ok(())
     }
 

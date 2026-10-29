@@ -32,7 +32,7 @@
 //!   (`U8` / `U16` / `U32` / `U64` / `Bool`).
 //! - [`part_prop_get_bytes`](HsmPartitionManager::part_prop_get_bytes) /
 //!   [`part_prop_set_bytes`](HsmPartitionManager::part_prop_set_bytes)
-//!   for `FixedBytes` / `VarBytes` slots, exchanging `&DmaBuf` so
+//!   for `FixedBytes` / `VarBytes` slots, exchanging `&HsmDmaBuf` so
 //!   the bytes flow into further PAL crypto without a copy.
 //! - [`part_prop_clear`](HsmPartitionManager::part_prop_clear) to
 //!   reset an absent-capable slot.
@@ -361,7 +361,7 @@ pub trait HsmPartitionManager: HsmIoTypes {
     ///
     /// # Returns
     ///
-    /// [`HsmResult<&DmaBuf>`] — on success, a borrowed sub-view of
+    /// [`HsmResult<&HsmDmaBuf>`] — on success, a borrowed sub-view of
     /// the PAL's backing storage so the bytes can flow into further
     /// PAL crypto primitives without a copy.  For `FixedBytes` the
     /// length equals the slot's declared `len`; for `VarBytes` it is
@@ -371,7 +371,8 @@ pub trait HsmPartitionManager: HsmIoTypes {
     /// The returned view is valid for the duration of the `&self`
     /// borrow on the [`HsmPartitionManager`] implementation; PAL
     /// impls must not invalidate it before the borrow ends.
-    fn part_prop_get_bytes<'a>(&'a self, io: &Self::Io, id: PartPropId) -> HsmResult<&'a DmaBuf>;
+    fn part_prop_get_bytes<'a>(&'a self, io: &Self::Io, id: PartPropId)
+    -> HsmResult<&'a HsmDmaBuf>;
 
     /// Write a [`PartPropKind::FixedBytes`] or
     /// [`PartPropKind::VarBytes`] slot.
@@ -394,7 +395,8 @@ pub trait HsmPartitionManager: HsmIoTypes {
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
+    fn part_prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &HsmDmaBuf)
+    -> HsmResult<()>;
 
     /// Reset a property slot to its absent state.
     ///

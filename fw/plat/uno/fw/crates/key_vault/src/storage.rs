@@ -19,7 +19,7 @@
 //! storage behind a trait is what lets the allocator, layout, and error
 //! logic be exercised on the host without real GSRAM.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use zerocopy::FromBytes;
@@ -207,13 +207,13 @@ pub trait TableStorage {
     ///
     /// # Returns
     ///
-    /// Reference to the 12032-byte blob region as a `DmaBuf` (DMA-aligned memory).
+    /// Reference to the 12032-byte blob region as a `HsmDmaBuf` (DMA-aligned memory).
     ///
     /// # Errors
     ///
     /// [`HsmError::InvalidArg`](tsra_fw_hsm_pal_traits::HsmError::InvalidArg)
     /// if `table` is out of range.
-    fn blob(&self, table: usize) -> HsmResult<&DmaBuf>;
+    fn blob(&self, table: usize) -> HsmResult<&HsmDmaBuf>;
 
     /// Borrows the key blob region of a table (mutably).
     ///
@@ -234,5 +234,5 @@ pub trait TableStorage {
     ///
     /// [`HsmError::InvalidArg`](tsra_fw_hsm_pal_traits::HsmError::InvalidArg)
     /// if `table` is out of range.
-    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut DmaBuf>;
+    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut HsmDmaBuf>;
 }

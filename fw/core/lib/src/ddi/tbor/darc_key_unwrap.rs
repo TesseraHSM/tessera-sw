@@ -33,7 +33,7 @@
 //! The command **persists nothing** (no vault write, no lifecycle
 //! advance), so it records no rollback on the undo log.  Every recovered
 //! secret (the TMK, the COSE plaintext, and the vault scalar) is scrubbed
-//! on EVERY exit path.  This command is **Crypto-Officer-only**.
+//! during IO teardown. This command is **Crypto-Officer-only**.
 
 use tsra_fw_core_crypto_cose_key::key_op;
 use tsra_fw_core_crypto_cose_key::parse_ec2_private_cose_key;
@@ -49,7 +49,8 @@ use tsra_fw_ddi_tbor_types::TborDarcKeyUnwrapResp;
 use tsra_fw_ddi_tbor_types::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
 use tsra_fw_ddi_tbor_types::DARC_UNWRAP_PUB_KEY_MAX_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -130,7 +131,7 @@ fn attrs_for_ecc(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAt
 ///
 /// Public-key material, so an ordinary (non-constant-time) comparison is
 /// appropriate.
-fn pub_key_matches(curve: HsmEccCurve, x: &DmaBuf, y: &DmaBuf, wire_pub: &DmaBuf) -> bool {
+fn pub_key_matches(curve: HsmEccCurve, x: &HsmDmaBuf, y: &HsmDmaBuf, wire_pub: &HsmDmaBuf) -> bool {
     let coord_raw = curve.priv_key_len();
     let wc = curve.wire_coord_len();
     if wire_pub.len() != 2 * wc {
@@ -143,7 +144,7 @@ fn pub_key_matches(curve: HsmEccCurve, x: &DmaBuf, y: &DmaBuf, wire_pub: &DmaBuf
 /// Whether the wire-LE coordinate `wire_le` (field-width, low bytes are
 /// the reversed field element, any high bytes are zero pad) equals the
 /// big-endian coordinate `be` (`coord_raw` bytes).
-fn coord_matches(wire_le: &DmaBuf, be: &DmaBuf, coord_raw: usize) -> bool {
+fn coord_matches(wire_le: &HsmDmaBuf, be: &HsmDmaBuf, coord_raw: usize) -> bool {
     if be.len() != coord_raw {
         return false;
     }
@@ -166,18 +167,17 @@ fn coord_matches(wire_le: &DmaBuf, be: &DmaBuf, coord_raw: usize) -> bool {
 /// **Stateless**: recovers and re-masks the EC key without writing the
 /// vault or advancing any lifecycle, so it records no rollback on the
 /// `undo` log.  Every recovered secret (the TMK, the COSE plaintext, and
-/// the vault scalar) is scrubbed on EVERY exit path — scope rewind does
-/// not clear DMA memory.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// the vault scalar) is scrubbed during IO teardown.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  Every value captured out is `Copy`, so it outlives
     // the borrow.
     let (tmk_mk_id, out_scope, sess_id, req_usage): (HsmKeyId, HsmKeyScope, HsmSessId, KeyUsage) = {
-        let req = TborDarcKeyUnwrapReq::decode(req_buf)?;
+        let req = TborDarcKeyUnwrapReq::decode(cmd_buf.request())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -221,7 +221,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // ── Recover the 32-byte TMK from its masked envelope. ──
             let masked_tmk = alloc.dma_alloc(MASKED_TMK_LEN)?;
             {
-                let req = TborDarcKeyUnwrapReq::decode(req_buf)?;
+                let req = TborDarcKeyUnwrapReq::decode(cmd_buf.request())?;
                 masked_tmk.copy_from_slice(req.masked_tmk());
             }
             let tmk_masking_key = pal.vault_key(io, tmk_mk_id)?;
@@ -235,23 +235,19 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 Ok::<_, HsmError>(tmk)
             }
             .await;
-            masked_tmk.zeroize();
             let tmk = unmask_res?;
 
             // ── AES-KWP-unwrap the COSE_Key, decode it, convert to the
             // vault scalar, re-derive + check the public key, and mask the
-            // recovered key.  Every recovered secret is scrubbed on EVERY
-            // path — no fallible step may sit between the TMK's recovery
-            // and its `zeroize` guard, so `wrapped` is allocated and filled
-            // INSIDE the guarded block. ──
+            // recovered key.
             let crypto_res = async {
                 let wrapped_len = {
-                    let req = TborDarcKeyUnwrapReq::decode(req_buf)?;
+                    let req = TborDarcKeyUnwrapReq::decode(cmd_buf.request())?;
                     req.wrapped_key().len()
                 };
                 let wrapped = alloc.dma_alloc(wrapped_len)?;
                 {
-                    let req = TborDarcKeyUnwrapReq::decode(req_buf)?;
+                    let req = TborDarcKeyUnwrapReq::decode(cmd_buf.request())?;
                     wrapped.copy_from_slice(req.wrapped_key());
                 }
 
@@ -261,8 +257,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                     let mli = pal.aes_kwp_unwrap(io, tmk, wrapped, cose).await?;
 
                     // Decode + all EC math while the COSE plaintext (which
-                    // holds `d`) is borrowed; return only owned results so
-                    // the borrow ends before `cose` is scrubbed.
+                    // holds `d`) is borrowed.
                     let parsed = parse_ec2_private_cose_key(&cose[..mli])?;
                     let curve = parsed.curve;
 
@@ -311,23 +306,19 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                         Ok::<_, HsmError>((key_kind.0, masked_len, wire_pub_len))
                     }
                     .await;
-                    vault.zeroize();
                     vault_res
                 }
                 .await;
-                cose.zeroize();
                 cose_res
             }
             .await;
 
-            tmk.zeroize();
             crypto_res
         })
         .await?;
 
     encode_response(
-        pal,
-        io,
+        cmd_buf,
         key_kind,
         &masked_out[..masked_len],
         &pub_out[..pub_len],
@@ -335,14 +326,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 }
 
 /// Encode the `DarcKeyUnwrap` response around the masked key + public key.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
+fn encode_response(
+    cmd_buf: &mut HsmCmdBuf<'_>,
     key_kind: u8,
-    masked_key: &DmaBuf,
-    pub_key: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+    masked_key: &HsmDmaBuf,
+    pub_key: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborDarcKeyUnwrapResp::encode(buf, 0, false)?
             .key_kind(key_kind)?
             .masked_key(masked_key)?

@@ -10,7 +10,7 @@
 //!
 //! It is `no_std` and takes no allocations: decoding walks the CBOR with
 //! a `minicbor` cursor only to locate the coordinate / scalar spans and
-//! returns zero-copy [`DmaBuf`](tsra_fw_hsm_pal_traits::DmaBuf)
+//! returns zero-copy [`HsmDmaBuf`](tsra_fw_hsm_pal_traits::HsmDmaBuf)
 //! sub-views borrowing from the input buffer.
 //!
 //! Every code path is **no-panic across the trust boundary**: any

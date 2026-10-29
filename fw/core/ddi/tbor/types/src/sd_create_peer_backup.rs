@@ -72,7 +72,7 @@ const _: () = assert!(MASKED_SD_LEN == 276);
 const _: () = assert!(POK_REMOTE_BACKUP_LEN == 161);
 
 /// `SdCreatePeerBackup` request schema.
-#[tbor(opcode = 0x0E)]
+#[tbor(opcode = 0x0E, pair = TborSdCreatePeerBackupResp)]
 pub struct TborSdCreatePeerBackupReq<'a> {
     /// Session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -111,7 +111,7 @@ pub struct TborSdCreatePeerBackupReq<'a> {
 }
 
 /// `SdCreatePeerBackup` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborSdCreatePeerBackupReq)]
 pub struct TborSdCreatePeerBackupResp<'a> {
     /// Peer backup: an HPKE-Auth seal of BKS3.  Always exactly
     /// [`POK_REMOTE_BACKUP_LEN`] (161 B).

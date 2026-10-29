@@ -18,9 +18,14 @@ Produces a raw ECDSA `r ‖ s` signature over a host-supplied
 The device unmasks the key **in place** in the request buffer (recovering
 its curve from the blob's key kind), checks the `sign` usage attribute,
 signs, and returns the signature.  The recovered plaintext key is
-scrubbed from the request buffer on every path.  Firmware does **no**
+scrubbed from the request buffer during IO teardown.  Firmware does **no**
 hashing — the caller supplies the digest.  This is the TBOR analogue of
 MBOR `EccSign`, keyed by a masked blob instead of a vault id.
+
+After authentication, the consumed envelope metadata becomes the compact
+response's signature slot. Checked disjoint regions keep the private key
+and digest live while the PAL writes the signature directly, without a
+separate response allocation or copy-back.
 
 The digest is supplied and consumed in PKA-native **little-endian** byte
 order (the natural big-endian digest with all bytes reversed); the device

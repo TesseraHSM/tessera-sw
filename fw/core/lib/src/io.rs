@@ -102,7 +102,7 @@ impl<P: HsmPal> Hsm<P> {
                 )),
             },
         };
-        let handler_ok = op_result.is_ok();
+        let handler_ok = op_result.as_ref().is_ok_and(|status| !status.ddi_failed);
 
         // Post the completion (CQE) to the host, then run the undo/commit
         // walk, then free the slot.  Splitting `complete_io` from
@@ -320,7 +320,7 @@ impl<P: HsmPal> Hsm<P> {
                 Err(_) => (None, None, false),
             };
 
-            let resp: &DmaBuf = dispatch_result.map(|out| out.resp).or_else(|status| {
+            let resp: &HsmDmaBuf = dispatch_result.map(|out| out.resp).or_else(|status| {
                 self.pal()
                     .dma_alloc_var(io, |buf| ddi::mbor::encode_ddi_err(hdr.op, status, buf))
                     .op_status(HostStatus::INTERNAL_ERROR)
@@ -359,19 +359,15 @@ impl<P: HsmPal> Hsm<P> {
 
     /// Handles an [`OP_TBOR`] IO command.
     ///
-    /// Mirrors [`Self::handle_mbor_op`] but parses the request body via
-    /// the TBOR codec and dispatches by raw `u8` opcode. TBOR commands
-    /// are currently sessionless; SQE session flags must indicate
-    /// [`SessionCtrl::NoSession`].
+    /// Parses TBOR framing and dispatches by raw `u8` opcode, using the
+    /// opcode's session policy and a shared exchange allocation.
     ///
     /// **Phase 1 (pre-decode)** — SQE validation, inbound DMA, TBOR
     /// `RequestView::parse`. Errors → [`OpError`] → CQE host status.
     ///
     /// **Phase 2 (post-decode)** — Dispatch by opcode. Errors are
-    /// returned as a TBOR response carrying a non-zero `status` field
-    /// (built by the per-opcode handlers via the encoder API). For now,
-    /// dispatch errors that cannot construct a typed error response
-    /// surface as CQE-level host status codes.
+    /// encoded into the exchange as a non-zero TBOR `status`. The undo
+    /// log is independent and remains live through outbound DMA and CQE.
     async fn handle_tbor_op<'s>(
         &'s self,
         io: &mut P::Io,
@@ -379,9 +375,9 @@ impl<P: HsmPal> Hsm<P> {
     ) -> Result<HsmOpStatus, OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
-        let req_buf = self
+        let mut allocation = self
             .pal()
-            .dma_alloc(io, split)
+            .dma_alloc_exchange(io, split)
             .op_status(HostStatus::ALLOC_ERR)?;
 
         // ── Phase 1: inbound DMA (yield 1) ─────────────────────────
@@ -390,7 +386,7 @@ impl<P: HsmPal> Hsm<P> {
                 io,
                 params.src_addr,
                 params.src_addr2,
-                &mut req_buf[..params.src_len],
+                &mut allocation.buffer_mut()[..params.src_len],
                 true,
             )
             .await
@@ -400,93 +396,71 @@ impl<P: HsmPal> Hsm<P> {
                 HostStatus::DMA_TXN_ERROR,
             )?;
 
-        // ── Phase 2: parse TBOR header, validate session, dispatch ─
-        let (resp, session_ctrl, cqe_sess_id, cqe_closed) = {
-            // Capture `opcode` via a short-lived shared reborrow so
-            // the parsed `RequestView` is dropped before `dispatch`
-            // takes a mutable borrow of the same buffer.  AEAD-path
-            // handlers (`OpenSessionFinish` / `ChangePsk` / `PartInit`)
-            // open envelope sub-views in place via `decode_mut`,
-            // which requires `&mut DmaBuf` end-to-end.
-            // The body `session_id` is taken from this same parse. The
-            // dispatcher's in-session gating needs it, and re-deriving it
-            // there meant a second `RequestView::parse` plus a full TOC
-            // scan per request -- measured at 7.2us, which was the whole
-            // remaining gap to MBOR on `EccSign`.
-            let (opcode, body_sess_id) = {
-                let req_view = TborRequestView::parse(&req_buf[..params.src_len]).op_err(
+        // Parse once before growing or reborrowing the request storage.
+        let (opcode, body_sess_id) = {
+            let req_view = TborRequestView::parse(&allocation.buffer_mut()[..params.src_len])
+                .op_err(
                     "core",
                     HsmError::DdiDecodeFailed,
                     HostStatus::REQ_HDR_DECODE_ERR,
                 )?;
-                let op = req_view.opcode();
-                // Out-of-session opcodes have no id to find and no gate
-                // to satisfy, so they skip the scan entirely.
-                let sid = if ddi::tbor::needs_body_session_id(op) {
-                    ddi::tbor::peek_session_id(&req_view)
-                } else {
-                    None
-                };
-                (op, sid)
-            };
-
-            // Per-opcode session-flag validation: GetApiRev /
-            // OpenSessionInit must be sessionless; OpenSessionFinish /
-            // CloseSession / ChangePsk must carry the SQE session_id
-            // for the targeted slot.  Unknown opcodes are classified as
-            // NoSession here so dispatch reaches the handler layer and
-            // surfaces `UnsupportedCmd` via a typed TBOR response.
-            let session_ctrl = SessionCtrl::from_tbor_opcode(opcode);
-            if let Err(_e) = Self::validate_tbor_session_flags(session_ctrl, params.session_flags) {
-                let resp: &DmaBuf = self
-                    .pal()
-                    .dma_alloc_var(io, |buf| {
-                        ddi::tbor::encode_tbor_err(opcode, HsmError::InvalidArg, buf)
-                    })
-                    .op_status(HostStatus::INTERNAL_ERROR)?;
-                (resp, session_ctrl, None, false)
+            let op = req_view.opcode();
+            let sid = if ddi::tbor::needs_body_session_id(op) {
+                ddi::tbor::peek_session_id(&req_view)
             } else {
-                let dispatch_result = ddi::tbor::dispatch(
+                None
+            };
+            (op, sid)
+        };
+
+        let capacity = ddi::tbor::exchange_capacity(opcode, params.src_len, params.dst_len);
+        if capacity > allocation.len() {
+            self.pal()
+                .dma_grow(io, &mut allocation, capacity)
+                .op_status(HostStatus::ALLOC_ERR)?;
+        }
+        let mut exchange = HsmCmdBuf::new(allocation.buffer_mut(), params.src_len, params.dst_len)
+            .op_status(HostStatus::INTERNAL_ERROR)?;
+        let session_ctrl = SessionCtrl::from_tbor_opcode(opcode);
+        let dispatch_result =
+            if Self::validate_tbor_session_flags(session_ctrl, params.session_flags).is_err() {
+                Err(HsmError::InvalidArg)
+            } else {
+                ddi::tbor::dispatch(
                     self.pal(),
                     io,
-                    &mut req_buf[..params.src_len],
+                    &mut exchange,
                     opcode,
                     params.sqe_session_id,
                     body_sess_id,
                     params.oob,
                     undo,
                 )
-                .await;
-                // Mirror `handle_mbor_op`: a successful session-establishing
-                // command reports its allocated id in `session_id` (which sets
-                // `session_id_valid`), and a successful SessionClose additionally
-                // sets `session_closed`. The host driver registers/drops the
-                // session against the calling file handle from these fields —
-                // without them every follow-up in-session TBOR ioctl is rejected
-                // with `NoExistingSession` before reaching the firmware. Both are
-                // left cleared on any dispatch failure.
-                let (cqe_sess_id, cqe_closed) = match &dispatch_result {
-                    Ok(out) => match session_ctrl {
-                        SessionCtrl::Open => (out.session_id, false),
-                        // The dispatcher already proved the body `session_id`
-                        // matches the SQE one for close, so use the SQE value
-                        // directly rather than threading it back out.
-                        SessionCtrl::Close => (Some(params.sqe_session_id), true),
-                        _ => (None, false),
-                    },
-                    Err(_) => (None, false),
-                };
-
-                let resp: &DmaBuf = dispatch_result.map(|out| out.resp).or_else(|err| {
-                    self.pal()
-                        .dma_alloc_var(io, |buf| ddi::tbor::encode_tbor_err(opcode, err, buf))
-                        .op_status(HostStatus::INTERNAL_ERROR)
-                        .map(|b| &*b)
-                })?;
-                (resp, session_ctrl, cqe_sess_id, cqe_closed)
+                .await
+            };
+        // Session ids are exposed only after successful dispatch and response
+        // validation. Preserve the existing close/open CQE semantics.
+        let ddi_failed = dispatch_result.is_err();
+        let (cqe_sess_id, cqe_closed) = match &dispatch_result {
+            Ok(out) => match session_ctrl {
+                SessionCtrl::Open => (out.session_id, false),
+                SessionCtrl::Close => (Some(params.sqe_session_id), true),
+                _ => (None, false),
+            },
+            Err(_) => (None, false),
+        };
+        let resp = match dispatch_result {
+            Ok(out) => exchange
+                .response(out.response_len)
+                .op_status(HostStatus::INTERNAL_ERROR)?,
+            Err(err) => {
+                let len = ddi::tbor::encode_exchange_err(opcode, err, &mut exchange)
+                    .op_status(HostStatus::INTERNAL_ERROR)?;
+                exchange
+                    .response(len)
+                    .op_status(HostStatus::INTERNAL_ERROR)?
             }
         };
-
         let resp_len = resp.len();
 
         // ── Outbound DMA (yield 2) ─────────────────────────────────
@@ -499,13 +473,9 @@ impl<P: HsmPal> Hsm<P> {
                 HostStatus::DMA_TXN_ERROR,
             )?;
 
-        Ok(HsmOpStatus::new(
-            resp_len,
-            session_ctrl,
-            cqe_sess_id,
-            None,
-            cqe_closed,
-        ))
+        let mut status = HsmOpStatus::new(resp_len, session_ctrl, cqe_sess_id, None, cqe_closed);
+        status.ddi_failed = ddi_failed;
+        Ok(status)
     }
 
     /// Validates the SQE for an MBOR / TBOR IO command and extracts the
@@ -536,6 +506,7 @@ impl<P: HsmPal> Hsm<P> {
         };
         Ok(IoSqeParams {
             src_len: sqe.src_len() as usize,
+            dst_len: sqe.dst_len() as usize,
             src_addr: sqe.src_prp1(),
             src_addr2: sqe.src_prp2(),
             dst_addr: sqe.dst_prp1(),
@@ -685,6 +656,7 @@ fn flush_session_id(sqe: &Sqe<'_>) -> HsmResult<u16> {
 /// Fields extracted from a validated MBOR / TBOR IO SQE.
 struct IoSqeParams {
     src_len: usize,
+    dst_len: usize,
     src_addr: HsmDmaAddr,
     /// Second host source page (SQE PRP2). Required once the request
     /// crosses the first 4 KiB page; the two host pages are separately
@@ -739,7 +711,186 @@ fn classify_session_state(session_ctrl: SessionCtrl, state: HsmSessionState) -> 
 
 #[cfg(test)]
 mod session_gate_tests {
+    use tsra_fw_ddi_tbor_types as types;
+    use tsra_fw_hsm_pal_std::HsmIoRequest;
+    use tsra_fw_hsm_pal_std::HsmPartId;
+    use tsra_fw_hsm_pal_std::StdHsmPal;
+
     use super::*;
+
+    #[repr(align(4096))]
+    struct HostPage([u8; 4096]);
+
+    #[allow(unsafe_code)]
+    fn response_bytes(bytes: &[u8]) -> &HsmDmaBuf {
+        // SAFETY: the std PAL uses ordinary process memory, without device DMA.
+        unsafe { HsmDmaBuf::from_raw(bytes) }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn tbor_errors_and_failed_completions_rollback_pending_sessions() {
+        std::thread::Builder::new()
+            // Match the std firmware executor's stack for the unoptimized IO future.
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(check_tbor_rollback());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[allow(clippy::unwrap_used)]
+    async fn check_tbor_rollback() {
+        let (tx, rx) = async_channel::bounded(1);
+        let hsm = Hsm::new(StdHsmPal::new(rx, tokio::runtime::Handle::current()));
+        hsm.pal().part_alloc_internal(0, 1).await.unwrap();
+        hsm.pal().part_enable_internal(0).await.unwrap();
+        let mut committed_session = None;
+
+        for attempt in 0..10 {
+            let short_response = attempt < 8;
+            let fail_completion = attempt == 8;
+            let mut request = HostPage([0; 4096]);
+            let mut response = HostPage([0xA5; 4096]);
+            let request_len = types::TborSessionOpenInitReq::encode(&mut request.0)
+                .unwrap()
+                .psk_id(types::PskId::CryptoUser)
+                .unwrap()
+                .session_type(types::SessionKind(0))
+                .unwrap()
+                .suite_id(types::SuiteId(1))
+                .unwrap()
+                .pk_init(&[0; 97])
+                .unwrap()
+                .finish()
+                .len();
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            tx.send(HsmIoRequest {
+                pid: HsmPartId::from(0u8),
+                qid: 0,
+                qidx: 0,
+                sqe: SqeBuilder::new()
+                    .cmd(CmdDword::new().with_op(OP_TBOR))
+                    .buf_lens(request_len as u32, if short_response { 12 } else { 4096 })
+                    .src_prp1(request.0.as_ptr() as u64)
+                    .dst_prp1(response.0.as_mut_ptr() as u64)
+                    .session_flags(SessionFlags::new().with_ctrl(SessionCtrl::Open as u8))
+                    .build(),
+                tx: reply_tx,
+            })
+            .await
+            .unwrap();
+            let io = hsm.pal().poll_io().await.unwrap();
+            if attempt > 0 {
+                hsm.pal()
+                    .alloc_scoped(&io, |alloc| -> HsmResult<()> {
+                        let reused =
+                            alloc.dma_alloc(UNDO_LOG_SIZE + request_len.next_multiple_of(4))?;
+                        assert!(
+                            reused.iter().all(|&b| b == 0),
+                            "previous IO was not scrubbed"
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            for id in 0u16..8 {
+                assert!(
+                    matches!(
+                        hsm.pal().session_state(&io, HsmSessId::from(id)),
+                        HsmSessionState::Invalid
+                    ),
+                    "session {id} remained live before attempt {attempt}"
+                );
+            }
+            if attempt == 0 {
+                hsm.pal()
+                    .dma_alloc(&io, 16384 - UNDO_LOG_SIZE - 100)
+                    .unwrap()
+                    .fill(0xA5);
+            }
+            let mut pk_init = [0; 97];
+            pk_init[0] = 4;
+            pk_init[1..]
+                .copy_from_slice(&crate::part_state::part_id_pub_key(hsm.pal(), &io).unwrap()[..]);
+            types::TborSessionOpenInitReq::encode(&mut request.0)
+                .unwrap()
+                .psk_id(types::PskId::CryptoUser)
+                .unwrap()
+                .session_type(types::SessionKind(0))
+                .unwrap()
+                .suite_id(types::SuiteId(1))
+                .unwrap()
+                .pk_init(&pk_init)
+                .unwrap()
+                .finish();
+            let reply_rx = if fail_completion {
+                drop(reply_rx);
+                None
+            } else {
+                Some(reply_rx)
+            };
+            hsm.handle_io(io).await;
+            if let Some(reply_rx) = reply_rx {
+                let mut raw = reply_rx.await.unwrap();
+                let cqe = Cqe::from(&mut raw);
+                if attempt == 0 {
+                    assert_eq!(cqe.status(), HostStatus::ALLOC_ERR);
+                    assert!(response.0.iter().all(|&b| b == 0xA5));
+                    continue;
+                }
+                assert_eq!(cqe.status(), 0, "attempt {attempt}");
+                let len = usize::from(cqe.dst_len());
+                assert!(response.0[len..].iter().all(|&b| b == 0xA5));
+                if short_response {
+                    let frame =
+                        tsra_fw_ddi_tbor::ResponseView::parse(response_bytes(&response.0[..len]))
+                            .unwrap();
+                    assert_eq!(
+                        frame.status(),
+                        HsmError::TborBufferTooSmall.0,
+                        "attempt {attempt}"
+                    );
+                    assert_eq!(len, 12);
+                    assert!(!cqe.dw0().session_id_valid());
+                } else {
+                    let frame =
+                        types::TborSessionOpenInitResp::decode(response_bytes(&response.0[..len]))
+                            .unwrap();
+                    assert!(cqe.dw0().session_id_valid());
+                    assert_eq!(cqe.dw1().session_id(), u16::from(frame.session_id()));
+                    committed_session = Some(HsmSessId::from(u16::from(frame.session_id())));
+                }
+            } else {
+                types::TborSessionOpenInitResp::decode(response_bytes(&response.0)).unwrap();
+            }
+        }
+
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        tx.send(HsmIoRequest {
+            pid: HsmPartId::from(0u8),
+            qid: 0,
+            qidx: 0,
+            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
+            tx: reply_tx,
+        })
+        .await
+        .unwrap();
+        let io = hsm.pal().poll_io().await.unwrap();
+        let id = committed_session.unwrap();
+        assert!(matches!(
+            hsm.pal().session_state(&io, id),
+            HsmSessionState::Pending
+        ));
+        hsm.pal().session_destroy(&io, id).await.unwrap();
+        hsm.pal().drop_io(io).await.unwrap();
+    }
 
     #[test]
     fn flush_success_and_absent_session_report_closed_completion() {

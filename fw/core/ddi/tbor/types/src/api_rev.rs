@@ -28,14 +28,14 @@ pub const TBOR_OP_API_REV: u8 = 0x01;
 /// single `none` TOC placeholder to satisfy the TBOR codec's
 /// `toc_count >= 1` requirement; the decoder verifies that placeholder
 /// is present and the opcode matches.
-#[tbor(opcode = 0x01)]
+#[tbor(opcode = 0x01, pair = TborApiRevResp)]
 pub struct TborApiRevReq;
 
 /// `ApiRev` response schema.
 ///
 /// Advertises the inclusive range of TBOR wire-protocol versions the
 /// firmware supports.
-#[tbor(response)]
+#[tbor(response, pair = TborApiRevReq)]
 pub struct TborApiRevResp {
     /// Lowest TBOR wire-protocol version the firmware speaks.
     pub min_ver: U8,

@@ -40,7 +40,7 @@ const _: () = assert!(MASKED_TMK_LEN == 260);
 ///
 /// Originates a fresh DARC Transfer Masking Key under the active
 /// session's partition; the TMK is always security-domain-scoped.
-#[tbor(opcode = 0x23)]
+#[tbor(opcode = 0x23, pair = TborDarcTmkGenResp)]
 pub struct TborDarcTmkGenReq {
     /// CO session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -52,7 +52,7 @@ pub struct TborDarcTmkGenReq {
 /// `DarcTmkGen` response schema.
 ///
 /// Carries the freshly minted TMK masked under the partition SDMK.
-#[tbor(response)]
+#[tbor(response, pair = TborDarcTmkGenReq)]
 pub struct TborDarcTmkGenResp<'a> {
     /// The minted TMK, masked (AEAD-GCM-256) under the partition SDMK.
     /// Always exactly [`MASKED_TMK_LEN`] (260 B).

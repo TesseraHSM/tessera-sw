@@ -3,10 +3,10 @@
 
 //! Fluent encoder for TBOR messages.
 //!
-//! Strategy: data bytes are staged forward of the maximum possible TOC
-//! region while building, then shifted left into their final position on
-//! [`Encoder::finish`] once the final TOC count is known. This keeps the
-//! API allocation-free and copies each payload byte exactly once.
+//! With [`Encoder::with_toc_slots`], data bytes are written directly at
+//! their final offset; callers fill any unused TOC slots with `none`.
+//! Otherwise data is staged behind the maximum TOC region and compacted
+//! on [`Encoder::finish`]. Both paths are allocation-free.
 //!
 //! `Encoder<H>` is generic over header kind; [`RequestEncoder`] and
 //! [`ResponseEncoder`] are the public type aliases consumers use.
@@ -31,6 +31,7 @@ pub struct Encoder<'a, H: Header> {
     header: H,
     toc_words: [u32; MAX_TOC_ENTRIES],
     toc_count: usize,
+    toc_slots: usize,
     /// Bytes written so far to the staged data region (relative to
     /// [`stage_base`](Self::stage_base)).
     data_offset: usize,
@@ -79,9 +80,23 @@ impl<'a, H: Header> Encoder<'a, H> {
             header,
             toc_words: [0u32; MAX_TOC_ENTRIES],
             toc_count: 0,
+            toc_slots: MAX_TOC_ENTRIES,
             data_offset: 0,
             _phantom: PhantomData,
         }
+    }
+
+    /// Reserve a known TOC footprint so payloads are written at their final
+    /// offsets. Call before adding entries and fill unused slots with `none`.
+    pub fn with_toc_slots(mut self, slots: usize) -> Result<Self, EncodeError> {
+        if slots == 0 {
+            return Err(EncodeError::MissingTocEntries);
+        }
+        if slots > MAX_TOC_ENTRIES || self.toc_count != 0 {
+            return Err(EncodeError::TooManyTocEntries);
+        }
+        self.toc_slots = slots;
+        Ok(self)
     }
 
     /// Compute the total encoded message length without writing.
@@ -198,7 +213,7 @@ impl<'a, H: Header> Encoder<'a, H> {
 
         // Shift staged data from its max-TOC parking spot into its final
         // position. No-op when toc_count is already MAX_TOC_ENTRIES.
-        let stage_base = Self::stage_base();
+        let stage_base = self.stage_base();
         if self.data_offset > 0 && stage_base != data_start {
             self.buf
                 .copy_within(stage_base..stage_base + self.data_offset, data_start);
@@ -219,12 +234,12 @@ impl<'a, H: Header> Encoder<'a, H> {
     /// possible TOC region. Final data is shifted left from here on
     /// [`finish`](Self::finish) once the real TOC count is known.
     #[inline]
-    fn stage_base() -> usize {
-        H::LEN + MAX_TOC_ENTRIES * TOC_ENTRY_LEN
+    fn stage_base(&self) -> usize {
+        H::LEN + self.toc_slots * TOC_ENTRY_LEN
     }
 
     fn push_toc(&mut self, word: u32) -> Result<(), EncodeError> {
-        if self.toc_count >= MAX_TOC_ENTRIES {
+        if self.toc_count >= self.toc_slots {
             return Err(EncodeError::TooManyTocEntries);
         }
         self.toc_words[self.toc_count] = word;
@@ -245,7 +260,7 @@ impl<'a, H: Header> Encoder<'a, H> {
     /// Compute the destination range in `self.buf` for `len` new staged
     /// bytes, returning `BufferTooSmall` if it would overflow the buffer.
     fn stage_range(&self, len: usize) -> Result<core::ops::Range<usize>, EncodeError> {
-        let start = Self::stage_base() + self.data_offset;
+        let start = self.stage_base() + self.data_offset;
         let end = start + len;
         if end > self.buf.len() {
             return Err(EncodeError::BufferTooSmall);

@@ -11,7 +11,7 @@
 //! locates the indexed descriptor and forwards it **verbatim** to the
 //! GDMA ([`HsmGdmaController::copy_mem_from_host_raw`]), which interprets
 //! the descriptor and copies the item into a caller-allocated
-//! [`DmaBuf`]. This layer does **no** SGL parsing itself — it only
+//! [`HsmDmaBuf`]. This layer does **no** SGL parsing itself — it only
 //! bounds the index and computes the descriptor's address.
 //!
 //! The Uno GDMA does not walk PRP lists; each transfer is a single SGL
@@ -20,9 +20,9 @@
 
 #![no_std]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -105,7 +105,7 @@ pub async fn copy_oob<P>(
     io: &P::Io,
     oob: &OobPtr,
     index: usize,
-    dst: &mut DmaBuf,
+    dst: &mut HsmDmaBuf,
 ) -> HsmResult<()>
 where
     P: HsmGdmaController + HsmAlloc,

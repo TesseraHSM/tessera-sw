@@ -57,7 +57,7 @@ pub const MASKED_KEX_KEY_LEN: usize = 8 + 12 + 192 + 48 + 16;
 ///
 /// Generates a DARC key-exchange key under the active session's
 /// partition with the caller-supplied [`KeyScope`].
-#[tbor(opcode = 0x20)]
+#[tbor(opcode = 0x20, pair = TborDarcKexKeyGenResp)]
 pub struct TborDarcKexKeyGenReq {
     /// CO/CU session id this request is bound to.  The dispatcher
     /// cross-checks it against the SQE-carried session id.
@@ -71,7 +71,7 @@ pub struct TborDarcKexKeyGenReq {
 }
 
 /// `DarcKexKeyGen` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborDarcKexKeyGenReq)]
 pub struct TborDarcKexKeyGenResp<'a> {
     /// The new key-exchange key's ECC-P384 private half, masked
     /// (AEAD-GCM-256) under the requested scope's masking key.  Always

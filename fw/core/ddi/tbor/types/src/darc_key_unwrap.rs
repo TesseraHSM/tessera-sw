@@ -81,7 +81,7 @@ const _: () = assert!(MASKED_TMK_LEN == 260);
 ///
 /// Imports an AES-KWP-wrapped EC2 `COSE_Key` private key under a DARC TMK
 /// and re-masks it under the requested scope.
-#[tbor(opcode = 0x22)]
+#[tbor(opcode = 0x22, pair = TborDarcKeyUnwrapResp)]
 pub struct TborDarcKeyUnwrapReq<'a> {
     /// CO session id this request is bound to.
     #[tbor(session_id)]
@@ -110,7 +110,7 @@ pub struct TborDarcKeyUnwrapReq<'a> {
 }
 
 /// `DarcKeyUnwrap` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborDarcKeyUnwrapReq)]
 pub struct TborDarcKeyUnwrapResp<'a> {
     /// The recovered key's vault-kind discriminant (`HsmVaultKeyKind`);
     /// one of `Ecc{256,384,521}Private`.

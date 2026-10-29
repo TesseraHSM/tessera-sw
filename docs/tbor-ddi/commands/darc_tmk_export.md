@@ -36,8 +36,7 @@ Handler flow:
 4. Unmask `masked_tmk` → the 32-byte TMK (its masked-key kind must be
    `DarcTmk` and the plaintext exactly 32 bytes).
 5. HPKE-Auth-seal the TMK to `RcvrPub` (sender-auth `SndrPriv`) → the
-   145-byte `sealed_tmk`.  `SndrPriv` and the TMK are zeroized on every
-   exit path.
+   145-byte `sealed_tmk`. IO teardown scrubs `SndrPriv` and the TMK.
 
 The command **persists nothing** (no vault write, no lifecycle advance),
 so it records no rollback on the undo log.

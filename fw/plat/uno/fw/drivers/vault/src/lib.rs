@@ -18,7 +18,7 @@
 #![no_std]
 #![allow(unsafe_code)]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_uno_key_vault::Entry;
@@ -253,9 +253,9 @@ impl TableStorage for VaultStorage {
     ///
     /// # Returns
     ///
-    /// A shared [`DmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob in
+    /// A shared [`HsmDmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob in
     /// GSRAM.
-    fn blob(&self, table: usize) -> HsmResult<&DmaBuf> {
+    fn blob(&self, table: usize) -> HsmResult<&HsmDmaBuf> {
         if table >= TABLE_COUNT {
             return Err(HsmError::InvalidArg);
         }
@@ -263,7 +263,7 @@ impl TableStorage for VaultStorage {
         // `BLOB_SIZE` bytes of 'static GSRAM; the single-threaded executor
         // guarantees no aliasing mutation.
         Ok(unsafe {
-            DmaBuf::from_raw(core::slice::from_raw_parts(
+            HsmDmaBuf::from_raw(core::slice::from_raw_parts(
                 Self::blob_addr(table) as *const u8,
                 BLOB_SIZE,
             ))
@@ -278,16 +278,16 @@ impl TableStorage for VaultStorage {
     ///
     /// # Returns
     ///
-    /// An exclusive [`DmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob
+    /// An exclusive [`HsmDmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob
     /// in GSRAM.
-    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut DmaBuf> {
+    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut HsmDmaBuf> {
         if table >= TABLE_COUNT {
             return Err(HsmError::InvalidArg);
         }
         // SAFETY: as `blob`, with exclusive access for the duration of the
         // `&mut self` borrow on the single-threaded executor.
         Ok(unsafe {
-            DmaBuf::from_raw_mut(core::slice::from_raw_parts_mut(
+            HsmDmaBuf::from_raw_mut(core::slice::from_raw_parts_mut(
                 Self::blob_addr(table) as *mut u8,
                 BLOB_SIZE,
             ))

@@ -22,9 +22,9 @@
 //! [`labeled_extract`]: crate::kdf::labeled_extract
 //! [`labeled_expand`]: crate::kdf::labeled_expand
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -72,7 +72,7 @@ fn build_kem_context(
     }
 }
 
-fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut DmaBuf> {
+fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDmaBuf> {
     alloc.dma_alloc(len)
 }
 
@@ -193,7 +193,7 @@ pub async fn encap<'a, P>(
     suite: HpkeSuite,
     pk_r: &[u8],
     enc: &mut [u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -282,7 +282,7 @@ pub async fn decap<'a, P>(
     enc: &[u8],
     sk_r: &[u8],
     pk_r: &[u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -343,10 +343,10 @@ pub async fn auth_encap<'a, P>(
     io: &P::Io,
     suite: HpkeSuite,
     pk_r: &[u8],
-    sk_s: &DmaBuf,
+    sk_s: &HsmDmaBuf,
     pk_s: &[u8],
     enc: &mut [u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -438,7 +438,7 @@ pub async fn auth_decap<'a, P>(
     sk_r: &[u8],
     pk_r: &[u8],
     pk_s: &[u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -509,7 +509,7 @@ async fn extract_and_expand<'a, P>(
     suite: HpkeSuite,
     dh: &[u8],
     kem_context: &[u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where

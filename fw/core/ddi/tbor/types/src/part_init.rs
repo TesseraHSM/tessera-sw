@@ -132,7 +132,7 @@ pub const PTA_REPORT_MAX_LEN: usize = 1024;
 /// part-final command.
 ///
 /// [`PartPolicy`]: crate::policy::PartPolicy
-#[tbor(opcode = 0x07)]
+#[tbor(opcode = 0x07, pair = TborPartInitResp)]
 pub struct TborPartInitReq<'a> {
     /// CO session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -185,7 +185,7 @@ pub struct TborPartInitReq<'a> {
 ///
 /// Carries the DER-encoded PTA CSR and the COSE_Sign1 PTA
 /// key-attestation report.
-#[tbor(response)]
+#[tbor(response, pair = TborPartInitReq)]
 pub struct TborPartInitResp<'a> {
     /// DER-encoded PKCS#10 CertificationRequest for the PTA public
     /// key.  Variable length up to [`PTA_CSR_MAX_LEN`].

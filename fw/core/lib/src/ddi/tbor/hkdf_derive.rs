@@ -24,7 +24,7 @@ use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_ddi_tbor_types::KdfKeyType;
 use tsra_fw_ddi_tbor_types::TborHkdfDeriveReq;
 use tsra_fw_ddi_tbor_types::TborHkdfDeriveResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
@@ -171,62 +171,58 @@ fn var_hmac_len(key_length: u8, min: usize, max: usize) -> HsmResult<usize> {
 ///
 /// No partition lock or undo log is required: the command **persists
 /// nothing** — it unmasks the IKM, derives the OKM, masks it, and returns
-/// the blob.  Takes `req_buf: &mut DmaBuf` so the input secret can be
-/// unmasked in place (`decode_mut`).
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// the blob in the consumed request storage.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborHkdfDeriveReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
-    let target_scope = HsmKeyScope(req.scope);
-    validate_active_session(pal, io, sess_id)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<usize> {
+        let req = TborHkdfDeriveReq::decode_mut(cmd_buf.request_mut())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id));
+        let target_scope = HsmKeyScope(req.scope);
+        validate_active_session(pal, io, sess_id)?;
 
-    // The derived key is masked under `target_scope`; a non-`Session` scope
-    // needs a masking key provisioned by `PartFinal` / the SD lifecycle.
-    // Fail cheaply before any crypto work.
-    if target_scope != HsmKeyScope::Session
-        && part_state::part_state(pal, io)? != PartState::Initialized
-    {
-        return Err(HsmError::InvalidArg);
-    }
+        // The derived key is masked under `target_scope`; a non-`Session` scope
+        // needs a masking key provisioned by `PartFinal` / the SD lifecycle.
+        // Fail cheaply before any crypto work.
+        if target_scope != HsmKeyScope::Session
+            && part_state::part_state(pal, io)? != PartState::Initialized
+        {
+            return Err(HsmError::InvalidArg);
+        }
 
-    // Resolve the hash and derivation target (masking kind + OKM length)
-    // up front so an unsupported algorithm / key type is rejected before
-    // the IKM is unmasked.  `decode_mut` surfaces the inline scalars as raw
-    // bytes; re-wrap them in their open-enums (any value is valid — an
-    // unrecognized one is rejected by the mapping below).
-    let algo = hkdf_hsm_hash(HashAlgo(req.hash_algo))?;
-    let target = resolve_target(KdfKeyType(req.key_type), req.key_length)?;
+        // Resolve the hash and derivation target (masking kind + OKM length)
+        // up front so an unsupported algorithm / key type is rejected before
+        // the IKM is unmasked.  `decode_mut` surfaces the inline scalars as raw
+        // bytes; re-wrap them in their open-enums (any value is valid — an
+        // unrecognized one is rejected by the mapping below).
+        let algo = hkdf_hsm_hash(HashAlgo(req.hash_algo))?;
+        let target = resolve_target(KdfKeyType(req.key_type), req.key_length)?;
 
-    // Platform identity bound into the derived-key blob (anti-rollback on
-    // re-import).
-    let svn = part_state::part_mfgr_svn(pal);
-    let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
-    let attrs = target.attrs(target_scope);
+        // Platform identity bound into the derived-key blob (anti-rollback on
+        // re-import).
+        let svn = part_state::part_mfgr_svn(pal);
+        let owner =
+            u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
+        let attrs = target.attrs(target_scope);
 
-    // Optional HKDF inputs: an empty buffer selects the RFC 5869 default
-    // (all-zero) salt / omits the info.  These borrow disjoint request
-    // fields from `masked_secret`, so they coexist with the in-place
-    // unmask below.
-    let salt = (!req.salt.is_empty()).then_some(req.salt);
-    let info = (!req.info.is_empty()).then_some(req.info);
-    // Caller-supplied label stamped into the derived-key metadata (≤ 128 B,
-    // bounded by the wire `max_len`); empty for an unlabeled key.
-    let caller_label = req.key_label;
+        // Optional HKDF inputs: an empty buffer selects the RFC 5869 default
+        // (all-zero) salt / omits the info.  These borrow disjoint request
+        // fields from `masked_secret`, so they coexist with the in-place
+        // unmask below.
+        let salt = (!req.salt.is_empty()).then_some(req.salt);
+        let info = (!req.info.is_empty()).then_some(req.info);
+        // Caller-supplied label stamped into the derived-key metadata (≤ 128 B,
+        // bounded by the wire `max_len`); empty for an unlabeled key.
+        let caller_label = req.key_label;
 
-    // The scope that masked the IKM is recorded (cleartext, tag-bound) in
-    // its blob metadata; resolve its masking key before unmasking.  The
-    // peek borrow is transient — it ends before the in-place unmask.
-    let scope_ikm = peek_metadata(req.masked_secret)?.usage_flags().scope();
-    let masking_key_ikm = resolve_masking_key(pal, io, scope_ikm, sess_id)?;
+        // The scope that masked the IKM is recorded (cleartext, tag-bound) in
+        // its blob metadata; resolve its masking key before unmasking.  The
+        // peek borrow is transient — it ends before the in-place unmask.
+        let scope_ikm = peek_metadata(req.masked_secret)?.usage_flags().scope();
+        let masking_key_ikm = resolve_masking_key(pal, io, scope_ikm, sess_id)?;
 
-    // Unmask the IKM in place, derive, and mask the OKM inside a block that
-    // yields a `Result`, so **every** post-unmask path (success or error)
-    // falls through to the `masked_secret` wipe below — the recovered IKM
-    // must never survive in the request buffer.
-    let outcome: HsmResult<&'p DmaBuf> = async {
         let view = unmask(pal, io, masking_key_ikm, req.masked_secret).await?;
         validate_input_secret(view.key_kind)?;
         if !view.key_attrs.derive() {
@@ -235,73 +231,58 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         let masked_len = masked_blob_len(AeadAlg::AesGcm256, target.out_len);
 
-        // Build the response with the masked-key slot reserved; the derived
-        // key is masked straight into it below.
-        let resp = pal.dma_alloc_var(io, |buf| {
-            let frame = TborHkdfDeriveResp::encode(buf, 0, false)?
-                .masked_key_reserve(masked_len)?
-                .finish();
-            Ok(frame.as_bytes().len())
-        })?;
-        {
-            let out = TborHkdfDeriveResp::decode_mut(resp)?;
-            pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
-                // Resolve the target masking key and staging label BEFORE
-                // deriving, so that once `prk` / `okm` hold key material the
-                // only remaining fallible step is `mask` — whose result is
-                // bound (not `?`-propagated) so every path reaches the
-                // scratch wipes.  Scope exit only resets the bump watermark;
-                // it does not zero freed memory.
-                let masking_key_target = resolve_masking_key(pal, io, target_scope, sess_id)?;
-                let key_label = alloc.dma_alloc(caller_label.len())?;
-                key_label.copy_from_slice(caller_label);
-                let params = MaskParams {
-                    key_kind: target.kind,
-                    key_attrs: attrs,
-                    svn,
-                    owner_seed_id: owner,
-                    key_label,
-                };
+        // Resolve the target masking key and staging label before deriving.
+        let masking_key_target = resolve_masking_key(pal, io, target_scope, sess_id)?;
+        let key_label = alloc.dma_alloc(caller_label.len())?;
+        key_label.copy_from_slice(caller_label);
+        let params = MaskParams {
+            key_kind: target.kind,
+            key_attrs: attrs,
+            svn,
+            owner_seed_id: owner,
+            key_label,
+        };
 
-                // `prk` and `okm` are allocated separately (each `dma_alloc`
-                // is independently 4-byte aligned, which the crypto DMA
-                // engine requires); `okm.len()` is caller-controlled and
-                // need not be 4-aligned.
-                let prk = alloc.dma_alloc(algo.digest_len())?;
-                let okm = alloc.dma_alloc(target.out_len)?;
-                let derive_and_mask = async {
-                    pal.hkdf_extract(io, algo, salt, view.target_key, prk)
-                        .await?;
-                    pal.hkdf_expand(io, algo, prk, info, okm).await?;
-                    mask(
-                        pal,
-                        io,
-                        alloc,
-                        AeadAlg::AesGcm256,
-                        masking_key_target,
-                        &params,
-                        okm,
-                        Some(out.masked_key),
-                    )
-                    .await
-                    .map(|_| ())
-                }
-                .await;
-                prk.zeroize();
-                okm.zeroize();
-                derive_and_mask
-            })
-            .await?;
+        // `prk` and `okm` are allocated separately (each `dma_alloc`
+        // is independently 4-byte aligned, which the crypto DMA
+        // engine requires); `okm.len()` is caller-controlled and
+        // need not be 4-aligned.
+        let prk = alloc.dma_alloc(algo.digest_len())?;
+        let okm = alloc.dma_alloc(target.out_len)?;
+        let derived = async {
+            pal.hkdf_extract(io, algo, salt, view.target_key, prk)
+                .await?;
+            pal.hkdf_expand(io, algo, prk, info, okm).await
         }
-        // Coerce the `&mut` response buffer to a shared `&DmaBuf` (preserving
-        // the `'p` allocator lifetime) so the async block's output matches
-        // the handler's `&'p DmaBuf` return.
-        let resp: &'p DmaBuf = resp;
-        Ok(resp)
-    }
-    .await;
-
-    // Scrub the recovered IKM plaintext from the request buffer.
-    req.masked_secret.zeroize();
-    outcome
+        .await;
+        let derive_and_mask = async {
+            derived?;
+            let len = cmd_buf.encode_response(|buf| {
+                Ok(TborHkdfDeriveResp::encode(buf, 0, false)?
+                    .masked_key_reserve(masked_len)?
+                    .finish()
+                    .as_bytes()
+                    .len())
+            })?;
+            let out = TborHkdfDeriveResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
+            let written = mask(
+                pal,
+                io,
+                alloc,
+                AeadAlg::AesGcm256,
+                masking_key_target,
+                &params,
+                okm,
+                Some(out.masked_key),
+            )
+            .await?;
+            if written != masked_len {
+                return Err(HsmError::InternalError);
+            }
+            Ok(len)
+        }
+        .await;
+        derive_and_mask
+    })
+    .await
 }

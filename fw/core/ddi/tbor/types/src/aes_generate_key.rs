@@ -77,7 +77,7 @@ pub enum AesKeySize {
 /// Generates a random AES key of the requested [`AesKeySize`] under the
 /// active session's partition, masked with the requested [`KeyScope`]'s
 /// masking key.
-#[tbor(opcode = 0x15)]
+#[tbor(opcode = 0x15, pair = TborAesGenerateKeyResp)]
 pub struct TborAesGenerateKeyReq<'a> {
     /// CO/CU session id this request is bound to.  The dispatcher
     /// cross-checks it against the SQE-carried session id.
@@ -111,7 +111,7 @@ pub struct TborAesGenerateKeyReq<'a> {
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// (via `masked_key_reserve`) and mask the generated key straight into it
 /// (`decode_mut`) — no scratch buffer and no copy.
-#[tbor(response)]
+#[tbor(response, pair = TborAesGenerateKeyReq)]
 pub struct TborAesGenerateKeyResp<'a> {
     /// The freshly generated AES key, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  244 / 252 / 260 B for

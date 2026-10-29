@@ -5,7 +5,7 @@
 //!
 //! Storage is backed by owned arrays (no GSRAM) and the GDMA engine by a
 //! CPU fake, so the full allocator / layout / error logic runs on the
-//! host. The fake brands owned memory as `DmaBuf`, which requires
+//! host. The fake brands owned memory as `HsmDmaBuf`, which requires
 //! `unsafe`; that is confined to this test module.
 
 #![allow(unsafe_code)]
@@ -20,9 +20,9 @@ use core::task::RawWaker;
 use core::task::RawWakerVTable;
 use core::task::Waker;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmIo;
@@ -105,19 +105,19 @@ impl<const N: usize> TableStorage for ArrayStorage<N> {
         }
         Ok(&mut self.bitmap[table])
     }
-    fn blob(&self, table: usize) -> HsmResult<&DmaBuf> {
+    fn blob(&self, table: usize) -> HsmResult<&HsmDmaBuf> {
         if table >= N {
             return Err(HsmError::InvalidArg);
         }
         // SAFETY: test-owned memory; "DMA" is a fiction on the host.
-        Ok(unsafe { DmaBuf::from_raw(&self.blob[table]) })
+        Ok(unsafe { HsmDmaBuf::from_raw(&self.blob[table]) })
     }
-    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut DmaBuf> {
+    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut HsmDmaBuf> {
         if table >= N {
             return Err(HsmError::InvalidArg);
         }
         // SAFETY: test-owned memory; "DMA" is a fiction on the host.
-        Ok(unsafe { DmaBuf::from_raw_mut(&mut self.blob[table]) })
+        Ok(unsafe { HsmDmaBuf::from_raw_mut(&mut self.blob[table]) })
     }
 }
 
@@ -135,7 +135,12 @@ impl HsmIoTypes for FakeGdma {
 }
 
 impl HsmGdmaController for FakeGdma {
-    async fn copy_mem(&self, _io: &Self::Io, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn copy_mem(
+        &self,
+        _io: &Self::Io,
+        src: &HsmDmaBuf,
+        dst: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
         self.copies.set(self.copies.get() + 1);
         if self.fail_copy.get() {
             return Err(HsmError::FailedToStartDmaTransaction);
@@ -143,7 +148,7 @@ impl HsmGdmaController for FakeGdma {
         dst.copy_from_slice(src);
         Ok(())
     }
-    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
         self.zeroizes.set(self.zeroizes.get() + 1);
         for b in dst.iter_mut() {
             *b = 0;
@@ -155,7 +160,7 @@ impl HsmGdmaController for FakeGdma {
         _io: &Self::Io,
         _src: HsmDmaAddr,
         _src2: HsmDmaAddr,
-        _dst: &mut DmaBuf,
+        _dst: &mut HsmDmaBuf,
         _prp: bool,
     ) -> HsmResult<()> {
         unimplemented!("vault does not use host copies")
@@ -164,7 +169,7 @@ impl HsmGdmaController for FakeGdma {
         &self,
         _io: &Self::Io,
         _desc: &[u8; 16],
-        _dst: &mut DmaBuf,
+        _dst: &mut HsmDmaBuf,
         _prp: bool,
     ) -> HsmResult<()> {
         unimplemented!("vault does not use host copies")
@@ -172,7 +177,7 @@ impl HsmGdmaController for FakeGdma {
     async fn copy_mem_to_host(
         &self,
         _io: &Self::Io,
-        _src: &DmaBuf,
+        _src: &HsmDmaBuf,
         _dst: HsmDmaAddr,
         _dst2: HsmDmaAddr,
         _prp: bool,
@@ -226,10 +231,10 @@ fn aes_attrs() -> HsmVaultKeyAttrs {
         .with_decrypt(true)
 }
 
-/// Runs `f` with a `key` slice branded as `&DmaBuf`.
-fn with_key<R>(bytes: &[u8], f: impl FnOnce(&DmaBuf) -> R) -> R {
+/// Runs `f` with a `key` slice branded as `&HsmDmaBuf`.
+fn with_key<R>(bytes: &[u8], f: impl FnOnce(&HsmDmaBuf) -> R) -> R {
     // SAFETY: test-owned memory; "DMA" is a fiction on the host.
-    let buf = unsafe { DmaBuf::from_raw(bytes) };
+    let buf = unsafe { HsmDmaBuf::from_raw(bytes) };
     f(buf)
 }
 

@@ -4,7 +4,7 @@
 //! AES-CBC-256 + HMAC-SHA-384 masking pipeline.
 //!
 //! Implements [`mask`]: a single async function that follows the
-//! firmware `out: Option<&mut DmaBuf>` query-size-then-fill convention.
+//! firmware `out: Option<&mut HsmDmaBuf>` query-size-then-fill convention.
 //! Metadata is supplied as a typed [`DdiMaskedKeyMetadata`] struct and
 //! MBOR-encoded **directly** into the metadata slot of the output
 //! buffer — no scratch buffer, no intermediate copy.
@@ -14,7 +14,7 @@
 //! The function never calls `dma_alloc`.  All scratch space comes from
 //! sub-slices of the caller's output buffer; the masking key is
 //! consumed in place as two sub-views (low 32 B = AES key, high 48 B =
-//! HMAC key) of the caller's [`DmaBuf`].
+//! HMAC key) of the caller's [`HsmDmaBuf`].
 //!
 //! ## In-place AES
 //!
@@ -37,8 +37,8 @@ use tsra_fw_ddi_mbor::MborLen;
 use tsra_fw_ddi_mbor::MborLenAccumulator;
 use tsra_fw_ddi_mbor_types::masked_key::DdiMaskedKeyMetadata;
 use tsra_fw_hsm_pal_traits::AesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
@@ -71,9 +71,8 @@ use crate::cbc::format::MASKING_KEY_AES_CBC_256_HMAC_384_LEN;
 ///   extra trailing bytes are left untouched.  Fills `buf[..total_len]`
 ///   with a complete, HMAC-authenticated masked-key blob.
 ///
-/// On any failure after `buf` has been mutated, the entire `buf` is
-/// zeroed before returning the error so the caller's response staging
-/// area never retains plaintext or an unauthenticated partial blob.
+/// On failure, callers must not publish the partial output. IO teardown
+/// scrubs the backing storage.
 ///
 /// # Type parameters
 ///
@@ -93,11 +92,8 @@ use crate::cbc::format::MASKING_KEY_AES_CBC_256_HMAC_384_LEN;
 /// * `metadata` — masked-key metadata struct.  MBOR-encoded into the
 ///   metadata slot of `out` and bound by the trailing HMAC tag.
 /// * `out` — DMA buffer of at least the encoded blob length, or
-///   `None` to query the required length.  **Precondition:** when
-///   `Some`, `out[..total_len]` must be zero on entry — the encoder
-///   relies on this for `post_metadata_pad` bytes (visible on the
-///   wire) and for the plaintext-staging tail inside the ciphertext
-///   slot (input to AES).  Checked via `debug_assert!`.
+///   `None` to query the required length. Padding is initialized by the
+///   encoder; the buffer need not be zero on entry.
 ///
 /// # Returns
 ///
@@ -112,10 +108,10 @@ use crate::cbc::format::MASKING_KEY_AES_CBC_256_HMAC_384_LEN;
 pub async fn mask<P>(
     pal: &P,
     io: &P::Io,
-    masking_key: &DmaBuf,
+    masking_key: &HsmDmaBuf,
     plaintext: &[u8],
     metadata: &DdiMaskedKeyMetadata<'_>,
-    out: Option<&mut DmaBuf>,
+    out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize>
 where
     P: HsmAes + HsmHmac + HsmRng,
@@ -138,11 +134,6 @@ where
     if masking_key.len() != MASKING_KEY_AES_CBC_256_HMAC_384_LEN || out.len() < total_len {
         return Err(HsmError::InvalidArg);
     }
-    debug_assert!(
-        out[..total_len].iter().all(|&b| b == 0),
-        "mask: `out[..total_len]` must be zero on entry",
-    );
-
     MaskedKeyHeader::new_cbc().write_into(out);
     hdr.write_into(&mut out[MaskedKeyHeader::SIZE..]);
 
@@ -163,25 +154,19 @@ where
                 }
             })
     };
-    if let Err(e) = encode_result {
-        out.fill(0);
-        return Err(e);
-    }
+    encode_result?;
+    out[meta_off + metadata_len..hdr.ciphertext_offset()].fill(0);
 
     let iv_off = hdr.iv_offset();
     let iv_len = AES_CBC_IV_SIZE;
     let ct_off = hdr.ciphertext_offset();
     let tag_off = hdr.tag_offset();
 
-    if let Err(e) = pal.rng_fill_bytes(io, &mut out[iv_off..iv_off + iv_len]) {
-        out.fill(0);
-        return Err(e);
-    }
+    pal.rng_fill_bytes(io, &mut out[iv_off..iv_off + iv_len])?;
 
-    // Stage plaintext into the ciphertext slot for in-place encryption;
-    // every error path from here must wipe `out` to avoid leaking
-    // plaintext.
+    // Stage plaintext and its zero padding for in-place encryption.
     out[ct_off..ct_off + plaintext.len()].copy_from_slice(plaintext);
+    out[ct_off + plaintext.len()..ct_off + hdr.ciphertext_len()].fill(0);
 
     // AES-CBC-256 encrypt in-place; split at `ct_off` to disjoin the IV
     // (immutable) and ciphertext (mutable) sub-views.  AES key = low
@@ -194,23 +179,18 @@ where
         pal.aes_cbc_enc_dec_in_place(io, AesOp::Encrypt, aes_key, ct, iv, None)
             .await
     };
-    if let Err(e) = aes_result {
-        out.fill(0);
-        return Err(e);
-    }
+    aes_result?;
 
     // HMAC-SHA-384 over everything before the tag slot; HMAC key = high
     // 48 B of `masking_key`.
     let hmac_result = {
         let (tagged, tag_slot) = out.split_at_mut(tag_off);
+        let tag_slot = &mut tag_slot[..total_len - tag_off];
         let hmac_key = &masking_key[AES_CBC_256_KEY_SIZE..];
         pal.hmac_sign(io, HsmHashAlgo::Sha384, hmac_key, tagged, tag_slot)
             .await
     };
-    if let Err(e) = hmac_result {
-        out.fill(0);
-        return Err(e);
-    }
+    hmac_result?;
 
     Ok(total_len)
 }

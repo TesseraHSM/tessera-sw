@@ -12,9 +12,9 @@
 //! signing through the PAL, and assembles a complete DER-encoded
 //! PKCS#10 CertificationRequest in the caller's output buffer.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -94,7 +94,7 @@ impl CsrInput<'_> {
 /// * `input`    — TBS template + variable field values
 ///   (see [`CsrInput`]).
 /// * `priv_key` — P-384 signing key (raw scalar, LE wire format),
-///   exactly [`PRIV_KEY_LEN`] bytes, supplied as a [`DmaBuf`] so it
+///   exactly [`PRIV_KEY_LEN`] bytes, supplied as a [`HsmDmaBuf`] so it
 ///   can be handed straight to
 ///   [`HsmEcc::ecc_sign`](tsra_fw_hsm_pal_traits::HsmEcc::ecc_sign).
 /// * `out`      — output buffer.  `None` runs in query mode and
@@ -117,7 +117,7 @@ pub async fn build_csr<'a, P: HsmCrypto + HsmAlloc + 'a>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     input: &CsrInput<'_>,
-    priv_key: &DmaBuf,
+    priv_key: &HsmDmaBuf,
     out: Option<&mut [u8]>,
 ) -> HsmResult<usize> {
     if priv_key.len() != PRIV_KEY_LEN {
@@ -195,7 +195,7 @@ fn patch_field(tbs: &mut [u8], offset: usize, value: &[u8]) -> HsmResult<()> {
 /// into `out`.  The PAL-returned signature is in `r || s` LE-by-half
 /// wire format and is converted to big-endian halves for DER
 /// INTEGER encoding.
-fn assemble_signed(out: &mut [u8], tbs: &DmaBuf, sig_le: &DmaBuf) -> HsmResult<usize> {
+fn assemble_signed(out: &mut [u8], tbs: &HsmDmaBuf, sig_le: &HsmDmaBuf) -> HsmResult<usize> {
     let (sig_r_be, sig_s_be) = sig_le_halves_to_be(sig_le)?;
 
     let mut sig_buf = [0u8; MAX_ECDSA384_SIG_DER_LEN];
@@ -231,7 +231,7 @@ fn assemble_signed(out: &mut [u8], tbs: &DmaBuf, sig_le: &DmaBuf) -> HsmResult<u
 /// Convert the PAL ECDSA-P384 wire format (`r || s`, each 48 B in
 /// little-endian byte order) into the big-endian byte halves required
 /// for DER INTEGER encoding.
-fn sig_le_halves_to_be(sig_le: &DmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
+fn sig_le_halves_to_be(sig_le: &HsmDmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
     let bytes: &[u8] = sig_le;
     if bytes.len() != SIGNATURE_LEN {
         return Err(HsmError::InternalError);

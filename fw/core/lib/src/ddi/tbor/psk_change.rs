@@ -26,7 +26,7 @@ use tsra_fw_ddi_tbor_types::build_psk_change_aad;
 use tsra_fw_ddi_tbor_types::TborPskChangeReq;
 use tsra_fw_ddi_tbor_types::TborPskChangeResp;
 use tsra_fw_ddi_tbor_types::PSK_CHANGE_AAD_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -46,54 +46,54 @@ const PSK_ID_CU: u8 = 1;
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
-    // `decode_mut` validates the wire frame and hands back a
-    // destructured view: scalar `session_id` by value, plus
-    // `psk_envelope` as `&mut DmaBuf` so `aead_open` can decrypt the
-    // envelope in place — no scratch copy.
-    let req = TborPskChangeReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
-
-    // Target slot is implicit in the session role; no cross-role
-    // rotation is permitted.
-    let target_psk_id = target_psk_for_role(sess_id.role());
-
-    // The `psk_envelope` length is pinned by the schema
-    // (`PSK_CHANGE_ENVELOPE_LEN` = 100 B); a malformed length was
-    // already rejected at decode with `TborInvalidFixedLength`. The
-    // AEAD-open below plus the AAD/payload-length checks remain the
-    // load-bearing validation for a correctly-sized but crafted
-    // envelope.
-
-    // Reserve the session's one-shot PSK-change budget **before** any
-    // crypto work, so replayed-after-success envelopes are rejected
-    // cheaply.  A successful return here means no further `PskChange`
-    // can succeed on this session; if the subsequent crypto/persist
-    // steps fail, the session is "burned" — the caller must
-    // renegotiate to retry.  Cross-session replay is already
-    // structurally impossible (HPKE-derived per-session `param_key`).
-    pal.session_try_consume_psk_change(io, sess_id)?;
-
-    // Record the prior PSK *before* overwriting it, so any later failure
-    // — the crypto below, the response DMA, or the CQE post — restores it
-    // via the dispatcher's undo walk.  The rotation is therefore
-    // all-or-nothing as the host observes it.  (The budget burn above is
-    // intentionally *not* reverted: one attempt per session.)
-    let prior = crate::part_state::part_psk(pal, io, target_psk_id)?;
-    let psk_prop = crate::part_state::part_psk_prop_id(target_psk_id)?;
-    undo.push_prop_restore_bytes(psk_prop, prior)?;
-
+) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |_alloc| {
+        // `decode_mut` validates the wire frame and hands back a
+        // destructured view: scalar `session_id` by value, plus
+        // `psk_envelope` as `&mut HsmDmaBuf` so `aead_open` can decrypt the
+        // envelope in place — no scratch copy.
+        let req = TborPskChangeReq::decode_mut(cmd_buf.request_mut())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id));
+
+        // Target slot is implicit in the session role; no cross-role
+        // rotation is permitted.
+        let target_psk_id = target_psk_for_role(sess_id.role());
+
+        // The `psk_envelope` length is pinned by the schema
+        // (`PSK_CHANGE_ENVELOPE_LEN` = 100 B); a malformed length was
+        // already rejected at decode with `TborInvalidFixedLength`. The
+        // AEAD-open below plus the AAD/payload-length checks remain the
+        // load-bearing validation for a correctly-sized but crafted
+        // envelope.
+
+        // Reserve the session's one-shot PSK-change budget **before** any
+        // crypto work, so replayed-after-success envelopes are rejected
+        // cheaply.  A successful return here means no further `PskChange`
+        // can succeed on this session; if the subsequent crypto/persist
+        // steps fail, the session is "burned" — the caller must
+        // renegotiate to retry.  Cross-session replay is already
+        // structurally impossible (HPKE-derived per-session `param_key`).
+        pal.session_try_consume_psk_change(io, sess_id)?;
+
+        // Record the prior PSK *before* overwriting it, so any later failure
+        // — the crypto below, the response DMA, or the CQE post — restores it
+        // via the dispatcher's undo walk.  The rotation is therefore
+        // all-or-nothing as the host observes it.  (The budget burn above is
+        // intentionally *not* reverted: one attempt per session.)
+        let prior = crate::part_state::part_psk(pal, io, target_psk_id)?;
+        let psk_prop = crate::part_state::part_psk_prop_id(target_psk_id)?;
+        undo.push_prop_restore_bytes(psk_prop, prior)?;
+
         // Fetch the session's `param_key` schedule (the PAL hides the
         // session-blob layout from us).
         let param_key = pal.session_param_key(io, sess_id)?;
 
         // AEAD-open the envelope **in place** on the inbound request
         // buffer.  The destructured `req.psk_envelope` is a
-        // `&mut DmaBuf` carved by `decode_mut` from the same parent
-        // `req_buf`; no copy into a scratch buffer is needed.
+        // `&mut HsmDmaBuf` carved by `decode_mut` from the same parent
+        // `cmd_buf.request_mut()`; no copy into a scratch buffer is needed.
         let aead_view = aead_open(pal, io, param_key, req.psk_envelope)
             .await
             .map_err(|_| HsmError::AeadEnvelopeAuthFailed)?;
@@ -133,7 +133,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // scratch buffer.
         crate::part_state::part_set_psk(pal, io, target_psk_id, aead_view.payload)?;
 
-        encode_response(pal, io)
+        encode_response(cmd_buf)
     })
     .await
 }
@@ -160,9 +160,9 @@ fn target_psk_for_role(role: SessionRole) -> u8 {
 }
 
 /// Encode the `PskChange` empty acknowledgement into a fresh
-/// IO-scoped DmaBuf.
-fn encode_response<'p, P: HsmPal>(pal: &'p P, io: &P::Io) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+/// IO-scoped HsmDmaBuf.
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborPskChangeResp::encode(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())
     })?;

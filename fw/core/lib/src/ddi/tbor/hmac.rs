@@ -9,7 +9,7 @@
 //! via unwrap).  The masked key's scope is read from its cleartext,
 //! tag-bound metadata to select the masking key; the key is unmasked
 //! on-device (verifying the AEAD tag), the MAC is computed, and the tag is
-//! returned — nothing is persisted and the recovered key is wiped.
+//! returned — nothing is persisted, and IO teardown wipes the recovered key.
 //!
 //! The key must be an HMAC kind; its hash variant selects the MAC
 //! algorithm and tag length (SHA-256 / 384 / 512 → 32 / 48 / 64 B).  A
@@ -21,7 +21,7 @@ use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_ddi_tbor_types::TborHmacReq;
 use tsra_fw_ddi_tbor_types::TborHmacResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -38,33 +38,29 @@ use super::validate_active_session;
 /// caller's key **in place** in the request buffer, computes a tag, and
 /// returns it.  There is no scratch copy of the masked blob or the
 /// recovered key.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    // `decode_mut` exposes `masked_key` as `&mut` (a slice of the request
-    // buffer) so `unmask` can decrypt it in place, while `msg` is a
-    // disjoint shared borrow.
-    let req = TborHmacReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
-    validate_active_session(pal, io, sess_id)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<usize> {
+        // `decode_mut` exposes `masked_key` as `&mut` (a slice of the request
+        // buffer) so `unmask` can decrypt it in place, while `msg` is a
+        // disjoint shared borrow.
+        let req = TborHmacReq::decode_mut(cmd_buf.request_mut())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id));
+        validate_active_session(pal, io, sess_id)?;
 
-    // Peek the masked-key metadata (cleartext, tag-bound) to route to the
-    // right masking key before unmasking.
-    let scope = peek_scope(req.masked_key)?;
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+        // Peek the masked-key metadata (cleartext, tag-bound) to route to the
+        // right masking key before unmasking.
+        let scope = peek_scope(req.masked_key)?;
+        let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
 
-    let masked_key = req.masked_key;
-    let msg = req.msg;
+        let masked_key = req.masked_key;
+        let msg = req.msg;
 
-    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<&'p DmaBuf> {
-        // Unmask the key in place and MAC into a scratch tag.  Capture the
-        // result so the recovered key (now sitting in the request buffer)
-        // can be wiped on EVERY path — success or failure — before
-        // proceeding or propagating.  `view`'s borrow of `masked_key` ends
-        // with the inner block, releasing it for the wipe.
-        let mac_res = async {
+        // Unmask the key in place and MAC into a scratch tag.
+        let (tag, tag_len) = async {
             let view = unmask(pal, io, masking_key, masked_key).await?;
             // The kind must be an HMAC variant (selects the MAC algorithm
             // and tag length); a non-HMAC kind is rejected as
@@ -75,25 +71,22 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             if !view.key_attrs.sign() {
                 return Err(HsmError::InvalidPermissions);
             }
-            // The recovered key (`view.target_key`, a `&DmaBuf` into the
+            // The recovered key (`view.target_key`, a `&HsmDmaBuf` into the
             // request buffer) is used directly — no copy.
             let tag_len = algo.digest_len();
             let tag = alloc.dma_alloc(tag_len)?;
             pal.hmac_sign(io, algo, view.target_key, msg, tag).await?;
             Ok::<_, HsmError>((tag, tag_len))
         }
-        .await;
-
-        masked_key.zeroize();
-        let (tag, tag_len) = mac_res?;
-        encode_response(pal, io, &tag[..tag_len])
+        .await?;
+        encode_response(cmd_buf, &tag[..tag_len])
     })
     .await
 }
 
 /// Encode the `Hmac` response around the computed tag.
-fn encode_response<'p, P: HsmPal>(pal: &'p P, io: &P::Io, tag: &[u8]) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, tag: &[u8]) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborHmacResp::encode(buf, 0, false)?.tag(tag)?.finish();
         Ok(frame.as_bytes().len())
     })?;

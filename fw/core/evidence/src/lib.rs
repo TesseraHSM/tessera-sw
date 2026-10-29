@@ -58,9 +58,9 @@ use tsra_fw_ddi_tbor_types::CertDescriptor;
 use tsra_fw_ddi_tbor_types::ReportDescriptor;
 use tsra_fw_hsm_oob::copy_oob;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
@@ -149,7 +149,7 @@ pub async fn verify_receiver_cert_chain<P>(
     oob: &OobPtr,
     chain: &[CertDescriptor],
     sata_anchor: &[u8],
-    rcvr_pub: &mut DmaBuf,
+    rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()>
 where
     P: HsmGdmaController + HsmAlloc + HsmCrypto,
@@ -199,8 +199,8 @@ pub async fn verify_evidence<P>(
     oob: &OobPtr,
     refs: &EvidenceRefs<'_>,
     anchors: &TrustAnchors<'_>,
-    attested_key: &mut DmaBuf,
-    policy_hash_out: Option<&mut DmaBuf>,
+    attested_key: &mut HsmDmaBuf,
+    policy_hash_out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<()>
 where
     P: HsmGdmaController + HsmAlloc + HsmCrypto,
@@ -326,7 +326,7 @@ where
             chain,
             anchor,
             leaf_out,
-            async |index: usize, buf: &mut DmaBuf| copy_oob(pal, io, oob, index, buf).await,
+            async |index: usize, buf: &mut HsmDmaBuf| copy_oob(pal, io, oob, index, buf).await,
         )
         .await
     })

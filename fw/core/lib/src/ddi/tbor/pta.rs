@@ -12,7 +12,7 @@ use tsra_fw_core_crypto_x509_chain::key_usage;
 use tsra_fw_core_crypto_x509_chain::CertInfo;
 use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
 use tsra_fw_hsm_pal_traits::CertChainInfo;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -62,8 +62,8 @@ fn fixed_size<const N: usize>(bytes: &[u8]) -> HsmResult<&[u8; N]> {
 
 fn sec1_public_key<'a>(
     alloc: &'a impl HsmScopedAlloc,
-    raw_public_key: &DmaBuf,
-) -> HsmResult<&'a mut DmaBuf> {
+    raw_public_key: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     if raw_public_key.len() != P384_RAW_PUBLIC_KEY_LEN {
         return Err(HsmError::InternalError);
     }
@@ -79,8 +79,8 @@ async fn hash<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     algorithm: HsmHashAlgo,
-    input: &DmaBuf,
-) -> HsmResult<&'a mut DmaBuf> {
+    input: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let digest = alloc.dma_alloc(algorithm.digest_len())?;
     pal.hash(io, algorithm, input, digest, true).await?;
     Ok(digest)
@@ -90,7 +90,7 @@ async fn issuer_cn<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    pta_public_key: &DmaBuf,
+    pta_public_key: &HsmDmaBuf,
 ) -> HsmResult<[u8; csr::SUBJECT_CN_LEN]> {
     let input = alloc.dma_alloc(PTAID_LABEL.len() + pta_public_key.len())?;
     input[..PTAID_LABEL.len()].copy_from_slice(PTAID_LABEL);
@@ -159,8 +159,8 @@ async fn build_pid_certificate<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    private_key: &DmaBuf,
-    output: &mut DmaBuf,
+    private_key: &HsmDmaBuf,
+    output: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     let public_key = sec1_public_key(alloc, part_state::part_id_pub_key(pal, io)?)?;
     let pta_public_key = sec1_public_key(alloc, part_state::part_pta_pub_key(pal, io)?)?;
@@ -214,7 +214,7 @@ pub fn subject_cn(digest: &[u8; 48]) -> [u8; csr::SUBJECT_CN_LEN] {
 pub(crate) async fn pid_certificate<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     if part_state::part_state(pal, io)? != PartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
@@ -229,7 +229,6 @@ pub(crate) async fn pid_certificate<'p, P: HsmPal>(
             let private = alloc.dma_alloc(P384_PRIVATE_KEY_LEN)?;
             private.copy_from_slice(key);
             let result = build_pid_certificate(pal, io, alloc, private, out).await;
-            private.zeroize();
             result
         })
         .await?;

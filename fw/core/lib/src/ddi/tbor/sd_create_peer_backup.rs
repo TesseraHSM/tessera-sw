@@ -36,7 +36,7 @@
 //!    [`recover_bks3_from_pok_local`](super::sd_backup::recover_bks3_from_pok_local)).
 //! 5. HPKE-Auth-seal BKS3 to `RcvrPub` with `SndrPriv` as the
 //!    sender-authentication key, returning `pok_peer_backup` (161 B).
-//!    `SndrPriv` and BKS3 are zeroized before returning.
+//!    IO teardown scrubs `SndrPriv` and BKS3.
 //!
 //! **Stateless:** nothing is persisted, no vault writes, no undo log.  This
 //! command is **Crypto-Officer-only**.
@@ -61,7 +61,8 @@ use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -96,13 +97,13 @@ const SEC1_UNCOMPRESSED: u8 = 0x04;
 /// **Stateless**: recovers BKS3 from the caller's local backup and re-seals
 /// it to the destination peer; no vault writes, no partition-state
 /// mutation, no undo log.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     oob: Option<OobPtr>,
-) -> HsmResult<&'p DmaBuf> {
-    let mk_key_id = gate_request(pal, io, req_buf)?;
+) -> HsmResult<usize> {
+    let mk_key_id = gate_request(pal, io, cmd_buf.request_mut())?;
 
     // The destination attestation evidence is mandatory side-band data
     // carried in the out-of-band SGL page.
@@ -122,7 +123,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // ── Phase 1: policy binding + peer-cloning gate + receiver evidence ──
         {
-            let req = TborSdCreatePeerBackupReq::decode(&*req_buf)?;
+            let req = TborSdCreatePeerBackupReq::decode(&*cmd_buf.request_mut())?;
             let policy = req.policy();
 
             // The re-supplied policy must match the one bound at `PartInit`.
@@ -173,20 +174,19 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // ── Phase 2: recover SndrPriv + BKS3, then HPKE-Auth-seal the BKS3
         // to RcvrPub.  The masked sealing key and the local backup are
         // copied into crypto scratch so the request-buffer borrow is
-        // confined; every recovered secret is scrubbed on EVERY exit path
-        // (scope rewind does not clear DMA).
+        // confined.
         let masking_key = pal.vault_key(io, mk_key_id)?;
 
         let blob = alloc.dma_alloc(MASKED_SEALING_KEY_LEN)?;
         let pok_scratch = alloc.dma_alloc(MASKED_SD_LEN)?;
         {
-            let req = TborSdCreatePeerBackupReq::decode(&*req_buf)?;
+            let req = TborSdCreatePeerBackupReq::decode(&*cmd_buf.request_mut())?;
             blob.copy_from_slice(req.masked_sealing_key());
             pok_scratch.copy_from_slice(req.pok_local_backup());
         }
 
         // Unmask into `blob`, copy the recovered private key out into its
-        // own scratch, then scrub `blob` immediately.
+        // own scratch.
         let unmask_res = async {
             let view = unmask(pal, io, masking_key, blob).await?;
             let sndr_priv = alloc.dma_alloc(view.target_key.len())?;
@@ -194,7 +194,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             Ok::<_, HsmError>((view.key_kind, sndr_priv))
         }
         .await;
-        blob.zeroize();
         let (key_kind, sndr_priv) = unmask_res?;
 
         let crypto_res = async {
@@ -212,7 +211,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pk_s[1 + coord..1 + 2 * coord].reverse();
 
             // Recover BKS3 from the caller's local backup (unmask under
-            // `PartLocalMK`), copy it out, then scrub the staging buffer.
+            // `PartLocalMK`), then copy it out of the staging buffer.
             // `recover_bks3_from_pok_local` validates the recovered length is
             // `BKS3_LEN`, so the copy below cannot mismatch.
             let bks3 = alloc.dma_alloc(BKS3_LEN)?;
@@ -223,7 +222,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 Ok::<_, HsmError>(())
             }
             .await;
-            pok_scratch.zeroize();
             recover_res?;
 
             // ── HPKE-Auth-seal the recovered BKS3 to RcvrPub ───────────
@@ -249,20 +247,18 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 Ok::<_, HsmError>(())
             }
             .await;
-            bks3.zeroize();
             seal_res
         }
         .await;
 
         // Scrub the recovered sender private key on every path.
-        sndr_priv.zeroize();
         crypto_res?;
 
         Ok(())
     })
     .await?;
 
-    encode_response(pal, io, pok_peer_out)
+    encode_response(cmd_buf, pok_peer_out)
 }
 
 /// Gate the initial session/state checks and resolve the masking-key ID for
@@ -273,7 +269,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// available), then routes the masked sealing key to its masking key.
 /// Unlike the create/restore provisioning commands, this is **not**
 /// one-shot: it neither requires nor sets the SD-initialized flag.
-fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &DmaBuf) -> HsmResult<HsmKeyId> {
+fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &HsmDmaBuf) -> HsmResult<HsmKeyId> {
     let req = TborSdCreatePeerBackupReq::decode(req_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
     validate_crypto_officer_active_session(pal, io, sess_id)?;
@@ -293,12 +289,8 @@ fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &DmaBuf) -> HsmResult<H
 }
 
 /// Encode the `SdCreatePeerBackup` response around the peer backup.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    pok_peer: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, pok_peer: &HsmDmaBuf) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSdCreatePeerBackupResp::encode(buf, 0, false)?
             .pok_peer_backup(pok_peer)?
             .finish();

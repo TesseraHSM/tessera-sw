@@ -45,7 +45,7 @@ pub const HMAC_TAG_MAX_LEN: usize = 64;
 /// `Hmac` request schema.
 ///
 /// Computes an HMAC tag over `msg` using the masked HMAC key.
-#[tbor(opcode = 0x12)]
+#[tbor(opcode = 0x12, pair = TborHmacResp)]
 pub struct TborHmacReq<'a> {
     /// CO/CU session id this request is bound to.  The dispatcher
     /// cross-checks it against the SQE-carried session id.
@@ -68,7 +68,7 @@ pub struct TborHmacReq<'a> {
 }
 
 /// `Hmac` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborHmacReq)]
 pub struct TborHmacResp<'a> {
     /// The HMAC tag over `msg`: 32 / 48 / 64 B for SHA-256 / 384 / 512.
     #[tbor(buffer, max_len = 64)]

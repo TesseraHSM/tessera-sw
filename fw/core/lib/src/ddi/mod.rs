@@ -39,7 +39,7 @@ use super::*;
 pub(crate) async fn recover_bk_boot<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    out: &mut DmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // Copy the persisted masked BK_BOOT into a working buffer and
     // unmask it (the raw key is never stored; it is created masked at

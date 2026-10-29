@@ -42,7 +42,7 @@ struct ParsedRequest<'a> {
     /// Sub-view of the inbound request buffer (DMA-branded by the
     /// codec), so it can flow straight into HPKE / HMAC inputs
     /// without an intermediate copy.
-    pk_init: &'a DmaBuf,
+    pk_init: &'a HsmDmaBuf,
 }
 
 /// Map a [`SessionSuite`] to the concrete [`HpkeSuite`] used by the
@@ -82,21 +82,21 @@ const _: () = assert!(PENDING_BLOB_LEN <= SESSION_PENDING_BLOB_MAX);
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
     cqe_sess_id: &mut Option<u16>,
-) -> HsmResult<&'p DmaBuf> {
-    let ParsedRequest {
-        role,
-        psk_id,
-        session_type,
-        suite,
-        pk_init,
-    } = parse_request(req_buf)?;
-
-    let hpke_suite = hpke_suite_for(suite);
-
+) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
+        let ParsedRequest {
+            role,
+            psk_id,
+            session_type,
+            suite,
+            pk_init,
+        } = parse_request(cmd_buf.request())?;
+
+        let hpke_suite = hpke_suite_for(suite);
+
         // ── Identity + PSK material (all on the scoped allocator) ──
         let psk = load_psk(pal, io, alloc, psk_id)?;
         let key_id = crate::part_state::part_id_key_id(pal, io)?;
@@ -162,13 +162,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         .await?;
 
         // ── Encode response from the scoped buffers ────────────────
-        encode_response(pal, io, session_id, pk_resp, mac_resp)
+        encode_response(cmd_buf, session_id, pk_resp, mac_resp)
     })
     .await
 }
 
 /// Decode and validate the wire request.
-fn parse_request<'a>(req_buf: &'a DmaBuf) -> HsmResult<ParsedRequest<'a>> {
+fn parse_request<'a>(req_buf: &'a HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     let req = TborSessionOpenInitReq::decode(req_buf)?;
 
     let role = match req.psk_id() {
@@ -184,7 +184,7 @@ fn parse_request<'a>(req_buf: &'a DmaBuf) -> HsmResult<ParsedRequest<'a>> {
     let suite = SessionSuite::from_u8(req.suite_id().0)?;
     let hpke_suite = hpke_suite_for(suite);
 
-    let pk_init: &DmaBuf = req.pk_init();
+    let pk_init: &HsmDmaBuf = req.pk_init();
     if pk_init.len() != hpke_suite.npk() {
         return Err(HsmError::InvalidArg);
     }
@@ -204,7 +204,7 @@ fn load_psk<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     psk_id: u8,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let psk = alloc.dma_alloc(PSK_LEN)?;
     let src = crate::part_state::part_psk(pal, io, psk_id)?;
     psk.copy_from_slice(&src[..PSK_LEN]);
@@ -228,7 +228,7 @@ fn load_pk_hsm_sec1<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let xy_len = crate::part_state::part_id_pub_key(pal, io)?.len();
     let pk_hsm = alloc.dma_alloc(xy_len + 1)?;
     pk_hsm[0] = 0x04;
@@ -273,13 +273,13 @@ async fn hpke_auth_psk_export<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     suite: HpkeSuite,
-    pk_init: &DmaBuf,
-    sk_hsm: &DmaBuf,
-    pk_hsm: &DmaBuf,
-    psk: &DmaBuf,
+    pk_init: &HsmDmaBuf,
+    sk_hsm: &HsmDmaBuf,
+    pk_hsm: &HsmDmaBuf,
+    psk: &HsmDmaBuf,
     psk_id_bytes: &[u8],
     info: &[u8],
-) -> HsmResult<(&'a mut DmaBuf, &'a mut DmaBuf)> {
+) -> HsmResult<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)> {
     let pk_resp = alloc.dma_alloc(suite.npk())?;
     let exported = alloc.dma_alloc(suite.nh())?;
     let cfg = HpkeSendExportConfig::auth_psk(
@@ -319,9 +319,9 @@ async fn create_pending_slot<P: HsmPal>(
     session_type: SessionType,
     suite: SessionSuite,
     hpke_suite: HpkeSuite,
-    exported: &DmaBuf,
-    pk_init: &DmaBuf,
-    pk_resp: &DmaBuf,
+    exported: &HsmDmaBuf,
+    pk_init: &HsmDmaBuf,
+    pk_resp: &HsmDmaBuf,
 ) -> HsmResult<HsmSessId> {
     let nh = hpke_suite.nh();
     let npk = hpke_suite.npk();
@@ -344,8 +344,8 @@ async fn create_pending_slot<P: HsmPal>(
 ///
 /// The label and the 2-byte big-endian `session_id` share one DMA
 /// buffer so we don't pay for a separate small allocation just to
-/// satisfy the PAL `hmac_continue(&DmaBuf)` contract.  `pk_init` is
-/// passed through as the codec-supplied `&DmaBuf` sub-view of the
+/// satisfy the PAL `hmac_continue(&HsmDmaBuf)` contract.  `pk_init` is
+/// passed through as the codec-supplied `&HsmDmaBuf` sub-view of the
 /// inbound request buffer.
 #[allow(clippy::too_many_arguments)]
 async fn compute_phase1_mac<'a, P: HsmPal>(
@@ -353,12 +353,12 @@ async fn compute_phase1_mac<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     suite: HpkeSuite,
-    exported: &DmaBuf,
+    exported: &HsmDmaBuf,
     session_id: u16,
-    pk_init: &DmaBuf,
-    pk_hsm: &DmaBuf,
-    pk_resp: &DmaBuf,
-) -> HsmResult<&'a mut DmaBuf> {
+    pk_init: &HsmDmaBuf,
+    pk_hsm: &HsmDmaBuf,
+    pk_resp: &HsmDmaBuf,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     debug_assert_eq!(SESSION_PHASE1_LABEL.len(), 14);
     let label_sid = alloc.dma_alloc(SESSION_PHASE1_LABEL.len() + 2)?;
     label_sid[..SESSION_PHASE1_LABEL.len()].copy_from_slice(SESSION_PHASE1_LABEL);
@@ -369,22 +369,21 @@ async fn compute_phase1_mac<'a, P: HsmPal>(
         .hmac_begin(io, HsmHashAlgo::Sha384, exported, alloc)
         .await?;
 
-    for chunk in &[label_sid as &DmaBuf, pk_init, pk_hsm, pk_resp] {
+    for chunk in &[label_sid as &HsmDmaBuf, pk_init, pk_hsm, pk_resp] {
         pal.hmac_continue(io, &mut hmac_ctx, chunk).await?;
     }
     pal.hmac_finish_into(io, hmac_ctx, mac_resp).await?;
     Ok(mac_resp)
 }
 
-/// Encode the `SessionOpenInit` response into a fresh IO-scoped DmaBuf.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
+/// Encode the `SessionOpenInit` response into a fresh IO-scoped HsmDmaBuf.
+fn encode_response(
+    cmd_buf: &mut HsmCmdBuf<'_>,
     session_id: u16,
-    pk_resp: &DmaBuf,
-    mac_resp: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+    pk_resp: &HsmDmaBuf,
+    mac_resp: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSessionOpenInitResp::encode(buf, 0, false)?
             .session_id(SessionId(session_id))?
             .pk_resp(pk_resp)?

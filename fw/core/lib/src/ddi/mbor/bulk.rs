@@ -42,7 +42,7 @@ pub(crate) fn is_bulk(kind: HsmVaultKeyKind) -> bool {
 pub(crate) async fn commit_key<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    material: &DmaBuf,
+    material: &HsmDmaBuf,
     kind: HsmVaultKeyKind,
     sess_id: HsmSessId,
     attrs: HsmVaultKeyAttrs,

@@ -37,8 +37,8 @@
 
 use core::ops::RangeInclusive;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -86,7 +86,7 @@ const BATCH_SIZE: u64 = 64;
 /// `[A | R[1..n]]` plus the semiblock count.
 struct WrapState<'o> {
     /// `A` lives at bytes `0..SEMI`, `R[i]` at `i*SEMI..(i+1)*SEMI`.
-    output: &'o mut DmaBuf,
+    output: &'o mut HsmDmaBuf,
     /// Number of `R` semiblocks (always `output.len() / SEMI - 1`).
     n: u64,
 }
@@ -97,7 +97,7 @@ struct UnwrapState<'a, 'o> {
     /// 64-bit register that holds the candidate AIV at the end.
     a: &'a mut [u8; SEMI],
     /// `R[i]` at bytes `(i-1)*SEMI..i*SEMI` (1-based; total `n*SEMI`).
-    output: &'o mut DmaBuf,
+    output: &'o mut HsmDmaBuf,
     /// Number of `R` semiblocks (always `output.len() / SEMI`).
     n: u64,
 }
@@ -130,12 +130,12 @@ struct UnwrapState<'a, 'o> {
 /// * Any [`HsmError`] surfaced by the AES driver.
 fn kw_wrap_batch<const DEPTH: usize>(
     ecb: &AesExclusive<'_, DEPTH>,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     state: &mut WrapState<'_>,
     j: u64,
     i_range: RangeInclusive<u64>,
-    pt: &mut DmaBuf,
-    ct: &mut DmaBuf,
+    pt: &mut HsmDmaBuf,
+    ct: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     for i in i_range {
         let idx = i as usize * SEMI;
@@ -190,12 +190,12 @@ fn kw_wrap_batch<const DEPTH: usize>(
 /// * Any [`HsmError`] surfaced by the AES driver.
 fn kw_unwrap_batch<const DEPTH: usize>(
     ecb: &AesExclusive<'_, DEPTH>,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     state: &mut UnwrapState<'_, '_>,
     j: u64,
     i_range: RangeInclusive<u64>,
-    ct: &mut DmaBuf,
-    pt: &mut DmaBuf,
+    ct: &mut HsmDmaBuf,
+    pt: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     for i in i_range.rev() {
         let idx = (i as usize - 1) * SEMI;
@@ -248,10 +248,10 @@ fn kw_unwrap_batch<const DEPTH: usize>(
 /// * Any [`HsmError`] surfaced by the AES driver.
 fn ecb_block_in_place<const DEPTH: usize>(
     ecb: &AesExclusive<'_, DEPTH>,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     op: AesOp,
-    block: &mut DmaBuf,
-    out: &mut DmaBuf,
+    block: &mut HsmDmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     ecb.encrypt_decrypt(&AesRequest {
         mode: AesMode::Ecb,
@@ -330,7 +330,7 @@ impl UnoHsmPal {
     async fn run_kw_wrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         mut state: WrapState<'_>,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
@@ -383,7 +383,7 @@ impl UnoHsmPal {
     async fn run_kw_unwrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         mut state: UnwrapState<'_, '_>,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
@@ -442,9 +442,9 @@ impl UnoHsmPal {
     pub(super) async fn kw_wrap_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let m = input.len();
         if m < 16 || !m.is_multiple_of(SEMI) || m > MAX_DATA {
@@ -494,9 +494,9 @@ impl UnoHsmPal {
     pub(super) async fn kw_unwrap_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let c_len = input.len();
         if c_len < 24 || !c_len.is_multiple_of(SEMI) || c_len > MAX_DATA + SEMI {
@@ -553,9 +553,9 @@ impl UnoHsmPal {
     pub(super) async fn kwp_wrap_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let m = input.len();
         if m == 0 || m > MAX_DATA {
@@ -644,9 +644,9 @@ impl UnoHsmPal {
     pub(super) async fn kwp_unwrap_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<usize> {
         let c_len = input.len();
         if c_len < BLOCK || !c_len.is_multiple_of(SEMI) || c_len > MAX_DATA + SEMI {

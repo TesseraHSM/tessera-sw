@@ -104,7 +104,7 @@ pub enum MlKemKeyKind {
 }
 
 /// `MlKemGenerateKey` request schema.
-#[tbor(opcode = 0x29)]
+#[tbor(opcode = 0x29, pair = TborMlKemGenerateKeyResp)]
 pub struct TborMlKemGenerateKeyReq {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -124,7 +124,7 @@ pub struct TborMlKemGenerateKeyReq {
 ///
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// and mask the decapsulation key straight into it (`decode_mut`).
-#[tbor(response)]
+#[tbor(response, pair = TborMlKemGenerateKeyReq)]
 pub struct TborMlKemGenerateKeyResp<'a> {
     /// The generated ML-KEM decapsulation key, masked (AEAD-GCM-256)
     /// under the scope's masking key.  Always 196 B: the wire is
@@ -134,7 +134,7 @@ pub struct TborMlKemGenerateKeyResp<'a> {
     pub masked_key: &'a [u8],
 
     /// The ML-KEM public / encapsulation key.  Up to 1568 B for ML-KEM-1024.
-    #[tbor(buffer, max_len = 1568)]
+    #[tbor(buffer, max_len = 1568, mutable)]
     pub pub_key: &'a [u8],
 }
 

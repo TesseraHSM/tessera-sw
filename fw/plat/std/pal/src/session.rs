@@ -169,7 +169,7 @@ impl HsmSessionManager for StdHsmPal {
         &self,
         io: &StdHsmIo,
         role: SessionRole,
-        handshake_state: &DmaBuf,
+        handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId> {
         let entry = self.active_part_mut(io.pid())?;
         entry.session_table.create_pending(role, handshake_state)
@@ -269,7 +269,7 @@ impl HsmSessionManager for StdHsmPal {
         Ok(())
     }
 
-    fn session_param_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_param_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
         let blob = entry.vault.key(kid)?;
@@ -279,11 +279,11 @@ impl HsmSessionManager for StdHsmPal {
         let key_bytes = &blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN];
         // SAFETY: same justification as `vault_key` — on the host,
         // any heap byte is reachable; branding the sub-slice as
-        // `DmaBuf` only satisfies the type system.
-        Ok(unsafe { DmaBuf::from_raw(key_bytes) })
+        // `HsmDmaBuf` only satisfies the type system.
+        Ok(unsafe { HsmDmaBuf::from_raw(key_bytes) })
     }
 
-    fn session_masking_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_masking_key(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
         let blob = entry.vault.key(kid)?;
@@ -303,8 +303,8 @@ impl HsmSessionManager for StdHsmPal {
         let key_bytes = &blob[offset..offset + size];
         // SAFETY: same justification as `session_param_key` — on the
         // host, any heap byte is reachable; branding the sub-slice as
-        // `DmaBuf` only satisfies the type system.
-        Ok(unsafe { DmaBuf::from_raw(key_bytes) })
+        // `HsmDmaBuf` only satisfies the type system.
+        Ok(unsafe { HsmDmaBuf::from_raw(key_bytes) })
     }
 
     fn session_try_consume_psk_change(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {

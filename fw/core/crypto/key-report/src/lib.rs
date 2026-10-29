@@ -11,7 +11,7 @@
 //! (ECDSA-P384). SHA-384 + ECDSA signing/verification are routed through
 //! the supplied [`HsmCrypto`](tsra_fw_hsm_pal_traits::HsmCrypto)
 //! implementation, and all working buffers are
-//! [`DmaBuf`](tsra_fw_hsm_pal_traits::DmaBuf) allocations.
+//! [`HsmDmaBuf`](tsra_fw_hsm_pal_traits::HsmDmaBuf) allocations.
 //!
 //! * [`key_report`] — build a signed report (query/copy convention).
 //! * [`parse_key_report`] — zero-copy decode into a [`KeyReportView`].

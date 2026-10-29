@@ -39,7 +39,7 @@ pub const TBOR_OP_MLKEM_DECAPSULATE: u8 = 0x2B;
 ///
 /// `masked_key` is `#[tbor(mutable)]` so the handler can unmask it **in
 /// place** in the request buffer (via `decode_mut`) — no scratch copy.
-#[tbor(opcode = 0x2B)]
+#[tbor(opcode = 0x2B, pair = TborMlKemDecapsulateResp)]
 pub struct TborMlKemDecapsulateReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -64,7 +64,7 @@ pub struct TborMlKemDecapsulateReq<'a> {
 ///
 /// `masked_shared_secret` is `#[tbor(mutable)]` so the handler can reserve
 /// the slot and mask the 32-byte shared secret straight into it.
-#[tbor(response)]
+#[tbor(response, pair = TborMlKemDecapsulateReq)]
 pub struct TborMlKemDecapsulateResp<'a> {
     /// The 32-byte ML-KEM shared secret, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  The envelope is always 164 B.

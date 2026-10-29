@@ -101,6 +101,7 @@
 
 mod alloc;
 mod cert;
+mod cmd_buf;
 mod crypto;
 mod dispatch;
 mod error;
@@ -116,6 +117,7 @@ mod vault;
 pub use alloc::*;
 
 pub use cert::*;
+pub use cmd_buf::*;
 pub use crypto::*;
 pub use dispatch::*;
 pub use error::*;

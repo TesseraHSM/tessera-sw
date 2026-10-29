@@ -146,8 +146,8 @@ pub trait HsmHash: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        data: &DmaBuf,
-        digest: &mut DmaBuf,
+        data: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()>;
 
@@ -205,7 +205,7 @@ pub trait HsmHash: HsmIoTypes {
         &self,
         io: &Self::Io,
         ctx: &mut Self::HashCtx<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Finalises the hash and writes the digest into `digest`.
@@ -233,7 +233,7 @@ pub trait HsmHash: HsmIoTypes {
         &self,
         io: &Self::Io,
         ctx: Self::HashCtx<'_>,
-        digest: &mut DmaBuf,
+        digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()>;
 }

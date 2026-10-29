@@ -57,7 +57,7 @@ pub(crate) async fn reopen_session<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let mut body: DdiReopenSessionReq<'_> = decoder.decode_data()?;
     let reopen_id = HsmSessId::from(hdr.sess_id.ok_or(HsmError::SessionExpected)?);
 
@@ -134,11 +134,11 @@ async fn encode_reopen_response<'p, P: HsmPal>(
     io: &P::Io,
     hdr: &DdiReqHdr,
     sess_id: HsmSessId,
-    bk_session: &DmaBuf,
-    mk_session: &DmaBuf,
+    bk_session: &HsmDmaBuf,
+    mk_session: &HsmDmaBuf,
     svn: u64,
     bks2_id: u16,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let bmk_metadata = DdiMaskedKeyMetadata {
         svn,
         key_type: DdiKeyType::AesCbc256Hmac384,
@@ -164,9 +164,6 @@ async fn encode_reopen_response<'p, P: HsmPal>(
     })?;
     let frame = DdiReopenSessionResp::from_layout(resp, &layout);
 
-    // `key_masking::cbc::mask` requires `out[..total_len]` to be zero
-    // on entry.
-    frame.bmk_session.fill(0);
     mask(
         pal,
         io,

@@ -22,7 +22,7 @@ pub(crate) async fn get_certificate<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiGetCertificateReq = decoder.decode_data()?;
 
     // Query cert size (no copy).

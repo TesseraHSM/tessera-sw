@@ -41,7 +41,7 @@
 
 #![no_std]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -67,7 +67,7 @@ pub struct UnwrapParams<'a> {
     /// OAEP hash algorithm used to wrap the KEK.
     pub oaep_hash: HsmHashAlgo,
     /// The wrapped blob `[ RSA-OAEP(KEK) | AES-KWP(key material) ]`.
-    pub wrapped_blob: &'a DmaBuf,
+    pub wrapped_blob: &'a HsmDmaBuf,
 }
 
 /// Unwrap a host-supplied `CKM_RSA_AES_KEY_WRAP` blob, returning the *raw*
@@ -98,7 +98,7 @@ pub async fn unwrap_key<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     params: UnwrapParams<'_>,
-) -> HsmResult<&'p mut DmaBuf> {
+) -> HsmResult<&'p mut HsmDmaBuf> {
     // The unwrapping key must be the partition's device-internal, locally
     // generated RSA-2048 private key that carries the `unwrap` permission.
     // `internal` is the load-bearing check: it is set *only* by the device

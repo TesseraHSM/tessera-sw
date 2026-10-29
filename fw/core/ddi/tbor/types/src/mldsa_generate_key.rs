@@ -157,7 +157,7 @@ pub enum MlDsaKeyKind {
 }
 
 /// `MlDsaGenerateKey` request schema.
-#[tbor(opcode = 0x26)]
+#[tbor(opcode = 0x26, pair = TborMlDsaGenerateKeyResp)]
 pub struct TborMlDsaGenerateKeyReq {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -178,7 +178,7 @@ pub struct TborMlDsaGenerateKeyReq {
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// and mask the private key straight into it (`decode_mut`) — no scratch
 /// copy of the masked blob.
-#[tbor(response)]
+#[tbor(response, pair = TborMlDsaGenerateKeyReq)]
 pub struct TborMlDsaGenerateKeyResp<'a> {
     /// The generated ML-DSA private key, masked (AEAD-GCM-256) under the
     /// scope's masking key.  Always 164 B: the wire is seed-only, so the

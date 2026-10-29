@@ -32,9 +32,9 @@ impl HsmKdf for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        salt: Option<&DmaBuf>,
-        ikm: &DmaBuf,
-        prk: &mut DmaBuf,
+        salt: Option<&HsmDmaBuf>,
+        ikm: &HsmDmaBuf,
+        prk: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .hkdf(
@@ -52,9 +52,9 @@ impl HsmKdf for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        prk: &DmaBuf,
-        info: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        prk: &HsmDmaBuf,
+        info: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .hkdf(
@@ -72,10 +72,10 @@ impl HsmKdf for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        label: Option<&DmaBuf>,
-        context: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        label: Option<&HsmDmaBuf>,
+        context: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .kbkdf(
@@ -92,8 +92,8 @@ impl HsmKdf for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         _algo: HsmHashAlgo,
-        _seed: &DmaBuf,
-        _mask: &mut DmaBuf,
+        _seed: &HsmDmaBuf,
+        _mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         todo!()
     }
@@ -102,8 +102,8 @@ impl HsmKdf for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         _algo: HsmHashAlgo,
-        _seed: &DmaBuf,
-        _mask: &mut DmaBuf,
+        _seed: &HsmDmaBuf,
+        _mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         todo!()
     }
@@ -112,9 +112,9 @@ impl HsmKdf for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        shared_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        shared_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .concat_kdf(
@@ -131,9 +131,9 @@ impl HsmKdf for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        other_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        other_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .concat_kdf(

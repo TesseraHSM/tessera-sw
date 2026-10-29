@@ -42,7 +42,8 @@ use tsra_fw_core_crypto_key_report::KeyReportParams;
 use tsra_fw_ddi_tbor_types::TborKeyReportReq;
 use tsra_fw_ddi_tbor_types::TborKeyReportResp;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_MAX_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -98,7 +99,7 @@ fn build_app_uuid<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     sess_id: HsmSessId,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let app_id = crate::session::session_app_id(pal, io, sess_id)?;
     let app_uuid = alloc.dma_alloc(APP_UUID_LEN)?;
     app_uuid.copy_from_slice(&app_id);
@@ -111,7 +112,7 @@ async fn attested_pub_key<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     key_kind: HsmVaultKeyKind,
-    priv_key: &DmaBuf,
+    priv_key: &HsmDmaBuf,
 ) -> HsmResult<AttestedPubKey<'a>> {
     if let Ok(rsa) = super::from_pal::rsa_key(key_kind) {
         let modulus_len = rsa.modulus_len();
@@ -173,31 +174,31 @@ async fn attested_pub_key<'a, P: HsmPal>(
 /// change, so a concurrently-dispatched command (IOs run in a task pool
 /// and interleave at await points) can neither observe it half-done nor
 /// require its rollback on failure. The masked key is unmasked in place
-/// in the request buffer and wiped after public-key derivation.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// in the request buffer and wiped during IO teardown.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborKeyReportReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
-
-    validate_crypto_officer_active_session(pal, io, sess_id)?;
-
-    // Reports bind the finalized partition policy, so the partition must
-    // be in the `Initialized` state even for session-scoped keys.
-    if part_state::part_state(pal, io)? != PartState::Initialized {
-        return Err(HsmError::InvalidArg);
-    }
-
-    // Peek the masked-key metadata (cleartext, tag-bound) to route to the
-    // right masking key before unmasking.
-    let masked_key = req.masked_key;
-    let report_data = req.report_data;
-    let scope = peek_metadata(masked_key)?.usage_flags().scope();
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
+        let req = TborKeyReportReq::decode_mut(cmd_buf.request_mut())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id));
+
+        validate_crypto_officer_active_session(pal, io, sess_id)?;
+
+        // Reports bind the finalized partition policy, so the partition must
+        // be in the `Initialized` state even for session-scoped keys.
+        if part_state::part_state(pal, io)? != PartState::Initialized {
+            return Err(HsmError::InvalidArg);
+        }
+
+        // Peek the masked-key metadata (cleartext, tag-bound) to route to the
+        // right masking key before unmasking.
+        let masked_key = req.masked_key;
+        let report_data = req.report_data;
+        let scope = peek_metadata(masked_key)?.usage_flags().scope();
+        let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+
         let (report, report_len) = build_key_report(
             pal,
             io,
@@ -208,7 +209,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             report_data,
         )
         .await?;
-        encode_response(pal, io, &report[..report_len])
+        encode_response(cmd_buf, &report[..report_len])
     })
     .await
 }
@@ -216,42 +217,32 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// Unmask the key, derive its public component, and build the PID-signed
 /// COSE_Sign1 report over it.
 ///
-/// Returns the report bytes in `alloc`-scoped scratch (`&mut DmaBuf`) plus
+/// Returns the report bytes in `alloc`-scoped scratch (`&mut HsmDmaBuf`) plus
 /// its exact length; the caller copies them into the IO-scoped response.
 async fn build_key_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    masked_key: &mut DmaBuf,
-    masking_key: &DmaBuf,
+    masked_key: &mut HsmDmaBuf,
+    masking_key: &HsmDmaBuf,
     sess_id: HsmSessId,
-    report_data: &DmaBuf,
-) -> HsmResult<(&'a mut DmaBuf, usize)> {
-    // Derive the public component directly from the request, then wipe
-    // the recovered private key before propagating any error.
-    let key_res = async {
+    report_data: &HsmDmaBuf,
+) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
+    // Derive the public component directly from the IO-scoped request.
+    let (key, key_attrs) = async {
         let view = unmask(pal, io, masking_key, masked_key).await?;
         let key = attested_pub_key(pal, io, alloc, view.key_kind, view.target_key).await?;
         Ok::<_, HsmError>((key, view.key_attrs))
     }
-    .await;
-
-    // Failed unmasking can leave partial plaintext, so clear the request
-    // field on both success and failure before it can be reused.
-    masked_key.zeroize();
-    let (key, key_attrs) = key_res?;
+    .await?;
     let flags: u32 = key_flags_from_attrs(key_attrs).into();
 
     build_signed_report(pal, io, alloc, sess_id, key, flags, report_data).await
 }
 
 /// Encode the `KeyReport` response frame around the finished report.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    report_bytes: &[u8],
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, report_bytes: &[u8]) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborKeyReportResp::encode(buf, 0, false)?
             .report(report_bytes)?
             .finish();
@@ -269,8 +260,8 @@ async fn build_signed_report<'a, P: HsmPal>(
     sess_id: HsmSessId,
     key: AttestedPubKey<'_>,
     flags: u32,
-    report_data_src: &DmaBuf,
-) -> HsmResult<(&'a mut DmaBuf, usize)> {
+    report_data_src: &HsmDmaBuf,
+) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
     let pid_priv = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
 
     let vm_launch_id = part_state::part_vm_launch_guid(pal, io)?;

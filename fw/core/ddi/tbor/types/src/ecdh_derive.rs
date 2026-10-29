@@ -53,7 +53,7 @@ pub const MASKED_SECRET_MAX_LEN: usize = 8 + 12 + 192 + 66 + 16;
 /// `masked_key` is `#[tbor(mutable)]` so the handler can `unmask` the local
 /// key **in place** in the request buffer (via `decode_mut`) — no scratch
 /// copy — and derive directly from the recovered key.
-#[tbor(opcode = 0x19)]
+#[tbor(opcode = 0x19, pair = TborEcdhDeriveResp)]
 pub struct TborEcdhDeriveReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -85,7 +85,7 @@ pub struct TborEcdhDeriveReq<'a> {
 ///
 /// `masked_secret` is `#[tbor(mutable)]` so the handler can reserve the
 /// slot and mask the derived secret straight into it (`decode_mut`).
-#[tbor(response)]
+#[tbor(response, pair = TborEcdhDeriveReq)]
 pub struct TborEcdhDeriveResp<'a> {
     /// The derived ECDH shared secret, masked (AEAD-GCM-256) under the
     /// scope's masking key.  260 / 276 / 294 B for P-256 / P-384 / P-521.

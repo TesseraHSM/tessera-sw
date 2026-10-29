@@ -26,7 +26,7 @@ use der::SliceReader;
 use der::Tag;
 use der::TagMode;
 use der::TagNumber;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -130,7 +130,7 @@ impl From<X509ParseError> for HsmError {
 ///   key algorithm is not a supported ECDSA/EC variant.
 /// * `Err(HsmError::X509UnrecognizedCriticalExtension)` if a critical
 ///   extension is present that this parser does not recognize.
-pub fn parse_cert(der: &DmaBuf) -> HsmResult<CertInfo<'_>> {
+pub fn parse_cert(der: &HsmDmaBuf) -> HsmResult<CertInfo<'_>> {
     let mut outer = SliceReader::new(der).map_err(X509ParseError::from)?;
     let cert = outer.sequence(|cert| -> X509ParseResult<_> {
         let tbs_raw = to_dma(der, cert.tlv_bytes()?);
@@ -159,27 +159,27 @@ pub fn parse_cert(der: &DmaBuf) -> HsmResult<CertInfo<'_>> {
     Ok(cert)
 }
 
-/// Convert a `&[u8]` sub-slice of a `&DmaBuf` back into a `&DmaBuf`
+/// Convert a `&[u8]` sub-slice of a `&HsmDmaBuf` back into a `&HsmDmaBuf`
 /// by computing its byte offset within the original buffer.
 ///
 /// `der` parser callbacks return `&[u8]` views, but downstream
-/// consumers (hash and ECC verify) require `&DmaBuf` to prove the
+/// consumers (hash and ECC verify) require `&HsmDmaBuf` to prove the
 /// bytes live in DMA-accessible memory. Since the parser only ever
 /// hands back sub-slices of the original DMA buffer, we can safely
-/// re-borrow them through the `DmaBuf` type by computing the offset.
+/// re-borrow them through the `HsmDmaBuf` type by computing the offset.
 ///
 /// # Parameters
 /// * `root` — the original DMA buffer the sub-slice was taken from.
 /// * `sub` — a sub-slice that points strictly inside `root`.
 ///
 /// # Returns
-/// A `&DmaBuf` view covering the same bytes as `sub`.
+/// A `&HsmDmaBuf` view covering the same bytes as `sub`.
 ///
 /// # Panics
 ///
 /// Panics if `sub` does not point within `root` (either starts before
 /// `root` or extends past its end).
-fn to_dma<'a>(root: &'a DmaBuf, sub: &'a [u8]) -> &'a DmaBuf {
+fn to_dma<'a>(root: &'a HsmDmaBuf, sub: &'a [u8]) -> &'a HsmDmaBuf {
     let root_ptr = root.as_ptr() as usize;
     let sub_ptr = sub.as_ptr() as usize;
     assert!(sub_ptr >= root_ptr, "sub-slice starts before root buffer");
@@ -203,8 +203,8 @@ fn to_dma<'a>(root: &'a DmaBuf, sub: &'a [u8]) -> &'a DmaBuf {
 /// 6. parsed BasicConstraints, if present
 /// 7. parsed KeyUsage bits, if present
 type ParsedTbs<'a> = (
-    &'a DmaBuf,
-    &'a DmaBuf,
+    &'a HsmDmaBuf,
+    &'a HsmDmaBuf,
     EcPubKey<'a>,
     Option<&'a [u8]>,
     Option<&'a [u8]>,
@@ -233,7 +233,7 @@ type ParsedTbs<'a> = (
 ///   malformed DER, or [`HsmError::X509UnsupportedAlgorithm`] /
 ///   [`HsmError::X509UnrecognizedCriticalExtension`] from the
 ///   nested SPKI / extension parsers.
-fn parse_tbs<'a>(root: &'a DmaBuf, tbs_raw: &'a DmaBuf) -> X509ParseResult<ParsedTbs<'a>> {
+fn parse_tbs<'a>(root: &'a HsmDmaBuf, tbs_raw: &'a HsmDmaBuf) -> X509ParseResult<ParsedTbs<'a>> {
     let mut reader = SliceReader::new(tbs_raw).map_err(X509ParseError::from)?;
     let parsed = reader.sequence(|tbs| -> X509ParseResult<_> {
         let _version: Option<u8> = tbs.context_specific(TagNumber(0), TagMode::Explicit)?;
@@ -319,7 +319,7 @@ fn parse_sig_algo_id(reader: &mut SliceReader<'_>) -> X509ParseResult<SigAlgo> {
 ///
 /// # Parameters
 /// * `root` — the original certificate DMA buffer; used to re-borrow
-///   the EC point bytes as `&DmaBuf` via [`to_dma`].
+///   the EC point bytes as `&HsmDmaBuf` via [`to_dma`].
 /// * `spki_raw` — the full SubjectPublicKeyInfo SEQUENCE bytes
 ///   (tag + length + value), borrowing from `root`.
 ///
@@ -330,7 +330,7 @@ fn parse_sig_algo_id(reader: &mut SliceReader<'_>) -> X509ParseResult<SigAlgo> {
 ///   non-EC keys or unsupported curves, or
 ///   [`HsmError::X509ParseError`] for malformed DER, missing the
 ///   `0x04` uncompressed-point marker, or wrong coordinate length.
-fn parse_ec_spki<'a>(root: &'a DmaBuf, spki_raw: &'a [u8]) -> X509ParseResult<EcPubKey<'a>> {
+fn parse_ec_spki<'a>(root: &'a HsmDmaBuf, spki_raw: &'a [u8]) -> X509ParseResult<EcPubKey<'a>> {
     let mut reader = SliceReader::new(spki_raw).map_err(X509ParseError::from)?;
     let pub_key = reader.sequence(|seq| -> X509ParseResult<_> {
         let curve = seq.sequence(|algo| -> X509ParseResult<_> {

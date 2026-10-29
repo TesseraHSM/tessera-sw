@@ -4,7 +4,7 @@
 //! AES-256-GCM `seal` / `open` implementation.
 //!
 //! Both operations are in-place on a single caller-owned
-//! [`DmaBuf`](tsra_fw_hsm_pal_traits::DmaBuf):
+//! [`HsmDmaBuf`](tsra_fw_hsm_pal_traits::HsmDmaBuf):
 //!
 //! * [`seal_gcm`] assembles `[HEADER | IV | AAD | DATA | TAG]` into
 //!   the buffer (small memcpys for IV / AAD / plaintext, dictated
@@ -18,8 +18,8 @@
 //! Public dispatch lives in [`crate::ops`]; this module never sees
 //! a non-`AES-256-GCM` `alg` value.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 
 use crate::alg::AeadAlg;
@@ -39,11 +39,11 @@ pub(crate) async fn seal_gcm<P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
-    pt: &DmaBuf,
-    buf: &mut DmaBuf,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
+    pt: &HsmDmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> Result<usize> {
     seal_gcm_inner(crypto, io, alg, key, iv, aad, Some(pt), pt.len(), buf).await
 }
@@ -59,11 +59,11 @@ pub(crate) async fn seal_gcm_in_place<P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
     pt_len: usize,
-    buf: &mut DmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> Result<usize> {
     seal_gcm_inner(crypto, io, alg, key, iv, aad, None, pt_len, buf).await
 }
@@ -73,12 +73,12 @@ async fn seal_gcm_inner<P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
-    pt: Option<&DmaBuf>,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
+    pt: Option<&HsmDmaBuf>,
     pt_len: usize,
-    buf: &mut DmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> Result<usize> {
     // Length validation -------------------------------------------------
     if key.len() != alg.key_len() {
@@ -157,8 +157,8 @@ async fn seal_gcm_inner<P: HsmCrypto>(
 pub(crate) async fn open_gcm<'a, P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
-    key: &DmaBuf,
-    buf: &'a mut DmaBuf,
+    key: &HsmDmaBuf,
+    buf: &'a mut HsmDmaBuf,
     header: Header,
 ) -> Result<AeadEnvelope<'a>> {
     let total_len = buf.len();
@@ -187,7 +187,7 @@ pub(crate) async fn open_gcm<'a, P: HsmCrypto>(
             other => Error::Backend(other),
         })?;
 
-    // Re-borrow `buf` immutably to construct the DmaBuf sub-views.
+    // Re-borrow `buf` immutably to construct the HsmDmaBuf sub-views.
     // All ranges are validated by `region_offsets`; the indexed
     // accesses below cannot panic.
     let view = &*buf;

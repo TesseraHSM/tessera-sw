@@ -46,8 +46,8 @@ Handler flow:
 
 The command **persists nothing** (no vault write, no lifecycle advance),
 so it records no rollback on the undo log. The recovered TMK, the vault
-scalar, the big-endian `d`, and the `COSE_Key` plaintext are zeroized on
-every exit path.
+scalar, the big-endian `d`, and the `COSE_Key` plaintext are scrubbed
+during IO teardown.
 
 This command is **Crypto-Officer-only**: a Crypto-User session is rejected
 with `InvalidPermissions`.

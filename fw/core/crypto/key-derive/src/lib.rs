@@ -28,7 +28,7 @@ use tsra_fw_core_crypto_key_masking::cbc::mask;
 use tsra_fw_core_crypto_key_masking::cbc::unmask;
 use tsra_fw_ddi_mbor_types::masked_key::DdiMaskedKeyMetadata;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -69,12 +69,12 @@ fn bk_boot_metadata(svn: u64, owner: u16) -> DdiMaskedKeyMetadata<'static> {
 pub async fn derive_masking_key<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    kdk: &DmaBuf,
+    kdk: &HsmDmaBuf,
     label: &[u8],
     extra_context: &[u8],
     svn: u64,
     owner: u16,
-    output: &mut DmaBuf,
+    output: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let mfgr = pal.mfgr_seed(svn)?;
     let dev_owner = pal.owner_seed(u64::from(owner))?;
@@ -109,16 +109,12 @@ pub async fn derive_masking_key<P: HsmPal>(
         )
         .await;
 
-    // Scrub the seed material (`mfgr_seed ‖ owner_seed`) staged in the
-    // reusable IO-scoped context buffer once the KDF has consumed it; scope
-    // rewind does not clear DMA memory, so wipe it explicitly on every path.
-    ctx.zeroize();
     res
 }
 
 /// Derives the partition's `BKx` (the `BK_BOOT` masking key) into
 /// `bkx`, which must be [`BK_BOOT_LEN`] bytes.
-async fn derive_bkx<P: HsmPal>(pal: &P, io: &P::Io, bkx: &mut DmaBuf) -> HsmResult<()> {
+async fn derive_bkx<P: HsmPal>(pal: &P, io: &P::Io, bkx: &mut HsmDmaBuf) -> HsmResult<()> {
     let svn = pal.mfgr_svn();
     let owner = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
     let fw_seed = pal.fw_seed();
@@ -132,7 +128,7 @@ async fn derive_bkx<P: HsmPal>(pal: &P, io: &P::Io, bkx: &mut DmaBuf) -> HsmResu
 ///
 /// Called once at partition allocation; the caller persists the
 /// returned blob.  The raw `BK_BOOT` never leaves this function.
-pub async fn mask_bk_boot<'a, P: HsmPal>(pal: &'a P, io: &P::Io) -> HsmResult<&'a mut DmaBuf> {
+pub async fn mask_bk_boot<'a, P: HsmPal>(pal: &'a P, io: &P::Io) -> HsmResult<&'a mut HsmDmaBuf> {
     let svn = pal.mfgr_svn();
     let owner = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
 
@@ -157,8 +153,8 @@ pub async fn mask_bk_boot<'a, P: HsmPal>(pal: &'a P, io: &P::Io) -> HsmResult<&'
 pub async fn unmask_bk_boot<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    masked: &DmaBuf,
-    out: &mut DmaBuf,
+    masked: &HsmDmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // `out` is a trust-boundary buffer; validate its length up front so a
     // wrong-sized caller buffer is rejected rather than panicking in the

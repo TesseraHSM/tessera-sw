@@ -26,7 +26,7 @@ use tsra_ddi_mbor_sim::report::REPORT_VERSION as SIM_REPORT_VERSION;
 use tsra_fw_core_crypto_key_report::parse_key_report;
 use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
 use tsra_fw_core_crypto_key_report::PUBLIC_KEY_MAX_SIZE;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 const P384_COORD: usize = 48;
 /// COSE elliptic-curve identifier for P-384 (RFC 9053 Table 18).
@@ -153,8 +153,8 @@ fn fw_decodes_sim_encoded_report() {
     let (bytes, public_key, cose_len, app_uuid, report_data, vm_launch_id, signature) =
         sim_build(flags);
 
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    let dma = unsafe { DmaBuf::from_raw(&bytes) };
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    let dma = unsafe { HsmDmaBuf::from_raw(&bytes) };
     let view = parse_key_report(dma).unwrap();
 
     assert_eq!(view.version, SIM_REPORT_VERSION);
@@ -176,8 +176,8 @@ fn fw_and_sim_decoders_agree() {
         let (bytes, _, _, _, _, _, _) = sim_build(flags);
 
         // Firmware decode.
-        // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-        let dma = unsafe { DmaBuf::from_raw(&bytes) };
+        // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+        let dma = unsafe { HsmDmaBuf::from_raw(&bytes) };
         let fw = parse_key_report(dma).unwrap();
 
         // Simulator decode.

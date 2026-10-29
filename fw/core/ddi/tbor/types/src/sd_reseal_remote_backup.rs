@@ -64,7 +64,7 @@ const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
 const _: () = assert!(POK_REMOTE_BACKUP_LEN == 161);
 
 /// `SdResealRemoteBackup` request schema.
-#[tbor(opcode = 0x0B)]
+#[tbor(opcode = 0x0B, pair = TborSdResealRemoteBackupResp)]
 pub struct TborSdResealRemoteBackupReq<'a> {
     /// Session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -110,7 +110,7 @@ pub struct TborSdResealRemoteBackupReq<'a> {
 }
 
 /// `SdResealRemoteBackup` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborSdResealRemoteBackupReq)]
 pub struct TborSdResealRemoteBackupResp<'a> {
     /// Resealed remote backup (an HPKE-Auth seal of the same BKS3 to the
     /// destination receiver).  Always exactly [`POK_REMOTE_BACKUP_LEN`]

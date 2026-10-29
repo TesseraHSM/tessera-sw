@@ -102,7 +102,7 @@ pub const SD_MK_BACKUP_LEN: usize = LOCAL_MK_BACKUP_LEN;
 const _: () = assert!(SD_MK_BACKUP_LEN == 260);
 
 /// `SdCreateRemoteBackup` request schema.
-#[tbor(opcode = 0x0A)]
+#[tbor(opcode = 0x0A, pair = TborSdCreateRemoteBackupResp)]
 pub struct TborSdCreateRemoteBackupReq<'a> {
     /// CO session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -157,7 +157,7 @@ pub struct TborSdCreateRemoteBackupReq<'a> {
 }
 
 /// `SdCreateRemoteBackup` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborSdCreateRemoteBackupReq)]
 pub struct TborSdCreateRemoteBackupResp<'a> {
     /// Remote partition-owner-key backup (an HPKE-Auth seal of BKS3).
     /// Always exactly [`POK_REMOTE_BACKUP_LEN`] (161 B).

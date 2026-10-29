@@ -61,7 +61,7 @@ pub const KEY_REPORT_MAX_LEN: usize = 1024;
 ///
 /// Attests the key carried by `masked_key`, binding `report_data` into
 /// the signed report payload.
-#[tbor(opcode = 0x10)]
+#[tbor(opcode = 0x10, pair = TborKeyReportResp)]
 pub struct TborKeyReportReq<'a> {
     /// CO/CU session id this request is bound to. The dispatcher
     /// cross-checks it against the SQE-carried session id.
@@ -80,7 +80,7 @@ pub struct TborKeyReportReq<'a> {
 }
 
 /// `KeyReport` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborKeyReportReq)]
 pub struct TborKeyReportResp<'a> {
     /// The tagged COSE_Sign1 key-attestation report, signed by the PID
     /// key. Variable length up to [`KEY_REPORT_MAX_LEN`].

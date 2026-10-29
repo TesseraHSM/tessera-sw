@@ -44,7 +44,7 @@ pub const TBOR_OP_MLDSA_VERIFY: u8 = 0x28;
 /// second source of truth that firmware must cross-check against the key,
 /// and would let a caller pair a parameter set with a mismatched key.
 /// `MlDsaVerify` request schema.
-#[tbor(opcode = 0x28)]
+#[tbor(opcode = 0x28, pair = TborMlDsaVerifyResp)]
 pub struct TborMlDsaVerifyReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -81,7 +81,7 @@ pub struct TborMlDsaVerifyReq<'a> {
 /// verification failure.  Returning a boolean instead would let a caller
 /// that forgets to inspect it treat any signature as valid; an error
 /// status is caught by the normal error path.
-#[tbor(response)]
+#[tbor(response, pair = TborMlDsaVerifyReq)]
 pub struct TborMlDsaVerifyResp;
 
 #[cfg(test)]
@@ -138,10 +138,10 @@ mod tests {
         assert!(frame.ctx().is_empty());
     }
 
-    /// The worst-case verify request must fit the host encoder's 8192-byte
-    /// transport buffer with the data section staged at offset 132.
+    /// The maximum request uses its paired TOC footprint, not a separate
+    /// maximum-sized staging TOC.
     #[test]
-    fn max_sized_request_fits_the_host_staging_budget() {
+    fn max_sized_request_fits_transport_capacity() {
         let mut buf = [0u8; 8192];
         let pub_key = [0x11u8; MLDSA_PUB_KEY_MAX_LEN];
         let message = [0x22u8; MLDSA_MESSAGE_MAX_LEN];
@@ -163,6 +163,8 @@ mod tests {
         assert_eq!(frame.message(), &message[..]);
         assert_eq!(frame.ctx(), &ctx[..]);
         assert_eq!(frame.signature(), &signature[..]);
+        assert_eq!(frame.len(), 8088);
+        assert_eq!(frame.len(), TborMlDsaVerifyReq::MAX_ENCODED_SIZE);
     }
 
     #[test]
@@ -179,24 +181,5 @@ mod tests {
         const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
         const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);
-    }
-
-    /// Worst-case verify frame: `header(4) + toc_count(6) * 4 + data`.
-    /// The data section is exactly the 8192-byte transport buffer minus
-    /// the 132-byte staging offset.
-    #[test]
-    fn worst_case_frame_fits_both_bounds() {
-        const TRANSPORT_BUF_LEN: usize = 8192;
-        const STAGE_OFFSET: usize = 132;
-        const TOC_COUNT: usize = 6;
-
-        let data = MLDSA_PUB_KEY_MAX_LEN
-            + MLDSA_MESSAGE_MAX_LEN
-            + MLDSA_CTX_MAX_LEN
-            + MLDSA_SIGNATURE_MAX_LEN;
-        assert_eq!(data, 8060);
-        assert_eq!(STAGE_OFFSET + data, TRANSPORT_BUF_LEN);
-        assert_eq!(4 + TOC_COUNT * 4 + data, 8088);
-        assert!(4 + TOC_COUNT * 4 + data <= TRANSPORT_BUF_LEN);
     }
 }

@@ -8,8 +8,8 @@
 
 use tsra_fw_core_crypto_aead_envelope::open as aead_open;
 use tsra_fw_core_crypto_aead_envelope::peek as aead_peek;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -53,10 +53,10 @@ pub struct UnmaskedView<'a> {
 
     /// Recovered target-key bytes (decrypted in place inside the
     /// caller's `blob`).  Borrows the `blob` buffer directly (a
-    /// [`DmaBuf`] sub-view of the decrypted payload region), so callers
+    /// [`HsmDmaBuf`] sub-view of the decrypted payload region), so callers
     /// that forward the key to another PAL/crypto verb needing a
-    /// `&DmaBuf` can pass it through without an intermediate copy.
-    pub target_key: &'a DmaBuf,
+    /// `&HsmDmaBuf` can pass it through without an intermediate copy.
+    pub target_key: &'a HsmDmaBuf,
 }
 
 /// In-place unmask: parse, authenticate, decrypt, and validate a
@@ -85,8 +85,8 @@ pub struct UnmaskedView<'a> {
 pub async fn unmask<'a, P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
-    key: &DmaBuf,
-    blob: &'a mut DmaBuf,
+    key: &HsmDmaBuf,
+    blob: &'a mut HsmDmaBuf,
 ) -> HsmResult<UnmaskedView<'a>> {
     // aead_envelope::open parses the alg byte from the envelope
     // header, validates the key length against alg.key_len(),
@@ -143,7 +143,7 @@ const USAGE_FLAGS_OFF: usize = 8;
 /// `validate_v1` inside `unmask`, which runs on authenticated bytes.
 /// So the validation is not skipped, only moved to the point where its
 /// input is trustworthy -- which is where it belonged.
-pub fn peek_scope(blob: &DmaBuf) -> HsmResult<HsmKeyScope> {
+pub fn peek_scope(blob: &HsmDmaBuf) -> HsmResult<HsmKeyScope> {
     let env = aead_peek(blob)?;
     if env.aad.len() != META_LEN {
         return Err(HsmError::MaskedKeyDecodeFailed);
@@ -182,7 +182,7 @@ pub fn peek_scope(blob: &DmaBuf) -> HsmResult<HsmKeyScope> {
 /// * Any [`HsmError`] surfaced by the envelope header / framing parse
 ///   (malformed header, unsupported `alg`, or a blob too short to hold a
 ///   complete `header ‖ iv ‖ aad ‖ tag` envelope).
-pub fn peek_metadata(blob: &DmaBuf) -> HsmResult<&MaskedKeyMetadata> {
+pub fn peek_metadata(blob: &HsmDmaBuf) -> HsmResult<&MaskedKeyMetadata> {
     // Parse + validate the envelope header and framing WITHOUT the
     // masking key (no tag verification, no decryption). This checks the
     // magic, reserved byte, `alg`, `aad_len` granularity, derives the IV

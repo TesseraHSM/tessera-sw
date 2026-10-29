@@ -14,9 +14,9 @@
 use core::slice;
 
 use tsra_fw_hsm_pal_traits::AesOp as PalAesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
@@ -159,10 +159,10 @@ impl UnoHsmPal {
         &self,
         mode: AesMode,
         op: DriverAesOp,
-        key: &DmaBuf,
-        iv: Option<&mut DmaBuf>,
-        message: &DmaBuf,
-        result: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        iv: Option<&mut HsmDmaBuf>,
+        message: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let update_iv = iv.is_some();
         self.aes
@@ -205,15 +205,15 @@ impl UnoHsmPal {
         &self,
         mode: AesMode,
         op: PalAesOp,
-        key: &DmaBuf,
-        iv: Option<&mut DmaBuf>,
-        data: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        iv: Option<&mut HsmDmaBuf>,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let (ptr, len) = (data.as_ptr(), data.len());
         // Safety: AES reads block N before writing block N (see method docs).
         // The aliased slice covers `data`, which is DMA-resident, so branding
-        // it as a `DmaBuf` is sound.
-        let message = unsafe { DmaBuf::from_raw(alias_immutable(ptr, len)) };
+        // it as a `HsmDmaBuf` is sound.
+        let message = unsafe { HsmDmaBuf::from_raw(alias_immutable(ptr, len)) };
         self.aes_run(mode, aes_op(op), key, iv, message, data).await
     }
 }
@@ -253,11 +253,11 @@ impl HsmAes for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         op: PalAesOp,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        iv_in: &DmaBuf,
-        output: &mut DmaBuf,
-        mut iv_out: Option<&mut DmaBuf>,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        iv_in: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
+        mut iv_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<()> {
         require_cbc_iv(iv_in)?;
         if let Some(iv_out) = iv_out.as_deref() {
@@ -286,10 +286,10 @@ impl HsmAes for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         op: PalAesOp,
-        key: &DmaBuf,
-        data: &mut DmaBuf,
-        iv_in: &DmaBuf,
-        mut iv_out: Option<&mut DmaBuf>,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
+        iv_in: &HsmDmaBuf,
+        mut iv_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<()> {
         require_cbc_iv(iv_in)?;
         if let Some(iv_out) = iv_out.as_deref() {
@@ -311,15 +311,29 @@ impl HsmAes for UnoHsmPal {
         .await
     }
 
+    async fn aes_cbc_enc_dec_in_place_iv(
+        &self,
+        _io: &UnoHsmIo,
+        op: PalAesOp,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
+        iv: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        require_cbc_iv(iv)?;
+        require_block_multiple(data, data.len())?;
+        self.aes_run_in_place(AesMode::Cbc, op, key, Some(iv), data)
+            .await
+    }
+
     /// Validates that `input` / `output` satisfy [`require_block_multiple`],
     /// then dispatches a single ECB submission via [`Self::aes_run`].
     async fn aes_ecb_enc_dec(
         &self,
         _io: &UnoHsmIo,
         op: PalAesOp,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         require_block_multiple(input, output.len())?;
         self.aes_run(AesMode::Ecb, aes_op(op), key, None, input, output)
@@ -332,8 +346,8 @@ impl HsmAes for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         op: PalAesOp,
-        key: &DmaBuf,
-        data: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         require_block_multiple(data, data.len())?;
         self.aes_run_in_place(AesMode::Ecb, op, key, None, data)
@@ -345,12 +359,12 @@ impl HsmAes for UnoHsmPal {
     async fn gcm_encrypt(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        plaintext: &DmaBuf,
-        ciphertext: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        plaintext: &HsmDmaBuf,
+        ciphertext: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -363,11 +377,11 @@ impl HsmAes for UnoHsmPal {
     async fn gcm_encrypt_in_place(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        data: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -381,12 +395,12 @@ impl HsmAes for UnoHsmPal {
     async fn gcm_decrypt(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        ciphertext: &DmaBuf,
-        plaintext: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        plaintext: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -399,11 +413,11 @@ impl HsmAes for UnoHsmPal {
     async fn gcm_decrypt_in_place(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        data: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -437,9 +451,9 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kw_wrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kw_wrap_impl(io, key, input, output).await
     }
@@ -468,9 +482,9 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kw_unwrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kw_unwrap_impl(io, key, input, output).await
     }
@@ -497,9 +511,9 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kwp_wrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kwp_wrap_impl(io, key, input, output).await
     }
@@ -529,9 +543,9 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kwp_unwrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<usize> {
         self.kwp_unwrap_impl(io, key, input, output).await
     }

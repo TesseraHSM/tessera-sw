@@ -20,8 +20,8 @@
 //! the read-only probes (`session_pending_state`, `session_param_key`,
 //! `session_try_consume_psk_change`) are synchronous.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -113,8 +113,7 @@ impl HsmSessionManager for UnoHsmPal {
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
         blob[SESSION_API_REV_SIZE..].copy_from_slice(masking_key);
 
-        // Store as an internal session key, then wipe the scratch copy of the
-        // masking key whether or not the store succeeded.
+        // Store as an internal session key; IO teardown scrubs the scratch copy.
         let attrs = HsmVaultKeyAttrs::new().with_internal(true);
         let created = {
             let mut v = crate::vault::vault(io);
@@ -129,7 +128,6 @@ impl HsmSessionManager for UnoHsmPal {
             )
             .await
         };
-        blob.zeroize();
         let physical_id = created?;
 
         // Allocate (or re-map, on re-key) the logical session slot.
@@ -202,7 +200,7 @@ impl HsmSessionManager for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         role: SessionRole,
-        handshake_state: &DmaBuf,
+        handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId> {
         if handshake_state.is_empty() || handshake_state.len() > SESSION_PENDING_BLOB_MAX {
             return Err(HsmError::InvalidArg);
@@ -350,7 +348,7 @@ impl HsmSessionManager for UnoHsmPal {
         Ok(())
     }
 
-    fn session_param_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_param_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.physical_id(id)?;
         // The param_key is the 32-byte field following the 8-byte api_rev
@@ -370,7 +368,7 @@ impl HsmSessionManager for UnoHsmPal {
             .0)
     }
 
-    fn session_masking_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_masking_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.physical_id(id)?;
         let blob = self.vault_key(io, physical_id)?;

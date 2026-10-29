@@ -24,9 +24,9 @@
 //! symbols are the `_vec` convenience wrappers, which are not exposed
 //! on the firmware side because the crate is `#![no_std]`.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -68,7 +68,7 @@ pub struct PskParams<'a> {
 pub struct AuthParams<'a> {
     /// Sender private key (DMA buffer — consumed directly by the ECDH
     /// engine, no internal copy).
-    pub sk_s: &'a DmaBuf,
+    pub sk_s: &'a HsmDmaBuf,
     /// Sender public key.
     pub pk_s: &'a [u8],
 }
@@ -497,7 +497,7 @@ impl<'a> HpkeReceiveExportConfig<'a> {
 // Internal helpers
 // =============================================================================
 
-fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut DmaBuf> {
+fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDmaBuf> {
     alloc.dma_alloc(len)
 }
 
@@ -528,9 +528,9 @@ pub async fn seal<'a, P>(
     pal: &P,
     io: &P::Io,
     cfg: &HpkeSealConfig<'_>,
-    pt: &DmaBuf,
+    pt: &HsmDmaBuf,
     enc_out: Option<&mut [u8]>,
-    ct_out: Option<&mut DmaBuf>,
+    ct_out: Option<&mut HsmDmaBuf>,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<SealSizes>
 where
@@ -566,9 +566,9 @@ async fn do_seal<'a, P>(
     pal: &P,
     io: &P::Io,
     cfg: &HpkeSealConfig<'_>,
-    pt: &DmaBuf,
+    pt: &HsmDmaBuf,
     enc_out: &mut [u8],
-    ct_out: &mut DmaBuf,
+    ct_out: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -810,7 +810,7 @@ async fn derive_exported<'a, P>(
     io: &P::Io,
     suite: HpkeSuite,
     mode: Mode,
-    shared_secret: &DmaBuf,
+    shared_secret: &HsmDmaBuf,
     info: &[u8],
     psk: &Option<PskParams<'_>>,
     exporter_context: &[u8],

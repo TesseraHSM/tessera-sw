@@ -44,7 +44,7 @@ Algorithm:
    than the current firmware SVN).
 6. HPKE-Auth-seal BKS3 to `RcvrPub` with `SndrPriv` as the
    sender-authentication key, returning `pok_peer_backup` (161 B).
-   `SndrPriv` and BKS3 are zeroized before returning.
+   IO teardown scrubs `SndrPriv` and BKS3.
 
 The command is **stateless**: no vault writes, no partition-state
 mutation, no undo log.

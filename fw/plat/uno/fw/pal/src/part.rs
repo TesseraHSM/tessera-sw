@@ -15,7 +15,7 @@
 //! [`PartState::Unallocated`]; a non-zero `SetResource` allocates the
 //! partition and a `PfnEnable` IPC enables it.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
@@ -331,7 +331,7 @@ impl UnoHsmPal {
             // while the establish-credential and session-encryption keys store
             // the 144-byte `pub(96) ‖ priv(48)` blob (matching the reference
             // firmware's on-storage layout), using the scratch public key.
-            let key_buf: &DmaBuf = match kind {
+            let key_buf: &HsmDmaBuf = match kind {
                 HsmVaultKeyKind::Ecc384Private => priv_buf,
                 HsmVaultKeyKind::EstablishCred | HsmVaultKeyKind::SessionEncryption => {
                     self.build_enable_key_blob(alloc, pub_buf, priv_buf)?
@@ -353,8 +353,8 @@ impl UnoHsmPal {
         &self,
         alloc: &'a UnoScopedAlloc<'_>,
         pub_key: &[u8],
-        priv_buf: &DmaBuf,
-    ) -> HsmResult<&'a mut DmaBuf> {
+        priv_buf: &HsmDmaBuf,
+    ) -> HsmResult<&'a mut HsmDmaBuf> {
         let buf = alloc.dma_alloc(ENABLE_KEY_LEN)?;
         buf[..ID_PUB_KEY_LEN].copy_from_slice(pub_key);
         buf[ID_PUB_KEY_LEN..ENABLE_KEY_LEN].copy_from_slice(&priv_buf[..P384_PRIV_LEN]);
@@ -880,7 +880,11 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_get_bytes<'a>(&'a self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<&'a DmaBuf> {
+    fn part_prop_get_bytes<'a>(
+        &'a self,
+        io: &UnoHsmIo,
+        id: PartPropId,
+    ) -> HsmResult<&'a HsmDmaBuf> {
         let p = PartStore::partition(io.pid())?;
         match id {
             // Identity / public keys — present once the backing key has
@@ -939,7 +943,12 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_set_bytes(&self, io: &UnoHsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+    fn part_prop_set_bytes(
+        &self,
+        io: &UnoHsmIo,
+        id: PartPropId,
+        data: &HsmDmaBuf,
+    ) -> HsmResult<()> {
         let p = PartStore::partition(io.pid())?;
         match id {
             PartPropId::NONCE => p.set_nonce(data),

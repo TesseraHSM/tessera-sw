@@ -27,7 +27,7 @@ use tsra_fw_ddi_tbor_types::AesKeySize;
 use tsra_fw_ddi_tbor_types::KeyUsage;
 use tsra_fw_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_fw_ddi_tbor_types::TborAesGenerateKeyResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -77,68 +77,68 @@ fn aes_key_attrs(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAt
 /// makes no observable state change, so a concurrently-dispatched command
 /// can neither observe it half-done nor require its rollback on failure.
 /// The masked blob is written straight into the reserved response slot (no
-/// scratch copy) and the raw key is wiped once masked.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// scratch copy); IO teardown scrubs the raw key.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborAesGenerateKeyReq::decode(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id()));
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    pal.alloc_scoped_async(io, async |alloc| -> HsmResult<usize> {
+        let req = TborAesGenerateKeyReq::decode(cmd_buf.request())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id()));
 
-    // Losslessly map the wire `KeyScope` onto the PAL `HsmKeyScope`
-    // (byte-identical discriminants; unknown values round-trip and are
-    // rejected by `resolve_masking_key`).
-    let scope = HsmKeyScope(req.scope().0);
-    validate_active_session(pal, io, sess_id)?;
+        // Losslessly map the wire `KeyScope` onto the PAL `HsmKeyScope`
+        // (byte-identical discriminants; unknown values round-trip and are
+        // rejected by `resolve_masking_key`).
+        let scope = HsmKeyScope(req.scope().0);
+        validate_active_session(pal, io, sess_id)?;
 
-    // Session-scoped keys are masked under the per-session masking key,
-    // available to any Active session.  Every other scope's masking key is
-    // provisioned by `PartFinal` / the SD lifecycle, so require an
-    // `Initialized` partition to fail cheaply and clearly before keygen.
-    if scope != HsmKeyScope::Session && part_state::part_state(pal, io)? != PartState::Initialized {
-        return Err(HsmError::InvalidArg);
-    }
+        // Session-scoped keys are masked under the per-session masking key,
+        // available to any Active session.  Every other scope's masking key is
+        // provisioned by `PartFinal` / the SD lifecycle, so require an
+        // `Initialized` partition to fail cheaply and clearly before keygen.
+        if scope != HsmKeyScope::Session
+            && part_state::part_state(pal, io)? != PartState::Initialized
+        {
+            return Err(HsmError::InvalidArg);
+        }
 
-    let (key_len, kind) = aes_size_kind(req.key_size())?;
-    // Caller-supplied label stamped into the masked metadata (≤ 128 B,
-    // bounded by the wire `max_len`); empty for an unlabeled key.
-    let caller_label = req.key_label();
-    // The masked-blob length is fixed by the key length (16 / 24 / 32 B →
-    // 244 / 252 / 260 B), so the response slot can be reserved up front,
-    // before any key material exists.
-    let masked_len = masked_blob_len(AeadAlg::AesGcm256, key_len);
+        let (key_len, kind) = aes_size_kind(req.key_size())?;
+        // Caller-supplied label stamped into the masked metadata (≤ 128 B,
+        // bounded by the wire `max_len`); empty for an unlabeled key.
+        let caller_label = req.key_label();
+        // The masked-blob length is fixed by the key length (16 / 24 / 32 B →
+        // 244 / 252 / 260 B), so the response slot can be reserved up front,
+        // before any key material exists.
+        let masked_len = masked_blob_len(AeadAlg::AesGcm256, key_len);
 
-    // Platform identity that binds the masked blob (anti-rollback on
-    // re-import): SVN (BKS1 lineage) and owner-seed id (BKS2 lineage).
-    let svn = part_state::part_mfgr_svn(pal);
-    let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
-    let attrs = aes_key_attrs(scope, req.key_usage())?;
+        // Platform identity that binds the masked blob (anti-rollback on
+        // re-import): SVN (BKS1 lineage) and owner-seed id (BKS2 lineage).
+        let svn = part_state::part_mfgr_svn(pal);
+        let owner =
+            u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
+        let attrs = aes_key_attrs(scope, req.key_usage())?;
 
-    // Build the response with the masked-key slot reserved (no copy at
-    // encode time).
-    let resp = pal.dma_alloc_var(io, |buf| {
-        let frame = TborAesGenerateKeyResp::encode(buf, 0, false)?
-            .masked_key_reserve(masked_len)?
-            .finish();
-        Ok(frame.as_bytes().len())
-    })?;
+        let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+        let key_label = alloc.dma_alloc(caller_label.len())?;
+        key_label.copy_from_slice(caller_label);
+        let len = cmd_buf.encode_response(|buf| {
+            Ok(TborAesGenerateKeyResp::encode(buf, 0, false)?
+                .masked_key_reserve(masked_len)?
+                .finish()
+                .as_bytes()
+                .len())
+        })?;
 
-    // Generate the key and mask it straight into the reserved slot.  The
-    // `decode_mut` view is scoped so its borrow of `resp` ends before
-    // `resp` is returned.
-    {
-        let out = TborAesGenerateKeyResp::decode_mut(resp)?;
-        pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
+        // Generate the key and mask it straight into its final slot.
+        {
+            let out = TborAesGenerateKeyResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
             // Resolve the masking key and build the mask params *before*
             // generating any key material.  Every fallible step here (an
             // unsupported / unprovisioned scope, or the label allocation)
             // must reject before a key exists — both to match this handler's
             // contract that scope failures happen before keygen, and so no
             // early return can leave a raw key sitting in DMA scratch.
-            let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-            let key_label = alloc.dma_alloc(caller_label.len())?;
-            key_label.copy_from_slice(caller_label);
             let params = MaskParams {
                 key_kind: kind,
                 key_attrs: attrs,
@@ -148,11 +148,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             };
 
             // Generate the random AES key into scratch, then mask it
-            // straight into the reserved response slot.  The generate +
-            // mask run inside a block that yields a `Result`, so the raw
-            // key is wiped on *every* path below — keygen failure, mask
-            // failure, or a short write — before the error propagates;
-            // scope rewind does not clear DMA memory.
+            // straight into the reserved response slot.
             let key_buf = alloc.dma_alloc(key_len)?;
             let outcome = async {
                 pal.aes_gen_key(io, key_buf).await?;
@@ -178,11 +174,10 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 Ok(())
             }
             .await;
-            key_buf.zeroize();
-            outcome
-        })
-        .await?;
-    }
+            outcome?;
+        }
 
-    Ok(resp)
+        Ok(len)
+    })
+    .await
 }

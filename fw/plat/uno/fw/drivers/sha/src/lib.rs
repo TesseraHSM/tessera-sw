@@ -20,15 +20,15 @@
 //! # Example
 //!
 //! ```ignore
-//! use tsra_fw_hsm_pal_traits::DmaBuf;
+//! use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 //!
 //! let sha = static_init!(ShaDriver<32>, ShaDriver::init());
 //! let mut message = *b"abc";
 //! let mut digest = [0u8; 32];
 //! sha.digest(ShaRequest {
 //!     mode: ShaMode::Sha256,
-//!     message: unsafe { DmaBuf::from_raw(&message) },
-//!     digest: unsafe { DmaBuf::from_raw_mut(&mut digest) },
+//!     message: unsafe { HsmDmaBuf::from_raw(&message) },
+//!     digest: unsafe { HsmDmaBuf::from_raw_mut(&mut digest) },
 //!     auto_pad: true,
 //!     byte_count: 3,
 //!     load_digest: false,

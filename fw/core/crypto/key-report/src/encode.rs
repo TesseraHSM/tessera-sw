@@ -7,16 +7,16 @@
 //! attestation private key. The attested public key may be ECC, RSA, or
 //! symmetric (see [`AttestedPubKey`]).
 //!
-//! All working buffers are [`DmaBuf`] allocations. Every encoded length
+//! All working buffers are [`HsmDmaBuf`] allocations. Every encoded length
 //! is computed by `minicbor::len` on the [`codec`](crate::codec) structs
 //! — there is no hand-maintained byte-counting. The inner COSE_Key uses
 //! negative integer map keys (which minicbor's derive cannot express), so
 //! it alone is written with an imperative `Encoder` (see
 //! [`to_cose_key`](crate::cose_key)).
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -43,15 +43,15 @@ pub struct KeyReportParams<'a> {
     /// [`KeyFlags`]: crate::KeyFlags
     pub flags: u32,
     /// Owning application UUID; must be [`APP_UUID_LEN`] bytes.
-    pub app_uuid: &'a DmaBuf,
+    pub app_uuid: &'a HsmDmaBuf,
     /// Report data; must be [`REPORT_DATA_LEN`] bytes.
-    pub report_data: &'a DmaBuf,
+    pub report_data: &'a HsmDmaBuf,
     /// VM launch ID; must be [`VM_LAUNCH_ID_LEN`] bytes.
-    pub vm_launch_id: &'a DmaBuf,
+    pub vm_launch_id: &'a HsmDmaBuf,
     /// Optional SHA-384 PartPolicy digest. When `Some`, the report is
     /// emitted as **v2** (carrying `policy_hash`); when `None`, as **v1**.
     /// Must be [`POLICY_HASH_LEN`] bytes when present.
-    pub policy_hash: Option<&'a DmaBuf>,
+    pub policy_hash: Option<&'a HsmDmaBuf>,
 }
 
 impl KeyReportParams<'_> {
@@ -85,7 +85,7 @@ impl KeyReportParams<'_> {
 /// # Parameters
 /// * `pal` — [`HsmCrypto`] (SHA-384 + ECDSA-P384) and [`HsmAlloc`].
 /// * `io` — caller's IO scope.
-/// * `alloc` — scoped allocator for internal `DmaBuf` scratch.
+/// * `alloc` — scoped allocator for internal `HsmDmaBuf` scratch.
 /// * `params` — attested key material, flags, UUIDs, report data.
 /// * `priv_key` — P-384 attestation private key (raw scalar, exactly
 ///   [`PRIV_KEY_LEN`] bytes).
@@ -100,7 +100,7 @@ pub async fn key_report<'a, P>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &KeyReportParams<'_>,
-    priv_key: &DmaBuf,
+    priv_key: &HsmDmaBuf,
     out: Option<&mut [u8]>,
 ) -> HsmResult<usize>
 where
@@ -128,7 +128,7 @@ where
 /// [`REPORT_VERSION`] otherwise — so there is no separate v1/v2 code path.
 fn build_payload_struct<'a>(
     params: &'a KeyReportParams<'a>,
-    cose_key: &'a DmaBuf,
+    cose_key: &'a HsmDmaBuf,
     cose_len: usize,
 ) -> KeyReportPayload<'a> {
     let policy_hash = params.policy_hash.map(|d| &**d);
@@ -175,7 +175,7 @@ async fn do_build<'a, P>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &KeyReportParams<'_>,
-    priv_key: &DmaBuf,
+    priv_key: &HsmDmaBuf,
     out: &mut [u8],
 ) -> HsmResult<usize>
 where
