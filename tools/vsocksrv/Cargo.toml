@@ -1,0 +1,30 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+edition = "2021"
+name = "vsocksrv"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+name = "vsocksrv"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { features = ["derive"], workspace = true }
+libc.workspace = true
+log.workspace = true
+tokio = { features = ["rt-multi-thread", "time"], workspace = true }
+tracing.workspace = true
+tracing-subscriber = { features = ["env-filter"], workspace = true }
+tsra_ddi_sock_proto.workspace = true
+tsra_fw_hsm_io.workspace = true
+tsra_fw_hsm_std.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { features = ["socket"], workspace = true }
+
+[lints]
+workspace = true

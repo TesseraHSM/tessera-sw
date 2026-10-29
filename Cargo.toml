@@ -37,6 +37,7 @@ members = [
   "ddi/tbor/codec",
   "ddi/tbor/derive",
   "ddi/tbor/types",
+  "ddi/vsock",
   "ddi/win",
   "examples/sealing/api",
   "examples/sealing/common",
@@ -90,6 +91,7 @@ members = [
   "plugins/ossl_prov/integration-tests/openssl-capi",
   "plugins/ossl_prov/integration-tests/openssl-cli",
   "tools/resiliency_stress",
+  "tools/vsocksrv",
   "xtask",
 
 ]
@@ -139,6 +141,7 @@ tsra_ddi_tbor_codec = { path = "ddi/tbor/codec" }
 tsra_ddi_tbor_derive = { path = "ddi/tbor/derive" }
 tsra_ddi_tbor_test_harness = { path = "crates/tbor_test_harness" }
 tsra_ddi_tbor_types = { path = "ddi/tbor/types" }
+tsra_ddi_vsock = { path = "ddi/vsock" }
 tsra_ddi_win = { path = "ddi/win" }
 tsra_ossl_engine_core = { path = "plugins/ossl_engine/tsra_ossl_engine_core" }
 tsra_ossl_engine_resiliency = { path = "plugins/ossl_engine/tsra_ossl_engine_resiliency" }

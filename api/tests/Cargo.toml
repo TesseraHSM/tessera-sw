@@ -39,6 +39,8 @@ emu = ["tsra_api/emu"]
 mock = ["tsra_api/mock"]
 res-test = ["dep:tsra_res_test_dev", "tsra_api/res-test"]
 session-ex-tests = []
+sock = ["tsra_api/sock"]
+vsock = ["tsra_api/vsock"]
 
 [lints]
 workspace = true
