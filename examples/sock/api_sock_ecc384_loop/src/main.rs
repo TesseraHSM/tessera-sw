@@ -132,18 +132,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let message = format!("TSRA TCP ECC P-384 loop iteration {index}");
         let digest = openssl::sha::sha384(message.as_bytes());
         let signature = HsmSigner::sign_vec(&mut HsmEccSignAlgo::default(), &private_key, &digest)
-            .map_err(|error| {
-                format!("ECC P-384 signing failed at iteration {index}: {error}")
-            })?;
+            .map_err(|error| format!("ECC P-384 signing failed at iteration {index}: {error}"))?;
         let verified = HsmVerifier::verify(
             &mut HsmEccSignAlgo::default(),
             &public_key,
             &digest,
             &signature,
         )
-        .map_err(|error| {
-            format!("ECC P-384 verification failed at iteration {index}: {error}")
-        })?;
+        .map_err(|error| format!("ECC P-384 verification failed at iteration {index}: {error}"))?;
         if !verified {
             return Err(format!("ECC P-384 verification failed at iteration {index}").into());
         }
@@ -158,7 +154,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hex(signature_prefix)
         );
     }
-    println!("Completed {} iteration(s) over {}", options.count, options.endpoint);
+    println!(
+        "Completed {} iteration(s) over {}",
+        options.count, options.endpoint
+    );
     Ok(())
 }
 
@@ -170,7 +169,10 @@ mod tests {
     fn default_options() {
         assert_eq!(
             parse_args(std::iter::empty()).expect("default options"),
-            Options { endpoint: DEFAULT_ENDPOINT.to_owned(), count: 1 }
+            Options {
+                endpoint: DEFAULT_ENDPOINT.to_owned(),
+                count: 1
+            }
         );
     }
 
@@ -179,7 +181,10 @@ mod tests {
         assert_eq!(
             parse_args(["tcp://localhost:2345", "5"].into_iter().map(str::to_owned))
                 .expect("explicit options"),
-            Options { endpoint: "tcp://localhost:2345".to_owned(), count: 5 }
+            Options {
+                endpoint: "tcp://localhost:2345".to_owned(),
+                count: 5
+            }
         );
     }
 
@@ -205,9 +210,12 @@ mod tests {
 
     #[test]
     fn rejects_extra_arguments() {
-        assert!(
-            parse_args([DEFAULT_ENDPOINT, "1", "extra"].into_iter().map(str::to_owned)).is_err()
-        );
+        assert!(parse_args(
+            [DEFAULT_ENDPOINT, "1", "extra"]
+                .into_iter()
+                .map(str::to_owned)
+        )
+        .is_err());
     }
 
     #[test]
