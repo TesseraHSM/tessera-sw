@@ -26,6 +26,10 @@ impl BcpError {
     /// tag mismatch.
     pub const CMD_ERROR: HsmError = make_component_error(ComponentId::BCP, 4);
 
-    /// The command did not complete in time; the engine was reset.
+    /// The command did not complete in time and the engine was reset, or a
+    /// reset is still pending.
     pub const TIMEOUT: HsmError = make_component_error(ComponentId::BCP, 5);
+
+    /// The engine could not be brought up: a soft reset did not complete.
+    pub const RESET_FAILED: HsmError = make_component_error(ComponentId::BCP, 6);
 }

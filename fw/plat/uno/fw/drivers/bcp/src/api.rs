@@ -3,8 +3,9 @@
 
 #![allow(unsafe_code)]
 
-use core::future::poll_fn;
 use core::future::Future;
+use core::pin::Pin;
+use core::task::Context;
 use core::task::Poll;
 
 use bitfield_struct::bitfield;
@@ -27,6 +28,7 @@ use tsra_fw_uno_reg_soc::bcp::CQ_CI;
 use tsra_fw_uno_reg_soc::bcp::LIST0_CFG;
 use tsra_fw_uno_reg_soc::bcp::SQ_CFG;
 use tsra_fw_uno_reg_soc::bcp::SQ_PI;
+use tsra_fw_uno_reg_soc::bcp::STATUS;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::BCP_CQ_OFFSET;
@@ -88,7 +90,7 @@ const ALL_FREE: u8 = ((1u16 << IDS) - 1) as u8;
 /// host's 6 s command timeout.
 const CMD_TIMEOUT: Duration = Duration::from_millis(2000);
 
-/// Bound on the wait for the soft reset to self-clear.
+/// Bound on the wait for a soft reset to complete and the engine to stop.
 const RESET_SPIN: u32 = 100_000;
 
 /// Driver-internal status for a command abandoned by a reset.
@@ -359,6 +361,11 @@ struct Slot {
 struct BcpState {
     /// Engine and rings configured.
     up: bool,
+    /// The reset of a stuck engine is not confirmed yet: the commands in
+    /// flight stay in flight, and new commands fail. Cleared once the
+    /// reset is confirmed, or once the engine has reported every command
+    /// in flight; either way the next command brings the engine up afresh.
+    stalled: bool,
     /// Next submission ring index.
     sq_pi: u16,
     /// Next completion ring index.
@@ -396,6 +403,7 @@ impl BcpDriver {
         Self {
             state: SingleCell::new(BcpState {
                 up: false,
+                stalled: false,
                 sq_pi: 0,
                 cq_ci: 0,
                 free: ALL_FREE,
@@ -419,72 +427,26 @@ impl BcpDriver {
     ///
     /// Waits for a command ID when all are in use. Returns the raw
     /// completion; the caller decides what the status means. Fails with
-    /// [`BcpError::TIMEOUT`] if the engine had to be reset.
+    /// [`BcpError::TIMEOUT`] if the engine had to be reset (or a reset is
+    /// still pending), or [`BcpError::RESET_FAILED`] if it could not be
+    /// brought up.
     ///
     /// # Cancellation safety
     ///
     /// Once submitted, the engine reads `src` and writes `dst` until the
-    /// command completes. The future must not be dropped before then.
+    /// command completes. Dropping the future before then blocks until the
+    /// engine is done with them, or has been reset past the command's
+    /// deadline, and then releases the command, so the buffers are never
+    /// freed while the engine may still use them.
     pub fn gcm<'a>(
         &'a self,
         req: GcmRequest<'a>,
     ) -> impl Future<Output = HsmResult<GcmCompletion>> + 'a {
-        let mut cmd: Option<usize> = None;
-
-        poll_fn(move |cx| {
-            self.state.with(|s| {
-                if cmd.is_none() {
-                    if let Err(e) = validate(&req) {
-                        return Poll::Ready(Err(e));
-                    }
-                    let chunks = req.data.src().1.div_ceil(BCP_CHUNK_LEN);
-                    if s.free == 0 || s.reserved + chunks > SQE_BUDGET {
-                        s.id_waiters.register(cx.waker());
-                        return Poll::Pending;
-                    }
-                    if !s.up {
-                        bring_up();
-                        s.up = true;
-                    }
-
-                    let id = s.free.trailing_zeros() as usize;
-                    s.free &= !(1 << id);
-                    s.slots[id].done = false;
-                    s.slots[id].aborting = false;
-                    s.slots[id].deadline = Instant::now() + CMD_TIMEOUT;
-                    s.slots[id].chunks = chunks as u8;
-                    s.reserved += chunks;
-                    cmd = Some(id);
-
-                    load_key(id, req.key);
-                    write_dfl(id, &req);
-                    submit(s, id, req.op, req.data.src().1);
-                }
-
-                let id = cmd.unwrap_or_default();
-                let slot = &mut s.slots[id];
-                if slot.done {
-                    slot.done = false;
-                    let done = GcmCompletion {
-                        status: slot.status,
-                        tag: slot.tag,
-                        err: slot.err,
-                    };
-                    slot.tag = [0; BCP_TAG_LEN];
-                    s.reserved -= usize::from(slot.chunks);
-                    clear_key(id);
-                    s.free |= 1 << id;
-                    s.id_waiters.wake();
-                    if done.status == STATUS_STALLED {
-                        return Poll::Ready(Err(BcpError::TIMEOUT));
-                    }
-                    return Poll::Ready(Ok(done));
-                }
-
-                slot.waker.register(cx.waker());
-                Poll::Pending
-            })
-        })
+        GcmFuture {
+            bcp: self,
+            req,
+            id: None,
+        }
     }
 
     /// Reap completions and wake their awaiters; reset the engine if a
@@ -502,18 +464,136 @@ impl BcpDriver {
             let pi = (GSRAM.bcp_cq_pi_shadow.get() as u16) & MASK;
             if pi != s.cq_ci {
                 reap(s, pi);
-            } else {
-                let now = Instant::now();
-                let late =
-                    s.slots.iter().enumerate().any(|(i, slot)| {
-                        s.free & (1 << i) == 0 && !slot.done && now > slot.deadline
-                    });
-                if late {
-                    recover(s);
-                }
+            }
+            // Checked after reaping as well, so that other commands
+            // completing on every pass cannot hold off the reset of one
+            // that is stuck.
+            let now = Instant::now();
+            let late = s
+                .slots
+                .iter()
+                .enumerate()
+                .any(|(i, slot)| s.free & (1 << i) == 0 && !slot.done && now > slot.deadline);
+            if late {
+                recover(s);
             }
         });
     }
+}
+
+/// The future [`BcpDriver::gcm`] returns. It owns its command from
+/// submission until the completion is consumed, so that dropping it
+/// mid-flight can wait for the engine before the buffers go.
+struct GcmFuture<'a> {
+    bcp: &'a BcpDriver,
+    req: GcmRequest<'a>,
+    /// Command ID while submitted and not yet consumed.
+    id: Option<usize>,
+}
+
+impl Future for GcmFuture<'_> {
+    type Output = HsmResult<GcmCompletion>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let bcp = this.bcp;
+        bcp.state.with(|s| {
+            let id = match this.id {
+                Some(id) => id,
+                None => {
+                    let req = &this.req;
+                    if let Err(e) = validate(req) {
+                        return Poll::Ready(Err(e));
+                    }
+                    if s.stalled {
+                        return Poll::Ready(Err(BcpError::TIMEOUT));
+                    }
+                    let chunks = req.data.src().1.div_ceil(BCP_CHUNK_LEN);
+                    if s.free == 0 || s.reserved + chunks > SQE_BUDGET {
+                        s.id_waiters.register(cx.waker());
+                        return Poll::Pending;
+                    }
+                    if !s.up {
+                        if !bring_up() {
+                            return Poll::Ready(Err(BcpError::RESET_FAILED));
+                        }
+                        s.up = true;
+                        s.sq_pi = 0;
+                        s.cq_ci = 0;
+                    }
+
+                    let id = s.free.trailing_zeros() as usize;
+                    s.free &= !(1 << id);
+                    s.slots[id].done = false;
+                    s.slots[id].aborting = false;
+                    s.slots[id].deadline = Instant::now() + CMD_TIMEOUT;
+                    s.slots[id].chunks = chunks as u8;
+                    s.reserved += chunks;
+                    this.id = Some(id);
+
+                    load_key(id, req.key);
+                    write_dfl(id, req);
+                    submit(s, id, req.op, req.data.src().1);
+                    id
+                }
+            };
+
+            if !s.slots[id].done {
+                s.slots[id].waker.register(cx.waker());
+                return Poll::Pending;
+            }
+            this.id = None;
+            let done = release(s, id);
+            if done.status == STATUS_STALLED {
+                return Poll::Ready(Err(BcpError::TIMEOUT));
+            }
+            Poll::Ready(Ok(done))
+        })
+    }
+}
+
+impl Drop for GcmFuture<'_> {
+    /// Dropped with its command in flight, and the caller is about to free
+    /// the command's buffers: wait for the engine to finish with them (or
+    /// to be reset past the command's deadline), then release the command.
+    /// While a reset cannot be confirmed this waits on, since returning
+    /// would hand the caller buffers the engine may still use.
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+        while !self.bcp.state.with(|s| s.slots[id].done) {
+            self.bcp.wake();
+        }
+        self.bcp.state.with(|s| {
+            release(s, id);
+        });
+    }
+}
+
+/// Release the completed command `id`: free its ID and SQE reservation,
+/// wipe its key, and return its completion.
+fn release(s: &mut BcpState, id: usize) -> GcmCompletion {
+    let slot = &mut s.slots[id];
+    slot.done = false;
+    let done = GcmCompletion {
+        status: slot.status,
+        tag: slot.tag,
+        err: slot.err,
+    };
+    slot.tag = [0; BCP_TAG_LEN];
+    s.reserved -= usize::from(slot.chunks);
+    clear_key(id);
+    s.free |= 1 << id;
+    if s.stalled && s.free == ALL_FREE {
+        // The engine reported every command in flight before its reset was
+        // confirmed. The next command brings it up again, which resets it
+        // and refuses to run if that is not confirmed either.
+        s.stalled = false;
+        s.up = false;
+    }
+    s.id_waiters.wake();
+    done
 }
 
 /// Advance the submission ring past the SQE just written at `sq_pi` and
@@ -581,13 +661,22 @@ fn reap(s: &mut BcpState, pi: u16) {
     BCP.cq_ci.write(CQ_CI::INDEX.val(s.cq_ci.into()));
 }
 
-/// Reset a stuck engine and fail every command in flight. The next command
-/// brings the engine back up.
+/// Reset a stuck engine and fail every command in flight. The commands
+/// complete only once the reset is confirmed to have stopped the engine,
+/// which until then may still be reading and writing their buffers; if it
+/// is not, they stay in flight, new commands fail, and the next pass tries
+/// again. The next command brings the engine back up.
 fn recover(s: &mut BcpState) {
-    BCP.control.write(CONTROL::CDMA_RST::SET);
+    if !reset() {
+        if !s.stalled {
+            s.stalled = true;
+            // Commands waiting for an ID fail instead.
+            s.id_waiters.wake();
+        }
+        return;
+    }
+    s.stalled = false;
     s.up = false;
-    s.sq_pi = 0;
-    s.cq_ci = 0;
 
     let free = s.free;
     for (i, slot) in s.slots.iter_mut().enumerate() {
@@ -598,6 +687,25 @@ fn recover(s: &mut BcpState) {
             slot.waker.wake();
         }
     }
+}
+
+/// Soft-reset the engine and confirm that it has stopped: the reset bit
+/// has self-cleared, no command is active and both AXI channels are idle.
+/// Returns `false` if that is not seen within [`RESET_SPIN`] polls.
+fn reset() -> bool {
+    // The reset leaves the engine disabled, so it starts no new transfer.
+    BCP.control.write(CONTROL::CDMA_RST::SET);
+    for _ in 0..RESET_SPIN {
+        let status = BCP.status.extract();
+        if !BCP.control.is_set(CONTROL::CDMA_RST)
+            && !status.is_set(STATUS::ACTIVE)
+            && status.is_set(STATUS::AXI_RD_IDLE)
+            && status.is_set(STATUS::AXI_WR_IDLE)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Check a request.
@@ -626,12 +734,11 @@ fn validate(req: &GcmRequest<'_>) -> HsmResult<()> {
 
 /// Bring the engine up, following the FP firmware's `CDMAInit`: soft
 /// reset, one queue pair and DFL list 0 in GSRAM over the SoC AXI
-/// interface, error checks, tag write-back, then enable.
-fn bring_up() {
-    BCP.control.write(CONTROL::CDMA_RST::SET);
-    let mut spin = 0;
-    while BCP.control.is_set(CONTROL::CDMA_RST) && spin < RESET_SPIN {
-        spin += 1;
+/// interface, error checks, tag write-back, then enable. Returns `false`,
+/// leaving the engine alone, if the reset cannot be confirmed.
+fn bring_up() -> bool {
+    if !reset() {
+        return false;
     }
 
     for e in GSRAM.bcp_sq.iter() {
@@ -688,6 +795,7 @@ fn bring_up() {
             + CONTROL::CQE_NVME_UPDT_EN::SET,
     );
     BCP.control.modify(CONTROL::CDMA_EN::SET);
+    true
 }
 
 /// Write a key into the vault slot of command `id`, as little-endian words.
