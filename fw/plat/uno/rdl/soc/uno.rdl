@@ -29,6 +29,7 @@
 `include "oic.rdl"
 `include "gdma.rdl"
 `include "aes.rdl"
+`include "bcp.rdl"
 `include "sha.rdl"
 `include "zero.rdl"
 `include "upka.rdl"
@@ -58,6 +59,7 @@ addrmap uno {
     rng    RNG             @ 0xA030_0000;
     sha    SHA             @ 0xA040_0000;
     zero   ZERO            @ 0xA0B0_0000;
+    bcp    BCP             @ 0xA0C0_0000;
     iic    IIC             @ 0xA128_0000;
     oic    OIC             @ 0xA12C_0000;
     intc   INTC            @ 0xB000_6000;
