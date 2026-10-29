@@ -397,6 +397,7 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
     let mut mock_exclude = exclude.to_owned();
 
     for pkg in [
+        "tsra_api_tests",
         "provider-integration-tests-cli",
         "provider-integration-tests-capi",
         "provider-integration-tests-nginx",
@@ -406,7 +407,8 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
         }
     }
 
-    // SDK Run all mock tests
+    // Run all mock tests (except tsra_api_tests)
+    // CI job: test_*_mock
     tests.push(Nextest {
         features: Some(if min {
             "mock,table-64".to_string()
@@ -422,21 +424,23 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
         filter: vec![],
     });
 
-    // SDK Run resiliency fault-injection tests (requires res-test
-    // feature for the fault-injection DDI device)
+    // Run tsra_api_tests
+    // CI job: test_*_api
     if !exclude.iter().any(|e| e == "tsra_api_tests") {
         tests.push(Nextest {
-            features: Some("mock,res-test".to_string()),
+            features: Some("mock".to_string()),
             package: Some("tsra_api_tests".to_string()),
             no_default_features: false,
-            filterset: Some("test(resiliency::fault_injection::)".to_string()),
-            profile: profile.clone().or(Some("ci-mock-res".to_string())),
+            filterset: None,
+            profile: profile.clone().or(Some("ci-api".to_string())),
             exclude: exclude.to_owned(),
             test: None,
             filter: vec![],
         });
     }
 
+    // Run tsra_api_tests with EX sessions against emu
+    // CI job: test_*_api
     if !exclude.iter().any(|e| e == "tsra_api_tests") {
         tests.push(Nextest {
             features: Some("emu,session-ex-tests".to_string()),
@@ -450,36 +454,8 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
         });
     }
 
-    // Run emu smoke tests
-    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-emu-smoke".to_string())),
-            exclude: exclude.to_owned(),
-            test: Some("tsra_ddi_tests".to_string()),
-            filter: vec!["smoke".to_string()],
-        });
-    }
-
-    // Run the full emu DDI suite, including non-smoke tests.
-    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-emu-ddi".to_string())),
-            exclude: exclude.to_owned(),
-            test: Some("tsra_ddi_tests".to_string()),
-            filter: vec![],
-        });
-    }
-
-    // SDK Run azihsm_ddi_tbor_types tests through the emu
-    // backend (in-process firmware).
+    // SDK Run TBOR types tests against emu backend
+    // CI job: test_ubuntu_misc
     #[cfg(not(target_os = "windows"))]
     if !exclude.iter().any(|e| e == "tsra_ddi_tbor_types") {
         tests.push(Nextest {
@@ -494,6 +470,51 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
         });
     }
 
+    // Run resiliency fault injection tests
+    // CI job: test_*_misc
+    if !exclude.iter().any(|e| e == "tsra_api_tests") {
+        tests.push(Nextest {
+            features: Some("mock,res-test".to_string()),
+            package: Some("tsra_api_tests".to_string()),
+            no_default_features: false,
+            filterset: Some("test(resiliency::fault_injection::)".to_string()),
+            profile: profile.clone().or(Some("ci-mock-res".to_string())),
+            exclude: exclude.to_owned(),
+            test: None,
+            filter: vec![],
+        });
+    }
+
+    // Run emu smoke tests
+    // CI job: test_*_smoke
+    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
+        tests.push(Nextest {
+            features: Some("emu".to_string()),
+            package: Some("tsra_ddi_mbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-emu-smoke".to_string())),
+            exclude: exclude.to_owned(),
+            test: Some("tsra_ddi_tests".to_string()),
+            filter: vec!["smoke".to_string()],
+        });
+    }
+
+    // Run emu DDI tests
+    // CI job: test_*_emu_ddi
+    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
+        tests.push(Nextest {
+            features: Some("emu".to_string()),
+            package: Some("tsra_ddi_mbor_types".to_string()),
+            no_default_features: false,
+            filterset: None,
+            profile: profile.clone().or(Some("ci-emu-ddi".to_string())),
+            exclude: exclude.to_owned(),
+            test: Some("tsra_ddi_tests".to_string()),
+            filter: vec![],
+        });
+    }
+
     tests
 }
 
@@ -503,7 +524,8 @@ fn table_count_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest
     let mut tests = Vec::new();
 
     if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        // SDK Run tsra_ddi_mbor_types mock tests table-4
+        // SDK Run all mock tests table-4
+        // CI job: test_ubuntu_misc
         tests.push(Nextest {
             features: Some("mock,table-4".to_string()),
             package: Some("tsra_ddi_mbor_types".to_string()),
@@ -515,7 +537,8 @@ fn table_count_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest
             filter: vec![],
         });
 
-        // SDK Run tsra_ddi_mbor_types mock tests table-64
+        // SDK Run all mock tests table-64
+        // CI job: test_ubuntu_misc
         tests.push(Nextest {
             features: Some("mock,table-64".to_string()),
             package: Some("tsra_ddi_mbor_types".to_string()),
