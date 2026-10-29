@@ -96,19 +96,15 @@ mod tests {
 
     use super::*;
 
-    static HSM: std::sync::LazyLock<Arc<StdHsm>> =
-        std::sync::LazyLock::new(|| Arc::new(StdHsm::new()));
-
     #[test]
     fn serves_concurrent_connections_on_the_same_partition() {
+        let hsm = crate::test_hsm();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let hsm = Arc::clone(&HSM);
-            super::super::init_partition(&hsm).await.expect("partition");
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
             let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
             let serving = tokio::spawn(run_server(listener, hsm));
@@ -150,12 +146,12 @@ mod tests {
 
     #[test]
     fn rejects_invalid_dma_and_oob_fields() {
+        let hsm = crate::test_hsm();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let hsm = Arc::clone(&HSM);
             for (src_len, dst_cap, oob) in [
                 (1, 4096, [0; 3]),
                 (0, 0, [0; 3]),

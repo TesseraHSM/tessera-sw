@@ -107,6 +107,23 @@ where
     runtime.block_on(serve(Arc::clone(hsm)))
 }
 
+#[cfg(test)]
+fn test_hsm() -> Arc<StdHsm> {
+    static HSM: std::sync::LazyLock<Arc<StdHsm>> =
+        std::sync::LazyLock::new(|| Arc::new(StdHsm::new()));
+    static PARTITION: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("partition setup runtime");
+        runtime
+            .block_on(init_partition(&HSM))
+            .expect("partition setup");
+    });
+    std::sync::LazyLock::force(&PARTITION);
+    Arc::clone(&HSM)
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::io;
@@ -123,8 +140,6 @@ mod linux {
 
     #[cfg(test)]
     use super::DMA_PAGE_SIZE;
-    #[cfg(test)]
-    use super::HSM_PARTITION_ID;
     #[cfg(test)]
     use super::TRANSPORT_INVALID_REQUEST;
     use super::execute_request;
@@ -419,10 +434,6 @@ mod linux {
 
         use super::*;
 
-        // StdHsm's Embassy executor is process-global, as in its integration tests.
-        static HSM: std::sync::LazyLock<Arc<StdHsm>> =
-            std::sync::LazyLock::new(|| Arc::new(StdHsm::new()));
-
         #[test]
         fn server_errors_return_after_hsm_startup() {
             const CHILD_ENV: &str = "TSRA_TEST_SOCKET_SERVER_ERROR_CHILD";
@@ -464,20 +475,13 @@ mod linux {
 
         #[test]
         fn serves_repeated_requests_after_invalid_dma_and_oob_fields() {
+            let hsm = crate::test_hsm();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
                 .build()
                 .expect("runtime");
-            let hsm = Arc::clone(&HSM);
             runtime.block_on(async {
-                hsm.part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
-                    .await
-                    .expect("allocate partition");
-                hsm.part_enable(HSM_PARTITION_ID)
-                    .await
-                    .expect("enable partition");
-
                 let (mut client, server) = UnixStream::pair().expect("socket pair");
                 client
                     .set_read_timeout(Some(Duration::from_secs(10)))
@@ -593,5 +597,18 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("TSRA DDI socket server failed: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_test_hsm_initializes_partition_once() {
+        let hsm = test_hsm();
+        let worker = std::thread::spawn(test_hsm);
+        let other = worker.join().expect("fixture worker");
+        assert!(Arc::ptr_eq(&hsm, &other));
     }
 }
