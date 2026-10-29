@@ -5,6 +5,8 @@
 
 use std::io::Read;
 use std::io::Write;
+use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
@@ -57,17 +59,24 @@ use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_io::OP_MBOR;
 use tsra_fw_hsm_io::OP_TBOR;
 
-/// Environment variable naming the Unix socket path or Linux `vsock://CID:PORT` endpoint.
+/// Environment variable naming a `tcp://HOST:PORT`, Unix socket, or Linux VSOCK endpoint.
 pub const SOCK_PATH_ENV: &str = "TSRA_DDI_SOCK";
 
-/// Default socket path when [`SOCK_PATH_ENV`] is unset.
+/// Default endpoint when [`SOCK_PATH_ENV`] is unset on Unix.
+#[cfg(unix)]
 pub const DEFAULT_SOCK_PATH: &str = "/tmp/tsra-ddi.sock";
+
+/// Default endpoint when [`SOCK_PATH_ENV`] is unset on non-Unix targets.
+#[cfg(not(unix))]
+pub const DEFAULT_SOCK_PATH: &str = "tcp://127.0.0.1:1234";
 
 /// Response buffer capacity advertised to the server. Fits MBOR and the
 /// current TBOR command set; larger responses are future work.
 const DST_CAP: u32 = 4096;
 
 enum SocketStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
     Unix(UnixStream),
     #[cfg(target_os = "linux")]
     Vsock(VsockStream),
@@ -76,6 +85,8 @@ enum SocketStream {
 impl Read for SocketStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
+            Self::Tcp(stream) => stream.read(buf),
+            #[cfg(unix)]
             Self::Unix(stream) => stream.read(buf),
             #[cfg(target_os = "linux")]
             Self::Vsock(stream) => stream.read(buf),
@@ -86,6 +97,8 @@ impl Read for SocketStream {
 impl Write for SocketStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
+            Self::Tcp(stream) => stream.write(buf),
+            #[cfg(unix)]
             Self::Unix(stream) => stream.write(buf),
             #[cfg(target_os = "linux")]
             Self::Vsock(stream) => stream.write(buf),
@@ -94,6 +107,8 @@ impl Write for SocketStream {
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
+            Self::Tcp(stream) => stream.flush(),
+            #[cfg(unix)]
             Self::Unix(stream) => stream.flush(),
             #[cfg(target_os = "linux")]
             Self::Vsock(stream) => stream.flush(),
@@ -188,7 +203,7 @@ pub(crate) fn socket_path() -> String {
 
 /// A connected socket DDI device.
 ///
-/// Wraps a single Unix-domain or Linux VSOCK connection to the server. Requests
+/// Wraps a single TCP, Unix-domain, or Linux VSOCK connection to the server. Requests
 /// are serialized through a mutex, so the synchronous trait methods can be
 /// shared across threads while each request/response exchange stays atomic.
 pub struct DdiSockDev {
@@ -208,22 +223,42 @@ impl std::fmt::Debug for DdiSockDev {
 impl DdiSockDev {
     /// Connect to the server at `path`.
     pub(crate) fn connect(path: &str) -> DdiResult<Self> {
-        let stream = match parse_vsock_endpoint(path).map_err(DdiError::IoError)? {
-            Some((cid, port)) => {
-                #[cfg(target_os = "linux")]
-                {
-                    SocketStream::Vsock(VsockStream::connect(cid, port).map_err(DdiError::IoError)?)
+        let stream = if let Some(address) = path.strip_prefix("tcp://") {
+            let stream = TcpStream::connect(address).map_err(DdiError::IoError)?;
+            stream.set_nodelay(true).map_err(DdiError::IoError)?;
+            SocketStream::Tcp(stream)
+        } else {
+            match parse_vsock_endpoint(path).map_err(DdiError::IoError)? {
+                Some((cid, port)) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        SocketStream::Vsock(
+                            VsockStream::connect(cid, port).map_err(DdiError::IoError)?,
+                        )
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let _ = (cid, port);
+                        return Err(DdiError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "vsock endpoints require Linux",
+                        )));
+                    }
                 }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    let _ = (cid, port);
-                    return Err(DdiError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "vsock endpoints require Linux",
-                    )));
+                None => {
+                    #[cfg(unix)]
+                    {
+                        SocketStream::Unix(UnixStream::connect(path).map_err(DdiError::IoError)?)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        return Err(DdiError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "this platform requires a tcp://HOST:PORT endpoint",
+                        )));
+                    }
                 }
             }
-            None => SocketStream::Unix(UnixStream::connect(path).map_err(DdiError::IoError)?),
         };
         Ok(Self {
             stream: Mutex::new(stream),
@@ -513,6 +548,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn unix_stream_preserves_request_response_framing() {
         let (client, mut server) = UnixStream::pair().expect("socket pair");
@@ -543,6 +579,56 @@ mod tests {
             b"response"
         );
         peer.join().expect("peer");
+    }
+
+    #[test]
+    fn tcp_stream_preserves_request_response_framing() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("TCP listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("TCP address"));
+        let peer = std::thread::spawn(move || {
+            let (mut server, _) = listener.accept().expect("TCP connection");
+            server
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            for _ in 0..2 {
+                let request = Request::read_from(&mut server).expect("request");
+                assert_eq!(request.payload, b"request");
+                assert_eq!(request.sqe[6], DST_CAP);
+                Response {
+                    status: 0,
+                    cqe: [8, 0, 0, 0],
+                    payload: b"response".to_vec(),
+                }
+                .write_to(&mut server)
+                .expect("response");
+            }
+        });
+        let device = DdiSockDev::connect(&endpoint).expect("TCP device");
+        for _ in 0..2 {
+            assert_eq!(
+                device
+                    .submit(OP_MBOR, 0, None, b"request".to_vec())
+                    .expect("submit"),
+                b"response"
+            );
+        }
+        peer.join().expect("peer");
+    }
+
+    #[test]
+    fn rejects_invalid_tcp_endpoints() {
+        for endpoint in ["tcp://", "tcp://localhost", "tcp://127.0.0.1:invalid"] {
+            assert!(DdiSockDev::connect(endpoint).is_err(), "{endpoint}");
+        }
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unix_paths_are_unsupported() {
+        assert!(matches!(
+            DdiSockDev::connect("/tmp/tsra-ddi.sock"),
+            Err(DdiError::IoError(error)) if error.kind() == std::io::ErrorKind::Unsupported
+        ));
     }
 
     #[test]
