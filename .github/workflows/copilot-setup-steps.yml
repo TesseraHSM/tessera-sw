@@ -17,7 +17,7 @@ on:
     paths:
       - .github/workflows/copilot-setup-steps.yml
 env:
-  CACHE_KEY_ID: dummy # dummy value to force cache miss
+  CACHE_KEY_ID: 9709feeb3d4e548df12fa714f6280701bd98c486
 
 jobs:
   # The job MUST be called `copilot-setup-steps` or it will not be picked up by Copilot.
