@@ -6,12 +6,12 @@
 #[path = "../../common.rs"]
 mod common;
 
-use tsra_ddi_interface::DdiError;
-use tsra_ddi_tbor_test_harness::*;
-use tsra_ddi_tbor_types::*;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_interface::DdiError;
+use tsra_ddi_tbor_test_harness::*;
+use tsra_ddi_tbor_types::*;
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
 enum FuzzAesType {

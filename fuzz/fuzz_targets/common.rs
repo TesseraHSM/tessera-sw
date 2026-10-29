@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
 use tsra_crypto::aead_envelope::AeadAlg;
 use tsra_crypto::*;
 use tsra_ddi::*;
@@ -17,8 +19,6 @@ use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
 use zerocopy::TryFromBytes;
 
 pub type DdiTest = TsraDdi;

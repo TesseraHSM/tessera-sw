@@ -6,12 +6,12 @@
 #[path = "../../common.rs"]
 mod common;
 
-use tsra_ddi_tbor_test_harness::*;
-use tsra_ddi_tbor_types::*;
 use common::KeyScope;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_tbor_test_harness::*;
+use tsra_ddi_tbor_types::*;
 
 const MIN_NUMBER_OF_REQS: usize = 1;
 const MAX_NUMBER_OF_REQS: usize = 32;
