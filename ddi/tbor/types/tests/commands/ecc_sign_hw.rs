@@ -7,8 +7,8 @@
 //! The existing `ecc_sign` round-trip lives behind
 //! `#![cfg(feature = "emu")]`, and that build does not currently compile,
 //! so `EccSign` has had **no** coverage on silicon. That gap is why the
-//! P-521 masking failure (known-issue 2.4) went unnoticed, and it means
-//! a green 341/341 says nothing about this command.
+//! P-521 masking failure went unnoticed, and it means a green 341/341
+//! says nothing about this command.
 //!
 //! This is deliberately backend-agnostic and ungated, so it runs wherever
 //! the rest of the suite runs. It verifies the signature against the
@@ -25,6 +25,7 @@ use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
+use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -73,15 +74,18 @@ fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) -> bool {
 /// Covers both operand paths: P-256 and P-384 hand the request digest
 /// straight to the engine because it already fills the operand width,
 /// while a short digest is staged into a zeroed operand-width buffer. A
-/// mistake in either yields a signature that will not verify.
+/// mistake in either yields a signature that will not verify. P-521 also
+/// covers masking a scalar that is not a whole number of AES blocks.
 #[test]
 fn ecc_sign_roundtrip_verifies_on_host() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
-    // P-521 is omitted: EccGenerateKey cannot mask a 66-byte scalar on
-    // this hardware (known-issue 2.4, AES CTR block alignment).
-    for (curve, digest_len) in [(ECC_CURVE_P256, 32usize), (ECC_CURVE_P384, 48usize)] {
+    for (curve, digest_len) in [
+        (ECC_CURVE_P256, 32usize),
+        (ECC_CURVE_P384, 48usize),
+        (ECC_CURVE_P521, 64usize),
+    ] {
         let key = ctx
             .tbor(&TborEccGenerateKeyReq {
                 session_id: session.session_id,
