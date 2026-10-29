@@ -132,31 +132,24 @@ fn wait_for_ctx_change(guard: &mut parking_lot::MutexGuard<'_, CtxState>) {
 /// Runs `f` with a reference to the global emulator context, creating it
 /// on first use.
 ///
-/// If a concurrent [`DdiEmu::shutdown`] join is in progress, waits for it
-/// to settle (either restoring the context or fully releasing it) rather
-/// than racing ahead on a temporarily-empty slot.
-///
-/// Returns [`DdiError::DeviceNotReady`] if called after a
-/// [`DdiEmu::shutdown`] call has fully released the context; see
-/// [`CTX`]. This is a normal, expected outcome of the `open_dev`/
-/// `shutdown` teardown race (a concurrent `open_dev` can lose the race
-/// and observe `ShutDown` right after it settles), so it must be
-/// reported through [`DdiResult`] rather than panicking.
+/// Returns [`DdiError::DeviceNotReady`] immediately — without blocking —
+/// if a concurrent [`DdiEmu::shutdown`] join is currently in progress, or
+/// if a prior call has already fully released the context; see [`CTX`].
+/// Both are a normal, expected outcome of the `open_dev`/`shutdown`
+/// teardown race, so they must be reported through [`DdiResult`] rather
+/// than panicking or waiting out the (potentially slow) drain: a device
+/// mid-shutdown is unavailable *now*, and a caller that needs it should
+/// retry rather than block for an unbounded time on a join that may not
+/// even end up releasing the context (see [`DdiEmu::shutdown`]).
 fn with_ctx<T>(f: impl FnOnce(&EmuCtx) -> T) -> DdiResult<T> {
     let mut guard = CTX.lock();
-    loop {
-        match &*guard {
-            CtxState::Running(_) => break,
-            CtxState::Uninitialized => {
-                *guard = CtxState::Running(EmuCtx::new());
-                break;
-            }
-            CtxState::ShuttingDown => wait_for_ctx_change(&mut guard),
-            CtxState::ShutDown => return Err(DdiError::DeviceNotReady),
-        }
+    match &*guard {
+        CtxState::Running(_) => {}
+        CtxState::Uninitialized => *guard = CtxState::Running(EmuCtx::new()),
+        CtxState::ShuttingDown | CtxState::ShutDown => return Err(DdiError::DeviceNotReady),
     }
     let CtxState::Running(ctx) = &*guard else {
-        unreachable!("loop above only exits with CtxState::Running")
+        unreachable!("match above only falls through with CtxState::Running")
     };
     Ok(f(ctx))
 }
@@ -297,9 +290,13 @@ impl Ddi for DdiEmu {
     /// caller error independent of the emulator's lifecycle state, so it
     /// must not be masked by — or itself trigger — a context
     /// creation/lifecycle side effect. Returns
-    /// [`DdiError::DeviceNotReady`] if [`DdiEmu::shutdown`] has already
-    /// fully released the context (the underlying `StdHsm` core is a
-    /// singleton that cannot be re-initialised).
+    /// [`DdiError::DeviceNotReady`] immediately (without blocking) if
+    /// [`DdiEmu::shutdown`] is currently draining the context or has
+    /// already fully released it (the underlying `StdHsm` core is a
+    /// singleton that cannot be re-initialised); callers should retry
+    /// rather than treat either case as permanent, since a shutdown that
+    /// observes live handles puts the context back rather than releasing
+    /// it.
     fn open_dev(&self, path: &str) -> DdiResult<Self::Dev> {
         if path != EMU_DEVICE_PATH {
             tracing::warn!(?path, expected = EMU_DEVICE_PATH, "DdiEmu: path mismatch");
@@ -413,6 +410,40 @@ mod tests {
         DdiEmu::shutdown();
 
         // Idempotent: calling again after release is still a no-op.
+        DdiEmu::shutdown();
+    }
+
+    #[test]
+    fn open_dev_returns_device_not_ready_immediately_during_an_in_progress_shutdown() {
+        let ddi = DdiEmu::default();
+        let dev = ddi.open_dev(EMU_DEVICE_PATH).expect("open_dev");
+        drop(dev);
+
+        // Simulate a `shutdown()` join currently in progress — exactly
+        // the state `shutdown()` leaves `CTX` in right before its own
+        // unlocked, potentially slow `hsm.shutdown()` join — without
+        // actually running a real join on another thread.
+        let (rt, hsm) = {
+            let mut guard = CTX.lock();
+            match std::mem::replace(&mut *guard, CtxState::ShuttingDown) {
+                CtxState::Running(EmuCtx { rt, hsm }) => (rt, hsm),
+                _ => panic!("expected CtxState::Running after open_dev"),
+            }
+        };
+
+        // `open_dev` must report `DeviceNotReady` right away instead of
+        // blocking until the in-progress shutdown settles: a late open
+        // racing a real, potentially slow drain must not itself become
+        // slow and unbounded — see the `with_ctx` doc comment.
+        let res = ddi.open_dev(EMU_DEVICE_PATH);
+        assert!(
+            matches!(res, Err(DdiError::DeviceNotReady)),
+            "expected DeviceNotReady, got {res:?}"
+        );
+
+        // Restore the context to what the real success path would have
+        // left it in, then release it as `shutdown()` would.
+        *CTX.lock() = CtxState::Running(EmuCtx { rt, hsm });
         DdiEmu::shutdown();
     }
 
