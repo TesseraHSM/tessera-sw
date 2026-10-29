@@ -38,6 +38,7 @@ default = []
 emu = ["tsra_ddi/emu"]
 mock = ["tsra_ddi/mock"]
 res-test = ["tsra_res_test_dev"]
+sock = ["tsra_ddi/sock"]
 # Forward the per-IO `iic recv` / `oic send` debug traces (emu backend only).
 trace-io = ["tsra_ddi/trace-io"]
 

@@ -6,7 +6,7 @@ edition = "2024"
 name = "ddi_sock_server"
 version = "0.1.0"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[dependencies]
 tokio = { features = [
   "io-util",
   "net",
@@ -16,8 +16,10 @@ tokio = { features = [
 tsra_ddi_sock_proto.workspace = true
 tsra_fw_hsm_std.workspace = true
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[dev-dependencies]
+tsra_ddi_interface.workspace = true
 tsra_ddi_mbor_types.workspace = true
+tsra_ddi_sock.workspace = true
 
 [lints]
 workspace = true

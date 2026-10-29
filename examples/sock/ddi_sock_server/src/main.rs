@@ -1,15 +1,128 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Linux VSOCK server backed by an in-process HSM emulator.
+//! TCP and Linux VSOCK server backed by an in-process HSM emulator.
 //!
-//! Run `cargo run -p ddi_sock_server` in a VSOCK-capable Linux guest. The server
-//! listens on port 1234 and uses partition 10. Clients connect to
-//! `vsock://CID:1234`, where CID is this guest's VSOCK context ID.
+//! Run `cargo run -p ddi_sock_server -- tcp://127.0.0.1:1234` on Windows or Linux.
+//! Without arguments, Windows uses TCP loopback and Linux uses VSOCK port 1234.
+//! All connections share partition 10. Linux VSOCK clients connect to
+//! `vsock://CID:1234`, where CID is the server guest's VSOCK context ID.
 //! This unauthenticated test transport is for trusted, isolated environments;
 //! it is not a production service. Emulator state is lost when the server exits.
 //! Requests with OOB pointers or lengths are rejected: this wire format cannot
 //! transfer descriptor arrays or the buffers they reference.
+
+use std::sync::Arc;
+
+use tsra_ddi_sock_proto::Request;
+use tsra_ddi_sock_proto::Response;
+use tsra_fw_hsm_std::StdHsm;
+
+mod tcp;
+
+const HSM_PARTITION_ID: u8 = 10;
+const DMA_PAGE_SIZE: usize = 4096;
+const TRANSPORT_INVALID_REQUEST: u32 = 1;
+const TRANSPORT_HSM_ERROR: u32 = 2;
+
+#[repr(align(4096))]
+struct DmaPage([u8; DMA_PAGE_SIZE]);
+
+fn patch_prp1(sqe: &mut [u32; 16], low_dword: usize, address: u64) {
+    sqe[low_dword] = address as u32;
+    sqe[low_dword + 1] = (address >> 32) as u32;
+}
+
+fn transport_error(status: u32) -> Response {
+    Response {
+        status,
+        cqe: [0; 4],
+        payload: Vec::new(),
+    }
+}
+
+async fn execute_request(hsm: &StdHsm, request: Request) -> Response {
+    let src_len = request.sqe[1] as usize;
+    let dst_cap = request.sqe[6] as usize;
+    if request.sqe[13..=15].iter().any(|&word| word != 0)
+        || src_len != request.payload.len()
+        || src_len > DMA_PAGE_SIZE
+        || dst_cap == 0
+        || dst_cap > DMA_PAGE_SIZE
+    {
+        return transport_error(TRANSPORT_INVALID_REQUEST);
+    }
+
+    let mut src = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
+    let mut dst = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
+    src.0[..src_len].copy_from_slice(&request.payload);
+
+    let mut sqe = request.sqe;
+    patch_prp1(&mut sqe, 2, src.0.as_ptr() as u64);
+    patch_prp1(&mut sqe, 7, dst.0.as_mut_ptr() as u64);
+
+    let cqe = match hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
+        Ok(cqe) => cqe,
+        Err(error) => {
+            eprintln!("StdHsm request failed: {error:?}");
+            return transport_error(TRANSPORT_HSM_ERROR);
+        }
+    };
+    let dst_len = (cqe[0] & 0xffff) as usize;
+    if dst_len > dst_cap {
+        return transport_error(TRANSPORT_HSM_ERROR);
+    }
+
+    Response {
+        status: 0,
+        cqe,
+        payload: dst.0[..dst_len].to_vec(),
+    }
+}
+
+async fn init_partition(hsm: &StdHsm) -> Result<(), String> {
+    hsm.part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
+        .await
+        .map_err(|error| format!("failed to allocate HSM partition: {error:?}"))?;
+    hsm.part_enable(HSM_PARTITION_ID)
+        .await
+        .map_err(|error| format!("failed to enable HSM partition: {error:?}"))
+}
+
+fn run_with_hsm<F>(serve: impl FnOnce(Arc<StdHsm>) -> F) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(|error| format!("failed to create Tokio runtime: {error}"))?;
+    // The Embassy executor is process-global and its destructor cannot terminate
+    // it. Retain an owner until process exit so errors can reach main without
+    // hanging in StdHsm::drop.
+    static HSM: std::sync::OnceLock<Arc<StdHsm>> = std::sync::OnceLock::new();
+    let hsm = HSM.get_or_init(|| Arc::new(StdHsm::with_tokio(runtime.handle().clone())));
+    runtime.block_on(serve(Arc::clone(hsm)))
+}
+
+#[cfg(test)]
+fn test_hsm() -> Arc<StdHsm> {
+    static HSM: std::sync::LazyLock<Arc<StdHsm>> =
+        std::sync::LazyLock::new(|| Arc::new(StdHsm::new()));
+    static PARTITION: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("partition setup runtime");
+        runtime
+            .block_on(init_partition(&HSM))
+            .expect("partition setup");
+    });
+    std::sync::LazyLock::force(&PARTITION);
+    Arc::clone(&HSM)
+}
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -25,6 +138,12 @@ mod linux {
     use tsra_ddi_sock_proto::Response;
     use tsra_fw_hsm_std::StdHsm;
 
+    #[cfg(test)]
+    use super::DMA_PAGE_SIZE;
+    #[cfg(test)]
+    use super::TRANSPORT_INVALID_REQUEST;
+    use super::execute_request;
+
     const AF_VSOCK: c_int = 40;
     const SOCK_STREAM: c_int = 1;
     const F_GETFL: c_int = 3;
@@ -32,10 +151,6 @@ mod linux {
     const O_NONBLOCK: c_int = 0x800;
     const VMADDR_CID_ANY: u32 = u32::MAX;
     const VSOCK_PORT: u32 = 1234;
-    const HSM_PARTITION_ID: u8 = 10;
-    const DMA_PAGE_SIZE: usize = 4096;
-    const TRANSPORT_INVALID_REQUEST: u32 = 1;
-    const TRANSPORT_HSM_ERROR: u32 = 2;
 
     #[repr(C)]
     struct SockAddrVm {
@@ -45,9 +160,6 @@ mod linux {
         cid: u32,
         zero: [u8; 4],
     }
-
-    #[repr(align(4096))]
-    struct DmaPage([u8; DMA_PAGE_SIZE]);
 
     struct Socket {
         fd: c_int,
@@ -181,58 +293,6 @@ mod linux {
         }
     }
 
-    fn patch_prp1(sqe: &mut [u32; 16], low_dword: usize, address: u64) {
-        sqe[low_dword] = address as u32;
-        sqe[low_dword + 1] = (address >> 32) as u32;
-    }
-
-    fn transport_error(status: u32) -> Response {
-        Response {
-            status,
-            cqe: [0; 4],
-            payload: Vec::new(),
-        }
-    }
-
-    async fn execute_request(hsm: &StdHsm, request: Request) -> Response {
-        let src_len = request.sqe[1] as usize;
-        let dst_cap = request.sqe[6] as usize;
-        if request.sqe[13..=15].iter().any(|&word| word != 0)
-            || src_len != request.payload.len()
-            || src_len > DMA_PAGE_SIZE
-            || dst_cap == 0
-            || dst_cap > DMA_PAGE_SIZE
-        {
-            return transport_error(TRANSPORT_INVALID_REQUEST);
-        }
-
-        let mut src = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
-        let mut dst = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
-        src.0[..src_len].copy_from_slice(&request.payload);
-
-        let mut sqe = request.sqe;
-        patch_prp1(&mut sqe, 2, src.0.as_ptr() as u64);
-        patch_prp1(&mut sqe, 7, dst.0.as_mut_ptr() as u64);
-
-        let cqe = match hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
-            Ok(cqe) => cqe,
-            Err(error) => {
-                eprintln!("StdHsm request failed: {error:?}");
-                return transport_error(TRANSPORT_HSM_ERROR);
-            }
-        };
-        let dst_len = (cqe[0] & 0xffff) as usize;
-        if dst_len > dst_cap {
-            return transport_error(TRANSPORT_HSM_ERROR);
-        }
-
-        Response {
-            status: 0,
-            cqe,
-            payload: dst.0[..dst_len].to_vec(),
-        }
-    }
-
     async fn read_exact(stream: &AsyncFd<Socket>, mut buffer: &mut [u8]) -> io::Result<()> {
         while !buffer.is_empty() {
             let mut ready = stream.readable().await?;
@@ -326,12 +386,7 @@ mod linux {
         let listener = listener
             .into_async_fd()
             .map_err(|error| format!("failed to register vsock listener: {error}"))?;
-        hsm.part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
-            .await
-            .map_err(|error| format!("failed to allocate HSM partition: {error:?}"))?;
-        hsm.part_enable(HSM_PARTITION_ID)
-            .await
-            .map_err(|error| format!("failed to enable HSM partition: {error:?}"))?;
+        super::init_partition(&hsm).await?;
 
         println!("TSRA DDI server listening on vsock port {VSOCK_PORT}");
         loop {
@@ -366,18 +421,7 @@ mod linux {
     }
 
     fn run_with_listener(listener: Socket) -> Result<(), String> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_io()
-            .enable_time()
-            .build()
-            .map_err(|error| format!("failed to create Tokio runtime: {error}"))?;
-        // The Embassy executor is process-global and its destructor cannot terminate
-        // it. Retain an owner until process exit so errors can reach main without
-        // hanging in StdHsm::drop.
-        static HSM: std::sync::OnceLock<Arc<StdHsm>> = std::sync::OnceLock::new();
-        let hsm = HSM.get_or_init(|| Arc::new(StdHsm::with_tokio(runtime.handle().clone())));
-        runtime.block_on(run_server(Arc::clone(hsm), listener))
+        super::run_with_hsm(|hsm| run_server(hsm, listener))
     }
 
     #[cfg(test)]
@@ -389,10 +433,6 @@ mod linux {
         use tsra_ddi_mbor_types::*;
 
         use super::*;
-
-        // StdHsm's Embassy executor is process-global, as in its integration tests.
-        static HSM: std::sync::LazyLock<Arc<StdHsm>> =
-            std::sync::LazyLock::new(|| Arc::new(StdHsm::new()));
 
         #[test]
         fn server_errors_return_after_hsm_startup() {
@@ -435,20 +475,13 @@ mod linux {
 
         #[test]
         fn serves_repeated_requests_after_invalid_dma_and_oob_fields() {
+            let hsm = crate::test_hsm();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
                 .build()
                 .expect("runtime");
-            let hsm = Arc::clone(&HSM);
             runtime.block_on(async {
-                hsm.part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
-                    .await
-                    .expect("allocate partition");
-                hsm.part_enable(HSM_PARTITION_ID)
-                    .await
-                    .expect("enable partition");
-
                 let (mut client, server) = UnixStream::pair().expect("socket pair");
                 client
                     .set_read_timeout(Some(Duration::from_secs(10)))
@@ -532,17 +565,50 @@ mod linux {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 fn run() -> Result<(), String> {
-    Err("the DDI VSOCK server requires Linux".into())
+    let mut args = std::env::args().skip(1);
+    let endpoint = args.next().unwrap_or_else(|| {
+        if cfg!(target_os = "linux") {
+            "vsock://*:1234".to_owned()
+        } else {
+            "tcp://127.0.0.1:1234".to_owned()
+        }
+    });
+    if args.next().is_some() {
+        return Err("usage: ddi_sock_server [tcp://HOST:PORT | vsock://*:1234]".into());
+    }
+    if let Some(address) = endpoint.strip_prefix("tcp://") {
+        tcp::run(address)
+    } else if endpoint == "vsock://*:1234" {
+        #[cfg(target_os = "linux")]
+        {
+            linux::run()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("VSOCK requires Linux; use tcp://127.0.0.1:1234 on Windows".into())
+        }
+    } else {
+        Err("unsupported listener endpoint; use tcp://HOST:PORT or vsock://*:1234".into())
+    }
 }
-
-#[cfg(target_os = "linux")]
-use linux::run;
 
 fn main() {
     if let Err(error) = run() {
         eprintln!("TSRA DDI socket server failed: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_test_hsm_initializes_partition_once() {
+        let hsm = test_hsm();
+        let worker = std::thread::spawn(test_hsm);
+        let other = worker.join().expect("fixture worker");
+        assert!(Arc::ptr_eq(&hsm, &other));
     }
 }

@@ -43,6 +43,8 @@ members = [
   "examples/sealing/leaf_svc",
   "examples/sealing/report",
   "examples/sealing/root_svc",
+  "examples/sock/api_sock_ecc384_loop",
+  "examples/sock/api_sock_get_api_rev",
   "examples/sock/ddi_sock_ecc384_loop",
   "examples/sock/ddi_sock_get_api_rev",
   "examples/sock/ddi_sock_server",
