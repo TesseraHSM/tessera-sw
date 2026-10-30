@@ -37,7 +37,9 @@ use std::process::Child;
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU32;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -260,11 +262,43 @@ impl Drop for TestEndpoints {
     }
 }
 
+/// Wraps a [`Write`] destination, counting every byte written through it
+/// into a shared counter. Used to let a test observe how many bytes
+/// [`bridge_connection`] forwards toward `vsocksrv` (the `ddi` ->
+/// `ch` direction) in real time, without needing a second connection
+/// that could race the bridge's own automatic reconnect for whichever
+/// replacement connection `DdiDev::erase` accepts.
+struct CountingWriter<W> {
+    inner: W,
+    forwarded: Arc<AtomicU64>,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.forwarded.fetch_add(n as u64, Ordering::SeqCst);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 /// Reads the `CONNECT <port>\n` line `vsocksrv` sends first, replies with
 /// the `OK <port>\n` acknowledgement `vsocksrv` now always expects (see
 /// `tools/vsocksrv/src/unix.rs::read_connect_ack`), then splices the
 /// remainder of `ch` bidirectionally with the real AF_VSOCK stream `ddi`.
-fn bridge_connection(mut ch: UnixStream, ddi: RawVsockStream) -> io::Result<()> {
+///
+/// `forwarded` is incremented with every byte this bridges from `ddi`
+/// (the real client-facing connection) towards `ch` (`vsocksrv`'s side),
+/// i.e. every byte of a client request actually reaching the host HSM
+/// bridge — see [`CountingWriter`].
+fn bridge_connection(
+    mut ch: UnixStream,
+    ddi: RawVsockStream,
+    forwarded: Arc<AtomicU64>,
+) -> io::Result<()> {
     // Read the "CONNECT <port>\n" line one byte at a time so no bytes are
     // buffered past it (see the sock-transport test's identical comment
     // for why a `BufReader` would be unsafe here).
@@ -292,14 +326,18 @@ fn bridge_connection(mut ch: UnixStream, ddi: RawVsockStream) -> io::Result<()> 
     let mut ddi_reader = RawVsockStream(ddi_fd);
     let mut ddi_writer = RawVsockStream(ddi_dup);
     let mut ch_clone = ch.try_clone()?;
+    let mut counting_ch = CountingWriter {
+        inner: ch,
+        forwarded,
+    };
 
     let to_ddi = thread::spawn(move || {
         let _ = io::copy(&mut ch_clone, &mut ddi_writer);
         let _ = nix::sys::socket::shutdown(ddi_writer.0, nix::sys::socket::Shutdown::Write);
     });
     let to_ch = thread::spawn(move || {
-        let _ = io::copy(&mut ddi_reader, &mut ch);
-        let _ = ch.shutdown(std::net::Shutdown::Write);
+        let _ = io::copy(&mut ddi_reader, &mut counting_ch);
+        let _ = counting_ch.inner.shutdown(std::net::Shutdown::Write);
     });
 
     let _ = to_ddi.join();
@@ -329,7 +367,19 @@ fn bridge_connection(mut ch: UnixStream, ddi: RawVsockStream) -> io::Result<()> 
 /// `DdiVsock::open_dev` call, so the probe connection this performs is
 /// accepted by `DdiVsockDev`'s *own* listener rather than by a leftover
 /// instance from a previous test.
-fn spawn_bridge(endpoints: &mut TestEndpoints) -> io::Result<Option<thread::JoinHandle<()>>> {
+///
+/// Also returns a shared counter of every byte this bridge has forwarded
+/// from the real `AF_VSOCK` client connection towards `vsocksrv` (the
+/// `ddi` -> `ch` direction), across every connection the bridge thread
+/// ever accepts for the lifetime of the returned handle — including
+/// whichever replacement connection it establishes after a client's
+/// [`DdiDev::erase`] call. A test can use this to confirm that a stale
+/// request was rejected locally rather than forwarded, by observing the
+/// *actual* connection `erase()` accepted, instead of racing it with a
+/// second, possibly-unused probe connection of its own.
+fn spawn_bridge(
+    endpoints: &mut TestEndpoints,
+) -> io::Result<Option<(thread::JoinHandle<()>, Arc<AtomicU64>)>> {
     // Probe loopback availability against the same port the real bridge
     // will use, before committing to spawning `vsocksrv` or a bridge
     // thread at all. Nothing is listening on `vsock_port` yet at this
@@ -349,25 +399,30 @@ fn spawn_bridge(endpoints: &mut TestEndpoints) -> io::Result<Option<thread::Join
     let ch_listener = UnixListener::bind(&endpoints.ch)?;
     endpoints.ch_owned = true;
     let vsock_port = endpoints.vsock_port;
-    Ok(Some(thread::spawn(move || {
-        loop {
-            let Ok((ch, _)) = ch_listener.accept() else {
-                // The listener itself is gone (e.g. the test process is
-                // tearing down): nothing left to bridge.
-                return;
-            };
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let Ok(Some(ddi)) = connect_vsock_loopback_with_retry(vsock_port, deadline) else {
-                return;
-            };
-            // Bridge this connection to completion before accepting the
-            // next one: `vsocksrv` only ever has one connection open at a
-            // time, and serializing here keeps accept() ordering (and
-            // therefore which AF_VSOCK connection a given reconnect
-            // lands on) unambiguous.
-            let _ = bridge_connection(ch, ddi);
-        }
-    })))
+    let forwarded = Arc::new(AtomicU64::new(0));
+    let forwarded_for_thread = forwarded.clone();
+    Ok(Some((
+        thread::spawn(move || {
+            loop {
+                let Ok((ch, _)) = ch_listener.accept() else {
+                    // The listener itself is gone (e.g. the test process is
+                    // tearing down): nothing left to bridge.
+                    return;
+                };
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let Ok(Some(ddi)) = connect_vsock_loopback_with_retry(vsock_port, deadline) else {
+                    return;
+                };
+                // Bridge this connection to completion before accepting the
+                // next one: `vsocksrv` only ever has one connection open at a
+                // time, and serializing here keeps accept() ordering (and
+                // therefore which AF_VSOCK connection a given reconnect
+                // lands on) unambiguous.
+                let _ = bridge_connection(ch, ddi, forwarded_for_thread.clone());
+            }
+        }),
+        forwarded,
+    )))
 }
 
 /// Locates the `vsocksrv` binary built alongside this test (see the
@@ -568,7 +623,7 @@ fn get_api_rev_round_trips_through_vsocksrv_over_real_vsock() {
 #[test]
 fn unrecognized_session_close_is_rejected_locally_after_erase_over_real_vsock() {
     let mut endpoints = TestEndpoints::new("stale-session-erase");
-    let _bridge =
+    let (_bridge, forwarded) =
         bridge_or_skip!(spawn_bridge(&mut endpoints).expect("failed to probe/start test bridge"));
     let _vsocksrv =
         vsocksrv_or_skip!(spawn_vsocksrv(&endpoints).expect("failed to start vsocksrv"));
@@ -581,37 +636,20 @@ fn unrecognized_session_close_is_rejected_locally_after_erase_over_real_vsock() 
     assert_get_api_rev_succeeds(&dev);
 
     // `erase()` blocks on `DdiVsockDev`'s listener accepting a
-    // *replacement* connection (see `src/dev.rs::erase`), so a raw
-    // throwaway client (standing in for whatever reconnects after a real
-    // reset — this test doesn't need it to speak the wire protocol at
-    // all) connects concurrently to unblock it.
-    let vsock_port = endpoints.vsock_port;
-    let replacement_client = thread::spawn(move || {
-        connect_vsock_loopback_with_retry(vsock_port, Instant::now() + Duration::from_secs(10))
-    });
-
+    // *replacement* connection (see `src/dev.rs::erase`). `vsocksrv`
+    // itself reconnects automatically once it notices its current
+    // connection dropped (`spawn_bridge`'s doc comment), so the bridge
+    // thread's own loop supplies that replacement — no separate,
+    // potentially-racing probe connection is needed (an earlier version
+    // of this test used one, but it could lose the race against
+    // `vsocksrv`'s own reconnect, leaving the probe connected to nothing
+    // and the real request forwarded to `vsocksrv` undetected).
     dev.erase().expect("erase should succeed");
-    let mut replacement = replacement_client
-        .join()
-        .expect("replacement-connect thread panicked")
-        .expect("failed to connect the replacement client")
-        .expect("AF_VSOCK loopback vanished mid-test");
 
-    // Prove the rejection below happens locally in
-    // `SessionGenerationTracker::check` — before any bytes reach the
-    // replacement connection — rather than merely surfacing as *some*
-    // I/O error against a peer that doesn't speak the wire protocol
-    // (which would pass `is_err()` even with the guard removed, as long
-    // as the stale request happened to fail for any reason once
-    // forwarded). A background reader blocks on the replacement socket;
-    // if the guard were bypassed and the stale close were forwarded to
-    // the transport, this would observe the request's bytes arriving.
-    let (reached_tx, reached_rx) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        let mut byte = [0u8; 1];
-        let reached = matches!(replacement.read(&mut byte), Ok(n) if n > 0);
-        let _ = reached_tx.send(reached);
-    });
+    // Everything forwarded so far (if anything) is unrelated background
+    // noise from before the reset; only bytes forwarded *after* this
+    // point can come from the stale close below.
+    let baseline = forwarded.load(Ordering::SeqCst);
 
     // Use a real `CloseSession` request (not `GetApiRev`): `GetApiRev`
     // maps to `SessionControlKind::NoSession`, which `record` never acts
@@ -637,16 +675,16 @@ fn unrecognized_session_close_is_rejected_locally_after_erase_over_real_vsock() 
          stream: {result:?}",
     );
 
-    // No bytes should ever have reached the replacement connection: the
-    // rejection above must come from the local guard, not from sending
-    // the request and getting back some unrelated failure.
-    let reached = reached_rx
-        .recv_timeout(Duration::from_millis(500))
-        .unwrap_or(false);
-    assert!(
-        !reached,
-        "the stale close must be rejected before reaching the transport, \
-         but bytes arrived at the replacement connection",
+    // Give any wrongly-forwarded bytes time to actually reach the
+    // bridge's `to_ch` copy before checking: this observes the *real*
+    // post-erase connection the bridge accepted (whichever one
+    // `vsocksrv`'s reconnect landed on), not a possibly-unrelated probe.
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        forwarded.load(Ordering::SeqCst),
+        baseline,
+        "the stale close must be rejected locally, but bytes were \
+         forwarded to vsocksrv's connection",
     );
 }
 
@@ -884,7 +922,7 @@ mod real_session_tests {
     #[test]
     fn stale_real_session_close_is_rejected_by_generation_after_erase_over_real_vsock() {
         let mut endpoints = TestEndpoints::new("stale-real-session-erase");
-        let _bridge = bridge_or_skip!(
+        let (_bridge, forwarded) = bridge_or_skip!(
             spawn_bridge(&mut endpoints).expect("failed to probe/start test bridge")
         );
         let _vsocksrv =
@@ -899,28 +937,16 @@ mod real_session_tests {
 
         let (sess_id, cookie) = establish_credential_and_open_session(&dev);
 
-        // Same replacement-connection dance as the synthetic-cookie test
-        // above: `erase()` blocks until a new connection is accepted.
-        let vsock_port = endpoints.vsock_port;
-        let replacement_client = thread::spawn(move || {
-            connect_vsock_loopback_with_retry(vsock_port, Instant::now() + Duration::from_secs(10))
-        });
-
+        // Same reasoning as the synthetic-cookie test above: `erase()`
+        // blocks until `vsocksrv`'s own automatic reconnect supplies a
+        // replacement connection via the bridge thread; no separate probe
+        // connection is needed (or safe, since it could lose that race).
         dev.erase().expect("erase should succeed");
-        let mut replacement = replacement_client
-            .join()
-            .expect("replacement-connect thread panicked")
-            .expect("failed to connect the replacement client")
-            .expect("AF_VSOCK loopback vanished mid-test");
 
-        // As above: prove the rejection happens locally, before any bytes
-        // reach the replacement connection.
-        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            let mut byte = [0u8; 1];
-            let reached = matches!(replacement.read(&mut byte), Ok(n) if n > 0);
-            let _ = reached_tx.send(reached);
-        });
+        // Everything forwarded so far (if anything) is unrelated
+        // background noise from before the reset; only bytes forwarded
+        // *after* this point can come from the stale close below.
+        let baseline = forwarded.load(Ordering::SeqCst);
 
         // Close the *real* pre-erase session using its genuine sess_id and
         // cookie. `SessionGenerationTracker::check` now finds a matching
@@ -947,13 +973,16 @@ mod real_session_tests {
              (torn-down) stream: {result:?}",
         );
 
-        let reached = reached_rx
-            .recv_timeout(Duration::from_millis(500))
-            .unwrap_or(false);
-        assert!(
-            !reached,
-            "the stale close must be rejected before reaching the transport, \
-             but bytes arrived at the replacement connection",
+        // Give any wrongly-forwarded bytes time to actually reach the
+        // bridge's `to_ch` copy before checking: this observes the real
+        // post-erase connection the bridge accepted, not a possibly
+        // unrelated probe.
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            forwarded.load(Ordering::SeqCst),
+            baseline,
+            "the stale close must be rejected locally, but bytes were \
+             forwarded to vsocksrv's connection",
         );
     }
 }
