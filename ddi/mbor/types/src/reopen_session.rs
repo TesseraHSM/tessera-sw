@@ -41,4 +41,4 @@ pub struct DdiReopenSessionResp {
     pub bmk_session: MborByteArray<1024>,
 }
 
-ddi_op_req_resp!(DdiReopenSession);
+ddi_op_req_resp!(DdiReopenSession, |resp| Some(resp.data.sess_id));
