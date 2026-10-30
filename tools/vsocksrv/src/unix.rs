@@ -578,19 +578,27 @@ fn connect_unix_once(path: &Path, port: u32, idle_timeout: Duration) -> io::Resu
 /// attempt.
 const PARTITION_ENABLE_RETRIES: u32 = 3;
 
-/// Frees then re-allocates and re-enables `partition_id`, which clears its
-/// keys, nonce, vault, *and* fully releases its sessions. Called when a
-/// client disconnects, since a disconnect signals a device reset.
+/// Number of consecutive *soft* resets (`part_disable`/`part_enable`)
+/// `reset_partition` performs before forcing one *hard* reset
+/// (`part_free`/`part_alloc`) to reclaim any abandoned session slots.
 ///
-/// This deliberately uses `part_free`/`part_alloc`, not
-/// `part_disable`/`part_enable`: `part_disable` preserves any live sessions
-/// across the cycle (marked `NeedsRenegotiation`, so a later `ReopenSession`
-/// can re-key them), mirroring real hardware NSSR semantics - it does not
-/// free session slots. Since vsocksrv drops a client's connection without
-/// ever explicitly closing its sessions, `part_disable`/`part_enable` would
-/// leak one session slot per connection until the partition's session table
-/// is exhausted. `part_free` clears the session table outright, so each
-/// reset starts the next client with zero live sessions.
+/// Each soft reset can leak at most one session slot (the disconnecting
+/// client's own session, if it never closed it), and the firmware's
+/// session table holds at most 8 concurrent sessions, so forcing a hard
+/// reset no less often than every 8 soft resets guarantees the table can
+/// never actually fill up with abandoned sessions.
+const MAX_SOFT_RESETS_BEFORE_HARD: u32 = 8;
+
+/// Frees then re-allocates and re-enables `partition_id`, which clears its
+/// boot key (`BK_BOOT`)/MOBK, keys, nonce, vault, *and* fully releases its
+/// sessions, destroying any chance of a later `ReopenSession`/restoration
+/// for every session on the partition - not just the disconnecting
+/// client's.
+///
+/// This is the destructive fallback `reset_partition` uses to reclaim
+/// abandoned session slots every `MAX_SOFT_RESETS_BEFORE_HARD` disconnects
+/// (see `reset_partition`), and also what it falls back to if a soft reset
+/// itself fails.
 ///
 /// Retries `part_alloc`/`part_enable` a few times on failure. Once
 /// `part_alloc` succeeds, later attempts only retry `part_enable` -
@@ -601,9 +609,13 @@ const PARTITION_ENABLE_RETRIES: u32 = 3;
 /// must treat that as fatal (stop serving further clients), since
 /// continuing on a partition that isn't known to be freshly reset would
 /// violate the isolation invariant this reset exists to uphold.
-fn reset_partition(hsm: &StdHsm, runtime: &tokio::runtime::Handle, partition_id: u8) -> Result<()> {
+fn hard_reset_partition(
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+) -> Result<()> {
     if let Err(error) = runtime.block_on(hsm.part_free(partition_id)) {
-        tracing::warn!(?error, "Failed to free partition on reset");
+        tracing::warn!(?error, "Failed to free partition on hard reset");
     }
     let res_mask = 1u128 << u32::from(partition_id);
     let mut allocated = false;
@@ -613,7 +625,11 @@ fn reset_partition(hsm: &StdHsm, runtime: &tokio::runtime::Handle, partition_id:
             match runtime.block_on(hsm.part_alloc(partition_id, res_mask)) {
                 Ok(()) => allocated = true,
                 Err(error) => {
-                    tracing::warn!(?error, attempt, "Failed to re-allocate partition on reset");
+                    tracing::warn!(
+                        ?error,
+                        attempt,
+                        "Failed to re-allocate partition on hard reset"
+                    );
                     last_error = Some(error);
                     continue;
                 }
@@ -622,7 +638,11 @@ fn reset_partition(hsm: &StdHsm, runtime: &tokio::runtime::Handle, partition_id:
         match runtime.block_on(hsm.part_enable(partition_id)) {
             Ok(()) => return Ok(()),
             Err(error) => {
-                tracing::warn!(?error, attempt, "Failed to re-enable partition on reset");
+                tracing::warn!(
+                    ?error,
+                    attempt,
+                    "Failed to re-enable partition on hard reset"
+                );
                 last_error = Some(error);
             }
         }
@@ -630,12 +650,95 @@ fn reset_partition(hsm: &StdHsm, runtime: &tokio::runtime::Handle, partition_id:
     let error = last_error.expect("loop runs at least once and only exits early via return Ok");
     tracing::error!(
         ?error,
-        "Failed to reset partition after all retries; partition is unusable until the server \
-         is restarted"
+        "Failed to hard-reset partition after all retries; partition is unusable until the \
+         server is restarted"
     );
     Err(anyhow!(
-        "Failed to reset partition after all retries: {error:?}"
+        "Failed to hard-reset partition after all retries: {error:?}"
     ))
+}
+
+/// Disables then re-enables `partition_id`, clearing its keys, nonce, and
+/// vault but - unlike [`hard_reset_partition`] - preserving its boot key
+/// (`BK_BOOT`/MOBK) and any live sessions (marked `NeedsRenegotiation`, so
+/// a later `ReopenSession` can re-key them), mirroring real hardware NSSR
+/// semantics.
+///
+/// This is the normal per-disconnect reset `reset_partition` uses; it
+/// never frees session slots, so a run of these alone would eventually
+/// exhaust the session table with abandoned sessions (see
+/// `reset_partition`'s periodic hard-reset fallback).
+///
+/// Retries a few times on failure for the same transient-contention
+/// reasons as `hard_reset_partition`.
+fn soft_reset_partition(
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 1..=PARTITION_ENABLE_RETRIES {
+        if let Err(error) = runtime.block_on(hsm.part_disable(partition_id)) {
+            tracing::warn!(?error, attempt, "Failed to disable partition on soft reset");
+            last_error = Some(error);
+            continue;
+        }
+        match runtime.block_on(hsm.part_enable(partition_id)) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    attempt,
+                    "Failed to re-enable partition on soft reset"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    let error = last_error.expect("loop runs at least once and only exits early via return Ok");
+    Err(anyhow!(
+        "Failed to soft-reset partition after all retries: {error:?}"
+    ))
+}
+
+/// Resets `partition_id` after a client disconnect, since any end of a
+/// connection signals a device reset.
+///
+/// Prefers [`soft_reset_partition`] (preserves the boot key/MOBK and lets
+/// the disconnecting client's own sessions be reopened later), falling
+/// back to the destructive [`hard_reset_partition`] - which reclaims every
+/// abandoned session slot at the cost of the boot key and all sessions -
+/// either when the soft reset itself fails, or proactively every
+/// `MAX_SOFT_RESETS_BEFORE_HARD` disconnects, to bound how many abandoned
+/// sessions can accumulate in the table. `soft_resets_since_hard_reset`
+/// persists this count across connections for the life of the server.
+fn reset_partition(
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+    soft_resets_since_hard_reset: &mut u32,
+) -> Result<()> {
+    if *soft_resets_since_hard_reset >= MAX_SOFT_RESETS_BEFORE_HARD {
+        tracing::debug!(
+            "Forcing a hard reset to reclaim any abandoned session slots after \
+             MAX_SOFT_RESETS_BEFORE_HARD soft resets"
+        );
+        let result = hard_reset_partition(hsm, runtime, partition_id);
+        *soft_resets_since_hard_reset = 0;
+        return result;
+    }
+    match soft_reset_partition(hsm, runtime, partition_id) {
+        Ok(()) => {
+            *soft_resets_since_hard_reset += 1;
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(?error, "Soft reset failed; falling back to a hard reset");
+            let result = hard_reset_partition(hsm, runtime, partition_id);
+            *soft_resets_since_hard_reset = 0;
+            result
+        }
+    }
 }
 
 /// Serves a single connection until it ends (cleanly, via timeout, or via
@@ -655,12 +758,13 @@ fn serve_connection_and_reset(
     runtime: &tokio::runtime::Handle,
     partition_id: u8,
     idle_timeout: Duration,
+    soft_resets_since_hard_reset: &mut u32,
 ) -> Result<()> {
     match serve_connection(stream, hsm, runtime, partition_id, idle_timeout) {
         Ok(()) => tracing::info!("HSM client connection closed"),
         Err(error) => tracing::warn!(?error, "HSM client connection closed with an error"),
     }
-    reset_partition(hsm, runtime, partition_id)
+    reset_partition(hsm, runtime, partition_id, soft_resets_since_hard_reset)
 }
 
 fn serve_connection(
@@ -786,13 +890,21 @@ fn serve_connection_logged(
     runtime: &tokio::runtime::Handle,
     partition_id: u8,
     idle_timeout: Duration,
+    soft_resets_since_hard_reset: &mut u32,
 ) -> Result<()> {
     let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
     tracing::info!(connection_id, "Connected HSM client");
     let connection_span = tracing::info_span!("connection", connection_id);
     let _connection_guard = connection_span.enter();
     tracing::debug!("Started connection worker");
-    serve_connection_and_reset(&mut stream, hsm, runtime, partition_id, idle_timeout)
+    serve_connection_and_reset(
+        &mut stream,
+        hsm,
+        runtime,
+        partition_id,
+        idle_timeout,
+        soft_resets_since_hard_reset,
+    )
 }
 
 pub(crate) fn main() -> Result<()> {
@@ -862,6 +974,11 @@ fn serve(
         .map_err(|error| anyhow!("Failed to enable HSM partition: {error:?}"))?;
     tracing::info!(partition_id = args.partition_id, "Enabled HSM partition");
 
+    // Shared across every connection served by this process: see
+    // `reset_partition`'s doc comment for how it bounds abandoned-session
+    // accumulation.
+    let mut soft_resets_since_hard_reset: u32 = 0;
+
     match args.socket_type {
         SocketType::Vsock => {
             debug!("Socket Type VSOCK");
@@ -889,6 +1006,7 @@ fn serve(
                     runtime.handle(),
                     args.partition_id,
                     CONNECTION_READ_TIMEOUT,
+                    &mut soft_resets_since_hard_reset,
                 )
                 .context(
                     "Partition reset failed after a client disconnected; refusing to \
@@ -910,6 +1028,7 @@ fn serve(
                     runtime.handle(),
                     args.partition_id,
                     UNIX_IDLE_READ_TIMEOUT,
+                    &mut soft_resets_since_hard_reset,
                 )
                 .context(
                     "Partition reset failed after a client disconnected; refusing to \
