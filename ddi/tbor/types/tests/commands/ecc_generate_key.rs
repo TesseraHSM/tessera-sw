@@ -13,8 +13,6 @@
 //! [`ecc_sign`](super::ecc_sign) and [`ecdh_derive`](super::ecdh_derive)
 //! tests, which build on this command.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;

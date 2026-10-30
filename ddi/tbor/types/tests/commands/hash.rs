@@ -8,8 +8,6 @@
 //! result byte-for-byte against the digest computed on the host with
 //! `tsra_crypto` (natural big-endian output), for every algorithm.
 
-#![cfg(feature = "emu")]
-
 use tsra_crypto::HashAlgo as CryptoHashAlgo;
 use tsra_crypto::Hasher;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
