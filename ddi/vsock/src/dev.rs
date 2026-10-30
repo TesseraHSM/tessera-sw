@@ -103,16 +103,20 @@ fn listener_for(port: u32) -> DdiResult<Arc<VsockListener>> {
 /// [`libc::VMADDR_CID_ANY`](libc::VMADDR_CID_ANY) on a fixed port.
 struct VsockListener {
     fd: RawFd,
-    /// Serializes [`DdiVsockDev::erase`]'s shutdown-then-accept replace
-    /// sequence across every device sharing this port's listener (see
-    /// `listener_for`). Without this, two devices racing their own
-    /// `erase()` calls could each shut down their own connection and then
-    /// both call `accept()` on the shared listener in either order,
-    /// letting one device's waiter consume the other's replacement
-    /// connection and cross-wire the handles. Holding this lock across
-    /// the whole shutdown+accept pair guarantees each device's replace
-    /// completes (and the host observes and reacts to that specific
-    /// disconnect) before the next device's replace can start.
+    /// Serializes every `accept()` on this port's listener — both
+    /// [`DdiVsockDev::accept`]'s initial `open_dev()` accept and
+    /// [`DdiVsockDev::erase`]'s shutdown-then-accept replace sequence —
+    /// across every device sharing this port's listener (see
+    /// `listener_for`). Without this, two callers racing their own
+    /// `erase()` calls (or a fresh `open_dev()` racing an in-progress
+    /// `erase()`) could each shut down their own connection (or skip
+    /// straight to accepting) and then both call `accept()` on the shared
+    /// listener in either order, letting one caller's waiter consume the
+    /// connection meant for another and cross-wire the handles. Holding
+    /// this lock across the whole shutdown+accept (or plain accept) pair
+    /// guarantees each replace/open completes (and the host observes and
+    /// reacts to that specific disconnect, when applicable) before the
+    /// next accept on this port can start.
     accept_lock: Mutex<()>,
 }
 
@@ -337,6 +341,15 @@ impl DdiVsockDev {
     /// Bind (on first use) and accept a connection on `port`.
     pub(crate) fn accept(port: u32) -> DdiResult<Self> {
         let listener = listener_for(port)?;
+        // Serialize against `erase()`'s shutdown+accept replace sequence
+        // on any existing device sharing this port's listener (see
+        // `VsockListener::accept_lock`). Without this, a fresh
+        // `open_dev()` accepting concurrently with another handle's
+        // `erase()` could consume the host's reconnect meant to replace
+        // that handle's connection, leaving the erasing handle's
+        // `accept()` blocked waiting on a connection that already went
+        // to this new handle instead.
+        let _accept_guard = listener.accept_lock.lock();
         let stream = listener.accept().map_err(DdiError::IoError)?;
         Ok(Self {
             stream: Mutex::new(stream),
