@@ -510,6 +510,7 @@ mod linux {
                     let mut request = Request {
                         sqe: [0; 16],
                         payload,
+                        oob: Vec::new(),
                     };
                     request.sqe[1] = len as u32;
                     request.sqe[6] = DMA_PAGE_SIZE as u32;

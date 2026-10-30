@@ -161,6 +161,7 @@ mod tests {
                 let mut request = Request {
                     sqe: [0; 16],
                     payload: Vec::new(),
+                    oob: Vec::new(),
                 };
                 request.sqe[1] = src_len;
                 request.sqe[6] = dst_cap;
