@@ -6,7 +6,7 @@
 
 # profile for running all mock tests
 # `vsocksrv_integration` spawns the separately-built `vsocksrv` binary
-# (see `tools/vsocksrv/README.md`), which this profile's `--workspace`
+# (see `examples/vsocksrv/README.md`), which this profile's `--workspace`
 # invocation does not build; it is only exercised by the dedicated
 # `ci-sock-ddi` profile, which builds `vsocksrv` first.
 [profile.ci-mock]

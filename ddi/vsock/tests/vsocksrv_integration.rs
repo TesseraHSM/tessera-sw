@@ -287,7 +287,7 @@ impl<W: Write> Write for CountingWriter<W> {
 
 /// Reads the `CONNECT <port>\n` line `vsocksrv` sends first, replies with
 /// the `OK <port>\n` acknowledgement `vsocksrv` now always expects (see
-/// `tools/vsocksrv/src/unix.rs::read_connect_ack`), then splices the
+/// `examples/vsocksrv/src/unix.rs::read_connect_ack`), then splices the
 /// remainder of `ch` bidirectionally with the real AF_VSOCK stream `ddi`.
 ///
 /// `forwarded` is incremented with every byte this bridges from `ddi`
@@ -354,7 +354,7 @@ fn bridge_connection(
 ///
 /// Looping (rather than accepting exactly once) matters because
 /// `vsocksrv` reconnects automatically whenever its current connection
-/// drops (see `tools/vsocksrv/src/unix.rs`'s "HSM client disconnected;
+/// drops (see `examples/vsocksrv/src/unix.rs`'s "HSM client disconnected;
 /// reconnecting"), which is exactly what happens when a test calls
 /// [`DdiDev::erase`]: that tears down the bridged connection, and
 /// `vsocksrv` immediately tries to re-establish a new one through this
