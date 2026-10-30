@@ -25,10 +25,10 @@ struct FuzzInput {
 }
 
 #[derive(Clone, Copy)]
-enum Command {
-    AesGenerateKey,
-    EccGenerateKey,
-    HmacGenerateKey,
+enum GenKeyCommand {
+    Aes,
+    Ecc,
+    Hmac,
 }
 
 /// Advance the SplitMix64 state and return a deterministic pseudorandom value
@@ -52,9 +52,9 @@ fuzz_target!(|input: FuzzInput| {
 
         for _ in 0..number_of_reqs {
             let command = match next_random(&mut state) % 3 {
-                0 => Command::AesGenerateKey,
-                1 => Command::EccGenerateKey,
-                _ => Command::HmacGenerateKey,
+                0 => GenKeyCommand::Aes,
+                1 => GenKeyCommand::Ecc,
+                _ => GenKeyCommand::Hmac,
             };
             let key_scope = match next_random(&mut state) % 6 {
                 0 => KeyScope::Unspecified,
@@ -88,7 +88,7 @@ fuzz_target!(|input: FuzzInput| {
             let scope = key_scope.to_tbor();
 
             let (result, expected_masked_key_len, expected_pub_key_len) = match command {
-                Command::AesGenerateKey => {
+                GenKeyCommand::Aes => {
                     let req = TborAesGenerateKeyReq {
                         session_id,
                         scope,
@@ -102,7 +102,7 @@ fuzz_target!(|input: FuzzInput| {
                         None,
                     )
                 }
-                Command::EccGenerateKey => {
+                GenKeyCommand::Ecc => {
                     let req = TborEccGenerateKeyReq {
                         session_id,
                         scope,
@@ -117,7 +117,7 @@ fuzz_target!(|input: FuzzInput| {
                         Some(64),
                     )
                 }
-                Command::HmacGenerateKey => {
+                GenKeyCommand::Hmac => {
                     let req = TborHmacGenerateKeyReq {
                         session_id,
                         scope,
