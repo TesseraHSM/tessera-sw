@@ -296,7 +296,7 @@ pub(crate) async fn handle<P: HsmPal>(
                             pal,
                             io,
                             alloc,
-                            AeadAlg::AesGcm256Iv16,
+                            AeadAlg::AesGcm256,
                             masking_key,
                             &params,
                             vault,

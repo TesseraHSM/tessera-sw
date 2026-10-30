@@ -23,7 +23,7 @@ use crate::Key;
 /// AES-256-GCM seal. See [`super::seal`] for the public entry
 /// point.
 ///
-/// Both GCM profiles use the first 12 IV bytes as the nonce.
+/// Only the first 12 IV bytes are used as the nonce.
 pub(crate) fn seal_gcm(
     alg: AeadAlg,
     key: &AesKey,
@@ -54,9 +54,7 @@ pub(crate) fn seal_gcm(
 
     // Assemble header || IV || AAD into `buf`.
     buf[iv_off..aad_off].copy_from_slice(iv);
-    if alg == AeadAlg::AesGcm256Iv16 {
-        buf[iv_off + 12..aad_off].copy_from_slice(&[0, 0, 0, 1]);
-    }
+    buf[iv_off + 12..aad_off].copy_from_slice(&[0, 0, 0, 1]);
     buf[aad_off..data_off].copy_from_slice(aad);
 
     // Encrypt plaintext into the data slot.

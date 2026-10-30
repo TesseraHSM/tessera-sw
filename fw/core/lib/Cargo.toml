@@ -38,6 +38,7 @@ zerocopy.workspace = true
 [dev-dependencies]
 async-channel.workspace = true
 tokio = { features = ["macros", "rt", "sync"], workspace = true }
+tsra_crypto.workspace = true
 tsra_fw_hsm_pal_std.workspace = true
 
 [features]

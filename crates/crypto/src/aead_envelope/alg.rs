@@ -7,8 +7,7 @@
 //! envelope header and selects every per-algorithm parameter (key
 //! length, IV length, tag length, AAD-length granularity).
 //!
-//! AES-256-GCM has ordinary (`0x03`) and block-aligned masked-key
-//! (`0x04`) profiles.
+//! AES-256-GCM (`0x03`) uses a 16-byte stored IV.
 
 use super::format::HEADER_LEN;
 use crate::CryptoError;
@@ -21,13 +20,11 @@ use crate::CryptoError;
 #[non_exhaustive]
 #[repr(u8)]
 pub enum AeadAlg {
-    /// AES-256-GCM (96-bit IV, 128-bit tag).
-    AesGcm256 = 0x03,
     /// AES-256-GCM with a 16-byte IV slot, 32-byte-aligned AAD, and
-    /// 16-byte-aligned payload.
+    /// a 128-bit tag.
     /// Only the first 12 IV bytes are the nonce; the stored suffix is
     /// `00 00 00 01` on seal and is ignored on open.
-    AesGcm256Iv16 = 0x04,
+    AesGcm256 = 0x03,
 }
 
 impl AeadAlg {
@@ -37,7 +34,6 @@ impl AeadAlg {
     pub const fn from_u8(b: u8) -> Result<Self, CryptoError> {
         match b {
             0x03 => Ok(Self::AesGcm256),
-            0x04 => Ok(Self::AesGcm256Iv16),
             _ => Err(CryptoError::AeadEnvelopeUnsupportedAlg),
         }
     }
@@ -50,32 +46,31 @@ impl AeadAlg {
     /// Required key length in bytes.
     pub const fn key_len(self) -> usize {
         match self {
-            Self::AesGcm256 | Self::AesGcm256Iv16 => 32,
+            Self::AesGcm256 => 32,
         }
     }
 
     /// Required IV length in bytes.
     pub const fn iv_len(self) -> usize {
         match self {
-            Self::AesGcm256 => 12,
-            Self::AesGcm256Iv16 => 16,
+            Self::AesGcm256 => 16,
         }
     }
 
     /// Tag length in bytes.
     pub const fn tag_len(self) -> usize {
         match self {
-            Self::AesGcm256 | Self::AesGcm256Iv16 => 16,
+            Self::AesGcm256 => 16,
         }
     }
 
     /// AAD-length granularity in bytes. `aad_len` must be `0` or a
     /// multiple of this value.
     ///
-    /// Both profiles use `32`, mirroring the firmware's constraints.
+    /// Uses `32`, mirroring the firmware's constraints.
     pub const fn aad_granularity(self) -> usize {
         match self {
-            Self::AesGcm256 | Self::AesGcm256Iv16 => 32,
+            Self::AesGcm256 => 32,
         }
     }
 
@@ -104,23 +99,21 @@ mod tests {
         let a = AeadAlg::AesGcm256;
         assert_eq!(a.as_u8(), 0x03);
         assert_eq!(a.key_len(), 32);
-        assert_eq!(a.iv_len(), 12);
+        assert_eq!(a.iv_len(), 16);
         assert_eq!(a.tag_len(), 16);
         assert_eq!(a.aad_granularity(), 32);
-        assert_eq!(a.envelope_len(0, 0), 8 + 12 + 16);
-        // 8 + 12 + 32 (aad) + 17 (pt) + 16 = 85
-        assert_eq!(a.envelope_len(17, 32), 8 + 12 + 32 + 17 + 16);
+        assert_eq!(a.envelope_len(0, 0), 8 + 16 + 16);
+        assert_eq!(a.envelope_len(17, 32), 8 + 16 + 32 + 17 + 16);
     }
 
     #[test]
     fn from_u8_round_trip() {
         assert_eq!(AeadAlg::from_u8(0x03).unwrap(), AeadAlg::AesGcm256);
-        assert_eq!(AeadAlg::from_u8(0x04).unwrap(), AeadAlg::AesGcm256Iv16);
     }
 
     #[test]
     fn from_u8_rejects_unknown() {
-        for b in [0x00u8, 0x01, 0x02, 0x05, 0xFF] {
+        for b in [0x00u8, 0x01, 0x02, 0x04, 0x05, 0xFF] {
             assert!(matches!(
                 AeadAlg::from_u8(b),
                 Err(CryptoError::AeadEnvelopeUnsupportedAlg)

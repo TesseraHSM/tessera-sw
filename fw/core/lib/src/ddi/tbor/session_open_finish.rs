@@ -60,8 +60,8 @@ const API_REV_LEN: usize = 8;
 /// bytes by [`HsmSessionManager::session_promote`].
 const SESSION_API_REV: [u8; API_REV_LEN] = [1, 0, 0, 0, 0, 0, 0, 0];
 
-/// Masked-key profile used for `bmk_session`; the seed envelope is ordinary GCM.
-const AEAD_ALG: AeadAlg = AeadAlg::AesGcm256Iv16;
+/// AEAD algorithm shared by `bmk_session` and the seed envelope.
+const AEAD_ALG: AeadAlg = AeadAlg::AesGcm256;
 
 /// Caller-supplied label embedded in the `bmk_session`
 /// [`MaskedKeyMetadata`]. Identifies the wrapped key as the
@@ -470,10 +470,10 @@ async fn hkdf_expand_labeled<'a, P: HsmPal>(
 /// Derive `BK_SESSION = SP800-108-KBKDF-SHA-384(BK_BOOT, "SESSION_BK",
 /// seed)` (32 bytes) and wrap `masking_key` under it via the
 /// [`masked_key::aead`](tsra_fw_core_crypto_key_masking::aead) module
-/// — an AEAD envelope whose 96 B AAD is a fixed
+/// — an AEAD envelope whose 192 B AAD is a fixed
 /// [`MaskedKeyMetadata`](tsra_fw_core_crypto_key_masking::aead::MaskedKeyMetadata)
 /// binding `{key_kind = MaskingKey, key_attrs, svn, owner_seed_id,
-/// key_label = "SMK"}` to the ciphertext.
+/// key_label = "SESSION_BMK"}` to the ciphertext.
 ///
 /// Only the `masking_key` is persisted in `bmk_session` — transport
 /// keys (`param_key`, `mac_tx_key`, `mac_rx_key`) are always derived

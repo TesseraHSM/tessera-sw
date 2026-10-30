@@ -102,7 +102,7 @@ pub(crate) async fn handle<P: HsmPal>(
         }
 
         let secret_len = curve.secret_len();
-        let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, secret_len);
+        let masked_len = masked_blob_len(AeadAlg::AesGcm256, secret_len);
         let kind = ecdh_secret(curve);
 
         // Resolve the target masking key and staging label before deriving.
@@ -139,7 +139,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 pal,
                 io,
                 alloc,
-                AeadAlg::AesGcm256Iv16,
+                AeadAlg::AesGcm256,
                 masking_key_target,
                 &params,
                 secret,

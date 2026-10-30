@@ -78,7 +78,7 @@ pub struct UnmaskedView<'a> {
 /// * `Err(HsmError::AesGcmDecryptTagDoesNotMatch)` — tag mismatch
 ///   (tamper / wrong key / corrupted blob).
 /// * `Err(HsmError::MaskedKeyDecodeFailed)` — any metadata
-///   invariant violation: AAD length not 192, bad magic, unsupported
+///   invariant violation: AAD length not 192, unaligned payload, bad magic, unsupported
 ///   version, `key_label_len > KEY_LABEL_MAX`, non-zero pad after
 ///   the label, or non-zero reserved tail.
 /// * Any [`HsmError`] surfaced by the masking PAL or envelope parser.
@@ -89,7 +89,10 @@ pub async fn unmask<'a, P: HsmKeyMasking>(
     blob: &'a mut HsmDmaBuf,
 ) -> HsmResult<UnmaskedView<'a>> {
     let env = aead_peek(blob)?;
-    if env.alg != AeadAlg::AesGcm256Iv16 || env.aad.len() != META_LEN {
+    if env.alg != AeadAlg::AesGcm256
+        || env.aad.len() != META_LEN
+        || !(blob.len() - env.alg.envelope_len(0, META_LEN)).is_multiple_of(16)
+    {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
     let payload_at = HEADER_LEN + env.alg.iv_len() + META_LEN;
@@ -104,7 +107,7 @@ pub async fn unmask<'a, P: HsmKeyMasking>(
     let metadata =
         MaskedKeyMetadata::ref_from_bytes(env.aad).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
 
-    metadata.validate_v2()?;
+    metadata.validate_v1()?;
     let data_end = tag_at
         .checked_sub(metadata.data_pad_len as usize)
         .filter(|&n| n >= payload_at)
@@ -113,7 +116,7 @@ pub async fn unmask<'a, P: HsmKeyMasking>(
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
 
-    // validate_v2 guarantees key_label_len ≤ KEY_LABEL_MAX, so this
+    // validate_v1 guarantees key_label_len ≤ KEY_LABEL_MAX, so this
     // accessor cannot return an error here.
     let key_label = metadata.key_label()?;
 
@@ -143,12 +146,15 @@ const USAGE_FLAGS_OFF: usize = 8;
 /// nothing else, because nothing else can be trusted yet. A corrupt or
 /// attacker-chosen scope selects the wrong masking key, and the tag
 /// check then fails; a corrupt anything-else is caught by
-/// `validate_v2` inside `unmask`, which runs on authenticated bytes.
+/// `validate_v1` inside `unmask`, which runs on authenticated bytes.
 /// So the validation is not skipped, only moved to the point where its
 /// input is trustworthy -- which is where it belonged.
 pub fn peek_scope(blob: &HsmDmaBuf) -> HsmResult<HsmKeyScope> {
     let env = aead_peek(blob)?;
-    if env.alg != AeadAlg::AesGcm256Iv16 || env.aad.len() != META_LEN {
+    if env.alg != AeadAlg::AesGcm256
+        || env.aad.len() != META_LEN
+        || !(blob.len() - env.alg.envelope_len(0, META_LEN)).is_multiple_of(16)
+    {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
     let raw = env
@@ -174,14 +180,16 @@ pub fn peek_scope(blob: &HsmDmaBuf) -> HsmResult<HsmKeyScope> {
 /// granularity, IV length (derived from the parsed `alg`), and the
 /// minimum envelope length (`header ‖ iv ‖ aad ‖ tag`) — by delegating
 /// to the envelope crate's key-free peek. Only the AEAD tag
-/// verification and payload decryption are skipped, so this is the
-/// key-free analogue of [`unmask`], sharing its `META_LEN` and v2
+/// verification and payload decryption are skipped; masked payloads must
+/// additionally be block-aligned. This is the
+/// key-free analogue of [`unmask`], sharing its `META_LEN` and v1
 /// metadata checks.
 ///
 /// # Errors
 ///
 /// * [`HsmError::MaskedKeyDecodeFailed`] — the AAD region is not
-///   `META_LEN` bytes, or the metadata fails v2 validation.
+///   `META_LEN` bytes, the payload is not block-aligned, or the metadata
+///   fails v1 validation.
 /// * Any [`HsmError`] surfaced by the envelope header / framing parse
 ///   (malformed header, unsupported `alg`, or a blob too short to hold a
 ///   complete `header ‖ iv ‖ aad ‖ tag` envelope).
@@ -197,7 +205,10 @@ pub fn peek_metadata(blob: &HsmDmaBuf) -> HsmResult<&MaskedKeyMetadata> {
 
     // Envelope-level schema check: only a META_LEN-byte AAD is a
     // masked-key blob. Identical to the check in `unmask`.
-    if env.alg != AeadAlg::AesGcm256Iv16 || env.aad.len() != META_LEN {
+    if env.alg != AeadAlg::AesGcm256
+        || env.aad.len() != META_LEN
+        || !(blob.len() - env.alg.envelope_len(0, META_LEN)).is_multiple_of(16)
+    {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
 
@@ -206,6 +217,6 @@ pub fn peek_metadata(blob: &HsmDmaBuf) -> HsmResult<&MaskedKeyMetadata> {
     // META_LEN-byte slice.
     let metadata =
         MaskedKeyMetadata::ref_from_bytes(env.aad).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
-    metadata.validate_v2()?;
+    metadata.validate_v1()?;
     Ok(metadata)
 }

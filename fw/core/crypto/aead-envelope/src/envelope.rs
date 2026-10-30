@@ -93,8 +93,5 @@ pub(crate) fn region_offsets(
     // `total_len - tag_len` cannot underflow because the check above
     // guarantees `total_len >= min_total >= tag_len`.
     let tag_off = total_len - tag_len;
-    if header.alg == AeadAlg::AesGcm256Iv16 && !(tag_off - payload_off).is_multiple_of(16) {
-        return Err(Error::InvalidFormat);
-    }
     Ok((iv_off, aad_off, payload_off, tag_off))
 }

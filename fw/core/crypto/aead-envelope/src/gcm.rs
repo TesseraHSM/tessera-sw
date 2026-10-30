@@ -117,6 +117,7 @@ async fn seal_gcm_inner<P: HsmCrypto>(
             needed: envelope_len,
         })?
         .copy_from_slice(iv);
+    body[iv_off + 12..aad_off].copy_from_slice(&[0, 0, 0, 1]);
     body.get_mut(aad_off..data_off)
         .ok_or(Error::BufferTooSmall {
             needed: envelope_len,
@@ -142,7 +143,7 @@ async fn seal_gcm_inner<P: HsmCrypto>(
     let (tag, _trailing) = tag_region.split_at_mut(alg.tag_len());
 
     crypto
-        .gcm_encrypt_in_place(io, key, iv, aad_len, aad_dat, tag)
+        .gcm_encrypt_in_place(io, key, &iv[..12], aad_len, aad_dat, tag)
         .await
         .map_err(Error::Backend)?;
 
@@ -180,7 +181,7 @@ pub(crate) async fn open_gcm<'a, P: HsmCrypto>(
     // PAL decrypts in place; on tag mismatch the AAD+DATA region is
     // left in an unspecified state per the PAL contract.
     crypto
-        .gcm_decrypt_in_place(io, key, iv_region, header.aad_len, tag, aad_dat)
+        .gcm_decrypt_in_place(io, key, &iv_region[..12], header.aad_len, tag, aad_dat)
         .await
         .map_err(|e| match e {
             HsmError::AesGcmDecryptTagDoesNotMatch => Error::AuthFailed,

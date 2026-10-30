@@ -53,7 +53,7 @@ const RESERVED_LEN: usize = 37;
 pub const KEY_LABEL_MAX: usize = 128;
 
 /// Total masked-key blob length including zero padding for a
-/// `target_key_len`-byte target key. Use [`AeadAlg::AesGcm256Iv16`].
+/// `target_key_len`-byte target key. Use [`AeadAlg::AesGcm256`].
 /// Saturates on overflow; [`mask`](crate::aead::mask) size queries
 /// reject overflow instead.
 #[inline]
@@ -76,7 +76,7 @@ pub const META_MAGIC: [u8; 4] = *b"MKEY";
 /// [`MaskedKeyMetadata`] changes meaning; purely additive use of
 /// reserved bytes (e.g. defining a new `HsmVaultKeyAttrs` bit) does
 /// NOT bump this.
-pub const META_VERSION_V2: u16 = 2;
+pub const META_VERSION_V1: u16 = 1;
 
 // =============================================================================
 // MaskedKeyMetadata
@@ -92,7 +92,7 @@ pub const META_VERSION_V2: u16 = 2;
 ///  Off  Len  Field            Notes
 ///  ─────────────────────────────────────────────────────────────────────
 ///    0    4  magic            b"MKEY"
-///    4    2  version    LE    = 2
+///    4    2  version    LE    = 1
 ///    6    1  key_kind         HsmVaultKeyKind raw (open_enum, repr(u8))
 ///    7    1  key_label_len    actual key_label length, ≤ KEY_LABEL_MAX
 ///    8    8  usage_flags LE   HsmVaultKeyAttrs::into_bits()
@@ -120,7 +120,7 @@ pub const META_VERSION_V2: u16 = 2;
 pub struct MaskedKeyMetadata {
     /// Magic — MUST equal [`META_MAGIC`] (`b"MKEY"`).
     pub magic: [u8; 4],
-    /// Schema version — MUST equal [`META_VERSION_V2`].
+    /// Schema version — MUST equal [`META_VERSION_V1`].
     pub version: Le16,
     /// Raw [`HsmVaultKeyKind`] byte.
     pub key_kind: u8,
@@ -145,18 +145,18 @@ pub struct MaskedKeyMetadata {
 const _: () = assert!(core::mem::size_of::<MaskedKeyMetadata>() == META_LEN);
 
 impl MaskedKeyMetadata {
-    /// Build a v2 metadata record from caller-supplied vault fields,
+    /// Build a v1 metadata record from caller-supplied vault fields,
     /// platform-identity bindings, and an opaque label.
     ///
     /// Magic, version, padding, and the reserved tail are filled in
     /// by this constructor and cannot be overridden — guaranteeing
     /// that every record this crate produces satisfies
-    /// [`validate_v2`](Self::validate_v2).
+    /// [`validate_v1`](Self::validate_v1).
     ///
     /// # Errors
     ///
     /// * [`HsmError::InvalidArg`] — `key_label.len() > KEY_LABEL_MAX`.
-    pub fn new_v2(
+    pub fn new_v1(
         key_kind: HsmVaultKeyKind,
         usage_flags: HsmVaultKeyAttrs,
         svn: u64,
@@ -171,7 +171,7 @@ impl MaskedKeyMetadata {
         label_slot[..key_label.len()].copy_from_slice(key_label);
         Ok(Self {
             magic: META_MAGIC,
-            version: Le16::new(META_VERSION_V2),
+            version: Le16::new(META_VERSION_V1),
             key_kind: key_kind.0,
             key_label_len: key_label.len() as u8,
             usage_flags: Le64::new(usage_flags.into_bits()),
@@ -201,7 +201,7 @@ impl MaskedKeyMetadata {
     ///
     /// Returns [`HsmError::MaskedKeyDecodeFailed`] if `key_label_len`
     /// exceeds [`KEY_LABEL_MAX`] (should never happen on a record
-    /// that passed [`validate_v2`](Self::validate_v2)).
+    /// that passed [`validate_v1`](Self::validate_v1)).
     #[inline]
     pub fn key_label(&self) -> HsmResult<&[u8]> {
         let n = self.key_label_len as usize;
@@ -211,12 +211,12 @@ impl MaskedKeyMetadata {
         Ok(&self.key_label[..n])
     }
 
-    /// Validate every field of the parsed metadata against v2's
+    /// Validate every field of the parsed metadata against v1's
     /// invariants. Returns [`HsmError::MaskedKeyDecodeFailed`] for
     /// any violation:
     ///
     /// * magic mismatch
-    /// * `version != META_VERSION_V2`
+    /// * `version != META_VERSION_V1`
     /// * `data_pad_len > 15`
     /// * `key_label_len > KEY_LABEL_MAX`
     /// * non-zero pad bytes after `key_label[..key_label_len]`
@@ -227,9 +227,9 @@ impl MaskedKeyMetadata {
     /// `Unknown(u8)`, the attribute bitfield reserves its high bits
     /// for future use, and the platform-identity bindings are policy
     /// fields for the caller to compare against current PAL values.
-    pub(crate) fn validate_v2(&self) -> HsmResult<()> {
+    pub(crate) fn validate_v1(&self) -> HsmResult<()> {
         if self.magic != META_MAGIC
-            || self.version.get() != META_VERSION_V2
+            || self.version.get() != META_VERSION_V1
             || self.data_pad_len > 15
             || (self.key_label_len as usize) > KEY_LABEL_MAX
             || !self._reserved.iter().all(|&b| b == 0)

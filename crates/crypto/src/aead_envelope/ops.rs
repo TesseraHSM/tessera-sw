@@ -41,8 +41,7 @@ use crate::CryptoError;
 /// touching crypto, then call again with `Some(&mut buf)` sized at
 /// least to that length to actually seal.
 ///
-/// Dispatches on `alg`, preserving the ordinary GCM profile separately
-/// from the block-aligned [`AeadAlg::AesGcm256Iv16`] profile.
+/// Dispatches on `alg`; AES-256-GCM uses a 16-byte stored IV.
 ///
 /// # Parameters
 ///
@@ -51,14 +50,13 @@ use crate::CryptoError;
 ///   `alg.key_len()`; validated only when `buf` is `Some`.
 /// * `iv`   — nonce (`alg.iv_len()` bytes; must be unique per
 ///   encryption with the same key; validated only when `buf` is
-///   `Some`). The IV16 profile uses only the first 12 bytes and stores
+///   `Some`). AES-256-GCM uses only the first 12 bytes and stores
 ///   a canonical `00 00 00 01` suffix.
 /// * `aad`  — additional authenticated data; length must be `0` or
 ///   a multiple of `alg.aad_granularity()`, and `<= MAX_AAD_LEN`.
 ///   Validated in both modes — an illegal AAD length is not a
 ///   valid query.
-/// * `pt`   — plaintext to encrypt; the IV16 profile requires a multiple
-///   of 16 bytes, including for size queries.
+/// * `pt`   — plaintext to encrypt.
 /// * `buf`  — `None` for a size query; `Some(out)` to seal, where
 ///   `out.len() >= alg.envelope_len(pt.len(), aad.len())`.
 ///
@@ -78,15 +76,12 @@ pub fn seal(
     if !is_valid_aad_len(aad.len(), alg.aad_granularity()) {
         return Err(CryptoError::AeadEnvelopeInvalidAadLength);
     }
-    if alg == AeadAlg::AesGcm256Iv16 && !pt.len().is_multiple_of(16) {
-        return Err(CryptoError::AeadEnvelopeInvalidFormat);
-    }
     let total = alg.envelope_len(pt.len(), aad.len());
     let Some(buf) = buf else {
         return Ok(total);
     };
     let n = match alg {
-        AeadAlg::AesGcm256 | AeadAlg::AesGcm256Iv16 => seal_gcm(alg, key, iv, aad, pt, buf)?,
+        AeadAlg::AesGcm256 => seal_gcm(alg, key, iv, aad, pt, buf)?,
     };
     Ok(n)
 }
@@ -115,7 +110,7 @@ pub fn seal(
 pub fn open<'a>(key: &AesKey, buf: &'a mut [u8]) -> Result<AeadEnvelope<'a>, CryptoError> {
     let header = read_header(buf)?;
     let env = match header.alg {
-        AeadAlg::AesGcm256 | AeadAlg::AesGcm256Iv16 => open_gcm(key, buf, header)?,
+        AeadAlg::AesGcm256 => open_gcm(key, buf, header)?,
     };
     Ok(env)
 }
@@ -132,8 +127,7 @@ pub fn open<'a>(key: &AesKey, buf: &'a mut [u8]) -> Result<AeadEnvelope<'a>, Cry
 /// # Errors
 /// * [`CryptoError::GcmBufferTooSmall`] — `buf.len()` is shorter
 ///   than the minimum envelope length implied by the parsed header.
-/// * [`CryptoError::AeadEnvelopeInvalidFormat`] — bad magic byte or
-///   an unaligned IV16-profile payload.
+/// * [`CryptoError::AeadEnvelopeInvalidFormat`] — bad magic or reserved byte.
 /// * [`CryptoError::AeadEnvelopeUnsupportedAlg`] — `alg` byte not
 ///   supported in v1.
 /// * [`CryptoError::AeadEnvelopeInvalidAadLength`] — encoded

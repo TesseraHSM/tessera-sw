@@ -134,7 +134,7 @@ pub(crate) async fn handle<P: HsmPal>(
             }
             let key_label = key_label?;
 
-            let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, priv_len);
+            let masked_len = masked_blob_len(AeadAlg::AesGcm256, priv_len);
 
             // Build the response with the masked-key slot reserved and the
             // public key copied in; the masked private key is filled in place.
@@ -162,7 +162,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     pal,
                     io,
                     alloc,
-                    AeadAlg::AesGcm256Iv16,
+                    AeadAlg::AesGcm256,
                     masking_key,
                     &params,
                     priv_key,

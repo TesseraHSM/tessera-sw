@@ -63,8 +63,8 @@ pub const SESSION_MAC_DIR_KEY_LEN: usize = 48;
 /// Length of the AEAD `seed_envelope` on the wire.
 ///
 /// `"AEAD"(4) ‖ alg=AesGcm256(1) ‖ rsv=0(1) ‖ aad_len_be=0(2) ‖
-///  IV(12) ‖ seed(32) ‖ TAG(16)` = 68 B.
-pub const SEED_ENVELOPE_LEN: usize = 8 + 12 + SEED_LEN + 16;
+///  IV(16) ‖ seed(32) ‖ TAG(16)` = 72 B.
+pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 
 /// Host-facing TBOR `SessionOpenFinish` request.
 #[tbor(opcode = TBOR_OP_SESSION_OPEN_FINISH, session_ctrl = in_session)]

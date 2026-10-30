@@ -137,7 +137,7 @@ async fn mask_kex_private_key<'p, P: HsmPal>(
             pal,
             io,
             alloc,
-            AeadAlg::AesGcm256Iv16,
+            AeadAlg::AesGcm256,
             masking_key,
             &params,
             priv_key,

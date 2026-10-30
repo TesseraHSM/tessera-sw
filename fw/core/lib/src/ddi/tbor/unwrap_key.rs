@@ -313,7 +313,7 @@ async fn encode_and_mask<P: HsmPal>(
 
     // Size the masked blob and the wire public key up front so both response
     // slots can be reserved to exactly fit.
-    let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, priv_blob.len());
+    let masked_len = masked_blob_len(AeadAlg::AesGcm256, priv_blob.len());
     if masked_len > UNWRAP_MASKED_KEY_MAX_LEN {
         return Err(HsmError::InternalError);
     }
@@ -367,7 +367,7 @@ async fn encode_and_mask<P: HsmPal>(
                 pal,
                 io,
                 alloc,
-                AeadAlg::AesGcm256Iv16,
+                AeadAlg::AesGcm256,
                 masking_key,
                 &params,
                 priv_blob,

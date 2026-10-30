@@ -17,7 +17,7 @@ const TBOR_MASKED_KEY_METADATA_LEN: usize = 192;
 /// Magic identifying authenticated TBOR masked-key metadata.
 const TBOR_MASKED_KEY_METADATA_MAGIC: [u8; 4] = *b"MKEY";
 /// Supported TBOR masked-key metadata format version.
-const TBOR_MASKED_KEY_METADATA_VERSION: u16 = 2;
+const TBOR_MASKED_KEY_METADATA_VERSION: u16 = 1;
 /// Reserved trailing bytes of the metadata (must decode as all-zero).
 const TBOR_MASKED_KEY_RESERVED_LEN: usize = 37;
 /// Bit offset of the `KeyScope` field packed into `usage_flags`.
@@ -356,7 +356,7 @@ impl HsmMaskedKey {
     fn parse_tbor_metadata(masked_key: &[u8]) -> HsmResult<HsmMaskedKeyMetadata> {
         let envelope =
             aead_envelope::inspect(masked_key).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
-        if !matches!(envelope.alg, aead_envelope::AeadAlg::AesGcm256Iv16)
+        if !matches!(envelope.alg, aead_envelope::AeadAlg::AesGcm256)
             || envelope.aad.len() != TBOR_MASKED_KEY_METADATA_LEN
             || !envelope.payload.len().is_multiple_of(16)
         {
@@ -686,10 +686,10 @@ mod tests {
 
     fn unchecked_ecc_blob(scope: u8) -> Vec<u8> {
         let mut blob = vec![0; 24 + TBOR_MASKED_KEY_METADATA_LEN + 48 + 16];
-        blob[..8].copy_from_slice(b"AEAD\x04\x00\x00\xc0");
+        blob[..8].copy_from_slice(b"AEAD\x03\x00\x00\xc0");
         blob[20..24].copy_from_slice(&[0, 0, 0, 1]);
         blob[24..28].copy_from_slice(b"MKEY");
-        blob[28..30].copy_from_slice(&2u16.to_le_bytes());
+        blob[28..30].copy_from_slice(&1u16.to_le_bytes());
         blob[30] = KEY_KIND_ECC384_PRIVATE;
         let usage = HsmMaskedKeyAttributes::SIGN.bits()
             | HsmMaskedKeyAttributes::LOCAL.bits()
@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn masked_metadata_rejects_bad_padding_and_old_formats() {
+    fn masked_metadata_rejects_bad_padding_and_unsupported_formats() {
         let blob = unchecked_padded_blob(KEY_KIND_AES192, 24);
         for pad in [0, 7, 9, 15, 16, 255] {
             let mut invalid = blob.clone();
@@ -807,13 +807,12 @@ mod tests {
         no_payload.truncate(232);
         assert!(HsmMaskedKey::to_key_props(&no_payload).is_err());
 
-        let mut old_version = blob.clone();
-        old_version[28..30].copy_from_slice(&1u16.to_le_bytes());
-        assert!(HsmMaskedKey::to_key_props(&old_version).is_err());
+        let mut unsupported_version = blob.clone();
+        unsupported_version[28..30].copy_from_slice(&2u16.to_le_bytes());
+        assert!(HsmMaskedKey::to_key_props(&unsupported_version).is_err());
 
-        // Make an otherwise correctly framed ordinary GCM envelope.
+        // The old 12-byte IV layout must not be interpreted as IV16.
         let mut old_profile = blob;
-        old_profile[4] = 0x03;
         old_profile.drain(20..24);
         assert!(aead_envelope::inspect(&old_profile).is_ok());
         assert!(HsmMaskedKey::to_key_props(&old_profile).is_err());

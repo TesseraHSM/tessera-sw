@@ -125,7 +125,7 @@ pub(super) fn build_envelope(
     use tsra_crypto::aead_envelope::AeadAlg;
     use tsra_crypto::Rng;
 
-    let iv = Rng::rand_vec(12).expect("rng iv");
+    let iv = Rng::rand_vec(AeadAlg::AesGcm256.iv_len()).expect("rng iv");
     let total = aead_envelope::seal(AeadAlg::AesGcm256, param_key, &iv, aad, plaintext, None)
         .expect("aead size");
     let mut out = vec![0u8; total];

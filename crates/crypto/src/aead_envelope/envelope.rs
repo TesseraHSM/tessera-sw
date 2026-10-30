@@ -18,7 +18,7 @@ use crate::CryptoError;
 pub struct AeadEnvelope<'a> {
     /// AEAD algorithm read from the envelope header.
     pub alg: AeadAlg,
-    /// The IV slot (12 or 16 bytes); only its first 12 bytes are the GCM nonce.
+    /// The 16-byte IV slot; only its first 12 bytes are the GCM nonce.
     pub iv: &'a [u8],
     /// Additional authenticated data (may be empty).
     pub aad: &'a [u8],
@@ -62,8 +62,5 @@ pub(crate) fn region_offsets(
     // `total_len - tag_len` cannot underflow because the check above
     // guarantees `total_len >= min_total >= tag_len`.
     let tag_off = total_len - tag_len;
-    if header.alg == AeadAlg::AesGcm256Iv16 && !(tag_off - payload_off).is_multiple_of(16) {
-        return Err(CryptoError::AeadEnvelopeInvalidFormat);
-    }
     Ok((iv_off, aad_off, payload_off, tag_off))
 }

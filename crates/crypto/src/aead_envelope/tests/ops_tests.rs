@@ -3,8 +3,10 @@
 
 //! Round-trip and error-path tests for the host AEAD envelope API.
 
+use crate::AesGcmAlgo;
 use crate::AesKey;
 use crate::CryptoError;
+use crate::EncryptOp;
 use crate::ImportableKey;
 use crate::aead_envelope::AeadAlg;
 use crate::aead_envelope::AeadEnvelope;
@@ -17,15 +19,18 @@ use crate::aead_envelope::seal;
 
 const K32: [u8; 32] = [0x42; 32];
 const IV12: [u8; 12] = [0x24; 12];
+const IV16: [u8; 16] = [
+    0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0x24, 0, 0, 0, 1,
+];
 
 fn key() -> AesKey {
     AesKey::from_bytes(&K32).expect("AesKey")
 }
 
 fn seal_into(aad: &[u8], pt: &[u8]) -> Vec<u8> {
-    let needed = seal(AeadAlg::AesGcm256, &key(), &IV12, aad, pt, None).unwrap();
+    let needed = seal(AeadAlg::AesGcm256, &key(), &IV16, aad, pt, None).unwrap();
     let mut out = vec![0u8; needed];
-    let n = seal(AeadAlg::AesGcm256, &key(), &IV12, aad, pt, Some(&mut out)).unwrap();
+    let n = seal(AeadAlg::AesGcm256, &key(), &IV16, aad, pt, Some(&mut out)).unwrap();
     assert_eq!(n, needed);
     out
 }
@@ -37,7 +42,7 @@ fn round_trip_zero_aad_zero_pt() {
     assert_eq!(view.alg, AeadAlg::AesGcm256);
     assert_eq!(view.aad, b"");
     assert_eq!(view.payload, b"");
-    assert_eq!(view.iv, IV12);
+    assert_eq!(view.iv, IV16);
 }
 
 #[test]
@@ -65,11 +70,11 @@ fn round_trip_various_sizes() {
 }
 
 #[test]
-fn iv16_profile_uses_nonce_prefix_and_ignores_stored_suffix() {
+fn aes_gcm256_uses_iv16_nonce_prefix_and_ignores_stored_suffix() {
     let aad = [0x33; 32];
     let pt = [0x55; 32];
     let iv = [0x24; 16];
-    let alg = AeadAlg::AesGcm256Iv16;
+    let alg = AeadAlg::AesGcm256;
     let needed = seal(alg, &key(), &iv, &aad, &pt, None).unwrap();
     assert_eq!(needed, 8 + 16 + 32 + 32 + 16);
     let mut env = vec![0; needed];
@@ -80,19 +85,12 @@ fn iv16_profile_uses_nonce_prefix_and_ignores_stored_suffix() {
     assert_eq!(&view.iv[12..], &[0, 0, 0, 1]);
     assert_eq!(view.aad, aad);
 
-    // Both profiles use standard 96-bit-nonce GCM, not a 128-bit nonce.
-    let mut ordinary = vec![0; AeadAlg::AesGcm256.envelope_len(pt.len(), 32)];
-    let aad32 = [0x33; 32];
-    seal(
-        AeadAlg::AesGcm256,
-        &key(),
-        &IV12,
-        &aad32,
-        &pt,
-        Some(&mut ordinary),
-    )
-    .unwrap();
-    assert_eq!(view.payload, inspect(&ordinary).unwrap().payload);
+    let mut expected = [0; 32];
+    let mut raw = AesGcmAlgo::for_encrypt(&IV12, Some(&aad)).unwrap();
+    raw.encrypt(&key(), &pt, Some(&mut expected)).unwrap();
+    assert_eq!(view.payload, expected);
+    assert_eq!(view.tag, raw.tag());
+    assert_eq!(env[4], 0x03);
 
     let mut bad_nonce = env.clone();
     bad_nonce[HEADER_LEN] ^= 1;
@@ -107,35 +105,14 @@ fn iv16_profile_uses_nonce_prefix_and_ignores_stored_suffix() {
 }
 
 #[test]
-fn iv16_profile_rejects_unaligned_payload_and_aad() {
-    let alg = AeadAlg::AesGcm256Iv16;
-    for len in [1, 15, 17, 31] {
-        let mut buf = [0; 128];
-        let pt = vec![0; len];
-        for out in [None, Some(buf.as_mut_slice())] {
-            assert_eq!(
-                seal(alg, &key(), &[0; 16], &[], &pt, out).unwrap_err(),
-                CryptoError::AeadEnvelopeInvalidFormat
-            );
-        }
-    }
+fn aes_gcm256_rejects_unaligned_aad() {
+    let alg = AeadAlg::AesGcm256;
     for aad_len in [8, 16, 48] {
         assert_eq!(
             seal(alg, &key(), &[0; 16], &vec![0; aad_len], &[0; 16], None).unwrap_err(),
             CryptoError::AeadEnvelopeInvalidAadLength
         );
     }
-    let mut env = vec![0; alg.envelope_len(16, 0)];
-    seal(alg, &key(), &[0; 16], &[], &[0; 16], Some(&mut env)).unwrap();
-    env.push(0);
-    assert_eq!(
-        inspect(&env).unwrap_err(),
-        CryptoError::AeadEnvelopeInvalidFormat
-    );
-    assert_eq!(
-        open(&key(), &mut env).unwrap_err(),
-        CryptoError::AeadEnvelopeInvalidFormat
-    );
 }
 
 #[test]
@@ -144,7 +121,7 @@ fn inspect_returns_ciphertext_does_not_decrypt() {
     let env = seal_into(&[], pt);
     let view: AeadEnvelope<'_> = inspect(&env).unwrap();
     assert_eq!(view.alg, AeadAlg::AesGcm256);
-    assert_eq!(view.iv, IV12);
+    assert_eq!(view.iv, IV16);
     assert_eq!(view.payload.len(), pt.len());
     assert_ne!(view.payload, pt, "inspect must not decrypt");
     assert_eq!(view.tag.len(), 16);
@@ -152,15 +129,15 @@ fn inspect_returns_ciphertext_does_not_decrypt() {
 
 #[test]
 fn seal_size_query_returns_required_length() {
-    let needed = seal(AeadAlg::AesGcm256, &key(), &IV12, &[], b"abc", None).unwrap();
-    assert_eq!(needed, HEADER_LEN + 12 + 3 + 16);
+    let needed = seal(AeadAlg::AesGcm256, &key(), &IV16, &[], b"abc", None).unwrap();
+    assert_eq!(needed, HEADER_LEN + 16 + 3 + 16);
 }
 
 #[test]
 fn seal_size_query_rejects_bad_aad_length() {
     // aad_len = 17 is not 0 and not a multiple of 32.
     let bad_aad = vec![0u8; 17];
-    let err = seal(AeadAlg::AesGcm256, &key(), &IV12, &bad_aad, b"x", None).unwrap_err();
+    let err = seal(AeadAlg::AesGcm256, &key(), &IV16, &bad_aad, b"x", None).unwrap_err();
     assert_eq!(err, CryptoError::AeadEnvelopeInvalidAadLength);
 }
 
@@ -168,13 +145,13 @@ fn seal_size_query_rejects_bad_aad_length() {
 fn seal_rejects_short_key() {
     let short = AesKey::from_bytes(&[0u8; 16]).expect("AES-128 key");
     let mut out = [0u8; 64];
-    let err = seal(AeadAlg::AesGcm256, &short, &IV12, &[], b"x", Some(&mut out)).unwrap_err();
+    let err = seal(AeadAlg::AesGcm256, &short, &IV16, &[], b"x", Some(&mut out)).unwrap_err();
     assert_eq!(err, CryptoError::GcmInvalidKeySize);
 }
 
 #[test]
 fn seal_rejects_short_iv() {
-    let bad_iv = [0u8; 11];
+    let bad_iv = [0u8; 12];
     let mut out = [0u8; 64];
     let err = seal(
         AeadAlg::AesGcm256,
@@ -194,7 +171,7 @@ fn seal_rejects_small_output_buffer() {
     let err = seal(
         AeadAlg::AesGcm256,
         &key(),
-        &IV12,
+        &IV16,
         &[],
         b"hello",
         Some(&mut tiny),
@@ -206,7 +183,7 @@ fn seal_rejects_small_output_buffer() {
 #[test]
 fn open_detects_tampered_payload() {
     let mut env = seal_into(&[], b"some plaintext");
-    let payload_off = HEADER_LEN + 12; // aad_len = 0
+    let payload_off = HEADER_LEN + 16; // aad_len = 0
     env[payload_off] ^= 0x01;
     let err = open(&key(), &mut env).unwrap_err();
     assert_eq!(err, CryptoError::GcmDecryptionFailed);
@@ -225,7 +202,7 @@ fn open_detects_tampered_tag() {
 fn open_detects_tampered_aad() {
     let aad = vec![0u8; 32];
     let mut env = seal_into(&aad, b"data");
-    let aad_off = HEADER_LEN + 12;
+    let aad_off = HEADER_LEN + 16;
     env[aad_off] ^= 0x01;
     let err = open(&key(), &mut env).unwrap_err();
     assert_eq!(err, CryptoError::GcmDecryptionFailed);
@@ -260,7 +237,7 @@ fn inspect_rejects_bad_magic() {
 #[test]
 fn inspect_rejects_unknown_alg() {
     let mut env = seal_into(&[], b"x");
-    env[4] = 0x01; // alg byte is at offset 4
+    env[4] = 0x04; // removed IV16-only algorithm
     assert_eq!(
         inspect(&env).unwrap_err(),
         CryptoError::AeadEnvelopeUnsupportedAlg

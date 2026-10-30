@@ -523,7 +523,7 @@ async fn mask_part_local_mk<P: HsmPal>(
         pal,
         io,
         alloc,
-        AeadAlg::AesGcm256Iv16,
+        AeadAlg::AesGcm256,
         local_bmk,
         &params,
         part_local_mk,

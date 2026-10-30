@@ -80,8 +80,8 @@ pub(crate) async fn handle<P: HsmPal>(
 
         // IO teardown wipes the allocation,
         // including partially written secrets.
-        let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, plain_len);
-        let payload_at = payload_offset(AeadAlg::AesGcm256Iv16);
+        let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
+        let payload_at = payload_offset(AeadAlg::AesGcm256);
 
         // Reserve both output slots up front so the fastpath core can write
         // the public key straight into the response. A temporary buffer
@@ -135,7 +135,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     pal,
                     io,
                     alloc,
-                    AeadAlg::AesGcm256Iv16,
+                    AeadAlg::AesGcm256,
                     masking_key,
                     &params,
                     plain_len,

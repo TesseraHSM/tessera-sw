@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! v2 masked-key format: AEAD envelope over
+//! v1 masked-key format: AEAD envelope over
 //! [`tsra_fw_core_crypto_aead_envelope`].
 //!
 //! Firmware-internal format used for session BMK wrapping and any
@@ -28,5 +28,5 @@ pub use format::blob_len as masked_blob_len;
 pub use format::MaskedKeyMetadata;
 pub use format::KEY_LABEL_MAX;
 pub use format::META_MAGIC;
-pub use format::META_VERSION_V2;
+pub use format::META_VERSION_V1;
 pub use tsra_fw_core_crypto_aead_envelope::AeadAlg;

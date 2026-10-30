@@ -18,8 +18,8 @@ use libfuzzer_sys::fuzz_target;
 struct FuzzInput {
     /// Session role
     role: FuzzRole,
-    /// AES-GCM nonce fed to the AEAD seal.
-    iv: [u8; 12],
+    /// AES-GCM stored IV fed to the AEAD seal.
+    iv: [u8; 16],
     /// Envelope shape
     shape: Shape,
     /// Optional post-seal single-byte flip
@@ -28,7 +28,7 @@ struct FuzzInput {
 
 /// Sizes the sealed envelope's AAD and payload regions. The three
 /// variants correspond to the three `aad_len` values (0, 32, 64) that
-/// the AES-GCM `aad_granularity` allows while still totalling 100 wire
+/// the AES-GCM `aad_granularity` allows while still totalling 104 wire
 /// bytes.
 #[derive(Arbitrary, Debug)]
 enum Shape {

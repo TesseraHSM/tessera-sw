@@ -29,7 +29,7 @@ use crate::aead::format::MaskedKeyMetadata;
 use crate::aead::format::KEY_LABEL_MAX;
 use crate::aead::format::META_LEN;
 
-/// Caller-supplied parameters for a v2 masked-key blob.
+/// Caller-supplied parameters for a v1 masked-key blob.
 ///
 /// Carries only the fields the caller owns; magic, version, padding,
 /// and the reserved tail of [`MaskedKeyMetadata`] are produced by
@@ -78,7 +78,7 @@ pub struct MaskParams<'a> {
 /// * `io`         — caller's I/O context.
 /// * `_alloc`     — retained for caller compatibility; no scratch is allocated.
 /// * `alg`        — AEAD algorithm for this blob (e.g.
-///   [`AeadAlg::AesGcm256Iv16`]). Determines the required `key` length
+///   [`AeadAlg::AesGcm256`]). Determines the required `key` length
 ///   via [`AeadAlg::key_len`].
 /// * `key`        — AEAD masking key; length MUST equal
 ///   `alg.key_len()`. Ignored when `out == None`.
@@ -168,7 +168,7 @@ pub async fn mask_in_place<P: HsmKeyMasking>(
 }
 
 fn mask_len(crypto: &impl HsmKeyMasking, alg: AeadAlg, pt_len: usize) -> HsmResult<(usize, u8)> {
-    if alg != AeadAlg::AesGcm256Iv16 {
+    if alg != AeadAlg::AesGcm256 {
         return Err(HsmError::InvalidArg);
     }
     let (len, pad) = crypto.key_mask_len(META_LEN, pt_len)?;
@@ -191,7 +191,7 @@ fn prepare(
         return Err(HsmError::InvalidArg);
     }
 
-    let metadata = MaskedKeyMetadata::new_v2(
+    let metadata = MaskedKeyMetadata::new_v1(
         params.key_kind,
         params.key_attrs,
         params.svn,

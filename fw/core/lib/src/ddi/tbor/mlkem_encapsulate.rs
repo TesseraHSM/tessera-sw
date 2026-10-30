@@ -112,7 +112,7 @@ pub(crate) async fn handle<P: HsmPal>(
             .await?;
 
         async {
-            let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, SHARED_SECRET_LEN);
+            let masked_len = masked_blob_len(AeadAlg::AesGcm256, SHARED_SECRET_LEN);
 
             let resp = cmd_buf.buffer_mut();
             let len = TborMlKemEncapsulateResp::encode(resp, 0, false)?
@@ -152,7 +152,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         pal,
                         io,
                         alloc,
-                        AeadAlg::AesGcm256Iv16,
+                        AeadAlg::AesGcm256,
                         masking_key,
                         &params,
                         shared_secret,
