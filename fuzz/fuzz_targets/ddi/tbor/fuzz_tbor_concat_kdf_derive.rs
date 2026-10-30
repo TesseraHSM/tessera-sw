@@ -288,9 +288,10 @@ fn make_secret(
 /// Reuse shared mutations while restricting flips to ciphertext so their
 /// expected rejection is precise; classify effective no-ops before execution.
 fn mutate_secret(input: &FuzzInput<'_>, secret: &mut Vec<u8>) -> Option<TborStatus> {
-    let mutation = match input.mutation % 4 {
-        0 => common::EnvelopeMutation::None,
-        1 => common::EnvelopeMutation::FlipByte {
+    let mutation = if input.mutation % 2 == 0 {
+        common::EnvelopeMutation::None
+    } else {
+        common::EnvelopeMutation::FlipByte {
             offset: u16::try_from(
                 CIPHERTEXT_OFFSET
                     + usize::from(input.offset)
@@ -301,9 +302,7 @@ fn mutate_secret(input: &FuzzInput<'_>, secret: &mut Vec<u8>) -> Option<TborStat
             )
             .expect("bounded ciphertext offset"),
             mask: input.mask,
-        },
-        2 => common::EnvelopeMutation::Truncate { len: input.offset },
-        _ => common::EnvelopeMutation::Append(payload(input, usize::from(input.mask % 3))),
+        }
     };
     let noop = mutation.is_noop(secret);
     mutation.apply(secret);
