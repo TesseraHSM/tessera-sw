@@ -12,7 +12,7 @@
 #[path = "../../common.rs"]
 mod common;
 
-use arbitrary::*;
+use arbitrary::Arbitrary;
 use libfuzzer_sys::*;
 use tsra_ddi_tbor_codec::*;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
