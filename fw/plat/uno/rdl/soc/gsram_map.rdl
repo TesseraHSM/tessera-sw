@@ -393,6 +393,65 @@ regfile gdma_cq_entry_t {
 
 // -- AES Command Entry - 24 bytes (6 DWORDs) --
 
+// -- BCP (CDMA) queue entries --
+//
+// Raw DWORDs; the driver owns the bit layouts (silicon `CdmaSqCmdDescr_t`,
+// `CdmaCqCmdDescr_t`, and the 128-byte host command + GCM/XTS aux command
+// the engine reads as a DFL element).
+
+regfile bcp_sqe_t {
+    name = "BCP SQE";
+    desc = "16-byte CDMA submission queue entry.";
+    io_sq_dw_t DW0 @ 0x00;
+    io_sq_dw_t DW1 @ 0x04;
+    io_sq_dw_t DW2 @ 0x08;
+    io_sq_dw_t DW3 @ 0x0C;
+};
+
+regfile bcp_cqe_t {
+    name = "BCP CQE";
+    desc = "8-byte CDMA completion queue entry.";
+    io_sq_dw_t DW0 @ 0x00;
+    io_sq_dw_t DW1 @ 0x04;
+};
+
+regfile bcp_dfl_entry_t {
+    name = "BCP DFL Entry";
+    desc = "128-byte CDMA descriptor fetch list element.";
+    io_sq_dw_t DW0  @ 0x00;
+    io_sq_dw_t DW1  @ 0x04;
+    io_sq_dw_t DW2  @ 0x08;
+    io_sq_dw_t DW3  @ 0x0C;
+    io_sq_dw_t DW4  @ 0x10;
+    io_sq_dw_t DW5  @ 0x14;
+    io_sq_dw_t DW6  @ 0x18;
+    io_sq_dw_t DW7  @ 0x1C;
+    io_sq_dw_t DW8  @ 0x20;
+    io_sq_dw_t DW9  @ 0x24;
+    io_sq_dw_t DW10 @ 0x28;
+    io_sq_dw_t DW11 @ 0x2C;
+    io_sq_dw_t DW12 @ 0x30;
+    io_sq_dw_t DW13 @ 0x34;
+    io_sq_dw_t DW14 @ 0x38;
+    io_sq_dw_t DW15 @ 0x3C;
+    io_sq_dw_t DW16 @ 0x40;
+    io_sq_dw_t DW17 @ 0x44;
+    io_sq_dw_t DW18 @ 0x48;
+    io_sq_dw_t DW19 @ 0x4C;
+    io_sq_dw_t DW20 @ 0x50;
+    io_sq_dw_t DW21 @ 0x54;
+    io_sq_dw_t DW22 @ 0x58;
+    io_sq_dw_t DW23 @ 0x5C;
+    io_sq_dw_t DW24 @ 0x60;
+    io_sq_dw_t DW25 @ 0x64;
+    io_sq_dw_t DW26 @ 0x68;
+    io_sq_dw_t DW27 @ 0x6C;
+    io_sq_dw_t DW28 @ 0x70;
+    io_sq_dw_t DW29 @ 0x74;
+    io_sq_dw_t DW30 @ 0x78;
+    io_sq_dw_t DW31 @ 0x7C;
+};
+
 regfile aes_cmd_entry_t {
     name = "AES Command Entry";
     desc = "24-byte AES command descriptor.";
@@ -643,6 +702,14 @@ addrmap io_gsram {
     aes_cmd_entry_t  AES_CMD[32]         @ 0x15064 += 0x18;
     upka_cmd_entry_t UPKA_ENGINE_CMD[16] @ 0x15364 += 0x14;
     sha_cmd_entry_t  SHA_CMD[32]         @ 0x154A4 += 0x20;
+
+    // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
+    // may master (0x0F000 - 0xB8000) ───
+    bcp_sqe_t        BCP_SQ[8]           @ 0x16000 += 0x10;   // 0x16000 - 0x16080
+    bcp_cqe_t        BCP_CQ[8]           @ 0x16100 += 0x08;   // 0x16100 - 0x16140
+    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16180;
+    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16184;
+    bcp_dfl_entry_t  BCP_DFL[8]          @ 0x16200 += 0x80;   // 0x16200 - 0x16600
 
     // ─── Heap (per-IO buffers) — 33 slots: 0..31 host (IIC), 32 admin ───
     io_meta_entry_t  IO_META[33]         @ 0x20C58 += 0x08;
