@@ -420,8 +420,15 @@ pub(crate) struct PartitionTable {
 
 impl Default for PartitionTable {
     fn default() -> Self {
+        // Build entries directly on the heap, avoiding a large stack temporary.
+        let entries: Vec<_> = (0..NUM_PARTITIONS)
+            .map(|_| PartitionEntry::default())
+            .collect();
         Self {
-            entries: Box::new(core::array::from_fn(|_| PartitionEntry::default())),
+            entries: entries
+                .into_boxed_slice()
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("collected exactly NUM_PARTITIONS entries")),
             global_res_mask: 0,
         }
     }
@@ -1825,6 +1832,16 @@ impl StdHsmPal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_table_initialization_fits_small_stack() {
+        std::thread::Builder::new()
+            .stack_size(128 * 1024)
+            .spawn(|| drop(PartitionTable::default()))
+            .expect("spawn small-stack thread")
+            .join()
+            .expect("construct partition table without overflowing the stack");
+    }
 
     #[test]
     fn partition_index_rejects_wide_ids_without_aliasing() {
