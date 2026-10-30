@@ -215,8 +215,28 @@ impl<const SIZE: usize> DmaPages<SIZE> {
         Self([0; SIZE])
     }
 
+    /// Returns the buffer's address for use as a DMA *source* only.
+    ///
+    /// Derived through `as_ptr()`, so the returned address carries
+    /// read-only provenance; a later write through a pointer
+    /// reconstructed from it (e.g. `StdGdma::copy_mem_to_host`) is
+    /// undefined behavior even though the allocation is large enough.
+    /// Use [`address_mut`](Self::address_mut) for any buffer the HSM
+    /// may write into.
     fn address(&self) -> u64 {
         self.0.as_ptr() as u64
+    }
+
+    /// Returns the buffer's address for use as a DMA *destination*.
+    ///
+    /// Derived through `as_mut_ptr()`, so the returned address carries
+    /// writable provenance, matching how `StdGdma::copy_mem_to_host`
+    /// later writes the HSM's response through a pointer reconstructed
+    /// from it. The borrow this requires must be kept alive (the
+    /// buffer must not be read or re-borrowed immutably) until the DMA
+    /// write has completed.
+    fn address_mut(&mut self) -> u64 {
+        self.0.as_mut_ptr() as u64
     }
 }
 
@@ -267,7 +287,7 @@ impl PreparedRequest {
 
         let mut source = Box::new(DmaPages::<MAX_SRC_LEN>::zeroed());
         source.0[..src_len].copy_from_slice(&request.payload);
-        let destination = Box::new(DmaPages::<MAX_DST_LEN>::zeroed());
+        let mut destination = Box::new(DmaPages::<MAX_DST_LEN>::zeroed());
 
         let mut oob_data: Vec<Vec<u8>> = request.oob.iter().map(|item| item.data.clone()).collect();
         let mut oob_descriptors =
@@ -284,9 +304,13 @@ impl PreparedRequest {
         let mut sqe = request.sqe;
         set_address(&mut sqe, 2, source.address());
         set_address(&mut sqe, 4, 0);
-        set_address(&mut sqe, 7, destination.address());
+        // The HSM writes its response through this address (and, when
+        // the destination spans two pages, through the PRP2 address
+        // below), so both must carry writable provenance —
+        // `address_mut` (not `address`).
+        set_address(&mut sqe, 7, destination.address_mut());
         let dst_prp2 = if dst_len > PAGE_SIZE {
-            destination.address() + PAGE_SIZE as u64
+            destination.address_mut() + PAGE_SIZE as u64
         } else {
             0
         };
