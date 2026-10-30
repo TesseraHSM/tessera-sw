@@ -175,9 +175,13 @@ impl HsmSession {
     pub fn change_psk(&self, new_psk: &[u8; PSK_LEN]) -> HsmResult<()> {
         let inner = self.inner.read();
         match &inner.kind {
-            SessionKind::Ver2 { param_key, .. } => {
-                ddi::psk_change(&inner.partition, inner.id, param_key, new_psk)
-            }
+            SessionKind::Ver2 { param_key, .. } => ddi::psk_change(
+                &inner.partition,
+                inner.id,
+                param_key,
+                new_psk,
+                &inner.ddi_cookie,
+            ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
     }
@@ -595,7 +599,9 @@ impl Drop for HsmSessionInner {
             SessionKind::Ver1 { .. } => {
                 self.with_dev(|dev| ddi::close_session(dev, self.id, self.rev))
             }
-            SessionKind::Ver2 { .. } => ddi::close_session_ex(&self.partition, self.id),
+            SessionKind::Ver2 { .. } => {
+                ddi::close_session_ex(&self.partition, self.id, &self.ddi_cookie)
+            }
         };
 
         // Wipe sensitive session material from process memory once the
@@ -671,7 +677,7 @@ impl HsmSessionInner {
             id: result.session_id,
             rev,
             partition,
-            ddi_cookie: Mutex::new(None),
+            ddi_cookie: Mutex::new(result.ddi_cookie),
             last_restore_epoch: epoch,
             kind: SessionKind::Ver2 {
                 psk_id: result.psk_id,

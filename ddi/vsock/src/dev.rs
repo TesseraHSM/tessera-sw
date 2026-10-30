@@ -56,6 +56,7 @@ use tsra_ddi_sock_proto::Request;
 use tsra_ddi_sock_proto::Response;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
+use tsra_ddi_tbor_types::TborRespSessionId;
 use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::SessionFlags;
@@ -195,22 +196,29 @@ fn nix_to_io(error: nix::Error) -> std::io::Error {
     std::io::Error::from_raw_os_error(error as i32)
 }
 
-/// Tracks which MBOR session ids belong to the current connection
-/// generation on a [`DdiVsockDev`], so a stale `HsmSession`'s `Drop`
-/// impl (`api/lib/src/session.rs:508-519`, which unconditionally sends
-/// `CloseSession`/`InSession`) can't reach a replacement connection
-/// after [`DdiVsockDev::erase`] and tear down an unrelated, live session
-/// that reused the same numeric id.
+/// Tracks which MBOR and TBOR session ids belong to the current
+/// connection generation on a [`DdiVsockDev`], so a stale `HsmSession`'s
+/// `Drop` impl (`api/lib/src/session.rs:508-519`, which unconditionally
+/// sends `CloseSession`/`InSession`) can't reach a replacement
+/// connection after [`DdiVsockDev::erase`] and tear down an unrelated,
+/// live session that reused the same numeric id. This covers both V1
+/// (MBOR) sessions, via [`DdiVsockDev::exec_op_mbor`], and V2
+/// (security-domain) sessions opened over the TBOR handshake, via
+/// [`DdiVsockDev::exec_op_tbor`] — both share one tracker instance per
+/// device, so a single `reset()` bumps the generation for either
+/// transport's open sessions.
 ///
 /// Pure in-memory bookkeeping — no I/O — so it's unit-testable in
 /// isolation from the real AF_VSOCK transport (see the `tests` module
 /// below).
 ///
-/// Only covers the MBOR session path (`exec_op_mbor`): TBOR's
-/// `TborResp` trait has no accessor for a response-carried session id,
-/// and (per `api/lib/src/ddi/session_ex.rs`) resiliency/reopen handling
-/// isn't wired up for the TBOR transport at all yet, so there's no
-/// existing invariant this guard would need to preserve there.
+/// TBOR has no `ReopenSession`-equivalent command (per
+/// `api/lib/src/ddi/session_ex.rs`, a V2 session is always
+/// re-established via a fresh handshake rather than reopened), so
+/// [`check`](Self::check) and [`record`](Self::record) take an explicit
+/// `is_reopen` flag rather than an MBOR-specific opcode: MBOR's
+/// `exec_op_mbor` passes `opcode == DdiOp::ReopenSession`; TBOR's
+/// `exec_op_tbor` always passes `false`.
 #[derive(Default)]
 struct SessionGenerationTracker {
     /// Bumped by [`reset`](Self::reset) each time the live connection is
@@ -238,12 +246,16 @@ impl SessionGenerationTracker {
     /// a failed round trip would be too late, since the point is to keep
     /// a stale close from ever reaching the (possibly reused) live
     /// session on the replacement connection.
+    ///
+    /// `is_reopen` is `true` only for MBOR's `ReopenSession`, the sole
+    /// op allowed to use a stale-generation token (to explicitly reopen
+    /// it); TBOR has no equivalent op and always passes `false`.
     fn check(
         &self,
-        opcode: DdiOp,
         session_ctrl: SessionControlKind,
         session_id: Option<u16>,
         cookie: Option<DdiCookie>,
+        is_reopen: bool,
     ) -> DdiResult<()> {
         if session_ctrl == SessionControlKind::Open {
             // No session id to validate yet: the firmware hasn't assigned
@@ -259,8 +271,7 @@ impl SessionGenerationTracker {
         let current = self.generation.load(Ordering::SeqCst);
         match self.open_sessions.lock().get(&id) {
             Some(session)
-                if session.token == token
-                    && (session.generation == current || opcode == DdiOp::ReopenSession) =>
+                if session.token == token && (session.generation == current || is_reopen) =>
             {
                 Ok(())
             }
@@ -268,14 +279,17 @@ impl SessionGenerationTracker {
         }
     }
 
-    /// Record the bookkeeping side-effect of a successful MBOR
+    /// Record the bookkeeping side-effect of a successful MBOR or TBOR
     /// `Open`/`Close`/`ReopenSession` exchange.
+    ///
+    /// `is_reopen` is `true` only for MBOR's `ReopenSession`; see
+    /// [`check`](Self::check).
     fn record(
         &self,
-        opcode: DdiOp,
         session_ctrl: SessionControlKind,
         session_id: Option<u16>,
         cookie: &mut Option<DdiCookie>,
+        is_reopen: bool,
     ) {
         match session_ctrl {
             SessionControlKind::Open => {
@@ -296,7 +310,7 @@ impl SessionGenerationTracker {
                     self.open_sessions.lock().remove(&id);
                 }
             }
-            SessionControlKind::InSession if opcode == DdiOp::ReopenSession => {
+            SessionControlKind::InSession if is_reopen => {
                 if let (Some(id), Some(token)) = (session_id, *cookie) {
                     if let Some(session) = self.open_sessions.lock().get_mut(&id) {
                         if session.token == token {
@@ -337,6 +351,23 @@ fn reopen_identity_confirmed(
     match requested {
         Some(requested) => header_sess_id == Some(requested) && body_sess_id == Some(requested),
         None => true,
+    }
+}
+
+/// Maps a TBOR [`SessionControlKind`](tsra_ddi_tbor_types::SessionControlKind)
+/// onto the MBOR one of the same name, so [`exec_op_tbor`]
+/// (DdiVsockDev::exec_op_tbor) can share one [`SessionGenerationTracker`]
+/// instance with [`exec_op_mbor`](DdiVsockDev::exec_op_mbor). The two
+/// transports define independent enums (so the TBOR host surface has no
+/// transport-layer dependency on MBOR types — see that enum's doc
+/// comment), but both encode the same four states with the same wire
+/// byte values, so the mapping is a straightforward one-to-one.
+fn to_tracked_session_ctrl(ctrl: tsra_ddi_tbor_types::SessionControlKind) -> SessionControlKind {
+    match ctrl {
+        tsra_ddi_tbor_types::SessionControlKind::NoSession => SessionControlKind::NoSession,
+        tsra_ddi_tbor_types::SessionControlKind::Open => SessionControlKind::Open,
+        tsra_ddi_tbor_types::SessionControlKind::Close => SessionControlKind::Close,
+        tsra_ddi_tbor_types::SessionControlKind::InSession => SessionControlKind::InSession,
     }
 }
 
@@ -391,40 +422,20 @@ impl DdiVsockDev {
         self.cmd_counter.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Build a submission entry, exchange it with the host, and return
-    /// the response body bytes.
+    /// The I/O-only half of a submit: write the request and read the
+    /// response over an already-locked `stream`.
     ///
-    /// Mirrors [`tsra_ddi_sock`]'s `DdiSockDev::submit`: the client
-    /// constructs the SQE (opcode, command id, lengths, session flags) and
-    /// reads the returned CQE; the host only re-homes the DMA buffers. The
-    /// SQE's PRP address fields are left zero — the host assigns them.
+    /// Constructs the SQE (opcode, command id, lengths, session flags)
+    /// and reads the returned CQE; the host only re-homes the DMA
+    /// buffers. The SQE's PRP address fields are left zero — the host
+    /// assigns them. Maps a nonzero transport status (header) or device
+    /// status (CQE) to [`DdiError::DdiError`].
     ///
-    /// Maps a nonzero transport status (header) or device status (CQE) to
-    /// [`DdiError::DdiError`].
-    fn submit(
-        &self,
-        op: u16,
-        session_ctrl: u8,
-        session_id: Option<u16>,
-        payload: Vec<u8>,
-    ) -> DdiResult<Vec<u8>> {
-        let mut stream = self.stream.lock();
-        Self::submit_locked(
-            &mut stream,
-            self.next_cmd_id(),
-            op,
-            session_ctrl,
-            session_id,
-            payload,
-        )
-    }
-
-    /// The I/O-only half of [`submit`](Self::submit): write the request and
-    /// read the response over an already-locked `stream`.
-    ///
-    /// Split out so [`exec_op_mbor`](DdiDev::exec_op_mbor) can hold
-    /// `self.stream`'s lock across its session-generation check, this
-    /// exchange, *and* the resulting bookkeeping update — see that method
+    /// Takes an already-locked `stream` (rather than locking
+    /// `self.stream` itself) so both [`exec_op_mbor`](DdiDev::exec_op_mbor)
+    /// and [`exec_op_tbor`](DdiDev::exec_op_tbor) can hold that lock
+    /// across their session-generation check, this exchange, *and* the
+    /// resulting bookkeeping update — see `exec_op_mbor`'s doc comment
     /// for why those three steps must not be interleaved with
     /// [`erase`](DdiDev::erase).
     fn submit_locked(
@@ -595,8 +606,12 @@ impl DdiDev for DdiVsockDev {
         let cmd_id = self.next_cmd_id();
         let typed_resp = {
             let mut stream = self.stream.lock();
-            self.sessions
-                .check(opcode, session_ctrl, session_id, *cookie)?;
+            self.sessions.check(
+                session_ctrl,
+                session_id,
+                *cookie,
+                opcode == DdiOp::ReopenSession,
+            )?;
             let resp_buf = Self::submit_locked(
                 &mut stream,
                 cmd_id,
@@ -683,8 +698,12 @@ impl DdiDev for DdiVsockDev {
             // confirmed successful, still under the same lock `erase()`
             // uses.
             let recorded_session_id = session_id.or(hdr.sess_id);
-            self.sessions
-                .record(opcode, session_ctrl, recorded_session_id, cookie);
+            self.sessions.record(
+                session_ctrl,
+                recorded_session_id,
+                cookie,
+                opcode == DdiOp::ReopenSession,
+            );
             typed_resp
         };
 
@@ -695,7 +714,7 @@ impl DdiDev for DdiVsockDev {
         &self,
         req: &T,
         oob_items: Option<&[&[u8]]>,
-        _cookie: &mut Option<DdiCookie>,
+        cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
         // The wire protocol has a channel for out-of-band SGL descriptor
         // pages (see `tsra_ddi_sock_proto`'s OOB field and `vsocksrv`'s
@@ -707,6 +726,7 @@ impl DdiDev for DdiVsockDev {
         // ── 1. Encode the TBOR request.
         let session_ctrl = req.session_ctrl();
         let session_id = req.get_session_id();
+        let tracked_ctrl = to_tracked_session_ctrl(session_ctrl);
 
         let mut buf = vec![0u8; DST_CAP as usize];
         let req_len = {
@@ -715,14 +735,54 @@ impl DdiDev for DdiVsockDev {
         };
         buf.truncate(req_len);
 
-        // ── 2. Build the SQE and exchange it over the vsock connection.
-        let resp_buf = self.submit(OP_TBOR, u8::from(session_ctrl), session_id, buf)?;
-        if resp_buf.is_empty() {
-            return Err(DdiError::DdiError(0));
-        }
+        // ── 2. Check the session generation, exchange the SQE/CQE,
+        //    decode the typed response, and record the resulting
+        //    bookkeeping update, all while holding `self.stream`'s lock —
+        //    see `exec_op_mbor` for why these steps must stay atomic
+        //    with respect to a concurrent `erase()`. TBOR shares the
+        //    same `SessionGenerationTracker` instance (and so the same
+        //    generation counter) as the MBOR path, so a V2 session's
+        //    `CloseSession`/in-session request from a handle predating
+        //    an `erase()` is rejected the same way a stale V1 `Close`
+        //    is — it can't reach a replacement connection's session
+        //    that numerically reused the same id. TBOR has no
+        //    `ReopenSession` equivalent, so `is_reopen` is always
+        //    `false` here.
+        let cmd_id = self.next_cmd_id();
+        let typed_resp = {
+            let mut stream = self.stream.lock();
+            self.sessions
+                .check(tracked_ctrl, session_id, *cookie, false)?;
+            let resp_buf = Self::submit_locked(
+                &mut stream,
+                cmd_id,
+                OP_TBOR,
+                u8::from(session_ctrl),
+                session_id,
+                buf,
+            )?;
+            if resp_buf.is_empty() {
+                return Err(DdiError::DdiError(0));
+            }
 
-        // ── 3. Decode the typed response.
-        <T::OpResp>::decode_response(&resp_buf).map_err(Into::into)
+            // Decode the typed response before recording the
+            // generation transition, for the same reason
+            // `exec_op_mbor` does: a `SessionOpenInit` whose body
+            // fails to decode must not still be recorded as an open
+            // session with nothing locally able to close it.
+            let typed_resp = <T::OpResp>::decode_response(&resp_buf)?;
+
+            // `SessionOpenInit`'s response carries the FW-assigned
+            // session id in its body (`resp_session_id()`, via
+            // `TborRespSessionId`); `SessionClose` requests already
+            // know the id being torn down ahead of time.
+            let recorded_session_id = session_id.or(typed_resp.resp_session_id());
+            self.sessions
+                .record(tracked_ctrl, recorded_session_id, cookie, false);
+            typed_resp
+        };
+
+        Ok(typed_resp)
     }
 
     // ── Fast-path crypto ops are not supported over the vsock transport
@@ -860,47 +920,22 @@ mod tests {
 
         // Open never carries a known session id ahead of time.
         tracker
-            .check(DdiOp::OpenSession, SessionControlKind::Open, None, None)
+            .check(SessionControlKind::Open, None, None, false)
             .expect("Open is never rejected pre-send");
-        tracker.record(
-            DdiOp::OpenSession,
-            SessionControlKind::Open,
-            Some(7),
-            &mut cookie,
-        );
+        tracker.record(SessionControlKind::Open, Some(7), &mut cookie, false);
 
         // The freshly-opened id is usable in-session and closeable.
         tracker
-            .check(
-                DdiOp::EccSign,
-                SessionControlKind::InSession,
-                Some(7),
-                cookie,
-            )
+            .check(SessionControlKind::InSession, Some(7), cookie, false)
             .expect("freshly-opened id should be usable in-session");
         tracker
-            .check(
-                DdiOp::CloseSession,
-                SessionControlKind::Close,
-                Some(7),
-                cookie,
-            )
+            .check(SessionControlKind::Close, Some(7), cookie, false)
             .expect("freshly-opened id should be closeable");
-        tracker.record(
-            DdiOp::CloseSession,
-            SessionControlKind::Close,
-            Some(7),
-            &mut cookie,
-        );
+        tracker.record(SessionControlKind::Close, Some(7), &mut cookie, false);
 
         // Once closed, the id is no longer recognized.
         assert!(matches!(
-            tracker.check(
-                DdiOp::CloseSession,
-                SessionControlKind::Close,
-                Some(7),
-                cookie
-            ),
+            tracker.check(SessionControlKind::Close, Some(7), cookie, false),
             Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
         ));
     }
@@ -913,12 +948,7 @@ mod tests {
     fn stale_session_after_reset_is_rejected_even_if_id_is_reused() {
         let tracker = SessionGenerationTracker::default();
         let mut stale_cookie = None;
-        tracker.record(
-            DdiOp::OpenSession,
-            SessionControlKind::Open,
-            Some(3),
-            &mut stale_cookie,
-        );
+        tracker.record(SessionControlKind::Open, Some(3), &mut stale_cookie, false);
 
         // A partition reset: the old connection (and its session table)
         // is gone.
@@ -927,52 +957,27 @@ mod tests {
         // An old handle's close and in-session requests are rejected even
         // before the firmware reuses its numeric id.
         assert!(matches!(
-            tracker.check(
-                DdiOp::CloseSession,
-                SessionControlKind::Close,
-                Some(3),
-                stale_cookie
-            ),
+            tracker.check(SessionControlKind::Close, Some(3), stale_cookie, false),
             Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
         ));
         assert!(matches!(
-            tracker.check(
-                DdiOp::EccSign,
-                SessionControlKind::InSession,
-                Some(3),
-                stale_cookie
-            ),
+            tracker.check(SessionControlKind::InSession, Some(3), stale_cookie, false),
             Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
         ));
 
         // The replacement connection's firmware reuses id 3 for an
         // unrelated, live session opened after the reset.
         let mut new_cookie = None;
-        tracker.record(
-            DdiOp::OpenSession,
-            SessionControlKind::Open,
-            Some(3),
-            &mut new_cookie,
-        );
+        tracker.record(SessionControlKind::Open, Some(3), &mut new_cookie, false);
 
         // The stale handle must remain rejected after the new session is
         // recorded, while the new handle's token is accepted.
         assert!(matches!(
-            tracker.check(
-                DdiOp::CloseSession,
-                SessionControlKind::Close,
-                Some(3),
-                stale_cookie
-            ),
+            tracker.check(SessionControlKind::Close, Some(3), stale_cookie, false),
             Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
         ));
         tracker
-            .check(
-                DdiOp::CloseSession,
-                SessionControlKind::Close,
-                Some(3),
-                new_cookie,
-            )
+            .check(SessionControlKind::Close, Some(3), new_cookie, false)
             .expect("new session on reused id should be closeable");
     }
 
@@ -980,35 +985,15 @@ mod tests {
     fn matching_session_can_reopen_after_reset() {
         let tracker = SessionGenerationTracker::default();
         let mut cookie = None;
-        tracker.record(
-            DdiOp::OpenSession,
-            SessionControlKind::Open,
-            Some(9),
-            &mut cookie,
-        );
+        tracker.record(SessionControlKind::Open, Some(9), &mut cookie, false);
         tracker.reset();
 
         tracker
-            .check(
-                DdiOp::ReopenSession,
-                SessionControlKind::InSession,
-                Some(9),
-                cookie,
-            )
+            .check(SessionControlKind::InSession, Some(9), cookie, true)
             .expect("only the matching handle may reopen after reset");
-        tracker.record(
-            DdiOp::ReopenSession,
-            SessionControlKind::InSession,
-            Some(9),
-            &mut cookie,
-        );
+        tracker.record(SessionControlKind::InSession, Some(9), &mut cookie, true);
         tracker
-            .check(
-                DdiOp::EccSign,
-                SessionControlKind::InSession,
-                Some(9),
-                cookie,
-            )
+            .check(SessionControlKind::InSession, Some(9), cookie, false)
             .expect("reopened handle should use its session in the new generation");
     }
 
@@ -1018,12 +1003,7 @@ mod tests {
     fn unknown_session_id_is_rejected() {
         let tracker = SessionGenerationTracker::default();
         assert!(matches!(
-            tracker.check(
-                DdiOp::CloseSession,
-                SessionControlKind::Close,
-                Some(42),
-                None
-            ),
+            tracker.check(SessionControlKind::Close, Some(42), None, false),
             Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
         ));
     }
@@ -1034,7 +1014,7 @@ mod tests {
     fn no_session_requests_are_never_rejected() {
         let tracker = SessionGenerationTracker::default();
         tracker
-            .check(DdiOp::GetApiRev, SessionControlKind::NoSession, None, None)
+            .check(SessionControlKind::NoSession, None, None, false)
             .expect("sessionless requests are never rejected");
     }
 
@@ -1045,7 +1025,7 @@ mod tests {
     fn open_requests_are_never_rejected_regardless_of_session_id() {
         let tracker = SessionGenerationTracker::default();
         tracker
-            .check(DdiOp::OpenSession, SessionControlKind::Open, Some(99), None)
+            .check(SessionControlKind::Open, Some(99), None, false)
             .expect("Open is never rejected pre-send, even with a session_id");
     }
 
@@ -1057,19 +1037,49 @@ mod tests {
         let tracker = SessionGenerationTracker::default();
         tracker.reset();
         let mut cookie = None;
-        tracker.record(
-            DdiOp::OpenSession,
-            SessionControlKind::Open,
-            Some(1),
-            &mut cookie,
-        );
+        tracker.record(SessionControlKind::Open, Some(1), &mut cookie, false);
         tracker
-            .check(
-                DdiOp::CloseSession,
-                SessionControlKind::Close,
-                Some(1),
-                cookie,
-            )
+            .check(SessionControlKind::Close, Some(1), cookie, false)
             .expect("session opened after reset should be closeable");
+    }
+
+    /// A TBOR V2 session (no `is_reopen` concept) shares the same
+    /// tracker and generation counter as MBOR: a stale pre-erase
+    /// `SessionClose`/in-session handle must be rejected after `reset()`,
+    /// even though TBOR never passes `is_reopen = true`.
+    #[test]
+    fn tbor_session_shares_generation_tracking_with_mbor() {
+        let tracker = SessionGenerationTracker::default();
+        let mut cookie = None;
+
+        // `SessionOpenInit`'s response reports the FW-assigned id, same
+        // shape as MBOR's `Open`.
+        tracker
+            .check(SessionControlKind::Open, None, None, false)
+            .expect("Open is never rejected pre-send");
+        tracker.record(SessionControlKind::Open, Some(5), &mut cookie, false);
+
+        // `SessionOpenFinish`/`PskChange`-style in-session ops succeed
+        // against the current generation.
+        tracker
+            .check(SessionControlKind::InSession, Some(5), cookie, false)
+            .expect("freshly-opened TBOR session should be usable in-session");
+
+        // A partition reset invalidates the stale handle, even though
+        // TBOR has no reopen path to recover it.
+        tracker.reset();
+        assert!(matches!(
+            tracker.check(SessionControlKind::Close, Some(5), cookie, false),
+            Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
+        ));
+
+        // The replacement connection's firmware reuses id 5 for an
+        // unrelated, live TBOR session opened after the reset; the new
+        // session's own handle remains valid.
+        let mut new_cookie = None;
+        tracker.record(SessionControlKind::Open, Some(5), &mut new_cookie, false);
+        tracker
+            .check(SessionControlKind::Close, Some(5), new_cookie, false)
+            .expect("new TBOR session on reused id should be closeable");
     }
 }

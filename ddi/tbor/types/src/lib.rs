@@ -183,7 +183,7 @@ pub trait TborOpReq: Sized {
     const OPCODE: u8;
 
     /// Owned, decoded response type.
-    type OpResp: TborResp;
+    type OpResp: TborResp + TborRespSessionId;
 
     /// Session identifier for this request, if any. The default
     /// `None` matches the current bootstrap commands which are all
@@ -214,4 +214,20 @@ pub trait TborOpReq: Sized {
 pub trait TborResp: Sized {
     /// Decode an owned response value from the wire buffer.
     fn decode_response(buf: &[u8]) -> Result<Self, codec::DecodeError>;
+}
+
+/// Session id carried in a TBOR response body, if any.
+///
+/// Mirrors `tsra_ddi_mbor_types::DdiRespSessionId` for the TBOR
+/// transport: lets `DdiVsockDev::exec_op_tbor` record a response's own
+/// session id (e.g. `SessionOpenInit`'s FW-assigned id) the same way
+/// `exec_op_mbor` does for `OpenSession`/`ReopenSession`.
+///
+/// The `#[tbor(response)]` derive implements this for every response
+/// struct automatically: a response with a `#[tbor(session_id)]`-tagged
+/// field returns that field's value; every other response (the vast
+/// majority, which carry no session id of their own) returns `None`.
+pub trait TborRespSessionId {
+    /// The session id this response reports, if any.
+    fn resp_session_id(&self) -> Option<u16>;
 }
