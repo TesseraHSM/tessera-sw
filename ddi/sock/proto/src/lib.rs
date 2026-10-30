@@ -297,7 +297,7 @@ impl Request {
         let sqe = frame.dword16(FieldId::Sqe)?;
         let payload = frame.bytes(FieldId::Payload)?.to_vec();
         let oob = frame
-            .optional_bytes(FieldId::Oob)
+            .optional_bytes(FieldId::Oob)?
             .map(decode_oob)
             .transpose()?
             .unwrap_or_default();
@@ -586,21 +586,33 @@ impl<'a> Frame<'a> {
         Err(ProtoError::Malformed("required field missing"))
     }
 
-    fn optional_bytes(&self, id: FieldId) -> Option<&'a [u8]> {
-        self.toc.iter().find_map(|entry| {
-            if FieldId::from_u16(entry.field_id) != Some(id) {
-                return None;
-            }
-            // Bounds are validated against the data section in `parse` for
-            // every `Frame` constructed through it (the only way to build
-            // one), so this should never fail in practice. Use checked
-            // slicing anyway rather than relying on that invariant holding
-            // for all current and future callers — a malformed/corrupted
-            // frame should return `None` here, not panic.
-            let start = entry.offset as usize;
-            let end = start.checked_add(entry.length as usize)?;
-            self.data.get(start..end)
-        })
+    fn optional_bytes(&self, id: FieldId) -> Result<Option<&'a [u8]>, ProtoError> {
+        let Some(entry) = self
+            .toc
+            .iter()
+            .find(|entry| FieldId::from_u16(entry.field_id) == Some(id))
+        else {
+            return Ok(None);
+        };
+        if entry.field_type != FieldType::Buffer {
+            return Err(ProtoError::Malformed("field is not a buffer"));
+        }
+        // Bounds are validated against the data section in `parse` for
+        // every `Frame` constructed through it (the only way to build
+        // one), so this should never fail in practice. Use checked
+        // slicing anyway rather than relying on that invariant holding
+        // for all current and future callers — a malformed/corrupted
+        // frame should be rejected with `Malformed` here, not silently
+        // treated as "field absent" (which would let a corrupted/malicious
+        // field smuggle an empty value past callers like `Request::decode`).
+        let start = entry.offset as usize;
+        let end = start
+            .checked_add(entry.length as usize)
+            .ok_or(ProtoError::Malformed("field extends past data section"))?;
+        self.data
+            .get(start..end)
+            .ok_or(ProtoError::Malformed("field extends past data section"))
+            .map(Some)
     }
 
     /// Read a fixed 16-dword field (the SQE).
