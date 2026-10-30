@@ -49,6 +49,7 @@ members = [
   "examples/sock/ddi_sock_ecc384_loop",
   "examples/sock/ddi_sock_get_api_rev",
   "examples/sock/ddi_sock_server",
+  "examples/vsocksrv",
   "fw/core/crypto/aead-envelope",
   "fw/core/crypto/aes-cbc-pad",
   "fw/core/crypto/cose-key",
@@ -91,7 +92,6 @@ members = [
   "plugins/ossl_prov/integration-tests/openssl-capi",
   "plugins/ossl_prov/integration-tests/openssl-cli",
   "tools/resiliency_stress",
-  "tools/vsocksrv",
   "xtask",
 
 ]
