@@ -13,11 +13,11 @@
 #[path = "../../common.rs"]
 mod common;
 
+use libfuzzer_sys::arbitrary::*;
+use libfuzzer_sys::*;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use libfuzzer_sys::arbitrary::*;
-use libfuzzer_sys::*;
 use x509::*;
 
 /// Four independent bytes keep raw requests and directed smoke-test seeds small.
@@ -127,11 +127,9 @@ fn exercise_request(ctx: &TestCtx, request: &TborGetCertReq, count: u8, state: L
     if expect_success {
         let response = read_certificate(ctx, request, state);
         if request.slot_id == 0 {
-            let mbor = ctx.get_certificate(request.cert_id).unwrap_or_else(|err| {
-                panic!(
-                    "TborGetCertReq in {state:?} failed: {err:?}"
-                )
-            });
+            let mbor = ctx
+                .get_certificate(request.cert_id)
+                .unwrap_or_else(|err| panic!("TborGetCertReq in {state:?} failed: {err:?}"));
             assert_eq!(
                 response.certificate.as_slice(),
                 mbor.data.certificate.as_slice(),

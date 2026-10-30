@@ -18,10 +18,10 @@
 #[path = "../../common.rs"]
 mod common;
 
+use libfuzzer_sys::*;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use libfuzzer_sys::*;
 
 /// Masking overhead inferred from the exported P-256 secret envelope size.
 const MASK_OVERHEAD: usize = CONCAT_MASKED_SECRET_MIN_LEN - 32;
@@ -340,7 +340,10 @@ fn expected_outcome(
 fn assert_rejection(err: &DdiError, expected: TborStatus) {
     match err {
         DdiError::DdiError(code) => assert_eq!(*code, expected.0, "wrong backend status"),
-        _ => assertions::assert_fw_rejects(err, expected),
+        DdiError::TborStatus(status) => {
+            assert_eq!(*status, expected, "FW rejected with wrong TborStatus")
+        }
+        _ => panic!("unexpected error type"),
     }
 }
 

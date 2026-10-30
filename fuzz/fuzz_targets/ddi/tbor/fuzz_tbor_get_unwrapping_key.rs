@@ -16,12 +16,12 @@ mod common;
 
 use std::time::Duration;
 
+use libfuzzer_sys::arbitrary::*;
+use libfuzzer_sys::*;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use libfuzzer_sys::arbitrary::*;
-use libfuzzer_sys::*;
 
 /// Lifecycle state in which to send the input-selected request.
 #[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]

@@ -15,11 +15,11 @@
 mod common;
 
 use arbitrary::*;
+use common::EccCurve;
+use libfuzzer_sys::*;
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use common::EccCurve;
-use libfuzzer_sys::*;
 
 /// Partition/session lifecycle established before issuing the fuzzed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

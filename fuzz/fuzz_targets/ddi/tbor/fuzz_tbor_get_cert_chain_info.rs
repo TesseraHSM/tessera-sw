@@ -13,11 +13,11 @@
 mod common;
 
 use arbitrary::*;
+use libfuzzer_sys::*;
 use tsra_ddi_tbor_codec::*;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
-use libfuzzer_sys::*;
 
 /// Three independent bytes keep lifecycle and request scenarios easy to mutate.
 #[derive(Arbitrary, Debug)]
@@ -143,9 +143,9 @@ fn exercise_request<R: TborOpReq<OpResp = TborGetCertChainInfoResp> + core::fmt:
             ctx.expect_fw_reject(request, status);
         }
         Expected::Success(slot_id) => {
-            let response = ctx
-                .tbor(request)
-                .unwrap_or_else(|err| panic!("valid TborGetCertChainInfoReq in {state:?} failed: {err:?}"));
+            let response = ctx.tbor(request).unwrap_or_else(|err| {
+                panic!("valid TborGetCertChainInfoReq in {state:?} failed: {err:?}")
+            });
             validate_metadata(&response);
             if slot_id == 0 {
                 assert_eq!(
