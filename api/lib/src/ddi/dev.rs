@@ -169,6 +169,27 @@ impl HsmDev {
         ACTIVE_SESSION_COOKIE.with(|active| active.set(SessionCookieScope::Active(active_cookie)));
         result
     }
+
+    /// Mirrors [`exec_op_mbor`](Self::exec_op_mbor): session-bound TBOR
+    /// ops traditionally pass `&mut None` through the DDI layer too, so
+    /// scope them onto the active [`with_session_cookie`] handle's
+    /// backend cookie the same way, keeping V2 (TBOR) sessions'
+    /// generation-bound tokens threaded through transparently.
+    pub(crate) fn exec_op_tbor<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: Option<&[&[u8]]>,
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let SessionCookieScope::Active(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get)
+        else {
+            return self.0.exec_op_tbor(req, oob_items, cookie);
+        };
+
+        let result = self.0.exec_op_tbor(req, oob_items, &mut active_cookie);
+        ACTIVE_SESSION_COOKIE.with(|active| active.set(SessionCookieScope::Active(active_cookie)));
+        result
+    }
 }
 
 impl Deref for HsmDev {

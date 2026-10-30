@@ -248,6 +248,19 @@ fn gen_response(item: &ItemStruct, fields: &[ParsedField]) -> TokenStream2 {
         quote! { Self { #(#names,)* } }
     };
 
+    // A response with a `#[tbor(session_id)]`-tagged field (today, only
+    // `TborSessionOpenInitResp`) reports that field's value via
+    // `TborRespSessionId`; every other response has no session id of
+    // its own and reports `None`.
+    let session_id_field = fields
+        .iter()
+        .find(|f| matches!(f.shape, FieldShape::SessionId))
+        .map(|f| f.name.clone());
+    let resp_session_id_impl = match &session_id_field {
+        Some(field) => quote! { ::core::option::Option::Some(self.#field) },
+        None => quote! { ::core::option::Option::None },
+    };
+
     quote! {
         impl ::tsra_ddi_tbor_types::TborResp for #name {
             const FIELD_TOC_COUNT: usize = #expected_toc;
@@ -272,6 +285,12 @@ fn gen_response(item: &ItemStruct, fields: &[ParsedField]) -> TokenStream2 {
                 // prefix.
                 #decode_steps
                 ::core::result::Result::Ok(#construct)
+            }
+        }
+
+        impl ::tsra_ddi_tbor_types::TborRespSessionId for #name {
+            fn resp_session_id(&self) -> ::core::option::Option<u16> {
+                #resp_session_id_impl
             }
         }
     }
