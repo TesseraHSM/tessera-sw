@@ -39,9 +39,9 @@ namespace
 // (`MASKED_KEX_KEY_LEN`, `KEX_PUB_KEY_LEN`, `MASKED_TMK_LEN`,
 // `SEALED_TMK_LEN`, `DARC_WRAP_WRAPPED_KEY_MAX_LEN`), which are not exposed
 // in the C header.
-constexpr uint32_t kMaskedKexKeyLen = 276;
+constexpr uint32_t kMaskedKexKeyLen = 280;
 constexpr uint32_t kKexPubKeyLen = 96;
-constexpr uint32_t kMaskedTmkLen = 260;
+constexpr uint32_t kMaskedTmkLen = 264;
 constexpr uint32_t kSealedTmkLen = 145;
 constexpr uint32_t kWrapWrappedKeyMaxLen = 512;
 

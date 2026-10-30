@@ -7,6 +7,7 @@
 #include <tsra_api.h>
 
 #include "handle/part_list_handle.hpp"
+#include "utils/sd_provision.hpp"
 #include "utils/utils.hpp"
 
 static_assert(offsetof(tsra_sess_ex_part_init_params, part_policy) == 0);
@@ -669,8 +670,8 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
             scope_guard::make_scope_exit([&sess_handle] { tsra_sess_close(sess_handle); });
 
         std::vector<uint8_t> policy(485, 0);
-        std::vector<uint8_t> key(276, 0);
-        std::vector<uint8_t> backup(276, 0);
+        std::vector<uint8_t> key(kMaskedSealingKeyLen, 0);
+        std::vector<uint8_t> backup(kPokLocalBackupLen, 0);
         uint8_t cert = 0;
         uint8_t report = 0;
         tsra_buffer policy_buf{ policy.data(), 0 };
@@ -680,8 +681,8 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         tsra_sd_cert_chain chain{ &cert_buf, 1 };
         tsra_sd_evidence evidence{ chain, chain, chain, &report_buf };
         tsra_buffer remote_backup{ backup.data(), 161 };
-        tsra_buffer local_backup{ backup.data(), 276 };
-        tsra_buffer mk_backup{ backup.data(), 260 };
+        tsra_buffer local_backup{ backup.data(), kPokLocalBackupLen };
+        tsra_buffer mk_backup{ backup.data(), kSdMkBackupLen };
 
         tsra_sd_create_remote_backup_params create{
             &policy_buf,
@@ -706,8 +707,8 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         };
 
         std::vector<uint8_t> remote(161, 0);
-        std::vector<uint8_t> local(276, 0);
-        std::vector<uint8_t> mk(260, 0);
+        std::vector<uint8_t> local(kPokLocalBackupLen, 0);
+        std::vector<uint8_t> mk(kSdMkBackupLen, 0);
         tsra_buffer remote_out{ remote.data(), static_cast<uint32_t>(remote.size()) };
         tsra_buffer local_out{ local.data(), static_cast<uint32_t>(local.size()) };
         tsra_buffer mk_out{ mk.data(), static_cast<uint32_t>(mk.size()) };
