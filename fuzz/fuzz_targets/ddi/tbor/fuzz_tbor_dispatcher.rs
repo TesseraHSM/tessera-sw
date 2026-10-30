@@ -17,7 +17,8 @@ struct FuzzInput {
     /// Session identifier supplied in place of the original MBOR request
     /// header's session id.
     request_header: FuzzRequestHeader,
-    /// Whether non-scope parameters should describe a valid request.
+    /// Whether to skip deliberately invalidating the selected field.
+    /// Key scope, usage, and label remain fuzzed and may still be invalid.
     valid_request: bool,
     /// Scope requested for the generated ECC key.
     key_scope: common::KeyScope,

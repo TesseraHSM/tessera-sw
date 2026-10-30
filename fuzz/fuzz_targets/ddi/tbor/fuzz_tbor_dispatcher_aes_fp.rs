@@ -66,6 +66,7 @@ struct FuzzInput {
 }
 
 const MAX_FUZZ_MSG_LEN: usize = AES_MSG_MAX_LEN + 1;
+const MAX_FUZZ_MASKED_KEY_INPUT_LEN: usize = 256;
 
 /// Concatenate source buffers, retaining at most one byte beyond the TBOR
 /// message limit so oversized inputs exercise length validation.
@@ -118,10 +119,11 @@ fn iv_from_input(input: &FuzzInput) -> [u8; AES_IV_LEN] {
     }
 }
 
-/// Append the selected legacy GCM or XTS request fields to the fuzzed
-/// masked-key bytes for requests that do not generate a valid key.
+/// Append the selected legacy GCM or XTS request fields to bounded fuzzed
+/// masked-key bytes and AAD for requests that do not generate a valid key.
 fn legacy_masked_key(input: &FuzzInput) -> Vec<u8> {
-    let mut key = input.masked_key.clone();
+    let mut key =
+        input.masked_key[..input.masked_key.len().min(MAX_FUZZ_MASKED_KEY_INPUT_LEN)].to_vec();
     match input.aes_type {
         FuzzAesType::AesGcm => {
             key.extend_from_slice(&input.gcm_request.key_id.to_le_bytes());
@@ -131,7 +133,7 @@ fn legacy_masked_key(input: &FuzzInput) -> Vec<u8> {
                 key.extend_from_slice(&tag);
             }
             if let Some(aad) = &input.gcm_request.aad {
-                key.extend_from_slice(aad);
+                key.extend_from_slice(&aad[..aad.len().min(MAX_FUZZ_MASKED_KEY_INPUT_LEN)]);
             }
         }
         FuzzAesType::AesXts => {
@@ -157,8 +159,15 @@ fuzz_target!(|input: FuzzInput| {
         );
         let key_usage_is_valid = input.key_usage == (KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT);
         let key_label_is_valid = input.key_label.len() <= TBOR_KEY_LABEL_MAX_LEN;
-        let key_generation_should_succeed =
-            key_scope_is_supported && key_usage_is_valid && key_label_is_valid;
+        let key_size = input.key_size.to_tbor();
+        let key_size_is_supported = matches!(
+            key_size,
+            AES_KEY_SIZE_128 | AES_KEY_SIZE_192 | AES_KEY_SIZE_256
+        );
+        let key_generation_should_succeed = key_scope_is_supported
+            && key_usage_is_valid
+            && key_label_is_valid
+            && key_size_is_supported;
 
         if input.use_valid_key && key_generation_should_succeed {
             match input.key_scope {
@@ -178,7 +187,7 @@ fuzz_target!(|input: FuzzInput| {
             match ctx.tbor(&TborAesGenerateKeyReq {
                 session_id: session.session_id,
                 scope: input.key_scope.to_tbor(),
-                key_size: input.key_size.to_tbor(),
+                key_size,
                 key_usage: input.key_usage,
                 key_label: input.key_label.clone(),
             }) {
