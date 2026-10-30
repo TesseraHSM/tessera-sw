@@ -20,10 +20,10 @@ pub const PK_RESP_LEN: usize = 97;
 /// Length of the Phase-1 confirmation MAC (HMAC-SHA-384).
 pub const MAC_RESP_LEN: usize = 48;
 
-/// Wire identifier for the only `SessionSuite` currently implemented
+/// Wire identifier for the only `HsmSessionSuite` currently implemented
 /// — HPKE `DHKEM(P-384, HKDF-SHA-384) + HKDF-SHA-384 + AES-256-GCM`.
 ///
-/// Mirrors the FW-side `SessionSuite::P384HkdfSha384AesGcm256`
+/// Mirrors the FW-side `HsmSessionSuite::P384HkdfSha384AesGcm256`
 /// discriminant.
 pub const SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256: u8 = 0x01;
 
@@ -46,7 +46,7 @@ pub const SESSION_PHASE1_LABEL: &[u8] = b"phase1-confirm";
 
 /// Channel-level integrity profile for a TBOR session.
 ///
-/// Host-side mirror of `tsra_fw_hsm_pal_traits::SessionType` —
+/// Host-side mirror of `tsra_fw_hsm_pal_traits::HsmSessionType` —
 /// kept here as an independent definition so the host crate does not
 /// have to pull in the firmware PAL traits.  The on-wire `u8`
 /// encoding matches the FW enum so both sides populate the same SQE
@@ -96,7 +96,7 @@ pub struct TborSessionOpenInitReq {
     /// the HSM with `InvalidSessionType`.
     pub session_type: U8,
 
-    /// Cryptographic suite identifier.  See `SessionSuite` in the PAL
+    /// Cryptographic suite identifier.  See `HsmSessionSuite` in the PAL
     /// traits crate for the registered values.  Today only `0x01`
     /// (`P384HkdfSha384AesGcm256`) is accepted; any other value is
     /// rejected by the HSM with `UnsupportedSessionSuite`.

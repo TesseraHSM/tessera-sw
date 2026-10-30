@@ -26,7 +26,15 @@ pub(crate) async fn get_certificate<'p, P: HsmPal>(
     let body: DdiGetCertificateReq = decoder.decode_data()?;
 
     // Query cert size (no copy).
-    let len = pal.get_cert(io, body.slot_id, body.cert_id, None).await?;
+    let len = pal
+        .get_cert(
+            io,
+            HsmCertSlot(body.slot_id),
+            HsmCertBank::Ecc,
+            body.cert_id,
+            None,
+        )
+        .await?;
 
     // Reserve the response inside a closure (encoder borrow ends with the
     // closure), recording where the cert slot landed in a layout returned
@@ -41,8 +49,14 @@ pub(crate) async fn get_certificate<'p, P: HsmPal>(
 
     let frame = DdiGetCertificateResp::from_layout(resp, &layout);
 
-    pal.get_cert(io, body.slot_id, body.cert_id, Some(frame.certificate))
-        .await?;
+    pal.get_cert(
+        io,
+        HsmCertSlot(body.slot_id),
+        HsmCertBank::Ecc,
+        body.cert_id,
+        Some(frame.certificate),
+    )
+    .await?;
 
     Ok(resp)
 }

@@ -70,12 +70,12 @@ use tsra_fw_ddi_tbor_types::SAPOTA_THUMBPRINT_LEN;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
-use tsra_fw_hsm_pal_traits::PartState;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::pta;
@@ -249,7 +249,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
     // PartInit is CO-only.  The dispatcher's default-PSK gate uses
     // the same `psk_id_for_role` mapping but does not by itself
     // reject CU sessions on this opcode.
-    if sess_id.role() != SessionRole::CryptoOfficer {
+    if sess_id.role() != HsmSessionRole::CryptoOfficer {
         return Err(HsmError::InvalidPermissions);
     }
 
@@ -679,7 +679,7 @@ fn commit_partition_state<P: HsmPal>(
     if let Some(sapota) = inputs.sapota_thumb {
         crate::part_state::part_set_sapota_thumbprint(pal, io, sapota)?;
     }
-    crate::part_state::part_set_state(pal, io, PartState::Initializing)?;
+    crate::part_state::part_set_state(pal, io, HsmPartState::Initializing)?;
     Ok(())
 }
 
@@ -687,18 +687,18 @@ fn commit_partition_state<P: HsmPal>(
 /// in commit order (the dispatcher walks them LIFO).  Each write-once
 /// field restores to **absent** (it was unset before PartInit); STATE
 /// restores to its prior `Enabled`.  The two `part_set_pta_key` fields
-/// (`PTA_KEY_ID` + `PTA_PUB_KEY`) are recorded together.
+/// (`PTA_KEY_ID` + `PTA_ECC_PUB_KEY`) are recorded together.
 fn record_field_undo(undo: &mut UndoLog<'_>, has_sapota: bool) -> HsmResult<()> {
-    undo.push_prop_restore_absent(PartPropId::PTA_KEY_ID)?;
-    undo.push_prop_restore_absent(PartPropId::PTA_PUB_KEY)?;
-    undo.push_prop_restore_absent(PartPropId::UPS_KEY_ID)?;
-    undo.push_prop_restore_absent(PartPropId::POLICY_HASH)?;
-    undo.push_prop_restore_absent(PartPropId::POTA_THUMBPRINT)?;
-    undo.push_prop_restore_absent(PartPropId::SATA_THUMBPRINT)?;
+    undo.push_prop_restore_absent(HsmPartPropId::PTA_KEY_ID)?;
+    undo.push_prop_restore_absent(HsmPartPropId::PTA_ECC_PUB_KEY)?;
+    undo.push_prop_restore_absent(HsmPartPropId::UPS_KEY_ID)?;
+    undo.push_prop_restore_absent(HsmPartPropId::POLICY_HASH)?;
+    undo.push_prop_restore_absent(HsmPartPropId::POTA_THUMBPRINT)?;
+    undo.push_prop_restore_absent(HsmPartPropId::SATA_THUMBPRINT)?;
     if has_sapota {
-        undo.push_prop_restore_absent(PartPropId::SAPOTA_THUMBPRINT)?;
+        undo.push_prop_restore_absent(HsmPartPropId::SAPOTA_THUMBPRINT)?;
     }
-    undo.push_prop_restore_scalar(PartPropId::STATE, PartState::Enabled as u32)
+    undo.push_prop_restore_scalar(HsmPartPropId::PART_STATE, HsmPartState::Enabled as u32)
 }
 
 /// Encode the `TborPartInitResp` into a fresh IO-scoped HsmDmaBuf.

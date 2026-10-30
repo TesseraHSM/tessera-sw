@@ -20,6 +20,8 @@
 use tsra_fw_ddi_tbor_types::TborGetCertReq;
 use tsra_fw_ddi_tbor_types::TborGetCertResp;
 use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
+use tsra_fw_hsm_pal_traits::HsmCertBank;
+use tsra_fw_hsm_pal_traits::HsmCertSlot;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -36,10 +38,10 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     let req = TborGetCertReq::decode(cmd_buf.request())?;
-    let slot_id = req.slot_id();
+    let slot = HsmCertSlot(req.slot_id());
     let cert_id = req.cert_id();
 
-    if slot_id == 2 {
+    if slot == HsmCertSlot::PartOwner {
         if cert_id != 0 {
             return Err(HsmError::InvalidArg);
         }
@@ -54,7 +56,9 @@ pub(crate) async fn handle<P: HsmPal>(
     }
 
     // Query the certificate size (no copy).
-    let len = pal.get_cert(io, slot_id, cert_id, None).await?;
+    let len = pal
+        .get_cert(io, slot, HsmCertBank::Ecc, cert_id, None)
+        .await?;
 
     // A provisioned certificate that overflows the wire bound is an
     // internal provisioning invariant violation, not a caller-input error.
@@ -77,7 +81,7 @@ pub(crate) async fn handle<P: HsmPal>(
     {
         let out = TborGetCertResp::decode_mut(&mut cmd_buf.buffer_mut()[..resp])?;
         let actual = pal
-            .get_cert(io, slot_id, cert_id, Some(out.certificate))
+            .get_cert(io, slot, HsmCertBank::Ecc, cert_id, Some(out.certificate))
             .await?;
         if actual != len {
             return Err(HsmError::InternalError);

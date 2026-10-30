@@ -31,14 +31,10 @@ pub(crate) fn is_bulk(kind: HsmVaultKeyKind) -> bool {
 /// Commit freshly produced key `material` to the vault and return its
 /// handle plus, for bulk kinds, the backend-assigned `bulk_key_id`.
 ///
-/// The core treats every key uniformly: it always calls
-/// [`vault_key_create`](HsmVault::vault_key_create) and then queries
-/// [`bulk_key_id`](HsmVault::bulk_key_id).  For bulk kinds a PAL with a
-/// bulk backend registers the key in `vault_key_create` and stores only an
-/// opaque handle, so `bulk_key_id` returns `Some`; ordinary keys store
-/// their material and return `None`.  A bulk kind that produces no id
-/// (backend-less platform) rolls back the vault entry and returns
-/// `UnsupportedCmd`.
+/// All keys are created through [`vault_key_create`](HsmVault::vault_key_create).
+/// Only bulk kinds query [`bulk_key_id`](HsmVault::bulk_key_id); ordinary
+/// keys return `None` for the bulk id. A failed bulk-id lookup rolls back
+/// the vault entry and propagates the error.
 pub(crate) async fn commit_key<P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -56,19 +52,19 @@ pub(crate) async fn commit_key<P: HsmPal>(
             attrs,
         )
         .await?;
-    let bulk_key_id = match pal.bulk_key_id(io, handle) {
-        Ok(id) => id,
-        // Roll back the just-created key so a lookup failure can't leave the
-        // vault entry (and any backend registration) behind with no handle.
-        Err(e) => {
-            let _ = pal.vault_key_delete(io, handle).await;
-            return Err(e);
+    let bulk_key_id = if is_bulk(kind) {
+        match pal.bulk_key_id(io, handle) {
+            Ok(id) => Some(id),
+            // Roll back the just-created key so a lookup failure can't leave the
+            // vault entry (and any backend registration) behind with no handle.
+            Err(e) => {
+                let _ = pal.vault_key_delete(io, handle).await;
+                return Err(e);
+            }
         }
+    } else {
+        None
     };
-    if is_bulk(kind) && bulk_key_id.is_none() {
-        let _ = pal.vault_key_delete(io, handle).await;
-        return Err(HsmError::UnsupportedCmd);
-    }
     Ok((handle, bulk_key_id))
 }
 

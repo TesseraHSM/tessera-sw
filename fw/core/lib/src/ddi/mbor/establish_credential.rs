@@ -540,7 +540,7 @@ async fn decrypt_credential<P: HsmPal>(
     // original ciphertext into `iv_chain` for use as the next IV.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_id,
         enc_cred.iv,
@@ -551,7 +551,7 @@ async fn decrypt_credential<P: HsmPal>(
     // Block 2: AES-CBC decrypt `enc_pin` in place with `iv_chain`.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_pin,
         iv_chain,

@@ -26,6 +26,7 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -34,7 +35,6 @@ use tsra_fw_hsm_pal_traits::SESSION_MAC_DIR_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_uno_drivers_session_store::SessionStore;
 
 use crate::UnoHsmIo;
@@ -73,7 +73,7 @@ impl HsmSessionManager for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         api_rev: &[u8],
-        masking_key: &[u8],
+        masking_key: &HsmDmaBuf,
         id: Option<HsmSessId>,
     ) -> HsmResult<HsmSessId> {
         if api_rev.len() != SESSION_API_REV_SIZE || masking_key.len() != SESSION_MASKING_KEY_SIZE {
@@ -199,7 +199,7 @@ impl HsmSessionManager for UnoHsmPal {
     async fn session_create_pending(
         &self,
         io: &UnoHsmIo,
-        role: SessionRole,
+        role: HsmSessionRole,
         handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId> {
         if handshake_state.is_empty() || handshake_state.len() > SESSION_PENDING_BLOB_MAX {
@@ -248,7 +248,7 @@ impl HsmSessionManager for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         id: HsmSessId,
-        out: Option<&mut [u8]>,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.pending_phys(id)?;
@@ -271,10 +271,10 @@ impl HsmSessionManager for UnoHsmPal {
         io: &UnoHsmIo,
         id: HsmSessId,
         api_rev: &[u8],
-        param_key: &[u8],
-        masking_key: &[u8],
-        mac_tx_key: Option<&[u8]>,
-        mac_rx_key: Option<&[u8]>,
+        param_key: &HsmDmaBuf,
+        masking_key: &HsmDmaBuf,
+        mac_tx_key: Option<&HsmDmaBuf>,
+        mac_rx_key: Option<&HsmDmaBuf>,
     ) -> HsmResult<()> {
         if api_rev.len() != SESSION_API_REV_SIZE
             || param_key.len() != SESSION_PARAM_KEY_LEN

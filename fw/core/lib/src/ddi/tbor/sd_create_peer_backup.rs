@@ -68,11 +68,11 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::masking_key_id_for_scope;
 use super::part_final::verify_policy_hash;
@@ -276,7 +276,7 @@ fn gate_request<P: HsmPal>(pal: &P, io: &P::Io, req_buf: &HsmDmaBuf) -> HsmResul
 
     // `PartLocalMK` and the policy hash are provisioned by `PartFinal`, so
     // the partition must be finalized (`Initialized`).
-    if part_state::part_state(pal, io)? != PartState::Initialized {
+    if part_state::part_state(pal, io)? != HsmPartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
 

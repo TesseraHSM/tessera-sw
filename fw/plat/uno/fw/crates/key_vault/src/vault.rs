@@ -599,7 +599,7 @@ impl<S: TableStorage> KeyVault<S> {
             }
             let region = &mut blob[attrs_off..end];
             if total > DMA_THRESHOLD {
-                gdma.zeroize_mem(io, region).await?;
+                gdma.zero_mem(io, region).await?;
             } else {
                 for byte in region.iter_mut() {
                     // SAFETY: this is an exclusive byte in the retired vault entry.

@@ -13,7 +13,7 @@
 //!
 //! * `BKS3` (48 B) — the security-domain partition-owner seed.
 //! * `SDBMK` — the SD backup masking key, `KBKDF(BKS3, mfgr_seed[svn] ‖
-//!   owner_seed[owner] ‖ policy_hash)`; derived on demand, never vaulted.
+//!   dev_owner_seed[owner] ‖ policy_hash)`; derived on demand, never vaulted.
 //! * `SDMK` (32 B) — the live SecurityDomain-scope masking key, vaulted.
 //!
 //! Envelopes:
@@ -33,11 +33,11 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
 use tsra_fw_hsm_undo::UndoLog;
 
 use crate::part_state;
@@ -129,7 +129,7 @@ pub(super) async fn recover_bks3_from_pok_local<'a, P: HsmPal>(
 
 /// Derive `SDBMK` for `bks3` at `{svn, owner}` into a fresh scoped buffer.
 ///
-/// `SDBMK = KBKDF(BKS3, mfgr_seed[svn] ‖ owner_seed[owner] ‖ policy_hash)`.
+/// `SDBMK = KBKDF(BKS3, mfgr_seed[svn] ‖ dev_owner_seed[owner] ‖ policy_hash)`.
 /// Binding the partition `policy_hash` proves the backup was produced by a
 /// TSRA wielding the same policy.  Both the create and restore paths
 /// key on the same label so the derived key round-trips.
@@ -272,7 +272,7 @@ pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
     sd_mk_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // Peek the previous sd_mk_backup's own cleartext `{svn, owner}`.  SDBMK is
-    // bound to `{svn, owner}` (KBKDF over `mfgr_seed[svn] ‖ owner_seed[owner]`),
+    // bound to `{svn, owner}` (KBKDF over `mfgr_seed[svn] ‖ dev_owner_seed[owner]`),
     // so the backup must be unmasked with SDBMK re-derived at the SVN/owner it
     // was *minted* under — not the current platform's.  The versioned device
     // seeds are forward-derivable, so this is what lets an older-SVN backup be
@@ -337,7 +337,7 @@ pub(super) async fn commit_sd_to_vault<'p, P: HsmPal>(
     // Atomic one-shot claim first (the race-winner gate); the recorded
     // inverse clears the flag on rollback.
     part_state::part_mark_sd_initialized(pal, io)?;
-    if let Err(e) = undo.push_prop_restore_scalar(PartPropId::SD_INITIALIZED, 0) {
+    if let Err(e) = undo.push_prop_restore_scalar(HsmPartPropId::SD_INITIALIZED, 0) {
         // The claim succeeded but its rollback inverse could not be
         // recorded (e.g. `UndoLogFull`); clear the flag now (best-effort)
         // so a full undo log cannot permanently wedge the partition's

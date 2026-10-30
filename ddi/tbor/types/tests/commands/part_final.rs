@@ -556,7 +556,7 @@ fn part_final_reject_policy_mismatch() {
 fn part_final_partition_serves_io_when_initialized() {
     use tsra_ddi_tbor_types::TborPartInfoReq;
 
-    /// `PartState::Initialized` wire discriminant.
+    /// `HsmPartState::Initialized` wire discriminant.
     const PART_STATE_INITIALIZED: u8 = 5;
 
     let ctx = TestCtx::new();

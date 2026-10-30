@@ -11,8 +11,8 @@
 use core::mem;
 use core::ops::AsyncFnOnce;
 
-use tsra_fw_hsm_pal_traits::DmaAllocation;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaAllocation;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -443,19 +443,19 @@ impl HsmAlloc for UnoHsmPal {
         Ok(unsafe { HsmDmaBuf::from_raw_mut(s) })
     }
 
-    fn dma_alloc_exchange(&self, io: &UnoHsmIo, size: usize) -> HsmResult<DmaAllocation<'_>> {
+    fn dma_alloc_exchange(&self, io: &UnoHsmIo, size: usize) -> HsmResult<HsmDmaAllocation<'_>> {
         let index = io.index();
         let (start, _) = bump(self, index, DMA, size, 4)?;
         let (base, _) = heap_base_cap(index, DMA);
         // SAFETY: bump reserved this exclusive SRAM range; retain the heap's
         // raw pointer provenance so later growth does not extend a slice.
-        Ok(unsafe { DmaAllocation::from_raw_parts(base.add(start), size) })
+        Ok(unsafe { HsmDmaAllocation::from_raw_parts(base.add(start), size) })
     }
 
     fn dma_grow(
         &self,
         io: &UnoHsmIo,
-        allocation: &mut DmaAllocation<'_>,
+        allocation: &mut HsmDmaAllocation<'_>,
         size: usize,
     ) -> HsmResult<()> {
         let index = io.index();
@@ -479,7 +479,7 @@ impl HsmAlloc for UnoHsmPal {
         pk(self, index, DMA).with(|v| *v = (*v).max(end));
         // SAFETY: the exclusive handle borrow excludes live views. The added
         // SRAM is unallocated, and the pointer retains heap provenance.
-        *allocation = unsafe { DmaAllocation::from_raw_parts(base.add(start), size) };
+        *allocation = unsafe { HsmDmaAllocation::from_raw_parts(base.add(start), size) };
         Ok(())
     }
 

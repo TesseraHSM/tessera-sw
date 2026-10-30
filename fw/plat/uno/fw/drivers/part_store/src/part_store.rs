@@ -9,8 +9,8 @@ use core::mem::size_of;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_hsm_pal_traits::PartState;
 use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CO;
 use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CU;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
@@ -1107,19 +1107,19 @@ impl Partition {
 
     // ── lifecycle state / generation / resource mask ─────────────────────
 
-    /// Reads the partition lifecycle [`PartState`].
+    /// Reads the partition lifecycle [`HsmPartState`].
     ///
     /// # Errors
     ///
     /// - [`HsmError::InvalidArg`] — the stored byte is not a known state.
     #[inline(never)]
-    pub fn state(self) -> HsmResult<PartState> {
-        PartState::from_u8(self.slot().state[0]).ok_or(HsmError::InvalidArg)
+    pub fn state(self) -> HsmResult<HsmPartState> {
+        HsmPartState::from_u8(self.slot().state[0]).ok_or(HsmError::InvalidArg)
     }
 
-    /// Sets the partition lifecycle [`PartState`].
+    /// Sets the partition lifecycle [`HsmPartState`].
     #[inline(never)]
-    pub fn set_state(mut self, state: PartState) {
+    pub fn set_state(mut self, state: HsmPartState) {
         self.slot_mut().state = [state as u8, 0, 0, 0];
     }
 

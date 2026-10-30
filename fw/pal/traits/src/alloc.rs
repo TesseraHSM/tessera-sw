@@ -97,13 +97,13 @@ use super::*;
 /// allocator between borrows. It retains the original allocation's raw pointer
 /// provenance; growing never joins or extends an existing slice reference.
 /// Memory remains owned and scrubbed by the per-IO allocator.
-pub struct DmaAllocation<'a> {
+pub struct HsmDmaAllocation<'a> {
     ptr: *mut u8,
     len: usize,
     scope: core::marker::PhantomData<&'a mut HsmDmaBuf>,
 }
 
-impl<'a> DmaAllocation<'a> {
+impl<'a> HsmDmaAllocation<'a> {
     /// Construct a handle over an exclusively owned DMA allocation.
     ///
     /// # Safety
@@ -572,7 +572,7 @@ pub trait HsmAlloc: HsmIoTypes {
     ///
     /// The handle, like `dma_alloc`'s buffers, is owned by the IO allocator.
     /// Its views cannot survive a call to `dma_grow`.
-    fn dma_alloc_exchange(&self, io: &Self::Io, size: usize) -> HsmResult<DmaAllocation<'_>>;
+    fn dma_alloc_exchange(&self, io: &Self::Io, size: usize) -> HsmResult<HsmDmaAllocation<'_>>;
 
     /// Extend the most recent DMA allocation handle in place, without copying.
     ///
@@ -588,7 +588,7 @@ pub trait HsmAlloc: HsmIoTypes {
     fn dma_grow(
         &self,
         io: &Self::Io,
-        allocation: &mut DmaAllocation<'_>,
+        allocation: &mut HsmDmaAllocation<'_>,
         size: usize,
     ) -> HsmResult<()>;
 

@@ -11,14 +11,14 @@ use tsra_fw_core_crypto_x509_builder::csr;
 use tsra_fw_core_crypto_x509_chain::key_usage;
 use tsra_fw_core_crypto_x509_chain::CertInfo;
 use tsra_fw_ddi_tbor_types::CERT_MAX_LEN;
-use tsra_fw_hsm_pal_traits::CertChainInfo;
+use tsra_fw_hsm_pal_traits::HsmCertChainInfo;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use crate::part_state;
 
@@ -215,7 +215,7 @@ pub(crate) async fn pid_certificate<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
 ) -> HsmResult<&'p HsmDmaBuf> {
-    if part_state::part_state(pal, io)? != PartState::Initialized {
+    if part_state::part_state(pal, io)? != HsmPartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
     let out = pal.dma_alloc(io, CERT_MAX_LEN)?;
@@ -236,13 +236,13 @@ pub(crate) async fn pid_certificate<'p, P: HsmPal>(
 }
 
 /// Fingerprint of a newly generated leaf; later reads generate different DER.
-pub(crate) async fn chain_info<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<CertChainInfo> {
+pub(crate) async fn chain_info<P: HsmPal>(pal: &P, io: &P::Io) -> HsmResult<HsmCertChainInfo> {
     let cert = pid_certificate(pal, io).await?;
     let digest = pal.dma_alloc(io, SHA256_DIGEST_LEN)?;
     pal.hash(io, HsmHashAlgo::Sha256, cert, digest, true)
         .await?;
     let thumbprint = *fixed_size::<SHA256_DIGEST_LEN>(digest)?;
-    Ok(CertChainInfo {
+    Ok(HsmCertChainInfo {
         count: 1,
         thumbprint,
     })

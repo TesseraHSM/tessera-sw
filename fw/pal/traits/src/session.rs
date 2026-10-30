@@ -75,15 +75,15 @@ pub enum HsmSessionState {
 /// range the session occupies and which TBOR commands the session may
 /// invoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionRole {
+pub enum HsmSessionRole {
     /// Crypto Officer — administrative role.  Sessions land in
     /// slot 0.  CO sessions are pinned to
-    /// [`SessionType::Authenticated`] (request rejected otherwise).
+    /// [`HsmSessionType::Authenticated`] (request rejected otherwise).
     CryptoOfficer,
 
     /// Crypto User — regular role.  Sessions land in slots 1..=7.
     /// CU sessions are pinned to
-    /// [`SessionType::PlainText`] (request rejected otherwise).
+    /// [`HsmSessionType::PlainText`] (request rejected otherwise).
     CryptoUser,
 }
 
@@ -97,16 +97,16 @@ pub enum SessionRole {
 ///
 /// Role pairing is enforced at handshake time:
 ///
-/// | Role | Allowed `SessionType` |
+/// | Role | Allowed `HsmSessionType` |
 /// |---|---|
-/// | [`SessionRole::CryptoOfficer`] | [`Authenticated`](Self::Authenticated) |
-/// | [`SessionRole::CryptoUser`]    | [`PlainText`](Self::PlainText) |
+/// | [`HsmSessionRole::CryptoOfficer`] | [`Authenticated`](Self::Authenticated) |
+/// | [`HsmSessionRole::CryptoUser`]    | [`PlainText`](Self::PlainText) |
 ///
 /// Any other combination is rejected with
 /// [`HsmError::InvalidSessionType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum SessionType {
+pub enum HsmSessionType {
     /// Channel transports MBOR bodies without per-message MAC.
     /// `param_key` is still derived so callers can opt-in to encrypt
     /// individual sensitive parameters via the `aead_envelope` envelope.
@@ -119,14 +119,14 @@ pub enum SessionType {
     Authenticated = 1,
 }
 
-impl SessionType {
-    /// Wire-encode this `SessionType` to its `u8` discriminant.
+impl HsmSessionType {
+    /// Wire-encode this `HsmSessionType` to its `u8` discriminant.
     #[inline]
     pub const fn to_u8(self) -> u8 {
         self as u8
     }
 
-    /// Parse a wire `u8` into a `SessionType`.
+    /// Parse a wire `u8` into a `HsmSessionType`.
     ///
     /// Returns [`HsmError::InvalidSessionType`] for any value other
     /// than `0` (PlainText) or `1` (Authenticated).
@@ -139,14 +139,14 @@ impl SessionType {
         }
     }
 
-    /// Validate that this `SessionType` is the only one allowed for
-    /// the given [`SessionRole`].  Returns
+    /// Validate that this `HsmSessionType` is the only one allowed for
+    /// the given [`HsmSessionRole`].  Returns
     /// [`HsmError::InvalidSessionType`] for any disallowed pairing.
     #[inline]
-    pub const fn validate_for_role(self, role: SessionRole) -> HsmResult<()> {
+    pub const fn validate_for_role(self, role: HsmSessionRole) -> HsmResult<()> {
         match (role, self) {
-            (SessionRole::CryptoOfficer, Self::Authenticated)
-            | (SessionRole::CryptoUser, Self::PlainText) => Ok(()),
+            (HsmSessionRole::CryptoOfficer, Self::Authenticated)
+            | (HsmSessionRole::CryptoUser, Self::PlainText) => Ok(()),
             _ => Err(HsmError::InvalidSessionType),
         }
     }
@@ -181,7 +181,7 @@ impl SessionType {
 /// [`open_session_finish`]: crate::open_session_finish
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum SessionSuite {
+pub enum HsmSessionSuite {
     /// HPKE `DHKEM(P-384, HKDF-SHA-384) + HKDF-SHA-384 + AES-256-GCM`.
     ///
     /// Authenticated PSK mode bound to the partition identity key.
@@ -190,14 +190,14 @@ pub enum SessionSuite {
     P384HkdfSha384AesGcm256 = 0x01,
 }
 
-impl SessionSuite {
-    /// Wire-encode this `SessionSuite` to its `u8` discriminant.
+impl HsmSessionSuite {
+    /// Wire-encode this `HsmSessionSuite` to its `u8` discriminant.
     #[inline]
     pub const fn to_u8(self) -> u8 {
         self as u8
     }
 
-    /// Parse a wire `u8` into a `SessionSuite`.
+    /// Parse a wire `u8` into a `HsmSessionSuite`.
     ///
     /// Returns [`HsmError::UnsupportedSessionSuite`] for any value
     /// that this firmware build does not implement (including `0x00`
@@ -274,7 +274,7 @@ pub trait HsmSessionManager: HsmIoTypes {
         &self,
         io: &Self::Io,
         api_rev: &[u8],
-        masking_key: &[u8],
+        masking_key: &HsmDmaBuf,
         id: Option<HsmSessId>,
     ) -> HsmResult<HsmSessId>;
 
@@ -329,8 +329,8 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// The chosen slot is constrained by `role`:
     ///
-    /// - [`SessionRole::CryptoOfficer`] → slot 0 only.
-    /// - [`SessionRole::CryptoUser`] → slots 1..=7.
+    /// - [`HsmSessionRole::CryptoOfficer`] → slot 0 only.
+    /// - [`HsmSessionRole::CryptoUser`] → slots 1..=7.
     ///
     /// Allocation policy within the eligible range:
     ///
@@ -368,7 +368,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     async fn session_create_pending(
         &self,
         io: &Self::Io,
-        role: SessionRole,
+        role: HsmSessionRole,
         handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId>;
 
@@ -396,7 +396,7 @@ pub trait HsmSessionManager: HsmIoTypes {
         &self,
         io: &Self::Io,
         id: HsmSessId,
-        out: Option<&mut [u8]>,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Promotes a [`Pending`](HsmSessionState::Pending) slot to
@@ -433,9 +433,9 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///   [`tsra_fw_core_crypto_aead_envelope`] for per-parameter
     ///   authenticated encryption (and to unseal the `seed_envelope`
     ///   in `OpenSessionFinish`).
-    /// - `masking_key` — 80-byte AES-CBC-256 + HMAC-SHA-384 blob;
-    ///   required for both CO and CU sessions.  Consumed by the
-    ///   `key_masking::cbc` masked-key system, not by the per-session AEAD.
+    /// - `masking_key` — 32-byte AES-256-GCM key, required for both CO and
+    ///   CU sessions. Consumed by the `key_masking::aead` masked-key system,
+    ///   separately from the per-parameter `param_key`.
     /// - `mac_tx_key` — `Some(48 B)` for Authenticated sessions
     ///   (VM→HSM message-MAC key); `None` for PlainText.
     /// - `mac_rx_key` — `Some(48 B)` for Authenticated sessions
@@ -455,10 +455,10 @@ pub trait HsmSessionManager: HsmIoTypes {
         io: &Self::Io,
         id: HsmSessId,
         api_rev: &[u8],
-        param_key: &[u8],
-        masking_key: &[u8],
-        mac_tx_key: Option<&[u8]>,
-        mac_rx_key: Option<&[u8]>,
+        param_key: &HsmDmaBuf,
+        masking_key: &HsmDmaBuf,
+        mac_tx_key: Option<&HsmDmaBuf>,
+        mac_rx_key: Option<&HsmDmaBuf>,
     ) -> HsmResult<()>;
 
     /// Returns a borrowed view of the active session's `param_key`

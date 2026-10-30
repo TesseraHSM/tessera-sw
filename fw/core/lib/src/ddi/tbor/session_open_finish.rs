@@ -31,21 +31,21 @@ use tsra_fw_ddi_tbor_types::*;
 use tsra_fw_hsm_pal_traits::*;
 use tsra_fw_hsm_undo::UndoLog;
 
-/// Map a [`SessionSuite`] to the concrete [`HpkeSuite`] used by the
+/// Map a [`HsmSessionSuite`] to the concrete [`HpkeSuite`] used by the
 /// session-establishment handshake.  Mirrors the function of the same
 /// name in [`super::session_open_init`]; kept duplicated to avoid
 /// pulling that module's internals into a public surface.
-const fn hpke_suite_for(suite: SessionSuite) -> HpkeSuite {
+const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
     match suite {
-        SessionSuite::P384HkdfSha384AesGcm256 => HpkeSuite::DHKemP384Sha384AesGcm256,
+        HsmSessionSuite::P384HkdfSha384AesGcm256 => HpkeSuite::DHKemP384Sha384AesGcm256,
     }
 }
 
-/// HPKE suite used by the only currently registered `SessionSuite`
+/// HPKE suite used by the only currently registered `HsmSessionSuite`
 /// (`P384HkdfSha384AesGcm256`).  Used at compile time to size the
 /// Pending blob; the runtime handler always uses
 /// [`hpke_suite_for`] for the actually-negotiated suite.
-const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(SessionSuite::P384HkdfSha384AesGcm256);
+const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(HsmSessionSuite::P384HkdfSha384AesGcm256);
 
 /// Length of the Pending blob; mirrors the layout written by
 /// [`super::session_open_init`]:
@@ -106,7 +106,7 @@ struct HandshakeState<'a> {
     exported: &'a mut HsmDmaBuf,
     pk_init: &'a mut HsmDmaBuf,
     pk_resp: &'a mut HsmDmaBuf,
-    session_type: SessionType,
+    session_type: HsmSessionType,
     /// Cryptographic suite recorded by Phase 1.  Drives every
     /// suite-derived size in this handler (Nh, Npk, AEAD parameters).
     suite: HpkeSuite,
@@ -263,14 +263,14 @@ fn load_pending_state<'a, P: HsmPal>(
 ) -> HsmResult<HandshakeState<'a>> {
     let blob_len = pal.session_pending_state(io, id, None)?;
     let blob = alloc.dma_alloc(blob_len)?;
-    pal.session_pending_state(io, id, Some(&mut blob[..]))?;
+    pal.session_pending_state(io, id, Some(&mut *blob))?;
 
     // Recover the suite *before* using suite-derived sizes, in case a
     // future build supports more than one suite with different
     // Nh/Npk.  Today only `P384HkdfSha384AesGcm256` is registered, so
     // a mismatch with the wire length pre-check would already have
     // fired in [`ensure_pending_blob_len`].
-    let suite = SessionSuite::from_u8(blob[blob.len() - 1])?;
+    let suite = HsmSessionSuite::from_u8(blob[blob.len() - 1])?;
     let hpke_suite = hpke_suite_for(suite);
 
     let nh = hpke_suite.nh();
@@ -281,7 +281,7 @@ fn load_pending_state<'a, P: HsmPal>(
     pk_init.copy_from_slice(&blob[nh..nh + npk]);
     let pk_resp = alloc.dma_alloc(npk)?;
     pk_resp.copy_from_slice(&blob[nh + npk..nh + 2 * npk]);
-    let session_type = SessionType::from_u8(blob[nh + 2 * npk])?;
+    let session_type = HsmSessionType::from_u8(blob[nh + 2 * npk])?;
 
     Ok(HandshakeState {
         exported,
@@ -390,7 +390,7 @@ async fn derive_remaining_keys<'a, P: HsmPal>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     exported: &HsmDmaBuf,
-    session_type: SessionType,
+    session_type: HsmSessionType,
     param_key: &'a mut HsmDmaBuf,
 ) -> HsmResult<DerivedKeys<'a>> {
     // The masking key is **random**, not derived from `exported`.
@@ -578,8 +578,8 @@ async fn promote_to_active<P: HsmPal>(
         api_rev,
         derived.param_key,
         derived.masking_key,
-        derived.mac_tx_key.as_deref().map(|b| &**b),
-        derived.mac_rx_key.as_deref().map(|b| &**b),
+        derived.mac_tx_key.as_deref(),
+        derived.mac_rx_key.as_deref(),
     )
     .await
 }

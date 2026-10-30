@@ -12,7 +12,7 @@
 //! Flow:
 //!
 //! 1. **Parse + gate** — CO-only; partition must be in
-//!    [`PartState::Initializing`]; the re-supplied `part_policy` must hash
+//!    [`HsmPartState::Initializing`]; the re-supplied `part_policy` must hash
 //!    to the stored `policy_hash`; and the supplied PTA certificate chain
 //!    (`cert_descriptors`, read out of band) must be anchored to the
 //!    policy `POTAPubKey` with its terminal (PTA) certificate's public
@@ -22,7 +22,7 @@
 //!    from `prev_local_mk_backup`; provision the random `EphemeralMK`.
 //! 3. **Commit** — vault the new keys (recording their ids), replace UMS
 //!    with UPS in the partition root slot, and advance the lifecycle to
-//!    [`PartState::Initialized`].
+//!    [`HsmPartState::Initialized`].
 //! 4. **Respond** — return the current `local_mk_backup`.
 
 use tsra_fw_core_crypto_key_derive::derive_masking_key;
@@ -46,13 +46,13 @@ use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
-use tsra_fw_hsm_pal_traits::PartState;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
@@ -124,7 +124,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // Lifecycle gate: PartFinal only runs against a partition that
         // `PartInit` left in `Initializing`.
-        if super::super::part_state::part_state(pal, io)? != PartState::Initializing {
+        if super::super::part_state::part_state(pal, io)? != HsmPartState::Initializing {
             return Err(HsmError::InvalidArg);
         }
 
@@ -230,7 +230,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
     let sess_id = HsmSessId::from(u16::from(req.session_id));
 
     // PartFinal is CO-only (parity with PartInit).
-    if sess_id.role() != SessionRole::CryptoOfficer {
+    if sess_id.role() != HsmSessionRole::CryptoOfficer {
         return Err(HsmError::InvalidPermissions);
     }
 
@@ -604,7 +604,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
 /// Commit the finalized partition state in a single **await-free**
 /// guards-first block: record the masking-key ids, replace UMS → UPS in the
 /// root slot (soft-deleting the old UMS key), and advance the lifecycle to
-/// [`PartState::Initialized`].
+/// [`HsmPartState::Initialized`].
 ///
 /// The three vault keys are already staged by [`stage_final_keys`]; only
 /// their `key_id`s flow in here.  Each mutation's inverse is recorded
@@ -633,7 +633,7 @@ fn commit_final<P: HsmPal>(
     // partition is no longer `Initializing` (e.g. a racing PartFinal already
     // finalized).  Recording the inverses and then failing would otherwise
     // clobber the winner's just-committed state.
-    if part_state::part_state(pal, io)? != PartState::Initializing {
+    if part_state::part_state(pal, io)? != HsmPartState::Initializing {
         return Err(HsmError::InvalidArg);
     }
 
@@ -641,23 +641,23 @@ fn commit_final<P: HsmPal>(
     // reverses them): clear the two new masking-key ids, restore UPS_KEY_ID
     // to the prior UMS id, re-enable the soft-deleted UMS key, and restore
     // STATE to `Initializing`.
-    undo.push_prop_restore_absent(PartPropId::LOCAL_MK_KEY_ID)?;
-    undo.push_prop_restore_absent(PartPropId::EPHEMERAL_MK_KEY_ID)?;
-    undo.push_prop_restore_scalar(PartPropId::UPS_KEY_ID, u32::from(u16::from(ums_key_id)))?;
+    undo.push_prop_restore_absent(HsmPartPropId::LOCAL_MK_KEY_ID)?;
+    undo.push_prop_restore_absent(HsmPartPropId::EPHEMERAL_MK_KEY_ID)?;
+    undo.push_prop_restore_scalar(HsmPartPropId::UPS_KEY_ID, u32::from(u16::from(ums_key_id)))?;
     undo.push_vault_disable(ums_key_id)?;
-    undo.push_prop_restore_scalar(PartPropId::STATE, PartState::Initializing as u32)?;
+    undo.push_prop_restore_scalar(HsmPartPropId::PART_STATE, HsmPartState::Initializing as u32)?;
 
     // Apply the mutations in the same order as the inverses above.
     part_state::part_set_local_mk_key_id(pal, io, local_id)?;
     part_state::part_set_ephemeral_mk_key_id(pal, io, ephemeral_id)?;
     // The UPS_KEY_ID slot is write-once, so clear it before re-pointing.
-    pal.part_prop_clear(io, PartPropId::UPS_KEY_ID)?;
+    pal.part_prop_clear(io, HsmPartPropId::UPS_KEY_ID)?;
     part_state::part_set_ups_key_id(pal, io, ups_id)?;
     // Soft-delete the old UMS key: the commit walk zeroizes it, the undo
     // walk re-enables it (see the recorded `push_vault_disable`).
     pal.vault_key_disable(io, ums_key_id)?;
 
-    part_state::part_set_state(pal, io, PartState::Initialized)
+    part_state::part_set_state(pal, io, HsmPartState::Initialized)
 }
 
 /// Encode the `TborPartFinalResp` into a fresh IO-scoped HsmDmaBuf.

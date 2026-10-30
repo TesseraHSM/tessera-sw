@@ -24,7 +24,7 @@ use tsra_fw_ddi_tbor_api::tbor;
 /// keeps it forward-compatible: an unrecognized byte surfaces as
 /// `PskId(x)` rather than failing to decode. The value is **not**
 /// validated at decode (any byte round-trips); the handler maps it to a
-/// [`SessionRole`](tsra_fw_hsm_pal_traits::SessionRole), rejecting any
+/// [`HsmSessionRole`](tsra_fw_hsm_pal_traits::HsmSessionRole), rejecting any
 /// value outside the two below with
 /// [`InvalidPskId`](tsra_fw_hsm_pal_traits::HsmError::InvalidPskId).
 #[repr(u8)]
@@ -44,15 +44,15 @@ pub enum PskId {
 /// schema field and its accessor are self-documenting (`SessionKind` with
 /// named variants rather than a bare `u8`) without coupling the wire type
 /// to the firmware-internal
-/// [`SessionType`](tsra_fw_hsm_pal_traits::SessionType) enum. Being
+/// [`HsmSessionType`](tsra_fw_hsm_pal_traits::HsmSessionType) enum. Being
 /// **open** keeps it forward-compatible: an unrecognized byte surfaces as
 /// `SessionKind(x)` rather than failing to decode. The value is **not**
 /// validated at decode (any byte round-trips); the handler maps it to a
-/// [`SessionType`] via `SessionType::from_u8(kind.0)` and cross-checks it
+/// [`HsmSessionType`] via `HsmSessionType::from_u8(kind.0)` and cross-checks it
 /// against the caller role, which is where an invalid value or role
 /// pairing is rejected with [`InvalidSessionType`].
 ///
-/// [`SessionType`]: tsra_fw_hsm_pal_traits::SessionType
+/// [`HsmSessionType`]: tsra_fw_hsm_pal_traits::HsmSessionType
 /// [`InvalidSessionType`]: tsra_fw_hsm_pal_traits::HsmError::InvalidSessionType
 #[repr(u8)]
 #[open_enum]
@@ -73,14 +73,14 @@ pub enum SessionKind {
 /// schema field and its accessor are self-documenting (`SuiteId` with
 /// named variants rather than a bare `u8`) without coupling the wire type
 /// to the firmware-internal
-/// [`SessionSuite`](tsra_fw_hsm_pal_traits::SessionSuite) enum. Being
+/// [`HsmSessionSuite`](tsra_fw_hsm_pal_traits::HsmSessionSuite) enum. Being
 /// **open** keeps it forward-compatible: an unrecognized byte surfaces as
 /// `SuiteId(x)` rather than failing to decode. The value is **not**
 /// validated at decode (any byte round-trips); the handler maps it to a
-/// [`SessionSuite`] via `SessionSuite::from_u8(id.0)`, which is where an
+/// [`HsmSessionSuite`] via `HsmSessionSuite::from_u8(id.0)`, which is where an
 /// unsupported suite is rejected with [`UnsupportedSessionSuite`].
 ///
-/// [`SessionSuite`]: tsra_fw_hsm_pal_traits::SessionSuite
+/// [`HsmSessionSuite`]: tsra_fw_hsm_pal_traits::HsmSessionSuite
 /// [`UnsupportedSessionSuite`]: tsra_fw_hsm_pal_traits::HsmError::UnsupportedSessionSuite
 #[repr(u8)]
 #[open_enum]
@@ -115,7 +115,7 @@ pub const MAC_RESP_LEN: usize = 48;
 /// is also mixed into the HPKE `info` for transcript binding, so any
 /// suite-downgrade attempt by an attacker would produce a different
 /// `exported` secret on the HSM and fail the Phase-1 confirm MAC.
-/// See [`tsra_fw_hsm_pal_traits::SessionSuite`] for the wire
+/// See [`tsra_fw_hsm_pal_traits::HsmSessionSuite`] for the wire
 /// registry.
 #[tbor(opcode = 0x03, pair = TborSessionOpenInitResp)]
 pub struct TborSessionOpenInitReq<'a> {
@@ -132,13 +132,13 @@ pub struct TborSessionOpenInitReq<'a> {
     ///
     /// Any other value, or a role/type pair other than the two above,
     /// is rejected with `InvalidSessionType` by the handler.  See
-    /// [`tsra_fw_hsm_pal_traits::SessionType`] for the full
+    /// [`tsra_fw_hsm_pal_traits::HsmSessionType`] for the full
     /// validation matrix.
     #[tbor(U8)]
     pub session_type: SessionKind,
 
     /// Cryptographic suite identifier.  See
-    /// [`tsra_fw_hsm_pal_traits::SessionSuite`] for the registered
+    /// [`tsra_fw_hsm_pal_traits::HsmSessionSuite`] for the registered
     /// values.  Today only `0x01`
     /// (`P384HkdfSha384AesGcm256`) is implemented; any other value is
     /// rejected with `UnsupportedSessionSuite` by the handler.

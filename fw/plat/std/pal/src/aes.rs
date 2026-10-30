@@ -12,8 +12,8 @@ use core::convert::TryInto;
 
 use super::*;
 
-fn aes_op_is_encrypt(op: AesOp) -> bool {
-    matches!(op, AesOp::Encrypt)
+fn aes_op_is_encrypt(op: HsmAesOp) -> bool {
+    matches!(op, HsmAesOp::Encrypt)
 }
 
 fn gcm_iv(iv: &HsmDmaBuf) -> HsmResult<&[u8; 12]> {
@@ -41,7 +41,7 @@ impl HsmAes for StdHsmPal {
     async fn aes_cbc_enc_dec(
         &self,
         _io: &StdHsmIo,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         iv_in: &HsmDmaBuf,
@@ -61,7 +61,7 @@ impl HsmAes for StdHsmPal {
     async fn aes_cbc_enc_dec_in_place(
         &self,
         _io: &StdHsmIo,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
         iv_in: &HsmDmaBuf,
@@ -81,7 +81,7 @@ impl HsmAes for StdHsmPal {
     async fn aes_cbc_enc_dec_in_place_iv(
         &self,
         _io: &StdHsmIo,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
         iv: &mut HsmDmaBuf,
@@ -99,7 +99,7 @@ impl HsmAes for StdHsmPal {
     async fn aes_ecb_enc_dec(
         &self,
         _io: &StdHsmIo,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
@@ -112,7 +112,7 @@ impl HsmAes for StdHsmPal {
     async fn aes_ecb_enc_dec_in_place(
         &self,
         _io: &StdHsmIo,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -344,7 +344,7 @@ mod tests {
             assert_eq!(
                 pal.aes_cbc_enc_dec_in_place_iv(
                     &io,
-                    AesOp::Encrypt,
+                    HsmAesOp::Encrypt,
                     key,
                     &mut message[..msg_len],
                     &mut iv[..iv_len],

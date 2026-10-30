@@ -63,7 +63,7 @@ fn bk_boot_metadata(svn: u64, owner: u16) -> DdiMaskedKeyMetadata<'static> {
 /// Derives a partition masking key bound to `(svn, owner)`.
 ///
 /// Runs SP 800-108 KBKDF (HMAC-SHA-384) keyed on `kdk`, with `label`
-/// and a context of `mfgr_seed[svn] ‖ owner_seed[owner] ‖
+/// and a context of `mfgr_seed[svn] ‖ dev_owner_seed[owner] ‖
 /// extra_context`.  The device-global seeds come from
 /// [`HsmSeedStore`].  `output` receives the derived key.
 pub async fn derive_masking_key<P: HsmPal>(
@@ -77,7 +77,7 @@ pub async fn derive_masking_key<P: HsmPal>(
     output: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let mfgr = pal.mfgr_seed(svn)?;
-    let dev_owner = pal.owner_seed(u64::from(owner))?;
+    let dev_owner = pal.dev_owner_seed(u64::from(owner))?;
 
     let mfgr_len = mfgr.len();
     let dev_owner_len = dev_owner.len();
@@ -116,7 +116,7 @@ pub async fn derive_masking_key<P: HsmPal>(
 /// `bkx`, which must be [`BK_BOOT_LEN`] bytes.
 async fn derive_bkx<P: HsmPal>(pal: &P, io: &P::Io, bkx: &mut HsmDmaBuf) -> HsmResult<()> {
     let svn = pal.mfgr_svn();
-    let owner = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
+    let owner = u16::try_from(pal.dev_owner_svn()).map_err(|_| HsmError::InvalidArg)?;
     let fw_seed = pal.fw_seed();
     let fw_seed_dma = pal.dma_alloc(io, fw_seed.len())?;
     fw_seed_dma.copy_from_slice(fw_seed);
@@ -130,7 +130,7 @@ async fn derive_bkx<P: HsmPal>(pal: &P, io: &P::Io, bkx: &mut HsmDmaBuf) -> HsmR
 /// returned blob.  The raw `BK_BOOT` never leaves this function.
 pub async fn mask_bk_boot<'a, P: HsmPal>(pal: &'a P, io: &P::Io) -> HsmResult<&'a mut HsmDmaBuf> {
     let svn = pal.mfgr_svn();
-    let owner = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
+    let owner = u16::try_from(pal.dev_owner_svn()).map_err(|_| HsmError::InvalidArg)?;
 
     // Fresh random BK_BOOT.
     let bk_boot = pal.dma_alloc(io, BK_BOOT_LEN)?;

@@ -7,12 +7,12 @@
 //!
 //! - [`HsmPartitionManager`] — the PAL trait core uses to read and
 //!   mutate per-partition state.
-//! - The **property surface** ([`PartPropId`], [`PartPropMeta`],
-//!   [`PartPropKind`], [`PartPropAccess`], [`PartPropDefault`]) —
+//! - The **property surface** ([`HsmPartPropId`], [`HsmPartPropMeta`],
+//!   [`HsmPartPropKind`], [`HsmPartPropAccess`], [`HsmPartPropDefault`]) —
 //!   a generic, kind-typed key-value view of that state, addressed
-//!   by [`PartPropId`] whose wire shape is pinned
+//!   by [`HsmPartPropId`] whose wire shape is pinned
 //!   at compile time.
-//! - The [`PartState`] lifecycle enum and a small set of canonical
+//! - The [`HsmPartState`] lifecycle enum and a small set of canonical
 //!   length constants ([`PART_POLICY_LEN`], [`BK_BOOT_LEN`],
 //!   [`SEALED_BK3_MAX_LEN`], [`MASKED_BK_BOOT_LEN`]) that pin the
 //!   byte sizes shared between core, the PAL, and host-side tools.
@@ -38,12 +38,12 @@
 //!   reset an absent-capable slot.
 //!
 //! The full set of slots backed by the PAL is enumerated by the
-//! `pub const` catalogue on [`PartPropId`]; each entry's
-//! [`PartPropMeta`] (returned by [`PartPropId::meta`]) pins its
-//! kind, access mode ([`PartPropAccess::Rw`] /
-//! [`PartPropAccess::Ro`]), presence semantics
-//! ([`PartPropDefault::RequiredPresent`] /
-//! [`PartPropDefault::AbsentUntilSet`]), and whether the bytes are
+//! `pub const` catalogue on [`HsmPartPropId`]; each entry's
+//! [`HsmPartPropMeta`] (returned by [`HsmPartPropId::meta`]) pins its
+//! kind, access mode ([`HsmPartPropAccess::Rw`] /
+//! [`HsmPartPropAccess::Ro`]), presence semantics
+//! ([`HsmPartPropDefault::RequiredPresent`] /
+//! [`HsmPartPropDefault::AbsentUntilSet`]), and whether the bytes are
 //! sensitive.
 //!
 //! # Lifecycle
@@ -64,7 +64,7 @@
 //!     PartInit binds PTA / policy / POTA thumbprint  Initializing
 //! ```
 //!
-//! [`PartState::Initializing`] is a one-shot transient: once
+//! [`HsmPartState::Initializing`] is a one-shot transient: once
 //! `PartInit` has bound the Partition Trust Anchor (PTA) key, the
 //! partition policy, and the POTA thumbprint, no further `PartInit`
 //! is permitted until the next alloc/free cycle.
@@ -73,7 +73,7 @@
 //!
 //! Each slot is either *present* (has a value) or *absent*.  Getters
 //! return [`HsmError::PartPropNotFound`] for absent slots; whether
-//! absence is reachable is pinned by [`PartPropDefault`]:
+//! absence is reachable is pinned by [`HsmPartPropDefault`]:
 //!
 //! - **`RequiredPresent`** — populated by the PAL before the
 //!   partition is exposed to callers; `PartPropNotFound` is
@@ -103,10 +103,10 @@ use super::*;
 
 /// Opaque identity blob for a partition.
 ///
-/// Borrowed view of the bytes stored at [`PartPropId::ID`].  The
+/// Borrowed view of the bytes stored at [`HsmPartPropId::PART_ID`].  The
 /// content is treated as opaque by core; only the host knows how to
 /// interpret it.
-pub type PartId<'a> = &'a [u8];
+pub type HsmPartId<'a> = &'a [u8];
 
 /// Canonical byte length of a TBOR PartPolicy blob.
 pub const PART_POLICY_LEN: usize = 584;
@@ -122,7 +122,7 @@ pub const POLICY_HASH_LEN: usize = 48;
 /// dispatch, IO gating, vault/session scoping).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum PartState {
+pub enum HsmPartState {
     /// The partition slot is free.  No resources, no identity, no
     /// keys.  IO arriving for this partition is dropped.
     Unallocated = 0,
@@ -167,13 +167,13 @@ pub enum PartState {
     Faulted = 6,
 }
 
-impl PartState {
-    /// Decode a serialized `u8` discriminant back into a `PartState`.
+impl HsmPartState {
+    /// Decode a serialized `u8` discriminant back into a `HsmPartState`.
     ///
     /// # Parameters
     ///
     /// - `raw` — the `#[repr(u8)]` discriminant byte, typically
-    ///   produced by an earlier read of [`PartPropId::STATE`] or by
+    ///   produced by an earlier read of [`HsmPartPropId::PART_STATE`] or by
     ///   on-disk decoders.
     ///
     /// # Returns
@@ -214,8 +214,8 @@ impl PartState {
 ///   kind/accessor mismatch (e.g. `get_u8`
 ///   on a `U32` slot, or `set_bytes` on a `Bool` slot), bytes
 ///   length violates the `FixedBytes` / `VarBytes` bound, or a
-///   write/clear targets an [`Access::Ro`](PartPropAccess::Ro) or
-///   [`RequiredPresent`](PartPropDefault::RequiredPresent) slot.
+///   write/clear targets an [`Access::Ro`](HsmPartPropAccess::Ro) or
+///   [`RequiredPresent`](HsmPartPropDefault::RequiredPresent) slot.
 /// - [`HsmError::PartPropNotFound`] — getter on an absent slot.
 ///   Unreachable for `RequiredPresent` slots; reachable for
 ///   `AbsentUntilSet` slots until the first successful setter or
@@ -223,35 +223,35 @@ impl PartState {
 /// - Other [`HsmError`] variants — PAL-level failures (for example
 ///   [`HsmError::InternalError`] on backing-store corruption,
 ///   [`HsmError::Bk3AlreadyInitialized`] on the one-shot
-///   [`PartPropId::BK3_INITIALIZED`] guard).
+///   [`HsmPartPropId::BK3_INITIALIZED`] guard).
 ///
 /// Partition scoping is implicit via the platform's private IO metadata.
 pub trait HsmPartitionManager: HsmIoTypes {
-    /// Read a [`PartPropKind::U8`] slot.
+    /// Read a [`HsmPartPropKind::U8`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::U8`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::U8`].
     ///
     /// # Returns
     ///
     /// [`HsmResult<u8>`] — the stored byte on success.  See the
     /// [`HsmPartitionManager`] doc-comment for the shared error
     /// contract.
-    fn part_prop_get_u8(&self, io: &Self::Io, id: PartPropId) -> HsmResult<u8>;
+    fn part_prop_get_u8(&self, io: &Self::Io, id: HsmPartPropId) -> HsmResult<u8>;
 
-    /// Write a [`PartPropKind::U8`] slot.
+    /// Write a [`HsmPartPropKind::U8`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::U8`] and `access` must be
-    ///   [`PartPropAccess::Rw`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::U8`] and `access` must be
+    ///   [`HsmPartPropAccess::Rw`].
     /// - `value` — byte to store; replaces any previous value and
-    ///   transitions [`AbsentUntilSet`](PartPropDefault::AbsentUntilSet)
+    ///   transitions [`AbsentUntilSet`](HsmPartPropDefault::AbsentUntilSet)
     ///   slots to present.
     ///
     /// # Returns
@@ -259,105 +259,105 @@ pub trait HsmPartitionManager: HsmIoTypes {
     /// [`HsmResult<()>`] — `Ok(())` on success.  See the
     /// [`HsmPartitionManager`] doc-comment for the shared error
     /// contract.
-    fn part_prop_set_u8(&self, io: &Self::Io, id: PartPropId, value: u8) -> HsmResult<()>;
+    fn part_prop_set_u8(&self, io: &Self::Io, id: HsmPartPropId, value: u8) -> HsmResult<()>;
 
-    /// Read a [`PartPropKind::U16`] slot.
+    /// Read a [`HsmPartPropKind::U16`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::U16`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::U16`].
     ///
     /// # Returns
     ///
     /// [`HsmResult<u16>`] — the stored value on success.
-    fn part_prop_get_u16(&self, io: &Self::Io, id: PartPropId) -> HsmResult<u16>;
+    fn part_prop_get_u16(&self, io: &Self::Io, id: HsmPartPropId) -> HsmResult<u16>;
 
-    /// Write a [`PartPropKind::U16`] slot.
+    /// Write a [`HsmPartPropKind::U16`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::U16`] and `access` must be
-    ///   [`PartPropAccess::Rw`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::U16`] and `access` must be
+    ///   [`HsmPartPropAccess::Rw`].
     /// - `value` — value to store; replaces any previous value and
-    ///   transitions [`AbsentUntilSet`](PartPropDefault::AbsentUntilSet)
+    ///   transitions [`AbsentUntilSet`](HsmPartPropDefault::AbsentUntilSet)
     ///   slots to present.
     ///
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_u16(&self, io: &Self::Io, id: PartPropId, value: u16) -> HsmResult<()>;
+    fn part_prop_set_u16(&self, io: &Self::Io, id: HsmPartPropId, value: u16) -> HsmResult<()>;
 
-    /// Read a [`PartPropKind::U32`] slot.
+    /// Read a [`HsmPartPropKind::U32`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::U32`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::U32`].
     ///
     /// # Returns
     ///
     /// [`HsmResult<u32>`] — the stored value on success.
-    fn part_prop_get_u32(&self, io: &Self::Io, id: PartPropId) -> HsmResult<u32>;
+    fn part_prop_get_u32(&self, io: &Self::Io, id: HsmPartPropId) -> HsmResult<u32>;
 
-    /// Write a [`PartPropKind::U32`] slot.
+    /// Write a [`HsmPartPropKind::U32`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::U32`] and `access` must be
-    ///   [`PartPropAccess::Rw`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::U32`] and `access` must be
+    ///   [`HsmPartPropAccess::Rw`].
     /// - `value` — value to store.
     ///
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_u32(&self, io: &Self::Io, id: PartPropId, value: u32) -> HsmResult<()>;
+    fn part_prop_set_u32(&self, io: &Self::Io, id: HsmPartPropId, value: u32) -> HsmResult<()>;
 
-    /// Read a [`PartPropKind::Bool`] slot.
+    /// Read a [`HsmPartPropKind::Bool`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::Bool`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::Bool`].
     ///
     /// # Returns
     ///
     /// [`HsmResult<bool>`] — the stored flag on success.
-    fn part_prop_get_bool(&self, io: &Self::Io, id: PartPropId) -> HsmResult<bool>;
+    fn part_prop_get_bool(&self, io: &Self::Io, id: HsmPartPropId) -> HsmResult<bool>;
 
-    /// Write a [`PartPropKind::Bool`] slot.
+    /// Write a [`HsmPartPropKind::Bool`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::Bool`] and `access` must be
-    ///   [`PartPropAccess::Rw`].  Per-slot semantics may further
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::Bool`] and `access` must be
+    ///   [`HsmPartPropAccess::Rw`].  Per-slot semantics may further
     ///   constrain the legal transitions (for example
-    ///   [`PartPropId::BK3_INITIALIZED`] permits only `false → true`).
+    ///   [`HsmPartPropId::BK3_INITIALIZED`] permits only `false → true`).
     /// - `value` — flag to store.
     ///
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_bool(&self, io: &Self::Io, id: PartPropId, value: bool) -> HsmResult<()>;
+    fn part_prop_set_bool(&self, io: &Self::Io, id: HsmPartPropId, value: bool) -> HsmResult<()>;
 
-    /// Read a [`PartPropKind::FixedBytes`] or [`PartPropKind::VarBytes`]
+    /// Read a [`HsmPartPropKind::FixedBytes`] or [`HsmPartPropKind::VarBytes`]
     /// slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::FixedBytes`] or
-    ///   [`PartPropKind::VarBytes`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::FixedBytes`] or
+    ///   [`HsmPartPropKind::VarBytes`].
     ///
     /// # Returns
     ///
@@ -371,42 +371,49 @@ pub trait HsmPartitionManager: HsmIoTypes {
     /// The returned view is valid for the duration of the `&self`
     /// borrow on the [`HsmPartitionManager`] implementation; PAL
     /// impls must not invalidate it before the borrow ends.
-    fn part_prop_get_bytes<'a>(&'a self, io: &Self::Io, id: PartPropId)
-    -> HsmResult<&'a HsmDmaBuf>;
+    fn part_prop_get_bytes<'a>(
+        &'a self,
+        io: &Self::Io,
+        id: HsmPartPropId,
+    ) -> HsmResult<&'a HsmDmaBuf>;
 
-    /// Write a [`PartPropKind::FixedBytes`] or
-    /// [`PartPropKind::VarBytes`] slot.
+    /// Write a [`HsmPartPropKind::FixedBytes`] or
+    /// [`HsmPartPropKind::VarBytes`] slot.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier; its [`meta`](PartPropId::meta)
-    ///   `kind` must be [`PartPropKind::FixedBytes`] or
-    ///   [`PartPropKind::VarBytes`], and `access` must be
-    ///   [`PartPropAccess::Rw`].
+    /// - `id` — property identifier; its [`meta`](HsmPartPropId::meta)
+    ///   `kind` must be [`HsmPartPropKind::FixedBytes`] or
+    ///   [`HsmPartPropKind::VarBytes`], and `access` must be
+    ///   [`HsmPartPropAccess::Rw`].
     /// - `data` — bytes to store.  For `FixedBytes`, `data.len()`
     ///   must equal the declared `len`; for `VarBytes`, `data.len()`
     ///   must be `≤` the declared `max`.  Any other length returns
     ///   [`HsmError::InvalidArg`].  Writing replaces any previous
-    ///   value and transitions [`AbsentUntilSet`](PartPropDefault::AbsentUntilSet)
+    ///   value and transitions [`AbsentUntilSet`](HsmPartPropDefault::AbsentUntilSet)
     ///   slots to present; PAL impls zeroise the previous bytes of a
     ///   `sensitive` slot before the overwrite.
     ///
     /// # Returns
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.
-    fn part_prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &HsmDmaBuf)
-    -> HsmResult<()>;
+    fn part_prop_set_bytes(
+        &self,
+        io: &Self::Io,
+        id: HsmPartPropId,
+        data: &HsmDmaBuf,
+    ) -> HsmResult<()>;
 
     /// Reset a property slot to its absent state.
     ///
     /// # Parameters
     ///
     /// - `io` — IO handle bound to the target partition.
-    /// - `id` — property identifier.  Its [`meta`](PartPropId::meta)
-    ///   `default` must be [`PartPropDefault::AbsentUntilSet`] and
-    ///   `access` must be [`PartPropAccess::Rw`];
-    ///   [`RequiredPresent`](PartPropDefault::RequiredPresent) slots
+    /// - `id` — property identifier.  Its [`meta`](HsmPartPropId::meta)
+    ///   `default` must be [`HsmPartPropDefault::AbsentUntilSet`] and
+    ///   `access` must be [`HsmPartPropAccess::Rw`];
+    ///   [`RequiredPresent`](HsmPartPropDefault::RequiredPresent) slots
     ///   have no "absent" state to reset to and return
     ///   [`HsmError::InvalidArg`].
     ///
@@ -418,7 +425,7 @@ pub trait HsmPartitionManager: HsmIoTypes {
     ///
     /// [`HsmResult<()>`] — `Ok(())` on success.  Idempotent on an
     /// already-absent slot (also returns `Ok(())`).
-    fn part_prop_clear(&self, io: &Self::Io, id: PartPropId) -> HsmResult<()>;
+    fn part_prop_clear(&self, io: &Self::Io, id: HsmPartPropId) -> HsmResult<()>;
 }
 
 /// Length of the per-partition `BK_BOOT` boot-key material in bytes.
@@ -450,12 +457,12 @@ pub const SEALED_BK3_MAX_LEN: u16 = 512;
 /// `MASKED_BK_BOOT_SIZE` (300 bytes) so blobs stay bit-compatible
 /// with host-side tooling and persistent stores sized by that
 /// firmware.  All PAL implementations size their backing storage
-/// for the [`PartPropId::MASKED_BK_BOOT`] slot to at least this
+/// for the [`HsmPartPropId::MASKED_BK_BOOT`] slot to at least this
 /// many bytes.
 pub const MASKED_BK_BOOT_LEN: usize = 300;
 
 // ============================================================================
-// Property surface — types and the PartPropId catalogue.
+// Property surface — types and the HsmPartPropId catalogue.
 //
 // Crate-level concepts (presence, sensitivity, pure-state)
 // are documented at the module level (see the //! block above);
@@ -466,13 +473,13 @@ pub const MASKED_BK_BOOT_LEN: usize = 300;
 
 /// Access mode for a property.
 ///
-/// Pinned per [`PartPropId`] by its meta; the PAL impl enforces it
+/// Pinned per [`HsmPartPropId`] by its meta; the PAL impl enforces it
 /// in the typed setters (`set_*`) and in [`HsmPartitionManager::part_prop_clear`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PartPropAccess {
+pub enum HsmPartPropAccess {
     /// Caller may read and write the property.  All typed setters
     /// and [`HsmPartitionManager::part_prop_clear`] are permitted (subject to
-    /// [`PartPropDefault`] for `clear`).
+    /// [`HsmPartPropDefault`] for `clear`).
     Rw,
 
     /// Caller may only read the property.  All typed setters and
@@ -487,12 +494,12 @@ pub enum PartPropAccess {
 
 /// Initial presence semantics for a property slot.
 ///
-/// Pinned per [`PartPropId`] by its meta; the PAL impl uses it both
+/// Pinned per [`HsmPartPropId`] by its meta; the PAL impl uses it both
 /// at partition-allocation time (to populate `RequiredPresent` slots)
 /// and at [`HsmPartitionManager::part_prop_clear`] time (to reject clears on
 /// always-present slots).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PartPropDefault {
+pub enum HsmPartPropDefault {
     /// The slot is initialised by the PAL when the partition is
     /// allocated (or earlier) and is never observed absent from the
     /// caller's perspective.  Getters do not return
@@ -519,7 +526,7 @@ pub enum PartPropDefault {
 /// [`HsmPartitionManager::part_prop_get_u8`] on a `U32` slot) returns
 /// [`HsmError::InvalidArg`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PartPropKind {
+pub enum HsmPartPropKind {
     /// Single unsigned byte.  Access: [`HsmPartitionManager::part_prop_get_u8`] /
     /// [`HsmPartitionManager::part_prop_set_u8`].
     U8,
@@ -558,9 +565,9 @@ pub enum PartPropKind {
 
 // ─── Metadata ─────────────────────────────────────────────────────────────
 
-/// Compile-time metadata for a [`PartPropId`].
+/// Compile-time metadata for a [`HsmPartPropId`].
 ///
-/// Returned by [`PartPropId::meta`].  Drives both:
+/// Returned by [`HsmPartPropId::meta`].  Drives both:
 ///
 /// - **Static layout** — PAL impls that use a flat storage backing
 ///   (presence bitmap + value region) compute slot offsets from
@@ -569,17 +576,17 @@ pub enum PartPropKind {
 ///   typed accessor, `access` against any mutation, and `default`
 ///   against `clear`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PartPropMeta {
+pub struct HsmPartPropMeta {
     /// Wire-shape of the slot's value.
-    pub kind: PartPropKind,
+    pub kind: HsmPartPropKind,
 
     /// Whether the caller may mutate the property; see
-    /// [`PartPropAccess`].
-    pub access: PartPropAccess,
+    /// [`HsmPartPropAccess`].
+    pub access: HsmPartPropAccess,
 
     /// Whether the slot starts present or absent; see
-    /// [`PartPropDefault`].
-    pub default: PartPropDefault,
+    /// [`HsmPartPropDefault`].
+    pub default: HsmPartPropDefault,
 
     /// Whether the slot's value is secret.  PAL impls that back the
     /// store with reusable memory (DMA pool, flat persistent
@@ -590,9 +597,9 @@ pub struct PartPropMeta {
     pub sensitive: bool,
 }
 
-impl PartPropMeta {
+impl HsmPartPropMeta {
     /// Single-slot fixed-length byte buffer
-    /// ([`PartPropKind::FixedBytes`]).
+    /// ([`HsmPartPropKind::FixedBytes`]).
     ///
     /// Use for slots whose every present value is exactly `len`
     /// bytes (identity blobs, raw public-key coordinates, fixed-size
@@ -602,8 +609,8 @@ impl PartPropMeta {
     /// # Parameters
     ///
     /// - `len` — exact byte length of every present value.
-    /// - `access` — caller mutability ([`Rw`](PartPropAccess::Rw) /
-    ///   [`Ro`](PartPropAccess::Ro)).
+    /// - `access` — caller mutability ([`Rw`](HsmPartPropAccess::Rw) /
+    ///   [`Ro`](HsmPartPropAccess::Ro)).
     /// - `default` — initial presence semantics.
     /// - `sensitive` — `true` if the slot's bytes are secret and
     ///   must be zeroised on clear/overwrite by the PAL.
@@ -613,12 +620,12 @@ impl PartPropMeta {
     /// [`Self`] — the assembled metadata.
     pub const fn fixed(
         len: u16,
-        access: PartPropAccess,
-        default: PartPropDefault,
+        access: HsmPartPropAccess,
+        default: HsmPartPropDefault,
         sensitive: bool,
     ) -> Self {
         Self {
-            kind: PartPropKind::FixedBytes { len },
+            kind: HsmPartPropKind::FixedBytes { len },
             access,
             default,
             sensitive,
@@ -626,7 +633,7 @@ impl PartPropMeta {
     }
 
     /// Single-slot variable-length byte buffer with an inclusive
-    /// upper bound ([`PartPropKind::VarBytes`]).
+    /// upper bound ([`HsmPartPropKind::VarBytes`]).
     ///
     /// Use for slots whose value length is data-dependent but
     /// bounded (sealed envelopes, masked boot-key blobs).  The PAL
@@ -645,12 +652,12 @@ impl PartPropMeta {
     /// [`Self`] — the assembled metadata.
     pub const fn var(
         max: u16,
-        access: PartPropAccess,
-        default: PartPropDefault,
+        access: HsmPartPropAccess,
+        default: HsmPartPropDefault,
         sensitive: bool,
     ) -> Self {
         Self {
-            kind: PartPropKind::VarBytes { max },
+            kind: HsmPartPropKind::VarBytes { max },
             access,
             default,
             sensitive,
@@ -660,14 +667,14 @@ impl PartPropMeta {
     /// Single-slot scalar (`U8` / `U16` / `U32` / `U64` / `Bool`).
     ///
     /// Use for any non-byte-buffer kind.  The caller picks the
-    /// [`PartPropKind`] variant; calling a typed accessor of a
+    /// [`HsmPartPropKind`] variant; calling a typed accessor of a
     /// different kind (e.g. `get_u8` on a slot built with `U32`)
     /// returns [`HsmError::InvalidArg`].
     ///
     /// # Parameters
     ///
     /// - `kind` — the scalar variant; must not be
-    ///   [`PartPropKind::FixedBytes`] or [`PartPropKind::VarBytes`]
+    ///   [`HsmPartPropKind::FixedBytes`] or [`HsmPartPropKind::VarBytes`]
     ///   (use [`Self::fixed`] / [`Self::var`] for those).
     /// - `access`, `default`, `sensitive` — see [`Self::fixed`].
     ///
@@ -675,9 +682,9 @@ impl PartPropMeta {
     ///
     /// [`Self`] — the assembled metadata.
     pub const fn scalar(
-        kind: PartPropKind,
-        access: PartPropAccess,
-        default: PartPropDefault,
+        kind: HsmPartPropKind,
+        access: HsmPartPropAccess,
+        default: HsmPartPropDefault,
         sensitive: bool,
     ) -> Self {
         Self {
@@ -689,15 +696,15 @@ impl PartPropMeta {
     }
 }
 
-// ─── PartPropId ───────────────────────────────────────────────────────────
+// ─── HsmPartPropId ───────────────────────────────────────────────────────────
 
 /// Stable wire identifier for a partition property.
 ///
-/// `PartPropId` is a `#[repr(transparent)]` `u16` newtype: the raw
+/// `HsmPartPropId` is a `#[repr(transparent)]` `u16` newtype: the raw
 /// value is part of the on-disk and undo-log encoding and MUST NOT
 /// be reassigned once shipped.  Adding new properties is allowed (
 /// pick the next free id in the appropriate range and add a match arm
-/// to [`PartPropId::meta`]); reassigning, repurposing, or shifting
+/// to [`HsmPartPropId::meta`]); reassigning, repurposing, or shifting
 /// existing ids is a wire-breaking change.
 ///
 /// # Id ranges
@@ -719,38 +726,38 @@ impl PartPropMeta {
 /// 1. Pick the next free `u16` in the appropriate range and add a
 ///    `pub const` here, with a doc comment that records the wire
 ///    shape, who sets the slot, and who reads it.
-/// 2. Add a match arm to [`PartPropId::meta`] returning the
-///    [`PartPropMeta`] for the new id — prefer the
-///    [`PartPropMeta::fixed`] / [`PartPropMeta::var`] /
-///    [`PartPropMeta::scalar`] / [`PartPropMeta::fixed_indexed`]
+/// 2. Add a match arm to [`HsmPartPropId::meta`] returning the
+///    [`HsmPartPropMeta`] for the new id — prefer the
+///    [`HsmPartPropMeta::fixed`] / [`HsmPartPropMeta::var`] /
+///    [`HsmPartPropMeta::scalar`] / [`HsmPartPropMeta::fixed_indexed`]
 ///    constructors over building the struct literal by hand.
 /// 3. Update the PAL implementation(s) to back the new slot in their
 ///    storage layout (presence bit + value region, undo-log entry
 ///    if applicable).
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PartPropId(u16);
+pub struct HsmPartPropId(u16);
 
-impl PartPropId {
+impl HsmPartPropId {
     // ── Identity, lifecycle, and platform state (0x0001..) ────────
 
     /// Opaque partition identity blob (16 B).  Read-only from caller
     /// perspective; populated by the PAL during partition setup.
-    pub const ID: PartPropId = PartPropId(0x0001);
+    pub const PART_ID: HsmPartPropId = HsmPartPropId(0x0001);
 
     /// Lifecycle state.  Encoded as `u8` matching
-    /// [`PartState`](crate::PartState) discriminants.
-    pub const STATE: PartPropId = PartPropId(0x0003);
+    /// [`HsmPartState`](crate::HsmPartState) discriminants.
+    pub const PART_STATE: HsmPartPropId = HsmPartPropId(0x0003);
 
     /// Monotonic partition generation counter, incremented on every
     /// allocate/free cycle.  Used by lifetime guards to detect
     /// partition reuse.  Read-only from caller perspective; managed
     /// by the PAL.
-    pub const GEN: PartPropId = PartPropId(0x0004);
+    pub const PART_GEN: HsmPartPropId = HsmPartPropId(0x0004);
 
     /// Number of host-allocated SQ/CQ resource pairs.  Read-only
     /// from caller perspective.
-    pub const RES_COUNT: PartPropId = PartPropId(0x0006);
+    pub const PART_RES_COUNT: HsmPartPropId = HsmPartPropId(0x0006);
 
     /// One-shot BK3 initialization flag.  Bool, `RequiredPresent`,
     /// `Rw` but **the only legal transition is `false → true`**;
@@ -758,7 +765,7 @@ impl PartPropId {
     /// [`HsmError::Bk3AlreadyInitialized`] and rejects `* → false`
     /// with [`HsmError::InvalidArg`].  Reset back to `false` happens
     /// PAL-internally on partition free / NSSR.
-    pub const BK3_INITIALIZED: PartPropId = PartPropId(0x0008);
+    pub const BK3_INITIALIZED: HsmPartPropId = HsmPartPropId(0x0008);
 
     /// One-shot security-domain initialization flag.  Bool,
     /// `RequiredPresent`, `Rw`.  A redundant `true` write (the flag is
@@ -767,77 +774,77 @@ impl PartPropId {
     /// for `SdCreateRemoteBackup`.  A `false` write is permitted so the
     /// TBOR undo log can roll the claim back on a failed command; the
     /// flag is also reset PAL-internally on partition free / NSSR.
-    pub const SD_INITIALIZED: PartPropId = PartPropId(0x0009);
+    pub const SD_INITIALIZED: HsmPartPropId = HsmPartPropId(0x0009);
 
     // ── Vault references (0x0010..) ───────────────────────────────
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition identity
     /// key (ECC-P384).  Read-only from caller perspective; assigned
     /// by the PAL when the identity key is materialised.
-    pub const ID_KEY_ID: PartPropId = PartPropId(0x0010);
+    pub const PART_ID_ECC_KEY_ID: HsmPartPropId = HsmPartPropId(0x0010);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition masking
     /// key.
-    pub const MK_KEY_ID: PartPropId = PartPropId(0x0011);
+    pub const MK_KEY_ID: HsmPartPropId = HsmPartPropId(0x0011);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition Unique
     /// Partition Secret derived key.
-    pub const UPS_KEY_ID: PartPropId = PartPropId(0x0012);
+    pub const UPS_KEY_ID: HsmPartPropId = HsmPartPropId(0x0012);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the Partition Trust
     /// Anchor (PTA) key.
-    pub const PTA_KEY_ID: PartPropId = PartPropId(0x0013);
+    pub const PTA_KEY_ID: HsmPartPropId = HsmPartPropId(0x0013);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition's
     /// unwrapping key.  Writable so `EstablishCredential` can re-import
     /// the host-persisted key after a live migration.
-    pub const RSA_UNWRAPPING_KEY_ID: PartPropId = PartPropId(0x0014);
+    pub const RSA_UNWRAPPING_KEY_ID: HsmPartPropId = HsmPartPropId(0x0014);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition's
     /// session encryption key (long-lived ECDH).
-    pub const SESSION_ENC_KEY_ID: PartPropId = PartPropId(0x0015);
+    pub const SESSION_ENC_KEY_ID: HsmPartPropId = HsmPartPropId(0x0015);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition's
     /// one-shot establish-credential RSA-OAEP key.
-    pub const ESTABLISH_CRED_KEY_ID: PartPropId = PartPropId(0x0016);
+    pub const ESTABLISH_CRED_KEY_ID: HsmPartPropId = HsmPartPropId(0x0016);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition-local key
     /// masking key (`PartLocalMK`).  Bound by the TBOR `PartFinal`
     /// handler; recovered each launch from the caller-replayed
     /// `local_mk_backup`.
-    pub const LOCAL_MK_KEY_ID: PartPropId = PartPropId(0x001B);
+    pub const LOCAL_MK_KEY_ID: HsmPartPropId = HsmPartPropId(0x001B);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the partition's ephemeral
     /// key masking key (`EphemeralMK`).  Bound by the TBOR `PartFinal`
     /// handler; freshly generated each launch (never backed up).
-    pub const EPHEMERAL_MK_KEY_ID: PartPropId = PartPropId(0x001C);
+    pub const EPHEMERAL_MK_KEY_ID: HsmPartPropId = HsmPartPropId(0x001C);
 
     /// Vault [`HsmKeyId`](crate::HsmKeyId) for the security-domain key
     /// masking key (`SDMK`).  Bound by the TBOR `SdCreateRemoteBackup`
     /// handler; resolves the [`SecurityDomain`](crate::HsmKeyScope::SecurityDomain)
     /// scope to its live masking key.
-    pub const SD_MK_KEY_ID: PartPropId = PartPropId(0x001D);
+    pub const SD_MK_KEY_ID: HsmPartPropId = HsmPartPropId(0x001D);
 
     /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) of the
     /// partition identity key.  Read-only from caller perspective;
-    /// materialised by the PAL alongside [`ID_KEY_ID`](Self::ID_KEY_ID).
-    pub const ID_PUB_KEY: PartPropId = PartPropId(0x0017);
+    /// materialised by the PAL alongside [`PART_ID_ECC_KEY_ID`](Self::PART_ID_ECC_KEY_ID).
+    pub const PART_ID_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0017);
 
     /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) for the
     /// session encryption key.  Read-only from caller perspective.
-    pub const SESSION_ENC_PUB_KEY: PartPropId = PartPropId(0x0018);
+    pub const SESSION_ENC_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0018);
 
     /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) for the
     /// one-shot establish-credential key.  Read-only from caller
     /// perspective.
-    pub const ESTABLISH_CRED_PUB_KEY: PartPropId = PartPropId(0x0019);
+    pub const ESTABLISH_CRED_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0019);
 
     /// Raw ECC-P384 public-key coordinates (`x ‖ y`, 96 B) for the
     /// Partition Trust Anchor.  Set together with
     /// [`PTA_KEY_ID`](Self::PTA_KEY_ID) by `PartInit` (the host-supplied
     /// SEC1 form is validated and its `0x04` prefix stripped at the
     /// facade boundary before storage).
-    pub const PTA_PUB_KEY: PartPropId = PartPropId(0x001A);
+    pub const PTA_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x001A);
 
     // ── Caller-presented secrets (0x0020..) ───────────────────────
 
@@ -847,61 +854,61 @@ impl PartPropId {
     /// can establish a CO session immediately; rotation through the
     /// setter is required before exposing the partition to
     /// untrusted traffic.
-    pub const PSK_CO: PartPropId = PartPropId(0x0020);
+    pub const PSK_CO: HsmPartPropId = HsmPartPropId(0x0020);
 
     /// Crypto User pre-shared key (32 B).  Sensitive.  Default-baked
     /// at allocation; see [`PSK_CO`](Self::PSK_CO).
-    pub const PSK_CU: PartPropId = PartPropId(0x0021);
+    pub const PSK_CU: HsmPartPropId = HsmPartPropId(0x0021);
 
     /// Caller-presented credential blob (32 B).  Sensitive.
     /// Absent-until-set; verified by the upper layer via
     /// constant-time compare against the value returned by
     /// [`HsmPartitionManager::part_prop_get_bytes`].
-    pub const CREDENTIAL: PartPropId = PartPropId(0x0022);
+    pub const CREDENTIAL: HsmPartPropId = HsmPartPropId(0x0022);
 
     /// 32-byte partition nonce, refreshed per credential / session
     /// event.  Sensitive.  Caller refreshes by writing a fresh
     /// PAL-RNG buffer via [`HsmPartitionManager::part_prop_set_bytes`].
-    pub const NONCE: PartPropId = PartPropId(0x0023);
+    pub const NONCE: HsmPartPropId = HsmPartPropId(0x0023);
 
     // ── Boot / launch-time bound material (0x0030..) ──────────────
 
     /// Sealed BK3 blob (≤ [`SEALED_BK3_MAX_LEN`](crate::SEALED_BK3_MAX_LEN) B).
     /// Sensitive.  Absent-until-set; set once per power cycle.
-    pub const SEALED_BK3: PartPropId = PartPropId(0x0030);
+    pub const SEALED_BK3: HsmPartPropId = HsmPartPropId(0x0030);
 
     /// Masked BK_BOOT blob (variable, ≤ [`MASKED_BK_BOOT_LEN`](crate::MASKED_BK_BOOT_LEN)).
     /// Sensitive.
-    pub const MASKED_BK_BOOT: PartPropId = PartPropId(0x0031);
+    pub const MASKED_BK_BOOT: HsmPartPropId = HsmPartPropId(0x0031);
 
     /// VM-launch GUID (16 B), bound at session-establishment time.
     /// Read-only from caller perspective; populated by the PAL.
-    pub const VM_LAUNCH_GUID: PartPropId = PartPropId(0x0033);
+    pub const VM_LAUNCH_GUID: HsmPartPropId = HsmPartPropId(0x0033);
 
     /// Partition policy hash — SHA-384 digest of the
     /// [`PART_POLICY_LEN`](crate::PART_POLICY_LEN)-byte PartPolicy blob
     /// (exactly [`POLICY_HASH_LEN`](crate::POLICY_HASH_LEN) bytes). Set by
     /// `PartInit`.
-    pub const POLICY_HASH: PartPropId = PartPropId(0x0034);
+    pub const POLICY_HASH: HsmPartPropId = HsmPartPropId(0x0034);
 
     /// POTA thumbprint (48 B).  Set by `PartInit`.
-    pub const POTA_THUMBPRINT: PartPropId = PartPropId(0x0035);
+    pub const POTA_THUMBPRINT: HsmPartPropId = HsmPartPropId(0x0035);
 
     /// SATA (Sealing Authority Trust Anchor) thumbprint (48 B).  Set by
     /// `PartInit` when configuring the partition for its security
     /// domain.
-    pub const SATA_THUMBPRINT: PartPropId = PartPropId(0x0037);
+    pub const SATA_THUMBPRINT: HsmPartPropId = HsmPartPropId(0x0037);
 
     /// SAPOTA (Sealing Authority's POTA) thumbprint (48 B).  Optional;
     /// set by `PartInit` only when the request carries a SAPOTA
     /// thumbprint.
-    pub const SAPOTA_THUMBPRINT: PartPropId = PartPropId(0x0038);
+    pub const SAPOTA_THUMBPRINT: HsmPartPropId = HsmPartPropId(0x0038);
 
     /// BK3 session key (48 B).  Sensitive.  Set by EstablishCredential
     /// once per session.
-    pub const BK3_SESSION: PartPropId = PartPropId(0x0036);
+    pub const BK3_SESSION: HsmPartPropId = HsmPartPropId(0x0036);
 
-    /// Wrap a raw `u16` as a [`PartPropId`].
+    /// Wrap a raw `u16` as a [`HsmPartPropId`].
     ///
     /// Used by undo-log replay and on-disk decoders that read raw
     /// ids off the wire.  Callers obtain ids from the named
@@ -937,38 +944,38 @@ impl PartPropId {
     ///
     /// # Returns
     ///
-    /// [`Option<PartPropMeta>`] — `Some(meta)` describing the
+    /// [`Option<HsmPartPropMeta>`] — `Some(meta)` describing the
     /// slot's wire shape, access mode, presence
     /// semantics, and sensitivity for any id known to this build of
     /// the PAL traits crate; `None` for any id not added to the
     /// match below at compile time.  PAL impls surface unknown ids
     /// as [`HsmError::InvalidArg`] in their getters and setters.
-    pub const fn meta(self) -> Option<PartPropMeta> {
-        use PartPropAccess::Ro;
-        use PartPropAccess::Rw;
-        use PartPropDefault::AbsentUntilSet as Abs;
-        use PartPropDefault::RequiredPresent as Req;
-        use PartPropKind::Bool;
-        use PartPropKind::U8;
-        use PartPropKind::U16;
-        use PartPropKind::U32;
+    pub const fn meta(self) -> Option<HsmPartPropMeta> {
+        use HsmPartPropAccess::Ro;
+        use HsmPartPropAccess::Rw;
+        use HsmPartPropDefault::AbsentUntilSet as Abs;
+        use HsmPartPropDefault::RequiredPresent as Req;
+        use HsmPartPropKind::Bool;
+        use HsmPartPropKind::U8;
+        use HsmPartPropKind::U16;
+        use HsmPartPropKind::U32;
 
         // Writable vault-ref props share the same shape (u16 HsmKeyId, RW, absent).
-        const VAULT_REF_RW: PartPropMeta = PartPropMeta::scalar(U16, Rw, Abs, false);
+        const VAULT_REF_RW: HsmPartPropMeta = HsmPartPropMeta::scalar(U16, Rw, Abs, false);
         // Read-only vault-ref props share the same shape (u16 HsmKeyId, RO, absent).
-        const VAULT_REF_RO: PartPropMeta = PartPropMeta::scalar(U16, Ro, Abs, false);
+        const VAULT_REF_RO: HsmPartPropMeta = HsmPartPropMeta::scalar(U16, Ro, Abs, false);
 
         let meta = match self {
             // ── Identity, lifecycle, platform ──
-            Self::ID => PartPropMeta::fixed(16, Ro, Abs, false),
-            Self::STATE => PartPropMeta::scalar(U8, Rw, Req, false),
-            Self::GEN => PartPropMeta::scalar(U32, Ro, Req, false),
-            Self::RES_COUNT => PartPropMeta::scalar(U8, Ro, Req, false),
-            Self::BK3_INITIALIZED => PartPropMeta::scalar(Bool, Rw, Req, false),
-            Self::SD_INITIALIZED => PartPropMeta::scalar(Bool, Rw, Req, false),
+            Self::PART_ID => HsmPartPropMeta::fixed(16, Ro, Abs, false),
+            Self::PART_STATE => HsmPartPropMeta::scalar(U8, Rw, Req, false),
+            Self::PART_GEN => HsmPartPropMeta::scalar(U32, Ro, Req, false),
+            Self::PART_RES_COUNT => HsmPartPropMeta::scalar(U8, Ro, Req, false),
+            Self::BK3_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
+            Self::SD_INITIALIZED => HsmPartPropMeta::scalar(Bool, Rw, Req, false),
 
             // ── Vault refs (HsmKeyId as u16) ──
-            Self::ID_KEY_ID => VAULT_REF_RO,
+            Self::PART_ID_ECC_KEY_ID => VAULT_REF_RO,
             Self::MK_KEY_ID
             | Self::UPS_KEY_ID
             | Self::PTA_KEY_ID
@@ -980,25 +987,25 @@ impl PartPropId {
             | Self::RSA_UNWRAPPING_KEY_ID => VAULT_REF_RW,
 
             // ── Public-key views (fixed P-384 sizes) ──
-            Self::ID_PUB_KEY | Self::SESSION_ENC_PUB_KEY | Self::ESTABLISH_CRED_PUB_KEY => {
-                PartPropMeta::fixed(96, Ro, Abs, false)
-            }
-            Self::PTA_PUB_KEY => PartPropMeta::fixed(96, Rw, Abs, false),
+            Self::PART_ID_ECC_PUB_KEY
+            | Self::SESSION_ENC_ECC_PUB_KEY
+            | Self::ESTABLISH_CRED_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Ro, Abs, false),
+            Self::PTA_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Rw, Abs, false),
 
             // ── Caller-presented secrets ──
-            Self::PSK_CO | Self::PSK_CU => PartPropMeta::fixed(PSK_LEN as u16, Rw, Req, true),
-            Self::CREDENTIAL => PartPropMeta::fixed(32, Rw, Abs, true),
-            Self::NONCE => PartPropMeta::fixed(32, Rw, Req, true),
+            Self::PSK_CO | Self::PSK_CU => HsmPartPropMeta::fixed(PSK_LEN as u16, Rw, Req, true),
+            Self::CREDENTIAL => HsmPartPropMeta::fixed(32, Rw, Abs, true),
+            Self::NONCE => HsmPartPropMeta::fixed(32, Rw, Req, true),
 
             // ── Boot / launch-time bound material ──
-            Self::SEALED_BK3 => PartPropMeta::var(SEALED_BK3_MAX_LEN, Rw, Abs, true),
-            Self::MASKED_BK_BOOT => PartPropMeta::var(MASKED_BK_BOOT_LEN as u16, Rw, Abs, true),
-            Self::VM_LAUNCH_GUID => PartPropMeta::fixed(16, Ro, Abs, false),
-            Self::POLICY_HASH => PartPropMeta::fixed(POLICY_HASH_LEN as u16, Rw, Abs, false),
-            Self::POTA_THUMBPRINT => PartPropMeta::fixed(48, Rw, Abs, false),
-            Self::SATA_THUMBPRINT => PartPropMeta::fixed(48, Rw, Abs, false),
-            Self::SAPOTA_THUMBPRINT => PartPropMeta::fixed(48, Rw, Abs, false),
-            Self::BK3_SESSION => PartPropMeta::fixed(48, Rw, Abs, true),
+            Self::SEALED_BK3 => HsmPartPropMeta::var(SEALED_BK3_MAX_LEN, Rw, Abs, true),
+            Self::MASKED_BK_BOOT => HsmPartPropMeta::var(MASKED_BK_BOOT_LEN as u16, Rw, Abs, true),
+            Self::VM_LAUNCH_GUID => HsmPartPropMeta::fixed(16, Ro, Abs, false),
+            Self::POLICY_HASH => HsmPartPropMeta::fixed(POLICY_HASH_LEN as u16, Rw, Abs, false),
+            Self::POTA_THUMBPRINT => HsmPartPropMeta::fixed(48, Rw, Abs, false),
+            Self::SATA_THUMBPRINT => HsmPartPropMeta::fixed(48, Rw, Abs, false),
+            Self::SAPOTA_THUMBPRINT => HsmPartPropMeta::fixed(48, Rw, Abs, false),
+            Self::BK3_SESSION => HsmPartPropMeta::fixed(48, Rw, Abs, true),
 
             _ => return None,
         };
@@ -1006,16 +1013,16 @@ impl PartPropId {
     }
 }
 
-impl From<u16> for PartPropId {
+impl From<u16> for HsmPartPropId {
     #[inline]
     fn from(v: u16) -> Self {
         Self(v)
     }
 }
 
-impl From<PartPropId> for u16 {
+impl From<HsmPartPropId> for u16 {
     #[inline]
-    fn from(id: PartPropId) -> Self {
+    fn from(id: HsmPartPropId) -> Self {
         id.0
     }
 }

@@ -36,8 +36,8 @@ use tsra_fw_ddi_mbor::MborEncoder;
 use tsra_fw_ddi_mbor::MborLen;
 use tsra_fw_ddi_mbor::MborLenAccumulator;
 use tsra_fw_ddi_mbor_types::masked_key::DdiMaskedKeyMetadata;
-use tsra_fw_hsm_pal_traits::AesOp;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -176,7 +176,7 @@ where
         let iv = &front[iv_off..iv_off + iv_len];
         let ct = &mut back[..hdr.ciphertext_len()];
         let aes_key = &masking_key[..AES_CBC_256_KEY_SIZE];
-        pal.aes_cbc_enc_dec_in_place(io, AesOp::Encrypt, aes_key, ct, iv, None)
+        pal.aes_cbc_enc_dec_in_place(io, HsmAesOp::Encrypt, aes_key, ct, iv, None)
             .await
     };
     aes_result?;

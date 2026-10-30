@@ -28,16 +28,16 @@ use tsra_fw_hsm_undo::UndoLog;
 /// Validated `SessionOpenInit` request fields.
 struct ParsedRequest<'a> {
     /// Roles
-    role: SessionRole,
+    role: HsmSessionRole,
 
     /// PSK identifier (0 or 1).
     psk_id: u8,
 
     /// Channel-level integrity profile selected by the caller.
-    session_type: SessionType,
+    session_type: HsmSessionType,
 
     /// Cryptographic suite negotiated by the caller.
-    suite: SessionSuite,
+    suite: HsmSessionSuite,
 
     /// Sub-view of the inbound request buffer (DMA-branded by the
     /// codec), so it can flow straight into HPKE / HMAC inputs
@@ -45,21 +45,21 @@ struct ParsedRequest<'a> {
     pk_init: &'a HsmDmaBuf,
 }
 
-/// Map a [`SessionSuite`] to the concrete [`HpkeSuite`] used by the
+/// Map a [`HsmSessionSuite`] to the concrete [`HpkeSuite`] used by the
 /// session-establishment handshake.  Today every implemented suite is
 /// HPKE-based, so this is a total function; future ML-KEM variants
 /// will require a different code path (and a different return type).
-const fn hpke_suite_for(suite: SessionSuite) -> HpkeSuite {
+const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
     match suite {
-        SessionSuite::P384HkdfSha384AesGcm256 => HpkeSuite::DHKemP384Sha384AesGcm256,
+        HsmSessionSuite::P384HkdfSha384AesGcm256 => HpkeSuite::DHKemP384Sha384AesGcm256,
     }
 }
 
-/// HPKE suite used by the only currently registered `SessionSuite`
+/// HPKE suite used by the only currently registered `HsmSessionSuite`
 /// (`P384HkdfSha384AesGcm256`).  Used at compile time to size the
 /// Pending blob; the runtime handler always uses
 /// [`hpke_suite_for`] for the actually-negotiated suite.
-const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(SessionSuite::P384HkdfSha384AesGcm256);
+const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(HsmSessionSuite::P384HkdfSha384AesGcm256);
 
 /// Length of the Pending handshake-state blob:
 /// `exported (Nh) ‖ pk_init (Npk) ‖ pk_resp (Npk) ‖ session_type (1 B)
@@ -172,16 +172,16 @@ fn parse_request<'a>(req_buf: &'a HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     let req = TborSessionOpenInitReq::decode(req_buf)?;
 
     let role = match req.psk_id() {
-        PskId::CryptoOfficer => SessionRole::CryptoOfficer,
-        PskId::CryptoUser => SessionRole::CryptoUser,
+        PskId::CryptoOfficer => HsmSessionRole::CryptoOfficer,
+        PskId::CryptoUser => HsmSessionRole::CryptoUser,
         _ => return Err(HsmError::InvalidPskId),
     };
     let psk_id = req.psk_id().0;
 
-    let session_type = SessionType::from_u8(req.session_type().0)?;
+    let session_type = HsmSessionType::from_u8(req.session_type().0)?;
     session_type.validate_for_role(role)?;
 
-    let suite = SessionSuite::from_u8(req.suite_id().0)?;
+    let suite = HsmSessionSuite::from_u8(req.suite_id().0)?;
     let hpke_suite = hpke_suite_for(suite);
 
     let pk_init: &HsmDmaBuf = req.pk_init();
@@ -252,8 +252,8 @@ fn load_pk_hsm_sec1<'a, P: HsmPal>(
 fn build_hpke_info(
     alloc: &impl HsmScopedAlloc,
     psk_id: u8,
-    session_type: SessionType,
-    suite: SessionSuite,
+    session_type: HsmSessionType,
+    suite: HsmSessionSuite,
 ) -> HsmResult<&[u8]> {
     let info = alloc.dma_alloc(SESSION_HPKE_INFO.len() + 3)?;
     let mut off = 0;
@@ -315,9 +315,9 @@ async fn create_pending_slot<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    role: SessionRole,
-    session_type: SessionType,
-    suite: SessionSuite,
+    role: HsmSessionRole,
+    session_type: HsmSessionType,
+    suite: HsmSessionSuite,
     hpke_suite: HpkeSuite,
     exported: &HsmDmaBuf,
     pk_init: &HsmDmaBuf,

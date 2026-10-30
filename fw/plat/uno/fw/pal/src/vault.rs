@@ -116,16 +116,16 @@ impl HsmVault for UnoHsmPal {
         v.create(self, io, app_id, key, kind, session, attrs).await
     }
 
-    fn bulk_key_id(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<Option<u16>> {
+    fn bulk_key_id(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<u16> {
         if !is_bulk_kind(self.vault_key_kind(io, key_id)?) {
-            return Ok(None);
+            return Err(HsmError::UnsupportedKeyType);
         }
         let blob = self.vault_key(io, key_id)?;
         let bytes: &[u8] = blob;
         if bytes.len() != core::mem::size_of::<u16>() {
             return Err(HsmError::InternalError);
         }
-        Ok(Some(u16::from_le_bytes([bytes[0], bytes[1]])))
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
     }
 
     // Without `bulk_crypto` the engine path below is compiled out; see the

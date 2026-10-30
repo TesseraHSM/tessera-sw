@@ -77,6 +77,10 @@ impl HsmVault for StdHsmPal {
         entry.vault.create(key, kind, session_key_id, attrs)
     }
 
+    fn bulk_key_id(&self, _io: &StdHsmIo, _key_id: HsmKeyId) -> HsmResult<u16> {
+        Err(HsmError::UnsupportedCmd)
+    }
+
     /// Delete a key from the partition's vault.
     async fn vault_key_delete(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;

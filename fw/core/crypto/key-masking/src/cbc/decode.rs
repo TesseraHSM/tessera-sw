@@ -10,8 +10,8 @@
 //! block).  The caller recovers the exact plaintext length from the
 //! metadata's higher-level format (e.g. `key_length`).
 
-use tsra_fw_hsm_pal_traits::AesOp;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -163,7 +163,7 @@ where
         let iv = &front[iv_off..iv_off + AES_CBC_IV_SIZE];
         let ct = &mut back[..ct_len];
         let aes_key = &masking_key[..AES_CBC_256_KEY_SIZE];
-        pal.aes_cbc_enc_dec_in_place(io, AesOp::Decrypt, aes_key, ct, iv, None)
+        pal.aes_cbc_enc_dec_in_place(io, HsmAesOp::Decrypt, aes_key, ct, iv, None)
             .await
     };
     aes_result?;

@@ -168,7 +168,7 @@ pub trait HsmIoController: HsmIoTypes {
     ///
     /// Posts no CQE of its own.  Called either to silently discard an IO
     /// — for example one that arrived for a
-    /// non-[`PartState::Enabled`](crate::PartState::Enabled) partition and
+    /// non-[`HsmPartState::Enabled`](crate::HsmPartState::Enabled) partition and
     /// core wants to drop without surfacing anything to the host — or to
     /// release the slot after [`complete_io`](Self::complete_io) has
     /// already posted the completion.

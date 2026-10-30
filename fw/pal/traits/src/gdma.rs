@@ -141,7 +141,7 @@ pub trait HsmGdmaController: HsmIoTypes {
     ///   the GDMA can address.
     /// - `Err(HsmError)` — propagated from the GDMA driver on
     ///   completion errors.
-    async fn zeroize_mem(&self, io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()>;
+    async fn zero_mem(&self, io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()>;
 
     /// Copies bytes from host memory into an HSM-local DMA buffer.
     ///

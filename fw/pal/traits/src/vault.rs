@@ -537,7 +537,7 @@ pub trait HsmVault: HsmIoTypes {
         attrs: HsmVaultKeyAttrs,
     ) -> HsmResult<HsmKeyId>;
 
-    /// The backend-assigned bulk key id for `key_id`, if it names a bulk key.
+    /// Returns the backend-assigned bulk key id for `key_id`.
     ///
     /// Bulk (AES-GCM / XTS) keys are held by a platform bulk-crypto backend
     /// rather than as material in the vault; the host addresses them by this
@@ -545,20 +545,18 @@ pub trait HsmVault: HsmIoTypes {
     /// it, is entirely platform-defined — a platform folds any backend
     /// registration into its [`vault_key_create`](Self::vault_key_create) /
     /// [`vault_key_delete`](Self::vault_key_delete) overrides and exposes only
-    /// this lookup to the core.  Platforms without a bulk backend inherit the
-    /// default `Ok(None)`.
+    /// this lookup to the core. Platforms without a bulk backend return
+    /// `Err(HsmError::UnsupportedCmd)`.
     ///
     /// # Parameters
     /// - `io` — caller I/O context (partition scope).
-    /// - `key_id` — the vault handle returned by `vault_key_create`.
+    /// - `key_id` — a bulk key's vault handle returned by `vault_key_create`.
     ///
     /// # Returns
-    /// - `Ok(Some(bulk_key_id))` — `key_id` is a bulk key.
-    /// - `Ok(None)` — `key_id` is an ordinary vault key, or the platform has
-    ///   no bulk backend.
-    fn bulk_key_id(&self, _io: &Self::Io, _key_id: HsmKeyId) -> HsmResult<Option<u16>> {
-        Ok(None)
-    }
+    /// - `Ok(bulk_key_id)` — the backend-assigned bulk key id.
+    /// - `Err(HsmError::UnsupportedCmd)` — the platform has no bulk backend.
+    /// - `Err(HsmError::UnsupportedKeyType)` — `key_id` is not a bulk key.
+    fn bulk_key_id(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<u16>;
 
     /// Deletes a single key by ID.
     ///

@@ -53,8 +53,8 @@ pub(crate) async fn aes_encrypt_decrypt<'p, P: HsmPal>(
     super::from_pal::assert_aes(vault_kind)?;
     let vault_attrs = pal.vault_key_attrs(io, key_id)?;
     let required_attr = match op {
-        AesOp::Encrypt => vault_attrs.encrypt(),
-        AesOp::Decrypt => vault_attrs.decrypt(),
+        HsmAesOp::Encrypt => vault_attrs.encrypt(),
+        HsmAesOp::Decrypt => vault_attrs.decrypt(),
     };
     if !required_attr {
         return Err(HsmError::InvalidPermissions);
@@ -87,11 +87,11 @@ pub(crate) async fn aes_encrypt_decrypt<'p, P: HsmPal>(
     Ok(resp)
 }
 
-/// Map a `DdiAesOp` to the PAL [`AesOp`].
-fn ddi_to_pal_aes_op(op: DdiAesOp) -> HsmResult<AesOp> {
+/// Map a `DdiAesOp` to the PAL [`HsmAesOp`].
+fn ddi_to_pal_aes_op(op: DdiAesOp) -> HsmResult<HsmAesOp> {
     match op {
-        DdiAesOp::Encrypt => Ok(AesOp::Encrypt),
-        DdiAesOp::Decrypt => Ok(AesOp::Decrypt),
+        DdiAesOp::Encrypt => Ok(HsmAesOp::Encrypt),
+        DdiAesOp::Decrypt => Ok(HsmAesOp::Decrypt),
         _ => Err(HsmError::InvalidArg),
     }
 }
