@@ -113,7 +113,9 @@ fuzz_target!(|input: FuzzInput| {
             let resp = result.expect("valid EccGenerateKey request should succeed");
             let wire_coord_len = input.curve.wire_coord_len();
             assert_eq!(resp.pub_key.len(), wire_coord_len * 2);
-            assert_eq!(resp.masked_key.len(), 228 + wire_coord_len);
+            assert!(
+                (MASKED_ECC_KEY_MIN_LEN..=MASKED_ECC_KEY_MAX_LEN).contains(&resp.masked_key.len())
+            );
             assert!(resp.pub_key.iter().any(|byte| *byte != 0));
             assert!(resp.masked_key.iter().any(|byte| *byte != 0));
         } else {

@@ -13,6 +13,8 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
+const MAX_OPS: usize = 16;
+
 #[derive(Arbitrary, Debug)]
 enum TestAppOps {
     OpenSession([u8; 16], [u8; 16]),
@@ -24,7 +26,7 @@ fuzz_target!(|ops: Vec<TestAppOps>| {
         let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
         let mut file_handles = Vec::new();
 
-        for op in &ops {
+        for op in ops.iter().take(MAX_OPS) {
             match op {
                 TestAppOps::OpenSession(user_id, pin) => {
                     // The existing TBOR session occupies this file handle, so

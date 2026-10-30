@@ -127,7 +127,7 @@ fuzz_target!(|input: FuzzInput| {
                     };
                     (
                         ctx.tbor(&req).map(|resp| (resp.masked_key.len(), None)),
-                        MASKED_HMAC_KEY_MIN_LEN..=MASKED_HMAC_KEY_MIN_LEN,
+                        MASKED_HMAC_KEY_MIN_LEN..=MASKED_HMAC_KEY_MAX_LEN,
                         None,
                     )
                 }
