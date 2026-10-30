@@ -134,6 +134,15 @@ impl DdiOpReq for DdiGetPrivKeyCmdReq {
     }
 }
 
+// This test-only op has no body-level session id distinct from the
+// header, matching the default for every production op besides
+// `ReopenSession` (see `DdiRespSessionId`).
+impl DdiRespSessionId for DdiGetPrivKeyCmdResp {
+    fn resp_session_id(&self) -> Option<u16> {
+        None
+    }
+}
+
 /// Action-specific request for `RawKeyImport`.
 #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Ddi)]
@@ -204,6 +213,15 @@ impl DdiOpReq for DdiRawKeyImportCmdReq {
 
     fn get_session_id(&self) -> Option<u16> {
         self.hdr.sess_id
+    }
+}
+
+// This test-only op has no body-level session id distinct from the
+// header, matching the default for every production op besides
+// `ReopenSession` (see `DdiRespSessionId`).
+impl DdiRespSessionId for DdiRawKeyImportCmdResp {
+    fn resp_session_id(&self) -> Option<u16> {
+        None
     }
 }
 

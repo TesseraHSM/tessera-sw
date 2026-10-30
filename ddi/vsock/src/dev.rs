@@ -47,6 +47,7 @@ use tsra_ddi_mbor_types::DdiOp;
 use tsra_ddi_mbor_types::DdiOpReq;
 use tsra_ddi_mbor_types::DdiReqHdr;
 use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiRespSessionId;
 use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_mbor_types::MborError;
 use tsra_ddi_mbor_types::SessionControlKind;
@@ -313,6 +314,29 @@ impl SessionGenerationTracker {
     /// reopen; any other operation from that generation fails.
     fn reset(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a `ReopenSession` response confirms the requested session id.
+///
+/// `requested` is the id named in the request (`DdiReqHdr::sess_id`);
+/// `header_sess_id` and `body_sess_id` are the same id as independently
+/// reported by the response's shared header and its op-specific body
+/// (`DdiReopenSessionResp::sess_id`, via `DdiRespSessionId`) respectively.
+/// Both must be present and equal to `requested` — a peer that omits
+/// either id, or reports a different one in either place, must not be
+/// trusted enough to promote the connection's session generation (see
+/// the call site in [`DdiVsockDev::exec_op_mbor`]). A missing `requested`
+/// id (no specific session named) trivially confirms, since there is
+/// nothing to check against.
+fn reopen_identity_confirmed(
+    requested: Option<u16>,
+    header_sess_id: Option<u16>,
+    body_sess_id: Option<u16>,
+) -> bool {
+    match requested {
+        Some(requested) => header_sess_id == Some(requested) && body_sess_id == Some(requested),
+        None => true,
     }
 }
 
@@ -634,22 +658,22 @@ impl DdiDev for DdiVsockDev {
             };
 
             // For `ReopenSession`, the request already names the id
-            // being reopened (`session_id`); a conforming peer's header
-            // echoes that same id back. The full identity check (which
-            // also covers the response body's own `sess_id` field) runs
-            // one layer up, after this call returns — but promoting the
-            // generation here unconditionally would let `check()` start
-            // trusting this handle on the replacement connection before
-            // that identity check ever runs. A peer that reports a
-            // *different* header id must not be trusted: reject before
-            // recording, leaving the old entry stale so `check()`
-            // continues to reject it (see `SessionGenerationTracker`).
-            if opcode == DdiOp::ReopenSession {
-                if let (Some(requested), Some(reported)) = (session_id, hdr.sess_id) {
-                    if requested != reported {
-                        return Err(DdiError::DdiStatus(DdiStatus::SessionNotFound));
-                    }
-                }
+            // being reopened (`session_id`). A conforming peer's header
+            // *and* body (`DdiReopenSessionResp::sess_id`, exposed
+            // generically via `DdiRespSessionId::resp_session_id`) both
+            // echo that same id back. Promoting the generation
+            // unconditionally — or only checking one of the two ids —
+            // would let `check()` start trusting this handle on the
+            // replacement connection before both fields are confirmed:
+            // a peer that omits either id, or reports a *different* one
+            // in either place, must not be trusted. Reject before
+            // recording in every such case, leaving the old entry stale
+            // so `check()` continues to reject it (see
+            // `SessionGenerationTracker`).
+            if opcode == DdiOp::ReopenSession
+                && !reopen_identity_confirmed(session_id, hdr.sess_id, typed_resp.resp_session_id())
+            {
+                return Err(DdiError::DdiStatus(DdiStatus::SessionNotFound));
             }
 
             // `Open` responses carry the firmware-assigned session id in
@@ -801,6 +825,30 @@ fn map_proto_err(e: ProtoError) -> DdiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `ReopenSession` response is only trusted when both the shared
+    /// header and the op-specific body independently confirm the exact
+    /// id that was requested; a mismatch or a missing id in either place
+    /// must not be mistaken for confirmation (see `exec_op_mbor`'s use
+    /// of this to gate generation promotion).
+    #[test]
+    fn reopen_identity_confirmed_requires_both_ids_to_match_requested() {
+        // Both ids match: confirmed.
+        assert!(reopen_identity_confirmed(Some(9), Some(9), Some(9)));
+        // Header mismatches the requested id: not confirmed, even though
+        // the body matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(1), Some(9)));
+        // Body mismatches the requested id: not confirmed, even though
+        // the header matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), Some(1)));
+        // Header id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), None, Some(9)));
+        // Body id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), None));
+        // No id was requested at all: trivially confirmed (nothing to
+        // check against).
+        assert!(reopen_identity_confirmed(None, Some(9), Some(9)));
+    }
 
     /// Baseline: an `Open` then `Close` on the same generation round-trips
     /// cleanly with no rejections, and the id is no longer tracked once
