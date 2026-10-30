@@ -16,9 +16,6 @@ compile_error!("features `emu` and `sock` are mutually exclusive; enable at most
 #[cfg(all(feature = "mock", feature = "sock"))]
 compile_error!("features `mock` and `sock` are mutually exclusive; enable at most one");
 
-#[cfg(all(feature = "sock", not(unix)))]
-compile_error!("feature `sock` requires a Unix target (tsra_ddi_sock uses Unix-domain sockets)");
-
 #[cfg(all(feature = "emu", feature = "vsock"))]
 compile_error!("features `emu` and `vsock` are mutually exclusive; enable at most one");
 
