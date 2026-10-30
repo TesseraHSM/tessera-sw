@@ -765,9 +765,9 @@ fn create_reports_defragmentation_needed() {
     // non-adjacent slots, leaving enough total free space but no run long
     // enough for a larger key.
     let (mut v, g, io) = vault::<1>();
-    // Ecc256Private = 32 B -> 64 B storage -> 8 blocks; 1888/8 = 236 keys
-    // fill the blob exactly.
-    let ids: Vec<_> = (0..236)
+    // Ecc256Private = 32 B -> 64 B storage -> 8 blocks.
+    let key_count = BLOB_SIZE / key_span(32);
+    let ids: Vec<_> = (0..key_count)
         .map(|i| {
             with_key(&[i as u8; 32], |k| {
                 block_on(v.create(
