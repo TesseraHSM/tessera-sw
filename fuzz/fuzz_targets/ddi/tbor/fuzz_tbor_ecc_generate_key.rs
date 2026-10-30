@@ -14,9 +14,11 @@
 #[path = "../../common.rs"]
 mod common;
 
-use arbitrary::*;
 use common::EccCurve;
-use libfuzzer_sys::*;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::arbitrary::Unstructured;
+use libfuzzer_sys::fuzz_target;
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;

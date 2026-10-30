@@ -18,21 +18,25 @@
 #[path = "../../common.rs"]
 mod common;
 
-use libfuzzer_sys::*;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
+use tsra_fw_core_crypto_key_masking::aead;
 
-/// Masking overhead inferred from the exported P-256 secret envelope size.
-const MASK_OVERHEAD: usize = CONCAT_MASKED_SECRET_MIN_LEN - 32;
+/// Masking overhead from the firmware's shared envelope and metadata layout.
+const MASK_OVERHEAD: usize = aead::masked_blob_len(aead::AeadAlg::AesGcm256, 0);
 /// Ciphertext follows the envelope header, IV, and fixed masked-key metadata.
-const CIPHERTEXT_OFFSET: usize = MASK_OVERHEAD - 16;
+const CIPHERTEXT_OFFSET: usize = aead::payload_offset(aead::AeadAlg::AesGcm256);
 /// Metadata follows the envelope header and AES-GCM IV.
-const METADATA_OFFSET: usize = tsra_crypto::aead_envelope::HEADER_LEN + 12;
+const METADATA_OFFSET: usize =
+    tsra_crypto::aead_envelope::HEADER_LEN + aead::AeadAlg::AesGcm256.iv_len();
 
 /// Independent selectors plus a borrowed payload; small inputs still execute
 /// requests without needing to supply hundreds of bytes for boundary buffers.
-#[derive(arbitrary::Arbitrary, Debug)]
+#[derive(Arbitrary, Debug)]
 struct FuzzInput<'a> {
     scenario: u8,
     partition: u8,
@@ -288,7 +292,12 @@ fn mutate_secret(input: &FuzzInput<'_>, secret: &mut Vec<u8>) -> Option<TborStat
         0 => common::EnvelopeMutation::None,
         1 => common::EnvelopeMutation::FlipByte {
             offset: u16::try_from(
-                CIPHERTEXT_OFFSET + usize::from(input.offset) % (secret.len() - MASK_OVERHEAD),
+                CIPHERTEXT_OFFSET
+                    + usize::from(input.offset)
+                        % tsra_crypto::aead_envelope::inspect(secret)
+                            .expect("generated secret is well framed")
+                            .payload
+                            .len(),
             )
             .expect("bounded ciphertext offset"),
             mask: input.mask,
@@ -302,7 +311,7 @@ fn mutate_secret(input: &FuzzInput<'_>, secret: &mut Vec<u8>) -> Option<TborStat
 }
 
 /// Predict the final request's outcome in backend/decoder/handler order.
-/// All input masking keys were provisioned before generating the authentic IKM.
+/// Any authentic IKM uses an already provisioned input masking key.
 fn expected_outcome(
     req: &TborConcatKdfDeriveReq,
     session_id: u16,
@@ -389,13 +398,7 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
         },
         key_type,
         key_length,
-        masked_secret: make_secret(
-            ctx,
-            session.session_id,
-            partition.available_scope(input.source_scope),
-            curve,
-            scenario == Scenario::NonSecret,
-        ),
+        masked_secret: vec![0; MASK_OVERHEAD + curve.coord_len()],
         info: payload(input, info_len(input.info_length)),
     };
     let mut secret_error = None;
@@ -449,27 +452,6 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
         Scenario::Scope => req.scope = input.scope,
         Scenario::ColdScope => req.scope = common::KEY_SCOPE_LOCAL,
         Scenario::MissingSd => req.scope = common::KEY_SCOPE_SECURITY_DOMAIN,
-        Scenario::NonSecret => secret_error = Some(TborStatus::InvalidKeyType),
-        Scenario::Header => {
-            req.masked_secret[0] ^= input.mask.max(1);
-            secret_error = Some(TborStatus::InvalidArg);
-        }
-        Scenario::Metadata => {
-            req.masked_secret[METADATA_OFFSET] ^= input.mask.max(1);
-            secret_error = Some(TborStatus::MaskedKeyDecodeFailed);
-        }
-        Scenario::Ciphertext => {
-            let offset = CIPHERTEXT_OFFSET + usize::from(input.offset) % curve.coord_len();
-            req.masked_secret[offset] ^= input.mask.max(1);
-            secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
-        }
-        Scenario::Tag => {
-            *req.masked_secret
-                .last_mut()
-                .expect("generated secret has a tag") ^= input.mask.max(1);
-            secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
-        }
-        Scenario::Mutation => secret_error = mutate_secret(input, &mut req.masked_secret),
         Scenario::RawSecret => {
             let len = secret_boundary(input.offset);
             req.masked_secret = payload(input, len);
@@ -479,11 +461,8 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
             secret_error = Some(TborStatus::InvalidArg);
         }
         Scenario::SecretLength => {
-            let len = secret_boundary(input.offset);
-            if len != req.masked_secret.len() {
-                req.masked_secret.resize(len, input.mask);
-                secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
-            }
+            req.masked_secret
+                .resize(secret_boundary(input.offset), input.mask);
         }
         Scenario::InfoLength => {
             req.info = payload(
@@ -502,7 +481,53 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
                 input,
                 usize::from(input.info_length) % (CONCAT_INFO_MAX_LEN + 2),
             );
-            secret_error = mutate_secret(input, &mut req.masked_secret);
+        }
+        _ => {}
+    }
+
+    // Unsupported output scopes are checked after unmasking, so they still
+    // need authentic IKM. Earlier rejections use the schema-sized placeholder.
+    if matches!(
+        expected_outcome(&req, session.session_id, partition, secret_error),
+        Ok(_) | Err(TborStatus::UnsupportedKeyScope)
+    ) {
+        let secret_len = req.masked_secret.len();
+        req.masked_secret = make_secret(
+            ctx,
+            session.session_id,
+            partition.available_scope(input.source_scope),
+            curve,
+            scenario == Scenario::NonSecret,
+        );
+        match scenario {
+            Scenario::NonSecret => secret_error = Some(TborStatus::InvalidKeyType),
+            Scenario::Header => {
+                req.masked_secret[0] ^= input.mask.max(1);
+                secret_error = Some(TborStatus::InvalidArg);
+            }
+            Scenario::Metadata => {
+                req.masked_secret[METADATA_OFFSET] ^= input.mask.max(1);
+                secret_error = Some(TborStatus::MaskedKeyDecodeFailed);
+            }
+            Scenario::Ciphertext => {
+                let offset = CIPHERTEXT_OFFSET + usize::from(input.offset) % curve.coord_len();
+                req.masked_secret[offset] ^= input.mask.max(1);
+                secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
+            }
+            Scenario::Tag => {
+                *req.masked_secret
+                    .last_mut()
+                    .expect("generated secret has a tag") ^= input.mask.max(1);
+                secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
+            }
+            Scenario::Mutation | Scenario::Combined => {
+                secret_error = mutate_secret(input, &mut req.masked_secret);
+            }
+            Scenario::SecretLength if secret_len != req.masked_secret.len() => {
+                req.masked_secret.resize(secret_len, input.mask);
+                secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
+            }
+            _ => {}
         }
     }
 

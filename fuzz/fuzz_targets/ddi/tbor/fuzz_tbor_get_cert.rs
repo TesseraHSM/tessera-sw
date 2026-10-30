@@ -13,8 +13,9 @@
 #[path = "../../common.rs"]
 mod common;
 
-use libfuzzer_sys::arbitrary::*;
-use libfuzzer_sys::*;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
@@ -149,11 +150,6 @@ fn exercise_request(ctx: &TestCtx, request: &TborGetCertReq, count: u8, state: L
                 panic!("invalid TborGetCertReq in {state:?} unexpectedly succeeded");
             }
             Err(err) => {
-                if !matches!(&err, tsra_ddi_interface::DdiError::TborStatus(status)
-                    if *status == TborStatus::InvalidArg)
-                {
-                    eprintln!("invalid TborGetCertReq in {state:?} returned unexpected error type");
-                }
                 assertions::assert_fw_rejects(&err, TborStatus::InvalidArg);
             }
         }

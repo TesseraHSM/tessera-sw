@@ -16,8 +16,9 @@ mod common;
 
 use std::time::Duration;
 
-use libfuzzer_sys::arbitrary::*;
-use libfuzzer_sys::*;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
 use tsra_ddi_tbor_test_harness::*;
@@ -167,7 +168,7 @@ fn exercise_rotated_session(
     let first = check_request(ctx, session.session_id, bound, false)
         .expect("matching rotated-PSK request must succeed");
 
-    for _ in 0..=input.repetitions % 3 {
+    for _ in 0..(input.repetitions % 3) {
         let next = check_request(ctx, session.session_id, bound, false)
             .expect("repeated GetUnwrappingKey must succeed");
         assert_eq!(first, next, "partition unwrapping key must remain stable");
