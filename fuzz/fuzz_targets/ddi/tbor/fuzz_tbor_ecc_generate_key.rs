@@ -307,7 +307,6 @@ fn check_signing_key(
     for coord in signature.chunks_exact(wire_coord) {
         sig_be.extend(coord[..curve.coord_len()].iter().rev().copied());
     }
-    digest.reverse();
     assert!(
         Verifier::verify(&mut EccAlgo::default(), &public, &digest, &sig_be)
             .expect("host verification must run"),

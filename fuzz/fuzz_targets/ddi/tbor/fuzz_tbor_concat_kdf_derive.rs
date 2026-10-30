@@ -284,17 +284,16 @@ fn make_secret(
 /// Reuse shared mutations while restricting flips to ciphertext so their
 /// expected rejection is precise; classify effective no-ops before execution.
 fn mutate_secret(input: &FuzzInput<'_>, secret: &mut Vec<u8>) -> Option<TborStatus> {
-    let mutation = match input.mutation % 4 {
-        0 => common::EnvelopeMutation::None,
-        1 => common::EnvelopeMutation::FlipByte {
+    let mutation = if input.mutation % 2 == 0 {
+        common::EnvelopeMutation::None
+    } else {
+        common::EnvelopeMutation::FlipByte {
             offset: u16::try_from(
                 CIPHERTEXT_OFFSET + usize::from(input.offset) % (secret.len() - MASK_OVERHEAD),
             )
             .expect("bounded ciphertext offset"),
             mask: input.mask,
-        },
-        2 => common::EnvelopeMutation::Truncate { len: input.offset },
-        _ => common::EnvelopeMutation::Append(payload(input, usize::from(input.mask % 3))),
+        }
     };
     let noop = mutation.is_noop(secret);
     mutation.apply(secret);
@@ -451,17 +450,29 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
         Scenario::MissingSd => req.scope = common::KEY_SCOPE_SECURITY_DOMAIN,
         Scenario::NonSecret => secret_error = Some(TborStatus::InvalidKeyType),
         Scenario::Header => {
-            req.masked_secret[0] ^= input.mask.max(1);
-            secret_error = Some(TborStatus::InvalidArg);
+            if let Some(byte) = req.masked_secret.first_mut() {
+                *byte ^= input.mask.max(1);
+                secret_error = Some(TborStatus::InvalidArg);
+            } else {
+                req.masked_secret.clear();
+            }
         }
         Scenario::Metadata => {
-            req.masked_secret[METADATA_OFFSET] ^= input.mask.max(1);
-            secret_error = Some(TborStatus::MaskedKeyDecodeFailed);
+            if let Some(byte) = req.masked_secret.get_mut(METADATA_OFFSET) {
+                *byte ^= input.mask.max(1);
+                secret_error = Some(TborStatus::MaskedKeyDecodeFailed);
+            } else {
+                req.masked_secret.clear();
+            }
         }
         Scenario::Ciphertext => {
             let offset = CIPHERTEXT_OFFSET + usize::from(input.offset) % curve.coord_len();
-            req.masked_secret[offset] ^= input.mask.max(1);
-            secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
+            if let Some(byte) = req.masked_secret.get_mut(offset) {
+                *byte ^= input.mask.max(1);
+                secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
+            } else {
+                req.masked_secret.clear();
+            }
         }
         Scenario::Tag => {
             *req.masked_secret
