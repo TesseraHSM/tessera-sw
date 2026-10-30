@@ -17,10 +17,11 @@ Tessera Integrated HSM (TSRA) SDK is a modular, cross-platform software developm
 
 Before running any commands in this document for the first time, restore required dependencies using these steps:
 
-For Linux systems, first install the following 4 Linux packages with the package manager of the distribution:
+For Linux systems, first install the following 5 Linux packages with the package manager of the distribution:
 
 ```
 clang-format-18
+gcc-arm-none-eabi
 libbsd-dev
 libssl-dev
 pkg-config
