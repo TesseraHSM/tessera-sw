@@ -53,24 +53,42 @@ const OOB_DESCRIPTOR_SIZE: usize = 16;
 const TRANSPORT_ERROR: u32 = 1;
 /// Connections are served one at a time (see `serve_connection_logged`), so
 /// an idle or stalled AF_VSOCK client must not be allowed to occupy the
-/// server indefinitely and lock out every other client. Any accepted
-/// connection that doesn't send a full request within this window is
-/// treated the same as a disconnect: the partition is reset and the
-/// connection is dropped so the next client can be accepted.
+/// server indefinitely and lock out every other client. Once a request
+/// frame has started arriving, it must complete within this window or the
+/// connection is treated the same as a disconnect: the partition is reset
+/// and the connection is dropped so the next client can be accepted. (See
+/// `VSOCK_IDLE_WAIT_TIMEOUT` for the separate, much longer bound on how
+/// long a connection may sit idle *before* a frame starts arriving.)
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Idle-read deadline used while waiting for the *next* request frame (as
 /// opposed to `CONNECTION_READ_TIMEOUT`, which also bounds writing a
-/// response and, for AF_VSOCK, the initial idle wait). AF_UNIX mode is
-/// inherently single-connection: `serve`'s AF_UNIX loop always reconnects to
-/// the same peer (the cloud-hypervisor manticorevsock device), so there is
-/// no other client whose fairness this timeout would protect (contrast the
-/// AF_VSOCK rationale on `CONNECTION_READ_TIMEOUT`). Applying the same 30s
-/// bound there instead let an ordinary idle gap between guest-issued HSM
-/// commands look identical to a peer disconnect, silently resetting the
-/// partition (wiping keys/sessions/vault) and orphaning the guest's
-/// existing connection out from under it. Use an effectively unbounded
-/// value instead so only a real disconnect ends an AF_UNIX connection.
+/// response). AF_UNIX mode is inherently single-connection: `serve`'s
+/// AF_UNIX loop always reconnects to the same peer (the cloud-hypervisor
+/// manticorevsock device), so there is no other client whose fairness
+/// this timeout would protect (contrast the AF_VSOCK rationale on
+/// `CONNECTION_READ_TIMEOUT`/`VSOCK_IDLE_WAIT_TIMEOUT`). Applying either
+/// of those bounds there instead let an ordinary idle gap between
+/// guest-issued HSM commands look identical to a peer disconnect, silently
+/// resetting the partition (wiping keys/sessions/vault) and orphaning the
+/// guest's existing connection out from under it. Use an effectively
+/// unbounded value instead so only a real disconnect ends an AF_UNIX
+/// connection.
 const UNIX_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// Upper bound on how long an AF_VSOCK connection may sit idle before the
+/// *next* request frame starts arriving.
+///
+/// A healthy client reasonably leaves a session idle between commands
+/// (e.g. TPM-paced access patterns), so this is intentionally much more
+/// generous than `CONNECTION_READ_TIMEOUT` - that remains the tight bound
+/// on *completing* a frame once it has started (see `serve_connection`),
+/// which still protects against a stalled/slow-drip peer regardless of
+/// how long idle waiting is allowed to run. `reset_partition`'s soft
+/// reset (see `MAX_SOFT_RESETS_BEFORE_HARD`) also means a connection that
+/// does time out here no longer destroys the boot key or abandons every
+/// session outright, but the client's stream is still dropped (and
+/// `DdiSockDev` does not reconnect it), so this remains a real disruption
+/// worth avoiding for a merely-idle (not actually abandoned) client.
+const VSOCK_IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Adjusts a stream's per-syscall socket timeouts.
@@ -174,6 +192,34 @@ impl<T: Write + SetSocketTimeouts> Write for DeadlineWrite<'_, T> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+/// Re-delivers one already-read byte before falling through to `inner`.
+///
+/// Used by `serve_connection` to splice the single byte it peeks (to
+/// distinguish idle waiting from an in-progress frame; see
+/// `VSOCK_IDLE_WAIT_TIMEOUT`) back in front of the stream, so
+/// `Request::read_from` sees a contiguous frame regardless of where the
+/// peek happened to land relative to the frame's own internal reads.
+struct Prefixed<'a, T: Read> {
+    prefix: Option<u8>,
+    inner: &'a mut T,
+}
+
+impl<T: Read> Read for Prefixed<'_, T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(byte) = self.prefix.take() {
+            if let Some(first) = buf.first_mut() {
+                *first = byte;
+                return Ok(1);
+            }
+            // `buf` is empty: there's nowhere to deliver the byte, so put
+            // it back for the next call instead of silently dropping it.
+            self.prefix = Some(byte);
+            return Ok(0);
+        }
+        self.inner.read(buf)
     }
 }
 
@@ -778,11 +824,60 @@ fn serve_connection(
     loop {
         debug!("Waiting for request frame");
         tracing::trace!("Waiting for request frame");
+
+        // Wait for the *first* byte of the next request using the full
+        // idle timeout: a healthy, merely-idle client (see
+        // `VSOCK_IDLE_WAIT_TIMEOUT`) must not be treated the same as one
+        // that started sending a frame and then stalled mid-transfer.
+        stream.set_read_timeout(idle_timeout)?;
+        let mut first_byte_buf = [0u8; 1];
+        let first_byte = match stream.read(&mut first_byte_buf) {
+            Ok(0) => None,
+            Ok(_) => Some(first_byte_buf[0]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) =>
+            {
+                debug!("Client disconnected");
+                tracing::debug!(kind = ?error.kind(), "Client disconnected");
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(first_byte) = first_byte else {
+            // No new frame started before the idle-wait timeout
+            // (`idle_timeout`) expired, or the peer disconnected cleanly;
+            // treat either as a disconnect so it can't hold up every other
+            // client waiting to be served. For AF_UNIX this is
+            // `UNIX_IDLE_READ_TIMEOUT` (effectively unbounded), so this
+            // path is only expected to fire for a genuinely abandoned
+            // AF_VSOCK client.
+            //
+            // The caller (`serve_connection_and_reset`) resets the
+            // partition unconditionally, since any end of a connection
+            // signals a device reset.
+            return Ok(());
+        };
+
+        // A frame has started arriving: bound *completing* it with the
+        // tight `CONNECTION_READ_TIMEOUT`, independent of how generous
+        // `idle_timeout` is, so a peer that starts a frame and then stalls
+        // or slow-drips it still can't occupy the server indefinitely.
         let mut deadline_stream = DeadlineRead {
             inner: stream,
-            deadline: Instant::now() + idle_timeout,
+            deadline: Instant::now() + CONNECTION_READ_TIMEOUT,
         };
-        let request = match Request::read_from(&mut deadline_stream) {
+        let mut prefixed = Prefixed {
+            prefix: Some(first_byte),
+            inner: &mut deadline_stream,
+        };
+        let request = match Request::read_from(&mut prefixed) {
             Ok(request) => request,
             Err(tsra_ddi_sock_proto::ProtoError::Io(error))
                 if matches!(
@@ -794,13 +889,9 @@ fn serve_connection(
                         | io::ErrorKind::TimedOut
                 ) =>
             {
-                // WouldBlock/TimedOut means the connection's idle-read
-                // timeout (`idle_timeout`) expired; treat a stalled client
-                // the same as a disconnect so it can't hold up every other
-                // client waiting to be served. For AF_UNIX this is
-                // `UNIX_IDLE_READ_TIMEOUT` (effectively unbounded), so this
-                // path is only expected to fire for a genuinely stalled
-                // AF_VSOCK client.
+                // A frame started but didn't complete within
+                // `CONNECTION_READ_TIMEOUT` (or the peer disconnected
+                // mid-frame); treat it the same as a disconnect.
                 debug!("Client disconnected");
                 tracing::debug!(kind = ?error.kind(), "Client disconnected");
                 // The caller (`serve_connection_and_reset`) resets the
@@ -1005,7 +1096,7 @@ fn serve(
                     hsm,
                     runtime.handle(),
                     args.partition_id,
-                    CONNECTION_READ_TIMEOUT,
+                    VSOCK_IDLE_WAIT_TIMEOUT,
                     &mut soft_resets_since_hard_reset,
                 )
                 .context(
@@ -1072,6 +1163,40 @@ mod tests {
         sqe[6] = destination_len;
         sqe[15] = (oob.len() * OOB_DESCRIPTOR_SIZE) as u32;
         Request { sqe, payload, oob }
+    }
+
+    #[test]
+    fn prefixed_redelivers_prefix_before_inner() {
+        let mut inner: &[u8] = &[2, 3, 4];
+        let mut prefixed = Prefixed {
+            prefix: Some(1),
+            inner: &mut inner,
+        };
+        let mut out = [0u8; 4];
+        // First read: only the prefix byte is returned, regardless of
+        // how much room `buf` has.
+        assert_eq!(prefixed.read(&mut out).unwrap(), 1);
+        assert_eq!(out[0], 1);
+        // Subsequent reads fall through to `inner` untouched.
+        let n = prefixed.read(&mut out).unwrap();
+        assert_eq!(&out[..n], &[2, 3, 4]);
+    }
+
+    #[test]
+    fn prefixed_retains_prefix_on_empty_buf() {
+        let mut inner: &[u8] = &[9];
+        let mut prefixed = Prefixed {
+            prefix: Some(5),
+            inner: &mut inner,
+        };
+        // An empty destination buffer can't receive the prefix byte, so it
+        // must be retained (not dropped) for the next call.
+        assert_eq!(prefixed.read(&mut []).unwrap(), 0);
+        let mut out = [0u8; 1];
+        assert_eq!(prefixed.read(&mut out).unwrap(), 1);
+        assert_eq!(out[0], 5);
+        assert_eq!(prefixed.read(&mut out).unwrap(), 1);
+        assert_eq!(out[0], 9);
     }
 
     #[test]
