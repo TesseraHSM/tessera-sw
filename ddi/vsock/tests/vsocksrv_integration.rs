@@ -144,7 +144,10 @@ impl Drop for RawVsockStream {
 }
 
 fn nix_to_io(error: nix::Error) -> io::Error {
-    io::Error::from_raw_os_error(error as i32)
+    // Same canonical conversion as `ddi/vsock/src/dev.rs::nix_to_io`:
+    // `nix::Error` is `Errno`, which provides `impl From<Errno> for
+    // std::io::Error` directly.
+    error.into()
 }
 
 /// Connects to `VMADDR_CID_LOCAL:port`, returning `None` if `AF_VSOCK`

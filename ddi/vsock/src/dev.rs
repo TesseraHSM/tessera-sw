@@ -193,7 +193,12 @@ impl Drop for VsockStream {
 }
 
 fn nix_to_io(error: nix::Error) -> std::io::Error {
-    std::io::Error::from_raw_os_error(error as i32)
+    // `nix::Error` is `nix::errno::Errno`, which provides this exact
+    // conversion as `impl From<Errno> for std::io::Error`; go through
+    // `Into` rather than re-deriving the `as i32` cast by hand so this
+    // stays correct if nix ever changes how `Errno`'s representation
+    // maps to platform errno values.
+    error.into()
 }
 
 /// Tracks which MBOR and TBOR session ids belong to the current
@@ -621,7 +626,10 @@ impl DdiDev for DdiVsockDev {
                 buf,
             )?;
             if resp_buf.is_empty() {
-                return Err(DdiError::DdiError(0));
+                // `DdiError::DdiError(0)` would misleadingly read like a
+                // success code; an empty buffer can't even hold a header,
+                // so treat it the same as the decode failure just below.
+                return Err(DdiError::MborError(MborError::DecodeError));
             }
 
             // Decode the response header and check device status.
@@ -762,7 +770,10 @@ impl DdiDev for DdiVsockDev {
                 buf,
             )?;
             if resp_buf.is_empty() {
-                return Err(DdiError::DdiError(0));
+                // `DdiError::DdiError(0)` would misleadingly read like a
+                // success code; an empty buffer is a decode failure, same
+                // as a malformed one below.
+                return Err(DdiError::TborDecodeError);
             }
 
             // Decode the typed response before recording the
