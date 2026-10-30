@@ -37,7 +37,7 @@
 //!
 //! # AAD-length invariant
 //!
-//! `aad_len` MUST be `0` or a multiple of `32` (`0x03`) or `16` (`0x04`). The constraint
+//! `aad_len` MUST be `0` or a multiple of `32` (both `0x03` and `0x04`). The constraint
 //! comes from the fw side's hardware DMA layout; mirroring it here
 //! guarantees envelopes produced by either side share an identical
 //! wire layout.
