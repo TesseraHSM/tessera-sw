@@ -3,7 +3,8 @@
 
 //! Supported AEAD algorithms and their fixed sizing.
 //!
-//! v1 supports only AES-256-GCM. Other discriminants are reserved
+//! Supports ordinary AES-256-GCM and its aligned key-masking profile.
+//! Other discriminants are reserved
 //! for future variants and listed in the registry below; they are
 //! not currently accepted by [`AeadAlg::from_u8`].
 //!
@@ -11,7 +12,8 @@
 //! |------------|--------------------------|---------------------------------|
 //! | `0x01`     | AES-128-GCM              | reserved (not implemented)      |
 //! | `0x02`     | AES-192-GCM              | reserved (not implemented)      |
-//! | `0x03`     | AES-256-GCM              | **v1 — the only supported alg** |
+//! | `0x03`     | AES-256-GCM              | ordinary envelopes              |
+//! | `0x04`     | AES-256-GCM, stored IV16 | aligned key-masking profile      |
 //! | `0x11`–`0x13` | AES-CBC-HMAC-SHA-2 family | reserved (not implemented)   |
 
 /// AEAD algorithms supported by the envelope format.
@@ -26,6 +28,10 @@ pub enum AeadAlg {
     /// AES-256-GCM with a 96-bit nonce and 128-bit tag (NIST
     /// SP 800-38D). Wire byte: `0x03`.
     AesGcm256 = 0x03,
+    /// Key-masking profile: 16-byte stored IV (96-bit nonce prefix),
+    /// 32-byte-aligned AAD and 16-byte-padded payload. Wire byte: `0x04`.
+    /// Sealing/opening is provided by `HsmKeyMasking`, not generic GCM.
+    AesGcm256Iv16 = 0x04,
 }
 
 /// AES-GCM IV length in bytes (NIST-recommended 96-bit nonce).
@@ -47,6 +53,7 @@ impl AeadAlg {
     pub const fn from_u8(v: u8) -> Option<Self> {
         match v {
             0x03 => Some(Self::AesGcm256),
+            0x04 => Some(Self::AesGcm256Iv16),
             _ => None,
         }
     }
@@ -59,7 +66,7 @@ impl AeadAlg {
     /// Required key length in bytes.
     pub const fn key_len(self) -> usize {
         match self {
-            Self::AesGcm256 => AES_256_KEY_LEN,
+            Self::AesGcm256 | Self::AesGcm256Iv16 => AES_256_KEY_LEN,
         }
     }
 
@@ -67,13 +74,14 @@ impl AeadAlg {
     pub const fn iv_len(self) -> usize {
         match self {
             Self::AesGcm256 => GCM_IV_LEN,
+            Self::AesGcm256Iv16 => 16,
         }
     }
 
     /// Authentication tag length in bytes.
     pub const fn tag_len(self) -> usize {
         match self {
-            Self::AesGcm256 => GCM_TAG_LEN,
+            Self::AesGcm256 | Self::AesGcm256Iv16 => GCM_TAG_LEN,
         }
     }
 
@@ -91,7 +99,7 @@ impl AeadAlg {
     /// ChaCha20-Poly1305 on a software PAL) would return `1`.
     pub const fn aad_granularity(self) -> usize {
         match self {
-            Self::AesGcm256 => 32,
+            Self::AesGcm256 | Self::AesGcm256Iv16 => 32,
         }
     }
 
@@ -118,10 +126,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_u8_accepts_only_0x03() {
+    fn from_u8_accepts_registered_profiles() {
         assert_eq!(AeadAlg::from_u8(0x03), Some(AeadAlg::AesGcm256));
+        assert_eq!(AeadAlg::from_u8(0x04), Some(AeadAlg::AesGcm256Iv16));
         for v in 0u8..=0xFF {
-            if v == 0x03 {
+            if v == 0x03 || v == 0x04 {
                 continue;
             }
             assert_eq!(AeadAlg::from_u8(v), None, "v=0x{v:02x}");

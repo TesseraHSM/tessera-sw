@@ -21,11 +21,11 @@
 //! * `session_id` — TOC-carried session id; cross-checked by the
 //!   dispatcher.
 //! * `masked_tmk` — the masked TMK envelope from `DarcTmkImport`/
-//!   `DarcTmkGen`, exactly [`MASKED_TMK_LEN`] (260 B); its masked-key
+//!   `DarcTmkGen`, exactly [`MASKED_TMK_LEN`] (264 B); its masked-key
 //!   kind must be
 //!   [`DarcTmk`](tsra_fw_hsm_pal_traits::HsmVaultKeyKind::DarcTmk).
 //! * `masked_key` — the local masked EC private key to export, up to
-//!   [`DARC_UNWRAP_MASKED_KEY_MAX_LEN`] (296 B); its masked-key kind must
+//!   [`DARC_UNWRAP_MASKED_KEY_MAX_LEN`] (312 B); its masked-key kind must
 //!   be one of `Ecc{256,384,521}Private`.
 //!
 //! Output:
@@ -45,8 +45,8 @@ pub const TBOR_OP_DARC_KEY_WRAP: u8 = 0x25;
 // Tripwires: keep the shared length constants in lock-step with the
 // `#[tbor(buffer, ... = ...)]` literals below (the derive requires integer
 // literals, so the two cannot share a symbol).
-const _: () = assert!(MASKED_TMK_LEN == 260);
-const _: () = assert!(DARC_UNWRAP_MASKED_KEY_MAX_LEN == 296);
+const _: () = assert!(MASKED_TMK_LEN == 264);
+const _: () = assert!(DARC_UNWRAP_MASKED_KEY_MAX_LEN == 312);
 const _: () = assert!(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN == 512);
 
 /// `DarcKeyWrap` request schema.
@@ -60,15 +60,15 @@ pub struct TborDarcKeyWrapReq<'a> {
     pub session_id: SessionId,
 
     /// The masked TMK envelope from `DarcTmkImport`/`DarcTmkGen`, exactly
-    /// [`MASKED_TMK_LEN`] (260 B).  Unmasked on-device to recover the
+    /// [`MASKED_TMK_LEN`] (264 B).  Unmasked on-device to recover the
     /// 32-byte TMK used as the AES-KWP key.
-    #[tbor(buffer, len = 260)]
+    #[tbor(buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 
     /// The local masked EC private key to export, up to
-    /// [`DARC_UNWRAP_MASKED_KEY_MAX_LEN`] (296 B).  Unmasked on-device;
+    /// [`DARC_UNWRAP_MASKED_KEY_MAX_LEN`] (312 B).  Unmasked on-device;
     /// its masked-key kind must be one of `Ecc{256,384,521}Private`.
-    #[tbor(buffer, max_len = 296)]
+    #[tbor(buffer, max_len = 312)]
     pub masked_key: &'a [u8],
 }
 

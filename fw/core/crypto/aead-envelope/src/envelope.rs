@@ -27,7 +27,7 @@ use crate::format::HEADER_LEN;
 pub struct AeadEnvelope<'a> {
     /// AEAD algorithm read from the envelope header.
     pub alg: AeadAlg,
-    /// The 12-byte GCM nonce.
+    /// Stored IV (`alg.iv_len()` bytes).
     pub iv: &'a HsmDmaBuf,
     /// Additional authenticated data (may be empty).
     pub aad: &'a HsmDmaBuf,
@@ -93,5 +93,8 @@ pub(crate) fn region_offsets(
     // `total_len - tag_len` cannot underflow because the check above
     // guarantees `total_len >= min_total >= tag_len`.
     let tag_off = total_len - tag_len;
+    if header.alg == AeadAlg::AesGcm256Iv16 && !(tag_off - payload_off).is_multiple_of(16) {
+        return Err(Error::InvalidFormat);
+    }
     Ok((iv_off, aad_off, payload_off, tag_off))
 }

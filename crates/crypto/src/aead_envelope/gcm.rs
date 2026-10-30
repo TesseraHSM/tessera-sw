@@ -23,8 +23,7 @@ use crate::Key;
 /// AES-256-GCM seal. See [`super::seal`] for the public entry
 /// point.
 ///
-/// Assumes `alg == AeadAlg::AesGcm256`; the dispatcher in
-/// [`super`] is the only caller and guarantees this.
+/// Both GCM profiles use the first 12 IV bytes as the nonce.
 pub(crate) fn seal_gcm(
     alg: AeadAlg,
     key: &AesKey,
@@ -55,10 +54,13 @@ pub(crate) fn seal_gcm(
 
     // Assemble header || IV || AAD into `buf`.
     buf[iv_off..aad_off].copy_from_slice(iv);
+    if alg == AeadAlg::AesGcm256Iv16 {
+        buf[iv_off + 12..aad_off].copy_from_slice(&[0, 0, 0, 1]);
+    }
     buf[aad_off..data_off].copy_from_slice(aad);
 
     // Encrypt plaintext into the data slot.
-    let mut algo = AesGcmAlgo::for_encrypt(iv, Some(aad))?;
+    let mut algo = AesGcmAlgo::for_encrypt(&iv[..12], Some(aad))?;
     let (data_slot, tag_slot) = buf[data_off..tag_off + alg.tag_len()].split_at_mut(pt.len());
     let n = algo.encrypt(key, pt, Some(data_slot))?;
     debug_assert_eq!(
@@ -101,7 +103,7 @@ pub(crate) fn open_gcm<'a>(
     let tag = buf[tag_off..total_len].to_vec();
     let ct = buf[payload_off..tag_off].to_vec();
 
-    let mut algo = AesGcmAlgo::for_decrypt(&iv, &tag, Some(&aad))?;
+    let mut algo = AesGcmAlgo::for_decrypt(&iv[..12], &tag, Some(&aad))?;
     let n = algo.decrypt(key, &ct, Some(&mut buf[payload_off..tag_off]))?;
     debug_assert_eq!(
         n,

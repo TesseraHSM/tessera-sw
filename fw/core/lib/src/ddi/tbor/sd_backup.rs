@@ -18,8 +18,8 @@
 //!
 //! Envelopes:
 //!
-//! * `pok_local_backup` (276 B) = `mask(BKS3, PartLocalMK)`.
-//! * `sd_mk_backup` (260 B) = `mask(SDMK, SDBMK)`.
+//! * `pok_local_backup` (280 B) = `mask(BKS3, PartLocalMK)`.
+//! * `sd_mk_backup` (264 B) = `mask(SDMK, SDBMK)`.
 
 use tsra_fw_core_crypto_key_derive::derive_masking_key;
 use tsra_fw_core_crypto_key_masking::aead::mask;
@@ -165,7 +165,7 @@ pub(super) async fn derive_sdbmk<'a, P: HsmPal>(
 }
 
 /// Mask `sdmk` under `sdbmk` into `out`, producing the `sd_mk_backup`
-/// envelope (exactly [`SD_MK_BACKUP_LEN`], 260 B).
+/// envelope (exactly [`SD_MK_BACKUP_LEN`], 264 B).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn mask_sd_mk_backup<P: HsmPal>(
     pal: &P,
@@ -190,7 +190,7 @@ pub(super) async fn mask_sd_mk_backup<P: HsmPal>(
         pal,
         io,
         alloc,
-        AeadAlg::AesGcm256,
+        AeadAlg::AesGcm256Iv16,
         sdbmk,
         &params,
         sdmk,
@@ -205,7 +205,7 @@ pub(super) async fn mask_sd_mk_backup<P: HsmPal>(
 
 /// Mask `bks3` under the partition-local masking key (`PartLocalMK`) into
 /// `out`, producing the `pok_local_backup` envelope (exactly
-/// [`MASKED_SD_LEN`], 276 B).
+/// [`MASKED_SD_LEN`], 280 B).
 pub(super) async fn mask_pok_local_backup<P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -230,7 +230,7 @@ pub(super) async fn mask_pok_local_backup<P: HsmPal>(
         pal,
         io,
         alloc,
-        AeadAlg::AesGcm256,
+        AeadAlg::AesGcm256Iv16,
         local_mk,
         &params,
         bks3,

@@ -65,6 +65,80 @@ fn round_trip_various_sizes() {
 }
 
 #[test]
+fn iv16_profile_uses_nonce_prefix_and_ignores_stored_suffix() {
+    let aad = [0x33; 32];
+    let pt = [0x55; 32];
+    let iv = [0x24; 16];
+    let alg = AeadAlg::AesGcm256Iv16;
+    let needed = seal(alg, &key(), &iv, &aad, &pt, None).unwrap();
+    assert_eq!(needed, 8 + 16 + 32 + 32 + 16);
+    let mut env = vec![0; needed];
+    seal(alg, &key(), &iv, &aad, &pt, Some(&mut env)).unwrap();
+    let view = inspect(&env).unwrap();
+    assert_eq!(view.alg, alg);
+    assert_eq!(&view.iv[..12], IV12);
+    assert_eq!(&view.iv[12..], &[0, 0, 0, 1]);
+    assert_eq!(view.aad, aad);
+
+    // Both profiles use standard 96-bit-nonce GCM, not a 128-bit nonce.
+    let mut ordinary = vec![0; AeadAlg::AesGcm256.envelope_len(pt.len(), 32)];
+    let aad32 = [0x33; 32];
+    seal(
+        AeadAlg::AesGcm256,
+        &key(),
+        &IV12,
+        &aad32,
+        &pt,
+        Some(&mut ordinary),
+    )
+    .unwrap();
+    assert_eq!(view.payload, inspect(&ordinary).unwrap().payload);
+
+    let mut bad_nonce = env.clone();
+    bad_nonce[HEADER_LEN] ^= 1;
+    assert_eq!(
+        open(&key(), &mut bad_nonce).unwrap_err(),
+        CryptoError::GcmDecryptionFailed
+    );
+    env[HEADER_LEN + 12..HEADER_LEN + 16].fill(0xff);
+    let opened = open(&key(), &mut env).unwrap();
+    assert_eq!(opened.payload, pt);
+    assert_eq!(&opened.iv[12..], &[0xff; 4]);
+}
+
+#[test]
+fn iv16_profile_rejects_unaligned_payload_and_aad() {
+    let alg = AeadAlg::AesGcm256Iv16;
+    for len in [1, 15, 17, 31] {
+        let mut buf = [0; 128];
+        let pt = vec![0; len];
+        for out in [None, Some(buf.as_mut_slice())] {
+            assert_eq!(
+                seal(alg, &key(), &[0; 16], &[], &pt, out).unwrap_err(),
+                CryptoError::AeadEnvelopeInvalidFormat
+            );
+        }
+    }
+    for aad_len in [8, 16, 48] {
+        assert_eq!(
+            seal(alg, &key(), &[0; 16], &vec![0; aad_len], &[0; 16], None).unwrap_err(),
+            CryptoError::AeadEnvelopeInvalidAadLength
+        );
+    }
+    let mut env = vec![0; alg.envelope_len(16, 0)];
+    seal(alg, &key(), &[0; 16], &[], &[0; 16], Some(&mut env)).unwrap();
+    env.push(0);
+    assert_eq!(
+        inspect(&env).unwrap_err(),
+        CryptoError::AeadEnvelopeInvalidFormat
+    );
+    assert_eq!(
+        open(&key(), &mut env).unwrap_err(),
+        CryptoError::AeadEnvelopeInvalidFormat
+    );
+}
+
+#[test]
 fn inspect_returns_ciphertext_does_not_decrypt() {
     let pt = b"sensitive plaintext payload!!!!";
     let env = seal_into(&[], pt);

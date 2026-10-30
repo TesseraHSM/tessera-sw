@@ -28,7 +28,7 @@
 //!     key,
 //!     iv: Some(iv),
 //!     update_iv: false,
-//!     message: plaintext,
+//!     message: Some(plaintext),
 //!     result: ciphertext,
 //! }).await?;
 //! ```

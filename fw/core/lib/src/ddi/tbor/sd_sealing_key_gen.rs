@@ -139,7 +139,7 @@ async fn mask_sealing_private_key<'p, P: HsmPal>(
             pal,
             io,
             alloc,
-            AeadAlg::AesGcm256,
+            AeadAlg::AesGcm256Iv16,
             masking_key,
             &params,
             priv_key,

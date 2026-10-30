@@ -49,8 +49,8 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 ///
 /// The TBOR wire ships **seed-only** ML-DSA private keys (see
 /// [`MlDsaKeyKind`]), so the masked plaintext is always the 32-byte `xi`
-/// seed: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(32) ‖ tag(16)` = 260 bytes.
-/// The 228-byte constant part is the AEAD-GCM-256 masked-envelope
+/// seed: `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(32) ‖ tag(16)` = 264 bytes.
+/// The 232-byte constant part is the AEAD-GCM-256 masked-envelope
 /// overhead.
 ///
 /// If an expanded (`Private`) kind is ever added to [`MlDsaKeyKind`], the
@@ -58,11 +58,11 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 /// this constant — together with the `max_len` literals on
 /// [`TborMlDsaGenerateKeyResp::masked_key`] and
 /// [`TborMlDsaSignReq`](crate::mldsa_sign::TborMlDsaSignReq)`::masked_key`
-/// — must be raised to `4896 + 228 = 5124`.
+/// — must be raised to `4896 + 232 = 5124`.
 ///
-/// Pinned into the `#[tbor(buffer, max_len = 260)]` literal on
+/// Pinned into the `#[tbor(buffer, max_len = 264)]` literal on
 /// [`TborMlDsaGenerateKeyResp::masked_key`].
-pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 12 + 192 + 32 + 4896 + 16;
+pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 16 + 192 + 32 + 4896 + 16;
 
 /// Maximum ML-DSA public-key length: 2592 bytes for ML-DSA-87.  Pinned
 /// into the `#[tbor(buffer, max_len = 2592)]` literal on
@@ -184,7 +184,7 @@ pub struct TborMlDsaGenerateKeyResp<'a> {
     /// scope's masking key.  Always 164 B: the wire is seed-only, so the
     /// plaintext is the 32-byte `xi` seed.  See
     /// [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 5156, mutable)]
+    #[tbor(buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 
     /// The ML-DSA public key.  Up to 2592 B for ML-DSA-87.
@@ -270,12 +270,12 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(5156 == MASKED_MLDSA_KEY_MAX_LEN);
+        const _: () = assert!(5160 == MASKED_MLDSA_KEY_MAX_LEN);
         const _: () = assert!(2592 == MLDSA_PUB_KEY_MAX_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);
         const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
         const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
-        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5156);
+        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5160);
     }
 
     /// The message cap is the residue of the worst-case `MlDsaVerify`

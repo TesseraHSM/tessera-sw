@@ -26,11 +26,11 @@ pub const TBOR_OP_DARC_KEY_WRAP: u8 = 0x25;
 /// schema's `MASKED_TMK_LEN`).  Kept module-private to avoid an ambiguous
 /// glob re-export with `darc_tmk_import`'s public `MASKED_TMK_LEN`;
 /// callers use that one.
-const MASKED_TMK_LEN: usize = 260;
+const MASKED_TMK_LEN: usize = 264;
 
 /// Max masked EC private-key envelope length accepted as input (matches
 /// the firmware schema's `DARC_UNWRAP_MASKED_KEY_MAX_LEN`).
-pub const DARC_WRAP_MASKED_KEY_MAX_LEN: usize = 296;
+pub const DARC_WRAP_MASKED_KEY_MAX_LEN: usize = 312;
 
 /// Max AES-KWP-wrapped `COSE_Key` length returned (matches the firmware
 /// schema's `DARC_UNWRAP_WRAPPED_KEY_MAX_LEN`).
@@ -50,13 +50,13 @@ pub struct TborDarcKeyWrapReq {
     pub session_id: u16,
 
     /// The masked TMK envelope from `DarcTmkImport`/`DarcTmkGen`, exactly
-    /// [`MASKED_TMK_LEN`] (260 B).
+    /// [`MASKED_TMK_LEN`] (264 B).
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
     /// The local masked EC private key to export (from `EccGenerateKey` /
     /// `DarcKeyUnwrap`); its masked-key kind must be one of
     /// `Ecc{256,384,521}Private`.
-    #[tbor(max_len = 296)]
+    #[tbor(max_len = 312)]
     pub masked_key: Vec<u8>,
 }
 

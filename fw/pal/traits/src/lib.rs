@@ -26,6 +26,7 @@
 //!  ├── HsmCertStore        — per-partition certificate chains
 //!  ├── HsmSessionManager   — session allocation and state
 //!  ├── HsmVault            — key storage and metadata
+//!  ├── HsmKeyMasking       — in-place key masking
 //!  └── HsmCrypto           — cryptographic operations
 //!       ├── HsmRng         — random number generation
 //!       ├── HsmHash        — SHA digest
@@ -107,6 +108,7 @@ mod dispatch;
 mod error;
 mod gdma;
 mod io;
+mod key_masking;
 mod lock;
 mod pal;
 mod part;
@@ -123,6 +125,7 @@ pub use dispatch::*;
 pub use error::*;
 pub use gdma::*;
 pub use io::*;
+pub use key_masking::*;
 pub use lock::*;
 pub use pal::*;
 pub use part::*;

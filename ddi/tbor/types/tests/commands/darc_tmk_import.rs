@@ -19,7 +19,7 @@
 //! is anchored to the policy POTA, and imports it.
 //!
 //! Coverage:
-//! * Round-trip — the imported TMK comes back as a non-zero 164-byte
+//! * Round-trip — the imported TMK comes back as a non-zero 264-byte
 //!   masked envelope.
 //! * Before finalize (partition not `Initialized`) → `InvalidArg`.
 //! * Crypto-User session → `InvalidPermissions`.

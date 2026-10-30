@@ -243,7 +243,7 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidPermissions);
         }
 
-        let masked_len = masked_blob_len(AeadAlg::AesGcm256, target.out_len);
+        let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, target.out_len);
 
         // Resolve the target masking key and staging label before deriving.
         let masking_key_target = resolve_masking_key(pal, io, target_scope, sess_id)?;
@@ -273,7 +273,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 pal,
                 io,
                 alloc,
-                AeadAlg::AesGcm256,
+                AeadAlg::AesGcm256Iv16,
                 masking_key_target,
                 &params,
                 okm,

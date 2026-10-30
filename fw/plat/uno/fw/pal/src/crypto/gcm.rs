@@ -38,6 +38,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
+use tsra_fw_uno_drivers_aes::AesRequest;
 
 use super::aes::AES_BLOCK_SIZE;
 use super::ghash::Ghash;
@@ -346,13 +347,8 @@ impl UnoHsmPal {
 
     /// In-place AES-CTR over `data`.
     ///
-    /// Copies `data` into a freshly allocated, disjoint scratch buffer and
-    /// runs the transform from scratch back into `data`.
-    ///
-    /// This avoids forming an `&` alias over `data` that would coexist with
-    /// the `&mut data` borrow — such overlapping `&`/`&mut` references are
-    /// undefined behavior in Rust, even though the AES engine reads each
-    /// input block before writing the corresponding output block.
+    /// For whole blocks, only the counter is staged. A partial final block
+    /// uses a padded scratch copy because the AES engine requires whole blocks.
     async fn ctr_crypt_in_place(
         &self,
         io: &UnoHsmIo,
@@ -364,9 +360,25 @@ impl UnoHsmPal {
             return Ok(());
         }
         self.alloc_scoped_async(io, async |scope| {
-            let scratch = scope.dma_alloc(data.len())?;
-            scratch.copy_from_slice(data);
-            self.ctr_crypt(io, key, iv, scratch, data).await
+            if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+                let scratch = scope.dma_alloc(data.len())?;
+                scratch.copy_from_slice(data);
+                return self.ctr_crypt(io, key, iv, scratch, data).await;
+            }
+            let ctr = scope.dma_alloc(AES_BLOCK_SIZE)?;
+            write_j0(ctr, iv)?;
+            increment_counter(ctr);
+            self.aes
+                .encrypt_decrypt(AesRequest {
+                    mode: AesMode::Ctr,
+                    op: AesOp::Encrypt,
+                    key,
+                    iv: Some(ctr),
+                    update_iv: false,
+                    message: None,
+                    result: data,
+                })
+                .await
         })
         .await
     }

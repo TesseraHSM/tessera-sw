@@ -10,16 +10,15 @@
 //! envelope's ciphertext is the masked plaintext key.
 //!
 //! ```text
-//!   off    0           8          20                        212
+//!   off    0           8          24                        216
 //!         ┌───────────┬──────────┬────────────────────────┬─────────┬─────┐
 //!         │ AEAD hdr  │   IV     │  MaskedKeyMetadata     │   CT    │ TAG │
-//!         │   8 B     │  12 B    │       192 B            │  N B    │16 B │
+//!         │   8 B     │  16 B    │       192 B            │ padded N│16 B │
 //!         └───────────┴──────────┴────────────────────────┴─────────┴─────┘
 //! ```
 //!
-//! Every byte from offset 0 through `212 + N` (exclusive of the
-//! trailing tag itself) is authenticated by the GCM tag, including
-//! the magic, version, `key_kind`, `usage_flags`, `svn`,
+//! The metadata and ciphertext are authenticated by the GCM tag, including
+//! the metadata magic, version, `key_kind`, `usage_flags`, `svn`,
 //! `owner_seed_id`, `key_label`, and the entire reserved tail of
 //! [`MaskedKeyMetadata`]. Any single-bit flip is caught at
 //! [`unmask`](crate::aead::unmask) before the `target_key` is exposed.
@@ -45,7 +44,7 @@ use zerocopy::Unaligned;
 pub(crate) const META_LEN: usize = 192;
 
 /// Length of the reserved tail in [`MaskedKeyMetadata`].
-const RESERVED_LEN: usize = 38;
+const RESERVED_LEN: usize = 37;
 
 /// Maximum length in bytes of a caller-supplied `key_label`. Labels
 /// are left-justified in a fixed 128-byte slot and zero-padded; the
@@ -53,13 +52,14 @@ const RESERVED_LEN: usize = 38;
 /// whose pad bytes are non-zero.
 pub const KEY_LABEL_MAX: usize = 128;
 
-/// Total masked-key blob length for an AEAD algorithm and a
-/// `target_key_len`-byte target key. Crate-private — callers
-/// discover the blob size via [`mask`](crate::aead::mask) with
-/// `out = None`.
+/// Total masked-key blob length including zero padding for a
+/// `target_key_len`-byte target key. Use [`AeadAlg::AesGcm256Iv16`].
+/// Saturates on overflow; [`mask`](crate::aead::mask) size queries
+/// reject overflow instead.
 #[inline]
 pub const fn blob_len(alg: AeadAlg, target_key_len: usize) -> usize {
-    alg.envelope_len(target_key_len, META_LEN)
+    let pad = (16 - target_key_len % 16) % 16;
+    alg.envelope_len(target_key_len.saturating_add(pad), META_LEN)
 }
 
 // =============================================================================
@@ -76,7 +76,7 @@ pub const META_MAGIC: [u8; 4] = *b"MKEY";
 /// [`MaskedKeyMetadata`] changes meaning; purely additive use of
 /// reserved bytes (e.g. defining a new `HsmVaultKeyAttrs` bit) does
 /// NOT bump this.
-pub const META_VERSION_V1: u16 = 1;
+pub const META_VERSION_V2: u16 = 2;
 
 // =============================================================================
 // MaskedKeyMetadata
@@ -92,14 +92,15 @@ pub const META_VERSION_V1: u16 = 1;
 ///  Off  Len  Field            Notes
 ///  ─────────────────────────────────────────────────────────────────────
 ///    0    4  magic            b"MKEY"
-///    4    2  version    LE    = 1
+///    4    2  version    LE    = 2
 ///    6    1  key_kind         HsmVaultKeyKind raw (open_enum, repr(u8))
 ///    7    1  key_label_len    actual key_label length, ≤ KEY_LABEL_MAX
 ///    8    8  usage_flags LE   HsmVaultKeyAttrs::into_bits()
 ///   16    8  svn         LE   partition SVN at mask time
 ///   24    2  owner_seed_id LE  owner-seed (BKS2) lineage identifier
 ///   26  128  key_label        left-justified, zero-padded
-///  154   38  _reserved        = 0 (future-extension space)
+///  154    1  data_pad_len     trailing zero bytes in plaintext, 0..=15
+///  155   37  _reserved        = 0 (future-extension space)
 /// ```
 ///
 /// The `key_kind` and `usage_flags` bits are passed through unchanged
@@ -119,7 +120,7 @@ pub const META_VERSION_V1: u16 = 1;
 pub struct MaskedKeyMetadata {
     /// Magic — MUST equal [`META_MAGIC`] (`b"MKEY"`).
     pub magic: [u8; 4],
-    /// Schema version — MUST equal [`META_VERSION_V1`] (currently `1`).
+    /// Schema version — MUST equal [`META_VERSION_V2`].
     pub version: Le16,
     /// Raw [`HsmVaultKeyKind`] byte.
     pub key_kind: u8,
@@ -135,45 +136,49 @@ pub struct MaskedKeyMetadata {
     /// Caller-supplied label, left-justified and zero-padded to
     /// [`KEY_LABEL_MAX`] bytes.
     pub key_label: [u8; KEY_LABEL_MAX],
-    /// Reserved future-extension space. MUST be all-zero on v1.
+    /// Authenticated count of trailing plaintext zero-padding bytes.
+    pub data_pad_len: u8,
+    /// Reserved future-extension space. MUST be all-zero.
     pub _reserved: [u8; RESERVED_LEN],
 }
 
 const _: () = assert!(core::mem::size_of::<MaskedKeyMetadata>() == META_LEN);
 
 impl MaskedKeyMetadata {
-    /// Build a v1 metadata record from caller-supplied vault fields,
+    /// Build a v2 metadata record from caller-supplied vault fields,
     /// platform-identity bindings, and an opaque label.
     ///
     /// Magic, version, padding, and the reserved tail are filled in
     /// by this constructor and cannot be overridden — guaranteeing
     /// that every record this crate produces satisfies
-    /// [`validate_v1`](Self::validate_v1).
+    /// [`validate_v2`](Self::validate_v2).
     ///
     /// # Errors
     ///
     /// * [`HsmError::InvalidArg`] — `key_label.len() > KEY_LABEL_MAX`.
-    pub fn new_v1(
+    pub fn new_v2(
         key_kind: HsmVaultKeyKind,
         usage_flags: HsmVaultKeyAttrs,
         svn: u64,
         owner_seed_id: u16,
         key_label: &[u8],
+        data_pad_len: u8,
     ) -> HsmResult<Self> {
-        if key_label.len() > KEY_LABEL_MAX {
+        if key_label.len() > KEY_LABEL_MAX || data_pad_len > 15 {
             return Err(HsmError::InvalidArg);
         }
         let mut label_slot = [0u8; KEY_LABEL_MAX];
         label_slot[..key_label.len()].copy_from_slice(key_label);
         Ok(Self {
             magic: META_MAGIC,
-            version: Le16::new(META_VERSION_V1),
+            version: Le16::new(META_VERSION_V2),
             key_kind: key_kind.0,
             key_label_len: key_label.len() as u8,
             usage_flags: Le64::new(usage_flags.into_bits()),
             svn: Le64::new(svn),
             owner_seed_id: Le16::new(owner_seed_id),
             key_label: label_slot,
+            data_pad_len,
             _reserved: [0; RESERVED_LEN],
         })
     }
@@ -196,7 +201,7 @@ impl MaskedKeyMetadata {
     ///
     /// Returns [`HsmError::MaskedKeyDecodeFailed`] if `key_label_len`
     /// exceeds [`KEY_LABEL_MAX`] (should never happen on a record
-    /// that passed [`validate_v1`](Self::validate_v1)).
+    /// that passed [`validate_v2`](Self::validate_v2)).
     #[inline]
     pub fn key_label(&self) -> HsmResult<&[u8]> {
         let n = self.key_label_len as usize;
@@ -206,12 +211,13 @@ impl MaskedKeyMetadata {
         Ok(&self.key_label[..n])
     }
 
-    /// Validate every field of the parsed metadata against v1's
+    /// Validate every field of the parsed metadata against v2's
     /// invariants. Returns [`HsmError::MaskedKeyDecodeFailed`] for
     /// any violation:
     ///
     /// * magic mismatch
-    /// * `version != META_VERSION_V1`
+    /// * `version != META_VERSION_V2`
+    /// * `data_pad_len > 15`
     /// * `key_label_len > KEY_LABEL_MAX`
     /// * non-zero pad bytes after `key_label[..key_label_len]`
     /// * non-zero reserved tail
@@ -221,9 +227,10 @@ impl MaskedKeyMetadata {
     /// `Unknown(u8)`, the attribute bitfield reserves its high bits
     /// for future use, and the platform-identity bindings are policy
     /// fields for the caller to compare against current PAL values.
-    pub(crate) fn validate_v1(&self) -> HsmResult<()> {
+    pub(crate) fn validate_v2(&self) -> HsmResult<()> {
         if self.magic != META_MAGIC
-            || self.version.get() != META_VERSION_V1
+            || self.version.get() != META_VERSION_V2
+            || self.data_pad_len > 15
             || (self.key_label_len as usize) > KEY_LABEL_MAX
             || !self._reserved.iter().all(|&b| b == 0)
         {

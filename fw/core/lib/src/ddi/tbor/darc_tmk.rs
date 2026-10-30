@@ -69,7 +69,7 @@ pub(super) async fn mask_tmk<P: HsmPal>(
         pal,
         io,
         alloc,
-        AeadAlg::AesGcm256,
+        AeadAlg::AesGcm256Iv16,
         sdmk,
         &params,
         tmk,

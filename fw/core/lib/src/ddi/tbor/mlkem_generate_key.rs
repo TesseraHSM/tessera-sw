@@ -130,7 +130,7 @@ pub(crate) async fn handle<P: HsmPal>(
 
         // Generate directly into the final slots. The exchange is scrubbed
         // on every failure, including partial key generation or masking.
-        let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
+        let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, plain_len);
         let resp = cmd_buf.buffer_mut();
         let len = TborMlKemGenerateKeyResp::encode(resp, 0, false)?
             .masked_key_reserve(masked_len)?
@@ -143,7 +143,7 @@ pub(crate) async fn handle<P: HsmPal>(
         {
             let out = TborMlKemGenerateKeyResp::decode_mut(resp)?;
             {
-                let at = payload_offset(AeadAlg::AesGcm256);
+                let at = payload_offset(AeadAlg::AesGcm256Iv16);
                 let end = at + plain_len;
                 if end > out.masked_key.len() {
                     return Err(HsmError::InternalError);
@@ -170,7 +170,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     pal,
                     io,
                     alloc,
-                    AeadAlg::AesGcm256,
+                    AeadAlg::AesGcm256Iv16,
                     masking_key,
                     &params,
                     plain_len,

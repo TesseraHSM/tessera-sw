@@ -37,6 +37,12 @@
 //! Total framing overhead for AES-256-GCM: **36 bytes**
 //! (`HEADER_LEN` + IV + TAG = 8 + 12 + 16).
 //!
+//! The key-masking profile [`AeadAlg::AesGcm256Iv16`] (`0x04`) instead
+//! stores a 16-byte IV with a 12-byte nonce prefix and requires 32-byte
+//! AAD alignment and 16-byte payload alignment. [`peek`] understands its
+//! framing; its cryptographic operations use the PAL's `HsmKeyMasking` interface,
+//! not generic [`seal`] / [`open`].
+//!
 //! # AAD-length invariant
 //!
 //! `aad_len` MUST be `0` or a multiple of `32`. This collapses the
@@ -85,6 +91,7 @@ mod format;
 mod gcm;
 mod ops;
 
+pub use format::write_header;
 pub use ops::open;
 pub use ops::payload_offset;
 pub use ops::peek;

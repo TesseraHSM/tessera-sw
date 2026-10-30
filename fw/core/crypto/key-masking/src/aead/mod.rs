@@ -28,5 +28,5 @@ pub use format::blob_len as masked_blob_len;
 pub use format::MaskedKeyMetadata;
 pub use format::KEY_LABEL_MAX;
 pub use format::META_MAGIC;
-pub use format::META_VERSION_V1;
+pub use format::META_VERSION_V2;
 pub use tsra_fw_core_crypto_aead_envelope::AeadAlg;

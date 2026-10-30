@@ -7,9 +7,8 @@
 //! envelope header and selects every per-algorithm parameter (key
 //! length, IV length, tag length, AAD-length granularity).
 //!
-//! v1 supports exactly one algorithm: AES-256-GCM (`0x03`). Future
-//! algorithms can be added without a wire-format break by reserving
-//! a new discriminant and routing it in the dispatcher.
+//! AES-256-GCM has ordinary (`0x03`) and block-aligned masked-key
+//! (`0x04`) profiles.
 
 use super::format::HEADER_LEN;
 use crate::CryptoError;
@@ -22,9 +21,13 @@ use crate::CryptoError;
 #[non_exhaustive]
 #[repr(u8)]
 pub enum AeadAlg {
-    /// AES-256-GCM (96-bit IV, 128-bit tag). The only variant
-    /// supported in v1.
+    /// AES-256-GCM (96-bit IV, 128-bit tag).
     AesGcm256 = 0x03,
+    /// AES-256-GCM with a 16-byte IV slot, 32-byte-aligned AAD, and
+    /// 16-byte-aligned payload.
+    /// Only the first 12 IV bytes are the nonce; the stored suffix is
+    /// `00 00 00 01` on seal and is ignored on open.
+    AesGcm256Iv16 = 0x04,
 }
 
 impl AeadAlg {
@@ -34,6 +37,7 @@ impl AeadAlg {
     pub const fn from_u8(b: u8) -> Result<Self, CryptoError> {
         match b {
             0x03 => Ok(Self::AesGcm256),
+            0x04 => Ok(Self::AesGcm256Iv16),
             _ => Err(CryptoError::AeadEnvelopeUnsupportedAlg),
         }
     }
@@ -46,7 +50,7 @@ impl AeadAlg {
     /// Required key length in bytes.
     pub const fn key_len(self) -> usize {
         match self {
-            Self::AesGcm256 => 32,
+            Self::AesGcm256 | Self::AesGcm256Iv16 => 32,
         }
     }
 
@@ -54,25 +58,24 @@ impl AeadAlg {
     pub const fn iv_len(self) -> usize {
         match self {
             Self::AesGcm256 => 12,
+            Self::AesGcm256Iv16 => 16,
         }
     }
 
     /// Tag length in bytes.
     pub const fn tag_len(self) -> usize {
         match self {
-            Self::AesGcm256 => 16,
+            Self::AesGcm256 | Self::AesGcm256Iv16 => 16,
         }
     }
 
     /// AAD-length granularity in bytes. `aad_len` must be `0` or a
     /// multiple of this value.
     ///
-    /// For GCM the value is `32`, mirroring the fw side's
-    /// hardware-driven constraint so envelopes produced by either
-    /// side share an identical wire layout.
+    /// Both profiles use `32`, mirroring the firmware's constraints.
     pub const fn aad_granularity(self) -> usize {
         match self {
-            Self::AesGcm256 => 32,
+            Self::AesGcm256 | Self::AesGcm256Iv16 => 32,
         }
     }
 
@@ -112,11 +115,12 @@ mod tests {
     #[test]
     fn from_u8_round_trip() {
         assert_eq!(AeadAlg::from_u8(0x03).unwrap(), AeadAlg::AesGcm256);
+        assert_eq!(AeadAlg::from_u8(0x04).unwrap(), AeadAlg::AesGcm256Iv16);
     }
 
     #[test]
     fn from_u8_rejects_unknown() {
-        for b in [0x00u8, 0x01, 0x02, 0x04, 0xFF] {
+        for b in [0x00u8, 0x01, 0x02, 0x05, 0xFF] {
             assert!(matches!(
                 AeadAlg::from_u8(b),
                 Err(CryptoError::AeadEnvelopeUnsupportedAlg)

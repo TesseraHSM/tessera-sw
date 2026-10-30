@@ -60,8 +60,8 @@ const API_REV_LEN: usize = 8;
 /// bytes by [`HsmSessionManager::session_promote`].
 const SESSION_API_REV: [u8; API_REV_LEN] = [1, 0, 0, 0, 0, 0, 0, 0];
 
-/// AEAD primitive used for both `seed_envelope` and `bmk_session`.
-const AEAD_ALG: AeadAlg = AeadAlg::AesGcm256;
+/// Masked-key profile used for `bmk_session`; the seed envelope is ordinary GCM.
+const AEAD_ALG: AeadAlg = AeadAlg::AesGcm256Iv16;
 
 /// Caller-supplied label embedded in the `bmk_session`
 /// [`MaskedKeyMetadata`]. Identifies the wrapped key as the

@@ -137,9 +137,9 @@ pub(crate) async fn handle<P: HsmPal>(
         // bounded by the wire `max_len`); empty for an unlabeled key.
         let caller_label = req.key_label();
         // The masked-blob length is fixed by the requested key length
-        // (32..=128 B → 164..=260 B), so the response slot can be reserved up
+        // (32..=128 B → 264..=360 B), so the response slot can be reserved up
         // front, before any key material exists.
-        let masked_len = masked_blob_len(AeadAlg::AesGcm256, key_len);
+        let masked_len = masked_blob_len(AeadAlg::AesGcm256Iv16, key_len);
 
         // Platform identity that binds the masked blob (anti-rollback on
         // re-import): SVN (BKS1 lineage) and owner-seed id (BKS2 lineage).
@@ -178,7 +178,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     pal,
                     io,
                     alloc,
-                    AeadAlg::AesGcm256,
+                    AeadAlg::AesGcm256Iv16,
                     masking_key,
                     &params,
                     key_buf,

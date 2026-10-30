@@ -35,25 +35,18 @@ pub const TBOR_OP_MLKEM_GENERATE_KEY: u8 = 0x29;
 
 /// Maximum masked ML-KEM decapsulation-key envelope length.
 ///
-/// The TBOR wire ships **seed-only** ML-KEM decapsulation keys, so the
-/// masked plaintext is always the 64-byte `(d ‖ z)` seed material:
-/// `64 + 228 = 292` B, where 228 is the AEAD-GCM-256 masked-envelope
-/// overhead `header(8) + iv(12) + aad(96) + tag(16)`.
-///
-/// If expanded (`Private`) key kinds are ever added to the wire enum, the
-/// worst-case plaintext becomes the 3168-byte ML-KEM-1024 decapsulation
-/// key and this constant — together with the `max_len` literals on
-/// [`TborMlKemGenerateKeyResp::masked_key`] and
-/// [`TborMlKemDecapsulateReq`](crate::mlkem_decapsulate::TborMlKemDecapsulateReq)`::masked_key`
-/// — must be raised to `3168 + 228 = 3396`.
-pub const MASKED_MLKEM_KEY_MAX_LEN: usize = 8 + 12 + 192 + 64 + 3168 + 16;
+/// The payload carries the 64-byte `(d ‖ z)` seed material followed by
+/// the expanded decapsulation key (3168 B for ML-KEM-1024). Both lengths
+/// are multiples of 16. The masked-envelope overhead is 232 B:
+/// `header(8) + iv(16) + aad(192) + tag(16)`.
+pub const MASKED_MLKEM_KEY_MAX_LEN: usize = 8 + 16 + 192 + 64 + 3168 + 16;
 /// Maximum ML-KEM public-key / encapsulation-key length: 1568 B for ML-KEM-1024.
 pub const MLKEM_PUB_KEY_MAX_LEN: usize = 1568;
 /// Maximum ML-KEM ciphertext length: 1568 B for ML-KEM-1024.
 pub const MLKEM_CIPHERTEXT_MAX_LEN: usize = 1568;
-/// Maximum masked shared-secret length: 32-byte shared secret plus 228 B
+/// Maximum masked shared-secret length: 32-byte shared secret plus 232 B
 /// of masked-envelope overhead.
-pub const MASKED_MLKEM_SHARED_SECRET_MAX_LEN: usize = 8 + 12 + 192 + 32 + 16;
+pub const MASKED_MLKEM_SHARED_SECRET_MAX_LEN: usize = 8 + 16 + 192 + 32 + 16;
 
 /// `MlKemKeyKind` discriminant for an ML-KEM-512 compact `(d, z)` seed (64 B).
 pub const MLKEM_KEY_KIND_512_SEED: u8 = 55;
@@ -85,10 +78,10 @@ pub struct TborMlKemGenerateKeyReq {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborMlKemGenerateKeyResp {
     /// The generated ML-KEM decapsulation key, masked under the scope's
-    /// masking key.  Always 196 B: the wire is seed-only, so the
-    /// plaintext is the 64-byte `(d ‖ z)` seed material.  See
+    /// masking key. The plaintext contains the 64-byte `(d ‖ z)` seed
+    /// followed by the expanded decapsulation key. See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(max_len = 3460)]
+    #[tbor(max_len = 3464)]
     pub masked_key: Vec<u8>,
 
     /// The ML-KEM public / encapsulation key bytes.
@@ -150,10 +143,10 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(3460 == MASKED_MLKEM_KEY_MAX_LEN);
+        const _: () = assert!(3464 == MASKED_MLKEM_KEY_MAX_LEN);
         const _: () = assert!(1568 == MLKEM_PUB_KEY_MAX_LEN);
         const _: () = assert!(1568 == MLKEM_CIPHERTEXT_MAX_LEN);
-        const _: () = assert!(260 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
-        assert_eq!(MASKED_MLKEM_KEY_MAX_LEN, 3460);
+        const _: () = assert!(264 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
+        assert_eq!(MASKED_MLKEM_KEY_MAX_LEN, 3464);
     }
 }

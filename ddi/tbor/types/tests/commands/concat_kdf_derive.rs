@@ -60,8 +60,8 @@ const HASH_SHA384: u8 = 2;
 const HASH_SHA512: u8 = 3;
 
 /// AEAD-GCM-256 masked-key envelope overhead:
-/// `header(8) ‖ iv(12) ‖ aad(192) ‖ tag(16)` = 228 B around the plaintext.
-const MASK_OVERHEAD: usize = 8 + 12 + 192 + 16;
+/// `header(8) ‖ iv(16) ‖ aad(192) ‖ tag(16)` = 232 B around padded plaintext.
+const MASK_OVERHEAD: usize = 8 + 16 + 192 + 16;
 
 /// Derive a fresh masked ECDH shared secret (the KDF IKM) on-device.
 fn fresh_masked_secret_for_curve(ctx: &TestCtx, session_id: u16, curve: u8) -> Vec<u8> {
@@ -164,7 +164,7 @@ fn concat_kdf_all_key_types_both_algs() {
 
             assert_eq!(
                 masked.len(),
-                MASK_OVERHEAD + okm_len,
+                MASK_OVERHEAD + okm_len.next_multiple_of(16),
                 "masked derived-key length must match the output type (alg {kdf_alg}, type {key_type})",
             );
 
@@ -753,7 +753,7 @@ fn concat_kdf_garbage_masked_secret_rejected() {
     // 12-byte IV. Corrupt its magic while preserving valid TBOR/envelope
     // framing so firmware reaches masked-key metadata decoding.
     let metadata_magic = garbage
-        .get_mut(8 + 12)
+        .get_mut(8 + 16)
         .expect("masked ECDH secret must contain metadata");
     *metadata_magic ^= 0xff;
 

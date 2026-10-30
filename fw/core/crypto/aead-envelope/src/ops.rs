@@ -96,6 +96,9 @@ pub async fn seal<P: HsmCrypto>(
     pt: &HsmDmaBuf,
     buf: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize> {
+    if alg == AeadAlg::AesGcm256Iv16 {
+        return Err(Error::UnsupportedAlg(alg.as_u8()).into());
+    }
     // Validate AAD length against the alg's granularity (and the
     // wire-format `u16` cap) up-front so a `None` size query still
     // surfaces an illegal AAD length rather than silently returning
@@ -112,6 +115,7 @@ pub async fn seal<P: HsmCrypto>(
 
     let n = match alg {
         AeadAlg::AesGcm256 => seal_gcm(crypto, io, alg, key, iv, aad, pt, buf).await?,
+        AeadAlg::AesGcm256Iv16 => return Err(Error::UnsupportedAlg(alg.as_u8()).into()),
     };
     Ok(n)
 }
@@ -137,6 +141,7 @@ pub async fn seal_in_place<P: HsmCrypto>(
     }
     let n = match alg {
         AeadAlg::AesGcm256 => seal_gcm_in_place(crypto, io, alg, key, iv, aad, pt_len, buf).await?,
+        AeadAlg::AesGcm256Iv16 => return Err(Error::UnsupportedAlg(alg.as_u8()).into()),
     };
     Ok(n)
 }
@@ -181,6 +186,7 @@ pub async fn open<'a, P: HsmCrypto>(
     let header = read_header(buf)?;
     let env = match header.alg {
         AeadAlg::AesGcm256 => open_gcm(crypto, io, key, buf, header).await?,
+        AeadAlg::AesGcm256Iv16 => return Err(Error::UnsupportedAlg(header.alg.as_u8()).into()),
     };
     Ok(env)
 }

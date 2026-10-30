@@ -23,7 +23,7 @@
 //! Coverage:
 //! * Lifecycle — `DarcTmkGen` → `DarcTmkExport` → `DarcTmkImport`
 //!   round-trips: the exported `sealed_tmk` is a non-zero 145-byte
-//!   envelope that imports back to a non-zero 164-byte masked TMK.
+//!   envelope that imports back to a non-zero 264-byte masked TMK.
 //! * Fresh `enc` — two exports of the same inputs yield distinct
 //!   `sealed_tmk` (fresh HPKE ephemeral).
 //! * Wrong masked sender-key kind (an `SdSealing` key) →
@@ -157,7 +157,7 @@ pub(crate) fn sd_initialized_session_with_data() -> ExportReady {
     }
 }
 
-/// Mint a TMK via `DarcTmkGen`, returning its 164-byte masked envelope.
+/// Mint a TMK via `DarcTmkGen`, returning its 264-byte masked envelope.
 pub(crate) fn gen_masked_tmk(ready: &ExportReady) -> [u8; MASKED_TMK_LEN] {
     let resp = ready
         .ctx
@@ -318,7 +318,7 @@ fn darc_tmk_export_lifecycle() {
     assert_eq!(
         reimported.len(),
         MASKED_TMK_LEN,
-        "re-imported TMK must be the fixed 164-byte envelope",
+        "re-imported TMK must be the fixed 264-byte envelope",
     );
     assert!(
         reimported.iter().any(|&b| b != 0),

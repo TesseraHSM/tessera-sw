@@ -52,6 +52,7 @@ mod ghash;
 mod hash;
 mod hmac;
 mod kdf;
+mod key_masking;
 mod kw;
 #[allow(unsafe_code)]
 mod mldsa;

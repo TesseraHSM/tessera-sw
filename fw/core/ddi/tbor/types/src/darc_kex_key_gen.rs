@@ -22,7 +22,7 @@
 //!
 //! * `masked_key` — the new DARC key-exchange key's ECC-P384 **private**
 //!   half, masked (AEAD-GCM-256) under the requested scope's masking
-//!   key, as a fixed [`MASKED_KEX_KEY_LEN`] (276 B) envelope.  The
+//!   key, as a fixed [`MASKED_KEX_KEY_LEN`] (280 B) envelope.  The
 //!   private key is **not** stored on the device: the caller holds the
 //!   masked blob and re-imports it (unmask-on-use) when the key is later
 //!   needed.
@@ -46,12 +46,12 @@ pub const TBOR_OP_DARC_KEX_KEY_GEN: u8 = 0x20;
 pub const KEX_PUB_KEY_LEN: usize = 96;
 
 /// Wire length of the masked key-exchange private key: an AEAD-GCM-256
-/// masked-key envelope (`header(8) ‖ iv(12) ‖ aad(192) ‖ pt(48) ‖
+/// masked-key envelope (`header(8) ‖ iv(16) ‖ aad(192) ‖ pt(48) ‖
 /// tag(16)`) whose plaintext is the 48-byte raw P-384 private scalar and
 /// whose AAD is the 192-byte `MaskedKeyMetadata`.  Pinned into the
-/// `#[tbor(buffer, len = 276)]` literal on
+/// `#[tbor(buffer, len = 280)]` literal on
 /// [`TborDarcKexKeyGenResp::masked_key`].
-pub const MASKED_KEX_KEY_LEN: usize = 8 + 12 + 192 + 48 + 16;
+pub const MASKED_KEX_KEY_LEN: usize = 8 + 16 + 192 + 48 + 16;
 
 /// `DarcKexKeyGen` request schema.
 ///
@@ -75,9 +75,9 @@ pub struct TborDarcKexKeyGenReq {
 pub struct TborDarcKexKeyGenResp<'a> {
     /// The new key-exchange key's ECC-P384 private half, masked
     /// (AEAD-GCM-256) under the requested scope's masking key.  Always
-    /// exactly [`MASKED_KEX_KEY_LEN`] (276 B).  The private key is not
+    /// exactly [`MASKED_KEX_KEY_LEN`] (280 B).  The private key is not
     /// stored on the device; the caller re-imports this blob when needed.
-    #[tbor(buffer, len = 276)]
+    #[tbor(buffer, len = 280)]
     pub masked_key: &'a [u8],
 
     /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,
@@ -131,8 +131,8 @@ mod tests {
         // The `#[tbor(buffer, len = N)]` attributes must remain numeric
         // literals; pin them against the exported consts.
         const _: () = assert!(96 == KEX_PUB_KEY_LEN);
-        const _: () = assert!(276 == MASKED_KEX_KEY_LEN);
+        const _: () = assert!(280 == MASKED_KEX_KEY_LEN);
         assert_eq!(KEX_PUB_KEY_LEN, 96);
-        assert_eq!(MASKED_KEX_KEY_LEN, 276);
+        assert_eq!(MASKED_KEX_KEY_LEN, 280);
     }
 }

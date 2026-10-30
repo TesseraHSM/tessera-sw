@@ -17,9 +17,9 @@ const TBOR_MASKED_KEY_METADATA_LEN: usize = 192;
 /// Magic identifying authenticated TBOR masked-key metadata.
 const TBOR_MASKED_KEY_METADATA_MAGIC: [u8; 4] = *b"MKEY";
 /// Supported TBOR masked-key metadata format version.
-const TBOR_MASKED_KEY_METADATA_VERSION: u16 = 1;
+const TBOR_MASKED_KEY_METADATA_VERSION: u16 = 2;
 /// Reserved trailing bytes of the metadata (must decode as all-zero).
-const TBOR_MASKED_KEY_RESERVED_LEN: usize = 38;
+const TBOR_MASKED_KEY_RESERVED_LEN: usize = 37;
 /// Bit offset of the `KeyScope` field packed into `usage_flags`.
 const TBOR_KEY_SCOPE_SHIFT: u32 = 17;
 /// 3-bit mask selecting the `KeyScope` field within `usage_flags`.
@@ -149,10 +149,12 @@ struct TborMaskedKeyMetadata {
     svn: Le64,
     owner_seed_id: Le16,
     key_label: [u8; TBOR_KEY_LABEL_MAX_LEN],
+    data_pad_len: u8,
     reserved: [u8; TBOR_MASKED_KEY_RESERVED_LEN],
 }
 
 const _: () = assert!(size_of::<TborMaskedKeyMetadata>() == TBOR_MASKED_KEY_METADATA_LEN);
+const _: () = assert!(core::mem::offset_of!(TborMaskedKeyMetadata, data_pad_len) == 154);
 
 impl TborMaskedKeyMetadata {
     /// Validates the authenticated metadata framing and zero padding.
@@ -163,6 +165,7 @@ impl TborMaskedKeyMetadata {
             .ok_or(HsmError::MaskedKeyDecodeFailed)?;
         if self.magic != TBOR_MASKED_KEY_METADATA_MAGIC
             || self.version.get() != TBOR_MASKED_KEY_METADATA_VERSION
+            || self.data_pad_len > 15
             || !label_padding.iter().all(|&byte| byte == 0)
             || !self.reserved.iter().all(|&byte| byte == 0)
         {
@@ -345,15 +348,17 @@ impl HsmMaskedKey {
     ///
     /// Validates the envelope algorithm and the authenticated metadata
     /// (magic, version, key kind, label, and reserved padding) and checks
-    /// the masked payload length against the key kind.
+    /// the block-aligned masked payload length minus its declared padding
+    /// against the key kind. Only firmware can validate the encrypted zero tail.
     /// Every device-supplied length is bounds-checked, so a malformed blob
     /// is rejected with [`HsmError::MaskedKeyDecodeFailed`] rather than
     /// panicking.
     fn parse_tbor_metadata(masked_key: &[u8]) -> HsmResult<HsmMaskedKeyMetadata> {
         let envelope =
             aead_envelope::inspect(masked_key).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
-        if !matches!(envelope.alg, aead_envelope::AeadAlg::AesGcm256)
+        if !matches!(envelope.alg, aead_envelope::AeadAlg::AesGcm256Iv16)
             || envelope.aad.len() != TBOR_MASKED_KEY_METADATA_LEN
+            || !envelope.payload.len().is_multiple_of(16)
         {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
@@ -364,7 +369,12 @@ impl HsmMaskedKey {
 
         let tbor_kind = TborMaskedKeyKind::try_from(metadata.key_kind)?;
         let (kind, bits, curve) = tbor_kind.key_metadata();
-        if !tbor_kind.payload_len_valid(bits, envelope.payload.len()) {
+        let payload_len = envelope
+            .payload
+            .len()
+            .checked_sub(usize::from(metadata.data_pad_len))
+            .ok_or(HsmError::MaskedKeyDecodeFailed)?;
+        if !tbor_kind.payload_len_valid(bits, payload_len) {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
 
@@ -675,15 +685,16 @@ mod tests {
     use super::*;
 
     fn unchecked_ecc_blob(scope: u8) -> Vec<u8> {
-        let mut blob = vec![0; 20 + TBOR_MASKED_KEY_METADATA_LEN + 48 + 16];
-        blob[..8].copy_from_slice(b"AEAD\x03\x00\x00\xc0");
-        blob[20..24].copy_from_slice(b"MKEY");
-        blob[24..26].copy_from_slice(&1u16.to_le_bytes());
-        blob[26] = KEY_KIND_ECC384_PRIVATE;
+        let mut blob = vec![0; 24 + TBOR_MASKED_KEY_METADATA_LEN + 48 + 16];
+        blob[..8].copy_from_slice(b"AEAD\x04\x00\x00\xc0");
+        blob[20..24].copy_from_slice(&[0, 0, 0, 1]);
+        blob[24..28].copy_from_slice(b"MKEY");
+        blob[28..30].copy_from_slice(&2u16.to_le_bytes());
+        blob[30] = KEY_KIND_ECC384_PRIVATE;
         let usage = HsmMaskedKeyAttributes::SIGN.bits()
             | HsmMaskedKeyAttributes::LOCAL.bits()
             | (u64::from(scope) << TBOR_KEY_SCOPE_SHIFT);
-        blob[28..36].copy_from_slice(&usage.to_le_bytes());
+        blob[32..40].copy_from_slice(&usage.to_le_bytes());
         blob
     }
 
@@ -716,13 +727,13 @@ mod tests {
                 Err(HsmError::InvalidKeyProps)
             );
         }
-        for offset in [0, 4, 5, 20, 24, 26, 211] {
+        for offset in [0, 4, 5, 24, 28, 30, 215] {
             let mut invalid = blob.clone();
             invalid[offset] = 0xff;
             assert!(HsmEccSignAlgo::masked_key_info(&invalid).is_err());
         }
         let mut no_sign = blob;
-        no_sign[28..36].copy_from_slice(
+        no_sign[32..40].copy_from_slice(
             &((3u64 << TBOR_KEY_SCOPE_SHIFT) | HsmMaskedKeyAttributes::DERIVE.bits()).to_le_bytes(),
         );
         assert_eq!(
@@ -734,11 +745,11 @@ mod tests {
     #[test]
     fn masked_sealing_key_props_decode_metadata() {
         let mut blob = unchecked_ecc_blob(HsmKeyScope::Local as u8);
-        blob[26] = KEY_KIND_SD_SEALING;
+        blob[30] = KEY_KIND_SD_SEALING;
         let usage = HsmMaskedKeyAttributes::DERIVE.bits()
             | HsmMaskedKeyAttributes::LOCAL.bits()
             | (3u64 << TBOR_KEY_SCOPE_SHIFT);
-        blob[28..36].copy_from_slice(&usage.to_le_bytes());
+        blob[32..40].copy_from_slice(&usage.to_le_bytes());
         let props = HsmMaskedKey::to_key_props(&blob).expect("sealing key metadata");
         assert_eq!(props.kind(), HsmKeyKind::Sealing);
         assert_eq!(props.class(), HsmKeyClass::Secret);
@@ -750,6 +761,77 @@ mod tests {
         }
         blob.push(0);
         assert!(HsmMaskedKey::to_key_props(&blob).is_err());
+    }
+
+    fn unchecked_padded_blob(key_kind: u8, raw_len: usize) -> Vec<u8> {
+        let padded_len = raw_len.next_multiple_of(16);
+        let mut blob = unchecked_ecc_blob(HsmKeyScope::Local as u8);
+        blob.resize(232 + padded_len, 0xa5);
+        blob[30] = key_kind;
+        blob[24 + 154] = (padded_len - raw_len) as u8;
+        blob
+    }
+
+    #[test]
+    fn padded_aes192_and_ecc521_metadata_decode() {
+        let aes = unchecked_padded_blob(KEY_KIND_AES192, 24);
+        assert_eq!(aes.len(), 264);
+        let props = HsmMaskedKey::to_key_props(&aes).expect("padded AES-192");
+        assert_eq!(props.kind(), HsmKeyKind::Aes);
+        assert_eq!(props.bits(), 192);
+
+        let ecc = unchecked_padded_blob(KEY_KIND_ECC521_PRIVATE, 68);
+        assert_eq!(ecc.len(), 312);
+        assert_eq!(HsmMaskedKey::ecc_curve(&ecc), Ok(HsmEccCurve::P521));
+
+        // The host sees ciphertext, so it must not check zero padding bytes.
+        let secret = unchecked_padded_blob(KEY_KIND_SECRET521, 66);
+        let props = HsmMaskedKey::to_key_props(&secret).expect("padded P-521 shared secret");
+        assert_eq!(props.kind(), HsmKeyKind::SharedSecret);
+        assert_eq!(props.bits(), 521);
+    }
+
+    #[test]
+    fn masked_metadata_rejects_bad_padding_and_old_formats() {
+        let blob = unchecked_padded_blob(KEY_KIND_AES192, 24);
+        for pad in [0, 7, 9, 15, 16, 255] {
+            let mut invalid = blob.clone();
+            invalid[24 + 154] = pad;
+            assert!(HsmMaskedKey::to_key_props(&invalid).is_err(), "pad {pad}");
+        }
+        let mut unaligned = blob.clone();
+        unaligned.push(0);
+        assert!(HsmMaskedKey::to_key_props(&unaligned).is_err());
+
+        let mut no_payload = blob.clone();
+        no_payload.truncate(232);
+        assert!(HsmMaskedKey::to_key_props(&no_payload).is_err());
+
+        let mut old_version = blob.clone();
+        old_version[28..30].copy_from_slice(&1u16.to_le_bytes());
+        assert!(HsmMaskedKey::to_key_props(&old_version).is_err());
+
+        // Make an otherwise correctly framed ordinary GCM envelope.
+        let mut old_profile = blob;
+        old_profile[4] = 0x03;
+        old_profile.drain(20..24);
+        assert!(aead_envelope::inspect(&old_profile).is_ok());
+        assert!(HsmMaskedKey::to_key_props(&old_profile).is_err());
+    }
+
+    #[test]
+    fn padded_rsa_payload_lengths_decode() {
+        for (kind, raw_len) in [
+            (KEY_KIND_RSA2K_PRIVATE, 256 * 2 + 4),
+            (KEY_KIND_RSA3K_PRIVATE, 384 * 2 + 4),
+            (KEY_KIND_RSA4K_PRIVATE, 512 * 2 + 4),
+            (KEY_KIND_RSA2K_PRIVATE_CRT, rsa_crt_payload_len(256)),
+            (KEY_KIND_RSA3K_PRIVATE_CRT, rsa_crt_payload_len(384)),
+            (KEY_KIND_RSA4K_PRIVATE_CRT, rsa_crt_payload_len(512)),
+        ] {
+            let blob = unchecked_padded_blob(kind, raw_len);
+            assert!(HsmMaskedKey::to_key_props(&blob).is_ok());
+        }
     }
 
     #[test]

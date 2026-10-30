@@ -9,16 +9,15 @@
 //! any crypto work, then call again with `Some(&mut buf)` of at least
 //! that length to actually mask.
 //!
-//! Mirrors the call shape of `build_bmk_session` in the TBOR session
-//! handler — the canonical AEAD-seal pattern in this firmware — by
-//! taking a scoped allocator for the small IV / AAD `HsmDmaBuf`s that
-//! [`aead_envelope::seal`] requires as separate inputs.
+//! The PAL generates the nonce and masks directly in the final envelope.
+//! Shared code does not allocate IV, AAD or payload staging buffers.
 
-use tsra_fw_core_crypto_aead_envelope::seal as aead_seal;
+use tsra_fw_core_crypto_aead_envelope::write_header;
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
-use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_core_crypto_aead_envelope::HEADER_LEN;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmKeyMasking;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -30,7 +29,7 @@ use crate::aead::format::MaskedKeyMetadata;
 use crate::aead::format::KEY_LABEL_MAX;
 use crate::aead::format::META_LEN;
 
-/// Caller-supplied parameters for a v1 masked-key blob.
+/// Caller-supplied parameters for a v2 masked-key blob.
 ///
 /// Carries only the fields the caller owns; magic, version, padding,
 /// and the reserved tail of [`MaskedKeyMetadata`] are produced by
@@ -70,19 +69,16 @@ pub struct MaskParams<'a> {
 /// envelope (algorithm chosen by `alg`) whose AAD is exactly one
 /// fixed [`MaskedKeyMetadata`] record built from `params`. The
 /// envelope binds every metadata byte (magic, version, `key_kind`,
-/// `key_label_len`, `usage_flags`, `key_label`, reserved tail) to
+/// `key_label_len`, `usage_flags`, `key_label`, padding count, reserved tail) to
 /// the ciphertext via the AEAD tag.
 ///
 /// # Parameters
 ///
-/// * `crypto`        — PAL providing AES and RNG (any [`HsmCrypto`]).
+/// * `crypto`     — PAL providing [`HsmKeyMasking`].
 /// * `io`         — caller's I/O context.
-/// * `alloc`      — scoped allocator. Used internally to stage the
-///   IV (12 B) and AAD copy (192 B); the plaintext is sealed **directly**
-///   from `target_key` (no copy). Both buffers are freed when the
-///   enclosing scope exits.
+/// * `_alloc`     — retained for caller compatibility; no scratch is allocated.
 /// * `alg`        — AEAD algorithm for this blob (e.g.
-///   [`AeadAlg::AesGcm256`]). Determines the required `key` length
+///   [`AeadAlg::AesGcm256Iv16`]). Determines the required `key` length
 ///   via [`AeadAlg::key_len`].
 /// * `key`        — AEAD masking key; length MUST equal
 ///   `alg.key_len()`. Ignored when `out == None`.
@@ -100,25 +96,21 @@ pub struct MaskParams<'a> {
 ///   untouched.
 /// * `Err(HsmError::InvalidArg)` — `key.len() != alg.key_len()`,
 ///   `params.key_label.len() > KEY_LABEL_MAX`, or `out` is too small.
-/// * `Err(HsmError::NotEnoughSpace)` — `alloc` exhausted.
-/// * Any [`HsmError`] surfaced by the PAL RNG / AES drivers, or by
-///   [`aead_envelope::seal`](aead_seal).
+/// * Any [`HsmError`] surfaced by the masking PAL or header encoder.
 ///
-/// On any failure after `out` has been mutated, the prefix used by
-/// the partial seal is zeroed before returning so the caller's
-/// response staging area never retains `target_key` bytes or an
-/// unauthenticated partial blob.
-pub async fn mask<P: HsmCrypto>(
+/// On failure, callers must not publish the partial envelope.
+/// IO teardown scrubs its backing storage.
+pub async fn mask<P: HsmKeyMasking>(
     crypto: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
+    _alloc: &impl HsmScopedAlloc,
     alg: AeadAlg,
     key: &HsmDmaBuf,
     params: &MaskParams<'_>,
     target_key: &HsmDmaBuf,
     out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize> {
-    let total = blob_len(alg, target_key.len());
+    let (total, pad) = mask_len(crypto, alg, target_key.len())?;
 
     // Size-query short-circuit — no crypto, no IO, no buffer writes,
     // no allocation.
@@ -126,46 +118,13 @@ pub async fn mask<P: HsmCrypto>(
         return Ok(total);
     };
 
-    if key.len() != alg.key_len() || params.key_label.len() > KEY_LABEL_MAX || out.len() < total {
-        return Err(HsmError::InvalidArg);
-    }
-
-    // Build the metadata record. new_v1 re-checks label length and
-    // sets every protocol-fixed byte (magic, version, pad, reserved)
-    // so the resulting record always satisfies validate_v1.
-    let metadata = MaskedKeyMetadata::new_v1(
-        params.key_kind,
-        params.key_attrs,
-        params.svn,
-        params.owner_seed_id,
-        params.key_label,
-    )?;
-
-    // Stage IV and AAD in scoped DMA buffers (the plaintext is sealed
-    // directly from `target_key`, no copy).  IV size is alg-dependent
-    // (alg.iv_len()).
-    let iv = alloc.dma_alloc(alg.iv_len())?;
-    crypto.rng_fill_bytes(io, &mut iv[..])?;
-
-    let aad = alloc.dma_alloc(META_LEN)?;
-    aad.copy_from_slice(metadata.as_bytes());
-
-    // Seal directly from `target_key` into `out`.  `aead_seal` / `seal_gcm`
-    // only *reads* `pt` (it copies the plaintext into `out`'s data region
-    // and encrypts in place there), so staging a separate `pt` copy of
-    // `target_key` would be a redundant second copy — wasteful of the
-    // scarce per-IO DMA budget for large keys (e.g. an RSA-4096 private
-    // key).  `target_key` and `out` are disjoint buffers, so passing it
-    // through directly is sound.  Mirrors `cbc::mask`, which likewise
-    // writes the plaintext straight into `out`.
-    let result = aead_seal(crypto, io, alg, key, iv, aad, target_key, Some(out)).await;
-    match result {
-        Ok(n) => {
-            debug_assert_eq!(n, total);
-            Ok(n)
-        }
-        Err(e) => Err(e),
-    }
+    prepare(alg, key, params, total, pad, out)?;
+    let at = payload_offset(alg);
+    out[at..at + target_key.len()].copy_from_slice(target_key);
+    crypto
+        .key_mask_in_place(io, key, META_LEN, &mut out[HEADER_LEN..total])
+        .await?;
+    Ok(total)
 }
 
 /// Offset inside a masked blob at which the plaintext key must be
@@ -179,8 +138,9 @@ pub const fn payload_offset(alg: AeadAlg) -> usize {
 /// [`payload_offset`], rather than holding it in a separate buffer.
 ///
 /// Same envelope and same AAD as [`mask`]; the only difference is that
-/// the plaintext is never copied, because it is already where the
-/// ciphertext belongs.  For a large key this halves the live footprint:
+/// shared code never copies the plaintext, because it is already where the
+/// ciphertext belongs. PAL implementations may use internal scratch buffers.
+/// Avoiding a second DMA payload allocation is important for large keys:
 /// an ML-DSA-87 blob is 4928 bytes, and on the 16 KB per-IO DMA heap
 /// keeping a second copy is the difference between fitting and
 /// `NotEnoughSpace`.
@@ -189,44 +149,61 @@ pub const fn payload_offset(alg: AeadAlg) -> usize {
 ///
 /// On error, callers must not publish the partial envelope or staged plaintext.
 /// IO teardown scrubs the backing storage.
-pub async fn mask_in_place<P: HsmCrypto>(
+pub async fn mask_in_place<P: HsmKeyMasking>(
     crypto: &P,
     io: &P::Io,
-    alloc: &impl HsmScopedAlloc,
+    _alloc: &impl HsmScopedAlloc,
     alg: AeadAlg,
     key: &HsmDmaBuf,
     params: &MaskParams<'_>,
     pt_len: usize,
     out: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
-    let total = blob_len(alg, pt_len);
+    let (total, pad) = mask_len(crypto, alg, pt_len)?;
+    prepare(alg, key, params, total, pad, out)?;
+    crypto
+        .key_mask_in_place(io, key, META_LEN, &mut out[HEADER_LEN..total])
+        .await?;
+    Ok(total)
+}
+
+fn mask_len(crypto: &impl HsmKeyMasking, alg: AeadAlg, pt_len: usize) -> HsmResult<(usize, u8)> {
+    if alg != AeadAlg::AesGcm256Iv16 {
+        return Err(HsmError::InvalidArg);
+    }
+    let (len, pad) = crypto.key_mask_len(META_LEN, pt_len)?;
+    let total = len.checked_add(HEADER_LEN).ok_or(HsmError::InvalidArg)?;
+    if pad as usize != (16 - pt_len % 16) % 16 || total != blob_len(alg, pt_len) {
+        return Err(HsmError::InternalError);
+    }
+    Ok((total, pad))
+}
+
+fn prepare(
+    alg: AeadAlg,
+    key: &HsmDmaBuf,
+    params: &MaskParams<'_>,
+    total: usize,
+    data_pad_len: u8,
+    out: &mut HsmDmaBuf,
+) -> HsmResult<()> {
     if key.len() != alg.key_len() || params.key_label.len() > KEY_LABEL_MAX || out.len() < total {
         return Err(HsmError::InvalidArg);
     }
 
-    let metadata = MaskedKeyMetadata::new_v1(
+    let metadata = MaskedKeyMetadata::new_v2(
         params.key_kind,
         params.key_attrs,
         params.svn,
         params.owner_seed_id,
         params.key_label,
+        data_pad_len,
     )?;
 
-    let iv = alloc.dma_alloc(alg.iv_len())?;
-    crypto.rng_fill_bytes(io, &mut iv[..])?;
-
-    let aad = alloc.dma_alloc(META_LEN)?;
-    aad.copy_from_slice(metadata.as_bytes());
-
-    let result = tsra_fw_core_crypto_aead_envelope::seal_in_place(
-        crypto, io, alg, key, iv, aad, pt_len, out,
-    )
-    .await;
-    match result {
-        Ok(n) => {
-            debug_assert_eq!(n, total);
-            Ok(n)
-        }
-        Err(e) => Err(e),
-    }
+    write_header(out, alg, META_LEN)?;
+    let aad_at = HEADER_LEN + alg.iv_len();
+    out[aad_at..aad_at + META_LEN].copy_from_slice(metadata.as_bytes());
+    let tag_at = total - alg.tag_len();
+    out[tag_at - data_pad_len as usize..tag_at].fill(0);
+    Ok(())
 }

@@ -21,7 +21,7 @@
 //!   in-session commands).
 //! * `masked_sealing_key` — the **sender's** masked SD-sealing key (from
 //!   [`SdSealingKeyGen`](crate::sd_sealing_key_gen)), exactly
-//!   [`MASKED_SEALING_KEY_LEN`] (276 B).  Unmasked on-device to recover the
+//!   [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover the
 //!   sender's private HPKE key (`SndrPriv`) that authenticates the seal;
 //!   never a vault handle.
 //! * `policy` — the unified [`PartPolicy`] describing the security domain
@@ -33,7 +33,7 @@
 //!   key is the receiver public key (`RcvrPub`) the backup is sealed to.
 //! * `pok_local_backup` — the device-local partition-owner-key backup (a
 //!   masked BKS3 wrapped under `PartLocalMK`), exactly [`MASKED_SD_LEN`]
-//!   (276 B), from which BKS3 is recovered.
+//!   (280 B), from which BKS3 is recovered.
 //!
 //! Output:
 //!
@@ -52,9 +52,9 @@ pub use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
 pub const TBOR_OP_SD_CREATE_PEER_BACKUP: u8 = 0x0E;
 
 // `masked_sealing_key` is a masked SD-sealing key; the derive needs an
-// integer literal on the field, so the length is spelled out as `276` and
+// integer literal on the field, so the length is spelled out as `280` and
 // pinned against the canonical `MASKED_SEALING_KEY_LEN` here.
-const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
+const _: () = assert!(MASKED_SEALING_KEY_LEN == 280);
 
 // `policy` carries the unified `PartPolicy`; the derive needs an integer
 // literal on the field, so the length is spelled out as `484` and pinned
@@ -62,9 +62,9 @@ const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
 const _: () = assert!(PART_POLICY_LEN == 584);
 
 // `pok_local_backup` is a masked BKS3 envelope; the derive needs an integer
-// literal on the field, so the length is spelled out as `276` and pinned
+// literal on the field, so the length is spelled out as `280` and pinned
 // against the canonical value here.
-const _: () = assert!(MASKED_SD_LEN == 276);
+const _: () = assert!(MASKED_SD_LEN == 280);
 
 // `pok_peer_backup` is an HPKE-Auth seal; the derive needs an integer
 // literal on the field, so the length is spelled out as `161` and pinned
@@ -81,10 +81,10 @@ pub struct TborSdCreatePeerBackupReq<'a> {
     pub session_id: SessionId,
 
     /// The sender's masked SD-sealing key (from `SdSealingKeyGen`), exactly
-    /// [`MASKED_SEALING_KEY_LEN`] (276 B).  Unmasked on-device to recover
+    /// [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
     /// the sender's private HPKE key (`SndrPriv`) that authenticates the
     /// seal.
-    #[tbor(buffer, len = 276)]
+    #[tbor(buffer, len = 280)]
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] describing the security
@@ -105,8 +105,8 @@ pub struct TborSdCreatePeerBackupReq<'a> {
 
     /// Device-local partition-owner-key backup (a masked BKS3 wrapped under
     /// `PartLocalMK`) from which BKS3 is recovered.  Always exactly
-    /// [`MASKED_SD_LEN`] (276 B).
-    #[tbor(buffer, len = 276)]
+    /// [`MASKED_SD_LEN`] (280 B).
+    #[tbor(buffer, len = 280)]
     pub pok_local_backup: &'a [u8],
 }
 

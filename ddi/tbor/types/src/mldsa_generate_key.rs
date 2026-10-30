@@ -38,9 +38,9 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 /// Maximum masked ML-DSA private-key envelope length.
 ///
 /// The masked plaintext is the 32-byte `xi` seed **concatenated with the
-/// expanded secret key**, seed first: `32 + 4896 + 228 = 5156` B at
-/// ML-DSA-87, where 228 is the AEAD-GCM-256 masked-envelope overhead
-/// `header(8) + iv(12) + aad(96) + tag(16)`.
+/// expanded secret key**, seed first: `32 + 4896 + 232 = 5160` B at
+/// ML-DSA-87, where 232 is the AEAD-GCM-256 masked-envelope overhead
+/// `header(8) + iv(16) + aad(192) + tag(16)`. The payload is padded to 16 B.
 ///
 /// Carrying both is what makes signing cheap. The seed alone would be
 /// smaller on the wire, but every signature would have to re-derive the
@@ -52,11 +52,11 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 /// One AEAD tag covers the pair, so the two halves cannot disagree without
 /// failing to unmask — the device does not need to re-derive to check them.
 ///
-/// Note this makes the masked length **parameter-set dependent** (2724 /
-/// 4196 / 5156 for ML-DSA-44 / 65 / 87), where the seed-only form was a
-/// constant 164 regardless. The `key_kind` in the AAD is therefore no
+/// Note this makes the masked length **parameter-set dependent** (2824 /
+/// 4296 / 5160 for ML-DSA-44 / 65 / 87), where the seed-only form is a
+/// constant 264 regardless. The `key_kind` in the AAD is therefore no
 /// longer the only thing distinguishing parameter sets.
-pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 12 + 192 + 32 + 4896 + 16;
+pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 16 + 192 + 32 + 4896 + 16;
 /// Maximum ML-DSA public-key length: 2592 B for ML-DSA-87.
 pub const MLDSA_PUB_KEY_MAX_LEN: usize = 2592;
 /// Maximum ML-DSA signature length: 4627 B for ML-DSA-87.
@@ -93,7 +93,7 @@ pub const MLDSA_CTX_MAX_LEN: usize = 255;
 /// `MlDsaSign` shares the same cap: sign and verify are inverse
 /// operations over pure ML-DSA, so a message that can be signed must also
 /// be verifiable.  `MlDsaSign` on its own would allow
-/// `8192 - 132 - 164 - 255 = 7641` bytes.
+/// `8192 - 132 - 5160 - 255 = 2645` bytes.
 ///
 /// The cap is therefore dictated entirely by `MlDsaVerify`.  If
 /// `MlDsaVerify` is ever removed as a command, raising the cap is a
@@ -135,7 +135,7 @@ pub struct TborMlDsaGenerateKeyResp {
     /// The generated ML-DSA private key, masked under the scope's masking
     /// key.  Always 164 B: the wire is seed-only, so the plaintext is the
     /// 32-byte `xi` seed.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(max_len = 5156)]
+    #[tbor(max_len = 5160)]
     pub masked_key: Vec<u8>,
 
     /// The ML-DSA public key bytes.
@@ -197,12 +197,12 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(5156 == MASKED_MLDSA_KEY_MAX_LEN);
+        const _: () = assert!(5160 == MASKED_MLDSA_KEY_MAX_LEN);
         const _: () = assert!(2592 == MLDSA_PUB_KEY_MAX_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);
         const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
         const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
-        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5156);
+        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5160);
     }
 
     /// The message cap is the residue of the worst-case `MlDsaVerify`

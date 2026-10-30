@@ -27,7 +27,7 @@
 //! * `key_usage` — the requested [`KeyUsage`] permissions; the handler
 //!   intersects these with the COSE_Key's own `key_ops` restriction.
 //! * `masked_tmk` — the masked TMK envelope from `DarcTmkImport`, exactly
-//!   [`MASKED_TMK_LEN`] (260 B); its masked-key kind must be
+//!   [`MASKED_TMK_LEN`] (264 B); its masked-key kind must be
 //!   [`DarcTmk`](tsra_fw_hsm_pal_traits::HsmVaultKeyKind::DarcTmk).
 //! * `wrapped_key` — the AES-KWP-wrapped EC2 `COSE_Key`, up to
 //!   [`DARC_UNWRAP_WRAPPED_KEY_MAX_LEN`].
@@ -59,10 +59,10 @@ pub const DARC_UNWRAP_WRAPPED_KEY_MAX_LEN: usize = 512;
 
 /// Max masked recovered-key envelope length: an AES-256-GCM `MaskedKey`
 /// envelope around the largest EC vault scalar (P-521, 68 B) —
-/// `header(8) + iv(12) + MaskedKeyMetadata aad(192) + ct(68) + tag(16)`
-/// = 296 B.  Pinned into the `#[tbor(buffer, max_len = 296)]` literal on
+/// `header(8) + iv(16) + MaskedKeyMetadata aad(192) + ct(68) + tag(16)`
+/// = 312 B.  Pinned into the `#[tbor(buffer, max_len = 312)]` literal on
 /// [`TborDarcKeyUnwrapResp::masked_key`].
-pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 8 + 12 + 192 + 68 + 16;
+pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
 
 /// Max recovered public-key length (P-521 wire `x ‖ y`, each 68 B).
 /// Pinned into the `#[tbor(buffer, max_len = 136)]` literal on
@@ -73,9 +73,9 @@ pub const DARC_UNWRAP_PUB_KEY_MAX_LEN: usize = 2 * 68;
 // `#[tbor(buffer, max_len = ...)]` literals below (the derive requires
 // integer literals, so the two cannot share a symbol).
 const _: () = assert!(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN == 512);
-const _: () = assert!(DARC_UNWRAP_MASKED_KEY_MAX_LEN == 296);
+const _: () = assert!(DARC_UNWRAP_MASKED_KEY_MAX_LEN == 312);
 const _: () = assert!(DARC_UNWRAP_PUB_KEY_MAX_LEN == 136);
-const _: () = assert!(MASKED_TMK_LEN == 260);
+const _: () = assert!(MASKED_TMK_LEN == 264);
 
 /// `DarcKeyUnwrap` request schema.
 ///
@@ -98,9 +98,9 @@ pub struct TborDarcKeyUnwrapReq<'a> {
     pub key_usage: KeyUsage,
 
     /// The masked TMK envelope from `DarcTmkImport`, exactly
-    /// [`MASKED_TMK_LEN`] (260 B).  Unmasked on-device to recover the
+    /// [`MASKED_TMK_LEN`] (264 B).  Unmasked on-device to recover the
     /// 32-byte TMK used as the AES-KWP key.
-    #[tbor(buffer, len = 260)]
+    #[tbor(buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 
     /// The AES-KWP-wrapped EC2 `COSE_Key`, up to
@@ -122,7 +122,7 @@ pub struct TborDarcKeyUnwrapResp<'a> {
     ///
     /// `#[tbor(mutable)]` so the handler can reserve the slot and mask the
     /// recovered key straight into it (`decode_mut`) — no scratch buffer.
-    #[tbor(buffer, max_len = 296, mutable)]
+    #[tbor(buffer, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
     /// The recovered key's wire public key (`x ‖ y`, wire-LE).
