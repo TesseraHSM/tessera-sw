@@ -2174,10 +2174,10 @@ impl Dispatcher {
             nonce: req.encrypted_credential.nonce,
             tag: req.encrypted_credential.tag,
         };
-        let credentials = zeroize::Zeroizing::new(vault.prepare_establish_credential(
+        let credentials = vault.prepare_establish_credential(
             encrypted_credential,
             &req.pub_key.der.data()[..req.pub_key.der.len()],
-        )?);
+        )?;
 
         let bmk_result = {
             tracing::debug!(
@@ -2209,7 +2209,7 @@ impl Dispatcher {
             bmk
         };
 
-        vault.commit_establish_credential(&credentials.0, &credentials.1)?;
+        vault.commit_establish_credential(credentials);
 
         let resp = DdiEstablishCredentialResp {
             bmk: MborByteArray::from_slice(&bmk_result).map_err(|_| TesseraError::InternalError)?,

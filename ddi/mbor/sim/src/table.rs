@@ -27,7 +27,7 @@ pub(crate) const MAX_TABLE_BYTES: usize = 16 * 1024; // 16 KB
 pub(crate) const KEY_LAZY_DELETE_TIMEOUT_IN_SECONDS: u64 = 2;
 
 /// Table is a collection of keys and their metadata.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Table {
     inner: Arc<RwLock<TableInner>>,
 }
@@ -114,6 +114,11 @@ impl Table {
     #[instrument(skip(self))]
     pub(crate) fn remove(&self, index: u8) -> Result<(), TesseraError> {
         self.inner.write().remove(index)
+    }
+
+    /// Retire an entry during commit; an already-empty slot needs no cleanup.
+    pub(crate) fn remove_if_present(&self, index: u8) {
+        self.inner.write().remove_if_present(index);
     }
 
     /// Removes all session_only keys of a given app session from the table.
@@ -241,17 +246,22 @@ impl TableInner {
     }
 
     fn remove(&mut self, index: u8) -> Result<(), TesseraError> {
-        let entry = self.entries[index as usize].as_mut().ok_or_else(|| {
+        if !self.remove_if_present(index) {
             tracing::error!(error = ?TesseraError::InvalidKeyIndex, index, "Invalid key index in the table");
-            TesseraError::InvalidKeyIndex
-        })?;
+            return Err(TesseraError::InvalidKeyIndex);
+        }
+        Ok(())
+    }
 
+    fn remove_if_present(&mut self, index: u8) -> bool {
+        let Some(mut entry) = self.entries[index as usize].take() else {
+            return false;
+        };
         entry.set_disabled();
 
         tracing::debug!(index, sess_id = ?entry.physical_sess_id(), key_tag = ?entry.key_tag(), "Entry removed");
         self.used_bytes -= entry.size();
-        self.entries[index as usize] = None;
-        Ok(())
+        true
     }
 
     fn remove_all_session_only_keys(
@@ -677,6 +687,11 @@ mod tests {
 
         let table_inner = table.inner.read();
         assert_eq!(table_inner.used_bytes, 0);
+        drop(table_inner);
+
+        table.remove_if_present(0);
+        table.remove_if_present(1);
+        assert_eq!(table.inner.read().used_bytes, 0);
     }
 
     #[test]
