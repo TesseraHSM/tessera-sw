@@ -23,8 +23,6 @@
 //! * `SecurityDomain` scope before `CreateSD` → `UnsupportedKeyScope`.
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;

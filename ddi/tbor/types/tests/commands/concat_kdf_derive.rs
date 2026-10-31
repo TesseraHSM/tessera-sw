@@ -19,8 +19,6 @@
 //! KDFs' byte-level correctness is covered by the `tsra_crypto`
 //! known-answer tests, which share the same primitive.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborConcatKdfDeriveReq;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;

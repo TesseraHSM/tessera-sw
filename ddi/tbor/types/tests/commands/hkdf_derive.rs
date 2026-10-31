@@ -18,8 +18,6 @@
 //! covered by the MBOR `HkdfDerive` tests and the std-PAL KDF driver
 //! tests, which share the same `pal.hkdf_extract` / `pal.hkdf_expand`.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
