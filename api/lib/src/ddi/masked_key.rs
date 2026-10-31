@@ -624,6 +624,13 @@ impl TryFrom<DdiMaskedKeyMetadata> for HsmMaskedKeyMetadata {
     /// Converts DDI masked key metadata to HSM masked key metadata.
     fn try_from(value: DdiMaskedKeyMetadata) -> Result<Self, Self::Error> {
         let attrs = HsmMaskedKeyAttributes::try_from(value.key_attributes)?;
+        let var_hmac_bits = || {
+            value
+                .key_length
+                .checked_mul(8)
+                .filter(|&bits| bits != 0)
+                .ok_or(HsmError::MaskedKeyDecodeFailed)
+        };
         let (kind, bits, curve) = match value.key_type {
             DdiKeyType::RsaUnwrap => (HsmKeyKind::Rsa, 2048, None), // Special internal key type for RSA unwrapping
             DdiKeyType::Rsa2kPrivate => (HsmKeyKind::Rsa, 2048, None),
@@ -648,6 +655,9 @@ impl TryFrom<DdiMaskedKeyMetadata> for HsmMaskedKeyMetadata {
             DdiKeyType::HmacSha256 => (HsmKeyKind::HmacSha256, 256, None),
             DdiKeyType::HmacSha384 => (HsmKeyKind::HmacSha384, 384, None),
             DdiKeyType::HmacSha512 => (HsmKeyKind::HmacSha512, 512, None),
+            DdiKeyType::VarHmac256 => (HsmKeyKind::HmacSha256, var_hmac_bits()?, None),
+            DdiKeyType::VarHmac384 => (HsmKeyKind::HmacSha384, var_hmac_bits()?, None),
+            DdiKeyType::VarHmac512 => (HsmKeyKind::HmacSha512, var_hmac_bits()?, None),
             _ => return Err(HsmError::InternalError),
         };
 
@@ -683,6 +693,59 @@ impl TryFrom<DdiMaskedKeyAttributes> for HsmMaskedKeyAttributes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mbor_hmac_metadata(key_type: DdiKeyType, key_length: u16) -> DdiMaskedKeyMetadata {
+        DdiMaskedKeyMetadata {
+            svn: None,
+            key_type,
+            key_attributes: DdiMaskedKeyAttributes { blob: [0; 32] },
+            bks2_index: None,
+            key_tag: None,
+            key_label: MborByteArray::from_slice(b"hmac").expect("key label"),
+            key_length,
+        }
+    }
+
+    #[test]
+    fn mbor_variable_hmac_metadata_preserves_key_length() {
+        for (key_type, kind, lengths) in [
+            (DdiKeyType::VarHmac256, HsmKeyKind::HmacSha256, [32, 40, 64]),
+            (
+                DdiKeyType::VarHmac384,
+                HsmKeyKind::HmacSha384,
+                [48, 80, 128],
+            ),
+            (
+                DdiKeyType::VarHmac512,
+                HsmKeyKind::HmacSha512,
+                [64, 96, 128],
+            ),
+        ] {
+            for key_length in lengths {
+                let metadata =
+                    HsmMaskedKeyMetadata::try_from(mbor_hmac_metadata(key_type, key_length))
+                        .expect("variable-length HMAC metadata");
+                assert_eq!(metadata.kind, kind);
+                assert_eq!(metadata.bits, key_length * 8);
+            }
+        }
+    }
+
+    #[test]
+    fn mbor_variable_hmac_metadata_rejects_empty_or_overflowing_length() {
+        for key_type in [
+            DdiKeyType::VarHmac256,
+            DdiKeyType::VarHmac384,
+            DdiKeyType::VarHmac512,
+        ] {
+            for key_length in [0, 8192, u16::MAX] {
+                assert!(matches!(
+                    HsmMaskedKeyMetadata::try_from(mbor_hmac_metadata(key_type, key_length)),
+                    Err(HsmError::MaskedKeyDecodeFailed)
+                ));
+            }
+        }
+    }
 
     fn unchecked_ecc_blob(scope: u8) -> Vec<u8> {
         let mut blob = vec![0; 24 + TBOR_MASKED_KEY_METADATA_LEN + 48 + 16];
@@ -807,9 +870,11 @@ mod tests {
         no_payload.truncate(232);
         assert!(HsmMaskedKey::to_key_props(&no_payload).is_err());
 
-        let mut unsupported_version = blob.clone();
-        unsupported_version[28..30].copy_from_slice(&2u16.to_le_bytes());
-        assert!(HsmMaskedKey::to_key_props(&unsupported_version).is_err());
+        for version in [0u16, 2, u16::MAX] {
+            let mut unsupported_version = blob.clone();
+            unsupported_version[28..30].copy_from_slice(&version.to_le_bytes());
+            assert!(HsmMaskedKey::to_key_props(&unsupported_version).is_err());
+        }
 
         // The old 12-byte IV layout must not be interpreted as IV16.
         let mut old_profile = blob;

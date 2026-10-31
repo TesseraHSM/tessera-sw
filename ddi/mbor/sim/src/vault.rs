@@ -295,19 +295,36 @@ impl Vault {
         self.inner.read().get_key_num_by_tag(app_id, key_tag)
     }
 
-    /// Establish credential.
-    ///
-    /// # Returns
-    /// * Ok if successful.
+    #[cfg(test)]
     #[instrument(skip(self), fields(id = ?self.id()))]
     pub(crate) fn establish_credential(
         &self,
         encrypted_credential: EncryptedCredential,
         client_pub_key: &[u8],
     ) -> Result<(), TesseraError> {
+        let mut inner = self.inner.write();
+        let (id, pin) = inner.prepare_establish_credential(encrypted_credential, client_pub_key)?;
+        inner.commit_establish_credential(&id, &pin)
+    }
+
+    /// Validate new user credentials, preserving the tunnel on success.
+    pub(crate) fn prepare_establish_credential(
+        &self,
+        encrypted_credential: EncryptedCredential,
+        client_pub_key: &[u8],
+    ) -> Result<([u8; 16], [u8; 16]), TesseraError> {
         self.inner
             .write()
-            .establish_credential(encrypted_credential, client_pub_key)
+            .prepare_establish_credential(encrypted_credential, client_pub_key)
+    }
+
+    /// Commit validated user credentials after partition provisioning succeeds.
+    pub(crate) fn commit_establish_credential(
+        &self,
+        id: &[u8; 16],
+        pin: &[u8; 16],
+    ) -> Result<(), TesseraError> {
+        self.inner.write().commit_establish_credential(id, pin)
     }
 
     /// Decrypt and authenticate an establish-credential payload without
@@ -750,19 +767,32 @@ impl VaultInner {
         Ok(())
     }
 
-    fn establish_credential(
+    fn prepare_establish_credential(
         &mut self,
         encrypted_credential: EncryptedCredential,
         client_pub_key: &[u8],
-    ) -> Result<(), TesseraError> {
+    ) -> Result<([u8; 16], [u8; 16]), TesseraError> {
         if !self.user.credentials.id.is_nil() && !self.user.credentials.pin.eq(&[0; 16]) {
             Err(TesseraError::VaultAppLimitReached)?;
         }
 
         let (decrypted_id, decrypted_pin) =
             self.decrypt_establish_credential(encrypted_credential, client_pub_key)?;
+        if decrypted_id == [0; 16] || decrypted_pin == [0; 16] {
+            // Authenticated but invalid credentials still consume the nonce.
+            self.reset_nonce()?;
+            return Err(TesseraError::InvalidAppCredentials);
+        }
+        Ok((decrypted_id, decrypted_pin))
+    }
+
+    fn commit_establish_credential(
+        &mut self,
+        id: &[u8; 16],
+        pin: &[u8; 16],
+    ) -> Result<(), TesseraError> {
         self.reset_nonce()?;
-        self.set_user_new_credential(&decrypted_id, &decrypted_pin)?;
+        self.set_user_new_credential(id, pin)?;
         self.clear_establish_cred_encryption_key_id()?;
         Ok(())
     }

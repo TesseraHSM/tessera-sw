@@ -1256,7 +1256,12 @@ mod tests {
 
         let (pal, io, _) = crypto_fixture().await;
         let mut key = [0x17; 32];
-        for (plaintext_len, count, corrupt_tail) in [(1, 15, true), (1, 16, false), (0, 1, false)] {
+        for (plaintext_len, count, corrupt_tail, version) in [
+            (1, 15, true, 1u16),
+            (1, 16, false, 1),
+            (0, 1, false, 1),
+            (1, 15, false, 2),
+        ] {
             pal.alloc_scoped_async(&io, async |alloc| {
                 let params = MaskParams {
                     key_kind: HsmVaultKeyKind::Aes256,
@@ -1297,6 +1302,7 @@ mod tests {
                     dma(&mut storage[HEADER_LEN..len]),
                 )
                 .await?;
+                storage[28..30].copy_from_slice(&version.to_le_bytes());
                 storage[24 + 154] = count;
                 if corrupt_tail {
                     storage[len - 17] = 1;
