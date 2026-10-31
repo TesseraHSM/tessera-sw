@@ -142,3 +142,29 @@ void assert_encrypt_ctx_finished(tsra_handle ctx);
 /// Asserts that update and finish on a finished decrypt context both return
 /// TSRA_STATUS_INVALID_CONTEXT_STATE.
 void assert_decrypt_ctx_finished(tsra_handle ctx);
+
+// ==================== AES Feedback Mode Reference Helpers ====================
+//
+// Generated keys never leave the HSM, so CFB/OFB/CTR known-answer checks use
+// the HSM's own AES-ECB (the AES forward cipher) to build reference output
+// from the NIST SP 800-38A definitions.
+
+enum class AesFeedbackMode
+{
+    Cfb,
+    Ofb,
+    Ctr,
+};
+
+/// Encrypts a single 16-byte block with AES-ECB under `key_handle`.
+std::vector<uint8_t> aes_ecb_block(tsra_handle key_handle, const uint8_t *block);
+
+/// Builds the reference encryption of `plaintext` and the expected IV-out.
+void aes_feedback_reference_encrypt(
+    AesFeedbackMode mode,
+    tsra_handle key_handle,
+    const uint8_t *iv,
+    const std::vector<uint8_t> &plaintext,
+    std::vector<uint8_t> &ciphertext,
+    std::vector<uint8_t> &iv_out
+);

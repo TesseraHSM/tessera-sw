@@ -31,7 +31,10 @@
 //!       ├── HsmRng         — random number generation
 //!       ├── HsmHash        — SHA digest
 //!       ├── HsmHmac        — HMAC sign/verify
-//!       ├── HsmAes         — AES encrypt/decrypt
+//!       ├── HsmAes         — AES keygen + ECB/CBC
+//!       ├── HsmAesGcm      — AES-GCM
+//!       ├── HsmAesKw       — AES-KW/KWP key wrap
+//!       ├── HsmAesXts      — AES-XTS (disabled)
 //!       ├── HsmEcc         — ECC keygen/sign/verify/ECDH
 //!       ├── HsmRsa         — RSA keygen/mod_exp
 //!       └── HsmKdf         — HKDF and KBKDF key derivation

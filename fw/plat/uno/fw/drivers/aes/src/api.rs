@@ -66,7 +66,7 @@ struct AesCmdCode {
     #[bits(7)]
     _rsvd2: u8,
 
-    /// Cipher mode (1=ECB, 2=CBC, 3=CTR).
+    /// Cipher mode (1=ECB, 2=CBC, 3=CTR, 4=CFB, 5=OFB).
     #[bits(4)]
     mode: u8,
 
@@ -85,6 +85,10 @@ pub enum AesMode {
     Cbc = 2,
     /// Counter mode — requires a 16-byte counter block IV.
     Ctr = 3,
+    /// 128-bit cipher feedback — requires a 16-byte IV.
+    Cfb = 4,
+    /// Output feedback — requires a 16-byte IV.
+    Ofb = 5,
 }
 
 /// AES operation direction.
@@ -110,7 +114,7 @@ pub struct AesRequest<'a> {
     pub op: AesOp,
     /// AES key bytes. Length must be 16, 24, or 32.
     pub key: &'a HsmDmaBuf,
-    /// IV for CBC/CTR (exactly 16 bytes). May be `None` for ECB.
+    /// IV for CBC/CTR/CFB/OFB (exactly 16 bytes). May be `None` for ECB.
     /// If `update_iv` is true, the IV is written back with the final
     /// chaining block.
     pub iv: Option<&'a mut HsmDmaBuf>,
@@ -119,6 +123,7 @@ pub struct AesRequest<'a> {
     /// Optional plaintext or ciphertext input. When `None`, the entire
     /// `result` buffer is transformed in place. ECB/CBC lengths must be a
     /// non-zero multiple of 16; CTR lengths may be any non-zero byte count.
+    /// CFB/OFB lengths must be a non-zero multiple of 16.
     pub message: Option<&'a HsmDmaBuf>,
     /// Output buffer. Must be at least as large as `message` when supplied.
     pub result: &'a mut HsmDmaBuf,
@@ -536,7 +541,7 @@ fn validate(req: &AesRequest<'_>) -> HsmResult<u32> {
     if req.result.len() < message_len {
         return Err(AesError::RESULT_BUF_TOO_SMALL);
     }
-    if matches!(req.mode, AesMode::Cbc | AesMode::Ctr) {
+    if req.mode != AesMode::Ecb {
         match req.iv.as_deref() {
             Some(iv) if iv.len() == AES_IV_SIZE => {}
             _ => return Err(AesError::INVALID_IV),

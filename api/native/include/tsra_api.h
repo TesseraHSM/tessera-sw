@@ -263,6 +263,22 @@ enum tsra_algo_id
      */
     TSRA_ALGO_ID_AES_GCM = 196615,
     /*
+     AES ECB Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_ECB = 196616,
+    /*
+     AES CFB (128-bit segment) Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_CFB = 196617,
+    /*
+     AES OFB Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_OFB = 196618,
+    /*
+     AES CTR Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_CTR = 196619,
+    /*
      SHA-1 Digest.
      */
     TSRA_ALGO_ID_SHA1 = 262145,
@@ -1594,6 +1610,46 @@ struct tsra_algo_aes_cbc_params
 };
 
 /*
+ AES CFB (128-bit segment) parameters.
+
+ On return, `iv` holds the last full ciphertext block (unchanged if no full
+ block was produced).
+
+ Continuing a message by passing the returned `iv` to a later single-shot
+ call is only correct when every call except the last processes a multiple of
+ 16 bytes; otherwise keystream bytes are reused. To process a message in
+ arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+ / `_update` / `_finish`) instead.
+ */
+struct tsra_algo_aes_cfb_params
+{
+    /*
+     IV
+     */
+    uint8_t iv[16];
+};
+
+/*
+ AES CTR parameters.
+
+ On return, `iv` holds the counter advanced by the number of blocks processed
+ (a trailing partial block counts as one).
+
+ Continuing a message by passing the returned `iv` to a later single-shot
+ call is only correct when every call except the last processes a multiple of
+ 16 bytes; otherwise keystream bytes are skipped. To process a message in
+ arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+ / `_update` / `_finish`) instead.
+ */
+struct tsra_algo_aes_ctr_params
+{
+    /*
+     Initial 128-bit counter block (big-endian, wraps modulo 2^128)
+     */
+    uint8_t iv[16];
+};
+
+/*
  AES GCM parameters.
  */
 struct tsra_algo_aes_gcm_params
@@ -1610,6 +1666,25 @@ struct tsra_algo_aes_gcm_params
      Optional AAD buffer
      */
     const struct tsra_buffer *aad;
+};
+
+/*
+ AES OFB parameters.
+
+ On return, `iv` holds the last keystream block.
+
+ Continuing a message by passing the returned `iv` to a later single-shot
+ call is only correct when every call except the last processes a multiple of
+ 16 bytes; otherwise keystream bytes are skipped. To process a message in
+ arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+ / `_update` / `_finish`) instead.
+ */
+struct tsra_algo_aes_ofb_params
+{
+    /*
+     IV
+     */
+    uint8_t iv[16];
 };
 
 /*

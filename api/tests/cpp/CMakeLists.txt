@@ -67,8 +67,12 @@ set(SOURCE
     utils/part_init_config.cpp
     utils/resiliency_config.cpp
     algo/aes/cbc_enc_dec_tests.cpp
+    algo/aes/cfb_enc_dec_tests.cpp
+    algo/aes/ctr_enc_dec_tests.cpp
+    algo/aes/ecb_enc_dec_tests.cpp
     algo/aes/helpers.cpp
     algo/aes/keygen_tests.cpp
+    algo/aes/ofb_enc_dec_tests.cpp
     algo/ecc/ecc_static_der.cpp
     algo/ecc/keygen_tests.cpp
     algo/ecc/unwrap_tests.cpp

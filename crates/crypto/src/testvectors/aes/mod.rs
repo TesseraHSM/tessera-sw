@@ -10,6 +10,24 @@ pub struct AesCbcTestVector {
     pub plaintext: &'static [u8],
     pub ciphertext: &'static [u8],
 }
+/// AES CFB-128 Test vector struct
+pub struct AesCfbTestVector {
+    pub test_count_id: u32,
+    pub encrypt: bool,
+    pub key: &'static [u8],
+    pub iv: &'static [u8],
+    pub plaintext: &'static [u8],
+    pub ciphertext: &'static [u8],
+}
+/// AES OFB Test vector struct
+pub struct AesOfbTestVector {
+    pub test_count_id: u32,
+    pub encrypt: bool,
+    pub key: &'static [u8],
+    pub iv: &'static [u8],
+    pub plaintext: &'static [u8],
+    pub ciphertext: &'static [u8],
+}
 /// AES XTS Test vector struct
 #[derive(Debug)]
 pub struct AesXtsTestVector {
@@ -39,6 +57,42 @@ mod cbc_256_nist_mmt_test_vectors;
 mod cbc_256_nist_sbox_test_vectors;
 mod cbc_256_nist_varkey_test_vectors;
 mod cbc_256_nist_vartxt_test_vectors;
+mod cfb_128_nist_gf_sbox_test_vectors;
+mod cfb_128_nist_mct_test_vectors;
+mod cfb_128_nist_mmt_test_vectors;
+mod cfb_128_nist_sbox_test_vectors;
+mod cfb_128_nist_varkey_test_vectors;
+mod cfb_128_nist_vartxt_test_vectors;
+mod cfb_192_nist_gf_sbox_test_vectors;
+mod cfb_192_nist_mct_test_vectors;
+mod cfb_192_nist_mmt_test_vectors;
+mod cfb_192_nist_sbox_test_vectors;
+mod cfb_192_nist_varkey_test_vectors;
+mod cfb_192_nist_vartxt_test_vectors;
+mod cfb_256_nist_gf_sbox_test_vectors;
+mod cfb_256_nist_mct_test_vectors;
+mod cfb_256_nist_mmt_test_vectors;
+mod cfb_256_nist_sbox_test_vectors;
+mod cfb_256_nist_varkey_test_vectors;
+mod cfb_256_nist_vartxt_test_vectors;
+mod ofb_128_nist_gf_sbox_test_vectors;
+mod ofb_128_nist_mct_test_vectors;
+mod ofb_128_nist_mmt_test_vectors;
+mod ofb_128_nist_sbox_test_vectors;
+mod ofb_128_nist_varkey_test_vectors;
+mod ofb_128_nist_vartxt_test_vectors;
+mod ofb_192_nist_gf_sbox_test_vectors;
+mod ofb_192_nist_mct_test_vectors;
+mod ofb_192_nist_mmt_test_vectors;
+mod ofb_192_nist_sbox_test_vectors;
+mod ofb_192_nist_varkey_test_vectors;
+mod ofb_192_nist_vartxt_test_vectors;
+mod ofb_256_nist_gf_sbox_test_vectors;
+mod ofb_256_nist_mct_test_vectors;
+mod ofb_256_nist_mmt_test_vectors;
+mod ofb_256_nist_sbox_test_vectors;
+mod ofb_256_nist_varkey_test_vectors;
+mod ofb_256_nist_vartxt_test_vectors;
 mod xts_128_nist_test_vectors;
 mod xts_256_nist_test_vectors;
 
@@ -60,5 +114,41 @@ pub use cbc_256_nist_mmt_test_vectors::AES_CBC_256_MMT_TEST_VECTORS;
 pub use cbc_256_nist_sbox_test_vectors::AES_CBC_256_SBOX_TEST_VECTORS;
 pub use cbc_256_nist_varkey_test_vectors::AES_CBC_256_VAR_KEY_TEST_VECTORS;
 pub use cbc_256_nist_vartxt_test_vectors::AES_CBC_256_VAR_TXT_TEST_VECTORS;
+pub use cfb_128_nist_gf_sbox_test_vectors::AES_CFB_128_GFSBOX_TEST_VECTORS;
+pub use cfb_128_nist_mct_test_vectors::AES_CFB_128_MCT_TEST_VECTORS;
+pub use cfb_128_nist_mmt_test_vectors::AES_CFB_128_MMT_TEST_VECTORS;
+pub use cfb_128_nist_sbox_test_vectors::AES_CFB_128_SBOX_TEST_VECTORS;
+pub use cfb_128_nist_varkey_test_vectors::AES_CFB_128_VAR_KEY_TEST_VECTORS;
+pub use cfb_128_nist_vartxt_test_vectors::AES_CFB_128_VAR_TXT_TEST_VECTORS;
+pub use cfb_192_nist_gf_sbox_test_vectors::AES_CFB_192_GFSBOX_TEST_VECTORS;
+pub use cfb_192_nist_mct_test_vectors::AES_CFB_192_MCT_TEST_VECTORS;
+pub use cfb_192_nist_mmt_test_vectors::AES_CFB_192_MMT_TEST_VECTORS;
+pub use cfb_192_nist_sbox_test_vectors::AES_CFB_192_SBOX_TEST_VECTORS;
+pub use cfb_192_nist_varkey_test_vectors::AES_CFB_192_VAR_KEY_TEST_VECTORS;
+pub use cfb_192_nist_vartxt_test_vectors::AES_CFB_192_VAR_TXT_TEST_VECTORS;
+pub use cfb_256_nist_gf_sbox_test_vectors::AES_CFB_256_GFSBOX_TEST_VECTORS;
+pub use cfb_256_nist_mct_test_vectors::AES_CFB_256_MCT_TEST_VECTORS;
+pub use cfb_256_nist_mmt_test_vectors::AES_CFB_256_MMT_TEST_VECTORS;
+pub use cfb_256_nist_sbox_test_vectors::AES_CFB_256_SBOX_TEST_VECTORS;
+pub use cfb_256_nist_varkey_test_vectors::AES_CFB_256_VAR_KEY_TEST_VECTORS;
+pub use cfb_256_nist_vartxt_test_vectors::AES_CFB_256_VAR_TXT_TEST_VECTORS;
+pub use ofb_128_nist_gf_sbox_test_vectors::AES_OFB_128_GFSBOX_TEST_VECTORS;
+pub use ofb_128_nist_mct_test_vectors::AES_OFB_128_MCT_TEST_VECTORS;
+pub use ofb_128_nist_mmt_test_vectors::AES_OFB_128_MMT_TEST_VECTORS;
+pub use ofb_128_nist_sbox_test_vectors::AES_OFB_128_SBOX_TEST_VECTORS;
+pub use ofb_128_nist_varkey_test_vectors::AES_OFB_128_VAR_KEY_TEST_VECTORS;
+pub use ofb_128_nist_vartxt_test_vectors::AES_OFB_128_VAR_TXT_TEST_VECTORS;
+pub use ofb_192_nist_gf_sbox_test_vectors::AES_OFB_192_GFSBOX_TEST_VECTORS;
+pub use ofb_192_nist_mct_test_vectors::AES_OFB_192_MCT_TEST_VECTORS;
+pub use ofb_192_nist_mmt_test_vectors::AES_OFB_192_MMT_TEST_VECTORS;
+pub use ofb_192_nist_sbox_test_vectors::AES_OFB_192_SBOX_TEST_VECTORS;
+pub use ofb_192_nist_varkey_test_vectors::AES_OFB_192_VAR_KEY_TEST_VECTORS;
+pub use ofb_192_nist_vartxt_test_vectors::AES_OFB_192_VAR_TXT_TEST_VECTORS;
+pub use ofb_256_nist_gf_sbox_test_vectors::AES_OFB_256_GFSBOX_TEST_VECTORS;
+pub use ofb_256_nist_mct_test_vectors::AES_OFB_256_MCT_TEST_VECTORS;
+pub use ofb_256_nist_mmt_test_vectors::AES_OFB_256_MMT_TEST_VECTORS;
+pub use ofb_256_nist_sbox_test_vectors::AES_OFB_256_SBOX_TEST_VECTORS;
+pub use ofb_256_nist_varkey_test_vectors::AES_OFB_256_VAR_KEY_TEST_VECTORS;
+pub use ofb_256_nist_vartxt_test_vectors::AES_OFB_256_VAR_TXT_TEST_VECTORS;
 pub use xts_128_nist_test_vectors::AES_XTS_128_NIST_TEST_VECTORS;
 pub use xts_256_nist_test_vectors::AES_XTS_256_NIST_TEST_VECTORS;

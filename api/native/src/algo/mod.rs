@@ -167,6 +167,22 @@ pub enum TsraAlgoId {
     // Corresponds to TSRA_ALGO_ID_AES_GCM
     AesGcm = 0x00030007,
 
+    /// AES ECB Encrypt & Decrypt.
+    // Corresponds to TSRA_ALGO_ID_AES_ECB
+    AesEcb = 0x00030008,
+
+    /// AES CFB (128-bit segment) Encrypt & Decrypt.
+    // Corresponds to TSRA_ALGO_ID_AES_CFB
+    AesCfb = 0x00030009,
+
+    /// AES OFB Encrypt & Decrypt.
+    // Corresponds to TSRA_ALGO_ID_AES_OFB
+    AesOfb = 0x0003000A,
+
+    /// AES CTR Encrypt & Decrypt.
+    // Corresponds to TSRA_ALGO_ID_AES_CTR
+    AesCtr = 0x0003000B,
+
     // ======================================================
     // Hash Algorithms (0x0004xxxx)
     // ======================================================

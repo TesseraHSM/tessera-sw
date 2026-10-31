@@ -446,3 +446,61 @@ void assert_decrypt_ctx_finished(tsra_handle ctx)
         TSRA_STATUS_INVALID_CONTEXT_STATE
     );
 }
+
+std::vector<uint8_t> aes_ecb_block(tsra_handle key_handle, const uint8_t *block)
+{
+    tsra_algo algo{ TSRA_ALGO_ID_AES_ECB, nullptr, 0 };
+    std::vector<uint8_t> out;
+    auto err = single_shot_crypt(CryptOperation::Encrypt, key_handle, &algo, block, 16, out);
+    EXPECT_EQ(err, TSRA_STATUS_SUCCESS);
+    EXPECT_EQ(out.size(), 16u);
+    out.resize(16);
+    return out;
+}
+
+void aes_feedback_reference_encrypt(
+    AesFeedbackMode mode,
+    tsra_handle key_handle,
+    const uint8_t *iv,
+    const std::vector<uint8_t> &plaintext,
+    std::vector<uint8_t> &ciphertext,
+    std::vector<uint8_t> &iv_out
+)
+{
+    std::vector<uint8_t> reg(iv, iv + 16);
+    ciphertext.clear();
+    for (size_t offset = 0; offset < plaintext.size(); offset += 16)
+    {
+        size_t len = std::min<size_t>(16, plaintext.size() - offset);
+        auto keystream = aes_ecb_block(key_handle, reg.data());
+        std::vector<uint8_t> out(len);
+        for (size_t i = 0; i < len; ++i)
+        {
+            out[i] = plaintext[offset + i] ^ keystream[i];
+        }
+        switch (mode)
+        {
+        case AesFeedbackMode::Cfb:
+            if (len == 16)
+            {
+                reg = out;
+            }
+            break;
+        case AesFeedbackMode::Ofb:
+            reg = keystream;
+            break;
+        case AesFeedbackMode::Ctr:
+            // 128-bit big-endian increment with wrap-around.
+            for (size_t i = 16; i-- > 0;)
+            {
+                if (++reg[i] != 0)
+                {
+                    break;
+                }
+            }
+            break;
+        }
+        ciphertext.insert(ciphertext.end(), out.begin(), out.end());
+    }
+    iv_out = reg;
+}

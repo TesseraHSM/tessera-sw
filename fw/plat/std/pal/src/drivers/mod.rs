@@ -14,7 +14,7 @@
 //!
 //! | Module      | Trait                | Operations |
 //! |-------------|----------------------|------------|
-//! | [`aes`]     | [`HsmAes`]           | AES-CBC / AES-ECB keygen, encrypt, decrypt |
+//! | [`aes`]     | [`HsmAes`], [`HsmAesGcm`], [`HsmAesKw`] | AES-CBC / AES-ECB keygen, AES-GCM, AES-KWP |
 //! | [`ecc`]     | [`HsmEcc`]           | ECDSA sign / verify, ECDH derive, keygen |
 //! | [`hash`]    | [`HsmHash`]          | SHA-1 / SHA-256 / SHA-384 / SHA-512 digest |
 //! | [`hmac`]    | [`HsmHmac`]          | HMAC sign / verify with all SHA variants |
@@ -32,6 +32,8 @@
 //! | [`oic`]  | Output I/O controller — CQE ring management |
 //!
 //! [`HsmAes`]: tsra_fw_hsm_pal_traits::HsmAes
+//! [`HsmAesGcm`]: tsra_fw_hsm_pal_traits::HsmAesGcm
+//! [`HsmAesKw`]: tsra_fw_hsm_pal_traits::HsmAesKw
 //! [`HsmEcc`]: tsra_fw_hsm_pal_traits::HsmEcc
 //! [`HsmHash`]: tsra_fw_hsm_pal_traits::HsmHash
 //! [`HsmHmac`]: tsra_fw_hsm_pal_traits::HsmHmac
