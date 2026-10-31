@@ -429,6 +429,18 @@ key types. Supported curves are
 
 The masked or encrypted key associated with the given private or secret key
 
+Masked keys are opaque, variable-length blobs. TBOR GCM masked keys use the
+`AesGcm256` algorithm (`0x03`): a 16-byte stored IV, 192-byte authenticated metadata, plaintext
+zero-padded to 16 bytes, and a 16-byte tag. The authenticated padding count
+preserves the original key length. Only the first 12 IV bytes form the GCM
+nonce; the remaining four bytes are ignored when unmasking.
+
+Metadata remains at version 1; the padding count occupies a previously reserved
+byte. This format requires matching SDK and firmware updates. Existing
+12-byte-IV masked-key blobs and their persisted backups must be regenerated.
+GCM parameter envelopes also use the 16-byte IV slot. Legacy CBC masked keys
+are unchanged.
+
 |             |                                                             |
 | ----------- | ----------------------------------------------------------- |
 | Define      | TSRA_KEY_PROP_ID_MASKED_KEY                                 |

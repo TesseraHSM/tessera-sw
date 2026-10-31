@@ -20,7 +20,7 @@
 //! ┌────────┬─────┬─────┬─────────────┬─────┬─────────────────┬─────────┬─────┐
 //! │ "AEAD" │ alg │ rsv │ aad_len_be  │ IV  │       AAD       │  DATA   │ TAG │
 //! └────────┴─────┴─────┴─────────────┴─────┴─────────────────┴─────────┴─────┘
-//!    4B     1B    1B       2B         12B   0 or 32·k bytes  pt_len    16B
+//!    4B     1B    1B       2B         16B   0 or 32·k bytes  pt_len    16B
 //! ```
 //!
 //! | Field        | Size       | Notes                                                |
@@ -29,13 +29,18 @@
 //! | `alg`        | 1 B        | [`AeadAlg`] discriminant (`0x03` = AES-256-GCM).     |
 //! | `rsv`        | 1 B        | Reserved; MUST be `0`. Future versions may use.      |
 //! | `aad_len_be` | 2 B        | u16 big-endian. Must be `0` or a multiple of `32`.   |
-//! | `iv`         | 12 B       | 96-bit GCM nonce.                                    |
+//! | `iv`         | 16 B       | First 12 bytes are the 96-bit GCM nonce.             |
 //! | `aad`        | `aad_len`  | Application-supplied associated data.                |
 //! | `data`       | `pt_len`   | Ciphertext after [`seal`], plaintext after [`open`]. |
 //! | `tag`        | 16 B       | Standard NIST GCM tag.                               |
 //!
-//! Total framing overhead for AES-256-GCM: **36 bytes**
-//! (`HEADER_LEN` + IV + TAG = 8 + 12 + 16).
+//! Total framing overhead for AES-256-GCM: **40 bytes**
+//! (`HEADER_LEN` + IV + TAG = 8 + 16 + 16).
+//!
+//! [`AeadAlg::AesGcm256`] (`0x03`) stores the IV suffix `00 00 00 01`
+//! on seal; opening ignores that suffix. Key masking uses the same
+//! envelope algorithm and the PAL's `HsmKeyMasking` interface, with
+//! plaintext zero-padded to 16 bytes.
 //!
 //! # AAD-length invariant
 //!
@@ -85,6 +90,7 @@ mod format;
 mod gcm;
 mod ops;
 
+pub use format::write_header;
 pub use ops::open;
 pub use ops::payload_offset;
 pub use ops::peek;

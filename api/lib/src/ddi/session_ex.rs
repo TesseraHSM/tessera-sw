@@ -412,7 +412,8 @@ pub(crate) fn psk_change(
     new_psk: &[u8; crate::PSK_LEN],
 ) -> HsmResult<()> {
     let aad = build_psk_change_aad(session_id);
-    let iv = Rng::rand_vec(12).map_err(|_| HsmError::InternalError)?;
+    let iv = Rng::rand_vec(tsra_crypto::aead_envelope::AeadAlg::AesGcm256.iv_len())
+        .map_err(|_| HsmError::InternalError)?;
 
     // First pass sizes the output buffer; second pass writes the sealed
     // envelope into it.

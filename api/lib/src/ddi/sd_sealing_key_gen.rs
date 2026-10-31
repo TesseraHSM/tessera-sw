@@ -55,7 +55,7 @@ const SEALING_GCM_TAG_LEN: usize = 16;
 const _: () = assert!(
     MASKED_SEALING_KEY_LEN
         == aead_envelope::HEADER_LEN
-            + AES_GCM_IV_SIZE
+            + aead_envelope::AeadAlg::AesGcm256.iv_len()
             + SEALING_META_LEN
             + SEALING_PRIV_SCALAR_LEN
             + SEALING_GCM_TAG_LEN
@@ -66,8 +66,8 @@ const _: () = assert!(
 ///
 /// The host cannot verify the AEAD tag (the masking key is
 /// device-internal), but it can confirm the firmware returned a
-/// well-formed AES-256-GCM masked-key envelope of the expected shape:
-/// valid header/magic, the GCM algorithm, and the 192-byte metadata AAD.
+/// well-formed IV16 AES-256-GCM masked-key envelope of the expected shape:
+/// valid header/magic, the masked-key profile, and the 192-byte metadata AAD.
 fn validate_masked_sealing_key(masked_key: &[u8; MASKED_SEALING_KEY_LEN]) -> HsmResult<()> {
     let env = aead_envelope::inspect(masked_key).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
     if !matches!(env.alg, aead_envelope::AeadAlg::AesGcm256) || env.aad.len() != SEALING_META_LEN {
@@ -210,17 +210,36 @@ pub(crate) fn masked_key_report(
 
 #[cfg(test)]
 mod tests {
+    use tsra_crypto::AesKey;
+    use tsra_crypto::ImportableKey;
+
     use super::*;
 
     /// Builds a masked-key blob with the given AEAD header fields
-    /// (`magic ‖ alg ‖ rsv=0 ‖ aad_len_be`); the remaining envelope
-    /// bytes are zeroed.
+    /// over a sealed, version-1 sealing-key envelope.
     fn masked_key_with_header(
         magic: [u8; 4],
         alg: u8,
         aad_len: u16,
     ) -> [u8; MASKED_SEALING_KEY_LEN] {
+        let key = AesKey::from_bytes(&[0x42; 32]).expect("masking key");
+        let mut metadata = [0u8; SEALING_META_LEN];
+        metadata[..4].copy_from_slice(b"MKEY");
+        metadata[4..6].copy_from_slice(&1u16.to_le_bytes());
+        metadata[6] = KEY_KIND_SD_SEALING;
+        // Metadata carries packed vault flags, not request KeyUsage bits.
+        let usage = (1u64 << 16) | (3u64 << 17);
+        metadata[8..16].copy_from_slice(&usage.to_le_bytes());
         let mut blob = [0u8; MASKED_SEALING_KEY_LEN];
+        aead_envelope::seal(
+            aead_envelope::AeadAlg::AesGcm256,
+            &key,
+            &[0x24; 16],
+            &metadata,
+            &[0x55; SEALING_PRIV_SCALAR_LEN],
+            Some(&mut blob),
+        )
+        .expect("seal version-1 sealing key");
         blob[0..4].copy_from_slice(&magic);
         blob[4] = alg;
         blob[5] = 0;
@@ -228,13 +247,26 @@ mod tests {
         blob
     }
 
-    /// AES-256-GCM `AeadAlg` discriminant.
+    /// AES-256-GCM envelope discriminant.
     const ALG_AES_GCM_256: u8 = 0x03;
 
     #[test]
-    fn validate_accepts_gcm256_envelope_with_96b_aad() {
+    fn validate_accepts_iv16_sealing_key_with_v1_metadata() {
         let blob = masked_key_with_header(*b"AEAD", ALG_AES_GCM_256, SEALING_META_LEN as u16);
         assert!(validate_masked_sealing_key(&blob).is_ok());
+        let props = HsmMaskedKey::to_key_props(&blob).expect("parse version-1 sealing key");
+        assert_eq!(props.kind(), HsmKeyKind::Sealing);
+        assert_eq!(props.bits(), 384);
+        assert!(props.can_derive());
+    }
+
+    #[test]
+    fn validate_rejects_removed_iv16_algorithm() {
+        let blob = masked_key_with_header(*b"AEAD", 0x04, SEALING_META_LEN as u16);
+        assert_eq!(
+            validate_masked_sealing_key(&blob),
+            Err(HsmError::MaskedKeyDecodeFailed),
+        );
     }
 
     #[test]

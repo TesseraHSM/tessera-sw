@@ -16,7 +16,7 @@
 //! * `masked_sealing_key` — the sender's masked SD-sealing key (the
 //!   `masked_key` returned by
 //!   [`SdSealingKeyGen`](crate::sd_sealing_key_gen)), exactly
-//!   [`MASKED_SEALING_KEY_LEN`] (276 B).  Unmasked on-device to recover
+//!   [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
 //!   the sender's private ECDH key (`SndrPriv`); never a vault handle.
 //! * `receiver_cert_chain` — the receiver key certificate chain (spec
 //!   `RcvrCertChain`), carried out of band.  Always present; validated
@@ -42,11 +42,11 @@
 //!   `DHKemP384Sha384AesGcm256` suite.
 //! * `pok_local_backup` — the local partition-owner-key backup: the same
 //!   fresh BKS3 masked under the partition-local masking key
-//!   (`PartLocalMK`), exactly [`MASKED_SD_LEN`] (276 B).  Persisted by
+//!   (`PartLocalMK`), exactly [`MASKED_SD_LEN`] (280 B).  Persisted by
 //!   the host and replayed to recover the security domain locally.
 //! * `sd_mk_backup` — the security-domain masking-key backup: the freshly
 //!   minted `SDMK` masked under the derived `SDBMK`, exactly
-//!   [`LOCAL_MK_BACKUP_LEN`] (260 B).  Persisted by the host and replayed
+//!   [`LOCAL_MK_BACKUP_LEN`] (264 B).  Persisted by the host and replayed
 //!   on restore.
 
 use tsra_fw_ddi_tbor_api::tbor;
@@ -64,14 +64,14 @@ pub const TBOR_OP_SD_CREATE_REMOTE_BACKUP: u8 = 0x0A;
 // against the canonical value here.
 const _: () = assert!(PART_POLICY_LEN == 584);
 
-// `masked_sealing_key` is spelled out as `276` on the field (the derive
+// `masked_sealing_key` is spelled out as `280` on the field (the derive
 // needs an integer literal) and pinned against the canonical
 // `MASKED_SEALING_KEY_LEN` here.
-const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
+const _: () = assert!(MASKED_SEALING_KEY_LEN == 280);
 
 /// Exact on-the-wire length of a **masked** security-domain blob (a
 /// masked BKS3): an AEAD-GCM-256 masked-key envelope
-/// (`header(8) ‖ iv(12) ‖ aad(192) ‖ pt(48) ‖ tag(16)`) whose plaintext
+/// (`header(8) ‖ iv(16) ‖ aad(192) ‖ pt(48) ‖ tag(16)`) whose plaintext
 /// is the 48-byte BKS3 and whose AAD is the 192-byte `MaskedKeyMetadata`.
 ///
 /// Retained here as the shared length authority for the rest of the
@@ -79,8 +79,8 @@ const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
 /// `SdCreatePeerBackup`), which re-export it.  **This command's**
 /// response is an HPKE-Auth seal sized by [`POK_REMOTE_BACKUP_LEN`], not
 /// a masked blob.
-pub const MASKED_SD_LEN: usize = 8 + 12 + 192 + 48 + 16;
-const _: () = assert!(MASKED_SD_LEN == 276);
+pub const MASKED_SD_LEN: usize = 8 + 16 + 192 + 48 + 16;
+const _: () = assert!(MASKED_SD_LEN == 280);
 
 /// Exact on-the-wire length of the remote partition-owner-key backup.
 ///
@@ -99,7 +99,7 @@ const _: () = assert!(POK_REMOTE_BACKUP_LEN == 161);
 /// rest of the SD backup family — so the intent is explicit at each sizing
 /// site and the two can diverge without silent copy/paste breakage.
 pub const SD_MK_BACKUP_LEN: usize = LOCAL_MK_BACKUP_LEN;
-const _: () = assert!(SD_MK_BACKUP_LEN == 260);
+const _: () = assert!(SD_MK_BACKUP_LEN == 264);
 
 /// `SdCreateRemoteBackup` request schema.
 #[tbor(opcode = 0x0A, pair = TborSdCreateRemoteBackupResp)]
@@ -111,7 +111,7 @@ pub struct TborSdCreateRemoteBackupReq<'a> {
     pub session_id: SessionId,
 
     /// The sender's masked SD-sealing key (from `SdSealingKeyGen`),
-    /// exactly [`MASKED_SEALING_KEY_LEN`] (276 B).  Unmasked on-device to
+    /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to
     /// recover `SndrPriv`.
     ///
     /// Marked `#[tbor(mutable)]` so the FW handler can AEAD-open (unmask)
@@ -121,7 +121,7 @@ pub struct TborSdCreateRemoteBackupReq<'a> {
     /// omitted from the generated `ViewMut` (its accessors remain on the
     /// shared [`decode`](TborSdCreateRemoteBackupReq::decode) view), so the
     /// handler reads evidence via `decode` and unmasks via `decode_mut`.
-    #[tbor(buffer, len = 276, mutable)]
+    #[tbor(buffer, len = 280, mutable)]
     pub masked_sealing_key: &'a [u8],
 
     /// Receiver key certificate-chain descriptors (root→leaf), carried
@@ -167,15 +167,15 @@ pub struct TborSdCreateRemoteBackupResp<'a> {
     /// Local partition-owner-key backup: the fresh BKS3 masked under the
     /// partition-local masking key (`PartLocalMK`), to be persisted by
     /// the host and replayed to recover the security domain locally.
-    /// Always exactly [`MASKED_SD_LEN`] (276 B).
-    #[tbor(buffer, len = 276)]
+    /// Always exactly [`MASKED_SD_LEN`] (280 B).
+    #[tbor(buffer, len = 280)]
     pub pok_local_backup: &'a [u8],
 
     /// Security-domain masking-key backup: the freshly minted `SDMK`
     /// masked under the derived `SDBMK`, to be persisted by the host and
     /// replayed on restore.  Always exactly [`LOCAL_MK_BACKUP_LEN`]
-    /// (260 B).
-    #[tbor(buffer, len = 260)]
+    /// (264 B).
+    #[tbor(buffer, len = 264)]
     pub sd_mk_backup: &'a [u8],
 }
 

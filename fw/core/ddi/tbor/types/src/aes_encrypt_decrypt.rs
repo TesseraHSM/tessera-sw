@@ -91,10 +91,10 @@ pub struct TborAesEncryptDecryptReq<'a> {
     pub iv: &'a [u8],
 
     /// The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an
-    /// AEAD-GCM-256 envelope of 244..=260 B, unmasked and wiped in place.
+    /// AEAD-GCM-256 envelope of 248..=264 B, unmasked and wiped in place.
     /// Placed after `msg` / `iv` so those fields can become the compact
     /// response without overlapping the live key.
-    #[tbor(buffer, min_len = 244, max_len = 260, mutable)]
+    #[tbor(buffer, min_len = 248, max_len = 264, mutable)]
     pub masked_key: &'a [u8],
 }
 
@@ -221,8 +221,8 @@ mod tests {
         // literals; pin them against the exported consts.
         const _: () = assert!(1024 == AES_MSG_MAX_LEN);
         const _: () = assert!(16 == AES_IV_LEN);
-        const _: () = assert!(244 == MASKED_AES_KEY_MIN_LEN);
-        const _: () = assert!(260 == MASKED_AES_KEY_MAX_LEN);
+        const _: () = assert!(248 == MASKED_AES_KEY_MIN_LEN);
+        const _: () = assert!(264 == MASKED_AES_KEY_MAX_LEN);
         assert_eq!(AES_MSG_MAX_LEN, 1024);
         assert_eq!(AES_IV_LEN, 16);
     }

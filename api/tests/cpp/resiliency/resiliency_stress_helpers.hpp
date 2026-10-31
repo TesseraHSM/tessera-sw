@@ -135,15 +135,8 @@ class resiliency_stress_base : public ::testing::Test
         tsra_resiliency_config resiliency_config{};
         r.resiliency_ctx = make_resiliency_config(resiliency_config);
 
-        err = tsra_part_init(
-            r.part,
-            &creds,
-            nullptr,
-            nullptr,
-            &init_config.backup_config,
-            &init_config.pota_endorsement,
-            &resiliency_config
-        );
+        // Recovers from a stale shared MOBK cache (e.g. left by an older build).
+        err = part_init_with_mobk_fallback(r.part, &creds, init_config, &resiliency_config);
         EXPECT_EQ(err, TSRA_STATUS_SUCCESS) << "part_init with resiliency failed";
         if (err != TSRA_STATUS_SUCCESS)
         {

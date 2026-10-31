@@ -101,7 +101,7 @@ pub(crate) fn read_header(buf: &[u8]) -> Result<Header> {
 /// * [`Error::BufferTooSmall`] — `buf.len() < HEADER_LEN`.
 /// * [`Error::InvalidAadLength`] — `aad_len` violates the alg's
 ///   granularity, or exceeds [`MAX_AAD_LEN`].
-pub(crate) fn write_header(buf: &mut [u8], alg: AeadAlg, aad_len: usize) -> Result<()> {
+pub fn write_header(buf: &mut [u8], alg: AeadAlg, aad_len: usize) -> Result<()> {
     if !is_valid_aad_len(aad_len, alg.aad_granularity()) {
         return Err(Error::InvalidAadLength);
     }

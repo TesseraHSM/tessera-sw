@@ -10,7 +10,7 @@
 //! [`TestCtx::new`].
 
 const ENVELOPE_HEADER_LEN: usize = tsra_crypto::aead_envelope::HEADER_LEN;
-const ENVELOPE_IV_LEN: usize = 12;
+const ENVELOPE_IV_LEN: usize = 16;
 const PART_INIT_AAD_LEN: usize = 32;
 const ENVELOPE_CIPHERTEXT_LEN: usize = MACH_SEED_LEN;
 const ENVELOPE_TAG_LEN: usize = 16;
@@ -68,7 +68,7 @@ fn part_init_envelope_tampered() {
     let mut envelope =
         encrypt_mach_seed_envelope(&session, &seed).expect("seal mach_seed envelope");
     // Envelope layout matches `psk_change`'s ciphertext-tamper test:
-    // HEADER(8) ‖ IV(12) ‖ AAD(32) ‖ CT(32) ‖ TAG(16).
+    // HEADER(8) ‖ IV(16) ‖ AAD(32) ‖ CT(32) ‖ TAG(16).
     assert_eq!(
         envelope.len(),
         MACH_SEED_ENVELOPE_LEN,
@@ -124,7 +124,7 @@ fn part_init_envelope_from_other_session() {
 /// AAD bytes of arbitrary but valid AEAD granularity (64 bytes —
 /// double the canonical [`PART_INIT_MACH_SEED_AAD_LEN`] of 32).  A
 /// 64-byte AAD inflates the envelope past the fixed
-/// [`MACH_SEED_ENVELOPE_LEN`] (100 B), so the FW schema's fixed-length
+/// [`MACH_SEED_ENVELOPE_LEN`] (104 B), so the FW schema's fixed-length
 /// check rejects it at decode with
 /// [`TborStatus::TborInvalidFixedLength`] before any AEAD work.
 #[test]
@@ -141,7 +141,7 @@ fn part_init_wrong_aad_length() {
 
 /// `mach_seed` plaintext length ≠ [`MACH_SEED_LEN`] (32) yields a wrong
 /// *envelope* length (ciphertext tracks plaintext for GCM), so the FW
-/// schema's fixed [`MACH_SEED_ENVELOPE_LEN`] (100 B) rejects both at
+/// schema's fixed [`MACH_SEED_ENVELOPE_LEN`] (104 B) rejects both at
 /// decode with [`TborStatus::TborInvalidFixedLength`]. Loop over
 /// `MACH_SEED_LEN ± 1` to cover the shortest excursions on either side
 /// of the canonical length. Mirrors
@@ -204,7 +204,7 @@ fn part_init_envelope_iv_tampered() {
         encrypt_mach_seed_envelope(&session, &mach_seed()).expect("seal mach_seed envelope");
 
     // Envelope:
-    // HEADER(8) ‖ IV(12) ‖ AAD(32) ‖ CT(32) ‖ TAG(16)
+    // HEADER(8) ‖ IV(16) ‖ AAD(32) ‖ CT(32) ‖ TAG(16)
     assert_eq!(
         envelope.len(),
         MACH_SEED_ENVELOPE_LEN,
@@ -233,7 +233,7 @@ fn part_init_envelope_aad_tampered() {
         encrypt_mach_seed_envelope(&session, &mach_seed()).expect("seal mach_seed envelope");
 
     // Envelope:
-    // HEADER(8) ‖ IV(12) ‖ AAD(32) ‖ CT(32) ‖ TAG(16)
+    // HEADER(8) ‖ IV(16) ‖ AAD(32) ‖ CT(32) ‖ TAG(16)
     assert_eq!(
         envelope.len(),
         MACH_SEED_ENVELOPE_LEN,
@@ -345,14 +345,15 @@ fn part_init_envelope_rejection_is_repeatable() {
     }
 }
 
-/// Verify that every byte after the eight-byte envelope header is authenticated.
+/// Verify that the nonce, AAD, ciphertext, and tag are authenticated.
 ///
 /// Envelope layout:
-/// HEADER(8) ‖ IV(12) ‖ AAD(32) ‖ CT(32) ‖ TAG(16)
+/// HEADER(8) ‖ IV(16) ‖ AAD(32) ‖ CT(32) ‖ TAG(16)
 ///
 /// The header is intentionally excluded because malformed header fields may
 /// follow a separate structural-decoding path and return a status other than
 /// `AeadEnvelopeAuthFailed`.
+/// The stored IV's four-byte suffix is ignored, not authenticated.
 #[test]
 fn part_init_every_authenticated_envelope_byte_tampered() {
     let ctx = TestCtx::new();
@@ -373,6 +374,9 @@ fn part_init_every_authenticated_envelope_byte_tampered() {
     );
 
     for index in ENVELOPE_HEADER_LEN..valid_envelope.len() {
+        if (ENVELOPE_HEADER_LEN + 12..ENVELOPE_HEADER_LEN + ENVELOPE_IV_LEN).contains(&index) {
+            continue;
+        }
         let mut tampered_envelope = valid_envelope.clone();
         tampered_envelope[index] ^= 0x01;
 

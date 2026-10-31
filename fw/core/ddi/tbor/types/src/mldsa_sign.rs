@@ -57,7 +57,7 @@ pub struct TborMlDsaSignReq<'a> {
 
     /// The masked ML-DSA secret key, an AEAD-GCM-256 envelope of 164 B:
     /// the wire ships seed-only keys.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 5156, mutable)]
+    #[tbor(buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 
     /// Message to sign.  The TBOR schema caps inline messages at 586 B; see
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(5156 == MASKED_MLDSA_KEY_MAX_LEN);
+        const _: () = assert!(5160 == MASKED_MLDSA_KEY_MAX_LEN);
         const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
         const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);

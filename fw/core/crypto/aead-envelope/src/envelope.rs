@@ -27,7 +27,7 @@ use crate::format::HEADER_LEN;
 pub struct AeadEnvelope<'a> {
     /// AEAD algorithm read from the envelope header.
     pub alg: AeadAlg,
-    /// The 12-byte GCM nonce.
+    /// Stored IV (`alg.iv_len()` bytes).
     pub iv: &'a HsmDmaBuf,
     /// Additional authenticated data (may be empty).
     pub aad: &'a HsmDmaBuf,

@@ -1108,6 +1108,221 @@ mod tests {
         pal.drop_io(io).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn gcm_envelope_interoperates_with_host_using_iv16() {
+        use tsra_crypto::aead_envelope as host_envelope;
+        use tsra_crypto::ImportableKey;
+        use tsra_fw_core_crypto_aead_envelope as fw_envelope;
+
+        let (pal, io, _) = crypto_fixture().await;
+        let mut key = [0x17; 32];
+        let host_key = tsra_crypto::AesKey::from_bytes(&key).unwrap();
+        let mut iv = [0x24; 16];
+        let mut aad = [0x33; 32];
+        for plaintext_len in [0, 1, 16, 17, 32] {
+            let mut plaintext = vec![0x5c; plaintext_len];
+            let mut blob = vec![0; AeadAlg::AesGcm256.envelope_len(plaintext_len, aad.len())];
+            fw_envelope::seal(
+                &pal,
+                &io,
+                AeadAlg::AesGcm256,
+                dma(&mut key),
+                dma(&mut iv),
+                dma(&mut aad),
+                dma(&mut plaintext),
+                Some(dma(&mut blob)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(blob[4], 0x03);
+            assert_eq!(&blob[20..24], &[0, 0, 0, 1]);
+            assert_eq!(
+                host_envelope::open(&host_key, &mut blob).unwrap().payload,
+                plaintext
+            );
+
+            host_envelope::seal(
+                host_envelope::AeadAlg::AesGcm256,
+                &host_key,
+                &iv,
+                &aad,
+                &plaintext,
+                Some(&mut blob),
+            )
+            .unwrap();
+            blob[20..24].fill(0xff);
+            let opened = fw_envelope::open(&pal, &io, dma(&mut key), dma(&mut blob))
+                .await
+                .unwrap();
+            assert_eq!(opened.payload, plaintext.as_slice());
+            assert_eq!(&opened.iv[12..], &[0xff; 4]);
+        }
+        pal.drop_io(io).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gcm_mask_zero_pads_and_recovers_exact_key_length() {
+        use tsra_fw_core_crypto_key_masking::aead;
+
+        let (pal, io, _) = crypto_fixture().await;
+        let mut key = [0x17; 32];
+        for plaintext_len in (0..=32).chain([66, 68]) {
+            for in_place in [false, true] {
+                pal.alloc_scoped_async(&io, async |alloc| {
+                    let params = MaskParams {
+                        key_kind: HsmVaultKeyKind::Aes256,
+                        key_attrs: HsmVaultKeyAttrs::new(),
+                        svn: 1,
+                        owner_seed_id: 2,
+                        key_label: alloc.dma_alloc(0)?,
+                    };
+                    let mut plaintext = vec![0x5c; plaintext_len];
+                    if let Some(last) = plaintext.last_mut() {
+                        *last = 0;
+                    }
+                    let mut storage = [0xa5; 512];
+                    let alg = AeadAlg::AesGcm256;
+                    let expected_len = 232 + plaintext_len.next_multiple_of(16);
+                    assert_eq!(
+                        mask(
+                            &pal,
+                            &io,
+                            alloc,
+                            alg,
+                            dma(&mut key),
+                            &params,
+                            dma(&mut plaintext),
+                            None
+                        )
+                        .await?,
+                        expected_len,
+                    );
+                    let len = if in_place {
+                        let at = aead::payload_offset(alg);
+                        storage[at..at + plaintext_len].copy_from_slice(&plaintext);
+                        aead::mask_in_place(
+                            &pal,
+                            &io,
+                            alloc,
+                            alg,
+                            dma(&mut key),
+                            &params,
+                            plaintext_len,
+                            dma(&mut storage),
+                        )
+                        .await?
+                    } else {
+                        mask(
+                            &pal,
+                            &io,
+                            alloc,
+                            alg,
+                            dma(&mut key),
+                            &params,
+                            dma(&mut plaintext),
+                            Some(dma(&mut storage)),
+                        )
+                        .await?
+                    };
+                    assert_eq!(len, expected_len);
+                    assert!(storage[len..].iter().all(|&b| b == 0xa5));
+                    assert_eq!(storage[4], AeadAlg::AesGcm256.as_u8());
+                    let metadata = aead::peek_metadata(dma(&mut storage[..len]))?;
+                    assert_eq!(metadata.version.get(), 1);
+                    assert_eq!(
+                        metadata.data_pad_len as usize,
+                        (16 - plaintext_len % 16) % 16
+                    );
+                    let view =
+                        aead::unmask(&pal, &io, dma(&mut key), dma(&mut storage[..len])).await?;
+                    assert_eq!(view.target_key, plaintext.as_slice());
+                    assert_eq!(
+                        view.target_key.as_ptr() as usize,
+                        storage.as_ptr() as usize + aead::payload_offset(alg)
+                    );
+                    Ok::<(), HsmError>(())
+                })
+                .await
+                .unwrap();
+            }
+        }
+        pal.drop_io(io).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gcm_unmask_rejects_authenticated_invalid_padding_and_removed_algorithm() {
+        use tsra_fw_core_crypto_aead_envelope::HEADER_LEN;
+        use tsra_fw_core_crypto_key_masking::aead;
+
+        let (pal, io, _) = crypto_fixture().await;
+        let mut key = [0x17; 32];
+        for (plaintext_len, count, corrupt_tail, version) in [
+            (1, 15, true, 1u16),
+            (1, 16, false, 1),
+            (0, 1, false, 1),
+            (1, 15, false, 2),
+        ] {
+            pal.alloc_scoped_async(&io, async |alloc| {
+                let params = MaskParams {
+                    key_kind: HsmVaultKeyKind::Aes256,
+                    key_attrs: HsmVaultKeyAttrs::new(),
+                    svn: 1,
+                    owner_seed_id: 2,
+                    key_label: alloc.dma_alloc(0)?,
+                };
+                let mut plaintext = vec![0x5c; plaintext_len];
+                let mut storage = [0xa5; 512];
+                let len = mask(
+                    &pal,
+                    &io,
+                    alloc,
+                    AeadAlg::AesGcm256,
+                    dma(&mut key),
+                    &params,
+                    dma(&mut plaintext),
+                    Some(dma(&mut storage)),
+                )
+                .await?;
+                assert!(matches!(
+                    aead::peek_scope(dma(&mut storage[..len + 1])),
+                    Err(HsmError::MaskedKeyDecodeFailed),
+                ));
+                assert!(matches!(
+                    aead::peek_metadata(dma(&mut storage[..len + 1])),
+                    Err(HsmError::MaskedKeyDecodeFailed),
+                ));
+                assert!(matches!(
+                    aead::unmask(&pal, &io, dma(&mut key), dma(&mut storage[..len + 1])).await,
+                    Err(HsmError::MaskedKeyDecodeFailed),
+                ));
+                pal.key_unmask_in_place(
+                    &io,
+                    dma(&mut key),
+                    192,
+                    dma(&mut storage[HEADER_LEN..len]),
+                )
+                .await?;
+                storage[28..30].copy_from_slice(&version.to_le_bytes());
+                storage[24 + 154] = count;
+                if corrupt_tail {
+                    storage[len - 17] = 1;
+                }
+                pal.key_mask_in_place(&io, dma(&mut key), 192, dma(&mut storage[HEADER_LEN..len]))
+                    .await?;
+                assert!(matches!(
+                    aead::unmask(&pal, &io, dma(&mut key), dma(&mut storage[..len])).await,
+                    Err(HsmError::MaskedKeyDecodeFailed),
+                ));
+                storage[4] = 0x04;
+                assert!(aead::peek_metadata(dma(&mut storage[..len])).is_err());
+                Ok::<(), HsmError>(())
+            })
+            .await
+            .unwrap();
+        }
+        pal.drop_io(io).await.unwrap();
+    }
+
     async fn masked_test_key(
         pal: &StdHsmPal,
         io: &StdHsmIo,

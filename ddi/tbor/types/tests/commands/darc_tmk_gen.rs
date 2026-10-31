@@ -6,11 +6,11 @@
 //! `DarcTmkGen` originates a fresh DARC Transfer Masking Key (TMK) and
 //! returns it masked under the partition security-domain masking key
 //! (SDMK).  It is the source-side counterpart of `DarcTmkImport`; both
-//! emit the identical 164-byte masked envelope, so a created and an
+//! emit the identical 264-byte masked envelope, so a created and an
 //! imported TMK are interchangeable downstream.
 //!
 //! Coverage:
-//! * Round-trip — the minted TMK comes back as a non-zero 164-byte masked
+//! * Round-trip — the minted TMK comes back as a non-zero 264-byte masked
 //!   envelope, and two calls yield distinct envelopes (fresh IV).
 //! * Envelope parity with `DarcTmkImport` — the masked-key metadata (AAD)
 //!   of a created TMK matches that of an imported one (same kind / attrs /
@@ -37,10 +37,10 @@ use crate::commands::darc_tmk_import::sd_initialized_session;
 use crate::commands::darc_tmk_import::SdReady;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
-/// Masked-key envelope layout: `header(8) ‖ iv(12) ‖ aad(96) ‖ ct ‖ tag`.
-/// The 96-byte `MaskedKeyMetadata` AAD begins at offset 20.
-const AAD_START: usize = 8 + 12;
-const AAD_END: usize = AAD_START + 96;
+/// Masked-key envelope layout: `header(8) ‖ iv(16) ‖ aad(192) ‖ ct ‖ tag`.
+/// The 192-byte `MaskedKeyMetadata` AAD begins at offset 24.
+const AAD_START: usize = 8 + 16;
+const AAD_END: usize = AAD_START + 192;
 
 /// A raw TMK to feed the harness `DarcTmkImport` for the envelope-parity
 /// comparison (value is irrelevant — only the metadata is compared).
@@ -74,7 +74,7 @@ fn darc_tmk_gen_roundtrip() {
     assert_eq!(
         masked.len(),
         MASKED_TMK_LEN,
-        "masked TMK must be the fixed 164-byte envelope",
+        "masked TMK must be the fixed 264-byte envelope",
     );
     assert!(
         masked.iter().any(|&b| b != 0),
@@ -96,7 +96,7 @@ fn darc_tmk_gen_envelope_matches_import() {
     // A created TMK and an imported TMK must carry identical masked-key
     // metadata (kind / attrs / label / svn / owner), so they are
     // interchangeable in later commands.  The IV and ciphertext differ;
-    // the 96-byte AAD does not.
+    // the 192-byte AAD does not.
     let created = key_gen(&ready);
     let imported = import_tmk(&ready);
     assert_eq!(

@@ -24,12 +24,12 @@ use crate::tbor;
 pub const TBOR_OP_AES_GENERATE_KEY: u8 = 0x15;
 
 /// Minimum masked AES-key envelope length (AES-128, 16-byte key): an
-/// AEAD-GCM-256 masked-key envelope `header(8) ‖ iv(12) ‖ aad(192) ‖
+/// AEAD-GCM-256 masked-key envelope `header(8) ‖ iv(16) ‖ aad(192) ‖
 /// pt(16) ‖ tag(16)`.
-pub const MASKED_AES_KEY_MIN_LEN: usize = 8 + 12 + 192 + 16 + 16;
+pub const MASKED_AES_KEY_MIN_LEN: usize = 8 + 16 + 192 + 16 + 16;
 
 /// Maximum masked AES-key envelope length (AES-256, 32-byte key).
-pub const MASKED_AES_KEY_MAX_LEN: usize = 8 + 12 + 192 + 32 + 16;
+pub const MASKED_AES_KEY_MAX_LEN: usize = 8 + 16 + 192 + 32 + 16;
 
 /// `AesKeySize` discriminant for AES-128 (16-byte key).
 pub const AES_KEY_SIZE_128: u8 = 1;
@@ -75,9 +75,9 @@ pub struct TborAesGenerateKeyReq {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborAesGenerateKeyResp {
     /// The freshly generated AES key, masked (AEAD-GCM-256) under the
-    /// requested scope's masking key.  244 / 252 / 260 B for
+    /// requested scope's masking key.  248 / 264 / 264 B for
     /// AES-128 / 192 / 256; not stored on-device.
-    #[tbor(max_len = 260)]
+    #[tbor(max_len = 264)]
     pub masked_key: Vec<u8>,
 }
 

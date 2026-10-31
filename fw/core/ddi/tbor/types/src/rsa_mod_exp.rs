@@ -41,8 +41,8 @@ pub const TBOR_OP_RSA_MOD_EXP: u8 = 0x1A;
 /// floor (an RSA-2048 masked key is far larger — its modulus alone is
 /// 256 B); the authoritative gate is `unmask` (AEAD-tag verification) plus
 /// the key-kind check in the handler.  Pinned into the `#[tbor(buffer,
-/// min_len = 260)]` literal on [`TborRsaModExpReq::masked_key`].
-pub const RSA_MASKED_KEY_MIN_LEN: usize = 260;
+/// min_len = 264)]` literal on [`TborRsaModExpReq::masked_key`].
+pub const RSA_MASKED_KEY_MIN_LEN: usize = 264;
 
 /// Maximum accepted masked RSA private-key envelope length — the largest
 /// masked key [`UnwrapKey`](crate::unwrap_key) can produce (RSA-4096-CRT).
@@ -94,9 +94,9 @@ pub struct TborRsaModExpReq<'a> {
     pub y: &'a [u8],
 
     /// The masked RSA private key (from `UnwrapKey`), an AEAD-GCM-256
-    /// envelope of 260..=3168 B.  Its kind recovers the modulus size and
+    /// envelope of 264..=3168 B.  Its kind recovers the modulus size and
     /// CRT form.
-    #[tbor(buffer, min_len = 260, max_len = 3168, mutable)]
+    #[tbor(buffer, min_len = 264, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
     /// The private-key operation, 1-byte [`RsaOp`] (gates on `decrypt` /
@@ -161,6 +161,6 @@ mod tests {
     fn lengths_match_pinned_values() {
         assert_eq!(RSA_MOD_EXP_MAX_LEN, 512);
         assert_eq!(RSA_MASKED_KEY_MAX_LEN, 3168);
-        assert_eq!(RSA_MASKED_KEY_MIN_LEN, 260);
+        assert_eq!(RSA_MASKED_KEY_MIN_LEN, 264);
     }
 }

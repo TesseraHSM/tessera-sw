@@ -7,7 +7,7 @@
 //! **originates** a fresh DARC Transfer Masking Key (TMK) and returns it
 //! masked under the partition security-domain masking key (SDMK).  It is
 //! the source-side counterpart of `DarcTmkImport` (which imports a TMK
-//! sealed off-device); both emit the identical 260-byte masked envelope,
+//! sealed off-device); both emit the identical 264-byte masked envelope,
 //! so a created and an imported TMK are interchangeable downstream.
 //!
 //! The TMK is always security-domain-scoped, so the request carries only
@@ -25,7 +25,7 @@ pub const TBOR_OP_DARC_TMK_GEN: u8 = 0x23;
 
 /// On-the-wire length of the `masked_tmk` output envelope (matches the
 /// firmware schema's `MASKED_TMK_LEN`).
-pub const MASKED_TMK_GEN_LEN: usize = 260;
+pub const MASKED_TMK_GEN_LEN: usize = 264;
 
 /// Host-facing TBOR `DarcTmkGen` request.
 ///
@@ -46,9 +46,9 @@ pub struct TborDarcTmkGenReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborDarcTmkGenResp {
-    /// The minted TMK, masked under the partition SDMK (exactly 260 B on
+    /// The minted TMK, masked under the partition SDMK (exactly 264 B on
     /// the wire; the firmware schema is the length authority).
-    #[tbor(max_len = 260)]
+    #[tbor(max_len = 264)]
     pub masked_tmk: Vec<u8>,
 }
 

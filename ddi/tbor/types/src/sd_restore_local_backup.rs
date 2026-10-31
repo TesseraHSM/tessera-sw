@@ -33,14 +33,14 @@ pub struct TborSdRestoreLocalBackupReq {
     pub session_id: u16,
 
     /// Local partition-owner-key backup to restore (a masked BKS3 wrapped
-    /// under the device-local key).  Exactly 276 B on the wire; the
+    /// under the device-local key).  Exactly 280 B on the wire; the
     /// firmware schema is the length authority.
-    #[tbor(max_len = 276)]
+    #[tbor(max_len = 280)]
     pub pok_local_backup: Vec<u8>,
 
-    /// Security-domain masking-key backup envelope.  Exactly 260 B on the
+    /// Security-domain masking-key backup envelope.  Exactly 264 B on the
     /// wire; the firmware schema is the length authority.
-    #[tbor(max_len = 260)]
+    #[tbor(max_len = 264)]
     pub sd_mk_backup: Vec<u8>,
 }
 
@@ -48,14 +48,14 @@ pub struct TborSdRestoreLocalBackupReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborSdRestoreLocalBackupResp {
-    /// Refreshed local partition-owner-key backup (exactly 276 B on the
+    /// Refreshed local partition-owner-key backup (exactly 280 B on the
     /// wire; the firmware schema is the length authority).
-    #[tbor(max_len = 276)]
+    #[tbor(max_len = 280)]
     pub pok_local_backup: Vec<u8>,
 
     /// Refreshed security-domain masking-key backup envelope (exactly
-    /// 260 B on the wire; the firmware schema is the length authority).
-    #[tbor(max_len = 260)]
+    /// 264 B on the wire; the firmware schema is the length authority).
+    #[tbor(max_len = 264)]
     pub sd_mk_backup: Vec<u8>,
 }
 
@@ -65,8 +65,8 @@ mod tests {
 
     use super::*;
 
-    const POK_LOCAL_BACKUP_LEN: usize = 276;
-    const SD_MK_BACKUP_LEN: usize = 260;
+    const POK_LOCAL_BACKUP_LEN: usize = 280;
+    const SD_MK_BACKUP_LEN: usize = 264;
 
     #[test]
     fn request_encodes_backups() {

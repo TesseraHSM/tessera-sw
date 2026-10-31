@@ -7,9 +7,7 @@
 //! envelope header and selects every per-algorithm parameter (key
 //! length, IV length, tag length, AAD-length granularity).
 //!
-//! v1 supports exactly one algorithm: AES-256-GCM (`0x03`). Future
-//! algorithms can be added without a wire-format break by reserving
-//! a new discriminant and routing it in the dispatcher.
+//! AES-256-GCM (`0x03`) uses a 16-byte stored IV.
 
 use super::format::HEADER_LEN;
 use crate::CryptoError;
@@ -22,8 +20,10 @@ use crate::CryptoError;
 #[non_exhaustive]
 #[repr(u8)]
 pub enum AeadAlg {
-    /// AES-256-GCM (96-bit IV, 128-bit tag). The only variant
-    /// supported in v1.
+    /// AES-256-GCM with a 16-byte IV slot, 32-byte-aligned AAD, and
+    /// a 128-bit tag.
+    /// Only the first 12 IV bytes are the nonce; the stored suffix is
+    /// `00 00 00 01` on seal and is ignored on open.
     AesGcm256 = 0x03,
 }
 
@@ -53,7 +53,7 @@ impl AeadAlg {
     /// Required IV length in bytes.
     pub const fn iv_len(self) -> usize {
         match self {
-            Self::AesGcm256 => 12,
+            Self::AesGcm256 => 16,
         }
     }
 
@@ -67,9 +67,7 @@ impl AeadAlg {
     /// AAD-length granularity in bytes. `aad_len` must be `0` or a
     /// multiple of this value.
     ///
-    /// For GCM the value is `32`, mirroring the fw side's
-    /// hardware-driven constraint so envelopes produced by either
-    /// side share an identical wire layout.
+    /// Uses `32`, mirroring the firmware's constraints.
     pub const fn aad_granularity(self) -> usize {
         match self {
             Self::AesGcm256 => 32,
@@ -101,12 +99,11 @@ mod tests {
         let a = AeadAlg::AesGcm256;
         assert_eq!(a.as_u8(), 0x03);
         assert_eq!(a.key_len(), 32);
-        assert_eq!(a.iv_len(), 12);
+        assert_eq!(a.iv_len(), 16);
         assert_eq!(a.tag_len(), 16);
         assert_eq!(a.aad_granularity(), 32);
-        assert_eq!(a.envelope_len(0, 0), 8 + 12 + 16);
-        // 8 + 12 + 32 (aad) + 17 (pt) + 16 = 85
-        assert_eq!(a.envelope_len(17, 32), 8 + 12 + 32 + 17 + 16);
+        assert_eq!(a.envelope_len(0, 0), 8 + 16 + 16);
+        assert_eq!(a.envelope_len(17, 32), 8 + 16 + 32 + 17 + 16);
     }
 
     #[test]
@@ -116,7 +113,7 @@ mod tests {
 
     #[test]
     fn from_u8_rejects_unknown() {
-        for b in [0x00u8, 0x01, 0x02, 0x04, 0xFF] {
+        for b in [0x00u8, 0x01, 0x02, 0x04, 0x05, 0xFF] {
             assert!(matches!(
                 AeadAlg::from_u8(b),
                 Err(CryptoError::AeadEnvelopeUnsupportedAlg)

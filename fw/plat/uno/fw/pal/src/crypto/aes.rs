@@ -172,7 +172,7 @@ impl UnoHsmPal {
                 key,
                 iv,
                 update_iv,
-                message,
+                message: Some(message),
                 result,
             })
             .await

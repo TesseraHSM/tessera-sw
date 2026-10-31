@@ -27,7 +27,7 @@ const KEX_META_LEN: usize = 192;
 /// Sanity-checks the firmware-returned masked KEX key before it is handed
 /// back for unmask-on-use. The host cannot verify the AEAD tag (the
 /// masking key is device-internal) but can confirm a well-formed
-/// AES-256-GCM masked-key envelope of the expected shape.
+/// IV16 AES-256-GCM masked-key envelope of the expected shape.
 fn validate_masked_kex_key(masked_key: &[u8; MASKED_KEX_KEY_LEN]) -> HsmResult<()> {
     let env = aead_envelope::inspect(masked_key).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
     if !matches!(env.alg, aead_envelope::AeadAlg::AesGcm256) || env.aad.len() != KEX_META_LEN {
@@ -68,4 +68,55 @@ pub(crate) fn darc_kex_key_gen(
 
     validate_masked_kex_key(&resp.masked_key)?;
     Ok((resp.masked_key, resp.pub_key))
+}
+
+#[cfg(test)]
+mod tests {
+    use tsra_crypto::AesKey;
+    use tsra_crypto::ImportableKey;
+
+    use super::*;
+
+    fn masked_kex_key() -> [u8; MASKED_KEX_KEY_LEN] {
+        let key = AesKey::from_bytes(&[0x42; 32]).expect("masking key");
+        let mut metadata = [0u8; KEX_META_LEN];
+        metadata[..4].copy_from_slice(b"MKEY");
+        metadata[4..6].copy_from_slice(&1u16.to_le_bytes());
+        metadata[6] = KEY_KIND_ECC384_PRIVATE;
+        // Metadata carries packed vault flags, not request KeyUsage bits.
+        let usage = (1u64 << 16) | (3u64 << 17);
+        metadata[8..16].copy_from_slice(&usage.to_le_bytes());
+        let mut blob = [0u8; MASKED_KEX_KEY_LEN];
+        aead_envelope::seal(
+            aead_envelope::AeadAlg::AesGcm256,
+            &key,
+            &[0x24; 16],
+            &metadata,
+            &[0x55; 48],
+            Some(&mut blob),
+        )
+        .expect("seal version-1 KEX key");
+        blob
+    }
+
+    #[test]
+    fn validate_accepts_iv16_kex_key_with_v1_metadata() {
+        let blob = masked_kex_key();
+        assert!(validate_masked_kex_key(&blob).is_ok());
+        assert_eq!(HsmMaskedKey::ecc_curve(&blob), Ok(HsmEccCurve::P384));
+    }
+
+    #[test]
+    fn validate_rejects_old_profile_and_malformed_framing() {
+        let blob = masked_kex_key();
+        for (offset, value) in [(0, b'X'), (4, 0x04), (4, 0xff), (5, 1), (7, 32)] {
+            let mut invalid = blob;
+            invalid[offset] = value;
+            assert_eq!(
+                validate_masked_kex_key(&invalid),
+                Err(HsmError::MaskedKeyDecodeFailed),
+                "offset {offset}, value {value}",
+            );
+        }
+    }
 }

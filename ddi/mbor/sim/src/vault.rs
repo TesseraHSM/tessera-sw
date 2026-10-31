@@ -92,6 +92,15 @@ pub(crate) struct SessionResult {
     pub(crate) bmk: Vec<u8>,
 }
 
+/// Validated credentials and preallocated state for an infallible commit.
+pub(crate) struct PreparedCredential {
+    id: Uuid,
+    pin: Zeroizing<[u8; 16]>,
+    nonce: [u8; 32],
+    key_table: Table,
+    key_index: u8,
+}
+
 /// The Vault.
 #[derive(Debug, Clone)]
 pub(crate) struct Vault {
@@ -295,19 +304,36 @@ impl Vault {
         self.inner.read().get_key_num_by_tag(app_id, key_tag)
     }
 
-    /// Establish credential.
-    ///
-    /// # Returns
-    /// * Ok if successful.
+    #[cfg(test)]
     #[instrument(skip(self), fields(id = ?self.id()))]
     pub(crate) fn establish_credential(
         &self,
         encrypted_credential: EncryptedCredential,
         client_pub_key: &[u8],
     ) -> Result<(), TesseraError> {
-        self.inner
-            .write()
-            .establish_credential(encrypted_credential, client_pub_key)
+        let mut inner = self.inner.write();
+        let prepared =
+            inner.prepare_establish_credential(encrypted_credential, client_pub_key, rand_bytes)?;
+        inner.commit_establish_credential(prepared);
+        Ok(())
+    }
+
+    /// Validate new user credentials, preserving the tunnel on success.
+    pub(crate) fn prepare_establish_credential(
+        &self,
+        encrypted_credential: EncryptedCredential,
+        client_pub_key: &[u8],
+    ) -> Result<PreparedCredential, TesseraError> {
+        self.inner.write().prepare_establish_credential(
+            encrypted_credential,
+            client_pub_key,
+            rand_bytes,
+        )
+    }
+
+    /// Commit validated user credentials after partition provisioning succeeds.
+    pub(crate) fn commit_establish_credential(&self, prepared: PreparedCredential) {
+        self.inner.write().commit_establish_credential(prepared);
     }
 
     /// Decrypt and authenticate an establish-credential payload without
@@ -750,21 +776,50 @@ impl VaultInner {
         Ok(())
     }
 
-    fn establish_credential(
+    fn prepare_establish_credential(
         &mut self,
         encrypted_credential: EncryptedCredential,
         client_pub_key: &[u8],
-    ) -> Result<(), TesseraError> {
+        fill_nonce: impl FnOnce(&mut [u8]) -> Result<(), TesseraError>,
+    ) -> Result<PreparedCredential, TesseraError> {
         if !self.user.credentials.id.is_nil() && !self.user.credentials.pin.eq(&[0; 16]) {
             Err(TesseraError::VaultAppLimitReached)?;
         }
 
-        let (decrypted_id, decrypted_pin) =
-            self.decrypt_establish_credential(encrypted_credential, client_pub_key)?;
-        self.reset_nonce()?;
-        self.set_user_new_credential(&decrypted_id, &decrypted_pin)?;
-        self.clear_establish_cred_encryption_key_id()?;
-        Ok(())
+        let credentials = Zeroizing::new(
+            self.decrypt_establish_credential(encrypted_credential, client_pub_key)?,
+        );
+        let mut nonce = [0; 32];
+        fill_nonce(&mut nonce)?;
+        if credentials.0 == [0; 16] || credentials.1 == [0; 16] {
+            // Authenticated but invalid credentials still consume the nonce.
+            self.nonce = nonce;
+            return Err(TesseraError::InvalidAppCredentials);
+        }
+        let key_num = KeyNumber(self.get_establish_cred_encryption_key_id()?);
+        let key_table = self
+            .tables
+            .get(key_num.table() as usize)
+            .ok_or(TesseraError::InvalidKeyNumber)?
+            .clone();
+        Ok(PreparedCredential {
+            id: Uuid::from_bytes(credentials.0),
+            pin: Zeroizing::new(credentials.1),
+            nonce,
+            key_table,
+            key_index: key_num.entry(),
+        })
+    }
+
+    fn commit_establish_credential(&mut self, prepared: PreparedCredential) {
+        prepared.key_table.remove_if_present(prepared.key_index);
+        self.establish_cred_encryption_key_id = None;
+        self.nonce = prepared.nonce;
+        self.user.credentials.id = prepared.id;
+        self.user
+            .credentials
+            .pin
+            .copy_from_slice(prepared.pin.as_ref());
     }
 
     fn decrypt_establish_credential(
@@ -2453,6 +2508,58 @@ pub(crate) mod tests {
                 short_app_id: 0
             }
         );
+    }
+
+    #[test]
+    fn test_establish_credential_nonce_failure_preserves_tunnel() {
+        let vault = Vault::new(Uuid::from_bytes([0xb2; 16]), 4).unwrap();
+        let key_num = vault.get_establish_cred_encryption_key_id().unwrap();
+        let (encrypted_credential, client_pub_key) =
+            helper_encrypt_credential(&vault, key_num, TEST_CRED_ID, TEST_CRED_PIN).unwrap();
+        let original_nonce = vault.get_nonce();
+
+        let result = vault.inner.write().prepare_establish_credential(
+            encrypted_credential,
+            &client_pub_key,
+            |nonce| {
+                nonce.fill(0x5a);
+                Err(TesseraError::RngError)
+            },
+        );
+        assert!(matches!(result, Err(TesseraError::RngError)));
+        assert!(!vault.user_credentials_established());
+        assert_eq!(vault.get_nonce(), original_nonce);
+        assert_eq!(
+            vault.get_establish_cred_encryption_key_id().unwrap(),
+            key_num
+        );
+        assert!(vault.get_key_entry(key_num).is_ok());
+
+        let prepared = vault
+            .prepare_establish_credential(encrypted_credential, &client_pub_key)
+            .expect("Nonce generation failure must leave establishment retryable");
+        let next_nonce = prepared.nonce;
+        assert_eq!(vault.get_nonce(), original_nonce);
+        assert!(!vault.user_credentials_established());
+
+        vault.commit_establish_credential(prepared);
+        assert_eq!(vault.get_nonce(), next_nonce);
+        assert!(vault.user_credentials_established());
+        assert!(matches!(
+            vault.get_establish_cred_encryption_key_id(),
+            Err(TesseraError::KeyNotFound)
+        ));
+        assert!(matches!(
+            vault.get_key_entry(key_num),
+            Err(TesseraError::InvalidKeyIndex)
+        ));
+        helper_open_session(
+            &vault,
+            TEST_CRED_ID,
+            TEST_CRED_PIN,
+            ApiRev { major: 1, minor: 0 },
+        )
+        .expect("Session open must succeed after retrying nonce generation");
     }
 
     #[test]

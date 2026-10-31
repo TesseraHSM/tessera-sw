@@ -149,7 +149,7 @@ fn kw_wrap_batch<const DEPTH: usize>(
             key,
             iv: None,
             update_iv: false,
-            message: pt,
+            message: Some(pt),
             result: ct,
         })?;
 
@@ -215,7 +215,7 @@ fn kw_unwrap_batch<const DEPTH: usize>(
             key,
             iv: None,
             update_iv: false,
-            message: ct,
+            message: Some(ct),
             result: pt,
         })?;
 
@@ -259,7 +259,7 @@ fn ecb_block_in_place<const DEPTH: usize>(
         key,
         iv: None,
         update_iv: false,
-        message: block,
+        message: Some(block),
         result: out,
     })?;
     block[..BLOCK].copy_from_slice(&out[..BLOCK]);

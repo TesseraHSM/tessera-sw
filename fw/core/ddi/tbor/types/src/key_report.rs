@@ -39,8 +39,8 @@ pub const TBOR_OP_KEY_REPORT: u8 = 0x10;
 
 /// Maximum wire length of the `masked_key` request buffer.
 ///
-/// A masked-key envelope is `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(N) ‖
-/// tag(16)` = `228 + N`, where `N` is the raw key plaintext (48 B for a
+/// A masked-key envelope is `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(N) ‖
+/// tag(16)` = `232 + N`, where `N` is the raw key plaintext (48 B for a
 /// P-384 sealing scalar). This bound matches `UnwrapKey` so RSA and RSA-CRT
 /// private-key envelopes also fit.
 /// Pinned into the `#[tbor(buffer, max_len = 3168)]` literal on

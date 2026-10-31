@@ -48,6 +48,7 @@ use super::*;
 /// | [`HsmCertStore`] | Per-partition certificate chain storage |
 /// | [`HsmSessionManager`] | Session allocation (vault-backed) |
 /// | [`HsmVault`] | Key storage with firmware capacity emulation |
+/// | [`HsmKeyMasking`] | In-place key masking and unmasking |
 /// | [`HsmCrypto`] | Cryptographic operations (hash, hmac, kdf, …) |
 ///
 /// ## Construction
@@ -67,6 +68,7 @@ pub trait HsmPal:
     + HsmSeedStore
     + HsmSessionManager
     + HsmVault
+    + HsmKeyMasking
     + HsmCrypto
     + Default
 {

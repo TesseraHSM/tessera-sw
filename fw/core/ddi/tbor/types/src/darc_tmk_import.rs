@@ -21,7 +21,7 @@
 //!   in-session commands).
 //! * `masked_kex_key` — the **receiver's** masked DARC key-exchange key
 //!   (from [`DarcKexKeyGen`](crate::darc_kex_key_gen)), exactly
-//!   [`MASKED_KEX_KEY_LEN`] (276 B).  Unmasked on-device to recover the
+//!   [`MASKED_KEX_KEY_LEN`] (280 B).  Unmasked on-device to recover the
 //!   receiver's private HPKE key (`RcvrPriv`) that opens the sealed TMK;
 //!   never a vault handle.  Its masked-key kind must be
 //!   [`DarcKex`](tsra_fw_hsm_pal_traits::HsmVaultKeyKind::DarcKex).
@@ -39,7 +39,7 @@
 //! Output:
 //!
 //! * `masked_tmk` — the imported TMK, re-masked (AEAD-GCM-256) under the
-//!   partition SDMK, as a fixed [`MASKED_TMK_LEN`] (260 B) envelope.
+//!   partition SDMK, as a fixed [`MASKED_TMK_LEN`] (264 B) envelope.
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -63,14 +63,14 @@ pub const SEALED_TMK_LEN: usize = (1 + 2 * 48) + (TMK_LEN + 16);
 ///
 /// The envelope is fully deterministic: an AES-256-GCM `MaskedKey`
 /// envelope around the 32-byte TMK plaintext —
-/// `header(8) + iv(12) + MaskedKeyMetadata aad(192) + ct(32) + tag(16)`
-/// = 260 B.
-pub const MASKED_TMK_LEN: usize = 8 + 12 + 192 + TMK_LEN + 16;
+/// `header(8) + iv(16) + MaskedKeyMetadata aad(192) + ct(32) + tag(16)`
+/// = 264 B.
+pub const MASKED_TMK_LEN: usize = 8 + 16 + 192 + TMK_LEN + 16;
 
 // `masked_kex_key` is a masked DARC key-exchange key; the derive needs an
-// integer literal on the field, so the length is spelled out as `276` and
+// integer literal on the field, so the length is spelled out as `280` and
 // pinned against the canonical `MASKED_KEX_KEY_LEN` here.
-const _: () = assert!(MASKED_KEX_KEY_LEN == 276);
+const _: () = assert!(MASKED_KEX_KEY_LEN == 280);
 
 // `policy` carries the unified `PartPolicy`; the derive needs an integer
 // literal on the field, so the length is spelled out as `484` and pinned
@@ -83,9 +83,9 @@ const _: () = assert!(PART_POLICY_LEN == 584);
 const _: () = assert!(SEALED_TMK_LEN == 145);
 
 // `masked_tmk` is a masked TMK envelope; the derive needs an integer
-// literal on the field, so the length is spelled out as `260` and pinned
+// literal on the field, so the length is spelled out as `264` and pinned
 // against `MASKED_TMK_LEN` here.
-const _: () = assert!(MASKED_TMK_LEN == 260);
+const _: () = assert!(MASKED_TMK_LEN == 264);
 
 // Pin the `remote_cert_chain` `#[tbor(min_len/max_len)]` literals to their
 // descriptor-size constants (the derive requires integer literals): a
@@ -106,9 +106,9 @@ pub struct TborDarcTmkImportReq<'a> {
     pub session_id: SessionId,
 
     /// The receiver's masked DARC key-exchange key (from
-    /// `DarcKexKeyGen`), exactly [`MASKED_KEX_KEY_LEN`] (276 B).  Unmasked
+    /// `DarcKexKeyGen`), exactly [`MASKED_KEX_KEY_LEN`] (280 B).  Unmasked
     /// on-device to recover the receiver's private HPKE key (`RcvrPriv`).
-    #[tbor(buffer, len = 276)]
+    #[tbor(buffer, len = 280)]
     pub masked_kex_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] whose `POTAPubKey` anchors
@@ -142,8 +142,8 @@ pub struct TborDarcTmkImportReq<'a> {
 #[tbor(response, pair = TborDarcTmkImportReq)]
 pub struct TborDarcTmkImportResp<'a> {
     /// The imported TMK, masked (AEAD-GCM-256) under the partition SDMK.
-    /// Always exactly [`MASKED_TMK_LEN`] (260 B).
-    #[tbor(buffer, len = 260)]
+    /// Always exactly [`MASKED_TMK_LEN`] (264 B).
+    #[tbor(buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 }
 
@@ -214,10 +214,10 @@ mod tests {
     fn lengths_match_pinned_values() {
         // The `#[tbor(... len = N)]` attributes must remain numeric
         // literals; pin them against the exported consts.
-        const _: () = assert!(276 == MASKED_KEX_KEY_LEN);
+        const _: () = assert!(280 == MASKED_KEX_KEY_LEN);
         const _: () = assert!(584 == PART_POLICY_LEN);
         const _: () = assert!(145 == SEALED_TMK_LEN);
-        const _: () = assert!(260 == MASKED_TMK_LEN);
+        const _: () = assert!(264 == MASKED_TMK_LEN);
         assert_eq!(TMK_LEN, 32);
     }
 }

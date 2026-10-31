@@ -50,7 +50,7 @@ pub struct TborMlDsaSignReq {
     /// The masked ML-DSA secret key (from `MlDsaGenerateKey`).  164 B:
     /// the wire ships seed-only keys.  See
     /// [`MASKED_MLDSA_KEY_MAX_LEN`](crate::MASKED_MLDSA_KEY_MAX_LEN).
-    #[tbor(max_len = 5156)]
+    #[tbor(max_len = 5160)]
     pub masked_key: Vec<u8>,
 
     /// Message to sign.  The TBOR schema caps inline messages at 586 B; see

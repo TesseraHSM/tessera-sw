@@ -58,14 +58,14 @@ pub const PART_INIT_MACH_SEED_AAD_LEN: usize = 32;
 ///
 /// The envelope is fully deterministic: an AEAD-GCM envelope around the
 /// 32-byte `mach_seed` plaintext with a 32-byte AAD —
-/// `header(8) + iv(12) + aad(32) + ct(32) + tag(16)` = 100 B. Pinned as
+/// `header(8) + iv(16) + aad(32) + ct(32) + tag(16)` = 104 B. Pinned as
 /// a fixed-length field so a malformed length is rejected at decode.
-pub const MACH_SEED_ENVELOPE_LEN: usize = 8 + 12 + PART_INIT_MACH_SEED_AAD_LEN + 32 + 16;
+pub const MACH_SEED_ENVELOPE_LEN: usize = 8 + 16 + PART_INIT_MACH_SEED_AAD_LEN + 32 + 16;
 
-// Pin the computed envelope length to the `#[tbor(... = 100)]` literal on
+// Pin the computed envelope length to the `#[tbor(... = 104)]` literal on
 // the `mach_seed_envelope` field (the derive requires an integer
 // literal). If the envelope layout changes, update both.
-const _: () = assert!(MACH_SEED_ENVELOPE_LEN == 100);
+const _: () = assert!(MACH_SEED_ENVELOPE_LEN == 104);
 
 /// Maximum bytes the wrapped `mach_seed_envelope` may occupy on the
 /// wire.
@@ -142,7 +142,7 @@ pub struct TborPartInitReq<'a> {
 
     /// AEAD-GCM envelope wrapping the 32-byte `mach_seed` plaintext
     /// under the active session's `param_key`.  Fixed length
-    /// [`MACH_SEED_ENVELOPE_LEN`] (100 B); a malformed length is
+    /// [`MACH_SEED_ENVELOPE_LEN`] (104 B); a malformed length is
     /// rejected at decode with `TborInvalidFixedLength`.  AAD layout is
     /// pinned to `label(17) ‖ session_id(2 LE) ‖ rsv0(13)` —
     /// see [`PART_INIT_MACH_SEED_AAD_LABEL`] and
@@ -152,7 +152,7 @@ pub struct TborPartInitReq<'a> {
     /// envelope in place — the field is exposed as the
     /// `mach_seed_envelope` member of the generated
     /// `TborPartInitReqViewMut` destructured view.
-    #[tbor(buffer, len = 100, mutable)]
+    #[tbor(buffer, len = 104, mutable)]
     pub mach_seed_envelope: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] blob bound into the

@@ -59,6 +59,7 @@ mod hash;
 mod hmac;
 mod io;
 mod kdf;
+mod key_masking;
 mod pal;
 mod part;
 mod part_lock;

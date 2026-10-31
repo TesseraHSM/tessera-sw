@@ -76,7 +76,7 @@ fn build_part_init_mach_seed_aad(session_id: u16) -> [u8; PART_INIT_MACH_SEED_AA
 /// Seal a 32-byte `mach_seed` under the active session's `param_key`
 /// as the `mach_seed_envelope` wire blob.
 ///
-/// Uses a fresh random 12-byte IV and the session-bound AAD from
+/// Uses a fresh random IV and the session-bound AAD from
 /// [`build_part_init_mach_seed_aad`]. Returns the exact bytes that
 /// occupy the `mach_seed_envelope` field of [`TborPartInitReq`].
 ///
@@ -95,7 +95,8 @@ fn seal_mach_seed_envelope(
     }
 
     let aad = build_part_init_mach_seed_aad(session_id);
-    let iv = Rng::rand_vec(12).map_err(|_| HsmError::InternalError)?;
+    let iv = Rng::rand_vec(aead_envelope::AeadAlg::AesGcm256.iv_len())
+        .map_err(|_| HsmError::InternalError)?;
 
     // First pass sizes the output buffer; second pass writes the
     // sealed envelope into it.

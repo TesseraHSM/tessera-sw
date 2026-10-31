@@ -52,7 +52,7 @@ pub struct TborMlKemDecapsulateReq<'a> {
     /// The masked ML-KEM decapsulation key, an AEAD-GCM-256 envelope of
     /// 196 B: the wire ships seed-only keys.  See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 3460, mutable)]
+    #[tbor(buffer, max_len = 3464, mutable)]
     pub masked_key: &'a [u8],
 
     /// ML-KEM ciphertext.  Up to 1568 B for ML-KEM-1024.
@@ -68,7 +68,7 @@ pub struct TborMlKemDecapsulateReq<'a> {
 pub struct TborMlKemDecapsulateResp<'a> {
     /// The 32-byte ML-KEM shared secret, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  The envelope is always 164 B.
-    #[tbor(buffer, max_len = 260, mutable)]
+    #[tbor(buffer, max_len = 264, mutable)]
     pub masked_shared_secret: &'a [u8],
 }
 
@@ -114,9 +114,9 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(3460 == MASKED_MLKEM_KEY_MAX_LEN);
+        const _: () = assert!(3464 == MASKED_MLKEM_KEY_MAX_LEN);
         const _: () = assert!(1568 == MLKEM_CIPHERTEXT_MAX_LEN);
-        const _: () = assert!(260 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
-        assert_eq!(MASKED_MLKEM_KEY_MAX_LEN, 3460);
+        const _: () = assert!(264 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
+        assert_eq!(MASKED_MLKEM_KEY_MAX_LEN, 3464);
     }
 }

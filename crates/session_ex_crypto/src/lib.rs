@@ -268,8 +268,8 @@ pub fn seal_seed_envelope(param_key: &AesKey, seed: &[u8]) -> SessionExCryptoRes
         return Err(SessionExCryptoError::InvalidInput);
     }
 
-    // Generate a random 12-byte IV and seal the seed under param_key with no AAD.
-    let iv = Rng::rand_vec(12).map_err(|_| SessionExCryptoError::Crypto)?;
+    let iv =
+        Rng::rand_vec(AeadAlg::AesGcm256.iv_len()).map_err(|_| SessionExCryptoError::Crypto)?;
     let total = aead_envelope::seal(AeadAlg::AesGcm256, param_key, &iv, &[], seed, None)
         .map_err(|_| SessionExCryptoError::Crypto)?;
     // The framed envelope is a fixed-size wire blob; reject any sizing

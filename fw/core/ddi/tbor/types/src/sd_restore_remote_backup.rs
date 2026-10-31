@@ -18,7 +18,7 @@
 //!   in-session commands).
 //! * `masked_sealing_key` — the **receiver's** masked SD-sealing key (from
 //!   [`SdSealingKeyGen`](crate::sd_sealing_key_gen)), exactly
-//!   [`MASKED_SEALING_KEY_LEN`] (276 B).  Unmasked on-device to recover the
+//!   [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover the
 //!   receiver's private HPKE key (`RcvrPriv`) that opens the backup; never
 //!   a vault handle.
 //! * `policy` — the unified [`PartPolicy`] describing the security domain
@@ -32,14 +32,14 @@
 //!   of BKS3, exactly [`POK_REMOTE_BACKUP_LEN`] (161 B).
 //! * `prev_sd_mk_backup` — the previous security-domain masking-key backup
 //!   (SDMK masked under the derived SDBMK), exactly
-//!   [`SD_MK_BACKUP_LEN`] (260 B), from which `SDMK` is recovered.
+//!   [`SD_MK_BACKUP_LEN`] (264 B), from which `SDMK` is recovered.
 //!
 //! Output:
 //!
 //! * `pok_local_backup` — the local partition-owner-key backup (BKS3 masked
-//!   under `PartLocalMK`), exactly [`MASKED_SD_LEN`] (276 B).
+//!   under `PartLocalMK`), exactly [`MASKED_SD_LEN`] (280 B).
 //! * `sd_mk_backup` — the refreshed security-domain masking-key backup
-//!   envelope, exactly [`SD_MK_BACKUP_LEN`] (260 B).
+//!   envelope, exactly [`SD_MK_BACKUP_LEN`] (264 B).
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -59,9 +59,9 @@ pub const TBOR_OP_SD_RESTORE_REMOTE_BACKUP: u8 = 0x0C;
 const _: () = assert!(PART_POLICY_LEN == 584);
 
 // `masked_sealing_key` is a masked SD-sealing key; the derive needs an
-// integer literal on the field, so the length is spelled out as `276` and
+// integer literal on the field, so the length is spelled out as `280` and
 // pinned against the canonical `MASKED_SEALING_KEY_LEN` here.
-const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
+const _: () = assert!(MASKED_SEALING_KEY_LEN == 280);
 
 // `src_remote_backup` is an HPKE-Auth seal; the derive needs an integer
 // literal on the field, so the length is spelled out as `161` and pinned
@@ -69,15 +69,15 @@ const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
 const _: () = assert!(POK_REMOTE_BACKUP_LEN == 161);
 
 // `pok_local_backup` is a masked BKS3 envelope; the derive needs an integer
-// literal on the field, so the length is spelled out as `276` and pinned
+// literal on the field, so the length is spelled out as `280` and pinned
 // against the canonical value here.
-const _: () = assert!(MASKED_SD_LEN == 276);
+const _: () = assert!(MASKED_SD_LEN == 280);
 
 // `prev_sd_mk_backup` / `sd_mk_backup` are `local_mk`-style backup
 // envelopes; the derive needs an integer literal on the field, so the
 // length is spelled out as `164` and pinned against the canonical value
 // here.
-const _: () = assert!(SD_MK_BACKUP_LEN == 260);
+const _: () = assert!(SD_MK_BACKUP_LEN == 264);
 
 /// `SdRestoreRemoteBackup` request schema.
 #[tbor(opcode = 0x0C, pair = TborSdRestoreRemoteBackupResp)]
@@ -89,9 +89,9 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
     pub session_id: SessionId,
 
     /// The receiver's masked SD-sealing key (from `SdSealingKeyGen`),
-    /// exactly [`MASKED_SEALING_KEY_LEN`] (276 B).  Unmasked on-device to
+    /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to
     /// recover the receiver's private HPKE key (`RcvrPriv`).
-    #[tbor(buffer, len = 276)]
+    #[tbor(buffer, len = 280)]
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] describing the security
@@ -131,8 +131,8 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
     pub src_remote_backup: &'a [u8],
 
     /// Previous security-domain masking-key backup (SDMK masked under the
-    /// derived SDBMK).  Always exactly [`SD_MK_BACKUP_LEN`] (260 B).
-    #[tbor(buffer, len = 260)]
+    /// derived SDBMK).  Always exactly [`SD_MK_BACKUP_LEN`] (264 B).
+    #[tbor(buffer, len = 264)]
     pub prev_sd_mk_backup: &'a [u8],
 }
 
@@ -140,13 +140,13 @@ pub struct TborSdRestoreRemoteBackupReq<'a> {
 #[tbor(response, pair = TborSdRestoreRemoteBackupReq)]
 pub struct TborSdRestoreRemoteBackupResp<'a> {
     /// Partition-owner-key backup re-wrapped under the device-local key.
-    /// Always exactly [`MASKED_SD_LEN`] (276 B).
-    #[tbor(buffer, len = 276)]
+    /// Always exactly [`MASKED_SD_LEN`] (280 B).
+    #[tbor(buffer, len = 280)]
     pub pok_local_backup: &'a [u8],
 
     /// Security-domain masking-key backup envelope.  Always exactly
-    /// [`SD_MK_BACKUP_LEN`] (260 B).
-    #[tbor(buffer, len = 260)]
+    /// [`SD_MK_BACKUP_LEN`] (264 B).
+    #[tbor(buffer, len = 264)]
     pub sd_mk_backup: &'a [u8],
 }
 
