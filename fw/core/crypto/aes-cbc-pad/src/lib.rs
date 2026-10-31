@@ -22,9 +22,9 @@
 //! [`HsmAes`] trait, not on any concrete PAL implementation.
 
 use tsra_fw_hsm_pal_traits::AesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -123,10 +123,10 @@ fn strip_pkcs7_padding(decrypted: &[u8]) -> HsmResult<usize> {
 pub async fn aes_cbc_pkcs7_encrypt<P: HsmAes + HsmAlloc>(
     pal: &P,
     io: &P::Io,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     iv: &mut [u8],
     pt: &[u8],
-    ct: &mut DmaBuf,
+    ct: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     let padded = padded_len(pt.len());
     if ct.len() < padded {
@@ -181,10 +181,10 @@ pub async fn aes_cbc_pkcs7_encrypt<P: HsmAes + HsmAlloc>(
 pub async fn aes_cbc_pkcs7_decrypt<P: HsmAes + HsmAlloc>(
     pal: &P,
     io: &P::Io,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     iv: &mut [u8],
-    ct: &DmaBuf,
-    pt: &mut DmaBuf,
+    ct: &HsmDmaBuf,
+    pt: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     let len = ct.len();
     if len == 0 || !len.is_multiple_of(BLOCK) || pt.len() < len {

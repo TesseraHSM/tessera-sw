@@ -77,7 +77,7 @@ pub const HKDF_MASKED_KEY_MAX_LEN: usize = 8 + 12 + 192 + 128 + 16;
 /// `info` are optional-by-emptiness: a zero-length buffer selects the RFC
 /// 5869 default salt / omits the info, which is cryptographically exact
 /// (HMAC pads a shorter-than-block key with zeros).
-#[tbor(opcode = 0x1C)]
+#[tbor(opcode = 0x1C, pair = TborHkdfDeriveResp)]
 pub struct TborHkdfDeriveReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -126,7 +126,7 @@ pub struct TborHkdfDeriveReq<'a> {
 ///
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// and mask the derived key straight into it (`decode_mut`).
-#[tbor(response)]
+#[tbor(response, pair = TborHkdfDeriveReq)]
 pub struct TborHkdfDeriveResp<'a> {
     /// The derived key, masked (AEAD-GCM-256) under the scope's masking
     /// key.  244..=356 B depending on the derived key length.

@@ -16,7 +16,7 @@
 
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -25,12 +25,12 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// Slot 2 generates a fresh PID leaf and fingerprints it; because each read
 /// mints a new leaf, later reads need not match this fingerprint. No undo
 /// log is needed.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborGetCertChainInfoReq::decode(req_buf)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    let req = TborGetCertChainInfoReq::decode(cmd_buf.request())?;
     let slot_id = req.slot_id();
 
     let info = if slot_id == 2 {
@@ -39,7 +39,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         pal.get_cert_chain_info(io, slot_id).await?
     };
 
-    let resp = pal.dma_alloc_var(io, |buf| {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborGetCertChainInfoResp::encode(buf, 0, false)?
             .num_certs(info.count)?
             .thumbprint(&info.thumbprint)?

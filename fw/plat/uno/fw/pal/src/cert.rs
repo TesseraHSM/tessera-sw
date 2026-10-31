@@ -18,9 +18,9 @@ use tsra_fw_core_crypto_x509_builder::cert_builder::LeafCertParams;
 use tsra_fw_core_crypto_x509_builder::cert_builder::TbsSigner;
 use tsra_fw_core_crypto_x509_builder::cert_builder::build_leaf_cert_with_signer;
 use tsra_fw_hsm_pal_traits::CertChainInfo;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCertStore;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -78,7 +78,12 @@ struct AliasSigner<'a> {
 }
 
 impl TbsSigner<UnoHsmIo> for AliasSigner<'_> {
-    async fn sign_digest(&self, io: &UnoHsmIo, digest: &DmaBuf, sig: &mut DmaBuf) -> HsmResult<()> {
+    async fn sign_digest(
+        &self,
+        io: &UnoHsmIo,
+        digest: &HsmDmaBuf,
+        sig: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
         // The GSRAM alias key is a SEC1 `ECPrivateKey` DER blob
         // (`ECC_DER_P384_PRIVATE_NO_PUB_LENGTH`), not a raw scalar: the private
         // key is the OCTET STRING value, stored big-endian.
@@ -110,12 +115,9 @@ impl TbsSigner<UnoHsmIo> for AliasSigner<'_> {
                     e[i] = digest[P384_FIELD - 1 - i];
                 }
                 let (r, s) = sig.split_at_mut(P384_FIELD);
-                let res = self
-                    .pal
+                self.pal
                     .ecc_sign_deterministic(io, UpkaEccCurve::P384, e, d, r, s)
-                    .await;
-                d.zeroize();
-                res
+                    .await
             })
             .await
     }

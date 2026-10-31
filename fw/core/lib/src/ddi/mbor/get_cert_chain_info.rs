@@ -22,7 +22,7 @@ pub(crate) async fn get_cert_chain_info<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiGetCertChainInfoReq = decoder.decode_data()?;
 
     let info = pal.get_cert_chain_info(io, body.slot_id).await?;

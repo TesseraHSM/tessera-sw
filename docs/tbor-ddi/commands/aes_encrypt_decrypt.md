@@ -16,8 +16,8 @@ caller-held **masked** AES key (the `masked_key` from
 [`UnwrapKey`](./unwrap_key.md)). The device reads the masked key's scope
 from its cleartext, tag-bound metadata to select the masking key, unmasks
 the key on-device (verifying the AEAD tag), runs the AES-CBC transform
-zero-copy — reading the request message and writing the transformed message
-plus the updated chaining IV straight into the response buffer — so the
+in place — overwriting the request message and chaining IV at their final
+response offsets, without copying either payload into another frame — so the
 host can chain subsequent CBC blocks. This is the TBOR analogue of
 MBOR `AesEncryptDecrypt`, keyed by a masked blob rather than a vault
 `key_id`. Nothing is persisted and the recovered key is wiped.
@@ -39,15 +39,18 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8 | `masked_key` | `buffer` (244–260 B) | The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an AEAD-GCM-256 envelope. Unmasked on-device to recover the key and confirm its AES kind + direction permission. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | `op` | `uint8` (inline) | Direction (`AesOp` discriminant): `1` = Encrypt, `2` = Decrypt. |
 | 16 | `msg` | `buffer` (≤ 1024 B) | The message to transform: a non-empty multiple of the 16-byte AES block. |
 | 20 | `iv` | `buffer` (16 B) | The CBC initialization vector. |
+| 24 | `masked_key` | `buffer` (244–260 B) | The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an AEAD-GCM-256 envelope. Unmasked on-device to recover the key and confirm its AES kind + direction permission. |
 
 ### Data section
 
-Carries the masked key, message, and IV.
+Carries the message, IV, and masked key, in that order. The message starts
+at the shared payload base (byte 28), immediately followed by the IV.
+Noncanonical message/IV offsets are rejected. This TBOR request order
+must be updated on both host and firmware.
 
 ## Response
 
@@ -58,6 +61,8 @@ Carries the masked key, message, and IV.
 | 8 | `msg` | `buffer` (≤ 1024 B) | The transformed message (same length as the input `msg`). |
 | 12 | `iv` | `buffer` (16 B) | The updated chaining IV (the last ciphertext block), for chaining subsequent CBC calls. |
 
+The remaining three TOC slots (bytes 16 through 27) contain `None`.
+
 ### Data section
 
 Carries the transformed message followed by the 16-byte chaining IV.
@@ -67,7 +72,7 @@ Carries the transformed message followed by the 16-byte chaining IV.
 | Error | Cause |
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
-| `InvalidArg` | Unknown `op`, IV not exactly 16 bytes, or `msg` empty / not a multiple of 16 / over 1024 bytes |
+| `InvalidArg` | Unknown `op`, noncanonical message/IV offsets, IV not exactly 16 bytes, or `msg` empty / not a multiple of 16 / over 1024 bytes |
 | `AesGcmDecryptTagDoesNotMatch` | The masked key's AEAD tag failed to verify (tampered or wrong-scope blob) |
 | `InvalidKeyType` | The recovered key is not a non-bulk AES key |
 | `InvalidPermissions` | The key lacks the permission for the direction (`encrypt` / `decrypt`) |

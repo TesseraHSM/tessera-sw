@@ -18,7 +18,7 @@ The device unmasks the key **in place** in the request buffer (recovering
 its modulus size and CRT form from the blob's key kind), checks the usage
 attribute the requested operation needs, computes the modular
 exponentiation, and returns the result.  The recovered plaintext key is
-scrubbed from the request buffer on every path.  This is the raw primitive
+scrubbed from the request buffer during IO teardown.  This is the raw primitive
 underlying RSA decrypt / sign — the host applies and removes any padding.
 This is the TBOR analogue of MBOR `RsaModExp`, keyed by a masked blob
 instead of a vault id.
@@ -38,14 +38,17 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8 | `masked_key` | `buffer` (164..=3072 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
-| — | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
-| — | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in wire little-endian order, exactly the key's modulus length. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in wire little-endian order, exactly the key's modulus length. |
+| 16 | `masked_key` | `buffer` (260..=3168 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
+| 20 | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
 
 ### Data section
 
-Carries the masked key followed by the input integer.
+Carries the input integer at offset 24, followed by the masked key. The integer
+must start immediately after the TOC so the PAL can replace `y` with `x` in place
+without moving the result or overlapping the key. Host and firmware schemas
+must be updated together.
 
 ## Response
 
@@ -57,14 +60,16 @@ Carries the masked key followed by the input integer.
 
 ### Data section
 
-Carries the result integer.
+Carries the result integer at offset 24, replacing the request's `y`. The remaining
+three paired TOC slots are `None`, and the unused allocation tail, including the
+unmasked key, is scrubbed during IO teardown.
 
 ## Errors
 
 | Error | Cause |
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
-| `InvalidArg` | Unknown `op_type`, or `y` length ≠ the key's modulus length |
+| `InvalidArg` | Unknown `op_type`, `y` length ≠ the key's modulus length, or noncanonical `y` offset |
 | `InvalidKeyType` | The masked blob is not an RSA private key |
 | `InvalidPermissions` | The key lacks the usage the operation needs (`decrypt` for Decrypt, `sign` for Sign) |
 | `MaskedKeyDecodeFailed` / `AesGcmDecryptTagDoesNotMatch` | The masked key is malformed or fails authentication (wrong scope / tampered) |

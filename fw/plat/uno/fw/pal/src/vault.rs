@@ -30,8 +30,8 @@
 #![allow(unsafe_code)]
 
 use tsra_fw_hsm_io::Sqe;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -59,18 +59,18 @@ pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
     KeyVault::new(VaultStorage::new(res_mask))
 }
 
-/// Build a `'static` [`DmaBuf`] over a key's blob location in GSRAM.
+/// Build a `'static` [`HsmDmaBuf`] over a key's blob location in GSRAM.
 ///
 /// `(table, off, len)` must come from `KeyVault::key_location` or
 /// `key_location_present`, which validate that the range lies inside that
 /// table's blob region.  The region is `'static` GSRAM, so the reference
 /// outlives the transient [`KeyVault`] the location was read from.
 #[inline]
-fn blob_ref(table: usize, off: usize, len: usize) -> &'static DmaBuf {
+fn blob_ref(table: usize, off: usize, len: usize) -> &'static HsmDmaBuf {
     let addr = VaultStorage::blob_addr(table) + off;
     // SAFETY: the caller's `key_location{,_present}` validated that
     // `addr..addr+len` lies within that table's 'static GSRAM blob region.
-    unsafe { DmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) }
+    unsafe { HsmDmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) }
 }
 
 impl UnoHsmPal {
@@ -94,7 +94,7 @@ impl HsmVault for UnoHsmPal {
     async fn vault_key_create(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
@@ -223,7 +223,7 @@ impl HsmVault for UnoHsmPal {
         Ok(())
     }
 
-    fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
         self.enforce_session_key_isolation(io, key_id)?;
         let (table, off, len) = vault(io).key_location(key_id)?;
         Ok(blob_ref(table, off, len))
@@ -445,7 +445,7 @@ fn fp_slots_free_mask(res_mask: u128) {
 async fn fp_bulk_create(
     pal: &UnoHsmPal,
     io: &UnoHsmIo,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     kind: HsmVaultKeyKind,
     session_id: Option<HsmSessId>,
     attrs: HsmVaultKeyAttrs,

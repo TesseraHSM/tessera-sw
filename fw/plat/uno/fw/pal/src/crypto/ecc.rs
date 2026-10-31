@@ -22,8 +22,8 @@
 
 use core::cmp::Ordering;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
@@ -308,7 +308,7 @@ impl HsmEcc for UnoHsmPal {
         _io: &UnoHsmIo,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
         let pka_curve = map_ecc_curve(curve)?;
@@ -386,8 +386,8 @@ impl HsmEcc for UnoHsmPal {
         io: &UnoHsmIo,
         _alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        root: &DmaBuf,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        root: &HsmDmaBuf,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
         let pka_curve = map_ecc_curve(curve)?;
@@ -449,9 +449,9 @@ impl HsmEcc for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let pka_curve = map_ecc_curve(curve)?;
         self.pka
@@ -479,10 +479,10 @@ impl HsmEcc for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         curve: HsmEccCurve,
-        pub_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &DmaBuf,
-        result: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let pka_curve = map_ecc_curve(curve)?;
 
@@ -556,9 +556,9 @@ impl HsmEcc for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &DmaBuf,
-        secret: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &HsmDmaBuf,
+        secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let pka_curve = map_ecc_curve(curve)?;
 
@@ -617,8 +617,8 @@ impl HsmEcc for UnoHsmPal {
     fn ecc_priv_der_to_vault(
         &self,
         _io: &UnoHsmIo,
-        der: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        der: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         // Parse the recovered PKCS#8 ECC private key (curve from its `namedCurve`
         // OID, plus the raw big-endian scalar `d`).
@@ -655,8 +655,8 @@ impl HsmEcc for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         curve: HsmEccCurve,
-        d: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        d: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The COSE EC2 `d` field is the raw big-endian scalar at the
         // curve's field width (P-256 32, P-384 48, P-521 66). Reject any
@@ -687,8 +687,8 @@ impl HsmEcc for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         curve: HsmEccCurve,
-        vault: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        vault: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The vault stores the scalar little-endian (PKA-native),
         // zero-padded to `wire_coord_len`. Recover the canonical
@@ -722,8 +722,8 @@ impl HsmEcc for UnoHsmPal {
     async fn ecc_priv_pub_key(
         &self,
         io: &UnoHsmIo,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The vault scalar length is the wire coordinate length, which is
         // unique per curve (32 / 48 / 68).
@@ -826,8 +826,8 @@ impl HsmEcc for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Validate `curve` up front rather than leaving it implicit in the
         // length check below. `ecc_priv_pub_key` re-derives the curve from

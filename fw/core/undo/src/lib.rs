@@ -38,7 +38,7 @@
 // methods; an explicit future type buys nothing here.
 #![allow(async_fn_in_trait)]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -256,7 +256,7 @@ pub enum WalkOutcome {
 /// log carries no partition lock guard.
 pub struct UndoLog<'a> {
     /// Double-ended backing: entry slots front, byte arena back.
-    buf: &'a mut DmaBuf,
+    buf: &'a mut HsmDmaBuf,
     /// Entry slots used (each [`ENTRY_SIZE`] bytes, from the front).
     nentries: usize,
     /// Bytes used by the pre-image arena (from the back).
@@ -264,16 +264,15 @@ pub struct UndoLog<'a> {
 }
 
 impl<'a> UndoLog<'a> {
-    /// Create an empty log over a single caller-provided [`DmaBuf`].
+    /// Create an empty log over a single caller-provided [`HsmDmaBuf`].
     ///
     /// `buf.len()` bounds the combined cost of entry slots ([`ENTRY_SIZE`]
     /// bytes each, from the front) and byte pre-images (from the back).
     /// The dispatcher carves `buf` from the per-io DMA heap (sized from
     /// [`UNDO_LOG_SIZE`] / a per-opcode table); tests pass a fixed array
-    /// branded as a `DmaBuf`. A `DmaBuf` is required (not a plain slice)
-    /// so the log's internal `zeroize` on walk completion can securely
-    /// scrub captured secret pre-images with volatile writes.
-    pub fn new(buf: &'a mut DmaBuf) -> Self {
+    /// branded as a `HsmDmaBuf`. IO teardown scrubs captured secret pre-images
+    /// after the undo or commit walk finishes.
+    pub fn new(buf: &'a mut HsmDmaBuf) -> Self {
         Self {
             buf,
             nentries: 0,
@@ -396,14 +395,14 @@ impl<'a> UndoLog<'a> {
         Ok(())
     }
 
-    fn bytes_from_handle(&self, handle: u32) -> HsmResult<&DmaBuf> {
+    fn bytes_from_handle(&self, handle: u32) -> HsmResult<&HsmDmaBuf> {
         let (off, len) = unpack_bytes_handle(handle);
         let end = off.checked_add(len).ok_or(HsmError::InvalidArg)?;
         if end > self.buf.len() {
             return Err(HsmError::InvalidArg);
         }
-        // `self.buf` is a `&mut DmaBuf`; indexing a `DmaBuf` by range yields
-        // a `DmaBuf` sub-view, so this stays DMA-typed with no re-branding.
+        // `self.buf` is a `&mut HsmDmaBuf`; indexing a `HsmDmaBuf` by range yields
+        // a `HsmDmaBuf` sub-view, so this stays DMA-typed with no re-branding.
         Ok(&self.buf[off..end])
     }
 
@@ -411,9 +410,8 @@ impl<'a> UndoLog<'a> {
     ///
     /// Consumes the log.  Returns [`WalkOutcome::Poisoned`] if any
     /// `Poison`-class step failed; the walk always runs to completion
-    /// (best-effort for the rest).  Zeroizes the backing buffer last, so
-    /// any captured secret pre-image (e.g. a prior PSK) does not linger.
-    pub async fn apply_undo<V: UndoVerbs>(mut self, verbs: &V, io: &V::Io) -> WalkOutcome {
+    /// (best-effort for the rest). IO teardown scrubs the backing buffer.
+    pub async fn apply_undo<V: UndoVerbs>(self, verbs: &V, io: &V::Io) -> WalkOutcome {
         let mut outcome = WalkOutcome::Ok;
         let mut i = self.nentries;
         while i > 0 {
@@ -425,7 +423,6 @@ impl<'a> UndoLog<'a> {
                 outcome = WalkOutcome::Poisoned;
             }
         }
-        self.zeroize();
         outcome
     }
 
@@ -434,28 +431,14 @@ impl<'a> UndoLog<'a> {
     /// Consumes the log.  All commit-side failures are best-effort
     /// (benign orphans), so this always returns [`WalkOutcome::Ok`]; the
     /// return type mirrors [`apply_undo`](Self::apply_undo) for a uniform
-    /// dispatcher.  Zeroizes the backing buffer last, so any captured
-    /// secret pre-image (e.g. a prior PSK) does not linger.
-    pub async fn apply_commit<V: UndoVerbs>(mut self, verbs: &V, io: &V::Io) -> WalkOutcome {
+    /// dispatcher. IO teardown scrubs the backing buffer.
+    pub async fn apply_commit<V: UndoVerbs>(self, verbs: &V, io: &V::Io) -> WalkOutcome {
         for i in 0..self.nentries {
             let entry = self.entry_at(i);
             // Best-effort: a failed zeroise leaves a benign orphan.
             let _ = self.commit_one(&entry, verbs, io).await;
         }
-        self.zeroize();
         WalkOutcome::Ok
-    }
-
-    /// Scrub the backing buffer (entries + arena) before the borrow ends,
-    /// so captured secret pre-images do not linger in the per-IO DMA heap
-    /// (which is only watermark-reset, not cleared, on the next IO).
-    fn zeroize(&mut self) {
-        // Delegate to `DmaBuf::zeroize`, which uses per-byte volatile
-        // writes + a compiler fence so the wipe cannot be elided even
-        // though these bytes are never read again through this reference.
-        self.buf.zeroize();
-        self.nentries = 0;
-        self.arena_used = 0;
     }
 
     async fn undo_one<V: UndoVerbs>(
@@ -549,7 +532,7 @@ pub trait UndoVerbs {
     /// Restore a `Bool` property.
     fn prop_set_bool(&self, io: &Self::Io, id: PartPropId, value: bool) -> HsmResult<()>;
     /// Restore a byte property from arena bytes.
-    fn prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
+    fn prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &HsmDmaBuf) -> HsmResult<()>;
     /// Destroy a session (its slot + backing vault keys) — the coarse
     /// inverse of session create/promote.
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
@@ -589,8 +572,8 @@ where
         HsmPartitionManager::part_prop_set_bool(self, io, id, value)
     }
 
-    fn prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
-        // `data` is already a `&DmaBuf` sub-view of the per-IO undo arena
+    fn prop_set_bytes(&self, io: &Self::Io, id: PartPropId, data: &HsmDmaBuf) -> HsmResult<()> {
+        // `data` is already a `&HsmDmaBuf` sub-view of the per-IO undo arena
         // (itself carved from the DMA heap), so no re-branding is needed.
         HsmPartitionManager::part_prop_set_bytes(self, io, id, data)
     }
@@ -768,7 +751,12 @@ mod tests {
             self.record(OP_SET_BOOL, id.raw(), u32::from(value));
             Ok(())
         }
-        fn prop_set_bytes(&self, _io: &Self::Io, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+        fn prop_set_bytes(
+            &self,
+            _io: &Self::Io,
+            id: PartPropId,
+            data: &HsmDmaBuf,
+        ) -> HsmResult<()> {
             self.record(OP_SET_BYTES, id.raw(), data.len() as u32);
             self.last_bytes.borrow_mut()[..data.len()].copy_from_slice(data);
             self.last_bytes_len.set(data.len());
@@ -789,9 +777,9 @@ mod tests {
     macro_rules! log {
         ($name:ident) => {
             let mut buf = [0u8; UNDO_LOG_SIZE];
-            // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
+            // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
             #[allow(unsafe_code)]
-            let dma = unsafe { DmaBuf::from_raw_mut(&mut buf) };
+            let dma = unsafe { HsmDmaBuf::from_raw_mut(&mut buf) };
             let mut $name: UndoLog<'_> = UndoLog::new(dma);
         };
     }

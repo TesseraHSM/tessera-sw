@@ -7,15 +7,13 @@
 //! host-supplied message and return it.  A pure hashing utility — no key,
 //! no scope, no partition state — the TBOR analogue of MBOR `ShaDigest`.
 //!
-//! Uses the reserve-then-fill pattern: the response frame is encoded with
-//! the digest slot reserved, then the PAL hashes straight into it — no
-//! intermediate buffer, no copy.  Available to both Crypto-Officer and
-//! Crypto-User sessions.
+//! Consumes the message into a hash context before reclaiming its storage
+//! for the final digest. Available to both Crypto-Officer and Crypto-User.
 
 use tsra_fw_ddi_tbor_types::HashAlgo;
 use tsra_fw_ddi_tbor_types::TborHashReq;
 use tsra_fw_ddi_tbor_types::TborHashResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -40,35 +38,27 @@ fn hsm_hash_algo(algo: HashAlgo) -> HsmResult<HsmHashAlgo> {
 /// No partition lock or undo log is required: the command reads no mutable
 /// partition state and persists nothing — it hashes the message and
 /// returns the digest.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborHashReq::decode(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id()));
-    validate_active_session(pal, io, sess_id)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    pal.alloc_scoped_async(io, async |alloc| {
+        let req = TborHashReq::decode(cmd_buf.request())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id()));
+        validate_active_session(pal, io, sess_id)?;
 
-    let algo = hsm_hash_algo(req.algo())?;
-    let digest_len = algo.digest_len();
-    let msg = req.msg();
+        let algo = hsm_hash_algo(req.algo())?;
+        let mut ctx = pal.hash_begin(io, algo, alloc)?;
+        pal.hash_continue(io, &mut ctx, req.msg()).await?;
 
-    // Build the response with the digest slot reserved (sized exactly to the
-    // algorithm's digest length), then have the PAL hash straight into it.
-    let resp = pal.dma_alloc_var(io, |buf| {
-        let frame = TborHashResp::encode(buf, 0, false)?
-            .digest_reserve(digest_len)?
-            .finish();
-        Ok(frame.as_bytes().len())
-    })?;
-
-    // `decode_mut` hands out a `&mut` view into the reserved slot; the view
-    // is scoped so its borrow of `resp` ends before `resp` is returned.  The
-    // digest is emitted in natural big-endian order.
-    {
-        let out = TborHashResp::decode_mut(resp)?;
-        pal.hash(io, algo, msg, out.digest, true).await?;
-    }
-
-    Ok(resp)
+        let len = TborHashResp::encode(cmd_buf.buffer_mut(), 0, false)?
+            .digest_reserve(algo.digest_len())?
+            .finish()
+            .len();
+        let out = TborHashResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
+        pal.hash_finish(io, ctx, out.digest, true).await?;
+        Ok(len)
+    })
+    .await
 }

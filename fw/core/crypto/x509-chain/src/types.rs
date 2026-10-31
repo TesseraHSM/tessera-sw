@@ -6,7 +6,7 @@
 //! All types are `no_std`-compatible and zero-allocation. Parsed
 //! certificate fields borrow from the input DER buffer.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -81,7 +81,7 @@ pub struct EcPubKey<'a> {
     pub curve: HsmEccCurve,
 
     /// Raw X || Y coordinates (no 0x04 prefix), in DMA-accessible memory.
-    pub point: &'a DmaBuf,
+    pub point: &'a HsmDmaBuf,
 }
 
 /// BasicConstraints extension fields.
@@ -121,14 +121,14 @@ pub mod key_usage {
 
 /// Fields extracted from one DER-encoded X.509 certificate.
 ///
-/// All byte slices borrow from the input `DmaBuf`. The struct is
+/// All byte slices borrow from the input `HsmDmaBuf`. The struct is
 /// valid only as long as the DER buffer it was parsed from.
 #[derive(Debug)]
 pub struct CertInfo<'a> {
     /// Raw DER bytes of the TBSCertificate SEQUENCE (tag + length +
     /// value). This is the data that was signed and must be hashed
     /// for signature verification. Points into DMA-accessible memory.
-    pub tbs_raw: &'a DmaBuf,
+    pub tbs_raw: &'a HsmDmaBuf,
 
     /// Signature algorithm used to sign this certificate.
     pub sig_algo: SigAlgo,
@@ -136,17 +136,17 @@ pub struct CertInfo<'a> {
     /// Raw ECDSA signature bytes from the certificate's signatureValue
     /// BIT STRING. DER-encoded SEQUENCE of two INTEGERs (r, s).
     /// Points into DMA-accessible memory.
-    pub signature: &'a DmaBuf,
+    pub signature: &'a HsmDmaBuf,
 
     /// Raw DER encoding of the issuer Name SEQUENCE.
     /// Used for byte-exact name chaining comparison.
     /// Points into DMA-accessible memory.
-    pub issuer_raw: &'a DmaBuf,
+    pub issuer_raw: &'a HsmDmaBuf,
 
     /// Raw DER encoding of the subject Name SEQUENCE.
     /// Used for byte-exact name chaining comparison.
     /// Points into DMA-accessible memory.
-    pub subject_raw: &'a DmaBuf,
+    pub subject_raw: &'a HsmDmaBuf,
 
     /// The certificate's public key.
     pub pub_key: EcPubKey<'a>,
@@ -179,7 +179,7 @@ pub enum StepResult<'a> {
         leaf_pub_key: &'a EcPubKey<'a>,
 
         /// Raw DER of the leaf certificate's subject Name.
-        leaf_subject: &'a DmaBuf,
+        leaf_subject: &'a HsmDmaBuf,
     },
 
     /// Validation failed.

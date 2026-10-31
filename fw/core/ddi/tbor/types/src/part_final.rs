@@ -84,7 +84,7 @@ const _: () = assert!(crate::evidence::CERT_DESCRIPTORS_MAX_LEN == 6);
 /// `local_mk` backup to restore.
 ///
 /// [`PartPolicy`]: crate::policy::PartPolicy
-#[tbor(opcode = 0x08)]
+#[tbor(opcode = 0x08, pair = TborPartFinalResp)]
 pub struct TborPartFinalReq<'a> {
     /// CO session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -139,7 +139,7 @@ pub struct TborPartFinalReq<'a> {
 /// `PartFinal` response schema.
 ///
 /// Carries the current `local_mk` backup envelope.
-#[tbor(response)]
+#[tbor(response, pair = TborPartFinalReq)]
 pub struct TborPartFinalResp<'a> {
     /// Current `local_mk` backup envelope (`CurrPartLocalMKBackup`).
     /// Always exactly [`LOCAL_MK_BACKUP_LEN`] (260 B).

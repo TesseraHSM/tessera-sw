@@ -27,7 +27,7 @@ pub(crate) fn get_api_rev<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     // GetApiRev is the bootstrap command — rev must not be set.
     if hdr.rev.is_some() {
         return Err(HsmError::UnsupportedRevision);

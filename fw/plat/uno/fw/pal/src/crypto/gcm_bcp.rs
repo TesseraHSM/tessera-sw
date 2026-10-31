@@ -38,8 +38,8 @@
 //!
 //! The tag corrections and GMAC use the software [`Ghash`].
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -112,13 +112,13 @@ fn ghash(h: &Block) -> HsmResult<Ghash> {
 }
 
 /// A `len`-byte buffer aligned for the engine, from the scope's DMA heap.
-fn engine_buf<S: HsmScopedAlloc>(scope: &S, len: usize) -> HsmResult<&mut DmaBuf> {
+fn engine_buf<S: HsmScopedAlloc>(scope: &S, len: usize) -> HsmResult<&mut HsmDmaBuf> {
     let raw = scope.dma_alloc(len + BCP_ADDR_ALIGN - 1)?;
     let off = raw.as_ptr().align_offset(BCP_ADDR_ALIGN);
     Ok(&mut raw[off..off + len])
 }
 
-fn is_aligned(buf: &DmaBuf) -> bool {
+fn is_aligned(buf: &HsmDmaBuf) -> bool {
     buf.as_ptr().align_offset(BCP_ADDR_ALIGN) == 0
 }
 
@@ -133,22 +133,22 @@ enum Dir<'a> {
 enum Bufs<'a> {
     /// Read `src`, write `dst` (the same length).
     Copy {
-        src: &'a DmaBuf,
-        dst: &'a mut DmaBuf,
+        src: &'a HsmDmaBuf,
+        dst: &'a mut HsmDmaBuf,
     },
     /// Transform in place.
-    InPlace(&'a mut DmaBuf),
+    InPlace(&'a mut HsmDmaBuf),
 }
 
 impl Bufs<'_> {
-    fn src(&self) -> &DmaBuf {
+    fn src(&self) -> &HsmDmaBuf {
         match self {
             Self::Copy { src, .. } => src,
             Self::InPlace(buf) => buf,
         }
     }
 
-    fn dst(&mut self) -> &mut DmaBuf {
+    fn dst(&mut self) -> &mut HsmDmaBuf {
         match self {
             Self::Copy { dst, .. } => dst,
             Self::InPlace(buf) => buf,
@@ -180,14 +180,13 @@ impl Bufs<'_> {
 
 impl UnoHsmPal {
     /// `H = E_K(0¹²⁸)` on the HSM AES engine.
-    async fn hash_subkey<S: HsmScopedAlloc>(&self, key: &DmaBuf, scope: &S) -> HsmResult<Block> {
+    async fn hash_subkey<S: HsmScopedAlloc>(&self, key: &HsmDmaBuf, scope: &S) -> HsmResult<Block> {
         let zero = scope.dma_alloc_zeroed(AES_BLOCK_SIZE)?;
         let out = scope.dma_alloc(AES_BLOCK_SIZE)?;
         self.aes_run(AesMode::Ecb, AesOp::Encrypt, key, None, zero, out)
             .await?;
         let mut h = [0u8; AES_BLOCK_SIZE];
         h.copy_from_slice(out);
-        out.zeroize();
         Ok(h)
     }
 
@@ -197,8 +196,8 @@ impl UnoHsmPal {
     async fn gcm_run(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
         dir: Dir<'_>,
         mut bufs: Bufs<'_>,
@@ -251,7 +250,7 @@ impl UnoHsmPal {
                 .await;
             let result = verdict(dir, &engine_tag, done);
             if result.is_err() {
-                bufs.dst()[pad..len].zeroize();
+                bufs.dst()[pad..len].fill(0);
             }
             return result;
         }
@@ -295,7 +294,7 @@ impl UnoHsmPal {
                 let done = self.bcp.gcm(req(bufs.engine_data(len))).await;
                 let result = verdict(dir, &engine_tag, done);
                 if result.is_err() {
-                    bufs.dst()[pad..len].zeroize();
+                    bufs.dst()[pad..len].fill(0);
                 }
                 result
             } else {
@@ -312,7 +311,6 @@ impl UnoHsmPal {
                     }
                     bufs.dst()[..len].copy_from_slice(&work[..len]);
                 }
-                work.zeroize();
                 result
             };
             let engine_tag = result?;
@@ -338,7 +336,7 @@ impl UnoHsmPal {
     async fn gmac(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         iv: &[u8; GCM_IV_LEN],
         aad_len: usize,
         dir: Dir<'_>,
@@ -361,7 +359,6 @@ impl UnoHsmPal {
             let mut ek = [0u8; AES_BLOCK_SIZE];
             ek.copy_from_slice(ek_j0);
             let tag = xor(&g.finish(), &ek);
-            out.zeroize();
             ek.fill(0);
 
             if let Dir::Decrypt(expected) = dir
@@ -385,12 +382,12 @@ impl UnoHsmPal {
     pub(super) async fn gcm_encrypt_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        plaintext: &DmaBuf,
-        ciphertext: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        plaintext: &HsmDmaBuf,
+        ciphertext: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN || ciphertext.len() < plaintext.len() {
             return Err(HsmError::InvalidArg);
@@ -411,11 +408,11 @@ impl UnoHsmPal {
     pub(super) async fn gcm_encrypt_in_place_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        data: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -434,12 +431,12 @@ impl UnoHsmPal {
     pub(super) async fn gcm_decrypt_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        ciphertext: &DmaBuf,
-        plaintext: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        plaintext: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let tag: &[u8] = tag;
         let tag: &Block = tag.try_into().map_err(|_| HsmError::InvalidArg)?;
@@ -461,11 +458,11 @@ impl UnoHsmPal {
     pub(super) async fn gcm_decrypt_in_place_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        data: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let tag: &[u8] = tag;
         let tag: &Block = tag.try_into().map_err(|_| HsmError::InvalidArg)?;

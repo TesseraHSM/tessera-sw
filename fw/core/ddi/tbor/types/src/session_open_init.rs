@@ -117,7 +117,7 @@ pub const MAC_RESP_LEN: usize = 48;
 /// `exported` secret on the HSM and fail the Phase-1 confirm MAC.
 /// See [`tsra_fw_hsm_pal_traits::SessionSuite`] for the wire
 /// registry.
-#[tbor(opcode = 0x03)]
+#[tbor(opcode = 0x03, pair = TborSessionOpenInitResp)]
 pub struct TborSessionOpenInitReq<'a> {
     /// PSK identifier asserting the caller role (`CryptoOfficer` = `0`,
     /// `CryptoUser` = `1`). Any other value is rejected with
@@ -159,7 +159,7 @@ pub struct TborSessionOpenInitReq<'a> {
 /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId) and marked
 /// `#[tbor(session_id)]` so the codec emits it as a 16-bit `SessionId`
 /// TOC entry (matching MBOR's session-id encoding).
-#[tbor(response)]
+#[tbor(response, pair = TborSessionOpenInitReq)]
 pub struct TborSessionOpenInitResp<'a> {
     /// Reserved session identifier (slot index).
     #[tbor(session_id)]

@@ -49,7 +49,7 @@ pub const TBOR_OP_MLDSA_SIGN: u8 = 0x27;
 /// `masked_key` is `#[tbor(mutable)]` so the handler can unmask it **in
 /// place** in the request buffer (via `decode_mut`) — no scratch copy —
 /// and sign directly from the recovered key.
-#[tbor(opcode = 0x27)]
+#[tbor(opcode = 0x27, pair = TborMlDsaSignResp)]
 pub struct TborMlDsaSignReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -73,7 +73,7 @@ pub struct TborMlDsaSignReq<'a> {
 }
 
 /// `MlDsaSign` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborMlDsaSignReq)]
 pub struct TborMlDsaSignResp<'a> {
     /// ML-DSA signature bytes.  Up to 4627 B for ML-DSA-87.
     #[tbor(buffer, max_len = 4627, mutable)]

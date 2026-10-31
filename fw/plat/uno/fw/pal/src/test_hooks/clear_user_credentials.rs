@@ -4,7 +4,7 @@
 //! Clear the partition's stored user credential.
 
 use tsra_fw_ddi_mbor::MborDecoder;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -24,12 +24,12 @@ pub(super) async fn dispatch<'p>(
     decoder: &mut MborDecoder<'_>,
     request_field_count: u8,
     request_len: usize,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     expect_empty_payload(decoder, request_field_count, request_len)?;
     execute(pal, io, hdr).await
 }
 
-async fn execute<'p>(pal: &'p UnoHsmPal, io: &UnoHsmIo, hdr: &ReqHdr) -> HsmResult<&'p DmaBuf> {
+async fn execute<'p>(pal: &'p UnoHsmPal, io: &UnoHsmIo, hdr: &ReqHdr) -> HsmResult<&'p HsmDmaBuf> {
     // Serialize with EstablishCredential/ChangePin, which hold this lock
     // across their own validation and CREDENTIAL commit: without it, a
     // concurrent request could interleave with the clear below and leave

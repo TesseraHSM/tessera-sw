@@ -458,7 +458,7 @@ pub fn gen_field_group(schema: &Schema) -> TokenStream {
 
         /// Zero-copy sub-view over an encoded field group.
         #vis struct #view_name<'a> {
-            buf: &'a tsra_fw_hsm_pal_traits::DmaBuf,
+            buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf,
             header_len: usize,
             toc_offset: usize,
         }
@@ -466,7 +466,7 @@ pub fn gen_field_group(schema: &Schema) -> TokenStream {
         impl<'a> #view_name<'a> {
             /// Construct from a validated buffer at the given TOC offset.
             #[doc(hidden)]
-            pub fn __new(buf: &'a tsra_fw_hsm_pal_traits::DmaBuf, header_len: usize, toc_offset: usize) -> Self {
+            pub fn __new(buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf, header_len: usize, toc_offset: usize) -> Self {
                 Self { buf, header_len, toc_offset }
             }
 
@@ -567,8 +567,7 @@ fn gen_group_view_accessor(field: &SchemaField, toc_idx: &TokenStream) -> TokenS
         WireType::Uint32 | WireType::Uint64 | WireType::Buffer | WireType::SealedKey => {
             let ds = quote! {
                 {
-                    let toc_count_idx: usize = if self.header_len == 4 { 2 } else { 3 };
-                    let tc = (self.buf[toc_count_idx] & 0x1F) as usize + 1;
+                    let tc = (self.buf[2] & 0x1F) as usize + 1;
                     self.header_len + tc * 4
                 }
             };
@@ -585,7 +584,7 @@ fn gen_group_view_accessor(field: &SchemaField, toc_idx: &TokenStream) -> TokenS
                         // to `&[T]`; a ragged blob falls back to `&[]`.
                         quote! {
                             {
-                                let __b: &tsra_fw_hsm_pal_traits::DmaBuf =
+                                let __b: &tsra_fw_hsm_pal_traits::HsmDmaBuf =
                                     tsra_fw_ddi_tbor::toc::read_toc_buffer(self.buf, self.header_len, self.toc_offset + #toc_idx, #ds);
                                 <[#elem] as ::zerocopy::TryFromBytes>::try_ref_from_bytes(&__b[..]).unwrap_or(&[])
                             }
@@ -596,7 +595,7 @@ fn gen_group_view_accessor(field: &SchemaField, toc_idx: &TokenStream) -> TokenS
                         // blob falls back to a zeroed static.
                         quote! {
                             {
-                                let __b: &tsra_fw_hsm_pal_traits::DmaBuf =
+                                let __b: &tsra_fw_hsm_pal_traits::HsmDmaBuf =
                                     tsra_fw_ddi_tbor::toc::read_toc_buffer(self.buf, self.header_len, self.toc_offset + #toc_idx, #ds);
                                 match <#ty as ::zerocopy::TryFromBytes>::try_ref_from_bytes(&__b[..]) {
                                     ::core::result::Result::Ok(__r) => __r,
@@ -631,7 +630,7 @@ fn gen_group_view_accessor(field: &SchemaField, toc_idx: &TokenStream) -> TokenS
             } else if let Some(elem) = &field.elem_type {
                 quote! { &'a [#elem] }
             } else {
-                quote! { &'a tsra_fw_hsm_pal_traits::DmaBuf }
+                quote! { &'a tsra_fw_hsm_pal_traits::HsmDmaBuf }
             }
         }
     };

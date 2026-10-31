@@ -34,7 +34,7 @@ Algorithm:
    mask(BKS3, PartLocalMK)` and `sd_mk_backup = mask(SDMK, SDBMK)`.
 5. Vault `SDMK` (SecurityDomain scope), record `SD_MK_KEY_ID`, and mark
    the partition SD-initialized — undo-guarded.  BKS3, SDMK, and SDBMK are
-   zeroized before returning.
+   scrubbed during IO teardown.
 
 The command is **stateful** (vaults `SDMK`, marks the partition
 SD-initialized) and **one-shot** per partition incarnation: a second

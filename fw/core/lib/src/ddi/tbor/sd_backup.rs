@@ -29,7 +29,7 @@ use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -101,13 +101,13 @@ pub(super) fn platform_svn_owner<P: HsmPal>(pal: &P) -> HsmResult<(u64, u16)> {
 ///
 /// Shared by the local restore (recovers BKS3 to re-provision the SD) and
 /// the peer-backup create (recovers BKS3 to re-seal it to a peer).  The
-/// caller wipes `pok_scratch`.
+/// IO teardown scrubs `pok_scratch`.
 pub(super) async fn recover_bks3_from_pok_local<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     svn: u64,
-    pok_scratch: &'a mut DmaBuf,
-) -> HsmResult<&'a DmaBuf> {
+    pok_scratch: &'a mut HsmDmaBuf,
+) -> HsmResult<&'a HsmDmaBuf> {
     let local_mk_id = part_state::part_local_mk_key_id(pal, io)?;
     let local_mk = pal.vault_key(io, local_mk_id)?;
     let view = unmask(pal, io, local_mk, pok_scratch).await?;
@@ -137,10 +137,10 @@ pub(super) async fn derive_sdbmk<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    bks3: &DmaBuf,
+    bks3: &HsmDmaBuf,
     svn: u64,
     owner: u16,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let sdbmk = alloc.dma_alloc(SDBMK_LEN)?;
     // Stage the stored policy hash in scratch so the extra context does not
     // hold a borrow of partition state across the derivation await.
@@ -171,11 +171,11 @@ pub(super) async fn mask_sd_mk_backup<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    sdbmk: &DmaBuf,
-    sdmk: &DmaBuf,
+    sdbmk: &HsmDmaBuf,
+    sdmk: &HsmDmaBuf,
     svn: u64,
     owner: u16,
-    out: &mut DmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let label = alloc.dma_alloc(SDMK_ENVELOPE_LABEL.len())?;
     label.copy_from_slice(SDMK_ENVELOPE_LABEL);
@@ -210,10 +210,10 @@ pub(super) async fn mask_pok_local_backup<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    bks3: &DmaBuf,
+    bks3: &HsmDmaBuf,
     svn: u64,
     owner: u16,
-    out: &mut DmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let local_mk_id = part_state::part_local_mk_key_id(pal, io)?;
     let local_mk = pal.vault_key(io, local_mk_id)?;
@@ -257,8 +257,7 @@ pub(super) async fn mask_pok_local_backup<P: HsmPal>(
 /// *current* `{svn, owner}` into `pok_local_out` / `sd_mk_out`, and commits
 /// the SD to the vault (undo-guarded).
 ///
-/// The caller wipes `bks3` and `prev_sd_mk_scratch`; both derived `SDBMK`s
-/// are scrubbed here on every exit path.
+/// IO teardown scrubs `bks3`, `prev_sd_mk_scratch`, and both derived `SDBMK`s.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
     pal: &P,
@@ -267,10 +266,10 @@ pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
     undo: &mut UndoLog<'p>,
     svn: u64,
     owner: u16,
-    bks3: &DmaBuf,
-    prev_sd_mk_scratch: &mut DmaBuf,
-    pok_local_out: &mut DmaBuf,
-    sd_mk_out: &mut DmaBuf,
+    bks3: &HsmDmaBuf,
+    prev_sd_mk_scratch: &mut HsmDmaBuf,
+    pok_local_out: &mut HsmDmaBuf,
+    sd_mk_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // Peek the previous sd_mk_backup's own cleartext `{svn, owner}`.  SDBMK is
     // bound to `{svn, owner}` (KBKDF over `mfgr_seed[svn] ‖ owner_seed[owner]`),
@@ -290,9 +289,7 @@ pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
 
     // SDBMK for the UNMASK, derived at the backup's own `{svn, owner}`; and
     // SDBMK for the RE-MASK, derived at the current `{svn, owner}` so the
-    // refreshed envelope is bound to this firmware's identity.  Both are their
-    // own scratch allocations (scope rewind does not clear DMA memory), so both
-    // are zeroized on EVERY exit path below.
+    // refreshed envelope is bound to this firmware's identity.
     let sdbmk_prev = derive_sdbmk(pal, io, alloc, bks3, prev_svn, prev_owner).await?;
     let sdbmk_curr = derive_sdbmk(pal, io, alloc, bks3, svn, owner).await?;
     let res = async {
@@ -325,8 +322,6 @@ pub(super) async fn reprovision_sd_from_bks3<'p, P: HsmPal>(
         commit_sd_to_vault(pal, io, undo, sdmk).await
     }
     .await;
-    sdbmk_curr.zeroize();
-    sdbmk_prev.zeroize();
     res
 }
 
@@ -337,7 +332,7 @@ pub(super) async fn commit_sd_to_vault<'p, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     undo: &mut UndoLog<'p>,
-    sdmk: &DmaBuf,
+    sdmk: &HsmDmaBuf,
 ) -> HsmResult<()> {
     // Atomic one-shot claim first (the race-winner gate); the recorded
     // inverse clears the flag on rollback.

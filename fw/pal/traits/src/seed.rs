@@ -22,7 +22,7 @@
 //! takes no [`HsmIo`](crate::HsmIo) / partition handle.  Seeds are
 //! returned as plain `&[u8]` views — consumers copy them into a freshly
 //! allocated, aligned KBKDF context before use and never DMA them from
-//! backing storage, so no [`DmaBuf`](crate::DmaBuf) (and hence no
+//! backing storage, so no [`HsmDmaBuf`](crate::HsmDmaBuf) (and hence no
 //! alignment) promise is made over the seed bytes.
 
 use crate::HsmResult;

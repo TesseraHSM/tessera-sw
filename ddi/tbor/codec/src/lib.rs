@@ -5,7 +5,7 @@
 //!
 //! Provides zero-copy decoding ([`RequestView`], [`ResponseView`]) and
 //! fluent encoding ([`RequestEncoder`], [`ResponseEncoder`]) of TBOR
-//! messages over plain `&[u8]` / `&mut [u8]` buffers with no `DmaBuf`
+//! messages over plain `&[u8]` / `&mut [u8]` buffers with no `HsmDmaBuf`
 //! branding, so host-side code does not have to depend on any firmware
 //! crate. The firmware codec ([`tsra_fw_ddi_tbor`]) speaks the same
 //! wire format but is maintained independently.

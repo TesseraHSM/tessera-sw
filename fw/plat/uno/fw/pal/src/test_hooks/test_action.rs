@@ -14,9 +14,9 @@ use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborMap;
 #[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_ddi_mbor_derive::Ddi;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 #[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -113,7 +113,7 @@ pub(super) async fn dispatch<'p>(
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_len: usize,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let selector = decode_action_selector(decoder)?;
 
     match selector.action {
@@ -219,7 +219,7 @@ fn decode_payload_bytes<'a>(
     decoder: &mut MborDecoder<'a>,
     request_field_count: u8,
     request_len: usize,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     if request_field_count != 2 {
         return Err(HsmError::DdiDecodeFailed);
     }
@@ -245,7 +245,7 @@ pub(super) fn encode_success<'p>(
     pal: &'p UnoHsmPal,
     io: &UnoHsmIo,
     hdr: &ReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {
         encode_resp(
             &success_hdr(hdr, hdr.sess_id),

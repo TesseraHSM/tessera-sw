@@ -42,7 +42,7 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiKbkdfCounterHmacDeriveReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let input_key_id = HsmKeyId::from(body.key_id);
@@ -70,34 +70,27 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
 
     {
         let kdk = pal.vault_key(io, input_key_id)?;
-        if let Err(e) = pal
-            .sp800_108_kdf(
-                io,
-                algo,
-                kdk,
-                body.label.as_deref(),
-                body.context.as_deref(),
-                out,
-            )
-            .await
-        {
-            out.zeroize();
-            return Err(e);
-        }
+        pal.sp800_108_kdf(
+            io,
+            algo,
+            kdk,
+            body.label.as_deref(),
+            body.context.as_deref(),
+            out,
+        )
+        .await?;
     }
 
     // Commit the derived key: AES bulk keys (GCM / XTS) are handed to the
     // bulk-crypto backend (the vault records only the returned
     // `bulk_key_id` handle, carried in the response for later bulk
-    // ops); every other kind is stored directly in the vault.  Scrub the
-    // derived material if the commit fails, before propagating the error.
+    // ops); every other kind is stored directly in the vault.
     let (key_handle, bulk_key_id) =
         match super::bulk::commit_key(pal, io, out, target.kind, HsmSessId::from(sess_id), attrs)
             .await
         {
             Ok(v) => v,
             Err(e) => {
-                out.zeroize();
                 return Err(e);
             }
         };
@@ -133,10 +126,5 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
     }
     .await;
 
-    // Scrub the derived key material now that the vault (or the bulk-crypto
-    // backend, for bulk keys) owns it and masking has consumed it.  Wipe on
-    // all paths — including a masking error — since the per-IO arena is not
-    // guaranteed to be wiped on teardown.
-    out.zeroize();
     super::bulk::rollback_on_err(pal, io, key_handle, result.map(|b| &*b)).await
 }

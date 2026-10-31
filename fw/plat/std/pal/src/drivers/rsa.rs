@@ -185,6 +185,28 @@ impl StdRsa {
         y: &[u8],
         x: &mut [u8],
     ) -> HsmResult<()> {
+        let result = self.mod_exp_priv_result(priv_key, y, x.len()).await?;
+        super::reverse_copy(x, &result);
+        Ok(())
+    }
+
+    /// Replace a little-endian input block with the private-key result.
+    pub async fn mod_exp_priv_in_place(
+        &self,
+        priv_key: &RsaPrivateKey,
+        y_x: &mut [u8],
+    ) -> HsmResult<()> {
+        let result = self.mod_exp_priv_result(priv_key, y_x, y_x.len()).await?;
+        super::reverse_copy(y_x, &result);
+        Ok(())
+    }
+
+    async fn mod_exp_priv_result(
+        &self,
+        priv_key: &RsaPrivateKey,
+        y: &[u8],
+        out_len: usize,
+    ) -> HsmResult<Vec<u8>> {
         // FIPS / NIST ACVP: the input value `m` must satisfy `1 < m < n-1`.
         // Reject out-of-range inputs with `InvalidArg` before the
         // exponentiation.  The check lives at the driver level so every
@@ -196,10 +218,7 @@ impl StdRsa {
         // Wire operands are little-endian; OpenSSL is big-endian.
         let mut y_be = y.to_vec();
         y_be.reverse();
-        let out_len = x.len();
-
-        let result = self
-            .pool
+        self.pool
             .submit_with_result(async move {
                 let mut algo = RsaEncryptAlgo::with_no_padding();
                 let mut buf = vec![0u8; out_len];
@@ -207,11 +226,7 @@ impl StdRsa {
                     .map_err(|_| HsmError::RsaDecryptFailed)?;
                 Ok::<_, HsmError>(buf)
             })
-            .await?;
-
-        // `result` is big-endian; emit the little-endian wire form.
-        super::reverse_copy(x, &result);
-        Ok(())
+            .await
     }
 
     /// Public-key modular exponentiation: `y = x^e mod n`.

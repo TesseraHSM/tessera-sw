@@ -19,9 +19,10 @@ SHA-1 is available for legacy compatibility, not collision-resistant uses
 such as digital signatures. Firmware without SHA-1 support rejects selector
 `0` with `InvalidArg`; existing SHA-2 selectors and wire layouts are unchanged.
 
-The handler uses the reserve-then-fill pattern: the response frame is
-encoded with the digest slot reserved, then the PAL hashes straight into
-it — no intermediate buffer, no copy.  The digest is emitted in natural
+The handler consumes the message into a streaming hash context before
+reclaiming the same allocation for a compact response. Finalization writes
+the digest into its final response slot, without an encoded-response
+allocation or payload copy-back. The digest is emitted in natural
 (big-endian) byte order.
 
 Available to **both Crypto-Officer and Crypto-User** sessions.

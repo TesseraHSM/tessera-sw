@@ -10,15 +10,15 @@
 use std::vec::Vec;
 
 use tsra_fw_ddi_tbor::*;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 
 // SAFETY: test-only branding. Host-side tests have no real DMA engine,
 // so the DMA-reachability contract is moot; the brand is needed purely
 // to satisfy the `RequestView::parse` / `ResponseView::parse` signatures.
-fn brand(b: &[u8]) -> &DmaBuf {
+fn brand(b: &[u8]) -> &HsmDmaBuf {
     // SAFETY: see fn-level doc comment.
-    unsafe { DmaBuf::from_raw(b) }
+    unsafe { HsmDmaBuf::from_raw(b) }
 }
 
 // ── Spec Worked Example 1: Simple Request ──────────────────────────────
@@ -30,17 +30,34 @@ fn spec_example1_request_decode() {
     // encoding per the field definitions (type=7, len=5, offset=0) is
     // `1C 00 A0 00` (BE packed bitfield).
     let wire: &[u8] = &[
-        0x01, 0x00, 0x01, 0x0A, // header: v1, reserved, 2 entries, opcode 0x0A
-        0x00, 0x00, 0x00, 0x2B, // TOC[0]: session_id = 0x002B (43)
-        0x1C, 0x00, 0xA0, 0x00, // TOC[1]: buffer, len=5, offset=0
-        0x48, 0x65, 0x6C, 0x6C, 0x6F, // data: "Hello"
+        PROTOCOL_VERSION,
+        0x00,
+        0x01,
+        0x0A,
+        0,
+        0,
+        0,
+        0, // header: v1, reserved, 2 entries, opcode 0x0A
+        0x00,
+        0x00,
+        0x00,
+        0x2B, // TOC[0]: session_id = 0x002B (43)
+        0x1C,
+        0x00,
+        0xA0,
+        0x00, // TOC[1]: buffer, len=5, offset=0
+        0x48,
+        0x65,
+        0x6C,
+        0x6C,
+        0x6F, // data: "Hello"
     ];
 
     let view = RequestView::parse(brand(wire)).unwrap();
-    assert_eq!(view.version(), 0x01);
+    assert_eq!(view.version(), PROTOCOL_VERSION);
     assert_eq!(view.opcode(), 0x0A);
     assert_eq!(view.toc_count(), 2);
-    assert_eq!(view.len(), 17);
+    assert_eq!(view.len(), 21);
 
     match view.toc_entry(0) {
         TocEntry::SessionId(v) => assert_eq!(v, 43),
@@ -56,7 +73,7 @@ fn spec_example1_request_decode() {
 #[test]
 fn spec_example1_request_encode() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .session_id(43)
         .unwrap()
         .buffer(b"Hello")
@@ -64,7 +81,7 @@ fn spec_example1_request_encode() {
         .finish()
         .unwrap();
 
-    assert_eq!(msg.len(), 17);
+    assert_eq!(msg.len(), 21);
 
     let view = RequestView::parse(brand(msg)).unwrap();
     assert_eq!(view.opcode(), 0x0A);
@@ -88,14 +105,25 @@ fn spec_example2_response_decode() {
     // encoding per field definitions (type=7, len=3, offset=0) is
     // `1C 00 60 00` (BE packed bitfield).
     let wire: &[u8] = &[
-        0x01, 0x01, 0x00, 0x00, // header: v1, flags=0x01 (FIPS), reserved, 1 entry
-        0x00, 0x00, 0x00, 0x00, // status: 0 (Success)
-        0x1C, 0x00, 0x60, 0x00, // TOC[0]: buffer, len=3, offset=0
-        0x4F, 0x4B, 0x21, // data: "OK!"
+        PROTOCOL_VERSION,
+        0x01,
+        0x00,
+        0x00, // header: v1, flags=0x01 (FIPS), reserved, 1 entry
+        0x00,
+        0x00,
+        0x00,
+        0x00, // status: 0 (Success)
+        0x1C,
+        0x00,
+        0x60,
+        0x00, // TOC[0]: buffer, len=3, offset=0
+        0x4F,
+        0x4B,
+        0x21, // data: "OK!"
     ];
 
     let view = ResponseView::parse(brand(wire)).unwrap();
-    assert_eq!(view.version(), 0x01);
+    assert_eq!(view.version(), PROTOCOL_VERSION);
     assert!(view.fips_approved());
     assert_eq!(view.status(), 0);
     assert_eq!(view.toc_count(), 1);
@@ -110,7 +138,7 @@ fn spec_example2_response_decode() {
 #[test]
 fn spec_example2_response_encode() {
     let mut buf = [0u8; 256];
-    let msg = ResponseEncoder::new(&mut buf, 0x01, 0, true)
+    let msg = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, true)
         .buffer(b"OK!")
         .unwrap()
         .finish()
@@ -132,7 +160,7 @@ fn spec_example2_response_encode() {
 #[test]
 fn round_trip_session_id() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x01)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x01)
         .session_id(0x1234)
         .unwrap()
         .finish()
@@ -148,7 +176,7 @@ fn round_trip_session_id() {
 #[test]
 fn round_trip_key_id() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x02)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x02)
         .key_id(0xABCD)
         .unwrap()
         .finish()
@@ -164,7 +192,7 @@ fn round_trip_key_id() {
 #[test]
 fn round_trip_uint8() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x03)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x03)
         .uint8(0xFF)
         .unwrap()
         .finish()
@@ -180,7 +208,7 @@ fn round_trip_uint8() {
 #[test]
 fn round_trip_uint16() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x04)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x04)
         .uint16(0xBEEF)
         .unwrap()
         .finish()
@@ -196,7 +224,7 @@ fn round_trip_uint16() {
 #[test]
 fn round_trip_uint32() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x05)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x05)
         .uint32(0xDEADBEEF)
         .unwrap()
         .finish()
@@ -212,7 +240,7 @@ fn round_trip_uint32() {
 #[test]
 fn round_trip_uint64() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x06)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x06)
         .uint64(0x0123456789ABCDEF)
         .unwrap()
         .finish()
@@ -229,7 +257,7 @@ fn round_trip_uint64() {
 fn round_trip_sealed_key() {
     let key_data = b"sealed-key-blob-here";
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x07)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x07)
         .sealed_key(key_data)
         .unwrap()
         .finish()
@@ -245,7 +273,7 @@ fn round_trip_sealed_key() {
 #[test]
 fn round_trip_multiple_entries() {
     let mut buf = [0u8; 512];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x72)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x72)
         .session_id(43)
         .unwrap()
         .key_id(16)
@@ -289,7 +317,7 @@ fn round_trip_multiple_entries() {
 #[test]
 fn round_trip_response_with_status_and_data() {
     let mut buf = [0u8; 512];
-    let msg = ResponseEncoder::new(&mut buf, 0x01, 0x00000005, false)
+    let msg = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0x00000005, false)
         .uint8(42)
         .unwrap()
         .buffer(b"error details")
@@ -317,13 +345,13 @@ fn round_trip_response_with_status_and_data() {
 #[test]
 fn decode_minimum_request() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0xFF)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0xFF)
         .uint8(0)
         .unwrap()
         .finish()
         .unwrap();
 
-    assert_eq!(msg.len(), 8);
+    assert_eq!(msg.len(), 12);
     let view = RequestView::parse(brand(msg)).unwrap();
     assert_eq!(view.toc_count(), 1);
     assert_eq!(view.data_size(), 0);
@@ -332,7 +360,7 @@ fn decode_minimum_request() {
 #[test]
 fn decode_minimum_response() {
     let mut buf = [0u8; 256];
-    let msg = ResponseEncoder::new(&mut buf, 0x01, 0, false)
+    let msg = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(0)
         .unwrap()
         .finish()
@@ -347,7 +375,7 @@ fn decode_minimum_response() {
 #[test]
 fn empty_buffer_field() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .buffer(&[])
         .unwrap()
         .finish()
@@ -363,7 +391,7 @@ fn empty_buffer_field() {
 #[test]
 fn max_toc_entries() {
     let mut buf = [0u8; 8192];
-    let mut enc = RequestEncoder::new(&mut buf, 0x01, 0x0A);
+    let mut enc = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A);
     for i in 0..32u8 {
         enc = enc.uint8(i).unwrap();
     }
@@ -390,7 +418,7 @@ fn decode_buffer_too_short() {
 
 #[test]
 fn decode_unsupported_version() {
-    let wire = [0x02, 0x00, 0x00, 0x0A, 0x0C, 0x00, 0x00, 0x00];
+    let wire = [0x02, 0x00, 0x00, 0x0A, 0, 0, 0, 0, 0x0C, 0x00, 0x00, 0x00];
     let err = RequestView::parse(brand(&wire)).unwrap_err();
     assert_eq!(err, HsmError::TborUnsupportedVersion);
 }
@@ -398,8 +426,18 @@ fn decode_unsupported_version() {
 #[test]
 fn decode_message_truncated() {
     let wire = [
-        0x01, 0x00, 0x01, 0x0A, // 2 TOC entries expected
-        0x00, 0x00, 0x00, 0x2B, // only 1 present
+        PROTOCOL_VERSION,
+        0x00,
+        0x01,
+        0x0A,
+        0,
+        0,
+        0,
+        0, // 2 TOC entries expected
+        0x00,
+        0x00,
+        0x00,
+        0x2B, // only 1 present
     ];
     let err = RequestView::parse(brand(&wire)).unwrap_err();
     assert_eq!(err, HsmError::TborMessageTruncated);
@@ -410,7 +448,20 @@ fn decode_offset_out_of_bounds() {
     // buffer (type=7) with length=127, offset=0 — but no data section
     let word = toc::build_toc_offset_len(TocType::Buffer as u8, 127, 0);
     let wb = word.to_be_bytes();
-    let wire = [0x01, 0x00, 0x00, 0x0A, wb[0], wb[1], wb[2], wb[3]];
+    let wire = [
+        PROTOCOL_VERSION,
+        0x00,
+        0x00,
+        0x0A,
+        0,
+        0,
+        0,
+        0,
+        wb[0],
+        wb[1],
+        wb[2],
+        wb[3],
+    ];
     let err = RequestView::parse(brand(&wire)).unwrap_err();
     assert_eq!(err, HsmError::TborOffsetLengthOutOfBounds);
 }
@@ -421,7 +472,20 @@ fn decode_invalid_uint32_length() {
     let word = toc::build_toc_offset_len(TocType::Uint32 as u8, 3, 0);
     let wb = word.to_be_bytes();
     let wire = [
-        0x01, 0x00, 0x00, 0x0A, wb[0], wb[1], wb[2], wb[3], 0x00, 0x00,
+        PROTOCOL_VERSION,
+        0x00,
+        0x00,
+        0x0A,
+        0,
+        0,
+        0,
+        0,
+        wb[0],
+        wb[1],
+        wb[2],
+        wb[3],
+        0x00,
+        0x00,
         0x00, // 3 bytes of data
     ];
     let err = RequestView::parse(brand(&wire)).unwrap_err();
@@ -431,7 +495,7 @@ fn decode_invalid_uint32_length() {
 #[test]
 fn encode_too_many_toc_entries() {
     let mut buf = [0u8; 8192];
-    let mut enc = RequestEncoder::new(&mut buf, 0x01, 0x0A);
+    let mut enc = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A);
     for _ in 0..32 {
         enc = enc.uint8(0).unwrap();
     }
@@ -442,7 +506,7 @@ fn encode_too_many_toc_entries() {
 #[test]
 fn encode_buffer_too_small() {
     let mut buf = [0u8; 8];
-    let err = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let err = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .buffer(b"this is way too long for the buffer")
         .unwrap_err();
     assert_eq!(err, HsmError::TborBufferTooSmall);
@@ -458,7 +522,22 @@ fn decode_unknown_toc_type_preserved() {
     let kw = known_word.to_be_bytes();
 
     let wire = [
-        0x01, 0x00, 0x01, 0x0A, uw[0], uw[1], uw[2], uw[3], kw[0], kw[1], kw[2], kw[3],
+        PROTOCOL_VERSION,
+        0x00,
+        0x01,
+        0x0A,
+        0,
+        0,
+        0,
+        0,
+        uw[0],
+        uw[1],
+        uw[2],
+        uw[3],
+        kw[0],
+        kw[1],
+        kw[2],
+        kw[3],
     ];
 
     let view = RequestView::parse(brand(&wire)).unwrap();
@@ -479,7 +558,7 @@ fn decode_unknown_toc_type_preserved() {
 #[test]
 fn decode_nonzero_reserved_bits_accepted() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .uint8(1)
         .unwrap()
         .finish()
@@ -502,7 +581,7 @@ fn decode_nonzero_reserved_bits_accepted() {
 #[test]
 fn toc_iter_yields_all_entries() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .session_id(1)
         .unwrap()
         .uint8(2)
@@ -525,7 +604,7 @@ fn toc_iter_yields_all_entries() {
 #[test]
 fn display_request_view() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .session_id(43)
         .unwrap()
         .buffer(b"Hello")
@@ -544,7 +623,7 @@ fn display_request_view() {
 #[test]
 fn display_response_view() {
     let mut buf = [0u8; 256];
-    let msg = ResponseEncoder::new(&mut buf, 0x01, 0, true)
+    let msg = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, true)
         .buffer(b"OK!")
         .unwrap()
         .finish()
@@ -561,7 +640,7 @@ fn display_response_view() {
 #[test]
 fn hex_dump_format() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .uint8(42)
         .unwrap()
         .finish()
@@ -577,7 +656,7 @@ fn hex_dump_format() {
 #[test]
 fn round_trip_none_entry() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .none()
         .unwrap()
         .finish()
@@ -591,7 +670,7 @@ fn round_trip_none_entry() {
 #[test]
 fn none_mixed_with_other_entries() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .session_id(42)
         .unwrap()
         .none()
@@ -614,7 +693,7 @@ fn none_mixed_with_other_entries() {
 #[test]
 fn none_response_round_trip() {
     let mut buf = [0u8; 256];
-    let msg = ResponseEncoder::new(&mut buf, 0x01, 0, false)
+    let msg = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .none()
         .unwrap()
         .uint8(7)
@@ -631,7 +710,7 @@ fn none_response_round_trip() {
 #[test]
 fn all_none_entries() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .none()
         .unwrap()
         .none()
@@ -655,8 +734,18 @@ fn none_entry_nonzero_payload_rejected() {
     let bad_word: u32 = (8u32 << 26) | 0x0001;
     let bw = bad_word.to_be_bytes();
     let wire = [
-        0x01, 0x00, 0x00, 0x0A, // header
-        bw[0], bw[1], bw[2], bw[3],
+        PROTOCOL_VERSION,
+        0x00,
+        0x00,
+        0x0A,
+        0,
+        0,
+        0,
+        0, // header
+        bw[0],
+        bw[1],
+        bw[2],
+        bw[3],
     ];
     let err = RequestView::parse(brand(&wire)).unwrap_err();
     assert_eq!(err, HsmError::TborInvalidNonePayload);
@@ -665,7 +754,7 @@ fn none_entry_nonzero_payload_rejected() {
 #[test]
 fn none_display() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .none()
         .unwrap()
         .uint8(1)
@@ -683,7 +772,7 @@ fn none_display() {
 #[test]
 fn round_trip_padding_entry() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .buffer(b"hi")
         .unwrap()
         .padding(2)
@@ -704,7 +793,7 @@ fn round_trip_padding_entry() {
 #[test]
 fn zero_length_padding_round_trip() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .padding(0)
         .unwrap()
         .uint8(1)
@@ -725,7 +814,7 @@ fn zero_length_padding_round_trip() {
 fn request_buffer_over_max_rejected() {
     let mut buf = [0u8; 16384];
     let big = [0u8; 8192]; // > MAX_DATA_SIZE (8191)
-    let err = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let err = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .buffer(&big)
         .unwrap_err();
     assert_eq!(err, HsmError::TborDataTooLarge);
@@ -735,7 +824,7 @@ fn request_buffer_over_max_rejected() {
 fn request_exact_max_data_succeeds() {
     let mut buf = [0u8; 8400];
     let data = [0u8; 8191];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .buffer(&data)
         .unwrap()
         .finish()
@@ -753,15 +842,15 @@ fn request_exact_max_data_succeeds() {
 #[test]
 fn response_reserved_bits_accepted() {
     let mut buf = [0u8; 256];
-    let msg = ResponseEncoder::new(&mut buf, 0x01, 0, false)
+    let msg = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(1)
         .unwrap()
         .finish()
         .unwrap();
 
     let mut wire: Vec<u8> = msg.to_vec();
-    wire[2] = 0xFF; // reserved byte
-    wire[3] |= 0xE0; // upper 3 reserved bits of toc_count byte
+    wire[3] = 0xFF; // reserved byte
+    wire[2] |= 0xE0; // upper 3 reserved bits of toc_count byte
 
     let view = ResponseView::parse(brand(&wire)).unwrap();
     assert_eq!(view.toc_count(), 1);
@@ -770,7 +859,7 @@ fn response_reserved_bits_accepted() {
 #[test]
 fn response_toc_iter() {
     let mut buf = [0u8; 256];
-    let msg = ResponseEncoder::new(&mut buf, 0x01, 0, true)
+    let msg = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, true)
         .session_id(10)
         .unwrap()
         .uint8(5)
@@ -788,7 +877,7 @@ fn response_toc_iter() {
 #[test]
 fn display_padding_and_sealed_key() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .sealed_key(b"keyblob")
         .unwrap()
         .padding(3)
@@ -807,7 +896,7 @@ fn display_padding_and_sealed_key() {
 #[test]
 fn empty_sealed_key_round_trip() {
     let mut buf = [0u8; 256];
-    let msg = RequestEncoder::new(&mut buf, 0x01, 0x0A)
+    let msg = RequestEncoder::new(&mut buf, PROTOCOL_VERSION, 0x0A)
         .sealed_key(&[])
         .unwrap()
         .finish()
@@ -825,7 +914,22 @@ fn decode_invalid_uint64_length() {
     let word = toc::build_toc_offset_len(TocType::Uint64 as u8, 4, 0); // should be 8
     let wb = word.to_be_bytes();
     let wire = [
-        0x01, 0x00, 0x00, 0x0A, wb[0], wb[1], wb[2], wb[3], 0x00, 0x00, 0x00, 0x00,
+        PROTOCOL_VERSION,
+        0x00,
+        0x00,
+        0x0A,
+        0,
+        0,
+        0,
+        0,
+        wb[0],
+        wb[1],
+        wb[2],
+        wb[3],
+        0x00,
+        0x00,
+        0x00,
+        0x00,
     ];
     let err = RequestView::parse(brand(&wire)).unwrap_err();
     assert_eq!(err, HsmError::TborInvalidFixedLength);

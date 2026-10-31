@@ -17,8 +17,8 @@ Computes an HMAC tag over a host-supplied message using a caller-held
 The masked key's scope is read from its cleartext, tag-bound metadata to
 select the masking key; the key is unmasked **in place** in the inbound
 request buffer (verifying the AEAD tag), the MAC is computed, and the tag
-is returned.  Nothing is persisted, and the recovered key is wiped in
-place from the request buffer once the MAC is computed.
+is returned. Nothing is persisted, and IO teardown wipes the recovered key
+from the request buffer.
 
 The key's kind selects the MAC algorithm and tag length (SHA-256 / 384 /
 512 → 32 / 48 / 64 bytes).  The key must carry the `sign` (`C_Sign`)

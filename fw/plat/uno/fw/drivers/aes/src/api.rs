@@ -10,7 +10,7 @@ use bitfield_struct::bitfield;
 use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_nvic::Nvic;
@@ -109,18 +109,18 @@ pub struct AesRequest<'a> {
     pub mode: AesMode,
     pub op: AesOp,
     /// AES key bytes. Length must be 16, 24, or 32.
-    pub key: &'a DmaBuf,
+    pub key: &'a HsmDmaBuf,
     /// IV for CBC/CTR (exactly 16 bytes). May be `None` for ECB.
     /// If `update_iv` is true, the IV is written back with the final
     /// chaining block.
-    pub iv: Option<&'a mut DmaBuf>,
+    pub iv: Option<&'a mut HsmDmaBuf>,
     /// When true (CBC only), the hardware writes the updated IV back.
     pub update_iv: bool,
     /// Plaintext or ciphertext input. ECB/CBC lengths must be a non-zero
     /// multiple of 16; CTR lengths may be any non-zero byte count.
-    pub message: &'a DmaBuf,
+    pub message: &'a HsmDmaBuf,
     /// Output buffer. Must be at least as large as `message`.
-    pub result: &'a mut DmaBuf,
+    pub result: &'a mut HsmDmaBuf,
 }
 
 struct WaiterSlot {

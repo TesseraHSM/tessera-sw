@@ -38,7 +38,7 @@
 //! `pending` with `auto_pad` enabled so the hardware appends standard SHA
 //! padding and writes the final truncated NIST digest.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -74,7 +74,7 @@ pub struct HsmHashContext<'a> {
     /// hardware submissions and ultimately receives the final digest. The
     /// pending region accumulates a partial block between
     /// [`hash_continue`](HsmHash::hash_continue) calls.
-    buf: &'a mut DmaBuf,
+    buf: &'a mut HsmDmaBuf,
 
     /// Number of valid bytes currently stored in the pending region of
     /// [`buf`](Self::buf).
@@ -88,7 +88,7 @@ pub(crate) trait ShaDigestContext {
 
     fn set_byte_count(&mut self, byte_count: u32);
 
-    fn buf(&mut self) -> &mut DmaBuf;
+    fn buf(&mut self) -> &mut HsmDmaBuf;
 }
 
 impl ShaDigestContext for HsmHashContext<'_> {
@@ -104,7 +104,7 @@ impl ShaDigestContext for HsmHashContext<'_> {
         self.byte_count = byte_count;
     }
 
-    fn buf(&mut self) -> &mut DmaBuf {
+    fn buf(&mut self) -> &mut HsmDmaBuf {
         self.buf
     }
 }
@@ -124,7 +124,7 @@ impl<'a> HsmHashContext<'a> {
     ///
     /// A freshly initialized [`HsmHashContext`] with `byte_count` and
     /// `pending_len` both set to zero.
-    pub(crate) fn new(algo: HsmHashAlgo, buf: &'a mut DmaBuf) -> Self {
+    pub(crate) fn new(algo: HsmHashAlgo, buf: &'a mut HsmDmaBuf) -> Self {
         Self {
             algo,
             byte_count: 0,
@@ -195,8 +195,8 @@ impl HsmHash for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        data: &DmaBuf,
-        digest: &mut DmaBuf,
+        data: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()> {
         let _ = io;
@@ -263,7 +263,7 @@ impl HsmHash for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         ctx: &mut Self::HashCtx<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let _ = io;
         self.hash_continue_bytes(ctx, data).await
@@ -292,7 +292,7 @@ impl HsmHash for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         mut ctx: Self::HashCtx<'_>,
-        digest: &mut DmaBuf,
+        digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()> {
         let _ = io;
@@ -366,8 +366,8 @@ impl UnoHsmPal {
     pub(crate) async fn sha_oneshot(
         &self,
         algo: HsmHashAlgo,
-        message: &DmaBuf,
-        digest: &mut DmaBuf,
+        message: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let byte_count = u32::try_from(message.len()).map_err(|_| HsmError::InvalidArg)?;
         let req = ShaRequest::new(algo.into(), message, digest).with_auto_pad(byte_count);
@@ -421,10 +421,10 @@ impl UnoHsmPal {
         blocks: &[u8],
     ) -> HsmResult<()> {
         // SAFETY: sha_submit_blocks is only called from hash_continue_bytes
-        // with data that originated from hash_continue(data: &DmaBuf) or
+        // with data that originated from hash_continue(data: &HsmDmaBuf) or
         // hmac_continue, so `blocks` is always a sub-slice of a
         // DMA-accessible caller buffer.
-        let blocks = unsafe { DmaBuf::from_raw(blocks) };
+        let blocks = unsafe { HsmDmaBuf::from_raw(blocks) };
         self.sha_digest_block(ctx, Some(blocks), blocks.len(), false)
             .await
     }
@@ -458,7 +458,7 @@ impl UnoHsmPal {
     pub(crate) async fn sha_digest_block<C>(
         &self,
         ctx: &mut C,
-        external_msg: Option<&DmaBuf>,
+        external_msg: Option<&HsmDmaBuf>,
         msg_len: usize,
         finalize: bool,
     ) -> HsmResult<()>
@@ -473,7 +473,7 @@ impl UnoHsmPal {
             .ok_or(HsmError::InvalidArg)?;
         let state_len = algo.state_len();
         let (digest, pending) = ctx.buf().split_at_mut(state_len);
-        let message: &DmaBuf = match external_msg {
+        let message: &HsmDmaBuf = match external_msg {
             Some(ext) => ext,
             None => &pending[..msg_len],
         };

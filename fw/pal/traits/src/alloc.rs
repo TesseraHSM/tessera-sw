@@ -53,13 +53,19 @@
 //!   yield (e.g. the inbound/outbound DMA staging buffer in
 //!   `handle_mbor_op` / `handle_tbor_op`).
 //!
+//! Scope exit reclaims storage without clearing it. IO teardown scrubs both
+//! pools up to their peak allocation ends, including reclaimed scratch.
+//! Ordinary allocations may contain earlier data from the same IO; use the
+//! zeroed allocation methods when an algorithm requires zero initialization.
+//!
 //! ## Errors
 //!
 //! Every fallible method returns [`HsmError::NotEnoughSpace`] when
 //! the underlying bump allocator's watermark cannot satisfy the
 //! request.  This is the *only* error any allocator method
-//! produces; other errors are propagated only through user closures
-//! ([`dma_alloc_var`](HsmAlloc::dma_alloc_var) etc.).
+//! produces; user closures propagate their own errors. The in-place
+//! [`dma_grow`](HsmAlloc::dma_grow) operation additionally rejects invalid
+//! allocation ranges with [`HsmError::InvalidArg`].
 //!
 //! ## Example
 //!
@@ -83,27 +89,78 @@ use core::ops::AsyncFnOnce;
 
 use super::*;
 
-// ── DmaBuf ────────────────────────────────────────────────────────
+// ── HsmDmaBuf ────────────────────────────────────────────────────────
+
+/// IO-scoped DMA allocation whose views borrow this handle, not the whole IO.
+///
+/// Unlike an outstanding `&mut HsmDmaBuf`, the handle can safely be grown by its
+/// allocator between borrows. It retains the original allocation's raw pointer
+/// provenance; growing never joins or extends an existing slice reference.
+/// Memory remains owned and scrubbed by the per-IO allocator.
+pub struct DmaAllocation<'a> {
+    ptr: *mut u8,
+    len: usize,
+    scope: core::marker::PhantomData<&'a mut HsmDmaBuf>,
+}
+
+impl<'a> DmaAllocation<'a> {
+    /// Construct a handle over an exclusively owned DMA allocation.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must retain provenance for the backing DMA heap allocation.
+    /// Its `len` bytes must be initialized, exclusive, and valid for `'a`;
+    /// the allocator must not reuse them while this handle or its views live.
+    pub unsafe fn from_raw_parts(ptr: *mut u8, len: usize) -> Self {
+        Self {
+            ptr,
+            len,
+            scope: core::marker::PhantomData,
+        }
+    }
+
+    /// Base address for allocator range validation, without creating a view.
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+
+    /// Current allocation capacity.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether this allocation is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Exclusively borrow the current allocation until the next handle access.
+    pub fn buffer_mut(&mut self) -> &mut HsmDmaBuf {
+        // SAFETY: the allocator owns the range and the exclusive handle borrow
+        // prevents growth or another mutable view while this reference is live.
+        unsafe { HsmDmaBuf::from_raw_mut(core::slice::from_raw_parts_mut(self.ptr, self.len)) }
+    }
+}
 
 /// A byte slice guaranteed to reside in DMA-accessible memory.
 ///
-/// `DmaBuf` is a `#[repr(transparent)]` newtype over `[u8]`. The
+/// `HsmDmaBuf` is a `#[repr(transparent)]` newtype over `[u8]`. The
 /// only way to construct one is via the unsafe `from_raw` /
 /// `from_raw_mut` helpers, which the PAL allocator uses to brand
 /// SRAM-backed buffers handed out by `dma_alloc`. Everywhere a
-/// `&DmaBuf` or `&mut DmaBuf` is required, the type system proves
+/// `&HsmDmaBuf` or `&mut HsmDmaBuf` is required, the type system proves
 /// the bytes live in a region the GDMA / SHA / AES engines can
 /// reach.
 ///
-/// `DmaBuf` `Deref`s to `[u8]`, so all read-only slice operations
+/// `HsmDmaBuf` `Deref`s to `[u8]`, so all read-only slice operations
 /// (length, iteration, `as_ptr`) work transparently. Mutable
 /// access goes through `DerefMut`.
 #[repr(transparent)]
-pub struct DmaBuf {
+pub struct HsmDmaBuf {
     inner: [u8],
 }
 
-impl DmaBuf {
+impl HsmDmaBuf {
     /// Brands a borrowed `[u8]` as DMA-accessible.
     ///
     /// # Safety
@@ -112,61 +169,47 @@ impl DmaBuf {
     /// DMA engines (GDMA, SHA, AES, etc.) can address. The PAL
     /// allocator is the only place this should be called with
     /// freshly allocated SRAM. Outside the PAL, prefer constructing
-    /// sub-views of an existing `DmaBuf` via indexing.
+    /// sub-views of an existing `HsmDmaBuf` via indexing.
     #[doc(hidden)]
     #[inline(always)]
     pub unsafe fn from_raw(buf: &[u8]) -> &Self {
-        // SAFETY: DmaBuf is transparent over [u8]; the caller guarantees DMA accessibility.
-        unsafe { &*(buf as *const [u8] as *const DmaBuf) }
+        // SAFETY: HsmDmaBuf is transparent over [u8]; the caller guarantees DMA accessibility.
+        unsafe { &*(buf as *const [u8] as *const HsmDmaBuf) }
     }
 
-    /// Mutable equivalent of [`DmaBuf::from_raw`].
+    /// Mutable equivalent of [`HsmDmaBuf::from_raw`].
     ///
     /// # Safety
     ///
-    /// Same requirements as [`DmaBuf::from_raw`].
+    /// Same requirements as [`HsmDmaBuf::from_raw`].
     #[doc(hidden)]
     #[inline(always)]
     pub unsafe fn from_raw_mut(buf: &mut [u8]) -> &mut Self {
         // SAFETY: The transparent cast preserves the exclusive borrow and DMA accessibility.
-        unsafe { &mut *(buf as *mut [u8] as *mut DmaBuf) }
+        unsafe { &mut *(buf as *mut [u8] as *mut HsmDmaBuf) }
     }
 
-    /// Splits this `DmaBuf` into two `DmaBuf` views at `mid`.
+    /// Splits this `HsmDmaBuf` into two `HsmDmaBuf` views at `mid`.
     ///
     /// Both halves remain DMA-accessible because they are
-    /// sub-views of an existing `DmaBuf`.
+    /// sub-views of an existing `HsmDmaBuf`.
     #[inline(always)]
-    pub fn split_at(&self, mid: usize) -> (&DmaBuf, &DmaBuf) {
+    pub fn split_at(&self, mid: usize) -> (&HsmDmaBuf, &HsmDmaBuf) {
         let (a, b) = self.inner.split_at(mid);
         // SAFETY: Both subslices retain the original buffer's DMA accessibility.
-        unsafe { (DmaBuf::from_raw(a), DmaBuf::from_raw(b)) }
+        unsafe { (HsmDmaBuf::from_raw(a), HsmDmaBuf::from_raw(b)) }
     }
 
-    /// Mutable equivalent of [`DmaBuf::split_at`].
+    /// Mutable equivalent of [`HsmDmaBuf::split_at`].
     #[inline(always)]
-    pub fn split_at_mut(&mut self, mid: usize) -> (&mut DmaBuf, &mut DmaBuf) {
+    pub fn split_at_mut(&mut self, mid: usize) -> (&mut HsmDmaBuf, &mut HsmDmaBuf) {
         let (a, b) = self.inner.split_at_mut(mid);
         // SAFETY: The disjoint subslices retain DMA accessibility and exclusive borrows.
-        unsafe { (DmaBuf::from_raw_mut(a), DmaBuf::from_raw_mut(b)) }
-    }
-
-    /// Securely zeroes the buffer.
-    ///
-    /// Uses per-byte volatile writes followed by a compiler fence so the
-    /// wipe cannot be optimized away even when the compiler can prove the
-    /// bytes are never read again. Intended for scrubbing key material.
-    #[inline]
-    pub fn zeroize(&mut self) {
-        for b in self.inner.iter_mut() {
-            // SAFETY: `b` is a valid, aligned, writable byte of this buffer.
-            unsafe { core::ptr::write_volatile(b, 0) };
-        }
-        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+        unsafe { (HsmDmaBuf::from_raw_mut(a), HsmDmaBuf::from_raw_mut(b)) }
     }
 }
 
-impl core::ops::Deref for DmaBuf {
+impl core::ops::Deref for HsmDmaBuf {
     type Target = [u8];
     #[inline(always)]
     fn deref(&self) -> &[u8] {
@@ -174,53 +217,53 @@ impl core::ops::Deref for DmaBuf {
     }
 }
 
-impl core::ops::DerefMut for DmaBuf {
+impl core::ops::DerefMut for HsmDmaBuf {
     #[inline(always)]
     fn deref_mut(&mut self) -> &mut [u8] {
         &mut self.inner
     }
 }
 
-// `DmaBuf` is a transparent newtype over `[u8]`, so byte-wise equality
+// `HsmDmaBuf` is a transparent newtype over `[u8]`, so byte-wise equality
 // matches caller expectations. This impl is required by the FW TBOR
-// codec's `TocEntry` enum (variants hold `&DmaBuf` and derive
+// codec's `TocEntry` enum (variants hold `&HsmDmaBuf` and derive
 // `PartialEq`/`Eq` for test assertions and the wire round-trip).
 //
 // Note: comparing two byte buffers in constant time is the caller's
 // responsibility (use `subtle::ConstantTimeEq` for secrets); this
 // `PartialEq` is `[u8]::eq` and short-circuits.
-impl PartialEq for DmaBuf {
+impl PartialEq for HsmDmaBuf {
     #[inline(always)]
     fn eq(&self, other: &Self) -> bool {
         self.inner == other.inner
     }
 }
 
-impl Eq for DmaBuf {}
+impl Eq for HsmDmaBuf {}
 
 // Cross-type byte equality used by tests and codec assertions that
-// compare a `&DmaBuf` to a `&[u8; N]` literal (e.g. `b"hello"`).
-impl PartialEq<[u8]> for DmaBuf {
+// compare a `&HsmDmaBuf` to a `&[u8; N]` literal (e.g. `b"hello"`).
+impl PartialEq<[u8]> for HsmDmaBuf {
     #[inline(always)]
     fn eq(&self, other: &[u8]) -> bool {
         &self.inner == other
     }
 }
 
-impl<const N: usize> PartialEq<[u8; N]> for DmaBuf {
+impl<const N: usize> PartialEq<[u8; N]> for HsmDmaBuf {
     #[inline(always)]
     fn eq(&self, other: &[u8; N]) -> bool {
         &self.inner == other.as_slice()
     }
 }
 
-impl core::fmt::Debug for DmaBuf {
+impl core::fmt::Debug for HsmDmaBuf {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "DmaBuf({} bytes)", self.inner.len())
+        write!(f, "HsmDmaBuf({} bytes)", self.inner.len())
     }
 }
 
-impl core::ops::Index<usize> for DmaBuf {
+impl core::ops::Index<usize> for HsmDmaBuf {
     type Output = u8;
     #[inline(always)]
     fn index(&self, i: usize) -> &u8 {
@@ -228,75 +271,75 @@ impl core::ops::Index<usize> for DmaBuf {
     }
 }
 
-impl core::ops::IndexMut<usize> for DmaBuf {
+impl core::ops::IndexMut<usize> for HsmDmaBuf {
     #[inline(always)]
     fn index_mut(&mut self, i: usize) -> &mut u8 {
         &mut self.inner[i]
     }
 }
 
-impl core::ops::Index<core::ops::Range<usize>> for DmaBuf {
-    type Output = DmaBuf;
+impl core::ops::Index<core::ops::Range<usize>> for HsmDmaBuf {
+    type Output = HsmDmaBuf;
     #[inline(always)]
-    fn index(&self, r: core::ops::Range<usize>) -> &DmaBuf {
+    fn index(&self, r: core::ops::Range<usize>) -> &HsmDmaBuf {
         // SAFETY: A subslice of this DMA buffer remains DMA-accessible.
-        unsafe { DmaBuf::from_raw(&self.inner[r]) }
+        unsafe { HsmDmaBuf::from_raw(&self.inner[r]) }
     }
 }
 
-impl core::ops::IndexMut<core::ops::Range<usize>> for DmaBuf {
+impl core::ops::IndexMut<core::ops::Range<usize>> for HsmDmaBuf {
     #[inline(always)]
-    fn index_mut(&mut self, r: core::ops::Range<usize>) -> &mut DmaBuf {
+    fn index_mut(&mut self, r: core::ops::Range<usize>) -> &mut HsmDmaBuf {
         // SAFETY: The exclusively borrowed subslice remains DMA-accessible.
-        unsafe { DmaBuf::from_raw_mut(&mut self.inner[r]) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.inner[r]) }
     }
 }
 
-impl core::ops::Index<core::ops::RangeTo<usize>> for DmaBuf {
-    type Output = DmaBuf;
+impl core::ops::Index<core::ops::RangeTo<usize>> for HsmDmaBuf {
+    type Output = HsmDmaBuf;
     #[inline(always)]
-    fn index(&self, r: core::ops::RangeTo<usize>) -> &DmaBuf {
+    fn index(&self, r: core::ops::RangeTo<usize>) -> &HsmDmaBuf {
         // SAFETY: A subslice of this DMA buffer remains DMA-accessible.
-        unsafe { DmaBuf::from_raw(&self.inner[r]) }
+        unsafe { HsmDmaBuf::from_raw(&self.inner[r]) }
     }
 }
 
-impl core::ops::IndexMut<core::ops::RangeTo<usize>> for DmaBuf {
+impl core::ops::IndexMut<core::ops::RangeTo<usize>> for HsmDmaBuf {
     #[inline(always)]
-    fn index_mut(&mut self, r: core::ops::RangeTo<usize>) -> &mut DmaBuf {
+    fn index_mut(&mut self, r: core::ops::RangeTo<usize>) -> &mut HsmDmaBuf {
         // SAFETY: The exclusively borrowed subslice remains DMA-accessible.
-        unsafe { DmaBuf::from_raw_mut(&mut self.inner[r]) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.inner[r]) }
     }
 }
 
-impl core::ops::Index<core::ops::RangeFrom<usize>> for DmaBuf {
-    type Output = DmaBuf;
+impl core::ops::Index<core::ops::RangeFrom<usize>> for HsmDmaBuf {
+    type Output = HsmDmaBuf;
     #[inline(always)]
-    fn index(&self, r: core::ops::RangeFrom<usize>) -> &DmaBuf {
+    fn index(&self, r: core::ops::RangeFrom<usize>) -> &HsmDmaBuf {
         // SAFETY: A subslice of this DMA buffer remains DMA-accessible.
-        unsafe { DmaBuf::from_raw(&self.inner[r]) }
+        unsafe { HsmDmaBuf::from_raw(&self.inner[r]) }
     }
 }
 
-impl core::ops::IndexMut<core::ops::RangeFrom<usize>> for DmaBuf {
+impl core::ops::IndexMut<core::ops::RangeFrom<usize>> for HsmDmaBuf {
     #[inline(always)]
-    fn index_mut(&mut self, r: core::ops::RangeFrom<usize>) -> &mut DmaBuf {
+    fn index_mut(&mut self, r: core::ops::RangeFrom<usize>) -> &mut HsmDmaBuf {
         // SAFETY: The exclusively borrowed subslice remains DMA-accessible.
-        unsafe { DmaBuf::from_raw_mut(&mut self.inner[r]) }
+        unsafe { HsmDmaBuf::from_raw_mut(&mut self.inner[r]) }
     }
 }
 
-impl core::ops::Index<core::ops::RangeFull> for DmaBuf {
-    type Output = DmaBuf;
+impl core::ops::Index<core::ops::RangeFull> for HsmDmaBuf {
+    type Output = HsmDmaBuf;
     #[inline(always)]
-    fn index(&self, _: core::ops::RangeFull) -> &DmaBuf {
+    fn index(&self, _: core::ops::RangeFull) -> &HsmDmaBuf {
         self
     }
 }
 
-impl core::ops::IndexMut<core::ops::RangeFull> for DmaBuf {
+impl core::ops::IndexMut<core::ops::RangeFull> for HsmDmaBuf {
     #[inline(always)]
-    fn index_mut(&mut self, _: core::ops::RangeFull) -> &mut DmaBuf {
+    fn index_mut(&mut self, _: core::ops::RangeFull) -> &mut HsmDmaBuf {
         self
     }
 }
@@ -379,7 +422,7 @@ pub trait HsmScopedAlloc {
     ///   endpoint.
     /// - `Err(HsmError::NotEnoughSpace)` — the Dma pool cannot
     ///   satisfy the request.
-    fn dma_alloc(&self, size: usize) -> HsmResult<&mut DmaBuf>;
+    fn dma_alloc(&self, size: usize) -> HsmResult<&mut HsmDmaBuf>;
 
     /// Allocates `size` bytes from the Dma (SRAM) pool and
     /// zero-fills them.
@@ -392,7 +435,7 @@ pub trait HsmScopedAlloc {
     ///
     /// - `Ok(&mut [u8])` — zero-initialised DMA-capable slice.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn dma_alloc_zeroed(&self, size: usize) -> HsmResult<&mut DmaBuf>;
+    fn dma_alloc_zeroed(&self, size: usize) -> HsmResult<&mut HsmDmaBuf>;
 }
 
 // ── Public allocator trait ────────────────────────────────────────
@@ -523,7 +566,31 @@ pub trait HsmAlloc: HsmIoTypes {
     /// - `Ok(&mut [u8])` — DMA-capable slice of length exactly
     ///   `size`, 4-byte aligned.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn dma_alloc(&self, io: &Self::Io, size: usize) -> HsmResult<&mut DmaBuf>;
+    fn dma_alloc(&self, io: &Self::Io, size: usize) -> HsmResult<&mut HsmDmaBuf>;
+
+    /// Allocate growable exchange storage with short-lived DMA views.
+    ///
+    /// The handle, like `dma_alloc`'s buffers, is owned by the IO allocator.
+    /// Its views cannot survive a call to `dma_grow`.
+    fn dma_alloc_exchange(&self, io: &Self::Io, size: usize) -> HsmResult<DmaAllocation<'_>>;
+
+    /// Extend the most recent DMA allocation handle in place, without copying.
+    ///
+    /// `allocation` must be the last allocation in `io`'s DMA heap. This
+    /// lets TBOR select exchange capacity after receiving its opcode, before
+    /// handlers allocate scratch. The undo log must be allocated beforehand.
+    ///
+    /// Existing bytes are preserved; newly exposed bytes have unspecified
+    /// contents. Failure leaves the allocation and watermark unchanged.
+    ///
+    /// Returns `InvalidArg` for shrinking or a non-tail/foreign allocation,
+    /// and `NotEnoughSpace` when the heap cannot accommodate `size`.
+    fn dma_grow(
+        &self,
+        io: &Self::Io,
+        allocation: &mut DmaAllocation<'_>,
+        size: usize,
+    ) -> HsmResult<()>;
 
     /// Allocates `size` bytes from `io`'s Dma pool and zero-fills
     /// them.
@@ -537,7 +604,7 @@ pub trait HsmAlloc: HsmIoTypes {
     ///
     /// - `Ok(&mut [u8])` — zero-initialised DMA-capable slice.
     /// - `Err(HsmError::NotEnoughSpace)` — pool exhausted.
-    fn dma_alloc_zeroed(&self, io: &Self::Io, size: usize) -> HsmResult<&mut DmaBuf>;
+    fn dma_alloc_zeroed(&self, io: &Self::Io, size: usize) -> HsmResult<&mut HsmDmaBuf>;
 
     /// Variable-size DMA allocation populated by a closure.
     ///
@@ -570,7 +637,7 @@ pub trait HsmAlloc: HsmIoTypes {
     /// - `Err(HsmError::NotEnoughSpace)` — Dma pool was empty before
     ///   `f` ran.
     /// - `Err(e)` — propagated unchanged from `f`.
-    fn dma_alloc_var<F>(&self, io: &Self::Io, f: F) -> HsmResult<&mut DmaBuf>
+    fn dma_alloc_var<F>(&self, io: &Self::Io, f: F) -> HsmResult<&mut HsmDmaBuf>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>;
 
@@ -600,7 +667,7 @@ pub trait HsmAlloc: HsmIoTypes {
     /// - `Err(HsmError::NotEnoughSpace)` — Dma pool empty before
     ///   `f` ran.
     /// - `Err(e)` — propagated unchanged from `f`.
-    fn dma_alloc_var_with<F, T>(&self, io: &Self::Io, f: F) -> HsmResult<(&mut DmaBuf, T)>
+    fn dma_alloc_var_with<F, T>(&self, io: &Self::Io, f: F) -> HsmResult<(&mut HsmDmaBuf, T)>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>;
 

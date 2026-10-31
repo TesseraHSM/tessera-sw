@@ -42,6 +42,7 @@ use core::task::Poll;
 use std::cell::UnsafeCell;
 
 use embassy_sync::waitqueue::WakerRegistration;
+use zeroize::Zeroize;
 
 /// Maximum concurrent IO slots.
 pub const MAX_IO_SLOTS: usize = 32;
@@ -77,6 +78,10 @@ pub struct BufferPool {
     /// Per-slot bump-allocator watermark for the Dma heap.
     dma_marks: Box<[Cell<usize>; MAX_IO_SLOTS]>,
 
+    /// Peak allocation ends, retained across scope and variable-allocation rewinds.
+    nondma_peaks: Box<[Cell<usize>; MAX_IO_SLOTS]>,
+    dma_peaks: Box<[Cell<usize>; MAX_IO_SLOTS]>,
+
     /// Bitmap of free slots. Bit set = slot available.
     free_mask: Cell<u64>,
 
@@ -108,6 +113,8 @@ impl BufferPool {
         let dma_bufs = boxed_bufs::<DMA_BUF_SIZE, MAX_IO_SLOTS>();
         let nondma_marks = Box::new(core::array::from_fn::<_, MAX_IO_SLOTS, _>(|_| Cell::new(0)));
         let dma_marks = Box::new(core::array::from_fn::<_, MAX_IO_SLOTS, _>(|_| Cell::new(0)));
+        let nondma_peaks = Box::new(core::array::from_fn::<_, MAX_IO_SLOTS, _>(|_| Cell::new(0)));
+        let dma_peaks = Box::new(core::array::from_fn::<_, MAX_IO_SLOTS, _>(|_| Cell::new(0)));
         let free_mask = if MAX_IO_SLOTS >= 64 {
             u64::MAX
         } else {
@@ -118,6 +125,8 @@ impl BufferPool {
             dma_bufs,
             nondma_marks,
             dma_marks,
+            nondma_peaks,
+            dma_peaks,
             free_mask: Cell::new(free_mask),
             waker: RefCell::new(WakerRegistration::new()),
         }
@@ -150,15 +159,11 @@ impl BufferPool {
     /// Free a buffer slot back to the pool.
     ///
     /// Zeroes the regions of the slot's NonDma and Dma buffers that
-    /// this IO actually touched (using the bump watermarks as
-    /// high-water marks) before clearing the free bit.  This
-    /// preserves the invariant that every fresh `dma_alloc` /
-    /// `nondma_alloc` returns zeroed memory, which is required by
-    /// zero-on-entry contracts (e.g. `key_masking::cbc::mask`'s
-    /// `out[..total_len] must be zero on entry`) and prevents stale
-    /// crypto material from outliving an IO.  Watermarks are then
-    /// reset on the next
-    /// [`alloc`](Self::alloc).
+    /// this IO could have touched, using peak allocation ends that survive
+    /// scope rewinds. This prevents secret scratch from outliving an IO.
+    /// Reused allocations within an IO are not implicitly zero-initialized;
+    /// callers requiring zeros must use the zeroed allocation methods.
+    /// Watermarks are reset on the next [`alloc`](Self::alloc).
     ///
     /// Sets the slot's bit in the free bitmap and wakes any task
     /// suspended in [`alloc`](Self::alloc).
@@ -174,15 +179,17 @@ impl BufferPool {
     /// borrow can outlive it.
     pub fn free(&self, idx: u16) {
         let i = idx as usize;
-        let nondma_hi = self.nondma_marks[i].get().min(NONDMA_BUF_SIZE);
-        let dma_hi = self.dma_marks[i].get().min(DMA_BUF_SIZE);
+        let nondma_hi = self.nondma_peaks[i].get().min(NONDMA_BUF_SIZE);
+        let dma_hi = self.dma_peaks[i].get().min(DMA_BUF_SIZE);
         // SAFETY: no outstanding borrows — see method-level Safety.
         unsafe {
             let nondma = &mut *self.nondma_bufs[i].get();
-            nondma[..nondma_hi].fill(0);
+            nondma[..nondma_hi].zeroize();
             let dma = &mut *self.dma_bufs[i].get();
-            dma[..dma_hi].fill(0);
+            dma[..dma_hi].zeroize();
         }
+        self.nondma_peaks[i].set(0);
+        self.dma_peaks[i].set(0);
         self.free_mask.set(self.free_mask.get() | (1u64 << idx));
         self.waker.borrow_mut().wake();
     }
@@ -224,6 +231,14 @@ impl BufferPool {
     /// Returns the watermark cell for the Dma heap of slot `idx`.
     pub fn dma_mark(&self, idx: u16) -> &Cell<usize> {
         &self.dma_marks[idx as usize]
+    }
+
+    pub(crate) fn nondma_peak(&self, idx: u16) -> &Cell<usize> {
+        &self.nondma_peaks[idx as usize]
+    }
+
+    pub(crate) fn dma_peak(&self, idx: u16) -> &Cell<usize> {
+        &self.dma_peaks[idx as usize]
     }
 }
 

@@ -31,7 +31,7 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiEccGenerateKeyPairReq<'_> = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
@@ -133,9 +133,6 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
     // padding), so copy directly without further reordering.
     frame.pub_key.raw.copy_from_slice(&pub_key[..pub_len]);
 
-    // `mask` requires `out[..total_len]` to be zero on entry; zero the
-    // reserved slot before filling it with the envelope.
-    frame.masked_key.fill(0);
     mask(
         pal,
         io,

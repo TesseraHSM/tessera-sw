@@ -144,7 +144,7 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
 pub(super) fn check_fail_fast<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    nonce: &DmaBuf,
+    nonce: &HsmDmaBuf,
     pub_key: &DdiPublicKey<'_>,
     is_reopen: bool,
 ) -> HsmResult<()> {
@@ -208,8 +208,8 @@ pub(super) async fn authenticate_and_derive_bk_session<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     enc_cred: &mut DdiEncryptedSessionCredential<'_>,
-    pub_key_raw: &DmaBuf,
-) -> HsmResult<&'p mut DmaBuf> {
+    pub_key_raw: &HsmDmaBuf,
+) -> HsmResult<&'p mut HsmDmaBuf> {
     // Steps 2-3: ECDH + HKDF → 80-byte OKM (aes_key ‖ hmac_key).
     let okm = pal.dma_alloc(io, BK_LEN)?;
     derive_session_credential_keys(pal, io, pub_key_raw, enc_cred.nonce, okm).await?;
@@ -271,9 +271,9 @@ pub(super) async fn authenticate_and_derive_bk_session<'p, P: HsmPal>(
 pub(super) async fn derive_session_credential_keys<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    host_eph_pub_key_raw: &DmaBuf,
-    nonce: &DmaBuf,
-    okm_out: &mut DmaBuf,
+    host_eph_pub_key_raw: &HsmDmaBuf,
+    nonce: &HsmDmaBuf,
+    okm_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let sess_enc_key_id = crate::part_state::part_session_enc_key_id(pal, io)?;
 
@@ -323,7 +323,7 @@ async fn verify_credential_hmac<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     enc_cred: &tsra_fw_ddi_mbor_types::open_session::DdiEncryptedSessionCredential<'_>,
-    hmac_key: &DmaBuf,
+    hmac_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let id_len = enc_cred.encrypted_id.len();
     let pin_len = enc_cred.encrypted_pin.len();
@@ -368,7 +368,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     enc_cred: &mut tsra_fw_ddi_mbor_types::open_session::DdiEncryptedSessionCredential<'_>,
-    aes_key: &DmaBuf,
+    aes_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let iv_chain_a = pal.dma_alloc(io, enc_cred.iv.len())?;
     let iv_chain_b = pal.dma_alloc(io, enc_cred.iv.len())?;
@@ -423,11 +423,11 @@ async fn encode_response<'p, P: HsmPal>(
     io: &P::Io,
     hdr: &DdiReqHdr,
     sess_id: HsmSessId,
-    bk_session: &DmaBuf,
-    mk_session: &DmaBuf,
+    bk_session: &HsmDmaBuf,
+    mk_session: &HsmDmaBuf,
     svn: u64,
     bks2_id: u16,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let bmk_metadata = DdiMaskedKeyMetadata {
         svn,
         key_type: DdiKeyType::AesCbc256Hmac384,
@@ -455,9 +455,6 @@ async fn encode_response<'p, P: HsmPal>(
     })?;
     let frame = DdiOpenSessionResp::from_layout(resp, &layout);
 
-    // `key_masking::cbc::mask` requires `out[..total_len]` to be zero
-    // on entry.
-    frame.bmk_session.fill(0);
     mask(
         pal,
         io,

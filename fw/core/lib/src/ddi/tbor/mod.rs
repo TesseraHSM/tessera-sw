@@ -11,14 +11,10 @@
 //!
 //! ## Async, PAL-aware shape
 //!
-//! The dispatcher signature mirrors
-//! [`crate::ddi::mbor::dispatch`]: it is `async fn dispatch<P:
-//! HsmPal>(pal, io, view, opcode) -> HsmResult<&'p DmaBuf>` so handlers
-//! can perform vault, crypto, and session-manager work.  Each handler
-//! allocates its output buffer via
-//! [`HsmAlloc::dma_alloc_var`](tsra_fw_hsm_pal_traits::HsmAlloc::dma_alloc_var)
-//! and returns the resulting `&DmaBuf` slice (lifetime tied to the
-//! per-IO allocator scope).
+//! Native exchange handlers fill shared storage and return a response length.
+//! Every handler returns a compact response length in the shared allocation.
+//! Completion validates that prefix; IO teardown performs final scrubbing.
+//! Error encoding initializes only the published response prefix.
 
 pub(crate) mod aes_encrypt_decrypt;
 pub(crate) mod aes_generate_key;
@@ -74,7 +70,8 @@ use tsra_fw_ddi_tbor::ResponseEncoder;
 use tsra_fw_ddi_tbor::TocEntry;
 use tsra_fw_ddi_tbor::PROTOCOL_VERSION;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -467,7 +464,7 @@ fn resolve_masking_key<'p, P: HsmPal>(
     io: &P::Io,
     scope: HsmKeyScope,
     sess_id: HsmSessId,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     match scope {
         HsmKeyScope::Session => {
             // The std PAL's `session_masking_key` may return an 80-byte
@@ -491,8 +488,7 @@ fn resolve_masking_key<'p, P: HsmPal>(
 
 /// Dispatch a parsed TBOR request to its handler.
 ///
-/// On success returns a `&DmaBuf` view of the encoded response (lifetime
-/// bound to the per-IO allocator).  On dispatch-level failure (unknown
+/// All handlers return a response length in the exchange. On failure (unknown
 /// opcode, default-PSK gate, etc.) returns the typed [`HsmError`];
 /// per-handler decoding errors are also reported as `Err(...)`.  The
 /// caller is responsible for translating a returned error into a TBOR
@@ -521,11 +517,65 @@ fn resolve_masking_key<'p, P: HsmPal>(
 /// the dispatcher cross-checks the body `session_id` against the SQE
 /// one for every close/in-session opcode, so the IO layer can just use
 /// the SQE value (exactly as `handle_mbor_op` uses `hdr.sess_id`).
-pub(crate) struct DispatchResult<'p> {
-    /// Encoded response slice (borrows `pal`'s per-IO allocator).
-    pub(crate) resp: &'p DmaBuf,
+pub(crate) struct DispatchResult {
+    /// Encoded response prefix in the exchange allocation.
+    pub(crate) response_len: usize,
     /// Slot id for the CQE; set only by `SessionOpenInit`.
     pub(crate) session_id: Option<u16>,
+}
+
+/// Capacity selected after header parsing, before any handler scratch allocation.
+pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: usize) -> usize {
+    use tsra_fw_ddi_tbor_types as types;
+
+    let output = match opcode {
+        opcode::API_REV => types::TborApiRevResp::MAX_ENCODED_SIZE,
+        opcode::SESSION_OPEN_INIT => types::TborSessionOpenInitResp::MAX_ENCODED_SIZE,
+        opcode::SESSION_OPEN_FINISH => types::TborSessionOpenFinishResp::MAX_ENCODED_SIZE,
+        opcode::SESSION_CLOSE => types::TborSessionCloseResp::MAX_ENCODED_SIZE,
+        opcode::PSK_CHANGE => types::TborPskChangeResp::MAX_ENCODED_SIZE,
+        opcode::PART_INIT => types::TborPartInitResp::MAX_ENCODED_SIZE,
+        opcode::PART_FINAL => types::TborPartFinalResp::MAX_ENCODED_SIZE,
+        opcode::PART_INFO => types::TborPartInfoResp::MAX_ENCODED_SIZE,
+        opcode::SD_SEALING_KEY_GEN => types::TborSdSealingKeyGenResp::MAX_ENCODED_SIZE,
+        opcode::SD_CREATE_REMOTE_BACKUP => types::TborSdCreateRemoteBackupResp::MAX_ENCODED_SIZE,
+        opcode::SD_RESEAL_REMOTE_BACKUP => types::TborSdResealRemoteBackupResp::MAX_ENCODED_SIZE,
+        opcode::SD_RESTORE_REMOTE_BACKUP => types::TborSdRestoreRemoteBackupResp::MAX_ENCODED_SIZE,
+        opcode::SD_RESTORE_LOCAL_BACKUP => types::TborSdRestoreLocalBackupResp::MAX_ENCODED_SIZE,
+        opcode::SD_CREATE_PEER_BACKUP => types::TborSdCreatePeerBackupResp::MAX_ENCODED_SIZE,
+        opcode::SD_RESTORE_PEER_BACKUP => types::TborSdRestorePeerBackupResp::MAX_ENCODED_SIZE,
+        opcode::KEY_REPORT => types::TborKeyReportResp::MAX_ENCODED_SIZE,
+        opcode::HMAC_GENERATE_KEY => types::TborHmacGenerateKeyResp::MAX_ENCODED_SIZE,
+        opcode::HMAC => types::TborHmacResp::MAX_ENCODED_SIZE,
+        opcode::GET_UNWRAPPING_KEY => types::TborGetUnwrappingKeyResp::MAX_ENCODED_SIZE,
+        opcode::UNWRAP_KEY => types::TborUnwrapKeyResp::MAX_ENCODED_SIZE,
+        opcode::AES_GENERATE_KEY => types::TborAesGenerateKeyResp::MAX_ENCODED_SIZE,
+        opcode::ECC_GENERATE_KEY => types::TborEccGenerateKeyResp::MAX_ENCODED_SIZE,
+        opcode::ECDH_DERIVE => types::TborEcdhDeriveResp::MAX_ENCODED_SIZE,
+        opcode::RSA_MOD_EXP => types::TborRsaModExpResp::MAX_ENCODED_SIZE,
+        opcode::HASH => types::TborHashResp::MAX_ENCODED_SIZE,
+        opcode::HKDF_DERIVE => types::TborHkdfDeriveResp::MAX_ENCODED_SIZE,
+        opcode::CONCAT_KDF_DERIVE => types::TborConcatKdfDeriveResp::MAX_ENCODED_SIZE,
+        opcode::GET_CERT_CHAIN_INFO => types::TborGetCertChainInfoResp::MAX_ENCODED_SIZE,
+        opcode::GET_CERTIFICATE => types::TborGetCertResp::MAX_ENCODED_SIZE,
+        opcode::DARC_KEX_KEY_GEN => types::TborDarcKexKeyGenResp::MAX_ENCODED_SIZE,
+        opcode::DARC_TMK_IMPORT => types::TborDarcTmkImportResp::MAX_ENCODED_SIZE,
+        opcode::DARC_KEY_UNWRAP => types::TborDarcKeyUnwrapResp::MAX_ENCODED_SIZE,
+        opcode::DARC_TMK_GEN => types::TborDarcTmkGenResp::MAX_ENCODED_SIZE,
+        opcode::DARC_TMK_EXPORT => types::TborDarcTmkExportResp::MAX_ENCODED_SIZE,
+        opcode::DARC_KEY_WRAP => types::TborDarcKeyWrapResp::MAX_ENCODED_SIZE,
+        opcode::MLDSA_GENERATE_KEY => types::TborMlDsaGenerateKeyResp::MAX_ENCODED_SIZE,
+        opcode::MLDSA_SIGN => types::TborMlDsaSignResp::MAX_ENCODED_SIZE,
+        opcode::MLDSA_VERIFY => types::TborMlDsaVerifyResp::MAX_ENCODED_SIZE,
+        opcode::MLKEM_GENERATE_KEY => types::TborMlKemGenerateKeyResp::MAX_ENCODED_SIZE,
+        opcode::MLKEM_ENCAPSULATE => types::TborMlKemEncapsulateResp::MAX_ENCODED_SIZE,
+        opcode::MLKEM_DECAPSULATE => types::TborMlKemDecapsulateResp::MAX_ENCODED_SIZE,
+        // These handlers reclaim response space within every valid request.
+        opcode::AES_ENCRYPT_DECRYPT | opcode::ECC_SIGN => request_len,
+        _ if !is_known_opcode(opcode) => host_capacity,
+        _ => tsra_fw_ddi_tbor::RESP_HEADER_LEN + 4,
+    };
+    request_len.max(output).next_multiple_of(4)
 }
 
 /// Dispatch takes the full request context (PAL, IO, buffers, opcode,
@@ -536,13 +586,13 @@ pub(crate) struct DispatchResult<'p> {
 pub(crate) async fn dispatch<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     opcode: u8,
     sqe_session_id: u16,
     body_sess_id: Option<HsmSessId>,
     oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<DispatchResult<'p>> {
+) -> HsmResult<DispatchResult> {
     // Reject unknown opcodes with the canonical error *before*
     // applying any gating logic so the gate cannot leak existence of
     // unsupported opcodes through a different error code.
@@ -559,9 +609,10 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     // command must arrive with sessionless SQE flags or it is rejected
     // before reaching here.
     if !is_known_opcode(opcode) {
-        let resp = pal.tbor_dispatch(io, opcode, req_buf).await?;
+        let outcome = pal.tbor_dispatch(io, opcode, cmd_buf).await;
+        let len = cmd_buf.finish_response(outcome)?;
         return Ok(DispatchResult {
-            resp,
+            response_len: len,
             session_id: None,
         });
     }
@@ -602,70 +653,71 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         }
     }
 
-    // `SessionOpenInit` reports its freshly allocated slot here; the other
-    // arms are untouched so the response type stays `&DmaBuf`.
     let mut session_id: Option<u16> = None;
 
     let resp = match opcode {
-        opcode::API_REV => api_rev::handle(pal, io, req_buf),
+        opcode::API_REV => api_rev::handle(cmd_buf),
+        opcode::HASH => hash::handle(pal, io, cmd_buf).await,
+        opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, cmd_buf).await,
+        opcode::ECC_SIGN => ecc_sign::handle(pal, io, cmd_buf).await,
         opcode::SESSION_OPEN_INIT => {
-            session_open_init::handle(pal, io, req_buf, undo, &mut session_id).await
+            session_open_init::handle(pal, io, cmd_buf, undo, &mut session_id).await
         }
-        opcode::SESSION_OPEN_FINISH => session_open_finish::handle(pal, io, req_buf, undo).await,
-        opcode::SESSION_CLOSE => session_close::handle(pal, io, req_buf).await,
-        opcode::PSK_CHANGE => psk_change::handle(pal, io, req_buf, undo).await,
-        opcode::PART_INIT => part_init::handle(pal, io, req_buf, undo).await,
-        opcode::PART_FINAL => part_final::handle(pal, io, req_buf, oob, undo).await,
-        opcode::PART_INFO => part_info::handle(pal, io, req_buf),
-        opcode::SD_SEALING_KEY_GEN => sd_sealing_key_gen::handle(pal, io, req_buf).await,
+        opcode::SESSION_OPEN_FINISH => session_open_finish::handle(pal, io, cmd_buf, undo).await,
+        opcode::SESSION_CLOSE => session_close::handle(pal, io, cmd_buf).await,
+        opcode::PSK_CHANGE => psk_change::handle(pal, io, cmd_buf, undo).await,
+        opcode::PART_INIT => part_init::handle(pal, io, cmd_buf, undo).await,
+        opcode::PART_FINAL => part_final::handle(pal, io, cmd_buf, oob, undo).await,
+        opcode::PART_INFO => part_info::handle(pal, io, cmd_buf),
+        opcode::SD_SEALING_KEY_GEN => sd_sealing_key_gen::handle(pal, io, cmd_buf).await,
         opcode::SD_CREATE_REMOTE_BACKUP => {
-            sd_create_remote_backup::handle(pal, io, req_buf, oob, undo).await
+            sd_create_remote_backup::handle(pal, io, cmd_buf, oob, undo).await
         }
         opcode::SD_RESEAL_REMOTE_BACKUP => {
-            sd_reseal_remote_backup::handle(pal, io, req_buf, oob).await
+            sd_reseal_remote_backup::handle(pal, io, cmd_buf, oob).await
         }
         opcode::SD_RESTORE_REMOTE_BACKUP => {
-            sd_restore_remote_backup::handle(pal, io, req_buf, oob, undo).await
+            sd_restore_remote_backup::handle(pal, io, cmd_buf, oob, undo).await
         }
         opcode::SD_RESTORE_LOCAL_BACKUP => {
-            sd_restore_local_backup::handle(pal, io, req_buf, undo).await
+            sd_restore_local_backup::handle(pal, io, cmd_buf, undo).await
         }
-        opcode::SD_CREATE_PEER_BACKUP => sd_create_peer_backup::handle(pal, io, req_buf, oob).await,
+        opcode::SD_CREATE_PEER_BACKUP => sd_create_peer_backup::handle(pal, io, cmd_buf, oob).await,
         opcode::SD_RESTORE_PEER_BACKUP => {
-            sd_restore_peer_backup::handle(pal, io, req_buf, oob, undo).await
+            sd_restore_peer_backup::handle(pal, io, cmd_buf, oob, undo).await
         }
-        opcode::KEY_REPORT => key_report::handle(pal, io, req_buf).await,
-        opcode::HMAC_GENERATE_KEY => hmac_generate_key::handle(pal, io, req_buf).await,
-        opcode::HMAC => hmac::handle(pal, io, req_buf).await,
-        opcode::GET_UNWRAPPING_KEY => get_unwrapping_key::handle(pal, io, req_buf).await,
-        opcode::UNWRAP_KEY => unwrap_key::handle(pal, io, req_buf, undo).await,
-        opcode::AES_GENERATE_KEY => aes_generate_key::handle(pal, io, req_buf).await,
-        opcode::AES_ENCRYPT_DECRYPT => aes_encrypt_decrypt::handle(pal, io, req_buf).await,
-        opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, req_buf).await,
-        opcode::ECC_SIGN => ecc_sign::handle(pal, io, req_buf).await,
-        opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, req_buf).await,
-        opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, req_buf).await,
-        opcode::HASH => hash::handle(pal, io, req_buf).await,
-        opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, req_buf).await,
-        opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, req_buf).await,
-        opcode::GET_CERT_CHAIN_INFO => get_cert_chain_info::handle(pal, io, req_buf).await,
-        opcode::GET_CERTIFICATE => get_cert::handle(pal, io, req_buf).await,
-        opcode::DARC_KEX_KEY_GEN => darc_kex_key_gen::handle(pal, io, req_buf).await,
-        opcode::DARC_TMK_IMPORT => darc_tmk_import::handle(pal, io, req_buf, oob).await,
-        opcode::DARC_KEY_UNWRAP => darc_key_unwrap::handle(pal, io, req_buf).await,
-        opcode::DARC_TMK_GEN => darc_tmk_gen::handle(pal, io, req_buf).await,
-        opcode::DARC_TMK_EXPORT => darc_tmk_export::handle(pal, io, req_buf, oob).await,
-        opcode::DARC_KEY_WRAP => darc_key_wrap::handle(pal, io, req_buf).await,
-        opcode::MLDSA_GENERATE_KEY => mldsa_generate_key::handle(pal, io, req_buf).await,
-        opcode::MLDSA_SIGN => mldsa_sign::handle(pal, io, req_buf).await,
-        opcode::MLDSA_VERIFY => mldsa_verify::handle(pal, io, req_buf).await,
-        opcode::MLKEM_GENERATE_KEY => mlkem_generate_key::handle(pal, io, req_buf).await,
-        opcode::MLKEM_ENCAPSULATE => mlkem_encapsulate::handle(pal, io, req_buf).await,
-        opcode::MLKEM_DECAPSULATE => mlkem_decapsulate::handle(pal, io, req_buf).await,
+        opcode::KEY_REPORT => key_report::handle(pal, io, cmd_buf).await,
+        opcode::HMAC_GENERATE_KEY => hmac_generate_key::handle(pal, io, cmd_buf).await,
+        opcode::HMAC => hmac::handle(pal, io, cmd_buf).await,
+        opcode::GET_UNWRAPPING_KEY => get_unwrapping_key::handle(pal, io, cmd_buf).await,
+        opcode::UNWRAP_KEY => unwrap_key::handle(pal, io, cmd_buf, undo).await,
+        opcode::AES_GENERATE_KEY => aes_generate_key::handle(pal, io, cmd_buf).await,
+        opcode::ECC_GENERATE_KEY => ecc_generate_key::handle(pal, io, cmd_buf).await,
+        opcode::ECDH_DERIVE => ecdh_derive::handle(pal, io, cmd_buf).await,
+        opcode::RSA_MOD_EXP => rsa_mod_exp::handle(pal, io, cmd_buf).await,
+        opcode::HKDF_DERIVE => hkdf_derive::handle(pal, io, cmd_buf).await,
+        opcode::CONCAT_KDF_DERIVE => concat_kdf_derive::handle(pal, io, cmd_buf).await,
+        opcode::GET_CERT_CHAIN_INFO => get_cert_chain_info::handle(pal, io, cmd_buf).await,
+        opcode::GET_CERTIFICATE => get_cert::handle(pal, io, cmd_buf).await,
+        opcode::DARC_KEX_KEY_GEN => darc_kex_key_gen::handle(pal, io, cmd_buf).await,
+        opcode::DARC_TMK_IMPORT => darc_tmk_import::handle(pal, io, cmd_buf, oob).await,
+        opcode::DARC_KEY_UNWRAP => darc_key_unwrap::handle(pal, io, cmd_buf).await,
+        opcode::DARC_TMK_GEN => darc_tmk_gen::handle(pal, io, cmd_buf).await,
+        opcode::DARC_TMK_EXPORT => darc_tmk_export::handle(pal, io, cmd_buf, oob).await,
+        opcode::DARC_KEY_WRAP => darc_key_wrap::handle(pal, io, cmd_buf).await,
+        opcode::MLDSA_GENERATE_KEY => mldsa_generate_key::handle(pal, io, cmd_buf).await,
+        opcode::MLDSA_SIGN => mldsa_sign::handle(pal, io, cmd_buf).await,
+        opcode::MLDSA_VERIFY => mldsa_verify::handle(pal, io, cmd_buf).await,
+        opcode::MLKEM_GENERATE_KEY => mlkem_generate_key::handle(pal, io, cmd_buf).await,
+        opcode::MLKEM_ENCAPSULATE => mlkem_encapsulate::handle(pal, io, cmd_buf).await,
+        opcode::MLKEM_DECAPSULATE => mlkem_decapsulate::handle(pal, io, cmd_buf).await,
         _ => Err(HsmError::UnsupportedCmd),
-    }?;
-
-    Ok(DispatchResult { resp, session_id })
+    };
+    let response_len = cmd_buf.finish_response(resp)?;
+    Ok(DispatchResult {
+        response_len,
+        session_id,
+    })
 }
 
 /// Returns `true` iff `opcode` is one of the opcodes wired into
@@ -924,10 +976,883 @@ pub(crate) fn encode_tbor_err(_opcode: u8, err: HsmError, out: &mut [u8]) -> Hsm
     Ok(bytes.len())
 }
 
+/// Replace the response prefix with a fully initialized TBOR error frame.
+pub(crate) fn encode_exchange_err(
+    opcode: u8,
+    err: HsmError,
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    encode_tbor_err(opcode, err, cmd_buf.buffer_mut())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use tsra_fw_core_crypto_key_masking::aead::mask;
+    use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
+    use tsra_fw_core_crypto_key_masking::aead::MaskParams;
+    use tsra_fw_ddi_tbor_types::AesOp;
+    use tsra_fw_ddi_tbor_types::HashAlgo;
+    use tsra_fw_ddi_tbor_types::RsaOp;
+    use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptReq;
+    use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptResp;
+    use tsra_fw_ddi_tbor_types::TborEccSignReq;
+    use tsra_fw_ddi_tbor_types::TborEccSignResp;
+    use tsra_fw_ddi_tbor_types::TborHashReq;
+    use tsra_fw_ddi_tbor_types::TborHashResp;
+    use tsra_fw_ddi_tbor_types::TborRsaModExpReq;
+    use tsra_fw_ddi_tbor_types::TborRsaModExpResp;
+    use tsra_fw_ddi_tbor_types::AES_IV_LEN;
+    use tsra_fw_ddi_tbor_types::AES_MSG_MAX_LEN;
+    use tsra_fw_ddi_tbor_types::HASH_MSG_MAX_LEN;
+    use tsra_fw_ddi_tbor_types::MASKED_AES_KEY_MAX_LEN;
+    use tsra_fw_ddi_tbor_types::MASKED_ECC_KEY_MAX_LEN;
+    use tsra_fw_ddi_tbor_types::RSA_MASKED_KEY_MAX_LEN;
+    use tsra_fw_hsm_pal_std::HsmIoRequest;
+    use tsra_fw_hsm_pal_std::HsmPartId;
+    use tsra_fw_hsm_pal_std::StdHsmIo;
+    use tsra_fw_hsm_pal_std::StdHsmPal;
+
     use super::*;
+
+    #[allow(unsafe_code)]
+    fn dma(bytes: &mut [u8]) -> &mut HsmDmaBuf {
+        // SAFETY: host tests use ordinary slice accesses, not a DMA engine.
+        unsafe { HsmDmaBuf::from_raw_mut(bytes) }
+    }
+
+    async fn crypto_fixture() -> (StdHsmPal, StdHsmIo, HsmSessId) {
+        let (tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        pal.part_alloc_internal(0, 1).await.unwrap();
+        pal.part_enable_internal(0).await.unwrap();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(HsmIoRequest {
+            pid: HsmPartId::from(0u8),
+            qid: 0,
+            qidx: 0,
+            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
+            tx: reply_tx,
+        })
+        .await
+        .unwrap();
+        let io = pal.poll_io().await.unwrap();
+        let sess_id = pal
+            .session_create_pending(&io, SessionRole::CryptoUser, dma(&mut []))
+            .await
+            .unwrap();
+        pal.session_promote(&io, sess_id, &[0; 8], &[1; 32], &[2; 32], None, None)
+            .await
+            .unwrap();
+        (pal, io, sess_id)
+    }
+
+    #[tokio::test]
+    async fn cbc_mask_initializes_padding_in_reused_dma_storage() {
+        use tsra_fw_core_crypto_key_masking::cbc;
+
+        use crate::ddi::mbor::from_pal;
+        use crate::ddi::mbor::masking;
+
+        let (pal, io, _) = crypto_fixture().await;
+        let mut key = [0x17; 80];
+        let plaintext = [0x5C; 17];
+        for plaintext_len in [1, 16, 17] {
+            for label_len in 0..4 {
+                let metadata = masking::masked_metadata(
+                    &pal,
+                    from_pal::vault_kind_ddi(HsmVaultKeyKind::Aes256).unwrap(),
+                    HsmVaultKeyAttrs::new(),
+                    &b"test"[..label_len],
+                    plaintext_len as u16,
+                )
+                .unwrap();
+                let mut storage = [0xA5; 512];
+                let len = cbc::mask(
+                    &pal,
+                    &io,
+                    dma(&mut key),
+                    &plaintext[..plaintext_len],
+                    &metadata,
+                    Some(dma(&mut storage)),
+                )
+                .await
+                .unwrap();
+                assert!(storage[len..].iter().all(|&b| b == 0xA5));
+                let layout = cbc::unmask(&pal, &io, dma(&mut key), dma(&mut storage[..len]))
+                    .await
+                    .unwrap();
+                let start = layout.plaintext_offset;
+                assert_eq!(
+                    &storage[start..start + plaintext_len],
+                    &plaintext[..plaintext_len]
+                );
+                assert!(
+                    storage[start + plaintext_len..start + layout.plaintext_max_len]
+                        .iter()
+                        .all(|&b| b == 0)
+                );
+                assert!(storage[layout.metadata_offset + layout.metadata_len..start]
+                    .iter()
+                    .all(|&b| b == 0));
+            }
+        }
+        pal.drop_io(io).await.unwrap();
+    }
+
+    async fn masked_test_key(
+        pal: &StdHsmPal,
+        io: &StdHsmIo,
+        sess_id: HsmSessId,
+        kind: HsmVaultKeyKind,
+        attrs: HsmVaultKeyAttrs,
+        key: &mut [u8],
+        out: &mut [u8],
+    ) -> usize {
+        pal.alloc_scoped_async(io, async |alloc| {
+            let params = MaskParams {
+                key_kind: kind,
+                key_attrs: attrs.with_scope(HsmKeyScope::Session),
+                svn: 0,
+                owner_seed_id: 0,
+                key_label: alloc.dma_alloc(0)?,
+            };
+            mask(
+                pal,
+                io,
+                alloc,
+                AeadAlg::AesGcm256,
+                pal.session_masking_key(io, sess_id)?,
+                &params,
+                dma(key),
+                Some(dma(out)),
+            )
+            .await
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn bounded_exchange(
+        pal: &StdHsmPal,
+        io: &StdHsmIo,
+        request: &[u8],
+        host_capacity: usize,
+    ) -> HsmResult<Vec<u8>> {
+        pal.alloc_scoped_async(io, async |_scope| {
+            // Mirror the real IO allocation order within the PAL's 16 KiB heap.
+            let undo_buf = pal.dma_alloc(io, tsra_fw_hsm_undo::UNDO_LOG_SIZE)?;
+            let undo_address = undo_buf.as_ptr() as usize;
+            let mut undo = UndoLog::new(undo_buf);
+            let mut allocation = pal.dma_alloc_exchange(io, request.len().next_multiple_of(4))?;
+            let address = allocation.as_ptr();
+            allocation.buffer_mut()[..request.len()].copy_from_slice(request);
+            let (opcode, body_session) = {
+                let view =
+                    tsra_fw_ddi_tbor::RequestView::parse(&allocation.buffer_mut()[..request.len()])?;
+                (view.opcode(), peek_session_id(&view))
+            };
+            let capacity = exchange_capacity(opcode, request.len(), host_capacity);
+            pal.dma_grow(io, &mut allocation, capacity)?;
+            assert_eq!(allocation.as_ptr(), address);
+            assert_eq!(address as usize, undo_address + tsra_fw_hsm_undo::UNDO_LOG_SIZE);
+            let mut cmd_buf =
+                HsmCmdBuf::new(allocation.buffer_mut(), request.len(), host_capacity)?;
+            let started = std::time::Instant::now();
+            let result = dispatch(
+                pal,
+                io,
+                &mut cmd_buf,
+                opcode,
+                body_session.map(u16::from).unwrap_or(0),
+                body_session,
+                None,
+                &mut undo,
+            )
+            .await;
+            assert!(undo.is_empty());
+            match result {
+                Ok(out) => {
+                    let response = cmd_buf.response(out.response_len)?;
+                    assert_eq!(response.as_ptr(), address);
+                    let response = response.to_vec();
+                    let retained = pal.dma_alloc(io, 0)?.as_ptr() as usize - undo_address;
+                    let workspace = match opcode {
+                        opcode::MLKEM_ENCAPSULATE | opcode::MLKEM_DECAPSULATE => 32,
+                        _ => 0,
+                    };
+                    assert_eq!(retained, tsra_fw_hsm_undo::UNDO_LOG_SIZE + capacity + workspace);
+                    println!(
+                        "TBOR {opcode:#04x}: request={} response={} exchange={capacity} retained_dma={retained} elapsed_us={}",
+                        request.len(), response.len(), started.elapsed().as_micros()
+                    );
+                    Ok(response)
+                }
+                Err(error) => {
+                    let len = encode_exchange_err(opcode, error, &mut cmd_buf)?;
+                    assert_eq!(len, 12);
+                    assert_eq!(
+                        tsra_fw_ddi_tbor::ResponseView::parse(cmd_buf.response(len)?)?.status(),
+                        error.0
+                    );
+                    Err(error)
+                }
+            }
+        })
+        .await
+    }
+
+    fn request_with_payload_gap(
+        request: &[u8],
+        toc_count: usize,
+        buffer_slots: &[usize],
+    ) -> Vec<u8> {
+        use tsra_fw_ddi_tbor::toc::*;
+        use tsra_fw_ddi_tbor::REQ_HEADER_LEN;
+
+        let gap = 4;
+        let data_start = REQ_HEADER_LEN + toc_count * 4;
+        let mut shifted = request.to_vec();
+        shifted.resize(request.len() + gap, 0);
+        shifted.copy_within(data_start..request.len(), data_start + gap);
+        shifted[data_start..data_start + gap].fill(0);
+        for &slot in buffer_slots {
+            let word = read_toc_word(&shifted, REQ_HEADER_LEN, slot);
+            let word = build_toc_offset_len(
+                raw_toc_entry_type(word),
+                raw_toc_length(word),
+                raw_toc_offset(word) + gap,
+            );
+            write_toc_word(&mut shifted, REQ_HEADER_LEN, slot, word);
+        }
+        shifted
+    }
+
+    #[tokio::test]
+    async fn maximum_mldsa_exchanges_fit_dma_heap_and_reject_failed_outputs() {
+        use tsra_fw_ddi_tbor_types as types;
+
+        let (pal, io, sess_id) = crypto_fixture().await;
+        crate::part_state::part_set_psk(&pal, &io, 1, dma(&mut [3; 32])).unwrap();
+        let mut request = [0; 8192];
+        let message = vec![0x42; types::MLDSA_MESSAGE_MAX_LEN];
+        let mut ctx = vec![0x24; types::MLDSA_CTX_MAX_LEN];
+        for kind in [
+            types::MlDsaKeyKind::MlDsa44Seed,
+            types::MlDsaKeyKind::MlDsa65Seed,
+            types::MlDsaKeyKind::MlDsa87Seed,
+        ] {
+            let req = types::TborMlDsaGenerateKeyReq::encode(&mut request)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .scope(types::KeyScope(HsmKeyScope::Session.0))
+                .unwrap()
+                .key_kind(kind)
+                .unwrap()
+                .finish();
+            // Bound the test future's stack usage independently of the DMA heap.
+            let mut key = Box::pin(bounded_exchange(&pal, &io, req.as_bytes(), 8192))
+                .await
+                .unwrap();
+            let key = types::TborMlDsaGenerateKeyResp::decode(dma(&mut key)).unwrap();
+            let masked_key = key.masked_key().to_vec();
+            let public_key = key.pub_key().to_vec();
+            let req = types::TborMlDsaSignReq::encode(&mut request)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .masked_key(&masked_key)
+                .unwrap()
+                .message(&message)
+                .unwrap()
+                .ctx(&ctx)
+                .unwrap()
+                .finish();
+            let mut signature = Box::pin(bounded_exchange(&pal, &io, req.as_bytes(), 8192))
+                .await
+                .unwrap();
+            assert_eq!(
+                Box::pin(bounded_exchange(&pal, &io, req.as_bytes(), 12)).await,
+                Err(HsmError::TborBufferTooSmall)
+            );
+            let mut noncanonical = request_with_payload_gap(
+                req.as_bytes(),
+                types::TborMlDsaSignReq::TOC_COUNT,
+                &[1, 2, 3],
+            );
+            types::TborMlDsaSignReq::decode(dma(&mut noncanonical)).unwrap();
+            assert_eq!(
+                Box::pin(bounded_exchange(&pal, &io, &noncanonical, 8192)).await,
+                Err(HsmError::InvalidArg)
+            );
+            let signature = types::TborMlDsaSignResp::decode(dma(&mut signature))
+                .unwrap()
+                .signature()
+                .to_vec();
+            for valid in [true, false] {
+                if !valid {
+                    ctx[0] ^= 1;
+                }
+                let req = types::TborMlDsaVerifyReq::encode(&mut request)
+                    .unwrap()
+                    .session_id(u16::from(sess_id).into())
+                    .unwrap()
+                    .pub_key(&public_key)
+                    .unwrap()
+                    .message(&message)
+                    .unwrap()
+                    .ctx(&ctx)
+                    .unwrap()
+                    .signature(&signature)
+                    .unwrap()
+                    .finish();
+                let result = Box::pin(bounded_exchange(&pal, &io, req.as_bytes(), 8192)).await;
+                if valid {
+                    result.unwrap();
+                    if kind == types::MlDsaKeyKind::MlDsa87Seed {
+                        assert_eq!(req.len(), 8088);
+                    }
+                } else {
+                    assert_eq!(result, Err(HsmError::MlDsaVerifyFailed));
+                    ctx[0] ^= 1;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn maximum_mlkem_exchanges_fit_dma_heap_and_preserve_shared_secrets() {
+        use tsra_fw_ddi_tbor_types as types;
+
+        let (pal, io, sess_id) = crypto_fixture().await;
+        crate::part_state::part_set_psk(&pal, &io, 1, dma(&mut [3; 32])).unwrap();
+        let mut request = [0; 8192];
+        for kind in [
+            types::MlKemKeyKind::MlKem512Seed,
+            types::MlKemKeyKind::MlKem768Seed,
+            types::MlKemKeyKind::MlKem1024Seed,
+        ] {
+            let req = types::TborMlKemGenerateKeyReq::encode(&mut request)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .scope(types::KeyScope(HsmKeyScope::Session.0))
+                .unwrap()
+                .key_kind(kind)
+                .unwrap()
+                .finish();
+            let mut key = bounded_exchange(&pal, &io, req.as_bytes(), 8192)
+                .await
+                .unwrap();
+            let key = types::TborMlKemGenerateKeyResp::decode(dma(&mut key)).unwrap();
+            let mut masked_key = key.masked_key().to_vec();
+            let public_key = key.pub_key().to_vec();
+            let req = types::TborMlKemEncapsulateReq::encode(&mut request)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .scope(types::KeyScope(HsmKeyScope::Session.0))
+                .unwrap()
+                .pub_key(&public_key)
+                .unwrap()
+                .finish();
+            let mut encapsulated = bounded_exchange(&pal, &io, req.as_bytes(), 8192)
+                .await
+                .unwrap();
+            let mut noncanonical = request_with_payload_gap(
+                req.as_bytes(),
+                types::TborMlKemEncapsulateReq::TOC_COUNT,
+                &[2],
+            );
+            types::TborMlKemEncapsulateReq::decode(dma(&mut noncanonical)).unwrap();
+            assert_eq!(
+                Box::pin(bounded_exchange(&pal, &io, &noncanonical, 8192)).await,
+                Err(HsmError::InvalidArg)
+            );
+            let encapsulated =
+                types::TborMlKemEncapsulateResp::decode(dma(&mut encapsulated)).unwrap();
+            let ciphertext = encapsulated.ciphertext().to_vec();
+            let mut shared_secret = encapsulated.masked_shared_secret().to_vec();
+            for valid in [true, false] {
+                if !valid {
+                    *masked_key.last_mut().unwrap() ^= 1;
+                }
+                let req = types::TborMlKemDecapsulateReq::encode(&mut request)
+                    .unwrap()
+                    .session_id(u16::from(sess_id).into())
+                    .unwrap()
+                    .scope(types::KeyScope(HsmKeyScope::Session.0))
+                    .unwrap()
+                    .masked_key(&masked_key)
+                    .unwrap()
+                    .ciphertext(&ciphertext)
+                    .unwrap()
+                    .finish();
+                let result = bounded_exchange(&pal, &io, req.as_bytes(), 8192).await;
+                if valid {
+                    let mut decapsulated = result.unwrap();
+                    let decapsulated =
+                        types::TborMlKemDecapsulateResp::decode(dma(&mut decapsulated)).unwrap();
+                    let mut recovered = decapsulated.masked_shared_secret().to_vec();
+                    let masking_key = pal.session_masking_key(&io, sess_id).unwrap();
+                    let left = tsra_fw_core_crypto_key_masking::aead::unmask(
+                        &pal,
+                        &io,
+                        masking_key,
+                        dma(&mut shared_secret),
+                    )
+                    .await
+                    .unwrap();
+                    let right = tsra_fw_core_crypto_key_masking::aead::unmask(
+                        &pal,
+                        &io,
+                        masking_key,
+                        dma(&mut recovered),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(left.target_key == right.target_key);
+                } else {
+                    assert!(result.is_err());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_requests_for_every_command_leave_sessions_and_undo_intact() {
+        let (pal, io, sess_id) = crypto_fixture().await;
+        crate::part_state::part_set_psk(&pal, &io, 1, dma(&mut [3; 32])).unwrap();
+        let mut tested = 0;
+        for opcode in 0..=u8::MAX {
+            if !is_known_opcode(opcode) || matches!(opcode, opcode::API_REV | opcode::PART_INFO) {
+                continue;
+            }
+            let mut request = [0; 136];
+            let mut encoder =
+                tsra_fw_ddi_tbor::RequestEncoder::new(&mut request, PROTOCOL_VERSION, opcode);
+            for _ in 0..32 {
+                encoder = encoder.none().unwrap();
+            }
+            let request = encoder.finish().unwrap();
+            pal.alloc_scoped_async(&io, async |_scope| {
+                let mut undo =
+                    UndoLog::new(pal.dma_alloc(&io, tsra_fw_hsm_undo::UNDO_LOG_SIZE).unwrap());
+                let capacity = exchange_capacity(opcode, request.len(), 8192);
+                let mut allocation = pal.dma_alloc_exchange(&io, capacity).unwrap();
+                allocation.buffer_mut()[..request.len()].copy_from_slice(request);
+                let mut cmd_buf =
+                    HsmCmdBuf::new(allocation.buffer_mut(), request.len(), 8192).unwrap();
+                let result = dispatch(
+                    &pal,
+                    &io,
+                    &mut cmd_buf,
+                    opcode,
+                    u16::from(sess_id),
+                    Some(sess_id),
+                    None,
+                    &mut undo,
+                )
+                .await;
+                let error = match result {
+                    Ok(_) => panic!("opcode {opcode:#04x} accepted missing required fields"),
+                    Err(error) => error,
+                };
+                let len = encode_exchange_err(opcode, error, &mut cmd_buf).unwrap();
+                assert_eq!(len, 12);
+                assert!(undo.is_empty());
+                assert!(matches!(
+                    pal.session_state(&io, sess_id),
+                    HsmSessionState::Active
+                ));
+            })
+            .await;
+            tested += 1;
+        }
+        assert_eq!(tested, 41);
+    }
+
+    #[tokio::test]
+    async fn exchange_hash_reclaims_input_and_grows_for_empty_messages() {
+        let (pal, io, sess_id) = crypto_fixture().await;
+        for size in [0, 3, HASH_MSG_MAX_LEN] {
+            let mut storage = [0xA5; 2100];
+            let address = storage.as_ptr();
+            let request_len = TborHashReq::encode(&mut storage)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .algo(HashAlgo::Sha512)
+                .unwrap()
+                .msg(&vec![0x42; size])
+                .unwrap()
+                .finish()
+                .len();
+            let capacity = exchange_capacity(opcode::HASH, request_len, 84);
+            let mut cmd_buf =
+                HsmCmdBuf::new(dma(&mut storage[..capacity]), request_len, 84).unwrap();
+            let outcome = hash::handle(&pal, &io, &mut cmd_buf).await;
+            let len = cmd_buf.finish_response(outcome).unwrap();
+            let response = cmd_buf.response(len).unwrap();
+            assert_eq!(response.as_ptr(), address);
+            let frame = TborHashResp::decode(response).unwrap();
+            assert_eq!(frame.digest().len(), HsmHashAlgo::Sha512.digest_len());
+            assert_eq!(len, 20 + frame.digest().len());
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_aes_preserves_message_and_iv_addresses() {
+        let (pal, io, sess_id) = crypto_fixture().await;
+        let mut masked = [0; MASKED_AES_KEY_MAX_LEN];
+        let masked_len = masked_test_key(
+            &pal,
+            &io,
+            sess_id,
+            HsmVaultKeyKind::Aes256,
+            HsmVaultKeyAttrs::new()
+                .with_encrypt(true)
+                .with_decrypt(true),
+            &mut [0x11; 32],
+            &mut masked,
+        )
+        .await;
+        let mut message = vec![0x5A; AES_MSG_MAX_LEN];
+        for op in [AesOp::Encrypt, AesOp::Decrypt] {
+            let mut storage = [0xA5; 1400];
+            let request = TborAesEncryptDecryptReq::encode(&mut storage)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .op(op)
+                .unwrap()
+                .msg(&message)
+                .unwrap()
+                .iv(&[0x22; AES_IV_LEN])
+                .unwrap()
+                .masked_key(&masked[..masked_len])
+                .unwrap()
+                .finish();
+            let request_len = request.len();
+            let msg_address = request.msg().as_ptr();
+            let iv_address = request.iv().as_ptr();
+            let mut cmd_buf =
+                HsmCmdBuf::new(dma(&mut storage), request_len, 28 + message.len() + 16).unwrap();
+            let outcome = aes_encrypt_decrypt::handle(&pal, &io, &mut cmd_buf).await;
+            let len = cmd_buf.finish_response(outcome).unwrap();
+            let response =
+                TborAesEncryptDecryptResp::decode(cmd_buf.response(len).unwrap()).unwrap();
+            assert_eq!(response.msg().as_ptr(), msg_address);
+            assert_eq!(response.iv().as_ptr(), iv_address);
+            assert_eq!(len, 28 + message.len() + AES_IV_LEN);
+            if op == AesOp::Encrypt {
+                assert_ne!(response.msg(), &message[..]);
+                message.copy_from_slice(response.msg());
+            } else {
+                assert!(response.msg().iter().all(|&b| b == 0x5A));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_aes_rejects_gaps_and_invalid_permissions() {
+        let (pal, io, sess_id) = crypto_fixture().await;
+        let mut masked = [0; MASKED_AES_KEY_MAX_LEN];
+        let masked_len = masked_test_key(
+            &pal,
+            &io,
+            sess_id,
+            HsmVaultKeyKind::Aes256,
+            HsmVaultKeyAttrs::new(),
+            &mut [0x11; 32],
+            &mut masked,
+        )
+        .await;
+        for (gap, expected) in [(0, HsmError::InvalidPermissions), (4, HsmError::InvalidArg)] {
+            let mut storage = [0xA5; 400];
+            let request_len = TborAesEncryptDecryptReq::encode(&mut storage)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .op(AesOp::Encrypt)
+                .unwrap()
+                .msg(&[0x5A; 32])
+                .unwrap()
+                .iv(&[0x22; AES_IV_LEN])
+                .unwrap()
+                .masked_key(&masked[..masked_len])
+                .unwrap()
+                .finish()
+                .len();
+            if gap != 0 {
+                use tsra_fw_ddi_tbor::toc::*;
+
+                storage.copy_within(28..request_len, 28 + gap);
+                for index in 2..5 {
+                    let word = read_toc_word(&storage, 8, index);
+                    let shifted = build_toc_offset_len(
+                        raw_toc_entry_type(word),
+                        raw_toc_length(word),
+                        raw_toc_offset(word) + gap,
+                    );
+                    write_toc_word(&mut storage, 8, index, shifted);
+                }
+            }
+            let mut cmd_buf = HsmCmdBuf::new(dma(&mut storage), request_len + gap, 80).unwrap();
+            let outcome = aes_encrypt_decrypt::handle(&pal, &io, &mut cmd_buf).await;
+            assert_eq!(cmd_buf.finish_response(outcome), Err(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn exchange_ecc_sign_reuses_metadata_and_enforces_permissions() {
+        for (curve, kind) in [
+            (HsmEccCurve::P256, HsmVaultKeyKind::Ecc256Private),
+            (HsmEccCurve::P384, HsmVaultKeyKind::Ecc384Private),
+            (HsmEccCurve::P521, HsmVaultKeyKind::Ecc521Private),
+        ] {
+            for permitted in [true, false] {
+                let (pal, io, sess_id) = crypto_fixture().await;
+                let mut key = vec![0; curve.wire_coord_len()];
+                key[curve.wire_coord_len() - 1] = 1;
+                let mut masked = [0; MASKED_ECC_KEY_MAX_LEN];
+                let masked_len = masked_test_key(
+                    &pal,
+                    &io,
+                    sess_id,
+                    kind,
+                    HsmVaultKeyAttrs::new().with_sign(permitted),
+                    &mut key,
+                    &mut masked,
+                )
+                .await;
+                let mut storage = [0xA5; 400];
+                let address = storage.as_ptr();
+                let request_len = TborEccSignReq::encode(&mut storage)
+                    .unwrap()
+                    .session_id(u16::from(sess_id).into())
+                    .unwrap()
+                    .masked_key(&masked[..masked_len])
+                    .unwrap()
+                    .digest(&vec![0x42; curve.ecdsa_digest_len()])
+                    .unwrap()
+                    .finish()
+                    .len();
+                let mut cmd_buf =
+                    HsmCmdBuf::new(dma(&mut storage), request_len, 20 + curve.wire_sig_len())
+                        .unwrap();
+                let outcome = ecc_sign::handle(&pal, &io, &mut cmd_buf).await;
+                let result = cmd_buf.finish_response(outcome);
+                if permitted {
+                    let len = result.unwrap();
+                    let response = cmd_buf.response(len).unwrap();
+                    assert_eq!(response.as_ptr(), address);
+                    let frame = TborEccSignResp::decode(response).unwrap();
+                    assert_eq!(frame.signature().len(), curve.wire_sig_len());
+                    assert_eq!(len, 20 + curve.wire_sig_len());
+                } else {
+                    assert_eq!(result, Err(HsmError::InvalidPermissions));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exchange_api_rev_reuses_the_request_allocation() {
+        let mut storage = [0xA5; 16];
+        let address = storage.as_ptr();
+        let len = tsra_fw_ddi_tbor_types::TborApiRevReq::encode(&mut storage)
+            .unwrap()
+            .finish()
+            .len();
+        let mut cmd_buf = HsmCmdBuf::new(dma(&mut storage), len, 16).unwrap();
+        let len = api_rev::handle(&mut cmd_buf).unwrap();
+        let bytes = cmd_buf.response(len).unwrap();
+        assert_eq!(bytes.as_ptr(), address);
+        let response = tsra_fw_ddi_tbor_types::TborApiRevResp::decode(bytes).unwrap();
+        assert_eq!(response.min_ver(), PROTOCOL_VERSION);
+        assert_eq!(response.max_ver(), PROTOCOL_VERSION);
+    }
+
+    #[tokio::test]
+    async fn exchange_rsa_overwrites_input_and_rejects_invalid_requests() {
+        let (pal, io, sess_id) = crypto_fixture().await;
+        let mut private_key = [0; 2 * 256 + 4];
+        pal.rsa_gen_keypair(
+            &io,
+            HsmRsaKey::Rsa2048Priv,
+            dma(&mut private_key),
+            dma(&mut [0; 512]),
+            HsmRsaPct::None,
+        )
+        .await
+        .unwrap();
+        let mut y = [0; 256];
+        y[0] = 2;
+        let mut expected = [0; 256];
+        pal.mod_exp_priv(
+            &io,
+            HsmRsaKey::Rsa2048Priv,
+            dma(&mut private_key),
+            dma(&mut y),
+            dma(&mut expected),
+        )
+        .await
+        .unwrap();
+        for (permitted, input, gap, host_capacity) in [
+            (true, 2, 0, 280),
+            (false, 2, 0, 280),
+            (true, 1, 0, 280),
+            (true, 2, 4, 280),
+            (true, 2, 0, 12),
+        ] {
+            let mut masked = [0; RSA_MASKED_KEY_MAX_LEN];
+            let masked_len = masked_test_key(
+                &pal,
+                &io,
+                sess_id,
+                HsmVaultKeyKind::Rsa2kPrivate,
+                HsmVaultKeyAttrs::new().with_sign(permitted),
+                &mut private_key,
+                &mut masked,
+            )
+            .await;
+            y[0] = input;
+            let mut storage = [0xA5; 1400];
+            let address = storage.as_ptr();
+            let request_len = TborRsaModExpReq::encode(&mut storage)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .y(&y)
+                .unwrap()
+                .masked_key(&masked[..masked_len])
+                .unwrap()
+                .op_type(RsaOp::Sign)
+                .unwrap()
+                .finish()
+                .len();
+            if gap != 0 {
+                use tsra_fw_ddi_tbor::toc::*;
+
+                let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborRsaModExpReq::TOC_COUNT * 4;
+                storage.copy_within(data_start..request_len, data_start + gap);
+                for index in 1..=2 {
+                    let word = read_toc_word(&storage, 8, index);
+                    let shifted = build_toc_offset_len(
+                        raw_toc_entry_type(word),
+                        raw_toc_length(word),
+                        raw_toc_offset(word) + gap,
+                    );
+                    write_toc_word(&mut storage, 8, index, shifted);
+                }
+            }
+            let mut cmd_buf =
+                HsmCmdBuf::new(dma(&mut storage), request_len + gap, host_capacity).unwrap();
+            let request = TborRsaModExpReq::decode(cmd_buf.request()).unwrap();
+            let y_address = request.y().as_ptr();
+            assert!(request.masked_key().as_ptr() as usize >= y_address as usize + y.len());
+            let outcome = rsa_mod_exp::handle(&pal, &io, &mut cmd_buf).await;
+            let result = cmd_buf.finish_response(outcome);
+            if permitted && input == 2 && gap == 0 && host_capacity == 280 {
+                let response = cmd_buf.response(result.unwrap()).unwrap();
+                assert_eq!(response.as_ptr(), address);
+                let frame = TborRsaModExpResp::decode(response).unwrap();
+                assert_eq!(frame.x().as_ptr(), y_address);
+                assert_eq!(frame.x(), &expected[..]);
+            } else {
+                let error = if !permitted {
+                    HsmError::InvalidPermissions
+                } else if host_capacity == 12 {
+                    HsmError::TborBufferTooSmall
+                } else {
+                    HsmError::InvalidArg
+                };
+                assert_eq!(result, Err(error));
+            }
+        }
+    }
+
+    #[test]
+    fn response_completion_validates_without_modifying_storage() {
+        for (host_capacity, outcome, expected) in [
+            (16, Ok(16), Ok(16)),
+            (
+                16,
+                Err(HsmError::InvalidPermissions),
+                Err(HsmError::InvalidPermissions),
+            ),
+            (16, Ok(0), Err(HsmError::TborBufferTooSmall)),
+            (16, Ok(17), Err(HsmError::TborBufferTooSmall)),
+            (128, Ok(65), Err(HsmError::TborBufferTooSmall)),
+        ] {
+            let mut storage = [0xA5; 64];
+            let cmd_buf = HsmCmdBuf::new(dma(&mut storage), 48, host_capacity).unwrap();
+            assert_eq!(cmd_buf.finish_response(outcome), expected);
+            assert!(storage.iter().all(|&b| b == 0xA5));
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_finishes_shared_responses_and_preserves_undo_storage() {
+        let (pal, io, _) = crypto_fixture().await;
+        for host_capacity in [12, 16] {
+            let mut storage = [0xA5; 32];
+            let address = storage.as_ptr();
+            let request_len = tsra_fw_ddi_tbor_types::TborApiRevReq::encode(&mut storage)
+                .unwrap()
+                .finish()
+                .len();
+            let mut undo_storage = [0xAC; 128];
+            let mut undo = UndoLog::new(dma(&mut undo_storage));
+            let mut cmd_buf =
+                HsmCmdBuf::new(dma(&mut storage), request_len, host_capacity).unwrap();
+            let result = dispatch(
+                &pal,
+                &io,
+                &mut cmd_buf,
+                opcode::API_REV,
+                0,
+                None,
+                None,
+                &mut undo,
+            )
+            .await;
+            if host_capacity == 16 {
+                let response = cmd_buf.response(result.unwrap().response_len).unwrap();
+                assert_eq!(response.as_ptr(), address);
+                assert_eq!(response.len(), 16);
+            } else {
+                assert!(matches!(result, Err(HsmError::TborBufferTooSmall)));
+            }
+            assert!(cmd_buf.buffer_mut()[16..].iter().all(|&b| b == 0xA5));
+            assert!(undo.is_empty());
+            assert!(undo_storage.iter().all(|&b| b == 0xAC));
+        }
+    }
+
+    #[test]
+    fn exchange_error_initializes_only_its_prefix_without_touching_undo_storage() {
+        let mut storage = [[0xA5; 64], [0x5A; 64]];
+        for storage in &mut storage {
+            let fill = storage[0];
+            let (undo, buffer) = storage.split_at_mut(32);
+            let address = buffer.as_ptr();
+            let mut cmd_buf = HsmCmdBuf::new(dma(buffer), 16, 12).unwrap();
+            let len =
+                encode_exchange_err(opcode::API_REV, HsmError::InvalidArg, &mut cmd_buf).unwrap();
+            let bytes = cmd_buf.response(len).unwrap();
+            assert_eq!(bytes.as_ptr(), address);
+            assert_eq!(len, 12);
+            let response = tsra_fw_ddi_tbor::ResponseView::parse(bytes).unwrap();
+            assert_eq!(response.status(), HsmError::InvalidArg.0);
+            assert_eq!(response.toc_count(), 1);
+            assert!(cmd_buf.buffer_mut()[len..].iter().all(|&b| b == fill));
+            assert!(undo.iter().all(|&b| b == fill));
+        }
+        assert_eq!(storage[0][32..44], storage[1][32..44]);
+    }
 
     /// Synthetic opcode used to exercise the "future in-session
     /// command that is NOT on the allow-list" branch of the gate.

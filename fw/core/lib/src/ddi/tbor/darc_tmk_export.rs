@@ -31,9 +31,8 @@
 //!
 //! The command **persists nothing** (no vault write, no lifecycle
 //! advance), so it records no rollback on the undo log.  This command is
-//! **Crypto-Officer-only**.  Every recovered secret (`SndrPriv`, the TMK)
-//! is scrubbed on EVERY exit path — scope rewind does not clear DMA
-//! memory, and `unmask` decrypts in place.
+//! **Crypto-Officer-only**. IO teardown scrubs recovered secrets
+//! (`SndrPriv`, the TMK).
 //!
 //! [`PartPolicy`]: super::policy
 
@@ -55,7 +54,8 @@ use tsra_fw_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
 use tsra_fw_hsm_oob::copy_oob;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -92,8 +92,8 @@ async fn recover_target_pub<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     oob: &OobPtr,
-    req_buf: &DmaBuf,
-    rcvr_pub: &mut DmaBuf,
+    req_buf: &HsmDmaBuf,
+    rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // The re-supplied policy must match the one bound at `PartInit`; only
     // then is its `DATAPubKey` a trustworthy anchor.
@@ -136,16 +136,16 @@ async fn recover_target_pub<P: HsmPal>(
 /// **Stateless**: recovers the local TMK and returns it HPKE-Auth-sealed
 /// to the target without writing the vault or advancing any lifecycle, so
 /// it records no rollback on the `undo` log.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     oob: Option<OobPtr>,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  Both ids are `Copy`, so they outlive the view.
     let (sender_mk_id, tmk_mk_id): (HsmKeyId, HsmKeyId) = {
-        let req = TborDarcTmkExportReq::decode(req_buf)?;
+        let req = TborDarcTmkExportReq::decode(cmd_buf.request())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -182,24 +182,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // ── Phase 1: policy binding + DATA-anchored target chain ──
         let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
-        recover_target_pub(pal, io, alloc, &oob, req_buf, pk_r).await?;
+        recover_target_pub(pal, io, alloc, &oob, cmd_buf.request(), pk_r).await?;
 
         // ── Phase 2: recover SndrPriv + TMK, then HPKE-Auth seal the TMK
         // to RcvrPub.  The masked inputs are copied into crypto scratch so
-        // the request-buffer borrow is confined; `unmask` decrypts in
-        // place, so each scratch blob holds plaintext secret after and is
-        // scrubbed immediately.  Every recovered secret is scrubbed on
-        // EVERY exit path (scope rewind does not clear DMA).
+        // the request-buffer borrow is confined; `unmask` decrypts in place.
         let sender_blob = alloc.dma_alloc(MASKED_KEX_KEY_LEN)?;
         let tmk_blob = alloc.dma_alloc(MASKED_TMK_LEN)?;
         {
-            let req = TborDarcTmkExportReq::decode(req_buf)?;
+            let req = TborDarcTmkExportReq::decode(cmd_buf.request())?;
             sender_blob.copy_from_slice(req.masked_sender_key());
             tmk_blob.copy_from_slice(req.masked_tmk());
         }
 
         // Unmask the sender key into `sender_blob`, copy the recovered
-        // private key out into its own scratch, then scrub `sender_blob`.
+        // private key out into its own scratch.
         let sender_masking_key = pal.vault_key(io, sender_mk_id)?;
         let unmask_sender = async {
             let view = unmask(pal, io, sender_masking_key, sender_blob).await?;
@@ -211,23 +208,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             Ok::<_, HsmError>(sndr_priv)
         }
         .await;
-        sender_blob.zeroize();
         let sndr_priv = unmask_sender?;
 
-        // From here `sndr_priv` holds a private key and MUST be scrubbed on
-        // every path.  Its scrub lives *outside* `crypto_res`, so every
-        // allocation that could fail after `sndr_priv` is recovered — the
-        // TMK buffer included — must stay *inside* `crypto_res`; otherwise
-        // an early `?` would rewind the scope (which does not clear DMA)
-        // before the unconditional scrub below.
         let crypto_res = async {
-            // The recovered TMK likewise MUST be scrubbed on every path
-            // once populated, so it is scrubbed here (inside `crypto_res`)
-            // after the `inner` block, whatever its outcome.
             let tmk = alloc.dma_alloc(TMK_LEN)?;
             let inner = async {
                 // Unmask the masked TMK into `tmk_blob`, copy the 32-byte
-                // TMK out, then scrub `tmk_blob`.
+                // TMK out into its own scratch.
                 let tmk_masking_key = pal.vault_key(io, tmk_mk_id)?;
                 let unmask_tmk = async {
                     let view = unmask(pal, io, tmk_masking_key, tmk_blob).await?;
@@ -241,7 +228,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                     Ok::<_, HsmError>(())
                 }
                 .await;
-                tmk_blob.zeroize();
                 unmask_tmk?;
 
                 // Sender public key (`SndrPub`) in SEC1 BE, derived
@@ -278,27 +264,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 Ok::<_, HsmError>(())
             }
             .await;
-            tmk.zeroize();
             inner
         }
         .await;
 
         // Scrub the recovered sender private key on every path.
-        sndr_priv.zeroize();
         crypto_res
     })
     .await?;
 
-    encode_response(pal, io, sealed_tmk_out)
+    encode_response(cmd_buf, sealed_tmk_out)
 }
 
 /// Encode the `DarcTmkExport` response around the sealed TMK.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    sealed_tmk: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, sealed_tmk: &HsmDmaBuf) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborDarcTmkExportResp::encode(buf, 0, false)?
             .sealed_tmk(sealed_tmk)?
             .finish();

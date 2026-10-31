@@ -212,6 +212,9 @@ pub trait TborOpReq: Sized {
 /// and validates the wire buffer via the codec [`codec::ResponseView`]
 /// and copies all field values out into the owned struct.
 pub trait TborResp: Sized {
+    /// Number of TOC entries occupied by the response schema.
+    const FIELD_TOC_COUNT: usize;
+
     /// Decode an owned response value from the wire buffer.
     fn decode_response(buf: &[u8]) -> Result<Self, codec::DecodeError>;
 }

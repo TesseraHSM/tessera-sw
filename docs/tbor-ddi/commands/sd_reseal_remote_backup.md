@@ -39,7 +39,7 @@ report's v2 `policy_hash` must equal `SHA-384(policy)`.  This binds the
 source and destination to the same policy (whose digest covers the POTA
 key).  The attested COSE_Keys are recovered as `SndrPub` (source sender)
 and `DstRcvrPub` (destination receiver).  `BKS3` and `RcvrPriv` are
-zeroized before returning on every path.
+scrubbed during IO teardown.
 
 Omit the device-owner chain with an empty descriptor list. Supplying an invalid
 owner chain still fails. The wire layout is unchanged.

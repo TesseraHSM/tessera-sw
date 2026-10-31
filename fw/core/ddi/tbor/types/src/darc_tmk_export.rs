@@ -87,7 +87,7 @@ const _: () = assert!(crate::evidence::CERT_DESCRIPTORS_MAX_LEN == 6);
 ///
 /// Unmasks a local TMK and HPKE-Auth-seals it to a DATA-authenticated
 /// target for off-device transfer.
-#[tbor(opcode = 0x24)]
+#[tbor(opcode = 0x24, pair = TborDarcTmkExportResp)]
 pub struct TborDarcTmkExportReq<'a> {
     /// CO session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -130,7 +130,7 @@ pub struct TborDarcTmkExportReq<'a> {
 /// `DarcTmkExport` response schema.
 ///
 /// Carries the HPKE-Auth-sealed TMK for the target to import.
-#[tbor(response)]
+#[tbor(response, pair = TborDarcTmkExportReq)]
 pub struct TborDarcTmkExportResp<'a> {
     /// The HPKE-Auth seal of the 32-byte TMK.  Always exactly
     /// [`SEALED_TMK_LEN`] (145 B): `enc(97) ‖ ct(48)`.

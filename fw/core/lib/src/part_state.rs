@@ -54,14 +54,14 @@
 //! partition from private IO metadata; this module never names a partition
 //! id directly.
 //!
-//! ## Byte-valued properties use [`DmaBuf`]
+//! ## Byte-valued properties use [`HsmDmaBuf`]
 //!
-//! All byte-valued accessors take or return `&DmaBuf` instead of the
+//! All byte-valued accessors take or return `&HsmDmaBuf` instead of the
 //! legacy `Option<&mut [u8]>` query/copy pattern.  This keeps data
 //! flowing through PAL crypto primitives zero-copy and avoids the
 //! two-pass length/copy idiom at every caller.
 //!
-//! Setters accept any `&DmaBuf` whose length matches the property's
+//! Setters accept any `&HsmDmaBuf` whose length matches the property's
 //! [`PartPropKind`]; the PAL impl validates length and returns
 //! [`HsmError::InvalidArg`] on a mismatch.  Getters return a borrow
 //! tied to the PAL impl's storage; callers must not assume the
@@ -91,7 +91,7 @@
 //! credentials, nonce, sealed / masked BK_BOOT,
 //! firmware seed) are zeroised by the PAL when overwritten or
 //! cleared.  Callers in this module never log the value of those
-//! properties; downstream code that takes a `&DmaBuf` of sensitive
+//! properties; downstream code that takes a `&HsmDmaBuf` of sensitive
 //! material is expected to honour the same rule.
 //!
 //! ## Type-narrowed views over the property kind
@@ -255,7 +255,7 @@ pub const fn part_res_count_prop_id() -> PartPropId {
 /// [`HsmError::PartPropNotFound`] before the PAL has populated it
 /// for this partition.  The bytes are opaque to core; only the host
 /// management layer interprets them.
-pub fn part_id<'a, P: HsmPartitionManager>(pal: &'a P, io: &P::Io) -> HsmResult<&'a DmaBuf> {
+pub fn part_id<'a, P: HsmPartitionManager>(pal: &'a P, io: &P::Io) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::ID)
 }
 
@@ -633,7 +633,7 @@ pub fn part_psk<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
     psk_id: u8,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, part_psk_prop_id(psk_id)?)
 }
 
@@ -646,7 +646,7 @@ pub fn part_set_psk<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
     psk_id: u8,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, part_psk_prop_id(psk_id)?, data)
 }
@@ -677,7 +677,7 @@ pub fn part_psk_prop_id(psk_id: u8) -> HsmResult<PartPropId> {
 pub fn part_credential<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::CREDENTIAL)
 }
 
@@ -691,7 +691,7 @@ pub fn part_credential<'a, P: HsmPartitionManager>(
 pub fn part_set_credential<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::CREDENTIAL, data)
 }
@@ -758,7 +758,7 @@ pub const NONCE_LEN: usize = 32;
 /// `RequiredPresent`, sensitive).  Always present; the PAL
 /// initialises it on partition allocation.  Refresh by writing fresh
 /// PAL-RNG bytes via [`part_set_nonce`].
-pub fn part_nonce<'a, P: HsmPartitionManager>(pal: &'a P, io: &P::Io) -> HsmResult<&'a DmaBuf> {
+pub fn part_nonce<'a, P: HsmPartitionManager>(pal: &'a P, io: &P::Io) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::NONCE)
 }
 
@@ -770,7 +770,7 @@ pub fn part_nonce<'a, P: HsmPartitionManager>(pal: &'a P, io: &P::Io) -> HsmResu
 pub fn part_set_nonce<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    nonce: &DmaBuf,
+    nonce: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::NONCE, nonce)
 }
@@ -855,7 +855,7 @@ pub fn part_owner_seed(pal: &impl HsmSeedStore, svn: u64) -> HsmResult<&[u8]> {
 pub fn part_sealed_bk3<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SEALED_BK3)
 }
 
@@ -868,7 +868,7 @@ pub fn part_sealed_bk3<'a, P: HsmPartitionManager>(
 pub fn part_set_sealed_bk3<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::SEALED_BK3, data)
 }
@@ -888,7 +888,7 @@ pub const fn part_sealed_bk3_prop_id() -> PartPropId {
 pub fn part_masked_bk_boot<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::MASKED_BK_BOOT)
 }
 
@@ -898,7 +898,7 @@ pub fn part_masked_bk_boot<'a, P: HsmPartitionManager>(
 pub fn part_set_masked_bk_boot<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::MASKED_BK_BOOT, data)
 }
@@ -919,7 +919,7 @@ pub const fn part_masked_bk_boot_prop_id() -> PartPropId {
 pub fn part_vm_launch_guid<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::VM_LAUNCH_GUID)
 }
 
@@ -939,7 +939,7 @@ pub const fn part_vm_launch_guid_prop_id() -> PartPropId {
 pub fn part_policy_hash<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::POLICY_HASH)
 }
 
@@ -950,7 +950,7 @@ pub fn part_policy_hash<'a, P: HsmPartitionManager>(
 pub fn part_set_policy_hash<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::POLICY_HASH, data)
 }
@@ -968,7 +968,7 @@ pub const fn part_policy_hash_prop_id() -> PartPropId {
 pub fn part_pota_thumbprint<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::POTA_THUMBPRINT)
 }
 
@@ -978,7 +978,7 @@ pub fn part_pota_thumbprint<'a, P: HsmPartitionManager>(
 pub fn part_set_pota_thumbprint<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::POTA_THUMBPRINT, data)
 }
@@ -994,7 +994,7 @@ pub const fn part_pota_thumbprint_prop_id() -> PartPropId {
 pub fn part_sata_thumbprint<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SATA_THUMBPRINT)
 }
 
@@ -1002,7 +1002,7 @@ pub fn part_sata_thumbprint<'a, P: HsmPartitionManager>(
 pub fn part_set_sata_thumbprint<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::SATA_THUMBPRINT, data)
 }
@@ -1011,7 +1011,7 @@ pub fn part_set_sata_thumbprint<P: HsmPartitionManager>(
 pub fn part_sapota_thumbprint<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SAPOTA_THUMBPRINT)
 }
 
@@ -1019,7 +1019,7 @@ pub fn part_sapota_thumbprint<'a, P: HsmPartitionManager>(
 pub fn part_set_sapota_thumbprint<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::SAPOTA_THUMBPRINT, data)
 }
@@ -1074,7 +1074,7 @@ pub fn part_is_credential_set<P: HsmPartitionManager>(pal: &P, io: &P::Io) -> Hs
 pub fn part_id_pub_key<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::ID_PUB_KEY)
 }
 
@@ -1082,7 +1082,7 @@ pub fn part_id_pub_key<'a, P: HsmPartitionManager>(
 pub fn part_session_enc_pub_key<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::SESSION_ENC_PUB_KEY)
 }
 
@@ -1090,7 +1090,7 @@ pub fn part_session_enc_pub_key<'a, P: HsmPartitionManager>(
 pub fn part_establish_cred_pub_key<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::ESTABLISH_CRED_PUB_KEY)
 }
 
@@ -1099,14 +1099,14 @@ pub fn part_establish_cred_pub_key<'a, P: HsmPartitionManager>(
 pub fn part_pta_pub_key<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::PTA_PUB_KEY)
 }
 
 /// Validates a host-supplied SEC1-uncompressed P-384 PTA key (`0x04 ‖ x
 /// ‖ y`, 97 B) and returns a view of the 96-byte raw `x ‖ y`
 /// coordinates (the constant `0x04` prefix is dropped before storage).
-fn pta_sec1_to_raw(sec1: &DmaBuf) -> HsmResult<&DmaBuf> {
+fn pta_sec1_to_raw(sec1: &HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
     const PTA_SEC1_LEN: usize = 97;
     if sec1.len() != PTA_SEC1_LEN || sec1[0] != 0x04 {
         return Err(HsmError::InvalidArg);
@@ -1119,7 +1119,7 @@ fn pta_sec1_to_raw(sec1: &DmaBuf) -> HsmResult<&DmaBuf> {
 pub fn part_set_pta_pub_key<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    sec1: &DmaBuf,
+    sec1: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let raw = pta_sec1_to_raw(sec1)?;
     pal.part_prop_set_bytes(io, PartPropId::PTA_PUB_KEY, raw)
@@ -1132,7 +1132,7 @@ pub fn part_set_pta_key<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
     key_id: HsmKeyId,
-    pub_sec1: &DmaBuf,
+    pub_sec1: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let raw = pta_sec1_to_raw(pub_sec1)?;
     part_set_pta_key_id(pal, io, key_id)?;
@@ -1143,7 +1143,7 @@ pub fn part_set_pta_key<P: HsmPartitionManager>(
 pub fn part_bk3_session<'a, P: HsmPartitionManager>(
     pal: &'a P,
     io: &P::Io,
-) -> HsmResult<&'a DmaBuf> {
+) -> HsmResult<&'a HsmDmaBuf> {
     pal.part_prop_get_bytes(io, PartPropId::BK3_SESSION)
 }
 
@@ -1151,7 +1151,7 @@ pub fn part_bk3_session<'a, P: HsmPartitionManager>(
 pub fn part_set_bk3_session<P: HsmPartitionManager>(
     pal: &P,
     io: &P::Io,
-    data: &DmaBuf,
+    data: &HsmDmaBuf,
 ) -> HsmResult<()> {
     pal.part_prop_set_bytes(io, PartPropId::BK3_SESSION, data)
 }

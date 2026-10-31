@@ -36,7 +36,7 @@
 //! The command **persists nothing** (no vault write, no lifecycle
 //! advance), so it records no rollback on the undo log.  Every recovered
 //! secret (the TMK, the vault scalar, the big-endian `d`, and the COSE
-//! plaintext) is scrubbed on EVERY exit path.  This command is
+//! plaintext) is scrubbed during IO teardown. This command is
 //! **Crypto-Officer-only**.
 
 use tsra_fw_core_crypto_cose_key::encode_ec2_private_cose_key;
@@ -47,7 +47,8 @@ use tsra_fw_ddi_tbor_types::TborDarcKeyWrapReq;
 use tsra_fw_ddi_tbor_types::TborDarcKeyWrapResp;
 use tsra_fw_ddi_tbor_types::DARC_UNWRAP_WRAPPED_KEY_MAX_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -120,7 +121,7 @@ fn cose_ops_for_attrs(attrs: HsmVaultKeyAttrs) -> HsmResult<([u8; 4], usize)> {
 ///
 /// Returns [`HsmError::InvalidArg`] if any padding above the field width
 /// is non-zero (a malformed wire coordinate).
-fn wire_le_coord_to_be(be_out: &mut DmaBuf, wire_le: &DmaBuf, field: usize) -> HsmResult<()> {
+fn wire_le_coord_to_be(be_out: &mut HsmDmaBuf, wire_le: &HsmDmaBuf, field: usize) -> HsmResult<()> {
     for i in 0..field {
         be_out[i] = wire_le[field - 1 - i];
     }
@@ -137,18 +138,17 @@ fn wire_le_coord_to_be(be_out: &mut DmaBuf, wire_le: &DmaBuf, field: usize) -> H
 /// **Stateless**: unmasks and re-wraps the EC key without writing the
 /// vault or advancing any lifecycle, so it records no rollback on the
 /// `undo` log.  Every recovered secret (the TMK, the vault scalar, the
-/// big-endian `d`, and the COSE plaintext) is scrubbed on EVERY exit
-/// path — scope rewind does not clear DMA memory.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// big-endian `d`, and the COSE plaintext) is scrubbed during IO teardown.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  Every value captured out is `Copy`, so it outlives
     // the borrow.
     let (tmk_mk_id, key_mk_id): (HsmKeyId, HsmKeyId) = {
-        let req = TborDarcKeyWrapReq::decode(req_buf)?;
+        let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
         let sess_id = tsra_fw_hsm_pal_traits::HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -181,7 +181,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             // ── Recover the 32-byte TMK from its masked envelope. ──
             let masked_tmk = alloc.dma_alloc(MASKED_TMK_LEN)?;
             {
-                let req = TborDarcKeyWrapReq::decode(req_buf)?;
+                let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
                 masked_tmk.copy_from_slice(req.masked_tmk());
             }
             let tmk_masking_key = pal.vault_key(io, tmk_mk_id)?;
@@ -195,24 +195,20 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 Ok::<_, HsmError>(tmk)
             }
             .await;
-            masked_tmk.zeroize();
             let tmk = unmask_res?;
 
             // ── Recover the local EC key, build its COSE_Key, and
-            // AES-KWP-wrap it under the TMK.  Every recovered secret is
-            // scrubbed on EVERY path — no fallible step may sit between a
-            // secret's recovery and its `zeroize` guard, so all working
-            // buffers are allocated and filled INSIDE the guarded blocks. ──
+            // AES-KWP-wrap it under the TMK.
             let crypto_res = async {
                 // Unmask the local EC key: recover the vault scalar (secret)
                 // plus its curve, vault attributes, and masked-key label.
                 let masked_key_len = {
-                    let req = TborDarcKeyWrapReq::decode(req_buf)?;
+                    let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
                     req.masked_key().len()
                 };
                 let masked_key = alloc.dma_alloc(masked_key_len)?;
                 {
-                    let req = TborDarcKeyWrapReq::decode(req_buf)?;
+                    let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
                     masked_key.copy_from_slice(req.masked_key());
                 }
                 let key_masking_key = pal.vault_key(io, key_mk_id)?;
@@ -223,14 +219,12 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                     let vault = alloc.dma_alloc(view.target_key.len())?;
                     vault.copy_from_slice(view.target_key);
                     // `kid` is the key's own masked-key label (non-secret,
-                    // bound in the GCM tag); copy it out before the view /
-                    // blob are scrubbed.
+                    // bound in the GCM tag); copy it out of the borrowed view.
                     let kid = alloc.dma_alloc(view.key_label.len())?;
                     kid.copy_from_slice(view.key_label);
                     Ok::<_, HsmError>((curve, ops_buf, ops_len, vault, kid))
                 }
                 .await;
-                masked_key.zeroize();
                 let (curve, ops_buf, ops_len, vault, kid) = unmask_res?;
 
                 let build_res = async {
@@ -282,25 +276,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                             Ok::<_, HsmError>(wrapped_total)
                         }
                         .await;
-                        cose.zeroize();
                         cose_res
                     }
                     .await;
-                    d.zeroize();
                     d_res
                 }
                 .await;
-                vault.zeroize();
                 build_res
             }
             .await;
 
-            tmk.zeroize();
             crypto_res
         })
         .await?;
 
-    encode_response(pal, io, &wrapped_out[..wrapped_len])
+    encode_response(cmd_buf, &wrapped_out[..wrapped_len])
 }
 
 /// Round `n` up to the next multiple of 8.
@@ -309,12 +299,8 @@ fn round_up_8(n: usize) -> usize {
 }
 
 /// Encode the `DarcKeyWrap` response around the wrapped key.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    wrapped_key: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, wrapped_key: &HsmDmaBuf) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborDarcKeyWrapResp::encode(buf, 0, false)?
             .wrapped_key(wrapped_key)?
             .finish();

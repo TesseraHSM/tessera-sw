@@ -29,7 +29,7 @@
 //! 4. HPKE-Auth-open `sealed_tmk` (`sk_r = RcvrPriv`, sender-auth
 //!    `SndrPub`) → the 32-byte **TMK**.
 //! 5. Re-mask the TMK under the SDMK and return the masked envelope.
-//!    `RcvrPriv` and the TMK are zeroized before returning.
+//!    IO teardown scrubs `RcvrPriv` and the TMK.
 //!
 //! The command **persists nothing** (no vault write, no lifecycle
 //! advance), so it records no rollback on the undo log.  This command is
@@ -52,7 +52,8 @@ use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
 use tsra_fw_hsm_oob::copy_oob;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -97,8 +98,8 @@ async fn recover_sender_pub<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     oob: &OobPtr,
-    req_buf: &DmaBuf,
-    sndr_pub: &mut DmaBuf,
+    req_buf: &HsmDmaBuf,
+    sndr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // The re-supplied policy must match the one bound at `PartInit`; only
     // then is its `POTAPubKey` a trustworthy anchor.
@@ -140,19 +141,18 @@ async fn recover_sender_pub<P: HsmPal>(
 ///
 /// **Stateless**: recovers the sealed TMK and returns it re-masked under
 /// the SDMK without writing the vault or advancing any lifecycle, so it
-/// records no rollback on the `undo` log.  Every recovered secret
-/// (`RcvrPriv`, the TMK) is scrubbed on EVERY exit path — scope rewind
-/// does not clear DMA memory.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// records no rollback on the `undo` log. IO teardown scrubs recovered
+/// secrets (`RcvrPriv`, the TMK).
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     oob: Option<OobPtr>,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  Both ids are `Copy`, so they outlive the view.
     let (kex_mk_id, sdmk_id): (HsmKeyId, HsmKeyId) = {
-        let req = TborDarcTmkImportReq::decode(req_buf)?;
+        let req = TborDarcTmkImportReq::decode(cmd_buf.request())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -187,25 +187,24 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // ── Phase 1: policy binding + POTA-anchored sender chain ──
         let sndr_pub = alloc.dma_alloc(1 + 2 * coord)?;
-        recover_sender_pub(pal, io, alloc, &oob, req_buf, sndr_pub).await?;
+        recover_sender_pub(pal, io, alloc, &oob, cmd_buf.request(), sndr_pub).await?;
 
         // ── Phase 2: recover RcvrPriv, HPKE-open the sealed TMK, and
         // re-mask it under the SDMK.  The masked receiver key and sealed
         // TMK are copied into crypto scratch so the request-buffer borrow
-        // is confined; every recovered secret is scrubbed on EVERY exit
-        // path (scope rewind does not clear DMA).
+        // is confined.
         let kex_masking_key = pal.vault_key(io, kex_mk_id)?;
 
         let blob = alloc.dma_alloc(tsra_fw_ddi_tbor_types::MASKED_KEX_KEY_LEN)?;
         let sealed = alloc.dma_alloc(tsra_fw_ddi_tbor_types::SEALED_TMK_LEN)?;
         {
-            let req = TborDarcTmkImportReq::decode(req_buf)?;
+            let req = TborDarcTmkImportReq::decode(cmd_buf.request())?;
             blob.copy_from_slice(req.masked_kex_key());
             sealed.copy_from_slice(req.sealed_tmk());
         }
 
         // Unmask into `blob`, copy the recovered private key out into its
-        // own scratch, then scrub `blob` immediately.
+        // own scratch.
         let unmask_res = async {
             let view = unmask(pal, io, kex_masking_key, blob).await?;
             let rcvr_priv = alloc.dma_alloc(view.target_key.len())?;
@@ -213,7 +212,6 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             Ok::<_, HsmError>((view.key_kind, rcvr_priv))
         }
         .await;
-        blob.zeroize();
         let (key_kind, rcvr_priv) = unmask_res?;
 
         let crypto_res = async {
@@ -257,30 +255,23 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             }
             .await;
 
-            tmk.zeroize();
-            pt_buf.zeroize();
             inner
         }
         .await;
 
         // Scrub the recovered receiver private key on every path.
-        rcvr_priv.zeroize();
         crypto_res?;
 
         Ok(())
     })
     .await?;
 
-    encode_response(pal, io, masked_tmk_out)
+    encode_response(cmd_buf, masked_tmk_out)
 }
 
 /// Encode the `DarcTmkImport` response around the masked TMK.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    masked_tmk: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, masked_tmk: &HsmDmaBuf) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborDarcTmkImportResp::encode(buf, 0, false)?
             .masked_tmk(masked_tmk)?
             .finish();

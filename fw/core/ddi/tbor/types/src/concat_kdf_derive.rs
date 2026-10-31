@@ -90,7 +90,7 @@ pub enum ConcatKdfAlg {
 /// IKM **in place** in the request buffer (via `decode_mut`) — no scratch
 /// copy — and derive directly from the recovered secret.  `info` is
 /// optional-by-emptiness: a zero-length buffer omits the info string.
-#[tbor(opcode = 0x1D)]
+#[tbor(opcode = 0x1D, pair = TborConcatKdfDeriveResp)]
 pub struct TborConcatKdfDeriveReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -132,7 +132,7 @@ pub struct TborConcatKdfDeriveReq<'a> {
 ///
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// and mask the derived key straight into it (`decode_mut`).
-#[tbor(response)]
+#[tbor(response, pair = TborConcatKdfDeriveReq)]
 pub struct TborConcatKdfDeriveResp<'a> {
     /// The derived key, masked (AEAD-GCM-256) under the scope's masking
     /// key.  244..=356 B depending on the derived key length.

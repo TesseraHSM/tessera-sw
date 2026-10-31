@@ -10,7 +10,7 @@ use bitfield_struct::bitfield;
 use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_nvic::Nvic;
@@ -132,12 +132,12 @@ pub struct ShaRequest<'a> {
     pub mode: ShaMode,
 
     /// Message to hash.
-    pub message: &'a DmaBuf,
+    pub message: &'a HsmDmaBuf,
 
     /// Output digest buffer. Also used as initial state input when
     /// `load_digest` is true and `initial_digest` is `None` — the
     /// hardware reads the current contents before overwriting.
-    pub digest: &'a mut DmaBuf,
+    pub digest: &'a mut HsmDmaBuf,
 
     /// Enable automatic padding. When true, `byte_count` is used for the
     /// length field embedded in the padded message.
@@ -153,7 +153,7 @@ pub struct ShaRequest<'a> {
 
     /// Separate initial digest buffer. When `None` and `load_digest`
     /// is true, the current contents of `digest` are used.
-    pub initial_digest: Option<&'a DmaBuf>,
+    pub initial_digest: Option<&'a HsmDmaBuf>,
 
     /// Write the full working-variable state instead of the NIST digest size.
     pub dont_truncate: bool,
@@ -165,12 +165,12 @@ pub struct ShaRequest<'a> {
     pub check_digest: bool,
 
     /// Reference digest used when `check_digest` is enabled.
-    pub ref_digest: Option<&'a DmaBuf>,
+    pub ref_digest: Option<&'a HsmDmaBuf>,
 }
 
 impl<'a> ShaRequest<'a> {
     /// Create a request with the required fields; all options default off.
-    pub fn new(mode: ShaMode, message: &'a DmaBuf, digest: &'a mut DmaBuf) -> Self {
+    pub fn new(mode: ShaMode, message: &'a HsmDmaBuf, digest: &'a mut HsmDmaBuf) -> Self {
         Self {
             mode,
             message,
@@ -212,7 +212,7 @@ impl<'a> ShaRequest<'a> {
     }
 
     /// Compare the computed digest against the provided reference digest.
-    pub fn with_check_digest(mut self, ref_digest: &'a DmaBuf) -> Self {
+    pub fn with_check_digest(mut self, ref_digest: &'a HsmDmaBuf) -> Self {
         self.check_digest = true;
         self.ref_digest = Some(ref_digest);
         self
@@ -224,7 +224,7 @@ impl<'a> ShaRequest<'a> {
     /// the hardware reads initial state from `initial` rather than
     /// `digest`. This allows the digest output to target a different
     /// buffer than the state input — enabling zero-copy finalization.
-    pub fn with_initial_digest(mut self, initial: &'a DmaBuf) -> Self {
+    pub fn with_initial_digest(mut self, initial: &'a HsmDmaBuf) -> Self {
         self.load_digest = true;
         self.initial_digest = Some(initial);
         self

@@ -29,8 +29,8 @@ info string (no salt).
 The device unmasks the input secret **in place** in the request buffer,
 checks that its kind is an ECDH shared secret (`Secret256` / `Secret384` /
 `Secret521`) carrying the `derive` usage attribute, runs the selected KDF
-into scratch, re-masks the output key under the target scope, and scrubs
-the recovered secret and the derived scratch on every path.  This is a
+into scratch, and re-masks the output key under the target scope.
+IO teardown scrubs the recovered secret and derived scratch. This is a
 **TBOR-only** command (no MBOR analogue).
 
 An **empty** `info` omits the `SharedInfo` / `OtherInfo`.

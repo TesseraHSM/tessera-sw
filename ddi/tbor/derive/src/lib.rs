@@ -141,6 +141,7 @@ fn gen_request(
     fields: &[ParsedField],
 ) -> syn::Result<TokenStream2> {
     let name = &item.ident;
+    let field_toc_count = fields.len().max(1);
     let opcode = attrs.opcode.as_ref().ok_or_else(|| {
         syn::Error::new(
             name.span(),
@@ -204,12 +205,19 @@ fn gen_request(
                 &self,
                 __buf: &'__b mut [u8],
             ) -> ::core::result::Result<&'__b [u8], ::tsra_ddi_tbor_codec::EncodeError> {
+                let __slots = (#field_toc_count).max(
+                    <#resp_ty as ::tsra_ddi_tbor_types::TborResp>::FIELD_TOC_COUNT,
+                );
                 let __enc = ::tsra_ddi_tbor_codec::RequestEncoder::new(
                     __buf,
                     ::tsra_ddi_tbor_codec::PROTOCOL_VERSION,
                     <Self as ::tsra_ddi_tbor_types::TborOpReq>::OPCODE,
-                );
+                ).with_toc_slots(__slots)?;
                 #encode_chain
+                let mut __enc = __enc;
+                for _ in #field_toc_count..__slots {
+                    __enc = __enc.none()?;
+                }
                 __enc.finish()
             }
         }
@@ -242,6 +250,8 @@ fn gen_response(item: &ItemStruct, fields: &[ParsedField]) -> TokenStream2 {
 
     quote! {
         impl ::tsra_ddi_tbor_types::TborResp for #name {
+            const FIELD_TOC_COUNT: usize = #expected_toc;
+
             fn decode_response(
                 __buf: &[u8],
             ) -> ::core::result::Result<Self, ::tsra_ddi_tbor_codec::DecodeError> {

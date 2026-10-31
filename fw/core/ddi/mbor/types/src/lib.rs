@@ -6,7 +6,7 @@
 use open_enum::open_enum;
 use pastey::paste;
 use tsra_fw_ddi_mbor_derive::Ddi;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 pub mod error;
 pub mod sessctrl;
@@ -331,7 +331,7 @@ pub struct DdiRespExt {}
 #[ddi(map)]
 pub struct DdiPublicKey<'a> {
     #[ddi(id = 1, max_len = 768)]
-    pub raw: &'a mut DmaBuf,
+    pub raw: &'a mut HsmDmaBuf,
     #[ddi(id = 2)]
     pub key_kind: DdiKeyType,
 }
@@ -345,7 +345,7 @@ pub struct DdiKeyProperties<'a> {
     #[ddi(id = 2)]
     pub key_availability: DdiKeyAvailability,
     #[ddi(id = 3, max_len = 128)]
-    pub key_label: &'a mut DmaBuf,
+    pub key_label: &'a mut HsmDmaBuf,
 }
 
 /// Target key metadata (16-byte bitflag blob).
@@ -474,7 +474,7 @@ pub struct DdiTargetKeyProperties<'a> {
     #[ddi(id = 1)]
     pub key_metadata: DdiTargetKeyMetadata,
     #[ddi(id = 2, max_len = 128)]
-    pub key_label: &'a mut DmaBuf,
+    pub key_label: &'a mut HsmDmaBuf,
 }
 
 // ── ddi_op_req_resp! macro ─────────────────────────────────────────────

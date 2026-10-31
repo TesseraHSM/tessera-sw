@@ -61,7 +61,7 @@ pub const MASKED_HMAC_KEY_MAX_LEN: usize = 8 + 12 + 192 + 128 + 16;
 /// Generates a random variable-length HMAC key of the requested
 /// [`HashAlgo`] and `key_length` under the active session's partition,
 /// masked with the requested [`KeyScope`]'s masking key.
-#[tbor(opcode = 0x11)]
+#[tbor(opcode = 0x11, pair = TborHmacGenerateKeyResp)]
 pub struct TborHmacGenerateKeyReq<'a> {
     /// CO/CU session id this request is bound to.  The dispatcher
     /// cross-checks it against the SQE-carried session id.
@@ -98,7 +98,7 @@ pub struct TborHmacGenerateKeyReq<'a> {
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// (via `masked_key_reserve`) and mask the generated key straight into it
 /// (`decode_mut`) — no scratch buffer and no copy.
-#[tbor(response)]
+#[tbor(response, pair = TborHmacGenerateKeyReq)]
 pub struct TborHmacGenerateKeyResp<'a> {
     /// The freshly generated HMAC key, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  `228 + key_length` B (260 … 356 B

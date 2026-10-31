@@ -25,8 +25,8 @@
 //!
 //! | Direction | Private key | Public key |
 //! |-----------|-------------|------------|
-//! | Trait → PAL (input)  | Raw HSM scalar `&DmaBuf` (`wire_coord_len` bytes, P-521 padded) | Wire-LE `x \|\| y` `&DmaBuf` (`wire_pub_key_len` bytes, P-521 padded) |
-//! | PAL → Trait (output) | Raw HSM scalar `&mut DmaBuf` (`wire_coord_len` bytes, P-521 padded) | Wire-LE `x \|\| y` `&mut DmaBuf` (`wire_pub_key_len` bytes, P-521 padded) |
+//! | Trait → PAL (input)  | Raw HSM scalar `&HsmDmaBuf` (`wire_coord_len` bytes, P-521 padded) | Wire-LE `x \|\| y` `&HsmDmaBuf` (`wire_pub_key_len` bytes, P-521 padded) |
+//! | PAL → Trait (output) | Raw HSM scalar `&mut HsmDmaBuf` (`wire_coord_len` bytes, P-521 padded) | Wire-LE `x \|\| y` `&mut HsmDmaBuf` (`wire_pub_key_len` bytes, P-521 padded) |
 //! | PAL → Driver (internal) | `EccPrivateKey` handle | Wire-LE bytes (`_le` slices, P-521 padded) |
 //! | Driver → OpenSSL (internal) | `EccPrivateKey` handle | `EccPublicKey` handle (raw BE coords) |
 //!
@@ -95,7 +95,7 @@ impl HsmEcc for StdHsmPal {
         _io: &StdHsmIo,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
         let priv_len = curve.wire_coord_len();
@@ -118,21 +118,12 @@ impl HsmEcc for StdHsmPal {
 
         let (pk, pub_key) = self.ecc.gen_keypair(to_ecc_curve(curve)).await?;
         self.ecc.pub_coords(&pub_key, false, scratch_pub).await?;
-        // From here the private scalar is in `scratch_priv`; wipe it on
-        // every exit (scope rewind does not clear DMA memory).
         if pk.to_hsm_bytes(&mut scratch_priv[..priv_len]).is_err() {
-            scratch_priv.zeroize();
             return Err(HsmError::EccExportError);
         }
 
         priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
         pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
-
-        // Scrub the private-scalar half of the scratch before returning:
-        // scope rewind does not clear DMA memory, so the freshly generated
-        // scalar would otherwise linger in — and leak through — a later
-        // per-IO allocation. (The pub half is not secret.)
-        scratch_priv.zeroize();
 
         Ok((priv_len, wire_pub_len))
     }
@@ -153,8 +144,8 @@ impl HsmEcc for StdHsmPal {
         io: &StdHsmIo,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        root: &DmaBuf,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        root: &HsmDmaBuf,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
         let priv_len = curve.wire_coord_len();
@@ -185,46 +176,22 @@ impl HsmEcc for StdHsmPal {
         info[KEYPAIR_LABEL_PTA.len()..].copy_from_slice(&(okm_len as u16).to_be_bytes());
         let okm = alloc.dma_alloc(okm_len)?;
 
-        // `okm` is raw key material, so every step that touches it runs
-        // inside an inner block and the scrub happens unconditionally
-        // afterwards — mirroring the `scratch_priv` handling below. An
-        // early `?` (HKDF failure, or an A.2.1 reduction failure) must not
-        // return a written OKM to the scoped pool: scope rewind does not
-        // clear DMA memory, so the bytes would survive into whatever
-        // allocates that region next. `DmaBuf::zeroize` (volatile writes +
-        // fence) rather than the slice `zeroize`, so the wipe cannot be
-        // optimized away.
-        let derived = async {
-            self.hkdf_expand(io, HsmHashAlgo::Sha384, root, Some(&*info), &mut *okm)
-                .await?;
-            EccPrivateKey::from_okm_a2_1(to_ecc_curve(curve), &*okm)
-                .map_err(|_| HsmError::EccGenerateError)
-        }
-        .await;
-        okm.zeroize();
-        let pk = derived?;
+        self.hkdf_expand(io, HsmHashAlgo::Sha384, root, Some(&*info), &mut *okm)
+            .await?;
+        let pk = EccPrivateKey::from_okm_a2_1(to_ecc_curve(curve), &*okm)
+            .map_err(|_| HsmError::EccGenerateError)?;
 
         let scratch = alloc.dma_alloc(priv_len + wire_pub_len)?;
         let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
 
-        // Serialize the scalar into `scratch_priv`, derive the public
-        // coordinates, and copy both out.  Once the scalar is in DMA
-        // scratch, every exit must wipe it (scope rewind does not clear DMA
-        // memory), so run the fallible tail and scrub unconditionally after.
-        let fill = async {
-            pk.to_hsm_bytes(&mut scratch_priv[..priv_len])
-                .map_err(|_| HsmError::EccExportError)?;
-            let pub_key = pk
-                .public_key()
-                .map_err(|_| HsmError::EccGetCoordinatesError)?;
-            self.ecc.pub_coords(&pub_key, false, scratch_pub).await?;
-            priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
-            pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
-            Ok::<(), HsmError>(())
-        }
-        .await;
-        scratch_priv.zeroize();
-        fill?;
+        pk.to_hsm_bytes(&mut scratch_priv[..priv_len])
+            .map_err(|_| HsmError::EccExportError)?;
+        let pub_key = pk
+            .public_key()
+            .map_err(|_| HsmError::EccGetCoordinatesError)?;
+        self.ecc.pub_coords(&pub_key, false, scratch_pub).await?;
+        priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
+        pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
 
         Ok((priv_len, wire_pub_len))
     }
@@ -238,9 +205,9 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let wire_len = curve.wire_sig_len();
         if signature.len() < wire_len {
@@ -261,10 +228,10 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
-        pub_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &DmaBuf,
-        result: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let wire_pub_len = curve.wire_pub_key_len();
         let wire_sig_len = curve.wire_sig_len();
@@ -295,8 +262,8 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let wire_priv_len = curve.wire_priv_key_len();
         let wire_pub_len = curve.wire_pub_key_len();
@@ -323,9 +290,9 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &DmaBuf,
-        secret: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &HsmDmaBuf,
+        secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let wire_pub_len = curve.wire_pub_key_len();
         if pub_key.len() < wire_pub_len || secret.len() < curve.secret_len() {
@@ -345,8 +312,8 @@ impl HsmEcc for StdHsmPal {
     fn ecc_priv_der_to_vault(
         &self,
         _io: &StdHsmIo,
-        der: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        der: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         // std PAL vault format is raw HSM-format scalar bytes; parse the
         // recovered PKCS#8 DER and re-export in the vault representation.
@@ -367,8 +334,8 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
-        d: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        d: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The COSE EC2 `d` field is the raw big-endian scalar at the
         // curve's field width; reject any other length before import.
@@ -395,8 +362,8 @@ impl HsmEcc for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         curve: HsmEccCurve,
-        vault: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        vault: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // std PAL vault format is raw big-endian HSM scalar bytes, left
         // zero-padded to `wire_coord_len`. Parse and validate it, then
@@ -429,8 +396,8 @@ impl HsmEcc for StdHsmPal {
     async fn ecc_priv_pub_key(
         &self,
         _io: &StdHsmIo,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // Parse the vault-format (raw HSM scalar) private key and report
         // the wire public-key length; in use mode derive the public key

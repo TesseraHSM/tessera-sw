@@ -11,8 +11,8 @@
 //! metadata's higher-level format (e.g. `key_length`).
 
 use tsra_fw_hsm_pal_traits::AesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
@@ -63,7 +63,7 @@ pub struct UnmaskLayout {
 ///
 /// * [`HsmError::MaskedKeyDecodeFailed`] — the headers are malformed, or
 ///   `blob.len()` does not match the on-wire length they declare.
-pub fn peek_metadata(blob: &DmaBuf) -> HsmResult<&[u8]> {
+pub fn peek_metadata(blob: &HsmDmaBuf) -> HsmResult<&[u8]> {
     // Structural header parse only (no key, no tag verification); mirrors
     // the header handling at the top of `unmask`.
     MaskedKeyHeader::parse_cbc(blob)?;
@@ -112,13 +112,13 @@ pub fn peek_metadata(blob: &DmaBuf) -> HsmResult<&[u8]> {
 ///   match the on-wire length declared by its headers, its headers are
 ///   malformed, or the HMAC tag does not match.
 /// * Any [`HsmError`] surfaced by the PAL HMAC or AES drivers.  On
-///   AES-decrypt failure, the ciphertext slot is wiped before
-///   returning so partial plaintext does not leak.
+///   AES-decrypt failure, the ciphertext slot may contain partial plaintext;
+///   callers must not publish it. IO teardown scrubs the backing storage.
 pub async fn unmask<P>(
     pal: &P,
     io: &P::Io,
-    masking_key: &DmaBuf,
-    blob: &mut DmaBuf,
+    masking_key: &HsmDmaBuf,
+    blob: &mut HsmDmaBuf,
 ) -> HsmResult<UnmaskLayout>
 where
     P: HsmAes + HsmHmac,
@@ -166,11 +166,7 @@ where
         pal.aes_cbc_enc_dec_in_place(io, AesOp::Decrypt, aes_key, ct, iv, None)
             .await
     };
-    if let Err(e) = aes_result {
-        // May hold partial plaintext; wipe before surfacing the error.
-        blob[ct_off..ct_off + ct_len].fill(0);
-        return Err(e);
-    }
+    aes_result?;
 
     Ok(UnmaskLayout {
         metadata_offset: meta_off,

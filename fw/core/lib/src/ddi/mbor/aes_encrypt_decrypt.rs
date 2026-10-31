@@ -24,7 +24,7 @@ pub(crate) async fn aes_encrypt_decrypt<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiAesEncryptDecryptReq<'_> = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
@@ -69,7 +69,7 @@ pub(crate) async fn aes_encrypt_decrypt<'p, P: HsmPal>(
     //   - the updated chaining IV produced by the AES engine is
     //     written directly into the response `iv` slot.
     // No scratch buffers are needed: the encoder layout produces
-    // disjoint `&mut DmaBuf` views for `msg` and `iv`, so we can
+    // disjoint `&mut HsmDmaBuf` views for `msg` and `iv`, so we can
     // pass both to the PAL call without overlap.
     let (resp, layout) = pal.dma_alloc_var_with(io, |buf| {
         let mut encoder = super::encode_resp_hdr(

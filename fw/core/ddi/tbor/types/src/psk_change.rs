@@ -87,7 +87,7 @@ pub const PSK_CHANGE_ENVELOPE_MAX_LEN: usize = 160;
 /// `param_key`.  The target PSK slot is derived from the session role
 /// (CO session → CO slot, CU session → CU slot); there is no
 /// slot-selection field on the wire.
-#[tbor(opcode = 0x06)]
+#[tbor(opcode = 0x06, pair = TborPskChangeResp)]
 pub struct TborPskChangeReq<'a> {
     /// Logical session id the request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId) and pulled out as
@@ -112,7 +112,7 @@ pub struct TborPskChangeReq<'a> {
 
 /// `PskChange` response schema (empty acknowledgement; status
 /// lives in the TBOR response header).
-#[tbor(response)]
+#[tbor(response, pair = TborPskChangeReq)]
 pub struct TborPskChangeResp;
 
 /// Builds the 32-byte AEAD AAD bound into a `PskChange` envelope.

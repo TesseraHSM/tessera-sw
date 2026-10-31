@@ -11,7 +11,7 @@
 //!
 //! ## Key representation
 //!
-//! DMA-facing AES operations take [`DmaBuf`] inputs/outputs for any bytes
+//! DMA-facing AES operations take [`HsmDmaBuf`] inputs/outputs for any bytes
 //! touched directly by the hardware engine (keys, IVs, payloads, tags,
 //! tweaks). Random key-generation outputs remain plain `&mut [u8]` so
 //! callers can write into either slices or DMA buffers via deref.
@@ -25,7 +25,7 @@
 //!
 //! ## In-place variants
 //!
-//! Methods suffixed `_in_place` operate on a single `&mut DmaBuf` buffer,
+//! Methods suffixed `_in_place` operate on a single `&mut HsmDmaBuf` buffer,
 //! reading input and writing output to the same memory. This avoids an
 //! extra buffer allocation and is the natural model for hardware engines
 //! that operate directly on DMA buffers.
@@ -115,11 +115,11 @@ pub trait HsmAes: HsmIoTypes {
         &self,
         io: &Self::Io,
         op: AesOp,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        iv_in: &DmaBuf,
-        output: &mut DmaBuf,
-        iv_out: Option<&mut DmaBuf>,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        iv_in: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
+        iv_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<()>;
 
     /// AES-CBC encrypt or decrypt in-place.
@@ -150,10 +150,24 @@ pub trait HsmAes: HsmIoTypes {
         &self,
         io: &Self::Io,
         op: AesOp,
-        key: &DmaBuf,
-        data: &mut DmaBuf,
-        iv_in: &DmaBuf,
-        iv_out: Option<&mut DmaBuf>,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
+        iv_in: &HsmDmaBuf,
+        iv_out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<()>;
+
+    /// AES-CBC with both the message and chaining IV updated in place.
+    ///
+    /// `data` must contain one or more whole 16-byte blocks; `iv` must be
+    /// exactly 16 bytes. On success, `iv` contains the last ciphertext block,
+    /// including when decrypting. Buffer and engine errors are propagated.
+    async fn aes_cbc_enc_dec_in_place_iv(
+        &self,
+        io: &Self::Io,
+        op: AesOp,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
+        iv: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES-ECB encrypt or decrypt with separate input / output
@@ -179,9 +193,9 @@ pub trait HsmAes: HsmIoTypes {
         &self,
         io: &Self::Io,
         op: AesOp,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES-ECB encrypt or decrypt in-place.
@@ -204,8 +218,8 @@ pub trait HsmAes: HsmIoTypes {
         &self,
         io: &Self::Io,
         op: AesOp,
-        key: &DmaBuf,
-        data: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES-GCM encrypt with separate input/output buffers.
@@ -259,12 +273,12 @@ pub trait HsmAes: HsmIoTypes {
     async fn gcm_encrypt(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        plaintext: &DmaBuf,
-        ciphertext: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        plaintext: &HsmDmaBuf,
+        ciphertext: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES-GCM encrypt in-place.
@@ -302,11 +316,11 @@ pub trait HsmAes: HsmIoTypes {
     async fn gcm_encrypt_in_place(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        data: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES-GCM decrypt with separate input/output buffers.
@@ -345,12 +359,12 @@ pub trait HsmAes: HsmIoTypes {
     async fn gcm_decrypt(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        ciphertext: &DmaBuf,
-        plaintext: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        plaintext: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES-GCM decrypt in-place.
@@ -391,11 +405,11 @@ pub trait HsmAes: HsmIoTypes {
     async fn gcm_decrypt_in_place(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        data: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     // ── AES Key Wrap (RFC 3394) ────────────────────────────────────
@@ -424,9 +438,9 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_kw_wrap(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES Key Wrap (RFC 3394) — unwrap key data.
@@ -454,9 +468,9 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_kw_unwrap(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     // ── AES Key Wrap with Padding (RFC 5649) ───────────────────────
@@ -485,9 +499,9 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_kwp_wrap(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// AES Key Wrap with Padding (RFC 5649) — unwrap key data.
@@ -515,9 +529,9 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_kwp_unwrap(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<usize>;
 
     // ── AES-XTS (IEEE 1619 / NIST SP 800-38E) ─────────────────────
@@ -569,11 +583,11 @@ pub trait HsmAes: HsmIoTypes {
     // async fn aes_xts_encrypt(
     //     &self,
     //     io: &Self::Io,
-    //     key: &DmaBuf,
-    //     tweak: &DmaBuf,
+    //     key: &HsmDmaBuf,
+    //     tweak: &HsmDmaBuf,
     //     dul: XtsDataUnitLen,
-    //     input: &DmaBuf,
-    //     output: &mut DmaBuf,
+    //     input: &HsmDmaBuf,
+    //     output: &mut HsmDmaBuf,
     // ) -> HsmResult<()>;
     //
     // /// AES-XTS decrypt with separate input / output buffers.
@@ -585,11 +599,11 @@ pub trait HsmAes: HsmIoTypes {
     // async fn aes_xts_decrypt(
     //     &self,
     //     io: &Self::Io,
-    //     key: &DmaBuf,
-    //     tweak: &DmaBuf,
+    //     key: &HsmDmaBuf,
+    //     tweak: &HsmDmaBuf,
     //     dul: XtsDataUnitLen,
-    //     input: &DmaBuf,
-    //     output: &mut DmaBuf,
+    //     input: &HsmDmaBuf,
+    //     output: &mut HsmDmaBuf,
     // ) -> HsmResult<()>;
     //
     // /// AES-XTS encrypt in-place.
@@ -613,10 +627,10 @@ pub trait HsmAes: HsmIoTypes {
     // async fn aes_xts_encrypt_in_place(
     //     &self,
     //     io: &Self::Io,
-    //     key: &DmaBuf,
-    //     tweak: &DmaBuf,
+    //     key: &HsmDmaBuf,
+    //     tweak: &HsmDmaBuf,
     //     dul: XtsDataUnitLen,
-    //     data: &mut DmaBuf,
+    //     data: &mut HsmDmaBuf,
     // ) -> HsmResult<()>;
     //
     // /// AES-XTS decrypt in-place.
@@ -628,9 +642,9 @@ pub trait HsmAes: HsmIoTypes {
     // async fn aes_xts_decrypt_in_place(
     //     &self,
     //     io: &Self::Io,
-    //     key: &DmaBuf,
-    //     tweak: &DmaBuf,
+    //     key: &HsmDmaBuf,
+    //     tweak: &HsmDmaBuf,
     //     dul: XtsDataUnitLen,
-    //     data: &mut DmaBuf,
+    //     data: &mut HsmDmaBuf,
     // ) -> HsmResult<()>;
 }

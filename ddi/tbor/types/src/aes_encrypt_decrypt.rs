@@ -40,11 +40,6 @@ pub struct TborAesEncryptDecryptReq {
     #[tbor(session_id)]
     pub session_id: u16,
 
-    /// The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an
-    /// AEAD-GCM-256 envelope of 244..=260 B.
-    #[tbor(min_len = 244, max_len = 260)]
-    pub masked_key: Vec<u8>,
-
     /// The direction as the 1-byte `AesOp` discriminant (see
     /// [`AES_OP_ENCRYPT`] / [`AES_OP_DECRYPT`]).
     pub op: u8,
@@ -57,6 +52,11 @@ pub struct TborAesEncryptDecryptReq {
     /// The 16-byte CBC initialization vector.  A fixed-size array encodes
     /// the exact length (the FW codec is the length authority).
     pub iv: [u8; 16],
+
+    /// The masked AES key, placed after the message and IV so firmware can
+    /// return those fields in place without moving their payload bytes.
+    #[tbor(min_len = 244, max_len = 260)]
+    pub masked_key: Vec<u8>,
 }
 
 /// Host-facing TBOR `AesEncryptDecrypt` response.

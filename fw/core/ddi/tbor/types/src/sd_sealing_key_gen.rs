@@ -56,7 +56,7 @@ pub const MASKED_SEALING_KEY_LEN: usize = 8 + 12 + 192 + 48 + 16;
 ///
 /// Generates a security-domain sealing key under the active session's
 /// partition with the caller-supplied [`KeyScope`].
-#[tbor(opcode = 0x09)]
+#[tbor(opcode = 0x09, pair = TborSdSealingKeyGenResp)]
 pub struct TborSdSealingKeyGenReq {
     /// CO/CU session id this request is bound to.  The dispatcher
     /// cross-checks it against the SQE-carried session id.
@@ -70,7 +70,7 @@ pub struct TborSdSealingKeyGenReq {
 }
 
 /// `SdSealingKeyGen` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborSdSealingKeyGenReq)]
 pub struct TborSdSealingKeyGenResp<'a> {
     /// The new sealing key's ECC-P384 private half, masked (AEAD-GCM-256)
     /// under the requested scope's masking key.  Always exactly

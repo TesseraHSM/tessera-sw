@@ -46,7 +46,7 @@ const _: () = assert!(MASKED_SD_LEN == 276);
 const _: () = assert!(SD_MK_BACKUP_LEN == 260);
 
 /// `SdRestoreLocalBackup` request schema.
-#[tbor(opcode = 0x0D)]
+#[tbor(opcode = 0x0D, pair = TborSdRestoreLocalBackupResp)]
 pub struct TborSdRestoreLocalBackupReq<'a> {
     /// Session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -67,7 +67,7 @@ pub struct TborSdRestoreLocalBackupReq<'a> {
 }
 
 /// `SdRestoreLocalBackup` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborSdRestoreLocalBackupReq)]
 pub struct TborSdRestoreLocalBackupResp<'a> {
     /// Refreshed local partition-owner-key backup.  Always exactly
     /// [`MASKED_SD_LEN`] (276 B).

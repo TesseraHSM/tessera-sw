@@ -30,7 +30,7 @@ pub const SEED_ENVELOPE_LEN: usize = 8 + 12 + SEED_LEN + 16;
 pub const BMK_SESSION_MAX_LEN: usize = 512;
 
 /// `SessionOpenFinish` request schema.
-#[tbor(opcode = 0x04)]
+#[tbor(opcode = 0x04, pair = TborSessionOpenFinishResp)]
 pub struct TborSessionOpenFinishReq<'a> {
     /// Pending session identifier the handshake reserved in Phase 1.
     /// Typed [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); marked
@@ -65,7 +65,7 @@ pub struct TborSessionOpenFinishReq<'a> {
 /// host persists this blob and replays it through the MBOR
 /// `ReopenSession` command to recover masked-key compatibility
 /// after the device resets or the slot is destroyed.
-#[tbor(response)]
+#[tbor(response, pair = TborSessionOpenFinishReq)]
 pub struct TborSessionOpenFinishResp<'a> {
     /// Wrapped session-key blob.  Variable length up to
     /// [`BMK_SESSION_MAX_LEN`].

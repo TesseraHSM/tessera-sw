@@ -1,31 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! TBOR `MlDsaGenerateKey` command handler — **bring-up stub**.
+//! TBOR `MlDsaGenerateKey` command handler.
 //!
-//! This is the first PQC handler wired into the TBOR dispatcher and it
-//! deliberately stops short of generating a key.  Its only job today is
-//! to prove the plumbing: that the opcode routes here, that the request
-//! decodes, and that the decoded fields are the ones the host sent.
-//!
-//! It does that by returning an error whose *identity depends on the
-//! decoded content*, so the host can tell the three cases apart:
-//!
-//! | Condition                          | Status returned        |
-//! |------------------------------------|------------------------|
-//! | unrecognized `key_kind`            | `InvalidArg`           |
-//! | scope other than Ephemeral / Local | `UnsupportedKeyScope`  |
-//! | well-formed request                | `InternalError`        |
-//!
-//! Any of the three proves strictly more than the `UnsupportedCmd` the
-//! dispatcher returned before this handler existed: reaching them at all
-//! means the frame decoded, and *which* one comes back is a function of
-//! the field values, so a decoder that silently returned zeroes would be
-//! visible as the wrong status.
-//!
-//! `InternalError` on the happy path is a placeholder standing in for
-//! "decoded fine, keygen not implemented yet". It is replaced by a real
-//! response once ML-DSA keygen lands.
+//! Generates into the shared exchange's final response slots, then masks
+//! the seed and expanded private key in place. IO teardown scrubs the exchange.
 
 use tsra_fw_core_crypto_key_masking::aead::mask_in_place;
 use tsra_fw_core_crypto_key_masking::aead::masked_blob_len;
@@ -35,7 +14,7 @@ use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::MlDsaKeyKind;
 use tsra_fw_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaGenerateKeyResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -51,58 +30,56 @@ use crate::part_state;
 
 /// Handle a TBOR `MlDsaGenerateKey` request.
 ///
-/// Persists nothing and allocates nothing, so it needs neither a
-/// partition lock nor an undo log entry.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// Persists nothing, so it needs neither a partition lock nor an undo log.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborMlDsaGenerateKeyReq::decode(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id()));
-    validate_active_session(pal, io, sess_id)?;
-    let scope = req.scope();
-    let key_kind = req.key_kind();
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    async {
+        let req = TborMlDsaGenerateKeyReq::decode(cmd_buf.request())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id()));
+        validate_active_session(pal, io, sess_id)?;
+        let scope = req.scope();
+        let key_kind = req.key_kind();
 
-    // The wire is seed-only: the expanded (`Private`) kinds are not
-    // offered, so anything outside the three seed kinds is malformed.
-    match key_kind {
-        MlDsaKeyKind::MlDsa44Seed | MlDsaKeyKind::MlDsa65Seed | MlDsaKeyKind::MlDsa87Seed => {}
-        _ => return Err(HsmError::InvalidArg),
-    }
+        // The wire is seed-only: the expanded (`Private`) kinds are not
+        // offered, so anything outside the three seed kinds is malformed.
+        match key_kind {
+            MlDsaKeyKind::MlDsa44Seed | MlDsaKeyKind::MlDsa65Seed | MlDsaKeyKind::MlDsa87Seed => {}
+            _ => return Err(HsmError::InvalidArg),
+        }
 
-    // No scope gate here: the masking key for `scope` is resolved (and its
-    // availability validated per-scope) at mask time by
-    // `resolve_masking_key`, which returns `UnsupportedKeyScope` for a
-    // scope whose masking key has not been provisioned.  Mirrors
-    // `EccGenerateKey` / `EcdhDerive` / `UnwrapKey`.  The old
-    // `Ephemeral | Local` gate dated from the out-of-session bring-up,
-    // when there was no session to scope a key to; these commands are
-    // in-session now, so the restriction no longer has a reason.
+        // No scope gate here: the masking key for `scope` is resolved (and its
+        // availability validated per-scope) at mask time by
+        // `resolve_masking_key`, which returns `UnsupportedKeyScope` for a
+        // scope whose masking key has not been provisioned.  Mirrors
+        // `EccGenerateKey` / `EcdhDerive` / `UnwrapKey`.  The old
+        // `Ephemeral | Local` gate dated from the out-of-session bring-up,
+        // when there was no session to scope a key to; these commands are
+        // in-session now, so the restriction no longer has a reason.
 
-    // Map the wire kind onto the vault kind the PAL speaks. Byte-identical
-    // discriminants, and the match above already rejected anything else.
-    let vault_kind = HsmVaultKeyKind(key_kind.0);
-    let pub_len = mldsa_pub_key_len(vault_kind)?;
+        // Map the wire kind onto the vault kind the PAL speaks. Byte-identical
+        // discriminants, and the match above already rejected anything else.
+        let vault_kind = HsmVaultKeyKind(key_kind.0);
+        let pub_len = mldsa_pub_key_len(vault_kind)?;
 
-    // Platform identity bound into the masked blob (anti-rollback on
-    // re-import): SVN and owner-seed id.
-    let svn = part_state::part_mfgr_svn(pal);
-    let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
-    let attrs = mldsa_key_attrs(HsmKeyScope(scope.0));
+        // Platform identity bound into the masked blob (anti-rollback on
+        // re-import): SVN and owner-seed id.
+        let svn = part_state::part_mfgr_svn(pal);
+        let owner =
+            u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
+        let attrs = mldsa_key_attrs(HsmKeyScope(scope.0));
 
-    // One contiguous blob holding the seed followed by the expanded secret
-    // key, masked as a unit. Keeping the seed means the public key can
-    // still be regenerated from the blob alone; keeping the expanded key
-    // means signing never has to re-derive it.
-    let sec_len = mldsa_sec_key_len(vault_kind)?;
-    let plain_len = MLDSA_SEED_LEN + sec_len;
+        // One contiguous blob holding the seed followed by the expanded secret
+        // key, masked as a unit. Keeping the seed means the public key can
+        // still be regenerated from the blob alone; keeping the expanded key
+        // means signing never has to re-derive it.
+        let sec_len = mldsa_sec_key_len(vault_kind)?;
+        let plain_len = MLDSA_SEED_LEN + sec_len;
 
-    // Generate and mask inside a block that yields a `Result`, so every
-    // path -- keygen, encode or mask failure -- falls through to the wipe
-    // below. The blob is the private key, and scope exit only resets the
-    // bump watermark; it does not zero freed DMA memory.
-    let outcome: HsmResult<&'p DmaBuf> = async {
+        // IO teardown wipes the allocation,
+        // including partially written secrets.
         let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
         let payload_at = payload_offset(AeadAlg::AesGcm256);
 
@@ -111,13 +88,14 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // would cost another `pub_len` bytes of the per-IO DMA heap, and
         // ML-DSA-87 no longer has that to spare now the masked blob carries
         // the expanded secret key.
-        let resp = pal.dma_alloc_var(io, |buf| {
-            let frame = TborMlDsaGenerateKeyResp::encode(buf, 0, false)?
-                .masked_key_reserve(masked_len)?
-                .pub_key_reserve(pub_len)?
-                .finish();
-            Ok(frame.as_bytes().len())
-        })?;
+        let resp = cmd_buf.buffer_mut();
+        let len = TborMlDsaGenerateKeyResp::encode(resp, 0, false)?
+            .masked_key_reserve(masked_len)?
+            .pub_key_reserve(pub_len)?
+            .finish()
+            .as_bytes()
+            .len();
+        let resp = &mut resp[..len];
 
         {
             let out = TborMlDsaGenerateKeyResp::decode_mut(resp)?;
@@ -130,12 +108,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 // seals over it without a second copy. A separate plaintext
                 // blob would cost another `plain_len` bytes of the 16 KB
                 // per-IO DMA heap, which ML-DSA-87 does not have.
-                let payload = out
-                    .masked_key
-                    .get_mut(payload_at..payload_at + plain_len)
-                    .ok_or(HsmError::InternalError)?;
+                let end = payload_at + plain_len;
+                if end > out.masked_key.len() {
+                    return Err(HsmError::InternalError);
+                }
+                let payload = &mut out.masked_key[payload_at..end];
                 let (seed, sec_key) = payload.split_at_mut(MLDSA_SEED_LEN);
-                pal.mldsa_gen_key(io, vault_kind, &mut seed[..], out.pub_key, &mut sec_key[..])
+                pal.mldsa_gen_key(io, vault_kind, seed, out.pub_key, sec_key)
                     .await?;
             }
 
@@ -173,12 +152,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             .await?;
         }
 
-        let resp: &'p DmaBuf = resp;
-        Ok(resp)
+        Ok(len)
     }
-    .await;
-
-    outcome
+    .await
 }
 
 /// Attributes recorded in the masked blob's metadata and re-applied on

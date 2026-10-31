@@ -35,7 +35,7 @@ pub const TBOR_OP_GET_UNWRAPPING_KEY: u8 = 0x13;
 pub const UNWRAPPING_PUB_KEY_LEN: usize = 256 + 4;
 
 /// `GetUnwrappingKey` request schema.
-#[tbor(opcode = 0x13)]
+#[tbor(opcode = 0x13, pair = TborGetUnwrappingKeyResp)]
 pub struct TborGetUnwrappingKeyReq {
     /// CO/CU session id this request is bound to.  The dispatcher
     /// cross-checks it against the SQE-carried session id.
@@ -49,7 +49,7 @@ pub struct TborGetUnwrappingKeyReq {
 /// with the slot **reserved** (via `pub_key_reserve`) and have the PAL
 /// write the wire public key straight into it (`decode_mut`) — no scratch
 /// buffer and no copy.
-#[tbor(response)]
+#[tbor(response, pair = TborGetUnwrappingKeyReq)]
 pub struct TborGetUnwrappingKeyResp<'a> {
     /// The RSA-2048 unwrapping public key in HSM wire format
     /// (`n_le(256) ‖ e_le(4)`), exactly [`UNWRAPPING_PUB_KEY_LEN`] (260)

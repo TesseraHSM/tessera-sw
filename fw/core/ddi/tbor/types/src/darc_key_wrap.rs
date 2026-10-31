@@ -53,7 +53,7 @@ const _: () = assert!(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN == 512);
 ///
 /// Exports a local masked EC private key as an AES-KWP-wrapped EC2
 /// `COSE_Key` under a DARC TMK.
-#[tbor(opcode = 0x25)]
+#[tbor(opcode = 0x25, pair = TborDarcKeyWrapResp)]
 pub struct TborDarcKeyWrapReq<'a> {
     /// CO session id this request is bound to.
     #[tbor(session_id)]
@@ -73,7 +73,7 @@ pub struct TborDarcKeyWrapReq<'a> {
 }
 
 /// `DarcKeyWrap` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborDarcKeyWrapReq)]
 pub struct TborDarcKeyWrapResp<'a> {
     /// The AES-KWP-wrapped EC2 `COSE_Key`, up to
     /// [`DARC_UNWRAP_WRAPPED_KEY_MAX_LEN`] (512 B).  Byte-for-byte what

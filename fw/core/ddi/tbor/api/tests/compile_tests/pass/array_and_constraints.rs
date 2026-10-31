@@ -3,10 +3,10 @@
 // Valid: fixed-size array and length constraints.
 #![allow(unsafe_code)]
 use tsra_fw_ddi_tbor_api::tbor;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
-fn brand(b: &[u8]) -> &DmaBuf {
-    unsafe { DmaBuf::from_raw(b) }
+fn brand(b: &[u8]) -> &HsmDmaBuf {
+    unsafe { HsmDmaBuf::from_raw(b) }
 }
 
 #[tbor(opcode = 0x03)]
@@ -32,5 +32,5 @@ fn main() {
         .finish();
 
     let view = ArrayReq::decode(brand(frame.as_bytes())).unwrap();
-    let _n: &DmaBuf = view.nonce(); // accessor returns &DmaBuf uniformly
+    let _n: &HsmDmaBuf = view.nonce(); // accessor returns &HsmDmaBuf uniformly
 }

@@ -11,13 +11,13 @@
 //!
 //! Mirrors the call shape of `build_bmk_session` in the TBOR session
 //! handler — the canonical AEAD-seal pattern in this firmware — by
-//! taking a scoped allocator for the small IV / AAD `DmaBuf`s that
+//! taking a scoped allocator for the small IV / AAD `HsmDmaBuf`s that
 //! [`aead_envelope::seal`] requires as separate inputs.
 
 use tsra_fw_core_crypto_aead_envelope::seal as aead_seal;
 use tsra_fw_core_crypto_aead_envelope::AeadAlg;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -60,7 +60,7 @@ pub struct MaskParams<'a> {
 
     /// Opaque caller-supplied label (e.g. `b"BK3"`, `b"MK"`). Length
     /// MUST be ≤ [`KEY_LABEL_MAX`].
-    pub key_label: &'a DmaBuf,
+    pub key_label: &'a HsmDmaBuf,
 }
 
 /// Mask `target_key` under `key` into a self-contained masked-key
@@ -113,10 +113,10 @@ pub async fn mask<P: HsmCrypto>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     alg: AeadAlg,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     params: &MaskParams<'_>,
-    target_key: &DmaBuf,
-    out: Option<&mut DmaBuf>,
+    target_key: &HsmDmaBuf,
+    out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize> {
     let total = blob_len(alg, target_key.len());
 
@@ -164,12 +164,7 @@ pub async fn mask<P: HsmCrypto>(
             debug_assert_eq!(n, total);
             Ok(n)
         }
-        Err(e) => {
-            // Best-effort wipe so a partial / unauthenticated blob is
-            // never observable in the caller's response buffer.
-            out[..total].fill(0);
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }
 
@@ -192,18 +187,17 @@ pub const fn payload_offset(alg: AeadAlg) -> usize {
 ///
 /// # Safety of failure
 ///
-/// On any error the whole envelope region is zeroed, so a partial or
-/// unauthenticated blob -- or the bare plaintext the caller staged --
-/// is never observable in the response buffer.
+/// On error, callers must not publish the partial envelope or staged plaintext.
+/// IO teardown scrubs the backing storage.
 pub async fn mask_in_place<P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     alg: AeadAlg,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     params: &MaskParams<'_>,
     pt_len: usize,
-    out: &mut DmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     let total = blob_len(alg, pt_len);
     if key.len() != alg.key_len() || params.key_label.len() > KEY_LABEL_MAX || out.len() < total {
@@ -233,9 +227,6 @@ pub async fn mask_in_place<P: HsmCrypto>(
             debug_assert_eq!(n, total);
             Ok(n)
         }
-        Err(e) => {
-            out[..total].fill(0);
-            Err(e)
-        }
+        Err(e) => Err(e),
     }
 }

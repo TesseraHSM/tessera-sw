@@ -23,7 +23,7 @@
 use core::ops::AsyncFnMut;
 
 use tsra_fw_ddi_tbor_types::evidence::CertDescriptor;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
@@ -125,7 +125,7 @@ impl ChainValidator {
     /// * `io` — I/O context for the current operation.
     /// * `alloc` — scoped allocator for temporary DMA buffers
     ///   (digest and decoded signature). The caller's DER buffers
-    ///   must already be in DMA-accessible memory (`&DmaBuf`).
+    ///   must already be in DMA-accessible memory (`&HsmDmaBuf`).
     /// * `prev` — the parsed previous certificate, or `None` for the
     ///   root (index 0). The previous cert's DER buffer must still be
     ///   alive so `prev`'s slices are valid.
@@ -459,7 +459,7 @@ pub async fn validate_chain<P, F>(
 ) -> HsmResult<()>
 where
     P: HsmHash + HsmEcc,
-    F: for<'a> AsyncFnMut(usize, &'a mut DmaBuf) -> HsmResult<()>,
+    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, false).await
 }
@@ -487,7 +487,7 @@ pub async fn validate_issuing_chain<P, F>(
 ) -> HsmResult<()>
 where
     P: HsmHash + HsmEcc,
-    F: for<'a> AsyncFnMut(usize, &'a mut DmaBuf) -> HsmResult<()>,
+    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, true).await
 }
@@ -505,7 +505,7 @@ async fn validate_chain_inner<P, F>(
 ) -> HsmResult<()>
 where
     P: HsmHash + HsmEcc,
-    F: for<'a> AsyncFnMut(usize, &'a mut DmaBuf) -> HsmResult<()>,
+    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     if descriptors.is_empty() || descriptors.len() > u16::MAX as usize {
         return Err(HsmError::InvalidArg);

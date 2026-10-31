@@ -40,7 +40,7 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiAesGenerateKeyReq<'_> = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
@@ -60,17 +60,13 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     // length, so the handler just sizes the buffer per the requested
     // key kind.
     let key_buf = pal.dma_alloc(io, key_len)?;
-    if let Err(e) = pal.aes_gen_key(io, key_buf).await {
-        key_buf.zeroize();
-        return Err(e);
-    }
+    pal.aes_gen_key(io, key_buf).await?;
 
     // Bulk keys live in the bulk-crypto backend: hand the freshly
     // generated material to the backend and keep only the 2-byte
     // `bulk_key_id` reference in the vault.  Non-bulk keys are stored
     // directly.  The registration is scoped to the creating session so
-    // later bulk ops (which carry the session id) match.  Scrub the
-    // material on commit failure before propagating.
+    // later bulk ops (which carry the session id) match.
     let (key_handle, bulk_key_id) = match super::bulk::commit_key(
         pal,
         io,
@@ -83,7 +79,6 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     {
         Ok(v) => v,
         Err(e) => {
-            key_buf.zeroize();
             return Err(e);
         }
     };
@@ -96,7 +91,7 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     // `bulk_key_id`); non-bulk keys read the stored bytes back from the
     // vault so the masked bytes match a later re-import.
     let result = async {
-        let plaintext: &DmaBuf = if is_bulk {
+        let plaintext: &HsmDmaBuf = if is_bulk {
             key_buf
         } else {
             pal.vault_key(io, key_handle)?
@@ -129,10 +124,5 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     }
     .await;
 
-    // Scrub the freshly generated key material now that the vault (or the
-    // bulk-crypto backend, for bulk keys) owns it and masking has consumed
-    // it.  Wipe on all paths — including a masking error — since the per-IO
-    // arena is not guaranteed to be wiped on teardown.
-    key_buf.zeroize();
     super::bulk::rollback_on_err(pal, io, key_handle, result.map(|b| &*b)).await
 }

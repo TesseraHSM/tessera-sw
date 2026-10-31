@@ -25,8 +25,8 @@
 //! }));
 //! gdma.init();
 //! gdma.copy_mem(
-//!     DmaBuf::Prp { prp0: DmaAddr::from_u32(0x2000_0000), prp1: DmaAddr::ZERO }, MemInterface::Device, 4096,
-//!     DmaBuf::Prp { prp0: DmaAddr::from_u32(0x2000_1000), prp1: DmaAddr::ZERO }, MemInterface::Device, 4096,
+//!     HsmDmaBuf::Prp { prp0: DmaAddr::from_u32(0x2000_0000), prp1: DmaAddr::ZERO }, MemInterface::Device, 4096,
+//!     HsmDmaBuf::Prp { prp0: DmaAddr::from_u32(0x2000_1000), prp1: DmaAddr::ZERO }, MemInterface::Device, 4096,
 //! )?.await?;
 //! ```
 

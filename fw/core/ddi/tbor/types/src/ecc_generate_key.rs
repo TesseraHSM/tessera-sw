@@ -72,7 +72,7 @@ pub enum EccCurve {
 }
 
 /// `EccGenerateKey` request schema.
-#[tbor(opcode = 0x17)]
+#[tbor(opcode = 0x17, pair = TborEccGenerateKeyResp)]
 pub struct TborEccGenerateKeyReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -105,7 +105,7 @@ pub struct TborEccGenerateKeyReq<'a> {
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// and mask the private key straight into it (`decode_mut`) — no scratch
 /// copy of the masked blob.
-#[tbor(response)]
+#[tbor(response, pair = TborEccGenerateKeyReq)]
 pub struct TborEccGenerateKeyResp<'a> {
     /// The generated private key, masked (AEAD-GCM-256) under the scope's
     /// masking key.  260 / 276 / 296 B for P-256 / P-384 / P-521.

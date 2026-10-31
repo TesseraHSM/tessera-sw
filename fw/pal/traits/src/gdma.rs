@@ -118,7 +118,7 @@ pub trait HsmGdmaController: HsmIoTypes {
     ///   could not be queued (e.g. engine in error state).
     /// - `Err(HsmError)` — propagated from the GDMA driver on
     ///   completion errors.
-    async fn copy_mem(&self, io: &Self::Io, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()>;
+    async fn copy_mem(&self, io: &Self::Io, src: &HsmDmaBuf, dst: &mut HsmDmaBuf) -> HsmResult<()>;
 
     /// Zeroes an HSM-local buffer in place.
     ///
@@ -141,7 +141,7 @@ pub trait HsmGdmaController: HsmIoTypes {
     ///   the GDMA can address.
     /// - `Err(HsmError)` — propagated from the GDMA driver on
     ///   completion errors.
-    async fn zeroize_mem(&self, io: &Self::Io, dst: &mut DmaBuf) -> HsmResult<()>;
+    async fn zeroize_mem(&self, io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()>;
 
     /// Copies bytes from host memory into an HSM-local DMA buffer.
     ///
@@ -183,7 +183,7 @@ pub trait HsmGdmaController: HsmIoTypes {
         io: &Self::Io,
         src: HsmDmaAddr,
         src2: HsmDmaAddr,
-        dst: &mut DmaBuf,
+        dst: &mut HsmDmaBuf,
         prp: bool,
     ) -> HsmResult<()>;
 
@@ -228,7 +228,7 @@ pub trait HsmGdmaController: HsmIoTypes {
         &self,
         io: &Self::Io,
         desc: &[u8; 16],
-        dst: &mut DmaBuf,
+        dst: &mut HsmDmaBuf,
         prp: bool,
     ) -> HsmResult<()>;
 
@@ -264,7 +264,7 @@ pub trait HsmGdmaController: HsmIoTypes {
     async fn copy_mem_to_host(
         &self,
         io: &Self::Io,
-        src: &DmaBuf,
+        src: &HsmDmaBuf,
         dst: HsmDmaAddr,
         dst2: HsmDmaAddr,
         prp: bool,
