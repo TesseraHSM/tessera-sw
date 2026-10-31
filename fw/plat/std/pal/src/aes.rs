@@ -48,7 +48,7 @@ impl HsmAes for StdHsmPal {
         self.aes.gen_key(key).await
     }
 
-    async fn aes_encrypt_decrypt(
+    async fn aes_enc_dec(
         &self,
         _io: &StdHsmIo,
         op: HsmAesOp,
@@ -71,7 +71,7 @@ impl HsmAes for StdHsmPal {
         Ok(())
     }
 
-    async fn aes_encrypt_decrypt_in_place(
+    async fn aes_enc_dec_in_place(
         &self,
         _io: &StdHsmIo,
         op: HsmAesOp,
@@ -429,7 +429,7 @@ mod tests {
             let buf = pal.dma_alloc(&io, len).unwrap();
             buf[..iv.len()].copy_from_slice(iv);
             buf[iv.len()..].copy_from_slice(&pt);
-            pal.aes_encrypt_decrypt_in_place(&io, HsmAesOp::Encrypt, mode, key, buf)
+            pal.aes_enc_dec_in_place(&io, HsmAesOp::Encrypt, mode, key, buf)
                 .await
                 .unwrap();
             assert_eq!(&buf[..pt.len()], &ct[..], "{mode:?} encrypt");
@@ -440,7 +440,7 @@ mod tests {
             let output = pal.dma_alloc(&io, len).unwrap();
             input[..iv.len()].copy_from_slice(iv);
             input[iv.len()..].copy_from_slice(&ct);
-            pal.aes_encrypt_decrypt(&io, HsmAesOp::Decrypt, mode, key, input, output)
+            pal.aes_enc_dec(&io, HsmAesOp::Decrypt, mode, key, input, output)
                 .await
                 .unwrap();
             assert_eq!(&output[..pt.len()], &pt[..], "{mode:?} decrypt");
@@ -469,14 +469,8 @@ mod tests {
         for (mode, key, len) in cases {
             buf.fill(0x42);
             assert_eq!(
-                pal.aes_encrypt_decrypt_in_place(
-                    &io,
-                    HsmAesOp::Encrypt,
-                    mode,
-                    key,
-                    &mut buf[..len]
-                )
-                .await,
+                pal.aes_enc_dec_in_place(&io, HsmAesOp::Encrypt, mode, key, &mut buf[..len])
+                    .await,
                 Err(HsmError::InvalidArg),
                 "{mode:?} len {len}"
             );
@@ -485,7 +479,7 @@ mod tests {
         // Output shorter than input.
         out.fill(0x24);
         assert_eq!(
-            pal.aes_encrypt_decrypt(
+            pal.aes_enc_dec(
                 &io,
                 HsmAesOp::Encrypt,
                 HsmAesMode::Ctr,

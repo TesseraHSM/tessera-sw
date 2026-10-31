@@ -130,7 +130,7 @@ pub(crate) async fn handle<P: HsmPal>(
         if !permitted {
             return Err(HsmError::InvalidPermissions);
         }
-        pal.aes_encrypt_decrypt_in_place(io, op, mode, view.target_key, data)
+        pal.aes_enc_dec_in_place(io, op, mode, view.target_key, data)
             .await?;
 
         Ok(

@@ -370,7 +370,7 @@ impl HsmAes for UnoHsmPal {
 
     /// Validates lengths before touching `output`, copies `input` into
     /// `output` and runs [`Self::aes_generic_in_place`] on it.
-    async fn aes_encrypt_decrypt(
+    async fn aes_enc_dec(
         &self,
         io: &UnoHsmIo,
         op: HsmAesOp,
@@ -389,7 +389,7 @@ impl HsmAes for UnoHsmPal {
     }
 
     /// See [`Self::aes_generic_in_place`].
-    async fn aes_encrypt_decrypt_in_place(
+    async fn aes_enc_dec_in_place(
         &self,
         io: &UnoHsmIo,
         op: HsmAesOp,

@@ -5,7 +5,7 @@
 //!
 //! Defines the [`HsmAes`] trait that PAL implementations use to expose
 //! AES key generation, the generic multi-mode
-//! [`aes_encrypt_decrypt`](HsmAes::aes_encrypt_decrypt) operation
+//! [`aes_enc_dec`](HsmAes::aes_enc_dec) operation
 //! (CBC / ECB / CFB-128 / OFB / CTR) and the legacy ECB/CBC entry points.
 //!
 //! ## Generic encrypt / decrypt layout
@@ -53,7 +53,7 @@ pub enum HsmAesOp {
 }
 
 /// AES confidentiality mode for
-/// [`aes_encrypt_decrypt`](HsmAes::aes_encrypt_decrypt).
+/// [`aes_enc_dec`](HsmAes::aes_enc_dec).
 ///
 /// Discriminants match tiger `AesMode` / CPT `param1[3:0]`.
 #[repr(u8)]
@@ -151,7 +151,7 @@ pub trait HsmAes: HsmIoTypes {
     /// - `Err(HsmError::InvalidArg)` — key, IV, alignment or buffer-size
     ///   violation; `output` is not modified.
     /// - `Err(HsmError)` — AES driver failure.
-    async fn aes_encrypt_decrypt(
+    async fn aes_enc_dec(
         &self,
         io: &Self::Io,
         op: HsmAesOp,
@@ -162,7 +162,7 @@ pub trait HsmAes: HsmIoTypes {
     ) -> HsmResult<()>;
 
     /// In-place variant of
-    /// [`aes_encrypt_decrypt`](Self::aes_encrypt_decrypt).
+    /// [`aes_enc_dec`](Self::aes_enc_dec).
     ///
     /// `buf` holds `[IV | data]` on entry and `[data | IV out]` on return,
     /// so a request buffer can be turned into a response without a second
@@ -174,7 +174,7 @@ pub trait HsmAes: HsmIoTypes {
     /// - `Err(HsmError::InvalidArg)` — key, IV or alignment violation;
     ///   `buf` is not modified.
     /// - `Err(HsmError)` — AES driver failure.
-    async fn aes_encrypt_decrypt_in_place(
+    async fn aes_enc_dec_in_place(
         &self,
         io: &Self::Io,
         op: HsmAesOp,
