@@ -49,6 +49,29 @@ pub trait HsmAesKw: HsmIoTypes {
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
+    /// AES Key Wrap (RFC 3394) — wrap key data in place.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (per-IO scope).
+    /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
+    /// - `buf` — `[reserved (8) | plaintext]`.  The plaintext
+    ///   (`buf[8..]`) must satisfy the [`Self::aes_kw_wrap`] input
+    ///   constraints; the first 8 bytes are overwritten.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(buf.len())` — `buf` holds the wrapped key.
+    /// - `Err(HsmError::InvalidArg)` — size or alignment
+    ///   constraints violated.
+    /// - `Err(HsmError)` — AES driver failure.
+    async fn aes_kw_wrap_in_place(
+        &self,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize>;
+
     /// AES Key Wrap (RFC 3394) — unwrap key data.
     ///
     /// Unwraps `input` under the KEK `key` and verifies the
@@ -79,6 +102,31 @@ pub trait HsmAesKw: HsmIoTypes {
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
+
+    /// AES Key Wrap (RFC 3394) — unwrap key data in place.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (per-IO scope).
+    /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
+    /// - `buf` — wrapped key data satisfying the
+    ///   [`Self::aes_kw_unwrap`] input constraints.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(buf.len() - 8)` — `buf[..buf.len() - 8]` holds the
+    ///   unwrapped key; the trailing 8 bytes are unspecified.
+    /// - `Err(HsmError::InvalidArg)` — size or alignment
+    ///   constraints violated.
+    /// - `Err(HsmError::AesUnwrapFailed)` — IV mismatch (wrong
+    ///   key or tampered ciphertext).
+    /// - `Err(HsmError)` — AES driver failure.
+    async fn aes_kw_unwrap_in_place(
+        &self,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
     ) -> HsmResult<usize>;
 
     // ── AES Key Wrap with Padding (RFC 5649) ───────────────────────
@@ -114,6 +162,30 @@ pub trait HsmAesKw: HsmIoTypes {
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
+    /// AES Key Wrap with Padding (RFC 5649) — wrap key data in place.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (per-IO scope).
+    /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
+    /// - `data_len` — plaintext length (1..=3072).
+    /// - `buf` — `[reserved (8) | plaintext (data_len) | pad room]`;
+    ///   must be at least `round_up_8(data_len) + 8` bytes.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(round_up_8(data_len) + 8)` — that prefix of `buf` holds
+    ///   the wrapped key.
+    /// - `Err(HsmError::InvalidArg)` — size constraints violated.
+    /// - `Err(HsmError)` — AES driver failure.
+    async fn aes_kwp_wrap_in_place(
+        &self,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
+        data_len: usize,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize>;
+
     /// AES Key Wrap with Padding (RFC 5649) — unwrap key data.
     ///
     /// Verifies the AIV (constant prefix + Message Length
@@ -147,5 +219,29 @@ pub trait HsmAesKw: HsmIoTypes {
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
+
+    /// AES Key Wrap with Padding (RFC 5649) — unwrap key data in place.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (per-IO scope).
+    /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
+    /// - `buf` — wrapped key data satisfying the
+    ///   [`Self::aes_kwp_unwrap`] input constraints.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(mli)` — the recovered plaintext length; `buf[..mli]` is
+    ///   valid plaintext and the remaining bytes are unspecified.
+    /// - `Err(HsmError::InvalidArg)` — size constraints violated.
+    /// - `Err(HsmError::AesUnwrapFailed)` — AIV mismatch or
+    ///   non-zero pad bytes.
+    /// - `Err(HsmError)` — AES driver failure.
+    async fn aes_kwp_unwrap_in_place(
+        &self,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
     ) -> HsmResult<usize>;
 }

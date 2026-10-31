@@ -251,14 +251,15 @@ pub(crate) async fn handle<P: HsmPal>(
                     wrapped.copy_from_slice(req.wrapped_key());
                 }
 
-                // KWP output is at most `input - 8` bytes.
-                let cose = alloc.dma_alloc(wrapped_len)?;
+                // Unwrap in place; the COSE plaintext lands at
+                // `wrapped[..mli]`.
                 let cose_res = async {
-                    let mli = pal.aes_kwp_unwrap(io, tmk, wrapped, Some(cose)).await?;
+                    let mli = pal.aes_kwp_unwrap_in_place(io, tmk, wrapped).await?;
+                    let cose = &wrapped[..mli];
 
                     // Decode + all EC math while the COSE plaintext (which
                     // holds `d`) is borrowed.
-                    let parsed = parse_ec2_private_cose_key(&cose[..mli])?;
+                    let parsed = parse_ec2_private_cose_key(cose)?;
                     let curve = parsed.curve;
 
                     // Effective usage = request ∩ COSE key_ops.

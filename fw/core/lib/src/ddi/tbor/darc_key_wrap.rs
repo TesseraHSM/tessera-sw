@@ -63,6 +63,9 @@ use super::masking_key_id_for_scope;
 use super::validate_crypto_officer_active_session;
 use crate::part_state;
 
+/// Size of the RFC 5649 AIV that prefixes the KWP-wrapped COSE_Key.
+const KWP_HEADER_LEN: usize = 8;
+
 /// Fully-specified ECDSA `alg` identifier for `curve` (the non-deprecated
 /// COSE "ESP" family; the deprecated polymorphic ES256/384/512 values are
 /// rejected by the COSE encoder).
@@ -247,8 +250,10 @@ pub(crate) async fn handle<P: HsmPal>(
                         wire_le_coord_to_be(x, &pub_wire[0..wc], field)?;
                         wire_le_coord_to_be(y, &pub_wire[wc..2 * wc], field)?;
 
-                        // Encode the EC2 private COSE_Key.
-                        let cose = alloc.dma_alloc(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN)?;
+                        // Encode the EC2 private COSE_Key directly after the
+                        // 8-byte KWP header slot, then AES-KWP-wrap it in
+                        // place under the TMK. A too-small buffer surfaces
+                        // as `InvalidArg` from the encoder or the wrap.
                         let cose_res = async {
                             let cose_len = encode_ec2_private_cose_key(
                                 curve,
@@ -258,24 +263,16 @@ pub(crate) async fn handle<P: HsmPal>(
                                 x,
                                 y,
                                 d,
-                                cose,
+                                &mut wrapped_out[KWP_HEADER_LEN..],
                             )?;
-
-                            // AES-KWP-wrap the COSE plaintext under the TMK.
-                            let wrapped_total =
-                                pal.aes_kwp_wrap(io, tmk, &cose[..cose_len], None).await?;
-                            if wrapped_total > DARC_UNWRAP_WRAPPED_KEY_MAX_LEN {
-                                return Err(HsmError::InvalidArg);
-                            }
-                            pal.aes_kwp_wrap(
-                                io,
-                                tmk,
-                                &cose[..cose_len],
-                                Some(&mut wrapped_out[..wrapped_total]),
-                            )
-                            .await
+                            pal.aes_kwp_wrap_in_place(io, tmk, cose_len, wrapped_out)
+                                .await
                         }
                         .await;
+                        if cose_res.is_err() {
+                            // Don't leave COSE plaintext (holding `d`) behind.
+                            wrapped_out.fill(0);
+                        }
                         cose_res
                     }
                     .await;

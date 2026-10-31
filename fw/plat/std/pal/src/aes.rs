@@ -6,10 +6,11 @@
 //!
 //! Thin delegation layer to the [`StdAes`](crate::drivers::aes::StdAes)
 //! driver. All implemented crypto work is offloaded to the worker pool by
-//! the driver. Newly added AES-KW/AES-XTS trait entry points are stubbed
-//! with `todo!()` for now.
+//! the driver. AES-XTS entry points are currently disabled.
 
 use core::convert::TryInto;
+
+use zeroize::Zeroizing;
 
 use super::*;
 
@@ -274,21 +275,43 @@ impl HsmAesKw for StdHsmPal {
     async fn aes_kw_wrap(
         &self,
         _io: &StdHsmIo,
-        _key: &HsmDmaBuf,
-        _input: &HsmDmaBuf,
-        _output: Option<&mut HsmDmaBuf>,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        todo!()
+        self.aes.kw_wrap(key, input, output.map(|o| &mut **o)).await
+    }
+
+    async fn aes_kw_wrap_in_place(
+        &self,
+        _io: &StdHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let input = Zeroizing::new(buf.get(8..).ok_or(HsmError::InvalidArg)?.to_vec());
+        self.aes.kw_wrap(key, &input, Some(&mut **buf)).await
     }
 
     async fn aes_kw_unwrap(
         &self,
         _io: &StdHsmIo,
-        _key: &HsmDmaBuf,
-        _input: &HsmDmaBuf,
-        _output: Option<&mut HsmDmaBuf>,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        todo!()
+        self.aes
+            .kw_unwrap(key, input, output.map(|o| &mut **o))
+            .await
+    }
+
+    async fn aes_kw_unwrap_in_place(
+        &self,
+        _io: &StdHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let input = buf.to_vec();
+        self.aes.kw_unwrap(key, &input, Some(&mut **buf)).await
     }
 
     async fn aes_kwp_wrap(
@@ -303,6 +326,18 @@ impl HsmAesKw for StdHsmPal {
             .await
     }
 
+    async fn aes_kwp_wrap_in_place(
+        &self,
+        _io: &StdHsmIo,
+        key: &HsmDmaBuf,
+        data_len: usize,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let end = data_len.checked_add(8).ok_or(HsmError::InvalidArg)?;
+        let input = Zeroizing::new(buf.get(8..end).ok_or(HsmError::InvalidArg)?.to_vec());
+        self.aes.kwp_wrap(key, &input, Some(&mut **buf)).await
+    }
+
     async fn aes_kwp_unwrap(
         &self,
         _io: &StdHsmIo,
@@ -313,6 +348,16 @@ impl HsmAesKw for StdHsmPal {
         self.aes
             .kwp_unwrap(key, input, output.map(|o| &mut **o))
             .await
+    }
+
+    async fn aes_kwp_unwrap_in_place(
+        &self,
+        _io: &StdHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let input = buf.to_vec();
+        self.aes.kwp_unwrap(key, &input, Some(&mut **buf)).await
     }
 }
 
@@ -521,5 +566,135 @@ mod tests {
             .await,
             Err(HsmError::InvalidArg)
         );
+    }
+
+    #[tokio::test]
+    async fn kw_matches_rfc3394_in_and_out_of_place() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+
+        // RFC 3394 §4.1: 128 bits of key data with a 128-bit KEK.
+        let key = pal.dma_alloc(&io, 16).unwrap();
+        key.copy_from_slice(&hex("000102030405060708090a0b0c0d0e0f"));
+        let pt = hex("00112233445566778899aabbccddeeff");
+        let ct = hex("1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5");
+
+        let input = pal.dma_alloc(&io, pt.len()).unwrap();
+        input.copy_from_slice(&pt);
+        let output = pal.dma_alloc(&io, ct.len()).unwrap();
+        assert_eq!(pal.aes_kw_wrap(&io, key, input, None).await, Ok(ct.len()));
+        assert_eq!(
+            pal.aes_kw_wrap(&io, key, input, Some(&mut *output)).await,
+            Ok(ct.len())
+        );
+        assert_eq!(&output[..], &ct[..]);
+
+        // In place: [reserved | pt] -> ct.
+        let buf = pal.dma_alloc(&io, ct.len()).unwrap();
+        buf[8..].copy_from_slice(&pt);
+        assert_eq!(pal.aes_kw_wrap_in_place(&io, key, buf).await, Ok(ct.len()));
+        assert_eq!(&buf[..], &ct[..]);
+
+        let plain = pal.dma_alloc(&io, pt.len()).unwrap();
+        assert_eq!(
+            pal.aes_kw_unwrap(&io, key, output, None).await,
+            Ok(pt.len())
+        );
+        assert_eq!(
+            pal.aes_kw_unwrap(&io, key, output, Some(&mut *plain)).await,
+            Ok(pt.len())
+        );
+        assert_eq!(&plain[..], &pt[..]);
+
+        assert_eq!(
+            pal.aes_kw_unwrap_in_place(&io, key, buf).await,
+            Ok(pt.len())
+        );
+        assert_eq!(&buf[..pt.len()], &pt[..]);
+
+        output[0] ^= 1;
+        assert_eq!(
+            pal.aes_kw_unwrap_in_place(&io, key, output).await,
+            Err(HsmError::AesUnwrapFailed)
+        );
+        assert_eq!(
+            pal.aes_kw_wrap_in_place(&io, key, &mut buf[..8]).await,
+            Err(HsmError::InvalidArg)
+        );
+    }
+
+    #[tokio::test]
+    async fn kwp_matches_rfc5649_in_and_out_of_place() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+
+        // RFC 5649 §6: a 20-byte (multi-block) and a 7-byte (single-block)
+        // key under the same 192-bit KEK.
+        let key = pal.dma_alloc(&io, 24).unwrap();
+        key.copy_from_slice(&hex("5840df6e29b02af1ab493b705bf16ea1ae8338f4dcc176a8"));
+        let cases = [
+            (
+                "c37b7e6492584340bed12207808941155068f738",
+                "138bdeaa9b8fa7fc61f97742e72248ee5ae6ae5360d1ae6a5f54f373fa543b6a",
+            ),
+            ("466f7250617369", "afbeb0f07dfbf5419200f2ccb50bb24f"),
+        ];
+        for (pt, ct) in cases {
+            let (pt, ct) = (hex(pt), hex(ct));
+
+            let input = pal.dma_alloc(&io, pt.len()).unwrap();
+            input.copy_from_slice(&pt);
+            let output = pal.dma_alloc(&io, ct.len()).unwrap();
+            assert_eq!(pal.aes_kwp_wrap(&io, key, input, None).await, Ok(ct.len()));
+            assert_eq!(
+                pal.aes_kwp_wrap(&io, key, input, Some(&mut *output)).await,
+                Ok(ct.len())
+            );
+            assert_eq!(&output[..], &ct[..]);
+
+            // In place: [reserved | pt | pad room] -> ct, with spare tail.
+            let buf = pal.dma_alloc(&io, ct.len() + 8).unwrap();
+            buf.fill(0xee);
+            buf[8..8 + pt.len()].copy_from_slice(&pt);
+            assert_eq!(
+                pal.aes_kwp_wrap_in_place(&io, key, pt.len(), buf).await,
+                Ok(ct.len())
+            );
+            assert_eq!(&buf[..ct.len()], &ct[..]);
+
+            let plain = pal.dma_alloc(&io, ct.len() - 8).unwrap();
+            assert_eq!(
+                pal.aes_kwp_unwrap(&io, key, output, None).await,
+                Ok(ct.len() - 8)
+            );
+            assert_eq!(
+                pal.aes_kwp_unwrap(&io, key, output, Some(&mut *plain))
+                    .await,
+                Ok(pt.len())
+            );
+            assert_eq!(&plain[..pt.len()], &pt[..]);
+
+            let wrapped = &mut buf[..ct.len()];
+            assert_eq!(
+                pal.aes_kwp_unwrap_in_place(&io, key, wrapped).await,
+                Ok(pt.len())
+            );
+            assert_eq!(&wrapped[..pt.len()], &pt[..]);
+
+            output[0] ^= 1;
+            assert_eq!(
+                pal.aes_kwp_unwrap_in_place(&io, key, output).await,
+                Err(HsmError::AesUnwrapFailed)
+            );
+            assert_eq!(
+                pal.aes_kwp_wrap_in_place(&io, key, pt.len(), &mut buf[..ct.len() - 1])
+                    .await,
+                Err(HsmError::InvalidArg)
+            );
+        }
     }
 }

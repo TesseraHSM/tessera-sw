@@ -686,6 +686,16 @@ impl HsmAesKw for UnoHsmPal {
         self.kw_wrap_impl(io, key, input, output).await
     }
 
+    /// AES-KW wrap in place. See [`UnoHsmPal::kw_wrap_in_place_impl`].
+    async fn aes_kw_wrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kw_wrap_in_place_impl(io, key, buf).await
+    }
+
     /// AES-KW unwrap (RFC 3394 §2.2.2).
     ///
     /// Delegates to [`UnoHsmPal::kw_unwrap_impl`] in the [`super::kw`]
@@ -718,6 +728,16 @@ impl HsmAesKw for UnoHsmPal {
         self.kw_unwrap_impl(io, key, input, output).await
     }
 
+    /// AES-KW unwrap in place. See [`UnoHsmPal::kw_unwrap_in_place_impl`].
+    async fn aes_kw_unwrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kw_unwrap_in_place_impl(io, key, buf).await
+    }
+
     /// AES-KWP wrap (RFC 5649 §4.1).
     ///
     /// Delegates to [`UnoHsmPal::kwp_wrap_impl`] in the [`super::kw`]
@@ -746,6 +766,17 @@ impl HsmAesKw for UnoHsmPal {
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         self.kwp_wrap_impl(io, key, input, output).await
+    }
+
+    /// AES-KWP wrap in place. See [`UnoHsmPal::kwp_wrap_in_place_impl`].
+    async fn aes_kwp_wrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        data_len: usize,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kwp_wrap_in_place_impl(io, key, data_len, buf).await
     }
 
     /// AES-KWP unwrap (RFC 5649 §4.2).
@@ -779,6 +810,16 @@ impl HsmAesKw for UnoHsmPal {
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         self.kwp_unwrap_impl(io, key, input, output).await
+    }
+
+    /// AES-KWP unwrap in place. See [`UnoHsmPal::kwp_unwrap_in_place_impl`].
+    async fn aes_kwp_unwrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kwp_unwrap_in_place_impl(io, key, buf).await
     }
 }
 

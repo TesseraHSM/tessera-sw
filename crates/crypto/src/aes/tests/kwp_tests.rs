@@ -33,6 +33,12 @@ fn test_aes192_kwp_vector2() {
     let actual_ct = Encrypter::encrypt_vec(&mut kwp, &aes_key, &pt).expect("Encryption failed");
     assert_eq!(actual_ct, ct);
 
+    // Single-semiblock path: query and exact-size output buffer.
+    assert_eq!(kwp.encrypt(&aes_key, &pt, None), Ok(ct.len()));
+    let mut exact = vec![0u8; ct.len()];
+    assert_eq!(kwp.encrypt(&aes_key, &pt, Some(&mut exact)), Ok(ct.len()));
+    assert_eq!(exact, ct);
+
     // Decryption
     let actual_pt = Decrypter::decrypt_vec(&mut kwp, &aes_key, &ct).expect("Decryption failed");
     assert_eq!(actual_pt, pt);

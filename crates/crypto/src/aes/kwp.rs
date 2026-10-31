@@ -198,7 +198,17 @@ impl EncryptOp for AesKeyWrapPadAlgo {
             // Use AES ECB encryption directly instead of full key wrap algorithm
             buf[0..aiv.len()].copy_from_slice(&aiv);
             buf[aiv.len()..aiv.len() + p.len()].copy_from_slice(&p);
-            Encrypter::encrypt(&mut AesEcbAlgo::default(), key, &buf, output)
+            let Some(output) = output else {
+                return Ok(buf.len());
+            };
+            if output.len() < buf.len() {
+                Err(CryptoError::AesBufferTooSmall)?;
+            }
+            // ECB requires one block of slack in its output, so encrypt into
+            // a scratch buffer and copy out the exact 16-byte ciphertext.
+            let ct = Encrypter::encrypt_vec(&mut AesEcbAlgo::default(), key, &buf)?;
+            output[..ct.len()].copy_from_slice(&ct);
+            Ok(ct.len())
         } else {
             // Standard case: use AES-KW with the constructed AIV
             Encrypter::encrypt(&mut AesKeyWrapAlgo::with_iv(&aiv)?, key, &p, output)

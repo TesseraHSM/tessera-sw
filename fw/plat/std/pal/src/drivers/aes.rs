@@ -37,6 +37,7 @@ use tsra_crypto::AesCtrAlgo;
 use tsra_crypto::AesEcbAlgo;
 use tsra_crypto::AesGcmAlgo;
 use tsra_crypto::AesKey;
+use tsra_crypto::AesKeyWrapAlgo;
 use tsra_crypto::AesKeyWrapPadAlgo;
 use tsra_crypto::AesOfbAlgo;
 use tsra_crypto::CryptoError;
@@ -380,6 +381,126 @@ impl StdAes {
 
         plaintext[..result_data.len()].copy_from_slice(&result_data);
         Ok(())
+    }
+
+    /// AES-KW (RFC 3394) wrap asynchronously.
+    ///
+    /// Wraps `input` with the key-encryption key `kek` using
+    /// [`AesKeyWrapAlgo`] with the default `0xA6A6…` IV.
+    ///
+    /// # Parameters
+    /// - `kek` — key-encryption key (16, 24, or 32 bytes).
+    /// - `input` — plaintext key material (`16..=3072` bytes, a multiple
+    ///   of 8).
+    /// - `output` — destination; must hold at least `input.len() + 8`
+    ///   bytes. `None` only validates and returns the wrapped length.
+    ///
+    /// # Returns
+    /// - `Ok(input.len() + 8)` — the wrapped length.
+    ///
+    /// # Errors
+    /// - [`HsmError::AesInvalidKeyLength`] — `kek` is not a valid AES
+    ///   key length.
+    /// - [`HsmError::InvalidArg`] — `input`/`output` size-constraint
+    ///   violation.
+    /// - [`HsmError::AesEncryptFailed`] — the wrapping operation failed.
+    pub async fn kw_wrap(
+        &self,
+        kek: &[u8],
+        input: &[u8],
+        output: Option<&mut [u8]>,
+    ) -> HsmResult<usize> {
+        if input.len() < 16 || !input.len().is_multiple_of(8) || input.len() > 3072 {
+            return Err(HsmError::InvalidArg);
+        }
+        let wrapped_len = input.len() + 8;
+        let Some(output) = output else {
+            return Ok(wrapped_len);
+        };
+        if output.len() < wrapped_len {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let kek_owned = Zeroizing::new(kek.to_vec());
+        let input_owned = Zeroizing::new(input.to_vec());
+
+        let result = self
+            .pool
+            .submit_with_result(async move {
+                let aes_key =
+                    AesKey::from_bytes(&kek_owned).map_err(|_| HsmError::AesInvalidKeyLength)?;
+                let mut algo = AesKeyWrapAlgo::with_default_iv();
+                let mut buf = vec![0u8; wrapped_len];
+                let written = algo
+                    .encrypt(&aes_key, &input_owned, Some(&mut buf))
+                    .map_err(|_| HsmError::AesEncryptFailed)?;
+                buf.truncate(written);
+                Ok::<_, HsmError>(buf)
+            })
+            .await?;
+
+        output[..result.len()].copy_from_slice(&result);
+        Ok(result.len())
+    }
+
+    /// AES-KW (RFC 3394) unwrap asynchronously.
+    ///
+    /// Unwraps `input` with the key-encryption key `kek`, verifying the
+    /// default `0xA6A6…` IV.
+    ///
+    /// # Parameters
+    /// - `kek` — key-encryption key (16, 24, or 32 bytes).
+    /// - `input` — wrapped key material (`24..=3080` bytes, a multiple
+    ///   of 8).
+    /// - `output` — destination; must hold at least `input.len() - 8`
+    ///   bytes. `None` only validates and returns the unwrapped length.
+    ///
+    /// # Returns
+    /// - `Ok(input.len() - 8)` — the unwrapped length.
+    ///
+    /// # Errors
+    /// - [`HsmError::AesInvalidKeyLength`] — `kek` is not a valid AES
+    ///   key length.
+    /// - [`HsmError::InvalidArg`] — `input`/`output` size-constraint
+    ///   violation.
+    /// - [`HsmError::AesUnwrapFailed`] — IV integrity check failed.
+    pub async fn kw_unwrap(
+        &self,
+        kek: &[u8],
+        input: &[u8],
+        output: Option<&mut [u8]>,
+    ) -> HsmResult<usize> {
+        if input.len() < 24 || !input.len().is_multiple_of(8) || input.len() > 3080 {
+            return Err(HsmError::InvalidArg);
+        }
+        let unwrapped_len = input.len() - 8;
+        let Some(output) = output else {
+            return Ok(unwrapped_len);
+        };
+        if output.len() < unwrapped_len {
+            return Err(HsmError::InvalidArg);
+        }
+
+        let kek_owned = Zeroizing::new(kek.to_vec());
+        let input_owned = input.to_vec();
+
+        let result = self
+            .pool
+            .submit_with_result(async move {
+                let aes_key =
+                    AesKey::from_bytes(&kek_owned).map_err(|_| HsmError::AesInvalidKeyLength)?;
+                let mut algo = AesKeyWrapAlgo::with_default_iv();
+                let mut buf = Zeroizing::new(vec![0u8; unwrapped_len]);
+                // Size is pre-validated above, so a failure here is an IV
+                // integrity failure.
+                algo.decrypt(&aes_key, &input_owned, Some(&mut buf))
+                    .map_err(|_| HsmError::AesUnwrapFailed)?;
+                Ok::<_, HsmError>(buf)
+            })
+            .await?;
+
+        output[..unwrapped_len].copy_from_slice(&result);
+        Ok(unwrapped_len)
     }
 
     /// AES-KWP (RFC 5649) wrap asynchronously.

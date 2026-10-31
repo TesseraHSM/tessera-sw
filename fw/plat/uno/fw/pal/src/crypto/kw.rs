@@ -454,6 +454,48 @@ impl UnoHsmPal {
         .await
     }
 
+    /// Unwraps the semiblocks `data` = `R[1..n]` with initial register
+    /// `a` = `C[0]` in place and returns the recovered `A` register.
+    async fn kw_unwrap_semiblocks(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        mut a: [u8; SEMI],
+        data: &mut HsmDmaBuf,
+    ) -> HsmResult<[u8; SEMI]> {
+        let n = (data.len() / SEMI) as u64;
+        self.run_kw_unwrap(
+            io,
+            key,
+            UnwrapState {
+                a: &mut a,
+                output: data,
+                n,
+            },
+        )
+        .await?;
+        Ok(a)
+    }
+
+    /// Single-block KWP unwrap (RFC 5649 §4.2, `n = 1`): AES-ECB decrypts
+    /// `block` in place and returns the MLI from the verified AIV. The
+    /// padded plaintext is left at `block[SEMI..BLOCK]`.
+    async fn kwp_unwrap_block(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        block: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.alloc_scoped_async(io, async |scope| {
+            let out = scope.dma_alloc(BLOCK)?;
+            self.aes
+                .with_exclusive(|ecb| ecb_block_in_place(ecb, key, AesOp::Decrypt, block, out))
+                .await
+        })
+        .await?;
+        verify_aiv(&block[..SEMI], &block[SEMI..BLOCK])
+    }
+
     /// AES-KW wrap (RFC 3394 §2.2.1).
     ///
     /// # Parameters
@@ -480,29 +522,45 @@ impl UnoHsmPal {
         input: &HsmDmaBuf,
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        let m = input.len();
-        let out_len = kw_wrap_len(m)?;
+        let out_len = kw_wrap_len(input.len())?;
         let Some(output) = output else {
             return Ok(out_len);
         };
         if output.len() < out_len {
             return Err(HsmError::InvalidArg);
         }
-
-        // Initialise: A = IV, R[1..n] = P[1..n]
-        output[..SEMI].copy_from_slice(&DEFAULT_IV);
         output[SEMI..out_len].copy_from_slice(input);
+        self.kw_wrap_in_place_impl(io, key, &mut output[..out_len])
+            .await
+    }
 
+    /// AES-KW wrap in place (RFC 3394 §2.2.1).
+    ///
+    /// # Parameters
+    /// * `key` — AES key (16, 24, or 32 bytes).
+    /// * `buf` — `[reserved (SEMI) | plaintext]`. The plaintext must
+    ///   satisfy the [`Self::kw_wrap_impl`] input constraints.
+    ///
+    /// # Returns
+    /// * `Ok(buf.len())` on success. `buf` holds the wrapped key.
+    ///
+    /// # Errors
+    /// * [`HsmError::InvalidArg`] if the plaintext length is invalid.
+    /// * Any [`HsmError`] surfaced by the AES driver.
+    pub(super) async fn kw_wrap_in_place_impl(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let m = buf.len().checked_sub(SEMI).ok_or(HsmError::InvalidArg)?;
+        let out_len = kw_wrap_len(m)?;
+
+        // Initialise: A = IV, R[1..n] = P[1..n] (already in place).
+        buf[..SEMI].copy_from_slice(&DEFAULT_IV);
         let n = (m / SEMI) as u64;
-        self.run_kw_wrap(
-            io,
-            key,
-            WrapState {
-                output: &mut output[..out_len],
-                n,
-            },
-        )
-        .await?;
+        self.run_kw_wrap(io, key, WrapState { output: buf, n })
+            .await?;
         Ok(out_len)
     }
 
@@ -546,19 +604,46 @@ impl UnoHsmPal {
         let mut a = [0u8; SEMI];
         a.copy_from_slice(&input[..SEMI]);
         output[..p_len].copy_from_slice(&input[SEMI..]);
+        let a = self
+            .kw_unwrap_semiblocks(io, key, a, &mut output[..p_len])
+            .await?;
+        if a != DEFAULT_IV {
+            return Err(HsmError::AesUnwrapFailed);
+        }
+        Ok(p_len)
+    }
 
-        let n = (p_len / SEMI) as u64;
-        self.run_kw_unwrap(
-            io,
-            key,
-            UnwrapState {
-                a: &mut a,
-                output: &mut output[..p_len],
-                n,
-            },
-        )
-        .await?;
+    /// AES-KW unwrap in place (RFC 3394 §2.2.2).
+    ///
+    /// # Parameters
+    /// * `key` — AES key (16, 24, or 32 bytes).
+    /// * `buf` — ciphertext satisfying the [`Self::kw_unwrap_impl`]
+    ///   input constraints.
+    ///
+    /// # Returns
+    /// * `Ok(buf.len() - SEMI)` on success. `buf[..buf.len() - SEMI]`
+    ///   holds the unwrapped key; the trailing semiblock is unspecified.
+    ///
+    /// # Errors
+    /// * [`HsmError::InvalidArg`] if the ciphertext length is invalid.
+    /// * [`HsmError::AesUnwrapFailed`] if the recovered IV does not
+    ///   match [`DEFAULT_IV`] (authentication failure).
+    /// * Any [`HsmError`] surfaced by the AES driver.
+    pub(super) async fn kw_unwrap_in_place_impl(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let p_len = kw_unwrap_len(buf.len())?;
 
+        // Initialise: A = C[0], R[1..n] = C[1..n+1] shifted to the front.
+        let mut a = [0u8; SEMI];
+        a.copy_from_slice(&buf[..SEMI]);
+        buf.copy_within(SEMI.., 0);
+        let a = self
+            .kw_unwrap_semiblocks(io, key, a, &mut buf[..p_len])
+            .await?;
         if a != DEFAULT_IV {
             return Err(HsmError::AesUnwrapFailed);
         }
@@ -567,10 +652,8 @@ impl UnoHsmPal {
 
     /// AES-KWP wrap (RFC 5649 §4.1).
     ///
-    /// Pads `input` to a multiple of [`SEMI`] with zeroes, prefixes
-    /// the AIV (`AIV_PREFIX ‖ MLI_be32`), and either runs a single
-    /// AES-ECB encrypt (1-semiblock special case) or KW-wraps the
-    /// padded data.
+    /// Copies `input` into `output` behind the AIV slot and delegates to
+    /// [`Self::kwp_wrap_in_place_impl`].
     ///
     /// # Parameters
     /// * `key` — AES key (16, 24, or 32 bytes).
@@ -598,58 +681,69 @@ impl UnoHsmPal {
         let Some(output) = output else {
             return Ok(out_len);
         };
-        let r = out_len - SEMI;
         if output.len() < out_len {
             return Err(HsmError::InvalidArg);
         }
+        output[SEMI..SEMI + m].copy_from_slice(input);
+        self.kwp_wrap_in_place_impl(io, key, m, &mut output[..out_len])
+            .await
+    }
 
-        // Build AIV: [AIV_PREFIX | MLI_be32]
-        let mut aiv = [0u8; SEMI];
-        aiv[..4].copy_from_slice(&AIV_PREFIX);
-        aiv[4..].copy_from_slice(&(m as u32).to_be_bytes());
+    /// AES-KWP wrap in place (RFC 5649 §4.1).
+    ///
+    /// Zero-pads the plaintext to a multiple of [`SEMI`], writes the AIV
+    /// (`AIV_PREFIX ‖ MLI_be32`) into the reserved front semiblock, and
+    /// either runs a single AES-ECB encrypt (1-semiblock special case)
+    /// or KW-wraps the padded data.
+    ///
+    /// # Parameters
+    /// * `key` — AES key (16, 24, or 32 bytes).
+    /// * `data_len` — plaintext length, in `1..=MAX_DATA`.
+    /// * `buf` — `[reserved (SEMI) | plaintext (data_len) | pad room]`;
+    ///   at least `next_multiple_of(data_len, SEMI) + SEMI` bytes.
+    ///
+    /// # Returns
+    /// * `Ok(len)` — the wrapped length; `buf[..len]` holds the wrapped
+    ///   key.
+    ///
+    /// # Errors
+    /// * [`HsmError::InvalidArg`] if `data_len` is out of range or `buf`
+    ///   is too small.
+    /// * Any [`HsmError`] surfaced by the AES driver.
+    pub(super) async fn kwp_wrap_in_place_impl(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        data_len: usize,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let m = data_len;
+        let out_len = kwp_wrap_len(m)?;
+        if buf.len() < out_len {
+            return Err(HsmError::InvalidArg);
+        }
+        let buf = &mut buf[..out_len];
 
-        if r == SEMI {
+        // Build [AIV_PREFIX | MLI_be32 | P | zero pad].
+        buf[..4].copy_from_slice(&AIV_PREFIX);
+        buf[4..SEMI].copy_from_slice(&(m as u32).to_be_bytes());
+        buf[SEMI + m..].fill(0);
+
+        if out_len == BLOCK {
             // 1-semiblock special case: a single AES-ECB encrypt.
-            return self
-                .alloc_scoped_async(io, async |scope| {
-                    let block = scope.dma_alloc_zeroed(BLOCK)?;
-                    let out = scope.dma_alloc(BLOCK)?;
-                    block[..SEMI].copy_from_slice(&aiv);
-                    block[SEMI..SEMI + m].copy_from_slice(input);
-
-                    self.aes
-                        .with_exclusive(|ecb| {
-                            ecb_block_in_place(
-                                ecb,
-                                key,
-                                AesOp::Encrypt,
-                                &mut block[..],
-                                &mut out[..],
-                            )
-                        })
-                        .await?;
-
-                    output[..BLOCK].copy_from_slice(&block[..BLOCK]);
-                    Ok::<usize, HsmError>(out_len)
-                })
-                .await;
+            self.alloc_scoped_async(io, async |scope| {
+                let out = scope.dma_alloc(BLOCK)?;
+                self.aes
+                    .with_exclusive(|ecb| ecb_block_in_place(ecb, key, AesOp::Encrypt, buf, out))
+                    .await
+            })
+            .await?;
+            return Ok(out_len);
         }
 
-        // r ≥ 2 semiblocks: zero-pad input, prefix AIV, KW-wrap.
-        output[..SEMI].copy_from_slice(&aiv);
-        output[SEMI..SEMI + m].copy_from_slice(input);
-        output[SEMI + m..out_len].fill(0);
-
-        let n = (r / SEMI) as u64;
-        self.run_kw_wrap(
-            io,
-            key,
-            WrapState {
-                output: &mut output[..out_len],
-                n,
-            },
-        )
-        .await?;
+        let n = (out_len / SEMI - 1) as u64;
+        self.run_kw_wrap(io, key, WrapState { output: buf, n })
+            .await?;
         Ok(out_len)
     }
 
@@ -685,33 +779,17 @@ impl UnoHsmPal {
         input: &HsmDmaBuf,
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        let c_len = input.len();
-        let p_len = kwp_unwrap_max_len(c_len)?;
+        let p_len = kwp_unwrap_max_len(input.len())?;
         let Some(output) = output else {
             return Ok(p_len);
         };
 
-        if c_len == BLOCK {
-            // 1-block special case: single AES-ECB decrypt + AIV check.
+        if input.len() == BLOCK {
             return self
                 .alloc_scoped_async(io, async |scope| {
                     let block = scope.dma_alloc(BLOCK)?;
-                    let out = scope.dma_alloc(BLOCK)?;
-                    block[..BLOCK].copy_from_slice(input);
-
-                    self.aes
-                        .with_exclusive(|ecb| {
-                            ecb_block_in_place(
-                                ecb,
-                                key,
-                                AesOp::Decrypt,
-                                &mut block[..],
-                                &mut out[..],
-                            )
-                        })
-                        .await?;
-
-                    let mli = verify_aiv(&block[..SEMI], &block[SEMI..BLOCK])?;
+                    block.copy_from_slice(input);
+                    let mli = self.kwp_unwrap_block(io, key, block).await?;
                     if output.len() < mli {
                         return Err(HsmError::InvalidArg);
                     }
@@ -729,19 +807,48 @@ impl UnoHsmPal {
         let mut a = [0u8; SEMI];
         a.copy_from_slice(&input[..SEMI]);
         output[..p_len].copy_from_slice(&input[SEMI..]);
-
-        let n = (p_len / SEMI) as u64;
-        self.run_kw_unwrap(
-            io,
-            key,
-            UnwrapState {
-                a: &mut a,
-                output: &mut output[..p_len],
-                n,
-            },
-        )
-        .await?;
-
+        let a = self
+            .kw_unwrap_semiblocks(io, key, a, &mut output[..p_len])
+            .await?;
         verify_aiv(&a, &output[..p_len])
+    }
+
+    /// AES-KWP unwrap in place (RFC 5649 §4.2).
+    ///
+    /// # Parameters
+    /// * `key` — AES key (16, 24, or 32 bytes).
+    /// * `buf` — ciphertext satisfying the [`Self::kwp_unwrap_impl`]
+    ///   input constraints.
+    ///
+    /// # Returns
+    /// * `Ok(mli)` — the recovered message length. `buf[..mli]` holds
+    ///   the unwrapped plaintext; the remaining bytes are unspecified.
+    ///
+    /// # Errors
+    /// * [`HsmError::InvalidArg`] if the ciphertext length is invalid.
+    /// * [`HsmError::AesUnwrapFailed`] if the AIV does not validate.
+    /// * Any [`HsmError`] surfaced by the AES driver.
+    pub(super) async fn kwp_unwrap_in_place_impl(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        let p_len = kwp_unwrap_max_len(buf.len())?;
+
+        if buf.len() == BLOCK {
+            let mli = self.kwp_unwrap_block(io, key, buf).await?;
+            buf.copy_within(SEMI..SEMI + mli, 0);
+            return Ok(mli);
+        }
+
+        // Initialise: A = C[0], R[1..n] = C[1..n+1] shifted to the front.
+        let mut a = [0u8; SEMI];
+        a.copy_from_slice(&buf[..SEMI]);
+        buf.copy_within(SEMI.., 0);
+        let a = self
+            .kw_unwrap_semiblocks(io, key, a, &mut buf[..p_len])
+            .await?;
+        verify_aiv(&a, &buf[..p_len])
     }
 }
