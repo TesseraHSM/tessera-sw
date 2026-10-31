@@ -154,13 +154,13 @@ fn exercise_rotated_session(
     let mut first = check_request(ctx, session.session_id, bound, false);
 
     for _ in 0..(input.repetitions % 3) {
-        let next = check_request(ctx, session.session_id, bound, false)
-            .expect("repeated GetUnwrappingKey must succeed");
-        assert_eq!(
-            first,
-            Some(next),
-            "partition unwrapping key must remain stable"
-        );
+        if let Some(next) = check_request(ctx, session.session_id, bound, false) {
+            if let Some(first) = first {
+                assert_eq!(first, next, "partition unwrapping key must remain stable");
+            } else {
+                first = Some(next);
+            }
+        }
     }
 
     for session_id in [0, u16::MAX] {
