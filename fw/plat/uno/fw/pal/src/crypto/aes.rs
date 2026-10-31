@@ -112,6 +112,13 @@ fn block_at(buf: &[u8], offset: usize) -> [u8; AES_BLOCK_SIZE] {
     block
 }
 
+/// XORs two AES blocks.
+#[inline]
+fn xor_block(mut a: [u8; AES_BLOCK_SIZE], b: [u8; AES_BLOCK_SIZE]) -> [u8; AES_BLOCK_SIZE] {
+    a.iter_mut().zip(&b).for_each(|(x, y)| *x ^= y);
+    a
+}
+
 #[inline]
 fn require_cbc_iv(iv: &[u8]) -> HsmResult<()> {
     if iv.len() != AES_BLOCK_SIZE {
@@ -253,14 +260,147 @@ impl UnoHsmPal {
         self.aes_run(mode, aes_op(op), key, iv, message, data).await
     }
 
+    /// Generic AES from `src` = `[IV | data]` into `dst` = `[data | IV out]`.
+    ///
+    /// `src` and `dst` have equal length and may be the same memory (see
+    /// [`Self::aes_generic_in_place`]). Every CPU read of `src` happens
+    /// before the first write to `dst`; after that `src` is only read by
+    /// the engine, which consumes each input block before writing the
+    /// output block that trails it by `iv_len` bytes.
+    ///
+    /// Zero copy: a single engine submission reads `src[iv_len..]` and
+    /// writes `dst[..len]` directly. The IV is staged in a 16-byte DMA block
+    /// so the engine never reads it from a region that may be overwritten.
+    /// The engine accepts any length for CTR, but CFB and OFB require whole
+    /// blocks: a partial final CFB/OFB block (< 16 bytes) is run as a second
+    /// submission through a zero-padded 16-byte DMA block, chained from the
+    /// first. That tail is the only data copied.
+    ///
+    /// The IV out is derived in software from blocks captured on the stack
+    /// rather than relying on hardware IV write-back, which is only defined
+    /// for CBC. CTR assumes the engine increments the full 128-bit
+    /// big-endian counter block.
+    async fn aes_generic(
+        &self,
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        mode: HsmAesMode,
+        key: &HsmDmaBuf,
+        src: &HsmDmaBuf,
+        dst: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let (iv_len, data_len) = generic_lens(mode, key.len(), src.len())?;
+        if dst.len() != src.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        let full = data_len - data_len % AES_BLOCK_SIZE;
+        // Bytes the engine cannot take in the main submission.
+        let tail = match mode {
+            HsmAesMode::Cfb | HsmAesMode::Ofb => data_len - full,
+            _ => 0,
+        };
+        let main = data_len - tail;
+
+        let mut iv_in = [0u8; AES_BLOCK_SIZE];
+        iv_in[..iv_len].copy_from_slice(&src[..iv_len]);
+        let last_full_in = match full {
+            0 => iv_in,
+            _ => block_at(src, iv_len + full - AES_BLOCK_SIZE),
+        };
+
+        self.alloc_scoped_async(io, async |scope| {
+            let mut iv = match iv_len {
+                0 => None,
+                _ => {
+                    let iv = scope.dma_alloc(AES_BLOCK_SIZE)?;
+                    iv.copy_from_slice(&iv_in);
+                    Some(iv)
+                }
+            };
+            let tail_block = match tail {
+                0 => None,
+                _ => {
+                    let block = scope.dma_alloc(AES_BLOCK_SIZE)?;
+                    block.fill(0);
+                    block[..tail].copy_from_slice(&src[iv_len + main..iv_len + data_len]);
+                    Some(block)
+                }
+            };
+
+            if main > 0 {
+                self.aes
+                    .encrypt_decrypt(AesRequest {
+                        mode: hw_mode(mode),
+                        op: aes_op(op),
+                        key,
+                        iv: iv.as_deref_mut(),
+                        update_iv: false,
+                        message: Some(&src[iv_len..iv_len + main]),
+                        result: &mut dst[..main],
+                    })
+                    .await?;
+            }
+
+            // Chaining value after the whole blocks: CFB uses the last
+            // ciphertext block, OFB the last keystream block.
+            let chain = match (mode, op) {
+                _ if full == 0 => iv_in,
+                (HsmAesMode::Cfb, HsmAesOp::Encrypt) => block_at(dst, full - AES_BLOCK_SIZE),
+                (HsmAesMode::Ofb, _) => {
+                    xor_block(block_at(dst, full - AES_BLOCK_SIZE), last_full_in)
+                }
+                _ => last_full_in,
+            };
+
+            let mut tail_keystream = None;
+            if let Some(block) = tail_block {
+                let padded_in = block_at(block, 0);
+                let iv = iv.take().ok_or(HsmError::InvalidArg)?;
+                iv.copy_from_slice(&chain);
+                self.aes
+                    .encrypt_decrypt(AesRequest {
+                        mode: hw_mode(mode),
+                        op: aes_op(op),
+                        key,
+                        iv: Some(iv),
+                        update_iv: false,
+                        message: None,
+                        result: block,
+                    })
+                    .await?;
+                dst[main..data_len].copy_from_slice(&block[..tail]);
+                // Zero padding makes the padded output block the raw
+                // keystream XOR the padded input block.
+                tail_keystream = Some(xor_block(block_at(block, 0), padded_in));
+            }
+
+            let iv_out = match (mode, op) {
+                (HsmAesMode::Ecb, _) => [0u8; AES_BLOCK_SIZE],
+                _ if data_len == 0 => iv_in,
+                (HsmAesMode::Cbc, HsmAesOp::Encrypt) => block_at(dst, data_len - AES_BLOCK_SIZE),
+                (HsmAesMode::Cbc, HsmAesOp::Decrypt) => last_full_in,
+                (HsmAesMode::Cfb, _) => chain,
+                (HsmAesMode::Ofb, _) => tail_keystream.unwrap_or(chain),
+                (HsmAesMode::Ctr, _) => {
+                    let blocks = data_len.div_ceil(AES_BLOCK_SIZE) as u128;
+                    u128::from_be_bytes(iv_in)
+                        .wrapping_add(blocks)
+                        .to_be_bytes()
+                }
+            };
+            dst[data_len..].copy_from_slice(&iv_out[..iv_len]);
+            Ok::<(), HsmError>(())
+        })
+        .await
+    }
+
     /// In-place generic AES over `buf` = `[IV | data]` → `[data | IV out]`.
     ///
-    /// The data is staged in a zero-padded block-multiple work buffer, so
-    /// partial final blocks in CFB/OFB/CTR only affect discarded bytes. The
-    /// IV out is derived in software from the staged input and output
-    /// blocks rather than relying on hardware IV write-back, which is only
-    /// defined for CBC. CTR assumes the engine increments the full 128-bit
-    /// big-endian counter block.
+    /// Runs [`Self::aes_generic`] with `buf` as both source and destination.
+    /// The engine's output trails its input by `iv_len` bytes, so output
+    /// block N overwrites input block N - 1 (or the IV for N = 0), which the
+    /// engine has already read because it processes blocks sequentially
+    /// (see [`Self::aes_run_in_place`]).
     async fn aes_generic_in_place(
         &self,
         io: &UnoHsmIo,
@@ -269,74 +409,13 @@ impl UnoHsmPal {
         key: &HsmDmaBuf,
         buf: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let (iv_len, data_len) = generic_lens(mode, key.len(), buf.len())?;
-        if data_len == 0 {
-            // `[IV]` → `[IV]`: every mode leaves the chaining value unchanged.
-            return Ok(());
-        }
-        let padded = data_len.next_multiple_of(AES_BLOCK_SIZE);
-        let full = data_len - data_len % AES_BLOCK_SIZE;
-
-        self.alloc_scoped_async(io, async |scope| {
-            let work = scope.dma_alloc(padded)?;
-            work[..data_len].copy_from_slice(&buf[iv_len..]);
-            work[data_len..].fill(0);
-            let mut iv_in = [0u8; AES_BLOCK_SIZE];
-            iv_in[..iv_len].copy_from_slice(&buf[..iv_len]);
-            let iv = match iv_len {
-                0 => None,
-                _ => {
-                    let iv = scope.dma_alloc(AES_BLOCK_SIZE)?;
-                    iv.copy_from_slice(&iv_in);
-                    Some(iv)
-                }
-            };
-            let last_in = block_at(work, padded - AES_BLOCK_SIZE);
-            let last_full_in = match full {
-                0 => iv_in,
-                _ => block_at(work, full - AES_BLOCK_SIZE),
-            };
-
-            self.aes
-                .encrypt_decrypt(AesRequest {
-                    mode: hw_mode(mode),
-                    op: aes_op(op),
-                    key,
-                    iv,
-                    update_iv: false,
-                    message: None,
-                    result: work,
-                })
-                .await?;
-
-            let last_out = block_at(work, padded - AES_BLOCK_SIZE);
-            let iv_out = match (mode, op) {
-                (HsmAesMode::Ecb, _) => [0u8; AES_BLOCK_SIZE],
-                (HsmAesMode::Cbc, HsmAesOp::Encrypt) => last_out,
-                (HsmAesMode::Cbc, HsmAesOp::Decrypt) => last_in,
-                (HsmAesMode::Cfb, _) if full == 0 => iv_in,
-                (HsmAesMode::Cfb, HsmAesOp::Encrypt) => block_at(work, full - AES_BLOCK_SIZE),
-                (HsmAesMode::Cfb, HsmAesOp::Decrypt) => last_full_in,
-                (HsmAesMode::Ofb, _) => {
-                    // Zero padding makes the padded output block the raw
-                    // keystream XOR the padded input block.
-                    let mut ks = last_out;
-                    ks.iter_mut().zip(&last_in).for_each(|(k, i)| *k ^= i);
-                    ks
-                }
-                (HsmAesMode::Ctr, _) => {
-                    let blocks = (padded / AES_BLOCK_SIZE) as u128;
-                    u128::from_be_bytes(iv_in)
-                        .wrapping_add(blocks)
-                        .to_be_bytes()
-                }
-            };
-
-            buf[..data_len].copy_from_slice(&work[..data_len]);
-            buf[data_len..].copy_from_slice(&iv_out[..iv_len]);
-            Ok::<(), HsmError>(())
-        })
-        .await
+        let (ptr, len) = (buf.as_ptr(), buf.len());
+        // Safety: the alias covers `buf`, which is DMA-resident and outlives
+        // the call. `aes_generic` finishes every CPU read of `src` before it
+        // first writes `dst`; afterwards only the engine reads `src`, ahead
+        // of the trailing writes (see method docs).
+        let src = unsafe { HsmDmaBuf::from_raw(alias_immutable(ptr, len)) };
+        self.aes_generic(io, op, mode, key, src, buf).await
     }
 }
 
@@ -387,9 +466,8 @@ impl HsmAes for UnoHsmPal {
         if output.len() < input.len() {
             return Err(HsmError::InvalidArg);
         }
-        let output = &mut output[..input.len()];
-        output.copy_from_slice(input);
-        self.aes_generic_in_place(io, op, mode, key, output).await?;
+        self.aes_generic(io, op, mode, key, input, &mut output[..input.len()])
+            .await?;
         Ok(input.len())
     }
 
