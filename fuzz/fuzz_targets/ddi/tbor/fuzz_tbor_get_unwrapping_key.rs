@@ -14,8 +14,6 @@
 #[path = "../../common.rs"]
 mod common;
 
-use std::time::Duration;
-
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -161,7 +159,7 @@ fn exercise_rotated_session(
     for _ in 0..(input.repetitions % 3) {
         let next = check_request(ctx, session.session_id, bound, false)
             .expect("repeated GetUnwrappingKey must succeed");
-        assert_eq!(first, next, "partition unwrapping key must remain stable");
+        assert_eq!(first, Some(next), "partition unwrapping key must remain stable");
     }
 
     for session_id in [0, u16::MAX] {
