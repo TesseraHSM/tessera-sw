@@ -31,6 +31,7 @@ use windows::Win32::Security::Cryptography::*;
 use super::*;
 
 type CngAesCbcKeyHandle = CngAesKeyHandle<CbcMode>;
+type CngAesCfbKeyHandle = CngAesKeyHandle<CfbMode>;
 type CngAesEcbKeyHandle = CngAesKeyHandle<EcbMode>;
 type CngAesXtsKeyHandle = CngAesKeyHandle<XtsMode>;
 type CngAesGcmKeyHandle = CngAesKeyHandle<GcmMode>;
@@ -54,6 +55,9 @@ pub struct CngAesKey {
 
     /// Windows CNG key handle for AES-CBC operations
     cbc_handle: CngAesCbcKeyHandle,
+
+    /// Windows CNG key handle for AES-CFB operations
+    cfb_handle: CngAesCfbKeyHandle,
 
     /// Windows CNG key handle for AES-GCM operations
     gcm_handle: CngAesGcmKeyHandle,
@@ -206,6 +210,7 @@ impl CngAesKey {
         Ok(Self {
             ecb_handle: CngAesKeyHandle::new(key_bytes)?,
             cbc_handle: CngAesKeyHandle::new(key_bytes)?,
+            cfb_handle: CngAesKeyHandle::new(key_bytes)?,
             gcm_handle: CngAesKeyHandle::new(key_bytes)?,
         })
     }
@@ -226,6 +231,15 @@ impl CngAesKey {
     /// The underlying `BCRYPT_KEY_HANDLE` for use with CNG CBC APIs
     pub(crate) fn cbc_handle(&self) -> BCRYPT_KEY_HANDLE {
         self.cbc_handle.handle()
+    }
+
+    /// Returns the Windows CNG key handle for CFB mode operations.
+    ///
+    /// # Returns
+    ///
+    /// The underlying `BCRYPT_KEY_HANDLE` for use with CNG CFB APIs
+    pub(crate) fn cfb_handle(&self) -> BCRYPT_KEY_HANDLE {
+        self.cfb_handle.handle()
     }
 
     /// Returns the Windows CNG key handle for GCM mode operations.
@@ -655,6 +669,20 @@ pub struct CbcMode;
 impl AesAlgoMode for CbcMode {
     fn algo_handle() -> BCRYPT_ALG_HANDLE {
         BCRYPT_AES_CBC_ALG_HANDLE
+    }
+}
+
+/// Marker type for AES-CFB mode.
+///
+/// Cipher Feedback (CFB) mode turns AES into a self-synchronizing stream cipher.
+/// CNG defaults to an 8-bit segment; callers select CFB-128 by setting the
+/// `BCRYPT_MESSAGE_BLOCK_LENGTH` property on the key handle.
+#[derive(Clone)]
+pub struct CfbMode;
+
+impl AesAlgoMode for CfbMode {
+    fn algo_handle() -> BCRYPT_ALG_HANDLE {
+        BCRYPT_AES_CFB_ALG_HANDLE
     }
 }
 

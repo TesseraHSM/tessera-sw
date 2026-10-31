@@ -3,34 +3,49 @@
 
 //! TBOR `AesEncryptDecrypt` wire schema.
 //!
-//! `AesEncryptDecrypt` is an in-session command that AES-CBC encrypts or
-//! decrypts a host-supplied message using a caller-held **masked** AES key
-//! (the `masked_key` from [`AesGenerateKey`](crate::aes_generate_key) or
-//! imported via [`UnwrapKey`](crate::unwrap_key)).  The device unmasks the
-//! key on-device (verifying the AEAD tag), runs the AES-CBC transform, and
-//! returns the transformed message plus the updated chaining IV so the
-//! host can chain subsequent CBC blocks — the TBOR analogue of MBOR
-//! `AesEncryptDecrypt`, but keyed by a masked blob rather than a vault
+//! `AesEncryptDecrypt` is an in-session command that AES encrypts or
+//! decrypts a host-supplied message in any [`AesMode`] (CBC, ECB, CFB-128,
+//! OFB or CTR) using a caller-held **masked** AES key (the `masked_key`
+//! from [`AesGenerateKey`](crate::aes_generate_key) or imported via
+//! [`UnwrapKey`](crate::unwrap_key)).  The device unmasks the key
+//! on-device (verifying the AEAD tag), runs the AES transform, and returns
+//! the transformed message plus the output chaining IV so the host can
+//! chain subsequent calls — the TBOR analogue of MBOR `AesEncryptDecrypt`
+//! (which remains CBC/ECB only), keyed by a masked blob rather than a vault
 //! `key_id`.  Nothing is persisted.
 //!
 //! Inputs:
 //!
 //! * `session_id` — TOC-carried session id; cross-checked against the
 //!   SQE-carried session id by the dispatcher.
+//! * `op` — the [`AesOp`] selecting encrypt or decrypt.
+//! * `mode` — the [`AesMode`].
+//! * `iv` — the input IV: empty for ECB, otherwise [`AES_IV_LEN`] bytes
+//!   (the initial counter block for CTR).
+//! * `msg` — the message to transform: non-empty, up to
+//!   [`AES_MSG_MAX_LEN`] bytes, and a multiple of the 16-byte AES block for
+//!   CBC / ECB.
 //! * `masked_key` — the masked AES key (an AEAD-GCM-256 envelope,
 //!   [`MASKED_AES_KEY_MIN_LEN`]..=[`MASKED_AES_KEY_MAX_LEN`] B).  Its
 //!   scope (read from the cleartext, tag-bound metadata) selects the
 //!   masking key; the key kind confirms it is an AES key.
-//! * `op` — the [`AesOp`] selecting encrypt or decrypt.
-//! * `msg` — the message to transform: a non-empty multiple of the 16-byte
-//!   AES block, up to [`AES_MSG_MAX_LEN`] bytes.
-//! * `iv` — the 16-byte ([`AES_IV_LEN`]) CBC initialization vector.
+//!
+//! The request carries `[iv | msg]` contiguously and the response
+//! `[msg | iv]` at the same payload offset, so the device transforms the
+//! request bytes in place (the tiger `AesOp` buffer layout).
 //!
 //! Outputs:
 //!
 //! * `msg` — the transformed message (same length as the input).
-//! * `iv` — the updated chaining IV (the last ciphertext block), for
-//!   chaining subsequent CBC calls.
+//! * `iv` — the output chaining IV (same length as the input `iv`):
+//!
+//!   | Mode | Output IV                                         |
+//!   |------|---------------------------------------------------|
+//!   | CBC  | last ciphertext block                             |
+//!   | ECB  | empty                                             |
+//!   | CFB  | last complete ciphertext block (input IV if none) |
+//!   | OFB  | last keystream block                              |
+//!   | CTR  | next counter block (128-bit big-endian increment) |
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
@@ -41,7 +56,7 @@ pub use crate::aes_generate_key::MASKED_AES_KEY_MIN_LEN;
 /// TBOR opcode for `AesEncryptDecrypt`.
 pub const TBOR_OP_AES_ENCRYPT_DECRYPT: u8 = 0x16;
 
-/// AES-CBC block size in bytes — also the required IV length.
+/// AES block size in bytes — also the IV length for every mode but ECB.
 pub const AES_IV_LEN: usize = 16;
 
 /// Maximum message length (bytes) accepted by `AesEncryptDecrypt`,
@@ -67,9 +82,36 @@ pub enum AesOp {
     Decrypt = 2,
 }
 
+/// AES confidentiality mode on the TBOR wire.
+///
+/// The 1-byte discriminants match the PAL `HsmAesMode` (and the tiger
+/// `AesMode`).  Kept as an [`open_enum`] so an unrecognized discriminant
+/// round-trips as `AesMode(x)` and is rejected on-device rather than
+/// failing to decode.
+#[repr(u8)]
+#[open_enum]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AesMode {
+    /// Cipher block chaining.
+    Cbc = 0,
+
+    /// Electronic codebook (no IV).
+    Ecb = 1,
+
+    /// 128-bit cipher feedback.
+    Cfb = 2,
+
+    /// Output feedback.
+    Ofb = 3,
+
+    /// Counter mode.
+    Ctr = 4,
+}
+
 /// `AesEncryptDecrypt` request schema.
 ///
-/// AES-CBC encrypts or decrypts `msg` under the masked AES key and `iv`.
+/// AES encrypts or decrypts `msg` under the masked AES key in `mode`,
+/// starting from `iv`.
 #[tbor(opcode = 0x16, pair = TborAesEncryptDecryptResp)]
 pub struct TborAesEncryptDecryptReq<'a> {
     /// CO/CU session id this request is bound to.  The dispatcher
@@ -81,18 +123,22 @@ pub struct TborAesEncryptDecryptReq<'a> {
     #[tbor(U8)]
     pub op: AesOp,
 
-    /// The message to transform: a non-empty multiple of the 16-byte AES
-    /// block, up to [`AES_MSG_MAX_LEN`] (1024) bytes.
+    /// The mode, carried as the 1-byte [`AesMode`] discriminant.
+    #[tbor(U8)]
+    pub mode: AesMode,
+
+    /// The input IV: empty for ECB, otherwise 16 bytes.
+    #[tbor(buffer, max_len = 16, mutable)]
+    pub iv: &'a [u8],
+
+    /// The message to transform: non-empty, up to [`AES_MSG_MAX_LEN`]
+    /// (1024) bytes; a multiple of the 16-byte AES block for CBC / ECB.
     #[tbor(buffer, max_len = 1024, mutable)]
     pub msg: &'a [u8],
 
-    /// The 16-byte CBC initialization vector.
-    #[tbor(buffer, len = 16, mutable)]
-    pub iv: &'a [u8],
-
     /// The masked AES key (from `AesGenerateKey` / `UnwrapKey`), an
     /// AEAD-GCM-256 envelope of 248..=264 B, unmasked and wiped in place.
-    /// Placed after `msg` / `iv` so those fields can become the compact
+    /// Placed after `iv` / `msg` so those fields can become the compact
     /// response without overlapping the live key.
     #[tbor(buffer, min_len = 248, max_len = 264, mutable)]
     pub masked_key: &'a [u8],
@@ -100,18 +146,19 @@ pub struct TborAesEncryptDecryptReq<'a> {
 
 /// `AesEncryptDecrypt` response schema.
 ///
-/// The `msg` / `iv` slots occupy the same payload offsets as the request.
-/// The handler transforms them in place, then describes the existing bytes
-/// with `msg_existing` / `iv_existing` without clearing or copying them.
+/// The response `[msg | iv]` occupies the same payload bytes as the request
+/// `[iv | msg]`.  The handler transforms them in place, then describes the
+/// existing bytes with `msg_existing` / `iv_existing` without clearing or
+/// copying them.
 #[tbor(response, pair = TborAesEncryptDecryptReq)]
 pub struct TborAesEncryptDecryptResp<'a> {
     /// The transformed message (same length as the input `msg`).
     #[tbor(buffer, max_len = 1024, mutable)]
     pub msg: &'a [u8],
 
-    /// The updated chaining IV (the last ciphertext block), for chaining
-    /// subsequent CBC calls.
-    #[tbor(buffer, len = 16, mutable)]
+    /// The output chaining IV (empty for ECB, otherwise 16 bytes); see the
+    /// module docs for its per-mode meaning.
+    #[tbor(buffer, max_len = 16, mutable)]
     pub iv: &'a [u8],
 }
 
@@ -135,17 +182,46 @@ mod tests {
             .unwrap()
             .op(AesOp::Encrypt)
             .unwrap()
-            .msg(&msg)
+            .mode(AesMode::Ctr)
             .unwrap()
             .iv(&iv)
+            .unwrap()
+            .msg(&msg)
             .unwrap()
             .masked_key(&masked)
             .unwrap()
             .finish();
 
         assert_eq!(frame.op(), AesOp::Encrypt);
+        assert_eq!(frame.mode(), AesMode::Ctr);
         assert_eq!(frame.msg(), &msg[..]);
         assert_eq!(frame.iv(), &iv[..]);
+    }
+
+    #[test]
+    fn request_accepts_empty_iv_and_unknown_mode() {
+        let mut buf = [0u8; 1536];
+        let masked = [0x11u8; MASKED_AES_KEY_MIN_LEN];
+        let msg = [0x22u8; 32];
+        let frame = TborAesEncryptDecryptReq::encode(&mut buf)
+            .unwrap()
+            .session_id(SessionId(7))
+            .unwrap()
+            .op(AesOp::Decrypt)
+            .unwrap()
+            .mode(AesMode(9))
+            .unwrap()
+            .iv(&[])
+            .unwrap()
+            .msg(&msg)
+            .unwrap()
+            .masked_key(&masked)
+            .unwrap()
+            .finish();
+
+        assert_eq!(frame.mode(), AesMode(9));
+        assert!(frame.iv().is_empty());
+        assert_eq!(frame.msg(), &msg[..]);
     }
 
     #[test]
@@ -205,14 +281,14 @@ mod tests {
     #[test]
     fn response_reserve_rejects_oversize() {
         // The reserve setter enforces the same length bound as the value
-        // setter: the IV slot is fixed at 16 bytes.
+        // setter: the IV slot holds at most 16 bytes.
         let mut buf = [0u8; 1536];
         let err = TborAesEncryptDecryptResp::encode(&mut buf, 0, true)
             .unwrap()
             .msg_reserve(48)
             .unwrap()
             .iv_reserve(17);
-        assert!(err.is_err(), "IV reserve must reject a non-16-byte length");
+        assert!(err.is_err(), "IV reserve must reject more than 16 bytes");
     }
 
     #[test]

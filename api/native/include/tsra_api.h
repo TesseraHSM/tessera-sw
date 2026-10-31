@@ -263,6 +263,22 @@ enum tsra_algo_id
      */
     TSRA_ALGO_ID_AES_GCM = 196615,
     /*
+     AES ECB Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_ECB = 196616,
+    /*
+     AES CFB (128-bit segment) Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_CFB = 196617,
+    /*
+     AES OFB Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_OFB = 196618,
+    /*
+     AES CTR Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_CTR = 196619,
+    /*
      SHA-1 Digest.
      */
     TSRA_ALGO_ID_SHA1 = 262145,
@@ -1594,6 +1610,34 @@ struct tsra_algo_aes_cbc_params
 };
 
 /*
+ AES CFB (128-bit segment) parameters.
+
+ `iv` is updated in place after every operation with the chaining IV, so a
+ message can be continued with a later call.
+ */
+struct tsra_algo_aes_cfb_params
+{
+    /*
+     IV
+     */
+    uint8_t iv[16];
+};
+
+/*
+ AES CTR parameters.
+
+ `iv` is updated in place after every operation with the chaining IV, so a
+ message can be continued with a later call.
+ */
+struct tsra_algo_aes_ctr_params
+{
+    /*
+     IV
+     */
+    uint8_t iv[16];
+};
+
+/*
  AES GCM parameters.
  */
 struct tsra_algo_aes_gcm_params
@@ -1610,6 +1654,20 @@ struct tsra_algo_aes_gcm_params
      Optional AAD buffer
      */
     const struct tsra_buffer *aad;
+};
+
+/*
+ AES OFB parameters.
+
+ `iv` is updated in place after every operation with the chaining IV, so a
+ message can be continued with a later call.
+ */
+struct tsra_algo_aes_ofb_params
+{
+    /*
+     IV
+     */
+    uint8_t iv[16];
 };
 
 /*

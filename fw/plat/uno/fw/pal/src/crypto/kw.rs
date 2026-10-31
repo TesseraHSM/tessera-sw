@@ -307,7 +307,7 @@ fn verify_aiv(aiv: &[u8], padded: &[u8]) -> HsmResult<usize> {
 }
 
 // =============================================================================
-// AES-KW/KWP methods — called from the HsmAes impl in aes.rs
+// AES-KW/KWP methods — called from the HsmAesKw impl in aes.rs
 // =============================================================================
 
 impl UnoHsmPal {

@@ -9,8 +9,8 @@
 //!
 //! | Submodule | Trait                | Hardware backend |
 //! |-----------|----------------------|------------------|
-//! | [`aes`]   | [`HsmAes`] (AES half) | AES core        |
-//! | [`kw`]    | [`HsmAes`] (KW/KWP)  | AES core        |
+//! | [`aes`]   | [`HsmAes`], [`HsmAesGcm`] | AES core   |
+//! | [`kw`]    | [`HsmAesKw`]          | AES core        |
 //! | [`hash`]  | [`HsmHash`]           | SHA core        |
 //! | [`hmac`]  | [`HsmHmac`]           | SHA core        |
 //! | [`kdf`]   | [`HsmKdf`]            | SHA core + HMAC |
@@ -28,6 +28,8 @@
 //! base [`HsmEcc`] adapter stays focused on the standard curve ops.
 //!
 //! [`HsmAes`]: tsra_fw_hsm_pal_traits::HsmAes
+//! [`HsmAesGcm`]: tsra_fw_hsm_pal_traits::HsmAesGcm
+//! [`HsmAesKw`]: tsra_fw_hsm_pal_traits::HsmAesKw
 //! [`HsmHash`]: tsra_fw_hsm_pal_traits::HsmHash
 //! [`HsmHmac`]: tsra_fw_hsm_pal_traits::HsmHmac
 //! [`HsmKdf`]: tsra_fw_hsm_pal_traits::HsmKdf

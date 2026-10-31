@@ -42,7 +42,10 @@ include = [
   "TSRA_BOOL_FALSE",
   "TSRA_BOOL_TRUE",
   "TsraAlgoAesCbcParams",
+  "TsraAlgoAesCfbParams",
+  "TsraAlgoAesCtrParams",
   "TsraAlgoAesGcmParams",
+  "TsraAlgoAesOfbParams",
   "TsraAlgoAesXtsParams",
   "TsraAlgoEcdhParams",
   "TsraAlgoHkdfParams",
@@ -98,7 +101,10 @@ item_types = [
 "PSK_LEN" = "TSRA_PSK_LEN"
 "TsraAlgo" = "tsra_algo"
 "TsraAlgoAesCbcParams" = "tsra_algo_aes_cbc_params"
+"TsraAlgoAesCfbParams" = "tsra_algo_aes_cfb_params"
+"TsraAlgoAesCtrParams" = "tsra_algo_aes_ctr_params"
 "TsraAlgoAesGcmParams" = "tsra_algo_aes_gcm_params"
+"TsraAlgoAesOfbParams" = "tsra_algo_aes_ofb_params"
 "TsraAlgoAesXtsParams" = "tsra_algo_aes_xts_params"
 "TsraAlgoEcdhParams" = "tsra_algo_ecdh_params"
 "TsraAlgoHkdfParams" = "tsra_algo_hkdf_params"

@@ -13,6 +13,9 @@
 //! |------|---------|-------------|
 //! | CBC  | None    | Yes (16 B)  |
 //! | ECB  | None    | No          |
+//! | CFB  | None    | Yes (16 B)  |
+//! | OFB  | None    | Yes (16 B)  |
+//! | CTR  | None    | Yes (16 B)  |
 //!
 //! ## Key sizes
 //!
@@ -29,10 +32,14 @@
 //! results directly into the caller's `&mut [u8]` output buffers.
 
 use tsra_crypto::AesCbcAlgo;
+use tsra_crypto::AesCfbAlgo;
+use tsra_crypto::AesCtrAlgo;
 use tsra_crypto::AesEcbAlgo;
 use tsra_crypto::AesGcmAlgo;
 use tsra_crypto::AesKey;
 use tsra_crypto::AesKeyWrapPadAlgo;
+use tsra_crypto::AesOfbAlgo;
+use tsra_crypto::CryptoError;
 use tsra_crypto::DecryptOp;
 use tsra_crypto::EncryptOp;
 use tsra_crypto::ImportableKey;
@@ -132,6 +139,94 @@ impl StdAes {
         output[..result_data.len()].copy_from_slice(&result_data);
         iv[..updated_iv.len()].copy_from_slice(&updated_iv);
         Ok(())
+    }
+
+    /// AES encrypt or decrypt in any [`HsmAesMode`] asynchronously.
+    ///
+    /// # Parameters
+    /// - `key` — Raw AES key bytes (16, 24, or 32 bytes).
+    /// - `encrypt` — `true` for encryption, `false` for decryption.
+    /// - `mode` — Confidentiality mode.
+    /// - `iv` — `mode.iv_len()` bytes of IV (empty for ECB).
+    /// - `input` — Source data; block-aligned for ECB/CBC.
+    ///
+    /// # Returns
+    /// The transformed data and the chaining IV (empty for ECB).
+    ///
+    /// # Errors
+    /// - [`HsmError::AesEncryptFailed`] / [`HsmError::AesDecryptFailed`]
+    /// - [`HsmError::AesInvalidKeyLength`]
+    pub async fn enc_dec(
+        &self,
+        key: &[u8],
+        encrypt: bool,
+        mode: HsmAesMode,
+        iv: &[u8],
+        input: &[u8],
+    ) -> HsmResult<(Vec<u8>, Vec<u8>)> {
+        fn run<A>(
+            algo: &mut A,
+            key: &AesKey,
+            encrypt: bool,
+            input: &[u8],
+        ) -> Result<Vec<u8>, CryptoError>
+        where
+            A: EncryptOp<Key = AesKey> + DecryptOp<Key = AesKey>,
+        {
+            // Block-mode backends require one spare block of output space.
+            let mut buf = vec![0u8; input.len() + 16];
+            let written = if encrypt {
+                algo.encrypt(key, input, Some(&mut buf))?
+            } else {
+                algo.decrypt(key, input, Some(&mut buf))?
+            };
+            buf.truncate(written);
+            Ok(buf)
+        }
+
+        let key_owned = key.to_vec();
+        let iv_owned = iv.to_vec();
+        let input_owned = input.to_vec();
+
+        self.pool
+            .submit_with_result(async move {
+                let aes_key =
+                    AesKey::from_bytes(&key_owned).map_err(|_| HsmError::AesInvalidKeyLength)?;
+                let result = match mode {
+                    HsmAesMode::Cbc => {
+                        let mut algo = AesCbcAlgo::with_no_padding(&iv_owned);
+                        run(&mut algo, &aes_key, encrypt, &input_owned)
+                            .map(|data| (data, algo.iv().to_vec()))
+                    }
+                    HsmAesMode::Ecb => {
+                        run(&mut AesEcbAlgo::default(), &aes_key, encrypt, &input_owned)
+                            .map(|data| (data, Vec::new()))
+                    }
+                    HsmAesMode::Cfb => {
+                        let mut algo = AesCfbAlgo::new(&iv_owned);
+                        run(&mut algo, &aes_key, encrypt, &input_owned)
+                            .map(|data| (data, algo.iv().to_vec()))
+                    }
+                    HsmAesMode::Ofb => {
+                        let mut algo = AesOfbAlgo::new(&iv_owned);
+                        run(&mut algo, &aes_key, encrypt, &input_owned)
+                            .map(|data| (data, algo.iv().to_vec()))
+                    }
+                    HsmAesMode::Ctr => {
+                        let mut algo = AesCtrAlgo::new(&iv_owned);
+                        run(&mut algo, &aes_key, encrypt, &input_owned)
+                            .map(|data| (data, algo.iv().to_vec()))
+                    }
+                };
+                result.map_err(|_| {
+                    if encrypt {
+                        HsmError::AesEncryptFailed
+                    } else {
+                        HsmError::AesDecryptFailed
+                    }
+                })
+            })
+            .await
     }
 
     /// AES-ECB encrypt or decrypt asynchronously.

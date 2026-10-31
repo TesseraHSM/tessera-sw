@@ -34,6 +34,7 @@ use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
+use tsra_ddi_tbor_types::AES_MODE_CBC;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 
@@ -310,7 +311,7 @@ mod emu_tests {
         let session = finalized_co_session(&ctx);
 
         let plaintext = vec![0xA5u8; 32];
-        let iv = [0x11u8; 16];
+        let iv = vec![0x11u8; 16];
 
         for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
             let masked_key = generate_key(&ctx, session.session_id, scope, AES_KEY_SIZE_256);
@@ -319,8 +320,9 @@ mod emu_tests {
                 session_id: session.session_id,
                 masked_key: masked_key.clone(),
                 op: AES_OP_ENCRYPT,
+                mode: AES_MODE_CBC,
+                iv: iv.clone(),
                 msg: plaintext.clone(),
-                iv,
             };
 
             let encrypted = ctx.tbor(&encrypt_req).expect("AesEncryptDecrypt encrypt");
@@ -340,8 +342,9 @@ mod emu_tests {
                 session_id: session.session_id,
                 masked_key,
                 op: AES_OP_DECRYPT,
+                mode: AES_MODE_CBC,
+                iv: iv.clone(),
                 msg: encrypted.msg,
-                iv,
             };
 
             let decrypted = ctx.tbor(&decrypt_req).expect("AesEncryptDecrypt decrypt");

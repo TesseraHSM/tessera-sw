@@ -10,9 +10,16 @@
 
 use itertools::Itertools;
 use resiliency_macro::*;
+use tsra_ddi_tbor_types::AES_IV_LEN;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
+use tsra_ddi_tbor_types::AES_MODE_CBC;
+use tsra_ddi_tbor_types::AES_MODE_CFB;
+use tsra_ddi_tbor_types::AES_MODE_CTR;
+use tsra_ddi_tbor_types::AES_MODE_ECB;
+use tsra_ddi_tbor_types::AES_MODE_OFB;
+use tsra_ddi_tbor_types::AES_MSG_MAX_LEN;
 use tsra_ddi_tbor_types::AES_OP_DECRYPT;
 use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
@@ -247,7 +254,7 @@ fn aes_cbc_encrypt_decrypt(
     output: &mut [u8],
 ) -> HsmResult<usize> {
     if key.session().is_ex() {
-        aes_cbc_encrypt_decrypt_tbor(key, op, iv, &input, output)
+        aes_encrypt_decrypt_tbor(key, AES_MODE_CBC, op, iv, &input, output)
     } else {
         aes_cbc_encrypt_decrypt_mbor(key, op, iv, &input, output)
     }
@@ -339,11 +346,13 @@ fn aes_tbor_key_usage(props: &HsmKeyProps) -> HsmResult<u64> {
     }
 }
 
-/// AES-CBC transforms one chunk over TBOR `AesEncryptDecrypt` using the
-/// caller-held masked key (unmask-on-use). Updates `iv` with the chaining
-/// IV and copies the transformed bytes into `output`.
-fn aes_cbc_encrypt_decrypt_tbor(
+/// Transforms one chunk over TBOR `AesEncryptDecrypt` in the given TBOR
+/// `AesMode` using the caller-held masked key (unmask-on-use). Updates `iv`
+/// with the chaining IV (empty for ECB) and copies the transformed bytes
+/// into `output`.
+fn aes_encrypt_decrypt_tbor(
     key: &HsmAesKey,
+    mode: u8,
     op: DdiAesOp,
     iv: &mut [u8],
     input: &[u8],
@@ -352,11 +361,10 @@ fn aes_cbc_encrypt_decrypt_tbor(
     let props = key.props();
     let masked = props.masked_key().ok_or(HsmError::InternalError)?;
 
-    let mut iv_arr = [0u8; 16];
-    if iv.len() != iv_arr.len() {
+    let iv_len = if mode == AES_MODE_ECB { 0 } else { AES_IV_LEN };
+    if iv.len() != iv_len || output.len() < input.len() {
         return Err(HsmError::InternalError);
     }
-    iv_arr.copy_from_slice(iv);
 
     let tbor_op = match op {
         DdiAesOp::Encrypt => AES_OP_ENCRYPT,
@@ -368,8 +376,9 @@ fn aes_cbc_encrypt_decrypt_tbor(
         session_id: key.session().ex_session_id()?,
         masked_key: masked.to_vec(),
         op: tbor_op,
+        mode,
+        iv: iv.to_vec(),
         msg: input.to_vec(),
-        iv: iv_arr,
     };
     let mut cookie = None;
     let resp = key.with_dev(|dev| {
@@ -377,10 +386,110 @@ fn aes_cbc_encrypt_decrypt_tbor(
             .map_err(HsmError::from)
     })?;
 
+    if resp.iv.len() != iv_len || resp.msg.len() != input.len() {
+        return Err(HsmError::InternalError);
+    }
     iv.copy_from_slice(&resp.iv);
-    let to_copy = resp.msg.len().min(output.len());
-    output[..to_copy].copy_from_slice(&resp.msg[..to_copy]);
-    Ok(to_copy)
+    output[..input.len()].copy_from_slice(&resp.msg);
+    Ok(input.len())
+}
+
+// Chunks must stay block aligned so the IV chains correctly between them.
+const _: () = assert!(AES_MSG_MAX_LEN.is_multiple_of(AES_IV_LEN));
+
+/// AES modes other than CBC, carried only by TBOR `AesEncryptDecrypt`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AesMode {
+    /// Electronic Codebook (no IV, block-multiple data).
+    Ecb,
+    /// CFB with a 128-bit segment (16-byte IV, any data length).
+    Cfb,
+    /// Output Feedback (16-byte IV, any data length).
+    Ofb,
+    /// Counter mode (16-byte big-endian counter, any data length).
+    Ctr,
+}
+
+impl AesMode {
+    /// Returns the TBOR `AesMode` discriminant.
+    fn tbor(self) -> u8 {
+        match self {
+            AesMode::Ecb => AES_MODE_ECB,
+            AesMode::Cfb => AES_MODE_CFB,
+            AesMode::Ofb => AES_MODE_OFB,
+            AesMode::Ctr => AES_MODE_CTR,
+        }
+    }
+}
+
+/// Encrypts `plaintext` with `key` in the given non-CBC AES mode.
+///
+/// Requires an extended (TBOR) session. Input is sent in chunks of at most
+/// `AES_MSG_MAX_LEN` bytes (a multiple of the AES block size), chaining the
+/// IV between chunks. On success `iv` holds the IV-out of the last chunk.
+///
+/// # Errors
+///
+/// - `HsmError::UnsupportedAlgorithm` - The session is not an extended session
+/// - `HsmError::InternalError` - The IV length does not match the mode, the
+///   output buffer is too small, or the device response is malformed
+/// - Any error returned by the device
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_mode_encrypt(
+    key: &HsmAesKey,
+    mode: AesMode,
+    iv: &mut [u8],
+    plaintext: &[u8],
+    ciphertext: &mut [u8],
+) -> HsmResult<usize> {
+    aes_mode_encrypt_decrypt(key, mode, DdiAesOp::Encrypt, iv, plaintext, ciphertext)
+}
+
+/// Decrypts `ciphertext` with `key` in the given non-CBC AES mode.
+///
+/// See [`aes_mode_encrypt`] for chunking, IV chaining and errors.
+#[resiliency_key_op(key = "key")]
+pub(crate) fn aes_mode_decrypt(
+    key: &HsmAesKey,
+    mode: AesMode,
+    iv: &mut [u8],
+    ciphertext: &[u8],
+    plaintext: &mut [u8],
+) -> HsmResult<usize> {
+    aes_mode_encrypt_decrypt(key, mode, DdiAesOp::Decrypt, iv, ciphertext, plaintext)
+}
+
+/// Fails with `HsmError::UnsupportedAlgorithm` unless `key` belongs to an
+/// extended (TBOR) session, the only transport for the non-CBC AES modes.
+pub(crate) fn aes_mode_ensure_supported(key: &HsmAesKey) -> HsmResult<()> {
+    if !key.session().is_ex() {
+        return Err(HsmError::UnsupportedAlgorithm);
+    }
+    Ok(())
+}
+
+/// Chunks `input` over TBOR `AesEncryptDecrypt`, chaining the IV.
+fn aes_mode_encrypt_decrypt(
+    key: &HsmAesKey,
+    mode: AesMode,
+    op: DdiAesOp,
+    iv: &mut [u8],
+    input: &[u8],
+    output: &mut [u8],
+) -> HsmResult<usize> {
+    aes_mode_ensure_supported(key)?;
+    if output.len() < input.len() {
+        return Err(HsmError::InternalError);
+    }
+    // Chain on a copy so a retried attempt restarts from the caller's IV.
+    let mut chain = iv.to_vec();
+    let mut len = 0;
+    for chunk in input.chunks(AES_MSG_MAX_LEN) {
+        len +=
+            aes_encrypt_decrypt_tbor(key, mode.tbor(), op, &mut chain, chunk, &mut output[len..])?;
+    }
+    iv.copy_from_slice(&chain);
+    Ok(len)
 }
 
 /// Converts a key size in bits to the corresponding DDI AES key size enum.

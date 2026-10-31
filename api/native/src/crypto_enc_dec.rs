@@ -41,6 +41,10 @@ pub unsafe extern "C" fn tsra_crypt_encrypt(
             TsraAlgoId::AesGcm => {
                 aes_gcm_encrypt(algo, key_handle, input_buf, output_buf)?;
             }
+            TsraAlgoId::AesEcb => aes_ecb_encrypt(algo, key_handle, input_buf, output_buf)?,
+            TsraAlgoId::AesCfb => aes_cfb_encrypt(algo, key_handle, input_buf, output_buf)?,
+            TsraAlgoId::AesOfb => aes_ofb_encrypt(algo, key_handle, input_buf, output_buf)?,
+            TsraAlgoId::AesCtr => aes_ctr_encrypt(algo, key_handle, input_buf, output_buf)?,
 
             TsraAlgoId::AesXts => {
                 aes_xts_encrypt(algo, key_handle, input_buf, output_buf)?;
@@ -88,6 +92,10 @@ pub unsafe extern "C" fn tsra_crypt_decrypt(
                 aes_cbc_decrypt(algo, key_handle, input_buf, output_buf)?
             }
             TsraAlgoId::AesGcm => aes_gcm_decrypt(algo, key_handle, input_buf, output_buf)?,
+            TsraAlgoId::AesEcb => aes_ecb_decrypt(algo, key_handle, input_buf, output_buf)?,
+            TsraAlgoId::AesCfb => aes_cfb_decrypt(algo, key_handle, input_buf, output_buf)?,
+            TsraAlgoId::AesOfb => aes_ofb_decrypt(algo, key_handle, input_buf, output_buf)?,
+            TsraAlgoId::AesCtr => aes_ctr_decrypt(algo, key_handle, input_buf, output_buf)?,
             TsraAlgoId::AesXts => {
                 aes_xts_decrypt(algo, key_handle, input_buf, output_buf)?;
             }
@@ -127,6 +135,10 @@ pub unsafe extern "C" fn tsra_crypt_encrypt_init(
         let handle = match algo.id {
             TsraAlgoId::AesCbc | TsraAlgoId::AesCbcPad => aes_cbc_encrypt_init(algo, key_handle)?,
             TsraAlgoId::AesGcm => aes_gcm_encrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesEcb => aes_ecb_encrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesCfb => aes_cfb_encrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesOfb => aes_ofb_encrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesCtr => aes_ctr_encrypt_init(algo, key_handle)?,
             TsraAlgoId::AesXts => aes_xts_encrypt_init(algo, key_handle)?,
             _ => Err(TsraStatus::UnsupportedAlgorithm)?,
         };
@@ -171,6 +183,18 @@ pub unsafe extern "C" fn tsra_crypt_encrypt_update(
             HandleType::AesGcmEncryptCtx => {
                 aes_gcm_encrypt_update(ctx_handle, input_buf, output_buf)?
             }
+            HandleType::AesEcbEncryptCtx => {
+                aes_ecb_encrypt_update(ctx_handle, input_buf, output_buf)?
+            }
+            HandleType::AesCfbEncryptCtx => {
+                aes_cfb_encrypt_update(ctx_handle, input_buf, output_buf)?
+            }
+            HandleType::AesOfbEncryptCtx => {
+                aes_ofb_encrypt_update(ctx_handle, input_buf, output_buf)?
+            }
+            HandleType::AesCtrEncryptCtx => {
+                aes_ctr_encrypt_update(ctx_handle, input_buf, output_buf)?
+            }
             HandleType::AesXtsEncryptCtx => {
                 aes_xts_encrypt_update(ctx_handle, input_buf, output_buf)?
             }
@@ -206,6 +230,10 @@ pub unsafe extern "C" fn tsra_crypt_encrypt_finish(
         match ctx_type {
             HandleType::AesCbcEncryptCtx => aes_cbc_encrypt_finish(ctx_handle, output_buf)?,
             HandleType::AesGcmEncryptCtx => aes_gcm_encrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesEcbEncryptCtx => aes_ecb_encrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesCfbEncryptCtx => aes_cfb_encrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesOfbEncryptCtx => aes_ofb_encrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesCtrEncryptCtx => aes_ctr_encrypt_finish(ctx_handle, output_buf)?,
             HandleType::AesXtsEncryptCtx => aes_xts_encrypt_finish(ctx_handle, output_buf)?,
             _ => Err(TsraStatus::InvalidHandle)?,
         }
@@ -239,6 +267,10 @@ pub unsafe extern "C" fn tsra_crypt_decrypt_init(
         let handle = match algo.id {
             TsraAlgoId::AesCbc | TsraAlgoId::AesCbcPad => aes_cbc_decrypt_init(algo, key_handle)?,
             TsraAlgoId::AesGcm => aes_gcm_decrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesEcb => aes_ecb_decrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesCfb => aes_cfb_decrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesOfb => aes_ofb_decrypt_init(algo, key_handle)?,
+            TsraAlgoId::AesCtr => aes_ctr_decrypt_init(algo, key_handle)?,
             TsraAlgoId::AesXts => aes_xts_decrypt_init(algo, key_handle)?,
             _ => Err(TsraStatus::UnsupportedAlgorithm)?,
         };
@@ -283,6 +315,18 @@ pub unsafe extern "C" fn tsra_crypt_decrypt_update(
             HandleType::AesGcmDecryptCtx => {
                 aes_gcm_decrypt_update(ctx_handle, input_buf, output_buf)?
             }
+            HandleType::AesEcbDecryptCtx => {
+                aes_ecb_decrypt_update(ctx_handle, input_buf, output_buf)?
+            }
+            HandleType::AesCfbDecryptCtx => {
+                aes_cfb_decrypt_update(ctx_handle, input_buf, output_buf)?
+            }
+            HandleType::AesOfbDecryptCtx => {
+                aes_ofb_decrypt_update(ctx_handle, input_buf, output_buf)?
+            }
+            HandleType::AesCtrDecryptCtx => {
+                aes_ctr_decrypt_update(ctx_handle, input_buf, output_buf)?
+            }
             HandleType::AesXtsDecryptCtx => {
                 aes_xts_decrypt_update(ctx_handle, input_buf, output_buf)?
             }
@@ -318,6 +362,10 @@ pub unsafe extern "C" fn tsra_crypt_decrypt_finish(
         match ctx_type {
             HandleType::AesCbcDecryptCtx => aes_cbc_decrypt_finish(ctx_handle, output_buf)?,
             HandleType::AesGcmDecryptCtx => aes_gcm_decrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesEcbDecryptCtx => aes_ecb_decrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesCfbDecryptCtx => aes_cfb_decrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesOfbDecryptCtx => aes_ofb_decrypt_finish(ctx_handle, output_buf)?,
+            HandleType::AesCtrDecryptCtx => aes_ctr_decrypt_finish(ctx_handle, output_buf)?,
             HandleType::AesXtsDecryptCtx => aes_xts_decrypt_finish(ctx_handle, output_buf)?,
             _ => Err(TsraStatus::InvalidHandle)?,
         }

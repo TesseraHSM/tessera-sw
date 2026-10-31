@@ -15,7 +15,10 @@
 //! | [`HsmRng`] | Cryptographically secure random bytes |
 //! | [`HsmHash`] | SHA-1 / SHA-256 / SHA-384 / SHA-512 digest |
 //! | [`HsmHmac`] | HMAC sign / verify with the same SHA family |
-//! | [`HsmAes`] | AES key gen + ECB / CBC / GCM / KW / KWP / XTS |
+//! | [`HsmAes`] | AES key gen + ECB / CBC |
+//! | [`HsmAesGcm`] | AES-GCM authenticated encryption |
+//! | [`HsmAesKw`] | AES-KW / AES-KWP key wrap |
+//! | [`HsmAesXts`] | AES-XTS (currently disabled) |
 //! | [`HsmEcc`] | ECC key gen, raw EC sign / verify, ECDH (NIST P-256/384/521) |
 //! | [`HsmRsa`] | RSA key gen + raw mod-exp + PKCS#1 v1.5 / OAEP / PSS |
 //! | [`HsmKdf`] | HKDF, KBKDF (SP 800-108), MGF1, X9.63, SP 800-56A |
@@ -64,6 +67,17 @@ use super::*;
 /// a new crypto family means adding a sub-trait here and a method
 /// table to the standard PAL.
 pub trait HsmCrypto:
-    HsmRng + HsmHash + HsmHmac + HsmAes + HsmEcc + HsmRsa + HsmKdf + HsmMlDsa + HsmMlKem
+    HsmRng
+    + HsmHash
+    + HsmHmac
+    + HsmAes
+    + HsmAesGcm
+    + HsmAesKw
+    + HsmAesXts
+    + HsmEcc
+    + HsmRsa
+    + HsmKdf
+    + HsmMlDsa
+    + HsmMlKem
 {
 }

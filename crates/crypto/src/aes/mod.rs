@@ -51,6 +51,21 @@ cfg_if::cfg_if! {
         #[path = "cbc_ossl11.rs"]
         mod cbc_ossl;
         #[cfg(ossl300)]
+        mod cfb_ossl;
+        #[cfg(not(ossl300))]
+        #[path = "cfb_ossl11.rs"]
+        mod cfb_ossl;
+        #[cfg(ossl300)]
+        mod ofb_ossl;
+        #[cfg(not(ossl300))]
+        #[path = "ofb_ossl11.rs"]
+        mod ofb_ossl;
+        #[cfg(ossl300)]
+        mod ctr_ossl;
+        #[cfg(not(ossl300))]
+        #[path = "ctr_ossl11.rs"]
+        mod ctr_ossl;
+        #[cfg(ossl300)]
         mod xts_ossl;
         #[cfg(not(ossl300))]
         #[path = "xts_ossl11.rs"]
@@ -64,6 +79,9 @@ cfg_if::cfg_if! {
         mod key_cng;
         mod ecb_cng;
         mod cbc_cng;
+        mod cfb_cng;
+        mod ofb_cng;
+        mod ctr_cng;
         mod xts_cng;
         mod gcm_cng;
 
@@ -85,6 +103,9 @@ define_type!(pub AesKey, key_ossl::OsslAesKey, key_cng::CngAesKey);
 define_type!(pub AesXtsKey, key_ossl::OsslAesXtsKey, key_cng::CngAesXtsKey);
 define_type!(pub AesCbcAlgo, cbc_ossl::OsslAesCbcAlgo, cbc_cng::CngAesCbcAlgo);
 define_type!(pub AesEcbAlgo, ecb_ossl::OsslAesEcbAlgo, ecb_cng::CngAesEcbAlgo);
+define_type!(pub AesCfbAlgo, cfb_ossl::OsslAesCfbAlgo, cfb_cng::CngAesCfbAlgo);
+define_type!(pub AesOfbAlgo, ofb_ossl::OsslAesOfbAlgo, ofb_cng::CngAesOfbAlgo);
+define_type!(pub AesCtrAlgo, ctr_ossl::OsslAesCtrAlgo, ctr_cng::CngAesCtrAlgo);
 define_type!(pub AesXtsAlgo, xts_ossl::OsslAesXtsAlgo, xts_cng::CngAesXtsAlgo);
 define_type!(pub AesGcmAlgo, gcm_ossl::OsslAesGcmAlgo, gcm_cng::CngAesGcmAlgo);
 

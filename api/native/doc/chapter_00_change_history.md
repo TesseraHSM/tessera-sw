@@ -33,5 +33,8 @@
 |            | returns recovered private/public key handles                     |
 | 10/01/2026 | Added partition-policy builder (`tsra_part_policy_builder_new`, |
 |            | setters, `tsra_part_policy_build`, `_free`)                    |
+| 10/31/2026 | Added AES ECB, CFB, OFB and CTR algorithms (`TSRA_ALGO_ID_AES_ECB`, |
+|            | `TSRA_ALGO_ID_AES_CFB`, `TSRA_ALGO_ID_AES_OFB`,                  |
+|            | `TSRA_ALGO_ID_AES_CTR`) and their parameter structures           |
 
 \pagebreak
