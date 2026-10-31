@@ -26,7 +26,7 @@
 //!   or restoration.
 //!
 //! `PartFinal` provisions the Ephemeral and Local masking keys, and this
-//! command requires an [`Initialized`](PartState::Initialized) partition.
+//! command requires an [`Initialized`](HsmPartState::Initialized) partition.
 //! SecurityDomain additionally requires a provisioned SD masking key;
 //! otherwise it returns [`HsmError::UnsupportedKeyScope`]. Session and
 //! other unsupported scopes are rejected with the same error.
@@ -48,12 +48,12 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::masking_key_id_for_scope;
 use super::validate_crypto_officer_active_session;
@@ -192,7 +192,7 @@ pub(crate) async fn handle<P: HsmPal>(
 
     // The scope's masking key is provisioned by `PartFinal`, so the
     // partition must be finalized (`Initialized`).
-    if part_state::part_state(pal, io)? != PartState::Initialized {
+    if part_state::part_state(pal, io)? != HsmPartState::Initialized {
         return Err(HsmError::InvalidArg);
     }
 

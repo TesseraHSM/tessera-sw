@@ -12,8 +12,8 @@
 //!   and historical rows are addressable by SVN via
 //!   [`mfgr_seed`](HsmSeedStore::mfgr_seed) (needed to recover keys
 //!   masked under a previous SVN).
-//! - **owner seed (BKS2)** — provisioned per device-owner lineage; the
-//!   *current* row is selected by [`owner_svn`](HsmSeedStore::owner_svn).
+//! - **device-owner seed (BKS2)** — provisioned per device-owner lineage; the
+//!   *current* row is selected by [`dev_owner_svn`](HsmSeedStore::dev_owner_svn).
 //!   Only one lineage (selector `0`) is supported today.
 //!
 //! ## Why this is its own trait (not per-partition properties)
@@ -39,29 +39,29 @@ pub trait HsmSeedStore {
     /// Current manufacturer-seed (BKS1) selector — the firmware SVN.
     fn mfgr_svn(&self) -> u64;
 
-    /// Current owner-seed (BKS2) selector (BKS2 lineage; always `0`
-    /// today, as only one owner lineage is supported).
-    fn owner_svn(&self) -> u64;
+    /// Current device-owner-seed (BKS2) selector (BKS2 lineage; always `0`
+    /// today, as only one device-owner lineage is supported).
+    fn dev_owner_svn(&self) -> u64;
 
     /// Current manufacturer seed (BKS1), selected by
     /// [`mfgr_svn`](Self::mfgr_svn).  The current row always exists, so
     /// this is infallible.
     fn curr_mfgr_seed(&self) -> &[u8];
 
-    /// Current owner seed (BKS2), selected by
-    /// [`owner_svn`](Self::owner_svn).  The current row always exists,
+    /// Current device-owner seed (BKS2), selected by
+    /// [`dev_owner_svn`](Self::dev_owner_svn).  The current row always exists,
     /// so this is infallible.
-    fn curr_owner_seed(&self) -> &[u8];
+    fn curr_dev_owner_seed(&self) -> &[u8];
 
     /// Manufacturer seed (BKS1) for a specific `svn` (historical
     /// lookup).  Returns [`HsmError::SeedNotFound`](crate::HsmError::SeedNotFound)
     /// if no provisioned row carries that SVN.
     fn mfgr_seed(&self, svn: u64) -> HsmResult<&[u8]>;
 
-    /// Owner seed (BKS2) for a specific owner selector `svn`.  Returns
+    /// Device-owner seed (BKS2) for a specific device-owner selector `svn`. Returns
     /// [`HsmError::SeedNotFound`](crate::HsmError::SeedNotFound) if no
     /// provisioned row carries that selector.
-    fn owner_seed(&self, svn: u64) -> HsmResult<&[u8]>;
+    fn dev_owner_seed(&self, svn: u64) -> HsmResult<&[u8]>;
 
     /// Firmware-supplied secret seed (the BK_BOOT masking key), a
     /// device-global firmware constant used as the KBKDF key in

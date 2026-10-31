@@ -183,7 +183,7 @@ impl<P: HsmPal> Hsm<P> {
             .map(|s| {
                 matches!(
                     s,
-                    PartState::Enabled | PartState::Initializing | PartState::Initialized
+                    HsmPartState::Enabled | HsmPartState::Initializing | HsmPartState::Initialized
                 )
             })
             .unwrap_or(false)

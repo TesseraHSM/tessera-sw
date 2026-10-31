@@ -29,6 +29,7 @@ use embassy_sync::once_lock::OnceLock;
 use tsra_fw_hsm_core::Hsm;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
+use tsra_fw_hsm_pal_std::HsmPartId;
 use tsra_fw_hsm_pal_std::*;
 use tsra_fw_hsm_pal_traits::*;
 

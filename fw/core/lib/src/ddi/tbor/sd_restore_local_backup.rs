@@ -47,10 +47,10 @@ use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::PartState;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::sd_backup;
@@ -78,7 +78,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // The SD masking keys / policy hash are provisioned by `PartFinal`,
         // so the partition must be finalized (`Initialized`).
-        if part_state::part_state(pal, io)? != PartState::Initialized {
+        if part_state::part_state(pal, io)? != HsmPartState::Initialized {
             return Err(HsmError::InvalidArg);
         }
 

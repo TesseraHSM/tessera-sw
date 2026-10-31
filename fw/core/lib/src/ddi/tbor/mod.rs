@@ -77,8 +77,8 @@ use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_undo::UndoLog;
 
@@ -384,7 +384,7 @@ fn validate_crypto_officer_active_session<P: HsmPal>(
     io: &P::Io,
     sess_id: HsmSessId,
 ) -> HsmResult<()> {
-    if sess_id.role() != SessionRole::CryptoOfficer {
+    if sess_id.role() != HsmSessionRole::CryptoOfficer {
         return Err(HsmError::InvalidPermissions);
     }
 
@@ -914,10 +914,10 @@ fn allowed_with_default_psk(opcode: u8) -> bool {
 /// against: CO sessions → slot 0, CU sessions → slot 1.  Matches the
 /// convention used by [`psk_change`] and the session-establishment
 /// handlers.
-fn psk_id_for_role(role: SessionRole) -> u8 {
+fn psk_id_for_role(role: HsmSessionRole) -> u8 {
     match role {
-        SessionRole::CryptoOfficer => 0,
-        SessionRole::CryptoUser => 1,
+        HsmSessionRole::CryptoOfficer => 0,
+        HsmSessionRole::CryptoUser => 1,
     }
 }
 
@@ -1038,12 +1038,20 @@ mod tests {
         .unwrap();
         let io = pal.poll_io().await.unwrap();
         let sess_id = pal
-            .session_create_pending(&io, SessionRole::CryptoUser, dma(&mut []))
+            .session_create_pending(&io, HsmSessionRole::CryptoUser, dma(&mut []))
             .await
             .unwrap();
-        pal.session_promote(&io, sess_id, &[0; 8], &[1; 32], &[2; 32], None, None)
-            .await
-            .unwrap();
+        pal.session_promote(
+            &io,
+            sess_id,
+            &[0; 8],
+            dma(&mut [1; 32]),
+            dma(&mut [2; 32]),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         (pal, io, sess_id)
     }
 
@@ -1982,8 +1990,8 @@ mod tests {
 
     #[test]
     fn psk_id_maps_role_to_slot() {
-        assert_eq!(psk_id_for_role(SessionRole::CryptoOfficer), 0);
-        assert_eq!(psk_id_for_role(SessionRole::CryptoUser), 1);
+        assert_eq!(psk_id_for_role(HsmSessionRole::CryptoOfficer), 0);
+        assert_eq!(psk_id_for_role(HsmSessionRole::CryptoUser), 1);
     }
 
     #[test]

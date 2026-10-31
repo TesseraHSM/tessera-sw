@@ -18,7 +18,7 @@
 //!
 //! ## Encrypt / decrypt unification
 //!
-//! CBC and ECB methods take an [`AesOp`] selector instead of having
+//! CBC and ECB methods take an [`HsmAesOp`] selector instead of having
 //! separate `_encrypt` / `_decrypt` methods. This reduces trait
 //! surface while keeping the operation direction explicit at the call
 //! site.
@@ -58,7 +58,7 @@ use super::*;
 
 /// AES encrypt/decrypt operation selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AesOp {
+pub enum HsmAesOp {
     /// Encrypt the input.
     Encrypt,
 
@@ -96,7 +96,7 @@ pub trait HsmAes: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `op` — [`AesOp::Encrypt`] or [`AesOp::Decrypt`].
+    /// - `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// - `key` — AES key (16 / 24 / 32 bytes).
     /// - `input` — source bytes; length must be a multiple of 16.
     /// - `iv_in` — 16-byte IV used for this request.
@@ -114,7 +114,7 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_cbc_enc_dec(
         &self,
         io: &Self::Io,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         iv_in: &HsmDmaBuf,
@@ -132,7 +132,7 @@ pub trait HsmAes: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `op` — [`AesOp::Encrypt`] or [`AesOp::Decrypt`].
+    /// - `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// - `key` — AES key (16 / 24 / 32 bytes).
     /// - `data` — input on entry, output on return; length must
     ///   be a multiple of 16.
@@ -149,7 +149,7 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_cbc_enc_dec_in_place(
         &self,
         io: &Self::Io,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
         iv_in: &HsmDmaBuf,
@@ -164,7 +164,7 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_cbc_enc_dec_in_place_iv(
         &self,
         io: &Self::Io,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
         iv: &mut HsmDmaBuf,
@@ -176,7 +176,7 @@ pub trait HsmAes: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `op` — [`AesOp::Encrypt`] or [`AesOp::Decrypt`].
+    /// - `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// - `key` — AES key (16 / 24 / 32 bytes).
     /// - `input` — source block(s); length must be a multiple of
     ///   16.
@@ -192,7 +192,7 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_ecb_enc_dec(
         &self,
         io: &Self::Io,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
@@ -203,7 +203,7 @@ pub trait HsmAes: HsmIoTypes {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `op` — [`AesOp::Encrypt`] or [`AesOp::Decrypt`].
+    /// - `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// - `key` — AES key (16 / 24 / 32 bytes).
     /// - `data` — input on entry, output on return; length must
     ///   be a multiple of 16.
@@ -217,7 +217,7 @@ pub trait HsmAes: HsmIoTypes {
     async fn aes_ecb_enc_dec_in_place(
         &self,
         io: &Self::Io,
-        op: AesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
     ) -> HsmResult<()>;

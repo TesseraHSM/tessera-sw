@@ -114,7 +114,7 @@ fn open_session_invalid_session_type_byte() {
 /// Rejects unsupported session-suite identifiers.
 #[test]
 fn open_session_unsupported_suite_id() {
-    // Any byte other than 0x01 must be rejected by `SessionSuite::from_u8`
+    // Any byte other than 0x01 must be rejected by `HsmSessionSuite::from_u8`
     // before any HPKE work happens. Spot-check three boundary values
     // covering "reserved-but-not-yet-implemented" (0x02), zero (0x00),
     // and the all-ones byte (0xFF).

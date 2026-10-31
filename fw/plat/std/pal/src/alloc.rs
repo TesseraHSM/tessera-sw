@@ -222,19 +222,19 @@ impl HsmAlloc for StdHsmPal {
         Ok(unsafe { HsmDmaBuf::from_raw_mut(s) })
     }
 
-    fn dma_alloc_exchange(&self, io: &StdHsmIo, size: usize) -> HsmResult<DmaAllocation<'_>> {
+    fn dma_alloc_exchange(&self, io: &StdHsmIo, size: usize) -> HsmResult<HsmDmaAllocation<'_>> {
         let pool = self.iic.pool();
         bump(pool, io.slot, Heap::Dma, size, 4)?;
         let start = pool.dma_mark(io.slot).get() - size;
         // SAFETY: bump reserved this exclusive range. Use the heap's raw pointer
         // rather than deriving growth provenance from a fixed-length slice.
-        Ok(unsafe { DmaAllocation::from_raw_parts(pool.dma_ptr(io.slot).add(start), size) })
+        Ok(unsafe { HsmDmaAllocation::from_raw_parts(pool.dma_ptr(io.slot).add(start), size) })
     }
 
     fn dma_grow(
         &self,
         io: &StdHsmIo,
-        allocation: &mut DmaAllocation<'_>,
+        allocation: &mut HsmDmaAllocation<'_>,
         size: usize,
     ) -> HsmResult<()> {
         let pool = self.iic.pool();
@@ -258,7 +258,7 @@ impl HsmAlloc for StdHsmPal {
         peak.set(peak.get().max(end));
         // SAFETY: no views can survive this exclusive handle borrow. The tail
         // extension is unallocated and the pointer retains heap provenance.
-        *allocation = unsafe { DmaAllocation::from_raw_parts(base.add(start), size) };
+        *allocation = unsafe { HsmDmaAllocation::from_raw_parts(base.add(start), size) };
         Ok(())
     }
 

@@ -47,7 +47,7 @@ pub fn session_app_id<P: HsmPal>(
     io: &P::Io,
     sess_id: HsmSessId,
 ) -> HsmResult<[u8; APP_ID_LEN]> {
-    let psk_id = u8::from(sess_id.role() == tsra_fw_hsm_pal_traits::SessionRole::CryptoUser);
+    let psk_id = u8::from(sess_id.role() == tsra_fw_hsm_pal_traits::HsmSessionRole::CryptoUser);
 
     let mut app_id = [0u8; APP_ID_LEN];
     let res = crate::part_state::part_psk(pal, io, psk_id);

@@ -31,12 +31,12 @@ use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::resolve_masking_key;
 use super::validate_active_session;
@@ -98,7 +98,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // provisioned by `PartFinal` / the SD lifecycle, so require an
         // `Initialized` partition to fail cheaply and clearly before keygen.
         if scope != HsmKeyScope::Session
-            && part_state::part_state(pal, io)? != PartState::Initialized
+            && part_state::part_state(pal, io)? != HsmPartState::Initialized
         {
             return Err(HsmError::InvalidArg);
         }

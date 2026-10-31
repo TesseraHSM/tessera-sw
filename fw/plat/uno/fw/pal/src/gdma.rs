@@ -162,7 +162,7 @@ impl HsmGdmaController for UnoHsmPal {
     /// Falls back to volatile CPU writes if the engine has no free tag or the
     /// transfer fails, so the buffer is scrubbed either way; both paths use
     /// writes that cannot be optimized away.
-    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
+    async fn zero_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
         let len = dst.len();
         if len == 0 {
             return Ok(());

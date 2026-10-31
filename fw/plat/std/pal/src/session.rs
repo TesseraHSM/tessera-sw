@@ -65,7 +65,7 @@ impl HsmSessionManager for StdHsmPal {
         &self,
         io: &StdHsmIo,
         api_rev: &[u8],
-        masking_key: &[u8],
+        masking_key: &HsmDmaBuf,
         id: Option<HsmSessId>,
     ) -> HsmResult<HsmSessId> {
         if api_rev.len() != SESSION_API_REV_SIZE || masking_key.len() != SESSION_MASKING_KEY_SIZE {
@@ -168,7 +168,7 @@ impl HsmSessionManager for StdHsmPal {
     async fn session_create_pending(
         &self,
         io: &StdHsmIo,
-        role: SessionRole,
+        role: HsmSessionRole,
         handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId> {
         let entry = self.active_part_mut(io.pid())?;
@@ -179,7 +179,7 @@ impl HsmSessionManager for StdHsmPal {
         &self,
         io: &StdHsmIo,
         id: HsmSessId,
-        out: Option<&mut [u8]>,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let entry = self.active_part(io.pid())?;
         let blob = entry.session_table.pending_state(id)?;
@@ -200,10 +200,10 @@ impl HsmSessionManager for StdHsmPal {
         io: &StdHsmIo,
         id: HsmSessId,
         api_rev: &[u8],
-        param_key: &[u8],
-        masking_key: &[u8],
-        mac_tx_key: Option<&[u8]>,
-        mac_rx_key: Option<&[u8]>,
+        param_key: &HsmDmaBuf,
+        masking_key: &HsmDmaBuf,
+        mac_tx_key: Option<&HsmDmaBuf>,
+        mac_rx_key: Option<&HsmDmaBuf>,
     ) -> HsmResult<()> {
         if api_rev.len() != SESSION_API_REV_SIZE
             || param_key.len() != SESSION_PARAM_KEY_LEN
@@ -317,26 +317,35 @@ impl HsmSessionManager for StdHsmPal {
 #[allow(clippy::unwrap_used)]
 mod session_type_tests {
     use tsra_fw_hsm_pal_traits::HsmError;
-    use tsra_fw_hsm_pal_traits::SessionRole;
-    use tsra_fw_hsm_pal_traits::SessionType;
+    use tsra_fw_hsm_pal_traits::HsmSessionRole;
+    use tsra_fw_hsm_pal_traits::HsmSessionType;
 
     #[test]
     fn to_u8_matches_discriminant() {
-        assert_eq!(SessionType::PlainText.to_u8(), 0);
-        assert_eq!(SessionType::Authenticated.to_u8(), 1);
+        assert_eq!(HsmSessionType::PlainText.to_u8(), 0);
+        assert_eq!(HsmSessionType::Authenticated.to_u8(), 1);
     }
 
     #[test]
     fn from_u8_round_trip() {
-        assert_eq!(SessionType::from_u8(0).unwrap(), SessionType::PlainText);
-        assert_eq!(SessionType::from_u8(1).unwrap(), SessionType::Authenticated);
+        assert_eq!(
+            HsmSessionType::from_u8(0).unwrap(),
+            HsmSessionType::PlainText
+        );
+        assert_eq!(
+            HsmSessionType::from_u8(1).unwrap(),
+            HsmSessionType::Authenticated
+        );
     }
 
     #[test]
     fn from_u8_rejects_unknown_values() {
         for v in [2u8, 3, 0x7f, 0x80, 0xff] {
             assert!(
-                matches!(SessionType::from_u8(v), Err(HsmError::InvalidSessionType)),
+                matches!(
+                    HsmSessionType::from_u8(v),
+                    Err(HsmError::InvalidSessionType)
+                ),
                 "expected InvalidSessionType for v={v}"
             );
         }
@@ -344,29 +353,29 @@ mod session_type_tests {
 
     #[test]
     fn validate_for_role_co_requires_authenticated() {
-        assert!(SessionType::Authenticated
-            .validate_for_role(SessionRole::CryptoOfficer)
+        assert!(HsmSessionType::Authenticated
+            .validate_for_role(HsmSessionRole::CryptoOfficer)
             .is_ok());
         assert!(matches!(
-            SessionType::PlainText.validate_for_role(SessionRole::CryptoOfficer),
+            HsmSessionType::PlainText.validate_for_role(HsmSessionRole::CryptoOfficer),
             Err(HsmError::InvalidSessionType)
         ));
     }
 
     #[test]
     fn validate_for_role_cu_requires_plaintext() {
-        assert!(SessionType::PlainText
-            .validate_for_role(SessionRole::CryptoUser)
+        assert!(HsmSessionType::PlainText
+            .validate_for_role(HsmSessionRole::CryptoUser)
             .is_ok());
         assert!(matches!(
-            SessionType::Authenticated.validate_for_role(SessionRole::CryptoUser),
+            HsmSessionType::Authenticated.validate_for_role(HsmSessionRole::CryptoUser),
             Err(HsmError::InvalidSessionType)
         ));
     }
 
     #[test]
     fn is_authenticated_flag() {
-        assert!(SessionType::Authenticated.is_authenticated());
-        assert!(!SessionType::PlainText.is_authenticated());
+        assert!(HsmSessionType::Authenticated.is_authenticated());
+        assert!(!HsmSessionType::PlainText.is_authenticated());
     }
 }

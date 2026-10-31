@@ -192,7 +192,7 @@ fuzz_target!(|input: FuzzInput| {
         let pota = CaKey::generate();
         let policy = common::known_good_part_policy(pota.raw_pub());
 
-        // PartInit: transition the partition to PartState::Initializing.
+        // PartInit: transition the partition to HsmPartState::Initializing.
         let init = ctx
             .part_init(
                 &session,

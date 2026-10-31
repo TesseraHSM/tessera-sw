@@ -56,12 +56,12 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::masking_key_id_for_scope;
 use super::resolve_masking_key;
@@ -183,7 +183,7 @@ pub(crate) async fn handle<P: HsmPal>(
 
         // The TMK is masked under the SDMK, and the output masking keys
         // are provisioned by partition / SD setup.
-        if part_state::part_state(pal, io)? != PartState::Initialized {
+        if part_state::part_state(pal, io)? != HsmPartState::Initialized {
             return Err(HsmError::InvalidArg);
         }
         if !part_state::part_is_sd_initialized(pal, io)? {

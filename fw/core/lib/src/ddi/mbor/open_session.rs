@@ -377,7 +377,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     // iv_chain_a for use as block 2's IV.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_id,
         enc_cred.iv,
@@ -389,7 +389,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     // ciphertext into iv_chain_b for use as block 3's IV.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_pin,
         iv_chain_a,
@@ -401,7 +401,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     // place with iv_chain_b.  No subsequent block needs the IV-out.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_seed,
         iv_chain_b,

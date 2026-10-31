@@ -16,6 +16,8 @@
 
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
+use tsra_fw_hsm_pal_traits::HsmCertBank;
+use tsra_fw_hsm_pal_traits::HsmCertSlot;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -31,12 +33,12 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     let req = TborGetCertChainInfoReq::decode(cmd_buf.request())?;
-    let slot_id = req.slot_id();
+    let slot = HsmCertSlot(req.slot_id());
 
-    let info = if slot_id == 2 {
+    let info = if slot == HsmCertSlot::PartOwner {
         super::pta::chain_info(pal, io).await?
     } else {
-        pal.get_cert_chain_info(io, slot_id).await?
+        pal.get_cert_chain_info(io, slot, HsmCertBank::Ecc).await?
     };
 
     let resp = cmd_buf.encode_response(|buf| {

@@ -23,7 +23,7 @@ impl HsmGdmaController for StdHsmPal {
     }
 
     /// Zero an HSM-local buffer with non-elidable software writes.
-    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
+    async fn zero_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
         zeroize::Zeroize::zeroize(&mut **dst);
         Ok(())
     }

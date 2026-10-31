@@ -148,7 +148,7 @@ impl HsmGdmaController for FakeGdma {
         dst.copy_from_slice(src);
         Ok(())
     }
-    async fn zeroize_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
+    async fn zero_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
         self.zeroizes.set(self.zeroizes.get() + 1);
         for b in dst.iter_mut() {
             *b = 0;

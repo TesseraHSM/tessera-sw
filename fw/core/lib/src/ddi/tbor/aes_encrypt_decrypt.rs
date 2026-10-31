@@ -26,7 +26,7 @@ use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptReq;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptResp;
 use tsra_fw_ddi_tbor_types::AES_IV_LEN;
 use tsra_fw_ddi_tbor_types::AES_MSG_MAX_LEN;
-use tsra_fw_hsm_pal_traits::AesOp as PalAesOp;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -40,12 +40,12 @@ use super::validate_active_session;
 /// AES-CBC block size in bytes — also the required IV length.
 const AES_BLOCK_LEN: usize = AES_IV_LEN;
 
-/// Map the wire [`AesOp`] onto the PAL [`PalAesOp`].  An unrecognized
+/// Map the wire [`AesOp`] onto the PAL [`HsmAesOp`].  An unrecognized
 /// discriminant is rejected with [`HsmError::InvalidArg`].
-fn pal_aes_op(op: AesOp) -> HsmResult<PalAesOp> {
+fn pal_aes_op(op: AesOp) -> HsmResult<HsmAesOp> {
     match op {
-        AesOp::Encrypt => Ok(PalAesOp::Encrypt),
-        AesOp::Decrypt => Ok(PalAesOp::Decrypt),
+        AesOp::Encrypt => Ok(HsmAesOp::Encrypt),
+        AesOp::Decrypt => Ok(HsmAesOp::Decrypt),
         _ => Err(HsmError::InvalidArg),
     }
 }
@@ -97,8 +97,8 @@ pub(crate) async fn handle<P: HsmPal>(
         let view = unmask(pal, io, masking_key, req.masked_key).await?;
         assert_aes_kind(view.key_kind)?;
         let permitted = match op {
-            PalAesOp::Encrypt => view.key_attrs.encrypt(),
-            PalAesOp::Decrypt => view.key_attrs.decrypt(),
+            HsmAesOp::Encrypt => view.key_attrs.encrypt(),
+            HsmAesOp::Decrypt => view.key_attrs.decrypt(),
         };
         if !permitted {
             return Err(HsmError::InvalidPermissions);

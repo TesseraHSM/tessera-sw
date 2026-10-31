@@ -13,8 +13,8 @@
 
 use core::slice;
 
-use tsra_fw_hsm_pal_traits::AesOp as PalAesOp;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -47,10 +47,10 @@ pub const AES_BLOCK_SIZE: usize = 16;
 
 /// Map the PAL AES direction selector to the AES driver enum.
 #[inline]
-fn aes_op(op: PalAesOp) -> DriverAesOp {
+fn aes_op(op: HsmAesOp) -> DriverAesOp {
     match op {
-        PalAesOp::Encrypt => DriverAesOp::Encrypt,
-        PalAesOp::Decrypt => DriverAesOp::Decrypt,
+        HsmAesOp::Encrypt => DriverAesOp::Encrypt,
+        HsmAesOp::Decrypt => DriverAesOp::Decrypt,
     }
 }
 
@@ -137,7 +137,7 @@ impl UnoHsmPal {
     ///
     /// # Parameters
     /// * `mode` — [`AesMode::Cbc`] or [`AesMode::Ecb`].
-    /// * `op` — [`AesOp::Encrypt`] or [`AesOp::Decrypt`].
+    /// * `op` — [`DriverAesOp::Encrypt`] or [`DriverAesOp::Decrypt`].
     /// * `key` — AES key. Must be 16, 24, or 32 bytes (AES-128/192/256);
     ///   the AES driver itself enforces this.
     /// * `iv` — Optional 16-byte IV. Required for CBC, must be `None` for
@@ -187,7 +187,7 @@ impl UnoHsmPal {
     ///
     /// # Parameters
     /// * `mode` — [`AesMode::Cbc`] or [`AesMode::Ecb`].
-    /// * `op` — [`PalAesOp::Encrypt`] or [`PalAesOp::Decrypt`].
+    /// * `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// * `key` — AES key (16, 24, or 32 bytes).
     /// * `iv` — Optional 16-byte IV (required for CBC, `None` for ECB).
     ///   Updated in-place when present.
@@ -204,7 +204,7 @@ impl UnoHsmPal {
     async fn aes_run_in_place(
         &self,
         mode: AesMode,
-        op: PalAesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         iv: Option<&mut HsmDmaBuf>,
         data: &mut HsmDmaBuf,
@@ -252,7 +252,7 @@ impl HsmAes for UnoHsmPal {
     async fn aes_cbc_enc_dec(
         &self,
         io: &UnoHsmIo,
-        op: PalAesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         iv_in: &HsmDmaBuf,
@@ -285,7 +285,7 @@ impl HsmAes for UnoHsmPal {
     async fn aes_cbc_enc_dec_in_place(
         &self,
         io: &UnoHsmIo,
-        op: PalAesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
         iv_in: &HsmDmaBuf,
@@ -314,7 +314,7 @@ impl HsmAes for UnoHsmPal {
     async fn aes_cbc_enc_dec_in_place_iv(
         &self,
         _io: &UnoHsmIo,
-        op: PalAesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
         iv: &mut HsmDmaBuf,
@@ -330,7 +330,7 @@ impl HsmAes for UnoHsmPal {
     async fn aes_ecb_enc_dec(
         &self,
         _io: &UnoHsmIo,
-        op: PalAesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
@@ -345,7 +345,7 @@ impl HsmAes for UnoHsmPal {
     async fn aes_ecb_enc_dec_in_place(
         &self,
         _io: &UnoHsmIo,
-        op: PalAesOp,
+        op: HsmAesOp,
         key: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {

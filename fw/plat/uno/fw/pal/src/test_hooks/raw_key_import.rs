@@ -34,13 +34,13 @@ use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSeedStore;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 
 use super::common::ReqHdr;
@@ -599,7 +599,7 @@ async fn mask_blob<'p>(
     let mk_id = part_mk_key_id(pal, io)?;
     let masking_key = pal.vault_key(io, mk_id)?;
 
-    let bks2_id = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
+    let bks2_id = u16::try_from(pal.dev_owner_svn()).map_err(|_| HsmError::InvalidArg)?;
     let metadata = DdiMaskedKeyMetadata {
         svn: pal.mfgr_svn(),
         key_type,
@@ -622,6 +622,6 @@ async fn mask_blob<'p>(
 /// has none (a persistent masked blob requested before
 /// `EstablishCredential`).
 fn part_mk_key_id(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<HsmKeyId> {
-    let raw = pal.part_prop_get_u16(io, PartPropId::MK_KEY_ID)?;
+    let raw = pal.part_prop_get_u16(io, HsmPartPropId::MK_KEY_ID)?;
     Ok(HsmKeyId::from(raw))
 }

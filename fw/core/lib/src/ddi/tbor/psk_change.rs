@@ -31,7 +31,7 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::SessionRole;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CO;
 use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CU;
 use tsra_fw_hsm_pal_traits::PSK_LEN;
@@ -152,10 +152,10 @@ fn is_default_psk(candidate: &[u8]) -> bool {
 /// Maps the active session's role to the partition PSK slot it is
 /// allowed to write.  Self-rotate-only: there is no cross-role
 /// rotation path.
-fn target_psk_for_role(role: SessionRole) -> u8 {
+fn target_psk_for_role(role: HsmSessionRole) -> u8 {
     match role {
-        SessionRole::CryptoOfficer => PSK_ID_CO,
-        SessionRole::CryptoUser => PSK_ID_CU,
+        HsmSessionRole::CryptoOfficer => PSK_ID_CO,
+        HsmSessionRole::CryptoUser => PSK_ID_CU,
     }
 }
 
@@ -178,21 +178,24 @@ mod tests {
 
     #[test]
     fn co_session_targets_co_slot() {
-        assert_eq!(target_psk_for_role(SessionRole::CryptoOfficer), PSK_ID_CO);
+        assert_eq!(
+            target_psk_for_role(HsmSessionRole::CryptoOfficer),
+            PSK_ID_CO
+        );
     }
 
     #[test]
     fn cu_session_targets_cu_slot() {
-        assert_eq!(target_psk_for_role(SessionRole::CryptoUser), PSK_ID_CU);
+        assert_eq!(target_psk_for_role(HsmSessionRole::CryptoUser), PSK_ID_CU);
     }
 
     #[test]
     fn session_id_zero_is_co_session() {
         // Sanity guard against drift in the slot-to-role mapping owned
         // by `HsmSessId::role`.
-        assert_eq!(HsmSessId::from(0u16).role(), SessionRole::CryptoOfficer);
+        assert_eq!(HsmSessId::from(0u16).role(), HsmSessionRole::CryptoOfficer);
         for slot in 1u16..=7 {
-            assert_eq!(HsmSessId::from(slot).role(), SessionRole::CryptoUser);
+            assert_eq!(HsmSessId::from(slot).role(), HsmSessionRole::CryptoUser);
         }
     }
 

@@ -12,7 +12,7 @@
 //! The resource mask defaults to **zero** — a partition has no key storage
 //! until Admin assigns tables via the `SetResource` IPC, at which point the
 //! identity is generated. Lifecycle state defaults to
-//! [`PartState::Unallocated`]; a non-zero `SetResource` allocates the
+//! [`HsmPartState::Unallocated`]; a non-zero `SetResource` allocates the
 //! partition and a `PfnEnable` IPC enables it.
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
@@ -21,6 +21,8 @@ use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -28,8 +30,6 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
-use tsra_fw_hsm_pal_traits::PartState;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
 use tsra_fw_uno_drivers_part_store::PartStore;
@@ -61,12 +61,12 @@ impl UnoHsmPal {
     ///
     /// The final state depends on the admin's PF/VF ordering:
     /// - **VF** (`is_pf == false`): `SetResource` precedes `PfnEnable`, so the
-    ///   partition is left [`PartState::Allocated`]; a later [`part_enable`]
-    ///   provisions the enable-time keys and reaches [`PartState::Enabled`].
+    ///   partition is left [`HsmPartState::Allocated`]; a later [`part_enable`]
+    ///   provisions the enable-time keys and reaches [`HsmPartState::Enabled`].
     /// - **PF** (`is_pf == true`): `PfnEnable` already ran (the partition is
-    ///   [`PartState::Enabled`] with `res_mask == 0` and deferred keys), so
+    ///   [`HsmPartState::Enabled`] with `res_mask == 0` and deferred keys), so
     ///   this provisions the deferred enable-time keys too and leaves the
-    ///   partition [`PartState::Enabled`], ready for host IO.
+    ///   partition [`HsmPartState::Enabled`], ready for host IO.
     ///
     /// Re-asserting the same mask on an already-provisioned partition is a
     /// no-op (the recovery replay path). Otherwise any existing allocation is
@@ -116,7 +116,7 @@ impl UnoHsmPal {
         // fully-provisioned `Enabled` partition being reallocated under a
         // *different* mask — is freed so keygen starts from a clean slate (no
         // leaked vault keys, no stale resource mask).
-        let pre_enabled = is_pf && part.state()? == PartState::Enabled && part.res_mask() == 0;
+        let pre_enabled = is_pf && part.state()? == HsmPartState::Enabled && part.res_mask() == 0;
         if !pre_enabled {
             self.part_free(pid).await?;
         }
@@ -155,10 +155,10 @@ impl UnoHsmPal {
                 self.rollback_alloc(pid).await;
                 return Err(e);
             }
-            part.set_state(PartState::Enabled);
+            part.set_state(HsmPartState::Enabled);
         } else {
             // VF (or PF SetResource-before-enable): PfnEnable follows and provisions the enabled keys.
-            part.set_state(PartState::Allocated);
+            part.set_state(HsmPartState::Allocated);
         }
         Ok(())
     }
@@ -197,7 +197,7 @@ impl UnoHsmPal {
         // back to `Unallocated`.
         part.clear_unwrapping_key();
         part.set_res_mask(0);
-        part.set_state(PartState::Unallocated);
+        part.set_state(HsmPartState::Unallocated);
     }
 
     /// Creates the partition's `Masked_BK_BOOT` once at allocation.
@@ -229,7 +229,7 @@ impl UnoHsmPal {
     /// partition stays allocated so the free can be retried.
     pub(crate) async fn part_free(&self, pid: HsmPartId) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
-        if part.state()? == PartState::Unallocated {
+        if part.state()? == HsmPartState::Unallocated {
             return Ok(());
         }
 
@@ -267,7 +267,7 @@ impl UnoHsmPal {
         // Release resources and reset lifecycle state.
         part.set_res_mask(0);
         part.bump_generation();
-        part.set_state(PartState::Unallocated);
+        part.set_state(HsmPartState::Unallocated);
         Ok(())
     }
 
@@ -520,21 +520,21 @@ impl UnoHsmPal {
     pub(crate) async fn part_enable(&self, pid: HsmPartId, is_pf: bool) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
         match part.state()? {
-            PartState::Allocated | PartState::Disabled => {
+            HsmPartState::Allocated | HsmPartState::Disabled => {
                 self.provision_enabled_keys(pid).await?;
-                part.set_state(PartState::Enabled);
+                part.set_state(HsmPartState::Enabled);
                 Ok(())
             }
             // PF (PcieFunction::Pf) is enabled before SetResource assigns its
             // `res_mask`, so the enabled keys cannot be provisioned here (the
             // vault has no table yet). Record the enable; `part_alloc`
             // provisions the keys once the resources arrive.
-            PartState::Unallocated if is_pf => {
-                part.set_state(PartState::Enabled);
+            HsmPartState::Unallocated if is_pf => {
+                part.set_state(HsmPartState::Enabled);
                 Ok(())
             }
             // Idempotent re-enable (e.g. an Admin/driver retry).
-            PartState::Enabled => Ok(()),
+            HsmPartState::Enabled => Ok(()),
             _ => Err(HsmError::InvalidArg),
         }
     }
@@ -549,7 +549,7 @@ impl UnoHsmPal {
     pub(crate) async fn part_disable(&self, pid: HsmPartId) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
         match part.state()? {
-            PartState::Enabled => {
+            HsmPartState::Enabled => {
                 self.with_admin_io(pid, async |admin_io, _alloc| -> HsmResult<()> {
                     let sessions = SessionStore::partition(pid)?;
                     for (slot, key_id) in sessions.occupied_physical_ids().into_iter().enumerate() {
@@ -565,7 +565,7 @@ impl UnoHsmPal {
                     Ok(())
                 })
                 .await?;
-                part.set_state(PartState::Disabled);
+                part.set_state(HsmPartState::Disabled);
                 Ok(())
             }
             _ => Err(HsmError::InvalidArg),
@@ -627,7 +627,7 @@ impl UnoHsmPal {
         let part = PartStore::partition(pid)?;
         // An unallocated partition has neither resources nor a vault table,
         // so there is nothing to reset.
-        if matches!(part.state()?, PartState::Unallocated) {
+        if matches!(part.state()?, HsmPartState::Unallocated) {
             return Ok(());
         }
 
@@ -690,7 +690,7 @@ impl UnoHsmPal {
         // `part_enable` is an idempotent no-op on an already-Enabled slot.
         self.provision_identity(pid).await?;
         self.provision_enabled_keys(pid).await?;
-        part.set_state(PartState::Enabled);
+        part.set_state(HsmPartState::Enabled);
         Ok(())
     }
 
@@ -756,24 +756,24 @@ impl UnoHsmPal {
 }
 
 impl HsmPartitionManager for UnoHsmPal {
-    fn part_prop_get_u8(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<u8> {
+    fn part_prop_get_u8(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<u8> {
         let part = PartStore::partition(io.pid())?;
         match id {
-            PartPropId::STATE => Ok(part.state()? as u8),
-            PartPropId::RES_COUNT => Ok(part.res_mask().count_ones() as u8),
+            HsmPartPropId::PART_STATE => Ok(part.state()? as u8),
+            HsmPartPropId::PART_RES_COUNT => Ok(part.res_mask().count_ones() as u8),
             _ => Err(HsmError::UnsupportedCmd),
         }
     }
 
-    fn part_prop_set_u8(&self, io: &UnoHsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+    fn part_prop_set_u8(&self, io: &UnoHsmIo, id: HsmPartPropId, value: u8) -> HsmResult<()> {
         let part = PartStore::partition(io.pid())?;
         match id {
-            PartPropId::STATE => {
+            HsmPartPropId::PART_STATE => {
                 // Raw mechanism: write the discriminant directly. Transition
                 // validation + the `PartInit` provisioning gate are upper-layer
                 // policy (`part_state::part_set_state`); the undo log restores
                 // prior states through this raw path.
-                let target = PartState::from_u8(value).ok_or(HsmError::InvalidArg)?;
+                let target = HsmPartState::from_u8(value).ok_or(HsmError::InvalidArg)?;
                 part.set_state(target);
                 Ok(())
             }
@@ -782,83 +782,83 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
-    fn part_prop_get_u16(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<u16> {
+    fn part_prop_get_u16(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<u16> {
         // The unwrapping key is materialised lazily on first read: if the HSP
         // has published it into the GSRAM backup slot but it is not yet in the
         // vault, import it now (synchronously) and record its id. An absent id
         // afterwards means the HSP has not published yet, which the handler
         // surfaces as `PendingKeyGeneration`.
-        if id == PartPropId::RSA_UNWRAPPING_KEY_ID {
+        if id == HsmPartPropId::RSA_UNWRAPPING_KEY_ID {
             self.ensure_unwrapping_key_imported(io)?;
         }
         let part = PartStore::partition(io.pid())?;
         let key = match id {
-            PartPropId::ID_KEY_ID => part.id_key_id(),
-            PartPropId::MK_KEY_ID => part.mk_key_id(),
-            PartPropId::UPS_KEY_ID => part.ups_key_id(),
-            PartPropId::PTA_KEY_ID => part.pta_key_id(),
-            PartPropId::RSA_UNWRAPPING_KEY_ID => part.unwrapping_key_id(),
-            PartPropId::ESTABLISH_CRED_KEY_ID => part.ec_key_id(),
-            PartPropId::SESSION_ENC_KEY_ID => part.se_key_id(),
-            PartPropId::LOCAL_MK_KEY_ID => part.local_mk_key_id(),
-            PartPropId::EPHEMERAL_MK_KEY_ID => part.ephemeral_mk_key_id(),
-            PartPropId::SD_MK_KEY_ID => part.sd_mk_key_id(),
+            HsmPartPropId::PART_ID_ECC_KEY_ID => part.id_key_id(),
+            HsmPartPropId::MK_KEY_ID => part.mk_key_id(),
+            HsmPartPropId::UPS_KEY_ID => part.ups_key_id(),
+            HsmPartPropId::PTA_KEY_ID => part.pta_key_id(),
+            HsmPartPropId::RSA_UNWRAPPING_KEY_ID => part.unwrapping_key_id(),
+            HsmPartPropId::ESTABLISH_CRED_KEY_ID => part.ec_key_id(),
+            HsmPartPropId::SESSION_ENC_KEY_ID => part.se_key_id(),
+            HsmPartPropId::LOCAL_MK_KEY_ID => part.local_mk_key_id(),
+            HsmPartPropId::EPHEMERAL_MK_KEY_ID => part.ephemeral_mk_key_id(),
+            HsmPartPropId::SD_MK_KEY_ID => part.sd_mk_key_id(),
             _ => return Err(HsmError::UnsupportedCmd),
         };
         key.map(u16::from).ok_or(HsmError::PartPropNotFound)
     }
 
-    fn part_prop_set_u16(&self, io: &UnoHsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
+    fn part_prop_set_u16(&self, io: &UnoHsmIo, id: HsmPartPropId, value: u16) -> HsmResult<()> {
         let part = PartStore::partition(io.pid())?;
         let key = HsmKeyId::from(value);
         match id {
-            PartPropId::MK_KEY_ID => part.set_mk_key_id(Some(key)),
-            PartPropId::SESSION_ENC_KEY_ID => part.set_se_key_id(Some(key)),
-            PartPropId::ESTABLISH_CRED_KEY_ID => part.set_ec_key_id(Some(key)),
-            PartPropId::LOCAL_MK_KEY_ID => part.set_local_mk_key_id(Some(key)),
-            PartPropId::EPHEMERAL_MK_KEY_ID => part.set_ephemeral_mk_key_id(Some(key)),
-            PartPropId::SD_MK_KEY_ID => part.set_sd_mk_key_id(Some(key)),
+            HsmPartPropId::MK_KEY_ID => part.set_mk_key_id(Some(key)),
+            HsmPartPropId::SESSION_ENC_KEY_ID => part.set_se_key_id(Some(key)),
+            HsmPartPropId::ESTABLISH_CRED_KEY_ID => part.set_ec_key_id(Some(key)),
+            HsmPartPropId::LOCAL_MK_KEY_ID => part.set_local_mk_key_id(Some(key)),
+            HsmPartPropId::EPHEMERAL_MK_KEY_ID => part.set_ephemeral_mk_key_id(Some(key)),
+            HsmPartPropId::SD_MK_KEY_ID => part.set_sd_mk_key_id(Some(key)),
             // Raw mechanism: UPS / PTA write-once is upper-layer policy
             // (`part_state::part_set_ups_key_id` / `part_set_pta_key_id`); the
             // undo log restores a prior id through this raw path.
-            PartPropId::UPS_KEY_ID => part.set_ups_key_id(Some(key)),
-            PartPropId::PTA_KEY_ID => part.set_pta_key_id(Some(key)),
-            PartPropId::RSA_UNWRAPPING_KEY_ID => part.set_unwrapping_key_id(Some(key)),
-            // ID_KEY_ID is read-only.
+            HsmPartPropId::UPS_KEY_ID => part.set_ups_key_id(Some(key)),
+            HsmPartPropId::PTA_KEY_ID => part.set_pta_key_id(Some(key)),
+            HsmPartPropId::RSA_UNWRAPPING_KEY_ID => part.set_unwrapping_key_id(Some(key)),
+            // PART_ID_ECC_KEY_ID is read-only.
             _ => return Err(HsmError::UnsupportedCmd),
         }
         Ok(())
     }
 
-    fn part_prop_get_u32(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<u32> {
+    fn part_prop_get_u32(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<u32> {
         let part = PartStore::partition(io.pid())?;
         match id {
-            PartPropId::GEN => Ok(part.generation()),
+            HsmPartPropId::PART_GEN => Ok(part.generation()),
             _ => Err(HsmError::UnsupportedCmd),
         }
     }
 
-    fn part_prop_set_u32(&self, _io: &UnoHsmIo, _id: PartPropId, _value: u32) -> HsmResult<()> {
+    fn part_prop_set_u32(&self, _io: &UnoHsmIo, _id: HsmPartPropId, _value: u32) -> HsmResult<()> {
         Err(HsmError::UnsupportedCmd)
     }
 
-    fn part_prop_get_bool(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<bool> {
+    fn part_prop_get_bool(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<bool> {
         let part = PartStore::partition(io.pid())?;
         match id {
-            PartPropId::BK3_INITIALIZED => Ok(part.bk3_initialized()),
-            PartPropId::SD_INITIALIZED => Ok(part.sd_initialized()),
+            HsmPartPropId::BK3_INITIALIZED => Ok(part.bk3_initialized()),
+            HsmPartPropId::SD_INITIALIZED => Ok(part.sd_initialized()),
             _ => Err(HsmError::UnsupportedCmd),
         }
     }
 
-    fn part_prop_set_bool(&self, io: &UnoHsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
+    fn part_prop_set_bool(&self, io: &UnoHsmIo, id: HsmPartPropId, value: bool) -> HsmResult<()> {
         let part = PartStore::partition(io.pid())?;
         match id {
             // One-shot gate: false→true is the only legal transition.
             // Re-asserting true returns Bk3AlreadyInitialized; clearing
             // back to false is rejected (reset happens PAL-internally on
             // partition free / NSSR).
-            PartPropId::BK3_INITIALIZED => {
+            HsmPartPropId::BK3_INITIALIZED => {
                 if !value {
                     return Err(HsmError::InvalidArg);
                 }
@@ -868,7 +868,7 @@ impl HsmPartitionManager for UnoHsmPal {
                 part.set_bk3_initialized(true);
                 Ok(())
             }
-            PartPropId::SD_INITIALIZED => {
+            HsmPartPropId::SD_INITIALIZED => {
                 // One-shot claim; `false` permitted for undo rollback.
                 if value && part.sd_initialized() {
                     return Err(HsmError::SdAlreadyInitialized);
@@ -883,47 +883,49 @@ impl HsmPartitionManager for UnoHsmPal {
     fn part_prop_get_bytes<'a>(
         &'a self,
         io: &UnoHsmIo,
-        id: PartPropId,
+        id: HsmPartPropId,
     ) -> HsmResult<&'a HsmDmaBuf> {
         let p = PartStore::partition(io.pid())?;
         match id {
             // Identity / public keys — present once the backing key has
             // been provisioned (identity at SetResource, the others at
             // enable).
-            PartPropId::ID if p.id_key_id().is_some() => Ok(p.id()),
-            PartPropId::ID_PUB_KEY if p.id_key_id().is_some() => Ok(p.id_pub_key()),
-            PartPropId::ESTABLISH_CRED_PUB_KEY if p.ec_key_id().is_some() => Ok(p.ec_pub_key()),
-            PartPropId::SESSION_ENC_PUB_KEY if p.se_key_id().is_some() => Ok(p.se_pub_key()),
-            PartPropId::ID
-            | PartPropId::ID_PUB_KEY
-            | PartPropId::ESTABLISH_CRED_PUB_KEY
-            | PartPropId::SESSION_ENC_PUB_KEY => Err(HsmError::PartPropNotFound),
+            HsmPartPropId::PART_ID if p.id_key_id().is_some() => Ok(p.id()),
+            HsmPartPropId::PART_ID_ECC_PUB_KEY if p.id_key_id().is_some() => Ok(p.id_pub_key()),
+            HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY if p.ec_key_id().is_some() => {
+                Ok(p.ec_pub_key())
+            }
+            HsmPartPropId::SESSION_ENC_ECC_PUB_KEY if p.se_key_id().is_some() => Ok(p.se_pub_key()),
+            HsmPartPropId::PART_ID
+            | HsmPartPropId::PART_ID_ECC_PUB_KEY
+            | HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY
+            | HsmPartPropId::SESSION_ENC_ECC_PUB_KEY => Err(HsmError::PartPropNotFound),
 
             // Always-present fields.
-            PartPropId::NONCE => Ok(p.nonce()),
-            PartPropId::VM_LAUNCH_GUID => Ok(p.vm_launch_guid()),
-            PartPropId::PSK_CO => Ok(p.psk_co()),
-            PartPropId::PSK_CU => Ok(p.psk_cu()),
+            HsmPartPropId::NONCE => Ok(p.nonce()),
+            HsmPartPropId::VM_LAUNCH_GUID => Ok(p.vm_launch_guid()),
+            HsmPartPropId::PSK_CO => Ok(p.psk_co()),
+            HsmPartPropId::PSK_CU => Ok(p.psk_cu()),
 
             // AbsentUntilSet fields — `PartPropNotFound` until provisioned.
-            PartPropId::CREDENTIAL if p.credential_valid() => Ok(p.credential()),
-            PartPropId::POTA_THUMBPRINT if p.pota_thumbprint_valid() => Ok(p.pota_thumbprint()),
-            PartPropId::SATA_THUMBPRINT if p.sata_thumbprint_valid() => Ok(p.sata_thumbprint()),
-            PartPropId::SAPOTA_THUMBPRINT if p.sapota_thumbprint_valid() => {
+            HsmPartPropId::CREDENTIAL if p.credential_valid() => Ok(p.credential()),
+            HsmPartPropId::POTA_THUMBPRINT if p.pota_thumbprint_valid() => Ok(p.pota_thumbprint()),
+            HsmPartPropId::SATA_THUMBPRINT if p.sata_thumbprint_valid() => Ok(p.sata_thumbprint()),
+            HsmPartPropId::SAPOTA_THUMBPRINT if p.sapota_thumbprint_valid() => {
                 Ok(p.sapota_thumbprint())
             }
-            PartPropId::BK3_SESSION if p.bk3_session_valid() => Ok(p.bk3_session()),
-            PartPropId::PTA_PUB_KEY if p.pta_pub_key_valid() => Ok(p.pta_pub_key()),
-            PartPropId::POLICY_HASH if p.policy_hash_valid() => Ok(p.policy_hash()),
-            PartPropId::CREDENTIAL
-            | PartPropId::POTA_THUMBPRINT
-            | PartPropId::SATA_THUMBPRINT
-            | PartPropId::SAPOTA_THUMBPRINT
-            | PartPropId::BK3_SESSION
-            | PartPropId::PTA_PUB_KEY
-            | PartPropId::POLICY_HASH => Err(HsmError::PartPropNotFound),
+            HsmPartPropId::BK3_SESSION if p.bk3_session_valid() => Ok(p.bk3_session()),
+            HsmPartPropId::PTA_ECC_PUB_KEY if p.pta_pub_key_valid() => Ok(p.pta_pub_key()),
+            HsmPartPropId::POLICY_HASH if p.policy_hash_valid() => Ok(p.policy_hash()),
+            HsmPartPropId::CREDENTIAL
+            | HsmPartPropId::POTA_THUMBPRINT
+            | HsmPartPropId::SATA_THUMBPRINT
+            | HsmPartPropId::SAPOTA_THUMBPRINT
+            | HsmPartPropId::BK3_SESSION
+            | HsmPartPropId::PTA_ECC_PUB_KEY
+            | HsmPartPropId::POLICY_HASH => Err(HsmError::PartPropNotFound),
             // Variable-length blobs are absent when their stored length is 0.
-            PartPropId::SEALED_BK3 => {
+            HsmPartPropId::SEALED_BK3 => {
                 let b = p.sealed_bk3();
                 if b.is_empty() {
                     Err(HsmError::PartPropNotFound)
@@ -931,7 +933,7 @@ impl HsmPartitionManager for UnoHsmPal {
                     Ok(b)
                 }
             }
-            PartPropId::MASKED_BK_BOOT => {
+            HsmPartPropId::MASKED_BK_BOOT => {
                 let b = p.masked_bk_boot();
                 if b.is_empty() {
                     Err(HsmError::PartPropNotFound)
@@ -946,49 +948,49 @@ impl HsmPartitionManager for UnoHsmPal {
     fn part_prop_set_bytes(
         &self,
         io: &UnoHsmIo,
-        id: PartPropId,
+        id: HsmPartPropId,
         data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let p = PartStore::partition(io.pid())?;
         match id {
-            PartPropId::NONCE => p.set_nonce(data),
-            PartPropId::PSK_CO => p.set_psk_co(data),
-            PartPropId::PSK_CU => p.set_psk_cu(data),
-            PartPropId::CREDENTIAL => p.set_credential(data),
-            PartPropId::SEALED_BK3 => p.set_sealed_bk3(data),
-            PartPropId::MASKED_BK_BOOT => p.set_masked_bk_boot(data),
-            PartPropId::BK3_SESSION => p.set_bk3_session(data),
-            PartPropId::POTA_THUMBPRINT => p.set_pota_thumbprint(data),
-            PartPropId::SATA_THUMBPRINT => p.set_sata_thumbprint(data),
-            PartPropId::SAPOTA_THUMBPRINT => p.set_sapota_thumbprint(data),
-            PartPropId::PTA_PUB_KEY => p.set_pta_pub_key(data),
-            PartPropId::POLICY_HASH => p.set_policy_hash(data),
+            HsmPartPropId::NONCE => p.set_nonce(data),
+            HsmPartPropId::PSK_CO => p.set_psk_co(data),
+            HsmPartPropId::PSK_CU => p.set_psk_cu(data),
+            HsmPartPropId::CREDENTIAL => p.set_credential(data),
+            HsmPartPropId::SEALED_BK3 => p.set_sealed_bk3(data),
+            HsmPartPropId::MASKED_BK_BOOT => p.set_masked_bk_boot(data),
+            HsmPartPropId::BK3_SESSION => p.set_bk3_session(data),
+            HsmPartPropId::POTA_THUMBPRINT => p.set_pota_thumbprint(data),
+            HsmPartPropId::SATA_THUMBPRINT => p.set_sata_thumbprint(data),
+            HsmPartPropId::SAPOTA_THUMBPRINT => p.set_sapota_thumbprint(data),
+            HsmPartPropId::PTA_ECC_PUB_KEY => p.set_pta_pub_key(data),
+            HsmPartPropId::POLICY_HASH => p.set_policy_hash(data),
             _ => Err(HsmError::UnsupportedCmd),
         }
     }
 
-    fn part_prop_clear(&self, io: &UnoHsmIo, id: PartPropId) -> HsmResult<()> {
+    fn part_prop_clear(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<()> {
         let p = PartStore::partition(io.pid())?;
         match id {
             // Read-write vault-ref key ids reset to absent.
-            PartPropId::MK_KEY_ID => p.set_mk_key_id(None),
-            PartPropId::UPS_KEY_ID => p.set_ups_key_id(None),
-            PartPropId::PTA_KEY_ID => p.set_pta_key_id(None),
-            PartPropId::SESSION_ENC_KEY_ID => p.set_se_key_id(None),
-            PartPropId::ESTABLISH_CRED_KEY_ID => p.set_ec_key_id(None),
-            PartPropId::LOCAL_MK_KEY_ID => p.set_local_mk_key_id(None),
-            PartPropId::EPHEMERAL_MK_KEY_ID => p.set_ephemeral_mk_key_id(None),
-            PartPropId::SD_MK_KEY_ID => p.set_sd_mk_key_id(None),
+            HsmPartPropId::MK_KEY_ID => p.set_mk_key_id(None),
+            HsmPartPropId::UPS_KEY_ID => p.set_ups_key_id(None),
+            HsmPartPropId::PTA_KEY_ID => p.set_pta_key_id(None),
+            HsmPartPropId::SESSION_ENC_KEY_ID => p.set_se_key_id(None),
+            HsmPartPropId::ESTABLISH_CRED_KEY_ID => p.set_ec_key_id(None),
+            HsmPartPropId::LOCAL_MK_KEY_ID => p.set_local_mk_key_id(None),
+            HsmPartPropId::EPHEMERAL_MK_KEY_ID => p.set_ephemeral_mk_key_id(None),
+            HsmPartPropId::SD_MK_KEY_ID => p.set_sd_mk_key_id(None),
             // AbsentUntilSet byte fields zeroize and reset to absent.
-            PartPropId::CREDENTIAL => p.clear_credential(),
-            PartPropId::POTA_THUMBPRINT => p.clear_pota_thumbprint(),
-            PartPropId::SATA_THUMBPRINT => p.clear_sata_thumbprint(),
-            PartPropId::SAPOTA_THUMBPRINT => p.clear_sapota_thumbprint(),
-            PartPropId::BK3_SESSION => p.clear_bk3_session(),
-            PartPropId::SEALED_BK3 => p.clear_sealed_bk3(),
-            PartPropId::MASKED_BK_BOOT => p.clear_masked_bk_boot(),
-            PartPropId::PTA_PUB_KEY => p.clear_pta_pub_key(),
-            PartPropId::POLICY_HASH => p.clear_policy_hash(),
+            HsmPartPropId::CREDENTIAL => p.clear_credential(),
+            HsmPartPropId::POTA_THUMBPRINT => p.clear_pota_thumbprint(),
+            HsmPartPropId::SATA_THUMBPRINT => p.clear_sata_thumbprint(),
+            HsmPartPropId::SAPOTA_THUMBPRINT => p.clear_sapota_thumbprint(),
+            HsmPartPropId::BK3_SESSION => p.clear_bk3_session(),
+            HsmPartPropId::SEALED_BK3 => p.clear_sealed_bk3(),
+            HsmPartPropId::MASKED_BK_BOOT => p.clear_masked_bk_boot(),
+            HsmPartPropId::PTA_ECC_PUB_KEY => p.clear_pta_pub_key(),
+            HsmPartPropId::POLICY_HASH => p.clear_policy_hash(),
             _ => return Err(HsmError::UnsupportedCmd),
         }
         Ok(())

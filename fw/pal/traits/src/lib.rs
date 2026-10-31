@@ -238,23 +238,23 @@ impl From<HsmSessId> for u16 {
 }
 
 impl HsmSessId {
-    /// Returns the [`SessionRole`] implied by this session's slot index.
+    /// Returns the [`HsmSessionRole`] implied by this session's slot index.
     ///
-    /// Slot 0 is reserved for [`SessionRole::CryptoOfficer`] sessions;
-    /// slots 1..=7 are [`SessionRole::CryptoUser`].  The mapping is
+    /// Slot 0 is reserved for [`HsmSessionRole::CryptoOfficer`] sessions;
+    /// slots 1..=7 are [`HsmSessionRole::CryptoUser`].  The mapping is
     /// pinned by the session-establishment protocol and matches the
     /// PSK-based role gating performed in `OpenSessionInit`.
     ///
     /// # Returns
     ///
-    /// [`SessionRole::CryptoOfficer`] if this is slot 0, otherwise
-    /// [`SessionRole::CryptoUser`].
+    /// [`HsmSessionRole::CryptoOfficer`] if this is slot 0, otherwise
+    /// [`HsmSessionRole::CryptoUser`].
     #[inline]
-    pub fn role(self) -> SessionRole {
+    pub fn role(self) -> HsmSessionRole {
         if self.0 == 0 {
-            SessionRole::CryptoOfficer
+            HsmSessionRole::CryptoOfficer
         } else {
-            SessionRole::CryptoUser
+            HsmSessionRole::CryptoUser
         }
     }
 }
