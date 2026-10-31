@@ -80,6 +80,7 @@ mod tests {
     use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
     #[test]
+    #[allow(unsafe_code)]
     fn key_mask_requires_32_byte_aad_alignment() {
         let key = [0; 32];
         // SAFETY: Validation only reads the key length, without submitting DMA.
