@@ -26,6 +26,8 @@ pub mod exdata;
 #[cfg(all(target_os = "linux", feature = "engine"))]
 pub mod hkdf_method;
 #[cfg(all(target_os = "linux", feature = "engine"))]
+pub mod mem;
+#[cfg(all(target_os = "linux", feature = "engine"))]
 mod method_table;
 #[cfg(all(target_os = "linux", feature = "engine"))]
 pub mod pkey_method;
@@ -34,4 +36,8 @@ pub mod rsa_method;
 #[cfg(all(target_os = "linux", feature = "engine"))]
 pub mod rsa_pkey_method;
 
+#[cfg(all(target_os = "linux", feature = "engine"))]
+pub use method_table::FILE_OUTPUT_SIZE_HINT;
+#[cfg(all(target_os = "linux", feature = "engine"))]
+pub use method_table::MASKED_KEY_MAX_BUFFER;
 pub use tsra_ossl_engine_sys as ffi;
