@@ -91,6 +91,13 @@ struct PendingHandshake {
     /// public key fetched out-of-band via the TBOR cert chain
     /// (`GetCertChainInfo` / `GetCertificate`).
     pub pk_hsm: [u8; PK_RESP_LEN],
+    /// Generation-bound backend token recorded for this session's
+    /// `SessionOpenInit` (`Open`) exchange by transports that track
+    /// one (e.g. the vsock DDI). Threaded into
+    /// [`open_session_ex_finish`]'s own `exec_op_tbor` call so the
+    /// Phase-2 `InSession` request is recognized as belonging to the
+    /// same handshake rather than rejected as missing a token.
+    pub ddi_cookie: Option<u64>,
 }
 
 pub(crate) struct OpenSessionExResult {
@@ -112,6 +119,14 @@ pub(crate) struct OpenSessionExResult {
     /// FW-emitted wrapped masking-key blob — opaque to the host.
     /// Held in a [`Zeroizing`] buffer so it is wiped on drop.
     pub(crate) bmk_session: Zeroizing<Vec<u8>>,
+    /// Generation-bound backend token for this session, as recorded by
+    /// the Phase-2 `SessionOpenFinish` `InSession` exchange. Stored in
+    /// the resulting [`HsmSession`](super::super::HsmSession) and
+    /// threaded through every later in-session TBOR op (and the final
+    /// `CloseSession`) so a transport that tracks per-session
+    /// generations (e.g. the vsock DDI) can tell a stale handle from a
+    /// live one after a partition reset.
+    pub(crate) ddi_cookie: Option<u64>,
 }
 
 /// Look up the partition identity public key (`pk_hsm`) via the
@@ -315,6 +330,7 @@ fn open_session_ex_init(
         pk_init: eph.pk_sec1,
         pk_resp: resp.pk_resp,
         pk_hsm: pk_hsm_sec1,
+        ddi_cookie: cookie,
     })
 }
 
@@ -367,7 +383,10 @@ fn open_session_ex_finish(
         mac_fin,
         seed_envelope,
     };
-    let mut cookie = None;
+    // Carry the Phase-1 `Open` token forward so the Phase-2
+    // `InSession` exchange is recognized as the same handshake rather
+    // than rejected for lacking one.
+    let mut cookie = pending.ddi_cookie;
     let resp = dev
         .exec_op_tbor(&req, None, &mut cookie)
         .map_err(HsmError::from)?;
@@ -382,6 +401,7 @@ fn open_session_ex_finish(
         exported: pending.exported.clone(),
         param_key,
         bmk_session: Zeroizing::new(resp.bmk_session),
+        ddi_cookie: cookie,
     })
 }
 
@@ -400,6 +420,11 @@ fn open_session_ex_finish(
 /// * `param_key` - The session's per-session AES wrap key used to seal
 ///   the new PSK.
 /// * `new_psk` - The 32-byte replacement PSK ([`crate::PSK_LEN`]).
+/// * `ddi_cookie` - The session's generation-bound backend token,
+///   threaded through so a transport that tracks per-session
+///   generations (e.g. the vsock DDI) recognizes this request as
+///   belonging to the still-live session rather than rejecting it as
+///   missing a token.
 ///
 /// # Errors
 ///
@@ -410,6 +435,7 @@ pub(crate) fn psk_change(
     session_id: u16,
     param_key: &AesKey,
     new_psk: &[u8; crate::PSK_LEN],
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<()> {
     let aad = build_psk_change_aad(session_id);
     let iv = Rng::rand_vec(tsra_crypto::aead_envelope::AeadAlg::AesGcm256.iv_len())
@@ -445,10 +471,11 @@ pub(crate) fn psk_change(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = None;
+    let mut cookie = *ddi_cookie.lock();
     let _resp: TborPskChangeResp = dev
         .exec_op_tbor(&req, None, &mut cookie)
         .map_err(HsmError::from)?;
+    *ddi_cookie.lock() = cookie;
     Ok(())
 }
 
@@ -465,19 +492,28 @@ pub(crate) fn psk_change(
 ///
 /// * `partition` - The HSM partition handle.
 /// * `session_id` - The TBOR session identifier to tear down.
+/// * `ddi_cookie` - The session's generation-bound backend token; see
+///   [`psk_change`].
 ///
 /// # Errors
 ///
 /// Propagates DDI failures from the round-trip.
-pub(crate) fn close_session_ex(partition: &HsmPartition, session_id: u16) -> HsmResult<()> {
+pub(crate) fn close_session_ex(
+    partition: &HsmPartition,
+    session_id: u16,
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
+) -> HsmResult<()> {
     let inner = partition.inner().read();
     let dev = inner.dev();
 
     let req = TborSessionCloseReq { session_id };
-    let mut cookie = None;
-    dev.exec_op_tbor(&req, None, &mut cookie)
+    let mut cookie = *ddi_cookie.lock();
+    let result = dev
+        .exec_op_tbor(&req, None, &mut cookie)
         .map_err(HsmError::from)
-        .map(|_| ())
+        .map(|_| ());
+    *ddi_cookie.lock() = cookie;
+    result
 }
 
 #[cfg(all(test, feature = "emu"))]

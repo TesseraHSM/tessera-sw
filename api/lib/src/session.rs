@@ -10,6 +10,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tracing::*;
 use tsra_crypto::AesKey;
@@ -34,6 +35,7 @@ impl HsmSession {
         app_id: u8,
         rev: HsmApiRev,
         partition: HsmPartition,
+        ddi_cookie: Option<u64>,
         seed: [u8; 48],
         bmk_session: Vec<u8>,
     ) -> Self {
@@ -43,6 +45,7 @@ impl HsmSession {
                 app_id,
                 rev,
                 partition,
+                ddi_cookie,
                 seed,
                 bmk_session,
             ))),
@@ -77,6 +80,10 @@ impl HsmSession {
     /// was last reopened.
     pub(crate) fn last_restore_epoch(&self) -> u64 {
         self.inner.read().last_restore_epoch()
+    }
+
+    pub(crate) fn ddi_cookie(&self) -> Option<u64> {
+        *self.inner.read().ddi_cookie.lock()
     }
 
     /// Serializes session-reopen attempts for a given epoch.
@@ -168,9 +175,13 @@ impl HsmSession {
     pub fn change_psk(&self, new_psk: &[u8; PSK_LEN]) -> HsmResult<()> {
         let inner = self.inner.read();
         match &inner.kind {
-            SessionKind::Ver2 { param_key, .. } => {
-                ddi::psk_change(&inner.partition, inner.id, param_key, new_psk)
-            }
+            SessionKind::Ver2 { param_key, .. } => ddi::psk_change(
+                &inner.partition,
+                inner.id,
+                param_key,
+                new_psk,
+                &inner.ddi_cookie,
+            ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
     }
@@ -568,6 +579,7 @@ struct HsmSessionInner {
     id: u16,
     rev: HsmApiRev,
     partition: HsmPartition,
+    ddi_cookie: Mutex<Option<u64>>,
     /// The partition restore epoch at which this session was last reopened.
     /// Compared against `ResiliencyState::restore_epoch` to decide whether
     /// a `reopen_session` call is needed before retrying a key operation.
@@ -587,7 +599,9 @@ impl Drop for HsmSessionInner {
             SessionKind::Ver1 { .. } => {
                 self.with_dev(|dev| ddi::close_session(dev, self.id, self.rev))
             }
-            SessionKind::Ver2 { .. } => ddi::close_session_ex(&self.partition, self.id),
+            SessionKind::Ver2 { .. } => {
+                ddi::close_session_ex(&self.partition, self.id, &self.ddi_cookie)
+            }
         };
 
         // Wipe sensitive session material from process memory once the
@@ -631,6 +645,7 @@ impl HsmSessionInner {
         app_id: u8,
         rev: HsmApiRev,
         partition: HsmPartition,
+        ddi_cookie: Option<u64>,
         seed: [u8; 48],
         bmk_session: Vec<u8>,
     ) -> Self {
@@ -639,6 +654,7 @@ impl HsmSessionInner {
             id,
             rev,
             partition,
+            ddi_cookie: Mutex::new(ddi_cookie),
             last_restore_epoch: epoch,
             kind: SessionKind::Ver1 {
                 app_id,
@@ -661,6 +677,7 @@ impl HsmSessionInner {
             id: result.session_id,
             rev,
             partition,
+            ddi_cookie: Mutex::new(result.ddi_cookie),
             last_restore_epoch: epoch,
             kind: SessionKind::Ver2 {
                 psk_id: result.psk_id,
@@ -764,7 +781,7 @@ impl HsmSessionInner {
     {
         let part = self.partition().inner().read();
         let dev = part.dev();
-        f(dev)
+        ddi::with_session_cookie(&self.ddi_cookie, || f(dev))
     }
 
     /// Returns the partition restore epoch at which this session was last

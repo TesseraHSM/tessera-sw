@@ -1315,10 +1315,24 @@ pub enum DdiDeviceKind {
     Physical = 2,
 }
 
+/// Extracts a response's body-level session id, for the rare ops (today
+/// only `ReopenSession`) whose response data independently reports the
+/// session id, distinct from the shared `DdiRespHdr::sess_id`. Backends
+/// can use this to confirm the body agrees with the header before
+/// trusting the response, e.g. before promoting any header-matched
+/// session to a new connection generation. See
+/// [`ddi_op_req_resp!`](crate::ddi_op_req_resp) for how this is wired up
+/// per op.
+pub trait DdiRespSessionId {
+    /// Get the session id from the response body, or `None` if this op's
+    /// response carries no such field independent of the header.
+    fn resp_session_id(&self) -> Option<u16>;
+}
+
 /// Trait all DDI request structures must implement
 pub trait DdiOpReq: MborEncode + MborLen + Sized {
     /// Response type
-    type OpResp: for<'a> MborDecode<'a>;
+    type OpResp: for<'a> MborDecode<'a> + DdiRespSessionId;
 
     /// Get opcode from the hdr
     fn get_opcode(&self) -> DdiOp;
@@ -1412,6 +1426,9 @@ pub struct DdiRespExt {}
 #[macro_export]
 macro_rules! ddi_op_req_resp {
     ($name:ident) => {
+        $crate::ddi_op_req_resp!($name, |_resp| None);
+    };
+    ($name:ident, $resp_session_id:expr) => {
         paste! {
             #[cfg_attr(feature = "fuzzing", derive(arbitrary::Arbitrary))]
             #[derive(Ddi, Debug)]
@@ -1460,6 +1477,13 @@ macro_rules! ddi_op_req_resp {
                 // header
                 fn get_session_id(&self) -> Option<u16> {
                     self.hdr.sess_id
+                }
+            }
+
+            impl DdiRespSessionId for [<$name CmdResp>] {
+                fn resp_session_id(&self) -> Option<u16> {
+                    let f: fn(&Self) -> Option<u16> = $resp_session_id;
+                    f(self)
                 }
             }
         }

@@ -1,0 +1,1268 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use std::io::Read;
+use std::io::Write;
+use std::io::{self};
+use std::os::fd::RawFd;
+use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
+use clap::Parser;
+use clap::ValueEnum;
+use log::debug;
+use nix::sys::socket::accept4;
+use nix::sys::socket::bind;
+use nix::sys::socket::listen;
+use nix::sys::socket::send;
+use nix::sys::socket::setsockopt;
+use nix::sys::socket::socket;
+use nix::sys::socket::sockopt::ReceiveTimeout;
+use nix::sys::socket::sockopt::SendTimeout;
+use nix::sys::socket::AddressFamily;
+use nix::sys::socket::MsgFlags;
+use nix::sys::socket::SockFlag;
+use nix::sys::socket::SockType;
+use nix::sys::socket::VsockAddr;
+use nix::sys::time::TimeVal;
+use nix::unistd::close;
+use nix::unistd::read;
+use tracing_subscriber::EnvFilter;
+use tsra_ddi_sock_proto::OobItem;
+use tsra_ddi_sock_proto::Request;
+use tsra_ddi_sock_proto::Response;
+use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::Sqe;
+use tsra_fw_hsm_std::StdHsm;
+
+const PAGE_SIZE: usize = 4096;
+const MAX_SRC_LEN: usize = PAGE_SIZE;
+const MAX_DST_LEN: usize = 2 * PAGE_SIZE;
+const OOB_DESCRIPTOR_SIZE: usize = 16;
+const TRANSPORT_ERROR: u32 = 1;
+/// Connections are served one at a time (see `serve_connection_logged`), so
+/// an idle or stalled AF_VSOCK client must not be allowed to occupy the
+/// server indefinitely and lock out every other client. Once a request
+/// frame has started arriving, it must complete within this window or the
+/// connection is treated the same as a disconnect: the partition is reset
+/// and the connection is dropped so the next client can be accepted. (See
+/// `VSOCK_IDLE_WAIT_TIMEOUT` for the separate, much longer bound on how
+/// long a connection may sit idle *before* a frame starts arriving.)
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Idle-read deadline used while waiting for the *next* request frame (as
+/// opposed to `CONNECTION_READ_TIMEOUT`, which also bounds writing a
+/// response). AF_UNIX mode is inherently single-connection: `serve`'s
+/// AF_UNIX loop always reconnects to the same peer (the cloud-hypervisor
+/// manticorevsock device), so there is no other client whose fairness
+/// this timeout would protect (contrast the AF_VSOCK rationale on
+/// `CONNECTION_READ_TIMEOUT`/`VSOCK_IDLE_WAIT_TIMEOUT`). Applying either
+/// of those bounds there instead let an ordinary idle gap between
+/// guest-issued HSM commands look identical to a peer disconnect, silently
+/// resetting the partition (wiping keys/sessions/vault) and orphaning the
+/// guest's existing connection out from under it. Use an effectively
+/// unbounded value instead so only a real disconnect ends an AF_UNIX
+/// connection.
+const UNIX_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// Upper bound on how long an AF_VSOCK connection may sit idle before the
+/// *next* request frame starts arriving.
+///
+/// A healthy client reasonably leaves a session idle between commands
+/// (e.g. TPM-paced access patterns), so this is intentionally much more
+/// generous than `CONNECTION_READ_TIMEOUT` - that remains the tight bound
+/// on *completing* a frame once it has started (see `serve_connection`),
+/// which still protects against a stalled/slow-drip peer regardless of
+/// how long idle waiting is allowed to run. `reset_partition`'s soft
+/// reset (see `MAX_SOFT_RESETS_BEFORE_HARD`) also means a connection that
+/// does time out here no longer destroys the boot key or abandons every
+/// session outright, but the client's stream is still dropped (and
+/// `DdiSockDev` does not reconnect it), so this remains a real disruption
+/// worth avoiding for a merely-idle (not actually abandoned) client.
+const VSOCK_IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Adjusts a stream's per-syscall socket timeouts.
+///
+/// `SO_RCVTIMEO`/`SO_SNDTIMEO` only bound a single blocking syscall, not
+/// however many syscalls a multi-read/write operation (e.g.
+/// `Request::read_from`, `Response::write_to`) ends up making. [`DeadlineRead`]
+/// and [`DeadlineWrite`] use this to shrink the underlying socket timeout to
+/// whatever time remains of their overall deadline before every syscall, so
+/// a peer that paces bytes just under the *socket* timeout still cannot
+/// exceed the overall deadline.
+trait SetSocketTimeouts {
+    fn set_read_timeout(&self, timeout: Duration) -> io::Result<()>;
+    fn set_write_timeout(&self, timeout: Duration) -> io::Result<()>;
+}
+
+impl SetSocketTimeouts for UnixStream {
+    fn set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+        UnixStream::set_read_timeout(self, Some(timeout))
+    }
+
+    fn set_write_timeout(&self, timeout: Duration) -> io::Result<()> {
+        UnixStream::set_write_timeout(self, Some(timeout))
+    }
+}
+
+impl SetSocketTimeouts for VsockStream {
+    fn set_read_timeout(&self, timeout: Duration) -> io::Result<()> {
+        setsockopt(self.0, ReceiveTimeout, &duration_to_timeval(timeout)).map_err(nix_to_io)
+    }
+
+    fn set_write_timeout(&self, timeout: Duration) -> io::Result<()> {
+        setsockopt(self.0, SendTimeout, &duration_to_timeval(timeout)).map_err(nix_to_io)
+    }
+}
+
+fn duration_to_timeval(duration: Duration) -> TimeVal {
+    let micros = duration.as_micros().max(1);
+    TimeVal::new((micros / 1_000_000) as i64, (micros % 1_000_000) as i64)
+}
+
+/// Returns the time remaining until `deadline`, or an
+/// [`io::ErrorKind::TimedOut`] error if it has already passed.
+fn remaining_or_timed_out(deadline: Instant) -> io::Result<Duration> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "connection deadline exceeded",
+        ));
+    }
+    Ok(deadline - now)
+}
+
+/// Wraps a `Read` with an overall deadline that bounds the *total* time
+/// spent reading a single frame, not just each individual blocking
+/// syscall.
+///
+/// The AF_VSOCK/AF_UNIX socket-level `SO_RCVTIMEO` (see
+/// `CONNECTION_READ_TIMEOUT`) only bounds how long a single `read()`
+/// syscall can block; it does not bound how long `Request::read_from` (or
+/// any other multi-read parse) takes overall. A peer that drips one byte
+/// just under that timeout apart could otherwise keep completing
+/// individual reads forever while still taking arbitrarily long to
+/// deliver a full frame, defeating the timeout and occupying this
+/// single-threaded server indefinitely. Shrinking the socket's own
+/// `SO_RCVTIMEO` to whatever remains of the overall deadline before every
+/// read (rather than just checking the deadline before calling into a
+/// `read()` that can still block for the full socket timeout) bounds the
+/// total wall-clock time regardless of how the peer paces its writes.
+struct DeadlineRead<'a, T: Read + SetSocketTimeouts> {
+    inner: &'a mut T,
+    deadline: Instant,
+}
+
+impl<T: Read + SetSocketTimeouts> Read for DeadlineRead<'_, T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let remaining = remaining_or_timed_out(self.deadline)?;
+        self.inner.set_read_timeout(remaining)?;
+        self.inner.read(buf)
+    }
+}
+
+/// Wraps a `Write` with an overall deadline that bounds the *total* time
+/// spent writing a single response, not just each individual blocking
+/// syscall. Mirrors [`DeadlineRead`]'s reasoning: `SO_SNDTIMEO` only bounds
+/// one `write()` syscall, so a peer that drains just a few bytes right
+/// before each timeout could otherwise keep `Response::write_to` blocked
+/// indefinitely across many individually-timed-out-but-successful writes.
+struct DeadlineWrite<'a, T: Write + SetSocketTimeouts> {
+    inner: &'a mut T,
+    deadline: Instant,
+}
+
+impl<T: Write + SetSocketTimeouts> Write for DeadlineWrite<'_, T> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let remaining = remaining_or_timed_out(self.deadline)?;
+        self.inner.set_write_timeout(remaining)?;
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Re-delivers one already-read byte before falling through to `inner`.
+///
+/// Used by `serve_connection` to splice the single byte it peeks (to
+/// distinguish idle waiting from an in-progress frame; see
+/// `VSOCK_IDLE_WAIT_TIMEOUT`) back in front of the stream, so
+/// `Request::read_from` sees a contiguous frame regardless of where the
+/// peek happened to land relative to the frame's own internal reads.
+struct Prefixed<'a, T: Read> {
+    prefix: Option<u8>,
+    inner: &'a mut T,
+}
+
+impl<T: Read> Read for Prefixed<'_, T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(byte) = self.prefix.take() {
+            if let Some(first) = buf.first_mut() {
+                *first = byte;
+                return Ok(1);
+            }
+            // `buf` is empty: there's nowhere to deliver the byte, so put
+            // it back for the next call instead of silently dropping it.
+            self.prefix = Some(byte);
+            return Ok(0);
+        }
+        self.inner.read(buf)
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SocketType {
+    Vsock,
+    Unix,
+}
+
+#[derive(Debug, Parser)]
+#[command(about = "Serve StdHsm requests over AF_VSOCK or AF_UNIX")]
+struct Args {
+    /// AF_VSOCK listen port or AF_UNIX guest destination port.
+    #[arg(long)]
+    port: u32,
+
+    /// Socket transport to use.
+    #[arg(long, value_enum, default_value_t = SocketType::Vsock)]
+    socket_type: SocketType,
+
+    /// Cloud Hypervisor AF_UNIX socket path.
+    #[arg(long, required_if_eq("socket_type", "unix"))]
+    unix_socket: Option<PathBuf>,
+
+    /// Local CID on which to listen. Defaults to any local CID.
+    #[arg(long, default_value_t = libc::VMADDR_CID_ANY)]
+    cid: u32,
+
+    /// HSM partition used for submitted requests.
+    #[arg(long, default_value_t = 3)]
+    partition_id: u8,
+}
+
+#[repr(C, align(4096))]
+struct DmaPages<const SIZE: usize>([u8; SIZE]);
+
+impl<const SIZE: usize> DmaPages<SIZE> {
+    fn zeroed() -> Self {
+        Self([0; SIZE])
+    }
+
+    /// Returns the buffer's address for use as a DMA *source* only.
+    ///
+    /// Derived through `as_ptr()`, so the returned address carries
+    /// read-only provenance; a later write through a pointer
+    /// reconstructed from it (e.g. `StdGdma::copy_mem_to_host`) is
+    /// undefined behavior even though the allocation is large enough.
+    /// Use [`address_mut`](Self::address_mut) for any buffer the HSM
+    /// may write into.
+    fn address(&self) -> u64 {
+        self.0.as_ptr() as u64
+    }
+
+    /// Returns the buffer's address for use as a DMA *destination*.
+    ///
+    /// Derived through `as_mut_ptr()`, so the returned address carries
+    /// writable provenance, matching how `StdGdma::copy_mem_to_host`
+    /// later writes the HSM's response through a pointer reconstructed
+    /// from it. The borrow this requires must be kept alive (the
+    /// buffer must not be read or re-borrowed immutably) until the DMA
+    /// write has completed.
+    fn address_mut(&mut self) -> u64 {
+        self.0.as_mut_ptr() as u64
+    }
+}
+
+struct PreparedRequest {
+    sqe: [u32; 16],
+    destination: Box<DmaPages<MAX_DST_LEN>>,
+    _source: Box<DmaPages<MAX_SRC_LEN>>,
+    _oob_descriptors: Option<Box<DmaPages<PAGE_SIZE>>>,
+    _oob_data: Vec<Vec<u8>>,
+}
+
+impl PreparedRequest {
+    fn new(request: Request) -> Result<Self> {
+        let src_len = request.sqe[1] as usize;
+        let dst_len = request.sqe[6] as usize;
+        let oob_len = request.sqe[15] as usize;
+
+        debug!(
+            "src_len {:?} dst_len {:?} oob_len {:?}",
+            src_len, dst_len, oob_len
+        );
+        if src_len > MAX_SRC_LEN || request.payload.len() != src_len {
+            bail!("Invalid source payload length");
+        }
+        if dst_len > MAX_DST_LEN {
+            bail!("Invalid destination length");
+        }
+        let expected_oob_len = request
+            .oob
+            .len()
+            .checked_mul(OOB_DESCRIPTOR_SIZE)
+            .context("OOB descriptor length overflow")?;
+        if oob_len != expected_oob_len || oob_len > PAGE_SIZE {
+            bail!("Invalid OOB descriptor length");
+        }
+
+        tracing::trace!(
+            src_len,
+            dst_len,
+            oob_descriptors = request.oob.len(),
+            oob_bytes = request
+                .oob
+                .iter()
+                .map(|item| item.data.len())
+                .sum::<usize>(),
+            "Validated request buffers"
+        );
+
+        let mut source = Box::new(DmaPages::<MAX_SRC_LEN>::zeroed());
+        source.0[..src_len].copy_from_slice(&request.payload);
+        let mut destination = Box::new(DmaPages::<MAX_DST_LEN>::zeroed());
+
+        let mut oob_data: Vec<Vec<u8>> = request.oob.iter().map(|item| item.data.clone()).collect();
+        let mut oob_descriptors =
+            (!request.oob.is_empty()).then(|| Box::new(DmaPages::<PAGE_SIZE>::zeroed()));
+        if let Some(page) = oob_descriptors.as_mut() {
+            for (index, (item, data)) in request.oob.iter().zip(&mut oob_data).enumerate() {
+                tracing::trace!(index, len = data.len(), "Re-homing OOB item");
+                let descriptor = rehome_oob_descriptor(item, data)?;
+                let offset = index * OOB_DESCRIPTOR_SIZE;
+                page.0[offset..offset + OOB_DESCRIPTOR_SIZE].copy_from_slice(&descriptor);
+            }
+        }
+
+        let mut sqe = request.sqe;
+        set_address(&mut sqe, 2, source.address());
+        set_address(&mut sqe, 4, 0);
+        // The HSM writes its response through this address (and, when
+        // the destination spans two pages, through the PRP2 address
+        // below), so both must carry writable provenance —
+        // `address_mut` (not `address`).
+        set_address(&mut sqe, 7, destination.address_mut());
+        let dst_prp2 = if dst_len > PAGE_SIZE {
+            destination.address_mut() + PAGE_SIZE as u64
+        } else {
+            0
+        };
+        set_address(&mut sqe, 9, dst_prp2);
+        set_address(
+            &mut sqe,
+            13,
+            oob_descriptors.as_ref().map_or(0, |page| page.address()),
+        );
+
+        Ok(Self {
+            sqe,
+            destination,
+            _source: source,
+            _oob_descriptors: oob_descriptors,
+            _oob_data: oob_data,
+        })
+    }
+
+    fn response(self, mut cqe: [u32; 4]) -> Response {
+        let cqe_view = Cqe::from(&mut cqe);
+        let dst_len = cqe_view.dst_len() as usize;
+        if dst_len > self.sqe[6] as usize || dst_len > self.destination.0.len() {
+            tracing::warn!(
+                dst_len,
+                requested_len = self.sqe[6],
+                "HSM completion reported an invalid destination length"
+            );
+            return error_response();
+        }
+        tracing::debug!(status = cqe_view.status(), dst_len, "Prepared HSM response");
+        Response {
+            status: 0,
+            cqe,
+            payload: self.destination.0[..dst_len].to_vec(),
+        }
+    }
+}
+
+fn rehome_oob_descriptor(item: &OobItem, data: &mut [u8]) -> Result<[u8; 16]> {
+    let descriptor_len = u32::from_le_bytes([
+        item.descriptor[8],
+        item.descriptor[9],
+        item.descriptor[10],
+        item.descriptor[11],
+    ]) as usize;
+    if descriptor_len != data.len() {
+        bail!("OOB descriptor length does not match its data");
+    }
+
+    let mut descriptor = item.descriptor;
+    descriptor[..8].copy_from_slice(&(data.as_ptr() as u64).to_le_bytes());
+    Ok(descriptor)
+}
+
+fn set_address(sqe: &mut [u32; 16], dword: usize, address: u64) {
+    sqe[dword] = address as u32;
+    sqe[dword + 1] = (address >> 32) as u32;
+}
+
+fn error_response() -> Response {
+    Response {
+        status: TRANSPORT_ERROR,
+        cqe: [0; 4],
+        payload: Vec::new(),
+    }
+}
+
+struct VsockListener(RawFd);
+
+impl VsockListener {
+    fn bind(cid: u32, port: u32) -> io::Result<Self> {
+        let fd = socket(
+            AddressFamily::Vsock,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )
+        .map_err(nix_to_io)?;
+        bind(fd, &VsockAddr::new(cid, port)).map_err(nix_to_io)?;
+        listen(fd, 128).map_err(nix_to_io)?;
+        Ok(Self(fd))
+    }
+
+    fn accept(&self) -> io::Result<VsockStream> {
+        let fd = accept4(self.0, SockFlag::SOCK_CLOEXEC).map_err(nix_to_io)?;
+        // Bound how long a single connection can occupy the server (see
+        // `CONNECTION_READ_TIMEOUT`).
+        let timeout = TimeVal::new(
+            CONNECTION_READ_TIMEOUT.as_secs() as i64,
+            i64::from(CONNECTION_READ_TIMEOUT.subsec_micros()),
+        );
+        if let Err(error) = setsockopt(fd, ReceiveTimeout, &timeout) {
+            let _ = close(fd);
+            return Err(nix_to_io(error));
+        }
+        if let Err(error) = setsockopt(fd, SendTimeout, &timeout) {
+            let _ = close(fd);
+            return Err(nix_to_io(error));
+        }
+        Ok(VsockStream(fd))
+    }
+}
+
+impl Drop for VsockListener {
+    fn drop(&mut self) {
+        let _ = close(self.0);
+    }
+}
+
+struct VsockStream(RawFd);
+
+impl Read for VsockStream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        read(self.0, buffer).map_err(nix_to_io)
+    }
+}
+
+impl Write for VsockStream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        send(self.0, buffer, MsgFlags::MSG_NOSIGNAL).map_err(nix_to_io)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for VsockStream {
+    fn drop(&mut self) {
+        let _ = close(self.0);
+    }
+}
+
+fn nix_to_io(error: nix::Error) -> io::Error {
+    // `nix::Error` *is* `nix::errno::Errno` in this nix version, and
+    // casting an arbitrary enum to `i32` only reliably yields the
+    // discriminant nix itself assigns (which may not track the real
+    // platform errno if nix's enum ever gains non-errno variants, and
+    // isn't guaranteed stable across nix releases). Defer to nix's own
+    // `From<Errno> for io::Error` conversion instead, so this keeps
+    // matching whatever nix considers correct even if that changes.
+    error.into()
+}
+
+fn write_connect_command(stream: &mut impl Write, port: u32) -> io::Result<()> {
+    writeln!(stream, "CONNECT {port}")?;
+    stream.flush()
+}
+
+/// Reads and validates the `OK <local-port>\n` acknowledgement Cloud
+/// Hypervisor's standard virtio-vsock unix backend sends after a
+/// successful host-initiated `CONNECT <port>\n`.
+///
+/// The acknowledged port is the backend's own ephemeral host-local port
+/// for this connection (not the guest destination port passed to
+/// `CONNECT`), so this only validates the `OK <digits>\n` shape.
+///
+/// Reads one byte at a time up to a sane line-length bound so it never
+/// consumes bytes belonging to the request/response frame that follows.
+/// Bounded by `deadline` overall (not just each individual `read_exact`
+/// syscall's socket timeout), mirroring [`DeadlineRead`]'s reasoning: a
+/// peer that drips one byte just under the socket timeout could
+/// otherwise keep this blocked far longer than intended.
+fn read_connect_ack(stream: &mut UnixStream, deadline: Instant) -> io::Result<()> {
+    const MAX_ACK_LEN: usize = 32;
+    let mut deadline_stream = DeadlineRead {
+        inner: stream,
+        deadline,
+    };
+    let mut line = Vec::with_capacity(MAX_ACK_LEN);
+    let mut byte = [0u8; 1];
+    loop {
+        deadline_stream.read_exact(&mut byte)?;
+        line.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+        if line.len() >= MAX_ACK_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "CONNECT acknowledgement exceeded the expected length",
+            ));
+        }
+    }
+    let text = std::str::from_utf8(&line)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "CONNECT ack wasn't UTF-8"))?;
+    let port_digits = text
+        .strip_prefix("OK ")
+        .and_then(|rest| rest.strip_suffix('\n'));
+    if !port_digits
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unexpected CONNECT acknowledgement: {line:?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Dials out to `path` and performs the `CONNECT`/`OK` handshake,
+/// retrying (with a fixed backoff) on both connection-level errors
+/// (the listener not existing yet) and transient handshake failures
+/// (e.g. the backend restarting mid-handshake), so a transient
+/// backend/guest restart cannot permanently stop AF_UNIX mode's
+/// automatic reconnects. Errors that indicate a genuine configuration
+/// or protocol problem (e.g. a malformed acknowledgement) are surfaced
+/// immediately instead of being retried forever.
+fn connect_unix(path: &Path, port: u32, idle_timeout: Duration) -> io::Result<UnixStream> {
+    loop {
+        match connect_unix_once(path, port, idle_timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::ConnectionAborted
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) =>
+            {
+                tracing::debug!(
+                    socket = %path.display(),
+                    ?error,
+                    "Waiting for AF_UNIX listener/handshake"
+                );
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// A single connect + `CONNECT`/`OK` handshake attempt, with no retry.
+fn connect_unix_once(path: &Path, port: u32, idle_timeout: Duration) -> io::Result<UnixStream> {
+    let mut stream = UnixStream::connect(path)?;
+    // The read timeout bounds the idle wait for the next request frame
+    // (see `idle_timeout`'s callers); the write timeout bounds writing a
+    // response and stays at `CONNECTION_READ_TIMEOUT` for every socket
+    // type, since that's a liveness bound on an in-flight write, not on
+    // command cadence.
+    stream.set_read_timeout(Some(idle_timeout))?;
+    stream.set_write_timeout(Some(CONNECTION_READ_TIMEOUT))?;
+    write_connect_command(&mut stream, port)?;
+    // The ack itself can take a moment (the backend waits on a real
+    // guest-side vsock accept), so bound it with the same liveness
+    // timeout as writes rather than the (potentially unbounded) idle
+    // timeout.
+    read_connect_ack(&mut stream, Instant::now() + CONNECTION_READ_TIMEOUT)?;
+    stream.set_read_timeout(Some(idle_timeout))?;
+    Ok(stream)
+}
+
+/// Number of attempts to re-enable a partition after a disconnect-triggered
+/// reset before giving up and logging at `error` level. `part_alloc`/
+/// `part_enable` failures are expected to be rare and transient (e.g.
+/// contention with a concurrent request), so a few immediate retries are
+/// cheap insurance against leaving the partition disabled - and therefore
+/// unusable by every subsequent connection - after a single failed
+/// attempt.
+const PARTITION_ENABLE_RETRIES: u32 = 3;
+
+/// Number of consecutive *soft* resets (`part_disable`/`part_enable`)
+/// `reset_partition` performs before forcing one *hard* reset
+/// (`part_free`/`part_alloc`) to reclaim any abandoned session slots.
+///
+/// Each soft reset can leak at most one session slot (the disconnecting
+/// client's own session, if it never closed it), and the firmware's
+/// session table holds at most 8 concurrent sessions, so forcing a hard
+/// reset no less often than every 8 soft resets guarantees the table can
+/// never actually fill up with abandoned sessions.
+const MAX_SOFT_RESETS_BEFORE_HARD: u32 = 8;
+
+/// Frees then re-allocates and re-enables `partition_id`, which clears its
+/// boot key (`BK_BOOT`)/MOBK, keys, nonce, vault, *and* fully releases its
+/// sessions, destroying any chance of a later `ReopenSession`/restoration
+/// for every session on the partition - not just the disconnecting
+/// client's.
+///
+/// This is the destructive fallback `reset_partition` uses to reclaim
+/// abandoned session slots every `MAX_SOFT_RESETS_BEFORE_HARD` disconnects
+/// (see `reset_partition`), and also what it falls back to if a soft reset
+/// itself fails.
+///
+/// Retries `part_alloc`/`part_enable` a few times on failure. Once
+/// `part_alloc` succeeds, later attempts only retry `part_enable` -
+/// re-calling `part_alloc` on an already-`Allocated` partition would just
+/// fail, permanently stranding the partition after a single transient
+/// `part_enable` failure. Returns an error if the partition could not be
+/// returned to a usable (`Enabled`) state after all retries; the caller
+/// must treat that as fatal (stop serving further clients), since
+/// continuing on a partition that isn't known to be freshly reset would
+/// violate the isolation invariant this reset exists to uphold.
+fn hard_reset_partition(
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+) -> Result<()> {
+    if let Err(error) = runtime.block_on(hsm.part_free(partition_id)) {
+        tracing::warn!(?error, "Failed to free partition on hard reset");
+    }
+    let res_mask = 1u128 << u32::from(partition_id);
+    let mut allocated = false;
+    let mut last_error = None;
+    for attempt in 1..=PARTITION_ENABLE_RETRIES {
+        if !allocated {
+            match runtime.block_on(hsm.part_alloc(partition_id, res_mask)) {
+                Ok(()) => allocated = true,
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        attempt,
+                        "Failed to re-allocate partition on hard reset"
+                    );
+                    last_error = Some(error);
+                    continue;
+                }
+            }
+        }
+        match runtime.block_on(hsm.part_enable(partition_id)) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    attempt,
+                    "Failed to re-enable partition on hard reset"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    let error = last_error.expect("loop runs at least once and only exits early via return Ok");
+    tracing::error!(
+        ?error,
+        "Failed to hard-reset partition after all retries; partition is unusable until the \
+         server is restarted"
+    );
+    Err(anyhow!(
+        "Failed to hard-reset partition after all retries: {error:?}"
+    ))
+}
+
+/// Disables then re-enables `partition_id`, clearing its keys, nonce, and
+/// vault but - unlike [`hard_reset_partition`] - preserving its boot key
+/// (`BK_BOOT`/MOBK) and any live sessions (marked `NeedsRenegotiation`, so
+/// a later `ReopenSession` can re-key them), mirroring real hardware NSSR
+/// semantics.
+///
+/// This is the normal per-disconnect reset `reset_partition` uses; it
+/// never frees session slots, so a run of these alone would eventually
+/// exhaust the session table with abandoned sessions (see
+/// `reset_partition`'s periodic hard-reset fallback).
+///
+/// Retries a few times on failure for the same transient-contention
+/// reasons as `hard_reset_partition`.
+fn soft_reset_partition(
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 1..=PARTITION_ENABLE_RETRIES {
+        if let Err(error) = runtime.block_on(hsm.part_disable(partition_id)) {
+            tracing::warn!(?error, attempt, "Failed to disable partition on soft reset");
+            last_error = Some(error);
+            continue;
+        }
+        match runtime.block_on(hsm.part_enable(partition_id)) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    attempt,
+                    "Failed to re-enable partition on soft reset"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    let error = last_error.expect("loop runs at least once and only exits early via return Ok");
+    Err(anyhow!(
+        "Failed to soft-reset partition after all retries: {error:?}"
+    ))
+}
+
+/// Resets `partition_id` after a client disconnect, since any end of a
+/// connection signals a device reset.
+///
+/// Prefers [`soft_reset_partition`] (preserves the boot key/MOBK and lets
+/// the disconnecting client's own sessions be reopened later), falling
+/// back to the destructive [`hard_reset_partition`] - which reclaims every
+/// abandoned session slot at the cost of the boot key and all sessions -
+/// either when the soft reset itself fails, or proactively every
+/// `MAX_SOFT_RESETS_BEFORE_HARD` disconnects, to bound how many abandoned
+/// sessions can accumulate in the table. `soft_resets_since_hard_reset`
+/// persists this count across connections for the life of the server.
+fn reset_partition(
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+    soft_resets_since_hard_reset: &mut u32,
+) -> Result<()> {
+    if *soft_resets_since_hard_reset >= MAX_SOFT_RESETS_BEFORE_HARD {
+        tracing::debug!(
+            "Forcing a hard reset to reclaim any abandoned session slots after \
+             MAX_SOFT_RESETS_BEFORE_HARD soft resets"
+        );
+        let result = hard_reset_partition(hsm, runtime, partition_id);
+        *soft_resets_since_hard_reset = 0;
+        return result;
+    }
+    match soft_reset_partition(hsm, runtime, partition_id) {
+        Ok(()) => {
+            *soft_resets_since_hard_reset += 1;
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(?error, "Soft reset failed; falling back to a hard reset");
+            let result = hard_reset_partition(hsm, runtime, partition_id);
+            *soft_resets_since_hard_reset = 0;
+            result
+        }
+    }
+}
+
+/// Serves a single connection until it ends (cleanly, via timeout, or via
+/// error), then unconditionally resets the partition, since *any* end of a
+/// connection signals a device reset. This must not be skipped for any exit
+/// path (including protocol/decode errors or a failed response write),
+/// otherwise the next client on the same shared partition could observe the
+/// previous client's live keys/sessions/vault state.
+///
+/// A connection-level error (protocol decode failure, I/O error, etc.) is
+/// logged here and does not fail this function - only a *reset* failure
+/// does, since that is the condition callers must treat as fatal (see
+/// `reset_partition`).
+fn serve_connection_and_reset(
+    stream: &mut (impl Read + Write + SetSocketTimeouts),
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+    idle_timeout: Duration,
+    soft_resets_since_hard_reset: &mut u32,
+) -> Result<()> {
+    match serve_connection(stream, hsm, runtime, partition_id, idle_timeout) {
+        Ok(()) => tracing::info!("HSM client connection closed"),
+        Err(error) => tracing::warn!(?error, "HSM client connection closed with an error"),
+    }
+    reset_partition(hsm, runtime, partition_id, soft_resets_since_hard_reset)
+}
+
+fn serve_connection(
+    stream: &mut (impl Read + Write + SetSocketTimeouts),
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+    idle_timeout: Duration,
+) -> Result<()> {
+    let mut request_id = 0u64;
+    loop {
+        debug!("Waiting for request frame");
+        tracing::trace!("Waiting for request frame");
+
+        // Wait for the *first* byte of the next request using the full
+        // idle timeout: a healthy, merely-idle client (see
+        // `VSOCK_IDLE_WAIT_TIMEOUT`) must not be treated the same as one
+        // that started sending a frame and then stalled mid-transfer.
+        stream.set_read_timeout(idle_timeout)?;
+        let mut first_byte_buf = [0u8; 1];
+        let first_byte = match stream.read(&mut first_byte_buf) {
+            Ok(0) => None,
+            Ok(_) => Some(first_byte_buf[0]),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) =>
+            {
+                debug!("Client disconnected");
+                tracing::debug!(kind = ?error.kind(), "Client disconnected");
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(first_byte) = first_byte else {
+            // No new frame started before the idle-wait timeout
+            // (`idle_timeout`) expired, or the peer disconnected cleanly;
+            // treat either as a disconnect so it can't hold up every other
+            // client waiting to be served. For AF_UNIX this is
+            // `UNIX_IDLE_READ_TIMEOUT` (effectively unbounded), so this
+            // path is only expected to fire for a genuinely abandoned
+            // AF_VSOCK client.
+            //
+            // The caller (`serve_connection_and_reset`) resets the
+            // partition unconditionally, since any end of a connection
+            // signals a device reset.
+            return Ok(());
+        };
+
+        // A frame has started arriving: bound *completing* it with the
+        // tight `CONNECTION_READ_TIMEOUT`, independent of how generous
+        // `idle_timeout` is, so a peer that starts a frame and then stalls
+        // or slow-drips it still can't occupy the server indefinitely.
+        let mut deadline_stream = DeadlineRead {
+            inner: stream,
+            deadline: Instant::now() + CONNECTION_READ_TIMEOUT,
+        };
+        let mut prefixed = Prefixed {
+            prefix: Some(first_byte),
+            inner: &mut deadline_stream,
+        };
+        let request = match Request::read_from(&mut prefixed) {
+            Ok(request) => request,
+            Err(tsra_ddi_sock_proto::ProtoError::Io(error))
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                ) =>
+            {
+                // A frame started but didn't complete within
+                // `CONNECTION_READ_TIMEOUT` (or the peer disconnected
+                // mid-frame); treat it the same as a disconnect.
+                debug!("Client disconnected");
+                tracing::debug!(kind = ?error.kind(), "Client disconnected");
+                // The caller (`serve_connection_and_reset`) resets the
+                // partition unconditionally, since any end of a connection
+                // signals a device reset.
+                return Ok(());
+            }
+            Err(error) => {
+                debug!("Failed to decode request frame");
+                tracing::warn!(?error, "Failed to decode request frame");
+                return Err(error.into());
+            }
+        };
+
+        request_id += 1;
+        let sqe = Sqe::from(&request.sqe);
+        let request_span = tracing::debug_span!(
+            "request",
+            request_id,
+            command_id = sqe.cmd_id(),
+            opcode = sqe.op(),
+            src_len = sqe.src_len(),
+            dst_len = sqe.dst_len(),
+            oob_count = request.oob.len(),
+        );
+        let _request_guard = request_span.enter();
+        debug!("Received request frame");
+        tracing::debug!("Received request frame");
+        let started = Instant::now();
+        let response = match PreparedRequest::new(request) {
+            Ok(prepared) => {
+                debug!("Submitting request to StdHsm");
+                tracing::trace!(partition_id, "Submitting request to StdHsm");
+                match runtime.block_on(hsm.io(prepared.sqe, partition_id, 0, 0)) {
+                    Ok(cqe) => {
+                        debug!("StdHsm request completed");
+                        tracing::debug!(
+                            elapsed_us = started.elapsed().as_micros(),
+                            "StdHsm request completed"
+                        );
+                        prepared.response(cqe)
+                    }
+                    Err(error) => {
+                        debug!("HSM request failed");
+                        tracing::warn!(
+                            ?error,
+                            elapsed_us = started.elapsed().as_micros(),
+                            "HSM request failed"
+                        );
+                        error_response()
+                    }
+                }
+            }
+            Err(error) => {
+                debug!("Invalid HSM request");
+                tracing::warn!(?error, "Invalid HSM request");
+                error_response()
+            }
+        };
+        debug!("Writing response frame");
+        tracing::trace!(
+            transport_status = response.status,
+            payload_len = response.payload.len(),
+            "Writing response frame"
+        );
+        response.write_to(&mut DeadlineWrite {
+            inner: stream,
+            deadline: Instant::now() + CONNECTION_READ_TIMEOUT,
+        })?;
+        debug!("Request finished");
+        tracing::debug!(
+            transport_status = response.status,
+            elapsed_us = started.elapsed().as_micros(),
+            "Request finished"
+        );
+    }
+}
+
+/// Serves one accepted connection under a per-connection tracing span,
+/// then propagates any partition reset failure (see
+/// `serve_connection_and_reset`) so the caller can stop accepting further
+/// clients rather than serving them on a partition that isn't known to be
+/// freshly reset.
+fn serve_connection_logged(
+    mut stream: impl Read + Write + SetSocketTimeouts,
+    hsm: &StdHsm,
+    runtime: &tokio::runtime::Handle,
+    partition_id: u8,
+    idle_timeout: Duration,
+    soft_resets_since_hard_reset: &mut u32,
+) -> Result<()> {
+    let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(connection_id, "Connected HSM client");
+    let connection_span = tracing::info_span!("connection", connection_id);
+    let _connection_guard = connection_span.enter();
+    tracing::debug!("Started connection worker");
+    serve_connection_and_reset(
+        &mut stream,
+        hsm,
+        runtime,
+        partition_id,
+        idle_timeout,
+        soft_resets_since_hard_reset,
+    )
+}
+
+pub(crate) fn main() -> Result<()> {
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("vsocksrv=info"));
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let args = Args::parse();
+    if args.partition_id >= 65 {
+        bail!("Partition ID must be less than 65");
+    }
+
+    let unix_stream = if matches!(args.socket_type, SocketType::Unix) {
+        debug!("Setting up UNIX socket");
+        let path = args
+            .unix_socket
+            .as_ref()
+            .context("AF_UNIX socket is required")?;
+        tracing::info!(socket = %path.display(), port = args.port, "Connecting to Cloud Hypervisor");
+        let stream = connect_unix(path, args.port, UNIX_IDLE_READ_TIMEOUT)
+            .context("Failed to connect to AF_UNIX")?;
+        tracing::info!(
+            socket = %path.display(),
+            port = args.port,
+            "Connected to Cloud Hypervisor"
+        );
+        debug!("Set up UNIX socket");
+        Some(stream)
+    } else {
+        None
+    };
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_time()
+        .build()
+        .context("Failed to create Tokio runtime")?;
+    tracing::debug!("Created Tokio runtime");
+    let hsm = Arc::new(StdHsm::with_tokio(runtime.handle().clone()));
+    tracing::debug!(partition_id = args.partition_id, "Created StdHsm");
+
+    let result = serve(&args, &runtime, &hsm, unix_stream);
+    if result.is_err() {
+        // `StdHsm::drop` joins its Embassy background thread, but that
+        // thread's `run()` future is intentionally pending forever (the
+        // Embassy tasks that actually do work - `poll_io`/`ipc_task` - are
+        // spawned separately and never make `run()` itself return). So
+        // once any fatal error occurs here, letting `hsm` drop normally
+        // would hang the process forever instead of exiting with an
+        // error. Skip its destructor: the process is about to exit
+        // anyway, so the OS reclaims every resource `StdHsm` holds.
+        std::mem::forget(hsm);
+    }
+    result
+}
+
+fn serve(
+    args: &Args,
+    runtime: &tokio::runtime::Runtime,
+    hsm: &Arc<StdHsm>,
+    mut unix_stream: Option<UnixStream>,
+) -> Result<()> {
+    runtime
+        .block_on(hsm.part_alloc(args.partition_id, 1u128 << u32::from(args.partition_id)))
+        .map_err(|error| anyhow!("Failed to allocate HSM partition: {error:?}"))?;
+    tracing::info!(partition_id = args.partition_id, "Allocated HSM partition");
+    runtime
+        .block_on(hsm.part_enable(args.partition_id))
+        .map_err(|error| anyhow!("Failed to enable HSM partition: {error:?}"))?;
+    tracing::info!(partition_id = args.partition_id, "Enabled HSM partition");
+
+    // Shared across every connection served by this process: see
+    // `reset_partition`'s doc comment for how it bounds abandoned-session
+    // accumulation.
+    let mut soft_resets_since_hard_reset: u32 = 0;
+
+    match args.socket_type {
+        SocketType::Vsock => {
+            debug!("Socket Type VSOCK");
+            let listener =
+                VsockListener::bind(args.cid, args.port).context("Failed to bind AF_VSOCK")?;
+            tracing::info!(
+                cid = args.cid,
+                port = args.port,
+                "Listening for HSM requests"
+            );
+            loop {
+                let stream = listener
+                    .accept()
+                    .context("Failed to accept AF_VSOCK connection")?;
+                // Serve one connection at a time: a disconnect resets the
+                // shared HSM partition (see `serve_connection`), and
+                // `partition_id` is a single process-wide value, so
+                // concurrent connections would let one client's
+                // disconnect wipe another's live sessions/keys. Handling
+                // connections serially also removes any need to bound
+                // concurrent threads against this untrusted listener.
+                serve_connection_logged(
+                    stream,
+                    hsm,
+                    runtime.handle(),
+                    args.partition_id,
+                    VSOCK_IDLE_WAIT_TIMEOUT,
+                    &mut soft_resets_since_hard_reset,
+                )
+                .context(
+                    "Partition reset failed after a client disconnected; refusing to \
+                         serve further clients on a partition that isn't known to be reset",
+                )?;
+            }
+        }
+        SocketType::Unix => {
+            debug!("Socket Type UNIX");
+            let path = args
+                .unix_socket
+                .as_ref()
+                .context("AF_UNIX socket is required")?;
+            let mut stream = unix_stream.take().context("AF_UNIX stream is missing")?;
+            loop {
+                serve_connection_and_reset(
+                    &mut stream,
+                    hsm,
+                    runtime.handle(),
+                    args.partition_id,
+                    UNIX_IDLE_READ_TIMEOUT,
+                    &mut soft_resets_since_hard_reset,
+                )
+                .context(
+                    "Partition reset failed after a client disconnected; refusing to \
+                         serve further clients on a partition that isn't known to be reset",
+                )?;
+                debug!("HSM client disconnected; reconnecting");
+                tracing::info!("HSM client disconnected; reconnecting");
+                // Drop the old connection *before* dialing the new one:
+                // `stream = connect_unix(...)` would otherwise evaluate
+                // the RHS (the full CONNECT/OK reconnect handshake)
+                // before dropping the old `stream`, per Rust's normal
+                // assignment order. That keeps the old connection open
+                // on this side for the reconnect's entire duration,
+                // which deadlocks any backend that (like Cloud
+                // Hypervisor's real virtio-vsock unix listener, or the
+                // test bridge) serves connections sequentially and
+                // needs to observe this old connection's EOF before it
+                // can accept and handshake the new one.
+                drop(stream);
+                stream = connect_unix(path, args.port, UNIX_IDLE_READ_TIMEOUT)
+                    .context("Failed to reconnect to AF_UNIX")?;
+                tracing::info!(
+                    socket = %path.display(),
+                    port = args.port,
+                    "Reconnected to Cloud Hypervisor"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn request(payload: Vec<u8>, destination_len: u32, oob: Vec<OobItem>) -> Request {
+        let mut sqe = [0; 16];
+        sqe[1] = payload.len() as u32;
+        sqe[6] = destination_len;
+        sqe[15] = (oob.len() * OOB_DESCRIPTOR_SIZE) as u32;
+        Request { sqe, payload, oob }
+    }
+
+    #[test]
+    fn prefixed_redelivers_prefix_before_inner() {
+        let mut inner: &[u8] = &[2, 3, 4];
+        let mut prefixed = Prefixed {
+            prefix: Some(1),
+            inner: &mut inner,
+        };
+        let mut out = [0u8; 4];
+        // First read: only the prefix byte is returned, regardless of
+        // how much room `buf` has.
+        assert_eq!(prefixed.read(&mut out).unwrap(), 1);
+        assert_eq!(out[0], 1);
+        // Subsequent reads fall through to `inner` untouched.
+        let n = prefixed.read(&mut out).unwrap();
+        assert_eq!(&out[..n], &[2, 3, 4]);
+    }
+
+    #[test]
+    fn prefixed_retains_prefix_on_empty_buf() {
+        let mut inner: &[u8] = &[9];
+        let mut prefixed = Prefixed {
+            prefix: Some(5),
+            inner: &mut inner,
+        };
+        // An empty destination buffer can't receive the prefix byte, so it
+        // must be retained (not dropped) for the next call.
+        assert_eq!(prefixed.read(&mut []).unwrap(), 0);
+        let mut out = [0u8; 1];
+        assert_eq!(prefixed.read(&mut out).unwrap(), 1);
+        assert_eq!(out[0], 5);
+        assert_eq!(prefixed.read(&mut out).unwrap(), 1);
+        assert_eq!(out[0], 9);
+    }
+
+    #[test]
+    fn prepares_local_dma_addresses() {
+        let mut descriptor = [0; OOB_DESCRIPTOR_SIZE];
+        descriptor[8..12].copy_from_slice(&4u32.to_le_bytes());
+        let prepared = PreparedRequest::new(request(
+            vec![1, 2, 3],
+            MAX_DST_LEN as u32,
+            vec![OobItem {
+                descriptor,
+                data: vec![4, 5, 6, 7],
+            }],
+        ))
+        .unwrap();
+
+        let address =
+            |dword| u64::from(prepared.sqe[dword]) | (u64::from(prepared.sqe[dword + 1]) << 32);
+        assert_eq!(address(2), prepared._source.address());
+        assert_eq!(address(7), prepared.destination.address());
+        assert_eq!(
+            address(9),
+            prepared.destination.address() + PAGE_SIZE as u64
+        );
+        assert_eq!(
+            address(13),
+            prepared._oob_descriptors.as_ref().unwrap().address()
+        );
+        assert_eq!(address(2) % PAGE_SIZE as u64, 0);
+        assert_eq!(address(7) % PAGE_SIZE as u64, 0);
+        assert_eq!(address(13) % PAGE_SIZE as u64, 0);
+
+        let page = &prepared._oob_descriptors.as_ref().unwrap().0;
+        let oob_address = u64::from_le_bytes(page[..8].try_into().unwrap());
+        assert_eq!(oob_address, prepared._oob_data[0].as_ptr() as u64);
+    }
+
+    /// The wire protocol and proto-level tests allow empty `src`/`dst`
+    /// payloads (commands with no input and/or no output), so
+    /// `PreparedRequest::new` must accept `src_len == 0` / `dst_len == 0`
+    /// rather than spuriously rejecting otherwise-valid requests.
+    #[test]
+    fn accepts_zero_length_src_and_dst() {
+        let prepared = PreparedRequest::new(request(Vec::new(), 0, Vec::new())).unwrap();
+        assert_eq!(prepared.sqe[1], 0);
+        assert_eq!(prepared.sqe[6], 0);
+    }
+
+    #[test]
+    fn rejects_payload_length_mismatch() {
+        let mut request = request(vec![1, 2, 3], PAGE_SIZE as u32, Vec::new());
+        request.sqe[1] = 4;
+        assert!(PreparedRequest::new(request).is_err());
+    }
+
+    #[test]
+    fn rejects_oob_count_mismatch() {
+        let mut request = request(vec![1], PAGE_SIZE as u32, Vec::new());
+        request.sqe[15] = OOB_DESCRIPTOR_SIZE as u32;
+        assert!(PreparedRequest::new(request).is_err());
+    }
+
+    #[test]
+    fn writes_unix_connect_command() {
+        let mut command = Vec::new();
+        write_connect_command(&mut command, 1234).unwrap();
+        assert_eq!(command, b"CONNECT 1234\n");
+    }
+}
