@@ -6,15 +6,15 @@
 #[path = "../../common.rs"]
 mod common;
 
+use common::FuzzRole;
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_crypto::*;
 use tsra_ddi_interface::*;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::*;
 use tsra_session_ex_crypto::*;
-use common::FuzzRole;
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 use x509::X509CertificateOp;
 
 /// P-384 coordinate length in bytes.

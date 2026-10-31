@@ -7,13 +7,19 @@
 
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use tsra_crypto::AesKey;
 use tsra_crypto::aead_envelope::AeadAlg;
-use tsra_crypto::*;
-use tsra_ddi::*;
+use tsra_crypto::aead_envelope::{self};
+use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
 use tsra_ddi_tbor_codec::Encoder;
-use tsra_ddi_tbor_codec::header::Header;
-use tsra_ddi_tbor_codec::*;
+use tsra_ddi_tbor_codec::Header;
+use tsra_ddi_tbor_codec::MAX_DATA_SIZE;
+use tsra_ddi_tbor_codec::MAX_TOC_ENTRIES;
+use tsra_ddi_tbor_codec::REQ_HEADER_LEN;
+use tsra_ddi_tbor_codec::RESP_HEADER_LEN;
+use tsra_ddi_tbor_codec::TOC_ENTRY_LEN;
+use tsra_ddi_tbor_codec::TocEntry;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
@@ -164,6 +170,11 @@ impl EccCurve {
     /// ECDH shared secret (the X coordinate).
     pub fn coord_len(self) -> usize {
         coord_sizes(self.wire_pub_key_len()).1
+    }
+
+    /// Wire coordinate length in bytes, including padding (P-521: 66 -> 68 bytes).
+    pub fn wire_coord_len(self) -> usize {
+        coord_sizes(self.wire_pub_key_len()).0
     }
 
     /// Largest digest the firmware zero-extends into the ECDSA field.
