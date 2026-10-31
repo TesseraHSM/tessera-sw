@@ -142,12 +142,15 @@ pub trait HsmAes: HsmIoTypes {
     /// - `mode` — confidentiality mode.
     /// - `key` — AES key (16 / 24 / 32 bytes).
     /// - `input` — `[IV | data]`; see [`HsmAesMode::data_len`].
-    /// - `output` — receives `[data | IV out]`; must be at least
-    ///   `input.len()` bytes.
+    /// - `output` — follows the query/alloc/use convention: `None`
+    ///   validates the request and returns the required output length
+    ///   without running AES; `Some(buf)` receives `[data | IV out]` and
+    ///   must be at least `input.len()` bytes.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `output[..input.len()]` populated.
+    /// - `Ok(len)` — required (`None`) or written (`Some`) output length,
+    ///   always `input.len()`; when written, `output[..len]` is populated.
     /// - `Err(HsmError::InvalidArg)` — key, IV, alignment or buffer-size
     ///   violation; `output` is not modified.
     /// - `Err(HsmError)` — AES driver failure.
@@ -158,8 +161,8 @@ pub trait HsmAes: HsmIoTypes {
         mode: HsmAesMode,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// In-place variant of
     /// [`aes_enc_dec`](Self::aes_enc_dec).

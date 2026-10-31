@@ -368,8 +368,9 @@ impl HsmAes for UnoHsmPal {
         self.rng_fill_bytes(io, key)
     }
 
-    /// Validates lengths before touching `output`, copies `input` into
-    /// `output` and runs [`Self::aes_generic_in_place`] on it.
+    /// Validates lengths before touching `output`; in query mode returns
+    /// the required length, otherwise copies `input` into `output` and
+    /// runs [`Self::aes_generic_in_place`] on it.
     async fn aes_enc_dec(
         &self,
         io: &UnoHsmIo,
@@ -377,15 +378,19 @@ impl HsmAes for UnoHsmPal {
         mode: HsmAesMode,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         generic_lens(mode, key.len(), input.len())?;
+        let Some(output) = output else {
+            return Ok(input.len());
+        };
         if output.len() < input.len() {
             return Err(HsmError::InvalidArg);
         }
         let output = &mut output[..input.len()];
         output.copy_from_slice(input);
-        self.aes_generic_in_place(io, op, mode, key, output).await
+        self.aes_generic_in_place(io, op, mode, key, output).await?;
+        Ok(input.len())
     }
 
     /// See [`Self::aes_generic_in_place`].

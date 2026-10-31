@@ -55,9 +55,12 @@ impl HsmAes for StdHsmPal {
         mode: HsmAesMode,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let (iv_len, data_len) = generic_lens(mode, key.len(), input.len())?;
+        let Some(output) = output else {
+            return Ok(input.len());
+        };
         if output.len() < input.len() {
             return Err(HsmError::InvalidArg);
         }
@@ -68,7 +71,7 @@ impl HsmAes for StdHsmPal {
             .await?;
         output[..data_len].copy_from_slice(&out);
         output[data_len..data_len + iv_len].copy_from_slice(&iv_out);
-        Ok(())
+        Ok(input.len())
     }
 
     async fn aes_enc_dec_in_place(
@@ -440,9 +443,19 @@ mod tests {
             let output = pal.dma_alloc(&io, len).unwrap();
             input[..iv.len()].copy_from_slice(iv);
             input[iv.len()..].copy_from_slice(&ct);
-            pal.aes_enc_dec(&io, HsmAesOp::Decrypt, mode, key, input, output)
-                .await
-                .unwrap();
+            output.fill(0x5a);
+            assert_eq!(
+                pal.aes_enc_dec(&io, HsmAesOp::Decrypt, mode, key, input, None)
+                    .await,
+                Ok(len),
+                "{mode:?} query"
+            );
+            assert!(output.iter().all(|&b| b == 0x5a));
+            assert_eq!(
+                pal.aes_enc_dec(&io, HsmAesOp::Decrypt, mode, key, input, Some(&mut *output))
+                    .await,
+                Ok(len)
+            );
             assert_eq!(&output[..pt.len()], &pt[..], "{mode:?} decrypt");
             assert_eq!(&output[pt.len()..], &iv_out[..], "{mode:?} decrypt iv out");
         }
@@ -485,11 +498,24 @@ mod tests {
                 HsmAesMode::Ctr,
                 key,
                 &buf[..33],
-                &mut out[..32]
+                Some(&mut out[..32])
             )
             .await,
             Err(HsmError::InvalidArg)
         );
         assert!(out.iter().all(|&b| b == 0x24));
+        // Query mode validates the input too.
+        assert_eq!(
+            pal.aes_enc_dec(
+                &io,
+                HsmAesOp::Encrypt,
+                HsmAesMode::Cbc,
+                key,
+                &buf[..31],
+                None
+            )
+            .await,
+            Err(HsmError::InvalidArg)
+        );
     }
 }
