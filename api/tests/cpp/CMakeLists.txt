@@ -126,6 +126,18 @@ endif()
 add_executable(tsra_api_cpp_tests ${SOURCE})
 target_include_directories(tsra_api_cpp_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+if(MSVC)
+    # `StdHsm::build()` constructs the `Hsm`/`StdHsmPal` core synchronously
+    # on the calling thread (only the Embassy executor itself runs on a
+    # dedicated 8 MiB thread, see `EMBASSY_STACK_SIZE` in
+    # `fw/plat/std/lib/src/lib.rs`). Those debug-build task frames are large
+    # enough to overflow the default 1 MiB MSVC main-thread stack, crashing
+    # this binary with STATUS_STACK_OVERFLOW (0xc00000fd) before any gtest
+    # output is printed. Match the main thread's reserved stack to the
+    # Embassy thread's so both can build `StdHsm` without overflowing.
+    target_link_options(tsra_api_cpp_tests PRIVATE /STACK:8388608)
+endif()
+
 # Expose the selected DDI backend and session-test mode to the C++ sources as
 # compile definitions.
 # `CARGO_FEATURE_*` env vars only exist during the Rust build script, not during
