@@ -430,7 +430,7 @@ impl StdAes {
                 let aes_key =
                     AesKey::from_bytes(&kek_owned).map_err(|_| HsmError::AesInvalidKeyLength)?;
                 let mut algo = AesKeyWrapAlgo::with_default_iv();
-                let mut buf = vec![0u8; wrapped_len];
+                let mut buf = Zeroizing::new(vec![0u8; wrapped_len]);
                 let written = algo
                     .encrypt(&aes_key, &input_owned, Some(&mut buf))
                     .map_err(|_| HsmError::AesEncryptFailed)?;

@@ -632,8 +632,8 @@ mod tests {
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
         let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
 
-        // RFC 5649 §6: a 20-byte (multi-block) and a 7-byte (single-block)
-        // key under the same 192-bit KEK.
+        // RFC 5649 §6 vectors plus an 8-byte boundary case checked with
+        // OpenSSL AES-192-ECB over [AIV | plaintext].
         let key = pal.dma_alloc(&io, 24).unwrap();
         key.copy_from_slice(&hex("5840df6e29b02af1ab493b705bf16ea1ae8338f4dcc176a8"));
         let cases = [
@@ -642,6 +642,7 @@ mod tests {
                 "138bdeaa9b8fa7fc61f97742e72248ee5ae6ae5360d1ae6a5f54f373fa543b6a",
             ),
             ("466f7250617369", "afbeb0f07dfbf5419200f2ccb50bb24f"),
+            ("0001020304050607", "ebc0330864fe681ead53d839b34b9c66"),
         ];
         for (pt, ct) in cases {
             let (pt, ct) = (hex(pt), hex(ct));

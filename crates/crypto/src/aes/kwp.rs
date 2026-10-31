@@ -180,9 +180,8 @@ impl EncryptOp for AesKeyWrapPadAlgo {
         aiv[0..Self::AIV.len()].copy_from_slice(&Self::AIV);
         aiv[Self::AIV.len()..Self::AIV_SIZE].copy_from_slice(&mli.to_be_bytes());
 
-        // Check if input is already a multiple of 8 bytes
-        // In this case, use standard AES-KW without padding
-        if input.len().is_multiple_of(8) {
+        // Aligned inputs longer than one semiblock use AES-KW.
+        if input.len() > 8 && input.len().is_multiple_of(8) {
             return Encrypter::encrypt(&mut AesKeyWrapAlgo::with_iv(&aiv)?, key, input, output);
         }
 
