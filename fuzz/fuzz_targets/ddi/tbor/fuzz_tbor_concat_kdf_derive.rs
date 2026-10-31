@@ -288,7 +288,7 @@ fn make_secret(
 /// Reuse shared mutations while restricting flips to ciphertext so their
 /// expected rejection is precise; classify effective no-ops before execution.
 fn mutate_secret(input: &FuzzInput<'_>, secret: &mut Vec<u8>) -> Option<TborStatus> {
-    let mutation = if input.mutation % 2 == 0 {
+    let mutation = if input.mutation.is_multiple_of(2) {
         common::EnvelopeMutation::None
     } else {
         common::EnvelopeMutation::FlipByte {
@@ -390,7 +390,7 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
         session_id: session.session_id,
         scope: partition.available_scope(input.scope),
         hash_algo: 1 + input.hash_algo % 3,
-        kdf_alg: if input.kdf_alg % 2 == 0 {
+        kdf_alg: if input.kdf_alg.is_multiple_of(2) {
             CONCAT_KDF_ALG_X963
         } else {
             CONCAT_KDF_ALG_SP800_56A
