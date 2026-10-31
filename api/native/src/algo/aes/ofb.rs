@@ -14,8 +14,13 @@ use crate::utils::validate_output_buffer;
 
 /// AES OFB parameters.
 ///
-/// `iv` is updated in place after every operation with the chaining IV, so a
-/// message can be continued with a later call.
+/// On return, `iv` holds the last keystream block.
+///
+/// Continuing a message by passing the returned `iv` to a later single-shot
+/// call is only correct when every call except the last processes a multiple of
+/// 16 bytes; otherwise keystream bytes are skipped. To process a message in
+/// arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+/// / `_update` / `_finish`) instead.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct TsraAlgoAesOfbParams {

@@ -14,12 +14,18 @@ use crate::utils::validate_output_buffer;
 
 /// AES CTR parameters.
 ///
-/// `iv` is updated in place after every operation with the chaining IV, so a
-/// message can be continued with a later call.
+/// On return, `iv` holds the counter advanced by the number of blocks processed
+/// (a trailing partial block counts as one).
+///
+/// Continuing a message by passing the returned `iv` to a later single-shot
+/// call is only correct when every call except the last processes a multiple of
+/// 16 bytes; otherwise keystream bytes are skipped. To process a message in
+/// arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+/// / `_update` / `_finish`) instead.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct TsraAlgoAesCtrParams {
-    /// IV
+    /// Initial 128-bit counter block (big-endian, wraps modulo 2^128)
     pub iv: [u8; 16],
 }
 

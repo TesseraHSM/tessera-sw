@@ -1001,7 +1001,10 @@ the same length as the input. No padding is applied. Empty input produces empty
 output.
 
 On return, `iv` holds the last full ciphertext block processed (unchanged if
-no full block was produced), so block-aligned calls can be chained.
+no full block was produced), so block-aligned calls can be chained. Chaining single-shot calls is only
+correct when every call except the last processes a multiple of 16 bytes; to
+process a message in arbitrary-length chunks, use one streaming context
+(`tsra_crypt_*_init` / `_update` / `_finish`).
 
 This algorithm is only supported on extended sessions opened with
 [tsra_sess_ex_open](#tsra_sess_ex_open); other sessions return
@@ -1045,8 +1048,10 @@ AES-OFB is a stream mode: input of any length is accepted and the output has
 the same length as the input. No padding is applied. Empty input produces empty
 output.
 
-On return, `iv` holds the last keystream block generated, so block-aligned
-calls can be chained.
+On return, `iv` holds the last keystream block generated, so block-aligned calls can be chained. Chaining single-shot calls is only
+correct when every call except the last processes a multiple of 16 bytes; to
+process a message in arbitrary-length chunks, use one streaming context
+(`tsra_crypt_*_init` / `_update` / `_finish`).
 
 This algorithm is only supported on extended sessions opened with
 [tsra_sess_ex_open](#tsra_sess_ex_open); other sessions return
@@ -1093,7 +1098,10 @@ output.
 `iv` is the initial 128-bit counter block, incremented as a big-endian integer
 (wrapping modulo 2^128) for each block. On return, `iv` holds the initial
 counter advanced by the number of blocks processed (a trailing partial block
-counts as one), so block-aligned calls can be chained.
+counts as one), so block-aligned calls can be chained. Chaining single-shot calls is only
+correct when every call except the last processes a multiple of 16 bytes; to
+process a message in arbitrary-length chunks, use one streaming context
+(`tsra_crypt_*_init` / `_update` / `_finish`).
 
 This algorithm is only supported on extended sessions opened with
 [tsra_sess_ex_open](#tsra_sess_ex_open); other sessions return

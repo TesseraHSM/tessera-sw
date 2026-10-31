@@ -14,8 +14,14 @@ use crate::utils::validate_output_buffer;
 
 /// AES CFB (128-bit segment) parameters.
 ///
-/// `iv` is updated in place after every operation with the chaining IV, so a
-/// message can be continued with a later call.
+/// On return, `iv` holds the last full ciphertext block (unchanged if no full
+/// block was produced).
+///
+/// Continuing a message by passing the returned `iv` to a later single-shot
+/// call is only correct when every call except the last processes a multiple of
+/// 16 bytes; otherwise keystream bytes are reused. To process a message in
+/// arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+/// / `_update` / `_finish`) instead.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct TsraAlgoAesCfbParams {

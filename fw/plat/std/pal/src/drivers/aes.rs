@@ -45,6 +45,7 @@ use tsra_crypto::EncryptOp;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::Rng;
 use tsra_fw_hsm_pal_traits::*;
+use zeroize::Zeroizing;
 
 use crate::worker::WorkerPool;
 
@@ -106,7 +107,9 @@ impl StdAes {
         input: &[u8],
         output: &mut [u8],
     ) -> HsmResult<()> {
-        let key_owned = key.to_vec();
+        // `Zeroizing` scrubs this transient heap copy of the plaintext key
+        // when the worker closure drops it.
+        let key_owned = Zeroizing::new(key.to_vec());
         let iv_owned = iv.to_vec();
         let input_owned = input.to_vec();
         let input_len = input.len();
@@ -184,7 +187,7 @@ impl StdAes {
             Ok(buf)
         }
 
-        let key_owned = key.to_vec();
+        let key_owned = Zeroizing::new(key.to_vec());
         let iv_owned = iv.to_vec();
         let input_owned = input.to_vec();
 
@@ -249,7 +252,7 @@ impl StdAes {
         input: &[u8],
         output: &mut [u8],
     ) -> HsmResult<()> {
-        let key_owned = key.to_vec();
+        let key_owned = Zeroizing::new(key.to_vec());
         let input_owned = input.to_vec();
         let input_len = input.len();
 
@@ -303,7 +306,7 @@ impl StdAes {
             return Err(HsmError::AesInvalidKeyLength);
         }
 
-        let key_owned = key.to_vec();
+        let key_owned = Zeroizing::new(key.to_vec());
         let iv_owned = *iv;
         let aad_owned = aad.map(|a| a.to_vec());
         let pt_owned = plaintext.to_vec();
@@ -354,7 +357,7 @@ impl StdAes {
             return Err(HsmError::AesInvalidKeyLength);
         }
 
-        let key_owned = key.to_vec();
+        let key_owned = Zeroizing::new(key.to_vec());
         let iv_owned = *iv;
         let aad_owned = aad.map(|a| a.to_vec());
         let tag_owned = *tag;
