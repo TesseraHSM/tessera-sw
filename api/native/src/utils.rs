@@ -75,17 +75,18 @@ pub(crate) fn deref_mut_ptr<'a, T>(ptr: *mut T) -> Result<&'a mut T, TsraStatus>
     Ok(unsafe { &mut *ptr })
 }
 
-/// Safely dereference a constant pointer
+/// Dereference a constant pointer supplied through the C ABI.
 ///
 /// # Safety
-/// The function validates that the pointer is non-null and aligned before
-/// dereferencing.
+/// The caller must provide a live, initialized `T` for the returned reference's
+/// lifetime. Null and misaligned pointers are rejected before dereferencing.
 #[allow(unsafe_code)]
 pub(crate) fn deref_ptr<'a, T>(ptr: *const T) -> Result<&'a T, TsraStatus> {
     validate_ptr(ptr)?;
 
-    // SAFETY: Pointer has been validated as non-null and aligned above
-    Ok(unsafe { &*ptr })
+    // SAFETY: Alignment is checked above; the C caller guarantees a live,
+    // initialized pointee. `as_ref` explicitly handles null without dereferencing.
+    unsafe { ptr.as_ref() }.ok_or(TsraStatus::InvalidArgument)
 }
 
 /// Safely assign a value to a pointer
