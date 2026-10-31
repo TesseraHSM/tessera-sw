@@ -126,10 +126,7 @@ fn check_request(
             assert_valid_unwrapping_pub_key(&resp.pub_key);
             Some(resp.pub_key)
         }
-        (
-            Expected::Success,
-            Err(DdiError::TborStatus(TborStatus::PendingKeyGeneration)),
-        ) => None,
+        (Expected::Success, Err(DdiError::TborStatus(TborStatus::PendingKeyGeneration))) => None,
         (Expected::Reject(status), Err(err)) => {
             assert_fw_rejects(&err, status);
             None
@@ -159,7 +156,11 @@ fn exercise_rotated_session(
     for _ in 0..(input.repetitions % 3) {
         let next = check_request(ctx, session.session_id, bound, false)
             .expect("repeated GetUnwrappingKey must succeed");
-        assert_eq!(first, Some(next), "partition unwrapping key must remain stable");
+        assert_eq!(
+            first,
+            Some(next),
+            "partition unwrapping key must remain stable"
+        );
     }
 
     for session_id in [0, u16::MAX] {
