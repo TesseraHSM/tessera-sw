@@ -18,6 +18,7 @@ tsra_ddi_mbor_sim = { path = "../ddi/mbor/sim" }
 tsra_ddi_tbor_codec = { path = "../ddi/tbor/codec" }
 tsra_ddi_tbor_test_harness = { path = "../crates/tbor_test_harness" }
 tsra_ddi_tbor_types = { path = "../ddi/tbor/types" }
+tsra_fw_core_crypto_key_masking = { path = "../fw/core/crypto/key-masking" }
 tsra_session_ex_crypto = { path = "../crates/session_ex_crypto" }
 x509 = { path = "../crates/x509" }
 zerocopy = { features = ["derive"], version = "0.8.17" }
@@ -152,6 +153,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_ecc_generate_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecc_generate_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_ecc_sign"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecc_sign.rs"
 test = false
@@ -194,6 +202,34 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_concat_kdf_derive"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_concat_kdf_derive.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_rsa_mod_exp"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_rsa_mod_exp.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_get_unwrapping_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_unwrapping_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_get_cert"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_cert.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_get_cert_chain_info"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_cert_chain_info.rs"
 test = false

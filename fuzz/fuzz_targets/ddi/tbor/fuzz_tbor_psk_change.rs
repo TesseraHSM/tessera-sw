@@ -6,12 +6,12 @@
 #[path = "../../common.rs"]
 mod common;
 
-use tsra_ddi_tbor_test_harness::TestCtx;
-use tsra_ddi_tbor_types::*;
 use common::FuzzRole;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_types::*;
 
 /// Fuzz input for the TBOR `PskChange` handler.
 #[derive(Arbitrary, Debug)]

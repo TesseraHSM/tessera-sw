@@ -6,6 +6,9 @@
 #[path = "../../common.rs"]
 mod common;
 
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
@@ -15,9 +18,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
 use tsra_ddi_tbor_types::MAX_CERTS;
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 
 /// Upper bound on a fuzzed per-cert DER: `MAX_CERT_DER_LEN` in the crypto
 /// crate is 1024, so 2× that still exercises oversized rejects without
