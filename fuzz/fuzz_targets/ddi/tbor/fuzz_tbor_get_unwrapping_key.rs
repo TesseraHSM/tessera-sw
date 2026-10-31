@@ -172,14 +172,16 @@ fn exercise_rotated_session(
             }
         }
     }
-    if selected_role && input.state == RequestState::RotatedPsk
-        && let Some(key) = check_request(ctx, input.session_id(session.session_id), bound, false) {
-            if let Some(first) = first {
-                assert_eq!(first, key, "fuzzed-ID success must return the same key");
-            } else {
-                first = Some(key);
-            }
+    if selected_role
+        && input.state == RequestState::RotatedPsk
+        && let Some(key) = check_request(ctx, input.session_id(session.session_id), bound, false)
+    {
+        if let Some(first) = first {
+            assert_eq!(first, key, "fuzzed-ID success must return the same key");
+        } else {
+            first = Some(key);
         }
+    }
 
     ctx.session_close(session.session_id)
         .expect("close rotated-PSK session");
