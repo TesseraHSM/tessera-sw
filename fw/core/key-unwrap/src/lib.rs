@@ -173,7 +173,7 @@ pub async fn unwrap_key<'p, P: HsmPal>(
     // 2. AES-KWP unwrap the payload with the recovered KEK.
     let payload_buf = pal.dma_alloc(io, kwp_payload.len())?;
     let payload_len = pal
-        .aes_kwp_unwrap(io, &kek_buf[..kek_len], kwp_payload, payload_buf)
+        .aes_kwp_unwrap(io, &kek_buf[..kek_len], kwp_payload, Some(payload_buf))
         .await
         // An AIV / padding integrity failure comes back as
         // `AesUnwrapFailed`; surface it as the unwrap-specific status (the

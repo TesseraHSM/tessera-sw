@@ -31,11 +31,13 @@ pub trait HsmAesKw: HsmIoTypes {
     /// - `input` — plaintext key material.  Must be ≥ 16 bytes,
     ///   a multiple of 8, and at most 3072 bytes.
     /// - `output` — destination; must be at least
-    ///   `input.len() + 8` bytes.
+    ///   `input.len() + 8` bytes. Pass `None` to validate the inputs
+    ///   and query the output length without wrapping.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `output[..input.len() + 8]` populated.
+    /// - `Ok(input.len() + 8)` — the wrapped length; when `output` is
+    ///   `Some`, `output[..input.len() + 8]` is populated.
     /// - `Err(HsmError::InvalidArg)` — size or alignment
     ///   constraints violated.
     /// - `Err(HsmError)` — AES driver failure.
@@ -44,8 +46,8 @@ pub trait HsmAesKw: HsmIoTypes {
         io: &Self::Io,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// AES Key Wrap (RFC 3394) — unwrap key data.
     ///
@@ -59,11 +61,13 @@ pub trait HsmAesKw: HsmIoTypes {
     /// - `input` — wrapped key data.  Must be ≥ 24 bytes,
     ///   a multiple of 8, and at most 3080 bytes.
     /// - `output` — destination; must be at least
-    ///   `input.len() - 8` bytes.
+    ///   `input.len() - 8` bytes. Pass `None` to validate the inputs
+    ///   and query the output length without unwrapping.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `output[..input.len() - 8]` populated.
+    /// - `Ok(input.len() - 8)` — the unwrapped length; when `output`
+    ///   is `Some`, `output[..input.len() - 8]` is populated.
     /// - `Err(HsmError::InvalidArg)` — size or alignment
     ///   constraints violated.
     /// - `Err(HsmError::AesUnwrapFailed)` — IV mismatch (wrong
@@ -74,8 +78,8 @@ pub trait HsmAesKw: HsmIoTypes {
         io: &Self::Io,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     // ── AES Key Wrap with Padding (RFC 5649) ───────────────────────
 
@@ -93,11 +97,13 @@ pub trait HsmAesKw: HsmIoTypes {
     /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
     /// - `input` — plaintext (1..=3072 bytes, any alignment).
     /// - `output` — destination; must be at least
-    ///   `round_up_8(input.len()) + 8` bytes.
+    ///   `round_up_8(input.len()) + 8` bytes. Pass `None` to validate
+    ///   the inputs and query the output length without wrapping.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — wrapped output populated.
+    /// - `Ok(round_up_8(input.len()) + 8)` — the wrapped length; when
+    ///   `output` is `Some`, that prefix of `output` is populated.
     /// - `Err(HsmError::InvalidArg)` — size constraints violated.
     /// - `Err(HsmError)` — AES driver failure.
     async fn aes_kwp_wrap(
@@ -105,8 +111,8 @@ pub trait HsmAesKw: HsmIoTypes {
         io: &Self::Io,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()>;
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize>;
 
     /// AES Key Wrap with Padding (RFC 5649) — unwrap key data.
     ///
@@ -120,12 +126,17 @@ pub trait HsmAesKw: HsmIoTypes {
     /// - `input` — wrapped key data.  Must be ≥ 16 bytes, a
     ///   multiple of 8, and at most 3080 bytes.
     /// - `output` — destination; must be at least
-    ///   `input.len() - 8` bytes.
+    ///   `input.len() - 8` bytes. Pass `None` to validate the inputs
+    ///   and query the maximum output length without unwrapping.
     ///
     /// # Returns
     ///
-    /// - `Ok(mli)` — the recovered plaintext length (the MLI from
-    ///   the AIV); `output[..mli]` is valid plaintext.
+    /// - With `output = None`: `Ok(input.len() - 8)`, an upper bound on
+    ///   the plaintext length (the exact length is only known after
+    ///   the AIV is decrypted).
+    /// - With `output = Some`: `Ok(mli)` — the recovered plaintext
+    ///   length (the MLI from the AIV); `output[..mli]` is valid
+    ///   plaintext.
     /// - `Err(HsmError::InvalidArg)` — size constraints violated.
     /// - `Err(HsmError::AesUnwrapFailed)` — AIV mismatch or
     ///   non-zero pad bytes.
@@ -135,6 +146,6 @@ pub trait HsmAesKw: HsmIoTypes {
         io: &Self::Io,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 }

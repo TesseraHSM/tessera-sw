@@ -254,7 +254,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 // KWP output is at most `input - 8` bytes.
                 let cose = alloc.dma_alloc(wrapped_len)?;
                 let cose_res = async {
-                    let mli = pal.aes_kwp_unwrap(io, tmk, wrapped, cose).await?;
+                    let mli = pal.aes_kwp_unwrap(io, tmk, wrapped, Some(cose)).await?;
 
                     // Decode + all EC math while the COSE plaintext (which
                     // holds `d`) is borrowed.

@@ -262,7 +262,8 @@ pub(crate) async fn handle<P: HsmPal>(
                             )?;
 
                             // AES-KWP-wrap the COSE plaintext under the TMK.
-                            let wrapped_total = round_up_8(cose_len) + 8;
+                            let wrapped_total =
+                                pal.aes_kwp_wrap(io, tmk, &cose[..cose_len], None).await?;
                             if wrapped_total > DARC_UNWRAP_WRAPPED_KEY_MAX_LEN {
                                 return Err(HsmError::InvalidArg);
                             }
@@ -270,10 +271,9 @@ pub(crate) async fn handle<P: HsmPal>(
                                 io,
                                 tmk,
                                 &cose[..cose_len],
-                                &mut wrapped_out[..wrapped_total],
+                                Some(&mut wrapped_out[..wrapped_total]),
                             )
-                            .await?;
-                            Ok::<_, HsmError>(wrapped_total)
+                            .await
                         }
                         .await;
                         cose_res
@@ -291,11 +291,6 @@ pub(crate) async fn handle<P: HsmPal>(
         .await?;
 
     encode_response(cmd_buf, &wrapped_out[..wrapped_len])
-}
-
-/// Round `n` up to the next multiple of 8.
-fn round_up_8(n: usize) -> usize {
-    (n + 7) & !7
 }
 
 /// Encode the `DarcKeyWrap` response around the wrapped key.

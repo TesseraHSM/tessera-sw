@@ -666,11 +666,12 @@ impl HsmAesKw for UnoHsmPal {
     /// * `input` — plaintext to wrap. Must be at least 16 bytes, a
     ///   whole multiple of 8, and at most 3 KiB.
     /// * `output` — destination buffer. Must be at least
-    ///   `input.len() + 8` bytes.
+    ///   `input.len() + 8` bytes. `None` only validates and returns the
+    ///   wrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on success. `output[..input.len() + 8]` contains the
-    ///   wrapped key.
+    /// * `Ok(input.len() + 8)` on success. When `output` is `Some`,
+    ///   `output[..input.len() + 8]` contains the wrapped key.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if a length constraint is violated.
@@ -680,8 +681,8 @@ impl HsmAesKw for UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         self.kw_wrap_impl(io, key, input, output).await
     }
 
@@ -695,11 +696,12 @@ impl HsmAesKw for UnoHsmPal {
     /// * `input` — wrapped ciphertext. Must be at least 24 bytes, a
     ///   whole multiple of 8, and at most `3 KiB + 8` bytes.
     /// * `output` — destination buffer. Must be at least
-    ///   `input.len() - 8` bytes.
+    ///   `input.len() - 8` bytes. `None` only validates and returns the
+    ///   unwrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on a verified unwrap. `output[..input.len() - 8]`
-    ///   contains the recovered key.
+    /// * `Ok(input.len() - 8)` on a verified unwrap. When `output` is
+    ///   `Some`, `output[..input.len() - 8]` contains the recovered key.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if a length constraint is violated.
@@ -711,8 +713,8 @@ impl HsmAesKw for UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         self.kw_unwrap_impl(io, key, input, output).await
     }
 
@@ -727,10 +729,11 @@ impl HsmAesKw for UnoHsmPal {
     /// * `key` — AES key (16, 24, or 32 bytes).
     /// * `input` — plaintext to wrap (1–3 KiB, any length).
     /// * `output` — destination buffer. Must be at least
-    ///   `next_multiple_of(input.len(), 8) + 8` bytes.
+    ///   `next_multiple_of(input.len(), 8) + 8` bytes. `None` only
+    ///   validates and returns the wrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on success.
+    /// * `Ok(next_multiple_of(input.len(), 8) + 8)` on success.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if a length constraint is violated.
@@ -740,8 +743,8 @@ impl HsmAesKw for UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         self.kwp_wrap_impl(io, key, input, output).await
     }
 
@@ -757,7 +760,8 @@ impl HsmAesKw for UnoHsmPal {
     ///   whole multiple of 8, and at most `3 KiB + 8` bytes.
     /// * `output` — destination buffer. Must be at least the recovered
     ///   `mli` bytes (and at least `input.len() - 8` bytes for inputs
-    ///   larger than one AES block).
+    ///   larger than one AES block). `None` only validates and returns
+    ///   the maximum unwrapped length, `input.len() - 8`.
     ///
     /// # Returns
     /// * `Ok(mli)` — the recovered message length. `output[..mli]`
@@ -772,7 +776,7 @@ impl HsmAesKw for UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         self.kwp_unwrap_impl(io, key, input, output).await
     }

@@ -73,6 +73,39 @@ const AIV_PREFIX: [u8; 4] = [0xA6, 0x59, 0x59, 0xA6];
 /// state buffers).
 const MAX_DATA: usize = 3072;
 
+/// Validates an AES-KW plaintext length and returns the wrapped length.
+fn kw_wrap_len(m: usize) -> HsmResult<usize> {
+    if m < 16 || !m.is_multiple_of(SEMI) || m > MAX_DATA {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(m + SEMI)
+}
+
+/// Validates an AES-KW ciphertext length and returns the unwrapped length.
+fn kw_unwrap_len(c_len: usize) -> HsmResult<usize> {
+    if c_len < 24 || !c_len.is_multiple_of(SEMI) || c_len > MAX_DATA + SEMI {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(c_len - SEMI)
+}
+
+/// Validates an AES-KWP plaintext length and returns the wrapped length.
+fn kwp_wrap_len(m: usize) -> HsmResult<usize> {
+    if m == 0 || m > MAX_DATA {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(m.next_multiple_of(SEMI) + SEMI)
+}
+
+/// Validates an AES-KWP ciphertext length and returns the maximum
+/// unwrapped length (the exact length is the MLI recovered from the AIV).
+fn kwp_unwrap_max_len(c_len: usize) -> HsmResult<usize> {
+    if c_len < BLOCK || !c_len.is_multiple_of(SEMI) || c_len > MAX_DATA + SEMI {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(c_len - SEMI)
+}
+
 /// Maximum number of AES-ECB blocks processed per `with_exclusive`
 /// session before yielding. Tunes KW throughput against task-scheduler
 /// fairness.
@@ -429,11 +462,12 @@ impl UnoHsmPal {
     ///   whole multiple of [`SEMI`], and at most [`MAX_DATA`] bytes.
     /// * `output` — destination buffer for the ciphertext. Must be at
     ///   least `input.len() + SEMI` bytes; the wrap appends an extra
-    ///   8-byte authenticated value at the front.
+    ///   8-byte authenticated value at the front. `None` only validates
+    ///   and returns the wrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on success. `output[..input.len() + SEMI]` contains
-    ///   the wrapped key.
+    /// * `Ok(input.len() + SEMI)` on success. When `output` is `Some`,
+    ///   `output[..input.len() + SEMI]` contains the wrapped key.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `input` or `output` violates the
@@ -444,13 +478,13 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let m = input.len();
-        if m < 16 || !m.is_multiple_of(SEMI) || m > MAX_DATA {
-            return Err(HsmError::InvalidArg);
-        }
-        let out_len = m + SEMI;
+        let out_len = kw_wrap_len(m)?;
+        let Some(output) = output else {
+            return Ok(out_len);
+        };
         if output.len() < out_len {
             return Err(HsmError::InvalidArg);
         }
@@ -468,7 +502,8 @@ impl UnoHsmPal {
                 n,
             },
         )
-        .await
+        .await?;
+        Ok(out_len)
     }
 
     /// AES-KW unwrap (RFC 3394 §2.2.2).
@@ -479,11 +514,12 @@ impl UnoHsmPal {
     ///   whole multiple of [`SEMI`], and at most `MAX_DATA + SEMI`
     ///   bytes.
     /// * `output` — destination buffer for the plaintext. Must be at
-    ///   least `input.len() - SEMI` bytes.
+    ///   least `input.len() - SEMI` bytes. `None` only validates and
+    ///   returns the unwrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on success. `output[..input.len() - SEMI]` contains
-    ///   the unwrapped key.
+    /// * `Ok(input.len() - SEMI)` on success. When `output` is `Some`,
+    ///   `output[..input.len() - SEMI]` contains the unwrapped key.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `input` or `output` violates the
@@ -496,13 +532,12 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        let c_len = input.len();
-        if c_len < 24 || !c_len.is_multiple_of(SEMI) || c_len > MAX_DATA + SEMI {
-            return Err(HsmError::InvalidArg);
-        }
-        let p_len = c_len - SEMI;
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        let p_len = kw_unwrap_len(input.len())?;
+        let Some(output) = output else {
+            return Ok(p_len);
+        };
         if output.len() < p_len {
             return Err(HsmError::InvalidArg);
         }
@@ -527,7 +562,7 @@ impl UnoHsmPal {
         if a != DEFAULT_IV {
             return Err(HsmError::AesUnwrapFailed);
         }
-        Ok(())
+        Ok(p_len)
     }
 
     /// AES-KWP wrap (RFC 5649 §4.1).
@@ -541,10 +576,11 @@ impl UnoHsmPal {
     /// * `key` — AES key (16, 24, or 32 bytes).
     /// * `input` — plaintext to wrap. Must be in `1..=MAX_DATA` bytes.
     /// * `output` — destination buffer. Must be at least
-    ///   `next_multiple_of(input.len(), SEMI) + SEMI` bytes.
+    ///   `next_multiple_of(input.len(), SEMI) + SEMI` bytes. `None` only
+    ///   validates and returns the wrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on success.
+    /// * `Ok(next_multiple_of(input.len(), SEMI) + SEMI)` on success.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if `input` is empty, exceeds
@@ -555,15 +591,14 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         let m = input.len();
-        if m == 0 || m > MAX_DATA {
-            return Err(HsmError::InvalidArg);
-        }
-
-        let r = m.next_multiple_of(SEMI);
-        let out_len = r + SEMI;
+        let out_len = kwp_wrap_len(m)?;
+        let Some(output) = output else {
+            return Ok(out_len);
+        };
+        let r = out_len - SEMI;
         if output.len() < out_len {
             return Err(HsmError::InvalidArg);
         }
@@ -595,7 +630,7 @@ impl UnoHsmPal {
                         .await?;
 
                     output[..BLOCK].copy_from_slice(&block[..BLOCK]);
-                    Ok::<(), HsmError>(())
+                    Ok::<usize, HsmError>(out_len)
                 })
                 .await;
         }
@@ -614,7 +649,8 @@ impl UnoHsmPal {
                 n,
             },
         )
-        .await
+        .await?;
+        Ok(out_len)
     }
 
     /// AES-KWP unwrap (RFC 5649 §4.2).
@@ -631,7 +667,8 @@ impl UnoHsmPal {
     /// * `output` — destination buffer for the unwrapped plaintext.
     ///   Must be at least `mli` bytes (the special case requires at
     ///   least `mli` bytes; the multi-block case requires at least
-    ///   `input.len() - SEMI` bytes).
+    ///   `input.len() - SEMI` bytes). `None` only validates and returns
+    ///   the maximum unwrapped length, `input.len() - SEMI`.
     ///
     /// # Returns
     /// * `Ok(mli)` — the recovered message length.
@@ -646,12 +683,13 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let c_len = input.len();
-        if c_len < BLOCK || !c_len.is_multiple_of(SEMI) || c_len > MAX_DATA + SEMI {
-            return Err(HsmError::InvalidArg);
-        }
+        let p_len = kwp_unwrap_max_len(c_len)?;
+        let Some(output) = output else {
+            return Ok(p_len);
+        };
 
         if c_len == BLOCK {
             // 1-block special case: single AES-ECB decrypt + AIV check.
@@ -683,7 +721,6 @@ impl UnoHsmPal {
                 .await;
         }
 
-        let p_len = c_len - SEMI;
         if output.len() < p_len {
             return Err(HsmError::InvalidArg);
         }

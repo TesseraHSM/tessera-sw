@@ -393,7 +393,11 @@ impl StdAes {
     /// - `kek` — key-encryption key (16, 24, or 32 bytes).
     /// - `input` — plaintext key material (`1..=3072` bytes, any length).
     /// - `output` — destination; must hold at least
-    ///   `round_up_8(input.len()) + 8` bytes.
+    ///   `round_up_8(input.len()) + 8` bytes. `None` only validates and
+    ///   returns the wrapped length.
+    ///
+    /// # Returns
+    /// - `Ok(round_up_8(input.len()) + 8)` — the wrapped length.
     ///
     /// # Errors
     /// - [`HsmError::AesInvalidKeyLength`] — `kek` is not a valid AES
@@ -402,7 +406,12 @@ impl StdAes {
     ///   violation (`input` must be `1..=3072`; `output` must hold at
     ///   least `round_up_8(input.len()) + 8` bytes).
     /// - [`HsmError::AesEncryptFailed`] — the wrapping operation failed.
-    pub async fn kwp_wrap(&self, kek: &[u8], input: &[u8], output: &mut [u8]) -> HsmResult<()> {
+    pub async fn kwp_wrap(
+        &self,
+        kek: &[u8],
+        input: &[u8],
+        output: Option<&mut [u8]>,
+    ) -> HsmResult<usize> {
         // RFC 5649 size constraints (per the `aes_kwp_wrap` trait
         // contract): the plaintext is 1..=3072 bytes and the output holds
         // at least `round_up_8(input.len()) + 8` bytes.  Violations are
@@ -411,6 +420,9 @@ impl StdAes {
             return Err(HsmError::InvalidArg);
         }
         let wrapped_len = input.len().next_multiple_of(8) + 8;
+        let Some(output) = output else {
+            return Ok(wrapped_len);
+        };
         if output.len() < wrapped_len {
             return Err(HsmError::InvalidArg);
         }
@@ -434,7 +446,7 @@ impl StdAes {
             .await?;
 
         output[..result.len()].copy_from_slice(&result);
-        Ok(())
+        Ok(result.len())
     }
 
     /// AES-KWP (RFC 5649) unwrap asynchronously.
@@ -446,7 +458,9 @@ impl StdAes {
     /// # Parameters
     /// - `kek` — key-encryption key (16, 24, or 32 bytes).
     /// - `input` — wrapped key material (multiple of 8 bytes, `>= 16`).
-    /// - `output` — destination for the unwrapped key material.
+    /// - `output` — destination for the unwrapped key material. `None`
+    ///   only validates and returns the maximum unwrapped length,
+    ///   `input.len() - 8`.
     ///
     /// # Returns
     /// - `Ok(len)` — unwrapped plaintext length; `output[..len]` valid.
@@ -463,7 +477,7 @@ impl StdAes {
         &self,
         kek: &[u8],
         input: &[u8],
-        output: &mut [u8],
+        output: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
         // RFC 5649 size constraints (per the `aes_kwp_unwrap` trait
         // contract): the wrapped input is >= 16 bytes, a multiple of 8, and
@@ -473,6 +487,9 @@ impl StdAes {
         if input.len() < 16 || !input.len().is_multiple_of(8) || input.len() > 3080 {
             return Err(HsmError::InvalidArg);
         }
+        let Some(output) = output else {
+            return Ok(input.len() - 8);
+        };
         if output.len() < input.len() - 8 {
             return Err(HsmError::InvalidArg);
         }
@@ -997,7 +1014,10 @@ mod tests {
         wrapped.truncate(wrapped_len);
 
         let mut out = vec![0u8; payload.len() + 8];
-        let len = driver.kwp_unwrap(&kek, &wrapped, &mut out).await.unwrap();
+        let len = driver
+            .kwp_unwrap(&kek, &wrapped, Some(&mut out))
+            .await
+            .unwrap();
         assert_eq!(&out[..len], &payload[..]);
     }
 
@@ -1018,7 +1038,7 @@ mod tests {
         wrapped[0] ^= 0xff; // corrupt the AIV → integrity check must fail
 
         let mut out = vec![0u8; payload.len() + 8];
-        let res = driver.kwp_unwrap(&kek, &wrapped, &mut out).await;
+        let res = driver.kwp_unwrap(&kek, &wrapped, Some(&mut out)).await;
         assert_eq!(res.unwrap_err(), HsmError::AesUnwrapFailed);
     }
 
@@ -1031,7 +1051,10 @@ mod tests {
         // Too short (< 16 bytes).
         let short = [0u8; 8];
         assert_eq!(
-            driver.kwp_unwrap(&kek, &short, &mut out).await.unwrap_err(),
+            driver
+                .kwp_unwrap(&kek, &short, Some(&mut out))
+                .await
+                .unwrap_err(),
             HsmError::InvalidArg
         );
 
@@ -1039,7 +1062,7 @@ mod tests {
         let unaligned = [0u8; 20];
         assert_eq!(
             driver
-                .kwp_unwrap(&kek, &unaligned, &mut out)
+                .kwp_unwrap(&kek, &unaligned, Some(&mut out))
                 .await
                 .unwrap_err(),
             HsmError::InvalidArg
@@ -1049,7 +1072,7 @@ mod tests {
         let oversized = vec![0u8; 3088];
         assert_eq!(
             driver
-                .kwp_unwrap(&kek, &oversized, &mut out)
+                .kwp_unwrap(&kek, &oversized, Some(&mut out))
                 .await
                 .unwrap_err(),
             HsmError::InvalidArg
@@ -1060,7 +1083,7 @@ mod tests {
         let mut tiny = vec![0u8; 8];
         assert_eq!(
             driver
-                .kwp_unwrap(&kek, &input, &mut tiny)
+                .kwp_unwrap(&kek, &input, Some(&mut tiny))
                 .await
                 .unwrap_err(),
             HsmError::InvalidArg
@@ -1080,12 +1103,59 @@ mod tests {
         let wrapped_len = payload.len().next_multiple_of(8) + 8;
 
         let mut wrapped = vec![0u8; wrapped_len];
-        driver.kwp_wrap(&kek, &payload, &mut wrapped).await.unwrap();
+        driver
+            .kwp_wrap(&kek, &payload, Some(&mut wrapped))
+            .await
+            .unwrap();
 
         // The wrap must be recoverable by the corresponding unwrap.
         let mut out = vec![0u8; payload.len() + 8];
-        let len = driver.kwp_unwrap(&kek, &wrapped, &mut out).await.unwrap();
+        let len = driver
+            .kwp_unwrap(&kek, &wrapped, Some(&mut out))
+            .await
+            .unwrap();
         assert_eq!(&out[..len], &payload[..]);
+    }
+
+    #[tokio::test]
+    async fn kwp_query_returns_lengths() {
+        let driver = make_driver();
+        let kek = [0x42u8; 32];
+        let payload: Vec<u8> = (0..47u8).collect();
+
+        let wrapped_len = driver.kwp_wrap(&kek, &payload, None).await.unwrap();
+        assert_eq!(wrapped_len, 56);
+        let mut wrapped = vec![0u8; wrapped_len];
+        assert_eq!(
+            driver
+                .kwp_wrap(&kek, &payload, Some(&mut wrapped))
+                .await
+                .unwrap(),
+            wrapped_len
+        );
+
+        // The unwrap query is the upper bound `input.len() - 8`; the real
+        // unwrap returns the exact MLI.
+        let max_len = driver.kwp_unwrap(&kek, &wrapped, None).await.unwrap();
+        assert_eq!(max_len, 48);
+        let mut out = vec![0u8; max_len];
+        assert_eq!(
+            driver
+                .kwp_unwrap(&kek, &wrapped, Some(&mut out))
+                .await
+                .unwrap(),
+            payload.len()
+        );
+
+        // Queries still validate input sizes.
+        assert_eq!(
+            driver.kwp_wrap(&kek, &[], None).await.unwrap_err(),
+            HsmError::InvalidArg
+        );
+        assert_eq!(
+            driver.kwp_unwrap(&kek, &[0u8; 20], None).await.unwrap_err(),
+            HsmError::InvalidArg
+        );
     }
 
     #[tokio::test]
@@ -1096,7 +1166,10 @@ mod tests {
         // Empty input.
         let mut out = vec![0u8; 32];
         assert_eq!(
-            driver.kwp_wrap(&kek, &[], &mut out).await.unwrap_err(),
+            driver
+                .kwp_wrap(&kek, &[], Some(&mut out))
+                .await
+                .unwrap_err(),
             HsmError::InvalidArg
         );
 
@@ -1105,7 +1178,7 @@ mod tests {
         let mut big = vec![0u8; 3073 + 16];
         assert_eq!(
             driver
-                .kwp_wrap(&kek, &oversized, &mut big)
+                .kwp_wrap(&kek, &oversized, Some(&mut big))
                 .await
                 .unwrap_err(),
             HsmError::InvalidArg
@@ -1115,7 +1188,10 @@ mod tests {
         let input = [0u8; 24];
         let mut tiny = vec![0u8; 24];
         assert_eq!(
-            driver.kwp_wrap(&kek, &input, &mut tiny).await.unwrap_err(),
+            driver
+                .kwp_wrap(&kek, &input, Some(&mut tiny))
+                .await
+                .unwrap_err(),
             HsmError::InvalidArg
         );
     }
@@ -1129,7 +1205,7 @@ mod tests {
         let mut out = vec![0u8; 32];
         assert_eq!(
             driver
-                .kwp_wrap(&bad_kek, &payload, &mut out)
+                .kwp_wrap(&bad_kek, &payload, Some(&mut out))
                 .await
                 .unwrap_err(),
             HsmError::AesInvalidKeyLength

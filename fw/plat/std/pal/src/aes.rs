@@ -276,8 +276,8 @@ impl HsmAesKw for StdHsmPal {
         _io: &StdHsmIo,
         _key: &HsmDmaBuf,
         _input: &HsmDmaBuf,
-        _output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        _output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         todo!()
     }
 
@@ -286,8 +286,8 @@ impl HsmAesKw for StdHsmPal {
         _io: &StdHsmIo,
         _key: &HsmDmaBuf,
         _input: &HsmDmaBuf,
-        _output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        _output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         todo!()
     }
 
@@ -296,9 +296,11 @@ impl HsmAesKw for StdHsmPal {
         _io: &StdHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        self.aes.kwp_wrap(key, input, output).await
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        self.aes
+            .kwp_wrap(key, input, output.map(|o| &mut **o))
+            .await
     }
 
     async fn aes_kwp_unwrap(
@@ -306,9 +308,11 @@ impl HsmAesKw for StdHsmPal {
         _io: &StdHsmIo,
         key: &HsmDmaBuf,
         input: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        self.aes.kwp_unwrap(key, input, output).await
+        self.aes
+            .kwp_unwrap(key, input, output.map(|o| &mut **o))
+            .await
     }
 }
 
