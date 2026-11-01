@@ -16,6 +16,7 @@ pub mod open_close;
 pub mod part_final;
 pub mod part_init;
 pub mod psk_change;
+pub mod reopen;
 
 pub use crypto::coord_sizes;
 pub use finish::build_mac_fin;
@@ -35,3 +36,7 @@ pub use part_init::encrypt_mach_seed_envelope;
 pub use part_init::part_init;
 pub use psk_change::encrypt_psk_envelope;
 pub use psk_change::psk_change;
+pub use reopen::session_reopen;
+pub use reopen::session_reopen_finish;
+pub use reopen::session_reopen_finish_with_mac;
+pub use reopen::session_reopen_init;

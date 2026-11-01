@@ -53,6 +53,13 @@
 //! | 1 | 1 | — | [`Pending`](HsmSessionState::Pending) — handshake in flight |
 //! | 1 | 0 | 0 | [`Active`](HsmSessionState::Active) — session is usable |
 //! | 1 | 0 | 1 | [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation) |
+//!
+//! A slot with both `pending_mask` and `renego_mask` set is a
+//! *reopen-Pending* slot: a `SessionReopenInit` handshake is in flight
+//! for a session that still needs renegotiation.  It reports
+//! [`Pending`](HsmSessionState::Pending), is never evicted by a fresh
+//! handshake, and reverts to `NeedsRenegotiation` if the reopen is
+//! abandoned ([`cancel_reopen`](SessionTable::cancel_reopen)).
 
 use tsra_fw_hsm_pal_traits::*;
 
@@ -153,7 +160,8 @@ impl SessionTable {
     /// because they carry no reopenable credential state.  Mirrors the
     /// reference firmware's `backup`/`restore` pair.
     pub fn backup(&self) -> u8 {
-        self.alloc_mask & !self.pending_mask
+        // Reopen-Pending slots are still owned by an established session.
+        self.alloc_mask & !(self.pending_mask & !self.renego_mask)
     }
 
     /// Re-establish session slots preserved across a partition disable,
@@ -355,11 +363,13 @@ impl SessionTable {
             }
         }
 
-        // 2. Evict the oldest Pending slot in range.
+        // 2. Evict the oldest fresh Pending slot in range (reopen-Pending
+        //    slots belong to an established session and are never evicted).
         let mut victim: Option<usize> = None;
         let mut victim_seq = u64::MAX;
+        let fresh_pending = self.pending_mask & !self.renego_mask;
         for slot in range_start..=range_end {
-            if (self.pending_mask & (1 << slot)) != 0 && self.pending_seqs[slot] < victim_seq {
+            if (fresh_pending & (1 << slot)) != 0 && self.pending_seqs[slot] < victim_seq {
                 victim_seq = self.pending_seqs[slot];
                 victim = Some(slot);
             }
@@ -377,6 +387,55 @@ impl SessionTable {
         //    NeedsRenegotiation slot is reserved for its own
         //    `ReopenSession`; it is never reclaimed by a fresh handshake.
         Err(HsmError::VaultSessionLimitReached)
+    }
+
+    /// Move a NeedsRenegotiation (or reopen-Pending) slot to Pending under
+    /// the same id for a `SessionReopenInit` handshake.  The renegotiation
+    /// bit stays set until [`promote`](Self::promote) so an abandoned
+    /// reopen can be reverted by [`cancel_reopen`](Self::cancel_reopen).
+    pub fn reopen_pending(
+        &mut self,
+        id: HsmSessId,
+        role: HsmSessionRole,
+        handshake_state: &[u8],
+    ) -> HsmResult<()> {
+        if handshake_state.is_empty() || handshake_state.len() > SESSION_PENDING_BLOB_MAX {
+            return Err(HsmError::InvalidArg);
+        }
+        let (range_start, range_end) = role_slot_range(role);
+        let slot = u16::from(id) as usize;
+        if !(range_start..=range_end).contains(&slot) {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.active_slot(id)?;
+        let bit = 1u8 << slot;
+        if (self.renego_mask & bit) == 0 {
+            return Err(if (self.pending_mask & bit) == 0 {
+                HsmError::InvalidArg
+            } else {
+                HsmError::SessionNotFound
+            });
+        }
+        self.install_pending(slot, handshake_state)
+    }
+
+    /// Whether `id` is a reopen-Pending slot.
+    pub fn is_reopen_pending(&self, id: HsmSessId) -> bool {
+        let slot = u16::from(id) as usize;
+        slot < MAX_SESSIONS && (self.pending_mask & self.renego_mask & (1 << slot)) != 0
+    }
+
+    /// Abandon a reopen handshake: a reopen-Pending slot reverts to
+    /// NeedsRenegotiation and its handshake state is zeroized.
+    pub fn cancel_reopen(&mut self, id: HsmSessId) -> HsmResult<()> {
+        if !self.is_reopen_pending(id) {
+            return Err(HsmError::SessionNotPending);
+        }
+        let slot = u16::from(id) as usize;
+        self.pending_mask &= !(1u8 << slot);
+        self.pending_blobs[slot].clear();
+        self.pending_seqs[slot] = 0;
+        Ok(())
     }
 
     fn install_pending(&mut self, slot: usize, handshake_state: &[u8]) -> HsmResult<()> {
@@ -409,6 +468,7 @@ impl SessionTable {
             return Err(HsmError::SessionNotPending);
         }
         self.pending_mask &= !(1u8 << slot);
+        self.renego_mask &= !(1u8 << slot);
         self.psk_change_mask &= !(1u8 << slot);
         self.pending_blobs[slot].clear();
         self.pending_seqs[slot] = 0;
@@ -991,5 +1051,145 @@ mod tests {
         assert_eq!(err, HsmError::SessionNotFound);
         let err = table.psk_change_used(id).unwrap_err();
         assert_eq!(err, HsmError::SessionNotFound);
+    }
+
+    /// Active CU session in slot 1 that a disable left NeedsRenegotiation.
+    fn renego_cu(table: &mut SessionTable) -> HsmSessId {
+        let id = table
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
+            .unwrap();
+        table.promote(id, HsmKeyId::from(0x77)).unwrap();
+        table.set_needs_renego(id);
+        id
+    }
+
+    #[test]
+    fn reopen_pending_rearms_renego_slot_and_replaces_blob() {
+        let mut table = SessionTable::new();
+        let id = renego_cu(&mut table);
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r1")
+            .unwrap();
+        assert!(matches!(table.state(id), HsmSessionState::Pending));
+        assert!(table.is_reopen_pending(id));
+        // A repeated reopen-init replaces the handshake blob.
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r2")
+            .unwrap();
+        assert_eq!(table.pending_state(id).unwrap(), b"r2");
+    }
+
+    #[test]
+    fn reopen_pending_rejects_non_renego_slots() {
+        let mut table = SessionTable::new();
+        let active = table.create(HsmKeyId::from(0x10)).unwrap();
+        assert_eq!(
+            table
+                .reopen_pending(active, HsmSessionRole::CryptoOfficer, b"r")
+                .unwrap_err(),
+            HsmError::InvalidArg
+        );
+        let fresh = table
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
+            .unwrap();
+        assert_eq!(
+            table
+                .reopen_pending(fresh, HsmSessionRole::CryptoUser, b"r")
+                .unwrap_err(),
+            HsmError::SessionNotFound
+        );
+        assert_eq!(
+            table
+                .reopen_pending(HsmSessId::from(5), HsmSessionRole::CryptoUser, b"r")
+                .unwrap_err(),
+            HsmError::SessionNotFound
+        );
+    }
+
+    #[test]
+    fn reopen_pending_rejects_role_mismatch_and_bad_blob() {
+        let mut table = SessionTable::new();
+        let id = renego_cu(&mut table);
+        assert_eq!(
+            table
+                .reopen_pending(id, HsmSessionRole::CryptoOfficer, b"r")
+                .unwrap_err(),
+            HsmError::InvalidArg
+        );
+        assert_eq!(
+            table
+                .reopen_pending(id, HsmSessionRole::CryptoUser, b"")
+                .unwrap_err(),
+            HsmError::InvalidArg
+        );
+        assert!(matches!(
+            table.state(id),
+            HsmSessionState::NeedsRenegotiation
+        ));
+    }
+
+    #[test]
+    fn fresh_init_never_evicts_reopen_pending_slot() {
+        let mut table = SessionTable::new();
+        let id = renego_cu(&mut table);
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
+        // Fill the rest of the CU range with fresh Pending handshakes,
+        // then force evictions; the reopen-Pending slot must survive.
+        for _ in 0..12 {
+            table
+                .create_pending(HsmSessionRole::CryptoUser, b"p")
+                .unwrap();
+        }
+        assert!(table.is_reopen_pending(id));
+        assert_eq!(table.pending_state(id).unwrap(), b"r");
+    }
+
+    #[test]
+    fn cancel_reopen_reverts_to_renego() {
+        let mut table = SessionTable::new();
+        let id = renego_cu(&mut table);
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
+        table.cancel_reopen(id).unwrap();
+        assert!(matches!(
+            table.state(id),
+            HsmSessionState::NeedsRenegotiation
+        ));
+        assert!(!table.is_reopen_pending(id));
+        // And it can be re-armed again.
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
+    }
+
+    #[test]
+    fn promote_reopen_pending_becomes_active() {
+        let mut table = SessionTable::new();
+        let id = renego_cu(&mut table);
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
+        table.promote(id, HsmKeyId::from(0x88)).unwrap();
+        assert!(matches!(table.state(id), HsmSessionState::Active));
+        assert!(!table.is_reopen_pending(id));
+        assert_eq!(u16::from(table.physical_id(id).unwrap()), 0x88);
+    }
+
+    #[test]
+    fn backup_keeps_reopen_pending_slot() {
+        let mut table = SessionTable::new();
+        let id = renego_cu(&mut table);
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
+        assert_eq!(table.backup(), 1 << u16::from(id));
+        table.restore(table.backup());
+        assert!(matches!(
+            table.state(id),
+            HsmSessionState::NeedsRenegotiation
+        ));
     }
 }

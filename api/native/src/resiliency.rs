@@ -44,6 +44,10 @@ const MAX_POTA_BUFFER_SIZE: usize = 4 * 1024;
 /// OBK (Owner Backup Key) size in bytes per the API contract.
 const OBK_SIZE: usize = 48;
 
+/// Maximum size (in bytes) of the concatenated DER PTA certificate chain
+/// returned by the PTA endorsement callback.
+const MAX_PTA_CHAIN_SIZE: usize = 64 * 1024;
+
 /// Storage operations for resiliency.
 ///
 /// All three function pointers are required.
@@ -136,6 +140,41 @@ pub struct TsraResiliencyConfig {
     pub mobk_callback_ops: *const TsraMobkCallbackOps,
 }
 
+/// PTA endorsement callback for security-domain (TBOR) resiliency.
+///
+/// The `endorse` callback is invoked when restore re-runs partition
+/// provisioning and needs a PTA certificate chain for the new PTA key.
+/// It receives the DER PKCS#10 CSR and COSE_Sign1 PTA report and returns
+/// the certificate chain as concatenated DER certificates (root first,
+/// PTA leaf last). Uses the two-call buffer pattern: first call with a
+/// null/zero output buffer to query the size, second call to fill it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TsraPtaCallbackOps {
+    pub endorse: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        pta_csr: *const TsraBuffer,
+        pta_report: *const TsraBuffer,
+        cert_chain: *mut TsraBuffer,
+    ) -> TsraStatus,
+}
+
+/// Resiliency configuration passed to `tsra_part_enable_resiliency_ex`.
+///
+/// - `ctx`: Opaque context pointer passed back to every callback. Must
+///   remain valid until `tsra_part_close` returns. **Must not** contain or
+///   reference the same partition handle — see module-level safety docs.
+/// - `storage_ops` and `lock_ops` are always required (inline).
+/// - `pta_callback_ops`: Optional PTA endorsement callback. When NULL,
+///   restore replays the chain captured from `tsra_sess_ex_part_final`.
+#[repr(C)]
+pub struct TsraResiliencyExConfig {
+    pub ctx: *mut c_void,
+    pub storage_ops: TsraResiliencyStorageOps,
+    pub lock_ops: TsraResiliencyLockOps,
+    pub pta_callback_ops: *const TsraPtaCallbackOps,
+}
+
 /// Bridge that implements [`api::ResiliencyStorage`] by calling through
 /// C function pointers.
 struct ResiliencyStorageAdapter {
@@ -199,6 +238,21 @@ unsafe impl Send for MobkCallbackAdapter {}
 // SAFETY: See ResiliencyStorageBridge safety comment.
 #[allow(unsafe_code)]
 unsafe impl Sync for MobkCallbackAdapter {}
+
+/// Bridge that implements [`api::PtaEndorsementCallback`] by calling
+/// through C function pointers.
+struct PtaCallbackAdapter {
+    ctx: *mut c_void,
+    ops: TsraPtaCallbackOps,
+}
+
+// SAFETY: See ResiliencyStorageAdapter safety comment.
+#[allow(unsafe_code)]
+unsafe impl Send for PtaCallbackAdapter {}
+
+// SAFETY: See ResiliencyStorageAdapter safety comment.
+#[allow(unsafe_code)]
+unsafe impl Sync for PtaCallbackAdapter {}
 
 impl api::ResiliencyStorage for ResiliencyStorageAdapter {
     #[allow(unsafe_code)]
@@ -518,6 +572,149 @@ impl TryFrom<&TsraResiliencyConfig> for api::HsmResiliencyConfig {
             lock,
             pota_callback,
             mobk_callback,
+        })
+    }
+}
+
+impl api::PtaEndorsementCallback for PtaCallbackAdapter {
+    #[allow(unsafe_code)]
+    fn endorse_pta(&self, pta_csr: &[u8], pta_report: &[u8]) -> api::HsmResult<Vec<Vec<u8>>> {
+        // Cast to *mut is safe: the C callback receives these via *const
+        // TsraBuffer so it will not write through these pointers.
+        let csr_buf = TsraBuffer {
+            ptr: pta_csr.as_ptr() as *mut c_void,
+            len: u32::try_from(pta_csr.len()).map_err(|_| api::HsmError::InvalidArgument)?,
+        };
+        let report_buf = TsraBuffer {
+            ptr: pta_report.as_ptr() as *mut c_void,
+            len: u32::try_from(pta_report.len()).map_err(|_| api::HsmError::InvalidArgument)?,
+        };
+
+        // First call: query required output size
+        let mut chain_buf = TsraBuffer {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+        };
+
+        // SAFETY: csr_buf and report_buf point to valid data; chain_buf is
+        // zero-initialized for the size query.
+        let status: api::HsmError =
+            unsafe { (self.ops.endorse)(self.ctx, &csr_buf, &report_buf, &mut chain_buf) }.into();
+
+        match status {
+            api::HsmError::BufferTooSmall if chain_buf.len != 0 => {}
+            api::HsmError::BufferTooSmall | api::HsmError::Success => {
+                return Err(api::HsmError::InvalidArgument);
+            }
+            err => return Err(err),
+        }
+
+        // Second call: fill allocated buffer
+        let len = chain_buf.len as usize;
+        if len > MAX_PTA_CHAIN_SIZE {
+            return Err(api::HsmError::InvalidArgument);
+        }
+        let mut data = vec![0u8; len];
+        chain_buf.ptr = data.as_mut_ptr() as *mut c_void;
+
+        // SAFETY: chain_buf.ptr points to a valid Vec allocation of
+        // chain_buf.len bytes.
+        let status: api::HsmError =
+            unsafe { (self.ops.endorse)(self.ctx, &csr_buf, &report_buf, &mut chain_buf) }.into();
+
+        if status != api::HsmError::Success {
+            return Err(status);
+        }
+
+        let returned_len = chain_buf.len as usize;
+        if returned_len > len {
+            return Err(api::HsmError::InvalidArgument);
+        }
+        data.truncate(returned_len);
+
+        split_der_chain(&data)
+    }
+}
+
+/// Splits concatenated DER certificates into individual certificates.
+///
+/// Every element must be a DER SEQUENCE with a definite length; trailing
+/// bytes or a malformed header are rejected.
+fn split_der_chain(mut data: &[u8]) -> api::HsmResult<Vec<Vec<u8>>> {
+    const DER_SEQUENCE: u8 = 0x30;
+
+    let mut certs = Vec::new();
+    while !data.is_empty() {
+        let (&tag, rest) = data.split_first().ok_or(api::HsmError::InvalidArgument)?;
+        let (&first, rest) = rest.split_first().ok_or(api::HsmError::InvalidArgument)?;
+        if tag != DER_SEQUENCE {
+            return Err(api::HsmError::InvalidArgument);
+        }
+        let (body_len, len_bytes) = if first < 0x80 {
+            (first as usize, 0)
+        } else {
+            let n = (first & 0x7F) as usize;
+            if n == 0 || n > 4 || rest.len() < n {
+                return Err(api::HsmError::InvalidArgument);
+            }
+            let len = rest[..n]
+                .iter()
+                .fold(0usize, |acc, &b| (acc << 8) | b as usize);
+            (len, n)
+        };
+        let total = body_len
+            .checked_add(2 + len_bytes)
+            .filter(|&t| t <= data.len())
+            .ok_or(api::HsmError::InvalidArgument)?;
+        let (cert, remaining) = data.split_at(total);
+        certs.push(cert.to_vec());
+        data = remaining;
+    }
+
+    if certs.is_empty() {
+        return Err(api::HsmError::InvalidArgument);
+    }
+    Ok(certs)
+}
+
+impl TryFrom<&TsraResiliencyExConfig> for api::HsmResiliencyExConfig {
+    type Error = TsraStatus;
+
+    #[allow(unsafe_code)]
+    fn try_from(config: &TsraResiliencyExConfig) -> Result<Self, Self::Error> {
+        // The #[repr(C)] structs could have been zero-initialized by a C caller.
+        if (config.storage_ops.read as usize) == 0
+            || (config.storage_ops.write as usize) == 0
+            || (config.storage_ops.clear as usize) == 0
+            || (config.lock_ops.lock as usize) == 0
+            || (config.lock_ops.unlock as usize) == 0
+        {
+            return Err(TsraStatus::InvalidArgument);
+        }
+
+        let pta_callback = if config.pta_callback_ops.is_null() {
+            None
+        } else {
+            let ops = *deref_ptr(config.pta_callback_ops)?;
+            if (ops.endorse as usize) == 0 {
+                return Err(TsraStatus::InvalidArgument);
+            }
+            Some(Box::new(PtaCallbackAdapter {
+                ctx: config.ctx,
+                ops,
+            }) as Box<dyn api::PtaEndorsementCallback>)
+        };
+
+        Ok(api::HsmResiliencyExConfig {
+            storage: Box::new(ResiliencyStorageAdapter {
+                ctx: config.ctx,
+                ops: config.storage_ops,
+            }),
+            lock: Arc::new(ResiliencyLockAdapter {
+                ctx: config.ctx,
+                ops: config.lock_ops,
+            }),
+            pta_callback,
         })
     }
 }
@@ -903,5 +1100,131 @@ mod tests {
             .expect("config should accept null optional callbacks");
         assert!(resiliency_config.pota_callback.is_none());
         assert!(resiliency_config.mobk_callback.is_none());
+    }
+
+    #[test]
+    fn split_der_chain_handles_short_and_long_lengths() {
+        let short = [0x30, 0x02, 0xAA, 0xBB];
+        let mut long = vec![0x30, 0x81, 0x80];
+        long.extend(std::iter::repeat_n(0xCC, 0x80));
+        let chain = [short.as_slice(), long.as_slice()].concat();
+
+        let certs = split_der_chain(&chain).expect("valid chain");
+        assert_eq!(certs, vec![short.to_vec(), long]);
+    }
+
+    #[test]
+    fn split_der_chain_rejects_malformed_input() {
+        for bad in [
+            &[][..],
+            &[0x30][..],
+            &[0x31, 0x00][..],
+            &[0x30, 0x03, 0xAA][..],
+            &[0x30, 0x80][..],
+            &[0x30, 0x85, 0, 0, 0, 0, 1][..],
+            &[0x30, 0x82, 0x01][..],
+            &[0x30, 0x84, 0xFF, 0xFF, 0xFF, 0xFF][..],
+            &[0x30, 0x00, 0x01][..],
+        ] {
+            assert_eq!(
+                split_der_chain(bad),
+                Err(api::HsmError::InvalidArgument),
+                "{bad:02x?}"
+            );
+        }
+    }
+
+    const PTA_CHAIN: [u8; 6] = [0x30, 0x01, 0x11, 0x30, 0x01, 0x22];
+
+    #[allow(unsafe_code)]
+    unsafe extern "C" fn pta_callback(
+        ctx: *mut c_void,
+        pta_csr: *const TsraBuffer,
+        pta_report: *const TsraBuffer,
+        cert_chain: *mut TsraBuffer,
+    ) -> TsraStatus {
+        let ctx = unsafe { &mut *(ctx as *mut StorageReadCtx) };
+        let (csr, report, out) = unsafe { (&*pta_csr, &*pta_report, &mut *cert_chain) };
+        ctx.calls += 1;
+        assert_eq!((csr.len, report.len), (2, 3));
+        if out.ptr.is_null() {
+            out.len = match ctx.mode {
+                StorageReadMode::EmptySuccess => return TsraStatus::Success,
+                StorageReadMode::OversizedBufferTooSmall => (MAX_PTA_CHAIN_SIZE + 1) as u32,
+                _ => PTA_CHAIN.len() as u32,
+            };
+            return TsraStatus::BufferTooSmall;
+        }
+        if let StorageReadMode::SecondCallFailure = ctx.mode {
+            return TsraStatus::InternalError;
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(PTA_CHAIN.as_ptr(), out.ptr as *mut u8, PTA_CHAIN.len())
+        };
+        out.len = PTA_CHAIN.len() as u32;
+        TsraStatus::Success
+    }
+
+    #[test]
+    fn pta_callback_splits_chain_and_rejects_invalid_protocols() {
+        let run = |mode| {
+            let mut ctx = StorageReadCtx { mode, calls: 0 };
+            let adapter = PtaCallbackAdapter {
+                ctx: &mut ctx as *mut _ as *mut c_void,
+                ops: TsraPtaCallbackOps {
+                    endorse: pta_callback,
+                },
+            };
+            api::PtaEndorsementCallback::endorse_pta(&adapter, &[1, 2], &[3, 4, 5])
+        };
+
+        assert_eq!(
+            run(StorageReadMode::NonZeroLenSuccess).expect("chain"),
+            vec![vec![0x30, 0x01, 0x11], vec![0x30, 0x01, 0x22]]
+        );
+        assert_eq!(
+            run(StorageReadMode::EmptySuccess),
+            Err(api::HsmError::InvalidArgument)
+        );
+        assert_eq!(
+            run(StorageReadMode::OversizedBufferTooSmall),
+            Err(api::HsmError::InvalidArgument)
+        );
+        assert_eq!(
+            run(StorageReadMode::SecondCallFailure),
+            Err(api::HsmError::InternalError)
+        );
+    }
+
+    #[test]
+    fn resiliency_ex_config_validates_callbacks() {
+        let mut ctx = StatusCtx {
+            status: TsraStatus::Success,
+        };
+        let null_pta = TsraResiliencyExConfig {
+            ctx: &mut ctx as *mut _ as *mut c_void,
+            storage_ops: TsraResiliencyStorageOps {
+                read: storage_read_callback,
+                write: storage_write_callback,
+                clear: storage_clear_callback,
+            },
+            lock_ops: TsraResiliencyLockOps {
+                lock: lock_callback,
+                unlock: lock_callback,
+            },
+            pta_callback_ops: ptr::null(),
+        };
+        let config = api::HsmResiliencyExConfig::try_from(&null_pta).expect("valid config");
+        assert!(config.pta_callback.is_none());
+
+        let pta_ops = TsraPtaCallbackOps {
+            endorse: pta_callback,
+        };
+        let with_pta = TsraResiliencyExConfig {
+            pta_callback_ops: &pta_ops,
+            ..null_pta
+        };
+        let config = api::HsmResiliencyExConfig::try_from(&with_pta).expect("valid config");
+        assert!(config.pta_callback.is_some());
     }
 }

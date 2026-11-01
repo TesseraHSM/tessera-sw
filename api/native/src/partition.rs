@@ -438,6 +438,38 @@ pub unsafe extern "C" fn tsra_part_init(
     })
 }
 
+/// @brief Enable security-domain (TBOR) resiliency on a partition
+///
+/// Enables automatic retry and recovery from transient hardware resets for
+/// sessions opened with `tsra_sess_ex_open`. Call once after
+/// `tsra_part_open` and before opening any security-domain session so the
+/// SDK can capture provisioning state and rotated PSKs.
+///
+/// @param[in] part_handle Handle to the HSM partition
+/// @param[in] config Resiliency configuration (see `tsra_resiliency_ex_config`)
+///
+/// @return `TSRA_STATUS_SUCCESS` on success; `TSRA_STATUS_INVALID_ARGUMENT`
+///         if `config` is malformed or resiliency is already enabled on the
+///         partition
+///
+/// @internal
+/// # Safety
+/// `config` must point to a valid `tsra_resiliency_ex_config` whose
+/// callbacks and `ctx` remain valid until `tsra_part_close` returns.
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn tsra_part_enable_resiliency_ex(
+    part_handle: TsraHandle,
+    config: *const TsraResiliencyExConfig,
+) -> TsraStatus {
+    abi_boundary(|| {
+        let config = api::HsmResiliencyExConfig::try_from(deref_ptr(config)?)?;
+        let partition = &HsmPartition::try_from(part_handle)?;
+        partition.enable_resiliency_ex(config)?;
+        Ok(())
+    })
+}
+
 /// Close an HSM partition
 ///
 /// @param[in] handle Handle to the HSM partition

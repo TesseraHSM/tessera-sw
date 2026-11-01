@@ -76,9 +76,11 @@ struct PartInitConfig
 ///               zero-initialized by the caller.
 void make_part_init_config(tsra_handle part_handle, PartInitConfig &config);
 
-/// Returns the MOBK file path for cross-process caching.
-/// Uses TSRA_MOBK_PATH from the environment if set, otherwise
-/// defaults to "mobk.bin" in the system temporary directory.
+/// Returns the MOBK cache file path.
+/// Uses TSRA_MOBK_PATH from the environment if set. Otherwise, on mock and
+/// emu (in-process devices) returns a per-process file that is removed at
+/// exit; on real hardware returns "mobk.bin" in the system temporary
+/// directory, shared across processes.
 std::string get_mobk_path();
 
 /// Load a cached MOBK from the on-disk file, if it exists.

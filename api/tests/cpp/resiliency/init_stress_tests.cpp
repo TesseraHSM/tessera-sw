@@ -74,6 +74,9 @@ TEST_F(init_resiliency_stress, cert_chain_under_reset)
 /// while a dedicated thread fires resets. At most five transient
 /// DDI_CMD_FAILURE errors are tolerated.
 ///
+/// MBOR-only: exercises `tsra_part_init`, which TBOR replaces with the
+/// session-scoped `tsra_sess_ex_part_init` / `tsra_sess_ex_part_final`.
+#if !SESSION_EX_TESTS
 TEST_F(init_resiliency_stress, init_part_under_reset)
 {
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
@@ -141,3 +144,4 @@ TEST_F(init_resiliency_stress, init_part_under_reset)
         );
     });
 }
+#endif // !SESSION_EX_TESTS

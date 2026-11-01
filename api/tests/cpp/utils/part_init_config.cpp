@@ -391,26 +391,71 @@ void make_part_init_config(tsra_handle part_handle, PartInitConfig &config)
     }
 }
 
-std::string get_mobk_path()
+namespace
+{
+
+std::string mobk_path_from_env()
 {
 #ifdef _WIN32
     char *val = nullptr;
     size_t len = 0;
     _dupenv_s(&val, &len, "TSRA_MOBK_PATH");
-    if (val != nullptr)
-    {
-        std::string result(val);
-        free(val);
-        return result;
-    }
+    std::string result = (val != nullptr) ? std::string(val) : std::string();
     free(val);
-    return (std::filesystem::temp_directory_path() / "mobk.bin").string();
+    return result;
 #else
     const char *val = std::getenv("TSRA_MOBK_PATH");
-    if (val != nullptr)
+    return (val != nullptr) ? std::string(val) : std::string();
+#endif
+}
+
+#if defined(TSRA_FEATURE_MOCK) || defined(TSRA_FEATURE_EMU)
+// Mock and emu run the device in-process, so a MOBK is only valid for the
+// process that created it. Scope the cache to this process and remove it on
+// exit so parallel or later test processes never pick up a foreign MOBK.
+struct ProcessMobkFile
+{
+    std::filesystem::path path;
+
+    ProcessMobkFile()
+        : path(
+              std::filesystem::temp_directory_path() / ("mobk_" +
+                                                        std::to_string(
+#ifdef _WIN32
+                                                            GetCurrentProcessId()
+#else
+                                                            getpid()
+#endif
+                                                        ) +
+                                                        ".bin")
+          )
     {
-        return std::string(val);
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
     }
+
+    ~ProcessMobkFile()
+    {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+    }
+};
+#endif
+
+} // namespace
+
+std::string get_mobk_path()
+{
+    auto env_path = mobk_path_from_env();
+    if (!env_path.empty())
+    {
+        return env_path;
+    }
+#if defined(TSRA_FEATURE_MOCK) || defined(TSRA_FEATURE_EMU)
+    static const ProcessMobkFile file;
+    return file.path.string();
+#else
+    // Real hardware outlives the process; share the cache across runs.
     return (std::filesystem::temp_directory_path() / "mobk.bin").string();
 #endif
 }

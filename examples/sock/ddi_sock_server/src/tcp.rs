@@ -394,6 +394,7 @@ mod tests {
                     exported: exported.into(),
                     param_key,
                     bmk_session: finished.bmk_session,
+                    seed: [0x5A; SESSION_SEED_LEN],
                 };
                 tbor(
                     &device,

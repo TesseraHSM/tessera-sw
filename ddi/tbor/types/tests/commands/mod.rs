@@ -50,6 +50,7 @@ pub mod part_final;
 pub mod part_info;
 pub mod part_init;
 pub mod psk_change;
+pub mod reopen_session;
 pub mod rsa_mod_exp;
 pub mod sd_create_peer_backup;
 pub mod sd_create_remote_backup;

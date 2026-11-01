@@ -93,6 +93,10 @@ set(SOURCE
     algo/rsa/sign_verify_tests.cpp
     algo/rsa/unwrap_tests.cpp
     algo/sha/digest_tests.cpp
+    resiliency/init_stress_tests.cpp
+    resiliency/aes_stress_tests.cpp
+    resiliency/ecc_stress_tests.cpp
+    resiliency/mixed_stress_tests.cpp
     algo/secret/unmask_tests.cpp
 )
 
@@ -116,10 +120,6 @@ else()
         handle_mgmt_tests.cpp
         multi_process_tests.cpp
         algo/kdf/kbkdf_tests.cpp
-        resiliency/init_stress_tests.cpp
-        resiliency/aes_stress_tests.cpp
-        resiliency/ecc_stress_tests.cpp
-        resiliency/mixed_stress_tests.cpp
     )
 endif()
 

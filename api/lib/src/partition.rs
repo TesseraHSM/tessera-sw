@@ -16,6 +16,7 @@ use tsra_ddi::DdiDev;
 
 use super::*;
 use crate::resiliency::*;
+use crate::resiliency_ex::*;
 
 /// HSM API revision.
 ///
@@ -585,7 +586,90 @@ impl HsmPartition {
         session_type: HsmSessionExType,
     ) -> HsmResult<HsmSession> {
         let result = ddi::open_session_ex(self, api_rev, psk.psk_id as u8, psk.psk, session_type)?;
-        Ok(HsmSession::new_ex(api_rev, self.clone(), result))
+        let session = HsmSession::new_ex(api_rev, self.clone(), result);
+        self.with_resiliency_ex(|rs| {
+            if let Some(key) = psk.psk {
+                rs.capture_psk(psk.psk_id as u8, key);
+            }
+            if psk.psk_id == HsmPskId::CO {
+                rs.track_co_session(&session);
+            }
+            Ok(())
+        })?;
+        Ok(session)
+    }
+
+    /// Enables transparent recovery of a TBOR (security-domain)
+    /// partition from resets (live migration, NSSR).
+    ///
+    /// Must be called before the partition is provisioned: subsequent
+    /// successful `change_psk`, `part_init_ex`, `part_final_ex` and
+    /// `sd_*_backup` calls are captured so that, after a reset, retried
+    /// operations can re-provision the partition and re-establish stale
+    /// sessions via `SessionReopenInit` / `SessionReopenFinish`.
+    /// Non-secret inputs and device-issued backup envelopes are persisted
+    /// to `config.storage`; rotated PSKs are kept in process memory only.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HsmError::InvalidArgument`] if resiliency (MBOR or TBOR)
+    /// is already enabled on this partition, or a storage error if the
+    /// persisted restore epoch cannot be read.
+    #[instrument(skip_all, err, fields(path = self.path().as_str()))]
+    pub fn enable_resiliency_ex(&self, config: HsmResiliencyExConfig) -> HsmResult<()> {
+        let mut inner = self.inner().write();
+        if inner.resiliency_state.is_some() || inner.resiliency_ex_state.is_some() {
+            return Err(HsmError::InvalidArgument);
+        }
+        inner.resiliency_ex_state = Some(Arc::new(ResiliencyExState::new(config)?));
+        Ok(())
+    }
+
+    /// Runs `f` against the TBOR resiliency state; no-op when it is not
+    /// enabled.
+    pub(crate) fn with_resiliency_ex<F>(&self, f: F) -> HsmResult<()>
+    where
+        F: FnOnce(&ResiliencyExState) -> HsmResult<()>,
+    {
+        // Release the partition lock before `f`, which may issue DDI calls.
+        let rs = self.inner().read().resiliency_ex_state.clone();
+        match rs {
+            Some(rs) => f(&rs),
+            None => Ok(()),
+        }
+    }
+
+    /// TBOR counterpart of [`Self::restore_partition`]: replays the
+    /// captured provisioning under the cross-process lock and advances
+    /// the restore epoch.
+    fn restore_partition_ex(&self) -> HsmResult<()> {
+        // No partition lock is held while restoring: the replay runs
+        // session operations whose capture hooks read the partition.
+        let (rs, path, rev) = {
+            let inner = self.inner().read();
+            let Some(rs) = inner.resiliency_ex_state.clone() else {
+                return Ok(());
+            };
+            (rs, inner.path().to_string(), inner.api_rev())
+        };
+        let pre_lock_epoch = rs.restore_epoch();
+
+        let _lock_guard = ResiliencyLockGuard::acquire_arc(Arc::clone(&rs.config.lock))?;
+        if rs.restore_epoch() != pre_lock_epoch {
+            return Ok(());
+        }
+
+        match rs.restore_device(&path, rev)? {
+            (true, reopened) => {
+                let epoch = rs.bump_epoch()?;
+                if let Some(session) = reopened {
+                    session.mark_restored(epoch);
+                }
+                Ok(())
+            }
+            // Already restored by another process: adopt its epoch.
+            (false, _) => rs.sync_epoch_from_storage(),
+        }
     }
 
     /// Restores partition state after a resiliency event.
@@ -620,6 +704,9 @@ impl HsmPartition {
     ///    the epoch; the outer retry loop will call us again.
     #[instrument(skip_all)]
     pub(crate) fn restore_partition(&self) -> HsmResult<()> {
+        if self.inner().read().resiliency_ex_state.is_some() {
+            return self.restore_partition_ex();
+        }
         // Snapshot epoch and clone the lock Arc BEFORE acquiring the
         // Cross-process resiliency lock.
         let (pre_lock_epoch, lock_ref) = {
@@ -966,7 +1053,8 @@ impl HsmPartition {
     /// Returns `true` if resiliency was configured for this partition
     /// (i.e., a non-`None` [`HsmResiliencyConfig`] was passed to [`init`]).
     pub(crate) fn resiliency_enabled(&self) -> bool {
-        self.inner().read().resiliency_state.is_some()
+        let inner = self.inner().read();
+        inner.resiliency_state.is_some() || inner.resiliency_ex_state.is_some()
     }
 
     /// Writes a value to the partition's resiliency storage.
@@ -1008,11 +1096,12 @@ impl HsmPartition {
     ///
     /// Returns `0` when resiliency is not enabled.
     pub(crate) fn restore_epoch(&self) -> u64 {
-        self.inner()
-            .read()
-            .resiliency_state
-            .as_ref()
-            .map_or(0, |rs| rs.restore_epoch)
+        let inner = self.inner().read();
+        match (&inner.resiliency_state, &inner.resiliency_ex_state) {
+            (Some(rs), _) => rs.restore_epoch,
+            (None, Some(rs)) => rs.restore_epoch(),
+            (None, None) => 0,
+        }
     }
 
     /// Acquires a read lock on the key barrier.
@@ -1057,6 +1146,17 @@ impl HsmPartition {
         } else if session_epoch > current_epoch {
             // This should never happen — session cannot be newer than the partition's epoch.
             return Err(HsmError::InternalError);
+        }
+
+        if let Some(psk_id) = session.ex_psk_id() {
+            let psk = {
+                let inner = self.inner().read();
+                let Some(rs) = inner.resiliency_ex_state.as_ref() else {
+                    return Ok(());
+                };
+                rs.psk(psk_id)
+            };
+            return session.reopen_ex(current_epoch, psk.as_deref());
         }
 
         // Read credentials from the resiliency state.
@@ -1114,6 +1214,7 @@ pub(crate) struct HsmPartitionInner {
     hardware_ver: String,
     pci_info: String,
     resiliency_state: Option<ResiliencyState>,
+    resiliency_ex_state: Option<Arc<ResiliencyExState>>,
 }
 
 impl HsmPartitionInner {
@@ -1154,6 +1255,7 @@ impl HsmPartitionInner {
             bmk: Vec::new(),
             mobk: Vec::new(),
             resiliency_state: None,
+            resiliency_ex_state: None,
         }
     }
 

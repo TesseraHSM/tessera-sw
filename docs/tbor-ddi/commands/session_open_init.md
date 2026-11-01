@@ -64,9 +64,10 @@ is added it will receive its own row above, and its `pk_init` /
 `pk_resp` / `mac_resp` lengths may differ from the values shown for
 `0x01`.
 
-Resume is **not** a TBOR concern: a host that wants to reuse a prior
-session's masking-key blob does so via the MBOR `ReopenSession`
-command.  Every `SessionOpenInit` here is therefore a fresh open.
+Every `SessionOpenInit` is a fresh open.  Re-establishing an existing
+session after a partition reset uses
+[`SessionReopenInit`](./session_reopen_init.md), which shares this
+handler's Phase-1 implementation.
 
 ## Request
 

@@ -394,7 +394,7 @@ pub(crate) fn generate_key_report(
 pub(crate) fn refresh_key_pair_raw_no_res(
     session: &HsmSession,
     old_props: &HsmKeyProps,
-    masked_key: &[u8],
+    masked_key: Option<&[u8]>,
 ) -> HsmResult<(HsmKeyHandle, HsmKeyProps, HsmKeyProps)> {
     if old_props.kind() == HsmKeyKind::Rsa && old_props.can_unwrap() {
         let priv_key_props = HsmKeyPropsBuilder::default()
@@ -411,6 +411,12 @@ pub(crate) fn refresh_key_pair_raw_no_res(
             .can_wrap(true)
             .build()?;
 
+        // The TBOR unwrapping key is resolved from the session by the
+        // device, so there is no MUK to persist.
+        if session.is_ex() {
+            return get_rsa_unwrapping_key_tbor(session, priv_key_props, pub_key_props);
+        }
+
         let (handle, priv_props, pub_props) =
             get_rsa_unwrapping_key_raw_no_res(session, priv_key_props, pub_key_props)?;
 
@@ -423,5 +429,5 @@ pub(crate) fn refresh_key_pair_raw_no_res(
         return Ok((handle, priv_props, pub_props));
     }
 
-    unmask_key_pair_raw_no_res(session, masked_key)
+    unmask_key_pair_raw_no_res(session, masked_key.ok_or(HsmError::InternalError)?)
 }

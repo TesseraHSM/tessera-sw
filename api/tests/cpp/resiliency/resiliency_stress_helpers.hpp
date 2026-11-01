@@ -40,6 +40,9 @@
 #include "handle/test_creds.hpp"
 #include "utils/part_init_config.hpp"
 #include "utils/resiliency_config.hpp"
+#if SESSION_EX_TESTS
+#include "utils/sd_provision.hpp"
+#endif
 #include "utils/utils.hpp"
 
 /* ------------------------------------------------------------------ */
@@ -69,12 +72,27 @@ static constexpr uint32_t NUM_WORKERS = 8;
 ///      infrastructure used by the OSSL CAPI resiliency tests).
 ///   4. Opens a session.
 ///
+/// With `SESSION_EX_TESTS` (TBOR), steps 3-4 instead enable resiliency via
+/// `tsra_part_enable_resiliency_ex` and provision the partition on a
+/// rotated-PSK Crypto-Officer session (`provision_sd_co_session`).
+///
 /// Derived test fixtures call run_under_reset() to exercise operations
 /// while a background thread fires partition resets.
 class resiliency_stress_base : public ::testing::Test
 {
   protected:
     PartitionListHandle part_list_;
+
+    /// API revision the partition handles are opened with: TBOR
+    /// (`session_ex`) builds need the session-ex revision.
+    static tsra_api_rev stress_api_rev()
+    {
+#if SESSION_EX_TESTS
+        return session_ex_test_api_rev();
+#else
+        return test_api_rev();
+#endif
+    }
 
     /// Helper: open a separate partition handle for issuing resets.
     /// Uses the same path as the main handle but a separate handle so
@@ -84,7 +102,7 @@ class resiliency_stress_base : public ::testing::Test
         tsra_str path_str = { const_cast<tsra_char *>(path.data()),
                               static_cast<uint32_t>(path.size()) };
         tsra_handle h = 0;
-        auto err = tsra_part_open(&path_str, &h, test_api_rev());
+        auto err = tsra_part_open(&path_str, &h, stress_api_rev());
         if (err != TSRA_STATUS_SUCCESS)
         {
             throw std::runtime_error(
@@ -111,7 +129,7 @@ class resiliency_stress_base : public ::testing::Test
 
         tsra_str path_str = { const_cast<tsra_char *>(path.data()),
                               static_cast<uint32_t>(path.size()) };
-        auto err = tsra_part_open(&path_str, &r.part, test_api_rev());
+        auto err = tsra_part_open(&path_str, &r.part, stress_api_rev());
         EXPECT_EQ(err, TSRA_STATUS_SUCCESS) << "part_open failed";
         if (err != TSRA_STATUS_SUCCESS)
             return r;
@@ -125,6 +143,29 @@ class resiliency_stress_base : public ::testing::Test
             return r;
         }
 
+#if SESSION_EX_TESTS
+        // TBOR: enable resiliency before provisioning so PartInit /
+        // PartFinal inputs are captured, then provision on a CO session.
+        tsra_resiliency_ex_config resiliency_config{};
+        r.resiliency_ctx = make_resiliency_ex_config(resiliency_config);
+
+        err = tsra_part_enable_resiliency_ex(r.part, &resiliency_config);
+        EXPECT_EQ(err, TSRA_STATUS_SUCCESS) << "part_enable_resiliency_ex failed";
+        if (err != TSRA_STATUS_SUCCESS)
+        {
+            tsra_part_close(r.part);
+            r.part = 0;
+            return r;
+        }
+
+        r.session = provision_sd_co_session(r.part);
+        if (r.session == 0)
+        {
+            tsra_part_close(r.part);
+            r.part = 0;
+            return r;
+        }
+#else
         tsra_credentials creds{};
         std::memcpy(creds.id, TEST_CRED_ID, sizeof(TEST_CRED_ID));
         std::memcpy(creds.pin, TEST_CRED_PIN, sizeof(TEST_CRED_PIN));
@@ -153,6 +194,7 @@ class resiliency_stress_base : public ::testing::Test
             r.part = 0;
             return r;
         }
+#endif
 
         return r;
     }
