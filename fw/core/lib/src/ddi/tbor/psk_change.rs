@@ -49,7 +49,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
-    pal.alloc_scoped_async(io, async |_alloc| {
+    pal.alloc_scoped_async(io, async |alloc| {
         // `decode_mut` validates the wire frame and hands back a
         // destructured view: scalar `session_id` by value, plus
         // `psk_envelope` as `&mut HsmDmaBuf` so `aead_open` can decrypt the
@@ -76,6 +76,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // renegotiate to retry.  Cross-session replay is already
         // structurally impossible (HPKE-derived per-session `param_key`).
         pal.session_try_consume_psk_change(io, sess_id)?;
+        let auth_binding = pal.session_auth_binding(io, sess_id)?;
+        crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
 
         // Record the prior PSK *before* overwriting it, so any later failure
         // — the crypto below, the response DMA, or the CQE post — restores it

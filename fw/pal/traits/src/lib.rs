@@ -315,10 +315,14 @@ pub const SESSION_SEED_LEN: usize = 32;
 ///
 /// Holds: HPKE `exported` (48 B) ‖ `pk_init` (97 B, SEC1
 /// uncompressed P-384) ‖ `pk_resp` (97 B, same) ‖ `session_type`
-/// (1 B) — the host-supplied `seed` is no longer part of the Pending
+/// (1 B), suite (1 B), and credential binding (68 B). The host-supplied
+/// `seed` is no longer part of the Pending
 /// blob (it arrives encrypted in `OpenSessionFinish` instead).
 /// Rounded up to give a small implementation margin.
-pub const SESSION_PENDING_BLOB_MAX: usize = 256;
+pub const SESSION_PENDING_BLOB_MAX: usize = 320;
+
+/// Session credential binding: role (4 B), AppId (16 B), PSK SHA-384 (48 B).
+pub const SESSION_AUTH_BINDING_LEN: usize = 4 + APP_ID_LEN + 48;
 
 /// HPKE `info` string for the session-establishment handshake.
 ///

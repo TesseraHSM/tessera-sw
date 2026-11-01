@@ -177,6 +177,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     },
                     &TrustAnchors {
                         part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        require_sd_sealing: true,
                     },
                     pk_sndr,
                     Some(src_hash),
@@ -206,6 +207,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     },
                     &TrustAnchors {
                         part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        require_sd_sealing: true,
                     },
                     pk_dst,
                     Some(dst_hash),

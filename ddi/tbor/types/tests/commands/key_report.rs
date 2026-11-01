@@ -113,6 +113,7 @@ fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: imported.masked_key,
             report_data,
@@ -224,7 +225,7 @@ fn masked_sealing_key(ctx: &TestCtx, session_id: u16, scope: u8) -> (Vec<u8>, Ve
 /// Verify a `KeyReport` COSE_Sign1: (1) the envelope verifies under the
 /// PID pubkey; (2) the embedded COSE_Key re-derives `sealing_pub_le`; and
 /// (3) the report's `report_data` matches what the caller supplied.
-fn verify_key_report(
+pub(crate) fn verify_key_report(
     ctx: &TestCtx,
     report: &[u8],
     sealing_pub_le: &[u8],
@@ -365,6 +366,7 @@ fn report_roundtrip_for_scope(scope: u8) {
     let report_data = sample_report_data();
 
     let req = TborKeyReportReq {
+        auth_envelope: Vec::new(),
         session_id: session.session_id,
         masked_key,
         report_data,
@@ -406,6 +408,7 @@ fn key_report_rejects_tampered_masked_key() {
     masked_key[last] ^= 0xFF;
 
     let req = TborKeyReportReq {
+        auth_envelope: Vec::new(),
         session_id: session.session_id,
         masked_key,
         report_data: sample_report_data(),
@@ -423,6 +426,7 @@ fn key_report_rejects_before_finalize() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
 
     let req = TborKeyReportReq {
+        auth_envelope: Vec::new(),
         session_id: session.session_id,
         masked_key: vec![0u8; MASKED_SEALING_KEY_LEN],
         report_data: sample_report_data(),
@@ -441,6 +445,7 @@ fn key_report_cu_rejects_before_finalize() {
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
     let req = TborKeyReportReq {
+        auth_envelope: Vec::new(),
         session_id: session.session_id,
         masked_key: vec![0u8; MASKED_SEALING_KEY_LEN],
         report_data: sample_report_data(),
@@ -461,6 +466,7 @@ fn key_report_rejected_on_default_psk() {
             .expect("open_session must succeed");
 
         let req = TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id(),
             masked_key: vec![0u8; MASKED_SEALING_KEY_LEN],
             report_data: sample_report_data(),
@@ -484,6 +490,7 @@ fn key_report_report_data_patterns() {
         ] {
             let resp = ctx
                 .tbor(&TborKeyReportReq {
+                    auth_envelope: Vec::new(),
                     session_id: session.session_id,
                     masked_key: masked_key.clone(),
                     report_data,
@@ -514,6 +521,7 @@ fn key_report_generated_ecc_all_curves() {
             let report_data = sample_report_data();
             let report = ctx
                 .tbor(&TborKeyReportReq {
+                    auth_envelope: Vec::new(),
                     session_id: session.session_id,
                     masked_key: key.masked_key,
                     report_data,
@@ -547,6 +555,7 @@ fn key_report_rejects_all_symmetric_key_classes() {
 
         ctx.expect_fw_reject(
             &TborKeyReportReq {
+                auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: key.masked_key,
                 report_data: sample_report_data(),
@@ -576,6 +585,7 @@ fn key_report_session_scope_roundtrip() {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
             report_data,
@@ -596,6 +606,7 @@ fn key_report_rejects_oversized_masked_key() {
     let session = finalized_co_session(&ctx);
     ctx.expect_fw_reject(
         &TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: vec![0; KEY_REPORT_MASKED_KEY_MAX_LEN + 1],
             report_data: sample_report_data(),
@@ -612,6 +623,7 @@ fn key_report_rejects_invalid_session() {
     let (masked_key, _) = masked_sealing_key(&ctx, session.session_id, SCOPE_LOCAL);
     ctx.expect_fw_reject(
         &TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: u16::MAX,
             masked_key,
             report_data: sample_report_data(),
@@ -640,6 +652,7 @@ fn key_report_rejects_tampered_iv_and_ciphertext() {
 
         ctx.expect_fw_reject(
             &TborKeyReportReq {
+                auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: tampered,
                 report_data,
@@ -649,6 +662,7 @@ fn key_report_rejects_tampered_iv_and_ciphertext() {
 
         let resp = ctx
             .tbor(&TborKeyReportReq {
+                auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: masked_key.clone(),
                 report_data,
@@ -709,6 +723,7 @@ fn key_report_imported_ecc_all_curves() {
 
         let report = ctx
             .tbor(&TborKeyReportReq {
+                auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: imported.masked_key,
                 report_data,
@@ -738,17 +753,130 @@ fn key_report_cu_attests_valid_key_after_finalize() {
     let cu = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     let report_data = sample_report_data();
     let mut req = TborKeyReportReq {
+        auth_envelope: Vec::new(),
         session_id: cu.session_id,
         masked_key,
         report_data,
     };
     let last = req.masked_key.len() - 1;
     req.masked_key[last] ^= 1;
+    req.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &req)
+        .expect("authenticate tampered-key request");
     ctx.expect_fw_reject(&req, TborStatus::AesGcmDecryptTagDoesNotMatch);
     req.masked_key[last] ^= 1;
+    req.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &req)
+        .expect("authenticate CU request");
     let report = ctx.tbor(&req).expect("CU KeyReport");
     verify_key_report(&ctx, &report.report, &public_key, &report_data);
     ctx.session_close(cu.session_id).expect("close CU session");
+}
+
+#[cfg(feature = "emu")]
+#[test]
+fn key_report_cu_authentication_binds_key_data_and_session() {
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+    use tsra_session_ex_crypto::seal_key_report_auth;
+
+    let ctx = TestCtx::new();
+    let co = finalized_co_session(&ctx);
+    let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
+    let cu_ctx = TestCtx::new_with_path(ctx.path());
+    let cu = bootstrap_rotated_cu(&cu_ctx, &ROTATED_CU_PSK);
+    let other_ctx = TestCtx::new_with_path(ctx.path());
+    let pending = other_ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU_PSK_ID, SessionType::PlainText)
+                .with_psk(&ROTATED_CU_PSK),
+        )
+        .expect("second CU init");
+    let other = other_ctx
+        .session_open_finish(pending)
+        .expect("second CU finish");
+    let mut request = TborKeyReportReq {
+        session_id: cu.session_id,
+        masked_key,
+        report_data: sample_report_data(),
+        auth_envelope: Vec::new(),
+    };
+    request.auth_envelope =
+        seal_key_report_auth(&cu.param_key, &request).expect("authenticate request");
+    for case in 0..6 {
+        let mut forged = request.clone();
+        match case {
+            0 => forged.auth_envelope.clear(),
+            1 => {
+                let last = forged.auth_envelope.len() - 1;
+                forged.auth_envelope[last] ^= 1;
+            }
+            2 => forged.report_data[0] ^= 1,
+            3 => forged.masked_key[0] ^= 1,
+            4 => forged.session_id = other.session_id,
+            5 => {
+                forged.auth_envelope = seal_key_report_auth(&other.param_key, &forged)
+                    .expect("authenticate with the wrong session key")
+            }
+            _ => unreachable!(),
+        }
+        let caller = if case == 4 { &other_ctx } else { &cu_ctx };
+        caller.expect_fw_reject(&forged, TborStatus::AeadEnvelopeAuthFailed);
+    }
+    let report = cu_ctx
+        .tbor(&request)
+        .expect("original request remains valid");
+    let decoded = verify_key_report(&ctx, &report.report, &public_key, &request.report_data);
+    assert_eq!(&decoded.app_uuid[..], &ROTATED_CU_PSK[..16]);
+    assert_ne!(decoded.flags & (1 << 10), 0, "sealing provenance is signed");
+    other_ctx
+        .session_close(other.session_id)
+        .expect("close second CU");
+    cu_ctx.session_close(cu.session_id).expect("close CU");
+    ctx.session_close(co.session_id).expect("close CO");
+}
+
+#[cfg(feature = "emu")]
+#[test]
+fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
+    use tsra_session_ex_crypto::seal_key_report_auth;
+
+    let ctx = TestCtx::new();
+    let co = finalized_co_session(&ctx);
+    let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
+    let old_ctx = TestCtx::new_with_path(ctx.path());
+    let old = old_ctx
+        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .expect("default CU session");
+    let pending_ctx = TestCtx::new_with_path(ctx.path());
+    let pending = pending_ctx
+        .session_open_init(CU_PSK_ID, SessionType::PlainText)
+        .expect("pending CU under the old credential");
+    let cu_ctx = TestCtx::new_with_path(ctx.path());
+    let cu = bootstrap_rotated_cu(&cu_ctx, &ROTATED_CU_PSK);
+
+    let err = pending_ctx
+        .session_open_finish(pending)
+        .expect_err("stale pending handshake must fail");
+    tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+    let mut request = TborKeyReportReq {
+        session_id: old.session_id(),
+        masked_key,
+        report_data: sample_report_data(),
+        auth_envelope: Vec::new(),
+    };
+    request.auth_envelope = seal_key_report_auth(&old.handshake().param_key, &request)
+        .expect("authenticate with the old credential's session key");
+    old_ctx.expect_fw_reject(&request, TborStatus::SessionAuthFailure);
+
+    request.session_id = cu.session_id;
+    request.auth_envelope =
+        seal_key_report_auth(&cu.param_key, &request).expect("authenticate fresh CU");
+    let report = cu_ctx
+        .tbor(&request)
+        .expect("freshly authenticated CU report");
+    let decoded = verify_key_report(&ctx, &report.report, &public_key, &request.report_data);
+    assert_eq!(&decoded.app_uuid[..], &ROTATED_CU_PSK[..16]);
+    old.close().expect("close stale CU");
+    cu_ctx.session_close(cu.session_id).expect("close fresh CU");
+    ctx.session_close(co.session_id).expect("close CO");
 }
 
 /// Attests a generated ECC key carrying a non-empty key label.
@@ -775,6 +903,7 @@ fn key_report_generated_ecc_non_empty_label() {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
             report_data,
@@ -812,6 +941,7 @@ fn key_report_generated_ecc_max_label() {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
             report_data,
@@ -847,6 +977,7 @@ fn key_report_generated_ecc_derive_usage() {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
             report_data,
@@ -883,6 +1014,7 @@ fn key_report_generated_ecc_derive_with_label() {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
             report_data,
@@ -919,6 +1051,7 @@ fn key_report_generated_ecc_binary_label() {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
             report_data,
@@ -955,6 +1088,7 @@ fn key_report_p521_with_max_label() {
 
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: key.masked_key,
             report_data,
@@ -1035,6 +1169,7 @@ fn imported_rsa_tampering_rejected(class: u8) {
 
         ctx.expect_fw_reject(
             &TborKeyReportReq {
+                auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: tampered,
                 report_data,
@@ -1045,6 +1180,7 @@ fn imported_rsa_tampering_rejected(class: u8) {
         // The original key must remain usable after rejection.
         let resp = ctx
             .tbor(&TborKeyReportReq {
+                auth_envelope: Vec::new(),
                 session_id: session.session_id,
                 masked_key: masked_key.clone(),
                 report_data,
@@ -1099,6 +1235,7 @@ fn imported_rsa_metadata_tampering_rejected(class: u8) {
 
     ctx.expect_fw_reject(
         &TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key: tampered,
             report_data,
@@ -1109,6 +1246,7 @@ fn imported_rsa_metadata_tampering_rejected(class: u8) {
     // The original key remains valid after the rejected request.
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key,
             report_data,
@@ -1149,6 +1287,7 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
 
     ctx.expect_fw_reject(
         &TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: u16::MAX,
             masked_key: masked_key.clone(),
             report_data,
@@ -1159,6 +1298,7 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
     // An invalid-session request must not affect the valid session.
     let report = ctx
         .tbor(&TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: session.session_id,
             masked_key,
             report_data,

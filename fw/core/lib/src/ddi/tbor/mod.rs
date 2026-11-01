@@ -1047,6 +1047,7 @@ mod tests {
             &[0; 8],
             dma(&mut [1; 32]),
             dma(&mut [2; 32]),
+            dma(&mut [0; tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN]),
             None,
             None,
         )

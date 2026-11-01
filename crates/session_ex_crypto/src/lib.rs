@@ -259,6 +259,37 @@ pub fn derive_param_key(exported: &[u8]) -> SessionExCryptoResult<AesKey> {
     AesKey::from_bytes(&bytes).map_err(|_| SessionExCryptoError::Crypto)
 }
 
+/// Authenticate the exact masked key and report data for a KeyReport request.
+pub fn seal_key_report_auth(
+    param_key: &AesKey,
+    request: &TborKeyReportReq,
+) -> SessionExCryptoResult<Vec<u8>> {
+    let mut data = Vec::with_capacity(request.masked_key.len() + KEY_REPORT_DATA_LEN);
+    data.extend_from_slice(&request.masked_key);
+    data.extend_from_slice(&request.report_data);
+    let mut digest = [0u8; 48];
+    HashAlgo::sha384()
+        .hash(&data, Some(&mut digest))
+        .map_err(|_| SessionExCryptoError::Crypto)?;
+    let aad = build_key_report_auth_aad(request.session_id);
+    let iv =
+        Rng::rand_vec(AeadAlg::AesGcm256.iv_len()).map_err(|_| SessionExCryptoError::Crypto)?;
+    let mut envelope = vec![0u8; KEY_REPORT_AUTH_ENVELOPE_LEN];
+    let written = aead_envelope::seal(
+        AeadAlg::AesGcm256,
+        param_key,
+        &iv,
+        &aad,
+        &digest,
+        Some(&mut envelope),
+    )
+    .map_err(|_| SessionExCryptoError::Crypto)?;
+    if written != envelope.len() {
+        return Err(SessionExCryptoError::Crypto);
+    }
+    Ok(envelope)
+}
+
 /// Seal a 32-byte `seed` under `param_key` as a no-AAD AEAD-GCM
 /// envelope. Returns the exact `SEED_ENVELOPE_LEN`-byte wire blob that
 /// occupies the `seed_envelope` field of `TborSessionOpenFinishReq`.

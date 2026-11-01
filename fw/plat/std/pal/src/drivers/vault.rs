@@ -145,10 +145,10 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
 /// bounds come from [`crate::session`], the module that actually builds
 /// the blob, so the check cannot drift from the writer:
 ///
-/// * [`SESSION_CU_BLOB_SIZE`] — PlainText (CU): `api_rev ‖ param_key ‖ masking_key`
+/// * [`SESSION_CU_BLOB_SIZE`] — PlainText (CU): `api_rev ‖ param_key ‖ masking_key ‖ auth_binding`
 /// * [`SESSION_CU_AUTH_BLOB_SIZE`] — Authenticated (CO): the above `‖ mac_tx ‖ mac_rx`
 fn session_ex_len_valid(len: usize) -> bool {
-    (SESSION_CU_BLOB_SIZE..=SESSION_CU_AUTH_BLOB_SIZE).contains(&len)
+    matches!(len, SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE)
 }
 
 /// Compute the firmware-equivalent storage cost for a key.
@@ -445,8 +445,8 @@ mod tests {
     /// actually writes, and both must round-trip through `create`.
     #[test]
     fn session_ex_len_matches_session_blob_sizes() {
-        assert_eq!(SESSION_CU_BLOB_SIZE, 72);
-        assert_eq!(SESSION_CU_AUTH_BLOB_SIZE, 168);
+        assert_eq!(SESSION_CU_BLOB_SIZE, 140);
+        assert_eq!(SESSION_CU_AUTH_BLOB_SIZE, 236);
 
         // Both real blobs are accepted.
         assert!(session_ex_len_valid(SESSION_CU_BLOB_SIZE));

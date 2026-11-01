@@ -436,6 +436,8 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// - `masking_key` — 32-byte AES-256-GCM key, required for both CO and
     ///   CU sessions. Consumed by the `key_masking::aead` masked-key system,
     ///   separately from the per-parameter `param_key`.
+    /// - `auth_binding` — [`SESSION_AUTH_BINDING_LEN`] bytes captured from
+    ///   the authenticated handshake: role, AppId and PSK digest.
     /// - `mac_tx_key` — `Some(48 B)` for Authenticated sessions
     ///   (VM→HSM message-MAC key); `None` for PlainText.
     /// - `mac_rx_key` — `Some(48 B)` for Authenticated sessions
@@ -457,6 +459,7 @@ pub trait HsmSessionManager: HsmIoTypes {
         api_rev: &[u8],
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
+        auth_binding: &HsmDmaBuf,
         mac_tx_key: Option<&HsmDmaBuf>,
         mac_rx_key: Option<&HsmDmaBuf>,
     ) -> HsmResult<()>;
@@ -489,6 +492,12 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
     fn session_param_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
+
+    /// Returns the credential binding captured by the TBOR handshake.
+    ///
+    /// Legacy MBOR sessions must return `InvalidPermissions`, not a view
+    /// into their unrelated masking-key schedule.
+    fn session_auth_binding(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
 
     /// Returns a borrowed view of the active session's masking key.  Its
     /// length depends on the session's schedule-blob format:

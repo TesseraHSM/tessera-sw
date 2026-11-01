@@ -22,6 +22,8 @@
 //! * `report_data` — caller-supplied [`KEY_REPORT_DATA_LEN`] (128 B) data
 //!   bound into the report payload (typically a freshness nonce or a
 //!   challenge digest).
+//! * `auth_envelope` — session-parameter-key authentication of the original
+//!   masked key and report data; mandatory for CU requests.
 //!
 //! Outputs:
 //!
@@ -52,6 +54,17 @@ pub const KEY_REPORT_MASKED_KEY_MAX_LEN: usize = crate::UNWRAP_MASKED_KEY_MAX_LE
 /// on [`TborKeyReportReq::report_data`].
 pub const KEY_REPORT_DATA_LEN: usize = 128;
 
+/// AEAD authentication envelope: 32 B AAD and a 48 B request digest.
+pub const KEY_REPORT_AUTH_ENVELOPE_LEN: usize = 120;
+
+/// Bind request authentication to this command and session.
+pub fn build_key_report_auth_aad(session_id: u16) -> [u8; 32] {
+    let mut aad = [0u8; 32];
+    aad[..13].copy_from_slice(b"key-report-v1");
+    aad[13..15].copy_from_slice(&session_id.to_le_bytes());
+    aad
+}
+
 /// Maximum wire length of the returned COSE_Sign1 `report`, including the
 /// largest supported public key (a 4096-bit RSA COSE_Key). Pinned into the
 /// `#[tbor(buffer, max_len = 1024)]` literal on [`TborKeyReportResp::report`].
@@ -77,6 +90,10 @@ pub struct TborKeyReportReq<'a> {
     /// into the report payload.
     #[tbor(buffer, len = 128)]
     pub report_data: &'a [u8],
+
+    /// Session-param-key AEAD envelope of SHA-384(masked_key || report_data).
+    #[tbor(buffer, max_len = 160, mutable)]
+    pub auth_envelope: &'a [u8],
 }
 
 /// `KeyReport` response schema.
@@ -108,6 +125,8 @@ mod tests {
             .masked_key(&masked)
             .unwrap()
             .report_data(&report_data)
+            .unwrap()
+            .auth_envelope(&[])
             .unwrap()
             .finish();
         assert_eq!(frame.masked_key(), &masked[..]);

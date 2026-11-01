@@ -189,11 +189,13 @@ pub(crate) fn masked_key_report(
     let mut report_data_arr = [0u8; KEY_REPORT_DATA_LEN];
     report_data_arr.copy_from_slice(report_data);
 
-    let req = TborKeyReportReq {
+    let mut req = TborKeyReportReq {
         session_id: session.ex_session_id()?,
         masked_key: masked_key.to_vec(),
         report_data: report_data_arr,
+        auth_envelope: Vec::new(),
     };
+    req.auth_envelope = session.key_report_auth(&req)?;
 
     let mut cookie = None;
     let resp = session.with_dev(|dev| {

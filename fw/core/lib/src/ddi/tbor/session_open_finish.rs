@@ -41,17 +41,10 @@ const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
     }
 }
 
-/// HPKE suite used by the only currently registered `HsmSessionSuite`
-/// (`P384HkdfSha384AesGcm256`).  Used at compile time to size the
-/// Pending blob; the runtime handler always uses
-/// [`hpke_suite_for`] for the actually-negotiated suite.
-const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(HsmSessionSuite::P384HkdfSha384AesGcm256);
-
 /// Length of the Pending blob; mirrors the layout written by
 /// [`super::session_open_init`]:
-/// `exported ‖ pk_init ‖ pk_resp ‖ session_type ‖ suite_id`.
-const PENDING_BLOB_LEN: usize =
-    DEFAULT_HPKE_SUITE.nh() + DEFAULT_HPKE_SUITE.npk() + DEFAULT_HPKE_SUITE.npk() + 1 + 1;
+/// `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`.
+const PENDING_BLOB_LEN: usize = super::session_open_init::PENDING_BLOB_LEN;
 
 /// Length of the API revision tag persisted alongside the session blob.
 const API_REV_LEN: usize = 8;
@@ -107,6 +100,7 @@ struct HandshakeState<'a> {
     pk_init: &'a mut HsmDmaBuf,
     pk_resp: &'a mut HsmDmaBuf,
     session_type: HsmSessionType,
+    auth_binding: &'a mut HsmDmaBuf,
     /// Cryptographic suite recorded by Phase 1.  Drives every
     /// suite-derived size in this handler (Nh, Npk, AEAD parameters).
     suite: HpkeSuite,
@@ -133,6 +127,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pk_init,
             pk_resp,
             session_type,
+            auth_binding,
             suite,
         } = load_pending_state(pal, io, alloc, sess_id)?;
 
@@ -167,6 +162,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             destroy_pending_on_auth_failure(pal, io, sess_id).await;
             return Err(e);
         }
+        crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
 
         // ── Derive param_key once, use it to open the seed envelope
         let param_key = hkdf_expand_labeled(
@@ -200,7 +196,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let bmk_session = build_bmk_session(pal, io, alloc, seed, derived.masking_key).await?;
 
         // ── Promote Pending → Active ──────────────────────────────
-        promote_to_active(pal, io, alloc, sess_id, derived).await?;
+        promote_to_active(pal, io, alloc, sess_id, derived, auth_binding).await?;
 
         encode_response(cmd_buf, bmk_session)
     })
@@ -254,7 +250,7 @@ fn ensure_pending_blob_len<P: HsmPal>(pal: &P, io: &P::Io, id: HsmSessId) -> Hsm
 }
 
 /// Load the Pending slot's blob and split it into `(exported,
-/// pk_init, pk_resp, session_type, suite)` scoped buffers.
+/// pk_init, pk_resp, auth_binding, session_type, suite)` scoped buffers.
 fn load_pending_state<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -281,13 +277,19 @@ fn load_pending_state<'a, P: HsmPal>(
     pk_init.copy_from_slice(&blob[nh..nh + npk]);
     let pk_resp = alloc.dma_alloc(npk)?;
     pk_resp.copy_from_slice(&blob[nh + npk..nh + 2 * npk]);
-    let session_type = HsmSessionType::from_u8(blob[nh + 2 * npk])?;
+    let auth_binding = alloc.dma_alloc(tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN)?;
+    let auth_start = nh + 2 * npk;
+    auth_binding.copy_from_slice(
+        &blob[auth_start..auth_start + tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN],
+    );
+    let session_type = HsmSessionType::from_u8(blob[blob.len() - 2])?;
 
     Ok(HandshakeState {
         exported,
         pk_init,
         pk_resp,
         session_type,
+        auth_binding,
         suite: hpke_suite,
     })
 }
@@ -569,6 +571,7 @@ async fn promote_to_active<P: HsmPal>(
     alloc: &impl HsmScopedAlloc,
     id: HsmSessId,
     derived: DerivedKeys<'_>,
+    auth_binding: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let api_rev = alloc.dma_alloc(API_REV_LEN)?;
     api_rev.copy_from_slice(&SESSION_API_REV);
@@ -578,6 +581,7 @@ async fn promote_to_active<P: HsmPal>(
         api_rev,
         derived.param_key,
         derived.masking_key,
+        auth_binding,
         derived.mac_tx_key.as_deref(),
         derived.mac_rx_key.as_deref(),
     )

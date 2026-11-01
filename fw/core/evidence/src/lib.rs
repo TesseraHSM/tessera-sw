@@ -27,6 +27,8 @@
 //!    **SAPOTA** key instead;
 //! 4. all supplied chains share the **same** leaf public key;
 //! 5. that shared leaf key signed the COSE_Sign1 attestation report.
+//! 6. when requested by a peer/reseal consumer, the signed report proves
+//!    HSM-generated SD-sealing-key provenance.
 //!
 //! The anchor choice reflects two distinct trust models. For the
 //! evidence-based reseal and peer commands, [`verify_evidence`] is the sole
@@ -51,6 +53,7 @@
 use tsra_fw_core_crypto_key_report::parse_ec2_cose_key;
 use tsra_fw_core_crypto_key_report::parse_key_report;
 use tsra_fw_core_crypto_key_report::verify_key_report;
+use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
 use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
 use tsra_fw_core_crypto_x509_chain::validate_chain as validate_cert_chain;
@@ -122,6 +125,8 @@ pub struct TrustAnchors<'a> {
     /// [`SdCreateRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdCreateRemoteBackupReq
     /// [`SdRestoreRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupReq
     pub part_owner_anchor: &'a [u8],
+    /// Require an HSM-generated SD sealing key, not an ordinary attested key.
+    pub require_sd_sealing: bool,
 }
 
 /// Validate a receiver key certificate chain and recover its leaf key.
@@ -269,6 +274,12 @@ where
         // The report is now authenticated: recover the attested public key
         // (SEC1 uncompressed big-endian) from its COSE_Key.
         let view = parse_key_report(report)?;
+        let flags = KeyFlags::from(view.flags);
+        if anchors.require_sd_sealing
+            && (!flags.is_sd_sealing() || !flags.is_generated() || flags.is_imported())
+        {
+            return Err(HsmError::InvalidArg);
+        }
         let cose_key = &view.public_key[..view.public_key_size as usize];
         let rcvr = parse_ec2_cose_key(cose_key)?;
         if rcvr.curve != CURVE {

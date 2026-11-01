@@ -148,9 +148,9 @@ pub enum HsmVaultKeyKind {
     /// In-flight TBOR session-handshake (Pending) state blob.
     ///
     /// Holds the opaque Pending blob (`exported ‖ pk_init ‖ pk_resp ‖
-    /// session_type ‖ suite_id`, up to
+    /// auth_binding ‖ session_type ‖ suite_id`, up to
     /// [`SESSION_PENDING_BLOB_MAX`](crate::SESSION_PENDING_BLOB_MAX) =
-    /// 256 B) produced by the TBOR `OpenSessionInit` phase and consumed
+    /// 320 B) produced by the TBOR `OpenSessionInit` phase and consumed
     /// by `OpenSessionFinish`.
     ///
     /// Written by
@@ -166,10 +166,10 @@ pub enum HsmVaultKeyKind {
     /// and CU).
     ///
     /// Length-discriminated by session type:
-    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)]`
-    ///   = 72 B.
+    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)
+    ///   ‖ auth_binding(68)]` = 140 B.
     /// * **Authenticated (CO):** the above ‖ `mac_tx(48) ‖ mac_rx(48)`
-    ///   = 168 B.
+    ///   = 236 B.
     ///
     /// `masking_key` is the 32 B AES-256-GCM
     /// [`SESSION_MASKING_KEY_LEN`](crate::SESSION_MASKING_KEY_LEN) key used

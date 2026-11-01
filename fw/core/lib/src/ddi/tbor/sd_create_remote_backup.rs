@@ -235,6 +235,7 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
             },
             &TrustAnchors {
                 part_owner_anchor: &sapota.data[..POLICY_MAX_KEY_LEN],
+                require_sd_sealing: false,
             },
             report_pk,
             None,

@@ -62,16 +62,20 @@ const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
 const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(HsmSessionSuite::P384HkdfSha384AesGcm256);
 
 /// Length of the Pending handshake-state blob:
-/// `exported (Nh) ‖ pk_init (Npk) ‖ pk_resp (Npk) ‖ session_type (1 B)
-/// ‖ suite_id (1 B)`.
+/// `exported (Nh) ‖ pk_init (Npk) ‖ pk_resp (Npk)
+/// ‖ auth_binding (68 B) ‖ session_type (1 B) ‖ suite_id (1 B)`.
 ///
 /// The trailing `session_type` byte tells [`session_open_finish`]
 /// which derived-key schedule to run (PlainText: param+masking only;
 /// Authenticated: param+masking+mac_tx+mac_rx).  The `suite_id` byte
 /// lets `session_open_finish` recover the negotiated cryptographic
 /// suite without trusting any client-side state.
-pub(super) const PENDING_BLOB_LEN: usize =
-    DEFAULT_HPKE_SUITE.nh() + DEFAULT_HPKE_SUITE.npk() + DEFAULT_HPKE_SUITE.npk() + 1 + 1;
+pub(super) const PENDING_BLOB_LEN: usize = DEFAULT_HPKE_SUITE.nh()
+    + DEFAULT_HPKE_SUITE.npk()
+    + DEFAULT_HPKE_SUITE.npk()
+    + tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN
+    + 1
+    + 1;
 
 /// Compile-time guard: the Pending blob must fit inside the PAL
 /// budget.  If the HPKE suite sizes grow past the budget, this
@@ -99,6 +103,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 
         // ── Identity + PSK material (all on the scoped allocator) ──
         let psk = load_psk(pal, io, alloc, psk_id)?;
+        let auth_binding = crate::session::capture_auth_binding(pal, io, alloc, role, psk).await?;
         let key_id = crate::part_state::part_id_key_id(pal, io)?;
         let sk_hsm = pal.vault_key(io, key_id)?;
         let pk_hsm = load_pk_hsm_sec1(pal, io, alloc)?;
@@ -140,6 +145,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             exported,
             pk_init,
             pk_resp,
+            auth_binding,
         )
         .await?;
         // Record the just-created Pending session's teardown inverse, so a
@@ -308,7 +314,7 @@ async fn hpke_auth_psk_export<'a, P: HsmPal>(
     Ok((pk_resp, exported))
 }
 
-/// Pack `exported ‖ pk_init ‖ pk_resp ‖ session_type ‖ suite_id`
+/// Pack `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`
 /// into a Pending blob and hand it to `session_create_pending`.
 #[allow(clippy::too_many_arguments)]
 async fn create_pending_slot<P: HsmPal>(
@@ -322,6 +328,7 @@ async fn create_pending_slot<P: HsmPal>(
     exported: &HsmDmaBuf,
     pk_init: &HsmDmaBuf,
     pk_resp: &HsmDmaBuf,
+    auth_binding: &HsmDmaBuf,
 ) -> HsmResult<HsmSessId> {
     let nh = hpke_suite.nh();
     let npk = hpke_suite.npk();
@@ -333,6 +340,8 @@ async fn create_pending_slot<P: HsmPal>(
     off += npk;
     pending_blob[off..off + npk].copy_from_slice(pk_resp);
     off += npk;
+    pending_blob[off..off + auth_binding.len()].copy_from_slice(auth_binding);
+    off += auth_binding.len();
     pending_blob[off] = session_type.to_u8();
     pending_blob[off + 1] = suite.to_u8();
     pal.session_create_pending(io, role, pending_blob).await

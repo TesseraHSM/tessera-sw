@@ -32,24 +32,32 @@
 //! AEAD tag still guarantees integrity / authenticity).
 //!
 //! This command is available to both Crypto-Officer and Crypto-User sessions.
+//! CU requests authenticate the original key and report data under the
+//! session parameter key. Both roles must use their current TBOR credential.
+//! SD-sealing provenance is signed separately from ordinary key capabilities.
 
+use tsra_fw_core_crypto_aead_envelope::open as aead_open;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_core_crypto_key_report::key_report;
 use tsra_fw_core_crypto_key_report::AttestedPubKey;
 use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KeyReportParams;
+use tsra_fw_ddi_tbor_types::build_key_report_auth_aad;
 use tsra_fw_ddi_tbor_types::TborKeyReportReq;
 use tsra_fw_ddi_tbor_types::TborKeyReportResp;
+use tsra_fw_ddi_tbor_types::KEY_REPORT_AUTH_ENVELOPE_LEN;
 use tsra_fw_ddi_tbor_types::KEY_REPORT_MAX_LEN;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
@@ -70,7 +78,7 @@ const RSA_PUB_EXP_LEN: usize = core::mem::size_of::<u32>();
 const _: () = assert!(APP_UUID_LEN == tsra_fw_hsm_pal_traits::APP_ID_LEN);
 
 /// Translate the recovered vault attributes into report [`KeyFlags`].
-fn key_flags_from_attrs(attrs: HsmVaultKeyAttrs) -> KeyFlags {
+fn key_flags_from_attrs(attrs: HsmVaultKeyAttrs, kind: HsmVaultKeyKind) -> KeyFlags {
     KeyFlags::new()
         .with_is_imported(!attrs.local())
         .with_is_session_key(attrs.session())
@@ -82,6 +90,7 @@ fn key_flags_from_attrs(attrs: HsmVaultKeyAttrs) -> KeyFlags {
         .with_can_wrap(attrs.wrap())
         .with_can_unwrap(attrs.unwrap())
         .with_can_derive(attrs.derive())
+        .with_is_sd_sealing(kind == HsmVaultKeyKind::SdSealing && attrs.local())
 }
 
 /// Reverse-copy `src` into `dst[..src.len()]` (LE↔BE per coordinate).
@@ -91,18 +100,15 @@ fn reverse_copy(dst: &mut [u8], src: &[u8]) {
     }
 }
 
-/// Allocate and populate the report's app-UUID field — the session AppId
-/// copied verbatim. It is the only non-key report field that needs owned
+/// Allocate the report's AppId captured by the authenticated handshake.
+/// It is the only non-key report field that needs owned
 /// storage; `report_data` and `vm_launch_id` are borrowed in place.
-fn build_app_uuid<'a, P: HsmPal>(
-    pal: &P,
-    io: &P::Io,
+fn build_app_uuid<'a>(
     alloc: &'a impl HsmScopedAlloc,
-    sess_id: HsmSessId,
+    auth_binding: &HsmDmaBuf,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    let app_id = crate::session::session_app_id(pal, io, sess_id)?;
     let app_uuid = alloc.dma_alloc(APP_UUID_LEN)?;
-    app_uuid.copy_from_slice(&app_id);
+    app_uuid.copy_from_slice(&auth_binding[4..4 + APP_UUID_LEN]);
     Ok(app_uuid)
 }
 
@@ -191,6 +197,22 @@ pub(crate) async fn handle<P: HsmPal>(
         if part_state::part_state(pal, io)? != HsmPartState::Initialized {
             return Err(HsmError::InvalidArg);
         }
+        let auth_binding = pal.session_auth_binding(io, sess_id)?;
+        crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
+        let app_uuid = build_app_uuid(alloc, auth_binding)?;
+
+        if sess_id.role() == HsmSessionRole::CryptoUser || !req.auth_envelope.is_empty() {
+            authenticate_request(
+                pal,
+                io,
+                alloc,
+                sess_id,
+                req.masked_key,
+                req.report_data,
+                req.auth_envelope,
+            )
+            .await?;
+        }
 
         // Peek the masked-key metadata (cleartext, tag-bound) to route to the
         // right masking key before unmasking.
@@ -205,13 +227,43 @@ pub(crate) async fn handle<P: HsmPal>(
             alloc,
             masked_key,
             masking_key,
-            sess_id,
+            app_uuid,
             report_data,
         )
         .await?;
         encode_response(cmd_buf, &report[..report_len])
     })
     .await
+}
+
+/// Authenticate the original request bytes before unmasking mutates them.
+#[allow(clippy::too_many_arguments)]
+async fn authenticate_request<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &impl HsmScopedAlloc,
+    sess_id: HsmSessId,
+    masked_key: &HsmDmaBuf,
+    report_data: &HsmDmaBuf,
+    envelope: &mut HsmDmaBuf,
+) -> HsmResult<()> {
+    if envelope.len() != KEY_REPORT_AUTH_ENVELOPE_LEN {
+        return Err(HsmError::AeadEnvelopeAuthFailed);
+    }
+    let data = alloc.dma_alloc(masked_key.len() + report_data.len())?;
+    data[..masked_key.len()].copy_from_slice(masked_key);
+    data[masked_key.len()..].copy_from_slice(report_data);
+    let digest = alloc.dma_alloc(48)?;
+    pal.hash(io, HsmHashAlgo::Sha384, data, digest, true)
+        .await?;
+    let view = aead_open(pal, io, pal.session_param_key(io, sess_id)?, envelope)
+        .await
+        .map_err(|_| HsmError::AeadEnvelopeAuthFailed)?;
+    let aad = build_key_report_auth_aad(u16::from(sess_id));
+    if view.aad[..] != aad || view.payload[..] != digest[..] {
+        return Err(HsmError::AeadEnvelopeAuthFailed);
+    }
+    Ok(())
 }
 
 /// Unmask the key, derive its public component, and build the PID-signed
@@ -225,19 +277,19 @@ async fn build_key_report<'a, P: HsmPal>(
     alloc: &'a impl HsmScopedAlloc,
     masked_key: &mut HsmDmaBuf,
     masking_key: &HsmDmaBuf,
-    sess_id: HsmSessId,
+    app_uuid: &HsmDmaBuf,
     report_data: &HsmDmaBuf,
 ) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
     // Derive the public component directly from the IO-scoped request.
-    let (key, key_attrs) = async {
+    let (key, key_attrs, key_kind) = async {
         let view = unmask(pal, io, masking_key, masked_key).await?;
         let key = attested_pub_key(pal, io, alloc, view.key_kind, view.target_key).await?;
-        Ok::<_, HsmError>((key, view.key_attrs))
+        Ok::<_, HsmError>((key, view.key_attrs, view.key_kind))
     }
     .await?;
-    let flags: u32 = key_flags_from_attrs(key_attrs).into();
+    let flags: u32 = key_flags_from_attrs(key_attrs, key_kind).into();
 
-    build_signed_report(pal, io, alloc, sess_id, key, flags, report_data).await
+    build_signed_report(pal, io, alloc, app_uuid, key, flags, report_data).await
 }
 
 /// Encode the `KeyReport` response frame around the finished report.
@@ -257,7 +309,7 @@ async fn build_signed_report<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    sess_id: HsmSessId,
+    app_uuid: &HsmDmaBuf,
     key: AttestedPubKey<'_>,
     flags: u32,
     report_data_src: &HsmDmaBuf,
@@ -265,8 +317,6 @@ async fn build_signed_report<'a, P: HsmPal>(
     let pid_priv = pal.vault_key(io, part_state::part_id_key_id(pal, io)?)?;
 
     let vm_launch_id = part_state::part_vm_launch_guid(pal, io)?;
-
-    let app_uuid = build_app_uuid(pal, io, alloc, sess_id)?;
 
     // `report_data` borrows straight from the request buffer (no copy);
     // `key_report` validates its exact `KEY_REPORT_DATA_LEN` length.

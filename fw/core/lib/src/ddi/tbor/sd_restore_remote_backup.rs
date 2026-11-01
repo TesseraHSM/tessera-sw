@@ -218,6 +218,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                         },
                         &TrustAnchors {
                             part_owner_anchor: &sapota.data[..POLICY_MAX_KEY_LEN],
+                            require_sd_sealing: false,
                         },
                         report_pk,
                         Some(src_hash),

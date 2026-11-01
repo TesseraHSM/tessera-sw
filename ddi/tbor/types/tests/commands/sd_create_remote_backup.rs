@@ -281,6 +281,7 @@ pub(crate) fn masked_key_report_and_pub(
     let report = ctx
         .tbor(&TborKeyReportReq {
             session_id,
+            auth_envelope: Vec::new(),
             masked_key: masked.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
         })

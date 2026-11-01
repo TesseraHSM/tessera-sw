@@ -158,13 +158,13 @@ depends on the `session_type` chosen in
 | Key | HKDF label | Length | Derived for |
 |---|---|---|---|
 | `param_key`   | `"tsra-session-param-v1"` | 32 B  | All sessions (AES-256 for `aead_envelope`) |
-| `masking_key` | `"tsra-masking-v1"`       | 80 B  | All sessions |
+| `masking_key` | `"tsra-masking-v1"`       | 32 B  | All sessions |
 | `mac_tx_key`  | `"tsra-session-mac-tx-v1"`| 48 B  | `Authenticated` sessions only (HSM → host) |
 | `mac_rx_key`  | `"tsra-session-mac-rx-v1"`| 48 B  | `Authenticated` sessions only (host → HSM) |
 
-`param_key` is a raw 32-byte AES-256 key.  `masking_key` keeps the
-80-byte AES-CBC-256 (32 B) + HMAC-SHA-384 (48 B) layout consumed by
-the MBOR masked-key subsystem.  MAC keys are raw 48-byte
+`param_key` and `masking_key` are raw 32-byte AES-256 keys for the
+TBOR AEAD envelopes. The legacy MBOR masking schedule is separate.
+MAC keys are raw 48-byte
 HMAC-SHA-384 keys.
 
 The derived keys are committed to the slot's session vault blob in
@@ -172,8 +172,13 @@ a length-discriminated layout:
 
 | `session_type` | Blob layout | Size |
 |---|---|---|
-| `PlainText` (CU)        | `api_rev(8) ‖ param_key(32) ‖ masking_key(80)` | 120 B |
-| `Authenticated` (CO)    | `api_rev(8) ‖ param_key(32) ‖ masking_key(80) ‖ mac_tx_key(48) ‖ mac_rx_key(48)` | 216 B |
+| `PlainText` (CU)        | `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68)` | 140 B |
+| `Authenticated` (CO)    | CU layout `‖ mac_tx_key(48) ‖ mac_rx_key(48)` | 236 B |
+
+`auth_binding` captures the handshake role (4-byte little-endian CO=0/CU=1),
+AppId (16 B), and SHA-384 PSK digest (48 B). The firmware checks that
+the credential remains current before promotion, PSK rotation and key
+attestation. Legacy MBOR sessions have no TBOR credential binding.
 
 Per-direction MAC keys (`mac_tx`/`mac_rx` rather than a single
 shared key) eliminate any risk of a reflected-message attack and
@@ -187,7 +192,7 @@ input.
 |---|---|
 | `InvalidArg` | `mac_fin` not 48 bytes, `seed_envelope` not 72 bytes, or `session_id` out of range |
 | `SessionNotPending` | Slot is not in `Pending` state |
-| `SessionAuthFailure` | MAC verify failed, or `seed_envelope` AEAD-open failed; the Pending slot is destroyed in either case |
+| `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed |
 | `PartitionNotProvisioned` | Identity key not present |
 
 A late `SessionOpenFinish` arriving against an evicted-and-reused slot

@@ -34,14 +34,16 @@ const SESSION_MASKING_KEY_SIZE: usize = 80;
 const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE;
 
 /// `SessionEx`-kind blob size for **PlainText (CU)** sessions:
-/// `api_rev(8) || param_key(32) || masking_key(32)` = 72 B.  The
+/// `api_rev(8) || param_key(32) || masking_key(32) || auth_binding(68)` = 140 B.  The
 /// SessionEx masking key is the 32 B AES-256-GCM `key_masking::aead`
 /// key ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.
-pub(crate) const SESSION_CU_BLOB_SIZE: usize =
-    SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN + SESSION_MASKING_KEY_LEN;
+pub(crate) const SESSION_CU_BLOB_SIZE: usize = SESSION_API_REV_SIZE
+    + SESSION_PARAM_KEY_LEN
+    + SESSION_MASKING_KEY_LEN
+    + SESSION_AUTH_BINDING_LEN;
 
 /// `SessionEx`-kind blob size for **Authenticated (CO)** sessions:
-/// PlainText blob ‖ `mac_tx(48) ‖ mac_rx(48)` = 168 B.
+/// PlainText blob ‖ `mac_tx(48) ‖ mac_rx(48)` = 236 B.
 pub(crate) const SESSION_CU_AUTH_BLOB_SIZE: usize =
     SESSION_CU_BLOB_SIZE + 2 * SESSION_MAC_DIR_KEY_LEN;
 
@@ -202,12 +204,14 @@ impl HsmSessionManager for StdHsmPal {
         api_rev: &[u8],
         param_key: &HsmDmaBuf,
         masking_key: &HsmDmaBuf,
+        auth_binding: &HsmDmaBuf,
         mac_tx_key: Option<&HsmDmaBuf>,
         mac_rx_key: Option<&HsmDmaBuf>,
     ) -> HsmResult<()> {
         if api_rev.len() != SESSION_API_REV_SIZE
             || param_key.len() != SESSION_PARAM_KEY_LEN
             || masking_key.len() != SESSION_MASKING_KEY_LEN
+            || auth_binding.len() != SESSION_AUTH_BINDING_LEN
         {
             return Err(HsmError::InvalidArg);
         }
@@ -236,14 +240,17 @@ impl HsmSessionManager for StdHsmPal {
         let attrs = HsmVaultKeyAttrs::new().with_internal(true);
 
         // Length-discriminated blob:
-        // - PlainText:     api_rev(8) + param_key(32) + masking_key(32)         = 72 B
-        // - Authenticated: above ‖ mac_tx(48) ‖ mac_rx(48)                       = 168 B
+        // - PlainText:     api_rev(8) + param_key(32) + masking_key(32)         = 140 B
+        // - Authenticated: above ‖ mac_tx(48) ‖ mac_rx(48)                       = 236 B
         let mut blob = [0u8; SESSION_CU_AUTH_BLOB_SIZE];
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
         blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN]
             .copy_from_slice(param_key);
-        blob[SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN..SESSION_CU_BLOB_SIZE]
+        blob[SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN
+            ..SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN]
             .copy_from_slice(masking_key);
+        blob[SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN..SESSION_CU_BLOB_SIZE]
+            .copy_from_slice(auth_binding);
 
         let blob_len = match mac_pair {
             None => SESSION_CU_BLOB_SIZE,
@@ -273,8 +280,8 @@ impl HsmSessionManager for StdHsmPal {
         let entry = self.active_part(io.pid())?;
         let kid = entry.session_table.physical_id(id)?;
         let blob = entry.vault.key(kid)?;
-        if blob.len() < SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN {
-            return Err(HsmError::InternalError);
+        if !matches!(blob.len(), SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE) {
+            return Err(HsmError::InvalidPermissions);
         }
         let key_bytes = &blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN];
         // SAFETY: same justification as `vault_key` — on the host,
@@ -307,6 +314,18 @@ impl HsmSessionManager for StdHsmPal {
         Ok(unsafe { HsmDmaBuf::from_raw(key_bytes) })
     }
 
+    fn session_auth_binding(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
+        let entry = self.active_part(io.pid())?;
+        let kid = entry.session_table.physical_id(id)?;
+        let blob = entry.vault.key(kid)?;
+        if !matches!(blob.len(), SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE) {
+            return Err(HsmError::InvalidPermissions);
+        }
+        let binding = &blob[SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN..SESSION_CU_BLOB_SIZE];
+        // SAFETY: this is a sub-view of the vault's DMA-reachable key storage.
+        Ok(unsafe { HsmDmaBuf::from_raw(binding) })
+    }
+
     fn session_try_consume_psk_change(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
         entry.session_table.try_consume_psk_change(id)
@@ -319,6 +338,53 @@ mod session_type_tests {
     use tsra_fw_hsm_pal_traits::HsmError;
     use tsra_fw_hsm_pal_traits::HsmSessionRole;
     use tsra_fw_hsm_pal_traits::HsmSessionType;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn legacy_mbor_cu_slot_has_no_tbor_credential_or_param_key() {
+        let (tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        pal.part_alloc_internal(0, 1).await.unwrap();
+        pal.part_enable_internal(0).await.unwrap();
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(HsmIoRequest {
+            pid: HsmPartId::from(0u8),
+            qid: 0,
+            qidx: 0,
+            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
+            tx: reply_tx,
+        })
+        .await
+        .unwrap();
+        let io = pal.poll_io().await.unwrap();
+        let masking_key = pal.dma_alloc(&io, SESSION_MASKING_KEY_SIZE).unwrap();
+        masking_key.fill(0x42);
+        let co_slot = pal
+            .session_create(&io, &[0u8; 8], masking_key, None)
+            .await
+            .unwrap();
+        let cu_slot = pal
+            .session_create(&io, &[0u8; 8], masking_key, None)
+            .await
+            .unwrap();
+        assert_eq!(co_slot.role(), HsmSessionRole::CryptoOfficer);
+        assert_eq!(cu_slot.role(), HsmSessionRole::CryptoUser);
+        assert!(matches!(
+            pal.session_state(&io, cu_slot),
+            HsmSessionState::Active
+        ));
+        assert!(matches!(
+            pal.session_auth_binding(&io, cu_slot),
+            Err(HsmError::InvalidPermissions)
+        ));
+        assert!(matches!(
+            pal.session_param_key(&io, cu_slot),
+            Err(HsmError::InvalidPermissions)
+        ));
+        pal.session_destroy(&io, cu_slot).await.unwrap();
+        pal.session_destroy(&io, co_slot).await.unwrap();
+    }
 
     #[test]
     fn to_u8_matches_discriminant() {
