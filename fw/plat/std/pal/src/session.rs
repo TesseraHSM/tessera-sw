@@ -79,20 +79,13 @@ impl HsmSessionManager for StdHsmPal {
         let pid = io.pid();
         let entry = self.active_part_mut(pid)?;
 
-        // On re-key: clean up the old session-scoped keys and the old
-        // session key before creating the replacement.  A slot awaiting
-        // renegotiation after a live-migration disable has already had
-        // its vault key material cleared, so there is nothing to tear
-        // down — `recreate` below simply installs the fresh mapping
-        // (mirroring the reference firmware's `recreate_session`).
+        // Only slots awaiting renegotiation can be recreated. Validate before
+        // touching vault keys so a rejected reopen leaves an active session intact.
         if let Some(reopen_id) = id {
-            if !matches!(
-                entry.session_table.state(reopen_id),
-                HsmSessionState::NeedsRenegotiation
-            ) {
-                let old_phys = entry.session_table.physical_id(reopen_id)?;
-                entry.vault.delete_by_session_key(old_phys)?;
-                entry.vault.delete(old_phys)?;
+            match entry.session_table.state(reopen_id) {
+                HsmSessionState::NeedsRenegotiation => {}
+                HsmSessionState::Active => return Err(HsmError::InvalidArg),
+                _ => return Err(HsmError::SessionNotFound),
             }
         }
 

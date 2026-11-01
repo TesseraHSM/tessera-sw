@@ -491,6 +491,7 @@ fn test_attest_aes_key() {
     );
 }
 
+#[cfg(not(feature = "sock"))]
 #[test]
 fn test_attest_aes_xts_bulk_key() {
     ddi_dev_test(

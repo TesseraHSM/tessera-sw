@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use nix::sys::socket::connect;
@@ -52,8 +53,10 @@ use tsra_ddi_sock_proto::Request;
 use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
 use tsra_ddi_sock_proto::ResponseFrame;
+use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
 use tsra_ddi_sock_proto::MAX_OOB_ITEM;
 use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
+use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_fw_hsm_io::CmdDword;
@@ -74,9 +77,8 @@ pub const DEFAULT_SOCK_PATH: &str = "/tmp/tsra-ddi.sock";
 #[cfg(not(unix))]
 pub const DEFAULT_SOCK_PATH: &str = "tcp://127.0.0.1:1234";
 
-/// Response buffer capacity advertised to the server. Fits MBOR and the
-/// current TBOR command set; larger responses are future work.
-const DST_CAP: u32 = 4096;
+/// Request/response capacity advertised to the server, including PQC commands.
+const DST_CAP: u32 = MAX_DMA_BUFFER;
 
 enum SocketStream {
     Tcp(TcpStream),
@@ -210,9 +212,12 @@ pub(crate) fn socket_path() -> String {
 /// Wraps a single TCP, Unix-domain, or Linux VSOCK connection to the server. Requests
 /// are serialized through a mutex, so the synchronous trait methods can be
 /// shared across threads while each request/response exchange stays atomic.
+/// Clones share the same connection and sessions; disconnect cleanup runs only
+/// after the last clone is dropped.
+#[derive(Clone)]
 pub struct DdiSockDev {
-    stream: Mutex<SocketStream>,
-    cmd_counter: AtomicU16,
+    stream: Arc<Mutex<SocketStream>>,
+    cmd_counter: Arc<AtomicU16>,
     device_kind: DdiDeviceKind,
 }
 
@@ -265,8 +270,8 @@ impl DdiSockDev {
             }
         };
         Ok(Self {
-            stream: Mutex::new(stream),
-            cmd_counter: AtomicU16::new(1),
+            stream: Arc::new(Mutex::new(stream)),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
             // The firmware reports a physical device, so the host codec
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
@@ -328,8 +333,14 @@ impl DdiSockDev {
         };
 
         // Transport-level status (e.g. server DMA allocation failure).
-        if resp.status != 0 {
-            return Err(DdiError::DdiError(resp.status));
+        match resp.status {
+            0 => {}
+            TRANSPORT_SESSION_NOT_OWNED => {
+                return Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch,
+                ));
+            }
+            status => return Err(DdiError::DdiError(status)),
         }
 
         // Device-level status lives in the completion entry.
@@ -389,6 +400,17 @@ impl DdiDev for DdiSockDev {
         let opcode = req.get_opcode();
         let session_ctrl: SessionControlKind = opcode.into();
         let session_id = req.get_session_id();
+        match session_ctrl {
+            SessionControlKind::NoSession | SessionControlKind::Open if session_id.is_some() => {
+                return Err(DdiError::DdiStatus(DdiStatus::InvalidArg));
+            }
+            SessionControlKind::InSession | SessionControlKind::Close if session_id.is_none() => {
+                return Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch,
+                ));
+            }
+            _ => {}
+        }
 
         let mut buf = vec![0u8; DST_CAP as usize];
         let req_len = {
@@ -583,8 +605,8 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .expect("read timeout");
         let device = DdiSockDev {
-            stream: Mutex::new(SocketStream::Unix(client)),
-            cmd_counter: AtomicU16::new(1),
+            stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Physical,
         };
         let peer = std::thread::spawn(move || {
@@ -638,6 +660,58 @@ mod tests {
                     .expect("submit"),
                 b"response"
             );
+        }
+        peer.join().expect("peer");
+    }
+
+    #[test]
+    fn cloned_devices_share_connection_and_serialize_requests() {
+        const THREADS: usize = 4;
+        const REQUESTS_PER_THREAD: u8 = 8;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut command_ids = std::collections::HashSet::new();
+            for _ in 0..THREADS * usize::from(REQUESTS_PER_THREAD) {
+                let request = Request::read_from(&mut stream).expect("request");
+                assert!(command_ids.insert(CmdDword::from_bits(request.sqe[0]).id()));
+                Response {
+                    status: 0,
+                    cqe: [request.payload.len() as u32, 0, 0, 0],
+                    payload: request.payload,
+                }
+                .write_to(&mut stream)
+                .expect("response");
+            }
+            assert_eq!(stream.read(&mut [0]).expect("last clone disconnected"), 0);
+        });
+        let device = DdiSockDev::connect(&endpoint).expect("device");
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS + 1));
+        let mut workers = Vec::new();
+        for thread in 0..THREADS {
+            let device = device.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for request in 0..REQUESTS_PER_THREAD {
+                    let payload = vec![thread as u8, request];
+                    assert_eq!(
+                        device
+                            .submit(OP_MBOR, 0, None, payload.clone(), &[])
+                            .expect("submit through clone"),
+                        payload
+                    );
+                }
+            }));
+        }
+        drop(device);
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("worker");
         }
         peer.join().expect("peer");
     }

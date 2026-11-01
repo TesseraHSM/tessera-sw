@@ -621,7 +621,7 @@ fn key_report_rejects_invalid_session() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let (masked_key, _) = masked_sealing_key(&ctx, session.session_id, SCOPE_LOCAL);
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: u16::MAX,

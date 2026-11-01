@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #![cfg(test)]
+// Fast-path AES GCM/XTS is unsupported on sock.
+#![cfg(not(feature = "sock"))]
 
 use std::thread;
 use std::time::Instant;

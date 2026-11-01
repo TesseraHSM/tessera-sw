@@ -46,6 +46,7 @@ use tsra_ddi_tbor_types::TborStatus;
 
 use crate::api_rev::helper_api_rev_tbor;
 use crate::assertions::assert_fw_rejects;
+use crate::assertions::assert_session_rejects;
 use crate::assertions::assert_tbor_decode_error;
 use crate::fixture::open_dev;
 use crate::fixture::open_dev_secondary;
@@ -217,6 +218,19 @@ impl TestCtx {
                 err
             }
         }
+    }
+
+    /// Expect a session rejection from firmware or the socket ownership gate.
+    #[track_caller]
+    pub fn expect_session_reject<R: TborOpReq>(&self, req: &R, expected: TborStatus) -> DdiError
+    where
+        R::OpResp: core::fmt::Debug,
+    {
+        let err = self
+            .tbor(req)
+            .expect_err("session command must be rejected");
+        assert_session_rejects(&err, expected);
+        err
     }
 
     /// [`Self::expect_fw_reject`] for a request carrying out-of-band SGL

@@ -120,6 +120,26 @@ These are separate, concurrently running terminal commands, not a sequential
 script. Alternatively, build the packages and run the executables directly from
 `target/debug` with the same arguments.
 
+## DDI Integration Tests
+
+Use a dedicated server: these suites reset its shared partition. Set
+`RUST_LOG=info` on both the server and test processes for informational logging.
+Run each suite serially:
+
+```sh
+RUST_LOG=info TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
+  -p tsra_ddi_mbor_types --features sock --test tsra_ddi_tests --test-threads 1
+RUST_LOG=info TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
+  -p tsra_ddi_tbor_types --features sock --test tsra_ddi_tbor_tests --test-threads 1
+```
+
+Use the test package's `sock` feature, not just `tsra_ddi/sock`: it selects
+socket-specific session expectations and excludes hardware-only MBOR bulk
+crypto tests, as the existing `emu` feature does. Tests of the removed
+`key_tag`/named-key lookup feature are disabled.
+Connections may own multiple sessions; cloned device handles share their
+connection and sessions. A different connection cannot use those sessions.
+
 ## Other Transports
 
 The explicit TCP commands above also work on Linux. For backward compatibility,
@@ -146,7 +166,7 @@ Neither transport is required for the TCP setup on Windows or Linux.
   session per worker as appropriate.
 - `sock`, `mock`, and `emu` select mutually exclusive DDI backends. Do not combine
   their feature flags in the same build.
-- The socket transport carries ordinary MBOR/TBOR commands, with a 4096-byte
+- The socket transport carries ordinary MBOR/TBOR commands, with an 8192-byte
   main request/response capacity. TBOR supports up to 64 OOB buffers of up to
   64 KiB each, reconstructed as server-owned SGL descriptors. Reset disables
   and re-enables the existing partition, waiting for active submissions.

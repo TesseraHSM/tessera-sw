@@ -73,6 +73,12 @@ pub const MAGIC: u32 = 0x3149_4444;
 /// Protocol version carried in every frame.
 pub const VERSION: u8 = 1;
 
+/// Transport rejection when a session allocation is not owned by the connection.
+pub const TRANSPORT_SESSION_NOT_OWNED: u32 = 3;
+
+/// Maximum main request/response buffer, matching the firmware's two-page limit.
+pub const MAX_DMA_BUFFER: u32 = 8192;
+
 /// Submission queue entry size in bytes (16 dwords).
 pub const SQE_BYTES: usize = 64;
 

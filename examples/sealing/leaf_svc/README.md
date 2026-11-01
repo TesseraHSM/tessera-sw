@@ -24,6 +24,12 @@ at the same endpoint: creation and recovery reset that partition. Each joined
 leaf instance also needs its own DDI server. Opening another connection does not
 allocate another partition.
 
+Each session belongs to the connection that opened it. Multiple sessions per
+connection are supported, but commands cannot use, finish, reopen, or close
+another connection's session. Reused slots invalidate the previous owner's
+lease. Reset preserves active-session ownership for reopening on the same
+connection and discards pending handshakes.
+
 Keep the DDI servers alive across application restarts. Reset disables and
 re-enables the existing partition, preserving device-lifetime state and waiting
 for in-flight submissions. The server closes sessions owned by disconnected
@@ -174,6 +180,6 @@ It covers create/sign, explicit local reset/recovery, root restart, remote
 recovery without local SD/remote backups, missing/corrupt-backup rejection,
 unauthorized-join rejection, and concurrent authorized signing.
 
-Transport limits are 4096 bytes for the main request/response and 64 OOB items,
+Transport limits are 8192 bytes for the main request/response and 64 OOB items,
 each up to 64 KiB. Command schemas may impose tighter limits. Fast-path
 AES-GCM/XTS and persistent server-state storage are not implemented.

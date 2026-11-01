@@ -11,7 +11,7 @@
 //! Backend is selected at compile time by
 //! [`tsra_ddi::TsraDdi::default`].
 
-use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_types::SessionType;
@@ -305,7 +305,7 @@ fn api_rev_works_after_failed_session_operation() {
         .session_close(u16::MAX)
         .expect_err("invalid session close should fail");
 
-    assert_fw_rejects(&err, TborStatus::SessionNotFound);
+    assert_session_rejects(&err, TborStatus::SessionNotFound);
 
     let after_error = ctx
         .tbor(&TborApiRevReq::new())

@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #![cfg(test)]
+// AES GCM/XTS are not yet supported on sock; disable these tests until support is added.
+#![cfg(not(feature = "sock"))]
 
 use test_with_tracing::test;
 use tsra_crypto::*;

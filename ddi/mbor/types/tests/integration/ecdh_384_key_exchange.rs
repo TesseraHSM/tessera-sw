@@ -698,8 +698,9 @@ fn test_ecdh_384_key_exchange() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_ecdh_384_key_exchange_key_tag() {
     ddi_dev_test(
         common_setup,

@@ -62,7 +62,8 @@ All test names below are relative to the
 | Rejected role/type request does not poison the fd | ✅ | `open_session::rejected_role_type_does_not_poison_fd` | Valid session succeeds after rejected CU + Authenticated Phase-1 |
 | Rejected session suite does not consume session state | ✅ | `open_session::rejected_suite_does_not_consume_session_slot` | Valid session succeeds after unsupported suite rejection |
 | Rejected public key does not consume session state | ✅ | `open_session::rejected_pk_init_does_not_consume_session_slot` | Valid session succeeds after invalid `pk_init` rejection |
-| Pending Phase-1 session blocks a second open on the same fd | ✅ | `open_session::pending_session_blocks_second_open_on_same_fd` | Pending session counts toward the per-fd session limit |
+| Pending Phase-1 session blocks a second open on the same fd | ✅ | `open_session::pending_session_blocks_second_open_on_same_fd` | Emulator/native drivers only; socket connections permit multiple sessions |
+| Multiple Pending and Active sessions on one socket connection | ✅ (sock) | `open_session::socket_connection_supports_multiple_sessions` | Both sessions finish and close independently |
 | Malformed `pk_init` (length / curve) | ⚠️ | — | Spec arm exists in handler; no negative test |
 
 ## `SessionOpenFinish` (opcode out-of-session, phase 2 of handshake)
@@ -77,7 +78,8 @@ All test names below are relative to the
 | MAC from one pending session cannot authenticate another | ✅ | `open_session::session_open_finish_rejects_mac_from_another_session` | Cross-session MAC substitution is rejected without damaging the source session |
 | Unknown Finish request does not destroy another pending session | ✅ | `open_session::unknown_finish_does_not_destroy_pending_session` | Valid pending session remains finishable after unrelated unknown-session rejection |
 | Authenticated-session MAC key derivation is deterministic | ✅ | `open_session::authenticated_session_mac_key_derivation_is_stable` | Repeated TX/RX derivation from one handshake is stable and direction-specific |
-| Failed Phase-2 leaves the original fd session-bound | ✅ | `open_session::failed_finish_mac_keeps_original_fd_session_bound` | Original fd continues enforcing the per-fd session limit after authentication failure |
+| Failed Phase-2 leaves the original fd session-bound | ✅ | `open_session::failed_finish_mac_keeps_original_fd_session_bound` | Emulator/native drivers only |
+| Fresh open on the same socket connection after failed Phase-2 | ✅ (sock) | `open_session::socket_connection_can_open_after_failed_finish` | Authentication error remains firmware-signalled; the connection is reusable |
 | Finish against a pending slot whose Init was for a different role | ⚠️ | — | Spec arm exists; not exercised |
 
 ## `SessionClose` (opcode in-session, allow-listed)
@@ -87,8 +89,8 @@ All test names below are relative to the
 | Happy path on Active CU session | ✅ | `session_close::session_close_cu_plaintext_active` |  |
 | Happy path on Active CO session | ✅ | `session_close::session_close_co_authenticated_active` |  |
 | Close a Pending-only slot (between Init and Finish) | ✅ | `session_close::session_close_pending_slot` |  |
-| Unknown `session_id` → FW rejection | 🟡 | `session_close::session_close_unknown_id` | Asserts `DdiError::DdiError(_)` |
-| Double-close of the same id → FW rejection | 🟡 | `session_close::session_close_double_close` | Asserts `DdiError::DdiError(_)` |
+| Unknown `session_id` → rejection | ✅ | `session_close::session_close_unknown_id` | Firmware `SessionNotFound`, or socket ownership rejection before firmware |
+| Double-close of the same id → rejection | ✅ | `session_close::session_close_double_close` | Firmware `SessionNotFound`, or socket ownership rejection before firmware |
 | Slot is freed for subsequent open after close | ✅ | `session_close::session_close_then_reopen` |  |
 | Default-PSK gate bypass (E2, both roles) | ✅ | `default_psk_gate::default_psk_gate_session_close_bypass_emu` |  |
 

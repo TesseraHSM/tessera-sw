@@ -1658,6 +1658,7 @@ fn test_reopen_session_with_invalid_session_id() {
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
                 assert_eq!(resp.hdr.status, DdiStatus::Success);
 
+                let active_session_id = resp.hdr.sess_id.unwrap();
                 let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                     &new_dev,
                     TEST_CRED_ID,
@@ -1667,7 +1668,7 @@ fn test_reopen_session_with_invalid_session_id() {
 
                 let resp = helper_reopen_session(
                     &new_dev,
-                    resp.hdr.sess_id.unwrap(), // valid session id but doesn't need to be reopened
+                    active_session_id,
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     encrypted_credential,
                     pub_key,
@@ -1678,6 +1679,12 @@ fn test_reopen_session_with_invalid_session_id() {
                     "ReopenSession on a session that doesn't need reopening should fail, got: {:?}",
                     resp
                 );
+                helper_close_session(
+                    &new_dev,
+                    Some(active_session_id),
+                    Some(DdiApiRev { major: 1, minor: 0 }),
+                )
+                .expect("a rejected reopen must leave the active session intact");
             }
         },
     );
