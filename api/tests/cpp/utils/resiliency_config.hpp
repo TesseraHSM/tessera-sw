@@ -59,6 +59,18 @@ void make_resiliency_config_in(ResiliencyTestCtx &ctx, tsra_resiliency_config &c
 /// @return Owning pointer to the test context.
 std::unique_ptr<ResiliencyTestCtx> make_resiliency_config(tsra_resiliency_config &config_out);
 
+/// Build a TBOR `tsra_resiliency_ex_config` backed by `ctx`'s directory,
+/// sharing the storage and lock callbacks of `make_resiliency_config_in`.
+/// No PTA callback is set, so restore replays the PTA chain captured from
+/// `tsra_sess_ex_part_final`.
+void make_resiliency_ex_config_in(ResiliencyTestCtx &ctx, tsra_resiliency_ex_config &config_out);
+
+/// TBOR counterpart of `make_resiliency_config`: creates a fresh shared
+/// directory and builds a `tsra_resiliency_ex_config` over it.
+///
+/// The returned ResiliencyTestCtx must outlive the config.
+std::unique_ptr<ResiliencyTestCtx> make_resiliency_ex_config(tsra_resiliency_ex_config &config_out);
+
 /// Returns a pointer to the shared POTA callback ops vtable used by
 /// the resiliency test helpers.
 const tsra_pota_callback_ops *get_pota_callback_ops();

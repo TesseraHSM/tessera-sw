@@ -1061,7 +1061,7 @@ fn second_part_init_without_erase_is_rejected() {
     assertions::assert_fw_rejects(&err, tsra_ddi_tbor_types::TborStatus::PtaKeyAlreadySet);
 }
 
-/// Verifies that a session created before erase cannot be reused for PartInit.
+/// Verifies that a session created before erase must be reopened before PartInit.
 #[test]
 fn part_init_with_stale_session_after_erase_is_rejected() {
     let ctx = TestCtx::new();
@@ -1080,7 +1080,10 @@ fn part_init_with_stale_session_after_erase_is_rejected() {
         )
         .expect_err("PartInit with a session created before erase must be rejected");
 
-    assertions::assert_fw_rejects(&err, tsra_ddi_tbor_types::TborStatus::DefaultPskMustRotate);
+    assertions::assert_fw_rejects(
+        &err,
+        tsra_ddi_tbor_types::TborStatus::SessionNeedsRenegotiation,
+    );
 }
 
 /// Verifies that a non-empty SAPOTA thumbprint with an invalid length is rejected.

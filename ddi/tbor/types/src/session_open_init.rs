@@ -81,8 +81,9 @@ impl SessionType {
 /// Always starts a fresh HPKE handshake.  The 32-byte session seed
 /// is now generated client-side in
 /// [`TborSessionOpenFinishReq`](crate::TborSessionOpenFinishReq) and
-/// shipped AEAD-encrypted in Phase 2.  Resume is handled by the MBOR
-/// `ReopenSession` command, not by this opcode.
+/// shipped AEAD-encrypted in Phase 2.  Resume is handled by
+/// [`TborSessionReopenInitReq`](crate::TborSessionReopenInitReq), not by
+/// this opcode.
 #[tbor(opcode = TBOR_OP_SESSION_OPEN_INIT, session_ctrl = open)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TborSessionOpenInitReq {

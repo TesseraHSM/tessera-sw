@@ -128,9 +128,9 @@ Wire layout (264 B total):
 Only the `masking_key` is wrapped — transport keys (`param_key`,
 `mac_tx_key`, `mac_rx_key`) are never persisted in `bmk_session`.
 
-TBOR sessions do not provide a resume path; a host that wants to
-restore a masking-key blob across resets uses the MBOR
-`ReopenSession` command instead.
+After a partition reset the host restores the session (and this
+`masking_key`) with [`SessionReopenFinish`](./session_reopen_finish.md),
+which takes the session's original `seed` and this `bmk_session`.
 
 A subsequent `BK_BOOT` rotation (SVN bump) invalidates all previously
 issued `bmk_session` blobs.
@@ -193,6 +193,7 @@ input.
 | `InvalidArg` | `mac_fin` not 48 bytes, `seed_envelope` not 72 bytes, or `session_id` out of range |
 | `SessionNotPending` | Slot is not in `Pending` state |
 | `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed |
+| `InvalidArg` | The Pending state was started by `SessionReopenInit` (slot left untouched) |
 | `PartitionNotProvisioned` | Identity key not present |
 
 A late `SessionOpenFinish` arriving against an evicted-and-reused slot

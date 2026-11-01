@@ -508,7 +508,7 @@ fn rsa_mod_exp_tbor(
 /// The host converts the wire public key to DER and returns an unpinned handle
 /// because subsequent TBOR unwraps resolve the partition key from the session
 /// instead of accepting a vault key ID.
-fn get_rsa_unwrapping_key_tbor(
+pub(crate) fn get_rsa_unwrapping_key_tbor(
     session: &HsmSession,
     mut priv_key_props: HsmKeyProps,
     mut pub_key_props: HsmKeyProps,

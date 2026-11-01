@@ -8,12 +8,20 @@ use tsra_api::*;
 
 use crate::utils::partition::*;
 use crate::utils::resiliency::*;
+use crate::utils::session::api_rev_at_least;
 
 // Partition-init helpers
 
 /// Open and init a partition with resiliency enabled, open a session,
 /// and return all handles plus the RAII cleanup context.
+///
+/// From API revision 1.1 the partition is a TBOR partition set up by
+/// [`init_with_resiliency_ex_and_session`].
 pub(crate) fn init_with_resiliency_and_session() -> (HsmPartition, HsmSession, ResiliencyTestCtx) {
+    if api_rev_at_least(1, 1) {
+        return init_with_resiliency_ex_and_session();
+    }
+
     let list = HsmPartitionManager::partition_info_list();
     assert!(!list.is_empty(), "No partitions found.");
     let part = HsmPartitionManager::open_partition(&list[0].path, test_api_rev())
@@ -35,6 +43,32 @@ pub(crate) fn init_with_resiliency_and_session() -> (HsmPartition, HsmSession, R
     let session = part
         .open_session(rev, &creds, None)
         .expect("Failed to open session");
+
+    (part, session, ctx)
+}
+
+/// Reset a TBOR partition, enable TBOR resiliency, rotate the default
+/// CO PSK and provision the partition, returning the CO session plus the
+/// RAII cleanup context.
+fn init_with_resiliency_ex_and_session() -> (HsmPartition, HsmSession, ResiliencyTestCtx) {
+    use crate::utils::sd_provision::*;
+
+    let (part, rev) = crate::utils::partition_ex_helpers::new_partition();
+    let ctx = ResiliencyTestCtx::new();
+    part.enable_resiliency_ex(make_resiliency_ex_config_in(ctx.dir()))
+        .expect("Failed to enable TBOR resiliency");
+
+    let session = part
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::new(HsmPskId::CO),
+            HsmSessionExType::Authenticated,
+        )
+        .expect("Failed to open CO session");
+    session
+        .change_psk(&ROTATED_CO_PSK)
+        .expect("Failed to rotate the default CO PSK");
+    provision_partition(&session);
 
     (part, session, ctx)
 }
