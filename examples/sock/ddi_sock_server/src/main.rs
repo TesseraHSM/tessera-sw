@@ -17,6 +17,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use tsra_ddi_mbor_types::DdiDecoder;
+use tsra_ddi_mbor_types::DdiOp;
+use tsra_ddi_mbor_types::DdiReopenSessionResp;
+use tsra_ddi_mbor_types::DdiReqHdr;
+use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
 use tsra_ddi_sock_proto::MAX_OOB_ITEM;
 use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
@@ -43,6 +49,7 @@ use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::CqeDw0;
 use tsra_fw_hsm_io::CqeDw1;
 use tsra_fw_hsm_io::OP_FLUSH;
+use tsra_fw_hsm_io::OP_MBOR;
 use tsra_fw_hsm_io::OP_TBOR;
 use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
@@ -185,10 +192,15 @@ impl Connection {
             let finish = op == OP_TBOR
                 && RequestView::parse(&submission.payload)
                     .is_ok_and(|view| view.opcode() == TBOR_OP_SESSION_OPEN_FINISH);
+            let reopen = op == OP_MBOR
+                && DdiDecoder::new(&submission.payload, false)
+                    .decode_hdr::<DdiReqHdr>()
+                    .is_ok_and(|hdr| hdr.op == DdiOp::ReopenSession);
             let lifecycle = session_ctrl == u8::from(SessionControlKind::Open)
                 || session_ctrl == u8::from(SessionControlKind::Close)
                 || op == OP_FLUSH
-                || finish;
+                || finish
+                || reopen;
             if !lifecycle {
                 if !scoped {
                     return Ok(execute_frame(server, request).await);
@@ -208,7 +220,7 @@ impl Connection {
             // Serialize slot mutations through firmware completion and ownership
             // publication; ordinary in-session commands can still run concurrently.
             let mut sessions = server.sessions.write().await;
-            if scoped && !state.owns_session(session_id, &sessions) {
+            if (scoped || reopen) && !state.owns_session(session_id, &sessions) {
                 return Ok(ResponseFrame::Submit(transport_error(
                     TRANSPORT_SESSION_NOT_OWNED,
                 )));
@@ -218,7 +230,8 @@ impl Connection {
                 let mut raw = cqe_dwords(&response.cqe);
                 let cqe = Cqe::from(&mut raw);
                 let flags = CqeDw0::from(response.cqe[0]);
-                if response.status == 0 && cqe.status() == 0 && flags.session_id_valid() {
+                if response.status == 0 && cqe.status() == 0 && flags.session_id_valid() && !reopen
+                {
                     let id = CqeDw1::from(response.cqe[1]).session_id();
                     if flags.session_closed() {
                         sessions.remove(&id);
@@ -239,6 +252,22 @@ impl Connection {
                         );
                         state.sessions.retain(|session| session.id != id);
                         state.sessions.push(SessionLease { id, generation });
+                    }
+                }
+                if response.status == 0 && cqe.status() == 0 && reopen {
+                    // Reopen re-keys an existing slot without publishing a CQE
+                    // session ID. Only its successful MBOR body reactivates the lease.
+                    let mut decoder = DdiDecoder::new(&response.payload, false);
+                    if decoder.decode_hdr::<DdiRespHdr>().is_ok_and(|hdr| {
+                        hdr.op == DdiOp::ReopenSession
+                            && hdr.status == DdiStatus::Success
+                            && hdr.sess_id == Some(session_id)
+                    }) && decoder
+                        .decode_data::<DdiReopenSessionResp>()
+                        .is_ok_and(|data| data.sess_id == session_id)
+                        && let Some(owner) = sessions.get_mut(&session_id)
+                    {
+                        owner.state = SessionState::Active;
                     }
                 }
                 if response.status == 0
