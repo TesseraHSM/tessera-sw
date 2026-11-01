@@ -197,7 +197,7 @@ pub(crate) async fn handle<P: HsmPal>(
         if part_state::part_state(pal, io)? != HsmPartState::Initialized {
             return Err(HsmError::InvalidArg);
         }
-        let auth_binding = pal.session_auth_binding(io, sess_id)?;
+        let auth_binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
         crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
         let app_uuid = build_app_uuid(alloc, auth_binding)?;
 

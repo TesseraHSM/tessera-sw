@@ -20,6 +20,22 @@ use tsra_fw_hsm_pal_traits::APP_ID_LEN;
 use tsra_fw_hsm_pal_traits::PSK_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 
+/// Snapshot vault-backed session identity before any asynchronous work.
+pub(crate) fn copy_auth_binding<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    id: HsmSessId,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let source = pal.session_auth_binding(io, id)?;
+    if source.len() != SESSION_AUTH_BINDING_LEN {
+        return Err(HsmError::InvalidPermissions);
+    }
+    let binding = alloc.dma_alloc(SESSION_AUTH_BINDING_LEN)?;
+    binding.copy_from_slice(source);
+    Ok(binding)
+}
+
 /// Capture the credential actually used by the HPKE handshake.
 pub(crate) async fn capture_auth_binding<'a, P: HsmPal>(
     pal: &P,

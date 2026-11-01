@@ -86,13 +86,17 @@ impl<P: HsmPal> Hsm<P> {
         // MBOR / flush / invalid SQEs; a TBOR command binds it on entry and
         // **fails before mutating** if its DMA buffer can't be carved.
         let mut undo: Option<UndoLog<'_>> = None;
+        let mut credential_guard = None;
 
         let op_result = match validated {
             Err(e) => Err(e),
             Ok(()) => match op {
                 OP_MBOR => self.handle_mbor_op(&mut io).await,
                 OP_TBOR => match self.bind_undo(&io) {
-                    Ok(log) => self.handle_tbor_op(&mut io, undo.insert(log)).await,
+                    Ok(log) => {
+                        self.handle_tbor_op(&mut io, undo.insert(log), &mut credential_guard)
+                            .await
+                    }
                     Err(e) => Err(e),
                 },
                 OP_FLUSH => self.handle_flush_op(&mut io).await,
@@ -127,8 +131,9 @@ impl<P: HsmPal> Hsm<P> {
 
         // Walk the undo log (TBOR only): commit iff the handler succeeded
         // *and* the CQE posted; otherwise revert unconditionally.  Safe
-        // without a lock or generation check — admin teardown can't race an
-        // in-flight IO, and this walk runs before `drop_io` frees the slot.
+        // against admin teardown, which cannot race an in-flight IO.
+        // Credential mutations retain their partition guard through this walk
+        // so another rotation cannot observe or overwrite uncommitted state.
         if let Some(log) = undo {
             let outcome = if handler_ok && cqe_ok {
                 log.apply_commit(self.pal(), &io).await
@@ -155,6 +160,7 @@ impl<P: HsmPal> Hsm<P> {
             }
         }
 
+        drop(credential_guard);
         if let Err(_e) = self.pal().drop_io(io).await {
             error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
         }
@@ -372,6 +378,7 @@ impl<P: HsmPal> Hsm<P> {
         &'s self,
         io: &mut P::Io,
         undo: &mut UndoLog<'s>,
+        credential_guard: &mut Option<P::PartitionGuard<'s>>,
     ) -> Result<HsmOpStatus, OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
@@ -412,6 +419,18 @@ impl<P: HsmPal> Hsm<P> {
             };
             (op, sid)
         };
+
+        if matches!(
+            opcode,
+            ddi::tbor::opcode::PSK_CHANGE | ddi::tbor::opcode::SESSION_OPEN_FINISH
+        ) {
+            *credential_guard = Some(
+                self.pal()
+                    .partition_lock(io)
+                    .await
+                    .op_status(HostStatus::INTERNAL_ERROR)?,
+            );
+        }
 
         let capacity = ddi::tbor::exchange_capacity(opcode, params.src_len, params.dst_len);
         if capacity > allocation.len() {

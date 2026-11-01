@@ -879,6 +879,63 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     ctx.session_close(co.session_id).expect("close CO");
 }
 
+#[cfg(feature = "emu")]
+#[test]
+fn key_report_concurrent_cu_rotations_have_one_winner() {
+    use std::sync::Barrier;
+
+    use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
+    use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
+
+    let ctx = TestCtx::new();
+    let co = finalized_co_session(&ctx);
+    let first_ctx = TestCtx::new_with_path(ctx.path());
+    let first = first_ctx
+        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .expect("first default CU");
+    let second_ctx = TestCtx::new_with_path(ctx.path());
+    let second = second_ctx
+        .open_session(CU_PSK_ID, SessionType::PlainText)
+        .expect("second default CU");
+    let candidates = [[0xB1; 32], [0xB2; 32]];
+    let barrier = Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let a = scope.spawn(|| {
+            barrier.wait();
+            first_ctx.psk_change(first.handshake(), &candidates[0])
+        });
+        let b = scope.spawn(|| {
+            barrier.wait();
+            second_ctx.psk_change(second.handshake(), &candidates[1])
+        });
+        [
+            a.join().expect("first rotation"),
+            b.join().expect("second rotation"),
+        ]
+    });
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let winner = results.iter().position(Result::is_ok).expect("one winner");
+    assert_fw_rejects(
+        results[1 - winner].as_ref().expect_err("stale rotation"),
+        TborStatus::SessionAuthFailure,
+    );
+    first.close().expect("close first CU");
+    second.close().expect("close second CU");
+    let pending = first_ctx
+        .session_open_init_with_options(
+            SessionOpenInitOptions::new(CU_PSK_ID, SessionType::PlainText)
+                .with_psk(&candidates[winner]),
+        )
+        .expect("winning credential init");
+    let fresh = first_ctx
+        .session_open_finish(pending)
+        .expect("winning credential finish");
+    first_ctx
+        .session_close(fresh.session_id)
+        .expect("close fresh CU");
+    ctx.session_close(co.session_id).expect("close CO");
+}
+
 /// Attests a generated ECC key carrying a non-empty key label.
 #[test]
 fn key_report_generated_ecc_non_empty_label() {

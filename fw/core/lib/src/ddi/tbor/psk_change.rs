@@ -76,7 +76,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // renegotiate to retry.  Cross-session replay is already
         // structurally impossible (HPKE-derived per-session `param_key`).
         pal.session_try_consume_psk_change(io, sess_id)?;
-        let auth_binding = pal.session_auth_binding(io, sess_id)?;
+        let auth_binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
         crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
 
         // Record the prior PSK *before* overwriting it, so any later failure
