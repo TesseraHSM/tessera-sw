@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! AES-256-GCM for the Uno PAL on the BCP (CDMA) bulk crypto engine, used
-//! by the default build. With `bulk_crypto` the FP firmware owns the
+//! by the default build. With `legacy_bulk_crypto` the FP firmware owns the
 //! engine, and the PAL's AES-GCM is the software `gcm` module instead.
 //!
 //! The caller supplies `[padded_AAD | text]` buffers, the AAD zero-padded

@@ -80,6 +80,7 @@ use super::*;
 /// | 55–57 | ML-KEM seed keys | `MlKem512Seed` .. `MlKem1024Seed` |
 /// | 58–60 | ML-KEM private keys | `MlKem512Private` .. `MlKem1024Private` |
 /// | 61–63 | ML-KEM public keys | `MlKem512Public` .. `MlKem1024Public` |
+/// | 64 | AES-256-XTS key (`K1 ‖ K2`) | `AesXts512` |
 #[repr(u8)]
 #[open_enum]
 #[derive(Clone, Copy, Debug)]
@@ -316,6 +317,9 @@ pub enum HsmVaultKeyKind {
     MlKem512Public = 61,
     MlKem768Public = 62,
     MlKem1024Public = 63,
+
+    // AES-256-XTS key, `K1 || K2` (TBOR; distinct from the MBOR bulk kind)
+    AesXts512 = 64,
 }
 
 /// Key scope: the lifecycle / visibility domain a vault key belongs
@@ -528,6 +532,9 @@ pub trait HsmVault: HsmIoTypes {
     /// - `Err(HsmError::NotEnoughSpace)` — vault is full.
     /// - `Err(HsmError::InvalidArg)` — `key.len()` does not match
     ///   `kind`, or `attrs` are inconsistent.
+    /// - `Err(HsmError::InvalidKeyType)` — `kind` is a bulk kind; bulk
+    ///   keys are created through
+    ///   [`HsmBulkCrypto::bulk_key_create`](crate::HsmBulkCrypto::bulk_key_create).
     async fn vault_key_create(
         &self,
         io: &Self::Io,
@@ -536,27 +543,6 @@ pub trait HsmVault: HsmIoTypes {
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
     ) -> HsmResult<HsmKeyId>;
-
-    /// Returns the backend-assigned bulk key id for `key_id`.
-    ///
-    /// Bulk (AES-GCM / XTS) keys are held by a platform bulk-crypto backend
-    /// rather than as material in the vault; the host addresses them by this
-    /// opaque id.  How the id is produced, and how the vault entry relates to
-    /// it, is entirely platform-defined — a platform folds any backend
-    /// registration into its [`vault_key_create`](Self::vault_key_create) /
-    /// [`vault_key_delete`](Self::vault_key_delete) overrides and exposes only
-    /// this lookup to the core. Platforms without a bulk backend return
-    /// `Err(HsmError::UnsupportedCmd)`.
-    ///
-    /// # Parameters
-    /// - `io` — caller I/O context (partition scope).
-    /// - `key_id` — a bulk key's vault handle returned by `vault_key_create`.
-    ///
-    /// # Returns
-    /// - `Ok(bulk_key_id)` — the backend-assigned bulk key id.
-    /// - `Err(HsmError::UnsupportedCmd)` — the platform has no bulk backend.
-    /// - `Err(HsmError::UnsupportedKeyType)` — `key_id` is not a bulk key.
-    fn bulk_key_id(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<u16>;
 
     /// Deletes a single key by ID.
     ///

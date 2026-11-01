@@ -90,6 +90,7 @@ tsra_fw_core_crypto_x509_builder = { path = "../../../core/crypto/x509-builder" 
 tsra_fw_ddi_mbor = { path = "../../../core/ddi/mbor/codec" }
 tsra_fw_ddi_mbor_derive = { path = "../../../core/ddi/mbor/derive" }
 tsra_fw_ddi_mbor_types = { path = "../../../core/ddi/mbor/types" }
+tsra_fw_hsm_bulk = { path = "../../../core/bulk" }
 tsra_fw_hsm_core = { default-features = false, path = "../../../core/lib" }
 tsra_fw_hsm_core_tracing = { path = "../../../core/tracing" }
 tsra_fw_hsm_io = { path = "../../../core/io" }

@@ -358,6 +358,7 @@ fn test_masked_key_rsa_unwrap_aes_key() {
     );
 }
 
+// Emu does not reject unmasking a key whose tag already exists.
 #[cfg(not(feature = "emu"))]
 #[test]
 fn test_masked_key_rsa_unwrap_aes_bulk_key() {

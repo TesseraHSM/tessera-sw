@@ -41,13 +41,13 @@
 mod aes;
 mod ecc;
 mod ecc_det;
-// AES-GCM: on the BCP by default; in software with `bulk_crypto`, where the
+// AES-GCM: on the BCP by default; in software with `legacy_bulk_crypto`, where the
 // FP firmware owns the BCP.
-#[cfg(feature = "bulk_crypto")]
+#[cfg(feature = "legacy_bulk_crypto")]
 mod gcm;
-#[cfg(not(feature = "bulk_crypto"))]
+#[cfg(not(feature = "legacy_bulk_crypto"))]
 mod gcm_bcp;
-#[cfg(not(feature = "bulk_crypto"))]
+#[cfg(not(feature = "legacy_bulk_crypto"))]
 use gcm_bcp as gcm;
 mod ghash;
 #[allow(unsafe_code)]

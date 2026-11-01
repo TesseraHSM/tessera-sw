@@ -42,6 +42,7 @@ use parking_lot::Mutex;
 use tsra_fw_hsm_core::Hsm;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
+use tsra_fw_hsm_io::CQE_DWORDS;
 use tsra_fw_hsm_pal_std::HsmPartId;
 use tsra_fw_hsm_pal_std::*;
 use tsra_fw_hsm_pal_traits::*;
@@ -645,10 +646,41 @@ impl StdHsm {
     /// Embassy thread has stopped.
     pub async fn io(&self, sqe: RawSqe, pid: u8, qid: u16, qidx: u16) -> HsmResult<RawCqe> {
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let req = HsmIoRequest::cmd(HsmPartId::from(pid), qid, qidx, sqe, reply_tx);
+        self.io_tx
+            .send(req)
+            .await
+            .map_err(|_| HsmError::InternalError)?;
+        let cqe = reply_rx.await.map_err(|_| HsmError::InternalError)?;
+        cqe.first_chunk::<CQE_DWORDS>()
+            .copied()
+            .ok_or(HsmError::InternalError)
+    }
+
+    /// Submit a bulk (fast-path) IO and wait for the completion.
+    ///
+    /// `sqe` is the 32-dword bulk SQE; the reply is the 16-dword bulk
+    /// CQE. Host buffers referenced by the SQE must stay alive until this
+    /// returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HsmError::InternalError`] if the core discards the IO (e.g.
+    /// the partition is not enabled) or the Embassy thread has stopped.
+    /// Failures of the IO itself are reported in the CQE.
+    pub async fn bulk_io(
+        &self,
+        sqe: RawBulkSqe,
+        pid: u8,
+        qid: u16,
+        qidx: u16,
+    ) -> HsmResult<RawBulkCqe> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let req = HsmIoRequest {
             pid: HsmPartId::from(pid),
             qid,
             qidx,
+            kind: HsmIoKind::Bulk,
             sqe,
             tx: reply_tx,
         };
@@ -1023,13 +1055,13 @@ mod tests {
 
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         hsm.io_tx
-            .send(HsmIoRequest {
-                pid: HsmPartId::from(PID),
-                qid: 0,
-                qidx: 0,
-                sqe: [0u32; 16],
-                tx: reply_tx,
-            })
+            .send(HsmIoRequest::cmd(
+                HsmPartId::from(PID),
+                0,
+                0,
+                [0u32; 16],
+                reply_tx,
+            ))
             .await
             .expect("submission channel closed unexpectedly");
 

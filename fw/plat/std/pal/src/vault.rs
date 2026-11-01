@@ -55,6 +55,26 @@ impl StdHsmPal {
     }
 }
 
+impl StdHsmPal {
+    /// Store `key` in the partition's vault, mapping a logical session ID
+    /// to its physical vault key ID first.  Shared by the ordinary and the
+    /// bulk create paths.
+    pub(crate) fn vault_store(
+        &self,
+        io: &StdHsmIo,
+        key: &[u8],
+        kind: HsmVaultKeyKind,
+        session_id: Option<HsmSessId>,
+        attrs: HsmVaultKeyAttrs,
+    ) -> HsmResult<HsmKeyId> {
+        let entry = self.active_part_mut(io.pid())?;
+        let session_key_id = session_id
+            .map(|sid| entry.session_table.physical_id(sid))
+            .transpose()?;
+        entry.vault.create(key, kind, session_key_id, attrs)
+    }
+}
+
 impl HsmVault for StdHsmPal {
     /// Store a new key in the partition's vault.
     ///
@@ -69,16 +89,11 @@ impl HsmVault for StdHsmPal {
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
     ) -> HsmResult<HsmKeyId> {
-        let pid = io.pid();
-        let entry = self.active_part_mut(pid)?;
-        let session_key_id = session_id
-            .map(|sid| entry.session_table.physical_id(sid))
-            .transpose()?;
-        entry.vault.create(key, kind, session_key_id, attrs)
-    }
-
-    fn bulk_key_id(&self, _io: &StdHsmIo, _key_id: HsmKeyId) -> HsmResult<u16> {
-        Err(HsmError::UnsupportedCmd)
+        // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
+        if crate::bulk::is_bulk_kind(kind) {
+            return Err(HsmError::InvalidKeyType);
+        }
+        self.vault_store(io, key, kind, session_id, attrs)
     }
 
     /// Delete a key from the partition's vault.

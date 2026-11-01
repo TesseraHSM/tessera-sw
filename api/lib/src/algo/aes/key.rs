@@ -676,11 +676,15 @@ impl HsmKeyUnmaskOp for HsmAesGcmKeyUnmaskAlgo {
         session: &HsmSession,
         masked_key: &[u8],
     ) -> Result<Self::Key, Self::Error> {
-        let (handle, props) = ddi::unmask_key(session, masked_key)?;
+        let (handle, mut props) = ddi::unmask_key(session, masked_key)?;
 
         // Create key guard first to ensure handle is released if validation fails
         let key_id = ddi::HsmKeyIdGuard::new(session, handle);
 
+        // TBOR GCM keys are plain AES-256 masked keys (PKCS#11 `CKK_AES`).
+        if session.is_ex() {
+            props = ddi::gcm_props_from_aes(props)?;
+        }
         HsmAesGcmKey::validate_props(&props)?;
         let key = HsmAesGcmKey::new(session.clone(), props, key_id.release());
         Ok(key)

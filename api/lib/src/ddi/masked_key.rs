@@ -63,6 +63,7 @@ enum TborMaskedKeyKind {
     VarLenHmacSha256,
     VarLenHmacSha384,
     VarLenHmacSha512,
+    AesXts512,
 }
 
 impl TryFrom<u8> for TborMaskedKeyKind {
@@ -89,6 +90,7 @@ impl TryFrom<u8> for TborMaskedKeyKind {
             KEY_KIND_VAR_LEN_HMAC_SHA256 => Self::VarLenHmacSha256,
             KEY_KIND_VAR_LEN_HMAC_SHA384 => Self::VarLenHmacSha384,
             KEY_KIND_VAR_LEN_HMAC_SHA512 => Self::VarLenHmacSha512,
+            KEY_KIND_AES_XTS512 => Self::AesXts512,
             _ => return Err(HsmError::MaskedKeyDecodeFailed),
         })
     }
@@ -117,6 +119,7 @@ impl TborMaskedKeyKind {
             Self::VarLenHmacSha256 => (HsmKeyKind::HmacSha256, 256, None),
             Self::VarLenHmacSha384 => (HsmKeyKind::HmacSha384, 384, None),
             Self::VarLenHmacSha512 => (HsmKeyKind::HmacSha512, 512, None),
+            Self::AesXts512 => (HsmKeyKind::AesXts, 512, None),
         }
     }
 

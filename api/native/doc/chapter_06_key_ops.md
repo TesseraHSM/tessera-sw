@@ -124,6 +124,17 @@ tsra_status tsra_key_unwrap(
  | [in] key_props      | [const tsra_key_prop_list*](#tsra_key_prop_list)     | key properties               |
  | [out] key_handle    | [tsra_handle *](#tsra_handle)                        | key handle for unwrapped key |
 
+**AES-XTS wrapped key format**
+
+For `TSRA_KEY_KIND_AES_XTS` (512 bits) the `wrapped_key` format depends on the
+session type:
+
+- Sessions opened with `tsra_sess_open`: a key-pair blob
+  `header || wrap(K1) || wrap(K2)`, where each half is an RSA-AES-wrapped
+  AES-256 key.
+- Sessions opened with `tsra_sess_ex_open`: a single RSA-AES wrap of the
+  64-byte key `K1 || K2` (PKCS#11 `CKK_AES_XTS`). `K1` and `K2` must differ.
+
 **Returns**
 
 `TSRA_STATUS_SUCCESS` on success, error code otherwise

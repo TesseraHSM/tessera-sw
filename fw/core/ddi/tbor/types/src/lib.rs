@@ -35,7 +35,10 @@ pub mod tbor_int {
 }
 
 pub mod aes_encrypt_decrypt;
+pub mod aes_gcm_encrypt_decrypt;
 pub mod aes_generate_key;
+pub mod aes_xts_encrypt_decrypt;
+pub mod aes_xts_generate_key;
 pub mod api_rev;
 pub mod concat_kdf_derive;
 pub mod darc_kex_key_gen;
@@ -84,7 +87,10 @@ pub mod unwrap_key;
 pub mod verify_key;
 
 pub use aes_encrypt_decrypt::*;
+pub use aes_gcm_encrypt_decrypt::*;
 pub use aes_generate_key::*;
+pub use aes_xts_encrypt_decrypt::*;
+pub use aes_xts_generate_key::*;
 pub use api_rev::*;
 pub use concat_kdf_derive::*;
 pub use darc_kex_key_gen::*;

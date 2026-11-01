@@ -650,6 +650,36 @@ impl HsmAesGcm for UnoHsmPal {
         self.gcm_decrypt_in_place_impl(io, key, iv, aad_len, tag, data)
             .await
     }
+
+    /// Not yet supported on Uno.
+    async fn gcm_encrypt_sgl(
+        &self,
+        _io: &UnoHsmIo,
+        _key: &HsmDmaBuf,
+        _iv: &HsmDmaBuf,
+        _aad_len: usize,
+        _len: usize,
+        _src: &[u8; 16],
+        _dst: &[u8; 16],
+        _tag: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
+
+    /// Not yet supported on Uno.
+    async fn gcm_decrypt_sgl(
+        &self,
+        _io: &UnoHsmIo,
+        _key: &HsmDmaBuf,
+        _iv: &HsmDmaBuf,
+        _aad_len: usize,
+        _len: usize,
+        _tag: &HsmDmaBuf,
+        _src: &[u8; 16],
+        _dst: &[u8; 16],
+    ) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
 }
 
 impl HsmAesKw for UnoHsmPal {
@@ -823,5 +853,23 @@ impl HsmAesKw for UnoHsmPal {
     }
 }
 
-// AES-XTS support is currently disabled.
-impl HsmAesXts for UnoHsmPal {}
+// AES-XTS is not yet supported on Uno.
+impl HsmAesXts for UnoHsmPal {
+    async fn aes_xts_gen_key(&self, _io: &UnoHsmIo, _key: &mut [u8]) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
+
+    async fn aes_xts_enc_dec_sgl(
+        &self,
+        _io: &UnoHsmIo,
+        _op: HsmAesOp,
+        _key: &HsmDmaBuf,
+        _tweak: &HsmDmaBuf,
+        _len: usize,
+        _dul: usize,
+        _src: &[u8; 16],
+        _dst: &[u8; 16],
+    ) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
+}

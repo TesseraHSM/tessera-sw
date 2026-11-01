@@ -11,7 +11,7 @@
 //! | [`HsmAes`] | `base` | AES key generation + ECB / CBC |
 //! | [`HsmAesGcm`] | `gcm` | AES-GCM authenticated encryption |
 //! | [`HsmAesKw`] | `kw` | AES-KW (RFC 3394) / AES-KWP (RFC 5649) |
-//! | [`HsmAesXts`] | `xts` | AES-XTS (currently disabled) |
+//! | [`HsmAesXts`] | `xts` | AES-256-XTS key generation + in-place transform |
 //!
 //! On Cortex-M7 hardware these delegate to a dedicated AES engine.
 //! On the standard (host-native) PAL they use OpenSSL.

@@ -87,8 +87,8 @@ profile = [
 ]
 
 # Target the bulk-crypto fastpath firmware rather than the PQC one; see
-# `tsra_fw_uno_pal/bulk_crypto`.
-bulk_crypto = ["tsra_fw_uno_pal/bulk_crypto"]
+# `tsra_fw_uno_pal/legacy_bulk_crypto`.
+legacy_bulk_crypto = ["tsra_fw_uno_pal/legacy_bulk_crypto"]
 
 [lints]
 workspace = true

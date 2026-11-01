@@ -40,6 +40,8 @@ use tsra_crypto::AesKey;
 use tsra_crypto::AesKeyWrapAlgo;
 use tsra_crypto::AesKeyWrapPadAlgo;
 use tsra_crypto::AesOfbAlgo;
+use tsra_crypto::AesXtsAlgo;
+use tsra_crypto::AesXtsKey;
 use tsra_crypto::CryptoError;
 use tsra_crypto::DecryptOp;
 use tsra_crypto::EncryptOp;
@@ -651,6 +653,72 @@ impl StdAes {
         output[..result.len()].copy_from_slice(&result);
         Ok(result.len())
     }
+
+    /// AES-XTS encrypt or decrypt in place.
+    ///
+    /// Uses [`AesXtsAlgo`] over the key `key1 || key2`, as the MBOR
+    /// simulator does. `tweak` is the little-endian data unit number of the
+    /// first `dul` bytes and increments by one per data unit. Like the
+    /// simulator, only the low 64 bits are used; the upper 64 bits are
+    /// ignored.
+    ///
+    /// # Parameters
+    /// - `key1` — data key (32 bytes).
+    /// - `key2` — tweak key (32 bytes).
+    /// - `encrypt` — `true` for encryption, `false` for decryption.
+    /// - `tweak` — initial tweak.
+    /// - `dul` — data unit length; a non-zero multiple of 16 dividing
+    ///   `data.len()`.
+    /// - `data` — the data, replaced by the result.
+    ///
+    /// # Errors
+    /// - [`HsmError::AesXtsInvalidDul`] — bad `dul`.
+    /// - [`HsmError::AesInvalidKeyLength`] — bad key length.
+    /// - [`HsmError::AesEncryptFailed`] / [`HsmError::AesDecryptFailed`] —
+    ///   AES failure (including tweak overflow).
+    pub async fn xts_crypt(
+        &self,
+        key1: &[u8],
+        key2: &[u8],
+        encrypt: bool,
+        tweak: [u8; 16],
+        dul: usize,
+        data: &mut [u8],
+    ) -> HsmResult<()> {
+        if dul == 0 || !dul.is_multiple_of(16) || !data.len().is_multiple_of(dul) {
+            return Err(HsmError::AesXtsInvalidDul);
+        }
+        if key1.len() != 32 || key2.len() != 32 {
+            return Err(HsmError::AesInvalidKeyLength);
+        }
+
+        let mut key_owned = Zeroizing::new(key1.to_vec());
+        key_owned.extend_from_slice(key2);
+        let input = Zeroizing::new(data.to_vec());
+        let len = data.len();
+
+        let result = self
+            .pool
+            .submit_with_result(async move {
+                let key =
+                    AesXtsKey::from_bytes(&key_owned).map_err(|_| HsmError::AesInvalidKeyLength)?;
+                let mut algo =
+                    AesXtsAlgo::new(&tweak[..8], dul).map_err(|_| HsmError::AesXtsInvalidDul)?;
+                let mut buf = Zeroizing::new(vec![0u8; len]);
+                if encrypt {
+                    algo.encrypt(&key, &input, Some(&mut buf))
+                        .map_err(|_| HsmError::AesEncryptFailed)?;
+                } else {
+                    algo.decrypt(&key, &input, Some(&mut buf))
+                        .map_err(|_| HsmError::AesDecryptFailed)?;
+                }
+                Ok::<_, HsmError>(buf)
+            })
+            .await?;
+
+        data.copy_from_slice(&result);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +729,72 @@ mod tests {
 
     fn make_driver() -> StdAes {
         StdAes::new(WorkerPool::new(Handle::current()))
+    }
+
+    // ── AES-XTS ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn xts_increments_tweak_per_unit_and_round_trips() {
+        let driver = make_driver();
+        let key1 = [0x11u8; 32];
+        let key2 = [0x22u8; 32];
+        let plaintext: Vec<u8> = (0..1024u32).map(|i| i as u8).collect();
+        let tweak = 0xFFFF_FFFEu64;
+
+        let mut whole = plaintext.clone();
+        let t = u128::from(tweak).to_le_bytes();
+        driver
+            .xts_crypt(&key1, &key2, true, t, 512, &mut whole)
+            .await
+            .unwrap();
+        assert_ne!(whole, plaintext);
+
+        for (i, unit) in plaintext.chunks(512).enumerate() {
+            let mut one = unit.to_vec();
+            let t = u128::from(tweak + i as u64).to_le_bytes();
+            driver
+                .xts_crypt(&key1, &key2, true, t, 512, &mut one)
+                .await
+                .unwrap();
+            assert_eq!(one, whole[i * 512..(i + 1) * 512]);
+        }
+
+        driver
+            .xts_crypt(&key1, &key2, false, t, 512, &mut whole)
+            .await
+            .unwrap();
+        assert_eq!(whole, plaintext);
+    }
+
+    #[tokio::test]
+    async fn xts_rejects_bad_dul_and_ignores_high_tweak() {
+        let driver = make_driver();
+        let k = [0x33u8; 32];
+        let k2 = [0x44u8; 32];
+        let mut data = vec![0u8; 64];
+        for dul in [0usize, 24, 48] {
+            assert_eq!(
+                driver
+                    .xts_crypt(&k, &k2, true, [0; 16], dul, &mut data)
+                    .await,
+                Err(HsmError::AesXtsInvalidDul)
+            );
+        }
+        let mut low = [0u8; 16];
+        low[0] = 7;
+        let mut high = low;
+        high[8] = 1;
+        let mut a = data.clone();
+        let mut b = data.clone();
+        driver
+            .xts_crypt(&k, &k2, true, low, 32, &mut a)
+            .await
+            .unwrap();
+        driver
+            .xts_crypt(&k, &k2, true, high, 32, &mut b)
+            .await
+            .unwrap();
+        assert_eq!(a, b);
     }
 
     // ── Key generation ──────────────────────────────────────────

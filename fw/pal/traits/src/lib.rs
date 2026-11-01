@@ -34,7 +34,7 @@
 //!       ├── HsmAes         — AES keygen + ECB/CBC
 //!       ├── HsmAesGcm      — AES-GCM
 //!       ├── HsmAesKw       — AES-KW/KWP key wrap
-//!       ├── HsmAesXts      — AES-XTS (disabled)
+//!       ├── HsmAesXts      — AES-XTS
 //!       ├── HsmEcc         — ECC keygen/sign/verify/ECDH
 //!       ├── HsmRsa         — RSA keygen/mod_exp
 //!       └── HsmKdf         — HKDF and KBKDF key derivation

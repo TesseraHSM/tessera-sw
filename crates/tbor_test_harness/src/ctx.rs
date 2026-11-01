@@ -36,6 +36,7 @@
 use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevResp;
 use tsra_ddi_tbor_types::TborOpReq;
@@ -157,6 +158,40 @@ impl TestCtx {
     pub fn tbor_oob<R: TborOpReq>(&self, req: &R, oob_items: &[&[u8]]) -> DdiResult<R::OpResp> {
         let mut cookie = None;
         self.dev.exec_op_tbor(req, Some(oob_items), &mut cookie)
+    }
+
+    /// Issue an `OP_TBOR` request carrying out-of-band SGL items that the
+    /// device may read ([`TborOobItem::In`]) or write
+    /// ([`TborOobItem::Out`]), e.g. the in / out blocks of `AesGcmEncryptDecrypt`
+    /// and `AesXtsEncryptDecrypt`.
+    pub fn tbor_oob_io<R: TborOpReq>(
+        &self,
+        req: &R,
+        oob_items: &mut [TborOobItem<'_>],
+    ) -> DdiResult<R::OpResp> {
+        let mut cookie = None;
+        self.dev.exec_op_tbor_oob(req, oob_items, &mut cookie)
+    }
+
+    /// [`Self::expect_fw_reject`] for a request carrying in / out
+    /// out-of-band SGL items (see [`Self::tbor_oob_io`]).
+    #[track_caller]
+    pub fn expect_fw_reject_oob_io<R: TborOpReq>(
+        &self,
+        req: &R,
+        oob_items: &mut [TborOobItem<'_>],
+        expected: TborStatus,
+    ) -> DdiError {
+        match self.tbor_oob_io(req, oob_items) {
+            Ok(_resp) => panic!(
+                "expected FW reject {expected:?} (0x{:08X}), got unexpected success",
+                expected.0,
+            ),
+            Err(err) => {
+                assert_fw_rejects(&err, expected);
+                err
+            }
+        }
     }
 
     /// Issue `req`, assert the FW dispatcher rejected it with exactly

@@ -17,12 +17,18 @@
 //! PAL-resident state is the fast-path bulk-key slot bitmap and the lock
 //! that serializes bulk-key registration against teardown.
 //!
-//! Bulk (AES-GCM / XTS) keys exist only in the `bulk_crypto` build, where
-//! the fast-path cores run the firmware that hosts the bulk-crypto engine.
-//! The default build pairs with the PQC fast-path firmware, which
-//! has no such engine and never answers bulk-key messages, so there bulk
-//! kinds are refused with [`HsmError::UnsupportedCmd`] and the engine paths
-//! are compiled out.
+//! Bulk (AES-GCM / XTS) keys are created through
+//! [`HsmBulkCrypto`](tsra_fw_hsm_pal_traits::HsmBulkCrypto) (see
+//! [`crate::bulk`]); [`HsmVault::vault_key_create`] refuses bulk kinds.
+//! Where their material lives depends on the build:
+//!
+//! - **default** — the HSM core runs bulk crypto itself, so a bulk key is
+//!   an ordinary vault entry holding its AES-256 material.
+//! - **`legacy_bulk_crypto`** — the fast-path cores run the firmware that hosts
+//!   the bulk-crypto engine; the key is registered with that engine over
+//!   IPC and the vault keeps only its 2-byte handle.  The engine paths
+//!   below exist only in this build: the PQC fast-path firmware never
+//!   answers bulk-key messages.
 //!
 //! Following the reference firmware, the SDK `meta` (key label) is not
 //! stored (see the [`KeyVault`] crate docs).
@@ -99,16 +105,9 @@ impl HsmVault for UnoHsmPal {
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
     ) -> HsmResult<HsmKeyId> {
-        // Bulk keys (AES-GCM / XTS) are consumed by the fast-path engine,
-        // not stored as material in the vault: register the key with the
-        // engine and keep only the 2-byte handle here.  Ordinary keys are
-        // stored directly.  Only the bulk-crypto fast-path firmware has
-        // that engine.
+        // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
         if is_bulk_kind(kind) {
-            #[cfg(not(feature = "bulk_crypto"))]
-            return Err(HsmError::UnsupportedCmd);
-            #[cfg(feature = "bulk_crypto")]
-            return fp_bulk_create(self, io, key, kind, session_id, attrs).await;
+            return Err(HsmError::InvalidKeyType);
         }
         let app_id = u8::from(io.pid());
         let session = session_id.map(u16::from);
@@ -116,21 +115,9 @@ impl HsmVault for UnoHsmPal {
         v.create(self, io, app_id, key, kind, session, attrs).await
     }
 
-    fn bulk_key_id(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<u16> {
-        if !is_bulk_kind(self.vault_key_kind(io, key_id)?) {
-            return Err(HsmError::UnsupportedKeyType);
-        }
-        let blob = self.vault_key(io, key_id)?;
-        let bytes: &[u8] = blob;
-        if bytes.len() != core::mem::size_of::<u16>() {
-            return Err(HsmError::InternalError);
-        }
-        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-    }
-
-    // Without `bulk_crypto` the engine path below is compiled out; see the
+    // Without `legacy_bulk_crypto` the engine path below is compiled out; see the
     // early return.
-    #[cfg_attr(not(feature = "bulk_crypto"), allow(unreachable_code))]
+    #[cfg_attr(not(feature = "legacy_bulk_crypto"), allow(unreachable_code))]
     async fn vault_key_delete(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
         // Serialized against bulk-key creation and session teardown (see
         // `UnoHsmPal::fp_bulk_lock`).
@@ -145,11 +132,9 @@ impl HsmVault for UnoHsmPal {
             return vault(io).delete(self, io, key_id).await;
         }
 
-        // Without `bulk_crypto` there is no engine to release a bulk key
-        // from: bulk kinds are refused at create, so one can only be left in
-        // GSRAM by a `bulk_crypto` image across a warm reset.  Delete it from
-        // the vault alone.
-        #[cfg(not(feature = "bulk_crypto"))]
+        // Without `legacy_bulk_crypto` a bulk key is an ordinary vault entry
+        // holding its material; there is no engine to release it from.
+        #[cfg(not(feature = "legacy_bulk_crypto"))]
         return vault(io).delete(self, io, key_id).await;
 
         // Bulk keys are mirrored in the fast-path engine and keep only their
@@ -249,7 +234,7 @@ impl HsmVault for UnoHsmPal {
 /// bulk key for the session is registered between the pre-pass, the engine
 /// delete and the vault delete.
 ///
-/// The engine delete is sent only with `bulk_crypto`: the PQC fast-path
+/// The engine delete is sent only with `legacy_bulk_crypto`: the PQC fast-path
 /// firmware never replies to it, which would hang every session close.
 pub(crate) async fn delete_session_keys(
     pal: &UnoHsmPal,
@@ -264,7 +249,7 @@ pub(crate) async fn delete_session_keys(
     // reallocated while a still-present entry references it (aliasing).
     let sess = u16::from(session_id);
     let to_free = session_bulk_slots(io, sess)?;
-    #[cfg(feature = "bulk_crypto")]
+    #[cfg(feature = "legacy_bulk_crypto")]
     fp_delete_session_only(pal, io, sess).await?;
     if let Err(e) = vault(io).delete_by_session(pal, io, sess).await {
         // Partial eviction: release the slots whose entries are already gone
@@ -285,8 +270,13 @@ pub(crate) async fn delete_session_keys(
 /// Collect the FP slots (one bitmap byte per table) referenced by the bulk
 /// keys bound to `session`, live or disabled.  A malformed stored handle is
 /// [`HsmError::InternalError`].
+///
+/// Without `legacy_bulk_crypto` bulk keys hold no FP slot, so the set is empty.
 fn session_bulk_slots(io: &UnoHsmIo, session: u16) -> HsmResult<[u8; NUM_FP_TABLES]> {
     let mut slots = [0u8; NUM_FP_TABLES];
+    if !cfg!(feature = "legacy_bulk_crypto") {
+        return Ok(slots);
+    }
     vault(io).for_each_session_key(session, |_key_id, kind, blob| {
         if is_bulk_kind(kind) {
             let bytes: &[u8] = blob;
@@ -326,15 +316,14 @@ use crate::ipc::KeyUpdateInfo;
 use crate::pal::IpcChannel;
 
 /// AES-256 bulk key length in bytes.
-const FP_BULK_KEY_LEN: usize = 32;
+pub(crate) const FP_BULK_KEY_LEN: usize = 32;
 
 /// FP application id reported to the fast-path engine.  The firmware
 /// reports `short_app_id = 0` to the host, so the engine `app_id` is 0.
 const FP_APP_ID: u8 = 0;
 
-/// True for the AES bulk vault kinds mirrored in the fast-path engine
-/// rather than stored as material in the vault.
-fn is_bulk_kind(kind: HsmVaultKeyKind) -> bool {
+/// True for the AES bulk (GCM / XTS) vault kinds.
+pub(crate) fn is_bulk_kind(kind: HsmVaultKeyKind) -> bool {
     matches!(
         kind,
         HsmVaultKeyKind::AesGcmBulk256
@@ -378,7 +367,7 @@ fn part_id_to_pcie_fn(part_id: u8) -> HsmResult<u8> {
 /// Returns `(vault_id, key_index)` — the owning table id and the assigned
 /// 0..=6 slot — mirroring the HSM key vault's table-based allocation so
 /// bulk-key capacity scales with the partition's owned tables.
-#[cfg_attr(not(feature = "bulk_crypto"), allow(dead_code))]
+#[cfg_attr(not(feature = "legacy_bulk_crypto"), allow(dead_code))]
 fn fp_slot_alloc(res_mask: u128) -> HsmResult<(u8, u8)> {
     FP_SLOTS.with(|slots| {
         for (table, used) in slots.iter_mut().enumerate().take(NUM_FP_TABLES) {
@@ -441,8 +430,8 @@ fn fp_slots_free_mask(res_mask: u128) {
 /// Runs under [`UnoHsmPal::fp_bulk_lock`], and a session-scoped key is
 /// rejected with [`HsmError::SessionNotFound`] once its session has been
 /// torn down, so session teardown never misses a registration.
-#[cfg_attr(not(feature = "bulk_crypto"), allow(dead_code))]
-async fn fp_bulk_create(
+#[cfg_attr(not(feature = "legacy_bulk_crypto"), allow(dead_code))]
+pub(crate) async fn fp_bulk_create(
     pal: &UnoHsmPal,
     io: &UnoHsmIo,
     key: &HsmDmaBuf,
@@ -577,7 +566,7 @@ async fn fp_bulk_delete(
 /// fast-path engine in a single message — the engine iterates its table and
 /// matches by session id + app id, mirroring the reference firmware's
 /// close-session path.
-#[cfg_attr(not(feature = "bulk_crypto"), allow(dead_code))]
+#[cfg_attr(not(feature = "legacy_bulk_crypto"), allow(dead_code))]
 async fn fp_delete_session_only(pal: &UnoHsmPal, io: &UnoHsmIo, session_id: u16) -> HsmResult<()> {
     let pcie_fn = part_id_to_pcie_fn(u8::from(io.pid()))?;
     let info = KeyUpdateInfo {

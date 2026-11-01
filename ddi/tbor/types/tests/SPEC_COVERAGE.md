@@ -556,6 +556,70 @@ scopes, salt/info handling, deterministic derivation, and invalid requests.
 
 ---
 
+## `AesXtsGenerateKey` (opcode in-session, gated)
+
+Generates a double-wide AES-256-XTS key and returns it as one masked blob
+(296 bytes).
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Session, Ephemeral, and Local scopes generate fresh masked keys after `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_roundtrip_all_scopes_after_part_final` | Checks the length, that the blob is not all zero, and that each call returns a distinct blob |
+| Session scope works before `PartFinal` | ✅ | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_session_scope_before_finalize` | |
+| Ephemeral and Local scopes are rejected before `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_rejects_non_session_scope_before_finalize` | `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_rejects_invalid_usage` | `InvalidPermissions` |
+| Invalid session ID is rejected | ✅ | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
+## `UnwrapKey` AES-XTS class (opcode in-session, gated)
+
+Imports an RSA-AES-wrapped 64-byte AES-256-XTS key (`K1 ‖ K2`) as one
+`AesXts512` masked blob.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| A 64-byte `K1 ‖ K2` imports as one `AesXts512` key | ✅ | `unwrap_key::unwrap_key_aes_xts_emu` | No public key |
+| Wrong length, equal halves, or a 64-byte key under the AES class is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_invalid_material_emu` | 32, 48 and 72 bytes; `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_non_cipher_usage_emu` | `InvalidPermissions` |
+| An imported key encrypts like the host AES-XTS reference | ✅ | `aes_xts_encrypt_decrypt::aes_xts_unwrapped_key_matches_host` | DUL 512, 4 units; decrypt round trip |
+
+## `AesXtsEncryptDecrypt` (opcode in-session, gated, OOB in / out)
+
+Processes `data_len / dul` XTS data units in one submission. The device
+reads the in OOB block and writes the out OOB block. The tweak is an
+8-byte little-endian value that increments per data unit. XTS keys
+cannot be imported, so correctness is checked through properties
+instead of known answers.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Encrypt / decrypt round trip across data-unit lengths and up to 16 KiB | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_roundtrip_data_unit_lengths` | DUL 16 to 16384, 1 to 32 units, Session and Local keys |
+| A multi-unit submission equals per-unit submissions with incrementing tweaks | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_multi_unit_matches_per_unit` | DUL 512 and 4096, both directions |
+| The tweak and the key change the ciphertext; output is deterministic | ✅ | `aes_xts_encrypt_decrypt::aes_xts_tweak_and_key_change_ciphertext` | Decrypting with the wrong tweak does not recover the plaintext |
+| The tweak after the last unit must fit in 64 bits | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_tweak_overflow` | `AesXtsInvalidBufferSize` |
+| Bad DUL or a `data_len` that is not a multiple of DUL is rejected | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_rejects_invalid_unit_lengths` | `AesXtsInvalidBufferSize` |
+| Oversize data or missing OOB blocks are rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_oversize_and_missing_oob` | `InvalidArg` |
+| A masked key of the same size that is not XTS is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_non_xts_key` | HMAC-SHA512 key; `InvalidKeyType` |
+| A tampered masked key is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_tampered_key` | `AesGcmDecryptTagDoesNotMatch` |
+| Invalid session ID is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
+## `AesGcmEncryptDecrypt` (opcode in-session, gated, OOB in / out)
+
+AES-256-GCM over an OOB `[padded AAD | text]` layout. The AAD region is
+`round_up_32(aad_len)`; the AAD sits at offset 16 when `aad_len % 32`
+is in `1..=16`. An empty message needs no OOB blocks.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| McGrew–Viega AES-256 known answers | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_known_answers` | Test cases 13 (empty, no OOB), 14, and 16 (with AAD) |
+| Round trip across AAD and text lengths | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_roundtrip_aad_and_text_lengths` | AAD 0 to 64 (every padding branch), text 0 to 1024 bytes, Session and Local keys |
+| Maximum `data_len` round trips | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_roundtrip_max_data_len` | With and without AAD |
+| Device-generated IV on encrypt is returned, fresh, and decryptable | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_device_iv_roundtrip` | |
+| Device-generated IV on decrypt is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_device_iv_on_decrypt` | `InvalidArg` |
+| A tampered tag, AAD, ciphertext, or IV fails authentication | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_tampered_inputs` | `AesGcmDecryptTagDoesNotMatch`, including an empty message |
+| A tampered masked key is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_tampered_key` | `AesGcmDecryptTagDoesNotMatch` |
+| A masked key of the same size that is not AES-256 is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_non_aes256_key` | HMAC-SHA256 key; `InvalidKeyType` |
+| Oversize or inconsistent lengths and missing OOB blocks are rejected | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_invalid_lengths_and_missing_oob` | `InvalidArg` |
+| Invalid session ID is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
 ## `GetPublicKey` (opcode in-session, gated)
 
 Unmasks a masked RSA / ECC private key and returns its wire public key, in

@@ -81,10 +81,10 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
         .await?;
     }
 
-    // Commit the derived key: AES bulk keys (GCM / XTS) are handed to the
-    // bulk-crypto backend (the vault records only the returned
-    // `bulk_key_id` handle, carried in the response for later bulk
-    // ops); every other kind is stored directly in the vault.
+    // Commit the derived key: AES bulk keys (GCM / XTS) go through the
+    // platform bulk-crypto path (its `bulk_key_id` is carried in the
+    // response for later bulk ops); every other kind is stored directly
+    // in the vault.
     let (key_handle, bulk_key_id) =
         match super::bulk::commit_key(pal, io, out, target.kind, HsmSessId::from(sess_id), attrs)
             .await

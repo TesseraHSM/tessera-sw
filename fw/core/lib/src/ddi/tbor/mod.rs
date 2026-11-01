@@ -17,7 +17,10 @@
 //! Error encoding initializes only the published response prefix.
 
 pub(crate) mod aes_encrypt_decrypt;
+pub(crate) mod aes_gcm_encrypt_decrypt;
 pub(crate) mod aes_generate_key;
+pub(crate) mod aes_xts_encrypt_decrypt;
+pub(crate) mod aes_xts_generate_key;
 pub(crate) mod api_rev;
 pub(crate) mod concat_kdf_derive;
 pub(crate) mod darc_kex_key_gen;
@@ -379,6 +382,20 @@ pub(crate) mod opcode {
     /// other PQC opcodes.  See [`super::mlkem_decapsulate`].
     pub(crate) const MLKEM_DECAPSULATE: u8 = 0x2B;
 
+    /// `AesGcmEncryptDecrypt` — AES-256-GCM over OOB in / out SGL blocks
+    /// with a caller-held masked AES-256 key.
+    /// See [`super::aes_gcm_encrypt_decrypt`].
+    pub(crate) const AES_GCM_ENCRYPT_DECRYPT: u8 = 0x2C;
+
+    /// `AesXtsEncryptDecrypt` — AES-256-XTS over OOB in / out SGL blocks
+    /// with a caller-held masked XTS key.
+    /// See [`super::aes_xts_encrypt_decrypt`].
+    pub(crate) const AES_XTS_ENCRYPT_DECRYPT: u8 = 0x2D;
+
+    /// `AesXtsGenerateKey` — generate a masked double-wide AES-256-XTS key.
+    /// See [`super::aes_xts_generate_key`].
+    pub(crate) const AES_XTS_GENERATE_KEY: u8 = 0x2E;
+
     /// `GetPublicKey` — derive the wire public key of a masked RSA / ECC
     /// private key. See [`super::get_public_key`].
     pub(crate) const GET_PUBLIC_KEY: u8 = 0x2F;
@@ -580,10 +597,14 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::MLKEM_GENERATE_KEY => types::TborMlKemGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::MLKEM_ENCAPSULATE => types::TborMlKemEncapsulateResp::MAX_ENCODED_SIZE,
         opcode::MLKEM_DECAPSULATE => types::TborMlKemDecapsulateResp::MAX_ENCODED_SIZE,
+        opcode::AES_XTS_ENCRYPT_DECRYPT => types::TborAesXtsEncryptDecryptResp::MAX_ENCODED_SIZE,
+        opcode::AES_XTS_GENERATE_KEY => types::TborAesXtsGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::GET_PUBLIC_KEY => types::TborGetPublicKeyResp::MAX_ENCODED_SIZE,
         opcode::VERIFY_KEY => types::TborVerifyKeyResp::MAX_ENCODED_SIZE,
         // These handlers reclaim response space within every valid request.
-        opcode::AES_ENCRYPT_DECRYPT | opcode::ECC_SIGN => request_len,
+        opcode::AES_ENCRYPT_DECRYPT | opcode::AES_GCM_ENCRYPT_DECRYPT | opcode::ECC_SIGN => {
+            request_len
+        }
         _ if !is_known_opcode(opcode) => host_capacity,
         _ => tsra_fw_ddi_tbor::RESP_HEADER_LEN + 4,
     };
@@ -723,6 +744,13 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::MLKEM_GENERATE_KEY => mlkem_generate_key::handle(pal, io, cmd_buf).await,
         opcode::MLKEM_ENCAPSULATE => mlkem_encapsulate::handle(pal, io, cmd_buf).await,
         opcode::MLKEM_DECAPSULATE => mlkem_decapsulate::handle(pal, io, cmd_buf).await,
+        opcode::AES_GCM_ENCRYPT_DECRYPT => {
+            aes_gcm_encrypt_decrypt::handle(pal, io, cmd_buf, oob).await
+        }
+        opcode::AES_XTS_ENCRYPT_DECRYPT => {
+            aes_xts_encrypt_decrypt::handle(pal, io, cmd_buf, oob).await
+        }
+        opcode::AES_XTS_GENERATE_KEY => aes_xts_generate_key::handle(pal, io, cmd_buf).await,
         opcode::GET_PUBLIC_KEY => get_public_key::handle(pal, io, cmd_buf).await,
         opcode::VERIFY_KEY => verify_key::handle(pal, io, cmd_buf).await,
         _ => Err(HsmError::UnsupportedCmd),
@@ -784,6 +812,9 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::MLKEM_GENERATE_KEY
             | opcode::MLKEM_ENCAPSULATE
             | opcode::MLKEM_DECAPSULATE
+            | opcode::AES_GCM_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_GENERATE_KEY
             | opcode::GET_PUBLIC_KEY
             | opcode::VERIFY_KEY
     )
@@ -841,6 +872,9 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
         | opcode::DARC_KEY_WRAP
+        | opcode::AES_GCM_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_GENERATE_KEY
         | opcode::GET_PUBLIC_KEY
         | opcode::VERIFY_KEY => true,
         // Default-deny: any future opcode is treated as in-session
@@ -908,6 +942,9 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
         | opcode::DARC_KEY_WRAP
+        | opcode::AES_GCM_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_GENERATE_KEY
         | opcode::GET_PUBLIC_KEY
         | opcode::VERIFY_KEY => true,
         _ => true,
@@ -1047,13 +1084,13 @@ mod tests {
         pal.part_alloc_internal(0, 1).await.unwrap();
         pal.part_enable_internal(0).await.unwrap();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-        tx.send(HsmIoRequest {
-            pid: HsmPartId::from(0u8),
-            qid: 0,
-            qidx: 0,
-            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
-            tx: reply_tx,
-        })
+        tx.send(HsmIoRequest::cmd(
+            HsmPartId::from(0u8),
+            0,
+            0,
+            [0; tsra_fw_hsm_io::SQE_DWORDS],
+            reply_tx,
+        ))
         .await
         .unwrap();
         let io = pal.poll_io().await.unwrap();

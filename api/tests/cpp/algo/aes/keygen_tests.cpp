@@ -452,7 +452,7 @@ TEST_F(tsra_aes_keygen, aes_unmask_wrong_kind_fails)
             session,
             TSRA_ALGO_ID_AES_KEY_GEN,
             TSRA_KEY_KIND_AES,
-            256,
+            128,
             TSRA_KEY_KIND_AES_GCM
         );
     });

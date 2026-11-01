@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pure-software AES-GCM for the Uno PAL, used by the `bulk_crypto`
+//! Pure-software AES-GCM for the Uno PAL, used by the `legacy_bulk_crypto`
 //! build, where the FP firmware owns the BCP (CDMA) engine. The default
 //! build runs AES-GCM on the BCP instead; see `gcm_bcp`.
 //!

@@ -350,13 +350,13 @@ mod session_type_tests {
         pal.part_alloc_internal(0, 1).await.unwrap();
         pal.part_enable_internal(0).await.unwrap();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-        tx.send(HsmIoRequest {
-            pid: HsmPartId::from(0u8),
-            qid: 0,
-            qidx: 0,
-            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
-            tx: reply_tx,
-        })
+        tx.send(HsmIoRequest::cmd(
+            HsmPartId::from(0u8),
+            0,
+            0,
+            [0; tsra_fw_hsm_io::SQE_DWORDS],
+            reply_tx,
+        ))
         .await
         .unwrap();
         let io = pal.poll_io().await.unwrap();

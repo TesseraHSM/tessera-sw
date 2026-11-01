@@ -43,9 +43,9 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
 // Cargo cannot drop a dependency for a feature; the BCP is unused here.
-#[cfg(feature = "bulk_crypto")]
+#[cfg(feature = "legacy_bulk_crypto")]
 use tsra_fw_uno_drivers_bcp as _;
-#[cfg(not(feature = "bulk_crypto"))]
+#[cfg(not(feature = "legacy_bulk_crypto"))]
 use tsra_fw_uno_drivers_bcp::BcpDriver;
 use tsra_fw_uno_drivers_boot_status as boot_status;
 use tsra_fw_uno_drivers_boot_status::BootStatus;
@@ -151,7 +151,7 @@ pub enum IpcChannel {
     AdminEvent = 1,
     /// HSM → FP requests (with response) over the PSRAM rings: bulk-key
     /// updates and test-hook crash injection.  Only the bulk-crypto
-    /// fast-path firmware (`bulk_crypto`) listens; the PQC build never
+    /// fast-path firmware (`legacy_bulk_crypto`) listens; the PQC build never
     /// enables it.
     FpMessage = 2,
     /// HSM → Admin requests (HSM is the requestor, Admin the responder).
@@ -318,8 +318,8 @@ pub struct UnoHsmPal {
     pub ipc: &'static Ipc,
 
     /// Bulk crypto processor (CDMA) — the PAL's AES-256-GCM. Absent with
-    /// `bulk_crypto`, where the FP firmware owns the engine.
-    #[cfg(not(feature = "bulk_crypto"))]
+    /// `legacy_bulk_crypto`, where the FP firmware owns the engine.
+    #[cfg(not(feature = "legacy_bulk_crypto"))]
     pub bcp: &'static BcpDriver,
 
     /// Boot handshake phase (PAL lifecycle state).
@@ -423,7 +423,7 @@ impl Default for UnoHsmPal {
                 // Pair 2: send bulk-key requests to the bulk-crypto
                 // backend and await the response (desc 15 out, 16 in)
                 // over the PSRAM HSM↔backend IPC rings.  Enabled only with
-                // `bulk_crypto`: the PQC mailboxes reuse these rings' PSRAM.
+                // `legacy_bulk_crypto`: the PQC mailboxes reuse these rings' PSRAM.
                 IpcPairConfig {
                     kind: IpcPairKind::SendMessage,
                     inbound_desc: 16,
@@ -473,7 +473,7 @@ impl Default for UnoHsmPal {
             )
         };
         // SAFETY: As above.
-        #[cfg(not(feature = "bulk_crypto"))]
+        #[cfg(not(feature = "legacy_bulk_crypto"))]
         let bcp = unsafe { static_init!(BcpDriver, BcpDriver::new()) };
         Self {
             iic,
@@ -485,7 +485,7 @@ impl Default for UnoHsmPal {
             rng,
             pqc,
             ipc,
-            #[cfg(not(feature = "bulk_crypto"))]
+            #[cfg(not(feature = "legacy_bulk_crypto"))]
             bcp,
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
             io_alloc: IO_ALLOC_INIT,
@@ -666,7 +666,7 @@ impl UnoHsmPal {
         }
 
         // The BCP raises no HSM interrupt; reap its completions every pass.
-        #[cfg(not(feature = "bulk_crypto"))]
+        #[cfg(not(feature = "legacy_bulk_crypto"))]
         self.bcp.wake();
     }
 
@@ -899,8 +899,8 @@ impl HsmPal for UnoHsmPal {
         // fast CP1 can read them is throughput. The default memory map makes
         // that window Device, which serialises reads; remap it Normal. The
         // bulk-crypto fast-path firmware keeps its HSM↔FP IPC rings in the
-        // same window, so with `bulk_crypto` it stays Device.
-        if !cfg!(feature = "bulk_crypto") {
+        // same window, so with `legacy_bulk_crypto` it stays Device.
+        if !cfg!(feature = "legacy_bulk_crypto") {
             // SAFETY: at boot, before any request can be submitted.
             unsafe { tsra_fw_uno_drivers_pqc::map_mailbox_normal() };
         }
@@ -923,7 +923,7 @@ impl HsmPal for UnoHsmPal {
         // Only the bulk-crypto fast-path firmware serves the HSM↔FP rings. The
         // PQC firmware never replies on them, and its mailboxes and status
         // words occupy that PSRAM, so the PQC build leaves both untouched.
-        if cfg!(feature = "bulk_crypto") {
+        if cfg!(feature = "legacy_bulk_crypto") {
             self.ipc.enable(IpcChannel::FpMessage as u8);
             // The HSM owns initialization of the HSM↔backend ring indices (the
             // reference firmware zeroes them at channel setup).  Clear all

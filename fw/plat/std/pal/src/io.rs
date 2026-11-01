@@ -9,8 +9,12 @@
 //! [`StdOic`](crate::drivers::oic::StdOic) for completing IOs.
 
 use tokio::sync::oneshot::Sender as ReplySender;
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::RawBulkCqe;
+use tsra_fw_hsm_bulk::RawBulkSqe;
+use tsra_fw_hsm_bulk::BULK_CQE_DWORDS;
+use tsra_fw_hsm_bulk::BULK_SQE_DWORDS;
 use tsra_fw_hsm_io::Cqe;
-use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_io::CQE_DWORDS;
 use tsra_fw_hsm_io::SQE_DWORDS;
@@ -21,10 +25,10 @@ use crate::StdHsmPal;
 
 /// An IO submit request sent from the user thread to the Embassy thread.
 ///
-/// Contains the SQE, metadata, and a oneshot reply channel. Host
-/// source data for inbound DMA is referenced by the PRP address in
-/// the SQE — the caller must keep the source buffer alive until the
-/// response is received.
+/// Contains the SQE, metadata, and a oneshot reply channel. Entries are
+/// stored at the largest (bulk) size; `kind` selects how many dwords are
+/// used (see [`StdHsmIo`]). Host buffers are referenced by address in the
+/// SQE — the caller must keep them alive until the response is received.
 pub struct HsmIoRequest {
     /// Source partition identifier.
     pub pid: HsmPartId,
@@ -35,11 +39,40 @@ pub struct HsmIoRequest {
     /// Index within the source queue.
     pub qidx: u16,
 
-    /// The 64-byte submission queue entry.
-    pub sqe: RawSqe,
+    /// Queue kind of the IO.
+    pub kind: HsmIoKind,
 
-    /// Oneshot channel for sending the CQE back to the submitter.
-    pub tx: ReplySender<RawCqe>,
+    /// The submission queue entry; a command SQE uses the first
+    /// [`SQE_DWORDS`] dwords.
+    pub sqe: RawBulkSqe,
+
+    /// Oneshot channel for sending the CQE back to the submitter; a
+    /// command CQE is the first [`CQE_DWORDS`] dwords.
+    pub tx: ReplySender<RawBulkCqe>,
+}
+
+impl HsmIoRequest {
+    /// Builds a command IO request from a command SQE.
+    pub fn cmd(
+        pid: HsmPartId,
+        qid: u16,
+        qidx: u16,
+        sqe: RawSqe,
+        tx: ReplySender<RawBulkCqe>,
+    ) -> Self {
+        let mut req = Self {
+            pid,
+            qid,
+            qidx,
+            kind: HsmIoKind::Cmd,
+            sqe: [0; BULK_SQE_DWORDS],
+            tx,
+        };
+        if let Some(head) = req.sqe.first_chunk_mut::<SQE_DWORDS>() {
+            *head = sqe;
+        }
+        req
+    }
 }
 
 /// An IO work item backed by a pool-allocated buffer slot.
@@ -69,19 +102,30 @@ pub struct StdHsmIo {
     /// [`HsmAlloc`](tsra_fw_hsm_pal_traits::HsmAlloc) to address per-IO bump heaps.
     pub(crate) slot: u16,
 
-    /// Oneshot channel for the CQE reply.
+    /// Oneshot channel for the reply.
     ///
     /// `Option` so [`complete_io`](HsmIoController::complete_io) can
     /// `take()` the oneshot sender (which is consumed on send) through a
     /// `&mut` borrow, leaving the rest of `io` intact for the
     /// post-completion walk.
-    pub(crate) tx: Option<ReplySender<RawCqe>>,
+    pub(crate) tx: Option<ReplySender<RawBulkCqe>>,
 
-    /// The 64-byte submission queue entry.
-    pub(crate) sqe: RawSqe,
+    /// Queue kind of the IO.
+    pub(crate) kind: HsmIoKind,
 
-    /// The 16-byte completion queue entry to be populated by the core.
-    pub(crate) cqe: RawCqe,
+    /// Submission entry storage, sized for the largest (bulk) entry;
+    /// [`sqe`](HsmIo::sqe) exposes the first `sqe_len` dwords.
+    pub(crate) sqe: RawBulkSqe,
+
+    /// Completion entry storage, sized for the largest (bulk) entry;
+    /// [`cqe`](HsmIo::cqe) exposes the first `cqe_len` dwords.
+    pub(crate) cqe: RawBulkCqe,
+
+    /// Submission entry length in dwords.
+    pub(crate) sqe_len: usize,
+
+    /// Completion entry length in dwords.
+    pub(crate) cqe_len: usize,
 }
 
 // SAFETY: StdHsmIo is only used on the single-threaded Embassy executor.
@@ -93,15 +137,22 @@ impl StdHsmIo {
     }
 
     /// Construct a new IO work item from a request and an allocated slot.
-    fn new(req: HsmIoRequest, slot: u16) -> Self {
+    pub(crate) fn new(req: HsmIoRequest, slot: u16) -> Self {
+        let (sqe_len, cqe_len) = match req.kind {
+            HsmIoKind::Cmd => (SQE_DWORDS, CQE_DWORDS),
+            HsmIoKind::Bulk => (BULK_SQE_DWORDS, BULK_CQE_DWORDS),
+        };
         Self {
             pid: req.pid,
             qid: req.qid,
             qidx: req.qidx,
-            sqe: req.sqe,
             slot,
             tx: Some(req.tx),
-            cqe: [0; CQE_DWORDS],
+            kind: req.kind,
+            sqe: req.sqe,
+            cqe: [0; BULK_CQE_DWORDS],
+            sqe_len,
+            cqe_len,
         }
     }
 
@@ -109,16 +160,8 @@ impl StdHsmIo {
     /// (e.g. masking `BK_BOOT` at partition allocation), backed by a
     /// caller-borrowed buffer-pool `slot`.  `tx` is a throwaway reply
     /// channel — no host awaits the completion.
-    pub(crate) fn admin(pid: HsmPartId, slot: u16, tx: ReplySender<RawCqe>) -> Self {
-        Self {
-            pid,
-            qid: 0,
-            qidx: 0,
-            sqe: [0; SQE_DWORDS],
-            slot,
-            tx: Some(tx),
-            cqe: [0; CQE_DWORDS],
-        }
+    pub(crate) fn admin(pid: HsmPartId, slot: u16, tx: ReplySender<RawBulkCqe>) -> Self {
+        Self::new(HsmIoRequest::cmd(pid, 0, 0, [0; SQE_DWORDS], tx), slot)
     }
 }
 
@@ -135,11 +178,15 @@ impl core::fmt::Debug for StdHsmIo {
 
 impl HsmIo for StdHsmIo {
     fn sqe(&self) -> &HsmSqe {
-        &self.sqe
+        &self.sqe[..self.sqe_len]
     }
 
     fn cqe(&mut self) -> &mut HsmCqe {
-        &mut self.cqe
+        &mut self.cqe[..self.cqe_len]
+    }
+
+    fn kind(&self) -> HsmIoKind {
+        self.kind
     }
 }
 
@@ -172,7 +219,14 @@ impl HsmIoController for StdHsmPal {
     /// the CQE cannot be posted (dropped receiver or double-complete) so
     /// core can treat it as `cqe_ok = false` and roll back.
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
-        Cqe::from(&mut io.cqe).set_sq_id(io.qid);
+        match io.kind {
+            HsmIoKind::Cmd => {
+                if let Some(cqe) = io.cqe.first_chunk_mut::<CQE_DWORDS>() {
+                    Cqe::from(cqe).set_sq_id(io.qid);
+                }
+            }
+            HsmIoKind::Bulk => BulkCqe::set_sq_id(&mut io.cqe, io.qid),
+        }
         self.oic.send(io)
     }
 

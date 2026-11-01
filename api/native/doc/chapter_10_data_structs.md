@@ -761,7 +761,7 @@ struct tsra_algo_aes_xts_params {
 
 | Field            | Type     | Description                                                           |
 | ---------------- | -------  | --------------------------------------------------------------------- |
-| sector_num       | uint8_t  | sector or data unit sequence number                            &nbsp; |
+| sector_num       | uint8_t  | sector or data unit sequence number (little-endian). 128-bit on `tsra_sess_open` sessions; 64-bit on `tsra_sess_ex_open` sessions, where bytes 8..16 must be zero for the initial tweak and the tweak advanced past the last processed data unit (else `TSRA_STATUS_INVALID_TWEAK`) &nbsp; |
 | data_unit_length | uint32_t | data unit length                                               &nbsp; |
 
 
