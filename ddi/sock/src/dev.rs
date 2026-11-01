@@ -49,7 +49,11 @@ use tsra_ddi_mbor_types::MborError;
 use tsra_ddi_mbor_types::SessionControlKind;
 use tsra_ddi_sock_proto::ProtoError;
 use tsra_ddi_sock_proto::Request;
+use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
+use tsra_ddi_sock_proto::ResponseFrame;
+use tsra_ddi_sock_proto::MAX_OOB_ITEM;
+use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_fw_hsm_io::CmdDword;
@@ -289,11 +293,20 @@ impl DdiSockDev {
         session_ctrl: u8,
         session_id: Option<u16>,
         payload: Vec<u8>,
+        oob_items: &[&[u8]],
     ) -> DdiResult<Vec<u8>> {
+        if oob_items.len() > MAX_OOB_ITEMS
+            || oob_items
+                .iter()
+                .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
+        {
+            return Err(DdiError::InvalidParameter);
+        }
         let cmd_id = self.next_cmd_id();
         let sqe = SqeBuilder::new()
             .cmd(CmdDword::new().with_op(op).with_id(cmd_id))
             .buf_lens(payload.len() as u32, DST_CAP)
+            .oob_len((oob_items.len() * 16) as u32)
             .session_flags(
                 SessionFlags::new()
                     .with_ctrl(session_ctrl)
@@ -302,7 +315,11 @@ impl DdiSockDev {
             .session_id(session_id.unwrap_or(0))
             .build();
 
-        let req = Request { sqe, payload };
+        let req = Request {
+            sqe,
+            payload,
+            oob_items: oob_items.iter().map(|item| item.to_vec()).collect(),
+        };
 
         let resp: Response = {
             let mut stream = self.stream.lock();
@@ -383,7 +400,7 @@ impl DdiDev for DdiSockDev {
         buf.truncate(req_len);
 
         // ── 2. Build the SQE and exchange it over the socket.
-        let resp_buf = self.submit(OP_MBOR, u8::from(session_ctrl), session_id, buf)?;
+        let resp_buf = self.submit(OP_MBOR, u8::from(session_ctrl), session_id, buf, &[])?;
         if resp_buf.is_empty() {
             return Err(DdiError::DdiError(0));
         }
@@ -409,12 +426,6 @@ impl DdiDev for DdiSockDev {
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        // The socket transport (v1) carries only the SQE body; it has no
-        // channel for out-of-band SGL descriptor pages yet.
-        if oob_items.is_some_and(|items| !items.is_empty()) {
-            return Err(DdiError::UnsupportedEncoding);
-        }
-
         // ── 1. Encode the TBOR request.
         let session_ctrl = req.session_ctrl();
         let session_id = req.get_session_id();
@@ -427,7 +438,13 @@ impl DdiDev for DdiSockDev {
         buf.truncate(req_len);
 
         // ── 2. Build the SQE and exchange it over the socket.
-        let resp_buf = self.submit(OP_TBOR, u8::from(session_ctrl), session_id, buf)?;
+        let resp_buf = self.submit(
+            OP_TBOR,
+            u8::from(session_ctrl),
+            session_id,
+            buf,
+            oob_items.unwrap_or(&[]),
+        )?;
         if resp_buf.is_empty() {
             return Err(DdiError::DdiError(0));
         }
@@ -437,7 +454,7 @@ impl DdiDev for DdiSockDev {
     }
 
     // ── Fast-path crypto ops are not supported over the socket transport
-    //    yet (v1 carries MBOR/TBOR DDI ops only). ─────────────────────
+    //    yet (the transport carries MBOR/TBOR DDI ops only). ────────
 
     fn exec_op_fp_gcm_slice(
         &self,
@@ -482,7 +499,17 @@ impl DdiDev for DdiSockDev {
     }
 
     fn erase(&self) -> Result<(), DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let mut stream = self.stream.lock();
+        RequestFrame::Reset
+            .write_to(&mut *stream)
+            .map_err(map_proto_err)?;
+        match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
+            ResponseFrame::Reset { status: 0 } => Ok(()),
+            ResponseFrame::Reset { status } => Err(DdiError::DdiError(status)),
+            ResponseFrame::Submit(_) => Err(map_proto_err(ProtoError::Malformed(
+                "expected reset response",
+            ))),
+        }
     }
 }
 
@@ -574,7 +601,7 @@ mod tests {
         });
         assert_eq!(
             device
-                .submit(OP_MBOR, 0, None, b"request".to_vec())
+                .submit(OP_MBOR, 0, None, b"request".to_vec(), &[])
                 .expect("submit"),
             b"response"
         );
@@ -607,7 +634,7 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(
                 device
-                    .submit(OP_MBOR, 0, None, b"request".to_vec())
+                    .submit(OP_MBOR, 0, None, b"request".to_vec(), &[])
                     .expect("submit"),
                 b"response"
             );
@@ -620,6 +647,61 @@ mod tests {
         for endpoint in ["tcp://", "tcp://localhost", "tcp://127.0.0.1:invalid"] {
             assert!(DdiSockDev::connect(endpoint).is_err(), "{endpoint}");
         }
+    }
+
+    #[test]
+    fn tcp_transfers_oob_and_reset_on_the_same_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            assert!(matches!(
+                RequestFrame::read_from(&mut stream).expect("reset"),
+                RequestFrame::Reset
+            ));
+            ResponseFrame::Reset { status: 0 }
+                .write_to(&mut stream)
+                .expect("reset result");
+            let request = Request::read_from(&mut stream).expect("OOB request");
+            assert_eq!(request.oob_items, [b"first".to_vec(), b"second".to_vec()]);
+            assert_eq!(&request.sqe[13..=15], &[0, 0, 32]);
+            Response {
+                status: 0,
+                cqe: [1, 0, 0, 0],
+                payload: vec![1],
+            }
+            .write_to(&mut stream)
+            .expect("response");
+            assert!(matches!(
+                RequestFrame::read_from(&mut stream).expect("reset"),
+                RequestFrame::Reset
+            ));
+            ResponseFrame::Reset { status: 2 }
+                .write_to(&mut stream)
+                .expect("reset failure");
+        });
+        let device = DdiSockDev::connect(&endpoint).expect("device");
+        for items in [
+            vec![b"".as_slice()],
+            vec![b"item".as_slice(); MAX_OOB_ITEMS + 1],
+        ] {
+            assert!(matches!(
+                device.submit(OP_TBOR, 0, None, vec![1], &items),
+                Err(DdiError::InvalidParameter)
+            ));
+        }
+        device.erase().expect("reset");
+        assert_eq!(
+            device
+                .submit(OP_TBOR, 0, None, vec![1], &[b"first", b"second"])
+                .expect("OOB submit"),
+            [1]
+        );
+        assert!(matches!(device.erase(), Err(DdiError::DdiError(2))));
+        peer.join().expect("peer");
     }
 
     #[cfg(not(unix))]

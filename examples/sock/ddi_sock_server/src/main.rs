@@ -9,13 +9,29 @@
 //! `vsock://CID:1234`, where CID is the server guest's VSOCK context ID.
 //! This unauthenticated test transport is for trusted, isolated environments;
 //! it is not a production service. Emulator state is lost when the server exits.
-//! Requests with OOB pointers or lengths are rejected: this wire format cannot
-//! transfer descriptor arrays or the buffers they reference.
+//! OOB bytes are re-homed into server-owned SGL descriptors. Sideband reset
+//! disables and re-enables this endpoint's partition, coordinated across all
+//! connections. Independent root/leaf instances need separate server processes.
 
 use std::sync::Arc;
 
+use tsra_ddi_sock_proto::MAX_OOB_ITEM;
+use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
 use tsra_ddi_sock_proto::Request;
+use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
+use tsra_ddi_sock_proto::ResponseFrame;
+use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborResp;
+use tsra_ddi_tbor_types::TborSessionCloseReq;
+use tsra_ddi_tbor_types::TborSessionCloseResp;
+use tsra_fw_hsm_io::CmdDword;
+use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::CqeDw0;
+use tsra_fw_hsm_io::CqeDw1;
+use tsra_fw_hsm_io::OP_TBOR;
+use tsra_fw_hsm_io::SessionFlags;
+use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_std::StdHsm;
 
 mod tcp;
@@ -27,6 +43,129 @@ const TRANSPORT_HSM_ERROR: u32 = 2;
 
 #[repr(align(4096))]
 struct DmaPage([u8; DMA_PAGE_SIZE]);
+
+struct SocketHsm {
+    hsm: Arc<StdHsm>,
+    execution: tokio::sync::RwLock<()>,
+}
+
+impl SocketHsm {
+    fn new(hsm: Arc<StdHsm>) -> Self {
+        Self {
+            hsm,
+            execution: tokio::sync::RwLock::new(()),
+        }
+    }
+}
+
+struct Connection {
+    server: Arc<SocketHsm>,
+    state: Arc<tokio::sync::Mutex<ConnectionState>>,
+}
+
+#[derive(Default)]
+struct ConnectionState {
+    sessions: Vec<u16>,
+    closed: bool,
+}
+
+impl Connection {
+    fn new(server: Arc<SocketHsm>) -> Self {
+        Self {
+            server,
+            state: Arc::new(tokio::sync::Mutex::new(ConnectionState::default())),
+        }
+    }
+
+    async fn execute(&self, request: RequestFrame) -> Result<ResponseFrame, String> {
+        let server = Arc::clone(&self.server);
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            // Disconnect cleanup must wait for any in-flight open/close to
+            // complete and record its CQE, even if its waiter was cancelled.
+            let mut state = state.lock().await;
+            if state.closed {
+                return Err("connection closed before submission".into());
+            }
+            let response = execute_frame(server, request).await;
+            if let ResponseFrame::Submit(response) = &response {
+                let mut raw = response.cqe;
+                let cqe = Cqe::from(&mut raw);
+                let flags = CqeDw0::from(response.cqe[0]);
+                if response.status == 0 && cqe.status() == 0 && flags.session_id_valid() {
+                    let id = CqeDw1::from(response.cqe[1]).session_id();
+                    if flags.session_closed() {
+                        state.sessions.retain(|&session| session != id);
+                    } else if !state.sessions.contains(&id) {
+                        state.sessions.push(id);
+                    }
+                }
+            }
+            Ok(response)
+        })
+        .await
+        .map_err(|error| format!("connection execution task failed: {error}"))?
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let server = Arc::clone(&self.server);
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            let mut state = state.lock().await;
+            state.closed = true;
+            for id in state.sessions.drain(..) {
+                if let Err(error) = close_session(Arc::clone(&server), id).await {
+                    eprintln!("disconnected client session cleanup failed: {error}");
+                }
+            }
+        });
+    }
+}
+
+async fn close_session(server: Arc<SocketHsm>, id: u16) -> Result<(), String> {
+    let mut payload = vec![0; DMA_PAGE_SIZE];
+    let len = TborSessionCloseReq { session_id: id }
+        .encode_request(&mut payload)
+        .map_err(|error| format!("encode disconnect session close: {error:?}"))?
+        .len();
+    payload.truncate(len);
+    let sqe = SqeBuilder::new()
+        .cmd(CmdDword::new().with_op(OP_TBOR))
+        .buf_lens(len as u32, DMA_PAGE_SIZE as u32)
+        .session_flags(
+            SessionFlags::new()
+                .with_ctrl(u8::from(tsra_ddi_tbor_types::SessionControlKind::Close))
+                .with_id_valid(true),
+        )
+        .session_id(id)
+        .build();
+    let response = execute_frame(
+        server,
+        RequestFrame::Submit(Request {
+            sqe,
+            payload,
+            oob_items: Vec::new(),
+        }),
+    )
+    .await;
+    let ResponseFrame::Submit(response) = response else {
+        return Err("unexpected disconnect session-close response".into());
+    };
+    let mut raw = response.cqe;
+    let cqe = Cqe::from(&mut raw);
+    if response.status != 0 || cqe.status() != 0 {
+        return Err(format!(
+            "disconnect session-close failed: transport={}, device={}",
+            response.status,
+            cqe.status()
+        ));
+    }
+    TborSessionCloseResp::decode_response(&response.payload)
+        .map_err(|error| format!("disconnect session-close rejected: {error:?}"))?;
+    Ok(())
+}
 
 fn patch_prp1(sqe: &mut [u32; 16], low_dword: usize, address: u64) {
     sqe[low_dword] = address as u32;
@@ -41,10 +180,19 @@ fn transport_error(status: u32) -> Response {
     }
 }
 
-async fn execute_request(hsm: &StdHsm, request: Request) -> Response {
+async fn execute_request(server: &SocketHsm, request: Request) -> Response {
     let src_len = request.sqe[1] as usize;
     let dst_cap = request.sqe[6] as usize;
-    if request.sqe[13..=15].iter().any(|&word| word != 0)
+    if request.sqe[2..6].iter().any(|&word| word != 0)
+        || request.sqe[7..11].iter().any(|&word| word != 0)
+        || request.sqe[13..15].iter().any(|&word| word != 0)
+        || request.oob_items.len() > MAX_OOB_ITEMS
+        || request
+            .oob_items
+            .iter()
+            .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
+        || request.sqe[15] as usize != request.oob_items.len() * 16
+        || (!request.oob_items.is_empty() && request.sqe[0] & 0x3ff != 2)
         || src_len != request.payload.len()
         || src_len > DMA_PAGE_SIZE
         || dst_cap == 0
@@ -55,13 +203,23 @@ async fn execute_request(hsm: &StdHsm, request: Request) -> Response {
 
     let mut src = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
     let mut dst = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
+    let mut oob_page = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
     src.0[..src_len].copy_from_slice(&request.payload);
+    for (index, item) in request.oob_items.iter().enumerate() {
+        let off = index * 16;
+        oob_page.0[off..off + 8].copy_from_slice(&(item.as_ptr() as u64).to_le_bytes());
+        oob_page.0[off + 8..off + 12].copy_from_slice(&(item.len() as u32).to_le_bytes());
+    }
 
     let mut sqe = request.sqe;
     patch_prp1(&mut sqe, 2, src.0.as_ptr() as u64);
     patch_prp1(&mut sqe, 7, dst.0.as_mut_ptr() as u64);
+    if !request.oob_items.is_empty() {
+        patch_prp1(&mut sqe, 13, oob_page.0.as_ptr() as u64);
+    }
 
-    let cqe = match hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
+    let _execution = server.execution.read().await;
+    let cqe = match server.hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
         Ok(cqe) => cqe,
         Err(error) => {
             eprintln!("StdHsm request failed: {error:?}");
@@ -80,16 +238,63 @@ async fn execute_request(hsm: &StdHsm, request: Request) -> Response {
     }
 }
 
-async fn init_partition(hsm: &StdHsm) -> Result<(), String> {
-    hsm.part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
+async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> ResponseFrame {
+    let reset = matches!(&request, RequestFrame::Reset);
+    // Own every DMA buffer and the execution gate until firmware completes,
+    // even if the connection task is cancelled while awaiting this task.
+    match tokio::spawn(async move {
+        match request {
+            RequestFrame::Submit(request) => {
+                ResponseFrame::Submit(execute_request(&server, request).await)
+            }
+            RequestFrame::Reset => {
+                let _execution = server.execution.write().await;
+                let result = async {
+                    server.hsm.part_disable(HSM_PARTITION_ID).await?;
+                    server.hsm.part_enable(HSM_PARTITION_ID).await
+                }
+                .await;
+                let status = match result {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        eprintln!("StdHsm reset failed: {error:?}");
+                        TRANSPORT_HSM_ERROR
+                    }
+                };
+                ResponseFrame::Reset { status }
+            }
+        }
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("StdHsm execution task failed: {error}");
+            if reset {
+                ResponseFrame::Reset {
+                    status: TRANSPORT_HSM_ERROR,
+                }
+            } else {
+                ResponseFrame::Submit(transport_error(TRANSPORT_HSM_ERROR))
+            }
+        }
+    }
+}
+
+async fn init_partition(server: &SocketHsm) -> Result<(), String> {
+    server
+        .hsm
+        .part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
         .await
         .map_err(|error| format!("failed to allocate HSM partition: {error:?}"))?;
-    hsm.part_enable(HSM_PARTITION_ID)
+    server
+        .hsm
+        .part_enable(HSM_PARTITION_ID)
         .await
         .map_err(|error| format!("failed to enable HSM partition: {error:?}"))
 }
 
-fn run_with_hsm<F>(serve: impl FnOnce(Arc<StdHsm>) -> F) -> Result<(), String>
+fn run_with_hsm<F>(serve: impl FnOnce(Arc<SocketHsm>) -> F) -> Result<(), String>
 where
     F: std::future::Future<Output = Result<(), String>>,
 {
@@ -102,15 +307,19 @@ where
     // The Embassy executor is process-global and its destructor cannot terminate
     // it. Retain an owner until process exit so errors can reach main without
     // hanging in StdHsm::drop.
-    static HSM: std::sync::OnceLock<Arc<StdHsm>> = std::sync::OnceLock::new();
-    let hsm = HSM.get_or_init(|| Arc::new(StdHsm::with_tokio(runtime.handle().clone())));
+    static HSM: std::sync::OnceLock<Arc<SocketHsm>> = std::sync::OnceLock::new();
+    let hsm = HSM.get_or_init(|| {
+        Arc::new(SocketHsm::new(Arc::new(StdHsm::with_tokio(
+            runtime.handle().clone(),
+        ))))
+    });
     runtime.block_on(serve(Arc::clone(hsm)))
 }
 
 #[cfg(test)]
-fn test_hsm() -> Arc<StdHsm> {
-    static HSM: std::sync::LazyLock<Arc<StdHsm>> =
-        std::sync::LazyLock::new(|| Arc::new(StdHsm::new()));
+fn test_hsm() -> Arc<SocketHsm> {
+    static HSM: std::sync::LazyLock<Arc<SocketHsm>> =
+        std::sync::LazyLock::new(|| Arc::new(SocketHsm::new(Arc::new(StdHsm::new()))));
     static PARTITION: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -134,15 +343,19 @@ mod linux {
     use tokio::io::unix::AsyncFd;
     use tsra_ddi_sock_proto::MAX_FRAME;
     use tsra_ddi_sock_proto::ProtoError;
+    #[cfg(test)]
     use tsra_ddi_sock_proto::Request;
+    use tsra_ddi_sock_proto::RequestFrame;
+    #[cfg(test)]
     use tsra_ddi_sock_proto::Response;
-    use tsra_fw_hsm_std::StdHsm;
+    use tsra_ddi_sock_proto::ResponseFrame;
 
+    use super::Connection;
     #[cfg(test)]
     use super::DMA_PAGE_SIZE;
+    use super::SocketHsm;
     #[cfg(test)]
     use super::TRANSPORT_INVALID_REQUEST;
-    use super::execute_request;
 
     const AF_VSOCK: c_int = 40;
     const SOCK_STREAM: c_int = 1;
@@ -319,7 +532,7 @@ mod linux {
         Ok(())
     }
 
-    async fn read_request(stream: &AsyncFd<Socket>) -> Result<Request, ProtoError> {
+    async fn read_request(stream: &AsyncFd<Socket>) -> Result<RequestFrame, ProtoError> {
         let mut length = [0; 4];
         read_exact(stream, &mut length).await?;
         let length = u32::from_le_bytes(length);
@@ -328,12 +541,12 @@ mod linux {
         }
         let mut body = vec![0; length as usize];
         read_exact(stream, &mut body).await?;
-        Request::decode(&body)
+        RequestFrame::decode(&body)
     }
 
     async fn write_response(
         stream: &AsyncFd<Socket>,
-        response: &Response,
+        response: &ResponseFrame,
     ) -> Result<(), ProtoError> {
         let body = response.encode()?;
         write_all(stream, &(body.len() as u32).to_le_bytes()).await?;
@@ -341,7 +554,8 @@ mod linux {
         Ok(())
     }
 
-    async fn serve_connection(stream: AsyncFd<Socket>, hsm: Arc<StdHsm>) -> Result<(), String> {
+    async fn serve_connection(stream: AsyncFd<Socket>, hsm: Arc<SocketHsm>) -> Result<(), String> {
+        let connection = Connection::new(hsm);
         loop {
             let request = match read_request(&stream).await {
                 Ok(request) => request,
@@ -350,7 +564,7 @@ mod linux {
                 }
                 Err(error) => return Err(format!("failed to read DDI request: {error}")),
             };
-            let response = execute_request(&hsm, request).await;
+            let response = connection.execute(request).await?;
             write_response(&stream, &response)
                 .await
                 .map_err(|error| format!("failed to write DDI response: {error}"))?;
@@ -382,7 +596,7 @@ mod linux {
         Ok(listener)
     }
 
-    async fn run_server(hsm: Arc<StdHsm>, listener: Socket) -> Result<(), String> {
+    async fn run_server(hsm: Arc<SocketHsm>, listener: Socket) -> Result<(), String> {
         let listener = listener
             .into_async_fd()
             .map_err(|error| format!("failed to register vsock listener: {error}"))?;
@@ -510,6 +724,7 @@ mod linux {
                     let mut request = Request {
                         sqe: [0; 16],
                         payload,
+                        oob_items: Vec::new(),
                     };
                     request.sqe[1] = len as u32;
                     request.sqe[6] = DMA_PAGE_SIZE as u32;

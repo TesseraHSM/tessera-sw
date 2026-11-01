@@ -15,8 +15,9 @@ which is a portable transport for native Windows applications. TCP is supported
 by Rust's standard library and the server's existing Tokio runtime on Windows
 and Linux, without introducing another transport dependency.
 
-TCP carries the existing length-delimited SQE/CQE protocol and opaque MBOR/TBOR
-payloads. It does not introduce a new API protocol or change public API call
+TCP carries the length-delimited SQE/CQE protocol and opaque MBOR/TBOR
+payloads, with ordered TBOR OOB bytes and sideband partition reset. It does not
+introduce a new API protocol or change public API call
 signatures. The application uses `tsra_api`; transport selection stays in the
 DDI layer through the opt-in `tsra_api/sock` feature.
 
@@ -146,10 +147,18 @@ Neither transport is required for the TCP setup on Windows or Linux.
 - `sock`, `mock`, and `emu` select mutually exclusive DDI backends. Do not combine
   their feature flags in the same build.
 - The socket transport carries ordinary MBOR/TBOR commands, with a 4096-byte
-  request/response capacity. Fast-path AES-GCM/XTS, erase/reset, and TBOR
-  out-of-band buffers are not supported.
+  main request/response capacity. TBOR supports up to 64 OOB buffers of up to
+  64 KiB each, reconstructed as server-owned SGL descriptors. Reset disables
+  and re-enables the existing partition, waiting for active submissions.
+  Fast-path AES-GCM/XTS remains unsupported.
+- Client and server must be updated together; the protocol does not provide
+  backward compatibility. Disconnected clients' sessions are closed by the
+  server rather than left occupying firmware session slots.
 - Calls are synchronous. Each connection allows one exchange at a time; this
   example uses multiple connections rather than multiplexing one connection.
+
+For a complete provisioning, signing, and recovery workflow, see the
+[socket sealing example](../../sealing/leaf_svc/README.md).
 
 ## Troubleshooting
 

@@ -9,28 +9,34 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tsra_ddi_sock_proto::MAX_FRAME;
 use tsra_ddi_sock_proto::ProtoError;
-use tsra_ddi_sock_proto::Request;
-use tsra_ddi_sock_proto::Response;
-use tsra_fw_hsm_std::StdHsm;
+use tsra_ddi_sock_proto::RequestFrame;
+use tsra_ddi_sock_proto::ResponseFrame;
 
-async fn read_request(stream: &mut TcpStream) -> Result<Request, ProtoError> {
+use super::Connection;
+use super::SocketHsm;
+
+async fn read_request(stream: &mut TcpStream) -> Result<RequestFrame, ProtoError> {
     let length = stream.read_u32_le().await?;
     if length > MAX_FRAME {
         return Err(ProtoError::TooLarge(length));
     }
     let mut body = vec![0; length as usize];
     stream.read_exact(&mut body).await?;
-    Request::decode(&body)
+    RequestFrame::decode(&body)
 }
 
-async fn write_response(stream: &mut TcpStream, response: &Response) -> Result<(), ProtoError> {
+async fn write_response(
+    stream: &mut TcpStream,
+    response: &ResponseFrame,
+) -> Result<(), ProtoError> {
     let body = response.encode()?;
     stream.write_u32_le(body.len() as u32).await?;
     stream.write_all(&body).await?;
     Ok(())
 }
 
-async fn serve_connection(mut stream: TcpStream, hsm: Arc<StdHsm>) -> Result<(), String> {
+async fn serve_connection(mut stream: TcpStream, hsm: Arc<SocketHsm>) -> Result<(), String> {
+    let connection = Connection::new(hsm);
     loop {
         let request = match read_request(&mut stream).await {
             Ok(request) => request,
@@ -39,14 +45,14 @@ async fn serve_connection(mut stream: TcpStream, hsm: Arc<StdHsm>) -> Result<(),
             }
             Err(error) => return Err(format!("failed to read DDI request: {error}")),
         };
-        let response = super::execute_request(&hsm, request).await;
+        let response = connection.execute(request).await?;
         write_response(&mut stream, &response)
             .await
             .map_err(|error| format!("failed to write DDI response: {error}"))?;
     }
 }
 
-async fn run_server(listener: TcpListener, hsm: Arc<StdHsm>) -> Result<(), String> {
+async fn run_server(listener: TcpListener, hsm: Arc<SocketHsm>) -> Result<(), String> {
     loop {
         let (stream, peer) = listener
             .accept()
@@ -93,6 +99,7 @@ mod tests {
     use tsra_ddi_interface::DdiDev;
     use tsra_ddi_mbor_types::*;
     use tsra_ddi_sock::DdiSock;
+    use tsra_ddi_sock_proto::Request;
 
     use super::*;
 
@@ -161,6 +168,7 @@ mod tests {
                 let mut request = Request {
                     sqe: [0; 16],
                     payload: Vec::new(),
+                    oob_items: Vec::new(),
                 };
                 request.sqe[1] = src_len;
                 request.sqe[6] = dst_cap;
@@ -169,6 +177,57 @@ mod tests {
                 assert_eq!(response.status, super::super::TRANSPORT_INVALID_REQUEST);
                 assert!(response.payload.is_empty());
             }
+            for (count, oob_len) in [(1, 0), (1, 32), (65, 1040)] {
+                let mut request = Request {
+                    sqe: [0; 16],
+                    payload: Vec::new(),
+                    oob_items: vec![vec![1]; count],
+                };
+                request.sqe[0] = 2;
+                request.sqe[6] = 4096;
+                request.sqe[15] = oob_len;
+                let response = super::super::execute_request(&hsm, request).await;
+                assert_eq!(response.status, super::super::TRANSPORT_INVALID_REQUEST);
+            }
+        });
+    }
+
+    #[test]
+    fn reset_waits_for_inflight_execution_and_survives_connection_cancellation() {
+        let hsm = crate::test_hsm();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let active_submission = hsm.execution.read().await;
+            let server = Arc::clone(&hsm);
+            let connection = tokio::spawn(super::super::execute_frame(server, RequestFrame::Reset));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hsm.execution.try_read().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("reset is waiting on active submissions");
+            assert!(!connection.is_finished());
+            connection.abort();
+            assert!(
+                connection
+                    .await
+                    .expect_err("cancel connection")
+                    .is_cancelled()
+            );
+            drop(active_submission);
+            let completed = tokio::time::timeout(Duration::from_secs(10), hsm.execution.write())
+                .await
+                .expect("owned reset completes after connection cancellation");
+            drop(completed);
+            assert!(matches!(
+                super::super::execute_frame(Arc::clone(&hsm), RequestFrame::Reset).await,
+                ResponseFrame::Reset { status: 0 }
+            ));
         });
     }
 }
