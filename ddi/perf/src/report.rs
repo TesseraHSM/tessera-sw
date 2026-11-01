@@ -65,12 +65,16 @@ pub(crate) fn print_run(result: &RunResult) {
 
 /// Append a run's rows to a TSV file, writing the header to a new file.
 pub(crate) fn append_tsv(path: &Path, args: &RunArgs, result: &RunResult) -> Result<(), String> {
-    let new = !path.exists();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let new = file
+        .metadata()
+        .map_err(|e| format!("stat {}: {e}", path.display()))?
+        .len()
+        == 0;
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -271,8 +275,11 @@ pub(crate) fn compare(
 
 #[cfg(test)]
 mod tests {
+    use super::append_tsv;
     use super::parse_tsv;
     use super::TSV_HEADER;
+    use crate::bench::RunResult;
+    use crate::RunArgs;
 
     #[test]
     fn later_rows_replace_earlier_rows_with_the_same_key() {
@@ -303,5 +310,34 @@ mod tests {
             "t.tsv"
         )
         .is_err());
+    }
+
+    #[test]
+    fn empty_existing_file_gets_a_header() {
+        let path =
+            std::env::temp_dir().join(format!("tsra-ddi-perf-empty-{}.tsv", std::process::id()));
+        std::fs::write(&path, []).expect("create empty TSV");
+        let args = RunArgs {
+            device: 0,
+            stabilize_seconds: 0,
+            test_seconds: 1,
+            keys: 1,
+            messages: 1,
+            cbc_len: 16,
+            verify_all: false,
+            max_samples: 1,
+            tsv: None,
+            label: String::new(),
+            quiet: true,
+        };
+        let result = RunResult {
+            threads: 1,
+            seconds: 1,
+            ops: Vec::new(),
+        };
+        append_tsv(&path, &args, &result).expect("append TSV header");
+        let text = std::fs::read_to_string(&path).expect("read TSV");
+        assert_eq!(text, format!("{TSV_HEADER}\n"));
+        std::fs::remove_file(path).expect("remove TSV");
     }
 }

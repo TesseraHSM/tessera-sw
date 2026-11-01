@@ -32,6 +32,7 @@ use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
+use tsra_ddi_tbor_types::AES_MSG_MAX_LEN;
 
 use crate::ops::OpKind;
 use crate::ops::OpWeight;
@@ -184,7 +185,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn check_args(run: &RunArgs, threads: &[usize]) -> Result<(), String> {
+fn check_args(run: &RunArgs, threads: &[usize], ops: &[OpKind]) -> Result<(), String> {
     if run.keys == 0 || run.messages == 0 {
         return Err("--keys and --messages must be at least 1".into());
     }
@@ -197,12 +198,30 @@ fn check_args(run: &RunArgs, threads: &[usize]) -> Result<(), String> {
     if run.cbc_len == 0 || !run.cbc_len.is_multiple_of(16) {
         return Err("--cbc-len must be a non-zero multiple of 16".into());
     }
+    if run.cbc_len > AES_MSG_MAX_LEN {
+        return Err(format!("--cbc-len must be at most {AES_MSG_MAX_LEN}"));
+    }
+    if ops.iter().any(|op| op.is_cbc()) && run.messages < run.keys {
+        return Err("--messages must be at least --keys for CBC operations".into());
+    }
+    Ok(())
+}
+
+fn check_unique_ops(ops: &[OpKind]) -> Result<(), String> {
+    let mut seen = BTreeSet::new();
+    for &op in ops {
+        if !seen.insert(op) {
+            return Err(format!("operation {} appears more than once", op.name()));
+        }
+    }
     Ok(())
 }
 
 fn perf(args: PerfArgs) -> Result<(), String> {
-    check_args(&args.run, &[args.threads])?;
     let mix: Vec<(OpKind, u32)> = args.ops.iter().map(|w| (w.op, w.weight)).collect();
+    let ops: Vec<OpKind> = mix.iter().map(|m| m.0).collect();
+    check_args(&args.run, &[args.threads], &ops)?;
+    check_unique_ops(&ops)?;
     let kinds: BTreeSet<OpKind> = mix.iter().map(|m| m.0).collect();
 
     let env = Env::new(&args.run, &kinds)?;
@@ -218,12 +237,13 @@ fn perf(args: PerfArgs) -> Result<(), String> {
 }
 
 fn suite(args: SuiteArgs) -> Result<(), String> {
-    check_args(&args.run, &args.threads)?;
     let ops = if args.ops.is_empty() {
         BASELINE_OPS.to_vec()
     } else {
         args.ops.clone()
     };
+    check_args(&args.run, &args.threads, &ops)?;
+    check_unique_ops(&ops)?;
     let kinds: BTreeSet<OpKind> = ops.iter().copied().collect();
 
     let env = Env::new(&args.run, &kinds)?;
@@ -257,4 +277,46 @@ fn suite(args: SuiteArgs) -> Result<(), String> {
         std::fs::write(path, &table).map_err(|e| format!("write {}: {e}", path.display()))?;
     }
     failure.map_or(Ok(()), Err)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_args;
+    use super::check_unique_ops;
+    use super::RunArgs;
+    use crate::ops::OpKind;
+
+    fn run_args() -> RunArgs {
+        RunArgs {
+            device: 0,
+            stabilize_seconds: 0,
+            test_seconds: 1,
+            keys: 2,
+            messages: 2,
+            cbc_len: 1024,
+            verify_all: false,
+            max_samples: 1,
+            tsv: None,
+            label: String::new(),
+            quiet: true,
+        }
+    }
+
+    #[test]
+    fn cbc_arguments_are_rejected_before_device_setup() {
+        let mut args = run_args();
+        args.cbc_len = 2048;
+        assert!(check_args(&args, &[1], &[OpKind::AesCbcEncrypt]).is_err());
+
+        args = run_args();
+        args.messages = 1;
+        assert!(check_args(&args, &[1], &[OpKind::AesCbcEncrypt]).is_err());
+        assert!(check_args(&args, &[1], &[OpKind::TborGetApiRev]).is_ok());
+    }
+
+    #[test]
+    fn duplicate_operations_are_rejected() {
+        assert!(check_unique_ops(&[OpKind::TborGetApiRev, OpKind::TborGetApiRev]).is_err());
+        assert!(check_unique_ops(&[OpKind::TborGetApiRev, OpKind::MborGetApiRev]).is_ok());
+    }
 }

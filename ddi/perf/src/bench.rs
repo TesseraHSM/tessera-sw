@@ -3,8 +3,6 @@
 
 //! Multi-threaded load generation and latency statistics.
 
-use std::sync::Barrier;
-use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -29,8 +27,15 @@ pub(crate) struct Summary {
 }
 
 impl Summary {
-    /// Summarize latencies given in nanoseconds; `None` when empty.
-    fn of(mut nanos: Vec<u64>) -> Option<Self> {
+    /// Summarize the sample's percentiles and the full window's aggregates.
+    fn of(
+        mut nanos: Vec<u64>,
+        count: u64,
+        mean_ns: f64,
+        m2_ns: f64,
+        min_ns: u64,
+        max_ns: u64,
+    ) -> Option<Self> {
         if nanos.is_empty() {
             return None;
         }
@@ -38,20 +43,14 @@ impl Summary {
         let us = |ns: u64| ns as f64 / 1000.0;
         let n = nanos.len();
         let pct = |p: usize| us(nanos[((n - 1) * p).div_ceil(100)]);
-        let mean = nanos.iter().map(|&ns| us(ns)).sum::<f64>() / n as f64;
-        let var = nanos
-            .iter()
-            .map(|&ns| us(ns) - mean)
-            .fold(0.0, |acc, d| d.mul_add(d, acc))
-            / n as f64;
         Some(Self {
-            mean,
-            stddev: var.sqrt(),
-            min: us(nanos[0]),
+            mean: mean_ns / 1000.0,
+            stddev: (m2_ns / count as f64).sqrt() / 1000.0,
+            min: us(min_ns),
             p50: pct(50),
             p90: pct(90),
             p99: pct(99),
-            max: us(nanos[n - 1]),
+            max: us(max_ns),
         })
     }
 }
@@ -97,8 +96,69 @@ impl RunResult {
 struct Record {
     count: u64,
     nanos: Vec<u64>,
+    mean_ns: f64,
+    m2_ns: f64,
+    min_ns: u64,
+    max_ns: u64,
     errors: u64,
     first_error: Option<String>,
+}
+
+impl Record {
+    fn observe(&mut self, ns: u64, max_samples: usize, rng: &mut impl rand::RngExt) {
+        self.count += 1;
+        let delta = ns as f64 - self.mean_ns;
+        self.mean_ns += delta / self.count as f64;
+        let delta2 = ns as f64 - self.mean_ns;
+        self.m2_ns = delta.mul_add(delta2, self.m2_ns);
+        if self.count == 1 {
+            self.min_ns = ns;
+            self.max_ns = ns;
+        } else {
+            self.min_ns = self.min_ns.min(ns);
+            self.max_ns = self.max_ns.max(ns);
+        }
+
+        if self.nanos.len() < max_samples {
+            self.nanos.push(ns);
+        } else if max_samples != 0 {
+            let slot = rng.random_range(0..self.count);
+            if slot < max_samples as u64 {
+                self.nanos[slot as usize] = ns;
+            }
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        if other.count != 0 {
+            if self.count == 0 {
+                self.mean_ns = other.mean_ns;
+                self.m2_ns = other.m2_ns;
+                self.min_ns = other.min_ns;
+                self.max_ns = other.max_ns;
+            } else {
+                let count = self.count + other.count;
+                let delta = other.mean_ns - self.mean_ns;
+                self.mean_ns += delta * other.count as f64 / count as f64;
+                self.m2_ns += other.m2_ns
+                    + delta * delta * self.count as f64 * other.count as f64 / count as f64;
+                self.min_ns = self.min_ns.min(other.min_ns);
+                self.max_ns = self.max_ns.max(other.max_ns);
+            }
+        }
+        self.count += other.count;
+        self.nanos.extend(other.nanos);
+        self.errors += other.errors;
+        if self.first_error.is_none() {
+            self.first_error = other.first_error;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StartupOutcome {
+    Start(Instant),
+    Abort,
 }
 
 /// Run `mix` on `threads` workers and collect the measured window.
@@ -114,10 +174,6 @@ pub(crate) fn run(
 
     let stabilize = Duration::from_secs(args.stabilize_seconds);
     let window = Duration::from_secs(args.test_seconds);
-    let ready = Barrier::new(threads + 1);
-    let start: OnceLock<Instant> = OnceLock::new();
-    let started = Barrier::new(threads + 1);
-
     let names: Vec<String> = kinds.iter().map(|k| k.name()).collect();
     if !args.quiet {
         println!(
@@ -130,73 +186,109 @@ pub(crate) fn run(
     }
 
     let per_thread: Vec<Result<Vec<Record>, String>> = thread::scope(|s| {
-        let handles: Vec<_> = (0..threads)
-            .map(|tid| {
-                let (kinds, cumulative) = (&kinds, &cumulative);
-                let (ready, started, start) = (&ready, &started, &start);
-                s.spawn(move || {
-                    // A panic here must not strand the others at the barrier.
-                    let worker = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Worker::new(env, args, tid, kinds)
-                    }))
-                    .unwrap_or_else(|_| Err(format!("thread {tid}: opening the device panicked")));
-                    ready.wait();
-                    started.wait();
-                    let mut worker = worker?;
-                    let t0 = *start.get().expect("set before the start barrier");
-                    let measure_from = t0 + stabilize;
-                    let measure_to = measure_from + window;
-                    let stop = measure_to + stabilize;
-
-                    let mut records: Vec<Record> =
-                        kinds.iter().map(|_| Record::default()).collect();
-                    let mut rng = rand::rng();
-                    while Instant::now() < stop {
-                        let pick = rng.random_range(0..total_weight);
-                        let i = cumulative.partition_point(|&c| c <= pick);
-                        let (dt, result) = worker.exec(kinds[i], args.verify_all);
-                        let done = Instant::now();
-                        let rec = &mut records[i];
-                        if let Err(e) = result {
-                            rec.errors += 1;
-                            rec.first_error.get_or_insert(e);
-                        } else if done >= measure_from && done < measure_to {
-                            rec.count += 1;
-                            if rec.nanos.len() < args.max_samples {
-                                rec.nanos.push(dt.as_nanos() as u64);
-                            }
-                        }
+        let mut handles = Vec::with_capacity(threads);
+        let mut start_senders = Vec::with_capacity(threads);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        for tid in 0..threads {
+            let (kinds, cumulative) = (&kinds, &cumulative);
+            let ready_tx = ready_tx.clone();
+            let (start_tx, start_rx) = std::sync::mpsc::channel();
+            let handle = thread::Builder::new().spawn_scoped(s, move || {
+                let worker = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    Worker::new(env, args, tid, kinds)
+                }))
+                .unwrap_or_else(|_| Err(format!("thread {tid}: opening the device panicked")));
+                ready_tx
+                    .send(())
+                    .map_err(|_| format!("thread {tid}: startup coordinator exited"))?;
+                drop(ready_tx);
+                let t0 = match start_rx.recv() {
+                    Ok(StartupOutcome::Start(start)) => start,
+                    Ok(StartupOutcome::Abort) | Err(_) => {
+                        return Err(format!("thread {tid}: startup aborted"));
                     }
-                    Ok(records)
-                })
-            })
-            .collect();
+                };
+                let mut worker = worker?;
+                let measure_from = t0 + stabilize;
+                let measure_to = measure_from + window;
+                let stop = measure_to + stabilize;
 
-        // Start everyone together once all workers are ready.
-        ready.wait();
-        let _ = start.set(Instant::now());
-        started.wait();
+                let mut records: Vec<Record> = kinds.iter().map(|_| Record::default()).collect();
+                let mut rng = rand::rng();
+                while Instant::now() < stop {
+                    let pick = rng.random_range(0..total_weight);
+                    let i = cumulative.partition_point(|&c| c <= pick);
+                    let (dt, result) = worker.exec(kinds[i], args.verify_all);
+                    let done = Instant::now();
+                    let rec = &mut records[i];
+                    if let Err(e) = result {
+                        rec.errors += 1;
+                        rec.first_error.get_or_insert(e);
+                    } else if done >= measure_from && done < measure_to {
+                        rec.observe(dt.as_nanos() as u64, args.max_samples, &mut rng);
+                    }
+                }
+                Ok(records)
+            });
+            match handle {
+                Ok(handle) => {
+                    handles.push(handle);
+                    start_senders.push(start_tx);
+                }
+                Err(e) => {
+                    for sender in start_senders {
+                        let _ = sender.send(StartupOutcome::Abort);
+                    }
+                    for handle in handles {
+                        let _ = handle.join();
+                    }
+                    return Err(format!("failed to spawn worker thread {tid}: {e}"));
+                }
+            }
+        }
+
+        drop(ready_tx);
+        for _ in 0..threads {
+            if ready_rx.recv().is_err() {
+                for sender in &start_senders {
+                    let _ = sender.send(StartupOutcome::Abort);
+                }
+                for handle in handles {
+                    let _ = handle.join();
+                }
+                return Err("worker exited before startup".into());
+            }
+        }
+        let start = Instant::now();
+        let mut failed_start = false;
+        for sender in &start_senders {
+            failed_start |= sender.send(StartupOutcome::Start(start)).is_err();
+        }
+        if failed_start {
+            for sender in &start_senders {
+                let _ = sender.send(StartupOutcome::Abort);
+            }
+            for handle in handles {
+                let _ = handle.join();
+            }
+            return Err("failed to release worker threads".into());
+        }
         if !args.quiet {
             progress(stabilize, window);
         }
-        handles
+        Ok(handles
             .into_iter()
             .map(|h| {
                 h.join()
                     .unwrap_or_else(|_| Err("worker thread panicked".into()))
             })
-            .collect()
-    });
+            .collect())
+    })?;
 
     let mut merged: Vec<Record> = kinds.iter().map(|_| Record::default()).collect();
     for records in per_thread {
         for (m, r) in merged.iter_mut().zip(records?) {
-            m.count += r.count;
-            m.nanos.extend(r.nanos);
-            m.errors += r.errors;
-            if m.first_error.is_none() {
-                m.first_error = r.first_error;
-            }
+            m.merge(r);
         }
     }
 
@@ -207,7 +299,7 @@ pub(crate) fn run(
             op,
             count: r.count,
             rps: r.count as f64 / window.as_secs_f64(),
-            latency: Summary::of(r.nanos),
+            latency: Summary::of(r.nanos, r.count, r.mean_ns, r.m2_ns, r.min_ns, r.max_ns),
             errors: r.errors,
             first_error: r.first_error,
         })
@@ -258,15 +350,48 @@ fn progress(stabilize: Duration, window: Duration) {
 #[cfg(test)]
 mod tests {
     use super::cumulative_weights;
+    use super::Record;
     use super::Summary;
     use crate::ops::OpKind;
 
     #[test]
     fn summary_of_known_latencies() {
-        let s = Summary::of((1..=100).map(|us| us * 1000).collect()).expect("non-empty");
+        let s = Summary::of(
+            (1..=100).map(|us| us * 1000).collect(),
+            100,
+            50_500.0,
+            83_325_000_000.0,
+            1_000,
+            100_000,
+        )
+        .expect("non-empty");
         assert_eq!((s.min, s.max, s.mean), (1.0, 100.0, 50.5));
         assert_eq!((s.p50, s.p90, s.p99), (51.0, 91.0, 100.0));
-        assert!(Summary::of(Vec::new()).is_none());
+        assert!((s.stddev - 28.866_070_047_7).abs() < 0.000_1);
+        assert!(Summary::of(Vec::new(), 0, 0.0, 0.0, 0, 0).is_none());
+    }
+
+    #[test]
+    fn latency_sample_and_aggregates_cover_the_full_window() {
+        let mut record = Record::default();
+        let mut rng = rand::rng();
+        for ns in 1..=1000 {
+            record.observe(ns, 10, &mut rng);
+        }
+        assert_eq!(record.nanos.len(), 10);
+        let summary = Summary::of(
+            record.nanos,
+            record.count,
+            record.mean_ns,
+            record.m2_ns,
+            record.min_ns,
+            record.max_ns,
+        )
+        .expect("non-empty sample");
+        assert_eq!(summary.mean, 0.5005);
+        assert_eq!((summary.min, summary.max), (0.001, 1.0));
+        let expected_stddev = (999_999.0_f64 / 12.0).sqrt() / 1000.0;
+        assert!((summary.stddev - expected_stddev).abs() < 0.000_001);
     }
 
     #[test]

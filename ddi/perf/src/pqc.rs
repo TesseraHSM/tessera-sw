@@ -35,6 +35,7 @@ use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlKemGenerateKeyReq;
 use tsra_ddi_tbor_types::MASKED_MLKEM_SHARED_SECRET_MAX_LEN;
+use zeroize::Zeroizing;
 
 use crate::setup::SCOPE_LOCAL;
 
@@ -173,7 +174,9 @@ fn host_mldsa_signer(
     variant: MlDsaVariant,
     messages: &[[u8; MLDSA_MSG_LEN]],
 ) -> Result<MlDsaSigner, String> {
-    let key = MlDsaPrivateKey::from_seed(variant, &random::<MLDSA_SEED_LEN>())
+    let mut seed = Zeroizing::new([0u8; MLDSA_SEED_LEN]);
+    rand::rng().fill(&mut seed[..]);
+    let key = MlDsaPrivateKey::from_seed(variant, &seed[..])
         .map_err(|e| format!("host {} keygen: {e:?}", p.name))?;
     let pub_key = key
         .public_key()
@@ -200,7 +203,9 @@ pub(crate) fn host_mlkem_pub_keys(p: &MlKemParams, n: usize) -> Result<Vec<Vec<u
         .ok_or_else(|| format!("no host {}", p.name))?;
     (0..n)
         .map(|_| {
-            MlKemPrivateKey::from_seed(variant, &random::<MLKEM_SEED_LEN>())
+            let mut seed = Zeroizing::new([0u8; MLKEM_SEED_LEN]);
+            rand::rng().fill(&mut seed[..]);
+            MlKemPrivateKey::from_seed(variant, &seed[..])
                 .and_then(|k| k.public_key())
                 .and_then(|k| k.to_vec())
                 .map_err(|e| format!("host {} keygen: {e:?}", p.name))
@@ -246,9 +251,9 @@ pub(crate) fn host_encapsulate(
     public: &MlKemPublicKey,
 ) -> Result<Vec<u8>, String> {
     let mut ct = vec![0u8; p.ciphertext_len];
-    let mut secret = [0u8; MLKEM_SHARED_SECRET_LEN];
+    let mut secret = Zeroizing::new([0u8; MLKEM_SHARED_SECRET_LEN]);
     MlKemAlgo::new()
-        .encapsulate(public, Some(&mut ct), Some(&mut secret))
+        .encapsulate(public, Some(&mut ct), Some(&mut secret[..]))
         .map_err(|e| format!("host {} encapsulate: {e:?}", p.name))?;
     Ok(ct)
 }

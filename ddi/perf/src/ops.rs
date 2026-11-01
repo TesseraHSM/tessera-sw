@@ -17,6 +17,7 @@ use tsra_crypto::EccAlgo;
 use tsra_crypto::EccPublicKey;
 use tsra_crypto::Encrypter;
 use tsra_crypto::ImportableKey;
+use tsra_crypto::MlDsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
 use tsra_ddi::TsraDdi;
@@ -243,7 +244,7 @@ impl OpKind {
         }
     }
 
-    fn is_cbc(self) -> bool {
+    pub(crate) fn is_cbc(self) -> bool {
         matches!(self, Self::AesCbcEncrypt | Self::AesCbcDecrypt)
     }
 
@@ -364,8 +365,7 @@ impl Pools {
             pools.cbc = (0..n)
                 .map(|j| {
                     let key = j % keys.len();
-                    let mut iv = [0u8; 16];
-                    rng.fill(&mut iv[..]);
+                    let iv = pqc::random();
                     let mut pt = vec![0u8; args.cbc_len];
                     rng.fill(&mut pt[..]);
                     let ct = host_cbc_encrypt(&keys[key].raw, &iv, &pt)?;
@@ -398,6 +398,7 @@ pub(crate) struct Worker<'e> {
     /// The indices [`Self::rotate_shared`] returned last, so a pre-flight
     /// follow-up can reuse that request's inputs.
     last_shared: (usize, usize),
+    last_mldsa_keygen: Option<(Vec<u8>, MlDsaPublicKey)>,
 }
 
 /// Time one device call.
@@ -457,6 +458,7 @@ impl<'e> Worker<'e> {
             tid: tid as u16,
             seq: 0,
             last_shared: (0, 0),
+            last_mldsa_keygen: None,
         })
     }
 
@@ -522,7 +524,7 @@ impl<'e> Worker<'e> {
 
     /// Pre-flight follow-up to a checked `op` request, for operations whose
     /// response alone cannot show that the device did the work: a PQC
-    /// keygen generates one more key and uses it, and `MlDsaVerify` must
+    /// keygen's checked response must be usable, and `MlDsaVerify` must
     /// reject a tampered signature. Other operations have none.
     pub(crate) fn prove(&mut self, op: OpKind) -> Result<(), String> {
         match op {
@@ -675,13 +677,17 @@ impl<'e> Worker<'e> {
         let env = self.env;
         let req = pqc::mldsa_keygen_req(env.session_id, p);
         let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
+        let mut checked_key = None;
         let result = resp.and_then(|r| {
             if verify {
-                pqc::check_mldsa_key(p, &r.pub_key, &r.masked_key).map(|_| ())
+                let public = pqc::check_mldsa_key(p, &r.pub_key, &r.masked_key)?;
+                checked_key = Some((r.masked_key, public));
+                Ok(())
             } else {
                 Ok(())
             }
         });
+        self.last_mldsa_keygen = checked_key;
         (dt, result)
     }
 
@@ -800,17 +806,16 @@ impl<'e> Worker<'e> {
     fn prove_mldsa_keygen(&mut self, op: OpKind) -> Result<(), String> {
         let (_, p) = op.mldsa().expect("ML-DSA operation");
         let env = self.env;
-        let key = env
-            .session_ctx()
-            .tbor(&pqc::mldsa_keygen_req(env.session_id, p))
-            .map_err(|e| format!("MlDsaGenerateKey: {e:?}"))?;
-        let public = pqc::check_mldsa_key(p, &key.pub_key, &key.masked_key)?;
+        let (masked_key, public) = self
+            .last_mldsa_keygen
+            .take()
+            .ok_or("no checked ML-DSA keygen response to prove")?;
         let message = pqc::random::<MLDSA_MSG_LEN>().to_vec();
         let signed = env
             .session_ctx()
             .tbor(&TborMlDsaSignReq {
                 session_id: env.session_id,
-                masked_key: key.masked_key,
+                masked_key,
                 message: message.clone(),
                 ctx: Vec::new(),
             })

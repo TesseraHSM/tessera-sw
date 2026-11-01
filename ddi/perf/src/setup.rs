@@ -182,7 +182,7 @@ impl Env {
     pub(crate) fn close(self) {
         if let Some(ctx) = &self.ctx {
             if let Err(e) = ctx.session_close(self.session_id) {
-                eprintln!("warning: closing session {}: {e:?}", self.session_id);
+                eprintln!("warning: closing session: {e:?}");
             }
         }
     }

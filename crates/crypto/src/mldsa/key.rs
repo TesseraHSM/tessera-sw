@@ -28,6 +28,7 @@ use ml_dsa::MlDsa65;
 use ml_dsa::MlDsa87;
 use ml_dsa::MlDsaParams;
 use ml_dsa::SigningKey as MlDsaSigningKey;
+use zeroize::Zeroizing;
 
 use super::*;
 
@@ -38,7 +39,7 @@ use super::*;
 #[derive(Clone)]
 pub struct MlDsaPrivateKey {
     variant: MlDsaVariant,
-    expanded: Vec<u8>,
+    expanded: Zeroizing<Vec<u8>>,
 }
 
 impl MlDsaPrivateKey {
@@ -66,7 +67,10 @@ impl MlDsaPrivateKey {
         }
 
         let expanded = dispatch!(variant, inner(seed))?;
-        Ok(Self { variant, expanded })
+        Ok(Self {
+            variant,
+            expanded: Zeroizing::new(expanded),
+        })
     }
 
     /// Returns the parameter set this key belongs to.
@@ -138,7 +142,7 @@ impl ImportableKey for MlDsaPrivateKey {
             MlDsaVariant::from_sec_key_len(bytes.len()).ok_or(CryptoError::MlDsaKeyImportError)?;
         Ok(Self {
             variant,
-            expanded: bytes.to_vec(),
+            expanded: Zeroizing::new(bytes.to_vec()),
         })
     }
 }

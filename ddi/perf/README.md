@@ -103,9 +103,9 @@ ML-DSA operations use an empty context.
 | `--test-seconds` | 30 | Measured window length |
 | `--keys` | 8 | Distinct keys per key type |
 | `--messages` | 64 | Distinct messages per thread |
-| `--cbc-len` | 1024 | AES-CBC message length in bytes, a multiple of 16 |
+| `--cbc-len` | 1024 | AES-CBC message length in bytes, a multiple of 16 and at most 1024 |
 | `--verify-all` | off | Check every timed response on the host |
-| `--max-samples` | 1000000 | Latency samples kept per thread and operation |
+| `--max-samples` | 1000000 | Reservoir-sampled latencies kept per thread and operation |
 | `--tsv` | none | Append result rows to this TSV file |
 | `--markdown` | none | `suite`, `compare`: also write the table to this file |
 | `--label` | empty | Stored with each TSV row, e.g. the firmware version |
@@ -115,7 +115,7 @@ ML-DSA operations use an empty context.
 ## TSV columns
 
 `--tsv` appends one row per operation and run, and writes the header line when
-it creates the file.
+the file is empty.
 
 | Column | Meaning |
 |---|---|
@@ -128,8 +128,8 @@ it creates the file.
 | `seconds` | Measured window, `--test-seconds` |
 | `ops` | Requests completed inside the measured window |
 | `rps` | `ops / seconds` |
-| `mean_us`, `stddev_us` | Mean and standard deviation of the device call latency, in µs |
-| `min_us`, `p50_us`, `p90_us`, `p99_us`, `max_us` | Minimum, percentiles and maximum of that latency, in µs |
+| `mean_us`, `stddev_us` | Full-window mean and standard deviation of the device call latency, in µs |
+| `min_us`, `p50_us`, `p90_us`, `p99_us`, `max_us` | Full-window minimum and maximum; percentiles from the reservoir sample, in µs |
 | `errors` | Failed requests in any phase; a run with errors exits non-zero |
 
 ## Input rotation and host verification
@@ -146,8 +146,9 @@ RSA signatures must verify with the public key, AES-CBC output must match the
 host's, device ML-DSA signatures must verify on the host, and `MlDsaVerify`
 must accept host signatures (and, in this check, reject a tampered one).
 Generated PQC keys must have the parameter set's lengths, and each keygen
-operation also generates a key and uses it once. ML-KEM shared secrets come
-back masked under a key the host cannot derive, so KEM results are checked for
-shape only. Any mismatch fails the run. `--verify-all` checks every timed
+operation also uses the exact checked key response once. CBC runs require at
+least as many messages as keys so every key is exercised. ML-KEM shared secrets
+come back masked under a key the host cannot derive, so KEM results are checked
+for shape only. Any mismatch fails the run. `--verify-all` checks every timed
 response too; it adds host work between requests, so leave it off for the
 numbers themselves.
