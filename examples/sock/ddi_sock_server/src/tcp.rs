@@ -130,6 +130,13 @@ mod tests {
     }
 
     fn open_init(device: &DdiSockDev, psk_id: u8) -> TborSessionOpenFinishReq {
+        open_init_with_exported(device, psk_id).0
+    }
+
+    fn open_init_with_exported(
+        device: &DdiSockDev,
+        psk_id: u8,
+    ) -> (TborSessionOpenFinishReq, Vec<u8>) {
         let chain = tbor(device, &TborGetCertChainInfoReq::new(0));
         let leaf = tbor(device, &TborGetCertReq::new(0, chain.num_certs - 1));
         let cert = X509Certificate::from_der(&leaf.certificate).expect("partition certificate");
@@ -166,7 +173,7 @@ mod tests {
         )
         .expect("phase 1 MAC");
         let param_key = derive_param_key(&exported).expect("parameter key");
-        TborSessionOpenFinishReq {
+        let finish = TborSessionOpenFinishReq {
             session_id: response.session_id,
             mac_fin: build_phase2_mac(
                 &exported,
@@ -180,7 +187,8 @@ mod tests {
                 .expect("seed envelope")
                 .try_into()
                 .expect("seed envelope length"),
-        }
+        };
+        (finish, exported)
     }
 
     fn with_session_clients(test: impl FnOnce(String, Arc<SocketHsm>) + Send + 'static) {
@@ -337,17 +345,21 @@ mod tests {
     #[test]
     fn cancelled_oob_submission_completes_before_disconnect_cleanup() {
         use tsra_ddi_interface::TborOobItem;
-        use tsra_ddi_tbor_test_harness::session;
+        use tsra_ddi_tbor_test_harness::SessionHandshake;
+        use tsra_ddi_tbor_test_harness::encrypt_mach_seed_envelope;
+        use tsra_ddi_tbor_test_harness::encrypt_psk_envelope;
         use tsra_ddi_tbor_test_harness::x509_fixture::PotaFixture;
         use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
+        use tsra_ddi_tbor_types::CertDescriptor;
         use tsra_ddi_tbor_types::PartPolicy;
         use tsra_ddi_tbor_types::PolicyKeyKind;
         use tsra_ddi_tbor_types::PolicyPubKey;
         use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
         use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
         use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
+        use tsra_ddi_tbor_types::TborPartFinalReq;
+        use tsra_ddi_tbor_types::TborPartInitReq;
         use tsra_ddi_tbor_types::TborResp;
-        use zerocopy::IntoBytes;
 
         let _guard = crate::test_partition_lock();
         let hsm = crate::test_hsm();
@@ -372,37 +384,62 @@ mod tests {
                     .open_dev(&endpoint)
                     .expect("client socket");
                 device.erase().expect("initial reset");
-                let session = session::session_open(
+                let (pending, exported) = open_init_with_exported(&device, 0);
+                let finished = tbor(&device, &pending);
+                let param_key = derive_param_key(&exported).expect("parameter key");
+                let session = SessionHandshake {
+                    session_id: pending.session_id,
+                    psk_id: 0,
+                    session_type: tsra_ddi_tbor_types::SessionType::Authenticated,
+                    exported,
+                    param_key,
+                    bmk_session: finished.bmk_session,
+                };
+                tbor(
                     &device,
-                    0,
-                    tsra_ddi_tbor_types::SessionType::Authenticated,
-                )
-                .expect("open session");
-                session::psk_change(&device, &session, &[0xA5; 32]).expect("rotate PSK");
+                    &TborPskChangeReq {
+                        session_id: session.session_id,
+                        psk_envelope: encrypt_psk_envelope(&session, &[0xA5; 32])
+                            .expect("PSK envelope"),
+                    },
+                );
                 let pota = PotaFixture::generate();
                 let mut policy = PartPolicy::zeroed();
                 policy.version.major = 1;
                 policy.pota_pub_key = PolicyPubKey::new(PolicyKeyKind::Ecc384, 96, pota.raw_pub());
                 policy.sata_pub_key = policy.pota_pub_key;
-                let init = session::part_init(
+                let init = tbor(
                     &device,
-                    &session,
-                    &[0x5A; 32],
-                    policy.as_bytes(),
-                    pota.thumbprint(),
-                    &[0x5A; 48],
-                    None,
-                )
-                .expect("initialize partition");
+                    &TborPartInitReq {
+                        session_id: session.session_id,
+                        mach_seed_envelope: encrypt_mach_seed_envelope(&session, &[0x5A; 32])
+                            .expect("machine seed envelope"),
+                        part_policy: policy.clone(),
+                        pota_thumbprint: *pota.thumbprint(),
+                        sata_thumbprint: [0x5A; 48],
+                        ..Default::default()
+                    },
+                );
                 let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));
-                session::part_final(
-                    &device,
-                    &session,
-                    policy.as_bytes(),
-                    &[],
-                    &chain.der_items(),
-                )
-                .expect("finalize partition");
+                let certs = chain.der_items();
+                let final_request = TborPartFinalReq {
+                    session_id: session.session_id,
+                    part_policy: policy,
+                    cert_descriptors: certs
+                        .iter()
+                        .enumerate()
+                        .map(|(index, cert)| CertDescriptor {
+                            index: u8::try_from(index).expect("certificate index"),
+                            length: u16::try_from(cert.len())
+                                .expect("certificate length")
+                                .into(),
+                        })
+                        .collect(),
+                    ..Default::default()
+                };
+                device
+                    .exec_op_tbor(&final_request, Some(&certs), &mut None)
+                    .expect("finalize partition");
                 let key = tbor(
                     &device,
                     &TborAesGenerateKeyReq {
