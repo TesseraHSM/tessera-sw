@@ -599,12 +599,12 @@ macro_rules! define_hsm_key_pair {
                     acquire_restore_guard!(self => session, part_restore_epoch, inner);
 
                     let old_props = inner.key_props().clone();
-                    let masked_key = old_props
-                        .masked_key()
-                        .ok_or(HsmError::InternalError)?
-                        .to_vec();
-                    let (new_handle, new_props, _pub_props) =
-                        ddi::refresh_key_pair_raw_no_res(&session, &old_props, &masked_key)?;
+                    let masked_key = old_props.masked_key().map(<[u8]>::to_vec);
+                    let (new_handle, new_props, _pub_props) = ddi::refresh_key_pair_raw_no_res(
+                        &session,
+                        &old_props,
+                        masked_key.as_deref(),
+                    )?;
                     inner.restore(new_handle, new_props, part_restore_epoch);
                     Ok(())
                 }

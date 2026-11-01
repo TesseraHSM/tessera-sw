@@ -155,6 +155,14 @@ impl HsmSessionManager for UnoHsmPal {
 
         let mut table = SessionStore::partition(io.pid())?;
 
+        // An abandoned reopen handshake reverts to NeedsRenegotiation; only
+        // its handshake-blob key is deleted.
+        if table.is_reopen_pending(id) {
+            let handshake = table.cancel_reopen(id)?;
+            let _ = crate::vault::vault(io).delete(self, io, handshake).await;
+            return Ok(());
+        }
+
         // A renegotiating slot has no live vault state: the partition reset
         // that flagged it (disable — e.g. the `CC.EN` clear an NVMe
         // Level-2 abort or firmware-crash recovery drives) already deleted
@@ -260,6 +268,55 @@ impl HsmSessionManager for UnoHsmPal {
             Err(e) => {
                 let mut v = crate::vault::vault(io);
                 let _ = v.delete(self, io, physical_id).await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn session_reopen_pending(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+        role: HsmSessionRole,
+        handshake_state: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        if handshake_state.is_empty() || handshake_state.len() > SESSION_PENDING_BLOB_MAX {
+            return Err(HsmError::InvalidArg);
+        }
+
+        // Validate the slot before touching the vault so a rejected reopen
+        // leaves no orphaned handshake key.
+        match SessionStore::partition(io.pid())?.state(id) {
+            HsmSessionState::NeedsRenegotiation | HsmSessionState::Pending => {}
+            HsmSessionState::Active => return Err(HsmError::InvalidArg),
+            HsmSessionState::Invalid => return Err(HsmError::SessionNotFound),
+        }
+
+        let attrs = HsmVaultKeyAttrs::new().with_internal(true);
+        let physical_id = {
+            let mut v = crate::vault::vault(io);
+            v.create(
+                self,
+                io,
+                u8::from(io.pid()),
+                handshake_state,
+                HsmVaultKeyKind::SessionExPending,
+                None,
+                attrs,
+            )
+            .await?
+        };
+
+        let mut store = SessionStore::partition(io.pid())?;
+        match store.reopen_pending(id, role, physical_id) {
+            Ok(replaced) => {
+                if let Some(old) = replaced {
+                    let _ = crate::vault::vault(io).delete(self, io, old).await;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = crate::vault::vault(io).delete(self, io, physical_id).await;
                 Err(e)
             }
         }

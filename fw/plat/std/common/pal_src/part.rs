@@ -290,6 +290,12 @@ pub(crate) struct PartitionEntry {
     /// Vault key ID of the partition unwrapping key.
     unwrapping_key_id: Option<HsmKeyId>,
 
+    /// Emulates the HSP's per-partition unwrapping-key slot: the stable
+    /// RSA-2048 private key (HSM byte format) that is re-imported into the
+    /// vault after `part_disable`. Survives disable/enable (NSSR) and is
+    /// cleared only by `part_free`.
+    unwrapping_key_bk: Option<Zeroizing<Vec<u8>>>,
+
     /// Crypto Officer PSK.  `None` while the well-known default
     /// applies; set to `Some` once `part_psk_set(psk_id=0, ..)` is
     /// invoked.
@@ -369,6 +375,7 @@ impl Default for PartitionEntry {
             bk3_session_set: false,
             mk_key_id: None,
             unwrapping_key_id: None,
+            unwrapping_key_bk: None,
             psk_co: None,
             psk_cu: None,
             pta_key_id: None,
@@ -631,34 +638,38 @@ impl StdHsmPal {
     /// components, the std PAL's vault representation; real firmware stores
     /// its own raw key material); the public key is derived from it on
     /// demand (matching the reference firmware).
+    ///
+    /// Like the hardware HSP slot, the key is generated once per
+    /// allocation and kept in `unwrapping_key_bk`; after an NSSR wipes the
+    /// vault, the next read re-imports that same key, so blobs wrapped
+    /// before the reset still unwrap.
     fn provision_unwrapping_key(&self, pid: HsmPartId) -> HsmResult<()> {
-        if self.active_part(pid)?.unwrapping_key_id.is_some() {
+        let entry = self.active_part_mut(pid)?;
+        if entry.unwrapping_key_id.is_some() {
             return Ok(());
         }
 
-        let pk = RsaPrivateKey::generate(256).map_err(|_| HsmError::RsaGenerateError)?;
-        let priv_len = pk.hsm_bytes_len();
-        let mut priv_buf = vec![0u8; priv_len];
+        if entry.unwrapping_key_bk.is_none() {
+            let pk = RsaPrivateKey::generate(256).map_err(|_| HsmError::RsaGenerateError)?;
+            let mut priv_buf = Zeroizing::new(vec![0u8; pk.hsm_bytes_len()]);
+            pk.to_hsm_bytes(&mut priv_buf)
+                .map_err(|_| HsmError::RsaToDerError)?;
+            entry.unwrapping_key_bk = Some(priv_buf);
+        }
+
         let attrs = HsmVaultKeyAttrs::new()
             .with_internal(true)
             .with_local(true)
             .with_unwrap(true);
-        let result = (|| {
-            pk.to_hsm_bytes(&mut priv_buf[..priv_len])
-                .map_err(|_| HsmError::RsaToDerError)?;
-
-            let entry = self.active_part_mut(pid)?;
-            let kid = entry.vault.create(
-                &priv_buf[..priv_len],
-                HsmVaultKeyKind::Rsa2kPrivate,
-                None,
-                attrs,
-            )?;
-            entry.unwrapping_key_id = Some(kid);
-            Ok(())
-        })();
-        priv_buf.fill(0);
-        result
+        let bk = entry
+            .unwrapping_key_bk
+            .as_deref()
+            .ok_or(HsmError::InternalError)?;
+        let kid = entry
+            .vault
+            .create(bk, HsmVaultKeyKind::Rsa2kPrivate, None, attrs)?;
+        entry.unwrapping_key_id = Some(kid);
+        Ok(())
     }
 
     /// Borrow a partition that is actively serving host traffic.
@@ -1003,6 +1014,10 @@ impl StdHsmPal {
         // enable/disable; it is cleared only here, on free.
         entry.masked_bk_boot[..entry.masked_bk_boot_len as usize].fill(0);
         entry.masked_bk_boot_len = 0;
+
+        // Like `Masked_BK_BOOT`, the HSP-slot unwrapping key outlives
+        // enable/disable and is dropped (zeroized) only on free.
+        entry.unwrapping_key_bk = None;
 
         // Release resources.
         table.global_res_mask &= !entry.res_mask;

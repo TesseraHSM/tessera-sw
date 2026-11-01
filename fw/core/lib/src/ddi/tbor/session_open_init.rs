@@ -9,9 +9,9 @@
 //! `Pending` session slot, computes the Phase-1 confirm MAC, and
 //! returns `(slot, pk_resp, mac_resp)` to the caller.
 //!
-//! Resume is no longer multiplexed onto this opcode; the host
-//! recovers a prior session's `masking_key` via the MBOR
-//! `ReopenSession` command instead.
+//! The handshake core ([`run_handshake`]) is shared with
+//! [`super::session_reopen_init`], which re-runs it against an existing
+//! slot that needs renegotiation instead of allocating a new one.
 //!
 //! On any error the partial session state is rolled back via the
 //! caller-visible TBOR error response; no Pending slot is leaked.
@@ -49,7 +49,7 @@ struct ParsedRequest<'a> {
 /// session-establishment handshake.  Today every implemented suite is
 /// HPKE-based, so this is a total function; future ML-KEM variants
 /// will require a different code path (and a different return type).
-const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
+pub(super) const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
     match suite {
         HsmSessionSuite::P384HkdfSha384AesGcm256 => HpkeSuite::DHKemP384Sha384AesGcm256,
     }
@@ -63,17 +63,21 @@ const DEFAULT_HPKE_SUITE: HpkeSuite = hpke_suite_for(HsmSessionSuite::P384HkdfSh
 
 /// Length of the Pending handshake-state blob:
 /// `exported (Nh) ‖ pk_init (Npk) ‖ pk_resp (Npk)
-/// ‖ auth_binding (68 B) ‖ session_type (1 B) ‖ suite_id (1 B)`.
+/// ‖ auth_binding (68 B) ‖ session_type (1 B) ‖ suite_id (1 B) ‖ kind (1 B)`.
 ///
-/// The trailing `session_type` byte tells [`session_open_finish`]
+/// The `session_type` byte tells [`session_open_finish`]
 /// which derived-key schedule to run (PlainText: param+masking only;
 /// Authenticated: param+masking+mac_tx+mac_rx).  The `suite_id` byte
 /// lets `session_open_finish` recover the negotiated cryptographic
-/// suite without trusting any client-side state.
+/// suite without trusting any client-side state. The trailing
+/// [`HandshakeKind`] byte binds the Pending slot to the Phase-1 opcode
+/// that created it, so `SessionOpenFinish` and `SessionReopenFinish`
+/// each only complete their own handshake.
 pub(super) const PENDING_BASE_LEN: usize = DEFAULT_HPKE_SUITE.nh()
     + DEFAULT_HPKE_SUITE.npk()
     + DEFAULT_HPKE_SUITE.npk()
     + tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN
+    + 1
     + 1
     + 1;
 
@@ -81,13 +85,57 @@ pub(super) const PENDING_BASE_LEN: usize = DEFAULT_HPKE_SUITE.nh()
 ///
 /// With secure sessions (Duo) it ends with the transport keys `h2m ‖ m2h`
 /// (see [`HsmSessionManager::session_create_pending`]), so
-/// `SessionOpenFinish` can already travel on the secure channel.
+/// `SessionOpenFinish` / `SessionReopenFinish` can already travel on the
+/// secure channel.
 pub(super) const fn pending_blob_len<P: HsmPalFeatures>() -> usize {
     if P::IO_PROTOCOL.secure_session() {
         PENDING_BASE_LEN + 2 * SESSION_TRANSPORT_KEY_LEN
     } else {
         PENDING_BASE_LEN
     }
+}
+
+/// Which Phase-1 opcode produced a Pending slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum HandshakeKind {
+    /// `SessionOpenInit`: fresh slot, fresh `masking_key`.
+    Open = 0,
+    /// `SessionReopenInit`: existing slot, `masking_key` restored from
+    /// `bmk_session`.
+    Reopen = 1,
+}
+
+/// Where Phase 1 obtains its Pending slot.
+#[derive(Clone, Copy)]
+pub(super) enum SlotSource {
+    /// Allocate a new slot in `role`'s range.
+    Create(HsmSessionRole),
+    /// Re-arm an existing slot that needs renegotiation.
+    Reopen(HsmSessId),
+}
+
+impl SlotSource {
+    fn kind(self) -> HandshakeKind {
+        match self {
+            Self::Create(_) => HandshakeKind::Open,
+            Self::Reopen(_) => HandshakeKind::Reopen,
+        }
+    }
+}
+
+/// Validated Phase-1 handshake parameters shared by open and reopen.
+pub(super) struct HandshakeParams<'a> {
+    pub(super) psk_id: u8,
+    pub(super) session_type: HsmSessionType,
+    pub(super) suite: HsmSessionSuite,
+    pub(super) pk_init: &'a HsmDmaBuf,
+}
+
+/// Phase-1 handshake output.
+pub(super) struct HandshakeOutput<'a> {
+    pub(super) session_id: u16,
+    pub(super) pk_resp: &'a HsmDmaBuf,
+    pub(super) mac_resp: &'a HsmDmaBuf,
 }
 
 /// Compile-time guard: the largest Pending blob must fit inside the PAL
@@ -112,78 +160,118 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pk_init,
         } = parse_request(cmd_buf.request())?;
 
-        let hpke_suite = hpke_suite_for(suite);
-
-        // ── Identity + PSK material (all on the scoped allocator) ──
-        let psk = load_psk(pal, io, alloc, psk_id)?;
-        let auth_binding = crate::session::capture_auth_binding(pal, io, alloc, role, psk).await?;
-        let key_id = crate::part_state::part_id_key_id(pal, io)?;
-        let sk_hsm = pal.vault_key(io, key_id)?;
-        let pk_hsm = load_pk_hsm_sec1(pal, io, alloc)?;
-
-        // ── HPKE info = SESSION_HPKE_INFO ‖ psk_id ‖ session_type
-        //                                   ‖ suite_id
-        // The trailing role+type+suite bytes bind the handshake
-        // transcript so a downgrade to a different role, session type
-        // or cryptographic suite produces a different `exported`
-        // secret on the HSM side, MAC-failing any spoofed Phase-1
-        // confirm.
-        let info = build_hpke_info(alloc, psk_id, session_type, suite)?;
-
-        // ── HPKE auth_psk send_export ──────────────────────────────
-        let psk_id_bytes = &[psk_id];
-        let (pk_resp, exported) = hpke_auth_psk_export(
-            pal,
-            io,
-            alloc,
-            hpke_suite,
-            pk_init,
-            sk_hsm,
-            pk_hsm,
-            psk,
-            psk_id_bytes,
-            info,
-        )
-        .await?;
-
-        // ── Pending slot allocation ────────────────────────────────
-        let slot = create_pending_slot(
-            pal,
-            io,
-            alloc,
-            role,
+        let params = HandshakeParams {
+            psk_id,
             session_type,
             suite,
-            hpke_suite,
-            exported,
             pk_init,
-            pk_resp,
-            auth_binding,
-        )
-        .await?;
-        // Record the just-created Pending session's teardown inverse, so a
-        // failure below (MAC, response encode, or the CQE post) reverts it
-        // via the dispatcher's undo walk rather than leaking the slot.
-        undo.push_session_destroy(slot)?;
-        let session_id = u16::from(slot);
+        };
+        let out = run_handshake(pal, io, alloc, undo, &params, SlotSource::Create(role)).await?;
+
         // Hand the freshly allocated slot to the IO layer so it lands in
         // the CQE: the host driver registers the session against the
         // calling file handle from that field, and without it every
         // follow-up in-session TBOR ioctl (SessionOpenFinish, PskChange,
         // SessionClose) is rejected with `NoExistingSession` before it
         // ever reaches the firmware.
-        *cqe_sess_id = Some(session_id);
+        *cqe_sess_id = Some(out.session_id);
 
-        // ── Phase-1 confirm MAC ────────────────────────────────────
-        let mac_resp = compute_phase1_mac(
-            pal, io, alloc, hpke_suite, exported, session_id, pk_init, pk_hsm, pk_resp,
-        )
-        .await?;
-
-        // ── Encode response from the scoped buffers ────────────────
-        encode_response(cmd_buf, session_id, pk_resp, mac_resp)
+        encode_response(cmd_buf, out.session_id, out.pk_resp, out.mac_resp)
     })
     .await
+}
+
+/// Phase-1 handshake core shared by `SessionOpenInit` and
+/// `SessionReopenInit`: HPKE `auth_psk` export, Pending slot
+/// acquisition (per `source`), and the Phase-1 confirm MAC.
+///
+/// Records the slot's teardown inverse in `undo` as soon as the slot is
+/// Pending, so any later failure reverts it (a reopen-Pending slot
+/// reverts to NeedsRenegotiation rather than being freed).
+pub(super) async fn run_handshake<'a, 'p: 'a, P: HsmPal>(
+    pal: &'p P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    undo: &mut UndoLog<'p>,
+    params: &HandshakeParams<'_>,
+    source: SlotSource,
+) -> HsmResult<HandshakeOutput<'a>> {
+    let HandshakeParams {
+        psk_id,
+        session_type,
+        suite,
+        pk_init,
+    } = *params;
+    let hpke_suite = hpke_suite_for(suite);
+
+    // ── Identity + PSK material (all on the scoped allocator) ──
+    let psk = load_psk(pal, io, alloc, psk_id)?;
+    let role = match source {
+        SlotSource::Create(role) => role,
+        SlotSource::Reopen(id) => id.role(),
+    };
+    let auth_binding = crate::session::capture_auth_binding(pal, io, alloc, role, psk).await?;
+    let key_id = crate::part_state::part_id_key_id(pal, io)?;
+    let sk_hsm = pal.vault_key(io, key_id)?;
+    let pk_hsm = load_pk_hsm_sec1(pal, io, alloc)?;
+
+    // ── HPKE info = SESSION_HPKE_INFO ‖ psk_id ‖ session_type
+    //                                   ‖ suite_id
+    // The trailing role+type+suite bytes bind the handshake
+    // transcript so a downgrade to a different role, session type
+    // or cryptographic suite produces a different `exported`
+    // secret on the HSM side, MAC-failing any spoofed Phase-1
+    // confirm.
+    let info = build_hpke_info(alloc, psk_id, session_type, suite)?;
+
+    // ── HPKE auth_psk send_export ──────────────────────────────
+    let psk_id_bytes = &[psk_id];
+    let (pk_resp, exported) = hpke_auth_psk_export(
+        pal,
+        io,
+        alloc,
+        hpke_suite,
+        pk_init,
+        sk_hsm,
+        pk_hsm,
+        psk,
+        psk_id_bytes,
+        info,
+    )
+    .await?;
+
+    // ── Pending slot acquisition ───────────────────────────────
+    let slot = acquire_pending_slot(
+        pal,
+        io,
+        alloc,
+        source,
+        session_type,
+        suite,
+        hpke_suite,
+        exported,
+        pk_init,
+        pk_resp,
+        auth_binding,
+    )
+    .await?;
+    // Record the Pending session's teardown inverse, so a failure below
+    // (MAC, response encode, or the CQE post) reverts it via the
+    // dispatcher's undo walk rather than leaking the slot.
+    undo.push_session_destroy(slot)?;
+    let session_id = u16::from(slot);
+
+    // ── Phase-1 confirm MAC ────────────────────────────────────
+    let mac_resp = compute_phase1_mac(
+        pal, io, alloc, hpke_suite, exported, session_id, pk_init, pk_hsm, pk_resp,
+    )
+    .await?;
+
+    Ok(HandshakeOutput {
+        session_id,
+        pk_resp,
+        mac_resp,
+    })
 }
 
 /// Decode and validate the wire request.
@@ -197,16 +285,9 @@ fn parse_request<'a>(req_buf: &'a HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     };
     let psk_id = req.psk_id().0;
 
-    let session_type = HsmSessionType::from_u8(req.session_type().0)?;
-    session_type.validate_for_role(role)?;
-
-    let suite = HsmSessionSuite::from_u8(req.suite_id().0)?;
-    let hpke_suite = hpke_suite_for(suite);
-
+    let (session_type, suite) =
+        parse_type_and_suite(role, req.session_type().0, req.suite_id().0, req.pk_init())?;
     let pk_init: &HsmDmaBuf = req.pk_init();
-    if pk_init.len() != hpke_suite.npk() {
-        return Err(HsmError::InvalidArg);
-    }
 
     Ok(ParsedRequest {
         role,
@@ -215,6 +296,24 @@ fn parse_request<'a>(req_buf: &'a HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
         suite,
         pk_init,
     })
+}
+
+/// Validate the wire `session_type` / `suite_id` bytes for `role` and
+/// the `pk_init` length for the suite.
+pub(super) fn parse_type_and_suite(
+    role: HsmSessionRole,
+    session_type: u8,
+    suite_id: u8,
+    pk_init: &HsmDmaBuf,
+) -> HsmResult<(HsmSessionType, HsmSessionSuite)> {
+    let session_type = HsmSessionType::from_u8(session_type)?;
+    session_type.validate_for_role(role)?;
+
+    let suite = HsmSessionSuite::from_u8(suite_id)?;
+    if pk_init.len() != hpke_suite_for(suite).npk() {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok((session_type, suite))
 }
 
 /// Load the partition's PSK into a freshly-allocated scoped buffer.
@@ -327,15 +426,15 @@ async fn hpke_auth_psk_export<'a, P: HsmPal>(
     Ok((pk_resp, exported))
 }
 
-/// Pack `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`
+/// Pack `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id ‖ kind`
 /// (plus `h2m ‖ m2h` with secure sessions) into a Pending blob and hand it
-/// to `session_create_pending`.
+/// to `session_create_pending` (open) or `session_reopen_pending` (reopen).
 #[allow(clippy::too_many_arguments)]
-async fn create_pending_slot<P: HsmPal>(
+async fn acquire_pending_slot<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    role: HsmSessionRole,
+    source: SlotSource,
     session_type: HsmSessionType,
     suite: HsmSessionSuite,
     hpke_suite: HpkeSuite,
@@ -358,6 +457,7 @@ async fn create_pending_slot<P: HsmPal>(
     off += auth_binding.len();
     pending_blob[off] = session_type.to_u8();
     pending_blob[off + 1] = suite.to_u8();
+    pending_blob[off + 2] = source.kind() as u8;
     if P::IO_PROTOCOL.secure_session() {
         let keys = &mut pending_blob[PENDING_BASE_LEN..];
         let (h2m, m2h) = keys.split_at_mut(SESSION_TRANSPORT_KEY_LEN);
@@ -380,7 +480,14 @@ async fn create_pending_slot<P: HsmPal>(
         )
         .await?;
     }
-    pal.session_create_pending(io, role, pending_blob).await
+    match source {
+        SlotSource::Create(role) => pal.session_create_pending(io, role, pending_blob).await,
+        SlotSource::Reopen(id) => {
+            pal.session_reopen_pending(io, id, id.role(), pending_blob)
+                .await?;
+            Ok(id)
+        }
+    }
 }
 
 /// Compute the Phase-1 confirm MAC:

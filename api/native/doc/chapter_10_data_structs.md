@@ -856,6 +856,45 @@ struct tsra_resiliency_config {
 
 All callbacks must be thread-safe — they may be called concurrently from multiple threads.
 
+### tsra_pta_callback_ops
+
+PTA endorsement callback for security-domain resiliency.
+
+```cpp
+struct tsra_pta_callback_ops {
+    tsra_status (*endorse)(void *ctx,
+                           const tsra_buffer *pta_csr,
+                           const tsra_buffer *pta_report,
+                           tsra_buffer *cert_chain);
+};
+```
+
+| Field   | Type             | Description |
+| ------- | ---------------- | ----------- |
+| endorse | function pointer | Endorse the PTA key generated when restore re-runs provisioning. `pta_csr` is the DER PKCS#10 CSR and `pta_report` the COSE_Sign1 PTA report. Returns the PTA certificate chain in `cert_chain` as concatenated DER certificates (root first, PTA leaf last). Uses the two-call buffer pattern: first call with `cert_chain->ptr == NULL` returns the required size in `cert_chain->len` and `TSRA_STATUS_BUFFER_TOO_SMALL`; second call fills the buffer (at most 64 KiB). |
+
+### tsra_resiliency_ex_config
+
+Resiliency configuration passed to [`tsra_part_enable_resiliency_ex`](#tsra_part_enable_resiliency_ex).
+
+```cpp
+struct tsra_resiliency_ex_config {
+    void *ctx;
+    tsra_resiliency_storage_ops storage_ops;
+    tsra_resiliency_lock_ops lock_ops;
+    const tsra_pta_callback_ops *pta_callback_ops;
+};
+```
+
+| Field            | Type                                                        | Description |
+| ---------------- | ----------------------------------------------------------- | ----------- |
+| ctx              | void *                                                      | Opaque context pointer passed to every callback. Caller-owned; must remain valid until `tsra_part_close` returns. **Must not** store or reference the same `tsra_handle`. |
+| storage_ops      | [tsra_resiliency_storage_ops](#tsra_resiliency_storage_ops) | Storage callbacks (required). |
+| lock_ops         | [tsra_resiliency_lock_ops](#tsra_resiliency_lock_ops)       | Lock callbacks (required). |
+| pta_callback_ops | [tsra_pta_callback_ops *](#tsra_pta_callback_ops)           | Optional PTA endorsement callback; NULL replays the captured PTA certificate chain. |
+
+All callbacks must be thread-safe — they may be called concurrently from multiple threads.
+
 ### tsra_algo_hkdf_params
 
 Parameters for HKDF Algorithm

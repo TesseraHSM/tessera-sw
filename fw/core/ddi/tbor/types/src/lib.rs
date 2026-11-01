@@ -83,6 +83,8 @@ pub mod sd_sealing_key_gen;
 pub mod session_close;
 pub mod session_open_finish;
 pub mod session_open_init;
+pub mod session_reopen_finish;
+pub mod session_reopen_init;
 pub mod unwrap_key;
 pub mod verify_key;
 
@@ -135,5 +137,7 @@ pub use sd_sealing_key_gen::*;
 pub use session_close::*;
 pub use session_open_finish::*;
 pub use session_open_init::*;
+pub use session_reopen_finish::*;
+pub use session_reopen_init::*;
 pub use unwrap_key::*;
 pub use verify_key::*;

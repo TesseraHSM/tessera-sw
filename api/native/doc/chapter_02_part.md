@@ -297,6 +297,39 @@ recovery needs it.
 
 `TSRA_STATUS_SUCCESS` on success, error code otherwise
 
+## tsra_part_enable_resiliency_ex
+
+Enable resiliency for security-domain sessions
+
+```cpp
+tsra_status tsra_part_enable_resiliency_ex(
+    tsra_handle part_handle,
+    const struct tsra_resiliency_ex_config *config
+    );
+```
+
+**Parameters**
+
+| Parameter        | Name                                                            | Description                               |
+| ---------------- | --------------------------------------------------------------- | ----------------------------------------- |
+| [in] part_handle | [tsra_handle](#tsra_handle)                                     | partition handle                          |
+| [in] config      | [struct tsra_resiliency_ex_config*](#tsra_resiliency_ex_config) | resiliency configuration (must be non-NULL) |
+
+Enables automatic retry and recovery from transient hardware resets for sessions opened with [`tsra_sess_ex_open`](#tsra_sess_ex_open). Call once after `tsra_part_open` and before opening any security-domain session, so the SDK can capture the provisioning state from `tsra_sess_ex_part_init`/`tsra_sess_ex_part_final` and PSKs rotated with `tsra_sess_ex_psk_change`. Rotated PSKs are held in process memory only and are never written to storage.
+
+After a reset, the next operation that observes it restores the partition under the caller's lock: it reopens the existing Crypto Officer session (`SessionReopenInit`/`SessionReopenFinish`), replays provisioning and PSK rotation, and then reopens and retries the affected session.
+
+> **PTA callback:** When `pta_callback_ops` is non-NULL, its `endorse`
+> callback is invoked whenever restore re-runs provisioning, to obtain a
+> PTA certificate chain for the new PTA CSR. When NULL, the chain
+> captured from the original `tsra_sess_ex_part_final` call is replayed.
+> The callback must not call TSRA APIs on the same `tsra_handle`.
+> See [`tsra_pta_callback_ops`](#tsra_pta_callback_ops) for details.
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on success. `TSRA_STATUS_INVALID_ARGUMENT` if `config` is malformed or resiliency is already enabled on the partition.
+
 ## tsra_part_close
 
 Close partition handle

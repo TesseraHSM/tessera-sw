@@ -9,11 +9,13 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::Weak;
 
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tracing::*;
 use tsra_crypto::AesKey;
+use tsra_ddi_tbor_types::SESSION_SEED_LEN;
 use tsra_ddi_tbor_types::SessionType;
 use zerocopy::IntoBytes;
 use zeroize::Zeroize;
@@ -27,6 +29,17 @@ pub struct HsmSession {
 
 /// Marker trait for HSM sessions.
 impl Session for HsmSession {}
+
+/// Non-owning reference to an [`HsmSession`].
+#[derive(Debug, Clone)]
+pub(crate) struct WeakHsmSession(Weak<RwLock<HsmSessionInner>>);
+
+impl WeakHsmSession {
+    /// Returns the session if it is still alive.
+    pub(crate) fn upgrade(&self) -> Option<HsmSession> {
+        self.0.upgrade().map(|inner| HsmSession { inner })
+    }
+}
 
 impl HsmSession {
     #[instrument(skip_all, fields(session_id = id))]
@@ -134,6 +147,68 @@ impl HsmSession {
         Ok(Some(result))
     }
 
+    /// Re-establishes a stale V2 (TBOR) session after a partition
+    /// restore via `SessionReopenInit` / `SessionReopenFinish`.
+    ///
+    /// Serialized like [`Self::with_reopen_guard`]: under the session
+    /// write lock, a session already at `part_restore_epoch` is left
+    /// untouched. Otherwise the handshake is re-run with `psk` (or the
+    /// role default when `None`), the session's fresh `exported` /
+    /// `param_key` / `bmk_session` replace the stale material, and the
+    /// session epoch advances to `part_restore_epoch`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HsmError::InvalidSession`] for a V1 session and
+    /// propagates handshake / DDI failures.
+    pub(crate) fn reopen_ex(
+        &self,
+        part_restore_epoch: u64,
+        psk: Option<&[u8; PSK_LEN]>,
+    ) -> HsmResult<()> {
+        let mut inner = self.inner.write();
+        if inner.last_restore_epoch == part_restore_epoch {
+            return Ok(());
+        } else if inner.last_restore_epoch > part_restore_epoch {
+            return Err(HsmError::InternalError);
+        }
+        inner.reopen_ex(psk)?;
+        inner.last_restore_epoch = part_restore_epoch;
+        Ok(())
+    }
+
+    /// Re-establishes a V2 session regardless of its epoch, which is left
+    /// unchanged; see [`Self::mark_restored`].
+    ///
+    /// Used by the TBOR restore path, which must reopen the CO session to
+    /// re-provision the partition before the restore epoch advances.
+    pub(crate) fn force_reopen_ex(&self, psk: Option<&[u8; PSK_LEN]>) -> HsmResult<()> {
+        self.inner.write().reopen_ex(psk)
+    }
+
+    /// Marks a session reopened during a restore as current at
+    /// `part_restore_epoch`.
+    pub(crate) fn mark_restored(&self, part_restore_epoch: u64) {
+        let mut inner = self.inner.write();
+        if inner.last_restore_epoch < part_restore_epoch {
+            inner.last_restore_epoch = part_restore_epoch;
+        }
+    }
+
+    /// Returns a non-owning reference to this session.
+    pub(crate) fn downgrade(&self) -> WeakHsmSession {
+        WeakHsmSession(Arc::downgrade(&self.inner))
+    }
+
+    /// Returns the PSK slot id (0 = CO, 1 = CU) of a V2 session, or
+    /// `None` for a V1 session.
+    pub(crate) fn ex_psk_id(&self) -> Option<u8> {
+        match &self.inner.read().kind {
+            SessionKind::Ver2 { psk_id, .. } => Some(*psk_id),
+            SessionKind::Ver1 { .. } => None,
+        }
+    }
+
     /// Returns the partition handle associated with this session.
     pub(crate) fn partition(&self) -> HsmPartition {
         self.inner.read().partition().clone()
@@ -188,16 +263,23 @@ impl HsmSession {
     /// [`HsmError::InvalidSession`].
     pub fn change_psk(&self, new_psk: &[u8; PSK_LEN]) -> HsmResult<()> {
         let inner = self.inner.read();
-        match &inner.kind {
-            SessionKind::Ver2 { param_key, .. } => ddi::psk_change(
-                &inner.partition,
-                inner.id,
-                param_key,
-                new_psk,
-                &inner.ddi_cookie,
-            ),
-            SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
-        }
+        let SessionKind::Ver2 {
+            psk_id, param_key, ..
+        } = &inner.kind
+        else {
+            return Err(HsmError::InvalidSession);
+        };
+        ddi::psk_change(
+            &inner.partition,
+            inner.id,
+            param_key,
+            new_psk,
+            &inner.ddi_cookie,
+        )?;
+        inner.partition.with_resiliency_ex(|rs| {
+            rs.capture_psk(*psk_id, new_psk);
+            Ok(())
+        })
     }
 
     pub(crate) fn key_report_auth(
@@ -229,7 +311,7 @@ impl HsmSession {
         sapota_thumbprint: Option<&[u8]>,
     ) -> HsmResult<HsmPartInitExResult> {
         let inner = self.inner.read();
-        match &inner.kind {
+        let result = match &inner.kind {
             SessionKind::Ver2 { param_key, .. } => ddi::part_init_ex(
                 &inner.partition,
                 inner.id,
@@ -242,7 +324,17 @@ impl HsmSession {
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
-        }
+        }?;
+        inner.partition.with_resiliency_ex(|rs| {
+            rs.capture_part_init(
+                part_policy,
+                mach_seed,
+                pota_thumbprint,
+                sata_thumbprint,
+                sapota_thumbprint,
+            )
+        })?;
+        Ok(result)
     }
 
     /// Issues TBOR `PartFinal` (opcode `0x08`) on this CO session.
@@ -258,7 +350,7 @@ impl HsmSession {
         prev_local_mk_backup: Option<&[u8]>,
     ) -> HsmResult<HsmPartFinalExResult> {
         let inner = self.inner.read();
-        match &inner.kind {
+        let result = match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::part_final_ex(
                 &inner.partition,
                 inner.id,
@@ -268,7 +360,11 @@ impl HsmSession {
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
-        }
+        }?;
+        inner.partition.with_resiliency_ex(|rs| {
+            rs.capture_part_final(pta_cert_chain, &result.local_mk_backup)
+        })?;
+        Ok(result)
     }
 
     /// Issues TBOR `SdCreateRemoteBackup` (opcode `0x0A`) on this CO
@@ -291,7 +387,7 @@ impl HsmSession {
         receiver_evidence: &HsmSdEvidence<'_>,
     ) -> HsmResult<HsmSdRemoteBackupResult> {
         let inner = self.inner.read();
-        match &inner.kind {
+        let result = match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_create_remote_backup_ex(
                 &inner.partition,
                 inner.id,
@@ -302,7 +398,11 @@ impl HsmSession {
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
-        }
+        }?;
+        inner.partition.with_resiliency_ex(|rs| {
+            rs.capture_sd_backups(&result.pok_local_backup, &result.sd_mk_backup)
+        })?;
+        Ok(result)
     }
 
     /// Issues TBOR `DarcKexKeyGen` (opcode `0x20`) on this CO session.
@@ -420,7 +520,7 @@ impl HsmSession {
         prev_sd_mk_backup: &[u8],
     ) -> HsmResult<HsmSdRestoreResult> {
         let inner = self.inner.read();
-        match &inner.kind {
+        let result = match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_remote_backup_ex(
                 &inner.partition,
                 inner.id,
@@ -433,7 +533,11 @@ impl HsmSession {
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
-        }
+        }?;
+        inner.partition.with_resiliency_ex(|rs| {
+            rs.capture_sd_backups(&result.pok_local_backup, &result.sd_mk_backup)
+        })?;
+        Ok(result)
     }
 
     /// Issues TBOR `SdCreatePeerBackup` (opcode `0x0E`) on this CO session.
@@ -483,7 +587,7 @@ impl HsmSession {
         prev_sd_mk_backup: &[u8],
     ) -> HsmResult<HsmSdRestoreResult> {
         let inner = self.inner.read();
-        match &inner.kind {
+        let result = match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_peer_backup_ex(
                 &inner.partition,
                 inner.id,
@@ -495,7 +599,11 @@ impl HsmSession {
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
-        }
+        }?;
+        inner.partition.with_resiliency_ex(|rs| {
+            rs.capture_sd_backups(&result.pok_local_backup, &result.sd_mk_backup)
+        })?;
+        Ok(result)
     }
 
     /// Issues TBOR `SdRestoreLocalBackup` (opcode `0x0D`) on this CO
@@ -511,7 +619,7 @@ impl HsmSession {
         sd_mk_backup: &[u8],
     ) -> HsmResult<HsmSdRestoreResult> {
         let inner = self.inner.read();
-        match &inner.kind {
+        let result = match &inner.kind {
             SessionKind::Ver2 { .. } => ddi::sd_restore_local_backup_ex(
                 &inner.partition,
                 inner.id,
@@ -520,7 +628,11 @@ impl HsmSession {
                 &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
-        }
+        }?;
+        inner.partition.with_resiliency_ex(|rs| {
+            rs.capture_sd_backups(&result.pok_local_backup, &result.sd_mk_backup)
+        })?;
+        Ok(result)
     }
 }
 
@@ -556,8 +668,11 @@ enum SessionKind {
         /// Sensitive — never logged (redacted in the manual `Debug`
         /// impl, since `AesKey` is not `Debug`).
         param_key: AesKey,
-        /// FW-emitted wrapped masking-key blob.
+        /// FW-emitted wrapped masking-key blob. Refreshed on reopen.
         bmk_session: Vec<u8>,
+        /// Session seed sealed during the original handshake; re-sent
+        /// on `SessionReopenFinish` so the HSM can unwrap `bmk_session`.
+        seed: [u8; SESSION_SEED_LEN],
     },
 }
 
@@ -666,10 +781,12 @@ impl Drop for HsmSessionInner {
             SessionKind::Ver2 {
                 exported,
                 bmk_session,
+                seed,
                 ..
             } => {
                 exported.zeroize();
                 bmk_session.zeroize();
+                seed.zeroize();
             }
         }
     }
@@ -734,6 +851,7 @@ impl HsmSessionInner {
                 exported: result.exported.to_vec(),
                 param_key: result.param_key,
                 bmk_session: result.bmk_session.to_vec(),
+                seed: *result.seed,
             },
         }
     }
@@ -869,5 +987,43 @@ impl HsmSessionInner {
     /// reopened.
     pub(crate) fn last_restore_epoch(&self) -> u64 {
         self.last_restore_epoch
+    }
+
+    /// Re-runs the V2 handshake via `SessionReopenInit` /
+    /// `SessionReopenFinish` and replaces the stale session material
+    /// and continuity cookie.
+    fn reopen_ex(&mut self, psk: Option<&[u8; PSK_LEN]>) -> HsmResult<()> {
+        let SessionKind::Ver2 {
+            psk_id,
+            session_type,
+            exported,
+            param_key,
+            bmk_session,
+            seed,
+        } = &mut self.kind
+        else {
+            return Err(HsmError::InvalidSession);
+        };
+        let ddi_cookie = self.ddi_cookie.get_mut();
+
+        let result = ddi::reopen_session_ex(
+            &self.partition,
+            self.rev,
+            self.id,
+            *ddi_cookie,
+            *psk_id,
+            psk,
+            *session_type,
+            seed,
+            bmk_session,
+        )?;
+
+        exported.zeroize();
+        *exported = result.exported.to_vec();
+        *param_key = result.param_key;
+        bmk_session.zeroize();
+        *bmk_session = result.bmk_session.to_vec();
+        *ddi_cookie = result.ddi_cookie;
+        Ok(())
     }
 }

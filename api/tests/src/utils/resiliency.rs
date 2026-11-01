@@ -173,6 +173,17 @@ pub(crate) fn make_resiliency_config_in(dir: &Path) -> HsmResiliencyConfig {
     }
 }
 
+/// Creates a [`HsmResiliencyExConfig`] (TBOR resiliency) backed by the
+/// given directory. No PTA callback is configured, so restore replays
+/// the PTA chain captured from the original `part_final_ex`.
+pub(crate) fn make_resiliency_ex_config_in(dir: &Path) -> HsmResiliencyExConfig {
+    HsmResiliencyExConfig {
+        storage: Box::new(FileStorage::new(dir.to_path_buf())),
+        lock: Arc::new(FileLock::new(dir.join(".lock"))),
+        pta_callback: None,
+    }
+}
+
 /// Convenience wrapper: creates the shared directory, builds a
 /// [`HsmResiliencyConfig`], and returns the RAII context.
 ///

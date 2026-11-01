@@ -1250,6 +1250,44 @@ struct tsra_resiliency_config
 };
 
 /*
+ PTA endorsement callback for security-domain (TBOR) resiliency.
+
+ The `endorse` callback is invoked when restore re-runs partition
+ provisioning and needs a PTA certificate chain for the new PTA key.
+ It receives the DER PKCS#10 CSR and COSE_Sign1 PTA report and returns
+ the certificate chain as concatenated DER certificates (root first,
+ PTA leaf last). Uses the two-call buffer pattern: first call with a
+ null/zero output buffer to query the size, second call to fill it.
+ */
+struct tsra_pta_callback_ops
+{
+    tsra_status (*endorse)(
+        void *ctx,
+        const struct tsra_buffer *pta_csr,
+        const struct tsra_buffer *pta_report,
+        struct tsra_buffer *cert_chain
+    );
+};
+
+/*
+ Resiliency configuration passed to `tsra_part_enable_resiliency_ex`.
+
+ - `ctx`: Opaque context pointer passed back to every callback. Must
+   remain valid until `tsra_part_close` returns. **Must not** contain or
+   reference the same partition handle — see module-level safety docs.
+ - `storage_ops` and `lock_ops` are always required (inline).
+ - `pta_callback_ops`: Optional PTA endorsement callback. When NULL,
+   restore replays the chain captured from `tsra_sess_ex_part_final`.
+ */
+struct tsra_resiliency_ex_config
+{
+    void *ctx;
+    struct tsra_resiliency_storage_ops storage_ops;
+    struct tsra_resiliency_lock_ops lock_ops;
+    const struct tsra_pta_callback_ops *pta_callback_ops;
+};
+
+/*
  Partition property structure for querying partition attributes.
 
  # Safety
@@ -3009,6 +3047,31 @@ tsra_status tsra_part_init(
     const struct tsra_owner_backup_key_config *backup_key_config,
     const struct tsra_pota_endorsement *pota_endorsement,
     const struct tsra_resiliency_config *resiliency_config
+);
+
+/*
+ @brief Enable security-domain (TBOR) resiliency on a partition
+
+ Enables automatic retry and recovery from transient hardware resets for
+ sessions opened with `tsra_sess_ex_open`. Call once after
+ `tsra_part_open` and before opening any security-domain session so the
+ SDK can capture provisioning state and rotated PSKs.
+
+ @param[in] part_handle Handle to the HSM partition
+ @param[in] config Resiliency configuration (see `tsra_resiliency_ex_config`)
+
+ @return `TSRA_STATUS_SUCCESS` on success; `TSRA_STATUS_INVALID_ARGUMENT`
+         if `config` is malformed or resiliency is already enabled on the
+         partition
+
+ @internal
+ # Safety
+ `config` must point to a valid `tsra_resiliency_ex_config` whose
+ callbacks and `ctx` remain valid until `tsra_part_close` returns.
+ */
+tsra_status tsra_part_enable_resiliency_ex(
+    tsra_handle part_handle,
+    const struct tsra_resiliency_ex_config *config
 );
 
 /*

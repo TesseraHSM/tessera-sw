@@ -31,10 +31,6 @@ class ecc_resiliency_stress : public resiliency_stress_base
 ///
 TEST_F(ecc_resiliency_stress, ecc_sign_under_reset)
 {
-    if (api_rev_at_least(1, 1))
-    {
-        return;
-    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -81,10 +77,6 @@ TEST_F(ecc_resiliency_stress, ecc_sign_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_sign_verify_under_reset)
 {
-    if (api_rev_at_least(1, 1))
-    {
-        return;
-    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -138,10 +130,6 @@ TEST_F(ecc_resiliency_stress, ecc_sign_verify_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_key_gen_under_reset)
 {
-    if (api_rev_at_least(1, 1))
-    {
-        return;
-    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -182,10 +170,6 @@ TEST_F(ecc_resiliency_stress, ecc_key_gen_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_key_report_under_reset)
 {
-    if (api_rev_at_least(1, 1))
-    {
-        return;
-    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -248,10 +232,6 @@ TEST_F(ecc_resiliency_stress, ecc_key_report_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_unmask_under_reset)
 {
-    if (api_rev_at_least(1, 1))
-    {
-        return;
-    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);

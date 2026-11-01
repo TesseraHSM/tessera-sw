@@ -86,6 +86,8 @@ pub(crate) fn sess_ctrl_from_tbor_opcode(opcode: u8) -> HsmSessCtrl {
         | opcode::GET_CERTIFICATE => HsmSessCtrl::NoSession,
         opcode::SESSION_OPEN_INIT => HsmSessCtrl::Open,
         opcode::SESSION_OPEN_FINISH
+        | opcode::SESSION_REOPEN_INIT
+        | opcode::SESSION_REOPEN_FINISH
         | opcode::PSK_CHANGE
         | opcode::PART_INIT
         | opcode::PART_FINAL

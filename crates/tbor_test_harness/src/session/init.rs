@@ -20,6 +20,7 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSessionOpenInitReq;
 use tsra_ddi_tbor_types::TborSessionOpenInitResp;
+use tsra_ddi_tbor_types::MAC_RESP_LEN;
 use tsra_ddi_tbor_types::PK_INIT_LEN;
 use tsra_ddi_tbor_types::SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256;
 use tsra_session_ex_crypto::build_hpke_info;
@@ -149,6 +150,33 @@ pub fn session_open_init_with_options(
     dev: &TestDev,
     opts: SessionOpenInitOptions<'_>,
 ) -> Result<PendingHandshake, DdiError> {
+    let psk_id = opts.psk_id;
+    let session_type = opts.session_type;
+    let suite_id = opts.suite_id;
+    run_phase1(dev, opts, |pk_init| {
+        let req = TborSessionOpenInitReq {
+            psk_id,
+            session_type: session_type.to_u8(),
+            suite_id,
+            pk_init,
+        };
+        let mut cookie = None;
+        let resp: TborSessionOpenInitResp = dev.exec_op_tbor(&req, None, &mut cookie)?;
+        Ok((resp.session_id, resp.pk_resp, resp.mac_resp))
+    })
+}
+
+/// Phase-1 core shared by `SessionOpenInit` and `SessionReopenInit`.
+///
+/// `send` ships the opcode-specific request for the given `pk_init` and
+/// returns `(session_id, pk_resp, mac_resp)`.
+pub(super) fn run_phase1(
+    dev: &TestDev,
+    opts: SessionOpenInitOptions<'_>,
+    send: impl FnOnce(
+        [u8; PK_INIT_LEN],
+    ) -> Result<(u16, [u8; PK_INIT_LEN], [u8; MAC_RESP_LEN]), DdiError>,
+) -> Result<PendingHandshake, DdiError> {
     let (sk_init, pk_init_sec1, pk_init_key) = match opts.ephemeral {
         Some((sk, pk_sec1)) => {
             let pk = ec_pub_from_sec1(&pk_sec1).map_err(|_| DdiError::InvalidParameter)?;
@@ -163,14 +191,7 @@ pub fn session_open_init_with_options(
 
     let (pk_hsm_key, pk_hsm_sec1) = crypto::fetch_pk_hsm(dev)?;
 
-    let req = TborSessionOpenInitReq {
-        psk_id: opts.psk_id,
-        session_type: opts.session_type.to_u8(),
-        suite_id: opts.suite_id,
-        pk_init: pk_init_sec1,
-    };
-    let mut cookie = None;
-    let resp: TborSessionOpenInitResp = dev.exec_op_tbor(&req, None, &mut cookie)?;
+    let (session_id, pk_resp, mac_resp) = send(pk_init_sec1)?;
 
     let info = build_hpke_info(opts.psk_id, opts.session_type.to_u8(), opts.suite_id);
     let default_psk = default_psk(opts.psk_id).map_err(|_| DdiError::InvalidParameter)?;
@@ -180,7 +201,7 @@ pub fn session_open_init_with_options(
             &sk_init,
             &pk_init_key,
             &pk_hsm_key,
-            &resp.pk_resp,
+            &pk_resp,
             &info,
             psk,
             &[opts.psk_id],
@@ -190,11 +211,11 @@ pub fn session_open_init_with_options(
 
     verify_phase1_mac(
         &exported,
-        resp.session_id,
+        session_id,
         &pk_init_sec1,
         &pk_hsm_sec1,
-        &resp.pk_resp,
-        &resp.mac_resp,
+        &pk_resp,
+        &mac_resp,
     )
     .map_err(|_| DdiError::TborDecodeError)?;
 
@@ -203,16 +224,16 @@ pub fn session_open_init_with_options(
         // close of this slot under the transport keys bound at Phase 1.
         let transport =
             SessionTransport::derive(&exported).map_err(|_| DdiError::TborDecodeError)?;
-        dev.set_session_transport(resp.session_id, transport);
+        dev.set_session_transport(session_id, transport);
     }
 
     Ok(PendingHandshake {
-        session_id: resp.session_id,
+        session_id,
         psk_id: opts.psk_id,
         session_type: opts.session_type,
         exported,
         pk_init: pk_init_sec1,
-        pk_resp: resp.pk_resp,
+        pk_resp,
         pk_hsm: pk_hsm_sec1,
     })
 }

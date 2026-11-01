@@ -58,6 +58,8 @@ pub struct SessionHandshake {
     pub param_key: AesKey,
     /// FW-emitted wrapped masking-key blob — opaque to the host.
     pub bmk_session: Vec<u8>,
+    /// Session seed sealed into `seed_envelope`; needed to reopen.
+    pub seed: [u8; SESSION_SEED_LEN],
 }
 
 impl SessionHandshake {
@@ -135,29 +137,50 @@ pub fn session_open_finish_with_mac(
     pending: PendingHandshake,
     mac_fin: [u8; 48],
 ) -> Result<SessionHandshake, DdiError> {
-    let param_key = derive_param_key(&pending.exported).map_err(|_| DdiError::TborDecodeError)?;
     let seed = fresh_seed()?;
+    run_phase2(
+        pending,
+        mac_fin,
+        seed,
+        |session_id, mac_fin, seed_envelope| {
+            let req = TborSessionOpenFinishReq {
+                session_id,
+                mac_fin,
+                seed_envelope,
+            };
+            // On Duo this travels sealed under the transport registered at Phase 1.
+            let mut cookie = None;
+            let resp: TborSessionOpenFinishResp = dev
+                .exec_op_tbor(&req, None, &mut cookie)
+                .inspect_err(|err| {
+                    // Firmware reclaims the slot after an authentication failure.
+                    if matches!(err, DdiError::TborStatus(TborStatus::SessionAuthFailure)) {
+                        dev.remove_session_transport(session_id);
+                    }
+                })?;
+            Ok(resp.bmk_session)
+        },
+    )
+}
+
+/// Phase-2 core shared by `SessionOpenFinish` and `SessionReopenFinish`.
+///
+/// Seals `seed` under the handshake's `param_key`; `send` ships the
+/// opcode-specific request and returns the new `bmk_session`.
+pub(super) fn run_phase2(
+    pending: PendingHandshake,
+    mac_fin: [u8; 48],
+    seed: [u8; SESSION_SEED_LEN],
+    send: impl FnOnce(u16, [u8; 48], [u8; SEED_ENVELOPE_LEN]) -> Result<Vec<u8>, DdiError>,
+) -> Result<SessionHandshake, DdiError> {
+    let param_key = derive_param_key(&pending.exported).map_err(|_| DdiError::TborDecodeError)?;
     let envelope = seal_seed_envelope(&param_key, &seed).map_err(|_| DdiError::TborDecodeError)?;
     let seed_envelope: [u8; SEED_ENVELOPE_LEN] = envelope
         .as_slice()
         .try_into()
         .map_err(|_| DdiError::TborDecodeError)?;
 
-    let req = TborSessionOpenFinishReq {
-        session_id: pending.session_id,
-        mac_fin,
-        seed_envelope,
-    };
-    // On Duo this travels sealed under the transport registered at Phase 1.
-    let mut cookie = None;
-    let resp: TborSessionOpenFinishResp =
-        dev.exec_op_tbor(&req, None, &mut cookie)
-            .inspect_err(|err| {
-                // Firmware reclaims the slot after an authentication failure.
-                if matches!(err, DdiError::TborStatus(TborStatus::SessionAuthFailure)) {
-                    dev.remove_session_transport(pending.session_id);
-                }
-            })?;
+    let bmk_session = send(pending.session_id, mac_fin, seed_envelope)?;
 
     Ok(SessionHandshake {
         session_id: pending.session_id,
@@ -165,6 +188,7 @@ pub fn session_open_finish_with_mac(
         session_type: pending.session_type,
         exported: pending.exported,
         param_key,
-        bmk_session: resp.bmk_session,
+        bmk_session,
+        seed,
     })
 }

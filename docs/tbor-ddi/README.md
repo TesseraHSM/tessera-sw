@@ -189,6 +189,8 @@ storage is zero.
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
 | `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
+| `0x30` | `SessionReopenInit` | InSession | [`commands/session_reopen_init.md`](./commands/session_reopen_init.md) |
+| `0x31` | `SessionReopenFinish` | InSession | [`commands/session_reopen_finish.md`](./commands/session_reopen_finish.md) |
 | `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 
 ## Default-PSK gate
@@ -213,7 +215,8 @@ Any other in-session opcode returns `DefaultPskMustRotate`
 unlocks CO sessions but does not affect CU; rotating the CU PSK is a
 separate operation.  Out-of-session opcodes (`ApiRev`,
 `SessionOpenInit`, `SessionOpenFinish`, `PartInfo`, `GetCertChainInfo`,
-`GetCertificate`) are never gated so a client can always open the
+`GetCertificate`) and the reopen handshake (`SessionReopenInit`,
+`SessionReopenFinish`) are never gated so a client can always open the
 bootstrap session.
 
 **Bootstrap sequence (mandatory on first provisioning):**
@@ -242,10 +245,14 @@ the same shape for both roles, but the negotiated `session_type` pins
 which keys the schedule derives and therefore which envelope
 subsequent in-session commands carry.
 
-Resume is **not** a TBOR concern.  A host that wants to restore a
-prior session's `masking_key` blob across resets uses the MBOR
-`ReopenSession` command instead; every `SessionOpenInit` here opens
-a fresh session.
+Every `SessionOpenInit` opens a fresh session.  After a partition
+reset, existing sessions are `NeedsRenegotiation` (in-session commands
+fail with `SessionNeedsRenegotiation`) and are re-established under the
+same `session_id` with
+[`SessionReopenInit`](./commands/session_reopen_init.md) /
+[`SessionReopenFinish`](./commands/session_reopen_finish.md), which
+share the open handshake and restore the session's `masking_key` from
+its `bmk_session`.
 
 ### Crypto Officer (Authenticated, `psk_id = 0`, `session_type = 1`)
 

@@ -38,6 +38,8 @@
 |            | `TSRA_ALGO_ID_AES_CTR`) and their parameter structures           |
 |            | AES-XTS `tsra_key_unwrap` on ex sessions takes a single wrap of  |
 |            | the 64-byte `K1 \|\| K2` key                                     |
+| 11/01/2026 | Added security-domain resiliency (`tsra_part_enable_resiliency_ex`, |
+|            | `tsra_resiliency_ex_config`, `tsra_pta_callback_ops`)            |
 |            | AES-XTS on ex sessions supports a 64-bit tweak; non-zero upper   |
 |            | `sector_num` bytes return `TSRA_STATUS_INVALID_TWEAK`            |
 |            | `tsra_key_unmask_pair` supports RSA and ECC on ex sessions       |

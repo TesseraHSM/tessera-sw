@@ -29,10 +29,6 @@ class init_resiliency_stress : public resiliency_stress_base
 ///
 TEST_F(init_resiliency_stress, cert_chain_under_reset)
 {
-    if (api_rev_at_least(1, 1))
-    {
-        return;
-    }
     part_list_.for_each_part([&](std::vector<tsra_char> &path) {
         auto r = init_partition_with_resiliency(path);
         ASSERT_NE(r.part, 0u);
@@ -79,6 +75,8 @@ TEST_F(init_resiliency_stress, cert_chain_under_reset)
 /// while a dedicated thread fires resets. At most five transient
 /// DDI_CMD_FAILURE errors are tolerated.
 ///
+/// MBOR-only: exercises `tsra_part_init`, which TBOR replaces with the
+/// session-scoped `tsra_sess_ex_part_init` / `tsra_sess_ex_part_final`.
 TEST_F(init_resiliency_stress, init_part_under_reset)
 {
     if (api_rev_at_least(1, 1))
