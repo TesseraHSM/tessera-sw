@@ -893,7 +893,7 @@ mod session_gate_tests {
             hsm.handle_io(io).await;
             if let Some(reply_rx) = reply_rx {
                 let mut raw = reply_rx.await.unwrap();
-                let cqe = Cqe::from(&mut raw);
+                let cqe = Cqe::try_from(&mut raw[..tsra_fw_hsm_io::CQE_DWORDS]).unwrap();
                 if attempt == 0 {
                     assert_eq!(cqe.status(), HostStatus::ALLOC_ERR);
                     assert!(response.0.iter().all(|&b| b == 0xA5));

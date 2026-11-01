@@ -107,6 +107,8 @@ pub(crate) async fn handle<P: HsmPal>(
         ))
     };
 
+    cmd_buf.response(TborAesGcmEncryptDecryptResp::MAX_ENCODED_SIZE)?;
+
     // In bounds: decode bounded every field within the request, and
     // `[iv | tag]` ends at or before the masked key.
     let (head, tail) = cmd_buf.request_mut().split_at_mut(key_off);

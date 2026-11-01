@@ -71,6 +71,8 @@ pub(crate) async fn handle<P: HsmPal>(
     let src = read_oob_desc(pal, io, &oob, in_index).await?;
     let dst = read_oob_desc(pal, io, &oob, out_index).await?;
 
+    cmd_buf.response(TborAesXtsEncryptDecryptResp::MAX_ENCODED_SIZE)?;
+
     // In bounds: decode bounded every field within the request, and the
     // tweak ends at or before the masked key.
     let (head, tail) = cmd_buf.request_mut().split_at_mut(key_off);
