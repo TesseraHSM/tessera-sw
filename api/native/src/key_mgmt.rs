@@ -349,12 +349,10 @@ pub unsafe extern "C" fn tsra_key_unwrap_pair(
 /// the key material and properties, so no external properties or unwrapping keys
 /// are needed. On a legacy session, the device authenticates and imports the key.
 ///
-/// On an extended session, this reconstructs an unpinned host handle without a
-/// device command. Only the envelope shape and supported properties are checked;
-/// the metadata remains unauthenticated until a device operation uses the key.
-/// A modified AEAD tag or a session-scoped blob from another session can return
-/// success here and fail with a masked-key authentication error on use.
-/// Property reads and output-size queries do not authenticate the blob.
+/// On an extended session, the device authenticates the blob via TBOR VerifyKey
+/// and an unpinned host handle is returned; no device-resident key is created.
+/// A modified blob or a session-scoped blob from another session fails with
+/// TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED.
 ///
 /// @param[in] sess_handle Handle to the HSM session
 /// @param[in] key_kind The kind of key to unmask (e.g., AES)

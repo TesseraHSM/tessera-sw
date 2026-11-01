@@ -37,5 +37,7 @@
 |            | `TSRA_ALGO_ID_AES_CFB`, `TSRA_ALGO_ID_AES_OFB`,                  |
 |            | `TSRA_ALGO_ID_AES_CTR`) and their parameter structures           |
 |            | `tsra_key_unmask_pair` supports RSA and ECC on ex sessions       |
+|            | `tsra_key_unmask` authenticates the blob on ex sessions (TBOR    |
+|            | `VerifyKey`); tampered or wrong-session blobs fail at unmask     |
 
 \pagebreak

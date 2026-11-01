@@ -419,7 +419,7 @@ fn test_aes_unmask_corrupted_blob_fails(session: HsmSession) {
 
 #[cfg(feature = "session-ex-tests")]
 #[session_test]
-fn test_aes_unmask_defers_tag_authentication_until_use(session: HsmSession) {
+fn test_aes_unmask_rejects_modified_tag(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Aes)
@@ -438,20 +438,16 @@ fn test_aes_unmask_defers_tag_authentication_until_use(session: HsmSession) {
 
     let mut masked = original.masked_key_vec().expect("masked key");
     *masked.last_mut().expect("AEAD tag") ^= 1;
-    let reconstructed =
-        HsmKeyManager::unmask_key(&session, &mut HsmAesKeyUnmaskAlgo::default(), &masked)
-            .expect("tag authentication is deferred during reconstruction");
-    compare_key_properties(&original, &reconstructed);
-
-    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
-    let error = HsmEncrypter::encrypt_vec(&mut cipher, &reconstructed, &plaintext)
-        .expect_err("the device must reject the modified authentication tag");
-    assert_eq!(error, HsmError::MaskedKeyAuthenticationFailed);
+    let result = HsmKeyManager::unmask_key(&session, &mut HsmAesKeyUnmaskAlgo::default(), &masked);
+    assert!(
+        matches!(result, Err(HsmError::MaskedKeyAuthenticationFailed)),
+        "unmask must reject the modified authentication tag"
+    );
 }
 
 #[cfg(feature = "session-ex-tests")]
 #[test]
-fn test_aes_unmask_defers_wrong_session_rejection_until_use() {
+fn test_aes_unmask_rejects_key_from_another_session() {
     let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();
     let (partition, rev, session) = crate::utils::sd_provision::finalized_co_partition();
     let props = HsmKeyPropsBuilder::default()
@@ -487,13 +483,11 @@ fn test_aes_unmask_defers_wrong_session_rejection_until_use() {
     HsmEncrypter::encrypt_vec(&mut cipher, &target_key, &plaintext)
         .expect("the target session can use its own key");
 
-    let reconstructed =
-        HsmKeyManager::unmask_key(&other, &mut HsmAesKeyUnmaskAlgo::default(), &masked)
-            .expect("session binding is deferred during reconstruction");
-    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
-    let error = HsmEncrypter::encrypt_vec(&mut cipher, &reconstructed, &plaintext)
-        .expect_err("the device must reject a key masked for another session");
-    assert_eq!(error, HsmError::MaskedKeyAuthenticationFailed);
+    let result = HsmKeyManager::unmask_key(&other, &mut HsmAesKeyUnmaskAlgo::default(), &masked);
+    assert!(
+        matches!(result, Err(HsmError::MaskedKeyAuthenticationFailed)),
+        "unmask must reject a key masked for another session"
+    );
 }
 
 /// verifies AES key unwrap fails when unwrapping with wrong algorithm type

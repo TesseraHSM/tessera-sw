@@ -153,22 +153,17 @@ tsra_status tsra_key_unmask(
 **Authentication**
 
 - A legacy session authenticates and imports the key into the device.
-- An extended session reconstructs an unpinned host handle without issuing
-  TBOR `UnwrapKey` or any other device command. It validates the envelope shape
-  and supported properties, but does **not** authenticate the AEAD tag or
-  session binding. The parsed metadata remains unauthenticated.
-- A structurally valid blob with a modified tag, or a session-scoped blob
-  supplied to another session, can return `TSRA_STATUS_SUCCESS` here. The first
-  device operation using that blob rejects it with a masked-key authentication
-  error. Property reads and output-size queries do not perform authentication.
-- This differs from `tsra_key_unmask_pair`, which authenticates the blob during
-  extended-session public-key recovery.
+- An extended session authenticates the blob on the device with TBOR
+  `VerifyKey` (AEAD tag over the metadata and key material, and the session
+  binding of session-scoped blobs), then returns an unpinned host handle. No
+  device-resident key is created.
+- A blob with a modified tag, metadata, or key material, or a session-scoped
+  blob supplied to another session, fails with
+  `TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED`.
 
 **Returns**
 
 `TSRA_STATUS_SUCCESS` on successful reconstruction, error code otherwise.
-For extended sessions, success is not proof that the blob is authentic or
-usable in the target session.
 
 ## tsra_key_unmask_pair
 

@@ -179,14 +179,12 @@ impl HsmKeyManager {
     ///
     /// # Authentication
     ///
-    /// On extended HSM sessions, the built-in single-key unmask algorithms
-    /// reconstruct an unpinned host handle without a device command. They
-    /// validate the envelope shape and supported properties, but the metadata
-    /// remains unauthenticated until a device operation uses the key. A
-    /// modified AEAD tag or a session-scoped blob from another session may
-    /// therefore be accepted here and fail with
-    /// [`HsmError::MaskedKeyAuthenticationFailed`] on use. Size queries and
-    /// property reads do not authenticate the blob.
+    /// On extended HSM sessions, the built-in unmask algorithms reconstruct
+    /// an unpinned host handle (no device-resident key is created). The
+    /// device authenticates the blob first — TBOR `VerifyKey` for single
+    /// keys, `GetPublicKey` for key pairs — so a modified blob or a
+    /// session-scoped blob from another session fails here with
+    /// [`HsmError::MaskedKeyAuthenticationFailed`].
     pub fn unmask_key<Algo: HsmKeyUnmaskOp>(
         session: &Algo::Session,
         algo: &mut Algo,

@@ -125,6 +125,7 @@ mod session_open_finish;
 mod session_open_init;
 mod status;
 mod unwrap_key;
+mod verify_key;
 
 pub use aes_encrypt_decrypt::*;
 pub use aes_generate_key::*;
@@ -173,6 +174,7 @@ pub use session_open_finish::*;
 pub use session_open_init::*;
 pub use status::*;
 pub use unwrap_key::*;
+pub use verify_key::*;
 
 /// Trait implemented by host-side TBOR request value types.
 ///

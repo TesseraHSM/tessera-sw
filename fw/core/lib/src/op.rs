@@ -306,7 +306,8 @@ impl SessionCtrl {
             | opcode::MLKEM_GENERATE_KEY
             | opcode::MLKEM_ENCAPSULATE
             | opcode::MLKEM_DECAPSULATE
-            | opcode::GET_PUBLIC_KEY => Self::InSession,
+            | opcode::GET_PUBLIC_KEY
+            | opcode::VERIFY_KEY => Self::InSession,
             opcode::SESSION_CLOSE => Self::Close,
             _ => Self::NoSession,
         }

@@ -26,7 +26,7 @@ use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 
 /// Generate a session-scoped ECC signing key; returns `(masked, pub)`.
-fn generate_ecc(ctx: &TestCtx, session_id: u16, curve: u8) -> (Vec<u8>, Vec<u8>) {
+pub fn generate_ecc(ctx: &TestCtx, session_id: u16, curve: u8) -> (Vec<u8>, Vec<u8>) {
     let resp = ctx
         .tbor(&TborEccGenerateKeyReq {
             session_id,

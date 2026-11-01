@@ -57,3 +57,4 @@ pub mod sd_sealing_key_gen;
 pub mod session_close;
 pub mod unexpected_toc_type;
 pub mod unwrap_key;
+pub mod verify_key;

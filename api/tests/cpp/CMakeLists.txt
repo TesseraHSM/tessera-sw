@@ -91,6 +91,7 @@ set(SOURCE
     algo/rsa/sign_verify_tests.cpp
     algo/rsa/unwrap_tests.cpp
     algo/sha/digest_tests.cpp
+    algo/secret/unmask_tests.cpp
 )
 
 if(SESSION_EX_TESTS)
@@ -114,7 +115,6 @@ else()
         multi_process_tests.cpp
         algo/aes/gcm_enc_dec_tests.cpp
         algo/aes/xts_enc_dec_tests.cpp
-        algo/secret/unmask_tests.cpp
         algo/kdf/kbkdf_tests.cpp
         resiliency/init_stress_tests.cpp
         resiliency/aes_stress_tests.cpp

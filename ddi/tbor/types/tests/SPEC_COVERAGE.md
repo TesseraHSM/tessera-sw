@@ -569,6 +569,18 @@ the same format as `UnwrapKey` / `EccGenerateKey`.
 | A session-scoped key is rejected in a different session | ✅ | `get_public_key::get_public_key_session_scoped_key_rejected_in_different_session` | `AesGcmDecryptTagDoesNotMatch` |
 | Default CO PSK is rejected | ✅ | `get_public_key::get_public_key_rejects_default_co_psk` | `DefaultPskMustRotate` |
 
+## `VerifyKey` (opcode in-session, gated)
+
+Authenticates a masked key of any kind without using it; empty response.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Intact symmetric and asymmetric keys are accepted | ✅ 🔁 | `verify_key::verify_key_accepts_intact_keys` | AES-256, RSA, RSA-CRT, ECC |
+| Crypto-User sessions are allowed | ✅ | `verify_key::verify_key_allowed_on_crypto_user_session` | |
+| A tampered tag, metadata, or key material is rejected | ✅ 🔁 | `verify_key::verify_key_tampered_masked_key_rejected` | `AesGcmDecryptTagDoesNotMatch` |
+| A session-scoped key is rejected in a different session | ✅ | `verify_key::verify_key_session_scoped_key_rejected_in_different_session` | `AesGcmDecryptTagDoesNotMatch` |
+| Default CO PSK is rejected | ✅ | `verify_key::verify_key_rejects_default_co_psk` | `DefaultPskMustRotate` |
+
 ## Known gaps (summary)
 
 The rows marked ⚠️ above, consolidated:

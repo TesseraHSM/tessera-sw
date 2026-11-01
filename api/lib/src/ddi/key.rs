@@ -3,6 +3,7 @@
 
 use resiliency_macro::resiliency_key_gen;
 use tsra_ddi_tbor_types::TborGetPublicKeyReq;
+use tsra_ddi_tbor_types::TborVerifyKeyReq;
 
 use super::*;
 
@@ -213,7 +214,7 @@ pub(crate) fn unmask_key_raw_no_res(
     masked_key: &[u8],
 ) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
     if session.is_ex() {
-        return unmask_key_tbor(masked_key);
+        return unmask_key_tbor(session, masked_key);
     }
     let resp = unmask_key_exec_mbor(session, masked_key)?;
     let key_id = to_key_handle(resp.data.key_id, resp.data.bulk_key_id);
@@ -222,14 +223,17 @@ pub(crate) fn unmask_key_raw_no_res(
     Ok((guard.release(), key_props))
 }
 
-/// Unmasks a single TBOR masked key on the host.
+/// Unmasks a single TBOR masked key.
 ///
 /// TBOR keys are not device-resident: the key is an unpinned handle whose
-/// props carry the caller-held blob. This only validates the envelope shape
-/// and decodes cleartext metadata; it does not authenticate the AEAD tag or
-/// session binding. The returned properties remain unauthenticated until a
-/// device operation uses the blob and verifies it under the scope's masking key.
-pub(crate) fn unmask_key_tbor(masked_key: &[u8]) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
+/// props carry the caller-held blob. After host-side envelope and metadata
+/// validation, the blob is authenticated on the device with TBOR `VerifyKey`
+/// (AEAD tag over metadata and key material, under the scope's masking key),
+/// so a tampered or wrong-session blob is rejected here rather than on use.
+pub(crate) fn unmask_key_tbor(
+    session: &HsmSession,
+    masked_key: &[u8],
+) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
     let key_props = HsmMaskedKey::to_tbor_key_props(masked_key)?;
     if matches!(
         key_props.kind(),
@@ -237,7 +241,22 @@ pub(crate) fn unmask_key_tbor(masked_key: &[u8]) -> HsmResult<(HsmKeyHandle, Hsm
     ) {
         return Err(HsmError::UnsupportedKeyOperation);
     }
+    verify_key_tbor(session, masked_key)?;
     Ok((HsmKeyHandle::Unpinned, key_props))
+}
+
+/// Authenticates a TBOR masked key on the device with `VerifyKey`.
+fn verify_key_tbor(session: &HsmSession, masked_key: &[u8]) -> HsmResult<()> {
+    let req = TborVerifyKeyReq {
+        session_id: session.ex_session_id()?,
+        masked_key: masked_key.to_vec(),
+    };
+    let mut cookie = None;
+    session.with_dev(|dev| {
+        dev.exec_op_tbor(&req, None, &mut cookie)
+            .map_err(HsmError::from)
+    })?;
+    Ok(())
 }
 
 /// Raw unmask for key pairs — no resiliency retry.
