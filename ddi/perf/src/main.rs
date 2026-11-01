@@ -222,6 +222,7 @@ fn perf(args: PerfArgs) -> Result<(), String> {
     let ops: Vec<OpKind> = mix.iter().map(|m| m.0).collect();
     check_args(&args.run, &[args.threads], &ops)?;
     check_unique_ops(&ops)?;
+    bench::cumulative_weights(&mix)?;
     let kinds: BTreeSet<OpKind> = mix.iter().map(|m| m.0).collect();
 
     let env = Env::new(&args.run, &kinds)?;

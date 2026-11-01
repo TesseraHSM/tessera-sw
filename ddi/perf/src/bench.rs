@@ -29,20 +29,31 @@ pub(crate) struct Summary {
 impl Summary {
     /// Summarize the sample's percentiles and the full window's aggregates.
     fn of(
-        mut nanos: Vec<u64>,
+        mut samples: Vec<(u64, f64)>,
         count: u64,
         mean_ns: f64,
         m2_ns: f64,
         min_ns: u64,
         max_ns: u64,
     ) -> Option<Self> {
-        if nanos.is_empty() {
+        if samples.is_empty() {
             return None;
         }
-        nanos.sort_unstable();
+        samples.sort_unstable_by_key(|&(ns, _)| ns);
         let us = |ns: u64| ns as f64 / 1000.0;
-        let n = nanos.len();
-        let pct = |p: usize| us(nanos[((n - 1) * p).div_ceil(100)]);
+        let total_weight: f64 = samples.iter().map(|&(_, weight)| weight).sum();
+        let pct = |p: usize| {
+            let target = total_weight * p as f64 / 100.0;
+            let mut weight = 0.0;
+            let ns = samples
+                .iter()
+                .find_map(|&(ns, sample_weight)| {
+                    weight += sample_weight;
+                    (weight > target).then_some(ns)
+                })
+                .unwrap_or_else(|| samples.last().expect("non-empty sample").0);
+            us(ns)
+        };
         Some(Self {
             mean: mean_ns / 1000.0,
             stddev: (m2_ns / count as f64).sqrt() / 1000.0,
@@ -96,6 +107,7 @@ impl RunResult {
 struct Record {
     count: u64,
     nanos: Vec<u64>,
+    weighted_nanos: Vec<(u64, f64)>,
     mean_ns: f64,
     m2_ns: f64,
     min_ns: u64,
@@ -147,7 +159,15 @@ impl Record {
             }
         }
         self.count += other.count;
-        self.nanos.extend(other.nanos);
+        if other.weighted_nanos.is_empty() {
+            if !other.nanos.is_empty() {
+                let weight = other.count as f64 / other.nanos.len() as f64;
+                self.weighted_nanos
+                    .extend(other.nanos.into_iter().map(|ns| (ns, weight)));
+            }
+        } else {
+            self.weighted_nanos.extend(other.weighted_nanos);
+        }
         self.errors += other.errors;
         if self.first_error.is_none() {
             self.first_error = other.first_error;
@@ -299,7 +319,14 @@ pub(crate) fn run(
             op,
             count: r.count,
             rps: r.count as f64 / window.as_secs_f64(),
-            latency: Summary::of(r.nanos, r.count, r.mean_ns, r.m2_ns, r.min_ns, r.max_ns),
+            latency: Summary::of(
+                r.weighted_nanos,
+                r.count,
+                r.mean_ns,
+                r.m2_ns,
+                r.min_ns,
+                r.max_ns,
+            ),
             errors: r.errors,
             first_error: r.first_error,
         })
@@ -313,7 +340,7 @@ pub(crate) fn run(
 
 /// Running totals of the mix's weights, which pick each request's
 /// operation; fails if they do not fit in a `u32`.
-fn cumulative_weights(mix: &[(OpKind, u32)]) -> Result<Vec<u32>, String> {
+pub(crate) fn cumulative_weights(mix: &[(OpKind, u32)]) -> Result<Vec<u32>, String> {
     let mut total = 0u32;
     mix.iter()
         .map(|&(_, weight)| {
@@ -357,7 +384,7 @@ mod tests {
     #[test]
     fn summary_of_known_latencies() {
         let s = Summary::of(
-            (1..=100).map(|us| us * 1000).collect(),
+            (1..=100).map(|us| (us * 1000, 1.0)).collect(),
             100,
             50_500.0,
             83_325_000_000.0,
@@ -380,7 +407,7 @@ mod tests {
         }
         assert_eq!(record.nanos.len(), 10);
         let summary = Summary::of(
-            record.nanos,
+            record.nanos.into_iter().map(|ns| (ns, 100.0)).collect(),
             record.count,
             record.mean_ns,
             record.m2_ns,
@@ -392,6 +419,39 @@ mod tests {
         assert_eq!((summary.min, summary.max), (0.001, 1.0));
         let expected_stddev = (999_999.0_f64 / 12.0).sqrt() / 1000.0;
         assert!((summary.stddev - expected_stddev).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn merged_latency_samples_are_weighted_by_request_count() {
+        let mut merged = Record::default();
+        merged.merge(Record {
+            count: 1000,
+            nanos: vec![1],
+            mean_ns: 1.0,
+            min_ns: 1,
+            max_ns: 1,
+            ..Record::default()
+        });
+        merged.merge(Record {
+            count: 10,
+            nanos: vec![100_000],
+            mean_ns: 100_000.0,
+            min_ns: 100_000,
+            max_ns: 100_000,
+            ..Record::default()
+        });
+
+        let summary = Summary::of(
+            merged.weighted_nanos,
+            merged.count,
+            merged.mean_ns,
+            merged.m2_ns,
+            merged.min_ns,
+            merged.max_ns,
+        )
+        .expect("non-empty sample");
+        assert_eq!(summary.p50, 0.001);
+        assert_eq!(summary.max, 100.0);
     }
 
     #[test]
