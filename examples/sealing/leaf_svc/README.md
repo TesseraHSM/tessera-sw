@@ -182,4 +182,5 @@ unauthorized-join rejection, and concurrent authorized signing.
 
 Transport limits are 8192 bytes for the main request/response and 64 OOB items,
 each up to 64 KiB. Command schemas may impose tighter limits. Fast-path
-AES-GCM/XTS and persistent server-state storage are not implemented.
+AES-GCM/XTS bulk operations are supported. Persistent server-state storage is
+not implemented; emulator state is lost when the DDI server exits.
