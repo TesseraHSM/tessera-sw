@@ -180,7 +180,6 @@ fn test_masked_key_secret_hkdf_aes192() {
     );
 }
 
-#[cfg(not(feature = "sock"))]
 #[test]
 fn test_masked_key_secret_hkdf_aes_gcm_secret256() {
     ddi_dev_test(
@@ -218,7 +217,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret256() {
     );
 }
 
-#[cfg(not(feature = "sock"))]
 #[test]
 fn test_masked_key_secret_hkdf_aes_gcm_secret384() {
     ddi_dev_test(
@@ -256,7 +254,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret384() {
     );
 }
 
-#[cfg(not(feature = "sock"))]
 #[test]
 fn test_masked_key_secret_hkdf_aes_gcm_secret521() {
     ddi_dev_test(
@@ -733,7 +730,6 @@ fn test_secret_hkdf_helper(
     assert_eq!(resp.data.msg.len(), msg_len);
 }
 
-#[cfg(not(feature = "sock"))]
 #[allow(clippy::too_many_arguments)]
 fn test_secret_hkdf_aes_gcm_helper(
     dev: &mut <DdiTest as Ddi>::Dev,

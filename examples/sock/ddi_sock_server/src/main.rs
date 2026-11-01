@@ -9,7 +9,8 @@
 //! `vsock://CID:1234`, where CID is the server guest's VSOCK context ID.
 //! This unauthenticated test transport is for trusted, isolated environments;
 //! it is not a production service. Emulator state is lost when the server exits.
-//! OOB bytes are re-homed into server-owned SGL descriptors. Sideband reset
+//! OOB bytes are re-homed into server-owned SGL descriptors, and bulk
+//! (fast-path AES-GCM/XTS) buffers into server-owned SGL data. Sideband reset
 //! disables and re-enables this endpoint's partition, coordinated across all
 //! connections. Independent root/leaf instances need separate server processes.
 
@@ -19,6 +20,7 @@ use std::sync::Arc;
 use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
 use tsra_ddi_sock_proto::MAX_OOB_ITEM;
 use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
+use tsra_ddi_sock_proto::OobItem;
 use tsra_ddi_sock_proto::Request;
 use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
@@ -29,6 +31,12 @@ use tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_FINISH;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
 use tsra_ddi_tbor_types::codec::RequestView;
+use tsra_fw_hsm_bulk::BLOCK_LEN;
+use tsra_fw_hsm_bulk::BULK_SQE_DWORDS;
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::BulkParams;
+use tsra_fw_hsm_bulk::BulkSqe;
+use tsra_fw_hsm_bulk::RawBulkSqe;
 use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::CqeDw0;
@@ -42,6 +50,7 @@ use tsra_fw_hsm_std::StdHsm;
 mod tcp;
 
 const HSM_PARTITION_ID: u8 = 10;
+const HSM_BULK_QID: u16 = 1;
 const DMA_PAGE_SIZE: usize = 4096;
 const DMA_BUF_SIZE: usize = MAX_DMA_BUFFER as usize;
 const TRANSPORT_INVALID_REQUEST: u32 = 1;
@@ -124,6 +133,20 @@ impl Connection {
             let RequestFrame::Submit(submission) = &request else {
                 return Ok(execute_frame(server, request).await);
             };
+            if submission.sqe.len() == BULK_SQE_DWORDS {
+                // Bulk IOs run in an open session that this connection must
+                // own. A malformed SQE never reaches firmware.
+                let session_id = BulkSqe::parse(&submission.sqe).map(|sqe| sqe.session_id);
+                let sessions = server.sessions.read().await;
+                if session_id.is_ok_and(|id| !state.owns_session(id, &sessions)) {
+                    return Ok(ResponseFrame::Submit(transport_error(
+                        TRANSPORT_SESSION_NOT_OWNED,
+                    )));
+                }
+                let response = execute_frame(Arc::clone(&server), request).await;
+                drop(sessions);
+                return Ok(response);
+            }
             let op = CmdDword::from(submission.sqe[0]).op();
             let session_flags = SessionFlags::from(submission.sqe[11]);
             let session_id = submission.sqe[12] as u16;
@@ -168,7 +191,7 @@ impl Connection {
             }
             let response = execute_frame(Arc::clone(&server), request).await;
             if let ResponseFrame::Submit(response) = &response {
-                let mut raw = response.cqe;
+                let mut raw = cqe_dwords(&response.cqe);
                 let cqe = Cqe::from(&mut raw);
                 let flags = CqeDw0::from(response.cqe[0]);
                 if response.status == 0 && cqe.status() == 0 && flags.session_id_valid() {
@@ -249,16 +272,17 @@ async fn close_session(server: Arc<SocketHsm>, id: u16) -> Result<(), String> {
     let response = execute_frame(
         server,
         RequestFrame::Submit(Request {
-            sqe,
+            sqe: sqe.to_vec(),
             payload: Vec::new(),
             oob_items: Vec::new(),
+            tail: Vec::new(),
         }),
     )
     .await;
     let ResponseFrame::Submit(response) = response else {
         return Err("unexpected disconnect session-close response".into());
     };
-    let mut raw = response.cqe;
+    let mut raw = cqe_dwords(&response.cqe);
     let cqe = Cqe::from(&mut raw);
     if response.status != 0 || cqe.status() != 0 {
         return Err(format!(
@@ -275,27 +299,106 @@ fn patch_prp1(sqe: &mut [u32; 16], low_dword: usize, address: u64) {
     sqe[low_dword + 1] = (address >> 32) as u32;
 }
 
+/// Copies a normal-queue CQE out of a response; transport errors carry zeros.
+fn cqe_dwords(cqe: &[u32]) -> [u32; 4] {
+    cqe.try_into().unwrap_or_default()
+}
+
 fn transport_error(status: u32) -> Response {
     Response {
         status,
-        cqe: [0; 4],
+        cqe: vec![0; 4],
         payload: Vec::new(),
+        oob_items: Vec::new(),
+        tail: Vec::new(),
     }
 }
 
 async fn execute_request(server: &SocketHsm, request: Request) -> Response {
-    let src_len = request.sqe[1] as usize;
-    let dst_cap = request.sqe[6] as usize;
-    if request.sqe[2..6].iter().any(|&word| word != 0)
-        || request.sqe[7..11].iter().any(|&word| word != 0)
-        || request.sqe[13..15].iter().any(|&word| word != 0)
+    match <RawBulkSqe>::try_from(request.sqe.as_slice()) {
+        Ok(sqe) => execute_bulk(server, sqe, request).await,
+        Err(_) => execute_normal(server, request).await,
+    }
+}
+
+/// Runs a fast-path AES-GCM/XTS request. Client buffer addresses in the SQE
+/// are placeholders and are replaced with server-owned buffers.
+async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> Response {
+    let mut sqe = match BulkSqe::parse(&raw) {
+        Ok(sqe) => sqe,
+        Err(error) => {
+            return Response {
+                status: 0,
+                cqe: BulkCqe::error(&raw, HSM_BULK_QID, error).encode().to_vec(),
+                payload: Vec::new(),
+                oob_items: Vec::new(),
+                tail: Vec::new(),
+            };
+        }
+    };
+    let tail_len = match &sqe.params {
+        BulkParams::Gcm(gcm) => gcm.tail.map_or(0, |tail| usize::from(tail.len)),
+        BulkParams::Xts(_) => 0,
+    };
+    if !request.oob_items.is_empty()
+        || request.payload.len() != sqe.src_len as usize
+        || request.tail.len() != tail_len
+    {
+        return transport_error(TRANSPORT_INVALID_REQUEST);
+    }
+
+    let src = request.payload;
+    let mut dst = vec![0u8; sqe.dst_len as usize];
+    let mut tail = [0u8; BLOCK_LEN as usize];
+    tail[..tail_len].copy_from_slice(&request.tail);
+    sqe.src_addr = src.as_ptr() as u64;
+    sqe.dst_addr = dst.as_mut_ptr() as u64;
+    if let BulkParams::Gcm(gcm) = &mut sqe.params
+        && let Some(gcm_tail) = &mut gcm.tail
+    {
+        // Firmware reads the tail input and writes its output in place.
+        gcm_tail.src = tail.as_mut_ptr() as u64;
+        gcm_tail.dst = gcm_tail.src;
+    }
+
+    let _execution = server.execution.read().await;
+    let cqe = match server
+        .hsm
+        .bulk_io(sqe.encode(), HSM_PARTITION_ID, HSM_BULK_QID, 0)
+        .await
+    {
+        Ok(cqe) => cqe,
+        Err(error) => {
+            eprintln!("StdHsm bulk request failed: {error:?}");
+            return transport_error(TRANSPORT_HSM_ERROR);
+        }
+    };
+    drop(src);
+    Response {
+        status: 0,
+        cqe: cqe.to_vec(),
+        payload: dst,
+        oob_items: Vec::new(),
+        tail: tail[..tail_len].to_vec(),
+    }
+}
+
+async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
+    let Ok(mut sqe) = <[u32; 16]>::try_from(request.sqe.as_slice()) else {
+        return transport_error(TRANSPORT_INVALID_REQUEST);
+    };
+    let src_len = sqe[1] as usize;
+    let dst_cap = sqe[6] as usize;
+    if sqe[2..6].iter().any(|&word| word != 0)
+        || sqe[7..11].iter().any(|&word| word != 0)
+        || sqe[13..15].iter().any(|&word| word != 0)
         || request.oob_items.len() > MAX_OOB_ITEMS
         || request
             .oob_items
             .iter()
             .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
-        || request.sqe[15] as usize != request.oob_items.len() * 16
-        || (!request.oob_items.is_empty() && request.sqe[0] & 0x3ff != 2)
+        || sqe[15] as usize != request.oob_items.len() * 16
+        || (!request.oob_items.is_empty() && sqe[0] & 0x3ff != 2)
         || src_len != request.payload.len()
         || src_len > DMA_BUF_SIZE
         || dst_cap == 0
@@ -308,13 +411,20 @@ async fn execute_request(server: &SocketHsm, request: Request) -> Response {
     let mut dst = Box::new(DmaBuf([0; DMA_BUF_SIZE]));
     let mut oob_page = Box::new(DmaBuf([0; DMA_PAGE_SIZE]));
     src.0[..src_len].copy_from_slice(&request.payload);
-    for (index, item) in request.oob_items.iter().enumerate() {
+    let mut oob: Vec<(bool, Vec<u8>)> = request
+        .oob_items
+        .into_iter()
+        .map(|item| match item {
+            OobItem::In(bytes) => (false, bytes),
+            OobItem::Out(len) => (true, vec![0; len as usize]),
+        })
+        .collect();
+    for (index, (_, item)) in oob.iter_mut().enumerate() {
         let off = index * 16;
-        oob_page.0[off..off + 8].copy_from_slice(&(item.as_ptr() as u64).to_le_bytes());
+        oob_page.0[off..off + 8].copy_from_slice(&(item.as_mut_ptr() as u64).to_le_bytes());
         oob_page.0[off + 8..off + 12].copy_from_slice(&(item.len() as u32).to_le_bytes());
     }
 
-    let mut sqe = request.sqe;
     patch_prp1(&mut sqe, 2, src.0.as_ptr() as u64);
     patch_prp1(&mut sqe, 7, dst.0.as_mut_ptr() as u64);
     if src_len > DMA_PAGE_SIZE {
@@ -323,7 +433,7 @@ async fn execute_request(server: &SocketHsm, request: Request) -> Response {
     if dst_cap > DMA_PAGE_SIZE {
         patch_prp1(&mut sqe, 9, dst.0[DMA_PAGE_SIZE..].as_mut_ptr() as u64);
     }
-    if !request.oob_items.is_empty() {
+    if !oob.is_empty() {
         patch_prp1(&mut sqe, 13, oob_page.0.as_ptr() as u64);
     }
 
@@ -342,8 +452,13 @@ async fn execute_request(server: &SocketHsm, request: Request) -> Response {
 
     Response {
         status: 0,
-        cqe,
+        cqe: cqe.to_vec(),
         payload: dst.0[..dst_len].to_vec(),
+        oob_items: oob
+            .into_iter()
+            .filter_map(|(out, item)| out.then_some(item))
+            .collect(),
+        tail: Vec::new(),
     }
 }
 
@@ -837,9 +952,10 @@ mod linux {
                     .expect("encode GetApiRev");
                     payload.truncate(len);
                     let mut request = Request {
-                        sqe: [0; 16],
+                        sqe: vec![0; 16],
                         payload,
                         oob_items: Vec::new(),
+                        tail: Vec::new(),
                     };
                     request.sqe[1] = len as u32;
                     request.sqe[6] = DMA_PAGE_SIZE as u32;

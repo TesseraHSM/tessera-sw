@@ -16,7 +16,8 @@ by Rust's standard library and the server's existing Tokio runtime on Windows
 and Linux, without introducing another transport dependency.
 
 TCP carries the length-delimited SQE/CQE protocol and opaque MBOR/TBOR
-payloads, with ordered TBOR OOB bytes and sideband partition reset. It does not
+payloads, with ordered TBOR OOB bytes, fast-path AES-GCM/XTS bulk requests and
+sideband partition reset. It does not
 introduce a new API protocol or change public API call
 signatures. The application uses `tsra_api`; transport selection stays in the
 DDI layer through the opt-in `tsra_api/sock` feature.
@@ -133,6 +134,14 @@ RUST_LOG=info TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
   -p tsra_ddi_tbor_types --features sock --test tsra_ddi_tbor_tests --test-threads 1
 ```
 
+The API tests, including the C++ suite, run the same way; add
+`session-ex-tests` for TBOR (`open_session_ex`) sessions:
+
+```sh
+TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
+  -p tsra_api_tests --features sock --test-threads 1
+```
+
 Use the test package's `sock` feature, not just `tsra_ddi/sock`: it selects
 socket-specific session expectations and excludes hardware-only MBOR bulk
 crypto tests, as the existing `emu` feature does. Tests of the removed
@@ -170,7 +179,8 @@ Neither transport is required for the TCP setup on Windows or Linux.
   main request/response capacity. TBOR supports up to 64 OOB buffers of up to
   64 KiB each, reconstructed as server-owned SGL descriptors. Reset disables
   and re-enables the existing partition, waiting for active submissions.
-  Fast-path AES-GCM/XTS remains unsupported.
+  Fast-path AES-GCM/XTS requests carry a 32-dword bulk SQE with up to 16 KiB of
+  data inline; the server copies it into its own buffers.
 - Client and server must be updated together; the protocol does not provide
   backward compatibility. Disconnected clients' sessions are closed by the
   server rather than left occupying firmware session slots.

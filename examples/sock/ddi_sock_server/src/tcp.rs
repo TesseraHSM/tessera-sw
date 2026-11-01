@@ -105,6 +105,7 @@ mod tests {
     use tsra_ddi_mbor_types::*;
     use tsra_ddi_sock::DdiSock;
     use tsra_ddi_sock::DdiSockDev;
+    use tsra_ddi_sock_proto::OobItem;
     use tsra_ddi_sock_proto::Request;
     use tsra_ddi_tbor_types::SESSION_SEED_LEN;
     use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
@@ -460,9 +461,10 @@ mod tests {
                 (0, 4096, [0x1000, 0, 16]),
             ] {
                 let mut request = Request {
-                    sqe: [0; 16],
+                    sqe: vec![0; 16],
                     payload: Vec::new(),
                     oob_items: Vec::new(),
+                    tail: Vec::new(),
                 };
                 request.sqe[1] = src_len;
                 request.sqe[6] = dst_cap;
@@ -473,9 +475,10 @@ mod tests {
             }
             for (count, oob_len) in [(1, 0), (1, 32), (65, 1040)] {
                 let mut request = Request {
-                    sqe: [0; 16],
+                    sqe: vec![0; 16],
                     payload: Vec::new(),
-                    oob_items: vec![vec![1]; count],
+                    oob_items: vec![OobItem::In(vec![1]); count],
+                    tail: Vec::new(),
                 };
                 request.sqe[0] = 2;
                 request.sqe[6] = 4096;

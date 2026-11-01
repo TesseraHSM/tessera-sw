@@ -19,11 +19,9 @@
 //!   OOB, a non-XTS key, a tampered key and an invalid session are
 //!   rejected.
 
-// The sock backend gains out-of-band output support in a later change.
-#![cfg(not(feature = "sock"))]
-
 use tsra_crypto::Rng;
 use tsra_ddi_interface::TborOobItem;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesXtsEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -268,7 +266,15 @@ fn aes_xts_rejects_invalid_session() {
     let sid = finalized_co_session(&ctx).session_id;
     let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
     let r = req(u16::MAX, AES_OP_ENCRYPT, &key, 0, 512, 512);
-    expect_reject(&ctx, &r, 512, TborStatus::FileHandleSessionIdDoesNotMatch);
+    let input = [0u8; 512];
+    let mut out = [0u8; 512];
+    let err = ctx
+        .tbor_oob_io(
+            &r,
+            &mut [TborOobItem::In(&input), TborOobItem::Out(&mut out)],
+        )
+        .expect_err("session command must be rejected");
+    assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 }
 
 /// A key imported through `UnwrapKey` (`K1 ‖ K2`) encrypts exactly like the

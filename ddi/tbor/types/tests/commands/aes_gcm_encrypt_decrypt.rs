@@ -19,11 +19,9 @@
 //! * Non-AES-256 key, oversize data, inconsistent lengths, missing OOB
 //!   and an invalid session are rejected.
 
-// The sock backend gains out-of-band output support in a later change.
-#![cfg(not(feature = "sock"))]
-
 use tsra_crypto::Rng;
 use tsra_ddi_interface::TborOobItem;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
@@ -487,5 +485,8 @@ fn aes_gcm_rejects_invalid_session() {
         0,
         0,
     );
-    ctx.expect_fw_reject_oob_io(&r, &mut [], TborStatus::FileHandleSessionIdDoesNotMatch);
+    let err = ctx
+        .tbor_oob_io(&r, &mut [])
+        .expect_err("session command must be rejected");
+    assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 }
