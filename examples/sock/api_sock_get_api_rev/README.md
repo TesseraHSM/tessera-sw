@@ -180,7 +180,10 @@ Neither transport is required for the TCP setup on Windows or Linux.
   64 KiB each, reconstructed as server-owned SGL descriptors. Reset disables
   and re-enables the existing partition, waiting for active submissions.
   Fast-path AES-GCM/XTS requests carry a 32-dword bulk SQE with up to 16 KiB of
-  data inline; the server copies it into its own buffers.
+  data inline; the server copies it into its own buffers. Bulk requests require
+  an owned Active session: a pending TBOR handshake cannot submit bulk IO.
+  Reset preserves ownership for cleanup but blocks bulk IO until the session
+  is successfully reopened or authenticated again.
 - Client and server must be updated together; the protocol does not provide
   backward compatibility. Disconnected clients' sessions are closed by the
   server rather than left occupying firmware session slots.

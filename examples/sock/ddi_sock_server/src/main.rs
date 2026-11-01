@@ -30,6 +30,7 @@ use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_FINISH;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::codec::RequestView;
 use tsra_fw_hsm_bulk::BLOCK_LEN;
 use tsra_fw_hsm_bulk::BULK_SQE_DWORDS;
@@ -63,11 +64,27 @@ struct SocketHsm {
     hsm: Arc<StdHsm>,
     execution: tokio::sync::RwLock<()>,
     sessions: tokio::sync::RwLock<HashMap<u16, SessionOwner>>,
+    #[cfg(test)]
+    submission_probe: tokio::sync::Mutex<Option<SubmissionProbe>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    Pending,
+    Active,
+    NeedsRenegotiation,
 }
 
 struct SessionOwner {
     generation: Arc<()>,
-    pending: bool,
+    state: SessionState,
+}
+
+#[cfg(test)]
+struct SubmissionProbe {
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+    completed: tokio::sync::oneshot::Sender<Response>,
 }
 
 struct SessionLease {
@@ -89,6 +106,8 @@ impl SocketHsm {
             hsm,
             execution: tokio::sync::RwLock::new(()),
             sessions: tokio::sync::RwLock::new(HashMap::new()),
+            #[cfg(test)]
+            submission_probe: tokio::sync::Mutex::new(None),
         }
     }
 }
@@ -134,11 +153,16 @@ impl Connection {
                 return Ok(execute_frame(server, request).await);
             };
             if submission.sqe.len() == BULK_SQE_DWORDS {
-                // Bulk IOs run in an open session that this connection must
-                // own. A malformed SQE never reaches firmware.
+                // Partition-scoped bulk keys do not validate session state in
+                // firmware, so ownership alone is insufficient here.
                 let session_id = BulkSqe::parse(&submission.sqe).map(|sqe| sqe.session_id);
                 let sessions = server.sessions.read().await;
-                if session_id.is_ok_and(|id| !state.owns_session(id, &sessions)) {
+                if session_id.is_ok_and(|id| {
+                    !state.owns_session(id, &sessions)
+                        || !sessions
+                            .get(&id)
+                            .is_some_and(|owner| owner.state == SessionState::Active)
+                }) {
                     return Ok(ResponseFrame::Submit(transport_error(
                         TRANSPORT_SESSION_NOT_OWNED,
                     )));
@@ -206,7 +230,11 @@ impl Connection {
                             id,
                             SessionOwner {
                                 generation: Arc::clone(&generation),
-                                pending: op == OP_TBOR,
+                                state: if op == OP_TBOR {
+                                    SessionState::Pending
+                                } else {
+                                    SessionState::Active
+                                },
                             },
                         );
                         state.sessions.retain(|session| session.id != id);
@@ -219,7 +247,20 @@ impl Connection {
                     && TborSessionOpenFinishResp::decode_response(&response.payload).is_ok()
                     && let Some(owner) = sessions.get_mut(&session_id)
                 {
-                    owner.pending = false;
+                    owner.state = SessionState::Active;
+                } else if response.status == 0
+                    && finish
+                    && matches!(
+                        TborSessionOpenFinishResp::decode_response(&response.payload),
+                        Err(tsra_ddi_tbor_types::codec::DecodeError::FwError(status))
+                            if status == TborStatus::SessionAuthFailure.0
+                    )
+                    && sessions
+                        .get(&session_id)
+                        .is_some_and(|owner| owner.state == SessionState::Pending)
+                {
+                    sessions.remove(&session_id);
+                    state.sessions.retain(|session| session.id != session_id);
                 }
             }
             Ok(response)
@@ -438,6 +479,14 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
     }
 
     let _execution = server.execution.read().await;
+    #[cfg(test)]
+    let completion = if let Some(probe) = server.submission_probe.lock().await.take() {
+        probe.started.send(()).expect("submission observer");
+        probe.resume.await.expect("resume submission");
+        Some(probe.completed)
+    } else {
+        None
+    };
     let cqe = match server.hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
         Ok(cqe) => cqe,
         Err(error) => {
@@ -450,7 +499,7 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
         return transport_error(TRANSPORT_HSM_ERROR);
     }
 
-    Response {
+    let response = Response {
         status: 0,
         cqe: cqe.to_vec(),
         payload: dst.0[..dst_len].to_vec(),
@@ -459,7 +508,14 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
             .filter_map(|(out, item)| out.then_some(item))
             .collect(),
         tail: Vec::new(),
+    };
+    #[cfg(test)]
+    if let Some(completion) = completion {
+        completion
+            .send(response.clone())
+            .expect("submission completion observer");
     }
+    response
 }
 
 async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> ResponseFrame {
@@ -478,7 +534,10 @@ async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> Respons
                     server.hsm.part_disable(HSM_PARTITION_ID).await?;
                     // NSSR discards Pending slots but preserves Active slots
                     // for renegotiation, including their connection ownership.
-                    sessions.retain(|_, owner| !owner.pending);
+                    sessions.retain(|_, owner| owner.state != SessionState::Pending);
+                    for owner in sessions.values_mut() {
+                        owner.state = SessionState::NeedsRenegotiation;
+                    }
                     server.hsm.part_enable(HSM_PARTITION_ID).await
                 }
                 .await;
@@ -542,6 +601,12 @@ where
         ))))
     });
     runtime.block_on(serve(Arc::clone(hsm)))
+}
+
+#[cfg(test)]
+fn test_partition_lock() -> parking_lot::MutexGuard<'static, ()> {
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    LOCK.lock()
 }
 
 #[cfg(test)]
@@ -919,6 +984,7 @@ mod linux {
 
         #[test]
         fn serves_repeated_requests_after_invalid_dma_and_oob_fields() {
+            let _guard = crate::test_partition_lock();
             let hsm = crate::test_hsm();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -1052,6 +1118,7 @@ mod tests {
 
     #[test]
     fn shared_test_hsm_initializes_partition_once() {
+        let _guard = test_partition_lock();
         let hsm = test_hsm();
         let worker = std::thread::spawn(test_hsm);
         let other = worker.join().expect("fixture worker");

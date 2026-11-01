@@ -21,12 +21,15 @@ tsra_fw_hsm_io.workspace = true
 tsra_fw_hsm_std.workspace = true
 
 [dev-dependencies]
+parking_lot.workspace = true
 tsra_crypto.workspace = true
 tsra_ddi_interface.workspace = true
 tsra_ddi_mbor_types.workspace = true
 tsra_ddi_sock.workspace = true
+tsra_ddi_tbor_test_harness = { features = ["sock"], workspace = true }
 tsra_session_ex_crypto.workspace = true
 x509.workspace = true
+zerocopy.workspace = true
 
 [lints]
 workspace = true

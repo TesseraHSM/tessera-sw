@@ -100,6 +100,7 @@ mod tests {
     use tsra_crypto::EccPublicKey;
     use tsra_crypto::ImportableKey;
     use tsra_ddi_interface::Ddi;
+    use tsra_ddi_interface::DdiAesGcmParams;
     use tsra_ddi_interface::DdiDev;
     use tsra_ddi_interface::DdiError;
     use tsra_ddi_mbor_types::*;
@@ -183,6 +184,7 @@ mod tests {
     }
 
     fn with_session_clients(test: impl FnOnce(String, Arc<SocketHsm>) + Send + 'static) {
+        let _guard = crate::test_partition_lock();
         let hsm = crate::test_hsm();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -193,11 +195,22 @@ mod tests {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
             let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
             let serving = tokio::spawn(run_server(listener, Arc::clone(&hsm)));
-            let clients = tokio::task::spawn_blocking(move || test(endpoint, hsm));
+            let client_hsm = Arc::clone(&hsm);
+            let clients = tokio::task::spawn_blocking(move || test(endpoint, client_hsm));
             tokio::time::timeout(Duration::from_secs(30), clients)
                 .await
                 .expect("session clients complete")
                 .expect("session client task");
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if hsm.sessions.read().await.is_empty() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("all client sessions cleaned up");
             serving.abort();
         });
     }
@@ -227,6 +240,274 @@ mod tests {
                 DdiStatus::FileHandleSessionIdDoesNotMatch
             ))
         ));
+    }
+
+    fn bulk_error(device: &DdiSockDev, session_id: u16) -> DdiError {
+        device
+            .exec_op_fp_gcm(
+                DdiAesOp::Encrypt,
+                DdiAesGcmParams {
+                    key_id: u32::MAX,
+                    iv: [0; 12],
+                    aad: None,
+                    tag: None,
+                    session_id,
+                    short_app_id: 0,
+                },
+                vec![0; 16],
+            )
+            .expect_err("unallocated bulk key")
+    }
+
+    #[test]
+    fn bulk_rejects_pending_and_failed_finish_sessions() {
+        with_session_clients(|endpoint, hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let mut pending = open_init(&owner, 0);
+            assert!(matches!(
+                bulk_error(&owner, pending.session_id),
+                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+            ));
+
+            pending.mac_fin[0] ^= 1;
+            assert!(matches!(
+                owner.exec_op_tbor(&pending, None, &mut None),
+                Err(DdiError::TborStatus(status)) if status == TborStatus::SessionAuthFailure
+            ));
+            assert!(
+                !hsm.sessions
+                    .blocking_read()
+                    .contains_key(&pending.session_id)
+            );
+            assert!(matches!(
+                bulk_error(&owner, pending.session_id),
+                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+            ));
+
+            let replacement = open_init(&owner, 0);
+            tbor(&owner, &replacement);
+            assert!(matches!(
+                bulk_error(&owner, replacement.session_id),
+                DdiError::FpError(status)
+                    if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
+            ));
+        });
+    }
+
+    #[test]
+    fn bulk_rejects_reset_session_until_authenticated_again() {
+        with_session_clients(|endpoint, hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let session = open_init(&owner, 0);
+            tbor(&owner, &session);
+            let lease = generation(&hsm, session.session_id);
+            assert!(matches!(
+                bulk_error(&owner, session.session_id),
+                DdiError::FpError(status)
+                    if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
+            ));
+
+            owner.erase().expect("reset");
+            assert!(matches!(
+                bulk_error(&owner, session.session_id),
+                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+            ));
+            drop(owner);
+            wait_for_cleanup(lease);
+
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("replacement socket");
+            let replacement = open_init(&owner, 0);
+            tbor(&owner, &replacement);
+            assert!(matches!(
+                bulk_error(&owner, replacement.session_id),
+                DdiError::FpError(status)
+                    if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
+            ));
+        });
+    }
+
+    #[test]
+    fn cancelled_oob_submission_completes_before_disconnect_cleanup() {
+        use tsra_ddi_interface::TborOobItem;
+        use tsra_ddi_tbor_test_harness::session;
+        use tsra_ddi_tbor_test_harness::x509_fixture::PotaFixture;
+        use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
+        use tsra_ddi_tbor_types::PartPolicy;
+        use tsra_ddi_tbor_types::PolicyKeyKind;
+        use tsra_ddi_tbor_types::PolicyPubKey;
+        use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
+        use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
+        use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
+        use tsra_ddi_tbor_types::TborResp;
+        use zerocopy::IntoBytes;
+
+        let _guard = crate::test_partition_lock();
+        let hsm = crate::test_hsm();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+            let server = Arc::clone(&hsm);
+            let serving = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("accept client");
+                serve_connection(stream, server).await
+            });
+            let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+            let (submit_tx, submit_rx) = tokio::sync::oneshot::channel();
+            let client_hsm = Arc::clone(&hsm);
+            let client = tokio::task::spawn_blocking(move || {
+                let device = DdiSock::default()
+                    .open_dev(&endpoint)
+                    .expect("client socket");
+                device.erase().expect("initial reset");
+                let session = session::session_open(
+                    &device,
+                    0,
+                    tsra_ddi_tbor_types::SessionType::Authenticated,
+                )
+                .expect("open session");
+                session::psk_change(&device, &session, &[0xA5; 32]).expect("rotate PSK");
+                let pota = PotaFixture::generate();
+                let mut policy = PartPolicy::zeroed();
+                policy.version.major = 1;
+                policy.pota_pub_key = PolicyPubKey::new(PolicyKeyKind::Ecc384, 96, pota.raw_pub());
+                policy.sata_pub_key = policy.pota_pub_key;
+                let init = session::part_init(
+                    &device,
+                    &session,
+                    &[0x5A; 32],
+                    policy.as_bytes(),
+                    pota.thumbprint(),
+                    &[0x5A; 48],
+                    None,
+                )
+                .expect("initialize partition");
+                let chain = pota.chain_for(&pta_pub_from_csr(&init.pta_csr));
+                session::part_final(
+                    &device,
+                    &session,
+                    policy.as_bytes(),
+                    &[],
+                    &chain.der_items(),
+                )
+                .expect("finalize partition");
+                let key = tbor(
+                    &device,
+                    &TborAesGenerateKeyReq {
+                        session_id: session.session_id,
+                        scope: 3,
+                        key_size: tsra_ddi_tbor_types::AES_KEY_SIZE_256,
+                        key_usage: tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT
+                            | tsra_ddi_tbor_types::KEY_USAGE_DECRYPT,
+                        ..Default::default()
+                    },
+                );
+                let request = TborAesGcmEncryptDecryptReq {
+                    session_id: session.session_id,
+                    op: tsra_ddi_tbor_types::AES_OP_ENCRYPT,
+                    iv_source: tsra_ddi_tbor_types::GCM_IV_SOURCE_HOST,
+                    aad_len: 0,
+                    data_len: 16,
+                    in_index: 0,
+                    out_index: 1,
+                    iv: vec![0x11; 12],
+                    tag: vec![0; 16],
+                    masked_key: key.masked_key,
+                };
+                let input = [0x42; 16];
+                let mut output = [0; 16];
+                let expected = device
+                    .exec_op_tbor_oob(
+                        &request,
+                        &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
+                        &mut None,
+                    )
+                    .expect("reference OOB encryption");
+                assert_ne!(output, input);
+                prepared_tx
+                    .send((
+                        expected,
+                        output,
+                        generation(&client_hsm, session.session_id),
+                    ))
+                    .expect("submission preparation");
+                submit_rx.blocking_recv().expect("submit cancelled request");
+                assert!(
+                    device
+                        .exec_op_tbor_oob(
+                            &request,
+                            &mut [TborOobItem::In(&input), TborOobItem::Out(&mut output)],
+                            &mut None,
+                        )
+                        .is_err(),
+                    "cancelled connection must not return the discarded response"
+                );
+            });
+
+            let (expected, output, lease) =
+                tokio::time::timeout(Duration::from_secs(30), prepared_rx)
+                    .await
+                    .expect("prepare OOB submission")
+                    .expect("prepared client");
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
+            *hsm.submission_probe.lock().await = Some(crate::SubmissionProbe {
+                started: started_tx,
+                resume: resume_rx,
+                completed: completed_tx,
+            });
+            submit_tx.send(()).expect("start submission");
+            tokio::time::timeout(Duration::from_secs(10), started_rx)
+                .await
+                .expect("submission reached DMA handoff")
+                .expect("submission started");
+            serving.abort();
+            assert!(
+                serving
+                    .await
+                    .expect_err("cancel connection waiter")
+                    .is_cancelled()
+            );
+            assert!(
+                lease.upgrade().is_some(),
+                "cleanup must wait for firmware completion"
+            );
+            resume_tx.send(()).expect("allow firmware completion");
+            let response = tokio::time::timeout(Duration::from_secs(10), completed_rx)
+                .await
+                .expect("firmware completes after cancellation")
+                .expect("submission completion");
+            assert_eq!(response.status, 0);
+            let mut raw = crate::cqe_dwords(&response.cqe);
+            assert_eq!(tsra_fw_hsm_io::Cqe::from(&mut raw).status(), 0);
+            assert_eq!(
+                TborAesGcmEncryptDecryptResp::decode_response(&response.payload)
+                    .expect("DMA destination response"),
+                expected
+            );
+            assert_eq!(response.oob_items, vec![output.to_vec()]);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while lease.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("disconnect cleanup after completion");
+            client.await.expect("disconnected client task");
+        });
     }
 
     #[test]
@@ -400,6 +681,7 @@ mod tests {
 
     #[test]
     fn serves_concurrent_connections_on_the_same_partition() {
+        let _guard = crate::test_partition_lock();
         let hsm = crate::test_hsm();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -448,6 +730,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_dma_and_oob_fields() {
+        let _guard = crate::test_partition_lock();
         let hsm = crate::test_hsm();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -491,6 +774,7 @@ mod tests {
 
     #[test]
     fn reset_waits_for_inflight_execution_and_survives_connection_cancellation() {
+        let _guard = crate::test_partition_lock();
         let hsm = crate::test_hsm();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
