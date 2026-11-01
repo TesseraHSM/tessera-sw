@@ -277,6 +277,15 @@ impl HsmMaskedKey {
         Ok(key_props)
     }
 
+    /// Converts a TBOR masked key blob into key properties, rejecting any
+    /// other blob format with [`HsmError::MaskedKeyDecodeFailed`].
+    pub(crate) fn to_tbor_key_props(masked_key: &[u8]) -> HsmResult<HsmKeyProps> {
+        let metadata = Self::parse_tbor_metadata(masked_key)?;
+        let mut key_props = Self::key_props(&metadata, HsmKeyClass::Secret)?;
+        key_props.set_masked_key(masked_key);
+        Ok(key_props)
+    }
+
     /// Converts a masked key blob into a key pair's properties.
     ///
     /// # Arguments

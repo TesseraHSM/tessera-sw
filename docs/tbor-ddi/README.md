@@ -145,6 +145,7 @@ storage is zero.
 | `0x29` | `MlKemGenerateKey` | NoSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) (**schema-only**) |
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
+| `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
 
 ## Default-PSK gate
 

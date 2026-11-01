@@ -36,5 +36,6 @@
 | 10/31/2026 | Added AES ECB, CFB, OFB and CTR algorithms (`TSRA_ALGO_ID_AES_ECB`, |
 |            | `TSRA_ALGO_ID_AES_CFB`, `TSRA_ALGO_ID_AES_OFB`,                  |
 |            | `TSRA_ALGO_ID_AES_CTR`) and their parameter structures           |
+|            | `tsra_key_unmask_pair` supports RSA and ECC on ex sessions       |
 
 \pagebreak

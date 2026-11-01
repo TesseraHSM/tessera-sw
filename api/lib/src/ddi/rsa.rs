@@ -592,7 +592,7 @@ fn rsa_aes_unwrap_key_pair_tbor(
         return Err(HsmError::InvalidKeyProps);
     }
     HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
-    let pub_key_der = tbor_unwrapped_pub_key_to_der(&priv_key_props, &resp.pub_key)?;
+    let pub_key_der = tbor_wire_pub_key_to_der(&priv_key_props, &resp.pub_key)?;
     let (dev_priv_key_props, dev_pub_key_props) =
         HsmMaskedKey::to_key_pair_props(&resp.masked_key, &pub_key_der)?;
 
@@ -684,8 +684,9 @@ fn tbor_key_class_and_kind(props: &HsmKeyProps) -> HsmResult<(u8, u8)> {
     }
 }
 
-/// Validates and converts a TBOR RSA/ECC public key to DER.
-fn tbor_unwrapped_pub_key_to_der(props: &HsmKeyProps, wire: &[u8]) -> HsmResult<Vec<u8>> {
+/// Validates and converts a TBOR RSA/ECC wire public key (as returned by
+/// `UnwrapKey` and `GetPublicKey`) to DER.
+pub(crate) fn tbor_wire_pub_key_to_der(props: &HsmKeyProps, wire: &[u8]) -> HsmResult<Vec<u8>> {
     match props.kind() {
         HsmKeyKind::Rsa | HsmKeyKind::RsaCrt => {
             let expected_modulus_len =

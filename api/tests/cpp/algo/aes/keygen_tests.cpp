@@ -2081,11 +2081,7 @@ TEST_F(tsra_aes_keygen, aes_key_unmask_rejects_null_arguments)
 
         tsra_buffer valid_ptr_zero_len_buf{ dummy_masked_blob.data(), 0 };
         err = tsra_key_unmask(session, TSRA_KEY_KIND_AES, &valid_ptr_zero_len_buf, key.get_ptr());
-#if SESSION_EX_TESTS
-        ASSERT_EQ(err, TSRA_STATUS_UNSUPPORTED_KEY_OPERATION);
-#else
         ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
-#endif
         ASSERT_EQ(key.get(), 0u);
     });
 }

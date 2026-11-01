@@ -156,6 +156,8 @@ tsra_status tsra_key_unmask_pair(
 
 - `priv_key_handle` and `pub_key_handle` must point to distinct output addresses.
 - Passing the same pointer for both outputs returns `TSRA_STATUS_INVALID_ARGUMENT`.
+- On an extended session the device authenticates the masked key and
+  returns its public key; no device-resident key is created.
 
 **Returns**
 

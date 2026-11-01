@@ -143,8 +143,9 @@ fn attrs_for_class(
 }
 
 /// Which wire public key (if any) an imported private key kind carries,
-/// and how to re-derive it from the vault-resident private key.
-enum PubDeriv {
+/// and how to re-derive it from the vault-resident private key.  Shared
+/// with [`super::get_public_key`] so both commands emit the same format.
+pub(super) enum PubDeriv {
     /// RSA — wire public key is `n_le ‖ e_le`, via `rsa_priv_pub_key`.
     Rsa,
     /// ECC — wire public key is `x ‖ y`, via `ecc_priv_pub_key`.
@@ -153,7 +154,7 @@ enum PubDeriv {
 
 /// Classify an imported vault key kind for public-key re-derivation.
 /// Symmetric kinds (AES / HMAC) carry no public key → `None`.
-fn pub_deriv(kind: HsmVaultKeyKind) -> Option<PubDeriv> {
+pub(super) fn pub_deriv(kind: HsmVaultKeyKind) -> Option<PubDeriv> {
     match kind {
         HsmVaultKeyKind::Rsa2kPrivate
         | HsmVaultKeyKind::Rsa3kPrivate

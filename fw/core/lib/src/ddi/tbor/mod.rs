@@ -33,6 +33,7 @@ pub(crate) mod ecdh_derive;
 pub(crate) mod from_pal;
 pub(crate) mod get_cert;
 pub(crate) mod get_cert_chain_info;
+pub(crate) mod get_public_key;
 pub(crate) mod get_unwrapping_key;
 pub(crate) mod hash;
 pub(crate) mod hkdf_derive;
@@ -376,6 +377,10 @@ pub(crate) mod opcode {
     /// TEMPORARY: dispatched out of session for hardware bring-up, like the
     /// other PQC opcodes.  See [`super::mlkem_decapsulate`].
     pub(crate) const MLKEM_DECAPSULATE: u8 = 0x2B;
+
+    /// `GetPublicKey` — derive the wire public key of a masked RSA / ECC
+    /// private key. See [`super::get_public_key`].
+    pub(crate) const GET_PUBLIC_KEY: u8 = 0x2F;
 }
 
 /// Validate that `sess_id` belongs to an active Crypto-Officer session.
@@ -570,6 +575,7 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::MLKEM_GENERATE_KEY => types::TborMlKemGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::MLKEM_ENCAPSULATE => types::TborMlKemEncapsulateResp::MAX_ENCODED_SIZE,
         opcode::MLKEM_DECAPSULATE => types::TborMlKemDecapsulateResp::MAX_ENCODED_SIZE,
+        opcode::GET_PUBLIC_KEY => types::TborGetPublicKeyResp::MAX_ENCODED_SIZE,
         // These handlers reclaim response space within every valid request.
         opcode::AES_ENCRYPT_DECRYPT | opcode::ECC_SIGN => request_len,
         _ if !is_known_opcode(opcode) => host_capacity,
@@ -711,6 +717,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::MLKEM_GENERATE_KEY => mlkem_generate_key::handle(pal, io, cmd_buf).await,
         opcode::MLKEM_ENCAPSULATE => mlkem_encapsulate::handle(pal, io, cmd_buf).await,
         opcode::MLKEM_DECAPSULATE => mlkem_decapsulate::handle(pal, io, cmd_buf).await,
+        opcode::GET_PUBLIC_KEY => get_public_key::handle(pal, io, cmd_buf).await,
         _ => Err(HsmError::UnsupportedCmd),
     };
     let response_len = cmd_buf.finish_response(resp)?;
@@ -770,6 +777,7 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::MLKEM_GENERATE_KEY
             | opcode::MLKEM_ENCAPSULATE
             | opcode::MLKEM_DECAPSULATE
+            | opcode::GET_PUBLIC_KEY
     )
 }
 
@@ -824,7 +832,8 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::DARC_KEY_UNWRAP
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
-        | opcode::DARC_KEY_WRAP => true,
+        | opcode::DARC_KEY_WRAP
+        | opcode::GET_PUBLIC_KEY => true,
         // Default-deny: any future opcode is treated as in-session
         // until classified, so the default-PSK gate applies to it.
         _ => true,
@@ -889,7 +898,8 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::DARC_KEY_UNWRAP
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
-        | opcode::DARC_KEY_WRAP => true,
+        | opcode::DARC_KEY_WRAP
+        | opcode::GET_PUBLIC_KEY => true,
         _ => true,
     }
 }
@@ -2098,6 +2108,7 @@ mod tests {
             opcode::SD_CREATE_REMOTE_BACKUP,
             opcode::SD_RESEAL_REMOTE_BACKUP,
             opcode::KEY_REPORT,
+            opcode::GET_PUBLIC_KEY,
         ] {
             assert!(is_known_opcode(op), "{op:#04x} should be known");
         }
@@ -2172,6 +2183,13 @@ mod tests {
     #[test]
     fn key_report_is_in_session() {
         assert!(is_in_session(opcode::KEY_REPORT));
+    }
+
+    #[test]
+    fn get_public_key_is_in_session_and_cross_checked() {
+        assert!(is_in_session(opcode::GET_PUBLIC_KEY));
+        assert!(needs_session_id_cross_check(opcode::GET_PUBLIC_KEY));
+        assert!(!allowed_with_default_psk(opcode::GET_PUBLIC_KEY));
     }
 
     #[test]
