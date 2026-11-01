@@ -48,10 +48,11 @@ use tsra_fw_hsm_pal_traits::*;
 
 /// Global HSM singleton — concrete type with StdHsmPal.
 ///
-/// Published only once [`StdHsmBuilder::build`] has confirmed the Embassy
-/// thread actually started (see [`BUILD_RESERVED`]): every Embassy task
-/// reaches it via `HSM.get().await`, which simply waits (polls) until this
-/// is set, so publishing it slightly after the thread spawns is safe.
+/// Constructed and published on the dedicated Embassy thread itself (see
+/// the `hsm-embassy` thread closure in [`StdHsmBuilder::build`]), not on
+/// the caller's thread: every Embassy task reaches it via
+/// `HSM.get().await`, which simply waits (polls) until this is set, so
+/// publishing it slightly after the thread starts running is safe.
 static HSM: OnceLock<Hsm<StdHsmPal>> = OnceLock::new();
 
 /// Guards the one-instance-ever [`StdHsm`] build reservation.
@@ -60,9 +61,9 @@ static HSM: OnceLock<Hsm<StdHsmPal>> = OnceLock::new();
 /// [`StdHsmBuilder::build`], before any other setup. Unlike initializing
 /// [`HSM`] itself (which cannot be rolled back — [`OnceLock::init`] has no
 /// corresponding "uninit"), this reservation *is* released if a later step
-/// — currently, spawning the Embassy thread — fails, so a transient
-/// startup failure does not permanently prevent a later `build()` retry
-/// from succeeding.
+/// — creating the owned Tokio runtime, or spawning the Embassy thread —
+/// fails, so a transient startup failure does not permanently prevent a
+/// later `build()` retry from succeeding.
 static BUILD_RESERVED: AtomicBool = AtomicBool::new(false);
 
 /// Number of long-running Embassy loops [`ShutdownTracker`] must wait to
@@ -235,14 +236,20 @@ async fn poll_io(spawner: embassy_executor::Spawner, tracker: Arc<ShutdownTracke
 #[embassy_executor::task(pool_size = MAX_CONCURRENT_IOS)]
 async fn handle_io(io: StdHsmIo, tracker: Arc<ShutdownTracker>) {
     HSM.get().await.handle_io(io).await;
-    tracker.release_handle_io_slot();
     // Placed *after* the CQE reply has already been sent to the
     // submitter (so a held IO doesn't also wedge the submitter's own
     // `io()` future — see the `test_hooks` doc comment) but *before*
-    // `task_done`, so a test can prove shutdown's drain genuinely waits
-    // on the Embassy-internal task count rather than merely on the
-    // submitter-observable completion of `io()`.
+    // releasing the `handle_io` pool slot and `task_done`, so a test can
+    // prove shutdown's drain genuinely waits on the Embassy-internal
+    // task count rather than merely on the submitter-observable
+    // completion of `io()`. Releasing the pool slot only after the hold
+    // completes (rather than before) keeps `handle_io_permits` mirroring
+    // the Embassy task pool's actual occupancy while a hold is armed —
+    // otherwise `poll_io` could acquire a permit and spawn a 33rd
+    // concurrent `handle_io` while 32 are genuinely still occupied,
+    // tripping the pool-full `expect`.
     test_hooks::wait_if_held().await;
+    tracker.release_handle_io_slot();
     tracker.task_done();
 }
 
@@ -388,9 +395,9 @@ impl StdHsmBuilder {
     /// if the Embassy thread or tokio runtime fails to start. Also panics
     /// if the supplied Tokio handle belongs to a current-thread runtime.
     ///
-    /// A failure to spawn the Embassy thread releases the reservation (see
-    /// [`BUILD_RESERVED`]), so a later `build()` call in the same process
-    /// can still succeed.
+    /// A failure to create the owned Tokio runtime or spawn the Embassy
+    /// thread releases the reservation (see [`BUILD_RESERVED`]), so a
+    /// later `build()` call in the same process can still succeed.
     pub fn build(self) -> StdHsm {
         if let Some(handle) = &self.tokio_handle {
             assert!(
@@ -416,11 +423,20 @@ impl StdHsmBuilder {
         let (owned_rt, handle) = if let Some(h) = self.tokio_handle {
             (None, h)
         } else {
-            let rt = tokio::runtime::Builder::new_multi_thread()
+            let rt = match tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_time()
                 .build()
-                .expect("failed to create tokio runtime");
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    // Roll back the reservation so a later retry can
+                    // succeed: nothing has been initialized yet (`HSM`
+                    // included), so there is nothing else to unwind.
+                    BUILD_RESERVED.store(false, Ordering::Release);
+                    panic!("failed to create tokio runtime: {e}");
+                }
+            };
             let h = rt.handle().clone();
             (Some(rt), h)
         };
@@ -429,8 +445,6 @@ impl StdHsmBuilder {
         let (ipc_tx, ipc_rx) = async_channel::bounded(4);
 
         let pool_handle = handle.clone();
-        let pal = StdHsmPal::new(io_rx, pool_handle);
-        let hsm = Hsm::new(pal);
 
         // Reserves one slot each for `poll_io` and `ipc_task`; decremented
         // as those loops (and any in-flight `handle_io`) permanently exit.
@@ -453,6 +467,29 @@ impl StdHsmBuilder {
             .spawn(move || {
                 use embassy_executor::Executor;
                 use static_cell::StaticCell;
+
+                // Constructed here, on the Embassy thread's dedicated
+                // 8 MiB stack, rather than in `build()` on the caller's
+                // stack: `StdHsmPal`/`Hsm`'s debug-build stack temporaries
+                // are large enough to overflow a default 1 MiB stack
+                // (see `EMBASSY_STACK_SIZE` above), and `build()` runs on
+                // whatever stack its caller happens to have — including
+                // the default-sized main thread of an ordinary SDK
+                // consumer's process.
+                let pal = StdHsmPal::new(io_rx, pool_handle);
+                let hsm = Hsm::new(pal);
+
+                // Publish the `Hsm` core only now that this Embassy
+                // thread has actually started successfully: Embassy
+                // tasks on this thread reach it via `HSM.get().await`,
+                // which simply waits (polls) until this completes, so
+                // publishing it slightly afterward is safe. `BUILD_RESERVED`
+                // guarantees this `build()` call is the only one that can
+                // reach this point, so `HSM.init` cannot fail.
+                assert!(
+                    HSM.init(hsm).is_ok(),
+                    "unreachable: BUILD_RESERVED guarantees HSM.init is only ever called once"
+                );
 
                 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
                 let executor = EXECUTOR.init(Executor::new());
@@ -492,17 +529,6 @@ impl StdHsmBuilder {
                 panic!("failed to spawn Embassy thread: {e}");
             }
         };
-
-        // Publish the `Hsm` core only now that the Embassy thread has
-        // actually started successfully: Embassy tasks on that thread
-        // reach it via `HSM.get().await`, which simply waits (polls)
-        // until this completes, so publishing it slightly afterward is
-        // safe. `BUILD_RESERVED` guarantees this `build()` call is the
-        // only one that can reach this point, so `HSM.init` cannot fail.
-        assert!(
-            HSM.init(hsm).is_ok(),
-            "unreachable: BUILD_RESERVED guarantees HSM.init is only ever called once"
-        );
 
         StdHsm {
             io_tx,
