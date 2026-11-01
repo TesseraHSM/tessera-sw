@@ -497,28 +497,39 @@ impl DdiDev for DdiEmuDev {
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        let oob: Vec<(u64, usize)> = oob_items
+        // Firmware may write any item the request names as an output, so
+        // it only ever sees owned staging copies, never the borrowed inputs.
+        let mut staged: Vec<Vec<u8>> = oob_items
             .unwrap_or(&[])
             .iter()
-            .map(|item| (item.as_ptr() as u64, item.len()))
+            .map(|item| item.to_vec())
             .collect();
-        self.exec_tbor(req, &oob)
+        self.exec_tbor(req, &staged_oob(&mut staged))
     }
 
-    /// TBOR exec path with device-writable out-of-band items. The
-    /// in-process firmware reads [`TborOobItem::In`] and writes
-    /// [`TborOobItem::Out`] buffers through their host addresses.
+    /// TBOR exec path with device-writable out-of-band items. Items are
+    /// staged in owned buffers the in-process firmware may read or write;
+    /// only [`TborOobItem::Out`] buffers receive the device's writes.
     fn exec_op_tbor_oob<T: TborOpReq>(
         &self,
         req: &T,
         oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        let oob: Vec<(u64, usize)> = oob_items
-            .iter_mut()
-            .map(|item| (item.dma_ptr() as u64, item.len()))
+        let mut staged: Vec<Vec<u8>> = oob_items
+            .iter()
+            .map(|item| match item {
+                TborOobItem::In(buf) => buf.to_vec(),
+                TborOobItem::Out(buf) => buf.to_vec(),
+            })
             .collect();
-        self.exec_tbor(req, &oob)
+        let result = self.exec_tbor(req, &staged_oob(&mut staged));
+        for (item, buf) in oob_items.iter_mut().zip(&staged) {
+            if let TborOobItem::Out(out) = item {
+                out.copy_from_slice(buf);
+            }
+        }
+        result
     }
 
     /// Runs an AES-GCM fast-path operation through the bulk queue.
@@ -709,6 +720,14 @@ impl DdiDev for DdiEmuDev {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+/// Host DMA descriptors `(address, length)` for staged OOB buffers.
+fn staged_oob(staged: &mut [Vec<u8>]) -> Vec<(u64, usize)> {
+    staged
+        .iter_mut()
+        .map(|buf| (buf.as_mut_ptr() as u64, buf.len()))
+        .collect()
+}
 
 fn bulk_dir(mode: DdiAesOp) -> BulkDir {
     if mode == DdiAesOp::Encrypt {
