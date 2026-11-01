@@ -442,8 +442,8 @@ Firmware integration coverage for the TBOR `KeyReport` command. Tests validate P
 | Local-scoped sealing key produces a valid signed attestation report | ✅ | `key_report::key_report_local_roundtrip` | Verifies COSE_Sign1 signature and embedded COSE_Key coordinates |
 | Tampered masked-key authentication tag is rejected | ✅ | `key_report::key_report_rejects_tampered_masked_key` | Expects `AesGcmDecryptTagDoesNotMatch` |
 | KeyReport before partition finalization is rejected | ✅ | `key_report::key_report_rejects_before_finalize` | Expects `InvalidArg` |
-| Crypto-User session is rejected | ✅ | `key_report::key_report_rejected_on_cu_session` | Expects `InvalidPermissions` |
-| Default CO PSK is rejected | ✅ | `key_report::key_report_rejected_on_default_psk` | Expects `DefaultPskMustRotate` |
+| Crypto-User requests before finalization are rejected | ✅ | `key_report::key_report_cu_rejects_before_finalize` | Expects `InvalidArg` |
+| Default CO and CU PSKs are rejected | ✅ 🔁 | `key_report::key_report_rejected_on_default_psk` | Expects `DefaultPskMustRotate` for both roles |
 | Different report-data patterns are preserved in signed reports | ✅ 🔁 | `key_report::key_report_report_data_patterns` | Covers zero-filled, 0xFF-filled, and patterned report data under Ephemeral and Local scopes |
 | Generated ECC keys on all supported curves can be attested | ✅ 🔁 | `key_report::key_report_generated_ecc_all_curves` | Tests P-256, P-384, and P-521 under Ephemeral and Local scopes; verifies Generated and Sign flags |
 | Symmetric key classes are rejected | ✅ 🔁 | `key_report::key_report_rejects_all_symmetric_key_classes` | AES and HMAC-SHA256/384/512; expects `UnsupportedKeyType` |
@@ -452,7 +452,7 @@ Firmware integration coverage for the TBOR `KeyReport` command. Tests validate P
 | Invalid session ID is rejected | ✅ | `key_report::key_report_rejects_invalid_session` | Uses `u16::MAX`; expects `FileHandleSessionIdDoesNotMatch` |
 | Tampered IV and ciphertext are rejected without affecting the original key | ✅ 🔁 | `key_report::key_report_rejects_tampered_iv_and_ciphertext` | Expects `AesGcmDecryptTagDoesNotMatch`; original masked key remains attestable |
 | Imported ECC keys on all supported curves can be attested | ✅ 🔁 | `key_report::key_report_imported_ecc_all_curves` | P-256, P-384, and P-521; verifies Imported, Sign, and Verify flags |
-| Crypto-User cannot attest a valid Local-scoped key after finalization | ✅ | `key_report::key_report_rejects_cu_with_valid_key_after_finalize` | Expects `InvalidPermissions` |
+| Crypto-User can attest a valid Local-scoped key after finalization | ✅ | `key_report::key_report_cu_attests_valid_key_after_finalize` | Verifies PID signature, public-key binding and report data; tampered keys still fail authentication |
 | Generated ECC key with a non-empty label can be attested | ✅ | `key_report::key_report_generated_ecc_non_empty_label` | Verifies Generated and Sign flags |
 | Generated ECC key with maximum-length label can be attested | ✅ | `key_report::key_report_generated_ecc_max_label` | Uses `TBOR_KEY_LABEL_MAX_LEN` |
 | Generated DERIVE-only ECC key can be attested | ✅ | `key_report::key_report_generated_ecc_derive_usage` | Verifies Generated and Derive flags |

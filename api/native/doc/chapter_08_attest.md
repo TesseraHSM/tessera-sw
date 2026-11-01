@@ -4,6 +4,10 @@
 
 Retrieve the attestation report for a specified key
 
+TBOR `KeyReport` is available to active Crypto Officer and Crypto User
+sessions on a finalized partition. The calling role's default PSK must be
+rotated, and the masked key must pass its scope and authentication checks.
+
 ```cpp
 const tsra_byte *tsra_generate_key_report(
     tsra_handle key_handle, 

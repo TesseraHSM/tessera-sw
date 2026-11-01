@@ -16,12 +16,12 @@
 //!   sealed key's public point, and its `report_data` round-trips.
 //! * Tampered masked key (flipped AEAD tag) → `AesGcmDecryptTagDoesNotMatch`.
 //! * Before finalize (partition not `Initialized`) → `InvalidArg`.
-//! * Crypto-User session → `InvalidPermissions`.
+//! * Crypto-User requests before finalization → `InvalidArg`.
 //! * Report-data patterns and repeated requests preserve signed key binding.
 //! * Ordinary ECC keys on all curves, including P-521 wire padding.
 //! * Imported ECC keys retain their public points and imported/sign/verify
 //!   flags (emu); generated keys carry generated/sign/derive flags.
-//! * CU rejection with a valid key on a finalized partition.
+//! * CU attestation of a valid key on a finalized partition; tampering is rejected.
 //! * All supported symmetric key classes are rejected (emu).
 //! * Session-scoped P-384 ECC keys successfully produce signed reports;
 //!   the PID signature, public-key binding, and report data are verified.
@@ -45,6 +45,7 @@ use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
+use tsra_ddi_tbor_test_harness::CU_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::SessionType;
@@ -429,9 +430,9 @@ fn key_report_rejects_before_finalize() {
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 }
 
-/// Rejects KeyReport requests from a Crypto-User session.
+/// Rejects Crypto-User KeyReport requests before partition finalization.
 #[test]
-fn key_report_rejected_on_cu_session() {
+fn key_report_cu_rejects_before_finalize() {
     let ctx = TestCtx::new();
 
     // Rotate the CU PSK out of the default so the dispatcher's default-PSK
@@ -439,33 +440,33 @@ fn key_report_rejected_on_cu_session() {
     // sessions are pinned to `SessionType::PlainText`.
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
-    // KeyReport is Crypto-Officer-only: the handler's role gate (checked
-    // before the state/scope gates) rejects a CU session.
     let req = TborKeyReportReq {
         session_id: session.session_id,
         masked_key: vec![0u8; MASKED_SEALING_KEY_LEN],
         report_data: sample_report_data(),
     };
-    ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+    ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 }
 
-/// Rejects KeyReport requests while the default CO PSK is in use.
+/// Rejects KeyReport requests while either role's default PSK is in use.
 #[test]
 fn key_report_rejected_on_default_psk() {
-    let ctx = TestCtx::new();
-    // Open a CO session WITHOUT rotating the PSK (still the public
-    // default) — the dispatcher's default-PSK gate must reject the command
-    // before the handler runs.
-    let session = ctx
-        .open_session(CO_PSK_ID, SessionType::Authenticated)
-        .expect("open_session must succeed");
+    for (psk_id, session_type) in [
+        (CO_PSK_ID, SessionType::Authenticated),
+        (CU_PSK_ID, SessionType::PlainText),
+    ] {
+        let ctx = TestCtx::new();
+        let session = ctx
+            .open_session(psk_id, session_type)
+            .expect("open_session must succeed");
 
-    let req = TborKeyReportReq {
-        session_id: session.session_id(),
-        masked_key: vec![0u8; MASKED_SEALING_KEY_LEN],
-        report_data: sample_report_data(),
-    };
-    ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+        let req = TborKeyReportReq {
+            session_id: session.session_id(),
+            masked_key: vec![0u8; MASKED_SEALING_KEY_LEN],
+            report_data: sample_report_data(),
+        };
+        ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+    }
 }
 
 /// Verifies report-data binding across patterns and repeated requests.
@@ -660,7 +661,6 @@ fn key_report_rejects_tampered_iv_and_ciphertext() {
 
 /// Attests imported ECC keys across P-256, P-384, and P-521 using platform-appropriate key sizes.
 /// Verifies imported ECC key reports against independently generated host public keys.
-
 #[cfg(feature = "emu")]
 #[test]
 fn key_report_imported_ecc_all_curves() {
@@ -728,23 +728,26 @@ fn key_report_imported_ecc_all_curves() {
     }
 }
 
-/// Rejects a CU request even with a valid key after partition finalization.
+/// A CU can attest a Local-scoped key but cannot bypass its authentication.
 #[test]
-fn key_report_rejects_cu_with_valid_key_after_finalize() {
+fn key_report_cu_attests_valid_key_after_finalize() {
     let ctx = TestCtx::new();
     let co = finalized_co_session(&ctx);
-    let (masked_key, _) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
+    let (masked_key, public_key) = masked_sealing_key(&ctx, co.session_id, SCOPE_LOCAL);
     ctx.session_close(co.session_id).expect("close CO session");
     let cu = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
-    // Every other prerequisite is valid, isolating the CO-only role gate.
-    ctx.expect_fw_reject(
-        &TborKeyReportReq {
-            session_id: cu.session_id,
-            masked_key,
-            report_data: sample_report_data(),
-        },
-        TborStatus::InvalidPermissions,
-    );
+    let report_data = sample_report_data();
+    let mut req = TborKeyReportReq {
+        session_id: cu.session_id,
+        masked_key,
+        report_data,
+    };
+    let last = req.masked_key.len() - 1;
+    req.masked_key[last] ^= 1;
+    ctx.expect_fw_reject(&req, TborStatus::AesGcmDecryptTagDoesNotMatch);
+    req.masked_key[last] ^= 1;
+    let report = ctx.tbor(&req).expect("CU KeyReport");
+    verify_key_report(&ctx, &report.report, &public_key, &report_data);
     ctx.session_close(cu.session_id).expect("close CU session");
 }
 

@@ -11,6 +11,8 @@
 //!
 //! The request carries the masked-key envelope to attest plus a
 //! caller-supplied 128-byte `report_data` bound into the report payload.
+//! Both active Crypto-Officer and Crypto-User sessions may attest keys on
+//! a finalized partition after rotating their role's default PSK.
 
 use alloc::vec::Vec;
 

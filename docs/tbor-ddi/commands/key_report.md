@@ -44,8 +44,10 @@ log.  The masked blob's `svn` / `owner_seed_id` are **not** enforced
 against the current partition lineage: the report reflects the key
 as-masked (the AEAD tag still guarantees integrity / authenticity).
 
-This command is **Crypto-Officer-only**: a Crypto-User session is
-rejected with `InvalidPermissions`.
+This command is available to **both Crypto-Officer and Crypto-User** sessions.
+The session must be active, the partition must be finalized, and the calling
+role's default PSK must have been rotated. Key-scope and masked-key
+authentication checks apply equally to both roles.
 
 ## Request
 
@@ -56,7 +58,7 @@ section carrying the masked key and report data.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 4 | `session_id` | `session_id` (inline) | CO or CU session this request is bound to; cross-checked against the SQE-carried session id. |
 | 8 | `masked_key` | `buffer` (≤ 512 B) | The masked-key envelope to attest, as produced by `SdSealingKeyGen`: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(N) ‖ tag(16)`. |
 | — | `report_data` | `buffer` (128 B) | Caller-supplied data bound into the report payload (typically a freshness nonce or a challenge digest). |
 
@@ -84,7 +86,7 @@ Carries the variable-length COSE_Sign1 `report`.
 
 | Error | Cause |
 |---|---|
-| `InvalidPermissions` | The calling session is a Crypto User (this command is Crypto-Officer-only) |
+| `DefaultPskMustRotate` | The calling role's PSK is still the public default |
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
 | `InvalidArg` | The partition is not `Initialized` (run `PartFinal` first), or `report_data` is the wrong length |
 | `UnsupportedKeyScope` | The masked key's scope (`Session`, `SecurityDomain`, or other) has no masking key yet |

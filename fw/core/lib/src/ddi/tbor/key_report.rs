@@ -12,7 +12,7 @@
 //!
 //! Flow:
 //!
-//! 1. Decode the request; gate to a Crypto-Officer, `Active` session on an
+//! 1. Decode the request; gate to a Crypto-Officer or Crypto-User `Active` session on an
 //!    `Initialized` partition (parity with `SdSealingKeyGen`).
 //! 2. **Peek** the masked blob's cleartext metadata to read the key
 //!    `scope`, and resolve the scope's masking key.
@@ -31,7 +31,7 @@
 //! current partition lineage: the report reflects the key as-masked (the
 //! AEAD tag still guarantees integrity / authenticity).
 //!
-//! This command is **Crypto-Officer-only**.
+//! This command is available to both Crypto-Officer and Crypto-User sessions.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
@@ -54,7 +54,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
 use super::resolve_masking_key;
-use super::validate_crypto_officer_active_session;
+use super::validate_active_session;
 use crate::part_state;
 
 /// Length of the app-UUID field bound into the report.
@@ -184,7 +184,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let req = TborKeyReportReq::decode_mut(cmd_buf.request_mut())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
 
-        validate_crypto_officer_active_session(pal, io, sess_id)?;
+        validate_active_session(pal, io, sess_id)?;
 
         // Reports bind the finalized partition policy, so the partition must
         // be in the `Initialized` state even for session-scoped keys.
