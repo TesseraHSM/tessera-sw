@@ -16,6 +16,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use tsra_ddi_mbor_types::DdiDecoder;
 use tsra_ddi_mbor_types::DdiOp;
@@ -71,8 +73,12 @@ struct SocketHsm {
     hsm: Arc<StdHsm>,
     execution: tokio::sync::RwLock<()>,
     sessions: tokio::sync::RwLock<HashMap<u16, SessionOwner>>,
+    pending_cleanups: AtomicUsize,
+    cleanup_completed: tokio::sync::Notify,
     #[cfg(test)]
     submission_probe: tokio::sync::Mutex<Option<SubmissionProbe>>,
+    #[cfg(test)]
+    cleanup_probe: tokio::sync::Mutex<Option<CleanupProbe>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -94,6 +100,12 @@ struct SubmissionProbe {
     completed: tokio::sync::oneshot::Sender<Response>,
 }
 
+#[cfg(test)]
+struct CleanupProbe {
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
 struct SessionLease {
     id: u16,
     generation: Arc<()>,
@@ -113,8 +125,34 @@ impl SocketHsm {
             hsm,
             execution: tokio::sync::RwLock::new(()),
             sessions: tokio::sync::RwLock::new(HashMap::new()),
+            pending_cleanups: AtomicUsize::new(0),
+            cleanup_completed: tokio::sync::Notify::new(),
             #[cfg(test)]
             submission_probe: tokio::sync::Mutex::new(None),
+            #[cfg(test)]
+            cleanup_probe: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn wait_for_cleanup(&self) {
+        loop {
+            let completed = self.cleanup_completed.notified();
+            tokio::pin!(completed);
+            completed.as_mut().enable();
+            if self.pending_cleanups.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            completed.await;
+        }
+    }
+}
+
+struct CleanupCompletion(Arc<SocketHsm>);
+
+impl Drop for CleanupCompletion {
+    fn drop(&mut self) {
+        if self.0.pending_cleanups.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.cleanup_completed.notify_waiters();
         }
     }
 }
@@ -150,6 +188,7 @@ impl Connection {
         let server = Arc::clone(&self.server);
         let state = Arc::clone(&self.state);
         tokio::spawn(async move {
+            server.wait_for_cleanup().await;
             // Disconnect cleanup must wait for any in-flight open/close to
             // complete and record its CQE, even if its waiter was cancelled.
             let mut state = state.lock().await;
@@ -303,7 +342,17 @@ impl Drop for Connection {
     fn drop(&mut self) {
         let server = Arc::clone(&self.server);
         let state = Arc::clone(&self.state);
+        // Register synchronously: replacement requests must observe cleanup
+        // even before the spawned task first runs.
+        server.pending_cleanups.fetch_add(1, Ordering::AcqRel);
+        let completion = CleanupCompletion(Arc::clone(&server));
         tokio::spawn(async move {
+            let _completion = completion;
+            #[cfg(test)]
+            if let Some(probe) = server.cleanup_probe.lock().await.take() {
+                probe.started.send(()).expect("cleanup probe listener");
+                probe.resume.await.expect("cleanup probe resume");
+            }
             let mut state = state.lock().await;
             state.closed = true;
             let mut sessions = server.sessions.write().await;

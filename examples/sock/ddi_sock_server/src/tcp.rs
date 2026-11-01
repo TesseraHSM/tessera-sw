@@ -689,6 +689,52 @@ mod tests {
     }
 
     #[test]
+    fn replacement_bootstrap_waits_for_delayed_disconnect_cleanup() {
+        with_session_clients(|endpoint, hsm| {
+            let first = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("first socket");
+            first.erase().expect("initial reset");
+            let session = open_init(&first, 0);
+            tbor(&first, &session);
+
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            *hsm.cleanup_probe.blocking_lock() = Some(crate::CleanupProbe {
+                started: started_tx,
+                resume: resume_rx,
+            });
+            drop(first);
+            started_rx.blocking_recv().expect("cleanup is delayed");
+            std::thread::scope(|scope| {
+                let (reset_tx, reset_rx) = std::sync::mpsc::channel();
+                let replacement = scope.spawn(move || {
+                    let device = DdiSock::default()
+                        .open_dev(&endpoint)
+                        .expect("replacement socket");
+                    device.erase().expect("replacement reset");
+                    reset_tx.send(()).expect("reset notification");
+                    let session = open_init(&device, 0);
+                    tbor(&device, &session);
+                    tbor(
+                        &device,
+                        &TborSessionCloseReq {
+                            session_id: session.session_id,
+                        },
+                    );
+                });
+                let early_reset = reset_rx.recv_timeout(Duration::from_millis(100));
+                resume_tx.send(()).expect("release disconnect cleanup");
+                assert!(
+                    matches!(early_reset, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                    "replacement reset must not bypass delayed cleanup"
+                );
+                replacement.join().expect("replacement bootstrap");
+            });
+        });
+    }
+
+    #[test]
     fn reset_preserves_active_ownership_for_disconnect_cleanup() {
         with_session_clients(|endpoint, hsm| {
             let first = DdiSock::default()
