@@ -225,8 +225,10 @@ pub(crate) fn unmask_key_raw_no_res(
 /// Unmasks a single TBOR masked key on the host.
 ///
 /// TBOR keys are not device-resident: the key is an unpinned handle whose
-/// props carry the caller-held blob. The props are decoded from the blob's
-/// metadata; the firmware authenticates the blob when the key is used.
+/// props carry the caller-held blob. This only validates the envelope shape
+/// and decodes cleartext metadata; it does not authenticate the AEAD tag or
+/// session binding. The returned properties remain unauthenticated until a
+/// device operation uses the blob and verifies it under the scope's masking key.
 pub(crate) fn unmask_key_tbor(masked_key: &[u8]) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
     let key_props = HsmMaskedKey::to_tbor_key_props(masked_key)?;
     if matches!(

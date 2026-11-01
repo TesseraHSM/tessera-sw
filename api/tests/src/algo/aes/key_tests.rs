@@ -417,6 +417,85 @@ fn test_aes_unmask_corrupted_blob_fails(session: HsmSession) {
     HsmKeyManager::delete_key(key).unwrap();
 }
 
+#[cfg(feature = "session-ex-tests")]
+#[session_test]
+fn test_aes_unmask_defers_tag_authentication_until_use(session: HsmSession) {
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(256)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .scope(HsmKeyScope::Session)
+        .build()
+        .expect("AES session key properties");
+    let original = HsmKeyManager::generate_key(&session, &mut HsmAesKeyGenAlgo::default(), props)
+        .expect("generate AES session key");
+    let plaintext = [0x11; 32];
+    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
+    HsmEncrypter::encrypt_vec(&mut cipher, &original, &plaintext)
+        .expect("original masked key is usable");
+
+    let mut masked = original.masked_key_vec().expect("masked key");
+    *masked.last_mut().expect("AEAD tag") ^= 1;
+    let reconstructed =
+        HsmKeyManager::unmask_key(&session, &mut HsmAesKeyUnmaskAlgo::default(), &masked)
+            .expect("tag authentication is deferred during reconstruction");
+    compare_key_properties(&original, &reconstructed);
+
+    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
+    let error = HsmEncrypter::encrypt_vec(&mut cipher, &reconstructed, &plaintext)
+        .expect_err("the device must reject the modified authentication tag");
+    assert_eq!(error, HsmError::MaskedKeyAuthenticationFailed);
+}
+
+#[cfg(feature = "session-ex-tests")]
+#[test]
+fn test_aes_unmask_defers_wrong_session_rejection_until_use() {
+    let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();
+    let (partition, rev, session) = crate::utils::sd_provision::finalized_co_partition();
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(256)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .scope(HsmKeyScope::Session)
+        .build()
+        .expect("AES session key properties");
+    let original =
+        HsmKeyManager::generate_key(&session, &mut HsmAesKeyGenAlgo::default(), props.clone())
+            .expect("generate AES session key");
+    let masked = original.masked_key_vec().expect("masked key");
+
+    let other_partition = HsmPartitionManager::open_partition(&partition.path(), rev)
+        .expect("open another device handle for the same partition");
+    let other = other_partition
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::new(HsmPskId::CU),
+            HsmSessionExType::PlainText,
+        )
+        .expect("open a different session");
+    other
+        .change_psk(&[0x5A; PSK_LEN])
+        .expect("rotate the target session's default CU PSK");
+    let target_key = HsmKeyManager::generate_key(&other, &mut HsmAesKeyGenAlgo::default(), props)
+        .expect("generate a key in the target session");
+    let plaintext = [0x11; 32];
+    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
+    HsmEncrypter::encrypt_vec(&mut cipher, &target_key, &plaintext)
+        .expect("the target session can use its own key");
+
+    let reconstructed =
+        HsmKeyManager::unmask_key(&other, &mut HsmAesKeyUnmaskAlgo::default(), &masked)
+            .expect("session binding is deferred during reconstruction");
+    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
+    let error = HsmEncrypter::encrypt_vec(&mut cipher, &reconstructed, &plaintext)
+        .expect_err("the device must reject a key masked for another session");
+    assert_eq!(error, HsmError::MaskedKeyAuthenticationFailed);
+}
+
 /// verifies AES key unwrap fails when unwrapping with wrong algorithm type
 #[session_test]
 fn test_aes_unwrap_wrong_algo_fails(session: HsmSession) {

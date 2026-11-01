@@ -2546,7 +2546,14 @@ tsra_status tsra_key_unwrap_pair(
 
  This function unmasks a previously masked symmetric key. The masked key contains
  the key material and properties, so no external properties or unwrapping keys
- are needed. The key is imported into the HSM within the provided session.
+ are needed. On a legacy session, the device authenticates and imports the key.
+
+ On an extended session, this reconstructs an unpinned host handle without a
+ device command. Only the envelope shape and supported properties are checked;
+ the metadata remains unauthenticated until a device operation uses the key.
+ A modified AEAD tag or a session-scoped blob from another session can return
+ success here and fail with a masked-key authentication error on use.
+ Property reads and output-size queries do not authenticate the blob.
 
  @param[in] sess_handle Handle to the HSM session
  @param[in] key_kind The kind of key to unmask (e.g., AES)
@@ -2571,7 +2578,9 @@ tsra_status tsra_key_unmask(
 
  This function unmasks a previously masked key pair. The masked key contains
  the key material and properties, so no external properties or unwrapping keys
- are needed. The key pair is imported into the HSM within the provided session.
+ are needed. On a legacy session, the device authenticates and imports the pair.
+ On an extended session, the device authenticates the blob and returns its public
+ key via TBOR GetPublicKey; no device-resident key is created.
 
  @param[in] sess_handle Handle to the HSM session
  @param[in] key_kind The kind of key pair to unmask (RSA or ECC)

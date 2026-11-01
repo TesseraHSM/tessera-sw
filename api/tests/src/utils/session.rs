@@ -92,8 +92,7 @@ where
 }
 
 #[allow(clippy::expect_used)]
-#[cfg(not(feature = "session-ex-tests"))]
-fn open_session_test_session(path: &str) -> HsmSession {
+pub(crate) fn open_session_test_session(path: &str) -> HsmSession {
     let part = HsmPartitionManager::open_partition(path, SESSION_TEST_API_REV)
         .expect("Failed to open the partition for an open_session test");
     let creds = HsmCredentials::new(&APP_ID, &APP_PIN);

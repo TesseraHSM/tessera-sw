@@ -150,6 +150,9 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
 ///
 /// Only valid on a V2 (security-domain) session, where the key is
 /// rebuilt as an unpinned masked blob and unmasked by the firmware on use.
+/// Reconstruction validates the envelope and supported properties only;
+/// the metadata and AEAD tag are not authenticated until a key report or
+/// security-domain backup operation uses the blob.
 #[derive(Default)]
 pub struct HsmSealingKeyUnmaskAlgo {}
 
