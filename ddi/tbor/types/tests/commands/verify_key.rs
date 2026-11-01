@@ -19,6 +19,7 @@ use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::*;
 
 use crate::commands::common::CO;
+use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::get_public_key::generate_ecc;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
@@ -48,6 +49,33 @@ fn verify_key_accepts_intact_keys() {
     }
     let (masked_key, _) = generate_ecc(&ctx, session.session_id, ECC_CURVE_P256);
     verify_key(&ctx, session.session_id, masked_key);
+}
+
+/// Expanded PQC envelopes larger than the RSA unwrap limit remain verifiable.
+#[test]
+fn verify_key_accepts_large_generated_pqc_keys() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    for key_kind in [MLDSA_KEY_KIND_65_SEED, MLDSA_KEY_KIND_87_SEED] {
+        let key = ctx
+            .tbor(&TborMlDsaGenerateKeyReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                key_kind,
+            })
+            .expect("generate ML-DSA key");
+        assert!(key.masked_key.len() > UNWRAP_MASKED_KEY_MAX_LEN);
+        verify_key(&ctx, session.session_id, key.masked_key);
+    }
+    let key = ctx
+        .tbor(&TborMlKemGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: MLKEM_KEY_KIND_1024_SEED,
+        })
+        .expect("generate ML-KEM-1024 key");
+    assert!(key.masked_key.len() > UNWRAP_MASKED_KEY_MAX_LEN);
+    verify_key(&ctx, session.session_id, key.masked_key);
 }
 
 /// Crypto-User sessions may verify keys.

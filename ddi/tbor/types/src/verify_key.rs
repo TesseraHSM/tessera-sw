@@ -16,7 +16,11 @@ use crate::tbor;
 pub const TBOR_OP_VERIFY_KEY: u8 = 0x32;
 
 /// Maximum wire length of the `masked_key` request buffer.
-pub const VERIFY_KEY_MASKED_KEY_MAX_LEN: usize = crate::UNWRAP_MASKED_KEY_MAX_LEN;
+pub const VERIFY_KEY_MASKED_KEY_MAX_LEN: usize = crate::MASKED_MLDSA_KEY_MAX_LEN;
+
+const _: () = assert!(VERIFY_KEY_MASKED_KEY_MAX_LEN >= crate::MASKED_MLKEM_KEY_MAX_LEN);
+const _: () = assert!(VERIFY_KEY_MASKED_KEY_MAX_LEN >= crate::UNWRAP_MASKED_KEY_MAX_LEN);
+const _: () = assert!(VERIFY_KEY_MASKED_KEY_MAX_LEN == 5160);
 
 /// Host-facing TBOR `VerifyKey` request.
 #[tbor(opcode = TBOR_OP_VERIFY_KEY, session_ctrl = in_session)]
@@ -28,7 +32,7 @@ pub struct TborVerifyKeyReq {
 
     /// The masked-key envelope. Variable length up to
     /// [`VERIFY_KEY_MASKED_KEY_MAX_LEN`].
-    #[tbor(max_len = 3168)]
+    #[tbor(max_len = 5160)]
     pub masked_key: Vec<u8>,
 }
 

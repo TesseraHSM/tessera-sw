@@ -32,11 +32,12 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8 | `masked_key` | `buffer` (≤ 3168 B) | The masked key; unmasked in place. |
+| 8 | `masked_key` | `buffer` (≤ 5160 B) | The masked key; unmasked in place. |
 
 ### Data section
 
-Carries the masked key.
+Carries the masked key, including expanded ML-DSA-87 material (the largest
+generated envelope), ML-DSA-65 and ML-KEM-1024 envelopes.
 
 ## Response
 

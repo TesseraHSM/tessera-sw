@@ -23,13 +23,15 @@ use tsra_fw_ddi_tbor_api::tbor;
 /// TBOR opcode for `VerifyKey`.
 pub const TBOR_OP_VERIFY_KEY: u8 = 0x32;
 
-/// Maximum wire length of the `masked_key` request buffer. Matches
-/// `UnwrapKey` so RSA-4096 CRT envelopes fit. Pinned into the
-/// `#[tbor(buffer, max_len = 3168)]` literal on
+/// Maximum wire length of the `masked_key` request buffer. Accommodates
+/// expanded ML-DSA-87 keys, the largest generated masked keys. Pinned into the
+/// `#[tbor(buffer, max_len = 5160)]` literal on
 /// [`TborVerifyKeyReq::masked_key`].
-pub const VERIFY_KEY_MASKED_KEY_MAX_LEN: usize = crate::UNWRAP_MASKED_KEY_MAX_LEN;
+pub const VERIFY_KEY_MASKED_KEY_MAX_LEN: usize = crate::MASKED_MLDSA_KEY_MAX_LEN;
 
-const _: () = assert!(VERIFY_KEY_MASKED_KEY_MAX_LEN == 3168);
+const _: () = assert!(VERIFY_KEY_MASKED_KEY_MAX_LEN >= crate::MASKED_MLKEM_KEY_MAX_LEN);
+const _: () = assert!(VERIFY_KEY_MASKED_KEY_MAX_LEN >= crate::UNWRAP_MASKED_KEY_MAX_LEN);
+const _: () = assert!(VERIFY_KEY_MASKED_KEY_MAX_LEN == 5160);
 
 /// `VerifyKey` request schema.
 #[tbor(opcode = 0x32, pair = TborVerifyKeyResp)]
@@ -41,7 +43,7 @@ pub struct TborVerifyKeyReq<'a> {
 
     /// The masked-key envelope. `mutable` so the handler can unmask it in
     /// place.
-    #[tbor(buffer, max_len = 3168, mutable)]
+    #[tbor(buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 }
 
@@ -72,6 +74,26 @@ mod tests {
             .unwrap()
             .finish();
         assert_eq!(frame.masked_key(), &masked[..]);
+    }
+
+    #[test]
+    fn request_bounds_largest_generated_key() {
+        let masked = [0xCD; VERIFY_KEY_MASKED_KEY_MAX_LEN + 1];
+        let mut buf = [0u8; 8192];
+        let frame = TborVerifyKeyReq::encode(&mut buf)
+            .unwrap()
+            .session_id(SessionId(9))
+            .unwrap()
+            .masked_key(&masked[..VERIFY_KEY_MASKED_KEY_MAX_LEN])
+            .unwrap()
+            .finish();
+        assert_eq!(frame.masked_key().len(), VERIFY_KEY_MASKED_KEY_MAX_LEN);
+        assert!(TborVerifyKeyReq::encode(&mut buf)
+            .unwrap()
+            .session_id(SessionId(9))
+            .unwrap()
+            .masked_key(&masked)
+            .is_err());
     }
 
     #[test]
