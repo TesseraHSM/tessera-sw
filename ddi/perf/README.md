@@ -105,10 +105,10 @@ ML-DSA operations use an empty context.
 | `--messages` | 64 | Distinct messages per thread |
 | `--cbc-len` | 1024 | AES-CBC message length in bytes, a multiple of 16 and at most 1024 |
 | `--verify-all` | off | Check every timed response on the host |
-| `--max-samples` | 1000000 | Reservoir-sampled latencies kept per thread and operation |
+| `--max-samples` | 1000000 | Reservoir-sampled latencies kept per thread and operation, at least 1 |
 | `--tsv` | none | Append result rows to this TSV file |
 | `--markdown` | none | `suite`, `compare`: also write the table to this file |
-| `--label` | empty | Stored with each TSV row, e.g. the firmware version |
+| `--label` | empty | Stored with each TSV row, e.g. the firmware version; no tabs, line breaks or other control characters |
 | `--device` | 0 | Device index, as enumerated by the DDI backend |
 | `--quiet` | off | Suppress progress output |
 

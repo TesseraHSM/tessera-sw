@@ -204,6 +204,16 @@ fn check_args(run: &RunArgs, threads: &[usize], ops: &[OpKind]) -> Result<(), St
     if ops.iter().any(|op| op.is_cbc()) && run.messages < run.keys {
         return Err("--messages must be at least --keys for CBC operations".into());
     }
+    // An empty reservoir leaves nothing to summarize latencies from.
+    if run.max_samples == 0 {
+        return Err("--max-samples must be at least 1".into());
+    }
+    // Tabs and line breaks would split the label's TSV field and row.
+    if run.label.chars().any(char::is_control) {
+        return Err(
+            "--label must not contain tabs, line breaks or other control characters".into(),
+        );
+    }
     Ok(())
 }
 
@@ -319,5 +329,23 @@ mod tests {
     fn duplicate_operations_are_rejected() {
         assert!(check_unique_ops(&[OpKind::TborGetApiRev, OpKind::TborGetApiRev]).is_err());
         assert!(check_unique_ops(&[OpKind::TborGetApiRev, OpKind::MborGetApiRev]).is_ok());
+    }
+
+    #[test]
+    fn zero_max_samples_is_rejected() {
+        let mut args = run_args();
+        args.max_samples = 0;
+        assert!(check_args(&args, &[1], &[OpKind::TborGetApiRev]).is_err());
+    }
+
+    #[test]
+    fn labels_with_tsv_separators_are_rejected() {
+        let mut args = run_args();
+        for bad in ["fw\t1", "fw\n1", "fw\r1"] {
+            args.label = bad.into();
+            assert!(check_args(&args, &[1], &[OpKind::TborGetApiRev]).is_err());
+        }
+        args.label = "0.0.0.0-61031171beta main 87cff0d".into();
+        assert!(check_args(&args, &[1], &[OpKind::TborGetApiRev]).is_ok());
     }
 }

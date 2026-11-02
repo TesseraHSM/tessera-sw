@@ -18,6 +18,7 @@ use tsra_crypto::EccPublicKey;
 use tsra_crypto::Encrypter;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::MlDsaPublicKey;
+use tsra_crypto::MlKemPublicKey;
 use tsra_crypto::Rng;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
@@ -406,6 +407,9 @@ pub(crate) struct Worker<'e> {
     /// follow-up can reuse that request's inputs.
     last_shared: (usize, usize),
     last_mldsa_keygen: Option<(Vec<u8>, MlDsaPublicKey)>,
+    /// The ML-KEM key pair the last keygen response returned, once checked,
+    /// for [`Self::prove_mlkem_keygen`] to decapsulate with.
+    last_mlkem_keygen: Option<(Vec<u8>, MlKemPublicKey)>,
 }
 
 /// Time one device call.
@@ -466,6 +470,7 @@ impl<'e> Worker<'e> {
             seq: 0,
             last_shared: (0, 0),
             last_mldsa_keygen: None,
+            last_mlkem_keygen: None,
         })
     }
 
@@ -752,13 +757,17 @@ impl<'e> Worker<'e> {
         let env = self.env;
         let req = pqc::mlkem_keygen_req(env.session_id, p);
         let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
+        let mut checked_key = None;
         let result = resp.and_then(|r| {
             if verify {
-                pqc::check_mlkem_key(p, &r.pub_key, &r.masked_key).map(|_| ())
+                let public = pqc::check_mlkem_key(p, &r.pub_key, &r.masked_key)?;
+                checked_key = Some((r.masked_key, public));
+                Ok(())
             } else {
                 Ok(())
             }
         });
+        self.last_mlkem_keygen = checked_key;
         (dt, result)
     }
 
@@ -857,23 +866,23 @@ impl<'e> Worker<'e> {
         }
     }
 
-    /// Generate an ML-KEM key and have the device decapsulate a host
-    /// ciphertext with it. The device masks the shared secret, so this shows
-    /// the key is usable, not that the two sides agree on the secret.
+    /// Have the device decapsulate a host ciphertext with the key pair the
+    /// checked keygen response returned. The device masks the shared secret,
+    /// so this shows the key is usable, not that the two sides agree on the
+    /// secret.
     fn prove_mlkem_keygen(&mut self, op: OpKind) -> Result<(), String> {
         let (_, p) = op.mlkem().expect("ML-KEM operation");
         let env = self.env;
-        let key = env
-            .session_ctx()
-            .tbor(&pqc::mlkem_keygen_req(env.session_id, p))
-            .map_err(|e| format!("MlKemGenerateKey: {e:?}"))?;
-        let public = pqc::check_mlkem_key(p, &key.pub_key, &key.masked_key)?;
+        let (masked_key, public) = self
+            .last_mlkem_keygen
+            .take()
+            .ok_or("no checked ML-KEM keygen response to prove")?;
         let decap = env
             .session_ctx()
             .tbor(&TborMlKemDecapsulateReq {
                 session_id: env.session_id,
                 scope: SCOPE_LOCAL,
-                masked_key: key.masked_key,
+                masked_key,
                 ciphertext: pqc::host_encapsulate(p, &public)?,
             })
             .map_err(|e| format!("MlKemDecapsulate with a generated key: {e:?}"))?;
