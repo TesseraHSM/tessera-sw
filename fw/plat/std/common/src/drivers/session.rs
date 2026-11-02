@@ -444,6 +444,22 @@ impl SessionTable {
         Ok(())
     }
 
+    /// Revert a reopen promoted by [`promote`](Self::promote): an Active
+    /// slot goes back to NeedsRenegotiation.  Returns the physical vault
+    /// key ID it was bound to so the caller can clean up the vault.
+    pub fn demote_reopened(&mut self, id: HsmSessId) -> HsmResult<HsmKeyId> {
+        let slot = self.active_slot(id)?;
+        let bit = 1u8 << slot;
+        if ((self.pending_mask | self.renego_mask) & bit) != 0 {
+            return Err(HsmError::SessionNotPending);
+        }
+        let phys = HsmKeyId::from(self.phys_ids[slot]);
+        self.renego_mask |= bit;
+        self.psk_change_mask &= !bit;
+        self.phys_ids[slot] = 0;
+        Ok(phys)
+    }
+
     fn install_pending(&mut self, slot: usize, handshake_state: &[u8]) -> HsmResult<()> {
         self.pending_blobs[slot].store(handshake_state)?;
         self.alloc_mask |= 1 << slot;
@@ -1166,6 +1182,29 @@ mod tests {
         ));
         assert!(!table.is_reopen_pending(id));
         // And it can be re-armed again.
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
+    }
+
+    #[test]
+    fn demote_reopened_reverts_promoted_slot_to_renego() {
+        let mut table = SessionTable::new();
+        let id = renego_cu(&mut table);
+        table
+            .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
+        // Still reopen-Pending: not demotable.
+        assert_eq!(table.demote_reopened(id), Err(HsmError::SessionNotPending));
+        table.promote(id, HsmKeyId::from(42)).unwrap();
+        assert_eq!(table.demote_reopened(id).unwrap(), HsmKeyId::from(42));
+        assert!(matches!(
+            table.state(id),
+            HsmSessionState::NeedsRenegotiation
+        ));
+        // Not Active any more: a second demote is rejected.
+        assert_eq!(table.demote_reopened(id), Err(HsmError::SessionNotPending));
+        // And it can be reopened again.
         table
             .reopen_pending(id, HsmSessionRole::CryptoUser, b"r")
             .unwrap();

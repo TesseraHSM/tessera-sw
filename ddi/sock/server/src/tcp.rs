@@ -199,6 +199,8 @@ mod tests {
     use tsra_ddi_tbor_types::TborSessionCloseReq;
     use tsra_ddi_tbor_types::TborSessionOpenFinishReq;
     use tsra_ddi_tbor_types::TborSessionOpenInitReq;
+    use tsra_ddi_tbor_types::TborSessionReopenFinishReq;
+    use tsra_ddi_tbor_types::TborSessionReopenInitReq;
     use tsra_ddi_tbor_types::TborStatus;
     use tsra_session_ex_crypto::*;
     use x509::X509Certificate;
@@ -220,6 +222,35 @@ mod tests {
         device: &DdiSockDev,
         psk_id: u8,
     ) -> (TborSessionOpenFinishReq, Vec<u8>) {
+        handshake(device, psk_id, |request| {
+            let response = tbor(device, request);
+            (response.session_id, response.pk_resp, response.mac_resp)
+        })
+    }
+
+    fn reopen_init(device: &DdiSockDev, session_id: u16, psk_id: u8) -> TborSessionOpenFinishReq {
+        handshake(device, psk_id, |request| {
+            let response = tbor(
+                device,
+                &TborSessionReopenInitReq {
+                    session_id,
+                    session_type: request.session_type,
+                    suite_id: request.suite_id,
+                    pk_init: request.pk_init,
+                },
+            );
+            (session_id, response.pk_resp, response.mac_resp)
+        })
+        .0
+    }
+
+    /// Runs Phase 1 via `init` (open or reopen) and builds the Phase-2
+    /// fields for the fixed test seed.
+    fn handshake<const PK: usize, const MAC: usize>(
+        device: &DdiSockDev,
+        psk_id: u8,
+        init: impl FnOnce(&TborSessionOpenInitReq) -> (u16, [u8; PK], [u8; MAC]),
+    ) -> (TborSessionOpenFinishReq, Vec<u8>) {
         let chain = tbor(device, &TborGetCertChainInfoReq::new(0));
         let leaf = tbor(device, &TborGetCertReq::new(0, chain.num_certs - 1));
         let cert = X509Certificate::from_der(&leaf.certificate).expect("partition certificate");
@@ -234,13 +265,13 @@ mod tests {
             pk_init: ephemeral.pk_sec1,
             ..Default::default()
         };
-        let response = tbor(device, &request);
+        let (session_id, pk_resp, mac_resp) = init(&request);
         let info = build_hpke_info(request.psk_id, request.session_type, request.suite_id);
         let exported = receive_exported(
             &ephemeral.sk,
             &ephemeral.pk,
             &pk_hsm,
-            &response.pk_resp,
+            &pk_resp,
             &info,
             default_psk(request.psk_id).expect("default PSK"),
             &[request.psk_id],
@@ -248,22 +279,22 @@ mod tests {
         .expect("HPKE export");
         verify_phase1_mac(
             &exported,
-            response.session_id,
+            session_id,
             &ephemeral.pk_sec1,
             &pk_hsm_sec1,
-            &response.pk_resp,
-            &response.mac_resp,
+            &pk_resp,
+            &mac_resp,
         )
         .expect("phase 1 MAC");
         let param_key = derive_param_key(&exported).expect("parameter key");
         let finish = TborSessionOpenFinishReq {
-            session_id: response.session_id,
+            session_id,
             mac_fin: build_phase2_mac(
                 &exported,
-                response.session_id,
+                session_id,
                 &ephemeral.pk_sec1,
                 &pk_hsm_sec1,
-                &response.pk_resp,
+                &pk_resp,
             )
             .expect("phase 2 MAC"),
             seed_envelope: seal_seed_envelope(&param_key, &[0x5A; SESSION_SEED_LEN])
@@ -425,6 +456,40 @@ mod tests {
             tbor(&owner, &replacement);
             assert!(matches!(
                 bulk_error(&owner, replacement.session_id),
+                DdiError::FpError(status)
+                    if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
+            ));
+        });
+    }
+
+    #[test]
+    fn tbor_reopen_reactivates_reset_session() {
+        with_session_clients(|endpoint, _hsm| {
+            let owner = DdiSock::default()
+                .open_dev(&endpoint)
+                .expect("owner socket");
+            owner.erase().expect("initial reset");
+            let session = open_init(&owner, 0);
+            let opened = tbor(&owner, &session);
+
+            owner.erase().expect("reset");
+            assert!(matches!(
+                bulk_error(&owner, session.session_id),
+                DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation)
+            ));
+
+            let reopen = reopen_init(&owner, session.session_id, 0);
+            tbor(
+                &owner,
+                &TborSessionReopenFinishReq {
+                    session_id: reopen.session_id,
+                    mac_fin: reopen.mac_fin,
+                    seed_envelope: reopen.seed_envelope,
+                    bmk_session: opened.bmk_session,
+                },
+            );
+            assert!(matches!(
+                bulk_error(&owner, session.session_id),
                 DdiError::FpError(status)
                     if status == u32::from(tsra_fw_hsm_bulk::sts::INVALID_FIELD_GCM)
             ));

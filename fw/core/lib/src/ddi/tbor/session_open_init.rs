@@ -258,7 +258,10 @@ pub(super) async fn run_handshake<'a, 'p: 'a, P: HsmPal>(
     // Record the Pending session's teardown inverse, so a failure below
     // (MAC, response encode, or the CQE post) reverts it via the
     // dispatcher's undo walk rather than leaking the slot.
-    undo.push_session_destroy(slot)?;
+    match source {
+        SlotSource::Create(_) => undo.push_session_destroy(slot)?,
+        SlotSource::Reopen(_) => undo.push_session_cancel_reopen(slot)?,
+    }
     let session_id = u16::from(slot);
 
     // ── Phase-1 confirm MAC ────────────────────────────────────

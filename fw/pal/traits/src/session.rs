@@ -435,9 +435,10 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// * it is never evicted by a fresh `session_create_pending`;
     /// * a repeated call on a reopen-Pending slot replaces the stored
     ///   handshake state (the host may restart an abandoned reopen);
-    /// * [`session_destroy`](Self::session_destroy) on a reopen-Pending
-    ///   slot reverts it to `NeedsRenegotiation` instead of freeing it,
-    ///   so a failed reopen handshake cannot drop the session;
+    /// * [`session_cancel_reopen`](Self::session_cancel_reopen) reverts
+    ///   it to `NeedsRenegotiation`, so a failed reopen handshake cannot
+    ///   drop the session; [`session_destroy`](Self::session_destroy)
+    ///   (host close / flush) frees it like any other slot;
     /// * [`session_promote`](Self::session_promote) completes the reopen,
     ///   leaving the slot [`Active`](HsmSessionState::Active);
     /// * a partition disable returns it to `NeedsRenegotiation`.
@@ -457,6 +458,24 @@ pub trait HsmSessionManager: HsmIoTypes {
         role: HsmSessionRole,
         handshake_state: &HsmDmaBuf,
     ) -> HsmResult<()>;
+
+    /// Rolls back a reopen handshake, returning the slot to
+    /// [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation) under
+    /// the same id.
+    ///
+    /// Used by the undo walk of `SessionReopenInit` / `SessionReopenFinish`:
+    ///
+    /// * a reopen-Pending slot drops its handshake state;
+    /// * an [`Active`](HsmSessionState::Active) slot (a reopen already
+    ///   promoted by the failing command) has its new session vault key
+    ///   and every session-scoped key bound to it removed.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — slot is `NeedsRenegotiation`.
+    /// - `Err(HsmError::SessionNotPending)` — slot is neither
+    ///   reopen-Pending nor Active.
+    async fn session_cancel_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 
     /// Borrows the opaque handshake state of a
     /// [`Pending`](HsmSessionState::Pending) slot.

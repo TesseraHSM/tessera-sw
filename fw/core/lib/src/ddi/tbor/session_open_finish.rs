@@ -20,8 +20,8 @@
 //! The Phase-2 core ([`run_finish`]) is shared with
 //! [`super::session_reopen_finish`], which restores the session's
 //! existing `masking_key` from the host's `bmk_session` instead of
-//! generating a fresh one.  Destroying a reopen-Pending slot reverts it
-//! to NeedsRenegotiation, so a failed reopen never loses the session.
+//! generating a fresh one.  A failed reopen (before or after promotion)
+//! reverts the slot to NeedsRenegotiation, so it never loses the session.
 //!
 //! All variable-length buffers live on the per-IO scoped allocator
 //! per the firmware async-discipline convention; no DMA-sized arrays
@@ -204,8 +204,12 @@ pub(super) async fn run_finish<'a, 'p, P: HsmPal>(
     // (MAC/envelope auth, key derivation, promote, response, or the CQE
     // post) reverts the session via the dispatcher's undo walk — the
     // same "destroy on failure" the bespoke rollback did, now uniform.
-    // For a reopen-Pending slot the PAL reverts to NeedsRenegotiation.
-    undo.push_session_destroy(sess_id)?;
+    // A reopen instead reverts to NeedsRenegotiation, even after the
+    // promote, so the host can retry it.
+    match kind {
+        HandshakeKind::Open => undo.push_session_destroy(sess_id)?,
+        HandshakeKind::Reopen => undo.push_session_cancel_reopen(sess_id)?,
+    }
     let pk_hsm = load_pk_hsm(pal, io, alloc)?;
     // A transport-protected slot seals the reply under its own keys, so
     // an authentication failure must leave it for the undo walk.
@@ -231,7 +235,7 @@ pub(super) async fn run_finish<'a, 'p, P: HsmPal>(
     )
     .await
     {
-        destroy_pending_on_auth_failure(pal, io, undo, sess_id, sealed).await;
+        destroy_pending_on_auth_failure(pal, io, undo, sess_id, kind, sealed).await;
         return Err(e);
     }
     crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
@@ -252,7 +256,7 @@ pub(super) async fn run_finish<'a, 'p, P: HsmPal>(
     let seed = match open_seed_envelope(pal, io, param_key, seed_envelope).await {
         Ok(seed) => seed,
         Err(e) => {
-            destroy_pending_on_auth_failure(pal, io, undo, sess_id, sealed).await;
+            destroy_pending_on_auth_failure(pal, io, undo, sess_id, kind, sealed).await;
             return Err(e);
         }
     };
@@ -263,7 +267,7 @@ pub(super) async fn run_finish<'a, 'p, P: HsmPal>(
     let masking_key = match obtain_masking_key(pal, io, alloc, bk_session, mk_source).await {
         Ok(mk) => mk,
         Err(e) => {
-            destroy_pending_on_auth_failure(pal, io, undo, sess_id, sealed).await;
+            destroy_pending_on_auth_failure(pal, io, undo, sess_id, kind, sealed).await;
             return Err(e);
         }
     };
@@ -363,11 +367,13 @@ async fn obtain_masking_key<'a, P: HsmPal>(
 /// observable to a racing finish until that walk completes.  Destroying
 /// here shrinks that window to nothing.
 ///
-/// The [`UndoLog`] holds only the `session_destroy` entry pushed up front,
-/// so once the eager destroy succeeds the log is discarded: a second
-/// destroy would delete the slot outright (a reverted reopen slot is
-/// NeedsRenegotiation) or hit a slot re-allocated in the meantime.  If the
-/// eager destroy fails the entry stays as the backstop.
+/// A reopen-Pending slot is reverted to NeedsRenegotiation instead of
+/// destroyed, so a failed reopen never loses the session.
+///
+/// The [`UndoLog`] holds only the teardown entry pushed up front, so once
+/// the eager teardown succeeds the log is discarded: a second one would
+/// fail on (or hit a re-allocated) slot.  If the eager teardown fails the
+/// entry stays as the backstop.
 ///
 /// A `sealed` (transport-protected) slot is left to the undo walk instead:
 /// its transport keys must outlive this handler to seal the error reply,
@@ -379,9 +385,17 @@ async fn destroy_pending_on_auth_failure<'p, P: HsmPal>(
     io: &P::Io,
     undo: &mut UndoLog<'p>,
     id: HsmSessId,
+    kind: HandshakeKind,
     sealed: bool,
 ) {
-    if !sealed && pal.session_destroy(io, id).await.is_ok() {
+    if sealed {
+        return;
+    }
+    let torn_down = match kind {
+        HandshakeKind::Open => pal.session_destroy(io, id).await,
+        HandshakeKind::Reopen => pal.session_cancel_reopen(io, id).await,
+    };
+    if torn_down.is_ok() {
         undo.discard();
     }
 }

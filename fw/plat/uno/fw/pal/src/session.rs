@@ -155,14 +155,6 @@ impl HsmSessionManager for UnoHsmPal {
 
         let mut table = SessionStore::partition(io.pid())?;
 
-        // An abandoned reopen handshake reverts to NeedsRenegotiation; only
-        // its handshake-blob key is deleted.
-        if table.is_reopen_pending(id) {
-            let handshake = table.cancel_reopen(id)?;
-            let _ = crate::vault::vault(io).delete(self, io, handshake).await;
-            return Ok(());
-        }
-
         // A renegotiating slot has no live vault state: the partition reset
         // that flagged it (disable — e.g. the `CC.EN` clear an NVMe
         // Level-2 abort or firmware-crash recovery drives) already deleted
@@ -320,6 +312,27 @@ impl HsmSessionManager for UnoHsmPal {
                 Err(e)
             }
         }
+    }
+
+    async fn session_cancel_reopen(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<()> {
+        let _guard = self.fp_bulk_lock.lock().await;
+
+        let mut table = SessionStore::partition(io.pid())?;
+        if table.is_reopen_pending(id) {
+            let handshake = table.cancel_reopen(id)?;
+            let _ = crate::vault::vault(io).delete(self, io, handshake).await;
+            return Ok(());
+        }
+        if !matches!(table.state(id), HsmSessionState::Active) {
+            return Err(HsmError::SessionNotPending);
+        }
+        let physical_id = table.physical_id(id)?;
+        crate::vault::delete_session_keys(self, io, id).await?;
+        crate::vault::vault(io)
+            .delete(self, io, physical_id)
+            .await?;
+        table.demote_reopened(id)?;
+        Ok(())
     }
 
     fn session_pending_state(

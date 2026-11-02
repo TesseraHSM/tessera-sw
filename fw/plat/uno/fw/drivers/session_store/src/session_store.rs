@@ -329,11 +329,12 @@ impl SessionTable {
     /// the physical-id indirection, and the volatile pending / PSK-change
     /// masks.
     ///
-    /// Used on partition free, which releases the prior session context.
-    /// Disable and NSSR (`Migrate`) use
-    /// [`mark_all_needs_renego`](Self::mark_all_needs_renego) instead, retaining
-    /// established logical IDs for reopen or close. Mirrors the reference
-    /// firmware's `session_table().restore(0)` in `HsmPartState::clear_partition_info`.
+    /// Used on partition free (and on an NSSR of a partition with no
+    /// resources yet), which discards the prior session context. A disable
+    /// or full NSSR uses [`mark_all_needs_renego`](Self::mark_all_needs_renego)
+    /// instead, retaining established logical IDs so the host can reopen or
+    /// close its sessions. Mirrors the reference firmware's
+    /// `session_table().restore(0)` in `HsmPartState::clear_partition_info`.
     #[inline(never)]
     pub fn clear_all(&mut self) {
         self.region_mut().fill(0);
@@ -483,6 +484,28 @@ impl SessionTable {
         let slot = u16::from(id) as usize;
         let phys = HsmKeyId::from(self.phys_id(slot));
         self.set_pending_mask(self.pending_mask() & !(1u8 << slot));
+        self.set_phys_id(slot, 0);
+        Ok(phys)
+    }
+
+    /// Reverts a reopen promoted by [`promote`](Self::promote): an Active
+    /// slot goes back to NeedsRenegotiation. Returns the physical vault key
+    /// id it was bound to so the caller can delete it.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::SessionNotFound`] — `id` is not an allocated slot.
+    /// - [`HsmError::SessionNotPending`] — the slot is not Active.
+    #[inline(never)]
+    pub fn demote_reopened(&mut self, id: HsmSessId) -> HsmResult<HsmKeyId> {
+        let slot = self.active_slot(id)?;
+        let bit = 1u8 << slot;
+        if ((self.pending_mask() | self.renego_mask()) & bit) != 0 {
+            return Err(HsmError::SessionNotPending);
+        }
+        let phys = HsmKeyId::from(self.phys_id(slot));
+        self.region_mut()[RENEGO_MASK] |= bit;
+        self.set_psk_change_mask(self.psk_change_mask() & !bit);
         self.set_phys_id(slot, 0);
         Ok(phys)
     }
