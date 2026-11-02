@@ -188,6 +188,8 @@ mod round_trips {
     use openssl::pkey::Public;
     use openssl::sign::Verifier;
     use tsra_api::HsmAesCbcAlgo;
+    use tsra_api::HsmAesGcmAlgo;
+    use tsra_api::HsmAesGcmKey;
     use tsra_api::HsmAesGcmKeyUnmaskAlgo;
     use tsra_api::HsmAesKey;
     use tsra_api::HsmAesKeyGenAlgo;
@@ -212,9 +214,11 @@ mod round_trips {
     use tsra_api::HsmSession;
     use tsra_api::HsmSigner;
     use tsra_ossl_engine_core::cipher_method::AES_BLOCK;
+    use tsra_ossl_engine_core::cipher_method::GCM_IV_LEN;
+    use tsra_ossl_engine_core::cipher_method::GCM_TAG_LEN;
     use tsra_ossl_engine_core::cipher_method::TSRA_CTRL_SET_KEY_URI;
-    use tsra_ossl_engine_core::cipher_method::register_aes_cbc_ciphers;
-    use tsra_ossl_engine_core::cipher_method::release_aes_cbc_ciphers;
+    use tsra_ossl_engine_core::cipher_method::register_aes_ciphers;
+    use tsra_ossl_engine_core::cipher_method::release_aes_ciphers;
     use tsra_ossl_engine_core::error::RetCode;
 
     use super::*;
@@ -808,7 +812,7 @@ mod round_trips {
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_aes_cbc(data: EngineData, dir: &Path) -> EngineResult<()> {
         let (mut engine, engine_raw) = keygen_engine(data)?;
-        register_aes_cbc_ciphers::<crate::aes::TsraAesCbc>(&engine)?;
+        register_aes_ciphers::<crate::aes::TsraAes>(&engine)?;
         let slot = crate::engine_impl::engine_data_slot()?;
         let data = slot
             .get(&engine)
@@ -903,7 +907,7 @@ mod round_trips {
         // SAFETY: every cipher context above is freed; engine_raw is the
         // ENGINE_new ref from new_test_engine.
         unsafe {
-            release_aes_cbc_ciphers(&engine);
+            release_aes_ciphers(&engine);
             ffi::ENGINE_free(engine_raw);
         }
         tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
@@ -959,7 +963,7 @@ mod round_trips {
     pub(super) fn run_generate_key(data: EngineData, dir: &Path) -> EngineResult<()> {
         let (mut engine, engine_raw) = keygen_engine(data)?;
         engine.set_ctrl::<crate::engine_impl::TsraCtrl>()?;
-        register_aes_cbc_ciphers::<crate::aes::TsraAesCbc>(&engine)?;
+        register_aes_ciphers::<crate::aes::TsraAes>(&engine)?;
         let slot = crate::engine_impl::engine_data_slot()?;
         let data = slot
             .get(&engine)
@@ -1093,7 +1097,201 @@ mod round_trips {
         // SAFETY: every cipher context above is freed; engine_raw is the
         // ENGINE_new ref from new_test_engine.
         unsafe {
-            release_aes_cbc_ciphers(&engine);
+            release_aes_ciphers(&engine);
+            ffi::ENGINE_free(engine_raw);
+        }
+        Ok(())
+    }
+
+    /// One message under the key at `uri`: encrypts without `tag`, decrypts
+    /// with it.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    fn aes_gcm(
+        engine_raw: *mut ffi::ENGINE,
+        uri: &str,
+        iv: &[u8; GCM_IV_LEN],
+        aad: &[u8],
+        input: &[u8],
+        tag: Option<&[u8; GCM_TAG_LEN]>,
+    ) -> Option<(Vec<u8>, [u8; GCM_TAG_LEN])> {
+        let ok = RetCode::Success as c_int;
+        let enc = c_int::from(tag.is_none());
+        let uri = CString::new(uri).unwrap();
+        let tag_len = c_int::try_from(GCM_TAG_LEN).unwrap();
+        let mut tag_out = tag.copied().unwrap_or_default();
+        let mut out = vec![0u8; input.len()];
+        let mut n: c_int = 0;
+        let mut fin: c_int = 0;
+        let len = |b: &[u8]| c_int::try_from(b.len()).unwrap();
+        // SAFETY: standard EVP cipher calls on a fresh context, freed below; uri
+        // is NUL-terminated, tag_out holds the tag and out has room for input.
+        let done = unsafe {
+            let nid = c_int::try_from(ffi::NID_aes_256_gcm).unwrap();
+            let cipher = ffi::ENGINE_get_cipher(engine_raw, nid);
+            assert!(!cipher.is_null(), "engine AES-256-GCM cipher");
+            let ctx = ffi::EVP_CIPHER_CTX_new();
+            assert!(!ctx.is_null());
+            let tag_ptr = tag_out.as_mut_ptr().cast::<c_void>();
+            let uri_ptr = uri.as_ptr().cast_mut().cast::<c_void>();
+            let done = ffi::EVP_CipherInit_ex(ctx, cipher, engine_raw, null(), null(), enc) == ok
+                && ffi::EVP_CIPHER_CTX_ctrl(ctx, TSRA_CTRL_SET_KEY_URI, 0, uri_ptr) == ok
+                && ffi::EVP_CipherInit_ex(ctx, null(), null_mut(), null(), iv.as_ptr(), enc) == ok
+                && (tag.is_none()
+                    || ffi::EVP_CIPHER_CTX_ctrl(ctx, set_tag_ctrl(), tag_len, tag_ptr) == ok)
+                && ffi::EVP_CipherUpdate(ctx, null_mut(), &mut n, aad.as_ptr(), len(aad)) == ok
+                && ffi::EVP_CipherUpdate(ctx, out.as_mut_ptr(), &mut n, input.as_ptr(), len(input))
+                    == ok
+                && ffi::EVP_CipherFinal_ex(ctx, out.as_mut_ptr(), &mut fin) == ok
+                && fin == 0
+                && (tag.is_some()
+                    || ffi::EVP_CIPHER_CTX_ctrl(ctx, get_tag_ctrl(), tag_len, tag_ptr) == ok);
+            ffi::EVP_CIPHER_CTX_free(ctx);
+            ffi::ERR_clear_error();
+            done
+        };
+        out.truncate(usize::try_from(n).unwrap());
+        done.then_some((out, tag_out))
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn set_tag_ctrl() -> c_int {
+        c_int::try_from(ffi::EVP_CTRL_AEAD_SET_TAG).unwrap()
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn get_tag_ctrl() -> c_int {
+        c_int::try_from(ffi::EVP_CTRL_AEAD_GET_TAG).unwrap()
+    }
+
+    /// The reference ciphertext and tag.
+    fn sdk_gcm_encrypt(
+        key: &HsmAesGcmKey,
+        iv: &[u8],
+        aad: &[u8],
+        msg: &[u8],
+    ) -> EngineResult<(Vec<u8>, [u8; GCM_TAG_LEN])> {
+        let mut algo = HsmAesGcmAlgo::new_for_encryption(iv.to_vec(), Some(aad.to_vec()))
+            .map_err(|e| EngineError::wrap("AES-GCM algo", e))?;
+        let ct = HsmEncrypter::encrypt_vec(&mut algo, key, msg)
+            .map_err(|e| EngineError::wrap("SDK AES-GCM", e))?;
+        let tag = algo
+            .tag()
+            .copied()
+            .ok_or(EngineError::Other("SDK AES-GCM produced no tag".into()))?;
+        Ok((ct, tag))
+    }
+
+    #[allow(clippy::unwrap_used)]
+    fn random_gcm_iv() -> [u8; GCM_IV_LEN] {
+        let mut iv = [0u8; GCM_IV_LEN];
+        openssl::rand::rand_bytes(&mut iv).unwrap();
+        iv
+    }
+
+    /// AES-256-GCM with a `GENERATE_KEY` key matches the SDK's; backend-agnostic.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_aes_gcm(data: EngineData, dir: &Path) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        engine.set_ctrl::<crate::engine_impl::TsraCtrl>()?;
+        register_aes_ciphers::<crate::aes::TsraAes>(&engine)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let data = slot
+            .get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        let pid = std::process::id();
+        let path = dir.join(format!("aes-gcm-{pid}.bin"));
+        let _guard = TempFile(path.clone());
+        let uri = format!("tsra://{};type=aes-gcm", path.display());
+        assert!(generate_key_cmd(engine_raw, &uri), "{uri}");
+        let masked = std::fs::read(&path).map_err(|e| EngineError::wrap("read GCM blob", e))?;
+        let key = data.with_session(|session| {
+            HsmKeyManager::unmask_key(session, &mut HsmAesGcmKeyUnmaskAlgo::default(), &masked)
+                .map_err(|e| EngineError::wrap("unmask GCM key", e))
+        })?;
+
+        let iv = random_gcm_iv();
+        for aad_len in [0usize, 13, 64] {
+            let aad = pattern(aad_len);
+            for len in [0usize, 33, 4113] {
+                let msg = pattern(len);
+                let (ct, tag) = sdk_gcm_encrypt(&key, &iv, &aad, &msg)?;
+                assert_eq!(
+                    aes_gcm(engine_raw, &uri, &iv, &aad, &msg, None),
+                    Some((ct.clone(), tag)),
+                    "aad {aad_len}, {len} bytes"
+                );
+                let pt = aes_gcm(engine_raw, &uri, &iv, &aad, &ct, Some(&tag)).map(|(pt, _)| pt);
+                assert_eq!(pt, Some(msg), "aad {aad_len}, {len} bytes");
+            }
+        }
+
+        let (aad, msg) = (pattern(13), pattern(33));
+        let (ct, tag) = sdk_gcm_encrypt(&key, &iv, &aad, &msg)?;
+        let flip = |bytes: &[u8]| {
+            let mut v = bytes.to_vec();
+            v[0] ^= 1;
+            v
+        };
+        let bad_tag: [u8; GCM_TAG_LEN] = flip(&tag).try_into().unwrap();
+        let bad_iv: [u8; GCM_IV_LEN] = flip(&iv).try_into().unwrap();
+        for (what, iv, aad, ct, tag) in [
+            ("ciphertext", &iv, &aad, &flip(&ct), &tag),
+            ("tag", &iv, &aad, &ct, &bad_tag),
+            ("AAD", &iv, &flip(&aad), &ct, &tag),
+            ("IV", &bad_iv, &aad, &ct, &tag),
+        ] {
+            assert!(
+                aes_gcm(engine_raw, &uri, iv, aad, ct, Some(tag)).is_none(),
+                "a changed {what} must fail"
+            );
+        }
+
+        let aes_path = dir.join(format!("aes-gcm-plain-{pid}.bin"));
+        let _aes_guard = TempFile(aes_path.clone());
+        assert!(generate_key_cmd(
+            engine_raw,
+            &format!("tsra://{};type=aes", aes_path.display())
+        ));
+        let garbage = dir.join(format!("aes-gcm-garbage-{pid}.bin"));
+        let _garbage_guard = TempFile(garbage.clone());
+        write_key_material(&garbage, &[0x5au8; 64])
+            .map_err(|e| EngineError::wrap("write garbage blob", e))?;
+        for bad_uri in [
+            format!("tsra://{};type=aes", path.display()),
+            format!("{uri};bits=128"),
+            format!("tsra://{};type=aes-gcm", aes_path.display()),
+            format!(
+                "tsra://{};type=aes-gcm",
+                dir.join("no-such-gcm-key.bin").display()
+            ),
+            format!("tsra://{};type=aes-gcm", garbage.display()),
+        ] {
+            assert!(
+                aes_gcm(engine_raw, &bad_uri, &iv, &[], &msg, None).is_none(),
+                "{bad_uri} must be refused"
+            );
+        }
+
+        // A second handle observes the wrapper's delete on drop.
+        let observer = key.clone();
+        assert!(
+            sdk_gcm_encrypt(&observer, &iv, &[], b"x").is_ok(),
+            "key usable"
+        );
+        drop(crate::aes::GcmKey::new(key));
+        assert!(
+            sdk_gcm_encrypt(&observer, &iv, &[], b"x").is_err(),
+            "a released key must be deleted from the HSM"
+        );
+
+        let _ = slot.take(&mut engine)?;
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // SAFETY: every cipher context above is freed; engine_raw is the
+        // ENGINE_new ref from new_test_engine.
+        unsafe {
+            release_aes_ciphers(&engine);
             ffi::ENGINE_free(engine_raw);
         }
         Ok(())
@@ -2558,6 +2756,19 @@ mod emu {
         round_trips::run_aes_cbc(data, &scratch.0).unwrap();
     }
 
+    #[test]
+    #[serial]
+    fn aes_gcm_via_engine_cipher() {
+        let scratch = Scratch::new("aes-gcm");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_aes_gcm(data, &scratch.0).unwrap();
+    }
+
     // The GENERATE_KEY ctrl command for every AES key kind and size (see
     // round_trips::run_generate_key).
     #[test]
@@ -3071,6 +3282,19 @@ mod hw_tests {
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_aes_cbc(data, &std::env::temp_dir())
+    }
+
+    /// [`super::round_trips::run_aes_gcm`] on hardware; env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine aes_gcm_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn aes_gcm_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_aes_gcm(data, &std::env::temp_dir())
     }
 
     /// Hardware `GENERATE_KEY`, same flow as emu test (see
