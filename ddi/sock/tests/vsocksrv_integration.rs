@@ -350,30 +350,6 @@ fn reconnect_after_disconnect_still_serves_requests() {
     assert_get_api_rev_succeeds(&dev2);
 }
 
-/// Unlike `reconnect_after_disconnect_still_serves_requests` (which drops
-/// the whole `DdiSockDev` and constructs a fresh one), `DdiDev::erase`
-/// reconnects the *same* handle in place: it shuts down the current
-/// connection and redials the same endpoint, swapping the live stream
-/// under the hood. Callers (e.g. a partition reset) keep using the same
-/// `DdiSockDev` across the reset rather than needing to re-run
-/// `Ddi::open_dev`.
-#[test]
-fn erase_reconnects_the_same_handle_and_still_serves_requests() {
-    let mut paths = SocketPaths::new("erase-reconnect");
-    let _bridge = spawn_bridge_loop(&mut paths, 2).expect("failed to start test bridge");
-    let _vsocksrv = spawn_vsocksrv(&paths).expect("failed to start vsocksrv");
-
-    let ddi = DdiSock::default();
-    let dev = ddi
-        .open_dev(paths.ddi.to_str().expect("temp path is valid UTF-8"))
-        .expect("failed to connect to vsocksrv via the bridge");
-    assert_get_api_rev_succeeds(&dev);
-
-    dev.erase()
-        .expect("erase should reconnect to the same endpoint");
-    assert_get_api_rev_succeeds(&dev);
-}
-
 /// Regression test for `reset_partition`'s reset cycle: it must remain
 /// fully usable across many repeated connect/disconnect cycles, not just
 /// a single one. This guards against, e.g., accidentally reverting to a

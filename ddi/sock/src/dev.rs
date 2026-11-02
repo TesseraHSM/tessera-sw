@@ -5,7 +5,6 @@
 
 use std::io::Read;
 use std::io::Write;
-use std::net::Shutdown;
 use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -17,15 +16,11 @@ use nix::sys::socket::connect;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::send;
 #[cfg(target_os = "linux")]
-use nix::sys::socket::shutdown as nix_shutdown;
-#[cfg(target_os = "linux")]
 use nix::sys::socket::socket;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::AddressFamily;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::MsgFlags;
-#[cfg(target_os = "linux")]
-use nix::sys::socket::Shutdown as NixShutdown;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::SockFlag;
 #[cfg(target_os = "linux")]
@@ -46,6 +41,7 @@ use tsra_ddi_mbor_codec::MborDecoder;
 use tsra_ddi_mbor_codec::MborEncode;
 use tsra_ddi_mbor_codec::MborEncoder;
 use tsra_ddi_mbor_types::DdiAesOp;
+use tsra_ddi_mbor_types::DdiApiRev;
 use tsra_ddi_mbor_types::DdiCloseSessionCmdReq;
 use tsra_ddi_mbor_types::DdiCloseSessionReq;
 use tsra_ddi_mbor_types::DdiDecoder;
@@ -127,21 +123,6 @@ impl Write for SocketStream {
     }
 }
 
-impl SocketStream {
-    /// Shut down both directions of the connection, so the peer observes
-    /// a disconnect before [`DdiSockDev::erase`] dials its replacement
-    /// connection (see the call site for why this ordering matters).
-    fn shutdown(&self) -> std::io::Result<()> {
-        match self {
-            Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
-            #[cfg(unix)]
-            Self::Unix(stream) => stream.shutdown(Shutdown::Both),
-            #[cfg(target_os = "linux")]
-            Self::Vsock(stream) => stream.shutdown(),
-        }
-    }
-}
-
 #[cfg(target_os = "linux")]
 struct VsockStream {
     fd: std::os::fd::RawFd,
@@ -181,15 +162,6 @@ impl Write for VsockStream {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
-    }
-}
-
-#[cfg(target_os = "linux")]
-impl VsockStream {
-    /// Shut down both directions of the connection without invalidating
-    /// the underlying fd (the [`Drop`] impl still closes it).
-    fn shutdown(&self) -> std::io::Result<()> {
-        nix_shutdown(self.fd, NixShutdown::Both).map_err(std::io::Error::from)
     }
 }
 
@@ -236,54 +208,6 @@ pub(crate) fn socket_path() -> String {
     std::env::var(SOCK_PATH_ENV).unwrap_or_else(|_| DEFAULT_SOCK_PATH.to_owned())
 }
 
-/// Dial `path` (a Unix socket path, `tcp://HOST:PORT`, or
-/// `vsock://CID:PORT` endpoint) and return the resulting stream.
-///
-/// Factored out of [`DdiSockDev::connect`] so [`DdiSockDev::erase`] can
-/// redial the same endpoint without duplicating the transport-selection
-/// logic.
-fn connect_stream(path: &str) -> DdiResult<SocketStream> {
-    if let Some(address) = path.strip_prefix("tcp://") {
-        let stream = TcpStream::connect(address).map_err(DdiError::IoError)?;
-        stream.set_nodelay(true).map_err(DdiError::IoError)?;
-        Ok(SocketStream::Tcp(stream))
-    } else {
-        match parse_vsock_endpoint(path).map_err(DdiError::IoError)? {
-            Some((cid, port)) => {
-                #[cfg(target_os = "linux")]
-                {
-                    Ok(SocketStream::Vsock(
-                        VsockStream::connect(cid, port).map_err(DdiError::IoError)?,
-                    ))
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    let _ = (cid, port);
-                    Err(DdiError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "vsock endpoints require Linux",
-                    )))
-                }
-            }
-            None => {
-                #[cfg(unix)]
-                {
-                    Ok(SocketStream::Unix(
-                        UnixStream::connect(path).map_err(DdiError::IoError)?,
-                    ))
-                }
-                #[cfg(not(unix))]
-                {
-                    Err(DdiError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "this platform requires a tcp://HOST:PORT endpoint",
-                    )))
-                }
-            }
-        }
-    }
-}
-
 /// A connected socket DDI device.
 ///
 /// Wraps a single TCP, Unix-domain, or Linux VSOCK connection to the server. Requests
@@ -293,9 +217,6 @@ pub struct DdiSockDev {
     stream: Mutex<SocketStream>,
     cmd_counter: AtomicU16,
     device_kind: DdiDeviceKind,
-    /// The endpoint originally passed to [`Self::connect`], retained so
-    /// [`Self::erase`] can redial the same server after disconnecting.
-    path: String,
 }
 
 impl std::fmt::Debug for DdiSockDev {
@@ -307,16 +228,52 @@ impl std::fmt::Debug for DdiSockDev {
 }
 
 impl DdiSockDev {
-    /// Connect to the server at `path`.
+    /// Connect to the server at `path` (a Unix socket path, `tcp://HOST:PORT`,
+    /// or `vsock://CID:PORT` endpoint).
     pub(crate) fn connect(path: &str) -> DdiResult<Self> {
-        let stream = connect_stream(path)?;
+        let stream = if let Some(address) = path.strip_prefix("tcp://") {
+            let stream = TcpStream::connect(address).map_err(DdiError::IoError)?;
+            stream.set_nodelay(true).map_err(DdiError::IoError)?;
+            SocketStream::Tcp(stream)
+        } else {
+            match parse_vsock_endpoint(path).map_err(DdiError::IoError)? {
+                Some((cid, port)) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        SocketStream::Vsock(
+                            VsockStream::connect(cid, port).map_err(DdiError::IoError)?,
+                        )
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let _ = (cid, port);
+                        return Err(DdiError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "vsock endpoints require Linux",
+                        )));
+                    }
+                }
+                None => {
+                    #[cfg(unix)]
+                    {
+                        SocketStream::Unix(UnixStream::connect(path).map_err(DdiError::IoError)?)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        return Err(DdiError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "this platform requires a tcp://HOST:PORT endpoint",
+                        )));
+                    }
+                }
+            }
+        };
         Ok(Self {
             stream: Mutex::new(stream),
             cmd_counter: AtomicU16::new(1),
             // The firmware reports a physical device, so the host codec
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
-            path: path.to_owned(),
         })
     }
 
@@ -454,7 +411,11 @@ impl DdiSockDev {
             hdr: DdiReqHdr {
                 op: DdiOp::CloseSession,
                 sess_id: Some(leaked_id),
-                rev: None,
+                // See the identical comment in `ddi/vsock/src/dev.rs`'s
+                // `close_leaked_session_locked`: a `None` rev here makes
+                // the firmware reject this best-effort cleanup outright,
+                // permanently leaking the session slot.
+                rev: Some(DdiApiRev { major: 1, minor: 0 }),
             },
             data: DdiCloseSessionReq {},
             ext: None,
@@ -715,17 +676,18 @@ impl DdiDev for DdiSockDev {
     }
 
     fn erase(&self) -> Result<(), DdiError> {
-        // There's no in-band SQE/CQE opcode for a factory reset over this
-        // transport. Instead, shut down the current connection and dial
-        // a fresh one to the same endpoint: a server that ties partition
-        // reset to connection loss (e.g. `vsocksrv`) sees the disconnect
-        // and resets before the replacement connection is established.
-        let mut stream = self.stream.lock();
-        // Best-effort: a peer that already closed its end can make this
-        // fail, but the subsequent reconnect is what actually matters.
-        let _ = stream.shutdown();
-        *stream = connect_stream(&self.path)?;
-        Ok(())
+        // Unlike `ddi/vsock`, this transport has no `SessionGenerationTracker`
+        // to invalidate session ids left over from before a reset, and no
+        // guarantee that the peer behind `path` even ties a partition reset
+        // to connection loss in the first place (the `ddi_sock_server`
+        // reference TCP backend does not - see
+        // `examples/sock/ddi_sock_server/src/tcp.rs`). Implementing this via
+        // shutdown-then-reconnect, as `ddi/vsock` does, could therefore
+        // either report success without actually clearing state, or let a
+        // stale pre-reset session id collide with one a different client
+        // reuses post-reset. Leave this unsupported until both the server
+        // contract and the client-side generation tracking exist.
+        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
     }
 }
 
@@ -847,7 +809,6 @@ mod tests {
             stream: Mutex::new(SocketStream::Unix(client)),
             cmd_counter: AtomicU16::new(1),
             device_kind: DdiDeviceKind::Physical,
-            path: String::new(),
         };
         let peer = std::thread::spawn(move || {
             let request = Request::read_from(&mut server).expect("request");

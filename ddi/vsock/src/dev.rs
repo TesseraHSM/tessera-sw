@@ -40,6 +40,7 @@ use tsra_ddi_mbor_codec::MborDecoder;
 use tsra_ddi_mbor_codec::MborEncode;
 use tsra_ddi_mbor_codec::MborEncoder;
 use tsra_ddi_mbor_types::DdiAesOp;
+use tsra_ddi_mbor_types::DdiApiRev;
 use tsra_ddi_mbor_types::DdiCloseSessionCmdReq;
 use tsra_ddi_mbor_types::DdiCloseSessionReq;
 use tsra_ddi_mbor_types::DdiDecoder;
@@ -625,7 +626,16 @@ impl DdiVsockDev {
             hdr: DdiReqHdr {
                 op: DdiOp::CloseSession,
                 sess_id: Some(leaked_id),
-                rev: None,
+                // Every non-`GetApiRev` request must carry a supported
+                // revision (`check_api_rev` in `fw/core/lib/src/ddi/mbor/mod.rs`
+                // rejects anything else as `UnsupportedRevision` before
+                // dispatch) - a `None` here silently failed this cleanup
+                // on every call, permanently leaking the session slot
+                // instead of reclaiming it. `{ major: 1, minor: 0 }` is
+                // the floor of the supported range and always accepted
+                // (mirrors `ddi/emu/src/dev.rs`'s identical best-effort
+                // close).
+                rev: Some(DdiApiRev { major: 1, minor: 0 }),
             },
             data: DdiCloseSessionReq {},
             ext: None,

@@ -11,6 +11,11 @@
 //! it is not a production service. Emulator state is lost when the server exits.
 //! Requests with OOB pointers or lengths are rejected: this wire format cannot
 //! transfer descriptor arrays or the buffers they reference.
+//! Unlike `vsocksrv`, this server does not reset its shared partition when a
+//! client disconnects, so `DdiDev::erase` is unsupported for `ddi/sock`
+//! clients connecting here (see that method's doc comment for why a
+//! reconnect-only implementation would be unsafe against a server that
+//! makes no such guarantee).
 
 use std::sync::Arc;
 
