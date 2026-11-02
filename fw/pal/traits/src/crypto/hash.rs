@@ -18,22 +18,23 @@ use super::*;
 
 /// Supported hash algorithms.
 ///
-/// Discriminant values are `u32` for direct mapping to hardware register
-/// selectors on Cortex-M7.
+/// Discriminants are fixed `u32` values. Platforms map them to their engine's
+/// own selectors (e.g. the Uno SHA driver's `ShaMode`, which numbers the
+/// algorithms differently) with a `match`, never by casting.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmHashAlgo {
     /// SHA-1 (160-bit digest). **Not FIPS-approved for signing.**
-    Sha1,
+    Sha1 = 2,
 
     /// SHA-256 (256-bit / 32-byte digest).
-    Sha256,
+    Sha256 = 4,
 
     /// SHA-384 (384-bit / 48-byte digest).
-    Sha384,
+    Sha384 = 5,
 
     /// SHA-512 (512-bit / 64-byte digest).
-    Sha512,
+    Sha512 = 6,
 }
 
 impl HsmHashAlgo {

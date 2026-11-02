@@ -42,14 +42,15 @@ pub enum KeyScope {
 
 /// Hash algorithm selector on the TBOR wire.
 ///
-/// The 1-byte discriminants mirror the firmware
-/// [`HsmHashAlgo`](tsra_fw_hsm_pal_traits::HsmHashAlgo) values
-/// (`Sha1 = 0`, `Sha256 = 1`, `Sha384 = 2`, `Sha512 = 3`) so the two convert
-/// losslessly. Shared by hashing, KDF, HMAC key generation, and OAEP
-/// unwrapping schemas. Kept as an [`open_enum`] so an unrecognized
-/// discriminant round-trips as `HashAlgo(x)` and is rejected on-device
-/// rather than failing to decode. Each command restricts which algorithms
-/// it accepts; SHA-1 is supported by `Hash`, `HkdfDerive`, and `UnwrapKey`.
+/// The 1-byte wire discriminants (`Sha1 = 0`, `Sha256 = 1`, `Sha384 = 2`,
+/// `Sha512 = 3`) differ from the firmware
+/// [`HsmHashAlgo`](tsra_fw_hsm_pal_traits::HsmHashAlgo) values; each handler
+/// maps one onto the other with a `match`. Shared by hashing, KDF, HMAC key
+/// generation, and OAEP unwrapping schemas. Kept as an [`open_enum`] so an
+/// unrecognized discriminant round-trips as `HashAlgo(x)` and is rejected
+/// on-device rather than failing to decode. Each command restricts which
+/// algorithms it accepts; SHA-1 is supported by `Hash`, `HkdfDerive`, and
+/// `UnwrapKey`.
 #[repr(u8)]
 #[open_enum]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
