@@ -90,11 +90,7 @@ impl KeyLen {
 /// With `bulk_crypto` the fast-path engine holds the material and the vault
 /// keeps only its 2-byte handle (as the reference firmware did); otherwise
 /// the HSM runs bulk crypto itself and the vault keeps the AES-256 key.
-pub const BULK_KEY_LEN: u16 = if cfg!(feature = "bulk_crypto") {
-    2
-} else {
-    32
-};
+pub const BULK_KEY_LEN: u16 = if cfg!(feature = "bulk_crypto") { 2 } else { 32 };
 
 /// Per-kind length table, indexed by `HsmVaultKeyKind` discriminant.
 ///
