@@ -225,6 +225,7 @@ impl HsmSession {
                 pota_thumbprint,
                 sata_thumbprint,
                 sapota_thumbprint,
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -250,6 +251,7 @@ impl HsmSession {
                 part_policy,
                 pta_cert_chain,
                 prev_local_mk_backup,
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -496,6 +498,7 @@ impl HsmSession {
                 inner.id,
                 pok_local_backup,
                 sd_mk_backup,
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }

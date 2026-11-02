@@ -273,6 +273,18 @@ impl SessionGenerationTracker {
     /// `is_reopen` is `true` only for MBOR's `ReopenSession`, the sole
     /// op allowed to use a stale-generation token (to explicitly reopen
     /// it); TBOR has no equivalent op and always passes `false`.
+    ///
+    /// A matching token under a stale generation returns
+    /// [`DdiStatus::SessionNeedsRenegotiation`] for an `InSession` op —
+    /// this handle is real, just invalidated by the reset the firmware
+    /// still needs to be told about — so the API layer's resiliency
+    /// retry path (`is_key_op_retryable_error`/`key_needs_restoration`)
+    /// restores the partition, reopens the session, and retries rather
+    /// than surfacing a non-retryable `DdiCmdFailure`. A stale `Close`,
+    /// or any token mismatch (including no token at all), still returns
+    /// [`DdiStatus::SessionNotFound`]: there is nothing to renegotiate
+    /// for a close, and a mismatched token never identified a session
+    /// this tracker recorded in the first place.
     fn check(
         &self,
         session_ctrl: SessionControlKind,
@@ -297,6 +309,11 @@ impl SessionGenerationTracker {
                 if session.token == token && (session.generation == current || is_reopen) =>
             {
                 Ok(())
+            }
+            Some(session)
+                if session.token == token && session_ctrl == SessionControlKind::InSession =>
+            {
+                Err(DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation))
             }
             _ => Err(DdiError::DdiStatus(DdiStatus::SessionNotFound)),
         }
@@ -1089,15 +1106,21 @@ mod tests {
         // is gone.
         tracker.reset();
 
-        // An old handle's close and in-session requests are rejected even
-        // before the firmware reuses its numeric id.
+        // An old handle's close request is rejected even before the
+        // firmware reuses its numeric id: there is nothing to
+        // renegotiate for a close.
         assert!(matches!(
             tracker.check(SessionControlKind::Close, Some(3), stale_cookie, false),
             Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
         ));
+        // An old handle's in-session request is retryable instead: the
+        // token still identifies a real (just reset-invalidated) prior
+        // session, so the API layer's resiliency retry path can restore
+        // the partition and reopen it rather than treating this as an
+        // unrecoverable failure.
         assert!(matches!(
             tracker.check(SessionControlKind::InSession, Some(3), stale_cookie, false),
-            Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))
+            Err(DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation))
         ));
 
         // The replacement connection's firmware reuses id 3 for an
