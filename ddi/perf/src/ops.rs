@@ -18,6 +18,7 @@ use tsra_crypto::EccPublicKey;
 use tsra_crypto::Encrypter;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::MlDsaPublicKey;
+use tsra_crypto::Rng;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
 use tsra_ddi::TsraDdi;
@@ -325,7 +326,7 @@ struct Pools {
     rsa: BTreeMap<usize, Vec<RsaMsg>>,
     cbc: Vec<CbcEntry>,
     /// Messages for `MlDsaSign`.
-    mldsa: Vec<[u8; MLDSA_MSG_LEN]>,
+    mldsa: Vec<Vec<u8>>,
 }
 
 impl Pools {
@@ -365,7 +366,10 @@ impl Pools {
             pools.cbc = (0..n)
                 .map(|j| {
                     let key = j % keys.len();
-                    let iv = pqc::random();
+                    let iv = Rng::rand_vec(16)
+                        .map_err(|e| format!("host CBC IV: {e:?}"))?
+                        .try_into()
+                        .map_err(|_| "unexpected CBC IV length")?;
                     let mut pt = vec![0u8; args.cbc_len];
                     rng.fill(&mut pt[..]);
                     let ct = host_cbc_encrypt(&keys[key].raw, &iv, &pt)?;
@@ -378,7 +382,10 @@ impl Pools {
             .iter()
             .any(|k| matches!(k.mldsa(), Some((MlDsaCmd::Sign, _))))
         {
-            pools.mldsa = (0..n).map(|_| pqc::random()).collect();
+            pools.mldsa = (0..n)
+                .map(|_| Rng::rand_vec(MLDSA_MSG_LEN))
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("host ML-DSA messages: {e:?}"))?;
         }
         Ok(pools)
     }
@@ -700,7 +707,7 @@ impl<'e> Worker<'e> {
         let req = TborMlDsaSignReq {
             session_id: env.session_id,
             masked_key: key.masked.clone(),
-            message: self.pools.mldsa[m].to_vec(),
+            message: self.pools.mldsa[m].clone(),
             ctx: Vec::new(),
         };
         let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
@@ -724,7 +731,7 @@ impl<'e> Worker<'e> {
         let req = TborMlDsaVerifyReq {
             session_id: env.session_id,
             pub_key: signed.keys[k].pub_key.clone(),
-            message: signed.messages[m].to_vec(),
+            message: signed.messages[m].clone(),
             ctx: Vec::new(),
             signature: signed.keys[k].sigs[m].clone(),
         };
@@ -810,7 +817,8 @@ impl<'e> Worker<'e> {
             .last_mldsa_keygen
             .take()
             .ok_or("no checked ML-DSA keygen response to prove")?;
-        let message = pqc::random::<MLDSA_MSG_LEN>().to_vec();
+        let message =
+            Rng::rand_vec(MLDSA_MSG_LEN).map_err(|e| format!("host ML-DSA message: {e:?}"))?;
         let signed = env
             .session_ctx()
             .tbor(&TborMlDsaSignReq {
@@ -838,7 +846,7 @@ impl<'e> Worker<'e> {
         let resp = env.session_ctx().tbor(&TborMlDsaVerifyReq {
             session_id: env.session_id,
             pub_key: signed.keys[k].pub_key.clone(),
-            message: signed.messages[m].to_vec(),
+            message: signed.messages[m].clone(),
             ctx: Vec::new(),
             signature,
         });

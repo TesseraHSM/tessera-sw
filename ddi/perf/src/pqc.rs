@@ -24,6 +24,7 @@ use tsra_crypto::MlKemPrivateKey;
 use tsra_crypto::MlKemPublicKey;
 use tsra_crypto::MlKemVariant;
 use tsra_crypto::PrivateKey;
+use tsra_crypto::Rng;
 use tsra_crypto::Signer;
 use tsra_crypto::Verifier;
 use tsra_crypto::MLDSA_SEED_LEN;
@@ -63,7 +64,7 @@ pub(crate) struct MlDsaSigner {
 
 /// `MlDsaVerify` inputs, made once on the host and shared by all threads.
 pub(crate) struct MlDsaSigned {
-    pub(crate) messages: Vec<[u8; MLDSA_MSG_LEN]>,
+    pub(crate) messages: Vec<Vec<u8>>,
     pub(crate) keys: Vec<MlDsaSigner>,
 }
 
@@ -73,13 +74,6 @@ pub(crate) struct MlKemKey {
     pub(crate) masked: Vec<u8>,
     /// Host encapsulations to the key's public key.
     pub(crate) cts: Vec<Vec<u8>>,
-}
-
-/// `N` random bytes.
-pub(crate) fn random<const N: usize>() -> [u8; N] {
-    let mut bytes = [0u8; N];
-    rand::rng().fill(&mut bytes[..]);
-    bytes
 }
 
 /// `f(i)` for each `i` in `0..n`, in order, spread over the host's cores:
@@ -163,7 +157,10 @@ pub(crate) fn host_mldsa_signed(
 ) -> Result<MlDsaSigned, String> {
     let variant = MlDsaVariant::from_pub_key_len(p.pub_key_len)
         .ok_or_else(|| format!("no host {}", p.name))?;
-    let messages: Vec<[u8; MLDSA_MSG_LEN]> = (0..messages).map(|_| random()).collect();
+    let messages = (0..messages)
+        .map(|_| Rng::rand_vec(MLDSA_MSG_LEN))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("host ML-DSA messages: {e:?}"))?;
     let keys = par_map(keys, |_| host_mldsa_signer(p, variant, &messages))?;
     Ok(MlDsaSigned { messages, keys })
 }
@@ -172,7 +169,7 @@ pub(crate) fn host_mldsa_signed(
 fn host_mldsa_signer(
     p: &MlDsaParams,
     variant: MlDsaVariant,
-    messages: &[[u8; MLDSA_MSG_LEN]],
+    messages: &[Vec<u8>],
 ) -> Result<MlDsaSigner, String> {
     let mut seed = Zeroizing::new([0u8; MLDSA_SEED_LEN]);
     rand::rng().fill(&mut seed[..]);
