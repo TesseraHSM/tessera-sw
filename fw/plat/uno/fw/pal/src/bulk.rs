@@ -49,6 +49,10 @@ impl HsmBulkCrypto for UnoHsmPal {
         let key_id = crate::vault::fp_bulk_create(self, io, key, kind, session_id, attrs).await?;
         #[cfg(not(feature = "legacy_bulk_crypto"))]
         let key_id = {
+            // Serialized with session teardown, as in `fp_bulk_create`. The
+            // guard drops before the cleanup below, which takes it again.
+            let _guard = self.fp_bulk_lock.lock().await;
+            crate::vault::check_bulk_session(self, io, session_id)?;
             let app_id = u8::from(io.pid());
             let session = session_id.map(u16::from);
             crate::vault::vault(io)

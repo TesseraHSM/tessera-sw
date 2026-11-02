@@ -332,6 +332,27 @@ pub(crate) fn is_bulk_kind(kind: HsmVaultKeyKind) -> bool {
     )
 }
 
+/// Rejects a bulk-key create bound to a session that is not established.
+///
+/// The caller must hold [`UnoHsmPal::fp_bulk_lock`], so session teardown
+/// (which holds it while scrubbing the session's keys) cannot run between
+/// this check and the vault insert and leave a key bound to a freed session.
+pub(crate) fn check_bulk_session(
+    pal: &UnoHsmPal,
+    io: &UnoHsmIo,
+    session_id: Option<HsmSessId>,
+) -> HsmResult<()> {
+    if session_id.is_some_and(|sid| {
+        matches!(
+            pal.session_state(io, sid),
+            HsmSessionState::Pending | HsmSessionState::Invalid
+        )
+    }) {
+        return Err(HsmError::SessionNotFound);
+    }
+    Ok(())
+}
+
 /// Maximum FP bulk-key slots per resource-group table (FP addresses a key
 /// within a table by a 0..=6 sub-index).
 const FP_MAX_SLOTS_PER_PART: u8 = 7;
@@ -451,14 +472,7 @@ pub(crate) async fn fp_bulk_create(
     };
 
     let _guard = pal.fp_bulk_lock.lock().await;
-    if session_id.is_some_and(|sid| {
-        matches!(
-            pal.session_state(io, sid),
-            HsmSessionState::Pending | HsmSessionState::Invalid
-        )
-    }) {
-        return Err(HsmError::SessionNotFound);
-    }
+    check_bulk_session(pal, io, session_id)?;
 
     // The engine scopes a bulk key by PCIe function, which `io.pid()` carries.
     let pcie_fn = part_id_to_pcie_fn(u8::from(io.pid()))?;
