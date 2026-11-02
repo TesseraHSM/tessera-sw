@@ -585,9 +585,9 @@ Imports an RSA-AES-wrapped 64-byte AES-256-XTS key (`K1 ‖ K2`) as one
 
 Processes `data_len / dul` XTS data units in one submission. The device
 reads the in OOB block and writes the out OOB block. The tweak is an
-8-byte little-endian value that increments per data unit. XTS keys
-cannot be imported, so correctness is checked through properties
-instead of known answers.
+8-byte little-endian value that increments per data unit. Correctness
+is checked through properties and, for keys imported with `UnwrapKey`,
+by comparing device output against the host AES-XTS reference.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|

@@ -47,6 +47,16 @@ pub type HsmSqe = [u32];
 /// Length and layout are platform-defined and validated by the protocol codec.
 pub type HsmCqe = [u32];
 
+/// Queue kind of an [`HsmIo`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HsmIoKind {
+    /// Command (DDI) IO with request / response buffers.
+    Cmd,
+
+    /// Bulk (fast-path) AES-GCM / AES-XTS IO.
+    Bulk,
+}
+
 /// Handle to a single in-flight I/O.
 ///
 /// Represents a submission/completion pair: the caller reads the
@@ -63,16 +73,6 @@ pub type HsmCqe = [u32];
 /// [`HsmIoController::complete_io`] or
 /// [`HsmIoController::drop_io`]; failing to do so leaks the
 /// underlying queue slot.
-/// Queue kind of an [`HsmIo`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HsmIoKind {
-    /// Command (DDI) IO with request / response buffers.
-    Cmd,
-
-    /// Bulk (fast-path) AES-GCM / AES-XTS IO.
-    Bulk,
-}
-
 pub trait HsmIo {
     /// Borrows the submission queue entry.
     ///
