@@ -4,7 +4,7 @@
 // BCP -- Bulk Crypto Processor (Marvell CDMA engine)
 //
 // Queue-driven AES-256-GCM / AES-256-XTS DMA engine. The FP cores drive
-// it in `legacy_bulk_crypto` builds; otherwise they run PQC and the HSM drives
+// it in `bulk_crypto` builds; otherwise they run PQC and the HSM drives
 // it. Register layout follows the silicon `Cdma_t`
 // (fp/qmgr/hal/CDMA/RegCdma.h); only the registers the HSM driver uses
 // are described.

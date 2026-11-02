@@ -11,7 +11,7 @@ use xshell::cmd;
 use xshell::Shell;
 
 use crate::fw_util::FwPaths;
-use crate::fw_util::LEGACY_BULK_CRYPTO_FEATURE;
+use crate::fw_util::BULK_CRYPTO_FEATURE;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -36,10 +36,10 @@ impl Xtask for Clippy {
         // too so it cannot rot unnoticed.
         {
             let _dir = sh.push_dir(&fw.fw_dir);
-            log::info!("Running clippy on firmware workspace ({LEGACY_BULK_CRYPTO_FEATURE})...");
+            log::info!("Running clippy on firmware workspace ({BULK_CRYPTO_FEATURE})...");
             cmd!(
                 sh,
-                "cargo +nightly clippy --features {LEGACY_BULK_CRYPTO_FEATURE} -- -D warnings"
+                "cargo +nightly clippy --features {BULK_CRYPTO_FEATURE} -- -D warnings"
             )
             .run()?;
         }

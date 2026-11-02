@@ -7,7 +7,7 @@
 //! [`PqcDriver`], which offloads to a fastpath (FP) core. Operation inputs
 //! and outputs use DMA-branded buffers.
 //!
-//! With `legacy_bulk_crypto` the FP cores run the bulk-crypto firmware, which
+//! With `bulk_crypto` the FP cores run the bulk-crypto firmware, which
 //! has no PQC engine, so every call is refused with
 //! [`HsmError::UnsupportedCmd`] before anything is drawn from the RNG or
 //! written to the PQC mailboxes (which overlay that firmware's HSM↔FP IPC
@@ -39,9 +39,9 @@ fn mldsa_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
 /// parameter set — which is why `kind` has to be carried alongside it.
 const MLDSA_SEED_LEN: usize = 32;
 
-// With `legacy_bulk_crypto` each method returns before reaching the PQC driver; see
+// With `bulk_crypto` each method returns before reaching the PQC driver; see
 // the module docs.
-#[cfg_attr(feature = "legacy_bulk_crypto", allow(unreachable_code))]
+#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code))]
 impl HsmMlDsa for UnoHsmPal {
     async fn mldsa_sign_in_place(
         &self,
@@ -53,7 +53,7 @@ impl HsmMlDsa for UnoHsmPal {
     ) -> HsmResult<()> {
         let mut rnd = [0u8; MLDSA_SEED_LEN];
         let result = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             self.rng_fill_bytes(io, &mut rnd)?;
             self.pqc
@@ -80,7 +80,7 @@ impl HsmMlDsa for UnoHsmPal {
         // Bracketed so an early `?` cannot skip the closing mark: every
         // exit, error or not, leaves through the await below.
         let outcome: HsmResult<()> = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             // Validate before handing anything to the driver, so buffer-size
             // bugs surface here rather than as a malformed FP request.
@@ -124,7 +124,7 @@ impl HsmMlDsa for UnoHsmPal {
     ) -> HsmResult<()> {
         // Bracketed so a failed RNG draw still reaches the closing mark.
         let outcome: HsmResult<()> = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             // Per-signature randomness for the hedged variant, drawn here for
             // the same reason as the seed: an FP core has no entropy source.
@@ -160,10 +160,10 @@ impl HsmMlDsa for UnoHsmPal {
         ctx: &HsmDmaBuf,
         signature: &HsmDmaBuf,
     ) -> HsmResult<bool> {
-        // Bracketed so the `legacy_bulk_crypto` refusal still reaches the closing
+        // Bracketed so the `bulk_crypto` refusal still reaches the closing
         // mark; see `mldsa_gen_key`.
         let outcome: HsmResult<bool> = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             self.pqc
                 .mldsa_verify(kind, pub_key, message, ctx, signature)
@@ -175,7 +175,7 @@ impl HsmMlDsa for UnoHsmPal {
     }
 }
 
-#[cfg_attr(feature = "legacy_bulk_crypto", allow(unreachable_code))]
+#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code))]
 impl HsmMlKem for UnoHsmPal {
     async fn mlkem_encaps_in_place(
         &self,
@@ -186,7 +186,7 @@ impl HsmMlKem for UnoHsmPal {
     ) -> HsmResult<()> {
         let mut m = [0u8; MLDSA_SEED_LEN];
         let result = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             self.rng_fill_bytes(io, &mut m)?;
             self.pqc
@@ -213,7 +213,7 @@ impl HsmMlKem for UnoHsmPal {
         // Bracketed so validation and RNG failures still reach the closing
         // mark; see `mldsa_gen_key`.
         let outcome: HsmResult<()> = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             let expected_pub = mlkem_pub_key_len(kind)?;
             if seed.len() != MLKEM_SEED_LEN || pub_key.len() != expected_pub {
@@ -241,7 +241,7 @@ impl HsmMlKem for UnoHsmPal {
     ) -> HsmResult<()> {
         // Bracketed so a failed RNG draw still reaches the closing mark.
         let outcome: HsmResult<()> = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             // Encapsulation randomness, drawn here for the same reason as the
             // seeds: an FP core has no entropy source.
@@ -276,10 +276,10 @@ impl HsmMlKem for UnoHsmPal {
         ciphertext: &HsmDmaBuf,
         shared_secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        // Bracketed so the `legacy_bulk_crypto` refusal still reaches the closing
+        // Bracketed so the `bulk_crypto` refusal still reaches the closing
         // mark; see `mldsa_gen_key`.
         let outcome: HsmResult<()> = async {
-            #[cfg(feature = "legacy_bulk_crypto")]
+            #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             self.pqc
                 .mlkem_decaps(kind, sec_key, ciphertext, shared_secret)

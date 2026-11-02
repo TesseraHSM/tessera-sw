@@ -7,7 +7,7 @@
 //! CDMA engine at `0xA0C0_0000`.
 //!
 //! The PQC build gives the FP cores to PQC, so the HSM drives this engine
-//! directly as the Uno PAL's AES-GCM. With `legacy_bulk_crypto` the FP firmware
+//! directly as the Uno PAL's AES-GCM. With `bulk_crypto` the FP firmware
 //! owns the engine for host bulk AES-GCM/XTS, and the HSM must not touch it.
 //! The driver programs one 8-entry submission/completion queue pair and
 //! DFL list 0 in GSRAM, and submits AES-256-GCM commands of up to two

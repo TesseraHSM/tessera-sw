@@ -16,8 +16,8 @@ zerocopy = { workspace = true }
 
 [features]
 # Bulk keys are fast-path engine handles (2 bytes) rather than AES-256
-# material; set by the PAL's `legacy_bulk_crypto` build.
-legacy_bulk_crypto = []
+# material; set by the PAL's `bulk_crypto` build.
+bulk_crypto = []
 
 [lints]
 workspace = true

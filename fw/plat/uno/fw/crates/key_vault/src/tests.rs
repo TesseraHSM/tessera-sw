@@ -508,8 +508,8 @@ fn variable_hmac_persists_actual_length() {
 }
 
 // Only the 2-byte bulk handle is small enough to exhaust the slots before the
-// blob space; without `legacy_bulk_crypto` every kind exhausts blob space first.
-#[cfg(feature = "legacy_bulk_crypto")]
+// blob space; without `bulk_crypto` every kind exhausts blob space first.
+#[cfg(feature = "bulk_crypto")]
 #[test]
 fn slot_exhaustion_reports_not_enough_space() {
     // Tiny keys (bulk handle = 2 B) so slots run out before blob space.

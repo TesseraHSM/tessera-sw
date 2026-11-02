@@ -6,7 +6,7 @@
 //! - **default build** — a bulk key is a vault entry holding its AES-256
 //!   material, and its host-visible bulk key id is its vault key id. Bulk
 //!   IOs will run on the BCP; they are not serviced yet.
-//! - **`legacy_bulk_crypto`** — the fast-path firmware hosts the bulk engine: the
+//! - **`bulk_crypto`** — the fast-path firmware hosts the bulk engine: the
 //!   key is registered with it over IPC, the vault keeps the 2-byte engine
 //!   handle, and that handle is the bulk key id. Bulk IOs never reach the
 //!   HSM core.
@@ -45,9 +45,9 @@ impl HsmBulkCrypto for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        #[cfg(feature = "legacy_bulk_crypto")]
+        #[cfg(feature = "bulk_crypto")]
         let key_id = crate::vault::fp_bulk_create(self, io, key, kind, session_id, attrs).await?;
-        #[cfg(not(feature = "legacy_bulk_crypto"))]
+        #[cfg(not(feature = "bulk_crypto"))]
         let key_id = {
             // Serialized with session teardown, as in `fp_bulk_create`. The
             // guard drops before the cleanup below, which takes it again.
@@ -75,14 +75,14 @@ impl HsmBulkCrypto for UnoHsmPal {
         if !is_bulk_kind(self.vault_key_kind(io, key_id)?) {
             return Err(HsmError::UnsupportedKeyType);
         }
-        #[cfg(feature = "legacy_bulk_crypto")]
+        #[cfg(feature = "bulk_crypto")]
         {
             // The vault entry holds the 2-byte engine handle.
             let bytes: &[u8] = self.vault_key(io, key_id)?;
             let handle: [u8; 2] = bytes.try_into().map_err(|_| HsmError::InternalError)?;
             Ok(u16::from_le_bytes(handle))
         }
-        #[cfg(not(feature = "legacy_bulk_crypto"))]
+        #[cfg(not(feature = "bulk_crypto"))]
         Ok(u16::from(key_id))
     }
 

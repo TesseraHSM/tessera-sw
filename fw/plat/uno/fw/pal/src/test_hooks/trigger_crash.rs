@@ -148,7 +148,7 @@ fn decode_request(
 
     // All five SoC cores are reachable: the HSM crashes itself, Admin over
     // the HSM→Admin channel, and the three fast-path cores over the HSM→FP
-    // channel (`legacy_bulk_crypto` builds only; see `execute`). Anything else is a
+    // channel (`bulk_crypto` builds only; see `execute`). Anything else is a
     // malformed core id, which the reference rejects as an invalid argument
     // rather than an unsupported command.
     match wire_request.cpu_id {
@@ -185,10 +185,10 @@ async fn execute(pal: &UnoHsmPal, request: CrashRequest) -> HsmResult<Infallible
             .await
         }
         // Only the bulk-crypto fast-path firmware listens on the HSM→FP
-        // channel, and only the `legacy_bulk_crypto` build enables it: a send to the
+        // channel, and only the `bulk_crypto` build enables it: a send to the
         // PQC fast-path firmware would wait forever for a reply.
         DdiTestActionSocCpuId::Fp0 | DdiTestActionSocCpuId::Fp1 | DdiTestActionSocCpuId::Fp2
-            if !cfg!(feature = "legacy_bulk_crypto") =>
+            if !cfg!(feature = "bulk_crypto") =>
         {
             Err(HsmError::UnsupportedCmd)
         }
