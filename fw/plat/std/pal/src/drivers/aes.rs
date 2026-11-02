@@ -414,6 +414,9 @@ impl StdAes {
             return Err(HsmError::InvalidArg);
         }
         let wrapped_len = input.len() + 8;
+        if !matches!(kek.len(), 16 | 24 | 32) {
+            return Err(HsmError::AesInvalidKeyLength);
+        }
         let Some(output) = output else {
             return Ok(wrapped_len);
         };
@@ -474,6 +477,9 @@ impl StdAes {
             return Err(HsmError::InvalidArg);
         }
         let unwrapped_len = input.len() - 8;
+        if !matches!(kek.len(), 16 | 24 | 32) {
+            return Err(HsmError::AesInvalidKeyLength);
+        }
         let Some(output) = output else {
             return Ok(unwrapped_len);
         };
@@ -541,6 +547,9 @@ impl StdAes {
             return Err(HsmError::InvalidArg);
         }
         let wrapped_len = input.len().next_multiple_of(8) + 8;
+        if !matches!(kek.len(), 16 | 24 | 32) {
+            return Err(HsmError::AesInvalidKeyLength);
+        }
         let Some(output) = output else {
             return Ok(wrapped_len);
         };
@@ -607,6 +616,9 @@ impl StdAes {
         // distinct from an integrity failure — matching the hardware PAL.
         if input.len() < 16 || !input.len().is_multiple_of(8) || input.len() > 3080 {
             return Err(HsmError::InvalidArg);
+        }
+        if !matches!(kek.len(), 16 | 24 | 32) {
+            return Err(HsmError::AesInvalidKeyLength);
         }
         let Some(output) = output else {
             return Ok(input.len() - 8);
@@ -1331,5 +1343,21 @@ mod tests {
                 .unwrap_err(),
             HsmError::AesInvalidKeyLength
         );
+    }
+
+    #[tokio::test]
+    async fn kw_kwp_queries_reject_bad_kek() {
+        let driver = make_driver();
+        let bad_kek = [0x42u8; 15];
+        let data = [0u8; 16];
+        let wrapped = [0u8; 24];
+        for err in [
+            driver.kw_wrap(&bad_kek, &data, None).await,
+            driver.kw_unwrap(&bad_kek, &wrapped, None).await,
+            driver.kwp_wrap(&bad_kek, &data, None).await,
+            driver.kwp_unwrap(&bad_kek, &wrapped, None).await,
+        ] {
+            assert_eq!(err.unwrap_err(), HsmError::AesInvalidKeyLength);
+        }
     }
 }

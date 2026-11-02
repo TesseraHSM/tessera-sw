@@ -42,6 +42,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_aes::AesError;
 use tsra_fw_uno_drivers_aes::AesExclusive;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
@@ -72,6 +73,15 @@ const AIV_PREFIX: [u8; 4] = [0xA6, 0x59, 0x59, 0xA6];
 /// and [`UnoHsmPal::kwp_wrap_impl`] (3 KiB, sized for HSM session
 /// state buffers).
 const MAX_DATA: usize = 3072;
+
+/// Validates the KEK length (16, 24, or 32 bytes) with the same error the
+/// AES driver reports, so length-only queries match execution.
+fn check_kek_len(key: &HsmDmaBuf) -> HsmResult<()> {
+    match key.len() {
+        16 | 24 | 32 => Ok(()),
+        _ => Err(AesError::INVALID_KEY_LEN),
+    }
+}
 
 /// Validates an AES-KW plaintext length and returns the wrapped length.
 fn kw_wrap_len(m: usize) -> HsmResult<usize> {
@@ -523,6 +533,7 @@ impl UnoHsmPal {
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let out_len = kw_wrap_len(input.len())?;
+        check_kek_len(key)?;
         let Some(output) = output else {
             return Ok(out_len);
         };
@@ -593,6 +604,7 @@ impl UnoHsmPal {
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let p_len = kw_unwrap_len(input.len())?;
+        check_kek_len(key)?;
         let Some(output) = output else {
             return Ok(p_len);
         };
@@ -678,6 +690,7 @@ impl UnoHsmPal {
     ) -> HsmResult<usize> {
         let m = input.len();
         let out_len = kwp_wrap_len(m)?;
+        check_kek_len(key)?;
         let Some(output) = output else {
             return Ok(out_len);
         };
@@ -780,6 +793,7 @@ impl UnoHsmPal {
         output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let p_len = kwp_unwrap_max_len(input.len())?;
+        check_kek_len(key)?;
         let Some(output) = output else {
             return Ok(p_len);
         };
