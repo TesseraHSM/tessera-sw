@@ -13,7 +13,7 @@
 //! second finalize.
 //!
 //! Backend is selected at compile time by
-//! [`tsra_ddi::tsraDdi::default`]. **Both backends now carry the PTA
+//! [`tsra_ddi::TsraDdi::default`]. **Both backends now carry the PTA
 //! chain out of band and the firmware consumes it on either**, so the
 //! tests below send real POTA-to-PTA chains on hardware as well as under
 //! the emulator. Only the two rejects that fire before the chain walk —

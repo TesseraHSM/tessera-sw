@@ -4,7 +4,7 @@
 //! Integration tests for the TBOR `PskChange` command.
 //!
 //! Backend is selected at compile time by
-//! [`tsra_ddi::tsraDdi::default`]; cross-test isolation comes
+//! [`tsra_ddi::TsraDdi::default`]; cross-test isolation comes
 //! from the factory-reset performed by [`TestCtx::new`], and live
 //! sessions close on `Drop` via [`SessionGuard`].
 //!
@@ -263,7 +263,7 @@ fn psk_change_wrong_session_id_in_aad() {
 // session B (with B's id in both header and AAD). FW verifies with
 // B's key and the tag fails. Session B is opened on a **second ctx**
 // (via `TestCtx::new_with_path(ctx.path())`) so on hw the crafted
-// request lands on B's fd — `tsra_MAX_SESSIONS_PER_FD = 1` requires
+// request lands on B's fd — `TSRA_MAX_SESSIONS_PER_FD = 1` requires
 // the second concurrent session to live on its own fd.
 // ===========================================================================
 
@@ -580,11 +580,9 @@ fn psk_change_invalid_aad_content_rejected() {
             psk_envelope: envelope,
         };
 
-        let err = ctx
+        let _err = ctx
             .tbor(&req)
             .expect_err(&format!("modified AAD at offset {offset} must be rejected"));
-
-        println!("AAD mutation at offset {offset} rejected: {err:?}");
     }
 }
 

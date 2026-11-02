@@ -12,7 +12,7 @@
 //! `Enabled → Initializing` lifecycle transition.
 //!
 //! Backend is selected at compile time by
-//! [`tsra_ddi::tsraDdi::default`].
+//! [`tsra_ddi::TsraDdi::default`].
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::TestCtx;
