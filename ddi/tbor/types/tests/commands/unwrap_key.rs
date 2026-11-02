@@ -287,7 +287,7 @@ fn unwrap_key_ecc_p256() {
 
     // Import a host-generated P-256 key (PKCS#8 DER) and check the decode +
     // public-key re-derivation path.
-    let key = EccPrivateKey::generate(32).expect("generate P-256 key");
+    let key = EccPrivateKey::from_curve(EccCurve::P256).expect("generate P-256 key");
     let der = key.to_vec().expect("ECC PKCS#8 DER export");
     let resp = unwrap(&ctx, session.session_id, KEY_CLASS_ECC, &der);
 

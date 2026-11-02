@@ -391,7 +391,7 @@ mod tests {
                     session_id: pending.session_id,
                     psk_id: 0,
                     session_type: tsra_ddi_tbor_types::SessionType::Authenticated,
-                    exported,
+                    exported: exported.into(),
                     param_key,
                     bmk_session: finished.bmk_session,
                 };

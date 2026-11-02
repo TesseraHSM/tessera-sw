@@ -822,7 +822,7 @@ fn failed_finish_mac_reclaims_session_state() {
         .tbor(&replay)
         .expect_err("failed authentication must destroy the pending slot");
 
-    assert_fw_rejects(&err, TborStatus::SessionNotFound);
+    assert_session_rejects(&err, TborStatus::SessionNotFound);
 
     // The original fd may remain session-bound after failed Phase-2.
     // Open the full CU capacity on fresh fds. If the failed pending slot
