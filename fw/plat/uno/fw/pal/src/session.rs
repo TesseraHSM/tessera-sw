@@ -31,11 +31,11 @@ use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MAC_DIR_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
-use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_uno_drivers_session_store::SessionStore;
 
 use crate::UnoHsmIo;
@@ -55,8 +55,10 @@ const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE
 /// `[api_rev(8) || param_key(32) || masking_key(32) || auth_binding(68)]` = 140 bytes.  The
 /// SessionEx masking key is the 32 B AES-256-GCM `key_masking::aead` key
 /// ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.
-const SESSION_CU_BLOB_SIZE: usize =
-    SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN + SESSION_MASKING_KEY_LEN + SESSION_AUTH_BINDING_LEN;
+const SESSION_CU_BLOB_SIZE: usize = SESSION_API_REV_SIZE
+    + SESSION_PARAM_KEY_LEN
+    + SESSION_MASKING_KEY_LEN
+    + SESSION_AUTH_BINDING_LEN;
 
 /// `SessionEx` authenticated (CO) blob: the plaintext blob followed by
 /// `mac_tx(48) || mac_rx(48)` = 236 bytes.
@@ -315,7 +317,8 @@ impl HsmSessionManager for UnoHsmPal {
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
         blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN]
             .copy_from_slice(param_key);
-        blob[SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN..SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN]
+        blob[SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN
+            ..SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN]
             .copy_from_slice(masking_key);
         blob[SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN..SESSION_CU_BLOB_SIZE]
             .copy_from_slice(auth_binding);
@@ -408,7 +411,10 @@ impl HsmSessionManager for UnoHsmPal {
         if !matches!(blob.len(), SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE) {
             return Err(HsmError::InvalidPermissions);
         }
-        Ok(blob.split_at(SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN).1
-            .split_at(SESSION_AUTH_BINDING_LEN).0)
+        Ok(blob
+            .split_at(SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN)
+            .1
+            .split_at(SESSION_AUTH_BINDING_LEN)
+            .0)
     }
 }

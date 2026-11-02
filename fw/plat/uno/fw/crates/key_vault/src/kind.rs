@@ -153,11 +153,13 @@ static KIND_LEN: [KeyLen; 64] = [
     /* 32 VarLenHmacSha256             */ KeyLen::Variable { min: 32, max: 64 },
     /* 33 VarLenHmacSha384             */ KeyLen::Variable { min: 48, max: 128 },
     /* 34 VarLenHmacSha512             */ KeyLen::Variable { min: 64, max: 128 },
-    /* 35 SessionExPending           */ KeyLen::Variable {
+    /* 35 SessionExPending           */
+    KeyLen::Variable {
         min: 32,
         max: SESSION_PENDING_BLOB_MAX as u16,
     },
-    /* 36 SessionEx                    */ KeyLen::Variable {
+    /* 36 SessionEx                    */
+    KeyLen::Variable {
         min: SESSION_CU_LEN,
         max: SESSION_CO_LEN,
     },
