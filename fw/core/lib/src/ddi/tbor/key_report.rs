@@ -52,6 +52,7 @@ use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -60,6 +61,8 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 
 use super::resolve_masking_key;
 use super::validate_active_session;
@@ -174,13 +177,11 @@ async fn attested_pub_key<'a, P: HsmPal>(
 
 /// Handle a TBOR `KeyReport` request.
 ///
-/// No partition lock or undo log is required: the command **persists
-/// nothing** — it unmasks the caller-supplied blob, derives its public
-/// component, and returns a signed report.  It makes no observable state
-/// change, so a concurrently-dispatched command (IOs run in a task pool
-/// and interleave at await points) can neither observe it half-done nor
-/// require its rollback on failure. The masked key is unmasked in place
-/// in the request buffer and wiped during IO teardown.
+/// The dispatcher holds the partition credential guard through completion,
+/// serializing attestation with credential rotation and its rollback.
+/// Session-backed data is copied before yielding because session close does
+/// not take that guard. The command persists nothing; the unmasked key and
+/// scratch copies are wiped during IO teardown.
 pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -198,6 +199,10 @@ pub(crate) async fn handle<P: HsmPal>(
             return Err(HsmError::InvalidArg);
         }
         let auth_binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
+        let param_key = alloc.dma_alloc(SESSION_PARAM_KEY_LEN)?;
+        param_key.copy_from_slice(pal.session_param_key(io, sess_id)?);
+        let session_masking_key = alloc.dma_alloc(SESSION_MASKING_KEY_LEN)?;
+        session_masking_key.copy_from_slice(pal.session_masking_key(io, sess_id)?);
         crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
         let app_uuid = build_app_uuid(alloc, auth_binding)?;
 
@@ -207,6 +212,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 io,
                 alloc,
                 sess_id,
+                param_key,
                 req.masked_key,
                 req.report_data,
                 req.auth_envelope,
@@ -214,12 +220,14 @@ pub(crate) async fn handle<P: HsmPal>(
             .await?;
         }
 
-        // Peek the masked-key metadata (cleartext, tag-bound) to route to the
-        // right masking key before unmasking.
         let masked_key = req.masked_key;
         let report_data = req.report_data;
         let scope = peek_metadata(masked_key)?.usage_flags().scope();
-        let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+        let masking_key = if scope == HsmKeyScope::Session {
+            &*session_masking_key
+        } else {
+            resolve_masking_key(pal, io, scope, sess_id)?
+        };
 
         let (report, report_len) = build_key_report(
             pal,
@@ -243,6 +251,7 @@ async fn authenticate_request<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     sess_id: HsmSessId,
+    param_key: &HsmDmaBuf,
     masked_key: &HsmDmaBuf,
     report_data: &HsmDmaBuf,
     envelope: &mut HsmDmaBuf,
@@ -256,7 +265,7 @@ async fn authenticate_request<P: HsmPal>(
     let digest = alloc.dma_alloc(48)?;
     pal.hash(io, HsmHashAlgo::Sha384, data, digest, true)
         .await?;
-    let view = aead_open(pal, io, pal.session_param_key(io, sess_id)?, envelope)
+    let view = aead_open(pal, io, param_key, envelope)
         .await
         .map_err(|_| HsmError::AeadEnvelopeAuthFailed)?;
     let aad = build_key_report_auth_aad(u16::from(sess_id));

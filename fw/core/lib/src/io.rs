@@ -422,7 +422,9 @@ impl<P: HsmPal> Hsm<P> {
 
         if matches!(
             opcode,
-            ddi::tbor::opcode::PSK_CHANGE | ddi::tbor::opcode::SESSION_OPEN_FINISH
+            ddi::tbor::opcode::PSK_CHANGE
+                | ddi::tbor::opcode::SESSION_OPEN_FINISH
+                | ddi::tbor::opcode::KEY_REPORT
         ) {
             *credential_guard = Some(
                 self.pal()

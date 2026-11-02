@@ -771,6 +771,37 @@ fn key_report_cu_attests_valid_key_after_finalize() {
     ctx.session_close(cu.session_id).expect("close CU session");
 }
 
+#[test]
+fn key_report_cu_session_scope_roundtrip() {
+    let ctx = TestCtx::new();
+    let co = finalized_co_session(&ctx);
+    ctx.session_close(co.session_id).expect("close CO");
+    let cu = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
+    let key = ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: cu.session_id,
+            scope: SCOPE_SESSION,
+            curve: ECC_CURVE_P384,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("generate CU session-scoped ECC key");
+    let report_data = sample_report_data();
+    let mut request = TborKeyReportReq {
+        session_id: cu.session_id,
+        masked_key: key.masked_key,
+        report_data,
+        auth_envelope: Vec::new(),
+    };
+    request.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &request)
+        .expect("authenticate CU session-scoped request");
+    let report = ctx.tbor(&request).expect("attest CU session-scoped key");
+    let decoded = verify_key_report(&ctx, &report.report, &key.pub_key, &report_data);
+    assert_eq!(decoded.flags, (1 << 2) | (1 << 5));
+    assert_eq!(&decoded.app_uuid[..], &ROTATED_CU_PSK[..16]);
+    ctx.session_close(cu.session_id).expect("close CU");
+}
+
 #[cfg(feature = "emu")]
 #[test]
 fn key_report_cu_authentication_binds_key_data_and_session() {

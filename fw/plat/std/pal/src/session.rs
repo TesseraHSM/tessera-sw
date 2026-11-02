@@ -20,6 +20,8 @@
 //! [`KeyVault`]: crate::drivers::vault::KeyVault
 //! [`SessionTable`]: crate::drivers::session::SessionTable
 
+use zeroize::Zeroizing;
+
 use super::*;
 
 /// Size of the API revision portion of the session blob (bytes).
@@ -240,9 +242,9 @@ impl HsmSessionManager for StdHsmPal {
         let attrs = HsmVaultKeyAttrs::new().with_internal(true);
 
         // Length-discriminated blob:
-        // - PlainText:     api_rev(8) + param_key(32) + masking_key(32)         = 140 B
+        // - PlainText: api_rev(8) + param_key(32) + masking_key(32) + auth_binding(68) = 140 B
         // - Authenticated: above ‖ mac_tx(48) ‖ mac_rx(48)                       = 236 B
-        let mut blob = [0u8; SESSION_CU_AUTH_BLOB_SIZE];
+        let mut blob = Zeroizing::new([0u8; SESSION_CU_AUTH_BLOB_SIZE]);
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
         blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN]
             .copy_from_slice(param_key);

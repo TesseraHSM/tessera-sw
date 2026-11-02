@@ -60,10 +60,10 @@ impl StdHash {
         let data_owned = Zeroizing::new(data.to_vec());
         let digest_len = digest.len();
 
-        let result: HsmResult<Vec<u8>> = self
+        let result: HsmResult<Zeroizing<Vec<u8>>> = self
             .pool
             .submit_with_result(async move {
-                let mut out = vec![0u8; digest_len];
+                let mut out = Zeroizing::new(vec![0u8; digest_len]);
                 let mut algo = algo;
                 algo.hash(&data_owned, Some(&mut out))
                     .map_err(|_| HsmError::ShaError)?;
