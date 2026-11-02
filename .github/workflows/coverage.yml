@@ -16,9 +16,20 @@ env:
 
 jobs:
 
-  coverage_ubuntu:
+  coverage:
 
-    runs-on: ubuntu-24.04
+    name: coverage_${{ matrix.label }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: ubuntu
+            runner: ubuntu-24.04
+          - label: windows
+            runner: windows-2025-vs2026
+
+    runs-on: ${{ matrix.runner }}
 
     defaults:
       run:
@@ -27,7 +38,11 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/ubuntu-setup
+      if: matrix.label == 'ubuntu'
+    - uses: ./.github/actions/windows-setup
+      if: matrix.label == 'windows'
     - name: Free disk space
+      if: matrix.label == 'ubuntu'
       run: |
         # The two coverage steps below run with --skip-clean, so the
         # instrumented mock-test artifacts stay on disk while the resiliency
@@ -58,47 +73,10 @@ jobs:
       if: ${{ steps.test-mock-coverage.outcome == 'success' && steps.test-res-fault.outcome == 'success' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: coverage-report-ubuntu
+        name: coverage-report-${{ matrix.label }}
         path: ./target/reports/
     - name: Fail if any tests failed
       if: ${{ steps.test-mock-coverage.outcome == 'failure' || steps.test-res-fault.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
-        exit 1
-
-  coverage_windows:
-
-    runs-on: windows-2025-vs2026
-
-    defaults:
-      run:
-        working-directory: .
-
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - uses: ./.github/actions/windows-setup
-    - name: Run all mock tests with code coverage
-      id: test-mock-coverage
-      run: cargo xtask precheck --coverage --skip-clean --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi -F mock --profile ci-mock
-      continue-on-error: true
-    - name: Run resiliency fault injection tests with code coverage
-      id: test-res-fault
-      run: cargo xtask precheck --coverage --skip-clean -p tsra_api_tests -F mock,res-test -E 'test(resiliency::fault_injection::)' --profile ci-mock-res
-      continue-on-error: true
-    - name: Generate nextest report
-      id: nextest-report
-      run: cargo xtask precheck --nextest-report
-    - name: Code Coverage Summary Report
-      if: ${{ steps.test-mock-coverage.outcome == 'success' && steps.test-res-fault.outcome == 'success' }}
-      run: cargo xtask precheck --coverage-report
-    - name: Upload coverage report
-      if: ${{ steps.test-mock-coverage.outcome == 'success' && steps.test-res-fault.outcome == 'success' }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-      with:
-        name: coverage-report-windows
-        path: ./target/reports/
-    - name: Fail if any tests failed
-      if: ${{ steps.test-mock-coverage.outcome == 'failure' || steps.test-res-fault.outcome == 'failure' }}
-      run: |
-        echo "One or more tests failed in this job."
         exit 1
