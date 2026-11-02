@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::io::Write;
 use std::os::fd::RawFd;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -120,6 +121,22 @@ struct VsockListener {
     /// reacts to that specific disconnect, when applicable) before the
     /// next accept on this port can start.
     accept_lock: Mutex<()>,
+    /// Whether a live [`DdiVsockDev`] currently owns this port.
+    ///
+    /// Claimed (nonblockingly, via `compare_exchange`) by
+    /// [`DdiVsockDev::accept`] *before* it ever touches `accept_lock`,
+    /// and released by [`DdiVsockDev`]'s `Drop` impl. Without this, a
+    /// second concurrent `open_dev()` on an already-connected port would
+    /// acquire `accept_lock` and then block inside `listener.accept()`
+    /// waiting for another host connection — while the *existing* live
+    /// handle's `erase()` (which needs that same lock to shut down and
+    /// replace its own stream) waits behind it, and the host
+    /// (`vsocksrv`) in turn waits for that shutdown before it dials the
+    /// reconnect the blocked `accept()` needs. That's a deadlock with no
+    /// participant able to make progress. Rejecting the second
+    /// `open_dev()` immediately — before it can ever block on
+    /// `accept_lock` or `accept()` — avoids the cycle entirely.
+    owned: AtomicBool,
 }
 
 impl VsockListener {
@@ -139,6 +156,7 @@ impl VsockListener {
         let listener = Self {
             fd,
             accept_lock: Mutex::new(()),
+            owned: AtomicBool::new(false),
         };
         bind(fd, &VsockAddr::new(libc::VMADDR_CID_ANY, port)).map_err(nix_to_io)?;
         listen(fd, 128).map_err(nix_to_io)?;
@@ -359,6 +377,20 @@ fn reopen_identity_confirmed(
     }
 }
 
+/// Whether an `OpenSession` response's header and body agree on the
+/// newly assigned session id.
+///
+/// Unlike `ReopenSession` (where the *requested* id is already known
+/// ahead of time, see [`reopen_identity_confirmed`]), `OpenSession` has
+/// no id to check against — the firmware assigns one, and the header
+/// and body are the only two independent reports of what it is. Both
+/// must be present and equal: a peer that omits either id, or reports a
+/// different one in either place, hasn't actually confirmed the new
+/// session's id (see the call site in [`DdiVsockDev::exec_op_mbor`]).
+fn open_identity_confirmed(header_sess_id: Option<u16>, body_sess_id: Option<u16>) -> bool {
+    header_sess_id.is_some() && header_sess_id == body_sess_id
+}
+
 /// Maps a TBOR [`SessionControlKind`](tsra_ddi_tbor_types::SessionControlKind)
 /// onto the MBOR one of the same name, so [`exec_op_tbor`]
 /// (DdiVsockDev::exec_op_tbor) can share one [`SessionGenerationTracker`]
@@ -397,10 +429,41 @@ impl std::fmt::Debug for DdiVsockDev {
     }
 }
 
+impl Drop for DdiVsockDev {
+    fn drop(&mut self) {
+        // Release this port's ownership claim (see `VsockListener::owned`
+        // and `DdiVsockDev::accept`) so a later `open_dev()` on the same
+        // port can succeed once this handle is gone. The listener itself
+        // outlives this handle (cached in the process-wide `LISTENERS`
+        // registry), so this can't fail except via a prior `listener_for`
+        // error, in which case there's no claim to release anyway.
+        if let Ok(listener) = listener_for(self.port) {
+            listener.owned.store(false, Ordering::Release);
+        }
+    }
+}
+
 impl DdiVsockDev {
     /// Bind (on first use) and accept a connection on `port`.
     pub(crate) fn accept(port: u32) -> DdiResult<Self> {
         let listener = listener_for(port)?;
+        // Claim exclusive ownership of this port *before* ever touching
+        // `accept_lock` or blocking in `accept()`. A second concurrent
+        // `open_dev()` on a port that already has a live handle must be
+        // rejected immediately here, rather than being allowed to block
+        // inside `accept()` while holding `accept_lock` — see
+        // `VsockListener::owned` for why that would deadlock against the
+        // existing handle's `erase()`.
+        if listener
+            .owned
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(DdiError::IoError(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!("vsock port {port} already has a live device handle"),
+            )));
+        }
         // Serialize against `erase()`'s shutdown+accept replace sequence
         // on any existing device sharing this port's listener (see
         // `VsockListener::accept_lock`). Without this, a fresh
@@ -410,7 +473,17 @@ impl DdiVsockDev {
         // `accept()` blocked waiting on a connection that already went
         // to this new handle instead.
         let _accept_guard = listener.accept_lock.lock();
-        let stream = listener.accept().map_err(DdiError::IoError)?;
+        let stream = match listener.accept() {
+            Ok(stream) => stream,
+            Err(err) => {
+                // The port claim above must not outlive a failed accept:
+                // otherwise every subsequent `open_dev()` retry on this
+                // port would be rejected forever, even though no handle
+                // actually holds it.
+                listener.owned.store(false, Ordering::Release);
+                return Err(DdiError::IoError(err));
+            }
+        };
         Ok(Self {
             stream: Mutex::new(stream),
             cmd_counter: AtomicU16::new(1),
@@ -699,6 +772,36 @@ impl DdiDev for DdiVsockDev {
                 return Err(DdiError::DdiStatus(DdiStatus::SessionNotFound));
             }
 
+            // For `OpenSession`, the header carries the firmware-assigned
+            // id and the body independently echoes the same id back (via
+            // `DdiRespSessionId::resp_session_id`) — e.g. `open_session`
+            // in `api/lib/src/ddi/session.rs` builds the caller's handle
+            // from the *body's* id (`resp.data.sess_id`), while this
+            // tracker (and `recorded_session_id` just below) uses the
+            // *header's* id. Those must agree, or the handle returned to
+            // the caller would reference an id this tracker never
+            // recorded, so a later operation on that handle would fail
+            // `check()` with a spurious `SessionNotFound` even though the
+            // open otherwise succeeded. A peer that omits either id, or
+            // reports a different one in either place, hasn't actually
+            // confirmed the new session's id: treat it the same as a
+            // body decode failure — best-effort close whatever the
+            // header told us was opened, and surface a decode error
+            // rather than recording (and returning) an untrustworthy id.
+            if session_ctrl == SessionControlKind::Open
+                && !open_identity_confirmed(hdr.sess_id, typed_resp.resp_session_id())
+            {
+                if let Some(leaked_id) = hdr.sess_id {
+                    let _ = Self::close_leaked_session_locked(
+                        &mut stream,
+                        self.next_cmd_id(),
+                        pre_encode,
+                        leaked_id,
+                    );
+                }
+                return Err(DdiError::MborError(MborError::DecodeError));
+            }
+
             // `Open` responses carry the firmware-assigned session id in
             // the header; `Close` requests already know the id being
             // torn down ahead of time. Record the generation transition
@@ -919,6 +1022,27 @@ mod tests {
         // No id was requested at all: trivially confirmed (nothing to
         // check against).
         assert!(reopen_identity_confirmed(None, Some(9), Some(9)));
+    }
+
+    /// An `OpenSession` response is only trusted when the shared header
+    /// and the op-specific body independently report the *same*
+    /// firmware-assigned id; unlike `ReopenSession` there's no requested
+    /// id to check against (see `exec_op_mbor`'s use of this to gate
+    /// recording the new session).
+    #[test]
+    fn open_identity_confirmed_requires_matching_non_empty_ids() {
+        // Both ids agree: confirmed.
+        assert!(open_identity_confirmed(Some(9), Some(9)));
+        // Header and body disagree: not confirmed.
+        assert!(!open_identity_confirmed(Some(9), Some(1)));
+        // Header id missing entirely: not confirmed, even if the body
+        // reports one.
+        assert!(!open_identity_confirmed(None, Some(9)));
+        // Body id missing entirely: not confirmed, even if the header
+        // reports one.
+        assert!(!open_identity_confirmed(Some(9), None));
+        // Neither id present: not confirmed.
+        assert!(!open_identity_confirmed(None, None));
     }
 
     /// Baseline: an `Open` then `Close` on the same generation round-trips

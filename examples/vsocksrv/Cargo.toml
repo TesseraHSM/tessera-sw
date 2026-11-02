@@ -25,6 +25,30 @@ tsra_fw_hsm_std.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { features = ["socket"], workspace = true }
+# Depended on directly (not via `.workspace = true`) so this doesn't
+# inherit the `array`/`pre_encode` feature group from the root
+# `Cargo.toml`'s `[workspace.dependencies]` entry - `vsocksrv` only ever
+# needs a header-only decode (`DdiRespHdr`, to recover a freshly assigned
+# `OpenSession` id - see `track_session_lifecycle` in `src/unix.rs`), not
+# `pre_encode`'s encode-side support.
+#
+# `post_decode` (and the `pkcs1`/`sec1`/`spki`/`tracing` crates it pulls
+# in via `featuregroup-crypto`) is requested explicitly anyway, even
+# though `decode_hdr` itself never touches those hooks: `DdiDecoder::new`
+# only takes a `post_decode: bool` parameter at all when the feature is
+# enabled, and other workspace members already depend on this same crate
+# with `post_decode` on, so a workspace-wide build (unlike a `-p
+# vsocksrv` build alone) unifies the feature across every crate using
+# it regardless of what's requested here - matching that signature
+# explicitly keeps this call site correct in both cases instead of only
+# the narrower one. `array` is required alongside it: `post_decode`'s
+# own code (`DdiDerPublicKey::pub_key_der_post_decode`) only compiles
+# with `array` also enabled, even though nothing reachable from here
+# uses it either.
+tsra_ddi_mbor_types = { default-features = false, features = [
+  "array",
+  "post_decode",
+], path = "../../ddi/mbor/types" }
 
 [lints]
 workspace = true

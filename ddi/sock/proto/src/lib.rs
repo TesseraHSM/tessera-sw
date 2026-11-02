@@ -284,8 +284,11 @@ impl Request {
         // always including an empty field here would mean peers that
         // reject unknown/extra TOC fields (per the field's documented
         // "optional" wire contract) could choke on requests that have no
-        // OOB payload at all.
-        if !oob.is_empty() {
+        // OOB payload at all. Check `self.oob` (the original item
+        // collection), not `oob` (the encoded bytes): `encode_oob(&[])`
+        // still returns a non-empty 4-byte zero-count prefix, so checking
+        // the encoded bytes would always be true.
+        if !self.oob.is_empty() {
             fields.push((FieldId::Oob, oob.as_slice()));
         }
         encode_frame(Kind::Request, 0, &fields)
@@ -701,6 +704,27 @@ mod tests {
         assert_eq!(got.sqe, sample_sqe());
         assert_eq!(got.payload, vec![1, 2, 3, 4, 5]);
         assert!(got.oob.is_empty());
+    }
+
+    /// Regression test: a request with no OOB items must omit the `Oob`
+    /// TOC field entirely (two fields: `Sqe` + `Payload`), not emit an
+    /// empty one. `encode_oob(&[])` returns a non-empty 4-byte
+    /// zero-count prefix, so checking the *encoded* bytes for emptiness
+    /// (rather than the original `oob` item collection) always finds
+    /// them non-empty and would always emit a spurious third field.
+    #[test]
+    fn request_without_oob_omits_oob_field() {
+        let req = Request {
+            sqe: sample_sqe(),
+            payload: vec![1, 2, 3],
+            oob: Vec::new(),
+        };
+        let encoded = req.encode().unwrap();
+        let header = FrameHeader::ref_from_bytes(&encoded[..8]).unwrap();
+        assert_eq!(
+            header.toc_count, 2,
+            "a request with no OOB items must only encode Sqe + Payload fields"
+        );
     }
 
     #[test]

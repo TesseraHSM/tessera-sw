@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::io::Write;
 use std::io::{self};
@@ -39,11 +40,17 @@ use nix::sys::time::TimeVal;
 use nix::unistd::close;
 use nix::unistd::read;
 use tracing_subscriber::EnvFilter;
+use tsra_ddi_mbor_types::DdiDecoder;
+use tsra_ddi_mbor_types::DdiOp;
+use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiStatus;
+use tsra_ddi_mbor_types::SessionControlKind;
 use tsra_ddi_sock_proto::OobItem;
 use tsra_ddi_sock_proto::Request;
 use tsra_ddi_sock_proto::Response;
 use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::Sqe;
+use tsra_fw_hsm_io::OP_MBOR;
 use tsra_fw_hsm_std::StdHsm;
 
 const PAGE_SIZE: usize = 4096;
@@ -83,9 +90,9 @@ const UNIX_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(365 * 24 * 60 * 60)
 /// on *completing* a frame once it has started (see `serve_connection`),
 /// which still protects against a stalled/slow-drip peer regardless of
 /// how long idle waiting is allowed to run. `reset_partition`'s soft
-/// reset (see `MAX_SOFT_RESETS_BEFORE_HARD`) also means a connection that
-/// does time out here no longer destroys the boot key or abandons every
-/// session outright, but the client's stream is still dropped (and
+/// reset also means a connection that does time out here no longer
+/// destroys the boot key or abandons every session outright, but the
+/// client's stream is still dropped (and
 /// `DdiSockDev` does not reconnect it), so this remains a real disruption
 /// worth avoiding for a merely-idle (not actually abandoned) client.
 const VSOCK_IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -624,16 +631,81 @@ fn connect_unix_once(path: &Path, port: u32, idle_timeout: Duration) -> io::Resu
 /// attempt.
 const PARTITION_ENABLE_RETRIES: u32 = 3;
 
-/// Number of consecutive *soft* resets (`part_disable`/`part_enable`)
-/// `reset_partition` performs before forcing one *hard* reset
-/// (`part_free`/`part_alloc`) to reclaim any abandoned session slots.
+/// The firmware's session table holds at most this many concurrent
+/// sessions (mirrors `MAX_SESSIONS` in `ddi/mbor/sim/src/vault.rs`; kept
+/// in sync by hand since `vsocksrv` has no wire-level way to query the
+/// real limit - see `reset_partition`).
+const MAX_SESSIONS: usize = 8;
+
+/// Session ids `reset_partition` must assume are still occupying a table
+/// slot, tracked across the life of the server (not just one
+/// connection): a soft reset preserves every session it didn't itself
+/// open/close, so an id abandoned by one connection still occupies its
+/// slot through every later connection's soft resets, until either a
+/// `CloseSession` finally reclaims it or a hard reset wipes the whole
+/// table. Updated by [`track_session_lifecycle`] as `OpenSession`/
+/// `CloseSession` requests complete, and drained to empty whenever
+/// [`reset_partition`] performs a hard reset.
+type OccupiedSessions = HashSet<u16>;
+
+/// Updates `occupied` from one completed MBOR request/response exchange.
+/// `ctrl`/`id_valid`/`request_session_id` are read from the *request*
+/// SQE's session fields (`Sqe::session_flags`/`Sqe::session_id`) by the
+/// caller before the request is consumed by `PreparedRequest::new`, so
+/// this takes them by value instead of borrowing the `Sqe` itself.
 ///
-/// Each soft reset can leak at most one session slot (the disconnecting
-/// client's own session, if it never closed it), and the firmware's
-/// session table holds at most 8 concurrent sessions, so forcing a hard
-/// reset no less often than every 8 soft resets guarantees the table can
-/// never actually fill up with abandoned sessions.
-const MAX_SOFT_RESETS_BEFORE_HARD: u32 = 8;
+/// `CloseSession`'s target id is already known from the *request* itself
+/// (`ctrl == Close` and `request_session_id`, written by the client when
+/// it builds the SQE - see `tsra_ddi_vsock`'s
+/// `DdiVsockDev::submit_locked`), so closing a session never needs to
+/// inspect the response body. `OpenSession` is the opposite: the
+/// *request* never names a session id (there's nothing to name yet), so
+/// the newly assigned id is only discoverable in the *response*'s body -
+/// specifically its header (`DdiRespHdr::sess_id`), which this decodes
+/// on its own via [`DdiDecoder::decode_hdr`] without ever touching the
+/// (potentially much larger, and op-specific) typed body. This is the
+/// only case here that needs any MBOR decoding at all.
+///
+/// Both directions only take effect on device-level success (the raw
+/// CQE's `status() == 0`): a failed `OpenSession` never actually
+/// obtained a session id, and a failed `CloseSession` means the session
+/// is still live, so neither should change `occupied` on failure. This
+/// only tracks the MBOR wire path (`OP_MBOR`); callers must only invoke
+/// this for MBOR requests, since the request's session fields and the
+/// response's MBOR framing don't apply to any other opcode.
+fn track_session_lifecycle(
+    ctrl: SessionControlKind,
+    id_valid: bool,
+    request_session_id: u16,
+    response: &Response,
+    occupied: &mut OccupiedSessions,
+) {
+    let mut cqe_dwords = response.cqe;
+    let cqe = Cqe::from(&mut cqe_dwords);
+    if cqe.status() != 0 {
+        return;
+    }
+    match ctrl {
+        SessionControlKind::Close if id_valid => {
+            occupied.remove(&request_session_id);
+        }
+        SessionControlKind::Open => {
+            let Ok(hdr) = DdiDecoder::new(&response.payload, false).decode_hdr::<DdiRespHdr>()
+            else {
+                // A response whose header itself fails to decode can't
+                // be trusted to report *any* outcome, including the new
+                // session id - nothing to record here either way.
+                return;
+            };
+            if hdr.op == DdiOp::OpenSession && hdr.status == DdiStatus::Success {
+                if let Some(id) = hdr.sess_id {
+                    occupied.insert(id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Frees then re-allocates and re-enables `partition_id`, which clears its
 /// boot key (`BK_BOOT`)/MOBK, keys, nonce, vault, *and* fully releases its
@@ -642,9 +714,9 @@ const MAX_SOFT_RESETS_BEFORE_HARD: u32 = 8;
 /// client's.
 ///
 /// This is the destructive fallback `reset_partition` uses to reclaim
-/// abandoned session slots every `MAX_SOFT_RESETS_BEFORE_HARD` disconnects
-/// (see `reset_partition`), and also what it falls back to if a soft reset
-/// itself fails.
+/// occupied session slots once tracked occupancy reaches `MAX_SESSIONS`
+/// (see `reset_partition`), and also what it falls back to if a soft
+/// reset itself fails.
 ///
 /// Retries `part_alloc`/`part_enable` a few times on failure. Once
 /// `part_alloc` succeeds, later attempts only retry `part_enable` -
@@ -716,18 +788,29 @@ fn hard_reset_partition(
 /// `reset_partition`'s periodic hard-reset fallback).
 ///
 /// Retries a few times on failure for the same transient-contention
-/// reasons as `hard_reset_partition`.
+/// reasons as `hard_reset_partition`. Mirrors that function's "only
+/// retry the first step once" pattern: once `part_disable` succeeds,
+/// later attempts only retry `part_enable` - re-calling `part_disable`
+/// on an already-`Disabled` partition would just fail, permanently
+/// stranding the partition after a single transient `part_enable`
+/// failure.
 fn soft_reset_partition(
     hsm: &StdHsm,
     runtime: &tokio::runtime::Handle,
     partition_id: u8,
 ) -> Result<()> {
+    let mut disabled = false;
     let mut last_error = None;
     for attempt in 1..=PARTITION_ENABLE_RETRIES {
-        if let Err(error) = runtime.block_on(hsm.part_disable(partition_id)) {
-            tracing::warn!(?error, attempt, "Failed to disable partition on soft reset");
-            last_error = Some(error);
-            continue;
+        if !disabled {
+            match runtime.block_on(hsm.part_disable(partition_id)) {
+                Ok(()) => disabled = true,
+                Err(error) => {
+                    tracing::warn!(?error, attempt, "Failed to disable partition on soft reset");
+                    last_error = Some(error);
+                    continue;
+                }
+            }
         }
         match runtime.block_on(hsm.part_enable(partition_id)) {
             Ok(()) => return Ok(()),
@@ -752,36 +835,45 @@ fn soft_reset_partition(
 ///
 /// Prefers [`soft_reset_partition`] (preserves the boot key/MOBK and lets
 /// the disconnecting client's own sessions be reopened later), falling
-/// back to the destructive [`hard_reset_partition`] - which reclaims every
-/// abandoned session slot at the cost of the boot key and all sessions -
-/// either when the soft reset itself fails, or proactively every
-/// `MAX_SOFT_RESETS_BEFORE_HARD` disconnects, to bound how many abandoned
-/// sessions can accumulate in the table. `soft_resets_since_hard_reset`
-/// persists this count across connections for the life of the server.
+/// back to the destructive [`hard_reset_partition`] - which reclaims
+/// every occupied session slot at the cost of the boot key and all
+/// sessions - either when the soft reset itself fails, or proactively
+/// whenever `occupied` (tracked by [`track_session_lifecycle`] as real
+/// `OpenSession`/`CloseSession` traffic completes, not a per-disconnect
+/// guess) has reached [`MAX_SESSIONS`]: letting a soft reset through at
+/// that point would mean the very next `OpenSession` fails before this
+/// connection even gets a chance to free a slot by disconnecting.
+///
+/// Counting *disconnects* instead (as this once did) can never reliably
+/// bound exhaustion: a single connection can abandon more than one
+/// session (each soft reset leaks every session *that* connection opened
+/// and never closed, not just one), so the risk of hitting the table
+/// limit depends on how many sessions are actually occupied, not how
+/// many clients have come and gone.
 fn reset_partition(
     hsm: &StdHsm,
     runtime: &tokio::runtime::Handle,
     partition_id: u8,
-    soft_resets_since_hard_reset: &mut u32,
+    occupied: &mut OccupiedSessions,
 ) -> Result<()> {
-    if *soft_resets_since_hard_reset >= MAX_SOFT_RESETS_BEFORE_HARD {
+    if occupied.len() >= MAX_SESSIONS {
         tracing::debug!(
-            "Forcing a hard reset to reclaim any abandoned session slots after \
-             MAX_SOFT_RESETS_BEFORE_HARD soft resets"
+            occupied = occupied.len(),
+            "Forcing a hard reset to reclaim occupied session slots"
         );
         let result = hard_reset_partition(hsm, runtime, partition_id);
-        *soft_resets_since_hard_reset = 0;
+        // A hard reset destroys every session on the partition
+        // regardless of which connection opened it, so every id
+        // tracked so far - not just this connection's - is free again.
+        occupied.clear();
         return result;
     }
     match soft_reset_partition(hsm, runtime, partition_id) {
-        Ok(()) => {
-            *soft_resets_since_hard_reset += 1;
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(error) => {
             tracing::warn!(?error, "Soft reset failed; falling back to a hard reset");
             let result = hard_reset_partition(hsm, runtime, partition_id);
-            *soft_resets_since_hard_reset = 0;
+            occupied.clear();
             result
         }
     }
@@ -804,13 +896,13 @@ fn serve_connection_and_reset(
     runtime: &tokio::runtime::Handle,
     partition_id: u8,
     idle_timeout: Duration,
-    soft_resets_since_hard_reset: &mut u32,
+    occupied: &mut OccupiedSessions,
 ) -> Result<()> {
-    match serve_connection(stream, hsm, runtime, partition_id, idle_timeout) {
+    match serve_connection(stream, hsm, runtime, partition_id, idle_timeout, occupied) {
         Ok(()) => tracing::info!("HSM client connection closed"),
         Err(error) => tracing::warn!(?error, "HSM client connection closed with an error"),
     }
-    reset_partition(hsm, runtime, partition_id, soft_resets_since_hard_reset)
+    reset_partition(hsm, runtime, partition_id, occupied)
 }
 
 fn serve_connection(
@@ -819,6 +911,7 @@ fn serve_connection(
     runtime: &tokio::runtime::Handle,
     partition_id: u8,
     idle_timeout: Duration,
+    occupied: &mut OccupiedSessions,
 ) -> Result<()> {
     let mut request_id = 0u64;
     loop {
@@ -918,6 +1011,15 @@ fn serve_connection(
             oob_count = request.oob.len(),
         );
         let _request_guard = request_span.enter();
+        // Captured before `request` is consumed by `PreparedRequest::new`
+        // below, so `track_session_lifecycle` can still use them once the
+        // response is ready - see its doc comment for why these specific
+        // request-side fields (rather than the `Sqe` itself) are needed.
+        let is_mbor_request = sqe.op() == OP_MBOR;
+        let session_flags = sqe.session_flags();
+        let session_ctrl = SessionControlKind::from(session_flags.ctrl());
+        let session_id_valid = session_flags.id_valid();
+        let request_session_id = sqe.session_id();
         debug!("Received request frame");
         tracing::debug!("Received request frame");
         let started = Instant::now();
@@ -951,6 +1053,15 @@ fn serve_connection(
                 error_response()
             }
         };
+        if is_mbor_request {
+            track_session_lifecycle(
+                session_ctrl,
+                session_id_valid,
+                request_session_id,
+                &response,
+                occupied,
+            );
+        }
         debug!("Writing response frame");
         tracing::trace!(
             transport_status = response.status,
@@ -981,7 +1092,7 @@ fn serve_connection_logged(
     runtime: &tokio::runtime::Handle,
     partition_id: u8,
     idle_timeout: Duration,
-    soft_resets_since_hard_reset: &mut u32,
+    occupied: &mut OccupiedSessions,
 ) -> Result<()> {
     let connection_id = NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
     tracing::info!(connection_id, "Connected HSM client");
@@ -994,7 +1105,7 @@ fn serve_connection_logged(
         runtime,
         partition_id,
         idle_timeout,
-        soft_resets_since_hard_reset,
+        occupied,
     )
 }
 
@@ -1066,9 +1177,9 @@ fn serve(
     tracing::info!(partition_id = args.partition_id, "Enabled HSM partition");
 
     // Shared across every connection served by this process: see
-    // `reset_partition`'s doc comment for how it bounds abandoned-session
-    // accumulation.
-    let mut soft_resets_since_hard_reset: u32 = 0;
+    // `reset_partition`'s doc comment for how it bounds session-table
+    // exhaustion.
+    let mut occupied_sessions: OccupiedSessions = HashSet::new();
 
     match args.socket_type {
         SocketType::Vsock => {
@@ -1097,7 +1208,7 @@ fn serve(
                     runtime.handle(),
                     args.partition_id,
                     VSOCK_IDLE_WAIT_TIMEOUT,
-                    &mut soft_resets_since_hard_reset,
+                    &mut occupied_sessions,
                 )
                 .context(
                     "Partition reset failed after a client disconnected; refusing to \
@@ -1119,7 +1230,7 @@ fn serve(
                     runtime.handle(),
                     args.partition_id,
                     UNIX_IDLE_READ_TIMEOUT,
-                    &mut soft_resets_since_hard_reset,
+                    &mut occupied_sessions,
                 )
                 .context(
                     "Partition reset failed after a client disconnected; refusing to \
