@@ -29,8 +29,8 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8 | `masked_key` | `buffer` (≤ 3168 B) | The masked private key; unmasked in place. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `masked_key` | `buffer` (≤ 3168 B) | The masked private key; unmasked in place. |
 
 ### Data section
 

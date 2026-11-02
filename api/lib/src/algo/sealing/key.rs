@@ -149,7 +149,8 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
 /// Algorithm for unmasking a security-domain sealing key.
 ///
 /// Only valid on a V2 (security-domain) session, where the key is
-/// rebuilt as an unpinned masked blob and unmasked by the firmware on use.
+/// rebuilt as an unpinned handle over the masked blob; no device-resident
+/// key is created.
 /// Reconstruction authenticates the blob on the device (TBOR `VerifyKey`),
 /// so a tampered or wrong-session blob is rejected at unmask time.
 #[derive(Default)]
