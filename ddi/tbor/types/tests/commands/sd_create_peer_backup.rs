@@ -331,7 +331,7 @@ fn sd_create_peer_backup_rejects_empty_mfgr_cert_chain() {
     );
 }
 
-//TODO add this back when firmware surpports it in tsra
+//TODO add this back when firmware supports it in tsra
 /*/// Reject missing destination owner certificates.
 #[test]
 fn sd_create_peer_backup_rejects_empty_owner_cert_chain() {

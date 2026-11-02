@@ -4,7 +4,7 @@
 //! Integration tests for the TBOR `PskChange` command.
 //!
 //! Backend is selected at compile time by
-//! [`tsra_ddi::tsraDdi::default`]; cross-test isolation comes
+//! [`tsra_ddi::TsraDdi::default`]; cross-test isolation comes
 //! from the factory-reset performed by [`TestCtx::new`], and live
 //! sessions close on `Drop` via [`SessionGuard`].
 //!
@@ -52,6 +52,13 @@ const ROTATED_PSK: [u8; PSK_LEN] = [
     0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0,
     0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0,
 ];
+
+/// Expected length of an encrypted PSK change envelope.
+const PSK_CHANGE_ENVELOPE_LEN: usize = crate::commands::common::ENVELOPE_HEADER_LEN
+    + crate::commands::common::ENVELOPE_IV_LEN
+    + tsra_ddi_tbor_types::PSK_CHANGE_AAD_LEN
+    + PSK_LEN
+    + crate::commands::common::ENVELOPE_TAG_LEN;
 
 /// Build an AEAD-GCM envelope under `param_key` with a caller-controlled
 /// AAD and plaintext. Negative-path tests use this to exercise FW
@@ -263,7 +270,7 @@ fn psk_change_wrong_session_id_in_aad() {
 // session B (with B's id in both header and AAD). FW verifies with
 // B's key and the tag fails. Session B is opened on a **second ctx**
 // (via `TestCtx::new_with_path(ctx.path())`) so on hw the crafted
-// request lands on B's fd — `tsra_MAX_SESSIONS_PER_FD = 1` requires
+// request lands on B's fd — `TSRA_MAX_SESSIONS_PER_FD = 1` requires
 // the second concurrent session to live on its own fd.
 // ===========================================================================
 
@@ -462,8 +469,7 @@ fn psk_change_truncated_envelope_rejected() {
     let valid =
         encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
 
-    assert_eq!(valid.len(), 100);
-
+    assert_eq!(valid.len(), PSK_CHANGE_ENVELOPE_LEN);
     for len in [1usize, 4, 15, 16, 47, 48, 83, 84, 99] {
         let req = TborPskChangeReq {
             session_id: session.session_id(),
@@ -580,11 +586,9 @@ fn psk_change_invalid_aad_content_rejected() {
             psk_envelope: envelope,
         };
 
-        let err = ctx
+        let _err = ctx
             .tbor(&req)
             .expect_err(&format!("modified AAD at offset {offset} must be rejected"));
-
-        println!("AAD mutation at offset {offset} rejected: {err:?}");
     }
 }
 

@@ -166,7 +166,7 @@ fn decrypt_roundtrip(ctx: &TestCtx, session_id: u16, modulus_bytes: usize, crt: 
 
 /// Verify raw RSA-2048 signing with a non-CRT key.
 #[test]
-fn rsa_mod_exp_sign_roundtrip_2k_emu() {
+fn rsa_mod_exp_sign_roundtrip_2k() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     sign_roundtrip(&ctx, session.session_id, 256, false);
@@ -174,7 +174,7 @@ fn rsa_mod_exp_sign_roundtrip_2k_emu() {
 
 /// Verify raw RSA-3072 signing with a non-CRT key.
 #[test]
-fn rsa_mod_exp_sign_roundtrip_3k_emu() {
+fn rsa_mod_exp_sign_roundtrip_3k() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     sign_roundtrip(&ctx, session.session_id, 384, false);
@@ -182,7 +182,7 @@ fn rsa_mod_exp_sign_roundtrip_3k_emu() {
 
 /// Verify raw RSA-4096 signing with a non-CRT key.
 #[test]
-fn rsa_mod_exp_sign_roundtrip_4k_emu() {
+fn rsa_mod_exp_sign_roundtrip_4k() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     sign_roundtrip(&ctx, session.session_id, 512, false);
@@ -190,7 +190,7 @@ fn rsa_mod_exp_sign_roundtrip_4k_emu() {
 
 /// Verify raw RSA-4096 signing with a CRT key.
 #[test]
-fn rsa_mod_exp_sign_roundtrip_4k_crt_emu() {
+fn rsa_mod_exp_sign_roundtrip_4k_crt() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     sign_roundtrip(&ctx, session.session_id, 512, true);
@@ -198,7 +198,7 @@ fn rsa_mod_exp_sign_roundtrip_4k_crt_emu() {
 
 /// Verify raw RSA-4096 decryption with a non-CRT key.
 #[test]
-fn rsa_mod_exp_decrypt_roundtrip_4k_emu() {
+fn rsa_mod_exp_decrypt_roundtrip_4k() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     decrypt_roundtrip(&ctx, session.session_id, 512, false);
@@ -206,7 +206,7 @@ fn rsa_mod_exp_decrypt_roundtrip_4k_emu() {
 
 /// Verify raw RSA-2048 signing with a CRT key.
 #[test]
-fn rsa_mod_exp_sign_roundtrip_2k_crt_emu() {
+fn rsa_mod_exp_sign_roundtrip_2k_crt() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     sign_roundtrip(&ctx, session.session_id, 256, true);
@@ -214,7 +214,7 @@ fn rsa_mod_exp_sign_roundtrip_2k_crt_emu() {
 
 /// Verify raw RSA-2048 decryption with a non-CRT key.
 #[test]
-fn rsa_mod_exp_decrypt_roundtrip_2k_emu() {
+fn rsa_mod_exp_decrypt_roundtrip_2k() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     decrypt_roundtrip(&ctx, session.session_id, 256, false);
@@ -222,7 +222,7 @@ fn rsa_mod_exp_decrypt_roundtrip_2k_emu() {
 
 /// Verify raw RSA-2048 decryption with a CRT key.
 #[test]
-fn rsa_mod_exp_decrypt_roundtrip_2k_crt_emu() {
+fn rsa_mod_exp_decrypt_roundtrip_2k_crt() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     decrypt_roundtrip(&ctx, session.session_id, 256, true);
@@ -230,7 +230,7 @@ fn rsa_mod_exp_decrypt_roundtrip_2k_crt_emu() {
 
 /// Reject a signing operand one byte shorter than the RSA modulus.
 #[test]
-fn rsa_mod_exp_wrong_y_len_rejected_emu() {
+fn rsa_mod_exp_wrong_y_len_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let (masked_key, _pub, modulus_len) = import_rsa(
@@ -255,7 +255,7 @@ fn rsa_mod_exp_wrong_y_len_rejected_emu() {
 
 /// Reject an AES masked key supplied to the RSA signing operation.
 #[test]
-fn rsa_mod_exp_wrong_key_class_rejected_emu() {
+fn rsa_mod_exp_wrong_key_class_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -275,7 +275,7 @@ fn rsa_mod_exp_wrong_key_class_rejected_emu() {
 
 /// Verify raw RSA-3072 signing with a CRT key.
 #[test]
-fn rsa_mod_exp_sign_roundtrip_3k_crt_emu() {
+fn rsa_mod_exp_sign_roundtrip_3k_crt() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -284,7 +284,7 @@ fn rsa_mod_exp_sign_roundtrip_3k_crt_emu() {
 
 /// Verify raw RSA-3072 decryption with a non-CRT key.
 #[test]
-fn rsa_mod_exp_decrypt_roundtrip_3k_emu() {
+fn rsa_mod_exp_decrypt_roundtrip_3k() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -293,7 +293,7 @@ fn rsa_mod_exp_decrypt_roundtrip_3k_emu() {
 
 /// Verify raw RSA-3072 decryption with a CRT key.
 #[test]
-fn rsa_mod_exp_decrypt_roundtrip_3k_crt_emu() {
+fn rsa_mod_exp_decrypt_roundtrip_3k_crt() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -302,7 +302,7 @@ fn rsa_mod_exp_decrypt_roundtrip_3k_crt_emu() {
 
 /// Verify raw RSA-4096 decryption with a CRT key.
 #[test]
-fn rsa_mod_exp_decrypt_roundtrip_4k_crt_emu() {
+fn rsa_mod_exp_decrypt_roundtrip_4k_crt() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -311,7 +311,7 @@ fn rsa_mod_exp_decrypt_roundtrip_4k_crt_emu() {
 
 /// Reject an empty signing operand.
 #[test]
-fn rsa_mod_exp_empty_y_rejected_emu() {
+fn rsa_mod_exp_empty_y_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -336,7 +336,7 @@ fn rsa_mod_exp_empty_y_rejected_emu() {
 
 /// Reject a signing operand one byte longer than the RSA modulus.
 #[test]
-fn rsa_mod_exp_oversized_y_rejected_emu() {
+fn rsa_mod_exp_oversized_y_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -361,7 +361,7 @@ fn rsa_mod_exp_oversized_y_rejected_emu() {
 
 /// Reject a truncated decryption operand for an RSA-CRT key.
 #[test]
-fn rsa_mod_exp_decrypt_short_y_rejected_emu() {
+fn rsa_mod_exp_decrypt_short_y_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -390,7 +390,7 @@ fn rsa_mod_exp_decrypt_short_y_rejected_emu() {
 
 /// Verify RsaModExp rejects a zero-valued signing operand.
 #[test]
-fn rsa_mod_exp_sign_zero_operand_rejected_emu() {
+fn rsa_mod_exp_sign_zero_operand_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -416,7 +416,7 @@ fn rsa_mod_exp_sign_zero_operand_rejected_emu() {
 
 /// Verify RsaModExp rejects a one-valued signing operand.
 #[test]
-fn rsa_mod_exp_sign_one_operand_rejected_emu() {
+fn rsa_mod_exp_sign_one_operand_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -445,7 +445,7 @@ fn rsa_mod_exp_sign_one_operand_rejected_emu() {
 
 /// Verify repeated signing of the same operand is deterministic.
 #[test]
-fn rsa_mod_exp_repeated_sign_stable_emu() {
+fn rsa_mod_exp_repeated_sign_stable() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -485,7 +485,7 @@ fn rsa_mod_exp_repeated_sign_stable_emu() {
 
 /// Verify distinct operands produce distinct valid raw RSA signatures.
 #[test]
-fn rsa_mod_exp_different_messages_emu() {
+fn rsa_mod_exp_different_messages() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -538,7 +538,7 @@ fn rsa_mod_exp_different_messages_emu() {
 
 /// Verify repeated decryptions recover the same plaintext.
 #[test]
-fn rsa_mod_exp_repeated_decrypt_stable_emu() {
+fn rsa_mod_exp_repeated_decrypt_stable() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -578,7 +578,7 @@ fn rsa_mod_exp_repeated_decrypt_stable_emu() {
 /// Both imported key classes must compute the same private RSA operation
 /// when backed by the same RSA key material.
 #[test]
-fn rsa_mod_exp_rsa_crt_same_key_sign_equivalent_emu() {
+fn rsa_mod_exp_rsa_crt_same_key_sign_equivalent() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let key = RsaPrivateKey::generate(256).expect("generate RSA-2048 key");
@@ -623,7 +623,7 @@ fn rsa_mod_exp_rsa_crt_same_key_sign_equivalent_emu() {
 
 /// RSA and RSA-CRT decryptions must agree for the same underlying private key.
 #[test]
-fn rsa_mod_exp_rsa_crt_same_key_decrypt_equivalent_emu() {
+fn rsa_mod_exp_rsa_crt_same_key_decrypt_equivalent() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let key = RsaPrivateKey::generate(256).expect("generate RSA-2048 key");
@@ -668,7 +668,7 @@ fn rsa_mod_exp_rsa_crt_same_key_decrypt_equivalent_emu() {
 
 /// Verify the emulator rejects all-zero decrypt operands for RSA and RSA-CRT.
 #[test]
-fn rsa_mod_exp_decrypt_zero_operand_both_classes_rejected_emu() {
+fn rsa_mod_exp_decrypt_zero_operand_both_classes_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -694,7 +694,7 @@ fn rsa_mod_exp_decrypt_zero_operand_both_classes_rejected_emu() {
 
 /// Verify the emulator rejects decrypt operand one for RSA and RSA-CRT.
 #[test]
-fn rsa_mod_exp_decrypt_one_operand_both_classes_rejected_emu() {
+fn rsa_mod_exp_decrypt_one_operand_both_classes_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -722,7 +722,7 @@ fn rsa_mod_exp_decrypt_one_operand_both_classes_rejected_emu() {
 
 /// A low-valued non-palindromic operand verifies the wire endian convention.
 #[test]
-fn rsa_mod_exp_sign_little_endian_small_operand_emu() {
+fn rsa_mod_exp_sign_little_endian_small_operand() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let (masked_key, pubkey, modulus_len) = import_rsa(
@@ -751,7 +751,7 @@ fn rsa_mod_exp_sign_little_endian_small_operand_emu() {
 
 /// RSA-3072 / RSA-4096 and RSA-CRT must reject truncated operands.
 #[test]
-fn rsa_mod_exp_large_keys_short_y_rejected_emu() {
+fn rsa_mod_exp_large_keys_short_y_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -777,7 +777,7 @@ fn rsa_mod_exp_large_keys_short_y_rejected_emu() {
 
 /// Verify oversized decrypt operands are rejected for RSA-3072/4096 and CRT.
 #[test]
-fn rsa_mod_exp_large_keys_oversized_y_rejected_emu() {
+fn rsa_mod_exp_large_keys_oversized_y_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -806,7 +806,7 @@ fn rsa_mod_exp_large_keys_oversized_y_rejected_emu() {
 
 /// An AES masked key is invalid for the decrypt operation as well as sign.
 #[test]
-fn rsa_mod_exp_decrypt_wrong_key_class_rejected_emu() {
+fn rsa_mod_exp_decrypt_wrong_key_class_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let aes = unwrap(&ctx, session.session_id, KEY_CLASS_AES, &[0x42; 32]);
@@ -824,7 +824,7 @@ fn rsa_mod_exp_decrypt_wrong_key_class_rejected_emu() {
 
 /// An unknown operation selector must not be interpreted as Sign or Decrypt.
 #[test]
-fn rsa_mod_exp_unknown_operation_rejected_emu() {
+fn rsa_mod_exp_unknown_operation_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let (masked_key, _, modulus_len) = import_rsa(
@@ -848,7 +848,7 @@ fn rsa_mod_exp_unknown_operation_rejected_emu() {
 
 /// A decrypt-only RSA key must not be accepted for a signing operation.
 #[test]
-fn rsa_mod_exp_sign_with_decrypt_usage_rejected_emu() {
+fn rsa_mod_exp_sign_with_decrypt_usage_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -875,7 +875,7 @@ fn rsa_mod_exp_sign_with_decrypt_usage_rejected_emu() {
 
 /// A sign-only RSA key must not be accepted for decryption.
 #[test]
-fn rsa_mod_exp_decrypt_with_sign_usage_rejected_emu() {
+fn rsa_mod_exp_decrypt_with_sign_usage_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -902,7 +902,7 @@ fn rsa_mod_exp_decrypt_with_sign_usage_rejected_emu() {
 
 /// Empty masked keys are never valid private RSA keys.
 #[test]
-fn rsa_mod_exp_empty_masked_key_rejected_emu() {
+fn rsa_mod_exp_empty_masked_key_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     assert!(
@@ -919,7 +919,7 @@ fn rsa_mod_exp_empty_masked_key_rejected_emu() {
 
 /// A truncated masked-key envelope must not be accepted.
 #[test]
-fn rsa_mod_exp_truncated_masked_key_rejected_emu() {
+fn rsa_mod_exp_truncated_masked_key_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let (mut masked_key, _, modulus_len) = import_rsa(
@@ -945,7 +945,7 @@ fn rsa_mod_exp_truncated_masked_key_rejected_emu() {
 
 /// Corrupt the final byte of the masked-key envelope (normally its tag).
 #[test]
-fn rsa_mod_exp_corrupted_masked_key_rejected_emu() {
+fn rsa_mod_exp_corrupted_masked_key_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -974,7 +974,7 @@ fn rsa_mod_exp_corrupted_masked_key_rejected_emu() {
 
 /// An invalid session identifier must not authorize an RSA private operation.
 #[test]
-fn rsa_mod_exp_invalid_session_rejected_emu() {
+fn rsa_mod_exp_invalid_session_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let (masked_key, _, modulus_len) = import_rsa(
