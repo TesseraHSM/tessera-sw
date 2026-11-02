@@ -5,6 +5,7 @@
 
 use std::io::Read;
 use std::io::Write;
+use std::net::Shutdown;
 use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -16,11 +17,15 @@ use nix::sys::socket::connect;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::send;
 #[cfg(target_os = "linux")]
+use nix::sys::socket::shutdown as nix_shutdown;
+#[cfg(target_os = "linux")]
 use nix::sys::socket::socket;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::AddressFamily;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::MsgFlags;
+#[cfg(target_os = "linux")]
+use nix::sys::socket::Shutdown as NixShutdown;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::SockFlag;
 #[cfg(target_os = "linux")]
@@ -38,12 +43,18 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_mbor_codec::MborDecode;
 use tsra_ddi_mbor_codec::MborDecoder;
+use tsra_ddi_mbor_codec::MborEncode;
 use tsra_ddi_mbor_codec::MborEncoder;
 use tsra_ddi_mbor_types::DdiAesOp;
+use tsra_ddi_mbor_types::DdiCloseSessionCmdReq;
+use tsra_ddi_mbor_types::DdiCloseSessionReq;
 use tsra_ddi_mbor_types::DdiDecoder;
 use tsra_ddi_mbor_types::DdiDeviceKind;
+use tsra_ddi_mbor_types::DdiOp;
 use tsra_ddi_mbor_types::DdiOpReq;
+use tsra_ddi_mbor_types::DdiReqHdr;
 use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiRespSessionId;
 use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_mbor_types::MborError;
 use tsra_ddi_mbor_types::SessionControlKind;
@@ -116,6 +127,21 @@ impl Write for SocketStream {
     }
 }
 
+impl SocketStream {
+    /// Shut down both directions of the connection, so the peer observes
+    /// a disconnect before [`DdiSockDev::erase`] dials its replacement
+    /// connection (see the call site for why this ordering matters).
+    fn shutdown(&self) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.shutdown(Shutdown::Both),
+            #[cfg(target_os = "linux")]
+            Self::Vsock(stream) => stream.shutdown(),
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 struct VsockStream {
     fd: std::os::fd::RawFd,
@@ -155,6 +181,15 @@ impl Write for VsockStream {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl VsockStream {
+    /// Shut down both directions of the connection without invalidating
+    /// the underlying fd (the [`Drop`] impl still closes it).
+    fn shutdown(&self) -> std::io::Result<()> {
+        nix_shutdown(self.fd, NixShutdown::Both).map_err(std::io::Error::from)
     }
 }
 
@@ -201,6 +236,54 @@ pub(crate) fn socket_path() -> String {
     std::env::var(SOCK_PATH_ENV).unwrap_or_else(|_| DEFAULT_SOCK_PATH.to_owned())
 }
 
+/// Dial `path` (a Unix socket path, `tcp://HOST:PORT`, or
+/// `vsock://CID:PORT` endpoint) and return the resulting stream.
+///
+/// Factored out of [`DdiSockDev::connect`] so [`DdiSockDev::erase`] can
+/// redial the same endpoint without duplicating the transport-selection
+/// logic.
+fn connect_stream(path: &str) -> DdiResult<SocketStream> {
+    if let Some(address) = path.strip_prefix("tcp://") {
+        let stream = TcpStream::connect(address).map_err(DdiError::IoError)?;
+        stream.set_nodelay(true).map_err(DdiError::IoError)?;
+        Ok(SocketStream::Tcp(stream))
+    } else {
+        match parse_vsock_endpoint(path).map_err(DdiError::IoError)? {
+            Some((cid, port)) => {
+                #[cfg(target_os = "linux")]
+                {
+                    Ok(SocketStream::Vsock(
+                        VsockStream::connect(cid, port).map_err(DdiError::IoError)?,
+                    ))
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (cid, port);
+                    Err(DdiError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "vsock endpoints require Linux",
+                    )))
+                }
+            }
+            None => {
+                #[cfg(unix)]
+                {
+                    Ok(SocketStream::Unix(
+                        UnixStream::connect(path).map_err(DdiError::IoError)?,
+                    ))
+                }
+                #[cfg(not(unix))]
+                {
+                    Err(DdiError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "this platform requires a tcp://HOST:PORT endpoint",
+                    )))
+                }
+            }
+        }
+    }
+}
+
 /// A connected socket DDI device.
 ///
 /// Wraps a single TCP, Unix-domain, or Linux VSOCK connection to the server. Requests
@@ -210,6 +293,9 @@ pub struct DdiSockDev {
     stream: Mutex<SocketStream>,
     cmd_counter: AtomicU16,
     device_kind: DdiDeviceKind,
+    /// The endpoint originally passed to [`Self::connect`], retained so
+    /// [`Self::erase`] can redial the same server after disconnecting.
+    path: String,
 }
 
 impl std::fmt::Debug for DdiSockDev {
@@ -223,49 +309,14 @@ impl std::fmt::Debug for DdiSockDev {
 impl DdiSockDev {
     /// Connect to the server at `path`.
     pub(crate) fn connect(path: &str) -> DdiResult<Self> {
-        let stream = if let Some(address) = path.strip_prefix("tcp://") {
-            let stream = TcpStream::connect(address).map_err(DdiError::IoError)?;
-            stream.set_nodelay(true).map_err(DdiError::IoError)?;
-            SocketStream::Tcp(stream)
-        } else {
-            match parse_vsock_endpoint(path).map_err(DdiError::IoError)? {
-                Some((cid, port)) => {
-                    #[cfg(target_os = "linux")]
-                    {
-                        SocketStream::Vsock(
-                            VsockStream::connect(cid, port).map_err(DdiError::IoError)?,
-                        )
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    {
-                        let _ = (cid, port);
-                        return Err(DdiError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            "vsock endpoints require Linux",
-                        )));
-                    }
-                }
-                None => {
-                    #[cfg(unix)]
-                    {
-                        SocketStream::Unix(UnixStream::connect(path).map_err(DdiError::IoError)?)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        return Err(DdiError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            "this platform requires a tcp://HOST:PORT endpoint",
-                        )));
-                    }
-                }
-            }
-        };
+        let stream = connect_stream(path)?;
         Ok(Self {
             stream: Mutex::new(stream),
             cmd_counter: AtomicU16::new(1),
             // The firmware reports a physical device, so the host codec
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
+            path: path.to_owned(),
         })
     }
 
@@ -276,13 +327,10 @@ impl DdiSockDev {
     /// Build a submission entry, exchange it with the server, and return
     /// the response body bytes.
     ///
-    /// Mirrors the in-process emulator: the client constructs the SQE
-    /// (opcode, command id, lengths, session flags) and reads the returned
-    /// CQE; the server only re-homes the DMA buffers. The SQE's PRP
-    /// address fields are left zero — the server assigns them.
-    ///
-    /// Maps a nonzero transport status (header) or device status (CQE) to
-    /// [`DdiError::DdiError`].
+    /// Locks `self.stream` for the duration of the exchange and delegates
+    /// to [`Self::submit_locked`]. Used by paths (e.g. `exec_op_tbor`)
+    /// that don't need to hold the lock across any additional
+    /// post-processing.
     fn submit(
         &self,
         op: u16,
@@ -291,6 +339,35 @@ impl DdiSockDev {
         payload: Vec<u8>,
     ) -> DdiResult<Vec<u8>> {
         let cmd_id = self.next_cmd_id();
+        let mut stream = self.stream.lock();
+        Self::submit_locked(&mut stream, cmd_id, op, session_ctrl, session_id, payload)
+    }
+
+    /// The I/O-only half of a submit: write the request and read the
+    /// response over an already-locked `stream`.
+    ///
+    /// Mirrors the in-process emulator: the client constructs the SQE
+    /// (opcode, command id, lengths, session flags) and reads the returned
+    /// CQE; the server only re-homes the DMA buffers. The SQE's PRP
+    /// address fields are left zero — the server assigns them.
+    ///
+    /// Maps a nonzero transport status (header) or device status (CQE) to
+    /// [`DdiError::DdiError`].
+    ///
+    /// Takes an already-locked `stream` (rather than locking
+    /// `self.stream` itself) so [`DdiDev::exec_op_mbor`] can hold that
+    /// lock across the exchange *and* its `OpenSession`/`ReopenSession`
+    /// identity check, so a best-effort leaked-session close (see
+    /// [`Self::close_leaked_session_locked`]) can reuse the same stream
+    /// without racing a concurrent caller's request.
+    fn submit_locked(
+        stream: &mut SocketStream,
+        cmd_id: u16,
+        op: u16,
+        session_ctrl: u8,
+        session_id: Option<u16>,
+        payload: Vec<u8>,
+    ) -> DdiResult<Vec<u8>> {
         let sqe = SqeBuilder::new()
             .cmd(CmdDword::new().with_op(op).with_id(cmd_id))
             .buf_lens(payload.len() as u32, DST_CAP)
@@ -309,7 +386,6 @@ impl DdiSockDev {
         };
 
         let resp: Response = {
-            let mut stream = self.stream.lock();
             req.write_to(&mut *stream).map_err(map_proto_err)?;
             Response::read_from(&mut *stream).map_err(map_proto_err)?
         };
@@ -355,6 +431,88 @@ impl DdiSockDev {
         payload.truncate(dst_len);
         Ok(payload)
     }
+
+    /// Best-effort cleanup for a session the server reports opening
+    /// (header `status == Success`, carrying the new id) whose response
+    /// body then fails to decode, or whose header/body session ids
+    /// disagree. Issues a raw `CloseSession` for `leaked_id` over the
+    /// already-locked `stream`, so the firmware-side slot isn't left live
+    /// — nothing local ever recorded it (see the call site in
+    /// [`DdiDev::exec_op_mbor`]), so nothing local would otherwise ever
+    /// close it either.
+    ///
+    /// Errors are intentionally discarded by the caller: this is a
+    /// best-effort reclaim on top of an already-failing exchange, and the
+    /// original error is what should surface to the caller either way.
+    fn close_leaked_session_locked(
+        stream: &mut SocketStream,
+        cmd_id: u16,
+        pre_encode: bool,
+        leaked_id: u16,
+    ) -> DdiResult<()> {
+        let req = DdiCloseSessionCmdReq {
+            hdr: DdiReqHdr {
+                op: DdiOp::CloseSession,
+                sess_id: Some(leaked_id),
+                rev: None,
+            },
+            data: DdiCloseSessionReq {},
+            ext: None,
+        };
+
+        let mut buf = vec![0u8; DST_CAP as usize];
+        let req_len = {
+            let mut enc = MborEncoder::new(buf.as_mut_slice(), pre_encode);
+            req.mbor_encode(&mut enc)
+                .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
+            enc.position()
+        };
+        buf.truncate(req_len);
+
+        Self::submit_locked(
+            stream,
+            cmd_id,
+            OP_MBOR,
+            u8::from(SessionControlKind::Close),
+            Some(leaked_id),
+            buf,
+        )?;
+        Ok(())
+    }
+}
+
+/// Whether a `ReopenSession` response's header and body both agree with
+/// the `requested` session id.
+///
+/// Both must be present and equal to `requested` — a peer that omits
+/// either id, or reports a different one in either place, must not be
+/// trusted enough to be returned to the caller (see the call site in
+/// [`DdiDev::exec_op_mbor`]). A missing `requested` id (no specific
+/// session named) trivially confirms, since there is nothing to check
+/// against.
+fn reopen_identity_confirmed(
+    requested: Option<u16>,
+    header_sess_id: Option<u16>,
+    body_sess_id: Option<u16>,
+) -> bool {
+    match requested {
+        Some(requested) => header_sess_id == Some(requested) && body_sess_id == Some(requested),
+        None => true,
+    }
+}
+
+/// Whether an `OpenSession` response's header and body agree on the
+/// newly assigned session id.
+///
+/// Unlike `ReopenSession` (where the *requested* id is already known
+/// ahead of time, see [`reopen_identity_confirmed`]), `OpenSession` has
+/// no id to check against — the server assigns one, and the header and
+/// body are the only two independent reports of what it is. Both must be
+/// present and equal: a peer that omits either id, or reports a
+/// different one in either place, hasn't actually confirmed the new
+/// session's id (see the call site in [`DdiDev::exec_op_mbor`]).
+fn open_identity_confirmed(header_sess_id: Option<u16>, body_sess_id: Option<u16>) -> bool {
+    header_sess_id.is_some() && header_sess_id == body_sess_id
 }
 
 impl DdiDev for DdiSockDev {
@@ -386,8 +544,20 @@ impl DdiDev for DdiSockDev {
         };
         buf.truncate(req_len);
 
-        // ── 2. Build the SQE and exchange it over the socket.
-        let resp_buf = self.submit(OP_MBOR, u8::from(session_ctrl), session_id, buf)?;
+        // ── 2. Exchange the SQE/CQE and decode the full typed response,
+        //    all while holding `self.stream`'s lock, so a best-effort
+        //    leaked-session close (step 3/4 below) can reuse the same
+        //    stream without an intervening request from another caller.
+        let cmd_id = self.next_cmd_id();
+        let mut stream = self.stream.lock();
+        let resp_buf = Self::submit_locked(
+            &mut stream,
+            cmd_id,
+            OP_MBOR,
+            u8::from(session_ctrl),
+            session_id,
+            buf,
+        )?;
         if resp_buf.is_empty() {
             return Err(DdiError::DdiError(0));
         }
@@ -401,10 +571,68 @@ impl DdiDev for DdiSockDev {
             return Err(DdiError::DdiStatus(hdr.status));
         }
 
-        // ── 4. Decode the typed response (header + body).
+        // ── 4. Decode the typed response (header + body). A server
+        //    that already told us (via the header) that it opened a
+        //    session, but whose body then fails to decode, has left a
+        //    live session this call is about to error out of — with
+        //    nothing local ever having recorded it, nothing local would
+        //    otherwise ever close it either. Best-effort close it now,
+        //    still under this same stream lock, before surfacing the
+        //    decode error.
         let mut body_dec = MborDecoder::new(&resp_buf, post_decode);
-        <T::OpResp>::mbor_decode(&mut body_dec)
-            .map_err(|_| DdiError::MborError(MborError::DecodeError))
+        let typed_resp = match <T::OpResp>::mbor_decode(&mut body_dec) {
+            Ok(resp) => resp,
+            Err(_) => {
+                if session_ctrl == SessionControlKind::Open {
+                    if let Some(leaked_id) = hdr.sess_id {
+                        let _ = Self::close_leaked_session_locked(
+                            &mut stream,
+                            self.next_cmd_id(),
+                            pre_encode,
+                            leaked_id,
+                        );
+                    }
+                }
+                return Err(DdiError::MborError(MborError::DecodeError));
+            }
+        };
+
+        // ── 5. For `ReopenSession`, the request already names the id
+        //    being reopened (`session_id`). A conforming peer's header
+        //    *and* body (`DdiRespSessionId::resp_session_id`) both echo
+        //    that same id back; reject before returning the response in
+        //    every other case — a peer that omits either id, or reports
+        //    a different one in either place, hasn't actually confirmed
+        //    this is the session the caller asked to reopen.
+        if opcode == DdiOp::ReopenSession
+            && !reopen_identity_confirmed(session_id, hdr.sess_id, typed_resp.resp_session_id())
+        {
+            return Err(DdiError::DdiStatus(DdiStatus::SessionNotFound));
+        }
+
+        // ── 6. For `OpenSession`, the header carries the server-assigned
+        //    id and the body independently echoes the same id back. A
+        //    peer that omits either id, or reports a different one in
+        //    either place, hasn't actually confirmed the new session's
+        //    id: treat it the same as a body decode failure — best-effort
+        //    close whatever the header told us was opened, and surface a
+        //    decode error rather than returning an untrustworthy id to
+        //    the caller.
+        if session_ctrl == SessionControlKind::Open
+            && !open_identity_confirmed(hdr.sess_id, typed_resp.resp_session_id())
+        {
+            if let Some(leaked_id) = hdr.sess_id {
+                let _ = Self::close_leaked_session_locked(
+                    &mut stream,
+                    self.next_cmd_id(),
+                    pre_encode,
+                    leaked_id,
+                );
+            }
+            return Err(DdiError::MborError(MborError::DecodeError));
+        }
+
+        Ok(typed_resp)
     }
 
     fn exec_op_tbor<T: TborOpReq>(
@@ -487,7 +715,17 @@ impl DdiDev for DdiSockDev {
     }
 
     fn erase(&self) -> Result<(), DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        // There's no in-band SQE/CQE opcode for a factory reset over this
+        // transport. Instead, shut down the current connection and dial
+        // a fresh one to the same endpoint: a server that ties partition
+        // reset to connection loss (e.g. `vsocksrv`) sees the disconnect
+        // and resets before the replacement connection is established.
+        let mut stream = self.stream.lock();
+        // Best-effort: a peer that already closed its end can make this
+        // fail, but the subsequent reconnect is what actually matters.
+        let _ = stream.shutdown();
+        *stream = connect_stream(&self.path)?;
+        Ok(())
     }
 }
 
@@ -505,6 +743,51 @@ fn map_proto_err(e: ProtoError) -> DdiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `ReopenSession` response is only trusted when both the shared
+    /// header and the op-specific body independently confirm the exact
+    /// id that was requested; a mismatch or a missing id in either place
+    /// must not be mistaken for confirmation (see `exec_op_mbor`'s use
+    /// of this to gate returning the response to the caller).
+    #[test]
+    fn reopen_identity_confirmed_requires_both_ids_to_match_requested() {
+        // Both ids match: confirmed.
+        assert!(reopen_identity_confirmed(Some(9), Some(9), Some(9)));
+        // Header mismatches the requested id: not confirmed, even though
+        // the body matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(1), Some(9)));
+        // Body mismatches the requested id: not confirmed, even though
+        // the header matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), Some(1)));
+        // Header id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), None, Some(9)));
+        // Body id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), None));
+        // No id was requested at all: trivially confirmed (nothing to
+        // check against).
+        assert!(reopen_identity_confirmed(None, Some(9), Some(9)));
+    }
+
+    /// An `OpenSession` response is only trusted when the shared header
+    /// and the op-specific body independently report the *same*
+    /// server-assigned id; unlike `ReopenSession` there's no requested id
+    /// to check against (see `exec_op_mbor`'s use of this to gate
+    /// returning the new session to the caller).
+    #[test]
+    fn open_identity_confirmed_requires_matching_non_empty_ids() {
+        // Both ids agree: confirmed.
+        assert!(open_identity_confirmed(Some(9), Some(9)));
+        // Header and body disagree: not confirmed.
+        assert!(!open_identity_confirmed(Some(9), Some(1)));
+        // Header id missing entirely: not confirmed, even if the body
+        // reports one.
+        assert!(!open_identity_confirmed(None, Some(9)));
+        // Body id missing entirely: not confirmed, even if the header
+        // reports one.
+        assert!(!open_identity_confirmed(Some(9), None));
+        // Neither id present: not confirmed.
+        assert!(!open_identity_confirmed(None, None));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -564,6 +847,7 @@ mod tests {
             stream: Mutex::new(SocketStream::Unix(client)),
             cmd_counter: AtomicU16::new(1),
             device_kind: DdiDeviceKind::Physical,
+            path: String::new(),
         };
         let peer = std::thread::spawn(move || {
             let request = Request::read_from(&mut server).expect("request");

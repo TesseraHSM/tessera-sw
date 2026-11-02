@@ -603,6 +603,49 @@ fn get_api_rev_round_trips_through_vsocksrv_over_real_vsock() {
     assert_get_api_rev_succeeds(&dev);
 }
 
+/// Regression test for `DdiDev::erase`'s reset cycle, over a real
+/// `AF_VSOCK` connection: it must remain fully usable across many
+/// repeated erase cycles, not just a single one. Ports
+/// `tsra_ddi_sock`'s identically-motivated
+/// `many_reconnects_do_not_exhaust_partition` test to this crate's real
+/// transport, since `DdiVsockDev::erase` (and the
+/// `SessionGenerationTracker` bookkeeping it drives) is exactly the
+/// production-shaped code path such a regression would hide in — unlike
+/// `tsra_ddi_sock`, which reconnects by constructing a brand-new device
+/// handle per cycle, this calls `erase()` on the *same* long-lived
+/// `DdiVsockDev` handle every time, so it also exercises the
+/// generation-bump bookkeeping across repeated resets, not just the
+/// transport-level reconnect.
+///
+/// Note: `GetApiRev` never opens a session, so this alone does not drive
+/// the partition's fixed-size session table toward exhaustion (see the
+/// `tsra_ddi_sock` test's doc comment for the concrete failure mode this
+/// guards against) — doing so would require driving a stateful HSM
+/// operation through the wire protocol. This test instead exercises the
+/// reset cycle itself well past a handful of iterations and asserts the
+/// partition keeps serving requests.
+#[test]
+fn many_erases_do_not_exhaust_partition_over_real_vsock() {
+    const ERASES: usize = 16;
+    let mut endpoints = TestEndpoints::new("many-erases");
+    let _bridge =
+        bridge_or_skip!(spawn_bridge(&mut endpoints).expect("failed to probe/start test bridge"));
+    let _vsocksrv =
+        vsocksrv_or_skip!(spawn_vsocksrv(&endpoints).expect("failed to start vsocksrv"));
+
+    let ddi = DdiVsock::default();
+    let dev = ddi
+        .open_dev(&endpoints.vsock_port.to_string())
+        .expect("failed to accept the real AF_VSOCK connection via the bridge");
+    assert_get_api_rev_succeeds(&dev);
+
+    for _ in 0..ERASES {
+        dev.erase()
+            .expect("erase should accept the bridge's replacement connection");
+        assert_get_api_rev_succeeds(&dev);
+    }
+}
+
 /// Regression test for the stale-session-close fix in `src/dev.rs`
 /// (`SessionGenerationTracker`), over a real `AF_VSOCK` connection:
 /// after [`DdiDev::erase`] replaces the live connection, a
