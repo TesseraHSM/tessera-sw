@@ -3,10 +3,10 @@
 // Valid: basic request with scalar fields.
 #![allow(unsafe_code)]
 use tsra_fw_ddi_tbor_api::tbor;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
-fn brand(b: &[u8]) -> &DmaBuf {
-    unsafe { DmaBuf::from_raw(b) }
+fn brand(b: &[u8]) -> &HsmDmaBuf {
+    unsafe { HsmDmaBuf::from_raw(b) }
 }
 
 #[tbor(opcode = 0x01)]

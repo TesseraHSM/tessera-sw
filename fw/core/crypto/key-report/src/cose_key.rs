@@ -13,7 +13,7 @@
 
 use minicbor::Decoder;
 use minicbor::Encoder;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -48,16 +48,16 @@ pub enum AttestedPubKey<'a> {
         /// NIST curve the key is on.
         curve: HsmEccCurve,
         /// Big-endian X coordinate.
-        x: &'a DmaBuf,
+        x: &'a HsmDmaBuf,
         /// Big-endian Y coordinate.
-        y: &'a DmaBuf,
+        y: &'a HsmDmaBuf,
     },
     /// RSA public key; `n` / `e` are big-endian.
     Rsa {
         /// Big-endian modulus.
-        n: &'a DmaBuf,
+        n: &'a HsmDmaBuf,
         /// Big-endian public exponent.
-        e: &'a DmaBuf,
+        e: &'a HsmDmaBuf,
     },
     /// Symmetric key — no public component (empty COSE_Key).
     Symmetric,
@@ -173,9 +173,9 @@ pub struct Ec2CoseKey<'a> {
     /// NIST curve the key is on.
     pub curve: HsmEccCurve,
     /// Big-endian X coordinate (`curve.priv_key_len()` bytes).
-    pub x: &'a DmaBuf,
+    pub x: &'a HsmDmaBuf,
     /// Big-endian Y coordinate (`curve.priv_key_len()` bytes).
-    pub y: &'a DmaBuf,
+    pub y: &'a HsmDmaBuf,
 }
 
 /// Decode an EC2 `COSE_Key` map `{ 1: 2, -1: crv, -2: x, -3: y }`
@@ -190,7 +190,7 @@ pub struct Ec2CoseKey<'a> {
 ///
 /// Only the four canonical EC2 labels are accepted, each exactly once;
 /// the coordinate lengths must equal the curve's field size.
-pub fn parse_ec2_cose_key(cose_key: &DmaBuf) -> HsmResult<Ec2CoseKey<'_>> {
+pub fn parse_ec2_cose_key(cose_key: &HsmDmaBuf) -> HsmResult<Ec2CoseKey<'_>> {
     let mut kty_seen = false;
     let mut crv: Option<i8> = None;
     let mut x_span: Option<(usize, usize)> = None;

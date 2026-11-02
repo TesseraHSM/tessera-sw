@@ -10,8 +10,8 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_part_store::Partition;
@@ -124,10 +124,10 @@ impl SessionTable {
     /// Slot range eligible for a Pending session of `role`:
     /// CryptoOfficer → slot 0 only; CryptoUser → slots `1..=MAX_SESSIONS-1`.
     #[inline]
-    fn role_slot_range(role: SessionRole) -> (usize, usize) {
+    fn role_slot_range(role: HsmSessionRole) -> (usize, usize) {
         match role {
-            SessionRole::CryptoOfficer => (0, 0),
-            SessionRole::CryptoUser => (1, MAX_SESSIONS - 1),
+            HsmSessionRole::CryptoOfficer => (0, 0),
+            HsmSessionRole::CryptoUser => (1, MAX_SESSIONS - 1),
         }
     }
 
@@ -268,7 +268,7 @@ impl SessionTable {
     ///
     /// Mirrors the reference firmware's
     /// `session_table().restore(session_table().backup())` in
-    /// `PartState::disable` / `PartState::migrate`, and the std PAL's
+    /// `HsmPartState::disable` / `HsmPartState::migrate`, and the std PAL's
     /// `backup`/`restore` pair, whose `backup` is likewise
     /// `alloc_mask & !pending_mask`.
     #[inline(never)]
@@ -290,7 +290,7 @@ impl SessionTable {
     /// disable uses [`mark_all_needs_renego`](Self::mark_all_needs_renego)
     /// instead, retaining established logical IDs so the host can still close
     /// its sessions. Mirrors the reference firmware's
-    /// `session_table().restore(0)` in `PartState::clear_partition_info`.
+    /// `session_table().restore(0)` in `HsmPartState::clear_partition_info`.
     #[inline(never)]
     pub fn clear_all(&mut self) {
         self.region_mut().fill(0);
@@ -346,7 +346,7 @@ impl SessionTable {
     #[inline(never)]
     pub fn create_pending(
         &mut self,
-        role: SessionRole,
+        role: HsmSessionRole,
         physical_id: HsmKeyId,
     ) -> HsmResult<(HsmSessId, Option<HsmKeyId>)> {
         let (start, end) = Self::role_slot_range(role);

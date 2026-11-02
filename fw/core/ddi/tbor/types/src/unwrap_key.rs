@@ -92,7 +92,7 @@ pub enum KeyClass {
 }
 
 /// `UnwrapKey` request schema.
-#[tbor(opcode = 0x14)]
+#[tbor(opcode = 0x14, pair = TborUnwrapKeyResp)]
 pub struct TborUnwrapKeyReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -127,7 +127,7 @@ pub struct TborUnwrapKeyReq<'a> {
 }
 
 /// `UnwrapKey` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborUnwrapKeyReq)]
 pub struct TborUnwrapKeyResp<'a> {
     /// The recovered key's vault-kind discriminant (`HsmVaultKeyKind`).
     #[tbor(U8)]

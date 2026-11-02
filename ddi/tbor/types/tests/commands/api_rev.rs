@@ -31,7 +31,7 @@ fn round_trip() {
         .expect("TBOR ApiRev round-trip");
     assert_eq!(
         resp, EXPECTED,
-        "firmware should report min=max=1 for the bootstrap TBOR protocol version",
+        "firmware should report min=max=1 for the current TBOR protocol version",
     );
 }
 
@@ -105,8 +105,8 @@ fn assert_expected_api_rev(resp: &tsra_ddi_tbor_types::TborApiRevResp, context: 
     );
 
     assert!(
-        (resp.min_ver..=resp.max_ver).contains(&1),
-        "{context}: bootstrap TBOR version 1 must be inside the advertised range {}..={}",
+        (resp.min_ver..=resp.max_ver).contains(&tsra_ddi_tbor_codec::PROTOCOL_VERSION),
+        "{context}: the current TBOR version must be inside the advertised range {}..={}",
         resp.min_ver,
         resp.max_ver,
     );

@@ -332,6 +332,10 @@ Algorithm ID type values
 #define TSRA_ALGO_ID_AES_XTS 0x00030005
 #define TSRA_ALGO_ID_AES_GCM_KEY_GEN 0x00030006
 #define TSRA_ALGO_ID_AES_GCM 0x00030007
+#define TSRA_ALGO_ID_AES_ECB 0x00030008
+#define TSRA_ALGO_ID_AES_CFB 0x00030009
+#define TSRA_ALGO_ID_AES_OFB 0x0003000A
+#define TSRA_ALGO_ID_AES_CTR 0x0003000B
 #define TSRA_ALGO_ID_SHA1 0x00040001
 #define TSRA_ALGO_ID_SHA256 0x00040002
 #define TSRA_ALGO_ID_SHA384 0x00040003
@@ -682,6 +686,48 @@ struct tsra_algo_aes_cbc_params {
 | Field | Type                              | Description                                       |
 | ----- | --------------------------------- | ------------------------------------------------- |
 | iv    | [tsra_buffer *](#tsra_buffer)     | initialization vector. must be 16 bytes    &nbsp; |
+
+### tsra_algo_aes_cfb_params
+
+Parameters for AES CFB Algorithm. AES ECB takes no parameters.
+
+```cpp
+struct tsra_algo_aes_cfb_params {
+    uint8_t iv[16];
+};
+```
+
+| Field | Type        | Description                                                        |
+| ----- | ----------- | ------------------------------------------------------------------ |
+| iv    | uint8_t[16] | initialization vector. must be 16 bytes; updated on return  &nbsp; |
+
+### tsra_algo_aes_ofb_params
+
+Parameters for AES OFB Algorithm. AES ECB takes no parameters.
+
+```cpp
+struct tsra_algo_aes_ofb_params {
+    uint8_t iv[16];
+};
+```
+
+| Field | Type        | Description                                                        |
+| ----- | ----------- | ------------------------------------------------------------------ |
+| iv    | uint8_t[16] | initialization vector. must be 16 bytes; updated on return  &nbsp; |
+
+### tsra_algo_aes_ctr_params
+
+Parameters for AES CTR Algorithm. AES ECB takes no parameters.
+
+```cpp
+struct tsra_algo_aes_ctr_params {
+    uint8_t iv[16];
+};
+```
+
+| Field | Type        | Description                                                        |
+| ----- | ----------- | ------------------------------------------------------------------ |
+| iv    | uint8_t[16] | initial counter block. must be 16 bytes; updated on return  &nbsp; |
 
 ### tsra_algo_aes_gcm_params
 

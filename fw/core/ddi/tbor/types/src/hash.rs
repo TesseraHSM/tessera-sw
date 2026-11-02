@@ -37,7 +37,7 @@ pub const HASH_MSG_MAX_LEN: usize = 2048;
 pub const HASH_DIGEST_MAX_LEN: usize = 64;
 
 /// `Hash` request schema.
-#[tbor(opcode = 0x1B)]
+#[tbor(opcode = 0x1B, pair = TborHashResp)]
 pub struct TborHashReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -57,7 +57,7 @@ pub struct TborHashReq<'a> {
 /// `digest` is `#[tbor(mutable)]` so the handler can reserve the slot and
 /// have the PAL write the digest straight into it (`decode_mut`) — no
 /// scratch buffer, no copy.
-#[tbor(response)]
+#[tbor(response, pair = TborHashReq)]
 pub struct TborHashResp<'a> {
     /// The natural (big-endian) digest, exactly the algorithm's length
     /// (20 / 32 / 48 / 64 B for SHA-1 / 256 / 384 / 512).

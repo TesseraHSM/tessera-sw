@@ -4,7 +4,7 @@
 use core::ops::AsyncFnOnce;
 
 use embassy_sync::waitqueue::WakerRegistration;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::UPKA_ENGINE_CMD_COUNT;
@@ -175,9 +175,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn ecc_sign(
         &self,
         curve: UpkaEccCurve,
-        priv_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| eng.ecc_sign(curve, priv_key, hash, signature).await)
             .await
@@ -211,12 +211,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn ecc_verify(
         &self,
         curve: UpkaEccCurve,
-        pub_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &DmaBuf,
-        result: &mut DmaBuf,
-        prime: &DmaBuf,
-        mont_result: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
+        prime: &HsmDmaBuf,
+        mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| {
             eng.ecc_verify(curve, pub_key, hash, signature, result, prime, mont_result)
@@ -245,7 +245,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn ecc_gen_keypair(
         &self,
         curve: UpkaEccCurve,
-        key_buf: &mut DmaBuf,
+        key_buf: &mut HsmDmaBuf,
     ) -> HsmResult<usize> {
         self.with_engine(async |eng| eng.ecc_gen_keypair(curve, key_buf).await)
             .await
@@ -279,12 +279,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn ecdh_derive(
         &self,
         curve: UpkaEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &DmaBuf,
-        secret: &mut DmaBuf,
-        prime: &DmaBuf,
-        mont_result: &mut DmaBuf,
-        point_valid: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &HsmDmaBuf,
+        secret: &mut HsmDmaBuf,
+        prime: &HsmDmaBuf,
+        mont_result: &mut HsmDmaBuf,
+        point_valid: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| {
             eng.ecdh_derive(
@@ -323,12 +323,27 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn rsa_mod_exp_priv(
         &self,
         key_type: UpkaRsaKeyType,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| eng.rsa_mod_exp_priv(key_type, key, input, output).await)
             .await
+    }
+
+    /// Replace the input block with the private-key result.
+    pub async fn rsa_mod_exp_priv_in_place(
+        &self,
+        key_type: UpkaRsaKeyType,
+        key: &HsmDmaBuf,
+        input_output: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        self.with_engine(async |engine| {
+            engine
+                .rsa_mod_exp_priv_in_place(key_type, key, input_output)
+                .await
+        })
+        .await
     }
 
     /// Run an RSA public-key modular exponentiation.
@@ -353,9 +368,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn rsa_mod_exp_pub(
         &self,
         key_type: UpkaRsaKeyType,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| eng.rsa_mod_exp_pub(key_type, key, input, output).await)
             .await
@@ -379,8 +394,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     pub async fn ecc_gen_pub_key(
         &self,
         curve: UpkaEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.with_engine(async |eng| eng.ecc_gen_pub_key(curve, priv_key, pub_key).await)
             .await

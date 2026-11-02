@@ -22,7 +22,7 @@
 use tsra_fw_ddi_tbor_types::TborGetUnwrappingKeyReq;
 use tsra_fw_ddi_tbor_types::TborGetUnwrappingKeyResp;
 use tsra_fw_ddi_tbor_types::UNWRAPPING_PUB_KEY_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -36,12 +36,12 @@ use crate::part_state;
 /// No partition lock or undo log is required: the command only reads the
 /// unwrapping key property and derives its public key — it makes no
 /// observable state change.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborGetUnwrappingKeyReq::decode(req_buf)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    let req = TborGetUnwrappingKeyReq::decode(cmd_buf.request())?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
 
     validate_active_session(pal, io, sess_id)?;
@@ -67,7 +67,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // Build the response with the `pub_key` slot reserved (sized but
     // unwritten), then have the PAL derive the wire public key straight
     // into the reserved slot — no scratch buffer and no copy.
-    let resp = pal.dma_alloc_var(io, |buf| {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborGetUnwrappingKeyResp::encode(buf, 0, false)?
             .pub_key_reserve(UNWRAPPING_PUB_KEY_LEN)?
             .finish();
@@ -77,7 +77,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // `decode_mut` hands out a `&mut` view into the reserved slot; the view
     // is scoped so its borrow of `resp` ends before `resp` is returned.
     {
-        let out = TborGetUnwrappingKeyResp::decode_mut(resp)?;
+        let out = TborGetUnwrappingKeyResp::decode_mut(&mut cmd_buf.buffer_mut()[..resp])?;
         let actual = pal.rsa_priv_pub_key(io, priv_key, Some(out.pub_key))?;
         if actual != pub_len {
             return Err(HsmError::InternalError);

@@ -18,7 +18,7 @@
 //! The crate speaks only [`tsra_fw_hsm_pal_traits`], so it is reusable
 //! across wire protocols and import paths.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -62,11 +62,11 @@ pub struct DecodedKey<'p> {
     pub kind: HsmVaultKeyKind,
     /// The key in the PAL's vault representation, ready for
     /// `vault_key_create`.
-    pub material: &'p DmaBuf,
+    pub material: &'p HsmDmaBuf,
     /// Wire-format public key for asymmetric keys; `None` for symmetric
     /// keys.  Mutable so the caller can frame it into a response slot
     /// without a copy.
-    pub pub_key: Option<&'p mut DmaBuf>,
+    pub pub_key: Option<&'p mut HsmDmaBuf>,
 }
 
 /// Decode recovered key material into vault-ready form.
@@ -86,7 +86,7 @@ pub struct DecodedKey<'p> {
 pub async fn decode<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    material: &'p mut DmaBuf,
+    material: &'p mut HsmDmaBuf,
     class: KeyClass,
 ) -> HsmResult<DecodedKey<'p>> {
     match class {

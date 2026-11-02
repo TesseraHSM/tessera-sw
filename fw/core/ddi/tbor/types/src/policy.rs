@@ -6,8 +6,8 @@
 //! Canonical, single source of truth.  This crate is the DDI types
 //! crate and must not depend on the firmware crate
 //! (`tsra_fw_hsm_core`) or on firmware-only primitives like
-//! `DmaBuf` / `HsmError`.  The validation/parser surface
-//! (`from_bytes(&DmaBuf) -> HsmResult<PartPolicy>`) that consumes
+//! `HsmDmaBuf` / `HsmError`.  The validation/parser surface
+//! (`from_bytes(&HsmDmaBuf) -> HsmResult<PartPolicy>`) that consumes
 //! those firmware primitives lives in
 //! `fw/core/lib/src/ddi/tbor/policy.rs` as a thin free function over
 //! the types here.

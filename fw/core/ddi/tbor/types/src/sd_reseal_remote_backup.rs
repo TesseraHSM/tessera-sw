@@ -17,7 +17,7 @@
 //!   in-session commands).
 //! * `masked_sealing_key` — the masked SD-sealing key (from
 //!   [`SdSealingKeyGen`](crate::sd_sealing_key_gen)), exactly
-//!   [`MASKED_SEALING_KEY_LEN`] (276 B). Unmasked on-device to recover the
+//!   [`MASKED_SEALING_KEY_LEN`] (280 B). Unmasked on-device to recover the
 //!   receiver's private HPKE key; the same key both unseals the source and
 //!   authenticates the reseal to the destination (never a vault handle).
 //! * `policy` — the unified [`PartPolicy`] the source and destination must
@@ -54,9 +54,9 @@ pub const TBOR_OP_SD_RESEAL_REMOTE_BACKUP: u8 = 0x0B;
 const _: () = assert!(PART_POLICY_LEN == 584);
 
 // `masked_sealing_key` is a masked SD-sealing key; the derive needs an
-// integer literal on the field, so the length is spelled out as `276` and
+// integer literal on the field, so the length is spelled out as `280` and
 // pinned against the canonical `MASKED_SEALING_KEY_LEN` here.
-const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
+const _: () = assert!(MASKED_SEALING_KEY_LEN == 280);
 
 // `src_remote_backup` / `dst_remote_backup` are HPKE-Auth seals; the derive
 // needs an integer literal on the field, so the length is spelled out as
@@ -64,7 +64,7 @@ const _: () = assert!(MASKED_SEALING_KEY_LEN == 276);
 const _: () = assert!(POK_REMOTE_BACKUP_LEN == 161);
 
 /// `SdResealRemoteBackup` request schema.
-#[tbor(opcode = 0x0B)]
+#[tbor(opcode = 0x0B, pair = TborSdResealRemoteBackupResp)]
 pub struct TborSdResealRemoteBackupReq<'a> {
     /// Session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -73,10 +73,10 @@ pub struct TborSdResealRemoteBackupReq<'a> {
     pub session_id: SessionId,
 
     /// The masked SD-sealing key (from `SdSealingKeyGen`), exactly
-    /// [`MASKED_SEALING_KEY_LEN`] (276 B).  Unmasked on-device to recover
+    /// [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to recover
     /// the receiver's private HPKE key (used to both unseal the source and
     /// authenticate the reseal to the destination); never a vault handle.
-    #[tbor(buffer, len = 276)]
+    #[tbor(buffer, len = 280)]
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] the source and destination
@@ -110,7 +110,7 @@ pub struct TborSdResealRemoteBackupReq<'a> {
 }
 
 /// `SdResealRemoteBackup` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborSdResealRemoteBackupReq)]
 pub struct TborSdResealRemoteBackupResp<'a> {
     /// Resealed remote backup (an HPKE-Auth seal of the same BKS3 to the
     /// destination receiver).  Always exactly [`POK_REMOTE_BACKUP_LEN`]

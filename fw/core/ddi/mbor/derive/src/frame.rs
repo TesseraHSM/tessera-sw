@@ -6,7 +6,7 @@
 //! For structs that contain byte-slice fields or `#[ddi(frame)]` children,
 //! this module generates:
 //!
-//! * A companion **`<Struct>Frame<'a>`** struct whose fields are `&'a mut DmaBuf`
+//! * A companion **`<Struct>Frame<'a>`** struct whose fields are `&'a mut HsmDmaBuf`
 //!   slices (for direct byte-slice fields) or nested `<Child>Frame<'a>` structs
 //!   (for `#[ddi(frame)]` children).
 //! * A **`<Struct>FrameParams`** struct that bundles the parameters for
@@ -91,8 +91,8 @@ pub(crate) fn struct_frame(ddi: &DdiStruct) -> syn::Result<proc_macro2::TokenStr
                     pub #name: <#ty as tsra_fw_ddi_mbor::MborFrameable>::Frame<'a>
                 }
             } else {
-                // Direct slice: &'a mut DmaBuf.
-                quote! { pub #name: &'a mut tsra_fw_ddi_mbor::DmaBuf }
+                // Direct slice: &'a mut HsmDmaBuf.
+                quote! { pub #name: &'a mut tsra_fw_ddi_mbor::HsmDmaBuf }
             }
         })
         .collect::<Vec<_>>();
@@ -233,7 +233,7 @@ pub(crate) fn struct_frame(ddi: &DdiStruct) -> syn::Result<proc_macro2::TokenStr
                 }
             } else {
                 quote! {
-                    let #name = tsra_fw_ddi_mbor::DmaBuf::from_raw_mut(
+                    let #name = tsra_fw_ddi_mbor::HsmDmaBuf::from_raw_mut(
                         core::slice::from_raw_parts_mut(
                             buf_ptr.add(layout.#name.start),
                             layout.#name.end - layout.#name.start,
@@ -386,7 +386,7 @@ pub(crate) fn struct_frame(ddi: &DdiStruct) -> syn::Result<proc_macro2::TokenStr
             /// returned frame's slices will alias unrelated memory.
             #[allow(unsafe_code)]
             pub fn from_layout<'a>(
-                buf: &'a mut tsra_fw_ddi_mbor::DmaBuf,
+                buf: &'a mut tsra_fw_ddi_mbor::HsmDmaBuf,
                 layout: &#layout_ident,
             ) -> #frame_ident<'a> {
                 // SAFETY: `layout` was produced by `reserve()` writing into
@@ -522,9 +522,9 @@ fn frame_encode_field(f: &DdiStructField) -> proc_macro2::TokenStream {
                 (#id).mbor_encode(encoder)?;
                 let pad = #pad_expr;
                 let #name = encoder.encode_reserve(#len_name, pad)?;
-                // SAFETY: `encoder` was constructed from a `&mut DmaBuf`, so
+                // SAFETY: `encoder` was constructed from a `&mut HsmDmaBuf`, so
                 // the slice it returned is itself DMA-accessible.
-                let #name = unsafe { tsra_fw_ddi_mbor::DmaBuf::from_raw_mut(#name) };
+                let #name = unsafe { tsra_fw_ddi_mbor::HsmDmaBuf::from_raw_mut(#name) };
             }
         }
         DdiStructFieldKind::Array => {

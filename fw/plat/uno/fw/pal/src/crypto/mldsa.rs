@@ -1,24 +1,25 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! [`HsmMlDsa`] implementation for the Uno PAL.
+//! [`HsmMlDsa`] and [`HsmMlKem`] implementations for the Uno PAL.
 //!
 //! ML-DSA does not run on the HSM core: this forwards to the
-//! [`PqcDriver`], which offloads to a fastpath (FP) core.  The driver is
-//! a bring-up stub today, so every call currently fails there.
+//! [`PqcDriver`], which offloads to a fastpath (FP) core. Operation inputs
+//! and outputs use DMA-branded buffers.
 //!
 //! With `bulk_crypto` the FP cores run the bulk-crypto firmware, which
 //! has no PQC engine, so every call is refused with
 //! [`HsmError::UnsupportedCmd`] before anything is drawn from the RNG or
 //! written to the PQC mailboxes (which overlay that firmware's HSM↔FP IPC
 //! rings in PSRAM), and the driver calls are compiled out.
-//!
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlKem;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_trace::tracing::*;
 
@@ -42,13 +43,39 @@ const MLDSA_SEED_LEN: usize = 32;
 // the module docs.
 #[cfg_attr(feature = "bulk_crypto", allow(unreachable_code))]
 impl HsmMlDsa for UnoHsmPal {
+    async fn mldsa_sign_in_place(
+        &self,
+        io: &impl HsmIo,
+        kind: HsmVaultKeyKind,
+        key_signature: &mut HsmDmaBuf,
+        message: &HsmDmaBuf,
+        ctx: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let mut rnd = [0u8; MLDSA_SEED_LEN];
+        let result = async {
+            #[cfg(feature = "bulk_crypto")]
+            return Err(HsmError::UnsupportedCmd);
+            self.rng_fill_bytes(io, &mut rnd)?;
+            self.pqc
+                .with_engine(async |engine| {
+                    engine
+                        .mldsa_sign_in_place(kind, key_signature, &rnd, message, ctx)
+                        .await
+                })
+                .await
+        }
+        .await;
+        rnd.fill(0);
+        result
+    }
+
     async fn mldsa_gen_key(
         &self,
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
-        seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        seed: &mut HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
+        sec_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Bracketed so an early `?` cannot skip the closing mark: every
         // exit, error or not, leaves through the await below.
@@ -77,13 +104,7 @@ impl HsmMlDsa for UnoHsmPal {
             // seed and derives the key pair. Both the seed and the expanded
             // secret key come back so the HSM can mask them together, which is
             // what lets signing skip the derivation entirely.
-            {
-                // SAFETY: `seed` is caller-owned scratch of the length checked
-                // above; `DmaBuf::from_raw_mut` only re-types it for the RNG
-                // driver, which writes exactly `seed.len()` bytes.
-                let dma = unsafe { DmaBuf::from_raw_mut(seed) };
-                self.rng.fill_bytes(dma)?;
-            }
+            self.rng.fill_bytes(seed)?;
 
             self.pqc.mldsa_gen_key(kind, seed, pub_key, sec_key).await
         }
@@ -96,10 +117,10 @@ impl HsmMlDsa for UnoHsmPal {
         &self,
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
-        message: &[u8],
-        ctx: &[u8],
-        signature: &mut [u8],
+        sec_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        ctx: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Bracketed so a failed RNG draw still reaches the closing mark.
         let outcome: HsmResult<()> = async {
@@ -111,7 +132,7 @@ impl HsmMlDsa for UnoHsmPal {
             {
                 // SAFETY: `rnd` is a local of exactly the length the RNG driver
                 // fills; `from_raw_mut` only re-types it.
-                let dma = unsafe { DmaBuf::from_raw_mut(&mut rnd[..]) };
+                let dma = unsafe { HsmDmaBuf::from_raw_mut(&mut rnd[..]) };
                 self.rng.fill_bytes(dma)?;
             }
 
@@ -134,10 +155,10 @@ impl HsmMlDsa for UnoHsmPal {
         &self,
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
-        message: &[u8],
-        ctx: &[u8],
-        signature: &[u8],
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        ctx: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         // Bracketed so the `bulk_crypto` refusal still reaches the closing
         // mark; see `mldsa_gen_key`.
@@ -152,14 +173,42 @@ impl HsmMlDsa for UnoHsmPal {
 
         outcome
     }
+}
+
+#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code))]
+impl HsmMlKem for UnoHsmPal {
+    async fn mlkem_encaps_in_place(
+        &self,
+        io: &impl HsmIo,
+        kind: HsmVaultKeyKind,
+        pub_key_ciphertext: &mut HsmDmaBuf,
+        shared_secret: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let mut m = [0u8; MLDSA_SEED_LEN];
+        let result = async {
+            #[cfg(feature = "bulk_crypto")]
+            return Err(HsmError::UnsupportedCmd);
+            self.rng_fill_bytes(io, &mut m)?;
+            self.pqc
+                .with_engine(async |engine| {
+                    engine
+                        .mlkem_encaps_in_place(kind, pub_key_ciphertext, &m, shared_secret)
+                        .await
+                })
+                .await
+        }
+        .await;
+        m.fill(0);
+        result
+    }
 
     async fn mlkem_gen_key(
         &self,
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
-        seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        seed: &mut HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
+        sec_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Bracketed so validation and RNG failures still reach the closing
         // mark; see `mldsa_gen_key`.
@@ -173,12 +222,7 @@ impl HsmMlDsa for UnoHsmPal {
 
             // Same reasoning as ML-DSA: the seed pair is the private key and an
             // FP core has no entropy source, so it is drawn here.
-            {
-                // SAFETY: `seed` is caller-owned scratch of the length checked
-                // above; `from_raw_mut` only re-types it for the RNG driver.
-                let dma = unsafe { DmaBuf::from_raw_mut(seed) };
-                self.rng.fill_bytes(dma)?;
-            }
+            self.rng.fill_bytes(seed)?;
 
             self.pqc.mlkem_gen_key(kind, seed, pub_key, sec_key).await
         }
@@ -191,9 +235,9 @@ impl HsmMlDsa for UnoHsmPal {
         &self,
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
-        ciphertext: &mut [u8],
-        shared_secret: &mut [u8],
+        pub_key: &HsmDmaBuf,
+        ciphertext: &mut HsmDmaBuf,
+        shared_secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Bracketed so a failed RNG draw still reaches the closing mark.
         let outcome: HsmResult<()> = async {
@@ -205,7 +249,7 @@ impl HsmMlDsa for UnoHsmPal {
             {
                 // SAFETY: `m` is a local of exactly the length the RNG driver
                 // fills; `from_raw_mut` only re-types it.
-                let dma = unsafe { DmaBuf::from_raw_mut(&mut m[..]) };
+                let dma = unsafe { HsmDmaBuf::from_raw_mut(&mut m[..]) };
                 self.rng.fill_bytes(dma)?;
             }
 
@@ -228,9 +272,9 @@ impl HsmMlDsa for UnoHsmPal {
         &self,
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
-        ciphertext: &[u8],
-        shared_secret: &mut [u8],
+        sec_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        shared_secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Bracketed so the `bulk_crypto` refusal still reaches the closing
         // mark; see `mldsa_gen_key`.

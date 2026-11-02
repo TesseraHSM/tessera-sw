@@ -92,8 +92,7 @@ where
 }
 
 #[allow(clippy::expect_used)]
-#[cfg(not(feature = "session-ex-tests"))]
-fn open_session_test_session(path: &str) -> HsmSession {
+pub(crate) fn open_session_test_session(path: &str) -> HsmSession {
     let part = HsmPartitionManager::open_partition(path, SESSION_TEST_API_REV)
         .expect("Failed to open the partition for an open_session test");
     let creds = HsmCredentials::new(&APP_ID, &APP_PIN);
@@ -123,6 +122,14 @@ fn open_session_ex_test_session(path: &str, rev: HsmApiRev) -> HsmSession {
     session
         .change_psk(&ROTATED_CO_PSK)
         .expect("Failed to rotate the default CO PSK");
+    drop(session);
+    let session = part
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
+            HsmSessionExType::Authenticated,
+        )
+        .expect("Failed to reopen the test session with the rotated CO PSK");
     crate::utils::sd_provision::provision_partition(&session);
     session
 }

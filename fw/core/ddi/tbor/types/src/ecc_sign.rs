@@ -50,15 +50,15 @@ pub const ECC_SIG_MAX_LEN: usize = 136;
 /// `masked_key` is `#[tbor(mutable)]` so the handler can `unmask` it **in
 /// place** in the request buffer (via `decode_mut`) — no scratch copy — and
 /// sign directly from the recovered key.
-#[tbor(opcode = 0x18)]
+#[tbor(opcode = 0x18, pair = TborEccSignResp)]
 pub struct TborEccSignReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
     pub session_id: SessionId,
 
     /// The masked ECC private key (from `EccGenerateKey` / `UnwrapKey`), an
-    /// AEAD-GCM-256 envelope of 260..=296 B.  Its kind recovers the curve.
-    #[tbor(buffer, min_len = 260, max_len = 296, mutable)]
+    /// AEAD-GCM-256 envelope of 264..=312 B.  Its kind recovers the curve.
+    #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
     /// The pre-computed message digest in wire little-endian order. Its
@@ -69,7 +69,7 @@ pub struct TborEccSignReq<'a> {
 }
 
 /// `EccSign` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborEccSignReq)]
 pub struct TborEccSignResp<'a> {
     /// Raw ECDSA `r ‖ s`, each component little-endian and padded to the
     /// curve wire coordinate length: 64 / 96 / 136 B for

@@ -20,6 +20,14 @@ pub(crate) enum HandleType {
     AesXtsKey,
     AesCbcEncryptCtx,
     AesCbcDecryptCtx,
+    AesEcbEncryptCtx,
+    AesEcbDecryptCtx,
+    AesCfbEncryptCtx,
+    AesCfbDecryptCtx,
+    AesOfbEncryptCtx,
+    AesOfbDecryptCtx,
+    AesCtrEncryptCtx,
+    AesCtrDecryptCtx,
     AesGcmEncryptCtx,
     AesGcmDecryptCtx,
     AesXtsEncryptCtx,
@@ -208,6 +216,30 @@ pub unsafe extern "C" fn tsra_free_ctx_handle(handle: TsraHandle) -> TsraStatus 
             }
             HandleType::AesCbcDecryptCtx => {
                 let _: Box<AesCbcDecryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesEcbEncryptCtx => {
+                let _: Box<AesEcbEncryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesEcbDecryptCtx => {
+                let _: Box<AesEcbDecryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesCfbEncryptCtx => {
+                let _: Box<AesCfbEncryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesCfbDecryptCtx => {
+                let _: Box<AesCfbDecryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesOfbEncryptCtx => {
+                let _: Box<AesOfbEncryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesOfbDecryptCtx => {
+                let _: Box<AesOfbDecryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesCtrEncryptCtx => {
+                let _: Box<AesCtrEncryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
+            }
+            HandleType::AesCtrDecryptCtx => {
+                let _: Box<AesCtrDecryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;
             }
             HandleType::AesXtsEncryptCtx => {
                 let _: Box<AesXtsEncryptContext> = HANDLE_TABLE.free_handle(handle, handle_type)?;

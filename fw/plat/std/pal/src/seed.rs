@@ -3,9 +3,9 @@
 
 //! [`HsmSeedStore`] implementation for the std PAL.
 //!
-//! The std PAL emulator models a single firmware SVN and a single owner
+//! The std PAL emulator models a single firmware SVN and a single device-owner
 //! lineage, so it provisions exactly one manufacturer-seed (BKS1) row
-//! and one owner-seed (BKS2) row.  The bytes are taken from the prior
+//! and one device-owner-seed (BKS2) row. The bytes are taken from the prior
 //! reference firmware so derived masking keys are bit-compatible with
 //! persisted `Masked_BK_BOOT` blobs across the emulator and real
 //! hardware.
@@ -20,8 +20,8 @@ use crate::StdHsmPal;
 /// Hardcoded std PAL firmware SVN (the only provisioned BKS1 selector).
 const STD_SVN: u64 = 0;
 
-/// The only supported owner-seed (BKS2) selector.
-const STD_OWNER_SVN: u64 = 0;
+/// The only supported device-owner-seed (BKS2) selector.
+const STD_DEV_OWNER_SVN: u64 = 0;
 
 /// Hardcoded std PAL manufacturer seed (BKS1) for SVN 0.
 const STD_MFGR_SEED_ROW0: [u8; BK_SEED_LEN] = [
@@ -29,8 +29,8 @@ const STD_MFGR_SEED_ROW0: [u8; BK_SEED_LEN] = [
     0x2a, 0xbb, 0xca, 0xb5, 0x5c, 0xfb, 0x77, 0x3b, 0xc4, 0xd0, 0xa8, 0x8c, 0x21, 0x02, 0xb0, 0xac,
 ];
 
-/// Hardcoded std PAL owner seed (BKS2) for owner selector 0.
-const STD_OWNER_SEED_ROW0: [u8; BK_SEED_LEN] = [
+/// Hardcoded std PAL device-owner seed (BKS2) for device-owner selector 0.
+const STD_DEV_OWNER_SEED_ROW0: [u8; BK_SEED_LEN] = [
     0xad, 0x1a, 0x17, 0xe9, 0xed, 0x38, 0x27, 0x5e, 0x8b, 0x30, 0x5d, 0xb8, 0x19, 0x0f, 0x82, 0xb6,
     0x2d, 0xa2, 0x5a, 0xc6, 0xf0, 0x70, 0xa3, 0xe1, 0x75, 0x9c, 0x61, 0x92, 0xcc, 0xf4, 0x19, 0xa3,
 ];
@@ -64,16 +64,16 @@ impl HsmSeedStore for StdHsmPal {
         STD_SVN
     }
 
-    fn owner_svn(&self) -> u64 {
-        STD_OWNER_SVN
+    fn dev_owner_svn(&self) -> u64 {
+        STD_DEV_OWNER_SVN
     }
 
     fn curr_mfgr_seed(&self) -> &[u8] {
         &STD_MFGR_SEED_ROW0
     }
 
-    fn curr_owner_seed(&self) -> &[u8] {
-        &STD_OWNER_SEED_ROW0
+    fn curr_dev_owner_seed(&self) -> &[u8] {
+        &STD_DEV_OWNER_SEED_ROW0
     }
 
     fn mfgr_seed(&self, svn: u64) -> HsmResult<&[u8]> {
@@ -84,9 +84,9 @@ impl HsmSeedStore for StdHsmPal {
         }
     }
 
-    fn owner_seed(&self, svn: u64) -> HsmResult<&[u8]> {
-        if svn == STD_OWNER_SVN {
-            Ok(&STD_OWNER_SEED_ROW0)
+    fn dev_owner_seed(&self, svn: u64) -> HsmResult<&[u8]> {
+        if svn == STD_DEV_OWNER_SVN {
+            Ok(&STD_DEV_OWNER_SEED_ROW0)
         } else {
             Err(HsmError::SeedNotFound)
         }
@@ -109,21 +109,21 @@ mod tests {
     fn current_selectors_are_zero() {
         let pal = StdHsmPal::default();
         assert_eq!(pal.mfgr_svn(), 0);
-        assert_eq!(pal.owner_svn(), 0);
+        assert_eq!(pal.dev_owner_svn(), 0);
     }
 
     #[test]
     fn current_seeds_return_provisioned_rows() {
         let pal = StdHsmPal::default();
         assert_eq!(pal.curr_mfgr_seed(), &STD_MFGR_SEED_ROW0[..]);
-        assert_eq!(pal.curr_owner_seed(), &STD_OWNER_SEED_ROW0[..]);
+        assert_eq!(pal.curr_dev_owner_seed(), &STD_DEV_OWNER_SEED_ROW0[..]);
     }
 
     #[test]
     fn provisioned_selectors_resolve() {
         let pal = StdHsmPal::default();
         assert_eq!(pal.mfgr_seed(0).unwrap(), &STD_MFGR_SEED_ROW0[..]);
-        assert_eq!(pal.owner_seed(0).unwrap(), &STD_OWNER_SEED_ROW0[..]);
+        assert_eq!(pal.dev_owner_seed(0).unwrap(), &STD_DEV_OWNER_SEED_ROW0[..]);
     }
 
     #[test]
@@ -131,7 +131,10 @@ mod tests {
         let pal = StdHsmPal::default();
         for svn in [1u64, 5, 63] {
             assert!(matches!(pal.mfgr_seed(svn), Err(HsmError::SeedNotFound)));
-            assert!(matches!(pal.owner_seed(svn), Err(HsmError::SeedNotFound)));
+            assert!(matches!(
+                pal.dev_owner_seed(svn),
+                Err(HsmError::SeedNotFound)
+            ));
         }
     }
 }

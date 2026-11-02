@@ -61,7 +61,7 @@ pub struct TborPartInfoResp {
     /// Device kind, matching MBOR `DdiDeviceKind` (`2` = Physical).
     pub device_kind: U8,
 
-    /// Partition lifecycle state, matching the firmware `PartState`
+    /// Partition lifecycle state, matching the firmware `HsmPartState`
     /// discriminant (`0` = Unallocated, `1` = Allocated, `2` = Enabled,
     /// …).
     pub part_state: U8,

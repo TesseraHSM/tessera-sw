@@ -22,8 +22,8 @@
 //! concatenation-KDF hashing loop and differ only in how each variant
 //! lays out and encodes its input material.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
@@ -60,9 +60,9 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        salt: Option<&DmaBuf>,
-        ikm: &DmaBuf,
-        prk: &mut DmaBuf,
+        salt: Option<&HsmDmaBuf>,
+        ikm: &HsmDmaBuf,
+        prk: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
             if prk.len() < algo.digest_len() {
@@ -72,7 +72,7 @@ impl HsmKdf for UnoHsmPal {
             // RFC 5869: if salt is empty, use a zero-filled salt of digest_len
             // bytes in DMA-accessible memory.
             let zero_salt;
-            let salt: &DmaBuf = match salt {
+            let salt: &HsmDmaBuf = match salt {
                 Some(salt) if !salt.is_empty() => salt,
                 _ => {
                     zero_salt = scope.dma_alloc_zeroed(algo.digest_len())?;
@@ -114,9 +114,9 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        prk: &DmaBuf,
-        info: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        prk: &HsmDmaBuf,
+        info: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
             let hlen = algo.digest_len();
@@ -185,10 +185,10 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        label: Option<&DmaBuf>,
-        context: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        label: Option<&HsmDmaBuf>,
+        context: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
             let hlen = algo.digest_len();
@@ -255,8 +255,8 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.run_concat_kdf(io, algo, ConcatKdf::Mgf1, seed, &seed[..0], mask)
             .await
@@ -282,8 +282,8 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
             if mask.is_empty() {
@@ -321,9 +321,9 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        shared_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        shared_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.run_concat_kdf(io, algo, ConcatKdf::X963, z, shared_info, key)
             .await
@@ -351,9 +351,9 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        other_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        other_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.run_concat_kdf(io, algo, ConcatKdf::Sp80056a, z, other_info, key)
             .await
@@ -388,9 +388,9 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
         kdf: ConcatKdf,
-        z: &DmaBuf,
-        info: &DmaBuf,
-        output: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        info: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
             if output.is_empty() {
@@ -411,10 +411,10 @@ impl UnoHsmPal {
         &self,
         algo: HsmHashAlgo,
         kdf: ConcatKdf,
-        z: &DmaBuf,
-        info: &DmaBuf,
-        output: &mut DmaBuf,
-        state: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        info: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
+        state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let required = kdf.required_state_len(algo, z.len(), info.len());
         if state.len() < required {
@@ -478,7 +478,7 @@ impl ConcatKdf {
     ///
     /// # Returns
     /// * Total length in bytes of the populated input region.
-    fn init_input(&self, buf: &mut DmaBuf, z: &DmaBuf, info: &DmaBuf) -> usize {
+    fn init_input(&self, buf: &mut HsmDmaBuf, z: &HsmDmaBuf, info: &HsmDmaBuf) -> usize {
         match self {
             ConcatKdf::Mgf1 => {
                 buf[..z.len()].copy_from_slice(z);
@@ -506,7 +506,7 @@ impl ConcatKdf {
     /// * `z_len` — length of the `Z`/seed field (used to locate the
     ///   counter slot).
     /// * `counter` — value to write.
-    fn write_counter(&self, buf: &mut DmaBuf, z_len: usize, counter: u32) {
+    fn write_counter(&self, buf: &mut HsmDmaBuf, z_len: usize, counter: u32) {
         let off = self.counter_offset(z_len);
         buf[off..off + 4].copy_from_slice(&counter.to_be_bytes());
     }
@@ -559,10 +559,10 @@ impl ConcatKdf {
         &self,
         sha: &ShaExclusive<'_, DEPTH>,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        info: &DmaBuf,
-        output: &mut DmaBuf,
-        state: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        info: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
+        state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let mode: ShaMode = algo.into();
         let hlen = algo.digest_len();
@@ -622,9 +622,9 @@ impl ConcatKdf {
         &self,
         sha: &ShaExclusive<'_, DEPTH>,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
-        state: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
+        state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let mode: ShaMode = algo.into();
         let hlen = algo.digest_len();

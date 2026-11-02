@@ -126,9 +126,9 @@ pub trait HsmKdf: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        salt: Option<&DmaBuf>,
-        ikm: &DmaBuf,
-        prk: &mut DmaBuf,
+        salt: Option<&HsmDmaBuf>,
+        ikm: &HsmDmaBuf,
+        prk: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// HKDF-Expand (RFC 5869 §2.3): derive arbitrary-length output
@@ -162,9 +162,9 @@ pub trait HsmKdf: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        prk: &DmaBuf,
-        info: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        prk: &HsmDmaBuf,
+        info: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// SP 800-108 Counter Mode KDF with HMAC PRF.
@@ -193,10 +193,10 @@ pub trait HsmKdf: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        label: Option<&DmaBuf>,
-        context: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        label: Option<&HsmDmaBuf>,
+        context: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// MGF1 mask generation per
@@ -221,8 +221,8 @@ pub trait HsmKdf: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// MGF1 with in-place XOR.
@@ -249,8 +249,8 @@ pub trait HsmKdf: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// X9.63 KDF (SEC 1 §3.6.1) — the KDF used by ECIES variants
@@ -277,9 +277,9 @@ pub trait HsmKdf: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        shared_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        shared_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// SP 800-56A r3 §5.8.2.1 one-step concatenation KDF.
@@ -306,8 +306,8 @@ pub trait HsmKdf: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        other_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        other_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 }

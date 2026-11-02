@@ -38,13 +38,13 @@ use crate::key_props::KeyUsage;
 pub const TBOR_OP_ECC_GENERATE_KEY: u8 = 0x17;
 
 /// Minimum masked ECC private-key envelope length (P-256, 32-byte scalar):
-/// `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(32) ‖ tag(16)`.
-pub const MASKED_ECC_KEY_MIN_LEN: usize = 8 + 12 + 192 + 32 + 16;
+/// `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(32) ‖ tag(16)`.
+pub const MASKED_ECC_KEY_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
 
 /// Maximum masked ECC private-key envelope length (P-521, 68-byte
-/// wire scalar).  Pinned into the `#[tbor(buffer, max_len = 296)]` literal
+/// wire scalar).  Pinned into the `#[tbor(buffer, max_len = 312)]` literal
 /// on [`TborEccGenerateKeyResp::masked_key`].
-pub const MASKED_ECC_KEY_MAX_LEN: usize = 8 + 12 + 192 + 68 + 16;
+pub const MASKED_ECC_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
 
 /// Maximum wire public-key length (`x ‖ y`, P-521 padded coordinates).
 /// Pinned into the `#[tbor(buffer, max_len = 136)]` literal on
@@ -72,7 +72,7 @@ pub enum EccCurve {
 }
 
 /// `EccGenerateKey` request schema.
-#[tbor(opcode = 0x17)]
+#[tbor(opcode = 0x17, pair = TborEccGenerateKeyResp)]
 pub struct TborEccGenerateKeyReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -105,11 +105,11 @@ pub struct TborEccGenerateKeyReq<'a> {
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// and mask the private key straight into it (`decode_mut`) — no scratch
 /// copy of the masked blob.
-#[tbor(response)]
+#[tbor(response, pair = TborEccGenerateKeyReq)]
 pub struct TborEccGenerateKeyResp<'a> {
     /// The generated private key, masked (AEAD-GCM-256) under the scope's
-    /// masking key.  260 / 276 / 296 B for P-256 / P-384 / P-521.
-    #[tbor(buffer, max_len = 296, mutable)]
+    /// masking key.  264 / 280 / 312 B for P-256 / P-384 / P-521.
+    #[tbor(buffer, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
     /// The wire public key `x ‖ y` (little-endian, P-521 padded):
@@ -167,9 +167,9 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(296 == MASKED_ECC_KEY_MAX_LEN);
+        const _: () = assert!(312 == MASKED_ECC_KEY_MAX_LEN);
         const _: () = assert!(136 == ECC_PUB_KEY_MAX_LEN);
-        assert_eq!(MASKED_ECC_KEY_MIN_LEN, 260);
-        assert_eq!(MASKED_ECC_KEY_MAX_LEN, 296);
+        assert_eq!(MASKED_ECC_KEY_MIN_LEN, 264);
+        assert_eq!(MASKED_ECC_KEY_MAX_LEN, 312);
     }
 }

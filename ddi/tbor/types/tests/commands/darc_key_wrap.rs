@@ -337,7 +337,7 @@ fn darc_key_wrap_rejects_wrong_masked_tmk_kind() {
         })
         .expect("EccGenerateKey");
     let mut wrong_tmk = [0u8; MASKED_TMK_LEN];
-    // The EC masked envelope (164 B for P-256) is the same length as a
+    // The EC masked envelope (264 B for P-256) is the same length as a
     // masked TMK, so it decodes past the fixed-length wire check.
     wrong_tmk.copy_from_slice(&ec.masked_key);
 

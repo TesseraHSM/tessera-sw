@@ -28,15 +28,15 @@ use crate::commands::part_init::pota_thumbprint;
 /// `DdiDeviceKind::Physical` discriminant — uno is a physical device.
 const DEVICE_KIND_PHYSICAL: u8 = 2;
 
-/// `PartState::Enabled` discriminant — the default provisioned state of
+/// `HsmPartState::Enabled` discriminant — the default provisioned state of
 /// the emulator partition before any `PartInit`.
 pub(crate) const PART_STATE_ENABLED: u8 = 2;
 
-/// `PartState::Initializing` discriminant — the state a partition enters
+/// `HsmPartState::Initializing` discriminant — the state a partition enters
 /// after a successful `PartInit` binds its PTA / policy / POTA thumb.
 pub(crate) const PART_STATE_INITIALIZING: u8 = 4;
 
-/// `PartState::Initialized` discriminant, after `PartFinal`, independent of SD membership.
+/// `HsmPartState::Initialized` discriminant, after `PartFinal`, independent of SD membership.
 pub(crate) const PART_STATE_INITIALIZED: u8 = 5;
 
 pub(crate) fn assert_part_state(ctx: &TestCtx, expected: u8, expected_sd_initialized: bool) {

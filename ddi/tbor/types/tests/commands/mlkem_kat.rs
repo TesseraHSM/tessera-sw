@@ -49,8 +49,8 @@ use crate::commands::sd_sealing_key_gen::finalized_co_session;
 /// `KeyScope::Local` discriminant.
 const SCOPE_LOCAL: u8 = 0b011;
 
-/// Masked shared secret: 32-byte secret plus the 228-byte AEAD envelope.
-const MASKED_SHARED_SECRET_LEN: usize = 228 + 32;
+/// Masked shared secret: 32-byte secret plus the 232-byte AEAD envelope.
+const MASKED_SHARED_SECRET_LEN: usize = 232 + 32;
 
 /// Device generates the key and decapsulates; the host encapsulates
 /// against the published encapsulation key using an independent

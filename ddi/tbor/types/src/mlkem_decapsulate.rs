@@ -46,9 +46,9 @@ pub struct TborMlKemDecapsulateReq {
     pub scope: u8,
 
     /// The masked ML-KEM decapsulation key (from `MlKemGenerateKey`).
-    /// 196 B: the wire ships seed-only keys.  See
+    /// Carries the seed and expanded decapsulation key. See
     /// [`MASKED_MLKEM_KEY_MAX_LEN`].
-    #[tbor(max_len = 3460)]
+    #[tbor(max_len = 3464)]
     pub masked_key: Vec<u8>,
 
     /// ML-KEM ciphertext bytes.
@@ -61,7 +61,7 @@ pub struct TborMlKemDecapsulateReq {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborMlKemDecapsulateResp {
     /// The 32-byte shared secret, masked under the requested scope's masking key.
-    #[tbor(max_len = 260)]
+    #[tbor(max_len = 264)]
     pub masked_shared_secret: Vec<u8>,
 }
 
@@ -89,8 +89,8 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(3460 == MASKED_MLKEM_KEY_MAX_LEN);
+        const _: () = assert!(3464 == MASKED_MLKEM_KEY_MAX_LEN);
         const _: () = assert!(1568 == MLKEM_CIPHERTEXT_MAX_LEN);
-        const _: () = assert!(260 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
+        const _: () = assert!(264 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
     }
 }

@@ -18,6 +18,15 @@
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_MAC_DIR_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
+
+const SESSION_CU_LEN: u16 =
+    (8 + SESSION_PARAM_KEY_LEN + SESSION_MASKING_KEY_LEN + SESSION_AUTH_BINDING_LEN) as u16;
+const SESSION_CO_LEN: u16 = SESSION_CU_LEN + (2 * SESSION_MAC_DIR_KEY_LEN) as u16;
 
 /// Length contract for one key kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -80,7 +89,7 @@ impl KeyLen {
 ///
 /// Mirrors the reference firmware's `raw_key_blob_size()` (fixed kinds)
 /// and var-HMAC min/max. `SessionExPending` holds the in-flight TBOR
-/// Pending blob (up to 256).
+/// Pending blob (up to [`SESSION_PENDING_BLOB_MAX`]).
 ///
 /// # `SessionEx`
 ///
@@ -90,10 +99,10 @@ impl KeyLen {
 ///
 /// | Session type          | Layout                                             | Size |
 /// | --------------------- | ---------------------------------------------------| ---- |
-/// | `PlainText` (CU)      | `api_rev(8) ‖ param_key(32) ‖ masking_key(32)`     | 72   |
-/// | `Authenticated` (CO)  | the above `‖ mac_tx(48) ‖ mac_rx(48)`              | 168  |
+/// | `PlainText` (CU)      | `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68)` | 140 |
+/// | `Authenticated` (CO)  | the above `‖ mac_tx(48) ‖ mac_rx(48)`              | 236  |
 ///
-/// so the range is exactly `[72, 168]` — `min` is the CU blob and `max`
+/// so the range is exactly `[140, 236]` — `min` is the CU blob and `max`
 /// the CO blob; nothing legal lands in between.
 ///
 /// **Do not derive these from `SESSION_MASKING_KEY_SIZE` (80).** That is
@@ -144,8 +153,16 @@ static KIND_LEN: [KeyLen; 64] = [
     /* 32 VarLenHmacSha256             */ KeyLen::Variable { min: 32, max: 64 },
     /* 33 VarLenHmacSha384             */ KeyLen::Variable { min: 48, max: 128 },
     /* 34 VarLenHmacSha512             */ KeyLen::Variable { min: 64, max: 128 },
-    /* 35 SessionExPending           */ KeyLen::Variable { min: 32, max: 256 },
-    /* 36 SessionEx                    */ KeyLen::Variable { min: 72, max: 168 },
+    /* 35 SessionExPending           */
+    KeyLen::Variable {
+        min: 32,
+        max: SESSION_PENDING_BLOB_MAX as u16,
+    },
+    /* 36 SessionEx                    */
+    KeyLen::Variable {
+        min: SESSION_CU_LEN,
+        max: SESSION_CO_LEN,
+    },
     /* 37 PartitionTrustAnchor         */ KeyLen::Fixed(48),
     /* 38 UniquePartitionSecret */ KeyLen::Fixed(48),
     /* 39 PartitionLocalMaskingKey     */ KeyLen::Fixed(32),
@@ -325,11 +342,11 @@ mod tests {
         );
         assert_eq!(
             key_len(HsmVaultKeyKind::SessionEx),
-            Ok(KeyLen::Variable { min: 72, max: 168 })
+            Ok(KeyLen::Variable { min: 140, max: 236 })
         );
         assert_eq!(
             key_len(HsmVaultKeyKind::SessionExPending),
-            Ok(KeyLen::Variable { min: 32, max: 256 })
+            Ok(KeyLen::Variable { min: 32, max: 320 })
         );
     }
 
@@ -348,8 +365,9 @@ mod tests {
         // private `SESSION_API_REV_SIZE` in `session.rs`).
         const API_REV: usize = 8;
 
-        // PlainText (CU): api_rev ‖ param_key ‖ masking_key
-        let cu = API_REV + SESSION_PARAM_KEY_LEN + SESSION_MASKING_KEY_LEN;
+        // PlainText (CU): api_rev ‖ param_key ‖ masking_key ‖ auth_binding
+        let cu =
+            API_REV + SESSION_PARAM_KEY_LEN + SESSION_MASKING_KEY_LEN + SESSION_AUTH_BINDING_LEN;
         // Authenticated (CO): the CU blob ‖ mac_tx ‖ mac_rx
         let co = cu + 2 * SESSION_MAC_DIR_KEY_LEN;
 
@@ -363,23 +381,24 @@ mod tests {
     }
 
     /// Both real blob sizes must be accepted and the bounds must be
-    /// tight. The 72-byte case is the regression guard: the legacy
-    /// CBC-derived `min: 120` rejected *every* Crypto-User session at
-    /// `vault.create`, which only surfaced at `SessionOpenFinish`.
+    /// tight, including the credential binding in both layouts.
     #[test]
     fn session_ex_accepts_both_blobs_and_rejects_out_of_range() {
         let len = key_len(HsmVaultKeyKind::SessionEx).unwrap();
 
-        // CU (PlainText) — the size the legacy `min: 120` wrongly rejected.
-        assert_eq!(len.check(72), Ok(72));
+        // CU (PlainText).
+        assert_eq!(len.check(140), Ok(140));
         // CO (Authenticated).
-        assert_eq!(len.check(168), Ok(168));
+        assert_eq!(len.check(236), Ok(236));
 
         // Tight on both sides: nothing outside the two legal blobs.
-        assert!(len.check(71).is_err());
-        assert!(len.check(169).is_err());
-        // The legacy CBC-derived bounds must no longer be honoured.
-        assert!(len.check(216).is_err());
+        assert!(len.check(139).is_err());
+        assert!(len.check(237).is_err());
+        assert!(len.check(72).is_err());
+        let pending = key_len(HsmVaultKeyKind::SessionExPending).unwrap();
+        assert_eq!(pending.check(312), Ok(312));
+        assert_eq!(pending.check(SESSION_PENDING_BLOB_MAX), Ok(320));
+        assert!(pending.check(SESSION_PENDING_BLOB_MAX + 1).is_err());
     }
 
     #[test]

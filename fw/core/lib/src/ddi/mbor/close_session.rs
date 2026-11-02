@@ -31,7 +31,7 @@ pub(crate) async fn close_session<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiCloseSessionReq = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;

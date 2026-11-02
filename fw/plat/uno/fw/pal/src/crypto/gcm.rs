@@ -31,13 +31,14 @@
 //!
 //! GHASH itself is [`Ghash`]: pure software, no DMA, no async.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
+use tsra_fw_uno_drivers_aes::AesRequest;
 
 use super::aes::AES_BLOCK_SIZE;
 use super::ghash::Ghash;
@@ -138,7 +139,7 @@ fn aad_content_offset(aad_len: usize) -> usize {
 ///
 /// Returns [`HsmError::AesGcmInvalidBufferSize`] if the AAD content
 /// does not fit within the padded region.
-fn extract_aad(data: &DmaBuf, aad_len: usize) -> HsmResult<&DmaBuf> {
+fn extract_aad(data: &HsmDmaBuf, aad_len: usize) -> HsmResult<&HsmDmaBuf> {
     let layout = GcmLayout::new(data.len(), aad_len)?;
     let start = aad_content_offset(aad_len);
     if start + aad_len > layout.pad_len {
@@ -158,7 +159,7 @@ fn extract_aad(data: &DmaBuf, aad_len: usize) -> HsmResult<&DmaBuf> {
 /// # Errors
 ///
 /// Returns [`HsmError::InvalidArg`] if `iv` is not [`GCM_IV_LEN`] bytes.
-fn write_j0(dst: &mut DmaBuf, iv: &DmaBuf) -> HsmResult<()> {
+fn write_j0(dst: &mut HsmDmaBuf, iv: &HsmDmaBuf) -> HsmResult<()> {
     if iv.len() != GCM_IV_LEN {
         return Err(HsmError::InvalidArg);
     }
@@ -171,7 +172,7 @@ fn write_j0(dst: &mut DmaBuf, iv: &DmaBuf) -> HsmResult<()> {
 /// Increment the 32-bit big-endian counter in the last 4 bytes of a
 /// 16-byte block, wrapping at 2³².  This advances J₀ → J₀ + 1, which
 /// is the first counter value used by AES-CTR.
-fn increment_counter(block: &mut DmaBuf) {
+fn increment_counter(block: &mut HsmDmaBuf) {
     let ctr = u32::from_be_bytes([
         block[CTR_LOW_OFFSET],
         block[CTR_LOW_OFFSET + 1],
@@ -197,13 +198,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// XOR 16 bytes of `src` into `dst` (`DmaBuf` variant).
+/// XOR 16 bytes of `src` into `dst` (`HsmDmaBuf` variant).
 ///
 /// # Errors
 ///
 /// Returns [`HsmError::AesGcmInvalidBufferSize`] if either buffer is
 /// not exactly [`AES_BLOCK_SIZE`] bytes.
-fn xor_block(dst: &mut DmaBuf, src: &DmaBuf) -> HsmResult<()> {
+fn xor_block(dst: &mut HsmDmaBuf, src: &HsmDmaBuf) -> HsmResult<()> {
     if dst.len() != AES_BLOCK_SIZE || src.len() != AES_BLOCK_SIZE {
         return Err(HsmError::AesGcmInvalidBufferSize);
     }
@@ -220,7 +221,7 @@ fn xor_block(dst: &mut DmaBuf, src: &DmaBuf) -> HsmResult<()> {
 ///
 /// Returns [`HsmError::AesGcmInvalidBufferSize`] if `byte_len` would
 /// overflow when multiplied by 8.
-fn write_bit_length(dst: &mut DmaBuf, offset: usize, byte_len: usize) -> HsmResult<()> {
+fn write_bit_length(dst: &mut HsmDmaBuf, offset: usize, byte_len: usize) -> HsmResult<()> {
     let bits = u64::try_from(byte_len)
         .ok()
         .and_then(|n| n.checked_mul(8))
@@ -237,11 +238,11 @@ fn write_bit_length(dst: &mut DmaBuf, offset: usize, byte_len: usize) -> HsmResu
 /// `lengths` is a caller-supplied 16-byte scratch buffer used to hold
 /// the `len(A) ‖ len(C)` block.
 fn compute_ghash(
-    h: &DmaBuf,
-    aad: &DmaBuf,
-    ciphertext: &DmaBuf,
-    lengths: &mut DmaBuf,
-    tag: &mut DmaBuf,
+    h: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
+    ciphertext: &HsmDmaBuf,
+    lengths: &mut HsmDmaBuf,
+    tag: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     if h.len() != AES_BLOCK_SIZE || lengths.len() != AES_BLOCK_SIZE || tag.len() != GCM_TAG_LEN {
         return Err(HsmError::AesGcmInvalidBufferSize);
@@ -271,9 +272,9 @@ impl UnoHsmPal {
     async fn ecb_encrypt_block(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        block: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        block: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if block.len() != AES_BLOCK_SIZE || output.len() != AES_BLOCK_SIZE {
             return Err(HsmError::AesGcmInvalidBufferSize);
@@ -299,10 +300,10 @@ impl UnoHsmPal {
     async fn ctr_crypt(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if input.is_empty() {
             return Ok(());
@@ -339,8 +340,6 @@ impl UnoHsmPal {
             if result.is_ok() {
                 output[..len].copy_from_slice(&dst[..len]);
             }
-            src.zeroize();
-            dst.zeroize();
             result
         })
         .await
@@ -348,27 +347,38 @@ impl UnoHsmPal {
 
     /// In-place AES-CTR over `data`.
     ///
-    /// Copies `data` into a freshly allocated, disjoint scratch buffer and
-    /// runs the transform from scratch back into `data`.
-    ///
-    /// This avoids forming an `&` alias over `data` that would coexist with
-    /// the `&mut data` borrow — such overlapping `&`/`&mut` references are
-    /// undefined behavior in Rust, even though the AES engine reads each
-    /// input block before writing the corresponding output block.
+    /// For whole blocks, only the counter is staged. A partial final block
+    /// uses a padded scratch copy because the AES engine requires whole blocks.
     async fn ctr_crypt_in_place(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        data: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if data.is_empty() {
             return Ok(());
         }
         self.alloc_scoped_async(io, async |scope| {
-            let scratch = scope.dma_alloc(data.len())?;
-            scratch.copy_from_slice(data);
-            self.ctr_crypt(io, key, iv, scratch, data).await
+            if !data.len().is_multiple_of(AES_BLOCK_SIZE) {
+                let scratch = scope.dma_alloc(data.len())?;
+                scratch.copy_from_slice(data);
+                return self.ctr_crypt(io, key, iv, scratch, data).await;
+            }
+            let ctr = scope.dma_alloc(AES_BLOCK_SIZE)?;
+            write_j0(ctr, iv)?;
+            increment_counter(ctr);
+            self.aes
+                .encrypt_decrypt(AesRequest {
+                    mode: AesMode::Ctr,
+                    op: AesOp::Encrypt,
+                    key,
+                    iv: Some(ctr),
+                    update_iv: false,
+                    message: None,
+                    result: data,
+                })
+                .await
         })
         .await
     }
@@ -383,11 +393,11 @@ impl UnoHsmPal {
     async fn compute_tag(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        aad: &DmaBuf,
-        ciphertext: &DmaBuf,
-        tag: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN {
             return Err(HsmError::AesGcmInvalidBufferSize);
@@ -422,11 +432,11 @@ impl UnoHsmPal {
     async fn verify_tag(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
-        aad: &DmaBuf,
-        ciphertext: &DmaBuf,
-        expected: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        expected: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let matches = self
             .alloc_scoped_async(io, async |scope| {
@@ -454,12 +464,12 @@ impl UnoHsmPal {
     pub(super) async fn gcm_encrypt_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        plaintext: &DmaBuf,
-        ciphertext: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        plaintext: &HsmDmaBuf,
+        ciphertext: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN || ciphertext.len() < plaintext.len() {
             return Err(HsmError::InvalidArg);
@@ -492,11 +502,11 @@ impl UnoHsmPal {
     pub(super) async fn gcm_encrypt_in_place_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        data: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -520,12 +530,12 @@ impl UnoHsmPal {
     pub(super) async fn gcm_decrypt_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        ciphertext: &DmaBuf,
-        plaintext: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        plaintext: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN || plaintext.len() < ciphertext.len() {
             return Err(HsmError::InvalidArg);
@@ -556,11 +566,11 @@ impl UnoHsmPal {
     pub(super) async fn gcm_decrypt_in_place_impl(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        data: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);

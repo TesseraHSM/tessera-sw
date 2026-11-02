@@ -128,6 +128,8 @@ pub struct KeyFlags {
     pub can_unwrap: bool,
     /// Whether the key can derive other keys.
     pub can_derive: bool,
-    #[bits(22)]
+    /// The authenticated key kind is an HSM-generated SD sealing key.
+    pub is_sd_sealing: bool,
+    #[bits(21)]
     _reserved: u32,
 }

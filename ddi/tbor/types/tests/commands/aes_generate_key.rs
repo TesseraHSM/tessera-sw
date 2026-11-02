@@ -11,7 +11,7 @@
 //!
 //! Coverage:
 //! * Happy path per key size (128/192/256) — the masked key has the
-//!   expected length (244/252/260 B) and is non-zero; a second call yields
+//!   expected length (248/264/264 B) and is non-zero; a second call yields
 //!   a distinct key.
 //! * Every AES masking scope exercised after `PartFinal`: `Session`, `Ephemeral`,
 //!   and `Local`; `Session` is also available before finalization.
@@ -26,6 +26,7 @@ use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
+use tsra_ddi_tbor_types::AES_MODE_CBC;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 
@@ -35,9 +36,9 @@ use crate::commands::common::SCOPE_SECURITY_DOMAIN;
 use crate::commands::common::SCOPE_SESSION;
 
 /// Masked-key envelope length for a given AES key length: `header(8) ‖
-/// iv(12) ‖ aad(192) ‖ pt(key) ‖ tag(16)`.
+/// iv(16) ‖ aad(192) ‖ pt(key padded to 16 B) ‖ tag(16)`.
 fn masked_len(key_len: usize) -> usize {
-    8 + 12 + 192 + key_len + 16
+    8 + 16 + 192 + key_len.next_multiple_of(16) + 16
 }
 
 /// Expected AES key length (bytes) for a wire key-size discriminant.
@@ -300,7 +301,7 @@ mod tests {
         let session = finalized_co_session(&ctx);
 
         let plaintext = vec![0xA5u8; 32];
-        let iv = [0x11u8; 16];
+        let iv = vec![0x11u8; 16];
 
         for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
             let masked_key = generate_key(&ctx, session.session_id, scope, AES_KEY_SIZE_256);
@@ -309,8 +310,9 @@ mod tests {
                 session_id: session.session_id,
                 masked_key: masked_key.clone(),
                 op: AES_OP_ENCRYPT,
+                mode: AES_MODE_CBC,
+                iv: iv.clone(),
                 msg: plaintext.clone(),
-                iv,
             };
 
             let encrypted = ctx.tbor(&encrypt_req).expect("AesEncryptDecrypt encrypt");
@@ -330,8 +332,9 @@ mod tests {
                 session_id: session.session_id,
                 masked_key,
                 op: AES_OP_DECRYPT,
+                mode: AES_MODE_CBC,
+                iv: iv.clone(),
                 msg: encrypted.msg,
-                iv,
             };
 
             let decrypted = ctx.tbor(&decrypt_req).expect("AesEncryptDecrypt decrypt");

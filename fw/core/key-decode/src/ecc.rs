@@ -14,7 +14,7 @@
 //! conversion is delegated to
 //! [`HsmEcc::ecc_priv_der_to_vault`](tsra_fw_hsm_pal_traits::HsmEcc::ecc_priv_der_to_vault).
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -27,7 +27,7 @@ use super::DecodedKey;
 pub(super) async fn decode<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    material: &DmaBuf,
+    material: &HsmDmaBuf,
 ) -> HsmResult<DecodedKey<'p>> {
     // Convert the recovered PKCS#8 DER into the vault representation (the
     // PAL parses and classifies the curve).  Query the length, then

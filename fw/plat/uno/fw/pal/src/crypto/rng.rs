@@ -9,7 +9,7 @@
 //!
 //! [`RngDriver`]: tsra_fw_uno_drivers_rng::RngDriver
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
@@ -31,7 +31,7 @@ impl HsmRng for UnoHsmPal {
     ///   the RNG driver (e.g. hardware fault).
     fn rng_fill_bytes(&self, _io: &impl HsmIo, buf: &mut [u8]) -> HsmResult<()> {
         // SAFETY: The RNG driver only writes through the CPU; this borrow is not used for DMA.
-        let dma = unsafe { DmaBuf::from_raw_mut(buf) };
+        let dma = unsafe { HsmDmaBuf::from_raw_mut(buf) };
         self.rng.fill_bytes(dma)
     }
 }

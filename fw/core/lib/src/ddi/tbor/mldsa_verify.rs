@@ -26,7 +26,7 @@
 
 use tsra_fw_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaVerifyResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -57,45 +57,44 @@ fn mldsa_sig_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
 /// Handle a TBOR `MlDsaVerify` request.
 ///
 /// Persists nothing, holds no lock, and handles no secret material.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborMlDsaVerifyReq::decode(req_buf)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    async {
+        let req = TborMlDsaVerifyReq::decode(cmd_buf.request())?;
 
-    let kind = kind_from_pub_key_len(req.pub_key().len())?;
+        let kind = kind_from_pub_key_len(req.pub_key().len())?;
 
-    // A signature of the wrong length for the parameter set is malformed
-    // input, not a failed verification: report it as such rather than
-    // letting it read as a forgery.
-    if req.signature().len() != mldsa_sig_len(kind)? {
-        return Err(HsmError::InvalidArg);
-    }
-    if req.ctx().len() > 255 {
-        return Err(HsmError::InvalidArg);
-    }
+        // A signature of the wrong length for the parameter set is malformed
+        // input, not a failed verification: report it as such rather than
+        // letting it read as a forgery.
+        if req.signature().len() != mldsa_sig_len(kind)? {
+            return Err(HsmError::InvalidArg);
+        }
+        if req.ctx().len() > 255 {
+            return Err(HsmError::InvalidArg);
+        }
 
-    let verified = pal
-        .mldsa_verify(
-            io,
-            kind,
-            req.pub_key(),
-            req.message(),
-            req.ctx(),
-            req.signature(),
-        )
-        .await?;
+        let verified = pal
+            .mldsa_verify(
+                io,
+                kind,
+                req.pub_key(),
+                req.message(),
+                req.ctx(),
+                req.signature(),
+            )
+            .await?;
 
-    if !verified {
-        return Err(HsmError::MlDsaVerifyFailed);
-    }
+        if !verified {
+            return Err(HsmError::MlDsaVerifyFailed);
+        }
 
-    // Success carries no payload: the response exists only to say so.
-    let resp = pal.dma_alloc_var(io, |buf| {
-        let frame = TborMlDsaVerifyResp::encode(buf, 0, false)?.finish();
+        // Success carries no payload: the response exists only to say so.
+        let frame = TborMlDsaVerifyResp::encode(cmd_buf.buffer_mut(), 0, false)?.finish();
         Ok(frame.as_bytes().len())
-    })?;
-
-    Ok(&*resp)
+    }
+    .await
 }

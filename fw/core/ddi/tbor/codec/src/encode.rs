@@ -170,7 +170,7 @@ impl<'a> RequestEncoder<'a> {
         }
 
         // Shift staged data from max-TOC position to actual data_start.
-        let stage_base = REQ_HEADER_LEN + MAX_TOC_ENTRIES * 4; // = 132
+        let stage_base = REQ_HEADER_LEN + MAX_TOC_ENTRIES * 4; // = 136
         if self.data_offset > 0 && stage_base != data_start {
             self.buf
                 .copy_within(stage_base..stage_base + self.data_offset, data_start);
@@ -179,6 +179,7 @@ impl<'a> RequestEncoder<'a> {
         // Write header as a single u32.
         let hdr = u32::from_le_bytes([self.version, 0x00, (self.toc_count - 1) as u8, self.opcode]);
         self.buf[..4].copy_from_slice(&hdr.to_le_bytes());
+        self.buf[4..8].fill(0);
 
         // Write TOC entries.
         for i in 0..self.toc_count {
@@ -205,7 +206,7 @@ impl<'a> RequestEncoder<'a> {
     }
 
     fn stage_data(&mut self, data: &[u8]) -> Result<(), HsmError> {
-        let stage_base = REQ_HEADER_LEN + MAX_TOC_ENTRIES * 4; // = 132
+        let stage_base = REQ_HEADER_LEN + MAX_TOC_ENTRIES * 4; // = 136
         let dst_start = stage_base + self.data_offset;
         let dst_end = dst_start + data.len();
 
@@ -382,7 +383,7 @@ impl<'a> ResponseEncoder<'a> {
         }
 
         // Write header as two u32 words.
-        let hdr0 = u32::from_le_bytes([self.version, self.flags, 0x00, (self.toc_count - 1) as u8]);
+        let hdr0 = u32::from_le_bytes([self.version, self.flags, (self.toc_count - 1) as u8, 0x00]);
         self.buf[..4].copy_from_slice(&hdr0.to_le_bytes());
         self.buf[4..8].copy_from_slice(&self.status.to_le_bytes());
 

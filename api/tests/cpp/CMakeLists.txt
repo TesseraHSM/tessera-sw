@@ -67,8 +67,12 @@ set(SOURCE
     utils/part_init_config.cpp
     utils/resiliency_config.cpp
     algo/aes/cbc_enc_dec_tests.cpp
+    algo/aes/cfb_enc_dec_tests.cpp
+    algo/aes/ctr_enc_dec_tests.cpp
+    algo/aes/ecb_enc_dec_tests.cpp
     algo/aes/helpers.cpp
     algo/aes/keygen_tests.cpp
+    algo/aes/ofb_enc_dec_tests.cpp
     algo/ecc/ecc_static_der.cpp
     algo/ecc/keygen_tests.cpp
     algo/ecc/unwrap_tests.cpp
@@ -87,6 +91,7 @@ set(SOURCE
     algo/rsa/sign_verify_tests.cpp
     algo/rsa/unwrap_tests.cpp
     algo/sha/digest_tests.cpp
+    algo/secret/unmask_tests.cpp
 )
 
 if(SESSION_EX_TESTS)
@@ -110,7 +115,6 @@ else()
         multi_process_tests.cpp
         algo/aes/gcm_enc_dec_tests.cpp
         algo/aes/xts_enc_dec_tests.cpp
-        algo/secret/unmask_tests.cpp
         algo/kdf/kbkdf_tests.cpp
         resiliency/init_stress_tests.cpp
         resiliency/aes_stress_tests.cpp
@@ -121,6 +125,18 @@ endif()
 
 add_executable(tsra_api_cpp_tests ${SOURCE})
 target_include_directories(tsra_api_cpp_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+if(MSVC)
+    # `StdHsm::build()` constructs the `Hsm`/`StdHsmPal` core synchronously
+    # on the calling thread (only the Embassy executor itself runs on a
+    # dedicated 8 MiB thread, see `EMBASSY_STACK_SIZE` in
+    # `fw/plat/std/lib/src/lib.rs`). Those debug-build task frames are large
+    # enough to overflow the default 1 MiB MSVC main-thread stack, crashing
+    # this binary with STATUS_STACK_OVERFLOW (0xc00000fd) before any gtest
+    # output is printed. Match the main thread's reserved stack to the
+    # Embassy thread's so both can build `StdHsm` without overflowing.
+    target_link_options(tsra_api_cpp_tests PRIVATE /STACK:8388608)
+endif()
 
 # Expose the selected DDI backend and session-test mode to the C++ sources as
 # compile definitions.

@@ -64,7 +64,7 @@ impl HsmVault for StdHsmPal {
     async fn vault_key_create(
         &self,
         io: &StdHsmIo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
@@ -75,6 +75,10 @@ impl HsmVault for StdHsmPal {
             .map(|sid| entry.session_table.physical_id(sid))
             .transpose()?;
         entry.vault.create(key, kind, session_key_id, attrs)
+    }
+
+    fn bulk_key_id(&self, _io: &StdHsmIo, _key_id: HsmKeyId) -> HsmResult<u16> {
+        Err(HsmError::UnsupportedCmd)
     }
 
     /// Delete a key from the partition's vault.
@@ -119,15 +123,15 @@ impl HsmVault for StdHsmPal {
     }
 
     /// Retrieve key material by ID.
-    fn vault_key(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    fn vault_key(&self, io: &StdHsmIo, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
         self.assert_key_session_access(io, key_id)?;
         let entry = self.active_part(io.pid())?;
         let bytes = entry.vault.key(key_id)?;
         // SAFETY: on the host, "DMA" is a fiction — every heap-allocated
         // byte is reachable by every code path. Branding the slice as
-        // `DmaBuf` only satisfies the type system; no DMA hardware is
+        // `HsmDmaBuf` only satisfies the type system; no DMA hardware is
         // involved.
-        Ok(unsafe { DmaBuf::from_raw(bytes) })
+        Ok(unsafe { HsmDmaBuf::from_raw(bytes) })
     }
 
     /// Return the firmware raw key size for a given kind.

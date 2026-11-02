@@ -37,7 +37,7 @@ pub const TBOR_OP_MLKEM_ENCAPSULATE: u8 = 0x2A;
 /// second source of truth that firmware must cross-check against the key,
 /// and would let a caller pair a parameter set with a mismatched key.
 /// `MlKemEncapsulate` request schema.
-#[tbor(opcode = 0x2A)]
+#[tbor(opcode = 0x2A, pair = TborMlKemEncapsulateResp)]
 pub struct TborMlKemEncapsulateReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -48,7 +48,7 @@ pub struct TborMlKemEncapsulateReq<'a> {
     pub scope: KeyScope,
 
     /// ML-KEM public / encapsulation key.  Up to 1568 B for ML-KEM-1024.
-    #[tbor(buffer, max_len = 1568)]
+    #[tbor(buffer, max_len = 1568, mutable)]
     pub pub_key: &'a [u8],
 }
 
@@ -56,7 +56,7 @@ pub struct TborMlKemEncapsulateReq<'a> {
 ///
 /// `masked_shared_secret` is `#[tbor(mutable)]` so the handler can reserve
 /// the slot and mask the 32-byte shared secret straight into it.
-#[tbor(response)]
+#[tbor(response, pair = TborMlKemEncapsulateReq)]
 pub struct TborMlKemEncapsulateResp<'a> {
     /// ML-KEM ciphertext.  Up to 1568 B for ML-KEM-1024.
     #[tbor(buffer, max_len = 1568, mutable)]
@@ -64,7 +64,7 @@ pub struct TborMlKemEncapsulateResp<'a> {
 
     /// The 32-byte ML-KEM shared secret, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  The envelope is always 164 B.
-    #[tbor(buffer, max_len = 260, mutable)]
+    #[tbor(buffer, max_len = 264, mutable)]
     pub masked_shared_secret: &'a [u8],
 }
 
@@ -113,7 +113,7 @@ mod tests {
     fn lengths_match_pinned_values() {
         const _: () = assert!(1568 == MLKEM_PUB_KEY_MAX_LEN);
         const _: () = assert!(1568 == MLKEM_CIPHERTEXT_MAX_LEN);
-        const _: () = assert!(260 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
-        assert_eq!(MASKED_MLKEM_SHARED_SECRET_MAX_LEN, 260);
+        const _: () = assert!(264 == MASKED_MLKEM_SHARED_SECRET_MAX_LEN);
+        assert_eq!(MASKED_MLKEM_SHARED_SECRET_MAX_LEN, 264);
     }
 }

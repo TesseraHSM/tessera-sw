@@ -32,8 +32,8 @@
 //! pending bytes with auto-pad enabled, then runs the outer hash by
 //! loading the cached opad state and feeding it the inner digest.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
@@ -85,7 +85,7 @@ pub struct HmacContext<'a> {
     byte_count: u32,
 
     /// Scope-allocated `[state | pending | opad]` buffer.
-    buf: &'a mut DmaBuf,
+    buf: &'a mut HsmDmaBuf,
 
     /// Number of valid bytes currently in the pending region.
     pending_len: u8,
@@ -100,7 +100,7 @@ impl<'a> HmacContext<'a> {
     ///
     /// # Returns
     /// * The unconsumed tail of `data` (empty if all bytes fit).
-    fn fill_pending<'d>(&mut self, data: &'d DmaBuf) -> &'d DmaBuf {
+    fn fill_pending<'d>(&mut self, data: &'d HsmDmaBuf) -> &'d HsmDmaBuf {
         let pending_start = self.algo.state_len();
         let start = self.pending_len as usize;
         let n = (self.algo.block_len() - start).min(data.len());
@@ -121,7 +121,7 @@ impl<'a> HmacContext<'a> {
     /// * `(state, pending, opad)` — non-overlapping mutable borrows
     ///   covering bytes `0..state_len`, `state_len..state_len+block_len`,
     ///   and `state_len+block_len..state_len+2*block_len` respectively.
-    fn split_regions(&mut self) -> (&mut DmaBuf, &mut DmaBuf, &mut DmaBuf) {
+    fn split_regions(&mut self) -> (&mut HsmDmaBuf, &mut HsmDmaBuf, &mut HsmDmaBuf) {
         let state_len = self.algo.state_len();
         let block_len = self.algo.block_len();
         let (state, rest) = self.buf.split_at_mut(state_len);
@@ -143,7 +143,7 @@ impl ShaDigestContext for HmacContext<'_> {
         self.byte_count = byte_count;
     }
 
-    fn buf(&mut self) -> &mut DmaBuf {
+    fn buf(&mut self) -> &mut HsmDmaBuf {
         self.buf
     }
 }
@@ -178,7 +178,7 @@ impl HsmHmac for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         _algo: HsmHashAlgo,
-        key: &mut DmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.rng_fill_bytes(io, key)
     }
@@ -208,9 +208,9 @@ impl HsmHmac for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
             if tag.len() < algo.digest_len() {
@@ -245,9 +245,9 @@ impl HsmHmac for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         self.alloc_scoped_async(io, async |scope| {
             if tag.len() != algo.digest_len() {
@@ -286,7 +286,7 @@ impl HsmHmac for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HmacCtx<'a>>
     where
@@ -319,7 +319,7 @@ impl HsmHmac for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         ctx: &mut Self::HmacCtx<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let _ = io;
         self.hmac_continue_bytes(ctx, data).await
@@ -340,7 +340,7 @@ impl HsmHmac for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         mut ctx: Self::HmacCtx<'_>,
-        tag: &mut DmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let _ = io;
         let digest_len = ctx.algo.digest_len();
@@ -372,7 +372,7 @@ impl HsmHmac for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         mut ctx: Self::HmacCtx<'_>,
-        dest: &mut DmaBuf,
+        dest: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let _ = io;
         let digest_len = ctx.algo.digest_len();
@@ -412,7 +412,7 @@ impl HsmHmac for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         mut ctx: Self::HmacCtx<'_>,
-        tag: &DmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         let _ = io;
         if tag.len() != ctx.algo.digest_len() {
@@ -433,16 +433,16 @@ enum OuterMode<'a> {
     /// Write the final tag into the state region of `ctx.buf`.
     IntoState,
     /// Write the final tag into a caller-supplied slice.
-    IntoDest(&'a mut DmaBuf),
+    IntoDest(&'a mut HsmDmaBuf),
     /// Compare the final tag against a reference and report the result.
-    Verify(&'a DmaBuf),
+    Verify(&'a HsmDmaBuf),
 }
 
 impl UnoHsmPal {
     pub(crate) async fn hmac_continue_bytes(
         &self,
         ctx: &mut HmacContext<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let block_len = ctx.algo.block_len();
 
@@ -472,8 +472,8 @@ impl UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        buf: &'a mut DmaBuf,
+        key: &HsmDmaBuf,
+        buf: &'a mut HsmDmaBuf,
     ) -> HsmResult<HmacContext<'a>> {
         let block_len = algo.block_len();
         let state_len = algo.state_len();
@@ -563,7 +563,7 @@ impl UnoHsmPal {
     async fn hmac_submit_blocks(
         &self,
         ctx: &mut HmacContext<'_>,
-        blocks: &DmaBuf,
+        blocks: &HsmDmaBuf,
     ) -> HsmResult<()> {
         self.sha_digest_block(ctx, Some(blocks), blocks.len(), false)
             .await

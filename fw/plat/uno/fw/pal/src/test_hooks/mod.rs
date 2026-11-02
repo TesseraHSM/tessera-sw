@@ -68,7 +68,7 @@ use common::ReqHdr;
 use tsra_fw_ddi_mbor::MborDecode;
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborMap;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -102,15 +102,15 @@ fn handles_opcode(opcode: u32) -> bool {
 ///
 /// # Returns
 ///
-/// - `Ok(&DmaBuf)` — a claimed opcode that answers with a response.
+/// - `Ok(&HsmDmaBuf)` — a claimed opcode that answers with a response.
 /// - `Err(HsmError::UnsupportedCmd)` — not handled here.
 /// - `Err(HsmError::DdiDecodeFailed)` — claimed, but the envelope or
 ///   request data is malformed.
 pub(crate) async fn mbor_dispatch<'p>(
     pal: &'p UnoHsmPal,
     io: &UnoHsmIo,
-    req: &mut DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
+    req: &mut HsmDmaBuf,
+) -> HsmResult<&'p HsmDmaBuf> {
     let request_len = req.len();
     let mut decoder = MborDecoder::new(req);
 
@@ -137,7 +137,7 @@ pub(crate) async fn mbor_dispatch<'p>(
         return Err(HsmError::UnsupportedCmd);
     }
 
-    let result = async {
+    async {
         let field_id = u8::mbor_decode(&mut decoder).map_err(|_| HsmError::DdiDecodeFailed)?;
         if field_id != 1 {
             return Err(HsmError::DdiDecodeFailed);
@@ -153,14 +153,5 @@ pub(crate) async fn mbor_dispatch<'p>(
             _ => Err(HsmError::UnsupportedCmd),
         }
     }
-    .await;
-
-    #[cfg(feature = "fips_validation_hooks")]
-    if hdr.op == DDI_OP_TEST_ACTION {
-        // FIPS TestAction payloads can contain plaintext key material.
-        // Scrub the complete request on success and every post-header error.
-        req.zeroize();
-    }
-
-    result
+    .await
 }

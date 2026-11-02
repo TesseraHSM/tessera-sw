@@ -13,11 +13,11 @@
 // Pinned TBOR masked-blob wire lengths, mirroring the host / firmware
 // `tsra_ddi_tbor_types` constants (which are not exposed in the C
 // header). Each masked blob is an AEAD-GCM-256 envelope:
-// `header(8) + iv(12) + MaskedKeyMetadata aad(192) + plaintext + tag(16)`.
-inline constexpr uint32_t kMaskedSealingKeyLen = 276; ///< sealing priv scalar (48 B)
-inline constexpr uint32_t kMaskedSdLen = 276;         ///< masked BKS3 (48 B)
-inline constexpr uint32_t kPokLocalBackupLen = 276;   ///< device-local BKS3 backup (48 B)
-inline constexpr uint32_t kSdMkBackupLen = 260;       ///< masked SDMK / local_mk (32 B)
+// `header(8) + iv(16) + MaskedKeyMetadata aad(192) + padded plaintext + tag(16)`.
+inline constexpr uint32_t kMaskedSealingKeyLen = 280; ///< sealing priv scalar (48 B)
+inline constexpr uint32_t kMaskedSdLen = 280;         ///< masked BKS3 (48 B)
+inline constexpr uint32_t kPokLocalBackupLen = 280;   ///< device-local BKS3 backup (48 B)
+inline constexpr uint32_t kSdMkBackupLen = 264;       ///< masked SDMK / local_mk (32 B)
 /// Remote partition-owner-key backup: an HPKE-Auth seal (`enc(97) + ct(64)`).
 inline constexpr uint32_t kPokRemoteBackupLen = 161;
 
@@ -99,7 +99,7 @@ SdBackingContext provision_sd_restore_target(tsra_handle part_handle, const SdBa
 /// `KeyReport` attesting it.
 struct SealingKeyMaterial
 {
-    /// Masked sealing-key blob (276 B).
+    /// Masked sealing-key blob (280 B).
     std::vector<uint8_t> masked;
     /// Raw P-384 sealing-key public key (`X ‖ Y`, 96 B): the recipient
     /// public key (`RcvrPub`) the remote backup is sealed to.
@@ -108,7 +108,7 @@ struct SealingKeyMaterial
     std::vector<uint8_t> report;
 };
 
-/// Mint an SD sealing key on `session` and return its 276-byte masked blob
+/// Mint an SD sealing key on `session` and return its 280-byte masked blob
 /// plus a `KeyReport` built over 128 zero report-data bytes. Records a
 /// gtest failure and returns empty vectors on error.
 SealingKeyMaterial sealing_key_and_report(tsra_handle session);

@@ -6,7 +6,7 @@
 //! `RequestView` and `ResponseView` borrow the input buffer and provide
 //! infallible accessor methods after a single upfront validation pass.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 
 use crate::toc::*;
@@ -19,7 +19,7 @@ use crate::toc::*;
 /// The view borrows the input buffer for the lifetime `'a`.
 #[derive(Debug)]
 pub struct RequestView<'a> {
-    buf: &'a DmaBuf,
+    buf: &'a HsmDmaBuf,
 }
 
 impl<'a> RequestView<'a> {
@@ -33,8 +33,8 @@ impl<'a> RequestView<'a> {
     /// - Fixed-size types have correct lengths (uint32=4, uint64=8)
     ///
     /// Reserved bits are silently ignored per spec.
-    pub fn parse(buf: &'a DmaBuf) -> Result<Self, HsmError> {
-        // Minimum: 4-byte header + 1 TOC entry = 8 bytes.
+    pub fn parse(buf: &'a HsmDmaBuf) -> Result<Self, HsmError> {
+        // Minimum: 8-byte header + 1 TOC entry = 12 bytes.
         if buf.len() < REQ_HEADER_LEN + 4 {
             return Err(HsmError::TborBufferTooShort);
         }
@@ -103,7 +103,7 @@ impl<'a> RequestView<'a> {
 
     /// The raw message bytes.
     #[inline]
-    pub fn as_bytes(&self) -> &'a DmaBuf {
+    pub fn as_bytes(&self) -> &'a HsmDmaBuf {
         self.buf
     }
 
@@ -128,7 +128,7 @@ impl<'a> RequestView<'a> {
 
     /// The raw variable-length data section.
     #[inline]
-    pub fn data_section(&self) -> &'a DmaBuf {
+    pub fn data_section(&self) -> &'a HsmDmaBuf {
         &self.buf[self.data_start()..]
     }
 }
@@ -140,7 +140,7 @@ impl<'a> RequestView<'a> {
 /// After [`parse()`](Self::parse) succeeds, all accessors are infallible.
 #[derive(Debug)]
 pub struct ResponseView<'a> {
-    buf: &'a DmaBuf,
+    buf: &'a HsmDmaBuf,
 }
 
 impl<'a> ResponseView<'a> {
@@ -154,7 +154,7 @@ impl<'a> ResponseView<'a> {
     /// - Fixed-size types have correct lengths (uint32=4, uint64=8)
     ///
     /// Reserved bits are silently ignored per spec.
-    pub fn parse(buf: &'a DmaBuf) -> Result<Self, HsmError> {
+    pub fn parse(buf: &'a HsmDmaBuf) -> Result<Self, HsmError> {
         // Minimum: 8-byte header + 1 TOC entry = 12 bytes.
         if buf.len() < RESP_HEADER_LEN + 4 {
             return Err(HsmError::TborBufferTooShort);
@@ -165,7 +165,7 @@ impl<'a> ResponseView<'a> {
             return Err(HsmError::TborUnsupportedVersion);
         }
 
-        let toc_count = (buf[3] & 0x1F) as usize + 1;
+        let toc_count = (buf[2] & 0x1F) as usize + 1;
         let min_len = RESP_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
@@ -206,7 +206,7 @@ impl<'a> ResponseView<'a> {
     /// Number of TOC entries (1–32).
     #[inline]
     pub fn toc_count(&self) -> usize {
-        (self.buf[3] & 0x1F) as usize + 1
+        (self.buf[2] & 0x1F) as usize + 1
     }
 
     /// Byte offset where the variable-length data section starts.
@@ -235,7 +235,7 @@ impl<'a> ResponseView<'a> {
 
     /// The raw message bytes.
     #[inline]
-    pub fn as_bytes(&self) -> &'a DmaBuf {
+    pub fn as_bytes(&self) -> &'a HsmDmaBuf {
         self.buf
     }
 
@@ -260,7 +260,7 @@ impl<'a> ResponseView<'a> {
 
     /// The raw variable-length data section.
     #[inline]
-    pub fn data_section(&self) -> &'a DmaBuf {
+    pub fn data_section(&self) -> &'a HsmDmaBuf {
         &self.buf[self.data_start()..]
     }
 }

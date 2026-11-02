@@ -21,7 +21,7 @@ use x509::X509CertificateOp;
 const P384_COORD_LEN: usize = 48;
 
 /// AEAD-GCM IV length in bytes.
-const AES_GCM_IV_LEN: usize = 12;
+const AES_GCM_IV_LEN: usize = 16;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {

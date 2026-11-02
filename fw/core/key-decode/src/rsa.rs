@@ -15,7 +15,7 @@
 //! hardware uses its own raw non-CRT / custom CRT layouts, while the
 //! std/OpenSSL PAL uses the crypto crate's fixed-size HSM byte layout.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -29,7 +29,7 @@ use super::DecodedKey;
 pub(super) async fn decode<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    material: &'p mut DmaBuf,
+    material: &'p mut HsmDmaBuf,
     crt: bool,
 ) -> HsmResult<DecodedKey<'p>> {
     // Convert the recovered DER into the PAL's vault representation and

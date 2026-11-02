@@ -28,6 +28,7 @@ use tsra_ddi_tbor_types::SESSION_SEED_LEN;
 use tsra_session_ex_crypto::build_phase2_mac;
 use tsra_session_ex_crypto::derive_param_key;
 use tsra_session_ex_crypto::seal_seed_envelope;
+use zeroize::Zeroizing;
 
 use super::init::PendingHandshake;
 
@@ -53,7 +54,7 @@ pub struct SessionHandshake {
     /// HPKE exported secret (`Nh = 48`) used to derive `param_key`
     /// and (for authenticated sessions) the MAC keys. Retained so
     /// tests can re-derive labelled material on demand.
-    pub exported: Vec<u8>,
+    pub exported: Zeroizing<Vec<u8>>,
     /// Per-session AES-256 wrap key derived from the HPKE export.
     pub param_key: AesKey,
     /// FW-emitted wrapped masking-key blob — opaque to the host.

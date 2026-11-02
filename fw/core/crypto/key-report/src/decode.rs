@@ -5,13 +5,13 @@
 //!
 //! [`parse_key_report`] walks the CBOR with a minicbor `Decoder` only to
 //! locate field boundaries, then returns a [`KeyReportView`] whose byte
-//! fields are `&DmaBuf` sub-views of the input report buffer — no copies
+//! fields are `&HsmDmaBuf` sub-views of the input report buffer — no copies
 //! and no owned arrays. [`verify_key_report`] rebuilds the COSE
 //! `Sig_structure` and checks the ES384 signature.
 
 use minicbor::Decoder;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -25,7 +25,7 @@ use crate::sig::reverse_signature_halves;
 
 /// Zero-copy view over a decoded COSE_Sign1 key-attestation report.
 ///
-/// Scalar fields are decoded by value; every byte field is a `&DmaBuf`
+/// Scalar fields are decoded by value; every byte field is a `&HsmDmaBuf`
 /// sub-view borrowing directly from the input report buffer.
 pub struct KeyReportView<'a> {
     /// Report format version.
@@ -36,22 +36,22 @@ pub struct KeyReportView<'a> {
     pub flags: u32,
     /// The `public_key` field (fixed [`PUBLIC_KEY_MAX_SIZE`] bytes; the
     /// COSE_Key occupies the first `public_key_size`, rest zero-padded).
-    pub public_key: &'a DmaBuf,
+    pub public_key: &'a HsmDmaBuf,
     /// Owning application UUID.
-    pub app_uuid: &'a DmaBuf,
+    pub app_uuid: &'a HsmDmaBuf,
     /// Report data.
-    pub report_data: &'a DmaBuf,
+    pub report_data: &'a HsmDmaBuf,
     /// VM launch ID.
-    pub vm_launch_id: &'a DmaBuf,
+    pub vm_launch_id: &'a HsmDmaBuf,
     /// Optional SHA-384 PartPolicy digest. `Some` iff the report is v2
     /// (carries map key 7); `None` for a v1 report.
-    pub policy_hash: Option<&'a DmaBuf>,
+    pub policy_hash: Option<&'a HsmDmaBuf>,
     /// COSE_Sign1 protected header (signed input).
-    pub protected_header: &'a DmaBuf,
+    pub protected_header: &'a HsmDmaBuf,
     /// Encoded payload bytes (the Sig_structure input).
-    pub payload: &'a DmaBuf,
+    pub payload: &'a HsmDmaBuf,
     /// COSE_Sign1 signature (`r || s`, big-endian per half).
-    pub signature: &'a DmaBuf,
+    pub signature: &'a HsmDmaBuf,
 }
 
 /// Map a minicbor decode error to [`HsmError::InvalidArg`].
@@ -74,7 +74,7 @@ pub(crate) fn bytes_span(d: &mut Decoder<'_>) -> HsmResult<(usize, usize)> {
 /// # Errors
 /// * [`HsmError::InvalidArg`] — malformed report (bad tag, structure, or
 ///   CBOR).
-pub fn parse_key_report(report: &DmaBuf) -> HsmResult<KeyReportView<'_>> {
+pub fn parse_key_report(report: &HsmDmaBuf) -> HsmResult<KeyReportView<'_>> {
     if report.len() <= COSE_SIGN1_TAG_SIZE || report[0] != COSE_SIGN1_TAG {
         return Err(HsmError::InvalidArg);
     }
@@ -217,8 +217,8 @@ pub async fn verify_key_report<'a, P>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    report: &DmaBuf,
-    signer_pub: &DmaBuf,
+    report: &HsmDmaBuf,
+    signer_pub: &HsmDmaBuf,
 ) -> HsmResult<bool>
 where
     P: HsmCrypto + 'a,

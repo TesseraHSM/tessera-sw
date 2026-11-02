@@ -24,10 +24,10 @@ const HMAC_VARIANTS: [(HsmKeyKind, u32, usize); 3] = [
     (HsmKeyKind::HmacSha512, 512, 64),
 ];
 
-/// TBOR masked HMAC-key envelope overhead: `header(8) + iv(12) + aad(192)
+/// TBOR masked HMAC-key envelope overhead: `header(8) + iv(16) + aad(192)
 /// + tag(16)`; the total blob is this plus the raw key bytes.
 #[cfg(feature = "session-ex-tests")]
-const MASKED_HMAC_OVERHEAD: usize = 8 + 12 + 192 + 16;
+const MASKED_HMAC_OVERHEAD: usize = 8 + 16 + 192 + 16;
 
 /// Session-scoped secret HMAC key properties with sign/verify capabilities
 /// and a caller-supplied label.

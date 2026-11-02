@@ -952,6 +952,190 @@ struct tsra_algo algo = {
 };
 ```
 
+## AES ECB Encrypt & Decrypt
+
+AES-ECB is an algorithm for symmetric block encryption as defined by
+[NIST SP 800-38A](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf)
+
+Input must be a non-empty multiple of 16 bytes; otherwise
+`TSRA_STATUS_INVALID_ARGUMENT` is returned. When streaming, a trailing partial
+block is rejected by the finish call. No padding is applied.
+
+This algorithm is only supported on extended sessions opened with
+[tsra_sess_ex_open](#tsra_sess_ex_open); other sessions return
+`TSRA_STATUS_UNSUPPORTED_ALGORITHM`.
+
+|                            |                                                             |
+| -------------------------- | ----------------------------------------------------------- |
+| **Algorithm ID**           | `TSRA_ALGO_ID_AES_ECB`                                    |
+| **Params**                 | None (`params` must be NULL and `len` must be 0)   |
+| **Required Properties**    | None                                                        |
+| **Contributed Properties** | None                                                        |
+| **Supported Operations**   | [tsra_crypt_encrypt](#tsra_crypt_encrypt)               |
+|                            | [tsra_crypt_encrypt_init](#tsra_crypt_encrypt_init)     |
+|                            | [tsra_crypt_encrypt_update](#tsra_crypt_encrypt_update) |
+|                            | [tsra_crypt_encrypt_finish](#tsra_crypt_encrypt_finish)   |
+|                            | [tsra_crypt_decrypt](#tsra_crypt_decrypt)               |
+|                            | [tsra_crypt_decrypt_init](#tsra_crypt_decrypt_init)     |
+|                            | [tsra_crypt_decrypt_update](#tsra_crypt_decrypt_update) |
+|                            | [tsra_crypt_decrypt_finish](#tsra_crypt_decrypt_finish)   |
+| **PKCS#11 Mechanism**      | CKM_AES_ECB                                         &nbsp;  |
+
+**Example**
+
+```cpp
+struct tsra_algo algo = {
+    .id = TSRA_ALGO_ID_AES_ECB,
+    .params = NULL,
+    .len = 0,
+};
+```
+
+## AES CFB Encrypt & Decrypt
+
+AES-CFB is the CFB-128 (full-block cipher feedback) mode of symmetric encryption as defined by
+[NIST SP 800-38A](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf)
+
+AES-CFB is a stream mode: input of any length is accepted and the output has
+the same length as the input. No padding is applied. Empty input produces empty
+output.
+
+On return, `iv` holds the last full ciphertext block processed (unchanged if
+no full block was produced), so block-aligned calls can be chained. Chaining single-shot calls is only
+correct when every call except the last processes a multiple of 16 bytes; to
+process a message in arbitrary-length chunks, use one streaming context
+(`tsra_crypt_*_init` / `_update` / `_finish`).
+
+This algorithm is only supported on extended sessions opened with
+[tsra_sess_ex_open](#tsra_sess_ex_open); other sessions return
+`TSRA_STATUS_UNSUPPORTED_ALGORITHM`.
+
+|                            |                                                             |
+| -------------------------- | ----------------------------------------------------------- |
+| **Algorithm ID**           | `TSRA_ALGO_ID_AES_CFB`                                    |
+| **Params**                 | [tsra_algo_aes_cfb_params](#tsra_algo_aes_cfb_params)   |
+| **Required Properties**    | None                                                        |
+| **Contributed Properties** | None                                                        |
+| **Supported Operations**   | [tsra_crypt_encrypt](#tsra_crypt_encrypt)               |
+|                            | [tsra_crypt_encrypt_init](#tsra_crypt_encrypt_init)     |
+|                            | [tsra_crypt_encrypt_update](#tsra_crypt_encrypt_update) |
+|                            | [tsra_crypt_encrypt_finish](#tsra_crypt_encrypt_finish)   |
+|                            | [tsra_crypt_decrypt](#tsra_crypt_decrypt)               |
+|                            | [tsra_crypt_decrypt_init](#tsra_crypt_decrypt_init)     |
+|                            | [tsra_crypt_decrypt_update](#tsra_crypt_decrypt_update) |
+|                            | [tsra_crypt_decrypt_finish](#tsra_crypt_decrypt_finish)   |
+| **PKCS#11 Mechanism**      | CKM_AES_CFB128                                         &nbsp;  |
+
+**Example**
+
+```cpp
+struct tsra_algo_aes_cfb_params params;
+memcpy(params.iv, some_iv, sizeof(params.iv));
+
+struct tsra_algo algo = {
+    .id = TSRA_ALGO_ID_AES_CFB,
+    .params = &params,
+    .len = sizeof(struct tsra_algo_aes_cfb_params),
+};
+```
+
+## AES OFB Encrypt & Decrypt
+
+AES-OFB is the OFB (output feedback) mode of symmetric encryption as defined by
+[NIST SP 800-38A](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf)
+
+AES-OFB is a stream mode: input of any length is accepted and the output has
+the same length as the input. No padding is applied. Empty input produces empty
+output.
+
+On return, `iv` holds the last keystream block generated, so block-aligned calls can be chained. Chaining single-shot calls is only
+correct when every call except the last processes a multiple of 16 bytes; to
+process a message in arbitrary-length chunks, use one streaming context
+(`tsra_crypt_*_init` / `_update` / `_finish`).
+
+This algorithm is only supported on extended sessions opened with
+[tsra_sess_ex_open](#tsra_sess_ex_open); other sessions return
+`TSRA_STATUS_UNSUPPORTED_ALGORITHM`.
+
+|                            |                                                             |
+| -------------------------- | ----------------------------------------------------------- |
+| **Algorithm ID**           | `TSRA_ALGO_ID_AES_OFB`                                    |
+| **Params**                 | [tsra_algo_aes_ofb_params](#tsra_algo_aes_ofb_params)   |
+| **Required Properties**    | None                                                        |
+| **Contributed Properties** | None                                                        |
+| **Supported Operations**   | [tsra_crypt_encrypt](#tsra_crypt_encrypt)               |
+|                            | [tsra_crypt_encrypt_init](#tsra_crypt_encrypt_init)     |
+|                            | [tsra_crypt_encrypt_update](#tsra_crypt_encrypt_update) |
+|                            | [tsra_crypt_encrypt_finish](#tsra_crypt_encrypt_finish)   |
+|                            | [tsra_crypt_decrypt](#tsra_crypt_decrypt)               |
+|                            | [tsra_crypt_decrypt_init](#tsra_crypt_decrypt_init)     |
+|                            | [tsra_crypt_decrypt_update](#tsra_crypt_decrypt_update) |
+|                            | [tsra_crypt_decrypt_finish](#tsra_crypt_decrypt_finish)   |
+| **PKCS#11 Mechanism**      | CKM_AES_OFB                                         &nbsp;  |
+
+**Example**
+
+```cpp
+struct tsra_algo_aes_ofb_params params;
+memcpy(params.iv, some_iv, sizeof(params.iv));
+
+struct tsra_algo algo = {
+    .id = TSRA_ALGO_ID_AES_OFB,
+    .params = &params,
+    .len = sizeof(struct tsra_algo_aes_ofb_params),
+};
+```
+
+## AES CTR Encrypt & Decrypt
+
+AES-CTR is the CTR (counter) mode of symmetric encryption as defined by
+[NIST SP 800-38A](https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38a.pdf)
+
+AES-CTR is a stream mode: input of any length is accepted and the output has
+the same length as the input. No padding is applied. Empty input produces empty
+output.
+
+`iv` is the initial 128-bit counter block, incremented as a big-endian integer
+(wrapping modulo 2^128) for each block. On return, `iv` holds the initial
+counter advanced by the number of blocks processed (a trailing partial block
+counts as one), so block-aligned calls can be chained. Chaining single-shot calls is only
+correct when every call except the last processes a multiple of 16 bytes; to
+process a message in arbitrary-length chunks, use one streaming context
+(`tsra_crypt_*_init` / `_update` / `_finish`).
+
+This algorithm is only supported on extended sessions opened with
+[tsra_sess_ex_open](#tsra_sess_ex_open); other sessions return
+`TSRA_STATUS_UNSUPPORTED_ALGORITHM`.
+
+|                            |                                                             |
+| -------------------------- | ----------------------------------------------------------- |
+| **Algorithm ID**           | `TSRA_ALGO_ID_AES_CTR`                                    |
+| **Params**                 | [tsra_algo_aes_ctr_params](#tsra_algo_aes_ctr_params)   |
+| **Required Properties**    | None                                                        |
+| **Contributed Properties** | None                                                        |
+| **Supported Operations**   | [tsra_crypt_encrypt](#tsra_crypt_encrypt)               |
+|                            | [tsra_crypt_encrypt_init](#tsra_crypt_encrypt_init)     |
+|                            | [tsra_crypt_encrypt_update](#tsra_crypt_encrypt_update) |
+|                            | [tsra_crypt_encrypt_finish](#tsra_crypt_encrypt_finish)   |
+|                            | [tsra_crypt_decrypt](#tsra_crypt_decrypt)               |
+|                            | [tsra_crypt_decrypt_init](#tsra_crypt_decrypt_init)     |
+|                            | [tsra_crypt_decrypt_update](#tsra_crypt_decrypt_update) |
+|                            | [tsra_crypt_decrypt_finish](#tsra_crypt_decrypt_finish)   |
+| **PKCS#11 Mechanism**      | CKM_AES_CTR                                         &nbsp;  |
+
+**Example**
+
+```cpp
+struct tsra_algo_aes_ctr_params params;
+memcpy(params.iv, some_iv, sizeof(params.iv));
+
+struct tsra_algo algo = {
+    .id = TSRA_ALGO_ID_AES_CTR,
+    .params = &params,
+    .len = sizeof(struct tsra_algo_aes_ctr_params),
+};
+```
+
 ## SHA-1 Digest
 
 The SHA-1 is an algorithm for message digesting data. It generates a 160-bit message digest as defined in 

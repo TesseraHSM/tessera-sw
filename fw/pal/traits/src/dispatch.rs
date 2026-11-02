@@ -82,26 +82,17 @@
 //!
 //! The cost is that an implementer decodes the envelope and header for
 //! itself, duplicating work the core already did for MBOR. That is the
-//! price of the core staying oblivious, and it is what keeps the two
-//! protocols' hooks identical in shape.
+//! price of the core staying oblivious.
 //!
 //! # Contract
 //!
-//! The hook returns the encoded response as a slice borrowed from the
-//! PAL's per-IO allocator, exactly as the core's own handlers do.
-//!
-//! Returning the slice — rather than filling a buffer the core
-//! pre-allocates — is what keeps this cheap. The implementer allocates
-//! *after* any `await`, so it can use
-//! [`HsmAlloc::dma_alloc_var`](crate::HsmAlloc::dma_alloc_var), which
-//! hands over the remaining watermark and returns the unused tail to the
-//! pool. Pre-allocating a worst-case buffer for the hook to fill would
-//! instead pin the per-IO high-water mark at that maximum, and that mark
-//! drives the teardown scrub.
-//!
-//! Note an `async fn` may call `dma_alloc_var` freely; only `await`-ing
-//! *inside* the closure is disallowed. Doing the asynchronous work first
-//! and encoding afterwards is therefore the natural shape.
+//! MBOR returns a response borrowed from the per-IO allocator. TBOR fills
+//! the caller's [`HsmCmdBuf`] and returns its response length. It must
+//! preserve live request inputs while producing output and initialize every
+//! published byte, including gaps. Output starts at allocation offset zero.
+//! The core checks the length against allocation and host destination bounds.
+//! Crypto scratch may still use the per-IO allocator; a separate encoded
+//! TBOR response allocation or copy-back is not part of this contract.
 //!
 //! # No default implementations
 //!
@@ -116,7 +107,8 @@
 //! protocol to this trait breaks every platform until each one has
 //! considered it.
 
-use crate::DmaBuf;
+use crate::HsmCmdBuf;
+use crate::HsmDmaBuf;
 use crate::HsmIoTypes;
 use crate::HsmResult;
 
@@ -152,16 +144,16 @@ pub trait HsmCustomDispatch: HsmIoTypes {
     ///   per-IO allocator and valid until the IO completes.
     /// - `Err(HsmError::UnsupportedCmd)` — opcode not handled here
     ///   either; the core surfaces this to the host unchanged.
-    async fn mbor_dispatch(&self, io: &Self::Io, req: &mut DmaBuf) -> HsmResult<&DmaBuf>;
+    async fn mbor_dispatch(&self, io: &Self::Io, req: &mut HsmDmaBuf) -> HsmResult<&HsmDmaBuf>;
 
     /// Handle a TBOR opcode the core does not implement.
     ///
-    /// As with [`mbor_dispatch`](Self::mbor_dispatch), `req` is the
+    /// As with [`mbor_dispatch`](Self::mbor_dispatch), the request is the
     /// whole request. TBOR rejects an unknown opcode before parsing
     /// anything, so nothing has been consumed in any case.
     ///
     /// The opcode is passed separately here only because TBOR's is a
-    /// bare leading byte the core already has in hand; MBOR's sits
+    /// header byte the core already has in hand; MBOR's sits
     /// inside the encoded header, and pulling it out for the hook would
     /// mean handing over a decoded DDI type.
     ///
@@ -169,13 +161,17 @@ pub trait HsmCustomDispatch: HsmIoTypes {
     ///
     /// - `io` — the in-flight IO, for per-IO allocation.
     /// - `opcode` — the opcode that was not recognised.
-    /// - `req` — the untouched request buffer.
+    /// - `cmd_buf` — the untouched request and shared response storage.
     ///
     /// # Returns
     ///
-    /// - `Ok(resp)` — the encoded response, borrowed from the PAL's
-    ///   per-IO allocator and valid until the IO completes.
+    /// - `Ok(len)` — length of the initialized response prefix in `cmd_buf`.
     /// - `Err(HsmError::UnsupportedCmd)` — opcode not handled here
     ///   either; the core surfaces this to the host unchanged.
-    async fn tbor_dispatch(&self, io: &Self::Io, opcode: u8, req: &DmaBuf) -> HsmResult<&DmaBuf>;
+    async fn tbor_dispatch(
+        &self,
+        io: &Self::Io,
+        opcode: u8,
+        cmd_buf: &mut HsmCmdBuf<'_>,
+    ) -> HsmResult<usize>;
 }

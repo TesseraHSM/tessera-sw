@@ -19,7 +19,7 @@ pub(crate) async fn ecc_sign<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiEccSignReq<'_> = decoder.decode_data()?;
 
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;

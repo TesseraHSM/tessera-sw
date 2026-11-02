@@ -28,7 +28,7 @@
 //!     io: &P::Io,
 //!     alloc: &'a impl HsmScopedAlloc,
 //!     params: &XParams<'_>,
-//!     priv_key: &DmaBuf,
+//!     priv_key: &HsmDmaBuf,
 //!     out: Option<&mut [u8]>,
 //! ) -> HsmResult<usize>
 //! where P: HsmCrypto + HsmAlloc + 'a;

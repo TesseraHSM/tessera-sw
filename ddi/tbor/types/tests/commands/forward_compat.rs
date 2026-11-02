@@ -779,7 +779,7 @@ fn key_report_maximum_report_with_trailing_entry_is_preserved() {
 }
 
 /// Verifies that an appended field is ignored for a variable-length
-/// message followed by a fixed-size IV.
+/// message followed by a variable-length IV.
 #[test]
 fn aes_encrypt_decrypt_extra_trailing_toc_entry_is_ignored() {
     let msg: Vec<u8> = (0..64).map(|index| index as u8).collect();

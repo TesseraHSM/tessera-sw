@@ -148,9 +148,9 @@ pub enum HsmVaultKeyKind {
     /// In-flight TBOR session-handshake (Pending) state blob.
     ///
     /// Holds the opaque Pending blob (`exported ‖ pk_init ‖ pk_resp ‖
-    /// session_type ‖ suite_id`, up to
+    /// auth_binding ‖ session_type ‖ suite_id`, up to
     /// [`SESSION_PENDING_BLOB_MAX`](crate::SESSION_PENDING_BLOB_MAX) =
-    /// 256 B) produced by the TBOR `OpenSessionInit` phase and consumed
+    /// 320 B) produced by the TBOR `OpenSessionInit` phase and consumed
     /// by `OpenSessionFinish`.
     ///
     /// Written by
@@ -166,10 +166,10 @@ pub enum HsmVaultKeyKind {
     /// and CU).
     ///
     /// Length-discriminated by session type:
-    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)]`
-    ///   = 72 B.
+    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)
+    ///   ‖ auth_binding(68)]` = 140 B.
     /// * **Authenticated (CO):** the above ‖ `mac_tx(48) ‖ mac_rx(48)`
-    ///   = 168 B.
+    ///   = 236 B.
     ///
     /// `masking_key` is the 32 B AES-256-GCM
     /// [`SESSION_MASKING_KEY_LEN`](crate::SESSION_MASKING_KEY_LEN) key used
@@ -531,13 +531,13 @@ pub trait HsmVault: HsmIoTypes {
     async fn vault_key_create(
         &self,
         io: &Self::Io,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
     ) -> HsmResult<HsmKeyId>;
 
-    /// The backend-assigned bulk key id for `key_id`, if it names a bulk key.
+    /// Returns the backend-assigned bulk key id for `key_id`.
     ///
     /// Bulk (AES-GCM / XTS) keys are held by a platform bulk-crypto backend
     /// rather than as material in the vault; the host addresses them by this
@@ -545,20 +545,18 @@ pub trait HsmVault: HsmIoTypes {
     /// it, is entirely platform-defined — a platform folds any backend
     /// registration into its [`vault_key_create`](Self::vault_key_create) /
     /// [`vault_key_delete`](Self::vault_key_delete) overrides and exposes only
-    /// this lookup to the core.  Platforms without a bulk backend inherit the
-    /// default `Ok(None)`.
+    /// this lookup to the core. Platforms without a bulk backend return
+    /// `Err(HsmError::UnsupportedCmd)`.
     ///
     /// # Parameters
     /// - `io` — caller I/O context (partition scope).
-    /// - `key_id` — the vault handle returned by `vault_key_create`.
+    /// - `key_id` — a bulk key's vault handle returned by `vault_key_create`.
     ///
     /// # Returns
-    /// - `Ok(Some(bulk_key_id))` — `key_id` is a bulk key.
-    /// - `Ok(None)` — `key_id` is an ordinary vault key, or the platform has
-    ///   no bulk backend.
-    fn bulk_key_id(&self, _io: &Self::Io, _key_id: HsmKeyId) -> HsmResult<Option<u16>> {
-        Ok(None)
-    }
+    /// - `Ok(bulk_key_id)` — the backend-assigned bulk key id.
+    /// - `Err(HsmError::UnsupportedCmd)` — the platform has no bulk backend.
+    /// - `Err(HsmError::UnsupportedKeyType)` — `key_id` is not a bulk key.
+    fn bulk_key_id(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<u16>;
 
     /// Deletes a single key by ID.
     ///
@@ -667,7 +665,7 @@ pub trait HsmVault: HsmIoTypes {
     ///   [`vault_key_len`](Self::vault_key_len) for the key's `kind`.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<&DmaBuf>;
+    fn vault_key(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf>;
 
     /// Returns the canonical byte length of a key of the given kind.
     ///

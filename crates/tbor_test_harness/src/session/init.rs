@@ -32,6 +32,7 @@ use tsra_session_ex_crypto::generate_vm_ephemeral;
 use tsra_session_ex_crypto::receive_exported;
 use tsra_session_ex_crypto::verify_phase1_mac;
 use tsra_session_ex_crypto::VmEphemeralKey;
+use zeroize::Zeroizing;
 
 use super::crypto;
 
@@ -40,7 +41,6 @@ use super::crypto;
 /// tests (e.g., tamper `exported` to force a Phase-2 MAC mismatch);
 /// the happy-path helper [`session_open_init`] populates it from a
 /// real round-trip.
-#[derive(Debug)]
 pub struct PendingHandshake {
     /// Reserved session identifier returned by the FW.
     pub session_id: u16,
@@ -50,7 +50,7 @@ pub struct PendingHandshake {
     pub session_type: SessionType,
     /// HPKE export secret (`Nh = 48`) derived by HPKE
     /// `receive_export` after Phase 1 completes.
-    pub exported: Vec<u8>,
+    pub exported: Zeroizing<Vec<u8>>,
     /// Wire `pk_init` (SEC1 uncompressed, 97 B).
     pub pk_init: [u8; PK_INIT_LEN],
     /// Wire `pk_resp` (SEC1 uncompressed, 97 B).
@@ -58,6 +58,17 @@ pub struct PendingHandshake {
     /// Wire `pk_hsm` (SEC1 uncompressed, 97 B) — partition identity
     /// public key fetched out-of-band via the MBOR cert chain.
     pub pk_hsm: [u8; PK_INIT_LEN],
+}
+
+impl core::fmt::Debug for PendingHandshake {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PendingHandshake")
+            .field("session_id", &self.session_id)
+            .field("psk_id", &self.psk_id)
+            .field("session_type", &self.session_type)
+            .field("exported_len", &self.exported.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Override knobs for [`session_open_init_with_options`].
@@ -165,16 +176,18 @@ pub fn session_open_init_with_options(
     let info = build_hpke_info(opts.psk_id, opts.session_type.to_u8(), opts.suite_id);
     let default_psk = default_psk(opts.psk_id).map_err(|_| DdiError::InvalidParameter)?;
     let psk: &[u8] = opts.psk.unwrap_or(default_psk.as_slice());
-    let exported = receive_exported(
-        &sk_init,
-        &pk_init_key,
-        &pk_hsm_key,
-        &resp.pk_resp,
-        &info,
-        psk,
-        &[opts.psk_id],
-    )
-    .map_err(|_| DdiError::TborDecodeError)?;
+    let exported = Zeroizing::new(
+        receive_exported(
+            &sk_init,
+            &pk_init_key,
+            &pk_hsm_key,
+            &resp.pk_resp,
+            &info,
+            psk,
+            &[opts.psk_id],
+        )
+        .map_err(|_| DdiError::TborDecodeError)?,
+    );
 
     verify_phase1_mac(
         &exported,

@@ -44,7 +44,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let body: DdiUnmaskKeyReq<'_> = decoder.decode_data()?;
 
@@ -104,7 +104,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
     // the HMAC in `unmask` without leaking plaintext.
     let is_bulk = super::bulk::is_bulk(kind);
 
-    let (key_id, bulk_key_id, bulk_key_buf): (HsmKeyId, Option<u16>, Option<&mut DmaBuf>) =
+    let (key_id, bulk_key_id, bulk_key_buf): (HsmKeyId, Option<u16>, Option<&mut HsmDmaBuf>) =
         if is_bulk {
             let key_buf = pal.dma_alloc(io, key_len)?;
             let layout = if attrs.session() {
@@ -117,7 +117,6 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
             };
 
             let copied = copy_plaintext(body.masked_key, &layout, key_len, key_buf);
-            body.masked_key.zeroize();
             copied?;
 
             let (handle, bulk_id) = match super::bulk::commit_key(
@@ -132,7 +131,6 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
             {
                 Ok(v) => v,
                 Err(e) => {
-                    key_buf.zeroize();
                     return Err(e);
                 }
             };
@@ -150,25 +148,22 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
                     };
 
                     // Copy the primary key material (plaintext prefix) into a fresh
-                    // vault-import scratch buffer, then wipe the decrypted request
-                    // blob.  For ECC the trailing public point is ignored here; the
+                    // vault-import scratch buffer. For ECC the trailing public
+                    // point is ignored here; the
                     // private scalar re-derives it.
                     let key_buf = match pal.dma_alloc(io, key_len) {
                         Ok(buf) => buf,
                         Err(e) => {
-                            body.masked_key.zeroize();
                             return Err(e);
                         }
                     };
                     let copied = copy_plaintext(body.masked_key, &layout, key_len, key_buf);
-                    body.masked_key.zeroize();
                     copied?;
 
                     let session_binding = attrs.session().then_some(HsmSessId::from(sess_id));
                     let created = pal
                         .vault_key_create(io, key_buf, kind, session_binding, attrs)
                         .await;
-                    key_buf.zeroize();
                     created
                 })
                 .await?;
@@ -176,7 +171,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
         };
 
     // Every step after the commit runs inside one inner block so any
-    // failure scrubs the bulk-key material and rolls back the committed key.
+    // failure rolls back the committed key.
     let outcome = async {
         // Read back the material to re-mask: for bulk keys the vault holds only
         // the handle, so the backend-registered 32-byte material (kept alive above)
@@ -264,10 +259,7 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
             Ok((encoder.position(), layout))
         })?;
 
-        // `mask` requires `out[..total_len]` zeroed on entry; the encoder
-        // does not zero the reserved slot, so clear it before filling.
         let frame = DdiUnmaskKeyResp::from_layout(resp, &layout);
-        frame.masked_key.fill(0);
         mask(
             pal,
             io,
@@ -278,13 +270,9 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
         )
         .await?;
 
-        Ok::<&DmaBuf, HsmError>(resp)
+        Ok::<&HsmDmaBuf, HsmError>(resp)
     }
     .await;
-
-    if let Some(buf) = bulk_key_buf {
-        buf.zeroize();
-    }
 
     super::bulk::rollback_on_err(pal, io, key_id, outcome).await
 }
@@ -296,10 +284,10 @@ pub(crate) async fn unmask_key<'p, P: HsmPal>(
 /// * [`HsmError::MaskedKeyDecodeFailed`] — `key_len` exceeds the decrypted
 ///   plaintext region.
 fn copy_plaintext(
-    blob: &DmaBuf,
+    blob: &HsmDmaBuf,
     layout: &UnmaskLayout,
     key_len: usize,
-    out: &mut DmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     if key_len > layout.plaintext_max_len {
         return Err(HsmError::MaskedKeyDecodeFailed);

@@ -12,8 +12,8 @@
 
 use core::cmp::Ordering;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -179,7 +179,7 @@ fn assemble_rsa_operand_in_place(buf: &mut [u8], layout: &RsaOperandLayout) {
 /// RSA-4096-public and `d ‖ n ‖ e` for RSA-2048-private are both 516 bytes, so
 /// length alone is ambiguous, and the PKA accepts an operand longer than the
 /// minimum it requires. The returned slice aliases the operand — no copy.
-fn rsa_modulus_le(key_size: HsmRsaKey, priv_key: &DmaBuf) -> HsmResult<&[u8]> {
+fn rsa_modulus_le(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<&[u8]> {
     let k = key_size.modulus_len();
     let n_off = if key_size.is_crt() { 2 * k } else { k };
     let end = n_off + k;
@@ -241,9 +241,9 @@ impl UnoHsmPal {
         &'a self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        message_hash: &DmaBuf,
-        salt: &DmaBuf,
-        digest: &mut DmaBuf,
+        message_hash: &HsmDmaBuf,
+        salt: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()> {
         let mut ctx = self.hash_begin(io, algo, alloc)?;
@@ -281,8 +281,8 @@ impl UnoHsmPal {
         p_be: &[u8],
         q_be: &[u8],
         qinv_be: &[u8],
-        n1q_out: &mut DmaBuf,
-        n2p_out: &mut DmaBuf,
+        n1q_out: &mut HsmDmaBuf,
+        n2p_out: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Full operand = the modulus size k; the `p⁻¹ mod q` inverse runs at
         // the next PKA size that covers the k/2-byte prime.
@@ -401,8 +401,8 @@ impl HsmRsa for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         _key_size: HsmRsaKey,
-        _priv_key: &mut DmaBuf,
-        _pub_key: &mut DmaBuf,
+        _priv_key: &mut HsmDmaBuf,
+        _pub_key: &mut HsmDmaBuf,
         _pct: HsmRsaPct,
     ) -> HsmResult<()> {
         Err(HsmError::UnsupportedCmd)
@@ -412,9 +412,9 @@ impl HsmRsa for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        key: &DmaBuf,
-        y: &DmaBuf,
-        x: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        y: &HsmDmaBuf,
+        x: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // FIPS / NIST-ACVP: the input `m` must satisfy `1 < m < n - 1`. The PKA
         // engine reduces `m mod n` and returns a valid result for out-of-range
@@ -428,13 +428,29 @@ impl HsmRsa for UnoHsmPal {
         self.pka.rsa_mod_exp_priv(upka_key_type, key, y, x).await
     }
 
+    async fn mod_exp_priv_in_place(
+        &self,
+        _io: &UnoHsmIo,
+        key_type: HsmRsaKey,
+        key: &HsmDmaBuf,
+        y_x: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let modulus = rsa_modulus_le(key_type, key)?;
+        if !mod_exp_input_in_range(modulus, y_x) {
+            return Err(HsmError::InvalidArg);
+        }
+        self.pka
+            .rsa_mod_exp_priv_in_place(rsa_key_to_upka_key_type(key_type), key, y_x)
+            .await
+    }
+
     async fn mod_exp_pub(
         &self,
         _io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        key: &DmaBuf,
-        x: &DmaBuf,
-        y: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        x: &HsmDmaBuf,
+        y: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let upka_key_type = rsa_key_to_upka_key_type(key_size);
         self.pka.rsa_mod_exp_pub(upka_key_type, key, x, y).await
@@ -443,8 +459,8 @@ impl HsmRsa for UnoHsmPal {
     fn rsa_priv_pub_key(
         &self,
         _io: &UnoHsmIo,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The wire public key is `n_le ‖ e_le` (`k + 4` bytes), extracted from
         // the Uno vault private operand. Two vault layouts carry the same
@@ -483,9 +499,9 @@ impl HsmRsa for UnoHsmPal {
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
         io: &UnoHsmIo,
-        der: &'a mut DmaBuf,
+        der: &'a mut HsmDmaBuf,
         crt: bool,
-    ) -> HsmResult<(&'a DmaBuf, usize)> {
+    ) -> HsmResult<(&'a HsmDmaBuf, usize)> {
         // Note: `der` holds recovered plaintext DER — and, on the non-CRT path,
         // the staged `d` plus the leftover CRT components `p`/`q`/`dp`/`dq`/
         // `qinv` — on every path through this function. It is not scrubbed
@@ -579,9 +595,9 @@ impl HsmRsa for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        pub_key: &DmaBuf,
-        message: &DmaBuf,
-        output: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -622,9 +638,9 @@ impl HsmRsa for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        priv_key: &DmaBuf,
-        ciphertext: &DmaBuf,
-        output: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
@@ -667,9 +683,9 @@ impl HsmRsa for UnoHsmPal {
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        message_hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -707,9 +723,9 @@ impl HsmRsa for UnoHsmPal {
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message_hash: &DmaBuf,
-        signature: &DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
@@ -765,10 +781,10 @@ impl HsmRsa for UnoHsmPal {
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message: &DmaBuf,
-        label: &DmaBuf,
-        output: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -822,10 +838,10 @@ impl HsmRsa for UnoHsmPal {
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        ciphertext: &DmaBuf,
-        label: &DmaBuf,
-        output: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
@@ -905,10 +921,10 @@ impl HsmRsa for UnoHsmPal {
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        message_hash: &DmaBuf,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &mut DmaBuf,
+        signature: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -962,10 +978,10 @@ impl HsmRsa for UnoHsmPal {
         io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message_hash: &DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &DmaBuf,
+        signature: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where

@@ -19,7 +19,7 @@ use tsra_fw_ddi_mbor_types::change_pin::DdiChangePinReq;
 use tsra_fw_ddi_mbor_types::change_pin::DdiChangePinResp;
 use tsra_fw_ddi_mbor_types::change_pin::DdiEncryptedPin;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
-use tsra_fw_hsm_pal_traits::PartPropId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
 
 use super::*;
 
@@ -38,7 +38,7 @@ pub(crate) async fn change_pin<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiChangePinReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 
@@ -92,7 +92,7 @@ pub(crate) async fn change_pin<'p, P: HsmPal>(
     // ── AES-CBC decrypt the new PIN in place ─────────────────────────
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         body.new_pin.encrypted_pin,
         body.new_pin.iv,
@@ -130,7 +130,7 @@ pub(crate) async fn change_pin<'p, P: HsmPal>(
     // The credential is write-once: `part_set_credential` rejects a
     // re-set without an intervening clear, so clear before re-writing
     // `id ‖ new_pin`.
-    pal.part_prop_clear(io, PartPropId::CREDENTIAL)?;
+    pal.part_prop_clear(io, HsmPartPropId::CREDENTIAL)?;
     crate::part_state::part_set_credential(pal, io, new_cred)?;
 
     let resp = pal.dma_alloc_var(io, |buf| {
@@ -154,7 +154,7 @@ async fn verify_change_pin_hmac<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     new_pin: &DdiEncryptedPin<'_>,
-    hmac_key: &DmaBuf,
+    hmac_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let pin_len = new_pin.encrypted_pin.len();
     let iv_len = new_pin.iv.len();

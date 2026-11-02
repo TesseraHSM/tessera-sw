@@ -65,7 +65,7 @@ const PSK_CHANGE_ENVELOPE_LEN: usize = crate::commands::common::ENVELOPE_HEADER_
 /// arms that reject mismatched AAD, wrong-length plaintexts,
 /// envelopes encrypted under a different session's key, etc.
 fn build_envelope(param_key: &AesKey, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let iv = Rng::rand_vec(12).expect("rng iv");
+    let iv = Rng::rand_vec(AeadAlg::AesGcm256.iv_len()).expect("rng iv");
     let total = aead_envelope::seal(AeadAlg::AesGcm256, param_key, &iv, aad, plaintext, None)
         .expect("aead size");
     let mut out = vec![0u8; total];
@@ -174,8 +174,8 @@ fn psk_change_second_attempt_same_session_fails() {
 //
 // Both arms (ciphertext bit-flip, AAD bit-flip) must surface the same
 // AEAD failure status. Layout reminder:
-// HEADER(4) ‖ IV(12) ‖ AAD(32) ‖ CT(32) ‖ TAG(16). AAD starts at
-// offset 16; CT starts at offset 48.
+// HEADER(8) ‖ IV(16) ‖ AAD(32) ‖ CT(32) ‖ TAG(16). AAD starts at
+// offset 24; CT starts at offset 56.
 // ===========================================================================
 
 /// Verifies tampering with envelope ciphertext or AAD causes authentication failure.
@@ -185,16 +185,16 @@ fn psk_change_envelope_tampered() {
 
     for (label, mutate) in [
         (
-            "ciphertext bit-flip (offset = envelope_len / 2 — inside CT)",
+            "ciphertext bit-flip",
             (|e: &mut Vec<u8>| {
-                let target = e.len() / 2;
+                let target = aead_envelope::HEADER_LEN + AeadAlg::AesGcm256.iv_len() + 32;
                 e[target] ^= 0x01;
             }) as fn(&mut Vec<u8>),
         ),
         (
-            "AAD bit-flip (offset 16 — first AAD byte)",
+            "AAD bit-flip",
             (|e: &mut Vec<u8>| {
-                e[16] ^= 0x01;
+                e[aead_envelope::HEADER_LEN + AeadAlg::AesGcm256.iv_len()] ^= 0x01;
             }) as fn(&mut Vec<u8>),
         ),
     ] {
@@ -491,7 +491,7 @@ fn psk_change_oversized_envelope_rejected() {
     let valid =
         encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
 
-    assert_eq!(valid.len(), 100);
+    assert_eq!(valid.len(), PSK_CHANGE_ENVELOPE_LEN);
 
     for extra in [1usize, 2, 16, 32, 100] {
         let mut envelope = valid.clone();

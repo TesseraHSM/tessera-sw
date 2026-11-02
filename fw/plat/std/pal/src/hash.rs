@@ -7,10 +7,11 @@
 //! to [`tsra_crypto::HashAlgo`] and forwards one-shot hashing to the
 //! [`StdHash`](crate::drivers::hash::StdHash) driver.
 //!
-//! Multi-step hashing is not currently needed by the standard PAL, so
-//! those entry points are left as `todo!()` stubs.
+//! Multi-step hashing consumes input before its storage is reused for output.
 
 use tsra_crypto::HashAlgo;
+use tsra_crypto::HashOpContext;
+use tsra_crypto::HashStreamingOp;
 
 use super::*;
 
@@ -23,15 +24,14 @@ pub(crate) fn to_hash_algo(algo: HsmHashAlgo) -> HashAlgo {
     }
 }
 
-#[allow(dead_code)]
-pub struct StdHashCtx<'a> {
+pub struct StdHashCtx {
     algo: HsmHashAlgo,
-    state: &'a mut [u8],
+    state: <HashAlgo as HashStreamingOp>::Context,
 }
 
 impl HsmHash for StdHsmPal {
     type HashCtx<'a>
-        = StdHashCtx<'a>
+        = StdHashCtx
     where
         Self: 'a;
 
@@ -39,8 +39,8 @@ impl HsmHash for StdHsmPal {
         &self,
         _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        data: &DmaBuf,
-        digest: &mut DmaBuf,
+        data: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()> {
         let digest_len = algo.digest_len();
@@ -62,32 +62,45 @@ impl HsmHash for StdHsmPal {
     fn hash_begin<'a>(
         &self,
         _io: &StdHsmIo,
-        _algo: HsmHashAlgo,
+        algo: HsmHashAlgo,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HashCtx<'a>>
     where
         Self: 'a,
     {
-        todo!()
+        let state = to_hash_algo(algo)
+            .hash_init()
+            .map_err(|_| HsmError::ShaError)?;
+        Ok(StdHashCtx { algo, state })
     }
 
     async fn hash_continue(
         &self,
         _io: &StdHsmIo,
-        _ctx: &mut Self::HashCtx<'_>,
-        _data: &DmaBuf,
+        ctx: &mut Self::HashCtx<'_>,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()> {
-        todo!()
+        ctx.state.update(data).map_err(|_| HsmError::ShaError)
     }
 
     async fn hash_finish(
         &self,
         _io: &StdHsmIo,
-        _ctx: Self::HashCtx<'_>,
-        _digest: &mut DmaBuf,
-        _big_endian: bool,
+        mut ctx: Self::HashCtx<'_>,
+        digest: &mut HsmDmaBuf,
+        big_endian: bool,
     ) -> HsmResult<()> {
-        todo!()
+        let digest_len = ctx.algo.digest_len();
+        if digest.len() < digest_len {
+            return Err(HsmError::InvalidArg);
+        }
+        ctx.state
+            .finish(Some(&mut digest[..digest_len]))
+            .map_err(|_| HsmError::ShaError)?;
+        if !big_endian {
+            digest[..digest_len].reverse();
+        }
+        Ok(())
     }
 }
 
@@ -218,5 +231,56 @@ mod tests {
         let msg = multiblock_msg();
         let reference = openssl_digest(HsmHashAlgo::Sha512, &msg).await;
         verify_endianness(HsmHashAlgo::Sha512, &msg, &reference).await;
+    }
+
+    #[tokio::test]
+    async fn streaming_hash_consumes_fragments_before_output_reuse() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let msg = multiblock_msg();
+        let data = pal.dma_alloc(&io, msg.len()).unwrap();
+        let digest = pal.dma_alloc(&io, 68).unwrap();
+        for algo in [
+            HsmHashAlgo::Sha1,
+            HsmHashAlgo::Sha256,
+            HsmHashAlgo::Sha384,
+            HsmHashAlgo::Sha512,
+        ] {
+            for big_endian in [true, false] {
+                let mut expected = openssl_digest(algo, &msg).await;
+                if !big_endian {
+                    expected.reverse();
+                }
+                data.copy_from_slice(&msg);
+                digest.fill(0xA5);
+                pal.alloc_scoped_async(&io, async |alloc| {
+                    let mut ctx = pal.hash_begin(&io, algo, alloc)?;
+                    pal.hash_continue(&io, &mut ctx, &data[..0]).await?;
+                    for offset in (0..data.len()).step_by(13) {
+                        pal.hash_continue(
+                            &io,
+                            &mut ctx,
+                            &data[offset..(offset + 13).min(data.len())],
+                        )
+                        .await?;
+                    }
+                    data.fill(0xE7);
+                    pal.hash_finish(&io, ctx, digest, big_endian).await
+                })
+                .await
+                .unwrap();
+                assert_eq!(&digest[..expected.len()], &expected[..]);
+                assert!(digest[expected.len()..].iter().all(|&b| b == 0xA5));
+            }
+        }
+        let result = pal
+            .alloc_scoped_async(&io, async |alloc| {
+                let ctx = pal.hash_begin(&io, HsmHashAlgo::Sha256, alloc)?;
+                pal.hash_finish(&io, ctx, &mut digest[..31], true).await
+            })
+            .await;
+        assert_eq!(result, Err(HsmError::InvalidArg));
     }
 }
