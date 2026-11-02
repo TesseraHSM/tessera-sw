@@ -173,6 +173,71 @@ fn shutdown_waits_for_a_genuinely_in_flight_io_before_completing() {
     drop(rt);
 }
 
+/// Regression test for `shutdown_async`'s documented cancellation-safety
+/// guarantee: cancelling (dropping) the future before it completes must
+/// not abort the drain-then-teardown job it has already taken ownership
+/// of — that job keeps running to completion in the background exactly
+/// as with `Drop`, joining the Embassy thread and only then disposing of
+/// the self-owned tokio runtime.
+///
+/// Holds one IO in flight so the drain cannot complete immediately, polls
+/// `shutdown_async` exactly once (past its first `.await` point, where
+/// ownership of the Embassy thread and runtime transfers into the
+/// detached background job), then drops it without ever polling it to
+/// completion — simulating a caller that cancels it via a `select!` or
+/// `timeout` as the method's doc comment describes. The held IO is
+/// released only afterward, so the background job can only be observed
+/// completing (via `test_hooks::wait_for_shutdown_job_done`) if the drain
+/// genuinely continued despite the cancellation.
+#[tokio::test]
+async fn shutdown_async_completes_drain_and_teardown_after_being_cancelled() {
+    let hsm = Arc::new(StdHsm::new());
+    let _ = hsm.part_alloc(IO_PID, 1u128 << IO_PID).await;
+    let _ = hsm.part_enable(IO_PID).await;
+
+    test_hooks::hold_next_io();
+    hsm.io(sqe(0), IO_PID, 0, 0).await.expect("io");
+    test_hooks::wait_until_io_blocked().await;
+
+    let hsm = Arc::try_unwrap(hsm).unwrap_or_else(|_| panic!("StdHsm still shared"));
+
+    {
+        let mut shutdown = pin!(hsm.shutdown_async());
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        assert!(
+            shutdown.as_mut().poll(&mut cx).is_pending(),
+            "shutdown_async completed synchronously on its first poll \
+             while an IO was still genuinely in-flight"
+        );
+        // `shutdown` is dropped here at the end of this block — this is
+        // the cancellation under test.
+    }
+
+    // The background job cannot have completed yet: it is blocked
+    // joining the Embassy thread, which cannot exit until the held IO
+    // below is released. Deterministic, not timing-dependent.
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        test_hooks::wait_for_shutdown_job_done(),
+    )
+    .await
+    .expect_err(
+        "shutdown's background job reported done while an IO was still genuinely in-flight",
+    );
+
+    test_hooks::release_held_io();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        test_hooks::wait_for_shutdown_job_done(),
+    )
+    .await
+    .expect(
+        "cancelling shutdown_async aborted the drain instead of letting it \
+         complete in the background, as documented",
+    );
+}
+
 /// Minimal, dependency-free "executor" that busy-polls a future, used only
 /// to prove `shutdown_async` doesn't require its calling thread to already
 /// be inside a Tokio runtime (unlike bare `tokio::task::spawn_blocking`,

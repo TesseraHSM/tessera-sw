@@ -279,6 +279,7 @@ pub mod test_hooks {
     static ARMED: AtomicBool = AtomicBool::new(false);
     static RELEASE: Notify = Notify::const_new();
     static ABOUT_TO_BLOCK: Notify = Notify::const_new();
+    static SHUTDOWN_JOB_DONE: Notify = Notify::const_new();
 
     /// Arms the hold: the next [`handle_io`](super::handle_io) task to
     /// run blocks in [`wait_if_held`] until [`release_held_io`] is
@@ -313,6 +314,28 @@ pub mod test_hooks {
             ABOUT_TO_BLOCK.notify_one();
             RELEASE.notified().await;
         }
+    }
+
+    /// Awaits until [`StdHsm::shutdown_async`](crate::StdHsm::shutdown_async)'s
+    /// detached background job — joining the Embassy thread and then
+    /// disposing of any self-owned tokio runtime — has completed, even if
+    /// the `shutdown_async` future that spawned it was itself dropped
+    /// (cancelled) before observing that completion. Lets a test prove
+    /// `shutdown_async`'s documented cancellation-safety guarantee: that
+    /// dropping it early does not abort the drain, which continues in the
+    /// background exactly as with [`Drop`](core::ops::Drop). Safe to call
+    /// either before or after the job actually finishes — `Notify` stores
+    /// a wakeup permit if no one is waiting yet.
+    pub async fn wait_for_shutdown_job_done() {
+        SHUTDOWN_JOB_DONE.notified().await;
+    }
+
+    /// Signals [`wait_for_shutdown_job_done`] that the background job has
+    /// completed. Called unconditionally — regardless of whether the
+    /// `shutdown_async` future that spawned the job is still being
+    /// polled, was dropped, or ran to completion.
+    pub(crate) fn notify_shutdown_job_done() {
+        SHUTDOWN_JOB_DONE.notify_one();
     }
 }
 
@@ -787,6 +810,11 @@ impl StdHsm {
                 if let Some(rt) = tokio_rt {
                     rt.shutdown_background();
                 }
+                // Signalled unconditionally, independent of `done_tx`:
+                // this job keeps running (and must still be observable
+                // as complete by a test) even after `shutdown_async`'s
+                // future — and `done_rx` with it — has been dropped.
+                test_hooks::notify_shutdown_job_done();
                 let _ = done_tx.send(());
             });
             let _ = done_rx.await;
