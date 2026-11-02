@@ -3,6 +3,7 @@
 ## Project Overview
 
 Tessera Integrated HSM (TSRA) SDK is a modular, cross-platform software development kit (SDK) written in Rust. This repository is home to TSRA SDK, its simulator, and its OpenSSL Provider.
+Development status: This project is still under development and is not yet ready for deployment.
 
 ## Project Structure
 
