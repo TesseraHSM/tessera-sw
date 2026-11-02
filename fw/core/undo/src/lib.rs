@@ -83,6 +83,7 @@ const KIND_VAULT_CREATE: u8 = 0;
 const KIND_VAULT_DISABLE: u8 = 1;
 const KIND_PROP_RESTORE: u8 = 2;
 const KIND_SESSION_DESTROY: u8 = 3;
+const KIND_SESSION_CANCEL_REOPEN: u8 = 4;
 
 const MODE_SHIFT: u8 = 3;
 const MODE_MASK: u8 = 0b0000_0011;
@@ -143,6 +144,16 @@ impl UndoEntry {
     fn session_destroy(id: HsmSessId) -> Self {
         Self {
             tag: KIND_SESSION_DESTROY,
+            aux: 0,
+            id: u16::from(id),
+            data: 0,
+        }
+    }
+
+    #[inline]
+    fn session_cancel_reopen(id: HsmSessId) -> Self {
+        Self {
+            tag: KIND_SESSION_CANCEL_REOPEN,
             aux: 0,
             id: u16::from(id),
             data: 0,
@@ -354,6 +365,16 @@ impl<'a> UndoLog<'a> {
         self.push_entry(UndoEntry::session_destroy(id))
     }
 
+    /// Record that a NeedsRenegotiation session entered a reopen
+    /// handshake (or was promoted by one).
+    ///
+    /// undo → revert the slot to NeedsRenegotiation, dropping any
+    /// replacement session state but keeping the logical slot; commit →
+    /// keep.
+    pub fn push_session_cancel_reopen(&mut self, id: HsmSessId) -> HsmResult<()> {
+        self.push_entry(UndoEntry::session_cancel_reopen(id))
+    }
+
     /// Record that a property was set while previously **absent**.
     ///
     /// undo → clear the slot; commit → keep.
@@ -472,6 +493,11 @@ impl<'a> UndoLog<'a> {
                 }
             }
             KIND_SESSION_DESTROY => verbs.session_destroy(io, HsmSessId::from(entry.id)).await,
+            KIND_SESSION_CANCEL_REOPEN => {
+                verbs
+                    .session_cancel_reopen(io, HsmSessId::from(entry.id))
+                    .await
+            }
             _ => Err(HsmError::InvalidArg),
         }
     }
@@ -502,6 +528,9 @@ fn undo_policy(kind: u8) -> FailurePolicy {
         // undo = destroy the freshly-created session; a failure leaks a
         // never-established session slot → benign (reclaimed on teardown).
         KIND_SESSION_DESTROY => FailurePolicy::BestEffort,
+        // undo = revert a reopen to NeedsRenegotiation; a failure leaves the
+        // slot reserved until close/flush or the next reset → benign.
+        KIND_SESSION_CANCEL_REOPEN => FailurePolicy::BestEffort,
         // undo = re-enable / restore: must succeed for consistency.
         _ => FailurePolicy::Poison,
     }
@@ -536,6 +565,9 @@ pub trait UndoVerbs {
     /// Destroy a session (its slot + backing vault keys) — the coarse
     /// inverse of session create/promote.
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
+    /// Revert a reopen handshake (pending or promoted) to
+    /// NeedsRenegotiation, preserving the logical slot.
+    async fn session_cancel_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 }
 
 impl<P> UndoVerbs for P
@@ -580,6 +612,10 @@ where
 
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
         HsmSessionManager::session_destroy(self, io, id).await
+    }
+
+    async fn session_cancel_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
+        HsmSessionManager::session_cancel_reopen(self, io, id).await
     }
 }
 
@@ -649,6 +685,7 @@ mod tests {
     const OP_SET_BOOL: u8 = 7;
     const OP_SET_BYTES: u8 = 8;
     const OP_SESSION_DESTROY: u8 = 9;
+    const OP_SESSION_CANCEL_REOPEN: u8 = 10;
 
     #[derive(Clone, Copy, Default)]
     struct Rec {
@@ -769,6 +806,10 @@ mod tests {
             } else {
                 Ok(())
             }
+        }
+        async fn session_cancel_reopen(&self, _io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
+            self.record(OP_SESSION_CANCEL_REOPEN, u16::from(id), 0);
+            Ok(())
         }
     }
 
@@ -907,6 +948,25 @@ mod tests {
         undo_log.push_session_destroy(HsmSessId::from(7)).unwrap();
         assert_eq!(run_undo(undo_log, &m, &io), WalkOutcome::Ok);
         m.assert_rec(0, OP_SESSION_DESTROY, 7, 0);
+    }
+
+    #[test]
+    fn session_cancel_reopen_undoes_and_commit_noops() {
+        let m = MockVerbs::new();
+        let io = FakeIo::default();
+        log!(commit_log);
+        commit_log
+            .push_session_cancel_reopen(HsmSessId::from(2))
+            .unwrap();
+        assert_eq!(run_commit(commit_log, &m, &io), WalkOutcome::Ok);
+        assert_eq!(m.count(), 0);
+
+        log!(undo_log);
+        undo_log
+            .push_session_cancel_reopen(HsmSessId::from(2))
+            .unwrap();
+        assert_eq!(run_undo(undo_log, &m, &io), WalkOutcome::Ok);
+        m.assert_rec(0, OP_SESSION_CANCEL_REOPEN, 2, 0);
     }
 
     #[test]

@@ -592,9 +592,7 @@ impl HsmPartition {
             if let Some(key) = psk.psk {
                 rs.capture_psk(psk.psk_id as u8, key);
             }
-            if psk.psk_id == HsmPskId::CO {
-                rs.track_co_session(&session);
-            }
+            rs.track_session(psk.psk_id, &session);
             Ok(())
         })?;
         Ok(session)
@@ -660,16 +658,12 @@ impl HsmPartition {
             return Ok(());
         }
 
-        match rs.restore_device(&path, rev)? {
-            (true, reopened) => {
-                let epoch = rs.bump_epoch()?;
-                if let Some(session) = reopened {
-                    session.mark_restored(epoch);
-                }
-                Ok(())
-            }
+        let (restored, reopened) = rs.restore_device(&path, rev)?;
+        if restored || rs.publish_pending() {
+            rs.publish_restore(&reopened)
+        } else {
             // Already restored by another process: adopt its epoch.
-            (false, _) => rs.sync_epoch_from_storage(),
+            rs.sync_epoch_from_storage()
         }
     }
 

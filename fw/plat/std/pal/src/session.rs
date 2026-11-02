@@ -134,11 +134,6 @@ impl HsmSessionManager for StdHsmPal {
     async fn session_destroy(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
         let entry = self.active_part_mut(io.pid())?;
 
-        // An abandoned reopen handshake reverts to NeedsRenegotiation.
-        if entry.session_table.is_reopen_pending(id) {
-            return entry.session_table.cancel_reopen(id);
-        }
-
         if matches!(
             entry.session_table.state(id),
             HsmSessionState::Pending | HsmSessionState::NeedsRenegotiation
@@ -207,6 +202,21 @@ impl HsmSessionManager for StdHsmPal {
         entry
             .session_table
             .reopen_pending(id, role, handshake_state)
+    }
+
+    async fn session_cancel_reopen(&self, io: &StdHsmIo, id: HsmSessId) -> HsmResult<()> {
+        let entry = self.active_part_mut(io.pid())?;
+        if entry.session_table.is_reopen_pending(id) {
+            return entry.session_table.cancel_reopen(id);
+        }
+        if !matches!(entry.session_table.state(id), HsmSessionState::Active) {
+            return Err(HsmError::SessionNotPending);
+        }
+        let physical_id = entry.session_table.physical_id(id)?;
+        entry.vault.delete_by_session_key(physical_id)?;
+        entry.vault.delete(physical_id)?;
+        entry.session_table.demote_reopened(id)?;
+        Ok(())
     }
 
     fn session_pending_state(

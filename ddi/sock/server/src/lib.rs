@@ -50,8 +50,10 @@ use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_FINISH;
+use tsra_ddi_tbor_types::TBOR_OP_SESSION_REOPEN_FINISH;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
+use tsra_ddi_tbor_types::TborSessionReopenFinishResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::codec::RequestView;
 use tsra_fw_hsm_bulk::BLOCK_LEN;
@@ -327,9 +329,11 @@ impl Connection {
                     TRANSPORT_INVALID_REQUEST,
                 )));
             }
-            let finish = op == OP_TBOR
-                && RequestView::parse(&submission.payload)
-                    .is_ok_and(|view| view.opcode() == TBOR_OP_SESSION_OPEN_FINISH);
+            let tbor_op = (op == OP_TBOR)
+                .then(|| RequestView::parse(&submission.payload).map(|view| view.opcode()))
+                .and_then(Result::ok);
+            let finish = tbor_op == Some(TBOR_OP_SESSION_OPEN_FINISH);
+            let reopen_finish = tbor_op == Some(TBOR_OP_SESSION_REOPEN_FINISH);
             let reopen = op == OP_MBOR
                 && DdiDecoder::new(&submission.payload, false)
                     .decode_hdr::<DdiReqHdr>()
@@ -338,6 +342,7 @@ impl Connection {
                 || session_ctrl == u8::from(SessionControlKind::Close)
                 || op == OP_FLUSH
                 || finish
+                || reopen_finish
                 || reopen;
             if !lifecycle {
                 if !scoped {
@@ -407,6 +412,17 @@ impl Connection {
                     {
                         owner.state = SessionState::Active;
                     }
+                }
+                if response.status == 0
+                    && cqe.status() == 0
+                    && reopen_finish
+                    && TborSessionReopenFinishResp::decode_response(&response.payload).is_ok()
+                    && let Some(owner) = sessions.get_mut(&session_id)
+                {
+                    // Reopen re-keys the reset slot in place; firmware reverts a
+                    // failed attempt to NeedsRenegotiation, so only success
+                    // reactivates the lease.
+                    owner.state = SessionState::Active;
                 }
                 if response.status == 0
                     && cqe.status() == 0
