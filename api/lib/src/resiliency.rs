@@ -926,7 +926,7 @@ mod tests {
         assert_eq!(state.restore_epoch, 0);
     }
 
-    #[cfg(feature = "emu")]
+    #[cfg(any(feature = "emu", feature = "sock"))]
     #[test]
     fn aes_gcm_restore_preserves_ex_key_properties() {
         use crate::*;
@@ -934,7 +934,7 @@ mod tests {
         let info = HsmPartitionManager::partition_info_list()
             .into_iter()
             .next()
-            .expect("emulator partition");
+            .expect("partition");
         let rev = info.api_rev_range.expect("API revision range").max();
         let part = HsmPartitionManager::open_partition(&info.path, rev).expect("open partition");
         part.reset().expect("reset partition");

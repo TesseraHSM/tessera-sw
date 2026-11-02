@@ -22,8 +22,6 @@
 //!   tightest on the per-IO DMA budget; exercises the transient-vault
 //!   unwrap path that keeps it within 8 KB.
 
-#![cfg(feature = "emu")]
-
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::*;
@@ -172,17 +170,17 @@ fn rsa_4k_unwrap_roundtrip(crt: bool) {
 }
 
 #[test]
-fn unwrap_key_rsa_4k_emu() {
+fn unwrap_key_rsa_4k() {
     rsa_4k_unwrap_roundtrip(false);
 }
 
 #[test]
-fn unwrap_key_rsa_4k_crt_emu() {
+fn unwrap_key_rsa_4k_crt() {
     rsa_4k_unwrap_roundtrip(true);
 }
 
 #[test]
-fn unwrap_key_aes_emu() {
+fn unwrap_key_aes() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -198,7 +196,7 @@ fn unwrap_key_aes_emu() {
 
 /// Verifies all OAEP hashes unwrap symmetric keys and preserve an ECC public key.
 #[test]
-fn unwrap_key_all_oaep_hashes_emu() {
+fn unwrap_key_all_oaep_hashes() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = ctx
@@ -258,7 +256,7 @@ fn unwrap_key_all_oaep_hashes_emu() {
 
 /// Verifies an unknown OAEP selector is rejected even for a valid wrapped key.
 #[test]
-fn unwrap_key_unknown_oaep_hash_rejected_emu() {
+fn unwrap_key_unknown_oaep_hash_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = ctx
@@ -283,7 +281,7 @@ fn unwrap_key_unknown_oaep_hash_rejected_emu() {
 }
 
 #[test]
-fn unwrap_key_ecc_p256_emu() {
+fn unwrap_key_ecc_p256() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -306,7 +304,7 @@ fn unwrap_key_ecc_p256_emu() {
 }
 
 #[test]
-fn unwrap_key_hmac_emu() {
+fn unwrap_key_hmac() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -329,7 +327,7 @@ fn unwrap_key_hmac_emu() {
 }
 
 #[test]
-fn unwrap_key_rejects_invalid_usage_for_class_emu() {
+fn unwrap_key_rejects_invalid_usage_for_class() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -358,7 +356,7 @@ fn unwrap_key_rejects_invalid_usage_for_class_emu() {
 /// A 64-byte `K1 ‖ K2` imports as a single `AesXts512` key with no public
 /// key.
 #[test]
-fn unwrap_key_aes_xts_emu() {
+fn unwrap_key_aes_xts() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -377,7 +375,7 @@ fn unwrap_key_aes_xts_emu() {
 /// The AES-XTS class accepts exactly 64 bytes with distinct halves, and the
 /// plain AES class does not accept a 64-byte key.
 #[test]
-fn unwrap_key_aes_xts_rejects_invalid_material_emu() {
+fn unwrap_key_aes_xts_rejects_invalid_material() {
     let ctx = TestCtx::new();
     let sid = finalized_co_session(&ctx).session_id;
     let usage = KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT;
@@ -401,7 +399,7 @@ fn unwrap_key_aes_xts_rejects_invalid_material_emu() {
 /// An AES-XTS key is a cipher key: any usage other than encrypt+decrypt is
 /// rejected.
 #[test]
-fn unwrap_key_aes_xts_rejects_non_cipher_usage_emu() {
+fn unwrap_key_aes_xts_rejects_non_cipher_usage() {
     let ctx = TestCtx::new();
     let sid = finalized_co_session(&ctx).session_id;
 

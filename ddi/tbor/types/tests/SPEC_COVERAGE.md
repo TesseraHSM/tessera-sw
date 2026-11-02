@@ -563,11 +563,11 @@ Generates a double-wide AES-256-XTS key and returns it as one masked blob
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
-| Session, Ephemeral, and Local scopes generate fresh masked keys after `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_roundtrip_all_scopes_after_part_final` | Checks the length, that the blob is not all zero, and that each call returns a distinct blob |
-| Session scope works before `PartFinal` | ✅ | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_session_scope_before_finalize` | |
-| Ephemeral and Local scopes are rejected before `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_rejects_non_session_scope_before_finalize` | `InvalidArg` |
-| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_rejects_invalid_usage` | `InvalidPermissions` |
-| Invalid session ID is rejected | ✅ | `aes_xts_generate_key::emu_tests::aes_xts_generate_key_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+| Session, Ephemeral, and Local scopes generate fresh masked keys after `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_roundtrip_all_scopes_after_part_final` | Checks the length, that the blob is not all zero, and that each call returns a distinct blob |
+| Session scope works before `PartFinal` | ✅ | `aes_xts_generate_key::tests::aes_xts_generate_key_session_scope_before_finalize` | |
+| Ephemeral and Local scopes are rejected before `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_non_session_scope_before_finalize` | `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_invalid_usage` | `InvalidPermissions` |
+| Invalid session ID is rejected | ✅ | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
 
 ## `UnwrapKey` AES-XTS class (opcode in-session, gated)
 
@@ -576,9 +576,9 @@ Imports an RSA-AES-wrapped 64-byte AES-256-XTS key (`K1 ‖ K2`) as one
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
-| A 64-byte `K1 ‖ K2` imports as one `AesXts512` key | ✅ | `unwrap_key::unwrap_key_aes_xts_emu` | No public key |
-| Wrong length, equal halves, or a 64-byte key under the AES class is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_invalid_material_emu` | 32, 48 and 72 bytes; `InvalidArg` |
-| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_non_cipher_usage_emu` | `InvalidPermissions` |
+| A 64-byte `K1 ‖ K2` imports as one `AesXts512` key | ✅ | `unwrap_key::unwrap_key_aes_xts` | No public key |
+| Wrong length, equal halves, or a 64-byte key under the AES class is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_invalid_material` | 32, 48 and 72 bytes; `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_non_cipher_usage` | `InvalidPermissions` |
 | An imported key encrypts like the host AES-XTS reference | ✅ | `aes_xts_encrypt_decrypt::aes_xts_unwrapped_key_matches_host` | DUL 512, 4 units; decrypt round trip |
 
 ## `AesXtsEncryptDecrypt` (opcode in-session, gated, OOB in / out)

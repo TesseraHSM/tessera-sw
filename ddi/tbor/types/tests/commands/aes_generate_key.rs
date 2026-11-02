@@ -19,7 +19,6 @@
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
 //! * Unknown key size → `InvalidArg`.
 
-#![cfg(any(feature = "emu", feature = "mock", feature = "sock"))]
 // The shared masked-key helpers/constants below stay available under any
 // backend (so the module isn't emu-limited), but only the emu-gated tests
 // exercise them today; suppress dead-code noise in non-emu builds.
@@ -34,6 +33,7 @@ use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
+#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::AES_MODE_CBC;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;

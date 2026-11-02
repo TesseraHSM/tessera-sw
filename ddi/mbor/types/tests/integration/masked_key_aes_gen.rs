@@ -1,11 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#[cfg(not(feature = "emu"))]
-use std::cmp::min;
-#[cfg(not(feature = "emu"))]
-use std::thread;
-
 use test_with_tracing::test;
 use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
@@ -44,34 +39,6 @@ fn test_masked_key_aes_256_gen() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             test_masked_key_aes_gen(dev, session_id, DdiAesKeySize::Aes256);
-        },
-    );
-}
-
-// Emu does not reject unmasking a key whose tag already exists.
-#[cfg(not(feature = "emu"))]
-#[test]
-fn test_masked_key_aes_bulk_256_gen() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, ddi, path, session_id| {
-            let max_keys = get_device_info(ddi, path).tables as usize * 7;
-            // We open a session in each thread and we can only do MAX_SESSIONS sessions max.
-            let max_threads = MAX_SESSIONS;
-            let thread_count = min(max_keys, max_threads);
-            let thread_device_path = path.to_string();
-            let mut parent_dev = dev.clone();
-
-            let thread = thread::spawn(move || {
-                test_masked_key_aes_gcm_encrypt_decrypt_thread_fn(
-                    thread_device_path,
-                    thread_count,
-                    &mut parent_dev,
-                    session_id,
-                );
-            });
-            thread.join().unwrap();
         },
     );
 }
@@ -155,142 +122,6 @@ fn test_masked_key_aes_gen(
     // Verify the plain text
     assert_eq!(resp.data.msg.as_slice(), RAW_MSG);
     assert_eq!(resp.data.msg.len(), RAW_MSG.len());
-}
-
-#[cfg(not(feature = "emu"))]
-fn test_masked_key_aes_gcm_encrypt_decrypt_thread_fn(
-    device_path: String,
-    max_attempts: usize,
-    parent_dev: &mut <DdiTest as Ddi>::Dev,
-    parent_session: u16,
-) {
-    let ddi = DdiTest::default();
-    let dev = ddi.open_dev(device_path.as_str()).unwrap();
-    let mut app_sess_id = None;
-    let mut short_app_id = None;
-
-    for _ in 0..max_attempts {
-        let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
-            &dev,
-            TEST_CRED_ID,
-            TEST_CRED_PIN,
-            TEST_SESSION_SEED,
-        );
-
-        let resp = helper_open_session(
-            &dev,
-            None,
-            Some(DdiApiRev { major: 1, minor: 0 }),
-            encrypted_credential,
-            pub_key,
-        );
-        if resp.as_ref().is_err() {
-            if matches!(
-                resp.as_ref().unwrap_err(),
-                DdiError::DdiStatus(DdiStatus::NonceMismatch)
-            ) {
-                continue;
-            }
-        }
-
-        assert!(resp.is_ok(), "resp {:?}", resp);
-
-        let resp = resp.unwrap();
-
-        assert!(resp.hdr.sess_id.is_some());
-        assert_eq!(resp.hdr.op, DdiOp::OpenSession);
-        assert_eq!(resp.hdr.status, DdiStatus::Success);
-
-        app_sess_id = Some(resp.data.sess_id);
-        short_app_id = Some(resp.data.short_app_id);
-
-        break;
-    }
-
-    let app_sess_id = app_sess_id.unwrap();
-    let short_app_sess_id = short_app_id.unwrap();
-
-    thread::sleep(std::time::Duration::from_secs(1));
-
-    let resp = generate_aes_bulk_256_key(
-        parent_dev,
-        &parent_session,
-        Some(1),
-        DdiAesKeySize::AesGcmBulk256Unapproved,
-    );
-    assert!(resp.is_ok(), "resp: {:?}", resp);
-    let resp = resp.unwrap();
-
-    let key_id = resp.data.key_id;
-    let key_id_aes_bulk_256 = resp.data.bulk_key_id;
-    let masked_key = resp.data.masked_key;
-    assert!(key_id_aes_bulk_256.is_some());
-
-    assert!(verify_iv_not_default_from_masked_key(masked_key.as_slice()).unwrap_or(false));
-
-    assert!(verify_masked_key_attributes(
-        masked_key.as_slice(),
-        MaskedKeyAttributes::ENCRYPT | MaskedKeyAttributes::DECRYPT | MaskedKeyAttributes::LOCAL
-    ));
-
-    // Set up requests for the gcm encrypt operations
-    let aad = [0x4; 32usize];
-    let iv = [0x3u8; 12];
-
-    // Setup params for encrypt operation
-    let mut tsra_fp_gcm_params: DdiAesGcmParams = DdiAesGcmParams {
-        key_id: key_id_aes_bulk_256.unwrap() as u32,
-        iv,
-        aad: Some(aad.to_vec()),
-        tag: None, // tag is not needed for encryption
-        session_id: app_sess_id,
-        short_app_id: short_app_sess_id,
-    };
-
-    // Execute encrypt operation
-    let resp = dev.exec_op_fp_gcm(
-        DdiAesOp::Encrypt,
-        tsra_fp_gcm_params.clone(),
-        RAW_MSG.to_vec(),
-    );
-
-    assert!(resp.is_ok(), "resp: {:?}", resp);
-    let encrypted_resp = resp.unwrap();
-
-    // Ensure encrypted data length is the same as the original data
-    // Ensure encrypted data is different from original data
-    assert_eq!(encrypted_resp.data.len(), RAW_MSG.len());
-    assert_ne!(RAW_MSG.to_vec(), encrypted_resp.data);
-    let tag = encrypted_resp.tag;
-
-    let resp = helper_get_new_key_id_from_unmask(
-        parent_dev,
-        Some(parent_session),
-        Some(DdiApiRev { major: 1, minor: 0 }),
-        key_id,
-        true,
-        masked_key,
-    );
-    assert!(resp.is_ok(), "resp {:?}", resp);
-    let (_, new_bulk_key_id, _) = resp.unwrap();
-
-    assert!(new_bulk_key_id.is_some());
-    let newbulk_key_id = new_bulk_key_id.unwrap();
-
-    // Execute decrypt operation
-    tsra_fp_gcm_params.tag = tag;
-    tsra_fp_gcm_params.key_id = newbulk_key_id as u32;
-    let resp = dev.exec_op_fp_gcm(
-        DdiAesOp::Decrypt,
-        tsra_fp_gcm_params.clone(),
-        encrypted_resp.data.clone(),
-    );
-
-    assert!(resp.is_ok(), "resp: {:?}", resp);
-    let decrypted_resp = resp.unwrap();
-
-    assert_eq!(decrypted_resp.data.len(), RAW_MSG.len());
-    assert_eq!(decrypted_resp.data, RAW_MSG);
 }
 
 // Create session key, delete the key

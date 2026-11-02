@@ -19,9 +19,10 @@
 //!   OOB, a non-XTS key, a tampered key and an invalid session are
 //!   rejected.
 
-#![cfg(feature = "emu")]
+// The sock backend gains out-of-band output support in a later change.
+#![cfg(not(feature = "sock"))]
 
-use rand::RngExt;
+use tsra_crypto::Rng;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesXtsEncryptDecryptReq;
@@ -95,9 +96,14 @@ fn expect_reject(
 
 /// Random bytes of `len`.
 fn random(len: usize) -> Vec<u8> {
-    let mut v = vec![0u8; len];
-    rand::rng().fill(&mut v[..]);
-    v
+    Rng::rand_vec(len).expect("rng")
+}
+
+/// Random tweak that leaves room to advance across many data units.
+fn random_tweak() -> u64 {
+    let mut b = [0u8; 4];
+    Rng::rand_bytes(&mut b).expect("rng");
+    u32::from_le_bytes(b) as u64
 }
 
 /// Round trips across data-unit lengths, single and multiple units per
@@ -120,7 +126,7 @@ fn aes_xts_roundtrip_data_unit_lengths() {
             (XTS_DATA_MAX_LEN, 1),
         ] {
             let pt = random(dul * units);
-            let tweak = rand::rng().random::<u32>() as u64;
+            let tweak = random_tweak();
             let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, dul, &pt);
             assert_ne!(ct, pt, "dul {dul} units {units}");
             let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, dul, &ct);
@@ -282,7 +288,7 @@ fn aes_xts_unwrapped_key_matches_host() {
 
     let (dul, units) = (512, 4);
     let pt = random(dul * units);
-    let tweak = rand::rng().random::<u32>() as u64;
+    let tweak = random_tweak();
     let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, dul, &pt);
 
     let host_key = AesXtsKey::from_bytes(&key_bytes).expect("host XTS key");

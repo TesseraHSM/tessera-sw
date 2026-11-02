@@ -19,9 +19,10 @@
 //! * Non-AES-256 key, oversize data, inconsistent lengths, missing OOB
 //!   and an invalid session are rejected.
 
-#![cfg(feature = "emu")]
+// The sock backend gains out-of-band output support in a later change.
+#![cfg(not(feature = "sock"))]
 
-use rand::RngExt;
+use tsra_crypto::Rng;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
@@ -187,9 +188,7 @@ fn import_aes256(ctx: &TestCtx, sid: u16, key: &[u8]) -> Vec<u8> {
 
 /// Random bytes of `len`.
 fn random(len: usize) -> Vec<u8> {
-    let mut v = vec![0u8; len];
-    rand::rng().fill(&mut v[..]);
-    v
+    Rng::rand_vec(len).expect("rng")
 }
 
 /// McGrew–Viega test cases 13 (empty), 14 (one zero block) and 16

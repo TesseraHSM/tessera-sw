@@ -15,8 +15,6 @@
 //! * Usage other than encrypt + decrypt is rejected.
 //! * An invalid session id is rejected.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesXtsGenerateKeyReq;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
@@ -55,7 +53,7 @@ fn roundtrip(ctx: &TestCtx, session_id: u16, scope: u8) {
     );
 }
 
-mod emu_tests {
+mod tests {
     use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
     use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
     use tsra_ddi_tbor_types::TborStatus;
