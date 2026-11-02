@@ -53,6 +53,13 @@ const ROTATED_PSK: [u8; PSK_LEN] = [
     0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0,
 ];
 
+/// Expected length of an encrypted PSK change envelope.
+const PSK_CHANGE_ENVELOPE_LEN: usize = crate::commands::common::ENVELOPE_HEADER_LEN
+    + crate::commands::common::ENVELOPE_IV_LEN
+    + tsra_ddi_tbor_types::PSK_CHANGE_AAD_LEN
+    + PSK_LEN
+    + crate::commands::common::ENVELOPE_TAG_LEN;
+
 /// Build an AEAD-GCM envelope under `param_key` with a caller-controlled
 /// AAD and plaintext. Negative-path tests use this to exercise FW
 /// arms that reject mismatched AAD, wrong-length plaintexts,
@@ -462,8 +469,7 @@ fn psk_change_truncated_envelope_rejected() {
     let valid =
         encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
 
-    assert_eq!(valid.len(), 100);
-
+    assert_eq!(valid.len(), PSK_CHANGE_ENVELOPE_LEN);
     for len in [1usize, 4, 15, 16, 47, 48, 83, 84, 99] {
         let req = TborPskChangeReq {
             session_id: session.session_id(),
