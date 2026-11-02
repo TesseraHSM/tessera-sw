@@ -19,7 +19,6 @@
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
 //! * Unknown key size → `InvalidArg`.
 
-#![cfg(any(feature = "emu", feature = "mock", feature = "sock"))]
 // The shared masked-key helpers/constants below stay available under any
 // backend (so the module isn't emu-limited), but only the emu-gated tests
 // exercise them today; suppress dead-code noise in non-emu builds.
