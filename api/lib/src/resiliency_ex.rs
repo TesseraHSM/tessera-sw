@@ -24,6 +24,7 @@
 //!    `SessionReopenFinish`, which keeps session-scoped masked keys valid.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -98,6 +99,16 @@ pub(crate) struct ResiliencyExState {
     psks: Mutex<CapturedPsks>,
     /// The most recently opened CO session-ex on the owning partition.
     co_session: Mutex<Option<WeakHsmSession>>,
+    /// CU sessions-ex opened on the owning partition; a restore reopens
+    /// one of them to rotate the CU PSK without needing a spare slot.
+    cu_sessions: Mutex<Vec<WeakHsmSession>>,
+    /// Set when a reset is observed and cleared once the CU PSK has been
+    /// rotated back, so an interrupted restore still finishes it even
+    /// though the partition no longer reports the reset.
+    cu_rotation_pending: AtomicBool,
+    /// Sessions reopened by a restore whose epoch is not yet published;
+    /// `Some` while publication is outstanding.
+    unpublished: Mutex<Option<Vec<WeakHsmSession>>>,
     restore_epoch: AtomicU64,
 }
 
@@ -127,6 +138,9 @@ impl ResiliencyExState {
             config,
             psks: Mutex::new(CapturedPsks::default()),
             co_session: Mutex::new(None),
+            cu_sessions: Mutex::new(Vec::new()),
+            cu_rotation_pending: AtomicBool::new(false),
+            unpublished: Mutex::new(None),
             restore_epoch: AtomicU64::new(restore_epoch),
         })
     }
@@ -136,10 +150,48 @@ impl ResiliencyExState {
         self.restore_epoch.load(Ordering::Acquire)
     }
 
-    /// Tracks `session` as the partition's CO session so a restore can
-    /// reuse its (reset-reserved) slot.
-    pub(crate) fn track_co_session(&self, session: &HsmSession) {
-        *self.co_session.lock() = Some(session.downgrade());
+    /// Tracks `session` so a restore can reuse its (reset-reserved) slot:
+    /// the latest CO session, or any live CU session.
+    pub(crate) fn track_session(&self, psk_id: HsmPskId, session: &HsmSession) {
+        match psk_id {
+            HsmPskId::CO => *self.co_session.lock() = Some(session.downgrade()),
+            HsmPskId::CU => {
+                let mut sessions = self.cu_sessions.lock();
+                sessions.retain(|s| s.upgrade().is_some());
+                sessions.push(session.downgrade());
+            }
+        }
+    }
+
+    /// Returns the live tracked CU sessions.
+    fn cu_sessions(&self) -> Vec<HsmSession> {
+        self.cu_sessions
+            .lock()
+            .iter()
+            .filter_map(WeakHsmSession::upgrade)
+            .collect()
+    }
+
+    /// Whether a completed restore still has to publish its epoch.
+    pub(crate) fn publish_pending(&self) -> bool {
+        self.unpublished.lock().is_some()
+    }
+
+    /// Advances the restore epoch after a restore and marks the sessions
+    /// it reopened as current. If persisting the epoch fails, the
+    /// publication stays pending and is retried by the next restore.
+    pub(crate) fn publish_restore(&self, reopened: &[HsmSession]) -> HsmResult<()> {
+        let mut unpublished = self.unpublished.lock();
+        unpublished
+            .get_or_insert_with(Vec::new)
+            .extend(reopened.iter().map(HsmSession::downgrade));
+        let epoch = self.bump_epoch()?;
+        for session in unpublished.take().into_iter().flatten() {
+            if let Some(session) = session.upgrade() {
+                session.mark_restored(epoch);
+            }
+        }
+        Ok(())
     }
 
     /// Returns the tracked CO session, if it is still alive.
@@ -279,79 +331,110 @@ impl ResiliencyExState {
     /// Probes the partition on a private handle. When it was reset, or a
     /// previous restore stopped part-way, the provisioning is replayed on
     /// the tracked CO session (reopened in place) or, when none is alive,
-    /// a fresh CO session on a private handle.
+    /// a fresh CO session on a private handle. The captured CU PSK is then
+    /// restored through a tracked CU session (or a fresh one), retried
+    /// until it completes even if the partition no longer reports a reset.
     ///
-    /// Returns whether any device state was restored, and the tracked CO
-    /// session if it was reopened (so the caller can mark it current).
+    /// Returns whether any device state was restored, and the tracked
+    /// sessions it reopened (so the caller can mark them current).
     pub(crate) fn restore_device(
         &self,
         path: &str,
         rev: HsmApiRev,
-    ) -> HsmResult<(bool, Option<HsmSession>)> {
+    ) -> HsmResult<(bool, Vec<HsmSession>)> {
         // `PartInfo` is out-of-session, so probe the lifecycle state first.
         // An `Enabled` partition was reset: its PSKs are back to defaults.
         let probe = HsmPartitionManager::open_partition(path, rev)?;
         let state = ddi::part_state(&probe)?;
         let was_reset = state == PART_STATE_ENABLED;
+        if was_reset {
+            self.cu_rotation_pending.store(true, Ordering::Release);
+        }
+        let rotate_cu = self.cu_rotation_pending.load(Ordering::Acquire);
         let needs_sd = state == PART_STATE_INITIALIZED
             && !probe.sd_initialized()?
             && self.read(TSRA_STORAGE_EX_POK_LOCAL_BACKUP)?.is_some();
-        if !was_reset && state != PART_STATE_INITIALIZING && !needs_sd {
-            return Ok((false, None));
+        if !was_reset && state != PART_STATE_INITIALIZING && !needs_sd && !rotate_cu {
+            return Ok((false, Vec::new()));
         }
         // A reset parks every session in renegotiation, so the epoch must
         // advance even when there is no captured provisioning to replay.
         let mut restored = was_reset;
 
-        let co_psk = self.psk(HsmPskId::CO as u8);
-        let tracked = self.co_session();
-        let (co, rotated) = match &tracked {
-            Some(session) => {
-                drop(probe);
-                let rotated = reopen_restore_session(session, co_psk.as_deref(), was_reset)?;
-                (session.clone(), rotated)
-            }
-            None => open_restore_session(probe, rev, HsmPskId::CO, co_psk.as_deref(), was_reset)?,
-        };
-        restored |= rotated;
+        let mut reopened = Vec::new();
+        if was_reset || state == PART_STATE_INITIALIZING || needs_sd {
+            let co_psk = self.psk(HsmPskId::CO as u8);
+            let tracked = self.co_session();
+            let (co, rotated) = match &tracked {
+                Some(session) => {
+                    drop(probe);
+                    let rotated = reopen_restore_session(session, co_psk.as_deref(), was_reset)?;
+                    (session.clone(), rotated)
+                }
+                None => {
+                    open_restore_session(probe, rev, HsmPskId::CO, co_psk.as_deref(), was_reset)?
+                }
+            };
+            restored |= rotated;
 
-        match state {
-            PART_STATE_ENABLED => {
-                if let Some(params) = self.part_init_params()? {
-                    let init = co.part_init_ex(
-                        &params.policy,
-                        &params.mach_seed,
-                        &params.pota_thumbprint,
-                        &params.sata_thumbprint,
-                        params.sapota_thumbprint.as_deref(),
-                    )?;
-                    restored = true;
-                    self.finalize(&co, &params.policy, Some(&init))?;
-                    self.restore_sd(&co)?;
+            match state {
+                PART_STATE_ENABLED => {
+                    if let Some(params) = self.part_init_params()? {
+                        let init = co.part_init_ex(
+                            &params.policy,
+                            &params.mach_seed,
+                            &params.pota_thumbprint,
+                            &params.sata_thumbprint,
+                            params.sapota_thumbprint.as_deref(),
+                        )?;
+                        restored = true;
+                        self.finalize(&co, &params.policy, Some(&init))?;
+                        self.restore_sd(&co)?;
+                    }
                 }
-            }
-            PART_STATE_INITIALIZING => {
-                // A previous restore attempt stopped after `PartInit`.
-                if let Some(params) = self.part_init_params()? {
-                    restored = true;
-                    self.finalize(&co, &params.policy, None)?;
-                    self.restore_sd(&co)?;
+                PART_STATE_INITIALIZING => {
+                    // A previous restore attempt stopped after `PartInit`.
+                    if let Some(params) = self.part_init_params()? {
+                        restored = true;
+                        self.finalize(&co, &params.policy, None)?;
+                        self.restore_sd(&co)?;
+                    }
                 }
+                _ if needs_sd => restored |= self.restore_sd(&co)?,
+                _ => {}
             }
-            _ => restored |= self.restore_sd(&co)?,
+            drop(co);
+            reopened.extend(tracked);
+        } else {
+            drop(probe);
         }
-        drop(co);
 
-        if was_reset {
+        if rotate_cu {
             if let Some(cu_psk) = self.psk(HsmPskId::CU as u8) {
-                let part = HsmPartitionManager::open_partition(path, rev)?;
-                let (_cu, rotated) =
-                    open_restore_session(part, rev, HsmPskId::CU, Some(&cu_psk), true)?;
+                // Rotate through an existing CU slot: after a reset every
+                // pre-reset CU slot stays reserved, so a fresh open may
+                // find no free slot.
+                let mut rotated = None;
+                for cu in self.cu_sessions() {
+                    if let Ok(r) = reopen_restore_session(&cu, Some(&cu_psk), true) {
+                        rotated = Some(r);
+                        reopened.push(cu);
+                        break;
+                    }
+                }
+                let rotated = match rotated {
+                    Some(rotated) => rotated,
+                    None => {
+                        let part = HsmPartitionManager::open_partition(path, rev)?;
+                        open_restore_session(part, rev, HsmPskId::CU, Some(&cu_psk), true)?.1
+                    }
+                };
                 restored |= rotated;
             }
+            self.cu_rotation_pending.store(false, Ordering::Release);
         }
 
-        Ok((restored, tracked))
+        Ok((restored, reopened))
     }
 
     /// Runs `PartFinal` with the captured (or re-endorsed) PTA chain and

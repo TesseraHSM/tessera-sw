@@ -641,7 +641,8 @@ impl UnoHsmPal {
     /// (`SessionTable::mark_all_needs_renego`), mirroring `state.migrate()`'s
     /// `restore(backup())`: in-session ops fail with
     /// `SessionNeedsRenegotiation` until the host reopens the session, and
-    /// `CloseSession` still succeeds. Pending handshakes are released.
+    /// `CloseSession` still succeeds. Fresh Pending handshakes are released;
+    /// reopen-Pending slots retain their established session IDs.
     ///
     /// Provisioning survives NSSR with a freshly regenerated identity, and
     /// credentials can be re-established. A full [`part_disable`] additionally

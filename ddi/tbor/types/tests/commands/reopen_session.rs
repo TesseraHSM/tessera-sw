@@ -11,6 +11,7 @@
 #![cfg(feature = "emu")]
 
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::build_mac_fin;
@@ -150,6 +151,22 @@ fn reopen_finish_bmk_tampered_then_retry() {
         .expect_err("tampered bmk_session must fail");
     assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
     ctx.session_reopen(&prev, None).expect("retry reopen");
+}
+
+/// Closing a reopen-Pending slot frees it rather than reverting it to
+/// NeedsRenegotiation.
+#[test]
+fn close_during_reopen_frees_slot() {
+    let ctx = TestCtx::new();
+    let prev = erased_cu(&ctx);
+    ctx.session_reopen_init(prev.session_id, reopen_opts(&prev))
+        .expect("reopen init");
+    ctx.session_close(prev.session_id)
+        .expect("close reopen-Pending slot");
+    let err = ctx
+        .session_close(prev.session_id)
+        .expect_err("slot must be free after close");
+    assert_session_rejects(&err, TborStatus::SessionNotFound);
 }
 
 /// `SessionOpenFinish` cannot complete a reopen handshake.

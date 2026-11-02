@@ -40,7 +40,7 @@ use std::sync::atomic::Ordering;
 
 use tsra_api::*;
 use tsra_crypto::*;
-#[cfg(feature = "res-test")]
+#[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 use tsra_res_test_dev::DdiOp;
 use tsra_resiliency_test_helpers::FileLock;
 use tsra_resiliency_test_helpers::FileStorage;
@@ -55,7 +55,7 @@ use crate::utils::partition::*;
 /// re-running the BK3 flow (real-HW `init_bk3` is one-shot per power
 /// cycle). `EstablishCredential` is always invoked by both init and
 /// restore, so it is the reliable signal going forward.
-#[cfg(feature = "res-test")]
+#[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 pub(crate) fn bk3_op() -> DdiOp {
     DdiOp::EstablishCredential
 }
