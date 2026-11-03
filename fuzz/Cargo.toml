@@ -89,6 +89,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_part_info"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_part_info.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_sd_restore_peer_backup"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_sd_restore_peer_backup.rs"
 test = false
@@ -145,6 +152,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_key_report"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_key_report.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_establish_credential"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_establish_credential.rs"
 test = false
@@ -180,8 +194,22 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_unwrap_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_unwrap_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_hmac"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_hmac.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_hmac_generate_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_hmac_generate_key.rs"
 test = false
 
 [[bin]]
