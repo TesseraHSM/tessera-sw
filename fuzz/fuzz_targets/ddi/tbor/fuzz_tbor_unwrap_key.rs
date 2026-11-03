@@ -675,7 +675,7 @@ fn run(input: &Input<'_>) {
                 let result = ctx.tbor(&case.req);
                 assert!(
                     matches!(result, Err(DdiError::TborEncodeError)),
-                    "oversized transport request must fail host encoding: {result:?}"
+                    "oversized transport request must fail host encoding"
                 );
             }
         }

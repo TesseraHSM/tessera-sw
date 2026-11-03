@@ -284,7 +284,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput, baseline: &TborPartInfoResp) {
             ),
             Expected::CqeReject => assert!(
                 matches!(result, Err(DdiError::DdiError(status)) if status == REQUEST_DECODE_STATUS),
-                "expected CQE request-decode status {REQUEST_DECODE_STATUS:#x}, got {result:?}"
+                "unexpected CQE request-decode status"
             ),
         }
         assert_eq!(
