@@ -149,6 +149,15 @@ pub const SLOT_KEY_IN_OFFSET: usize = SLOT_SIG_OFFSET;
 /// [`SLOT_CT_OFFSET`]; decapsulation takes no public key.
 pub const SLOT_CT_IN_OFFSET: usize = SLOT_PK_OFFSET;
 
+/// Offset of the message SHAKE absorbs, mirroring `SLOT_SHAKE_IN_OFFSET` on
+/// FP. SHAKE uses no context string or signature, so its message may run on
+/// through those regions, up to [`SLOT_SHAKE_OUT_OFFSET`].
+pub const SLOT_SHAKE_IN_OFFSET: usize = SLOT_MSG_OFFSET;
+
+/// Offset of the SHAKE output, mirroring `SLOT_SHAKE_OUT_OFFSET` on FP.
+/// Borrows the public-key region, which SHAKE does not use.
+pub const SLOT_SHAKE_OUT_OFFSET: usize = SLOT_PK_OFFSET;
+
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;
 
@@ -160,6 +169,8 @@ const _: () = assert!(crate::request::PqcOp::MlDsaVerify as u32 == 3);
 const _: () = assert!(crate::request::PqcOp::MlKemGenerateKey as u32 == 4);
 const _: () = assert!(crate::request::PqcOp::MlKemEncapsulate as u32 == 5);
 const _: () = assert!(crate::request::PqcOp::MlKemDecapsulate as u32 == 6);
+const _: () = assert!(crate::request::PqcOp::Shake128 as u32 == 7);
+const _: () = assert!(crate::request::PqcOp::Shake256 as u32 == 8);
 
 /// A response read back from a core.
 #[derive(Debug, Clone, Copy)]
@@ -188,7 +199,8 @@ pub struct RequestParams<'a> {
     pub msg_len: u32,
     /// Length of the context string staged in the operand slot.
     pub ctx_len: u32,
-    /// Length of the signature staged in the operand slot (verify only).
+    /// Length of the signature staged in the operand slot (verify only);
+    /// for SHAKE, the number of output bytes requested.
     pub sig_len: u32,
     /// Length of the public key staged in the operand slot (verify only).
     pub pub_key_len: u32,

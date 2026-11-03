@@ -6,6 +6,7 @@
 use core::future::poll_fn;
 use core::task::Poll;
 
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_single_cell::SingleCell;
@@ -207,6 +208,13 @@ impl PqcDriver {
         sig: &[u8],
     ) -> HsmResult<bool> {
         self.with_engine(async |engine| engine.mldsa_verify(kind, pub_key, msg, ctx, sig).await)
+            .await
+    }
+
+    /// Hash `msg` with SHAKE on whichever FP core is free, filling `out`.
+    /// See [`PqcEngine::shake`].
+    pub async fn shake(&self, algo: HsmHashAlgo, msg: &[u8], out: &mut [u8]) -> HsmResult<()> {
+        self.with_engine(async |engine| engine.shake(algo, msg, out).await)
             .await
     }
 

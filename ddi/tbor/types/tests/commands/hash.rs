@@ -9,8 +9,6 @@
 //! against the output computed on the host with `tsra_crypto` (natural
 //! big-endian output), for every algorithm.
 
-#![cfg(feature = "emu")]
-
 use std::num::NonZeroUsize;
 
 use tsra_crypto::HashAlgo as CryptoHashAlgo;

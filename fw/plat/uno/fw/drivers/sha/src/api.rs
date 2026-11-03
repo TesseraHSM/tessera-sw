@@ -124,7 +124,7 @@ impl TryFrom<tsra_fw_hsm_pal_traits::HsmHashAlgo> for ShaMode {
             HsmHashAlgo::Sha256 => Ok(Self::Sha256),
             HsmHashAlgo::Sha384 => Ok(Self::Sha384),
             HsmHashAlgo::Sha512 => Ok(Self::Sha512),
-            // SHA-3 and SHAKE are not supported yet.
+            // The SHA engine has no SHA-3 modes; the PAL runs SHAKE on a PQC core.
             HsmHashAlgo::Sha3_256
             | HsmHashAlgo::Sha3_384
             | HsmHashAlgo::Sha3_512

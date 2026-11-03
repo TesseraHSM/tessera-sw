@@ -192,6 +192,7 @@ SHA-1, SHA-256, SHA-384, SHA-512, SHAKE128, and SHAKE256 through `TestCtx::tbor`
 validate successful responses byte-for-byte against `tsra_crypto`. Supported
 discriminants are `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512,
 `7` = SHAKE128, and `8` = SHAKE256; the SHAKE XOFs take an `out_len` of 1 to 256 bytes.
+The tests run on silicon as well as the emulator.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|

@@ -200,6 +200,11 @@ async fn doorbell(core_id: u8) -> ! {
 /// the public key straight into this core's operand slot.
 ///
 fn service(core_id: u8, req: &mailbox::Request) {
+    if matches!(req.op, mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256) {
+        service_shake(core_id, req);
+        return;
+    }
+
     // ML-KEM carries its own key kinds, so route on the operation first.
     if matches!(
         req.op,
@@ -412,6 +417,60 @@ const MAX_MLKEM_PK_LEN: usize = 1568;
 /// falling back to a byte-wise copy.
 #[repr(align(4))]
 struct Align4<const N: usize>([u8; N]);
+
+/// Bytes moved per step between the operand slot and dTCM when absorbing a
+/// SHAKE message and squeezing its output.
+const SHAKE_CHUNK: usize = 512;
+
+/// Hash the message staged in the operand slot with SHAKE128 or SHAKE256,
+/// writing `sig_len` bytes of output back into the slot.
+///
+/// Both directions go through a dTCM buffer: PSRAM is far cheaper to move
+/// in bursts (see [`mailbox::stage`]) than to feed the sponge byte by byte.
+#[inline(never)]
+fn service_shake(core_id: u8, req: &mailbox::Request) {
+    let out_len = req.sig_len;
+    // The message has to end before the output begins.
+    let fits = out_len != 0
+        && req.msg_len <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET
+        && out_len <= mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
+    let msg = if fits {
+        mailbox::slot_range(core_id, mailbox::SLOT_SHAKE_IN_OFFSET, req.msg_len)
+    } else {
+        None
+    };
+    let Some(msg) = msg else {
+        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        return;
+    };
+
+    let mut sponge = if req.op == mailbox::OP_SHAKE128 {
+        pqc_ml::keccak::shake128_init()
+    } else {
+        pqc_ml::keccak::shake256_init()
+    };
+    let mut buf = Align4([0u8; SHAKE_CHUNK]);
+    for part in msg.chunks(SHAKE_CHUNK) {
+        let staged = &mut buf.0[..part.len()];
+        mailbox::stage(staged, part);
+        sponge.absorb(staged);
+    }
+    sponge.finalize();
+
+    let Some(out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len)
+    else {
+        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        return;
+    };
+    for part in out.chunks_mut(SHAKE_CHUNK) {
+        let squeezed = &mut buf.0[..part.len()];
+        sponge.squeeze(squeezed);
+        mailbox::stage(part, squeezed);
+    }
+    buf.0.fill(0);
+
+    mailbox::respond(core_id, req, mailbox::STATUS_OK, out_len as u32);
+}
 
 /// Zero `n` bytes at `p`, eight words per store.
 ///

@@ -37,6 +37,14 @@
 //! [`hash_finish`](HsmHash::hash_finish) flushes whatever remains in
 //! `pending` with `auto_pad` enabled so the hardware appends standard SHA
 //! padding and writes the final truncated NIST digest.
+//!
+//! ## SHAKE
+//!
+//! The SHA engine has no SHA-3 modes, so SHAKE128 / SHAKE256 run on a PQC
+//! (fastpath) core via [`PqcDriver::shake`](tsra_fw_uno_drivers_pqc::PqcDriver::shake),
+//! which takes the whole message at once. The multi-step path therefore
+//! buffers the message (up to [`SHAKE_MSG_MAX`] bytes) in the context and
+//! submits it at [`hash_finish`](HsmHash::hash_finish).
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -44,6 +52,8 @@ use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_pqc::SHAKE_MSG_MAX;
+use tsra_fw_uno_drivers_pqc::SHAKE_OUT_MAX;
 use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_sha::ShaRequest;
 
@@ -66,6 +76,8 @@ pub struct HsmHashContext<'a> {
     /// Passed to the SHA engine on every submission.  On the final block the
     /// engine uses this value (plus the current message length) to construct
     /// the 64-bit or 128-bit length field in the SHA padding.
+    ///
+    /// For SHAKE, the number of message bytes buffered in [`buf`](Self::buf).
     byte_count: u32,
 
     /// Scope-allocated state buffer with layout `[digest(state_len) |
@@ -75,6 +87,8 @@ pub struct HsmHashContext<'a> {
     /// hardware submissions and ultimately receives the final digest. The
     /// pending region accumulates a partial block between
     /// [`hash_continue`](HsmHash::hash_continue) calls.
+    ///
+    /// For SHAKE, the buffered message ([`SHAKE_MSG_MAX`] bytes).
     buf: &'a mut HsmDmaBuf,
 
     /// Number of valid bytes currently stored in the pending region of
@@ -119,7 +133,8 @@ impl<'a> HsmHashContext<'a> {
     /// - `algo` — hash algorithm (e.g. SHA-256, SHA-512).
     /// - `buf` — alloc-allocated state storage for intermediate state, final
     ///   digest, and pending block storage. Must be at least
-    ///   [`HsmHashAlgo::hash_state_len`] bytes.
+    ///   [`HsmHashAlgo::hash_state_len`] bytes; for SHAKE, the message
+    ///   buffer.
     ///
     /// # Returns
     ///
@@ -175,7 +190,7 @@ impl HsmHash for UnoHsmPal {
     /// Computes a one-shot hash of the entire message.
     ///
     /// Delegates to [`sha_oneshot`](Self::sha_oneshot) with the hardware mode
-    /// derived from `algo`.
+    /// derived from `algo`, or to a PQC core for SHAKE.
     ///
     /// # Parameters
     ///
@@ -205,7 +220,13 @@ impl HsmHash for UnoHsmPal {
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
-        self.sha_oneshot(algo, data, digest).await?;
+        if algo.is_xof() {
+            self.pqc
+                .shake(algo, data, &mut digest[..digest_len])
+                .await?;
+        } else {
+            self.sha_oneshot(algo, data, digest).await?;
+        }
         if !big_endian {
             digest[..digest_len].reverse();
         }
@@ -228,8 +249,9 @@ impl HsmHash for UnoHsmPal {
     /// `Ok(HsmHashContext)` ready to accept data via
     /// [`hash_continue`](HsmHash::hash_continue),
     /// [`HsmError::UnsupportedDigestHashAlgorithm`] for an algorithm the SHA
-    /// engine cannot run (SHA-3, SHAKE), or [`HsmError::NotEnoughSpace`] if
-    /// the alloc cannot satisfy the allocation.
+    /// engine cannot run (SHA-3), [`HsmError::InvalidArg`] for a SHAKE output
+    /// longer than [`SHAKE_OUT_MAX`], or [`HsmError::NotEnoughSpace`] if the
+    /// alloc cannot satisfy the allocation.
     fn hash_begin<'a>(
         &self,
         _io: &UnoHsmIo,
@@ -239,6 +261,13 @@ impl HsmHash for UnoHsmPal {
     where
         Self: 'a,
     {
+        if algo.is_xof() {
+            if algo.digest_len() > SHAKE_OUT_MAX {
+                return Err(HsmError::InvalidArg);
+            }
+            let buf = alloc.dma_alloc(SHAKE_MSG_MAX)?;
+            return Ok(HsmHashContext::new(algo, buf));
+        }
         // Reject algorithms the SHA engine cannot run before allocating.
         ShaMode::try_from(algo)?;
         let buf = alloc.dma_alloc(algo.hash_state_len())?;
@@ -262,7 +291,8 @@ impl HsmHash for UnoHsmPal {
     /// # Returns
     ///
     /// `Ok(())` on success, or an [`HsmError`] if the cumulative message
-    /// length overflows `u32` or the hardware submission fails.
+    /// length overflows `u32` (for SHAKE, [`SHAKE_MSG_MAX`]) or the hardware
+    /// submission fails.
     async fn hash_continue(
         &self,
         io: &UnoHsmIo,
@@ -270,6 +300,16 @@ impl HsmHash for UnoHsmPal {
         data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let _ = io;
+        if ctx.algo.is_xof() {
+            let start = ctx.byte_count as usize;
+            let end = start
+                .checked_add(data.len())
+                .filter(|&end| end <= ctx.buf.len())
+                .ok_or(HsmError::InvalidArg)?;
+            ctx.buf[start..end].copy_from_slice(data);
+            ctx.byte_count = end as u32;
+            return Ok(());
+        }
         self.hash_continue_bytes(ctx, data).await
     }
 
@@ -306,9 +346,14 @@ impl HsmHash for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        let len = ctx.pending_len as usize;
-        self.sha_digest_block(&mut ctx, None, len, true).await?;
-        digest[..digest_len].copy_from_slice(&ctx.buf[..digest_len]);
+        if algo.is_xof() {
+            let msg = &ctx.buf[..ctx.byte_count as usize];
+            self.pqc.shake(algo, msg, &mut digest[..digest_len]).await?;
+        } else {
+            let len = ctx.pending_len as usize;
+            self.sha_digest_block(&mut ctx, None, len, true).await?;
+            digest[..digest_len].copy_from_slice(&ctx.buf[..digest_len]);
+        }
         if !big_endian {
             digest[..digest_len].reverse();
         }
@@ -374,8 +419,8 @@ impl UnoHsmPal {
         digest: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let byte_count = u32::try_from(message.len()).map_err(|_| HsmError::InvalidArg)?;
-        let req = ShaRequest::new(ShaMode::try_from(algo)?, message, digest)
-            .with_auto_pad(byte_count);
+        let req =
+            ShaRequest::new(ShaMode::try_from(algo)?, message, digest).with_auto_pad(byte_count);
         self.sha.digest(req).await
     }
 

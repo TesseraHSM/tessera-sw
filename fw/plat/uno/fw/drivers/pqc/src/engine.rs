@@ -3,6 +3,8 @@
 
 //! A claimed PQC engine, i.e. exclusive use of one FP core.
 
+use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_trace::tracing::*;
@@ -64,6 +66,16 @@ pub const MLDSA_CTX_MAX: usize = 255;
 /// Twice the ML-DSA seed, and carried in the mailbox's two 32-byte seed
 /// fields rather than a wider one.
 pub const MLKEM_SEED_LEN: usize = 64;
+
+/// Largest message [`PqcEngine::shake`] accepts: the TBOR `Hash` message
+/// cap, well inside the slot space before the SHAKE output.
+pub const SHAKE_MSG_MAX: usize = 2048;
+
+/// Largest SHAKE output: the rest of the slot after its output offset.
+pub const SHAKE_OUT_MAX: usize = mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
+
+const _: () =
+    assert!(SHAKE_MSG_MAX <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET);
 
 /// Encapsulation-key length per ML-KEM parameter set (FIPS 203 Table 3).
 pub fn mlkem_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
@@ -577,6 +589,47 @@ impl PqcEngine<'_> {
             s if s == STATUS_CRYPTO_FAILED => Ok(false),
             _ => Err(PqcError::FP_ERROR),
         }
+    }
+
+    /// Hash `msg` with SHAKE on this engine, filling all of `out`.
+    ///
+    /// # Parameters
+    /// * `algo` — [`HsmHashAlgo::Shake128`] or [`HsmHashAlgo::Shake256`];
+    ///   the output length is `out.len()`, not the length `algo` carries.
+    /// * `msg` — up to [`SHAKE_MSG_MAX`] bytes, staged into the operand slot.
+    /// * `out` — 1 to [`SHAKE_OUT_MAX`] bytes of output.
+    pub async fn shake(&mut self, algo: HsmHashAlgo, msg: &[u8], out: &mut [u8]) -> HsmResult<()> {
+        let op = match algo {
+            HsmHashAlgo::Shake128(_) => PqcOp::Shake128,
+            HsmHashAlgo::Shake256(_) => PqcOp::Shake256,
+            _ => return Err(HsmError::UnsupportedDigestHashAlgorithm),
+        };
+        if msg.len() > SHAKE_MSG_MAX || out.is_empty() || out.len() > SHAKE_OUT_MAX {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        if !mailbox::write_slot(self.id, mailbox::SLOT_SHAKE_IN_OFFSET, msg) {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+
+        let resp = self
+            .submit(&mailbox::RequestParams {
+                op: op as u32,
+                key_kind: 0,
+                xi: &[0u8; MLDSA_SEED_LEN],
+                rnd: &[0u8; MLDSA_SEED_LEN],
+                msg_len: msg.len() as u32,
+                ctx_len: 0,
+                sig_len: out.len() as u32,
+                pub_key_len: 0,
+            })
+            .await?;
+
+        if resp.out_len as usize != out.len()
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SHAKE_OUT_OFFSET, out)
+        {
+            return Err(PqcError::INVALID_BUFFER_SIZE);
+        }
+        Ok(())
     }
 
     /// Send a request to this engine's FP core and wait for its answer.

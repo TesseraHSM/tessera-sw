@@ -215,8 +215,9 @@ pub trait HsmHash: HsmIoTypes {
     /// - `Err(HsmError::UnsupportedDigestHashAlgorithm)` — the platform
     ///   cannot run `algo`.
     /// - `Err(HsmError::NotEnoughSpace)` — `alloc` cannot satisfy
-    ///   the state-buffer allocation
-    ///   ([`HsmHashAlgo::hash_state_len`] bytes).
+    ///   the context allocation (typically
+    ///   [`HsmHashAlgo::hash_state_len`] bytes; a PAL that buffers the
+    ///   message for an XOF needs more).
     fn hash_begin<'a>(
         &self,
         io: &Self::Io,
