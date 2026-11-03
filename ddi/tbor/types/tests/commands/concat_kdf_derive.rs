@@ -32,6 +32,8 @@ use tsra_ddi_tbor_types::CONCAT_KDF_ALG_X963;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE128;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
 use tsra_ddi_tbor_types::KDF_KEY_TYPE_AES128;
 use tsra_ddi_tbor_types::KDF_KEY_TYPE_AES192;
 use tsra_ddi_tbor_types::KDF_KEY_TYPE_AES256;
@@ -418,26 +420,28 @@ fn concat_kdf_var_hmac256_above_max_length_rejected() {
     );
 }
 
-/// Rejects an unsupported hash algorithm.
+/// Rejects unsupported hash algorithms: SHA-1 and the SHAKE XOFs.
 #[test]
 fn concat_kdf_unknown_hash_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let ikm = fresh_masked_secret(&ctx, session.session_id);
 
-    ctx.expect_fw_reject(
-        &TborConcatKdfDeriveReq {
-            session_id: session.session_id,
-            scope: SCOPE_LOCAL,
-            hash_algo: 0,
-            kdf_alg: CONCAT_KDF_ALG_X963,
-            key_type: KDF_KEY_TYPE_AES256,
-            key_length: 0,
-            masked_secret: ikm,
-            info: Vec::new(),
-        },
-        TborStatus::InvalidArg,
-    );
+    for hash_algo in [0, HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256] {
+        ctx.expect_fw_reject(
+            &TborConcatKdfDeriveReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                hash_algo,
+                kdf_alg: CONCAT_KDF_ALG_X963,
+                key_type: KDF_KEY_TYPE_AES256,
+                key_length: 0,
+                masked_secret: ikm.clone(),
+                info: Vec::new(),
+            },
+            TborStatus::InvalidArg,
+        );
+    }
 }
 
 /// Rejects an unsupported concatenation-KDF algorithm.

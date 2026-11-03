@@ -1719,30 +1719,41 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_hash_reclaims_input_and_grows_for_empty_messages() {
+        // 8-byte header plus four TOC slots (session_id, algo, out_len, msg).
+        const RESP_PREFIX_LEN: usize = 24;
         let (pal, io, sess_id) = crypto_fixture().await;
-        for size in [0, 3, HASH_MSG_MAX_LEN] {
-            let mut storage = [0xA5; 2100];
-            let address = storage.as_ptr();
-            let request_len = TborHashReq::encode(&mut storage)
-                .unwrap()
-                .session_id(u16::from(sess_id).into())
-                .unwrap()
-                .algo(HashAlgo::Sha512)
-                .unwrap()
-                .msg(&vec![0x42; size])
-                .unwrap()
-                .finish()
-                .len();
-            let capacity = exchange_capacity(opcode::HASH, request_len, 84);
-            let mut cmd_buf =
-                HsmCmdBuf::new(dma(&mut storage[..capacity]), request_len, 84).unwrap();
-            let outcome = hash::handle(&pal, &io, &mut cmd_buf).await;
-            let len = cmd_buf.finish_response(outcome).unwrap();
-            let response = cmd_buf.response(len).unwrap();
-            assert_eq!(response.as_ptr(), address);
-            let frame = TborHashResp::decode(response).unwrap();
-            assert_eq!(frame.digest().len(), HsmHashAlgo::Sha512.digest_len());
-            assert_eq!(len, 20 + frame.digest().len());
+        for (algo, out_len, digest_len) in [
+            (HashAlgo::Sha512, None, HsmHashAlgo::Sha512.digest_len()),
+            (HashAlgo::Shake256, Some(256), 256),
+        ] {
+            let host_capacity = RESP_PREFIX_LEN + digest_len;
+            for size in [0, 3, HASH_MSG_MAX_LEN] {
+                let mut storage = [0xA5; 2100];
+                let address = storage.as_ptr();
+                let request_len = TborHashReq::encode(&mut storage)
+                    .unwrap()
+                    .session_id(u16::from(sess_id).into())
+                    .unwrap()
+                    .algo(algo)
+                    .unwrap()
+                    .out_len(out_len)
+                    .unwrap()
+                    .msg(&vec![0x42; size])
+                    .unwrap()
+                    .finish()
+                    .len();
+                let capacity = exchange_capacity(opcode::HASH, request_len, host_capacity);
+                let mut cmd_buf =
+                    HsmCmdBuf::new(dma(&mut storage[..capacity]), request_len, host_capacity)
+                        .unwrap();
+                let outcome = hash::handle(&pal, &io, &mut cmd_buf).await;
+                let len = cmd_buf.finish_response(outcome).unwrap();
+                let response = cmd_buf.response(len).unwrap();
+                assert_eq!(response.as_ptr(), address);
+                let frame = TborHashResp::decode(response).unwrap();
+                assert_eq!(frame.digest().len(), digest_len);
+                assert_eq!(len, RESP_PREFIX_LEN + digest_len);
+            }
         }
     }
 

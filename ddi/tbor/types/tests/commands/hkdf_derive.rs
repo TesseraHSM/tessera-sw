@@ -312,27 +312,29 @@ fn hkdf_derive_is_stable_and_salt_info_separate_outputs() {
     }
 }
 
-/// Rejects an unsupported HKDF hash algorithm.
+/// Rejects unsupported HKDF hash algorithms, including the SHAKE XOFs.
 #[test]
 fn hkdf_derive_unknown_hash_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
 
-    ctx.expect_fw_reject(
-        &TborHkdfDeriveReq {
-            session_id: session.session_id,
-            scope: SCOPE_LOCAL,
-            hash_algo: u8::MAX,
-            key_type: KDF_KEY_TYPE_AES256,
-            key_length: 0,
-            masked_secret: ikm,
-            salt: Vec::new(),
-            info: Vec::new(),
-            key_label: Vec::new(),
-        },
-        TborStatus::InvalidArg,
-    );
+    for hash_algo in [HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
+        ctx.expect_fw_reject(
+            &TborHkdfDeriveReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                hash_algo,
+                key_type: KDF_KEY_TYPE_AES256,
+                key_length: 0,
+                masked_secret: ikm.clone(),
+                salt: Vec::new(),
+                info: Vec::new(),
+                key_label: Vec::new(),
+            },
+            TborStatus::InvalidArg,
+        );
+    }
 }
 
 /// Rejects an unsupported derived-key type.

@@ -128,8 +128,8 @@ impl TryFrom<tsra_fw_hsm_pal_traits::HsmHashAlgo> for ShaMode {
             HsmHashAlgo::Sha3_256
             | HsmHashAlgo::Sha3_384
             | HsmHashAlgo::Sha3_512
-            | HsmHashAlgo::Shake128
-            | HsmHashAlgo::Shake256 => Err(HsmError::UnsupportedDigestHashAlgorithm),
+            | HsmHashAlgo::Shake128(_)
+            | HsmHashAlgo::Shake256(_) => Err(HsmError::UnsupportedDigestHashAlgorithm),
         }
     }
 }

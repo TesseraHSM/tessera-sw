@@ -38,6 +38,8 @@ use tsra_ddi_tbor_types::HASH_ALGO_SHA1;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA384;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA512;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE128;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
 use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
 use crate::commands::common::CO;
@@ -257,12 +259,13 @@ fn hmac_generate_key_rejects_non_session_scopes_before_finalize() {
     }
 }
 
-/// Rejects unsupported HMAC hash algorithm discriminants.
+/// Rejects unsupported HMAC hash algorithm discriminants, including the SHAKE
+/// XOFs.
 #[test]
 fn hmac_generate_key_rejects_unknown_hash() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
-    for hash_algo in [0, 4, u8::MAX] {
+    for hash_algo in [0, 4, HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
         let req = TborHmacGenerateKeyReq {
             session_id: session.session_id,
             scope: SCOPE_EPHEMERAL,
@@ -652,7 +655,7 @@ fn hmac_generate_key_cu_rejects_unknown_hash() {
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
-    for hash_algo in [0u8, 4, u8::MAX] {
+    for hash_algo in [0u8, 4, HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
         let req = TborHmacGenerateKeyReq {
             session_id: session.session_id,
             scope: SCOPE_SESSION,

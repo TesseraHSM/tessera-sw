@@ -188,16 +188,17 @@ role's partition PSK still matches the compiled-in default.
 ## 'Hash' (opcode in-session, gated)
 
 Firmware integration coverage for the TBOR `Hash` command. These tests exercise
-SHA-1, SHA-256, SHA-384, and SHA-512 through `TestCtx::tbor` and validate successful
-responses byte-for-byte against `tsra_crypto`. Supported discriminants are
-`0` = SHA-1, `1` = SHA-256, `2` = SHA-384, and `3` = SHA-512.
+SHA-1, SHA-256, SHA-384, SHA-512, SHAKE128, and SHAKE256 through `TestCtx::tbor` and
+validate successful responses byte-for-byte against `tsra_crypto`. Supported
+discriminants are `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512,
+`7` = SHAKE128, and `8` = SHAKE256; the SHAKE XOFs take an `out_len` of 1 to 256 bytes.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
 | SHA-1, SHA-256, SHA-384, and SHA-512 match the host implementation for empty, short, and longer messages | ✅ 🔁 | `hash::hash_matches_host_all_algos` | Loops over all four algorithms via `HASH_ALGOS` and varied message sizes |
 | Unsupported hash algorithm is rejected with `InvalidArg` | ✅ | `hash::hash_unknown_algo_rejected` | Uses unsupported discriminant `255` (`u8::MAX`) |
 | Unknown session id is rejected with `SessionNotFound` | ✅ | `hash::hash_invalid_session_id_rejected` | Rotates the CU PSK and closes the bootstrap session before sending `u16::MAX` with no active session |
-| Multiple invalid algorithm discriminants are rejected with `InvalidArg` | ✅ 🔁 | `hash::hash_invalid_algos_rejected` | Rejects unsupported discriminants `4`, `127`, and `255`; `0` is SHA-1 |
+| Multiple invalid algorithm discriminants are rejected with `InvalidArg` | ✅ 🔁 | `hash::hash_invalid_algos_rejected` | Rejects `4`–`6` (reserved for SHA-3), `9`, `127`, and `255`; `0` is SHA-1 |
 | Arbitrary binary input hashes correctly | ✅ 🔁 | `hash::hash_binary_message_matches_host` | Includes `0x00`, `0x80`, and `0xff` bytes |
 | Different messages produce different digests | ✅ 🔁 | `hash::hash_different_messages_produce_different_digests` | Exercises all four supported algorithms |
 | SHA padding and compression-block boundaries match the host | ✅ 🔁 | `hash::hash_block_boundary_lengths_match_host` | Covers 55/56, 63/64/65, 111/112, and 127/128/129-byte boundaries |
@@ -218,6 +219,10 @@ responses byte-for-byte against `tsra_crypto`. Supported discriminants are
 | Closing a CO session releases it and a subsequently opened CU session can Hash normally | ✅ 🔁 | `hash::hash_new_session_works_after_previous_session_closed` | Also confirms the closed session id is rejected |
 | Maximum 2048-byte Hash message succeeds | ✅ 🔁 | `hash::hash_max_message_length_matches_host` | Exercises the protocol maximum for all four supported algorithms |
 | 2049-byte Hash message is rejected | ✅ 🔁 | `hash::hash_over_max_message_length_rejected` | Exercises all four algorithms; accepts rejection at the TBOR/firmware boundary without pinning where length validation occurs |
+| SHAKE128 and SHAKE256 match the host at output lengths from 1 to 256 bytes | ✅ 🔁 | `hash::hash_shake_matches_host` | Lengths 1, 16, 32, 64, 136, 168, 169, 255, and 256 (both sponge rates); empty, 3-, 1000-, and 2048-byte messages |
+| SHAKE128 and SHAKE256 known-answer vectors match | ✅ | `hash::hash_shake_known_answer_vectors` | FIPS 202 `"abc"` outputs: 32 bytes of SHAKE128, 64 bytes of SHAKE256 |
+| SHAKE without `out_len`, or with `out_len` 0 or above 256, is rejected with `InvalidArg` | ✅ 🔁 | `hash::hash_shake_invalid_out_len_rejected` | Also covers `u16::MAX` |
+| Fixed-length digests reject `out_len` with `InvalidArg` | ✅ 🔁 | `hash::hash_fixed_length_algos_reject_out_len` | Even when `out_len` equals the digest length |
 
 ## `GetCertChainInfo` (opcode out-of-session)
 
@@ -327,7 +332,7 @@ masked-key integrity, and unsupported SHA-1 generation.
 | Session-scoped generation succeeds before partition finalization | ✅ | `hmac_generate_key::hmac_generate_key_session_scope_before_finalize` | Uses rotated CO session before `PartFinal` |
 | SecurityDomain scope without a provisioned masking key → `UnsupportedKeyScope` | ✅ | `hmac_generate_key::hmac_generate_key_rejects_security_domain_scope` | SecurityDomain masking key is unavailable |
 | Ephemeral scope before partition finalization → `InvalidArg` | ✅ | `hmac_generate_key::hmac_generate_key_rejects_non_session_scopes_before_finalize` | Tests Ephemeral scope before `PartFinal` |
-| Unsupported HMAC hash algorithms → `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_rejects_unknown_hash` | CO; covers SHA-1 discriminant `0` and unsupported values `4` and `255` |
+| Unsupported HMAC hash algorithms → `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_rejects_unknown_hash` | CO; covers SHA-1 discriminant `0`, SHAKE `7` and `8`, and unsupported values `4` and `255` |
 | Unsupported key scopes → `UnsupportedKeyScope` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_rejects_unknown_scope` | Tests scope values `0`, `5`, and `255` |
 | CU can generate and use SHA-256/384/512 HMAC keys | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_crypto_user_session_scope` | Rotated CU session; Session scope |
 | Accept non-empty key label and generate usable key | ✅ | `hmac_generate_key::hmac_generate_key_accepts_non_empty_key_label` | Verifies successful generation and subsequent HMAC usage |
@@ -344,7 +349,7 @@ masked-key integrity, and unsupported SHA-1 generation.
 | Truncated masked-key envelope → `TborInvalidFixedLength` | ✅ | `hmac_generate_key::hmac_generate_key_truncated_masked_key_rejected` | Removes one byte before HMAC usage |
 | CU accepts valid variable HMAC key lengths | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_variable_lengths` | Tests nine SHA-256/384/512 key-length combinations |
 | CU rejects invalid key lengths with `InvalidKeyLength` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_rejects_invalid_lengths` | Tests zero, below-minimum, and above-maximum values |
-| CU rejects unsupported algorithms with `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_rejects_unknown_hash` | Covers SHA-1 discriminant `0` and unsupported values `4` and `255` |
+| CU rejects unsupported algorithms with `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_rejects_unknown_hash` | Covers SHA-1 discriminant `0`, SHAKE `7` and `8`, and unsupported values `4` and `255` |
 | CU accepts binary key labels | ✅ | `hmac_generate_key::hmac_generate_key_cu_accepts_binary_key_label` | Verifies generated key can be used for HMAC |
 | Closed CU session → `SessionNotFound` | ✅ | `hmac_generate_key::hmac_generate_key_cu_rejects_closed_session` | Rotated CU session closed before command |
 | SHA-256 rejects a 20-byte key with `InvalidKeyLength` | ✅ | `hmac_generate_key::hmac_generate_key_sha256_rejects_sha1_sized_key` | Verifies SHA-256 minimum length of 32 bytes |
@@ -534,7 +539,7 @@ scopes, salt/info handling, deterministic derivation, and invalid requests.
 | Empty and non-empty salt/info combinations are accepted | ✅ 🔁 | `hkdf_derive::hkdf_derive_optional_salt_info` | Covers all four combinations using SHA-1 and SHA-256 |
 | Maximum supported salt and info lengths are accepted | ✅ | `hkdf_derive::hkdf_derive_maximum_salt_and_info` | Uses SHA-512 and maximum-length salt/info buffers |
 | Identical inputs derive stable key material; changing salt or info changes the key | ✅ 🔁 | `hkdf_derive::hkdf_derive_is_stable_and_salt_info_separate_outputs` | Covers SHA-1 and SHA-256 using HMAC tags |
-| Unknown hash algorithm → `InvalidArg` | ✅ | `hkdf_derive::hkdf_derive_unknown_hash_rejected` | Uses unsupported discriminant `u8::MAX` |
+| Unknown hash algorithm → `InvalidArg` | ✅ | `hkdf_derive::hkdf_derive_unknown_hash_rejected` | Uses SHAKE discriminants `7` and `8` and unsupported `u8::MAX` |
 | Unknown derived-key type → `InvalidKeyType` | ✅ | `hkdf_derive::hkdf_derive_unknown_key_type_rejected` | Uses key type `99` |
 | SecurityDomain output scope → `UnsupportedKeyScope` | ✅ | `hkdf_derive::hkdf_derive_unsupported_scope_rejected` | Requests unsupported SecurityDomain scope |
 | Variable-length HMAC without explicit length → `InvalidKeyType` | ✅ | `hkdf_derive::hkdf_derive_var_hmac_missing_length_rejected` | Uses `key_length = 0` |

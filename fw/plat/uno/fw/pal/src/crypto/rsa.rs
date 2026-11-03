@@ -75,8 +75,8 @@ fn digest_info_prefix(algo: HsmHashAlgo) -> HsmResult<&'static [u8]> {
         HsmHashAlgo::Sha3_256
         | HsmHashAlgo::Sha3_384
         | HsmHashAlgo::Sha3_512
-        | HsmHashAlgo::Shake128
-        | HsmHashAlgo::Shake256 => return Err(HsmError::UnsupportedDigestHashAlgorithm),
+        | HsmHashAlgo::Shake128(_)
+        | HsmHashAlgo::Shake256(_) => return Err(HsmError::UnsupportedDigestHashAlgorithm),
     })
 }
 

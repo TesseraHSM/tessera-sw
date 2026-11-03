@@ -15,6 +15,7 @@
 //! | SHA-256   | 32 bytes    |
 //! | SHA-384   | 48 bytes    |
 //! | SHA-512   | 64 bytes    |
+//! | SHAKE128, SHAKE256 | the length the `HashAlgo` carries |
 //!
 //! ## Thread model
 //!

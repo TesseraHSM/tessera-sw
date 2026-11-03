@@ -14,6 +14,8 @@
 //! that provide SHA digest support. Higher-level DDI commands can build on it
 //! for operations such as signing and key derivation.
 
+use core::num::NonZeroU16;
+
 use super::*;
 
 /// Supported hash algorithms.
@@ -22,8 +24,11 @@ use super::*;
 /// own selectors (e.g. the Uno SHA driver's `ShaMode`, which numbers the
 /// algorithms differently) with a `match`, never by casting.
 ///
-/// The SHA-3 and SHAKE variants are not implemented yet: PALs reject them
+/// The SHAKE XOFs carry their output length, so [`digest_len`] is the length
+/// they produce. The SHA-3 variants are not implemented yet: PALs reject them
 /// with [`HsmError::UnsupportedDigestHashAlgorithm`].
+///
+/// [`digest_len`]: Self::digest_len
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmHashAlgo {
@@ -48,26 +53,30 @@ pub enum HsmHashAlgo {
     /// SHA3-512 (512-bit / 64-byte digest).
     Sha3_512 = 13,
 
-    /// SHAKE128 extendable output (XOF). Output size follows the output slice length.
-    Shake128 = 14,
+    /// SHAKE128 extendable output (XOF), producing the given number of bytes.
+    Shake128(NonZeroU16) = 14,
 
-    /// SHAKE256 extendable output (XOF). Output size follows the output slice length.
-    Shake256 = 15,
+    /// SHAKE256 extendable output (XOF), producing the given number of bytes.
+    Shake256(NonZeroU16) = 15,
 }
 
 impl HsmHashAlgo {
-    /// Returns the output digest length in bytes for the given algorithm.
-    ///
-    /// `0` for the XOFs ([`Shake128`](Self::Shake128),
-    /// [`Shake256`](Self::Shake256)), which have no fixed output length.
+    /// Returns the output length in bytes: the digest length, or the
+    /// requested output length of a SHAKE XOF.
     pub const fn digest_len(&self) -> usize {
         match self {
             HsmHashAlgo::Sha1 => 20,
             HsmHashAlgo::Sha256 | HsmHashAlgo::Sha3_256 => 32,
             HsmHashAlgo::Sha384 | HsmHashAlgo::Sha3_384 => 48,
             HsmHashAlgo::Sha512 | HsmHashAlgo::Sha3_512 => 64,
-            HsmHashAlgo::Shake128 | HsmHashAlgo::Shake256 => 0,
+            HsmHashAlgo::Shake128(len) | HsmHashAlgo::Shake256(len) => len.get() as usize,
         }
+    }
+
+    /// Returns `true` for the extendable-output functions (SHAKE128 and
+    /// SHAKE256).
+    pub const fn is_xof(&self) -> bool {
+        matches!(self, HsmHashAlgo::Shake128(_) | HsmHashAlgo::Shake256(_))
     }
 
     /// Block size in bytes for the algorithm; for SHA-3 and SHAKE, the
@@ -76,10 +85,10 @@ impl HsmHashAlgo {
         match self {
             HsmHashAlgo::Sha1 | HsmHashAlgo::Sha256 => 64,
             HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512 => 128,
-            HsmHashAlgo::Sha3_256 | HsmHashAlgo::Shake256 => 136,
+            HsmHashAlgo::Sha3_256 | HsmHashAlgo::Shake256(_) => 136,
             HsmHashAlgo::Sha3_384 => 104,
             HsmHashAlgo::Sha3_512 => 72,
-            HsmHashAlgo::Shake128 => 168,
+            HsmHashAlgo::Shake128(_) => 168,
         }
     }
 
@@ -93,8 +102,8 @@ impl HsmHashAlgo {
             HsmHashAlgo::Sha3_256
             | HsmHashAlgo::Sha3_384
             | HsmHashAlgo::Sha3_512
-            | HsmHashAlgo::Shake128
-            | HsmHashAlgo::Shake256 => 200,
+            | HsmHashAlgo::Shake128(_)
+            | HsmHashAlgo::Shake256(_) => 200,
         }
     }
 
@@ -203,6 +212,8 @@ pub trait HsmHash: HsmIoTypes {
     ///
     /// - `Ok(ctx)` — fresh hash context ready for
     ///   [`hash_continue`](Self::hash_continue).
+    /// - `Err(HsmError::UnsupportedDigestHashAlgorithm)` — the platform
+    ///   cannot run `algo`.
     /// - `Err(HsmError::NotEnoughSpace)` — `alloc` cannot satisfy
     ///   the state-buffer allocation
     ///   ([`HsmHashAlgo::hash_state_len`] bytes).
