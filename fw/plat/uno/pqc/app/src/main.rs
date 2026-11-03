@@ -203,6 +203,7 @@ async fn doorbell(core_id: u8) -> ! {
 fn service(core_id: u8, req: &mailbox::Request) {
     if matches!(req.op, mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256) {
         service_shake(core_id, req);
+        scrub_shake_stack();
         return;
     }
 
@@ -476,6 +477,31 @@ fn service_shake(core_id: u8, req: &mailbox::Request) {
     sponge.zeroize();
 
     mailbox::respond(core_id, req, mailbox::STATUS_OK, out_len as u32);
+}
+
+/// Bytes of stack [`scrub_shake_stack`] clears.
+///
+/// Covers [`service_shake`]'s frame and its deepest callee chain -- the
+/// sponge methods and the pqm4 Keccak assembly -- measured at about 0.9 KB,
+/// with headroom for codegen changes. ML-DSA verify claims far more from the
+/// same depth (see the table below), so this never reaches past stack the
+/// core already uses.
+const SHAKE_STACK_SCRUB: usize = 2048;
+
+/// Zero the stack [`service_shake`] just released.
+///
+/// Its frames are gone once it returns, but their bytes are not: the Keccak
+/// assembly drops a squeezed lane and its permutation scratch below the
+/// stack pointer without clearing them, and spilled registers can hold
+/// message-derived values. Called from the frame that called
+/// [`service_shake`], so this frame spans the same stack.
+#[inline(never)]
+fn scrub_shake_stack() {
+    let mut scratch = core::mem::MaybeUninit::<[u32; SHAKE_STACK_SCRUB / 4]>::uninit();
+    // SAFETY: `scratch` is this frame's own, word aligned and
+    // `SHAKE_STACK_SCRUB` bytes long.
+    unsafe { fast_zero(scratch.as_mut_ptr().cast::<u8>(), SHAKE_STACK_SCRUB) };
+    core::hint::black_box(&scratch);
 }
 
 /// Zero `n` bytes at `p`, eight words per store.

@@ -13,6 +13,7 @@ use tsra_fw_single_cell::SingleCell;
 
 use crate::engine::PqcEngine;
 use crate::error::PqcError;
+use crate::mailbox;
 use crate::pool::PqcState;
 use crate::shared_status;
 use crate::types::EngineId;
@@ -39,19 +40,42 @@ impl PqcDriver {
     /// Waiters are served FIFO: a task that queues is handed the next
     /// engine to be released, rather than racing tasks that arrive later.
     ///
+    /// Draining engines (see [`EngineState`](crate::EngineState))
+    /// rejoin the pool, scrubbed, once their core answers; nothing signals
+    /// that, so a waiter keeps polling while any engine is draining.
+    ///
     /// # Errors
     /// * [`PqcError::QUEUE_FULL`] — every waiter slot is taken.
+    /// * [`PqcError::FP_NOT_READY`] — every engine is draining, so none
+    ///   will be released until a core answers a request it has already
+    ///   missed its deadline for.
     pub async fn acquire_any(&self) -> HsmResult<PqcEngine<'_>> {
-        let mut queue_idx: Option<u8> = None;
+        // Withdraws from the queue if this future is dropped while waiting,
+        // so an engine handed to it is passed on rather than stranded.
+        let mut wait = WaitGuard {
+            driver: self,
+            idx: None,
+        };
 
         let result = poll_fn(|cx| {
             self.state.with(|s| {
+                s.reclaim_drained(mailbox::has_answered, mailbox::scrub);
+
                 // Already queued: take the engine if one has been handed over.
-                if let Some(idx) = queue_idx {
-                    return match s.poll_queue_slot(idx, cx) {
-                        Some(id) => Poll::Ready(Ok(id)),
-                        None => Poll::Pending,
-                    };
+                if let Some(idx) = wait.idx {
+                    if let Some(id) = s.poll_queue_slot(idx, cx) {
+                        wait.idx = None;
+                        return Poll::Ready(Ok(id));
+                    }
+                    if s.all_draining() {
+                        s.cancel_wait(idx);
+                        wait.idx = None;
+                        return Poll::Ready(Err(PqcError::FP_NOT_READY));
+                    }
+                    if s.has_draining() {
+                        cx.waker().wake_by_ref();
+                    }
+                    return Poll::Pending;
                 }
 
                 // Fast path, but only when nobody is waiting — otherwise a
@@ -61,12 +85,18 @@ impl PqcDriver {
                         return Poll::Ready(Ok(id));
                     }
                 }
+                if s.all_draining() {
+                    return Poll::Ready(Err(PqcError::FP_NOT_READY));
+                }
 
                 let Some(idx) = s.reserve_queue_slot() else {
                     return Poll::Ready(Err(PqcError::QUEUE_FULL));
                 };
-                queue_idx = Some(idx);
+                wait.idx = Some(idx);
                 s.poll_queue_slot(idx, cx);
+                if s.has_draining() {
+                    cx.waker().wake_by_ref();
+                }
                 Poll::Pending
             })
         })
@@ -77,9 +107,10 @@ impl PqcDriver {
                 driver: self,
                 id,
                 released: false,
+                in_flight: None,
             }),
-            // The closure's only error is `QUEUE_FULL`, returned before a
-            // slot is reserved, so there is never a slot to give back here.
+            // Errors are returned before a slot is reserved, or after the
+            // waiter has withdrawn, so there is never a slot to give back.
             Err(e) => Err(e),
         }
     }
@@ -235,6 +266,11 @@ impl PqcDriver {
         self.state.with(|s| s.release_engine(id));
     }
 
+    /// Withhold an engine whose request `seq` may still be running.
+    pub(crate) fn quarantine_engine(&self, id: EngineId, seq: u32) {
+        self.state.with(|s| s.quarantine_engine(id, seq));
+    }
+
     /// Number of engines currently idle.  Diagnostics only.
     pub fn free_engines(&self) -> u32 {
         self.state.with(|s| s.free_mask.count_ones())
@@ -244,6 +280,21 @@ impl PqcDriver {
 impl Default for PqcDriver {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A waiter's queue slot, withdrawn if [`PqcDriver::acquire_any`] is
+/// dropped before it collects an engine.
+struct WaitGuard<'a> {
+    driver: &'a PqcDriver,
+    idx: Option<u8>,
+}
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(idx) = self.idx.take() {
+            self.driver.state.with(|s| s.cancel_wait(idx));
+        }
     }
 }
 

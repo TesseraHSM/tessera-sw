@@ -149,19 +149,47 @@ pub fn mlkem_sec_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
 /// Exclusive claim on one FP core.
 ///
 /// Returned by [`PqcDriver::acquire_any`].  The engine is returned to the
-/// pool by [`release`](Self::release); `Drop` cannot do it because
-/// releasing may hand the engine straight to a waiting task, which needs
-/// access to driver state.
+/// pool by [`release`](Self::release), or by `Drop` as a safety net.
+///
+/// An engine let go of while a request is still running on its core — the
+/// request timed out, or its future was dropped — is not returned to the
+/// pool but quarantined until the core answers; see
+/// [`EngineState::Draining`](crate::EngineState::Draining).
 pub struct PqcEngine<'a> {
     pub(crate) driver: &'a PqcDriver,
     pub(crate) id: EngineId,
     pub(crate) released: bool,
+    /// Sequence number of a request posted to the core whose answer has not
+    /// been collected. Left set when [`submit_raw`](Self::submit_raw) times
+    /// out or is cancelled.
+    pub(crate) in_flight: Option<u32>,
 }
 
 impl PqcEngine<'_> {
     /// Which FP core this engine is.
     pub fn id(&self) -> EngineId {
         self.id
+    }
+
+    /// Make sure no earlier request is still running before this engine's
+    /// slot or mailbox is touched again.
+    ///
+    /// Only reachable by holding an engine across operations after one
+    /// timed out: staging would otherwise overwrite operands the core may
+    /// still be reading, and its late output could land in the new
+    /// request's. Once the core has answered, scrub what it left.
+    ///
+    /// # Errors
+    /// * [`PqcError::FP_NOT_READY`] — the core has still not answered.
+    fn settle(&mut self) -> HsmResult<()> {
+        if let Some(prev) = self.in_flight {
+            if !mailbox::has_answered(self.id, prev) {
+                return Err(PqcError::FP_NOT_READY);
+            }
+            mailbox::scrub(self.id);
+            self.in_flight = None;
+        }
+        Ok(())
     }
 
     /// Generate an ML-DSA keypair on this engine.
@@ -301,6 +329,7 @@ impl PqcEngine<'_> {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
+        self.settle()?;
         // Stage the bulk inputs before posting: the core reads them only
         // after seeing the request sequence number, which is written last.
         if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
@@ -457,6 +486,7 @@ impl PqcEngine<'_> {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
+        self.settle()?;
         if !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pub_key) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -504,6 +534,7 @@ impl PqcEngine<'_> {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
+        self.settle()?;
         // The decapsulation key occupies the region the ciphertext used to
         // use, so the ciphertext moves to the public-key region — which
         // decapsulation does not otherwise touch.
@@ -561,6 +592,7 @@ impl PqcEngine<'_> {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
+        self.settle()?;
         if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
             || !mailbox::write_slot(self.id, mailbox::SLOT_CTX_OFFSET, ctx)
             || !mailbox::write_slot(self.id, mailbox::SLOT_SIG_OFFSET, sig)
@@ -611,6 +643,7 @@ impl PqcEngine<'_> {
         let out = out
             .get_mut(..out_len)
             .ok_or(PqcError::INVALID_BUFFER_SIZE)?;
+        self.settle()?;
         if !mailbox::write_slot(self.id, mailbox::SLOT_SHAKE_IN_OFFSET, msg) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -679,8 +712,14 @@ impl PqcEngine<'_> {
         // debugging build if you need to see what the cores are
         // publishing.
 
+        // Operations that stage operands settle before staging; this covers
+        // the ones that use only the mailbox.
+        self.settle()?;
         let seq = self.driver.next_request_seq();
         mailbox::post_request(self.id, seq, params);
+        // Cleared when the answer is collected. If this future is dropped
+        // or gives up first, releasing the engine quarantines it instead.
+        self.in_flight = Some(seq);
 
         doorbell::ring(self.id, seq);
 
@@ -690,6 +729,7 @@ impl PqcEngine<'_> {
         let yield_deadline = embassy_time::Instant::now() + SUBMIT_YIELD_WINDOW;
         while embassy_time::Instant::now() < yield_deadline {
             if let Some(resp) = mailbox::take_response(self.id, seq) {
+                self.in_flight = None;
                 return Ok(resp);
             }
             embassy_futures::yield_now().await;
@@ -697,6 +737,7 @@ impl PqcEngine<'_> {
 
         for _ in 0..SUBMIT_POLL_ATTEMPTS {
             if let Some(resp) = mailbox::take_response(self.id, seq) {
+                self.in_flight = None;
                 return Ok(resp);
             }
             embassy_time::Timer::after(SUBMIT_POLL_INTERVAL).await;
@@ -756,23 +797,34 @@ impl PqcEngine<'_> {
     /// place: `release` would become `async fn release(self) ->
     /// HsmResult<()>`, send a wipe request, and `Drop` would need the
     /// same synchronous fallback UPKA uses.
+    ///
+    /// An engine whose last request is still running (it timed out) is
+    /// quarantined rather than returned; see
+    /// [`EngineState::Draining`](crate::EngineState::Draining).
     pub fn release(mut self) {
-        if !self.released {
-            self.released = true;
-            self.driver.release_engine(self.id);
+        self.give_back();
+    }
+
+    /// Return this engine to the pool, or quarantine it if a request may
+    /// still be running on its core. Idempotent.
+    fn give_back(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        match self.in_flight.take() {
+            Some(seq) => self.driver.quarantine_engine(self.id, seq),
+            None => self.driver.release_engine(self.id),
         }
     }
 }
 
 impl Drop for PqcEngine<'_> {
     /// Safety net for an engine dropped without [`release`](Self::release)
-    /// — an early `?` on an error path, say.  Without this the engine would
-    /// be leaked from the pool and, after three such leaks, PQC would wedge
-    /// permanently.
+    /// — an early `?` on an error path, or a future cancelled mid-request.
+    /// Without this the engine would be leaked from the pool and, after
+    /// three such leaks, PQC would wedge permanently.
     fn drop(&mut self) {
-        if !self.released {
-            self.released = true;
-            self.driver.release_engine(self.id);
-        }
+        self.give_back();
     }
 }

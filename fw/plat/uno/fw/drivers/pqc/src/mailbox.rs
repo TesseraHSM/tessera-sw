@@ -478,6 +478,32 @@ pub fn take_response(engine: EngineId, seq: u32) -> Option<Response> {
     }
 }
 
+/// True if `engine`'s core has answered request `seq`.
+pub fn has_answered(engine: EngineId, seq: u32) -> bool {
+    // SAFETY: as `take_response`.
+    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) == seq }
+}
+
+/// Wipe everything a request can leave in `engine`'s shared memory: the
+/// whole operand slot and the seed words of its mailbox.
+///
+/// Only once the core has answered: it may still be reading operands, or
+/// about to write results, until then.
+pub fn scrub(engine: EngineId) {
+    // Order the wipe after the sequence-number load that showed the core
+    // has answered, as `take_response` orders its reads.
+    dmb();
+    clear_slot(engine, 0, SLOT_SIZE);
+    let mb = mailbox(engine);
+    // SAFETY: as `post_request`.
+    unsafe {
+        for i in 0..SEED_LEN / 4 {
+            write_volatile(mb.add(word::XI + i), 0);
+            write_volatile(mb.add(word::RND + i), 0);
+        }
+    }
+}
+
 /// First word of the fastpath crash record; see the FP app's `crash`
 /// module. Sits above the request and response fields.
 const CRASH_WORD: usize = 48;

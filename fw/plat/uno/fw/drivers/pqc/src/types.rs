@@ -99,6 +99,13 @@ pub enum EngineState {
 
     /// Assigned to a task, which may or may not have work in flight.
     Busy,
+
+    /// Released while request `seq` may still be running on the core: a
+    /// timeout or a cancelled future let go of it before the answer
+    /// arrived. Withheld from the pool until the core answers, so a new
+    /// request cannot overwrite operands it is still reading or receive its
+    /// late output, then scrubbed before reuse.
+    Draining(u32),
 }
 
 /// Lifecycle state of one queue slot.

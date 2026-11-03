@@ -699,13 +699,14 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Rejects SHA-3 and SHAKE before anything is sized by them.
+        let prefix = digest_info_prefix(algo)?;
         let k = key_size.modulus_len();
         let digest_len = algo.digest_len();
         if message_hash.len() != digest_len || signature.len() < k {
             return Err(HsmError::InvalidArg);
         }
 
-        let prefix = digest_info_prefix(algo)?;
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Err(HsmError::InvalidArg);
@@ -739,6 +740,10 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Rejects SHA-3 and SHAKE before the modular exponentiation, so an
+        // unsupported hash is reported as such rather than as a bad
+        // signature, and costs no PKA operation.
+        let prefix = digest_info_prefix(algo)?;
         let k = key_size.modulus_len();
         let digest_len = algo.digest_len();
         if message_hash.len() != digest_len || signature.len() != k {
@@ -754,7 +759,6 @@ impl HsmRsa for UnoHsmPal {
             return Ok(false);
         }
 
-        let prefix = digest_info_prefix(algo)?;
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Ok(false);

@@ -45,6 +45,12 @@
 //! which takes the whole message at once. The multi-step path therefore
 //! buffers the message (up to [`SHAKE_MSG_MAX`] bytes) in the context and
 //! submits it at [`hash_finish`](HsmHash::hash_finish).
+//!
+//! With `bulk_crypto` the FP cores run the bulk-crypto firmware, which has
+//! no PQC engine, so SHAKE is refused with
+//! [`HsmError::UnsupportedDigestHashAlgorithm`] before anything is written to
+//! the PQC mailboxes (which overlay that firmware's HSM↔FP IPC rings), as
+//! ML-DSA and ML-KEM are.
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -184,6 +190,15 @@ impl<'a> HsmHashContext<'a> {
 // HsmHash trait implementation
 // ---------------------------------------------------------------------------
 
+/// Refuse SHAKE when the FP cores have no PQC engine; see the module docs.
+fn shake_available() -> HsmResult<()> {
+    if cfg!(feature = "bulk_crypto") {
+        Err(HsmError::UnsupportedDigestHashAlgorithm)
+    } else {
+        Ok(())
+    }
+}
+
 impl HsmHash for UnoHsmPal {
     type HashCtx<'a> = HsmHashContext<'a>;
 
@@ -223,6 +238,7 @@ impl HsmHash for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         if algo.is_xof() {
+            shake_available()?;
             // Reject what the PQC core cannot take before claiming one.
             if data.len() > SHAKE_MSG_MAX || digest_len > SHAKE_OUT_MAX {
                 return Err(HsmError::InvalidArg);
@@ -253,7 +269,8 @@ impl HsmHash for UnoHsmPal {
     /// `Ok(HsmHashContext)` ready to accept data via
     /// [`hash_continue`](HsmHash::hash_continue),
     /// [`HsmError::UnsupportedDigestHashAlgorithm`] for an algorithm the SHA
-    /// engine cannot run (SHA-3), [`HsmError::InvalidArg`] for a SHAKE output
+    /// engine cannot run (SHA-3), or SHAKE with `bulk_crypto`,
+    /// [`HsmError::InvalidArg`] for a SHAKE output
     /// longer than [`SHAKE_OUT_MAX`], or [`HsmError::NotEnoughSpace`] if the
     /// alloc cannot satisfy the allocation.
     fn hash_begin<'a>(
@@ -266,6 +283,7 @@ impl HsmHash for UnoHsmPal {
         Self: 'a,
     {
         if algo.is_xof() {
+            shake_available()?;
             if algo.digest_len() > SHAKE_OUT_MAX {
                 return Err(HsmError::InvalidArg);
             }

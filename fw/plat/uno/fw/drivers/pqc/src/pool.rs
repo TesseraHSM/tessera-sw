@@ -202,7 +202,9 @@ impl PqcState {
 
         match waiter {
             Some(idx) => {
-                // Stays busy: ownership transfers directly to the waiter.
+                // Ownership transfers directly to the waiter. Marked busy
+                // explicitly: a reclaimed engine arrives here draining.
+                self.engines[id.raw() as usize].state = EngineState::Busy;
                 self.queue[idx].state = QueueSlotState::Assigned(id);
                 self.queue[idx].waker.wake();
             }
@@ -210,6 +212,97 @@ impl PqcState {
                 self.engines[id.raw() as usize].state = EngineState::Idle;
                 self.free_mask |= 1u8 << id.raw();
             }
+        }
+    }
+
+    /// Withhold an engine released while request `seq` may still be running
+    /// on its core; see [`EngineState::Draining`].
+    ///
+    /// Wakes every waiter: each must start polling for the core's answer
+    /// (see [`PqcDriver::acquire_any`](crate::PqcDriver::acquire_any)), and
+    /// if no engine is left that will ever be released, give up.
+    pub(crate) fn quarantine_engine(&mut self, id: EngineId, seq: u32) {
+        self.engines[id.raw() as usize].state = EngineState::Draining(seq);
+        let mut idx = self.wait_head;
+        while idx != NO_SLOT {
+            self.queue[idx as usize].waker.wake();
+            idx = self.queue[idx as usize].next;
+        }
+    }
+
+    /// True if any engine is draining.
+    pub(crate) fn has_draining(&self) -> bool {
+        self.engines
+            .iter()
+            .any(|e| matches!(e.state, EngineState::Draining(_)))
+    }
+
+    /// True if every engine is draining, so none is idle and none will be
+    /// released until a core answers a request it has already missed the
+    /// deadline for.
+    pub(crate) fn all_draining(&self) -> bool {
+        self.engines
+            .iter()
+            .all(|e| matches!(e.state, EngineState::Draining(_)))
+    }
+
+    /// Return draining engines whose cores have since answered.
+    ///
+    /// `answered(id, seq)` reports whether core `id` has answered request
+    /// `seq`; `scrub(id)` wipes what the request left in shared memory and
+    /// runs before the engine is handed on.
+    pub(crate) fn reclaim_drained(
+        &mut self,
+        mut answered: impl FnMut(EngineId, u32) -> bool,
+        mut scrub: impl FnMut(EngineId),
+    ) {
+        for i in 0..ENGINES {
+            if let EngineState::Draining(seq) = self.engines[i].state {
+                let id = EngineId::new(i as u8);
+                if answered(id, seq) {
+                    scrub(id);
+                    self.release_engine(id);
+                }
+            }
+        }
+    }
+
+    /// Withdraw the waiter in queue slot `idx`, which has stopped waiting.
+    ///
+    /// An engine already handed to it goes to the next waiter instead, so a
+    /// waiter that leaves cannot strand one.
+    pub(crate) fn cancel_wait(&mut self, idx: u8) {
+        match self.queue[idx as usize].state {
+            QueueSlotState::Free => return,
+            QueueSlotState::Pending => self.unlink_waiter(idx),
+            // Left the wait ring when it was assigned.
+            QueueSlotState::Assigned(id) => self.release_engine(id),
+        }
+        let slot = &mut self.queue[idx as usize];
+        slot.state = QueueSlotState::Free;
+        slot.next = self.free_head;
+        self.free_head = idx;
+    }
+
+    /// Remove `idx` from the wait ring.
+    fn unlink_waiter(&mut self, idx: u8) {
+        let mut prev = NO_SLOT;
+        let mut cur = self.wait_head;
+        while cur != NO_SLOT && cur != idx {
+            prev = cur;
+            cur = self.queue[cur as usize].next;
+        }
+        if cur != idx {
+            return;
+        }
+        let next = self.queue[idx as usize].next;
+        if prev == NO_SLOT {
+            self.wait_head = next;
+        } else {
+            self.queue[prev as usize].next = next;
+        }
+        if self.wait_tail == idx {
+            self.wait_tail = prev;
         }
     }
 }
@@ -334,5 +427,81 @@ mod tests {
                 "slot {expected} should have been served in turn"
             );
         }
+    }
+
+    /// An engine released with a request still running stays out of the
+    /// pool until its core answers, and is scrubbed before anyone gets it.
+    #[test]
+    fn draining_engine_waits_for_its_core_and_is_scrubbed() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+        let waiter = state.reserve_queue_slot().expect("slot");
+
+        state.quarantine_engine(EngineId::new(1), 7);
+        state.reclaim_drained(
+            |_, _| false,
+            |_| panic!("scrubbed before the core answered"),
+        );
+        assert!(state.has_draining());
+        assert!(
+            collect(&mut state, waiter).is_none(),
+            "a draining engine must not be handed out"
+        );
+
+        let mut scrubbed = None;
+        state.reclaim_drained(
+            |id, seq| id == EngineId::new(1) && seq == 7,
+            |id| scrubbed = Some(id),
+        );
+        assert_eq!(scrubbed, Some(EngineId::new(1)));
+        assert!(!state.has_draining());
+        assert_eq!(collect(&mut state, waiter), Some(EngineId::new(1)));
+        assert_eq!(state.engines[1].state, EngineState::Busy);
+    }
+
+    /// Only when every engine is draining is there nothing left to wait for.
+    #[test]
+    fn all_draining_only_when_every_engine_is() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+        for i in 0..ENGINES as u8 - 1 {
+            state.quarantine_engine(EngineId::new(i), u32::from(i));
+        }
+        assert!(!state.all_draining());
+        state.quarantine_engine(EngineId::new(ENGINES as u8 - 1), 9);
+        assert!(state.all_draining());
+    }
+
+    /// A waiter that leaves is skipped, and one that leaves after being
+    /// handed an engine passes it on instead of stranding it.
+    #[test]
+    fn cancelled_waiters_leave_the_queue_and_pass_on_engines() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+
+        let a = state.reserve_queue_slot().expect("slot");
+        let b = state.reserve_queue_slot().expect("slot");
+        let c = state.reserve_queue_slot().expect("slot");
+        state.cancel_wait(b);
+        state.release_engine(EngineId::new(0));
+        assert_eq!(collect(&mut state, a), Some(EngineId::new(0)));
+        state.release_engine(EngineId::new(1));
+        assert_eq!(collect(&mut state, c), Some(EngineId::new(1)));
+        assert!(!state.has_waiters());
+
+        let d = state.reserve_queue_slot().expect("slot");
+        let e = state.reserve_queue_slot().expect("slot");
+        state.release_engine(EngineId::new(2));
+        state.cancel_wait(d);
+        assert_eq!(collect(&mut state, e), Some(EngineId::new(2)));
+
+        // Every slot is back on the free list.
+        reserve_all(&mut state);
     }
 }
