@@ -56,8 +56,16 @@ path = "junit.xml"
 path = "junit.xml"
 
 # profile for running socket DDI tests against a live ddi_sock_server
-# process
-[profile.ci-sock-ddi.junit]
+# process over TCP
+[profile.ci-sock-ddi-tcp.junit]
+path = "junit.xml"
+
+# profile for running socket DDI tests against a live ddi_sock_server
+# process over a Unix domain socket. Kept separate from
+# `ci-sock-ddi-tcp` (rather than both using one `ci-sock-ddi` profile)
+# so their JUnit output lands in distinct `target/nextest/<profile>`
+# directories and one run's report doesn't overwrite the other's.
+[profile.ci-sock-ddi-unix.junit]
 path = "junit.xml"
 
 # profile for running tsra_api_tests's ddi_sock_server session tests

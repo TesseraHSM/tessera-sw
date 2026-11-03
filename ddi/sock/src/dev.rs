@@ -742,7 +742,12 @@ impl DdiDev for DdiSockDev {
         if session_ctrl == SessionControlKind::Open
             && !open_identity_confirmed(hdr.sess_id, typed_resp.resp_session_id())
         {
-            if let Some(leaked_id) = hdr.sess_id {
+            // The header id is normally what a conforming peer opened,
+            // but a peer that omits it while still reporting one in the
+            // body has still left that body id live; fall back to it so
+            // the leaked slot isn't skipped just because the header was
+            // the field missing.
+            if let Some(leaked_id) = hdr.sess_id.or_else(|| typed_resp.resp_session_id()) {
                 let _ = Self::close_leaked_session_locked(
                     &mut stream,
                     self.next_cmd_id(),

@@ -86,6 +86,16 @@ impl HsmSession {
         *self.inner.read().ddi_cookie.lock()
     }
 
+    /// Updates the session's continuity cookie after a successful
+    /// `reopen_session`. The backend may return a refreshed token bound
+    /// to the new connection/generation; callers that keep using the
+    /// pre-reopen cookie would have every subsequent in-session call
+    /// (and the eventual close) rejected as belonging to an unknown
+    /// session.
+    pub(crate) fn set_ddi_cookie(&self, ddi_cookie: Option<u64>) {
+        *self.inner.read().ddi_cookie.lock() = ddi_cookie;
+    }
+
     /// Serializes session-reopen attempts for a given epoch.
     ///
     /// Acquires the session write lock and checks whether the session

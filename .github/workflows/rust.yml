@@ -149,11 +149,11 @@ jobs:
       run: cargo build --package ddi_sock_server
     - name: Run socket DDI tests against ddi_sock_server over TCP
       id: test-sock-ddi-ddi-sock-server-tcp
-      run: cargo xtask precheck --nextest --package tsra_ddi_sock --test ddi_sock_server_tcp_integration --profile ci-sock-ddi
+      run: cargo xtask precheck --nextest --package tsra_ddi_sock --test ddi_sock_server_tcp_integration --profile ci-sock-ddi-tcp
       continue-on-error: true
     - name: Run socket DDI tests against ddi_sock_server over unix
       id: test-sock-ddi-ddi-sock-server-unix
-      run: cargo xtask precheck --nextest --package tsra_ddi_sock --test ddi_sock_server_unix_integration --profile ci-sock-ddi
+      run: cargo xtask precheck --nextest --package tsra_ddi_sock --test ddi_sock_server_unix_integration --profile ci-sock-ddi-unix
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report

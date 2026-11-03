@@ -190,6 +190,29 @@ impl HsmDev {
         ACTIVE_SESSION_COOKIE.with(|active| active.set(SessionCookieScope::Active(active_cookie)));
         result
     }
+
+    /// Mirrors [`exec_op_mbor`](Self::exec_op_mbor): out-of-band TBOR ops
+    /// (e.g. AES-GCM/AES-XTS) traditionally pass `&mut None` through the
+    /// DDI layer too, so scope them onto the active
+    /// [`with_session_cookie`] handle's backend cookie the same way.
+    /// Without this wrapper, callers reaching `exec_op_tbor_oob` through
+    /// `Deref` would bypass `ACTIVE_SESSION_COOKIE` entirely and always
+    /// send no cookie, even inside a `with_session_cookie` scope.
+    pub(crate) fn exec_op_tbor_oob<T: tsra_ddi_tbor_types::TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let SessionCookieScope::Active(mut active_cookie) = ACTIVE_SESSION_COOKIE.with(Cell::get)
+        else {
+            return self.0.exec_op_tbor_oob(req, oob_items, cookie);
+        };
+
+        let result = self.0.exec_op_tbor_oob(req, oob_items, &mut active_cookie);
+        ACTIVE_SESSION_COOKIE.with(|active| active.set(SessionCookieScope::Active(active_cookie)));
+        result
+    }
 }
 
 impl Deref for HsmDev {

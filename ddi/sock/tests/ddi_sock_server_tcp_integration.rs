@@ -79,7 +79,11 @@ fn locate_ddi_sock_server_bin() -> std::path::PathBuf {
     } else {
         "release"
     };
-    let bin = target_dir.join(profile).join("ddi_sock_server");
+    // Cargo builds `ddi_sock_server.exe` on Windows; without the suffix
+    // this `exists()` check fails there even after a successful build.
+    let bin = target_dir
+        .join(profile)
+        .join(format!("ddi_sock_server{}", std::env::consts::EXE_SUFFIX));
     assert!(
         bin.exists(),
         "ddi_sock_server binary not found at {bin:?}; build it first with \

@@ -94,21 +94,39 @@ const IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Reads one [`RequestFrame`] from `stream`, honoring the idle/active
-/// timeout split: waiting for the length prefix uses [`IDLE_WAIT_TIMEOUT`],
-/// while completing an already-started frame (the body) uses the tighter
-/// [`CONNECTION_READ_TIMEOUT`]. Returns `Ok(None)` for every condition
+/// timeout split: only the wait for the length prefix's *first* byte
+/// uses [`IDLE_WAIT_TIMEOUT`] — once that byte has arrived the peer is
+/// mid-request, not idle, so every remaining read (the rest of the
+/// prefix, then the body) uses the tighter [`CONNECTION_READ_TIMEOUT`].
+/// Applying the idle timeout to the whole 4-byte prefix would let a
+/// client that sends one byte and then stalls hold the connection (and
+/// any sessions it owns) open for the full idle window instead of the
+/// advertised active timeout. Returns `Ok(None)` for every condition
 /// that should be treated as a clean disconnect: an idle-wait timeout,
 /// clean EOF, or a stall once a frame has started arriving.
 async fn read_request_with_timeout<S>(stream: &mut S) -> Result<Option<RequestFrame>, String>
 where
     S: AsyncRead + Unpin,
 {
-    let length = match tokio::time::timeout(IDLE_WAIT_TIMEOUT, stream.read_u32_le()).await {
-        Ok(Ok(length)) => length,
+    let mut length_buf = [0u8; 4];
+    match tokio::time::timeout(IDLE_WAIT_TIMEOUT, stream.read_exact(&mut length_buf[..1])).await {
+        Ok(Ok(_)) => {}
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Ok(Err(error)) => return Err(format!("failed to read DDI request length: {error}")),
         Err(_elapsed) => return Ok(None),
-    };
+    }
+    match tokio::time::timeout(
+        CONNECTION_READ_TIMEOUT,
+        stream.read_exact(&mut length_buf[1..]),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Ok(Err(error)) => return Err(format!("failed to read DDI request length: {error}")),
+        Err(_elapsed) => return Ok(None),
+    }
+    let length = u32::from_le_bytes(length_buf);
     if length > MAX_FRAME {
         return Err(format!("request frame too large: {length}"));
     }
@@ -964,8 +982,27 @@ mod linux {
     }
 
     async fn read_request(stream: &AsyncFd<Socket>) -> Result<Option<RequestFrame>, String> {
+        // Only the wait for the first prefix byte uses the generous idle
+        // timeout; once it arrives the peer is mid-request, not idle, so
+        // the rest of the prefix (and the body) uses the tighter active
+        // timeout. See `read_request_with_timeout` for why.
         let mut length = [0; 4];
-        match tokio::time::timeout(super::IDLE_WAIT_TIMEOUT, read_exact(stream, &mut length)).await
+        match tokio::time::timeout(
+            super::IDLE_WAIT_TIMEOUT,
+            read_exact(stream, &mut length[..1]),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Ok(Err(error)) => return Err(format!("failed to read DDI request length: {error}")),
+            Err(_elapsed) => return Ok(None),
+        }
+        match tokio::time::timeout(
+            super::CONNECTION_READ_TIMEOUT,
+            read_exact(stream, &mut length[1..]),
+        )
+        .await
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),

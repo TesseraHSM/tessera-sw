@@ -1104,9 +1104,11 @@ impl HsmPartition {
             )
         })?;
 
-        // If we actually performed the reopen, update the BMK on the session.
+        // If we actually performed the reopen, update the BMK and
+        // continuity cookie on the session.
         if let Some(result) = reopen_result {
             session.set_bmk_session(result.bmk_session);
+            session.set_ddi_cookie(result.ddi_cookie);
         }
 
         Ok(())

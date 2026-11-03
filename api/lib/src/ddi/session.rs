@@ -44,6 +44,12 @@ pub(crate) struct ReopenSessionResult {
     /// Updated backed-up session masking key from the device.
     /// Must replace the previously cached `bmk_session`.
     pub(crate) bmk_session: Vec<u8>,
+    /// Backend continuity token returned by this reopen. Replaces the
+    /// session's previously cached cookie: a backend that refreshes its
+    /// token on reopen (e.g. to bind to a new connection/generation)
+    /// would reject every later call still presenting the pre-reopen
+    /// value.
+    pub(crate) ddi_cookie: Option<DdiCookie>,
 }
 
 /// Opens a new session on an HSM partition.
@@ -216,6 +222,7 @@ pub(crate) fn reopen_session(
         sess_id: resp.data.sess_id,
         short_app_id: resp.data.short_app_id,
         bmk_session: resp.data.bmk_session.as_slice().to_vec(),
+        ddi_cookie,
     })
 }
 

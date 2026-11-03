@@ -36,8 +36,12 @@ fn profile_to_command(profile_name: &str) -> String {
             "cargo nextest run --no-fail-fast -p tsra_ddi_mbor_types -F emu --profile ci-emu-smoke --test tsra_ddi_tests -- smoke"
                 .to_string()
         }
-        "ci-sock-ddi" => {
-            "cargo nextest run --no-fail-fast -p tsra_ddi_sock --test ddi_sock_server_tcp_integration --profile ci-sock-ddi"
+        "ci-sock-ddi-tcp" => {
+            "cargo nextest run --no-fail-fast -p tsra_ddi_sock --test ddi_sock_server_tcp_integration --profile ci-sock-ddi-tcp"
+                .to_string()
+        }
+        "ci-sock-ddi-unix" => {
+            "cargo nextest run --no-fail-fast -p tsra_ddi_sock --test ddi_sock_server_unix_integration --profile ci-sock-ddi-unix"
                 .to_string()
         }
         "ci-api-sock" => {
