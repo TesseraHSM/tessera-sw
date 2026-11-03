@@ -138,7 +138,7 @@ fn hash_invalid_session_id_rejected() {
     // u16::MAX selects the CU role; clear its default-PSK gate first.
     rotate_cu_psk_and_close(&ctx);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id: u16::MAX,
             algo: HASH_ALGO_SHA256,
@@ -240,7 +240,7 @@ fn hash_closed_session_rejected() {
 
     ctx.session_close(session_id).expect("close CO session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id,
             algo: HASH_ALGO_SHA256,
@@ -595,7 +595,7 @@ fn hash_valid_session_usable_after_invalid_session_request() {
     rotate_cu_psk_and_close(&ctx);
     let session = finalized_co_session(&ctx);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id: u16::MAX,
             algo: HASH_ALGO_SHA512,
@@ -639,7 +639,7 @@ fn hash_new_session_works_after_previous_session_closed() {
     ctx.session_close(closed_session_id)
         .expect("close CO session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id: closed_session_id,
             algo: HASH_ALGO_SHA256,

@@ -3,7 +3,7 @@
 
 //! SHA3-256/384/512 (FIPS 202): known-answer tests over 1 KiB inputs and the
 //! NIST CAVP SHA3VS byte-oriented ShortMsg, LongMsg and Monte Carlo vectors,
-//! each run one-shot and streaming.
+//! each run one-shot and streaming, and rejection by HMAC and RSA signing.
 
 use super::*;
 use crate::testvectors::hash::SHA3_256_LONG_MSG_TEST_VECTORS;
@@ -345,5 +345,116 @@ fn test_sha3_512_nist_monte_vectors_one_shot() {
 fn test_sha3_512_nist_monte_vectors_streaming() {
     for vector in SHA3_512_MONTE_TEST_VECTORS {
         sha3_monte("SHA3-512", HashAlgo::sha3_512, vector, true);
+    }
+}
+
+// PKCS #11 defines HMAC and RSA signing over SHA-1 and SHA-2 only, so both
+// reject SHA-3 (KBKDF, which runs over HMAC, does too).
+
+const UNSUPPORTED: Option<CryptoError> = Some(CryptoError::HashUnsupportedAlgorithm);
+
+fn sha3s() -> [HashAlgo; 3] {
+    [
+        HashAlgo::sha3_256(),
+        HashAlgo::sha3_384(),
+        HashAlgo::sha3_512(),
+    ]
+}
+
+#[test]
+fn test_sha3_rejected_by_hmac() {
+    let key = HmacKey::from_bytes(&[0x0b; 32]).expect("hmac key");
+    let mac = [0u8; 64];
+    for sha3 in sha3s() {
+        let mut out = [0u8; 64];
+        let mut hmac = HmacAlgo::new(sha3.clone());
+        assert_eq!(
+            Signer::sign(&mut hmac, &key, b"abc", None).err(),
+            UNSUPPORTED
+        );
+        assert_eq!(
+            Signer::sign(&mut hmac, &key, b"abc", Some(&mut out)).err(),
+            UNSUPPORTED
+        );
+        assert_eq!(
+            Verifier::verify(&mut hmac, &key, b"abc", &mac).err(),
+            UNSUPPORTED
+        );
+        assert_eq!(
+            Signer::sign_init(HmacAlgo::new(sha3.clone()), key.clone()).err(),
+            UNSUPPORTED
+        );
+        assert_eq!(
+            Verifier::verify_init(HmacAlgo::new(sha3), key.clone()).err(),
+            UNSUPPORTED
+        );
+    }
+}
+
+#[test]
+fn test_sha3_rejected_by_kbkdf() {
+    let key = GenericSecretKey::from_bytes(&[0x0b; 32]).expect("key");
+    for sha3 in sha3s() {
+        let kbkdf = KbkdfAlgo::with_len(sha3, Some(b"label".to_vec()), None);
+        assert_eq!(kbkdf.derive(&key, 32).err(), UNSUPPORTED);
+    }
+}
+
+#[test]
+fn test_sha3_rejected_by_rsa_signing() {
+    let private_key = RsaPrivateKey::generate(2048 / 8).expect("rsa key");
+    let public_key = private_key.public_key().expect("rsa public key");
+    let signature = [0u8; 2048 / 8];
+    for sha3 in sha3s() {
+        let digest = vec![0u8; sha3.size()];
+
+        for mut algo in [
+            RsaSignAlgo::with_pss_padding(sha3.clone(), 32),
+            RsaSignAlgo::with_pkcs1_padding(sha3.clone()),
+        ] {
+            assert_eq!(
+                Signer::sign(&mut algo, &private_key, &digest, None).err(),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                Verifier::verify(&mut algo, &public_key, &digest, &signature).err(),
+                UNSUPPORTED
+            );
+        }
+
+        let pss = || RsaHashSignAlgo::with_pss_padding(sha3.clone(), 32);
+        let pkcs1 = || RsaHashSignAlgo::with_pkcs1_padding(sha3.clone());
+        for algo in [pss(), pkcs1()] {
+            assert_eq!(
+                Signer::sign_init(algo, private_key.clone()).err(),
+                UNSUPPORTED
+            );
+        }
+        for algo in [pss(), pkcs1()] {
+            assert_eq!(
+                Verifier::verify_init(algo, public_key.clone()).err(),
+                UNSUPPORTED
+            );
+        }
+        for mut algo in [pss(), pkcs1()] {
+            assert_eq!(
+                Signer::sign(&mut algo, &private_key, b"abc", None).err(),
+                UNSUPPORTED
+            );
+            assert_eq!(
+                Verifier::verify(&mut algo, &public_key, b"abc", &signature).err(),
+                UNSUPPORTED
+            );
+        }
+
+        let mut encoder = RsaPadPkcs1SignAlgo::new(signature.len(), sha3.clone(), &digest);
+        assert_eq!(Encoder::encode(&mut encoder, None).err(), UNSUPPORTED);
+        let mut encoder = RsaPadPssAlgo::with_mgf1(signature.len(), sha3.clone(), &digest, 32);
+        assert_eq!(Encoder::encode_vec(&mut encoder).err(), UNSUPPORTED);
+        let params = RsaPadPssAlgoParams::new(signature.len(), sha3, &digest);
+        assert_eq!(
+            Decoder::decode::<RsaPadPssAlgo>(&signature, params).err(),
+            UNSUPPORTED
+        );
     }
 }

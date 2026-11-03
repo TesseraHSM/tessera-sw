@@ -32,19 +32,10 @@
 use windows::Win32::Security::Cryptography::*;
 
 use super::*;
-use crate::hash::BCRYPT_SHA3_256_ALG_HANDLE;
-use crate::hash::BCRYPT_SHA3_384_ALG_HANDLE;
-use crate::hash::BCRYPT_SHA3_512_ALG_HANDLE;
-
-// HMAC-SHA3 pseudo-handles from the CNG documentation (Windows 11 23H2 and
-// later); the `windows` crate (0.62) does not define them.
-const BCRYPT_HMAC_SHA3_256_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3E1u32 as _);
-const BCRYPT_HMAC_SHA3_384_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3F1u32 as _);
-const BCRYPT_HMAC_SHA3_512_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x401u32 as _);
 
 pub struct CngHmacAlgo {
     _hash: HashAlgo,
-    /// `None` for hashes with no HMAC construction (the SHAKE XOFs).
+    /// `None` for hashes HMAC does not support (SHA-3 and the SHAKE XOFs).
     algo_handle: Option<BCRYPT_ALG_HANDLE>,
 }
 
@@ -57,7 +48,7 @@ impl CngHmacAlgo {
     }
 
     /// Returns the HMAC algorithm handle, or
-    /// `CryptoError::HashUnsupportedAlgorithm` for the SHAKE XOFs.
+    /// `CryptoError::HashUnsupportedAlgorithm` for SHA-3 and the SHAKE XOFs.
     fn checked_handle(&self) -> Result<BCRYPT_ALG_HANDLE, CryptoError> {
         self.algo_handle
             .ok_or(CryptoError::HashUnsupportedAlgorithm)
@@ -91,9 +82,6 @@ impl CngHmacAlgo {
             BCRYPT_SHA256_ALG_HANDLE => Some(BCRYPT_HMAC_SHA256_ALG_HANDLE),
             BCRYPT_SHA384_ALG_HANDLE => Some(BCRYPT_HMAC_SHA384_ALG_HANDLE),
             BCRYPT_SHA512_ALG_HANDLE => Some(BCRYPT_HMAC_SHA512_ALG_HANDLE),
-            BCRYPT_SHA3_256_ALG_HANDLE => Some(BCRYPT_HMAC_SHA3_256_ALG_HANDLE),
-            BCRYPT_SHA3_384_ALG_HANDLE => Some(BCRYPT_HMAC_SHA3_384_ALG_HANDLE),
-            BCRYPT_SHA3_512_ALG_HANDLE => Some(BCRYPT_HMAC_SHA3_512_ALG_HANDLE),
             _ => None,
         }
     }
@@ -120,7 +108,15 @@ impl SignOp for CngHmacAlgo {
             // - key.as_bytes() provides the HMAC key with valid lifetime
             // - data is the input message to authenticate
             // - signature buffer has been validated to have sufficient size (sig_len)
-            let status = unsafe { BCryptHash(handle, Some(key.as_bytes()), data, signature) };
+            //   and CNG requires the output length to equal the MAC length exactly
+            let status = unsafe {
+                BCryptHash(
+                    handle,
+                    Some(key.as_bytes()),
+                    data,
+                    &mut signature[..sig_len],
+                )
+            };
             status.ok().map_err(|_| CryptoError::HmacSignError)?;
         }
 
@@ -210,7 +206,8 @@ impl<'a> SignStreamingOpContext<'a> for CngHmacAlgoSignContext {
                 return Err(CryptoError::HmacBufferTooSmall);
             }
             //SAFETY: Calling Windows CNG API directly.
-            let status = unsafe { BCryptFinishHash(self.signer.handle(), sig, 0) };
+            // CNG requires the output length to equal the MAC length exactly.
+            let status = unsafe { BCryptFinishHash(self.signer.handle(), &mut sig[..sig_len], 0) };
             status.ok().map_err(|_| CryptoError::HmacSignFinishError)?;
         }
         Ok(sig_len)

@@ -255,6 +255,38 @@ pub fn write_slot(engine: EngineId, offset: usize, data: &[u8]) -> bool {
     true
 }
 
+/// Zero `len` bytes of `engine`'s operand slot at `offset`.
+///
+/// Volatile, so the scrub cannot be elided even though nothing on this core
+/// reads the bytes back.
+pub fn clear_slot(engine: EngineId, offset: usize, len: usize) -> bool {
+    let Some(end) = offset.checked_add(len) else {
+        return false;
+    };
+    if end > SLOT_SIZE {
+        return false;
+    }
+    let base = SLOT_ADDRS[engine.raw() as usize] as *mut u8;
+
+    // SAFETY: as `write_slot`, and word-wise for the same reason.
+    unsafe {
+        let dst = base.add(offset);
+        let head = dst.align_offset(align_of::<u32>()).min(len);
+        for i in 0..head {
+            write_volatile(dst.add(i), 0);
+        }
+        let words = (len - head) / 4;
+        let dst_w = dst.add(head) as *mut u32;
+        for i in 0..words {
+            write_volatile(dst_w.add(i), 0);
+        }
+        for i in head + words * 4..len {
+            write_volatile(dst.add(i), 0);
+        }
+    }
+    true
+}
+
 /// Copy `out.len()` bytes out of `engine`'s operand slot at `offset`.
 pub fn read_slot_at(engine: EngineId, offset: usize, out: &mut [u8]) -> bool {
     let Some(end) = offset.checked_add(out.len()) else {

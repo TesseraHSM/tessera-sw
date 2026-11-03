@@ -283,7 +283,7 @@ impl OsslRsaSignAlgo {
             .map_err(|_| CryptoError::RsaSetPropertyError)?;
 
         if let Some(hash) = &self.hash {
-            hash.ensure_not_xof()?;
+            hash.ensure_sha1_or_sha2()?;
             pkey_ctx
                 .set_signature_md(hash.md())
                 .map_err(|_| CryptoError::RsaSetPropertyError)?;

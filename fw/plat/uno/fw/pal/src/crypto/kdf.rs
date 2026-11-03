@@ -64,6 +64,9 @@ impl HsmKdf for UnoHsmPal {
         ikm: &HsmDmaBuf,
         prk: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             if prk.len() < algo.digest_len() {
                 return Err(HsmError::InvalidArg);
@@ -118,6 +121,9 @@ impl HsmKdf for UnoHsmPal {
         info: Option<&HsmDmaBuf>,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             let hlen = algo.digest_len();
 
@@ -190,10 +196,10 @@ impl HsmKdf for UnoHsmPal {
         context: Option<&HsmDmaBuf>,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
-            // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE)
-            // before sizing anything by their digest length.
-            ShaMode::try_from(algo)?;
             let hlen = algo.digest_len();
 
             if output.is_empty() {
@@ -288,6 +294,9 @@ impl HsmKdf for UnoHsmPal {
         seed: &HsmDmaBuf,
         mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             if mask.is_empty() {
                 return Ok::<(), HsmError>(());
@@ -395,6 +404,9 @@ impl UnoHsmPal {
         info: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             if output.is_empty() {
                 return Ok::<(), HsmError>(());

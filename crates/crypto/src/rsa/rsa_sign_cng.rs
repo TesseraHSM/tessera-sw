@@ -407,9 +407,9 @@ impl CngRsaSignAlgo {
     /// - The padding information structure (PKCS#1 or PSS)
     /// - The corresponding flags for Windows CNG APIs
     ///
-    /// or `CryptoError::HashUnsupportedAlgorithm` for a SHAKE hash.
+    /// or `CryptoError::HashUnsupportedAlgorithm` for a SHA-3 or SHAKE hash.
     fn padding_info(&self) -> Result<(PaddingInfo, BCRYPT_FLAGS), CryptoError> {
-        self.hash.ensure_not_xof()?;
+        self.hash.ensure_sha1_or_sha2()?;
         Ok(match self.padding {
             Padding::None => (PaddingInfo::None, BCRYPT_PAD_NONE),
             Padding::Pkcs1 => (

@@ -39,6 +39,7 @@ use embassy_executor::Spawner;
 use embassy_time::Duration;
 use embassy_time::Timer;
 use tsra_fw_uno_drivers_systick as systick;
+use zeroize::Zeroize;
 
 /// Number of fastpath cores.
 const FP_CORES: u8 = 3;
@@ -459,6 +460,8 @@ fn service_shake(core_id: u8, req: &mailbox::Request) {
 
     let Some(out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len)
     else {
+        buf.0.zeroize();
+        sponge.zeroize();
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
@@ -467,7 +470,10 @@ fn service_shake(core_id: u8, req: &mailbox::Request) {
         sponge.squeeze(squeezed);
         mailbox::stage(part, squeezed);
     }
-    buf.0.fill(0);
+    // Both hold message-derived bytes and live on the stack, outside the
+    // IO teardown scrub.
+    buf.0.zeroize();
+    sponge.zeroize();
 
     mailbox::respond(core_id, req, mailbox::STATUS_OK, out_len as u32);
 }

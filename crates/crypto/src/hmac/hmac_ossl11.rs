@@ -124,7 +124,7 @@ impl SignOp for OsslHmacAlgo {
     ) -> Result<usize, CryptoError> {
         use openssl::sign::Signer;
 
-        self.hash.ensure_not_xof()?;
+        self.hash.ensure_sha1_or_sha2()?;
         let len = self.hash.size();
         if let Some(signature) = signature {
             if signature.len() < len {
@@ -170,7 +170,7 @@ impl<'a> SignStreamingOp<'a> for OsslHmacAlgo {
     fn sign_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
         use openssl::sign::Signer;
 
-        self.hash.ensure_not_xof()?;
+        self.hash.ensure_sha1_or_sha2()?;
         let signer = Signer::new(self.hash.message_digest(), key.pkey())
             .map_err(|_| CryptoError::HmacSignError)?;
 
@@ -306,7 +306,7 @@ impl VerifyOp for OsslHmacAlgo {
     ) -> Result<bool, CryptoError> {
         use openssl::sign::Signer;
 
-        self.hash.ensure_not_xof()?;
+        self.hash.ensure_sha1_or_sha2()?;
         let mut result = vec![0u8; self.hash.size()];
 
         let mut verifier = Signer::new(self.hash.message_digest(), key.pkey())
@@ -350,7 +350,7 @@ impl<'a> VerifyStreamingOp<'a> for OsslHmacAlgo {
     fn verify_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
         use openssl::sign::Signer;
 
-        self.hash.ensure_not_xof()?;
+        self.hash.ensure_sha1_or_sha2()?;
         let verifier = Signer::new(self.hash.message_digest(), key.pkey())
             .map_err(|_| CryptoError::HmacVerifyInitError)?;
 

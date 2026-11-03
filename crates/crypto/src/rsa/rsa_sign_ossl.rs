@@ -360,7 +360,7 @@ impl OsslRsaSignAlgo {
     fn fetch_md(&self) -> Result<Option<openssl::md::Md>, CryptoError> {
         match &self.hash {
             Some(hash) => {
-                hash.ensure_not_xof()?;
+                hash.ensure_sha1_or_sha2()?;
                 Ok(Some(
                     openssl::md::Md::fetch(
                         Some(crate::libctx::crypto_libctx()),

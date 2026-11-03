@@ -27,6 +27,7 @@ embassy-executor = "0.10.0"
 embassy-futures = "0.1.2"
 embassy-time = "0.5.1"
 zerocopy = "0.8"
+zeroize = { default-features = false, version = "1.8.1" }
 
 [profile.release]
 codegen-units = 1

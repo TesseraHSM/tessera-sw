@@ -615,25 +615,35 @@ impl PqcEngine<'_> {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
-        let resp = self
-            .submit(&mailbox::RequestParams {
-                op: op as u32,
-                key_kind: 0,
-                xi: &[0u8; MLDSA_SEED_LEN],
-                rnd: &[0u8; MLDSA_SEED_LEN],
-                msg_len: msg.len() as u32,
-                ctx_len: 0,
-                sig_len: out_len as u32,
-                pub_key_len: 0,
-            })
-            .await?;
+        let result = async {
+            let resp = self
+                .submit(&mailbox::RequestParams {
+                    op: op as u32,
+                    key_kind: 0,
+                    xi: &[0u8; MLDSA_SEED_LEN],
+                    rnd: &[0u8; MLDSA_SEED_LEN],
+                    msg_len: msg.len() as u32,
+                    ctx_len: 0,
+                    sig_len: out_len as u32,
+                    pub_key_len: 0,
+                })
+                .await?;
 
-        if resp.out_len as usize != out_len
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SHAKE_OUT_OFFSET, out)
-        {
-            return Err(PqcError::INVALID_BUFFER_SIZE);
+            if resp.out_len as usize != out_len
+                || !mailbox::read_slot_at(self.id, mailbox::SLOT_SHAKE_OUT_OFFSET, out)
+            {
+                return Err(PqcError::INVALID_BUFFER_SIZE);
+            }
+            Ok::<(), HsmError>(())
         }
-        Ok(())
+        .await;
+
+        // The slot is shared PSRAM outside the per-IO heaps that IO teardown
+        // scrubs, so wipe the caller's message and its digest before the
+        // engine goes back to the pool, on success and failure alike.
+        mailbox::clear_slot(self.id, mailbox::SLOT_SHAKE_IN_OFFSET, msg.len());
+        mailbox::clear_slot(self.id, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len);
+        result
     }
 
     /// Send a request to this engine's FP core and wait for its answer.
