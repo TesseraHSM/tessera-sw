@@ -130,6 +130,70 @@ jobs:
         echo "One or more tests failed."
         exit 1
 
+  test_ubuntu_sock_ddi:
+
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/ubuntu-setup
+    - name: Build ddi_sock_server
+      # tsra_ddi_sock's ddi_sock_server integration tests spawn this
+      # binary directly (it has no lib target, so Cargo can't wire it up
+      # as a dev-dependency); build it explicitly so the tests find it
+      # under target/debug.
+      run: cargo build --package ddi_sock_server
+    - name: Run socket DDI tests against ddi_sock_server over TCP
+      id: test-sock-ddi-ddi-sock-server-tcp
+      run: cargo xtask precheck --nextest --package tsra_ddi_sock --test ddi_sock_server_tcp_integration --profile ci-sock-ddi
+      continue-on-error: true
+    - name: Run socket DDI tests against ddi_sock_server over unix
+      id: test-sock-ddi-ddi-sock-server-unix
+      run: cargo xtask precheck --nextest --package tsra_ddi_sock --test ddi_sock_server_unix_integration --profile ci-sock-ddi
+      continue-on-error: true
+    - name: Generate nextest report
+      id: nextest-report
+      run: cargo xtask precheck --nextest-report
+    - name: Fail if any tests failed
+      if: ${{ steps.test-sock-ddi-ddi-sock-server-tcp.outcome == 'failure' || steps.test-sock-ddi-ddi-sock-server-unix.outcome == 'failure' }}
+      run: |
+        echo "One or more tests failed."
+        exit 1
+
+  test_ubuntu_api_sock:
+
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/ubuntu-setup
+    - name: Build ddi_sock_server
+      # tsra_api_tests's ddi_sock_server session tests spawn this binary
+      # directly (it has no lib target, so Cargo can't wire it up as a
+      # dev-dependency); build it explicitly so the tests find it under
+      # target/debug.
+      run: cargo build --package ddi_sock_server
+    - name: Run tsra_api_tests's ddi_sock_server session tests
+      id: test-api-sock-ddi-sock-server
+      run: cargo xtask precheck --nextest --package tsra_api_tests --features sock --profile ci-api-sock --filterset 'test(ddi_sock_server_tests::)'
+      continue-on-error: true
+    - name: Generate nextest report
+      id: nextest-report
+      run: cargo xtask precheck --nextest-report
+    - name: Fail if any tests failed
+      if: ${{ steps.test-api-sock-ddi-sock-server.outcome == 'failure' }}
+      run: |
+        echo "One or more tests failed."
+        exit 1
+
   build_windows:
 
     runs-on: windows-2025-vs2026

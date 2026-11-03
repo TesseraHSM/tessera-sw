@@ -32,6 +32,18 @@ fn profile_to_command(profile_name: &str) -> String {
         }
         "ci-api" => "cargo nextest run --no-fail-fast -p tsra_api_tests -F emu --profile ci-api".to_string(),
         "ci-api-ex" => "cargo nextest run --no-fail-fast -p tsra_api_tests -F emu,session-ex-tests --profile ci-api-ex".to_string(),
+        "ci-emu-smoke" => {
+            "cargo nextest run --no-fail-fast -p tsra_ddi_mbor_types -F emu --profile ci-emu-smoke --test tsra_ddi_tests -- smoke"
+                .to_string()
+        }
+        "ci-sock-ddi" => {
+            "cargo nextest run --no-fail-fast -p tsra_ddi_sock --test ddi_sock_server_tcp_integration --profile ci-sock-ddi"
+                .to_string()
+        }
+        "ci-api-sock" => {
+            "cargo nextest run --no-fail-fast -p tsra_api_tests -F sock --profile ci-api-sock -- ddi_sock_server_tests"
+                .to_string()
+        }
         // For unknown profiles, construct a generic command showing the profile
         _ => format!("cargo nextest run --profile {}", profile_name),
     }

@@ -5,6 +5,8 @@
 #![cfg(test)]
 
 mod algo;
+#[cfg(feature = "sock")]
+mod ddi_sock_server_tests;
 #[cfg(not(feature = "session-ex-tests"))]
 mod partition_tests;
 #[cfg(not(feature = "session-ex-tests"))]

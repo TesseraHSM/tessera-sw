@@ -1,29 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
-use std::io;
 use std::sync::Arc;
 
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tsra_ddi_sock_proto::MAX_FRAME;
 use tsra_ddi_sock_proto::ProtoError;
-use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::ResponseFrame;
 
 use super::Connection;
 use super::SocketHsm;
-
-async fn read_request(stream: &mut TcpStream) -> Result<RequestFrame, ProtoError> {
-    let length = stream.read_u32_le().await?;
-    if length > MAX_FRAME {
-        return Err(ProtoError::TooLarge(length));
-    }
-    let mut body = vec![0; length as usize];
-    stream.read_exact(&mut body).await?;
-    RequestFrame::decode(&body)
-}
 
 async fn write_response(
     stream: &mut TcpStream,
@@ -38,17 +24,23 @@ async fn write_response(
 async fn serve_connection(mut stream: TcpStream, hsm: Arc<SocketHsm>) -> Result<(), String> {
     let connection = Connection::new(hsm);
     loop {
-        let request = match read_request(&mut stream).await {
-            Ok(request) => request,
-            Err(ProtoError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(());
-            }
-            Err(error) => return Err(format!("failed to read DDI request: {error}")),
+        let Some(request) = super::read_request_with_timeout(&mut stream).await? else {
+            return Ok(());
         };
-        let response = connection.execute(request).await?;
-        write_response(&mut stream, &response)
-            .await
-            .map_err(|error| format!("failed to write DDI response: {error}"))?;
+        let response =
+            match tokio::time::timeout(super::CONNECTION_READ_TIMEOUT, connection.execute(request))
+                .await
+            {
+                Ok(result) => result?,
+                Err(_elapsed) => return Ok(()),
+            };
+        tokio::time::timeout(
+            super::CONNECTION_READ_TIMEOUT,
+            write_response(&mut stream, &response),
+        )
+        .await
+        .map_err(|_elapsed| "failed to write DDI response: timed out".to_string())?
+        .map_err(|error| format!("failed to write DDI response: {error}"))?;
     }
 }
 
@@ -108,6 +100,7 @@ mod tests {
     use tsra_ddi_sock::DdiSockDev;
     use tsra_ddi_sock_proto::OobItem;
     use tsra_ddi_sock_proto::Request;
+    use tsra_ddi_sock_proto::RequestFrame;
     use tsra_ddi_tbor_types::SESSION_SEED_LEN;
     use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
     use tsra_ddi_tbor_types::TborGetCertReq;
