@@ -50,7 +50,7 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `masked_key` | `buffer` (164 B) | The masked ML-DSA seed; unmasked on-device.  Seed-only wire: 32-byte `xi` seed + 132 B envelope. |
+| — | `masked_key` | `buffer` (up to 5160 B) | The complete masked blob returned by `MlDsaGenerateKey`; unmasked on-device.  The 32-byte `xi` seed followed by the expanded secret key, plus the 232 B envelope: 2824 / 4296 / 5160 B for ML-DSA-44 / 65 / 87. |
 | — | `msg_type` | `u8` | `0` = `message` is the message; `3` = `message` is an external `μ`. |
 | — | `message` | `buffer` (up to 586 B) | Message bytes to sign, or the 64-byte `μ`. |
 | — | `ctx` | `buffer` (0..=255 B) | FIPS 204 context string.  Empty is the default; must be empty with `μ`. |
@@ -62,11 +62,11 @@ Carries the masked key, the message, then the context string.
 The 586 B message cap is inherited from [`MlDsaVerify`](./mldsa_verify.md)
 — sign and verify are inverse operations, so a message that can be signed
 must also be verifiable.  `MlDsaSign` on its own would allow
-`8192 - 132 - 164 - 255 = 7641` B.
+`8192 - 132 - 5160 - 255 = 2645` B.
 
-Worst-case frame: data `164 + 586 + 255 = 1005` B; staged `132 + 1005 =
-1137` B and encoded `8 + 5*4 + 1005 = 1033` B — both well inside the
-8192-byte transport buffer.
+Worst-case frame (ML-DSA-87 key): data `5160 + 586 + 255 = 6001` B; staged
+`132 + 6001 = 6133` B and encoded `8 + 5*4 + 6001 = 6029` B — both inside
+the 8192-byte transport buffer.
 
 ## Response
 
