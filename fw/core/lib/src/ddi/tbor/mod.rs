@@ -1687,6 +1687,8 @@ mod tests {
                 .unwrap()
                 .masked_key(&masked_key)
                 .unwrap()
+                .msg_type(types::MlDsaMsgType::Pure)
+                .unwrap()
                 .message(&message)
                 .unwrap()
                 .ctx(&ctx)
@@ -1702,7 +1704,7 @@ mod tests {
             let mut noncanonical = request_with_payload_gap(
                 req.as_bytes(),
                 types::TborMlDsaSignReq::TOC_COUNT,
-                &[1, 2, 3],
+                &[1, 3, 4],
             );
             types::TborMlDsaSignReq::decode(dma(&mut noncanonical)).unwrap();
             assert_eq!(
@@ -1723,6 +1725,8 @@ mod tests {
                     .unwrap()
                     .pub_key(&public_key)
                     .unwrap()
+                    .msg_type(types::MlDsaMsgType::Pure)
+                    .unwrap()
                     .message(&message)
                     .unwrap()
                     .ctx(&ctx)
@@ -1734,7 +1738,7 @@ mod tests {
                 if valid {
                     result.unwrap();
                     if kind == types::MlDsaKeyKind::MlDsa87Seed {
-                        assert_eq!(req.len(), 8088);
+                        assert_eq!(req.len(), 8092);
                     }
                 } else {
                     assert_eq!(result, Err(HsmError::MlDsaVerifyFailed));
