@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 use std::io;
+use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
@@ -60,16 +61,46 @@ async fn run_server(listener: UnixListener, hsm: Arc<SocketHsm>) -> Result<(), S
     }
 }
 
-pub(super) fn run(path: &str) -> Result<(), String> {
-    match std::fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "failed to remove stale Unix socket at {path}: {error}"
-            ));
-        }
+/// Removes a stale Unix socket left behind by a previous server instance
+/// at `path`, so `UnixListener::bind` can reuse the path.
+///
+/// A plain `remove_file` here would be unsafe to call unconditionally: if
+/// another server is already listening on `path`, unlinking it would let
+/// this process silently steal the path out from under it while existing
+/// clients keep talking to the original (now orphaned) listener; if
+/// `path` names an unrelated regular file (e.g. a typo'd endpoint), it
+/// would delete that file instead of failing loudly. Only remove the
+/// entry when it's confirmed to be a socket that nothing is listening on.
+fn remove_stale_socket(path: &str) -> Result<(), String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed to stat {path}: {error}")),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(format!(
+            "refusing to remove {path}: exists and is not a Unix socket"
+        ));
     }
+    // Probe whether a server is still listening: a stale socket from a
+    // crashed/previous run refuses the connection, while a live listener
+    // accepts it.
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => Err(format!(
+            "refusing to bind Unix listener at {path}: another server is already listening"
+        )),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+            std::fs::remove_file(path)
+                .map_err(|error| format!("failed to remove stale Unix socket at {path}: {error}"))
+        }
+        Err(error) => Err(format!(
+            "failed to probe existing socket at {path}: {error}"
+        )),
+    }
+}
+
+pub(super) fn run(path: &str) -> Result<(), String> {
+    remove_stale_socket(path)?;
     let path = path.to_owned();
     super::run_with_hsm(|hsm| async move {
         let listener = UnixListener::bind(&path)
@@ -101,6 +132,44 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn remove_stale_socket_removes_an_unconnected_socket_file() {
+        let path = socket_path();
+        // Bind and then drop the listener without ever accepting: the path
+        // still exists on disk as a socket file, but nothing is listening,
+        // exactly like a stale socket left behind by a crashed server.
+        {
+            let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+            drop(listener);
+        }
+        assert!(path.exists());
+        remove_stale_socket(path.to_str().expect("utf8 path")).expect("removes stale socket");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_stale_socket_refuses_a_non_socket_file() {
+        let path = socket_path();
+        std::fs::write(&path, b"not a socket").expect("write regular file");
+        let result = remove_stale_socket(path.to_str().expect("utf8 path"));
+        assert!(result.is_err());
+        // The regular file must be left untouched.
+        assert!(path.exists());
+        std::fs::remove_file(&path).expect("cleanup");
+    }
+
+    #[test]
+    fn remove_stale_socket_refuses_a_live_listener() {
+        let path = socket_path();
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let result = remove_stale_socket(path.to_str().expect("utf8 path"));
+        assert!(result.is_err());
+        // The live listener's path must be left untouched.
+        assert!(path.exists());
+        drop(listener);
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

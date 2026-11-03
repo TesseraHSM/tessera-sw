@@ -624,6 +624,24 @@ fn open_identity_confirmed(header_sess_id: Option<u16>, body_sess_id: Option<u16
     header_sess_id.is_some() && header_sess_id == body_sess_id
 }
 
+/// Picks the id (if any) to best-effort close after an unconfirmed
+/// `OpenSession` response (see the call site in [`DdiDev::exec_op_mbor`]).
+///
+/// Only returns an id when exactly one of the header/body reported one:
+/// that lone id is the only candidate for what was actually opened. When
+/// both are present they necessarily disagree (a caller only reaches this
+/// after [`open_identity_confirmed`] returned `false`), and there's no way
+/// to tell whether either one is the slot this call leaked, or an
+/// unrelated session this connection already owns — closing the wrong one
+/// would destroy a live session instead of cleaning up a leaked one, so
+/// this returns `None` rather than guessing.
+fn open_session_leaked_id(header_sess_id: Option<u16>, body_sess_id: Option<u16>) -> Option<u16> {
+    match (header_sess_id, body_sess_id) {
+        (Some(id), None) | (None, Some(id)) => Some(id),
+        _ => None,
+    }
+}
+
 impl DdiDev for DdiSockDev {
     fn device_kind(&self) -> DdiDeviceKind {
         self.device_kind
@@ -742,12 +760,9 @@ impl DdiDev for DdiSockDev {
         if session_ctrl == SessionControlKind::Open
             && !open_identity_confirmed(hdr.sess_id, typed_resp.resp_session_id())
         {
-            // The header id is normally what a conforming peer opened,
-            // but a peer that omits it while still reporting one in the
-            // body has still left that body id live; fall back to it so
-            // the leaked slot isn't skipped just because the header was
-            // the field missing.
-            if let Some(leaked_id) = hdr.sess_id.or_else(|| typed_resp.resp_session_id()) {
+            if let Some(leaked_id) =
+                open_session_leaked_id(hdr.sess_id, typed_resp.resp_session_id())
+            {
                 let _ = Self::close_leaked_session_locked(
                     &mut stream,
                     self.next_cmd_id(),
@@ -1055,6 +1070,23 @@ mod tests {
         assert!(!open_identity_confirmed(Some(9), None));
         // Neither id present: not confirmed.
         assert!(!open_identity_confirmed(None, None));
+    }
+
+    /// Best-effort cleanup after an unconfirmed `OpenSession` response
+    /// must only target an id when exactly one source reported it; a
+    /// header/body disagreement is ambiguous and must not be guessed at,
+    /// since the header's id could be an existing session this connection
+    /// already owns rather than the one actually leaked.
+    #[test]
+    fn open_session_leaked_id_only_trusts_a_lone_report() {
+        // Header omitted, body reported: close the body's id.
+        assert_eq!(open_session_leaked_id(None, Some(9)), Some(9));
+        // Body omitted, header reported: close the header's id.
+        assert_eq!(open_session_leaked_id(Some(5), None), Some(5));
+        // Both present but disagreeing: ambiguous, don't guess.
+        assert_eq!(open_session_leaked_id(Some(5), Some(9)), None);
+        // Neither present: nothing to clean up.
+        assert_eq!(open_session_leaked_id(None, None), None);
     }
 
     #[cfg(target_os = "linux")]
