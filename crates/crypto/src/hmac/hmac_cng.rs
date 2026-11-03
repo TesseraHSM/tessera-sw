@@ -32,6 +32,15 @@
 use windows::Win32::Security::Cryptography::*;
 
 use super::*;
+use crate::hash::BCRYPT_SHA3_256_ALG_HANDLE;
+use crate::hash::BCRYPT_SHA3_384_ALG_HANDLE;
+use crate::hash::BCRYPT_SHA3_512_ALG_HANDLE;
+
+// HMAC-SHA3 pseudo-handles from the CNG documentation (Windows 11 23H2 and
+// later); the `windows` crate version in use predates them.
+const BCRYPT_HMAC_SHA3_256_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3E1u32 as _);
+const BCRYPT_HMAC_SHA3_384_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3F1u32 as _);
+const BCRYPT_HMAC_SHA3_512_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x401u32 as _);
 
 pub struct CngHmacAlgo {
     _hash: HashAlgo,
@@ -73,6 +82,9 @@ impl CngHmacAlgo {
             BCRYPT_SHA256_ALG_HANDLE => BCRYPT_HMAC_SHA256_ALG_HANDLE,
             BCRYPT_SHA384_ALG_HANDLE => BCRYPT_HMAC_SHA384_ALG_HANDLE,
             BCRYPT_SHA512_ALG_HANDLE => BCRYPT_HMAC_SHA512_ALG_HANDLE,
+            BCRYPT_SHA3_256_ALG_HANDLE => BCRYPT_HMAC_SHA3_256_ALG_HANDLE,
+            BCRYPT_SHA3_384_ALG_HANDLE => BCRYPT_HMAC_SHA3_384_ALG_HANDLE,
+            BCRYPT_SHA3_512_ALG_HANDLE => BCRYPT_HMAC_SHA3_512_ALG_HANDLE,
             _ => panic!("Unsupported hash algorithm for HMAC"),
         }
     }

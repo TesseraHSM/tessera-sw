@@ -203,7 +203,7 @@ impl EncodeOp for RsaPadPkcs1SignAlgo {
             return Err(CryptoError::RsaBufferTooSmall);
         }
 
-        let digest_info = DerDigestInfo::new(self.hash_algo.der_algo(), &self.digest)?;
+        let digest_info = DerDigestInfo::new(self.hash_algo.der_algo()?, &self.digest)?;
         let der = digest_info.to_der_vec()?;
 
         // copy to end of the em buffer
@@ -275,7 +275,7 @@ impl DecodeOp for RsaPadPkcs1SignAlgo {
         }
 
         let digest_info = DerDigestInfo::from_der(&input[pos + 3..])?;
-        if digest_info.algo() != params.hash_algo.der_algo() {
+        if digest_info.algo() != params.hash_algo.der_algo()? {
             return Err(CryptoError::RsaInvalidPadding);
         }
 

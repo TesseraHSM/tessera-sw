@@ -4,6 +4,7 @@
 mod sha1_tests;
 mod sha256_tests;
 mod sha384_tests;
+mod sha3_tests;
 mod sha512_tests;
 
 use super::*;

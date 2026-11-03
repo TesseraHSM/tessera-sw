@@ -4,8 +4,10 @@
 //! Windows CNG (Cryptography Next Generation) hash implementations.
 //!
 //! This module provides hash algorithm implementations using Windows CNG APIs.
-//! It supports SHA-1, SHA-256, SHA-384, and SHA-512 algorithms through a unified
-//! interface that implements the `HashOp` and `HashStreamingOp` traits.
+//! It supports SHA-1, SHA-256, SHA-384, SHA-512, and SHA3-256/384/512
+//! algorithms through a unified interface that implements the `HashOp` and
+//! `HashStreamingOp` traits. SHA-3 requires Windows 11 23H2 / Windows Server
+//! 2025 or later; on older Windows its operations fail with an error.
 //!
 //! The implementation uses Windows-specific BCrypt APIs for cryptographic operations
 //! and provides both one-shot hashing and incremental hashing capabilities.
@@ -13,6 +15,15 @@
 use windows::Win32::Security::Cryptography::*;
 
 use super::*;
+
+// SHA-3 pseudo-handles and algorithm identifiers from the CNG documentation;
+// the `windows` crate version in use predates them.
+pub(crate) const BCRYPT_SHA3_256_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3B1u32 as _);
+pub(crate) const BCRYPT_SHA3_384_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3C1u32 as _);
+pub(crate) const BCRYPT_SHA3_512_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3D1u32 as _);
+const BCRYPT_SHA3_256_ALGORITHM: windows::core::PCWSTR = windows::core::w!("SHA3-256");
+const BCRYPT_SHA3_384_ALGORITHM: windows::core::PCWSTR = windows::core::w!("SHA3-384");
+const BCRYPT_SHA3_512_ALGORITHM: windows::core::PCWSTR = windows::core::w!("SHA3-512");
 
 /// Generic CNG hash implementation.
 ///
@@ -99,6 +110,34 @@ impl CngHashAlgo {
     pub fn sha512() -> Self {
         Self::new(BCRYPT_SHA512_ALG_HANDLE, 64)
     }
+
+    /// Creates a new SHA3-256 hash instance (FIPS 202, 256-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHA3-256 hashing.
+    pub fn sha3_256() -> Self {
+        Self::new(BCRYPT_SHA3_256_ALG_HANDLE, 32)
+    }
+
+    /// Creates a new SHA3-384 hash instance (FIPS 202, 384-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHA3-384 hashing.
+    pub fn sha3_384() -> Self {
+        Self::new(BCRYPT_SHA3_384_ALG_HANDLE, 48)
+    }
+
+    /// Creates a new SHA3-512 hash instance (FIPS 202, 512-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHA3-512 hashing.
+    pub fn sha3_512() -> Self {
+        Self::new(BCRYPT_SHA3_512_ALG_HANDLE, 64)
+    }
+
     /// Returns the hash output size in bytes for this algorithm.
     ///
     /// This method provides the size of the hash digest produced by this
@@ -108,9 +147,9 @@ impl CngHashAlgo {
     ///
     /// The hash output size in bytes:
     /// - SHA-1: 20 bytes
-    /// - SHA-256: 32 bytes
-    /// - SHA-384: 48 bytes
-    /// - SHA-512: 64 bytes    
+    /// - SHA-256, SHA3-256: 32 bytes
+    /// - SHA-384, SHA3-384: 48 bytes
+    /// - SHA-512, SHA3-512: 64 bytes
     pub fn size(&self) -> usize {
         self.size
     }
@@ -126,6 +165,9 @@ impl CngHashAlgo {
             BCRYPT_SHA256_ALG_HANDLE => BCRYPT_SHA256_ALGORITHM,
             BCRYPT_SHA384_ALG_HANDLE => BCRYPT_SHA384_ALGORITHM,
             BCRYPT_SHA512_ALG_HANDLE => BCRYPT_SHA512_ALGORITHM,
+            BCRYPT_SHA3_256_ALG_HANDLE => BCRYPT_SHA3_256_ALGORITHM,
+            BCRYPT_SHA3_384_ALG_HANDLE => BCRYPT_SHA3_384_ALGORITHM,
+            BCRYPT_SHA3_512_ALG_HANDLE => BCRYPT_SHA3_512_ALGORITHM,
             _ => unreachable!("Invalid bcrypt algorithm handle"),
         }
     }
@@ -171,13 +213,16 @@ impl CngHashAlgo {
         Ok(u32::from_le_bytes(hash_len) as usize)
     }
 
-    pub(crate) fn der_algo(&self) -> DerDigestAlgo {
+    /// Returns the DER digest algorithm identifier for this hash algorithm,
+    /// or `CryptoError::HashUnsupportedAlgorithm` for SHA-3, which has no
+    /// `DigestInfo` mapping here.
+    pub(crate) fn der_algo(&self) -> Result<DerDigestAlgo, CryptoError> {
         match self.bcrypt_algo {
-            BCRYPT_SHA1_ALG_HANDLE => DerDigestAlgo::Sha1,
-            BCRYPT_SHA256_ALG_HANDLE => DerDigestAlgo::Sha256,
-            BCRYPT_SHA384_ALG_HANDLE => DerDigestAlgo::Sha384,
-            BCRYPT_SHA512_ALG_HANDLE => DerDigestAlgo::Sha512,
-            _ => unreachable!("Invalid bcrypt algorithm handle"),
+            BCRYPT_SHA1_ALG_HANDLE => Ok(DerDigestAlgo::Sha1),
+            BCRYPT_SHA256_ALG_HANDLE => Ok(DerDigestAlgo::Sha256),
+            BCRYPT_SHA384_ALG_HANDLE => Ok(DerDigestAlgo::Sha384),
+            BCRYPT_SHA512_ALG_HANDLE => Ok(DerDigestAlgo::Sha512),
+            _ => Err(CryptoError::HashUnsupportedAlgorithm),
         }
     }
 }

@@ -13,6 +13,7 @@
 //! - **SHA-256**: Secure 256-bit hash from SHA-2 family
 //! - **SHA-384**: Secure 384-bit hash from SHA-2 family
 //! - **SHA-512**: Secure 512-bit hash from SHA-2 family
+//! - **SHA3-256**, **SHA3-384**, **SHA3-512**: SHA-3 family (FIPS 202)
 //!
 //! # Implementation Strategy
 //!
@@ -117,6 +118,33 @@ impl OsslHashAlgo {
         Self::new(MessageDigest::sha512())
     }
 
+    /// Creates a new SHA3-256 hash instance (FIPS 202, 256-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `OsslHash` instance configured for SHA3-256 hashing.
+    pub fn sha3_256() -> Self {
+        Self::new(MessageDigest::sha3_256())
+    }
+
+    /// Creates a new SHA3-384 hash instance (FIPS 202, 384-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `OsslHash` instance configured for SHA3-384 hashing.
+    pub fn sha3_384() -> Self {
+        Self::new(MessageDigest::sha3_384())
+    }
+
+    /// Creates a new SHA3-512 hash instance (FIPS 202, 512-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `OsslHash` instance configured for SHA3-512 hashing.
+    pub fn sha3_512() -> Self {
+        Self::new(MessageDigest::sha3_512())
+    }
+
     /// Returns the hash output size in bytes for this algorithm.
     ///
     /// This method provides the size of the hash digest produced by this
@@ -126,9 +154,9 @@ impl OsslHashAlgo {
     ///
     /// The hash output size in bytes:
     /// - SHA-1: 20 bytes
-    /// - SHA-256: 32 bytes
-    /// - SHA-384: 48 bytes
-    /// - SHA-512: 64 bytes
+    /// - SHA-256, SHA3-256: 32 bytes
+    /// - SHA-384, SHA3-384: 48 bytes
+    /// - SHA-512, SHA3-512: 64 bytes
     pub fn size(&self) -> usize {
         self.md.size()
     }
@@ -156,15 +184,17 @@ impl OsslHashAlgo {
     ///
     /// # Returns
     ///
-    /// The `DerDigestAlgo` corresponding to this hash algorithm.
-    pub(crate) fn der_algo(&self) -> DerDigestAlgo {
+    /// The `DerDigestAlgo` corresponding to this hash algorithm, or
+    /// `CryptoError::HashUnsupportedAlgorithm` for SHA-3, which has no
+    /// `DigestInfo` mapping here.
+    pub(crate) fn der_algo(&self) -> Result<DerDigestAlgo, CryptoError> {
         use openssl::nid::Nid;
         match self.md.type_() {
-            Nid::SHA1 => DerDigestAlgo::Sha1,
-            Nid::SHA256 => DerDigestAlgo::Sha256,
-            Nid::SHA384 => DerDigestAlgo::Sha384,
-            Nid::SHA512 => DerDigestAlgo::Sha512,
-            _ => panic!("Unsupported hash algorithm for DER OID"),
+            Nid::SHA1 => Ok(DerDigestAlgo::Sha1),
+            Nid::SHA256 => Ok(DerDigestAlgo::Sha256),
+            Nid::SHA384 => Ok(DerDigestAlgo::Sha384),
+            Nid::SHA512 => Ok(DerDigestAlgo::Sha512),
+            _ => Err(CryptoError::HashUnsupportedAlgorithm),
         }
     }
 }
