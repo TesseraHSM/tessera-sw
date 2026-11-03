@@ -90,7 +90,7 @@ tsra_test_hooks = ["dep:tsra_fw_ddi_mbor", "dep:tsra_fw_ddi_mbor_derive"]
 # The two firmwares use the same PSRAM window differently (IPC rings vs
 # PQC mailboxes), so the PAL must match the FP image;
 # `make_manticore.sh --bulk_crypto` selects both.
-bulk_crypto = []
+bulk_crypto = ["tsra_fw_uno_key_vault/bulk_crypto"]
 
 [lints]
 workspace = true

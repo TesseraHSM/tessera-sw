@@ -26,6 +26,7 @@ for the full per-feature gating table.
 
 * `--features emu` — canonical configuration, runs the full suite.
 * `--features mock` — transport-contract probes only.
+* `--features sock` — firmware behind a running socket DDI server.
 * No backend feature — native OS backend (`nix` on Linux / `win` on
   Windows); hardware-eligible command tests run against real silicon.
 
@@ -40,6 +41,19 @@ The canonical command is:
 ```bash
 cargo test -p tsra_ddi_tbor_types --tests --features emu
 ```
+
+For socket runs, start `ddi_sock_server` separately and run tests serially:
+
+```sh
+TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
+  -p tsra_ddi_tbor_types --features sock --test tsra_ddi_tbor_tests \
+  --test-threads 1 --no-fail-fast
+```
+
+Tests reset the endpoint's shared partition. Use a dedicated server without
+other clients. Socket connections permit multiple sessions; per-file-handle
+limit tests apply only to the emulator/native drivers. Invalid or closed socket
+session IDs can be rejected by the ownership gate before reaching firmware.
 
 ## Spec coverage matrix
 

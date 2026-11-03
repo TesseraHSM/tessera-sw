@@ -4,15 +4,33 @@
 //! Windows CNG (Cryptography Next Generation) hash implementations.
 //!
 //! This module provides hash algorithm implementations using Windows CNG APIs.
-//! It supports SHA-1, SHA-256, SHA-384, and SHA-512 algorithms through a unified
-//! interface that implements the `HashOp` and `HashStreamingOp` traits.
+//! It supports SHA-1, SHA-256, SHA-384, SHA-512, SHA3-256/384/512 and the
+//! SHAKE128/256 XOFs through a unified interface that implements the `HashOp`
+//! and `HashStreamingOp` traits. SHA-3 requires Windows 11 23H2 / Windows
+//! Server 2025 or later, and SHAKE requires Windows 11 24H2 / Windows Server
+//! 2025 or later; on older Windows their operations fail with an error.
 //!
 //! The implementation uses Windows-specific BCrypt APIs for cryptographic operations
 //! and provides both one-shot hashing and incremental hashing capabilities.
 
+use std::num::NonZeroUsize;
+
 use windows::Win32::Security::Cryptography::*;
 
 use super::*;
+
+// SHA-3 and cSHAKE pseudo-handles and algorithm identifiers from the CNG
+// documentation; the `windows` crate (0.62) does not define them.
+pub(crate) const BCRYPT_SHA3_256_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3B1u32 as _);
+pub(crate) const BCRYPT_SHA3_384_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3C1u32 as _);
+pub(crate) const BCRYPT_SHA3_512_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3D1u32 as _);
+const BCRYPT_CSHAKE128_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x411u32 as _);
+const BCRYPT_CSHAKE256_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x421u32 as _);
+const BCRYPT_SHA3_256_ALGORITHM: windows::core::PCWSTR = windows::core::w!("SHA3-256");
+const BCRYPT_SHA3_384_ALGORITHM: windows::core::PCWSTR = windows::core::w!("SHA3-384");
+const BCRYPT_SHA3_512_ALGORITHM: windows::core::PCWSTR = windows::core::w!("SHA3-512");
+const BCRYPT_CSHAKE128_ALGORITHM: windows::core::PCWSTR = windows::core::w!("CSHAKE128");
+const BCRYPT_CSHAKE256_ALGORITHM: windows::core::PCWSTR = windows::core::w!("CSHAKE256");
 
 /// Generic CNG hash implementation.
 ///
@@ -99,6 +117,64 @@ impl CngHashAlgo {
     pub fn sha512() -> Self {
         Self::new(BCRYPT_SHA512_ALG_HANDLE, 64)
     }
+
+    /// Creates a new SHA3-256 hash instance (FIPS 202, 256-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHA3-256 hashing.
+    pub fn sha3_256() -> Self {
+        Self::new(BCRYPT_SHA3_256_ALG_HANDLE, 32)
+    }
+
+    /// Creates a new SHA3-384 hash instance (FIPS 202, 384-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHA3-384 hashing.
+    pub fn sha3_384() -> Self {
+        Self::new(BCRYPT_SHA3_384_ALG_HANDLE, 48)
+    }
+
+    /// Creates a new SHA3-512 hash instance (FIPS 202, 512-bit hash values).
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHA3-512 hashing.
+    pub fn sha3_512() -> Self {
+        Self::new(BCRYPT_SHA3_512_ALG_HANDLE, 64)
+    }
+
+    /// Creates a new SHAKE128 XOF instance (FIPS 202) that produces `len`
+    /// bytes of output.
+    ///
+    /// Uses cSHAKE128 with empty function-name and customization strings,
+    /// which SP 800-185 defines to be SHAKE128. SHAKE is supported for hashing
+    /// only: HMAC, HKDF, KBKDF, the concatenation KDFs, RSA and ECDSA reject it
+    /// with `CryptoError::HashUnsupportedAlgorithm`.
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHAKE128 hashing.
+    pub fn shake128(len: NonZeroUsize) -> Self {
+        Self::new(BCRYPT_CSHAKE128_ALG_HANDLE, len.get())
+    }
+
+    /// Creates a new SHAKE256 XOF instance (FIPS 202) that produces `len`
+    /// bytes of output.
+    ///
+    /// Uses cSHAKE256 with empty function-name and customization strings,
+    /// which SP 800-185 defines to be SHAKE256. SHAKE is supported for hashing
+    /// only: HMAC, HKDF, KBKDF, the concatenation KDFs, RSA and ECDSA reject it
+    /// with `CryptoError::HashUnsupportedAlgorithm`.
+    ///
+    /// # Returns
+    ///
+    /// A new `CngHash` instance configured for SHAKE256 hashing.
+    pub fn shake256(len: NonZeroUsize) -> Self {
+        Self::new(BCRYPT_CSHAKE256_ALG_HANDLE, len.get())
+    }
+
     /// Returns the hash output size in bytes for this algorithm.
     ///
     /// This method provides the size of the hash digest produced by this
@@ -108,11 +184,20 @@ impl CngHashAlgo {
     ///
     /// The hash output size in bytes:
     /// - SHA-1: 20 bytes
-    /// - SHA-256: 32 bytes
-    /// - SHA-384: 48 bytes
-    /// - SHA-512: 64 bytes    
+    /// - SHA-256, SHA3-256: 32 bytes
+    /// - SHA-384, SHA3-384: 48 bytes
+    /// - SHA-512, SHA3-512: 64 bytes
+    /// - SHAKE128, SHAKE256: the output length given at construction
     pub fn size(&self) -> usize {
         self.size
+    }
+
+    /// Returns `true` for the SHAKE extendable-output functions.
+    pub(crate) fn is_xof(&self) -> bool {
+        matches!(
+            self.bcrypt_algo,
+            BCRYPT_CSHAKE128_ALG_HANDLE | BCRYPT_CSHAKE256_ALG_HANDLE
+        )
     }
 
     /// Converts the hash algorithm enum to the Windows CNG algorithm identifier.
@@ -126,6 +211,11 @@ impl CngHashAlgo {
             BCRYPT_SHA256_ALG_HANDLE => BCRYPT_SHA256_ALGORITHM,
             BCRYPT_SHA384_ALG_HANDLE => BCRYPT_SHA384_ALGORITHM,
             BCRYPT_SHA512_ALG_HANDLE => BCRYPT_SHA512_ALGORITHM,
+            BCRYPT_SHA3_256_ALG_HANDLE => BCRYPT_SHA3_256_ALGORITHM,
+            BCRYPT_SHA3_384_ALG_HANDLE => BCRYPT_SHA3_384_ALGORITHM,
+            BCRYPT_SHA3_512_ALG_HANDLE => BCRYPT_SHA3_512_ALGORITHM,
+            BCRYPT_CSHAKE128_ALG_HANDLE => BCRYPT_CSHAKE128_ALGORITHM,
+            BCRYPT_CSHAKE256_ALG_HANDLE => BCRYPT_CSHAKE256_ALGORITHM,
             _ => unreachable!("Invalid bcrypt algorithm handle"),
         }
     }
@@ -158,7 +248,7 @@ impl CngHashAlgo {
         //SAFETY: Calling Windows CNG API directly
         let status = unsafe {
             BCryptGetProperty(
-                handle,
+                handle.into(),
                 BCRYPT_HASH_LENGTH,
                 Some(&mut hash_len),
                 &mut result_len,
@@ -171,13 +261,16 @@ impl CngHashAlgo {
         Ok(u32::from_le_bytes(hash_len) as usize)
     }
 
-    pub(crate) fn der_algo(&self) -> DerDigestAlgo {
+    /// Returns the DER digest algorithm identifier for this hash algorithm,
+    /// or `CryptoError::HashUnsupportedAlgorithm` for SHA-3 and SHAKE, which
+    /// have no `DigestInfo` mapping here.
+    pub(crate) fn der_algo(&self) -> Result<DerDigestAlgo, CryptoError> {
         match self.bcrypt_algo {
-            BCRYPT_SHA1_ALG_HANDLE => DerDigestAlgo::Sha1,
-            BCRYPT_SHA256_ALG_HANDLE => DerDigestAlgo::Sha256,
-            BCRYPT_SHA384_ALG_HANDLE => DerDigestAlgo::Sha384,
-            BCRYPT_SHA512_ALG_HANDLE => DerDigestAlgo::Sha512,
-            _ => unreachable!("Invalid bcrypt algorithm handle"),
+            BCRYPT_SHA1_ALG_HANDLE => Ok(DerDigestAlgo::Sha1),
+            BCRYPT_SHA256_ALG_HANDLE => Ok(DerDigestAlgo::Sha256),
+            BCRYPT_SHA384_ALG_HANDLE => Ok(DerDigestAlgo::Sha384),
+            BCRYPT_SHA512_ALG_HANDLE => Ok(DerDigestAlgo::Sha512),
+            _ => Err(CryptoError::HashUnsupportedAlgorithm),
         }
     }
 }
@@ -210,13 +303,20 @@ impl HashOp for CngHashAlgo {
     /// This function contains unsafe code as it calls Windows CNG APIs directly.
     #[allow(unsafe_code)]
     fn hash(&mut self, data: &[u8], hash: Option<&mut [u8]>) -> Result<usize, CryptoError> {
-        let hash_len = Self::hash_size(self.bcrypt_algo)?;
+        // An XOF's BCRYPT_HASH_LENGTH is only its default output length.
+        let hash_len = if self.is_xof() {
+            self.size
+        } else {
+            Self::hash_size(self.bcrypt_algo)?
+        };
         if let Some(hash) = hash {
             if hash.len() < hash_len {
                 Err(CryptoError::HashBufferTooSmall)?;
             }
+            // CNG takes the output length from the buffer: it must match a
+            // fixed-length digest exactly, and sets an XOF's output length.
             //SAFETY: Calling Windows CNG API directly
-            let status = unsafe { BCryptHash(self.bcrypt_algo, None, data, hash) };
+            let status = unsafe { BCryptHash(self.bcrypt_algo, None, data, &mut hash[..hash_len]) };
             status.ok().map_err(|_| CryptoError::HashError)?;
         }
         Ok(hash_len)
@@ -317,8 +417,9 @@ impl HashOpContext for CngHashAlgoContext {
             if hash.len() < len {
                 Err(CryptoError::HashBufferTooSmall)?;
             }
+            // As in `hash`, the buffer length is the output length.
             //SAFETY: Calling Windows CNG API directly
-            let status = unsafe { BCryptFinishHash(self.handle.handle(), hash, 0) };
+            let status = unsafe { BCryptFinishHash(self.handle.handle(), &mut hash[..len], 0) };
             status.ok().map_err(|_| CryptoError::HashFinishError)?;
         }
         Ok(len)

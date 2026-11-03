@@ -199,6 +199,15 @@ pub const SLOT_CT_IN_OFFSET: usize = SLOT_PK_OFFSET;
 /// request fields the HSM wrote.
 pub const SLOT_SS_OFFSET: usize = SLOT_MSG_OFFSET;
 
+/// Offset of the message SHAKE absorbs. SHAKE uses no context string or
+/// signature, so its message may run on through those regions, up to
+/// [`SLOT_SHAKE_OUT_OFFSET`].
+pub const SLOT_SHAKE_IN_OFFSET: usize = SLOT_MSG_OFFSET;
+
+/// Offset of the SHAKE output; borrows the public-key region, which SHAKE
+/// does not use.
+pub const SLOT_SHAKE_OUT_OFFSET: usize = SLOT_PK_OFFSET;
+
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;
 
@@ -219,6 +228,12 @@ pub const OP_MLKEM_ENCAPSULATE: u32 = 5;
 
 /// Operation selector: decapsulate an ML-KEM ciphertext.
 pub const OP_MLKEM_DECAPSULATE: u32 = 6;
+
+/// Operation selector: hash the staged message with SHAKE128.
+pub const OP_SHAKE128: u32 = 7;
+
+/// Operation selector: hash the staged message with SHAKE256.
+pub const OP_SHAKE256: u32 = 8;
 
 /// Status: request serviced.
 pub const STATUS_OK: u32 = 0;
@@ -267,7 +282,8 @@ pub struct Request {
     /// Length of the context string staged in the operand slot.
     pub ctx_len: usize,
 
-    /// Length of the signature staged in the operand slot (verify only).
+    /// Length of the signature staged in the operand slot (verify only); for
+    /// SHAKE, the number of output bytes requested.
     pub sig_len: usize,
 
     /// Length of the public key staged in the operand slot (verify only).

@@ -14,6 +14,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_nvic::Nvic;
+use tsra_fw_uno_error::HsmError;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_pac::Interrupt;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
@@ -113,14 +114,22 @@ pub enum ShaMode {
     Sha512_256 = 7,
 }
 
-impl From<tsra_fw_hsm_pal_traits::HsmHashAlgo> for ShaMode {
-    fn from(algo: tsra_fw_hsm_pal_traits::HsmHashAlgo) -> Self {
+impl TryFrom<tsra_fw_hsm_pal_traits::HsmHashAlgo> for ShaMode {
+    type Error = HsmError;
+
+    fn try_from(algo: tsra_fw_hsm_pal_traits::HsmHashAlgo) -> HsmResult<Self> {
         use tsra_fw_hsm_pal_traits::HsmHashAlgo;
         match algo {
-            HsmHashAlgo::Sha1 => Self::Sha1,
-            HsmHashAlgo::Sha256 => Self::Sha256,
-            HsmHashAlgo::Sha384 => Self::Sha384,
-            HsmHashAlgo::Sha512 => Self::Sha512,
+            HsmHashAlgo::Sha1 => Ok(Self::Sha1),
+            HsmHashAlgo::Sha256 => Ok(Self::Sha256),
+            HsmHashAlgo::Sha384 => Ok(Self::Sha384),
+            HsmHashAlgo::Sha512 => Ok(Self::Sha512),
+            // The SHA engine has no SHA-3 modes; the PAL runs SHAKE on a PQC core.
+            HsmHashAlgo::Sha3_256
+            | HsmHashAlgo::Sha3_384
+            | HsmHashAlgo::Sha3_512
+            | HsmHashAlgo::Shake128(_)
+            | HsmHashAlgo::Shake256(_) => Err(HsmError::UnsupportedDigestHashAlgorithm),
         }
     }
 }

@@ -23,6 +23,7 @@ fn main() {
     // vars changed since they impact the CMake configuration.
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_MOCK");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_EMU");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SOCK");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_SESSION_EX_TESTS");
     println!("cargo:rerun-if-env-changed=CMAKE_GENERATOR");
     println!("cargo:rerun-if-env-changed=ProgramFiles(x86)");
@@ -43,6 +44,9 @@ fn try_main() -> anyhow::Result<()> {
     }
     if env::var("CARGO_FEATURE_EMU").is_ok() {
         features.push("emu");
+    }
+    if env::var("CARGO_FEATURE_SOCK").is_ok() {
+        features.push("sock");
     }
     let mut config = cmake::Config::new("cpp");
     config.define("TEST_FEATURES", features.join(" "));

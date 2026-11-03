@@ -6,6 +6,7 @@ name = "pqc_ml"
 version = "0.1.0"
 
 [dependencies]
+zeroize = { workspace = true }
 
 [build-dependencies]
 cc = "1"

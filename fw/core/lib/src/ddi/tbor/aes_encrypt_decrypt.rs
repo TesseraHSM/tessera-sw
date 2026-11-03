@@ -42,7 +42,7 @@ use super::validate_active_session;
 
 /// Map the wire [`AesOp`] onto the PAL [`HsmAesOp`].  An unrecognized
 /// discriminant is rejected with [`HsmError::InvalidArg`].
-fn pal_aes_op(op: AesOp) -> HsmResult<HsmAesOp> {
+pub(super) fn pal_aes_op(op: AesOp) -> HsmResult<HsmAesOp> {
     match op {
         AesOp::Encrypt => Ok(HsmAesOp::Encrypt),
         AesOp::Decrypt => Ok(HsmAesOp::Decrypt),

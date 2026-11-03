@@ -19,6 +19,7 @@
 //! | [`HsmAesGcm`] | AES-GCM authenticated encryption |
 //! | [`HsmAesKw`] | AES-KW / AES-KWP key wrap |
 //! | [`HsmAesXts`] | AES-XTS (currently disabled) |
+//! | [`HsmBulkCrypto`] | Bulk AES-GCM / AES-XTS keys and queue IOs |
 //! | [`HsmEcc`] | ECC key gen, raw EC sign / verify, ECDH (NIST P-256/384/521) |
 //! | [`HsmRsa`] | RSA key gen + raw mod-exp + PKCS#1 v1.5 / OAEP / PSS |
 //! | [`HsmKdf`] | HKDF, KBKDF (SP 800-108), MGF1, X9.63, SP 800-56A |
@@ -40,6 +41,7 @@
 //! before they return.
 
 mod aes;
+mod bulk;
 mod ecc;
 mod hash;
 mod hmac;
@@ -49,6 +51,7 @@ mod rng;
 mod rsa;
 
 pub use aes::*;
+pub use bulk::*;
 pub use ecc::*;
 pub use hash::*;
 pub use hmac::*;
@@ -74,6 +77,7 @@ pub trait HsmCrypto:
     + HsmAesGcm
     + HsmAesKw
     + HsmAesXts
+    + HsmBulkCrypto
     + HsmEcc
     + HsmRsa
     + HsmKdf

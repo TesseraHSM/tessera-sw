@@ -149,6 +149,15 @@ pub const SLOT_KEY_IN_OFFSET: usize = SLOT_SIG_OFFSET;
 /// [`SLOT_CT_OFFSET`]; decapsulation takes no public key.
 pub const SLOT_CT_IN_OFFSET: usize = SLOT_PK_OFFSET;
 
+/// Offset of the message SHAKE absorbs, mirroring `SLOT_SHAKE_IN_OFFSET` on
+/// FP. SHAKE uses no context string or signature, so its message may run on
+/// through those regions, up to [`SLOT_SHAKE_OUT_OFFSET`].
+pub const SLOT_SHAKE_IN_OFFSET: usize = SLOT_MSG_OFFSET;
+
+/// Offset of the SHAKE output, mirroring `SLOT_SHAKE_OUT_OFFSET` on FP.
+/// Borrows the public-key region, which SHAKE does not use.
+pub const SLOT_SHAKE_OUT_OFFSET: usize = SLOT_PK_OFFSET;
+
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;
 
@@ -160,6 +169,8 @@ const _: () = assert!(crate::request::PqcOp::MlDsaVerify as u32 == 3);
 const _: () = assert!(crate::request::PqcOp::MlKemGenerateKey as u32 == 4);
 const _: () = assert!(crate::request::PqcOp::MlKemEncapsulate as u32 == 5);
 const _: () = assert!(crate::request::PqcOp::MlKemDecapsulate as u32 == 6);
+const _: () = assert!(crate::request::PqcOp::Shake128 as u32 == 7);
+const _: () = assert!(crate::request::PqcOp::Shake256 as u32 == 8);
 
 /// A response read back from a core.
 #[derive(Debug, Clone, Copy)]
@@ -188,7 +199,8 @@ pub struct RequestParams<'a> {
     pub msg_len: u32,
     /// Length of the context string staged in the operand slot.
     pub ctx_len: u32,
-    /// Length of the signature staged in the operand slot (verify only).
+    /// Length of the signature staged in the operand slot (verify only);
+    /// for SHAKE, the number of output bytes requested.
     pub sig_len: u32,
     /// Length of the public key staged in the operand slot (verify only).
     pub pub_key_len: u32,
@@ -238,6 +250,38 @@ pub fn write_slot(engine: EngineId, offset: usize, data: &[u8]) -> bool {
         let tail = head + words * 4;
         for (i, &byte) in data[tail..].iter().enumerate() {
             write_volatile(dst.add(tail + i), byte);
+        }
+    }
+    true
+}
+
+/// Zero `len` bytes of `engine`'s operand slot at `offset`.
+///
+/// Volatile, so the scrub cannot be elided even though nothing on this core
+/// reads the bytes back.
+pub fn clear_slot(engine: EngineId, offset: usize, len: usize) -> bool {
+    let Some(end) = offset.checked_add(len) else {
+        return false;
+    };
+    if end > SLOT_SIZE {
+        return false;
+    }
+    let base = SLOT_ADDRS[engine.raw() as usize] as *mut u8;
+
+    // SAFETY: as `write_slot`, and word-wise for the same reason.
+    unsafe {
+        let dst = base.add(offset);
+        let head = dst.align_offset(align_of::<u32>()).min(len);
+        for i in 0..head {
+            write_volatile(dst.add(i), 0);
+        }
+        let words = (len - head) / 4;
+        let dst_w = dst.add(head) as *mut u32;
+        for i in 0..words {
+            write_volatile(dst_w.add(i), 0);
+        }
+        for i in head + words * 4..len {
+            write_volatile(dst.add(i), 0);
         }
     }
     true
@@ -431,6 +475,32 @@ pub fn take_response(engine: EngineId, seq: u32) -> Option<Response> {
             status: read_volatile(mb.add(word::STATUS)),
             out_len: read_volatile(mb.add(word::OUT_LEN)),
         })
+    }
+}
+
+/// True if `engine`'s core has answered request `seq`.
+pub fn has_answered(engine: EngineId, seq: u32) -> bool {
+    // SAFETY: as `take_response`.
+    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) == seq }
+}
+
+/// Wipe everything a request can leave in `engine`'s shared memory: the
+/// whole operand slot and the seed words of its mailbox.
+///
+/// Only once the core has answered: it may still be reading operands, or
+/// about to write results, until then.
+pub fn scrub(engine: EngineId) {
+    // Order the wipe after the sequence-number load that showed the core
+    // has answered, as `take_response` orders its reads.
+    dmb();
+    clear_slot(engine, 0, SLOT_SIZE);
+    let mb = mailbox(engine);
+    // SAFETY: as `post_request`.
+    unsafe {
+        for i in 0..SEED_LEN / 4 {
+            write_volatile(mb.add(word::XI + i), 0);
+            write_volatile(mb.add(word::RND + i), 0);
+        }
     }
 }
 

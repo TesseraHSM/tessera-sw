@@ -12,7 +12,7 @@ use super::common::*;
 // Key tag
 const KEY_TAG: u16 = 0x5453;
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 fn create_key(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> u16 {
     let key_props = helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -72,8 +72,9 @@ fn test_open_key_incorrect_session_id() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_open_key_incorrect_key_tag() {
     ddi_dev_test(
         common_setup,
@@ -95,8 +96,9 @@ fn test_open_key_incorrect_key_tag() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_open_key_no_key_tag() {
     ddi_dev_test(
         common_setup,
@@ -129,8 +131,9 @@ fn test_open_key_no_key_tag() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_open_key() {
     ddi_dev_test(
         common_setup,
@@ -149,8 +152,9 @@ fn test_open_key() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_open_deleted_key() {
     ddi_dev_test(
         common_setup,

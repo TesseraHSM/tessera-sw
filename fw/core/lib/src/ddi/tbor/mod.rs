@@ -17,7 +17,10 @@
 //! Error encoding initializes only the published response prefix.
 
 pub(crate) mod aes_encrypt_decrypt;
+pub(crate) mod aes_gcm_encrypt_decrypt;
 pub(crate) mod aes_generate_key;
+pub(crate) mod aes_xts_encrypt_decrypt;
+pub(crate) mod aes_xts_generate_key;
 pub(crate) mod api_rev;
 pub(crate) mod concat_kdf_derive;
 pub(crate) mod darc_kex_key_gen;
@@ -379,6 +382,20 @@ pub(crate) mod opcode {
     /// other PQC opcodes.  See [`super::mlkem_decapsulate`].
     pub(crate) const MLKEM_DECAPSULATE: u8 = 0x2B;
 
+    /// `AesGcmEncryptDecrypt` — AES-256-GCM over OOB in / out SGL blocks
+    /// with a caller-held masked AES-256 key.
+    /// See [`super::aes_gcm_encrypt_decrypt`].
+    pub(crate) const AES_GCM_ENCRYPT_DECRYPT: u8 = 0x2C;
+
+    /// `AesXtsEncryptDecrypt` — AES-256-XTS over OOB in / out SGL blocks
+    /// with a caller-held masked XTS key.
+    /// See [`super::aes_xts_encrypt_decrypt`].
+    pub(crate) const AES_XTS_ENCRYPT_DECRYPT: u8 = 0x2D;
+
+    /// `AesXtsGenerateKey` — generate a masked double-wide AES-256-XTS key.
+    /// See [`super::aes_xts_generate_key`].
+    pub(crate) const AES_XTS_GENERATE_KEY: u8 = 0x2E;
+
     /// `GetPublicKey` — derive the wire public key of a masked RSA / ECC
     /// private key. See [`super::get_public_key`].
     pub(crate) const GET_PUBLIC_KEY: u8 = 0x2F;
@@ -580,10 +597,14 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::MLKEM_GENERATE_KEY => types::TborMlKemGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::MLKEM_ENCAPSULATE => types::TborMlKemEncapsulateResp::MAX_ENCODED_SIZE,
         opcode::MLKEM_DECAPSULATE => types::TborMlKemDecapsulateResp::MAX_ENCODED_SIZE,
+        opcode::AES_XTS_ENCRYPT_DECRYPT => types::TborAesXtsEncryptDecryptResp::MAX_ENCODED_SIZE,
+        opcode::AES_XTS_GENERATE_KEY => types::TborAesXtsGenerateKeyResp::MAX_ENCODED_SIZE,
         opcode::GET_PUBLIC_KEY => types::TborGetPublicKeyResp::MAX_ENCODED_SIZE,
         opcode::VERIFY_KEY => types::TborVerifyKeyResp::MAX_ENCODED_SIZE,
         // These handlers reclaim response space within every valid request.
-        opcode::AES_ENCRYPT_DECRYPT | opcode::ECC_SIGN => request_len,
+        opcode::AES_ENCRYPT_DECRYPT | opcode::AES_GCM_ENCRYPT_DECRYPT | opcode::ECC_SIGN => {
+            request_len
+        }
         _ if !is_known_opcode(opcode) => host_capacity,
         _ => tsra_fw_ddi_tbor::RESP_HEADER_LEN + 4,
     };
@@ -723,6 +744,13 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::MLKEM_GENERATE_KEY => mlkem_generate_key::handle(pal, io, cmd_buf).await,
         opcode::MLKEM_ENCAPSULATE => mlkem_encapsulate::handle(pal, io, cmd_buf).await,
         opcode::MLKEM_DECAPSULATE => mlkem_decapsulate::handle(pal, io, cmd_buf).await,
+        opcode::AES_GCM_ENCRYPT_DECRYPT => {
+            aes_gcm_encrypt_decrypt::handle(pal, io, cmd_buf, oob).await
+        }
+        opcode::AES_XTS_ENCRYPT_DECRYPT => {
+            aes_xts_encrypt_decrypt::handle(pal, io, cmd_buf, oob).await
+        }
+        opcode::AES_XTS_GENERATE_KEY => aes_xts_generate_key::handle(pal, io, cmd_buf).await,
         opcode::GET_PUBLIC_KEY => get_public_key::handle(pal, io, cmd_buf).await,
         opcode::VERIFY_KEY => verify_key::handle(pal, io, cmd_buf).await,
         _ => Err(HsmError::UnsupportedCmd),
@@ -784,6 +812,9 @@ fn is_known_opcode(opcode: u8) -> bool {
             | opcode::MLKEM_GENERATE_KEY
             | opcode::MLKEM_ENCAPSULATE
             | opcode::MLKEM_DECAPSULATE
+            | opcode::AES_GCM_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_GENERATE_KEY
             | opcode::GET_PUBLIC_KEY
             | opcode::VERIFY_KEY
     )
@@ -841,6 +872,9 @@ fn is_in_session(opcode: u8) -> bool {
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
         | opcode::DARC_KEY_WRAP
+        | opcode::AES_GCM_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_GENERATE_KEY
         | opcode::GET_PUBLIC_KEY
         | opcode::VERIFY_KEY => true,
         // Default-deny: any future opcode is treated as in-session
@@ -908,6 +942,9 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::DARC_TMK_GEN
         | opcode::DARC_TMK_EXPORT
         | opcode::DARC_KEY_WRAP
+        | opcode::AES_GCM_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_ENCRYPT_DECRYPT
+        | opcode::AES_XTS_GENERATE_KEY
         | opcode::GET_PUBLIC_KEY
         | opcode::VERIFY_KEY => true,
         _ => true,
@@ -1047,13 +1084,13 @@ mod tests {
         pal.part_alloc_internal(0, 1).await.unwrap();
         pal.part_enable_internal(0).await.unwrap();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-        tx.send(HsmIoRequest {
-            pid: HsmPartId::from(0u8),
-            qid: 0,
-            qidx: 0,
-            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
-            tx: reply_tx,
-        })
+        tx.send(HsmIoRequest::cmd(
+            HsmPartId::from(0u8),
+            0,
+            0,
+            [0; tsra_fw_hsm_io::SQE_DWORDS],
+            reply_tx,
+        ))
         .await
         .unwrap();
         let io = pal.poll_io().await.unwrap();
@@ -1375,6 +1412,148 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    fn oob_blocks(input: &[u8], output: &mut [u8], descriptors: &mut [u8; 32]) -> OobPtr {
+        descriptors[..8].copy_from_slice(&(input.as_ptr() as u64).to_le_bytes());
+        descriptors[8..12].copy_from_slice(&(input.len() as u32).to_le_bytes());
+        descriptors[16..24].copy_from_slice(&(output.as_mut_ptr() as u64).to_le_bytes());
+        descriptors[24..28].copy_from_slice(&(output.len() as u32).to_le_bytes());
+        let address = descriptors.as_ptr() as u64;
+        OobPtr {
+            prp: HsmDmaAddr {
+                lo: address as u32,
+                hi: (address >> 32) as u32,
+            },
+            len: descriptors.len() as u32,
+        }
+    }
+
+    #[tokio::test]
+    async fn gcm_preflights_response_capacity_before_mutating_output() {
+        use tsra_fw_ddi_tbor_types as types;
+
+        let (pal, io, sess_id) = crypto_fixture().await;
+        let mut masked = [0; types::MASKED_AES_KEY_MAX_LEN];
+        let masked_len = masked_test_key(
+            &pal,
+            &io,
+            sess_id,
+            HsmVaultKeyKind::Aes256,
+            HsmVaultKeyAttrs::new().with_encrypt(true),
+            &mut [0x42; 32],
+            &mut masked,
+        )
+        .await;
+        let response_len = types::TborAesGcmEncryptDecryptResp::MAX_ENCODED_SIZE;
+        for iv_source in [types::GcmIvSource::Host, types::GcmIvSource::Device] {
+            for capacity in [response_len - 1, response_len] {
+                let input = [0x5A; 32];
+                let mut output = [0xA5; 32];
+                let mut descriptors = [0; 32];
+                let oob = oob_blocks(&input, &mut output, &mut descriptors);
+                let mut storage = [0; 512];
+                let request_len = types::TborAesGcmEncryptDecryptReq::encode(&mut storage)
+                    .unwrap()
+                    .session_id(u16::from(sess_id).into())
+                    .unwrap()
+                    .op(AesOp::Encrypt)
+                    .unwrap()
+                    .iv_source(iv_source)
+                    .unwrap()
+                    .aad_len(0)
+                    .unwrap()
+                    .data_len(32)
+                    .unwrap()
+                    .in_index(0)
+                    .unwrap()
+                    .out_index(1)
+                    .unwrap()
+                    .iv(&[0x33; 12])
+                    .unwrap()
+                    .tag(&[0; 16])
+                    .unwrap()
+                    .masked_key(&masked[..masked_len])
+                    .unwrap()
+                    .finish()
+                    .len();
+                let original = storage;
+                let mut cmd_buf = HsmCmdBuf::new(dma(&mut storage), request_len, capacity).unwrap();
+                let outcome =
+                    aes_gcm_encrypt_decrypt::handle(&pal, &io, &mut cmd_buf, Some(oob)).await;
+                let result = cmd_buf.finish_response(outcome);
+                if capacity < response_len {
+                    assert_eq!(result, Err(HsmError::TborBufferTooSmall));
+                    assert_eq!(storage, original);
+                    assert_eq!(output, [0xA5; 32]);
+                } else {
+                    assert_eq!(result, Ok(response_len));
+                    assert_ne!(output, [0xA5; 32]);
+                }
+            }
+        }
+        pal.drop_io(io).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn xts_preflights_response_capacity_before_mutating_output() {
+        use tsra_fw_ddi_tbor_types as types;
+
+        let (pal, io, sess_id) = crypto_fixture().await;
+        let mut key = [0x42; 64];
+        key[32..].fill(0x24);
+        let mut masked = [0; types::MASKED_AES_XTS_KEY_LEN];
+        let masked_len = masked_test_key(
+            &pal,
+            &io,
+            sess_id,
+            HsmVaultKeyKind::AesXts512,
+            HsmVaultKeyAttrs::new().with_encrypt(true),
+            &mut key,
+            &mut masked,
+        )
+        .await;
+        let response_len = types::TborAesXtsEncryptDecryptResp::MAX_ENCODED_SIZE;
+        for capacity in [response_len - 1, response_len] {
+            let input = [0x5A; 32];
+            let mut output = [0xA5; 32];
+            let mut descriptors = [0; 32];
+            let oob = oob_blocks(&input, &mut output, &mut descriptors);
+            let mut storage = [0; 512];
+            let request_len = types::TborAesXtsEncryptDecryptReq::encode(&mut storage)
+                .unwrap()
+                .session_id(u16::from(sess_id).into())
+                .unwrap()
+                .op(AesOp::Encrypt)
+                .unwrap()
+                .data_len(32)
+                .unwrap()
+                .dul(32)
+                .unwrap()
+                .in_index(0)
+                .unwrap()
+                .out_index(1)
+                .unwrap()
+                .tweak(&1u64.to_le_bytes())
+                .unwrap()
+                .masked_key(&masked[..masked_len])
+                .unwrap()
+                .finish()
+                .len();
+            let original = storage;
+            let mut cmd_buf = HsmCmdBuf::new(dma(&mut storage), request_len, capacity).unwrap();
+            let outcome = aes_xts_encrypt_decrypt::handle(&pal, &io, &mut cmd_buf, Some(oob)).await;
+            let result = cmd_buf.finish_response(outcome);
+            if capacity < response_len {
+                assert_eq!(result, Err(HsmError::TborBufferTooSmall));
+                assert_eq!(storage, original);
+                assert_eq!(output, [0xA5; 32]);
+            } else {
+                assert_eq!(result, Ok(response_len));
+                assert_ne!(output, [0xA5; 32]);
+            }
+        }
+        pal.drop_io(io).await.unwrap();
     }
 
     async fn bounded_exchange(
@@ -1719,30 +1898,41 @@ mod tests {
 
     #[tokio::test]
     async fn exchange_hash_reclaims_input_and_grows_for_empty_messages() {
+        // 8-byte header plus four TOC slots (session_id, algo, out_len, msg).
+        const RESP_PREFIX_LEN: usize = 24;
         let (pal, io, sess_id) = crypto_fixture().await;
-        for size in [0, 3, HASH_MSG_MAX_LEN] {
-            let mut storage = [0xA5; 2100];
-            let address = storage.as_ptr();
-            let request_len = TborHashReq::encode(&mut storage)
-                .unwrap()
-                .session_id(u16::from(sess_id).into())
-                .unwrap()
-                .algo(HashAlgo::Sha512)
-                .unwrap()
-                .msg(&vec![0x42; size])
-                .unwrap()
-                .finish()
-                .len();
-            let capacity = exchange_capacity(opcode::HASH, request_len, 84);
-            let mut cmd_buf =
-                HsmCmdBuf::new(dma(&mut storage[..capacity]), request_len, 84).unwrap();
-            let outcome = hash::handle(&pal, &io, &mut cmd_buf).await;
-            let len = cmd_buf.finish_response(outcome).unwrap();
-            let response = cmd_buf.response(len).unwrap();
-            assert_eq!(response.as_ptr(), address);
-            let frame = TborHashResp::decode(response).unwrap();
-            assert_eq!(frame.digest().len(), HsmHashAlgo::Sha512.digest_len());
-            assert_eq!(len, 20 + frame.digest().len());
+        for (algo, out_len, digest_len) in [
+            (HashAlgo::Sha512, None, HsmHashAlgo::Sha512.digest_len()),
+            (HashAlgo::Shake256, Some(256), 256),
+        ] {
+            let host_capacity = RESP_PREFIX_LEN + digest_len;
+            for size in [0, 3, HASH_MSG_MAX_LEN] {
+                let mut storage = [0xA5; 2100];
+                let address = storage.as_ptr();
+                let request_len = TborHashReq::encode(&mut storage)
+                    .unwrap()
+                    .session_id(u16::from(sess_id).into())
+                    .unwrap()
+                    .algo(algo)
+                    .unwrap()
+                    .out_len(out_len)
+                    .unwrap()
+                    .msg(&vec![0x42; size])
+                    .unwrap()
+                    .finish()
+                    .len();
+                let capacity = exchange_capacity(opcode::HASH, request_len, host_capacity);
+                let mut cmd_buf =
+                    HsmCmdBuf::new(dma(&mut storage[..capacity]), request_len, host_capacity)
+                        .unwrap();
+                let outcome = hash::handle(&pal, &io, &mut cmd_buf).await;
+                let len = cmd_buf.finish_response(outcome).unwrap();
+                let response = cmd_buf.response(len).unwrap();
+                assert_eq!(response.as_ptr(), address);
+                let frame = TborHashResp::decode(response).unwrap();
+                assert_eq!(frame.digest().len(), digest_len);
+                assert_eq!(len, RESP_PREFIX_LEN + digest_len);
+            }
         }
     }
 
@@ -1771,9 +1961,11 @@ mod tests {
                 .unwrap()
                 .op(op)
                 .unwrap()
-                .msg(&message)
+                .mode(tsra_fw_ddi_tbor_types::AesMode::Cbc)
                 .unwrap()
                 .iv(&[0x22; AES_IV_LEN])
+                .unwrap()
+                .msg(&message)
                 .unwrap()
                 .masked_key(&masked[..masked_len])
                 .unwrap()
@@ -1821,9 +2013,11 @@ mod tests {
                 .unwrap()
                 .op(AesOp::Encrypt)
                 .unwrap()
-                .msg(&[0x5A; 32])
+                .mode(tsra_fw_ddi_tbor_types::AesMode::Cbc)
                 .unwrap()
                 .iv(&[0x22; AES_IV_LEN])
+                .unwrap()
+                .msg(&[0x5A; 32])
                 .unwrap()
                 .masked_key(&masked[..masked_len])
                 .unwrap()

@@ -84,6 +84,8 @@ set(SOURCE
     algo/hmac/sign_verify_tests.cpp
     algo/hmac/keygen_tests.cpp
     algo/kdf/hkdf_tests.cpp
+    algo/aes/gcm_enc_dec_tests.cpp
+    algo/aes/xts_enc_dec_tests.cpp
     algo/rsa/keygen_tests.cpp
     algo/rsa/keyreport_tests.cpp
     algo/rsa/enc_dec_tests.cpp
@@ -113,8 +115,6 @@ else()
         session_tests.cpp
         handle_mgmt_tests.cpp
         multi_process_tests.cpp
-        algo/aes/gcm_enc_dec_tests.cpp
-        algo/aes/xts_enc_dec_tests.cpp
         algo/kdf/kbkdf_tests.cpp
         resiliency/init_stress_tests.cpp
         resiliency/aes_stress_tests.cpp

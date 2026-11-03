@@ -85,6 +85,13 @@ impl KeyLen {
     }
 }
 
+/// Stored length of an AES bulk (GCM / XTS) key.
+///
+/// With `bulk_crypto` the fast-path engine holds the material and the vault
+/// keeps only its 2-byte handle (as the reference firmware did); otherwise
+/// the HSM runs bulk crypto itself and the vault keeps the AES-256 key.
+pub const BULK_KEY_LEN: u16 = if cfg!(feature = "bulk_crypto") { 2 } else { 32 };
+
 /// Per-kind length table, indexed by `HsmVaultKeyKind` discriminant.
 ///
 /// Mirrors the reference firmware's `raw_key_blob_size()` (fixed kinds)
@@ -117,7 +124,7 @@ impl KeyLen {
 /// `SessionOpenFinish` as `TborStatus::InvalidArg`, long after the
 /// handshake crypto had succeeded. `session_ex_range_is_derived_from_pal_layout`
 /// pins the range to the PAL constants so it cannot drift back.
-static KIND_LEN: [KeyLen; 64] = [
+static KIND_LEN: [KeyLen; 65] = [
     /* 0  Free                         */ KeyLen::Invalid,
     /* 1  Rsa2kPublic                  */ KeyLen::Fixed(260),
     /* 2  Rsa3kPublic                  */ KeyLen::Fixed(388),
@@ -137,9 +144,9 @@ static KIND_LEN: [KeyLen; 64] = [
     /* 16 Aes128                       */ KeyLen::Fixed(16),
     /* 17 Aes192                       */ KeyLen::Fixed(24),
     /* 18 Aes256                       */ KeyLen::Fixed(32),
-    /* 19 AesXtsBulk256                */ KeyLen::Fixed(2),
-    /* 20 AesGcmBulk256                */ KeyLen::Fixed(2),
-    /* 21 AesGcmBulk256Unapproved      */ KeyLen::Fixed(2),
+    /* 19 AesXtsBulk256                */ KeyLen::Fixed(BULK_KEY_LEN),
+    /* 20 AesGcmBulk256                */ KeyLen::Fixed(BULK_KEY_LEN),
+    /* 21 AesGcmBulk256Unapproved      */ KeyLen::Fixed(BULK_KEY_LEN),
     /* 22 Secret256                    */ KeyLen::Fixed(32),
     /* 23 Secret384                    */ KeyLen::Fixed(48),
     /* 24 Secret521                    */ KeyLen::Fixed(68),
@@ -190,6 +197,7 @@ static KIND_LEN: [KeyLen; 64] = [
     /* 61 MlKem512Public               */ KeyLen::Fixed(800),
     /* 62 MlKem768Public               */ KeyLen::Fixed(1184),
     /* 63 MlKem1024Public              */ KeyLen::Fixed(1568),
+    /* 64 AesXts512                    */ KeyLen::Fixed(64),
 ];
 
 /// Resolves the length contract for `kind` in O(1).
@@ -237,9 +245,9 @@ mod tests {
             (HsmVaultKeyKind::Aes128, 16),
             (HsmVaultKeyKind::Aes192, 24),
             (HsmVaultKeyKind::Aes256, 32),
-            (HsmVaultKeyKind::AesXtsBulk256, 2),
-            (HsmVaultKeyKind::AesGcmBulk256, 2),
-            (HsmVaultKeyKind::AesGcmBulk256Unapproved, 2),
+            (HsmVaultKeyKind::AesXtsBulk256, BULK_KEY_LEN),
+            (HsmVaultKeyKind::AesGcmBulk256, BULK_KEY_LEN),
+            (HsmVaultKeyKind::AesGcmBulk256Unapproved, BULK_KEY_LEN),
             (HsmVaultKeyKind::Secret256, 32),
             (HsmVaultKeyKind::Secret384, 48),
             (HsmVaultKeyKind::Secret521, 68),
@@ -277,6 +285,7 @@ mod tests {
             (HsmVaultKeyKind::MlKem512Public, 800),
             (HsmVaultKeyKind::MlKem768Public, 1184),
             (HsmVaultKeyKind::MlKem1024Public, 1568),
+            (HsmVaultKeyKind::AesXts512, 64),
         ];
         for (kind, len) in table {
             assert_eq!(key_len(kind), Ok(KeyLen::Fixed(len)), "{kind:?}");
@@ -304,7 +313,7 @@ mod tests {
             (HsmVaultKeyKind::Ecc521Private, 68),
             (HsmVaultKeyKind::Aes128, 16),
             (HsmVaultKeyKind::Aes256, 32),
-            (HsmVaultKeyKind::AesXtsBulk256, 2),
+            (HsmVaultKeyKind::AesXtsBulk256, BULK_KEY_LEN),
             (HsmVaultKeyKind::Secret521, 68),
             (HsmVaultKeyKind::EstablishCred, 144),
             (HsmVaultKeyKind::Session, 88),
@@ -320,6 +329,7 @@ mod tests {
             (HsmVaultKeyKind::MlKem512Seed, 64),
             (HsmVaultKeyKind::MlKem1024Private, 3168),
             (HsmVaultKeyKind::MlKem1024Public, 1568),
+            (HsmVaultKeyKind::AesXts512, 64),
         ];
         for (kind, len) in cases {
             assert_eq!(key_len(kind), Ok(KeyLen::Fixed(len)), "{kind:?}");

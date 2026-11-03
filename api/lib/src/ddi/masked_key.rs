@@ -28,15 +28,27 @@ const TBOR_KEY_SCOPE_MASK: u64 = 0b111;
 const TBOR_KEY_SCOPE_SESSION: u64 = 0b001;
 
 /// std/OpenSSL stores `n | e | d | p | q | dp | dq | qInv`.
-#[cfg(feature = "emu")]
-const fn rsa_crt_payload_len(key_bytes: usize) -> usize {
+const fn std_rsa_crt_payload_len(key_bytes: usize) -> usize {
     key_bytes * 9 / 2 + 4
 }
 
 /// Uno stores the PKA operand `p | q | dp | dq | n | n1q | n2p | e`.
-#[cfg(not(feature = "emu"))]
-const fn rsa_crt_payload_len(key_bytes: usize) -> usize {
+const fn uno_rsa_crt_payload_len(key_bytes: usize) -> usize {
     key_bytes * 5 + 4
+}
+
+/// Checks an RSA-CRT payload length against the backend's firmware layout.
+/// A socket server may run either the std firmware or bridge to Uno.
+fn rsa_crt_payload_len_valid(key_bytes: usize, payload_len: usize) -> bool {
+    let std = payload_len == std_rsa_crt_payload_len(key_bytes);
+    let uno = payload_len == uno_rsa_crt_payload_len(key_bytes);
+    if cfg!(feature = "emu") {
+        std
+    } else if cfg!(feature = "sock") {
+        std || uno
+    } else {
+        uno
+    }
 }
 
 /// Key-kind discriminant recorded in the TBOR masked-key metadata
@@ -63,6 +75,7 @@ enum TborMaskedKeyKind {
     VarLenHmacSha256,
     VarLenHmacSha384,
     VarLenHmacSha512,
+    AesXts512,
 }
 
 impl TryFrom<u8> for TborMaskedKeyKind {
@@ -89,6 +102,7 @@ impl TryFrom<u8> for TborMaskedKeyKind {
             KEY_KIND_VAR_LEN_HMAC_SHA256 => Self::VarLenHmacSha256,
             KEY_KIND_VAR_LEN_HMAC_SHA384 => Self::VarLenHmacSha384,
             KEY_KIND_VAR_LEN_HMAC_SHA512 => Self::VarLenHmacSha512,
+            KEY_KIND_AES_XTS512 => Self::AesXts512,
             _ => return Err(HsmError::MaskedKeyDecodeFailed),
         })
     }
@@ -117,6 +131,7 @@ impl TborMaskedKeyKind {
             Self::VarLenHmacSha256 => (HsmKeyKind::HmacSha256, 256, None),
             Self::VarLenHmacSha384 => (HsmKeyKind::HmacSha384, 384, None),
             Self::VarLenHmacSha512 => (HsmKeyKind::HmacSha512, 512, None),
+            Self::AesXts512 => (HsmKeyKind::AesXts, 512, None),
         }
     }
 
@@ -126,7 +141,7 @@ impl TborMaskedKeyKind {
         let expected_len = match self {
             Self::Rsa2kPrivate | Self::Rsa3kPrivate | Self::Rsa4kPrivate => key_bytes * 2 + 4,
             Self::Rsa2kPrivateCrt | Self::Rsa3kPrivateCrt | Self::Rsa4kPrivateCrt => {
-                rsa_crt_payload_len(key_bytes)
+                return rsa_crt_payload_len_valid(key_bytes, payload_len);
             }
             Self::EccP256 | Self::EccP384 | Self::EccP521 => key_bytes.next_multiple_of(4),
             _ => key_bytes,
@@ -898,10 +913,23 @@ mod tests {
             (KEY_KIND_RSA2K_PRIVATE, 256 * 2 + 4),
             (KEY_KIND_RSA3K_PRIVATE, 384 * 2 + 4),
             (KEY_KIND_RSA4K_PRIVATE, 512 * 2 + 4),
-            (KEY_KIND_RSA2K_PRIVATE_CRT, rsa_crt_payload_len(256)),
-            (KEY_KIND_RSA3K_PRIVATE_CRT, rsa_crt_payload_len(384)),
-            (KEY_KIND_RSA4K_PRIVATE_CRT, rsa_crt_payload_len(512)),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            [
+                (KEY_KIND_RSA2K_PRIVATE_CRT, 256),
+                (KEY_KIND_RSA3K_PRIVATE_CRT, 384),
+                (KEY_KIND_RSA4K_PRIVATE_CRT, 512),
+            ]
+            .map(|(kind, key_bytes)| {
+                let len = if cfg!(feature = "emu") {
+                    std_rsa_crt_payload_len(key_bytes)
+                } else {
+                    uno_rsa_crt_payload_len(key_bytes)
+                };
+                (kind, len)
+            }),
+        ) {
             let blob = unchecked_padded_blob(kind, raw_len);
             assert!(HsmMaskedKey::to_key_props(&blob).is_ok());
         }
@@ -909,10 +937,15 @@ mod tests {
 
     #[test]
     fn rsa_crt_payload_len_matches_backend() {
-        #[cfg(feature = "emu")]
-        assert_eq!([256, 384, 512].map(rsa_crt_payload_len), [1156, 1732, 2308]);
-
-        #[cfg(not(feature = "emu"))]
-        assert_eq!([256, 384, 512].map(rsa_crt_payload_len), [1284, 1924, 2564]);
+        for (key_bytes, std, uno) in [(256, 1156, 1284), (384, 1732, 1924), (512, 2308, 2564)] {
+            assert_eq!(
+                rsa_crt_payload_len_valid(key_bytes, std),
+                cfg!(any(feature = "emu", feature = "sock"))
+            );
+            assert_eq!(
+                rsa_crt_payload_len_valid(key_bytes, uno),
+                !cfg!(feature = "emu")
+            );
+        }
     }
 }

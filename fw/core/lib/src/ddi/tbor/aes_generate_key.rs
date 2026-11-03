@@ -59,7 +59,7 @@ fn aes_size_kind(size: AesKeySize) -> HsmResult<(usize, HsmVaultKeyKind)> {
 /// key carries exactly `ENCRYPT | DECRYPT` (mirrors MBOR
 /// `key_attrs::for_aes`); any other usage is rejected.  `scope` records
 /// the lifecycle / visibility domain selecting the masking key.
-fn aes_key_attrs(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAttrs> {
+pub(super) fn aes_key_attrs(scope: HsmKeyScope, usage: KeyUsage) -> HsmResult<HsmVaultKeyAttrs> {
     if usage.bits() != (KeyUsage::ENCRYPT | KeyUsage::DECRYPT) {
         return Err(HsmError::InvalidPermissions);
     }

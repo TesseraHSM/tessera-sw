@@ -46,9 +46,11 @@ impl StdOic {
         );
 
         // Reply to submitter with just the CQE (oneshot — fires at most once).
-        match io.tx.take() {
-            Some(tx) => tx.send(io.cqe).map_err(|_| HsmError::CompleteIoFailure),
-            None => Err(HsmError::CompleteIoFailure),
+        let sent = io.tx.take().is_some_and(|tx| tx.send(io.cqe).is_ok());
+        if sent {
+            Ok(())
+        } else {
+            Err(HsmError::CompleteIoFailure)
         }
     }
 }

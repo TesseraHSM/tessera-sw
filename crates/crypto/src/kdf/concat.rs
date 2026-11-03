@@ -79,6 +79,7 @@ impl DeriveOp for ConcatKdfAlgo {
         if derive_len == 0 {
             return Err(CryptoError::ConcatKdfInvalidDerivedKeyLength);
         }
+        self.hash_algo.ensure_not_xof()?;
 
         let hash_size = self.hash_algo.size();
         // Number of hash blocks required.  Guard against the RFC/SEC cap:

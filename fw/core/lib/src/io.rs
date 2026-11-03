@@ -46,6 +46,7 @@ use tsra_fw_ddi_mbor_api::DdiDecoder;
 use tsra_fw_ddi_mbor_types::DdiOp;
 use tsra_fw_ddi_mbor_types::DdiReqHdr;
 use tsra_fw_ddi_tbor::RequestView as TborRequestView;
+use tsra_fw_hsm_bulk::BulkCqe;
 use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_undo::UndoLog;
 use tsra_fw_hsm_undo::WalkOutcome;
@@ -65,6 +66,11 @@ impl<P: HsmPal> Hsm<P> {
             if let Err(_e) = self.pal().drop_io(io).await {
                 error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
             }
+            return;
+        }
+
+        if io.kind() == HsmIoKind::Bulk {
+            self.handle_bulk_io(io).await;
             return;
         }
 
@@ -161,6 +167,33 @@ impl<P: HsmPal> Hsm<P> {
         }
 
         drop(credential_guard);
+        if let Err(_e) = self.pal().drop_io(io).await {
+            error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
+        }
+    }
+
+    /// Runs a bulk (fast-path) IO and posts its CQE.
+    ///
+    /// The PAL writes the success CQE into the IO's CQE; on error the
+    /// core writes the failure CQE from the IO's SQE. The SQ id is stamped
+    /// by [`complete_io`](HsmIoController::complete_io).
+    async fn handle_bulk_io(&self, mut io: P::Io) {
+        if let Err(e) = self.pal().bulk_crypt(&mut io).await {
+            debug!("core", "bulk IO failed: {:?}", e);
+            let cqe = BulkCqe::error(io.sqe(), 0, e);
+            if let Err(_e) = cqe.write(io.cqe()) {
+                error!("core", _e, "bulk error CQE write failed: {:?}", _e);
+            }
+        }
+
+        if let Err(_e) = self.pal().complete_io(&mut io).await {
+            error!(
+                "core",
+                HsmError::CompleteIoFailure,
+                "bulk completion failed: {:?}",
+                _e
+            );
+        }
         if let Err(_e) = self.pal().drop_io(io).await {
             error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
         }
@@ -792,19 +825,19 @@ mod session_gate_tests {
                 .finish()
                 .len();
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            tx.send(HsmIoRequest {
-                pid: HsmPartId::from(0u8),
-                qid: 0,
-                qidx: 0,
-                sqe: SqeBuilder::new()
+            tx.send(HsmIoRequest::cmd(
+                HsmPartId::from(0u8),
+                0,
+                0,
+                SqeBuilder::new()
                     .cmd(CmdDword::new().with_op(OP_TBOR))
                     .buf_lens(request_len as u32, if short_response { 12 } else { 4096 })
                     .src_prp1(request.0.as_ptr() as u64)
                     .dst_prp1(response.0.as_mut_ptr() as u64)
                     .session_flags(SessionFlags::new().with_ctrl(SessionCtrl::Open as u8))
                     .build(),
-                tx: reply_tx,
-            })
+                reply_tx,
+            ))
             .await
             .unwrap();
             let io = hsm.pal().poll_io().await.unwrap();
@@ -860,7 +893,7 @@ mod session_gate_tests {
             hsm.handle_io(io).await;
             if let Some(reply_rx) = reply_rx {
                 let mut raw = reply_rx.await.unwrap();
-                let cqe = Cqe::from(&mut raw);
+                let cqe = Cqe::try_from(&mut raw[..tsra_fw_hsm_io::CQE_DWORDS]).unwrap();
                 if attempt == 0 {
                     assert_eq!(cqe.status(), HostStatus::ALLOC_ERR);
                     assert!(response.0.iter().all(|&b| b == 0xA5));
@@ -894,13 +927,13 @@ mod session_gate_tests {
         }
 
         let (reply_tx, _) = tokio::sync::oneshot::channel();
-        tx.send(HsmIoRequest {
-            pid: HsmPartId::from(0u8),
-            qid: 0,
-            qidx: 0,
-            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
-            tx: reply_tx,
-        })
+        tx.send(HsmIoRequest::cmd(
+            HsmPartId::from(0u8),
+            0,
+            0,
+            [0; tsra_fw_hsm_io::SQE_DWORDS],
+            reply_tx,
+        ))
         .await
         .unwrap();
         let io = hsm.pal().poll_io().await.unwrap();

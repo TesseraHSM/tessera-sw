@@ -866,6 +866,11 @@ encryption and decryption. It is specified in [NIST SP800-38E](https://nvlpubs.n
 |                            | [tsra_crypt_decrypt_finish](#tsra_crypt_decrypt_finish)   |
 | **PKCS#11 Mechanism**      | CKM_AES_XTS                                         &nbsp;  |
 
+**Tweak width:** `sector_num` is a 128-bit little-endian tweak, incremented by one per data unit.
+Sessions opened with `tsra_sess_open` honor all 128 bits. Sessions opened with `tsra_sess_ex_open`
+support a 64-bit tweak: bytes 8..16 must be zero for the initial tweak and for the tweak advanced
+past the last processed data unit, otherwise the operation fails with `TSRA_STATUS_INVALID_TWEAK`.
+
 **Example**
 
 ```cpp

@@ -21,13 +21,25 @@ fn build_xts_wrapped_blob_header(key1_len: u16, key2_len: u16) -> [u8; 16] {
     hdr
 }
 
-/// Build a wrapped AES-XTS key-pair blob from two plaintext AES-256 halves.
+/// Build a wrapped AES-XTS key blob from two plaintext AES-256 halves.
+///
+/// MBOR sessions use the key-pair format (`header || wrap(K1) || wrap(K2)`).
+/// Ex (TBOR) sessions hold XTS as one `AesXts512` key, so the blob is a
+/// single RSA-AES wrap of `K1 || K2` (PKCS#11 `CKK_AES_XTS`).
 pub(crate) fn build_xts_wrapped_blob(
     wrapping_pub_key: &HsmRsaPublicKey,
     hash: HsmHashAlgo,
     key1_plain: &[u8],
     key2_plain: &[u8],
 ) -> Vec<u8> {
+    if cfg!(feature = "session-ex-tests") {
+        let key_plain = [key1_plain, key2_plain].concat();
+        // AES-256 KEK; the KEK size is independent of the wrapped key size.
+        let mut wrap_algo = HsmRsaAesWrapAlgo::new(hash, 32);
+        return HsmEncrypter::encrypt_vec(&mut wrap_algo, wrapping_pub_key, &key_plain)
+            .expect("Failed to wrap XTS key");
+    }
+
     let mut wrap_algo_1 = HsmRsaAesWrapAlgo::new(hash, key1_plain.len());
     let key1_wrapped = HsmEncrypter::encrypt_vec(&mut wrap_algo_1, wrapping_pub_key, key1_plain)
         .expect("Failed to wrap XTS key1");

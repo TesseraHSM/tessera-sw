@@ -12,6 +12,7 @@ use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
+use tsra_fw_hsm_io::CQE_DWORDS;
 use tsra_fw_hsm_io::OP_TBOR;
 use tsra_fw_hsm_io::SQE_DWORDS;
 use tsra_fw_hsm_pal_std::HsmIoRequest;
@@ -48,13 +49,13 @@ async fn check_credential_guard() {
         .expect("partition");
     hsm.pal().part_enable_internal(0).await.expect("enable");
     let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-    tx.send(HsmIoRequest {
-        pid: HsmPartId::from(0u8),
-        qid: 0,
-        qidx: 0,
-        sqe: [0; SQE_DWORDS],
-        tx: reply_tx,
-    })
+    tx.send(HsmIoRequest::cmd(
+        HsmPartId::from(0u8),
+        0,
+        0,
+        [0; SQE_DWORDS],
+        reply_tx,
+    ))
     .await
     .expect("control IO");
     let control_io = hsm.pal().poll_io().await.expect("poll control IO");
@@ -79,19 +80,19 @@ async fn check_credential_guard() {
         .finish()
         .len();
     let (reply_tx, mut reply_rx) = tokio::sync::oneshot::channel();
-    tx.send(HsmIoRequest {
-        pid: HsmPartId::from(0u8),
-        qid: 0,
-        qidx: 0,
-        sqe: SqeBuilder::new()
+    tx.send(HsmIoRequest::cmd(
+        HsmPartId::from(0u8),
+        0,
+        0,
+        SqeBuilder::new()
             .cmd(CmdDword::new().with_op(OP_TBOR))
             .buf_lens(request_len as u32, 4096)
             .src_prp1(request.0.as_ptr() as u64)
             .dst_prp1(response.0.as_mut_ptr() as u64)
             .session_flags(SessionFlags::new().with_ctrl(3).with_id_valid(true))
             .build(),
-        tx: reply_tx,
-    })
+        reply_tx,
+    ))
     .await
     .expect("KeyReport IO");
     let io = hsm.pal().poll_io().await.expect("poll KeyReport");
@@ -109,7 +110,10 @@ async fn check_credential_guard() {
     drop(credential_guard);
     handler.await;
     let mut completion = reply_rx.await.expect("KeyReport completion after unlock");
-    assert_eq!(Cqe::from(&mut completion).status(), 0);
+    let cqe = completion
+        .first_chunk_mut::<CQE_DWORDS>()
+        .expect("command CQE");
+    assert_eq!(Cqe::from(cqe).status(), 0);
     hsm.pal()
         .drop_io(control_io)
         .await

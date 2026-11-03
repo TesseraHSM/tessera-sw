@@ -24,6 +24,7 @@ use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
 use tsra_fw_hsm_pal_traits::HsmRsaPct;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_upka::UpkaModSize;
 use tsra_fw_uno_drivers_upka::UpkaRsaKeyType;
 
@@ -48,8 +49,10 @@ fn rsa_key_to_upka_key_type(key: HsmRsaKey) -> UpkaRsaKeyType {
     }
 }
 
-fn digest_info_prefix(algo: HsmHashAlgo) -> &'static [u8] {
-    match algo {
+/// The PKCS #1 v1.5 `DigestInfo` prefix for `algo`; SHA-3 and SHAKE are not
+/// supported yet.
+fn digest_info_prefix(algo: HsmHashAlgo) -> HsmResult<&'static [u8]> {
+    Ok(match algo {
         // SHA-256: SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }, OCTET STRING(32) }
         HsmHashAlgo::Sha256 => &[
             0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
@@ -70,7 +73,12 @@ fn digest_info_prefix(algo: HsmHashAlgo) -> &'static [u8] {
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E, 0x03, 0x02, 0x1A, 0x05, 0x00, 0x04,
             0x14,
         ],
-    }
+        HsmHashAlgo::Sha3_256
+        | HsmHashAlgo::Sha3_384
+        | HsmHashAlgo::Sha3_512
+        | HsmHashAlgo::Shake128(_)
+        | HsmHashAlgo::Shake256(_) => return Err(HsmError::UnsupportedDigestHashAlgorithm),
+    })
 }
 
 // =============================================================================
@@ -691,13 +699,14 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Rejects SHA-3 and SHAKE before anything is sized by them.
+        let prefix = digest_info_prefix(algo)?;
         let k = key_size.modulus_len();
         let digest_len = algo.digest_len();
         if message_hash.len() != digest_len || signature.len() < k {
             return Err(HsmError::InvalidArg);
         }
 
-        let prefix = digest_info_prefix(algo);
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Err(HsmError::InvalidArg);
@@ -731,6 +740,10 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Rejects SHA-3 and SHAKE before the modular exponentiation, so an
+        // unsupported hash is reported as such rather than as a bad
+        // signature, and costs no PKA operation.
+        let prefix = digest_info_prefix(algo)?;
         let k = key_size.modulus_len();
         let digest_len = algo.digest_len();
         if message_hash.len() != digest_len || signature.len() != k {
@@ -746,7 +759,6 @@ impl HsmRsa for UnoHsmPal {
             return Ok(false);
         }
 
-        let prefix = digest_info_prefix(algo);
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Ok(false);
@@ -790,6 +802,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -847,6 +862,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -930,6 +948,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -987,6 +1008,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;

@@ -89,6 +89,9 @@ pub enum KeyClass {
     HmacSha384 = 5,
     /// A raw variable-length HMAC-SHA-512 key (`VarLenHmacSha512`).
     HmacSha512 = 6,
+    /// A raw 64-byte AES-256-XTS key `K1 ‖ K2` with `K1 != K2`
+    /// (`AesXts512`).
+    AesXts512 = 7,
 }
 
 /// `UnwrapKey` request schema.

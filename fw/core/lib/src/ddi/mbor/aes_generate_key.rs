@@ -13,10 +13,11 @@
 //! For the bulk kinds (`AesGcmBulk256` / `AesGcmBulk256Unapproved` /
 //! `AesXtsBulk256`) the response also carries a `bulk_key_id`.  The bulk
 //! key is the key consumed by the bulk GCM / XTS encrypt/decrypt op; the
-//! host addresses it via this `bulk_key_id`.  Bulk key material is registered with the
-//! bulk-crypto backend (see [`bulk::commit_key`](super::bulk));
-//! the vault stores only the 2-byte backend handle, and `bulk_key_id` is
-//! the distinct backend-assigned id, not the vault `key_id`.
+//! host addresses it via this `bulk_key_id`.  Bulk keys are created through
+//! the platform bulk-crypto path (see [`bulk::commit_key`](super::bulk)),
+//! which decides where the material lives (the vault may hold only a
+//! backend handle) and assigns `bulk_key_id`; the core treats it as
+//! opaque and distinct from the vault `key_id`.
 //!
 //! Scope: 128/192/256-bit AES keys and AES-256 GCM / XTS bulk keys.
 
@@ -62,11 +63,9 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     let key_buf = pal.dma_alloc(io, key_len)?;
     pal.aes_gen_key(io, key_buf).await?;
 
-    // Bulk keys live in the bulk-crypto backend: hand the freshly
-    // generated material to the backend and keep only the 2-byte
-    // `bulk_key_id` reference in the vault.  Non-bulk keys are stored
-    // directly.  The registration is scoped to the creating session so
-    // later bulk ops (which carry the session id) match.
+    // Bulk keys go through the platform bulk-crypto path, which also
+    // assigns the `bulk_key_id`; non-bulk keys are stored directly.  A
+    // session-scoped key is bound to the creating session.
     let (key_handle, bulk_key_id) = match super::bulk::commit_key(
         pal,
         io,
@@ -87,8 +86,8 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     // Build the host's opaque re-import blob: envelope the freshly
     // generated key under the per-session masking key (session-scoped
     // keys) or the partition masking key (persistent keys).  Bulk keys
-    // mask the generated material directly (the vault holds only the
-    // `bulk_key_id`); non-bulk keys read the stored bytes back from the
+    // mask the generated material directly (the vault may hold only a
+    // backend handle); non-bulk keys read the stored bytes back from the
     // vault so the masked bytes match a later re-import.
     let result = async {
         let plaintext: &HsmDmaBuf = if is_bulk {

@@ -445,6 +445,7 @@ impl OsslRsaHashSignAlgo {
         use foreign_types::ForeignTypeRef;
         use openssl_sys as ffi;
 
+        self.hash.ensure_sha1_or_sha2()?;
         let mdname =
             std::ffi::CString::new(self.hash.md_name()?).map_err(|_| CryptoError::RsaError)?;
 
@@ -481,6 +482,7 @@ impl OsslRsaHashSignAlgo {
         use foreign_types::ForeignTypeRef;
         use openssl_sys as ffi;
 
+        self.hash.ensure_sha1_or_sha2()?;
         let mdname =
             std::ffi::CString::new(self.hash.md_name()?).map_err(|_| CryptoError::RsaError)?;
 

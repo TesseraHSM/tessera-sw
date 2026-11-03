@@ -51,6 +51,7 @@
 mod aes;
 mod alloc;
 mod buf_pool;
+mod bulk;
 mod cert;
 mod drivers;
 mod ecc;
@@ -79,4 +80,6 @@ pub use io::StdHsmIo;
 pub use pal::StdHsmPal;
 pub use part::HsmPartId;
 pub use part::PartCommand;
+pub use tsra_fw_hsm_bulk::RawBulkCqe;
+pub use tsra_fw_hsm_bulk::RawBulkSqe;
 use tsra_fw_hsm_pal_traits::*;

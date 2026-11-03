@@ -71,6 +71,7 @@ fn decode_class(class: KeyClass) -> HsmResult<DecodeKeyClass> {
         KeyClass::HmacSha256 => Ok(DecodeKeyClass::HmacSha256),
         KeyClass::HmacSha384 => Ok(DecodeKeyClass::HmacSha384),
         KeyClass::HmacSha512 => Ok(DecodeKeyClass::HmacSha512),
+        KeyClass::AesXts512 => Ok(DecodeKeyClass::AesXts512),
         _ => Err(HsmError::UnsupportedCmd),
     }
 }
@@ -82,7 +83,7 @@ fn decode_class(class: KeyClass) -> HsmResult<DecodeKeyClass> {
 /// Mirrors the MBOR `key_attrs::for_*` policy: `sign`+`verify` and
 /// `encrypt`+`decrypt` are matched pairs, exactly one usage group may be
 /// set, and each key class restricts which group(s) are valid:
-/// - AES → `encrypt`+`decrypt` only;
+/// - AES / AES-XTS → `encrypt`+`decrypt` only;
 /// - RSA → `sign`+`verify` or `encrypt`+`decrypt`;
 /// - ECC → `sign`+`verify` or `derive`;
 /// - HMAC → `sign`+`verify`.
@@ -115,7 +116,9 @@ fn attrs_for_class(
     let base = HsmVaultKeyAttrs::new().with_scope(scope);
     let attrs = match class {
         // Symmetric cipher key: encrypt / decrypt only.
-        KeyClass::Aes if encrypt_decrypt => base.with_encrypt(true).with_decrypt(true),
+        KeyClass::Aes | KeyClass::AesXts512 if encrypt_decrypt => {
+            base.with_encrypt(true).with_decrypt(true)
+        }
         // RSA private key: sign / verify or encrypt / decrypt.
         KeyClass::Rsa | KeyClass::RsaCrt if sign_verify => base.with_sign(true).with_verify(true),
         KeyClass::Rsa | KeyClass::RsaCrt if encrypt_decrypt => {
@@ -130,6 +133,7 @@ fn attrs_for_class(
         }
         // Any recognized class with a usage it does not permit.
         KeyClass::Aes
+        | KeyClass::AesXts512
         | KeyClass::Rsa
         | KeyClass::RsaCrt
         | KeyClass::Ecc

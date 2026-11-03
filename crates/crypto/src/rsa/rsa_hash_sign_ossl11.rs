@@ -85,6 +85,7 @@ impl SignOp for OsslRsaHashSignAlgo {
                 .map_err(|_| CryptoError::RsaError)
         }
 
+        self.hash.ensure_sha1_or_sha2()?;
         let mut ctx = MdCtx::new().map_err(|_| CryptoError::RsaError)?;
         let pkey_ctx = ctx
             .digest_sign_init(Some(self.hash.md()), key.pkey())
@@ -125,6 +126,7 @@ impl<'a> SignStreamingOp<'a> for OsslRsaHashSignAlgo {
     ///
     /// A streaming context that can be updated with message data and finalized.
     fn sign_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let mut ctx = MdCtx::new().map_err(|_| CryptoError::RsaError)?;
         let pkey_ctx = ctx
             .digest_sign_init(Some(self.hash.md()), key.pkey())
@@ -241,6 +243,7 @@ impl VerifyOp for OsslRsaHashSignAlgo {
         data: &[u8],
         signature: &[u8],
     ) -> Result<bool, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let mut ctx = MdCtx::new().map_err(|_| CryptoError::RsaError)?;
         let pkey_ctx = ctx
             .digest_verify_init(Some(self.hash.md()), key.pkey())
@@ -268,6 +271,7 @@ impl<'a> VerifyStreamingOp<'a> for OsslRsaHashSignAlgo {
     ///
     /// A streaming context that can be updated with message data and finalized.
     fn verify_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let mut ctx = MdCtx::new().map_err(|_| CryptoError::RsaError)?;
         let pkey_ctx = ctx
             .digest_verify_init(Some(self.hash.md()), key.pkey())

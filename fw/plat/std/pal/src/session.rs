@@ -79,20 +79,13 @@ impl HsmSessionManager for StdHsmPal {
         let pid = io.pid();
         let entry = self.active_part_mut(pid)?;
 
-        // On re-key: clean up the old session-scoped keys and the old
-        // session key before creating the replacement.  A slot awaiting
-        // renegotiation after a live-migration disable has already had
-        // its vault key material cleared, so there is nothing to tear
-        // down — `recreate` below simply installs the fresh mapping
-        // (mirroring the reference firmware's `recreate_session`).
+        // Only slots awaiting renegotiation can be recreated. Validate before
+        // touching vault keys so a rejected reopen leaves an active session intact.
         if let Some(reopen_id) = id {
-            if !matches!(
-                entry.session_table.state(reopen_id),
-                HsmSessionState::NeedsRenegotiation
-            ) {
-                let old_phys = entry.session_table.physical_id(reopen_id)?;
-                entry.vault.delete_by_session_key(old_phys)?;
-                entry.vault.delete(old_phys)?;
+            match entry.session_table.state(reopen_id) {
+                HsmSessionState::NeedsRenegotiation => {}
+                HsmSessionState::Active => return Err(HsmError::InvalidArg),
+                _ => return Err(HsmError::SessionNotFound),
             }
         }
 
@@ -350,13 +343,13 @@ mod session_type_tests {
         pal.part_alloc_internal(0, 1).await.unwrap();
         pal.part_enable_internal(0).await.unwrap();
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
-        tx.send(HsmIoRequest {
-            pid: HsmPartId::from(0u8),
-            qid: 0,
-            qidx: 0,
-            sqe: [0; tsra_fw_hsm_io::SQE_DWORDS],
-            tx: reply_tx,
-        })
+        tx.send(HsmIoRequest::cmd(
+            HsmPartId::from(0u8),
+            0,
+            0,
+            [0; tsra_fw_hsm_io::SQE_DWORDS],
+            reply_tx,
+        ))
         .await
         .unwrap();
         let io = pal.poll_io().await.unwrap();

@@ -39,6 +39,7 @@ use embassy_executor::Spawner;
 use embassy_time::Duration;
 use embassy_time::Timer;
 use tsra_fw_uno_drivers_systick as systick;
+use zeroize::Zeroize;
 
 /// Number of fastpath cores.
 const FP_CORES: u8 = 3;
@@ -200,6 +201,12 @@ async fn doorbell(core_id: u8) -> ! {
 /// the public key straight into this core's operand slot.
 ///
 fn service(core_id: u8, req: &mailbox::Request) {
+    if matches!(req.op, mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256) {
+        service_shake(core_id, req);
+        scrub_shake_stack();
+        return;
+    }
+
     // ML-KEM carries its own key kinds, so route on the operation first.
     if matches!(
         req.op,
@@ -412,6 +419,90 @@ const MAX_MLKEM_PK_LEN: usize = 1568;
 /// falling back to a byte-wise copy.
 #[repr(align(4))]
 struct Align4<const N: usize>([u8; N]);
+
+/// Bytes moved per step between the operand slot and dTCM when absorbing a
+/// SHAKE message and squeezing its output.
+const SHAKE_CHUNK: usize = 512;
+
+/// Hash the message staged in the operand slot with SHAKE128 or SHAKE256,
+/// writing `sig_len` bytes of output back into the slot.
+///
+/// Both directions go through a dTCM buffer: PSRAM is far cheaper to move
+/// in bursts (see [`mailbox::stage`]) than to feed the sponge byte by byte.
+#[inline(never)]
+fn service_shake(core_id: u8, req: &mailbox::Request) {
+    let out_len = req.sig_len;
+    // The message has to end before the output begins.
+    let fits = out_len != 0
+        && req.msg_len <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET
+        && out_len <= mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
+    let msg = if fits {
+        mailbox::slot_range(core_id, mailbox::SLOT_SHAKE_IN_OFFSET, req.msg_len)
+    } else {
+        None
+    };
+    let Some(msg) = msg else {
+        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        return;
+    };
+
+    let mut sponge = if req.op == mailbox::OP_SHAKE128 {
+        pqc_ml::keccak::shake128_init()
+    } else {
+        pqc_ml::keccak::shake256_init()
+    };
+    let mut buf = Align4([0u8; SHAKE_CHUNK]);
+    for part in msg.chunks(SHAKE_CHUNK) {
+        let staged = &mut buf.0[..part.len()];
+        mailbox::stage(staged, part);
+        sponge.absorb(staged);
+    }
+    sponge.finalize();
+
+    let Some(out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len)
+    else {
+        buf.0.zeroize();
+        sponge.zeroize();
+        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        return;
+    };
+    for part in out.chunks_mut(SHAKE_CHUNK) {
+        let squeezed = &mut buf.0[..part.len()];
+        sponge.squeeze(squeezed);
+        mailbox::stage(part, squeezed);
+    }
+    // Both hold message-derived bytes and live on the stack, outside the
+    // IO teardown scrub.
+    buf.0.zeroize();
+    sponge.zeroize();
+
+    mailbox::respond(core_id, req, mailbox::STATUS_OK, out_len as u32);
+}
+
+/// Bytes of stack [`scrub_shake_stack`] clears.
+///
+/// Covers [`service_shake`]'s frame and its deepest callee chain -- the
+/// sponge methods and the pqm4 Keccak assembly -- measured at about 0.9 KB,
+/// with headroom for codegen changes. ML-DSA verify claims far more from the
+/// same depth (see the table below), so this never reaches past stack the
+/// core already uses.
+const SHAKE_STACK_SCRUB: usize = 2048;
+
+/// Zero the stack [`service_shake`] just released.
+///
+/// Its frames are gone once it returns, but their bytes are not: the Keccak
+/// assembly drops a squeezed lane and its permutation scratch below the
+/// stack pointer without clearing them, and spilled registers can hold
+/// message-derived values. Called from the frame that called
+/// [`service_shake`], so this frame spans the same stack.
+#[inline(never)]
+fn scrub_shake_stack() {
+    let mut scratch = core::mem::MaybeUninit::<[u32; SHAKE_STACK_SCRUB / 4]>::uninit();
+    // SAFETY: `scratch` is this frame's own, word aligned and
+    // `SHAKE_STACK_SCRUB` bytes long.
+    unsafe { fast_zero(scratch.as_mut_ptr().cast::<u8>(), SHAKE_STACK_SCRUB) };
+    core::hint::black_box(&scratch);
+}
 
 /// Zero `n` bytes at `p`, eight words per store.
 ///

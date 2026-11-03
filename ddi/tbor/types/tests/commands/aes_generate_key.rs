@@ -19,21 +19,27 @@
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
 //! * Unknown key size → `InvalidArg`.
 
+// The shared masked-key helpers/constants below stay available under any
+// backend (so the module isn't emu-limited), but only the emu-gated tests
+// exercise them today; suppress dead-code noise in non-emu builds.
+#![cfg_attr(not(feature = "emu"), allow(dead_code))]
+
+#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::TestCtx;
+#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
-use tsra_ddi_tbor_types::AES_MODE_CBC;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 
-use crate::commands::common::SCOPE_EPHEMERAL;
-use crate::commands::common::SCOPE_LOCAL;
-use crate::commands::common::SCOPE_SECURITY_DOMAIN;
-use crate::commands::common::SCOPE_SESSION;
+pub(crate) use crate::commands::common::SCOPE_EPHEMERAL;
+pub(crate) use crate::commands::common::SCOPE_LOCAL;
+pub(crate) use crate::commands::common::SCOPE_SECURITY_DOMAIN;
+pub(crate) use crate::commands::common::SCOPE_SESSION;
 
 /// Masked-key envelope length for a given AES key length: `header(8) ‖
 /// iv(16) ‖ aad(192) ‖ pt(key padded to 16 B) ‖ tag(16)`.
@@ -93,6 +99,7 @@ fn generate_key_req(session_id: u16, scope: u8, key_size: u8) -> TborAesGenerate
 mod tests {
     use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
     use tsra_ddi_tbor_types::TborStatus;
+    use tsra_ddi_tbor_types::AES_MODE_CBC;
     use tsra_ddi_tbor_types::AES_OP_DECRYPT;
     use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 

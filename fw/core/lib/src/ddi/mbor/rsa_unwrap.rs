@@ -26,8 +26,8 @@
 //! by the other key-producing handlers and the reference firmware.  This
 //! keeps the largest RSA-4096 keys within the fixed per-IO DMA budget.
 //! The AES, RSA (plain / CRT), and ECC key classes are wired; the AES bulk
-//! variants (GCM / XTS) recover the raw AES key, register it with the
-//! bulk-crypto backend, and return its `bulk_key_id`.
+//! variants (GCM / XTS) recover the raw AES key, create it through the
+//! platform bulk-crypto path, and return its `bulk_key_id`.
 //! RSA and ECC imports return the imported key's wire public key,
 //! re-derived from the committed vault key.
 
@@ -88,8 +88,8 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
     let unwrap_key_id = HsmKeyId::from(body.key_id);
 
     // AES-256 bulk keys (GCM / XTS) follow a distinct import path: the
-    // recovered key is handed to the bulk-crypto backend and only its 2-byte
-    // `bulk_key_id` handle is kept in the vault (mirroring
+    // recovered key is created through the platform bulk-crypto path, which
+    // assigns its `bulk_key_id` (mirroring
     // [`aes_generate_key`](super::aes_generate_key)'s bulk path).  Handle
     // and return here, before the asymmetric / AES import flow below.
     if let Some(bulk_kind) = match body.wrapped_blob_key_class {
