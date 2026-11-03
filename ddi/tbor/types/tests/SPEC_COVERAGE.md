@@ -220,9 +220,9 @@ The tests run on silicon as well as the emulator.
 | CO and rotated-CU sessions produce identical digests for identical requests | ✅ 🔁 | `hash::hash_matches_across_co_and_cu_sessions` | Sessions are exercised sequentially because the fixture may not permit concurrent authenticated CO/CU sessions |
 | Invalid-session request does not affect a separate valid session | ✅ 🔁 | `hash::hash_valid_session_usable_after_invalid_session_request` | Rotates and closes the CU bootstrap session before CO setup; `u16::MAX` returns `FileHandleSessionIdDoesNotMatch`, and the active CO session remains usable |
 | Closing a CO session releases it and a subsequently opened CU session can Hash normally | ✅ 🔁 | `hash::hash_new_session_works_after_previous_session_closed` | Also confirms the closed session id is rejected |
-| Maximum 2048-byte Hash message succeeds | ✅ 🔁 | `hash::hash_max_message_length_matches_host` | Exercises the protocol maximum for all four supported algorithms |
-| 2049-byte Hash message is rejected | ✅ 🔁 | `hash::hash_over_max_message_length_rejected` | Exercises all four algorithms; accepts rejection at the TBOR/firmware boundary without pinning where length validation occurs |
-| SHAKE128 and SHAKE256 match the host at output lengths from 1 to 256 bytes | ✅ 🔁 | `hash::hash_shake_matches_host` | Lengths 1, 16, 32, 64, 136, 168, 169, 255, and 256 (both sponge rates); empty, 3-, 1000-, and 2048-byte messages |
+| Maximum 3072-byte Hash message succeeds | ✅ 🔁 | `hash::hash_max_message_length_matches_host` | Exercises the protocol maximum for all four supported algorithms |
+| 3073-byte Hash message is rejected | ✅ 🔁 | `hash::hash_over_max_message_length_rejected` | Exercises all four algorithms; accepts rejection at the TBOR/firmware boundary without pinning where length validation occurs |
+| SHAKE128 and SHAKE256 match the host at output lengths from 1 to 256 bytes | ✅ 🔁 | `hash::hash_shake_matches_host` | Lengths 1, 16, 32, 64, 136, 168, 169, 255, and 256 (both sponge rates); empty, 3-, 1000-, and 3072-byte messages |
 | SHAKE128 and SHAKE256 known-answer vectors match | ✅ | `hash::hash_shake_known_answer_vectors` | FIPS 202 `"abc"` outputs: 32 bytes of SHAKE128, 64 bytes of SHAKE256 |
 | SHAKE without `out_len`, or with `out_len` 0 or above 256, is rejected with `InvalidArg` | ✅ 🔁 | `hash::hash_shake_invalid_out_len_rejected` | Also covers `u16::MAX` |
 | Fixed-length digests reject `out_len` with `InvalidArg` | ✅ 🔁 | `hash::hash_fixed_length_algos_reject_out_len` | Even when `out_len` equals the digest length |

@@ -1907,7 +1907,7 @@ mod tests {
         ] {
             let host_capacity = RESP_PREFIX_LEN + digest_len;
             for size in [0, 3, HASH_MSG_MAX_LEN] {
-                let mut storage = [0xA5; 2100];
+                let mut storage = [0xA5; HASH_MSG_MAX_LEN + 64];
                 let address = storage.as_ptr();
                 let request_len = TborHashReq::encode(&mut storage)
                     .unwrap()

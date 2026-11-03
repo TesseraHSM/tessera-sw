@@ -69,7 +69,7 @@ pub const MLKEM_SEED_LEN: usize = 64;
 
 /// Largest message [`PqcEngine::shake`] accepts: the TBOR `Hash` message
 /// cap, well inside the slot space before the SHAKE output.
-pub const SHAKE_MSG_MAX: usize = 2048;
+pub const SHAKE_MSG_MAX: usize = 3072;
 
 /// Largest SHAKE output: the rest of the slot after its output offset.
 pub const SHAKE_OUT_MAX: usize = mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
