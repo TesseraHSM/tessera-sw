@@ -133,7 +133,7 @@ struct CertStore {
 /// Drop implementation for `CertStore`, which allows allocated `HCERTSTORE` objects to be auto-freed when a Rust function returns.
 impl Drop for CertStore {
     fn drop(&mut self) {
-        let _free_result = unsafe { CertCloseStore(self.store, 0) };
+        let _free_result = unsafe { CertCloseStore(Some(self.store), 0) };
     }
 }
 
@@ -170,7 +170,7 @@ impl X509Certificate {
         // SAFETY: Both certificate contexts remain alive for the entire call.
         let result = unsafe {
             CryptVerifyCertificateSignatureEx(
-                HCRYPTPROV_LEGACY::default(),
+                None,
                 X509_ASN_ENCODING,
                 CRYPT_VERIFY_CERT_SIGN_SUBJECT_CERT,
                 certificate.ptr.cast(),
@@ -369,7 +369,7 @@ impl X509CertificateOp for X509Certificate {
                 CertOpenStore(
                     CERT_STORE_PROV_MEMORY,
                     X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
-                    HCRYPTPROV_LEGACY::default(),
+                    None,
                     CERT_STORE_CREATE_NEW_FLAG,
                     None,
                 )
@@ -382,7 +382,7 @@ impl X509CertificateOp for X509Certificate {
             let context = cert.create_cert_context()?;
             let res = unsafe {
                 CertAddCertificateContextToStore(
-                    cert_store.store,
+                    Some(cert_store.store),
                     context.ptr,
                     CERT_STORE_ADD_ALWAYS,
                     None,
@@ -400,6 +400,7 @@ impl X509CertificateOp for X509Certificate {
         let chain_para = CERT_CHAIN_PARA {
             cbSize: std::mem::size_of::<CERT_CHAIN_PARA>() as u32,
             RequestedUsage: Default::default(),
+            ..Default::default()
         };
 
         let res = unsafe {
@@ -407,7 +408,7 @@ impl X509CertificateOp for X509Certificate {
                 None,
                 leaf_context.ptr,
                 None,
-                cert_store.store,
+                Some(cert_store.store),
                 &chain_para,
                 CERT_CHAIN_REVOCATION_CHECK_CACHE_ONLY,
                 None,
@@ -651,8 +652,8 @@ impl Drop for LocalAllocBuf {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
             unsafe {
-                let _ = windows::Win32::Foundation::LocalFree(windows::Win32::Foundation::HLOCAL(
-                    self.ptr,
+                let _ = windows::Win32::Foundation::LocalFree(Some(
+                    windows::Win32::Foundation::HLOCAL(self.ptr),
                 ));
             }
         }
@@ -808,7 +809,7 @@ impl X509CsrOp for X509Csr {
         };
         let res = unsafe {
             CryptVerifyCertificateSignatureEx(
-                HCRYPTPROV_LEGACY::default(),
+                None,
                 X509_ASN_ENCODING,
                 CRYPT_VERIFY_CERT_SIGN_SUBJECT_BLOB,
                 std::ptr::addr_of_mut!(der_blob) as *const core::ffi::c_void,

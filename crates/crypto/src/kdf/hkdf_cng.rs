@@ -616,7 +616,7 @@ impl CngHkdfKeyHandle {
         let status = unsafe {
             BCryptExportKey(
                 self.handle,
-                BCRYPT_KEY_HANDLE::default(),
+                None,
                 BCRYPT_KEY_DATA_BLOB,
                 output,
                 &mut size,

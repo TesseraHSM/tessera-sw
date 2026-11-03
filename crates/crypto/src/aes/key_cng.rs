@@ -336,7 +336,7 @@ impl CngAesKey {
         let status = unsafe {
             BCryptExportKey(
                 self.cbc_handle(),
-                BCRYPT_KEY_HANDLE::default(),
+                None,
                 BCRYPT_KEY_DATA_BLOB,
                 slice,
                 &mut size,
@@ -602,7 +602,7 @@ impl CngAesXtsKey {
         let status = unsafe {
             BCryptExportKey(
                 self.xts_handle(),
-                BCRYPT_KEY_HANDLE::default(),
+                None,
                 BCRYPT_KEY_DATA_BLOB,
                 slice,
                 &mut size,

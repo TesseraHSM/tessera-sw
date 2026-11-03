@@ -20,7 +20,7 @@ use windows::Win32::Security::Cryptography::*;
 use super::*;
 
 // SHA-3 and cSHAKE pseudo-handles and algorithm identifiers from the CNG
-// documentation; the `windows` crate version in use predates them.
+// documentation; the `windows` crate (0.62) does not define them.
 pub(crate) const BCRYPT_SHA3_256_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3B1u32 as _);
 pub(crate) const BCRYPT_SHA3_384_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3C1u32 as _);
 pub(crate) const BCRYPT_SHA3_512_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3D1u32 as _);
@@ -248,7 +248,7 @@ impl CngHashAlgo {
         //SAFETY: Calling Windows CNG API directly
         let status = unsafe {
             BCryptGetProperty(
-                handle,
+                handle.into(),
                 BCRYPT_HASH_LENGTH,
                 Some(&mut hash_len),
                 &mut result_len,

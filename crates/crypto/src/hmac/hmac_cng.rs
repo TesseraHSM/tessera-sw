@@ -37,7 +37,7 @@ use crate::hash::BCRYPT_SHA3_384_ALG_HANDLE;
 use crate::hash::BCRYPT_SHA3_512_ALG_HANDLE;
 
 // HMAC-SHA3 pseudo-handles from the CNG documentation (Windows 11 23H2 and
-// later); the `windows` crate version in use predates them.
+// later); the `windows` crate (0.62) does not define them.
 const BCRYPT_HMAC_SHA3_256_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3E1u32 as _);
 const BCRYPT_HMAC_SHA3_384_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x3F1u32 as _);
 const BCRYPT_HMAC_SHA3_512_ALG_HANDLE: BCRYPT_ALG_HANDLE = BCRYPT_ALG_HANDLE(0x401u32 as _);
@@ -72,7 +72,7 @@ impl CngHmacAlgo {
         //SAFETY: Calling windows CNG API directly.
         let status = unsafe {
             BCryptGetProperty(
-                handle,
+                handle.into(),
                 BCRYPT_HASH_LENGTH,
                 Some(&mut hash_len),
                 &mut result_len,
