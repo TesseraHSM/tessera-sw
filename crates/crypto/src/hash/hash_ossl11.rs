@@ -14,6 +14,8 @@
 //! - **SHA-384**: Secure 384-bit hash from SHA-2 family
 //! - **SHA-512**: Secure 512-bit hash from SHA-2 family
 //! - **SHA3-256**, **SHA3-384**, **SHA3-512**: SHA-3 family (FIPS 202)
+//! - **SHAKE128**, **SHAKE256**: SHA-3 XOFs (FIPS 202) with a caller-chosen
+//!   output length
 //!
 //! # Implementation Strategy
 //!
@@ -36,8 +38,11 @@
 //! - Efficient memory management
 //! - Vectorized operations for large data processing
 
+use std::num::NonZeroUsize;
+
 use openssl::hash::*;
 use openssl::md::*;
+use openssl::nid::Nid;
 
 use super::*;
 
@@ -49,6 +54,8 @@ use super::*;
 #[derive(Clone)]
 pub struct OsslHashAlgo {
     md: MessageDigest,
+    /// Output length of the SHAKE XOFs; `None` for fixed-length digests.
+    xof_len: Option<NonZeroUsize>,
 }
 
 impl OsslHashAlgo {
@@ -65,7 +72,7 @@ impl OsslHashAlgo {
     ///
     /// A new `OsslHash` instance ready to perform hash operations.
     pub fn new(md: MessageDigest) -> Self {
-        Self { md }
+        Self { md, xof_len: None }
     }
 
     /// Creates a new SHA-1 hash instance.
@@ -145,6 +152,40 @@ impl OsslHashAlgo {
         Self::new(MessageDigest::sha3_512())
     }
 
+    /// Creates a new SHAKE128 XOF instance (FIPS 202) that produces `len`
+    /// bytes of output.
+    ///
+    /// SHAKE is supported for hashing only: HMAC, HKDF, KBKDF, the
+    /// concatenation KDFs, RSA and ECDSA reject it with
+    /// `CryptoError::HashUnsupportedAlgorithm`.
+    ///
+    /// # Returns
+    ///
+    /// A new `OsslHash` instance configured for SHAKE128 hashing.
+    pub fn shake128(len: NonZeroUsize) -> Self {
+        Self {
+            md: MessageDigest::shake_128(),
+            xof_len: Some(len),
+        }
+    }
+
+    /// Creates a new SHAKE256 XOF instance (FIPS 202) that produces `len`
+    /// bytes of output.
+    ///
+    /// SHAKE is supported for hashing only: HMAC, HKDF, KBKDF, the
+    /// concatenation KDFs, RSA and ECDSA reject it with
+    /// `CryptoError::HashUnsupportedAlgorithm`.
+    ///
+    /// # Returns
+    ///
+    /// A new `OsslHash` instance configured for SHAKE256 hashing.
+    pub fn shake256(len: NonZeroUsize) -> Self {
+        Self {
+            md: MessageDigest::shake_256(),
+            xof_len: Some(len),
+        }
+    }
+
     /// Returns the hash output size in bytes for this algorithm.
     ///
     /// This method provides the size of the hash digest produced by this
@@ -157,8 +198,15 @@ impl OsslHashAlgo {
     /// - SHA-256, SHA3-256: 32 bytes
     /// - SHA-384, SHA3-384: 48 bytes
     /// - SHA-512, SHA3-512: 64 bytes
+    /// - SHAKE128, SHAKE256: the output length given at construction
     pub fn size(&self) -> usize {
-        self.md.size()
+        self.xof_len
+            .map_or_else(|| self.md.size(), NonZeroUsize::get)
+    }
+
+    /// Returns `true` for the SHAKE extendable-output functions.
+    pub(crate) fn is_xof(&self) -> bool {
+        matches!(self.md.type_(), Nid::SHAKE128 | Nid::SHAKE256)
     }
 
     /// Returns the OpenSSL MessageDigest for this hash algorithm.
@@ -185,10 +233,9 @@ impl OsslHashAlgo {
     /// # Returns
     ///
     /// The `DerDigestAlgo` corresponding to this hash algorithm, or
-    /// `CryptoError::HashUnsupportedAlgorithm` for SHA-3, which has no
-    /// `DigestInfo` mapping here.
+    /// `CryptoError::HashUnsupportedAlgorithm` for SHA-3 and SHAKE, which
+    /// have no `DigestInfo` mapping here.
     pub(crate) fn der_algo(&self) -> Result<DerDigestAlgo, CryptoError> {
-        use openssl::nid::Nid;
         match self.md.type_() {
             Nid::SHA1 => Ok(DerDigestAlgo::Sha1),
             Nid::SHA256 => Ok(DerDigestAlgo::Sha256),
@@ -212,7 +259,8 @@ impl HashOp for OsslHashAlgo {
     ///
     /// # Implementation Details
     ///
-    /// - Uses OpenSSL's optimized one-shot hash function
+    /// - Uses OpenSSL's optimized one-shot hash function (`hash_xof` for the
+    ///   SHAKE XOFs)
     /// - Validates output buffer size before computation
     /// - Copies result to user-provided buffer
     /// - Returns actual hash size regardless of operation mode
@@ -224,14 +272,20 @@ impl HashOp for OsslHashAlgo {
     /// operation.
     fn hash(&mut self, data: &[u8], hash: Option<&mut [u8]>) -> Result<usize, CryptoError> {
         use openssl::hash;
+        let size = self.size();
         if let Some(hash) = hash {
-            if hash.len() < self.md.size() {
+            if hash.len() < size {
                 Err(CryptoError::HashBufferTooSmall)?;
             }
-            let digest = hash::hash(self.md, data).map_err(|_| CryptoError::HashError)?;
-            hash[..self.md.size()].copy_from_slice(&digest[..self.md.size()]);
+            if self.is_xof() {
+                hash::hash_xof(self.md, data, &mut hash[..size])
+                    .map_err(|_| CryptoError::HashError)?;
+            } else {
+                let digest = hash::hash(self.md, data).map_err(|_| CryptoError::HashError)?;
+                hash[..size].copy_from_slice(&digest[..size]);
+            }
         }
-        Ok(self.md.size())
+        Ok(size)
     }
 }
 
@@ -352,18 +406,24 @@ impl HashOpContext for OsslHashAlgoContext {
     /// - `CryptoError::HashBufferTooSmall`: Output buffer insufficient
     /// - `CryptoError::HashFinalizeError`: OpenSSL finalization failed
     fn finish(&mut self, hash: Option<&mut [u8]>) -> Result<usize, CryptoError> {
-        let len = self.algo.md.size();
+        let len = self.algo.size();
         if let Some(hash) = hash {
             if hash.len() < len {
                 Err(CryptoError::HashBufferTooSmall)?;
             }
 
-            let digest = self
-                .hasher
-                .finish()
-                .map_err(|_| CryptoError::HashFinishError)?;
+            if self.algo.is_xof() {
+                self.hasher
+                    .finish_xof(&mut hash[..len])
+                    .map_err(|_| CryptoError::HashFinishError)?;
+            } else {
+                let digest = self
+                    .hasher
+                    .finish()
+                    .map_err(|_| CryptoError::HashFinishError)?;
 
-            hash[..digest.len()].copy_from_slice(&digest);
+                hash[..digest.len()].copy_from_slice(&digest);
+            }
         }
 
         Ok(len)

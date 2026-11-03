@@ -109,6 +109,7 @@ impl<'a> DeriveOp for CngHkdfAlgo<'a> {
     /// - The key derivation operation fails
     /// - Memory allocation fails
     fn derive(&self, key: &Self::Key, length: usize) -> Result<Self::DerivedKey, CryptoError> {
+        self.hash.ensure_not_xof()?;
         let key_vec = key.to_vec()?;
 
         // Perform HKDF Extract

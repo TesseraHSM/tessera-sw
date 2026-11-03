@@ -301,7 +301,10 @@ impl CngRsaEncryptAlgo {
     /// The corresponding Windows CNG hash algorithm constant.
     fn bcrypt_hash_algo_id(&self) -> Result<windows::core::PCWSTR, CryptoError> {
         match &self.hash {
-            Some(hash) => Ok(hash.algo_id()),
+            Some(hash) => {
+                hash.ensure_not_xof()?;
+                Ok(hash.algo_id())
+            }
             None => Err(CryptoError::RsaInvalidHashAlgorithm),
         }
     }

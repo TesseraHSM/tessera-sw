@@ -359,10 +359,17 @@ impl OsslRsaSignAlgo {
     /// kept alive for the whole operation.
     fn fetch_md(&self) -> Result<Option<openssl::md::Md>, CryptoError> {
         match &self.hash {
-            Some(hash) => Ok(Some(
-                openssl::md::Md::fetch(Some(crate::libctx::crypto_libctx()), hash.md_name()?, None)
+            Some(hash) => {
+                hash.ensure_not_xof()?;
+                Ok(Some(
+                    openssl::md::Md::fetch(
+                        Some(crate::libctx::crypto_libctx()),
+                        hash.md_name()?,
+                        None,
+                    )
                     .map_err(|_| CryptoError::RsaSetPropertyError)?,
-            )),
+                ))
+            }
             None => Ok(None),
         }
     }

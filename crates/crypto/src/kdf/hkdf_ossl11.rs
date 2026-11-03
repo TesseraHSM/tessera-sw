@@ -35,8 +35,6 @@
 //! - Provides memory-safe Rust wrappers around OpenSSL APIs
 //! - Zero-copy design using slice references
 
-use openssl::md::*;
-
 use super::*;
 
 /// OpenSSL-backed HKDF operation provider.
@@ -62,8 +60,8 @@ use super::*;
 /// - Supports proper salt usage in Extract phase
 /// - Allows context binding through info parameter in Expand phase
 pub struct OsslHkdfAlgo<'a> {
-    /// Message digest context for OpenSSL
-    md: &'a MdRef,
+    /// Hash algorithm for the underlying HMAC
+    hash: &'a HashAlgo,
     /// HKDF derivation mode
     mode: HkdfMode,
     /// Optional salt for extract phase
@@ -96,7 +94,7 @@ impl<'a> OsslHkdfAlgo<'a> {
         info: Option<&'a [u8]>,
     ) -> Self {
         Self {
-            md: hash.md(),
+            hash,
             mode,
             salt,
             info,
@@ -152,6 +150,8 @@ impl<'a> DeriveOp for OsslHkdfAlgo<'a> {
     /// - `CryptoError::HkdfDeriveError` - Derivation fails or a zero-length output is requested
     /// - `CryptoError::HmacInvalidDerivedKeyLength` - Extract-mode length differs from the digest size
     fn derive(&self, key: &Self::Key, derive_len: usize) -> Result<Self::DerivedKey, CryptoError> {
+        self.hash.ensure_not_xof()?;
+
         // Extract key bytes
         let key_bytes = key.to_vec()?;
 
@@ -162,7 +162,7 @@ impl<'a> DeriveOp for OsslHkdfAlgo<'a> {
         }
         // Extract-only yields the PRK (one digest block); reject a mismatched
         // requested length so behavior matches the 3.x / CNG backends.
-        if matches!(self.mode, HkdfMode::Extract) && derive_len != self.md.size() {
+        if matches!(self.mode, HkdfMode::Extract) && derive_len != self.hash.md().size() {
             return Err(CryptoError::HmacInvalidDerivedKeyLength);
         }
 
@@ -220,7 +220,7 @@ impl<'a> OsslHkdfAlgo<'a> {
 
         // Set message digest
         pkey_ctx
-            .set_hkdf_md(self.md)
+            .set_hkdf_md(self.hash.md())
             .map_err(|_| CryptoError::HkdfSetPropertyError)?;
 
         // Set HKDF mode
