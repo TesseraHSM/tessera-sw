@@ -40,6 +40,7 @@ use tsra_fw_hsm_pal_traits::HsmHmac;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_sha::ShaRequest;
 
 use super::hash::ShaDigestContext;
@@ -475,6 +476,9 @@ impl UnoHsmPal {
         key: &HsmDmaBuf,
         buf: &'a mut HsmDmaBuf,
     ) -> HsmResult<HmacContext<'a>> {
+        // Reject algorithms the SHA engine cannot run before sizing the key
+        // buffers by their block length.
+        let mode = ShaMode::try_from(algo)?;
         let block_len = algo.block_len();
         let state_len = algo.state_len();
         buf.fill(0);
@@ -499,7 +503,7 @@ impl UnoHsmPal {
             for i in 0..block_len {
                 pending[i] = effective_key[i] ^ HMAC_OPAD;
             }
-            let req = ShaRequest::new(algo.into(), pending, &mut opad[..state_len])
+            let req = ShaRequest::new(mode, pending, &mut opad[..state_len])
                 .with_full_state()
                 .with_byte_swap();
             self.sha.digest(req).await?;
@@ -606,7 +610,7 @@ impl UnoHsmPal {
         self.hmac_flush_pending(ctx, true).await?;
 
         let algo = ctx.algo;
-        let mode_sha = algo.into();
+        let mode_sha = ShaMode::try_from(algo)?;
         let state_len = algo.state_len();
         let digest_len = algo.digest_len();
         let block_len = algo.block_len();

@@ -191,6 +191,9 @@ impl HsmKdf for UnoHsmPal {
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
+            // Reject algorithms the SHA engine cannot run before dividing by
+            // their digest length (0 for the XOFs).
+            ShaMode::try_from(algo)?;
             let hlen = algo.digest_len();
 
             if output.is_empty() {
@@ -564,7 +567,7 @@ impl ConcatKdf {
         output: &mut HsmDmaBuf,
         state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let mode: ShaMode = algo.into();
+        let mode = ShaMode::try_from(algo)?;
         let hlen = algo.digest_len();
         let (hash, input) = state.split_at_mut(hlen);
         let counter_start = self.counter_start();
@@ -626,7 +629,7 @@ impl ConcatKdf {
         mask: &mut HsmDmaBuf,
         state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let mode: ShaMode = algo.into();
+        let mode = ShaMode::try_from(algo)?;
         let hlen = algo.digest_len();
         let (hash, input) = state.split_at_mut(hlen);
 

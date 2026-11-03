@@ -48,8 +48,10 @@ fn rsa_key_to_upka_key_type(key: HsmRsaKey) -> UpkaRsaKeyType {
     }
 }
 
-fn digest_info_prefix(algo: HsmHashAlgo) -> &'static [u8] {
-    match algo {
+/// The PKCS #1 v1.5 `DigestInfo` prefix for `algo`; SHA-3 and SHAKE are not
+/// supported yet.
+fn digest_info_prefix(algo: HsmHashAlgo) -> HsmResult<&'static [u8]> {
+    Ok(match algo {
         // SHA-256: SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }, OCTET STRING(32) }
         HsmHashAlgo::Sha256 => &[
             0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
@@ -70,7 +72,12 @@ fn digest_info_prefix(algo: HsmHashAlgo) -> &'static [u8] {
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E, 0x03, 0x02, 0x1A, 0x05, 0x00, 0x04,
             0x14,
         ],
-    }
+        HsmHashAlgo::Sha3_256
+        | HsmHashAlgo::Sha3_384
+        | HsmHashAlgo::Sha3_512
+        | HsmHashAlgo::Shake128
+        | HsmHashAlgo::Shake256 => return Err(HsmError::UnsupportedDigestHashAlgorithm),
+    })
 }
 
 // =============================================================================
@@ -697,7 +704,7 @@ impl HsmRsa for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        let prefix = digest_info_prefix(algo);
+        let prefix = digest_info_prefix(algo)?;
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Err(HsmError::InvalidArg);
@@ -746,7 +753,7 @@ impl HsmRsa for UnoHsmPal {
             return Ok(false);
         }
 
-        let prefix = digest_info_prefix(algo);
+        let prefix = digest_info_prefix(algo)?;
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Ok(false);

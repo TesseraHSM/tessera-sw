@@ -44,6 +44,7 @@ use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_sha::ShaRequest;
 
 use crate::UnoHsmIo;
@@ -225,9 +226,10 @@ impl HsmHash for UnoHsmPal {
     /// # Returns
     ///
     /// `Ok(HsmHashContext)` ready to accept data via
-    /// [`hash_continue`](HsmHash::hash_continue), or
-    /// [`HsmError::NotEnoughSpace`] if the alloc cannot satisfy the
-    /// allocation.
+    /// [`hash_continue`](HsmHash::hash_continue),
+    /// [`HsmError::UnsupportedDigestHashAlgorithm`] for an algorithm the SHA
+    /// engine cannot run (SHA-3, SHAKE), or [`HsmError::NotEnoughSpace`] if
+    /// the alloc cannot satisfy the allocation.
     fn hash_begin<'a>(
         &self,
         _io: &UnoHsmIo,
@@ -237,6 +239,8 @@ impl HsmHash for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run before allocating.
+        ShaMode::try_from(algo)?;
         let buf = alloc.dma_alloc(algo.hash_state_len())?;
         Ok(HsmHashContext::new(algo, buf))
     }
@@ -370,7 +374,8 @@ impl UnoHsmPal {
         digest: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let byte_count = u32::try_from(message.len()).map_err(|_| HsmError::InvalidArg)?;
-        let req = ShaRequest::new(algo.into(), message, digest).with_auto_pad(byte_count);
+        let req = ShaRequest::new(ShaMode::try_from(algo)?, message, digest)
+            .with_auto_pad(byte_count);
         self.sha.digest(req).await
     }
 
@@ -478,7 +483,7 @@ impl UnoHsmPal {
             None => &pending[..msg_len],
         };
 
-        let mut req = ShaRequest::new(algo.into(), message, digest);
+        let mut req = ShaRequest::new(ShaMode::try_from(algo)?, message, digest);
         if finalize {
             req = req.with_auto_pad(total);
         } else {

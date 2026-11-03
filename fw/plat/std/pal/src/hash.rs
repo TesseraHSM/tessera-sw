@@ -15,12 +15,18 @@ use tsra_crypto::HashStreamingOp;
 
 use super::*;
 
-pub(crate) fn to_hash_algo(algo: HsmHashAlgo) -> HashAlgo {
+/// The OpenSSL hash for `algo`; SHA-3 and SHAKE are not supported yet.
+pub(crate) fn to_hash_algo(algo: HsmHashAlgo) -> HsmResult<HashAlgo> {
     match algo {
-        HsmHashAlgo::Sha1 => HashAlgo::sha1(),
-        HsmHashAlgo::Sha256 => HashAlgo::sha256(),
-        HsmHashAlgo::Sha384 => HashAlgo::sha384(),
-        HsmHashAlgo::Sha512 => HashAlgo::sha512(),
+        HsmHashAlgo::Sha1 => Ok(HashAlgo::sha1()),
+        HsmHashAlgo::Sha256 => Ok(HashAlgo::sha256()),
+        HsmHashAlgo::Sha384 => Ok(HashAlgo::sha384()),
+        HsmHashAlgo::Sha512 => Ok(HashAlgo::sha512()),
+        HsmHashAlgo::Sha3_256
+        | HsmHashAlgo::Sha3_384
+        | HsmHashAlgo::Sha3_512
+        | HsmHashAlgo::Shake128
+        | HsmHashAlgo::Shake256 => Err(HsmError::UnsupportedDigestHashAlgorithm),
     }
 }
 
@@ -43,12 +49,13 @@ impl HsmHash for StdHsmPal {
         digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()> {
+        let hash_algo = to_hash_algo(algo)?;
         let digest_len = algo.digest_len();
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
         self.hash
-            .hash(to_hash_algo(algo), data, &mut digest[..digest_len])
+            .hash(hash_algo, data, &mut digest[..digest_len])
             .await?;
         if !big_endian {
             // SHA primitive is BE-native; reverse to the wire-LE
@@ -68,7 +75,7 @@ impl HsmHash for StdHsmPal {
     where
         Self: 'a,
     {
-        let state = to_hash_algo(algo)
+        let state = to_hash_algo(algo)?
             .hash_init()
             .map_err(|_| HsmError::ShaError)?;
         Ok(StdHashCtx { algo, state })
@@ -143,7 +150,7 @@ mod tests {
         let driver = StdHash::new(WorkerPool::new(Handle::current()));
         let mut digest = vec![0u8; algo.digest_len()];
         driver
-            .hash(to_hash_algo(algo), msg, &mut digest)
+            .hash(to_hash_algo(algo).unwrap(), msg, &mut digest)
             .await
             .unwrap();
         digest
@@ -282,5 +289,39 @@ mod tests {
             })
             .await;
         assert_eq!(result, Err(HsmError::InvalidArg));
+    }
+
+    #[tokio::test]
+    async fn sha3_and_shake_are_unsupported() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, Handle::current());
+        let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let data = pal.dma_alloc(&io, 3).unwrap();
+        data.copy_from_slice(b"abc");
+        let digest = pal.dma_alloc(&io, 64).unwrap();
+        for algo in [
+            HsmHashAlgo::Sha3_256,
+            HsmHashAlgo::Sha3_384,
+            HsmHashAlgo::Sha3_512,
+            HsmHashAlgo::Shake128,
+            HsmHashAlgo::Shake256,
+        ] {
+            assert_eq!(
+                pal.hash(&io, algo, data, digest, true).await,
+                Err(HsmError::UnsupportedDigestHashAlgorithm),
+                "{algo:?} one-shot"
+            );
+            let begin = pal
+                .alloc_scoped_async(&io, async |alloc| {
+                    pal.hash_begin(&io, algo, alloc).map(|_| ())
+                })
+                .await;
+            assert_eq!(
+                begin,
+                Err(HsmError::UnsupportedDigestHashAlgorithm),
+                "{algo:?} multi-step"
+            );
+        }
     }
 }

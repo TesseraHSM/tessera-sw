@@ -21,6 +21,9 @@ use super::*;
 /// Discriminants are fixed `u32` values. Platforms map them to their engine's
 /// own selectors (e.g. the Uno SHA driver's `ShaMode`, which numbers the
 /// algorithms differently) with a `match`, never by casting.
+///
+/// The SHA-3 and SHAKE variants are not implemented yet: PALs reject them
+/// with [`HsmError::UnsupportedDigestHashAlgorithm`].
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmHashAlgo {
@@ -35,33 +38,63 @@ pub enum HsmHashAlgo {
 
     /// SHA-512 (512-bit / 64-byte digest).
     Sha512 = 6,
+
+    /// SHA3-256 (256-bit / 32-byte digest).
+    Sha3_256 = 11,
+
+    /// SHA3-384 (384-bit / 48-byte digest).
+    Sha3_384 = 12,
+
+    /// SHA3-512 (512-bit / 64-byte digest).
+    Sha3_512 = 13,
+
+    /// SHAKE128 extendable output (XOF). Output size follows the output slice length.
+    Shake128 = 14,
+
+    /// SHAKE256 extendable output (XOF). Output size follows the output slice length.
+    Shake256 = 15,
 }
 
 impl HsmHashAlgo {
     /// Returns the output digest length in bytes for the given algorithm.
+    ///
+    /// `0` for the XOFs ([`Shake128`](Self::Shake128),
+    /// [`Shake256`](Self::Shake256)), which have no fixed output length.
     pub const fn digest_len(&self) -> usize {
         match self {
             HsmHashAlgo::Sha1 => 20,
-            HsmHashAlgo::Sha256 => 32,
-            HsmHashAlgo::Sha384 => 48,
-            HsmHashAlgo::Sha512 => 64,
+            HsmHashAlgo::Sha256 | HsmHashAlgo::Sha3_256 => 32,
+            HsmHashAlgo::Sha384 | HsmHashAlgo::Sha3_384 => 48,
+            HsmHashAlgo::Sha512 | HsmHashAlgo::Sha3_512 => 64,
+            HsmHashAlgo::Shake128 | HsmHashAlgo::Shake256 => 0,
         }
     }
 
-    /// Block size in bytes for the algorithm.
+    /// Block size in bytes for the algorithm; for SHA-3 and SHAKE, the
+    /// sponge rate.
     pub const fn block_len(&self) -> usize {
         match self {
             HsmHashAlgo::Sha1 | HsmHashAlgo::Sha256 => 64,
             HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512 => 128,
+            HsmHashAlgo::Sha3_256 | HsmHashAlgo::Shake256 => 136,
+            HsmHashAlgo::Sha3_384 => 104,
+            HsmHashAlgo::Sha3_512 => 72,
+            HsmHashAlgo::Shake128 => 168,
         }
     }
 
-    /// Working-variable state size in bytes (intermediate hash state).
+    /// Working-variable state size in bytes (intermediate hash state); for
+    /// SHA-3 and SHAKE, the 200-byte Keccak-f\[1600\] state.
     pub const fn state_len(&self) -> usize {
         match self {
             HsmHashAlgo::Sha1 => 20,
             HsmHashAlgo::Sha256 => 32,
             HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512 => 64,
+            HsmHashAlgo::Sha3_256
+            | HsmHashAlgo::Sha3_384
+            | HsmHashAlgo::Sha3_512
+            | HsmHashAlgo::Shake128
+            | HsmHashAlgo::Shake256 => 200,
         }
     }
 
