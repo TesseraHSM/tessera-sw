@@ -12,10 +12,68 @@
 
 use super::*;
 
+/// Length of the ML-DSA message representative μ (FIPS 204).
+pub const MLDSA_MU_LEN: usize = 64;
+
+/// How the `message` input of an ML-DSA signature operation is interpreted.
+///
+/// FIPS 204 signs and verifies the 64-byte message representative
+/// `μ = SHAKE256(tr || M', 64)`, where `tr` is the hash of the public key and
+/// `M'` encodes the domain, the context string and the input.  The type
+/// selects what the caller supplies and so how much of `μ` is computed for
+/// it.  Discriminants follow the engine's 2-bit message-type encoding.
+///
+/// The pre-hash types are currently unsupported: implementations reject
+/// them with [`HsmError::UnsupportedCmd`].
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmMlDsaMsgType {
+    /// Pure ML-DSA (FIPS 204 §5.2): `message` is the message `M`, and
+    /// `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`.
+    Pure = 0,
+
+    /// Pre-hash ML-DSA (HashML-DSA, FIPS 204 §5.4): `message` is the
+    /// 11-byte DER object identifier of the pre-hash function followed by
+    /// the message digest `PHM`, and
+    /// `μ = SHAKE256(tr || 0x01 || len(ctx) || ctx || OID || PHM, 64)`.
+    PreHash = 1,
+
+    /// Pre-hash ML-DSA computed from the message: `message` is the 11-byte
+    /// OID followed by the message `M` itself; the implementation computes
+    /// `PHM` from `M`, then `μ` as for [`PreHash`](Self::PreHash).
+    PreHashMessage = 2,
+
+    /// External μ: `message` is the [`MLDSA_MU_LEN`]-byte `μ`, used as is.
+    /// It already binds the context string, so `ctx` must be empty.
+    ExternalMu = 3,
+}
+
+impl HsmMlDsaMsgType {
+    /// Check an input of this type for the parts that do not depend on the
+    /// implementation: an external `μ` is exactly [`MLDSA_MU_LEN`] bytes and
+    /// comes without a context string.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — the input is well formed for this type.
+    /// - `Err(HsmError::InvalidArg)` — it is not.
+    pub fn check_input(self, message: &[u8], ctx: &[u8]) -> HsmResult<()> {
+        match self {
+            Self::ExternalMu if message.len() != MLDSA_MU_LEN || !ctx.is_empty() => {
+                Err(HsmError::InvalidArg)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// Asynchronous ML-DSA signature operations.
 ///
 /// Async because every method is a round trip to an FP core: the
 /// implementation yields while the request is in flight.
+///
+/// Every signing and verification method takes an [`HsmMlDsaMsgType`]
+/// saying how its `message` is to be read.
 pub trait HsmMlDsa {
     /// Replace the prefix of a key/signature region with an ML-DSA signature.
     ///
@@ -24,11 +82,15 @@ pub trait HsmMlDsa {
     /// written at the start of this region after all inputs have been consumed.
     /// `message` and `ctx` are disjoint from it. The caller wipes private bytes
     /// not replaced by the signature.
+    ///
+    /// `msg_type` says how `message` is to be read; see
+    /// [`mldsa_sign`](Self::mldsa_sign) for the errors.
     async fn mldsa_sign_in_place(
         &self,
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         key_signature: &mut HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
     ) -> HsmResult<()>;
@@ -73,21 +135,28 @@ pub trait HsmMlDsa {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
     /// - `sec_key` — expanded secret key (2560 / 4032 / 4896 bytes).
-    /// - `message` — the message to sign.
-    /// - `ctx` — FIPS 204 context string, up to 255 bytes.
+    /// - `msg_type` — how `message` is to be read.
+    /// - `message` — the input to sign, as `msg_type` defines it: the
+    ///   message itself, or the 64-byte `μ`.
+    /// - `ctx` — FIPS 204 context string, up to 255 bytes; empty for an
+    ///   external `μ`.
     /// - `signature` — output; must be exactly the parameter set's
     ///   signature length (2420 / 3309 / 4627).
     ///
     /// # Returns
     ///
     /// - `Ok(())` — `signature` populated.
-    /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length.
+    /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length, or a
+    ///   `message`/`ctx` not valid for `msg_type`.
+    /// - `Err(HsmError::UnsupportedCmd)` — `msg_type` is a pre-hash type.
     /// - `Err(HsmError)` — propagated from the FP offload path.
+    #[allow(clippy::too_many_arguments)]
     async fn mldsa_sign(
         &self,
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         sec_key: &HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
@@ -100,7 +169,9 @@ pub trait HsmMlDsa {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
     /// - `pub_key` — encoded public key, exactly the parameter set's length.
-    /// - `message`, `ctx` — the signed message and its FIPS 204 context.
+    /// - `msg_type` — how `message` is to be read.
+    /// - `message`, `ctx` — the signed input, as `msg_type` defines it, and
+    ///   its FIPS 204 context (empty for an external `μ`).
     /// - `signature` — exactly the parameter set's signature length.
     ///
     /// # Returns
@@ -108,13 +179,17 @@ pub trait HsmMlDsa {
     /// - `Ok(true)` / `Ok(false)` — the signature verified, or did not.
     ///   An invalid signature is an ordinary outcome, not an error, so it
     ///   cannot be conflated with a transport fault.
-    /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length.
+    /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length, or a
+    ///   `message`/`ctx` not valid for `msg_type`.
+    /// - `Err(HsmError::UnsupportedCmd)` — `msg_type` is a pre-hash type.
     /// - `Err(HsmError)` — propagated from the FP offload path.
+    #[allow(clippy::too_many_arguments)]
     async fn mldsa_verify(
         &self,
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         pub_key: &HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &HsmDmaBuf,

@@ -16,13 +16,19 @@
 //!
 //! The PAL consumes the tail-aligned expanded key before replacing the
 //! envelope prefix with the signature at its final response offset.
+//!
+//! `msg_type` selects what `message` is: the message itself, or an external
+//! `μ` the caller computed (64 bytes, with an empty `ctx`).  Both are checked
+//! before the key is unmasked.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor_types::MlDsaMsgType;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -39,6 +45,18 @@ fn mldsa_sig_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
         HsmVaultKeyKind::MlDsa44Seed => Ok(2420),
         HsmVaultKeyKind::MlDsa65Seed => Ok(3309),
         HsmVaultKeyKind::MlDsa87Seed => Ok(4627),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+/// Map the wire message type onto the PAL's.
+///
+/// Only the message itself and an external `μ` are accepted on the wire;
+/// the reserved values, including the pre-hash ones, are invalid.
+pub(super) fn mldsa_msg_type(msg_type: MlDsaMsgType) -> HsmResult<HsmMlDsaMsgType> {
+    match msg_type {
+        MlDsaMsgType::Pure => Ok(HsmMlDsaMsgType::Pure),
+        MlDsaMsgType::ExternalMu => Ok(HsmMlDsaMsgType::ExternalMu),
         _ => Err(HsmError::InvalidArg),
     }
 }
@@ -62,6 +80,8 @@ pub(crate) async fn handle<P: HsmPal>(
             if req.ctx.len() > 255 {
                 return Err(HsmError::InvalidArg);
             }
+            let msg_type = mldsa_msg_type(MlDsaMsgType(req.msg_type))?;
+            msg_type.check_input(req.message, req.ctx)?;
             let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlDsaSignReq::TOC_COUNT * 4;
             let masked_at = req.masked_key.as_ptr() as usize;
             if masked_at.checked_sub(base) != Some(data_start) {
@@ -95,6 +115,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 io,
                 kind,
                 &mut req.masked_key[..key_end],
+                msg_type,
                 req.message,
                 req.ctx,
             )

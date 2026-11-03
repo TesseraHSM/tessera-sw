@@ -37,6 +37,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
@@ -78,16 +79,34 @@ fn write_exact(dst: &mut [u8], src: &[u8]) -> HsmResult<()> {
     Ok(())
 }
 
+/// Whether `msg_type` selects an external `μ`, once its input is checked.
+///
+/// # Errors
+///
+/// - [`HsmError::InvalidArg`] — `message`/`ctx` not valid for `msg_type`.
+/// - [`HsmError::UnsupportedCmd`] — the pre-hash types, currently
+///   unsupported.
+fn external_mu(msg_type: HsmMlDsaMsgType, message: &[u8], ctx: &[u8]) -> HsmResult<bool> {
+    msg_type.check_input(message, ctx)?;
+    match msg_type {
+        HsmMlDsaMsgType::Pure => Ok(false),
+        HsmMlDsaMsgType::ExternalMu => Ok(true),
+        HsmMlDsaMsgType::PreHash | HsmMlDsaMsgType::PreHashMessage => Err(HsmError::UnsupportedCmd),
+    }
+}
+
 impl HsmMlDsa for StdHsmPal {
     async fn mldsa_sign_in_place(
         &self,
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         key_signature: &mut HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let variant = mldsa_variant(kind)?;
+        let external_mu = external_mu(msg_type, message, ctx)?;
         let key_at = key_signature
             .len()
             .checked_sub(variant.sec_key_len())
@@ -97,7 +116,7 @@ impl HsmMlDsa for StdHsmPal {
         }
         let result = self
             .pqc
-            .mldsa_sign(variant, &key_signature[key_at..], message, ctx)
+            .mldsa_sign(variant, &key_signature[key_at..], external_mu, message, ctx)
             .await?;
         write_exact(&mut key_signature[..variant.sig_len()], &result)
     }
@@ -128,16 +147,21 @@ impl HsmMlDsa for StdHsmPal {
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         sec_key: &HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let variant = mldsa_variant(kind)?;
+        let external_mu = external_mu(msg_type, message, ctx)?;
 
         // Unlike the seed, the per-signature randomness is not drawn here:
         // it never leaves the crypto layer, so that layer draws it, exactly
         // as it does the ECDSA nonce.
-        let outcome = self.pqc.mldsa_sign(variant, sec_key, message, ctx).await;
+        let outcome = self
+            .pqc
+            .mldsa_sign(variant, sec_key, external_mu, message, ctx)
+            .await;
 
         // Not a long-term secret, but it is signing input; do not leave
         // it on the stack for the next caller.
@@ -149,13 +173,15 @@ impl HsmMlDsa for StdHsmPal {
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         pub_key: &HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         let variant = mldsa_variant(kind)?;
+        let external_mu = external_mu(msg_type, message, ctx)?;
         self.pqc
-            .mldsa_verify(variant, pub_key, message, ctx, signature)
+            .mldsa_verify(variant, pub_key, external_mu, message, ctx, signature)
             .await
     }
 }
@@ -241,6 +267,8 @@ impl HsmMlKem for StdHsmPal {
 #[cfg(test)]
 mod tests {
     use tokio::runtime::Handle;
+    use tsra_crypto::ImportableKey;
+    use tsra_crypto::MlDsaPublicKey;
     use tsra_fw_hsm_pal_traits::HsmAlloc;
 
     use super::*;
@@ -305,14 +333,22 @@ mod tests {
                 let buffer = &mut storage[..sk_len + prefix];
                 buffer.fill(0xA5);
                 buffer[prefix..].copy_from_slice(&sk);
-                pal.mldsa_sign_in_place(&io, kind, buffer, dma(b"m"), dma(b"ctx"))
-                    .await
-                    .unwrap();
+                pal.mldsa_sign_in_place(
+                    &io,
+                    kind,
+                    buffer,
+                    HsmMlDsaMsgType::Pure,
+                    dma(b"m"),
+                    dma(b"ctx"),
+                )
+                .await
+                .unwrap();
                 assert!(pal
                     .mldsa_verify(
                         &io,
                         kind,
                         dma(&pk),
+                        HsmMlDsaMsgType::Pure,
                         dma(b"m"),
                         dma(b"ctx"),
                         &buffer[..sig_len]
@@ -360,6 +396,7 @@ mod tests {
                     &io,
                     HsmVaultKeyKind::MlDsa44Seed,
                     &mut buffer[..key_len],
+                    HsmMlDsaMsgType::Pure,
                     dma(b""),
                     dma(b""),
                 )
@@ -415,6 +452,7 @@ mod tests {
                 &io,
                 kind,
                 dma(&sk),
+                HsmMlDsaMsgType::Pure,
                 dma(b"message"),
                 dma(b"ctx"),
                 dma_mut(&mut sig),
@@ -423,15 +461,31 @@ mod tests {
             .expect("sign");
 
             assert!(
-                pal.mldsa_verify(&io, kind, dma(&pk), dma(b"message"), dma(b"ctx"), dma(&sig))
-                    .await
-                    .expect("verify"),
+                pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    HsmMlDsaMsgType::Pure,
+                    dma(b"message"),
+                    dma(b"ctx"),
+                    dma(&sig)
+                )
+                .await
+                .expect("verify"),
                 "{kind:?}: own signature failed to verify"
             );
             assert!(
-                !pal.mldsa_verify(&io, kind, dma(&pk), dma(b"messagf"), dma(b"ctx"), dma(&sig))
-                    .await
-                    .expect("verify"),
+                !pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    HsmMlDsaMsgType::Pure,
+                    dma(b"messagf"),
+                    dma(b"ctx"),
+                    dma(&sig)
+                )
+                .await
+                .expect("verify"),
                 "{kind:?}: signature verified for the wrong message"
             );
             // The context string is bound into the signature, so changing
@@ -441,6 +495,7 @@ mod tests {
                     &io,
                     kind,
                     dma(&pk),
+                    HsmMlDsaMsgType::Pure,
                     dma(b"message"),
                     dma(b"other"),
                     dma(&sig)
@@ -474,9 +529,17 @@ mod tests {
 
             let garbage = vec![0xAAu8; sig_len];
             assert!(
-                !pal.mldsa_verify(&io, kind, dma(&pk), dma(b"m"), dma(b""), dma(&garbage))
-                    .await
-                    .expect("verify must not error on a bad signature"),
+                !pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    HsmMlDsaMsgType::Pure,
+                    dma(b"m"),
+                    dma(b""),
+                    dma(&garbage)
+                )
+                .await
+                .expect("verify must not error on a bad signature"),
                 "{kind:?}: garbage signature verified"
             );
         }
@@ -553,6 +616,7 @@ mod tests {
                     &io,
                     kind,
                     dma(&sk),
+                    HsmMlDsaMsgType::Pure,
                     dma(b"same message"),
                     dma(b""),
                     dma_mut(&mut sig),
@@ -564,6 +628,7 @@ mod tests {
                         &io,
                         kind,
                         dma(&pk),
+                        HsmMlDsaMsgType::Pure,
                         dma(b"same message"),
                         dma(b""),
                         dma(&sig)
@@ -577,6 +642,207 @@ mod tests {
             assert_ne!(
                 sigs[0], sigs[1],
                 "{kind:?}: signing is deterministic; Uno signs hedged"
+            );
+        }
+    }
+
+    /// An external `μ` computed on the host signs and verifies exactly as
+    /// the message it was computed from: a signature over either verifies
+    /// over the other, in place too, on every parameter set.
+    #[tokio::test]
+    async fn mldsa_external_mu_matches_pure() {
+        let (pal, io) = pal_and_io();
+
+        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+            let (mut seed, mut pk, mut sk) =
+                ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
+            pal.mldsa_gen_key(
+                &io,
+                kind,
+                dma_mut(&mut seed),
+                dma_mut(&mut pk),
+                dma_mut(&mut sk),
+            )
+            .await
+            .expect("gen_key");
+            let mu = MlDsaPublicKey::from_bytes(&pk)
+                .and_then(|pk| pk.mu(b"ctx", b"message"))
+                .expect("host mu");
+
+            let mut sig = vec![0u8; sig_len];
+            pal.mldsa_sign(
+                &io,
+                kind,
+                dma(&sk),
+                HsmMlDsaMsgType::ExternalMu,
+                dma(&mu),
+                dma(b""),
+                dma_mut(&mut sig),
+            )
+            .await
+            .expect("sign mu");
+            assert!(
+                pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    HsmMlDsaMsgType::Pure,
+                    dma(b"message"),
+                    dma(b"ctx"),
+                    dma(&sig)
+                )
+                .await
+                .expect("verify"),
+                "{kind:?}: signature over mu failed pure verification"
+            );
+
+            pal.mldsa_sign(
+                &io,
+                kind,
+                dma(&sk),
+                HsmMlDsaMsgType::Pure,
+                dma(b"message"),
+                dma(b"ctx"),
+                dma_mut(&mut sig),
+            )
+            .await
+            .expect("sign");
+            assert!(
+                pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    HsmMlDsaMsgType::ExternalMu,
+                    dma(&mu),
+                    dma(b""),
+                    dma(&sig)
+                )
+                .await
+                .expect("verify mu"),
+                "{kind:?}: pure signature failed verification over mu"
+            );
+
+            let buffer = pal.dma_alloc(&io, sk_len).unwrap();
+            buffer.copy_from_slice(&sk);
+            pal.mldsa_sign_in_place(
+                &io,
+                kind,
+                buffer,
+                HsmMlDsaMsgType::ExternalMu,
+                dma(&mu),
+                dma(b""),
+            )
+            .await
+            .expect("sign mu in place");
+            assert!(
+                pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    HsmMlDsaMsgType::Pure,
+                    dma(b"message"),
+                    dma(b"ctx"),
+                    &buffer[..sig_len]
+                )
+                .await
+                .expect("verify"),
+                "{kind:?}: in-place signature over mu failed pure verification"
+            );
+        }
+    }
+
+    /// An external `μ` is exactly 64 bytes and comes without a context
+    /// string; the pre-hash types are currently unsupported. Each is
+    /// refused the same way by all three entry points.
+    #[tokio::test]
+    async fn mldsa_rejects_malformed_mu_and_prehash() {
+        let (pal, io) = pal_and_io();
+        let (kind, pk_len, sk_len, sig_len) = MLDSA_SETS[0];
+        let (mut seed, mut pk, mut sk) =
+            ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
+        pal.mldsa_gen_key(
+            &io,
+            kind,
+            dma_mut(&mut seed),
+            dma_mut(&mut pk),
+            dma_mut(&mut sk),
+        )
+        .await
+        .expect("gen_key");
+
+        let mu = [7u8; 65];
+        let cases: [(HsmMlDsaMsgType, &[u8], &[u8], HsmError); 5] = [
+            (
+                HsmMlDsaMsgType::ExternalMu,
+                &mu[..63],
+                b"",
+                HsmError::InvalidArg,
+            ),
+            (
+                HsmMlDsaMsgType::ExternalMu,
+                &mu[..],
+                b"",
+                HsmError::InvalidArg,
+            ),
+            (
+                HsmMlDsaMsgType::ExternalMu,
+                &mu[..64],
+                b"ctx",
+                HsmError::InvalidArg,
+            ),
+            (
+                HsmMlDsaMsgType::PreHash,
+                b"m",
+                b"",
+                HsmError::UnsupportedCmd,
+            ),
+            (
+                HsmMlDsaMsgType::PreHashMessage,
+                b"m",
+                b"",
+                HsmError::UnsupportedCmd,
+            ),
+        ];
+        let mut sig = vec![0u8; sig_len];
+        for (msg_type, message, ctx, expected) in cases {
+            assert_eq!(
+                pal.mldsa_sign(
+                    &io,
+                    kind,
+                    dma(&sk),
+                    msg_type,
+                    dma(message),
+                    dma(ctx),
+                    dma_mut(&mut sig),
+                )
+                .await,
+                Err(expected),
+                "{msg_type:?} sign, {} B",
+                message.len()
+            );
+            assert_eq!(
+                pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    msg_type,
+                    dma(message),
+                    dma(ctx),
+                    dma(&sig)
+                )
+                .await,
+                Err(expected),
+                "{msg_type:?} verify, {} B",
+                message.len()
+            );
+            let buffer = pal.dma_alloc(&io, sk_len).unwrap();
+            buffer.copy_from_slice(&sk);
+            assert_eq!(
+                pal.mldsa_sign_in_place(&io, kind, buffer, msg_type, dma(message), dma(ctx))
+                    .await,
+                Err(expected),
+                "{msg_type:?} sign in place, {} B",
+                message.len()
             );
         }
     }

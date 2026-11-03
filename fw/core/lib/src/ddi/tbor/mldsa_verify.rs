@@ -15,6 +15,9 @@
 //! boolean would silently treat a forged signature as valid; a caller who
 //! neglects to inspect a status gets an error either way.
 //!
+//! `msg_type` selects what `message` is: the message itself, or an external
+//! `μ` the caller computed (64 bytes, with an empty `ctx`).
+//!
 //! # Parameter set
 //!
 //! There is no key kind on the wire.  It is recovered from the public
@@ -31,6 +34,8 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+
+use super::mldsa_sign::mldsa_msg_type;
 
 /// Recover the parameter set from the public key length.
 ///
@@ -76,12 +81,15 @@ pub(crate) async fn handle<P: HsmPal>(
         if req.ctx().len() > 255 {
             return Err(HsmError::InvalidArg);
         }
+        let msg_type = mldsa_msg_type(req.msg_type())?;
+        msg_type.check_input(req.message(), req.ctx())?;
 
         let verified = pal
             .mldsa_verify(
                 io,
                 kind,
                 req.pub_key(),
+                msg_type,
                 req.message(),
                 req.ctx(),
                 req.signature(),

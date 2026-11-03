@@ -81,6 +81,10 @@ pub const MLDSA_RND_LEN: usize = 32;
 /// Maximum length of the FIPS 204 signing context string.
 pub const MLDSA_CTX_MAX_LEN: usize = 255;
 
+/// Length of the FIPS 204 message representative `μ`, which an
+/// [external-μ](MlDsaAlgo::external_mu) engine takes in place of the message.
+pub const MLDSA_MU_LEN: usize = 64;
+
 /// ML-DSA parameter sets.
 ///
 /// Each variant fixes the lattice dimensions and therefore every encoded

@@ -7,6 +7,10 @@
 //! [`PqcDriver`], which offloads to a fastpath (FP) core. Operation inputs
 //! and outputs use DMA-branded buffers.
 //!
+//! Signing and verification take the message itself or an external `μ`;
+//! the pre-hash message types are not supported on Uno and are refused with
+//! [`HsmError::UnsupportedCmd`].
+//!
 //! With `bulk_crypto` the FP cores run the bulk-crypto firmware, which
 //! has no PQC engine, so every call is refused with
 //! [`HsmError::UnsupportedCmd`] before anything is drawn from the RNG or
@@ -17,6 +21,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
@@ -35,6 +40,15 @@ fn mldsa_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
     }
 }
 
+/// Check an ML-DSA input for what Uno supports: the message itself or an
+/// external `μ`; the pre-hash types are not supported on Uno.
+fn check_msg_type(msg_type: HsmMlDsaMsgType, message: &[u8], ctx: &[u8]) -> HsmResult<()> {
+    match msg_type {
+        HsmMlDsaMsgType::Pure | HsmMlDsaMsgType::ExternalMu => msg_type.check_input(message, ctx),
+        HsmMlDsaMsgType::PreHash | HsmMlDsaMsgType::PreHashMessage => Err(HsmError::UnsupportedCmd),
+    }
+}
+
 /// Length of the compact ML-DSA private seed (`xi`), identical for every
 /// parameter set — which is why `kind` has to be carried alongside it.
 const MLDSA_SEED_LEN: usize = 32;
@@ -48,6 +62,7 @@ impl HsmMlDsa for UnoHsmPal {
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         key_signature: &mut HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -55,11 +70,12 @@ impl HsmMlDsa for UnoHsmPal {
         let result = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
+            check_msg_type(msg_type, message, ctx)?;
             self.rng_fill_bytes(io, &mut rnd)?;
             self.pqc
                 .with_engine(async |engine| {
                     engine
-                        .mldsa_sign_in_place(kind, key_signature, &rnd, message, ctx)
+                        .mldsa_sign_in_place(kind, key_signature, &rnd, msg_type, message, ctx)
                         .await
                 })
                 .await
@@ -118,6 +134,7 @@ impl HsmMlDsa for UnoHsmPal {
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         sec_key: &HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
@@ -126,6 +143,7 @@ impl HsmMlDsa for UnoHsmPal {
         let outcome: HsmResult<()> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
+            check_msg_type(msg_type, message, ctx)?;
             // Per-signature randomness for the hedged variant, drawn here for
             // the same reason as the seed: an FP core has no entropy source.
             let mut rnd = [0u8; MLDSA_SEED_LEN];
@@ -138,7 +156,7 @@ impl HsmMlDsa for UnoHsmPal {
 
             let result = self
                 .pqc
-                .mldsa_sign(kind, sec_key, &rnd, message, ctx, signature)
+                .mldsa_sign(kind, sec_key, &rnd, msg_type, message, ctx, signature)
                 .await;
 
             // The randomness is not a long-term secret, but it is signing input;
@@ -156,6 +174,7 @@ impl HsmMlDsa for UnoHsmPal {
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         pub_key: &HsmDmaBuf,
+        msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &HsmDmaBuf,
@@ -165,8 +184,9 @@ impl HsmMlDsa for UnoHsmPal {
         let outcome: HsmResult<bool> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
+            check_msg_type(msg_type, message, ctx)?;
             self.pqc
-                .mldsa_verify(kind, pub_key, message, ctx, signature)
+                .mldsa_verify(kind, pub_key, msg_type, message, ctx, signature)
                 .await
         }
         .await;

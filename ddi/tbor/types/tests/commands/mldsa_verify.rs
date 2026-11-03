@@ -22,6 +22,7 @@ use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_VERIFY;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -35,6 +36,7 @@ fn mldsa_verify_request_wire_shape() {
     let req = TborMlDsaVerifyReq {
         session_id: 0,
         pub_key: vec![0x11; 1312],
+        msg_type: MLDSA_MSG_TYPE_PURE,
         message: vec![0x22; 32],
         ctx: Vec::new(),
         signature: vec![0x33; 2420],
@@ -48,7 +50,7 @@ fn mldsa_verify_request_wire_shape() {
     let bytes = req.encode_request(&mut buf).expect("encode request");
     let view = RequestView::parse(bytes).expect("parse request");
     assert_eq!(view.opcode(), TBOR_OP_MLDSA_VERIFY);
-    assert_eq!(view.toc_count(), 5);
+    assert_eq!(view.toc_count(), 6);
 }
 
 /// Happy path: generate, sign, then verify the signature the device
@@ -76,6 +78,7 @@ fn verify_case(p: &MlDsaParams) {
         .tbor(&TborMlDsaSignReq {
             session_id: session.session_id,
             masked_key: key.masked_key,
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: message.clone(),
             ctx: Vec::new(),
         })
@@ -92,6 +95,7 @@ fn verify_case(p: &MlDsaParams) {
     ctx.tbor(&TborMlDsaVerifyReq {
         session_id: session.session_id,
         pub_key: key.pub_key,
+        msg_type: MLDSA_MSG_TYPE_PURE,
         message,
         ctx: Vec::new(),
         signature: signed.signature,

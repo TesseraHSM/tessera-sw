@@ -13,6 +13,9 @@
 //! string bound into the signature, and per-signature randomness. Neither fits
 //! the [`SignOp::sign`] signature, so both are held by the engine — the same
 //! shape [`EcdsaAlgo`](crate::EcdsaAlgo) uses to carry its hash algorithm.
+//!
+//! So is the choice of input: the message itself, or an external `μ`
+//! computed by the caller (see [`MlDsaAlgo::external_mu`]).
 #![allow(deprecated)]
 
 use ml_dsa::EncodedSignature;
@@ -25,6 +28,8 @@ use ml_dsa::MlDsa87;
 use ml_dsa::MlDsaParams;
 use ml_dsa::Signature;
 use ml_dsa::VerifyingKey;
+use ml_dsa::common::array::Array;
+use ml_dsa::common::array::sizes::U64;
 use ml_dsa::common::rand_core::TryCryptoRng;
 use ml_dsa::common::rand_core::TryRng;
 
@@ -35,6 +40,9 @@ use super::*;
 /// The engine holds the FIPS 204 context string. One engine serves both
 /// signing and verification, as [`EcdsaAlgo`](crate::EcdsaAlgo) does.
 ///
+/// An engine built by [`external_mu`](Self::external_mu) instead takes the
+/// 64-byte message representative `μ` as its `data`.
+///
 /// # Randomness
 ///
 /// Signing randomness is drawn from the platform generator, freshly for every
@@ -43,8 +51,12 @@ use super::*;
 /// given `(key, message, ctx)` yields a different, equally valid signature
 /// each time.
 pub struct MlDsaAlgo {
-    /// FIPS 204 context string, bound into the signature.
+    /// FIPS 204 context string, bound into the signature. Empty for an
+    /// external `μ`, which already binds it.
     ctx: Vec<u8>,
+
+    /// Whether `data` is an external `μ` rather than the message.
+    external_mu: bool,
 
     /// Randomness pinned by a known-answer test; see
     /// [`with_randomness`](Self::with_randomness). Production always draws.
@@ -65,9 +77,25 @@ impl MlDsaAlgo {
     pub fn new(ctx: &[u8]) -> Result<Self, CryptoError> {
         Ok(Self {
             ctx: check_ctx(ctx)?,
+            external_mu: false,
             #[cfg(test)]
             pinned_rnd: None,
         })
+    }
+
+    /// Creates an engine that signs and verifies an external `μ`.
+    ///
+    /// Its `data` is then the [`MLDSA_MU_LEN`]-byte message representative
+    /// `μ = SHAKE256(tr || M', 64)` (FIPS 204 Algorithm 7, line 6), computed by
+    /// the caller and used as is. `μ` already binds the context string, so
+    /// this engine has none.
+    pub fn external_mu() -> Self {
+        Self {
+            ctx: Vec::new(),
+            external_mu: true,
+            #[cfg(test)]
+            pinned_rnd: None,
+        }
     }
 
     /// Creates an engine that signs under fixed randomness.
@@ -89,8 +117,37 @@ impl MlDsaAlgo {
     ) -> Result<Self, CryptoError> {
         Ok(Self {
             ctx: check_ctx(ctx)?,
+            external_mu: false,
             pinned_rnd: Some(rnd),
         })
+    }
+
+    /// As [`external_mu`](Self::external_mu), signing under fixed randomness;
+    /// see [`with_randomness`](Self::with_randomness).
+    #[cfg(test)]
+    pub(crate) fn external_mu_with_randomness(rnd: [u8; MLDSA_RND_LEN]) -> Self {
+        Self {
+            pinned_rnd: Some(rnd),
+            ..Self::external_mu()
+        }
+    }
+
+    /// Interprets `data` as this engine takes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::MlDsaInvalidMu`] if an external `μ` is not
+    /// [`MLDSA_MU_LEN`] bytes.
+    fn input<'a>(&'a self, data: &'a [u8]) -> Result<Input<'a>, CryptoError> {
+        if self.external_mu {
+            let mu = Array::try_from(data).map_err(|_| CryptoError::MlDsaInvalidMu)?;
+            Ok(Input::Mu(mu))
+        } else {
+            Ok(Input::Message {
+                msg: data,
+                ctx: &self.ctx,
+            })
+        }
     }
 
     /// Draws the randomness for one signature.
@@ -115,7 +172,8 @@ impl SignOp for MlDsaAlgo {
     /// # Arguments
     ///
     /// * `key` - The signing key
-    /// * `data` - The message to sign
+    /// * `data` - The message to sign, or `μ` for an
+    ///   [external-μ](MlDsaAlgo::external_mu) engine
     /// * `signature` - Optional output buffer. If `None`, only calculates the
     ///   required size.
     ///
@@ -130,6 +188,8 @@ impl SignOp for MlDsaAlgo {
     /// - [`CryptoError::MlDsaSignError`] - the key does not decode, or the
     ///   platform generator failed
     /// - [`CryptoError::MlDsaBufferTooSmall`] - the output buffer is too small
+    /// - [`CryptoError::MlDsaInvalidMu`] - an external `μ` is not
+    ///   [`MLDSA_MU_LEN`] bytes
     fn sign(
         &mut self,
         key: &Self::Key,
@@ -138,8 +198,7 @@ impl SignOp for MlDsaAlgo {
     ) -> Result<usize, CryptoError> {
         fn inner<P: MlDsaParams>(
             sec_key: &[u8],
-            data: &[u8],
-            ctx: &[u8],
+            input: &Input<'_>,
             rnd: &[u8],
             signature: &mut [u8],
         ) -> Result<usize, CryptoError> {
@@ -147,9 +206,11 @@ impl SignOp for MlDsaAlgo {
                 .map_err(|_| CryptoError::MlDsaSignError)?;
             let sk = ExpandedSigningKey::<P>::from_expanded(&enc);
             let mut rng = FixedRng { bytes: rnd };
-            let sig = sk
-                .sign_randomized(data, ctx, &mut rng)
-                .map_err(|_| CryptoError::MlDsaSignError)?;
+            let sig = match input {
+                Input::Message { msg, ctx } => sk.sign_randomized(msg, ctx, &mut rng),
+                Input::Mu(mu) => sk.sign_mu_randomized(mu, &mut rng),
+            }
+            .map_err(|_| CryptoError::MlDsaSignError)?;
             let sig = sig.encode();
             signature
                 .get_mut(..sig.len())
@@ -162,10 +223,11 @@ impl SignOp for MlDsaAlgo {
         let Some(signature) = signature else {
             return Ok(len);
         };
+        let input = self.input(data)?;
         let rnd = self.signing_rnd()?;
         dispatch!(
             key.variant(),
-            inner(key.as_bytes(), data, &self.ctx, &rnd, signature)
+            inner(key.as_bytes(), &input, &rnd, signature)
         )
     }
 }
@@ -179,7 +241,8 @@ impl VerifyOp for MlDsaAlgo {
     /// # Arguments
     ///
     /// * `key` - The verifying key
-    /// * `data` - The message that was signed
+    /// * `data` - The message that was signed, or `μ` for an
+    ///   [external-μ](MlDsaAlgo::external_mu) engine
     /// * `signature` - The signature to check
     ///
     /// # Returns
@@ -191,8 +254,9 @@ impl VerifyOp for MlDsaAlgo {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::MlDsaVerifyError`] if `key` does not decode, so
-    /// the question could not be answered at all.
+    /// Returns [`CryptoError::MlDsaVerifyError`] if `key` does not decode, or
+    /// [`CryptoError::MlDsaInvalidMu`] if an external `μ` is not
+    /// [`MLDSA_MU_LEN`] bytes, so the question could not be answered at all.
     fn verify(
         &mut self,
         key: &Self::Key,
@@ -201,8 +265,7 @@ impl VerifyOp for MlDsaAlgo {
     ) -> Result<bool, CryptoError> {
         fn inner<P: MlDsaParams>(
             pub_key: &[u8],
-            data: &[u8],
-            ctx: &[u8],
+            input: &Input<'_>,
             signature: &[u8],
         ) -> Result<bool, CryptoError> {
             let enc = EncodedVerifyingKey::<P>::try_from(pub_key)
@@ -215,14 +278,25 @@ impl VerifyOp for MlDsaAlgo {
             let Some(sig) = Signature::<P>::decode(&sig_enc) else {
                 return Ok(false);
             };
-            Ok(vk.verify_with_context(data, ctx, &sig))
+            Ok(match input {
+                Input::Message { msg, ctx } => vk.verify_with_context(msg, ctx, &sig),
+                Input::Mu(mu) => vk.verify_mu(mu, &sig),
+            })
         }
 
-        dispatch!(
-            key.variant(),
-            inner(key.as_bytes(), data, &self.ctx, signature)
-        )
+        let input = self.input(data)?;
+        dispatch!(key.variant(), inner(key.as_bytes(), &input, signature))
     }
+}
+
+/// What one signature covers: a message under the engine's context
+/// string, or an external `μ`.
+enum Input<'a> {
+    /// The message and the context string bound with it.
+    Message { msg: &'a [u8], ctx: &'a [u8] },
+
+    /// An external message representative.
+    Mu(Array<u8, U64>),
 }
 
 /// Validates and copies a FIPS 204 context string.

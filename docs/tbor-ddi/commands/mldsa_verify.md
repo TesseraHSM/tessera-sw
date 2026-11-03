@@ -3,16 +3,17 @@ Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.
 -->
 
-# MlDsaVerify (Opcode 0x28) — schema-only
+# MlDsaVerify (Opcode 0x28)
 
 The parameter set is **not** carried on the wire.  It is recovered from the length of `pub_key`, which is unique per parameter set (ML-DSA-44 = 1312 B, ML-DSA-65 = 1952 B, ML-DSA-87 = 2592 B).  Carrying it explicitly would create a second source of truth that firmware must cross-check against the key, and would let a caller pair a parameter set with a mismatched key.
 
-**Handler:** _Not implemented yet (wire schema only)_
+**Handler:** `fw/core/lib/src/ddi/tbor/mldsa_verify.rs`
 **Session:** InSession
 
 ## Description
 
-Verifies an ML-DSA signature over a host-supplied message and public key.
+Verifies an ML-DSA signature over a host-supplied message, or an external
+`μ`, and public key.
 The response carries no payload: a successful response *is* the affirmative
 verification result.  An invalid signature is reported as the
 `MlDsaVerifyFailed` (`0x0870010D`) error status, mirroring `EccVerifyFailed`.
@@ -26,8 +27,12 @@ is 0..=255 bytes — a hard FIPS 204 limit, because the signed message
 representative encodes `|ctx|` in a single byte.  An empty `ctx` is the
 FIPS 204 default.
 
-This snapshot defines only the wire schema; no firmware handler or PQC
-implementation is registered.
+`msg_type` selects what `message` is, as for
+[`MlDsaSign`](./mldsa_sign.md): `0` for the message `M`, or `3` for the
+64-byte external `μ = SHAKE256(tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M, 64)` with
+an empty `ctx`.  A pure signature over `M` and `ctx` verifies over its
+`μ`, and vice versa.  Values `1` and `2` are reserved (pre-hash ML-DSA)
+and rejected, as are all others.
 
 ## Request
 
@@ -37,8 +42,9 @@ implementation is registered.
 |---|---|---|---|
 | 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | — | `pub_key` | `buffer` (up to 2592 B) | ML-DSA public key bytes. |
-| — | `message` | `buffer` (up to 586 B) | Message bytes that were signed. |
-| — | `ctx` | `buffer` (0..=255 B) | FIPS 204 context string; must match the one used at signing time. |
+| — | `msg_type` | `u8` | `0` = `message` is the message; `3` = `message` is an external `μ`. |
+| — | `message` | `buffer` (up to 586 B) | Message bytes that were signed, or the 64-byte `μ`. |
+| — | `ctx` | `buffer` (0..=255 B) | FIPS 204 context string; must match the one used at signing time, and be empty with `μ`. |
 | — | `signature` | `buffer` (up to 4627 B) | ML-DSA signature bytes. |
 
 ### Data section
@@ -73,8 +79,9 @@ removed as a command, raising it is a deliberate one-constant change to
 
 Worst-case frame: data `2592 + 586 + 255 + 4627 = 8060` B; staged
 `132 + 8060 = 8192` B (exactly the transport buffer) and encoded
-`4 + 6*4 + 8060 = 8088` B (inside both the 8192-byte buffer and the
-8191-byte `MAX_DATA_SIZE` data limit).
+`8 + 6*4 + 8060 = 8092` B (inside both the 8192-byte buffer and the
+8191-byte `MAX_DATA_SIZE` data limit).  `msg_type` travels in its TOC
+entry, so it costs the data section nothing.
 
 ## Response
 
@@ -88,10 +95,11 @@ _Empty._
 
 ## Errors
 
-Handler errors are not defined yet because this command is schema-only.
-Expected future errors include a public key whose length matches no
-supported parameter set, malformed public
-keys/signatures, and malformed request bodies.
+| Error | Cause |
+|---|---|
+| `MlDsaVerifyFailed` | The signature does not verify |
+| `InvalidArg` | A public key whose length matches no parameter set; a signature of the wrong length for it; `msg_type` other than `0` or `3`; with `3`, a `message` that is not 64 bytes or a non-empty `ctx` |
+| `DdiDecodeFailed` | Malformed request body |
 
 ## See also
 

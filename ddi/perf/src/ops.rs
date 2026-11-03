@@ -54,6 +54,7 @@ use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
+use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
 use crate::pqc;
@@ -712,6 +713,7 @@ impl<'e> Worker<'e> {
         let req = TborMlDsaSignReq {
             session_id: env.session_id,
             masked_key: key.masked.clone(),
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: self.pools.mldsa[m].clone(),
             ctx: Vec::new(),
         };
@@ -736,6 +738,7 @@ impl<'e> Worker<'e> {
         let req = TborMlDsaVerifyReq {
             session_id: env.session_id,
             pub_key: signed.keys[k].pub_key.clone(),
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: signed.messages[m].clone(),
             ctx: Vec::new(),
             signature: signed.keys[k].sigs[m].clone(),
@@ -833,6 +836,7 @@ impl<'e> Worker<'e> {
             .tbor(&TborMlDsaSignReq {
                 session_id: env.session_id,
                 masked_key,
+                msg_type: MLDSA_MSG_TYPE_PURE,
                 message: message.clone(),
                 ctx: Vec::new(),
             })
@@ -855,6 +859,7 @@ impl<'e> Worker<'e> {
         let resp = env.session_ctx().tbor(&TborMlDsaVerifyReq {
             session_id: env.session_id,
             pub_key: signed.keys[k].pub_key.clone(),
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: signed.messages[m].clone(),
             ctx: Vec::new(),
             signature,

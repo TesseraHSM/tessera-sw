@@ -604,7 +604,35 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     mailbox::respond(core_id, req, mailbox::STATUS_OK, pk_len as u32);
 }
 
-/// Sign the message staged in the operand slot.
+/// What an ML-DSA sign or verify request covers.
+enum DsaInput<'a> {
+    /// The message, signed under the context string.
+    Message { msg: &'a [u8], ctx: &'a [u8] },
+    /// An external `μ`, used as is.
+    Mu(&'a [u8; mailbox::MU_LEN]),
+}
+
+/// Read a sign or verify request's staged input as its message type says,
+/// or the status to refuse it with.
+///
+/// The HSM checks the input before posting it, so a refusal here means the
+/// two sides disagree about the protocol.
+fn dsa_input<'a>(
+    req: &mailbox::Request,
+    msg: &'a [u8],
+    ctx: &'a [u8],
+) -> Result<DsaInput<'a>, u32> {
+    match req.msg_type {
+        mailbox::MSG_TYPE_PURE => Ok(DsaInput::Message { msg, ctx }),
+        mailbox::MSG_TYPE_EXTERNAL_MU => match (msg.try_into(), ctx.is_empty()) {
+            (Ok(mu), true) => Ok(DsaInput::Mu(mu)),
+            _ => Err(mailbox::STATUS_UNSUPPORTED_OP),
+        },
+        _ => Err(mailbox::STATUS_UNSUPPORTED_OP),
+    }
+}
+
+/// Sign the message, or external `μ`, staged in the operand slot.
 ///
 /// The caller supplies the **expanded secret key**, staged in the slot, so
 /// no key derivation happens here. Deriving it from the seed instead used
@@ -651,16 +679,21 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
             mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
             return;
         };
+        let input = match dsa_input(req, msg, ctx) {
+            Ok(input) => input,
+            Err(status) => {
+                mailbox::respond(core_id, req, status, 0);
+                return;
+            }
+        };
 
-        pqc_ml::ml_dsa_sign(
-            variant,
-            &mut sig_buf[..sig_len],
-            msg,
-            ctx,
-            sk,
-            &req.rnd,
-            work,
-        )
+        let sig = &mut sig_buf[..sig_len];
+        match input {
+            DsaInput::Message { msg, ctx } => {
+                pqc_ml::ml_dsa_sign(variant, sig, msg, ctx, sk, &req.rnd, work)
+            }
+            DsaInput::Mu(mu) => pqc_ml::ml_dsa_sign_internal(variant, sig, mu, sk, &req.rnd, work),
+        }
     };
 
     if !ok {
@@ -679,7 +712,8 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
     mailbox::respond(core_id, req, mailbox::STATUS_OK, sig_len as u32);
 }
 
-/// Verify a signature under the supplied public key.
+/// Verify a signature over the message, or external `μ`, under the supplied
+/// public key.
 ///
 /// Every operand is an input, so all four are borrowed straight out of the
 /// slot with no copying -- unlike sign, where the output aliases the same
@@ -705,6 +739,13 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     ) else {
         mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
+    };
+    let input = match dsa_input(req, msg, ctx) {
+        Ok(input) => input,
+        Err(status) => {
+            mailbox::respond(core_id, req, status, 0);
+            return;
+        }
     };
 
     // Stage the signature and public key into dTCM. Both are unpacked into
@@ -757,7 +798,10 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
         &mut work.assume_init_mut()[..]
     };
 
-    let verified = pqc_ml::ml_dsa_verify(variant, msg, sig, ctx, pk, work);
+    let verified = match input {
+        DsaInput::Message { msg, ctx } => pqc_ml::ml_dsa_verify(variant, msg, sig, ctx, pk, work),
+        DsaInput::Mu(mu) => pqc_ml::ml_dsa_verify_internal(variant, mu, sig, pk, work),
+    };
 
     if verified {
         mailbox::respond(core_id, req, mailbox::STATUS_OK, 0);

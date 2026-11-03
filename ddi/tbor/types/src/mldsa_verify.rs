@@ -52,6 +52,10 @@ pub struct TborMlDsaVerifyReq {
     #[tbor(max_len = 2592)]
     pub pub_key: Vec<u8>,
 
+    /// How `message` is read: `MLDSA_MSG_TYPE_PURE` (the message itself) or
+    /// `MLDSA_MSG_TYPE_EXTERNAL_MU` (a 64-byte `μ`, with an empty `ctx`).
+    pub msg_type: u8,
+
     /// Message that was signed.  Capped at 586 B — the residue of the
     /// 8192-byte host staging budget once the maximum public key,
     /// signature and context string are accounted for.  See
@@ -87,6 +91,7 @@ mod tests {
     use super::*;
     use crate::mldsa_generate_key::MLDSA_CTX_MAX_LEN;
     use crate::mldsa_generate_key::MLDSA_MESSAGE_MAX_LEN;
+    use crate::mldsa_generate_key::MLDSA_MSG_TYPE_PURE;
     use crate::mldsa_generate_key::MLDSA_PUB_KEY_MAX_LEN;
     use crate::mldsa_generate_key::MLDSA_SIGNATURE_MAX_LEN;
 
@@ -95,6 +100,7 @@ mod tests {
         let req = TborMlDsaVerifyReq {
             session_id: 7,
             pub_key: alloc::vec![0x11u8; 64],
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: alloc::vec![0x22u8; 32],
             ctx: alloc::vec![0x44u8; 8],
             signature: alloc::vec![0x33u8; 64],
@@ -112,6 +118,7 @@ mod tests {
         let req = TborMlDsaVerifyReq {
             session_id: 7,
             pub_key: alloc::vec![0x11u8; 64],
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: alloc::vec![0x22u8; 32],
             ctx: alloc::vec![0x44u8; MLDSA_CTX_MAX_LEN],
             signature: alloc::vec![0x33u8; 64],
@@ -131,14 +138,15 @@ mod tests {
         let req = TborMlDsaVerifyReq {
             session_id: 7,
             pub_key: alloc::vec![0x11u8; MLDSA_PUB_KEY_MAX_LEN],
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: alloc::vec![0x22u8; MLDSA_MESSAGE_MAX_LEN],
             ctx: alloc::vec![0x44u8; MLDSA_CTX_MAX_LEN],
             signature: alloc::vec![0x33u8; MLDSA_SIGNATURE_MAX_LEN],
         };
         let mut buf = [0u8; 8192];
         let frame = req.encode_request(&mut buf).expect("encode");
-        // header(8) + 5 TOC entries * 4 + data(8060).
-        assert_eq!(frame.len(), 8088);
+        // header(8) + 6 TOC entries * 4 + data(8060).
+        assert_eq!(frame.len(), 8092);
     }
 
     #[test]

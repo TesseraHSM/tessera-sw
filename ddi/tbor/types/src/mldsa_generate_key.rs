@@ -103,6 +103,16 @@ pub const MLDSA_CTX_MAX_LEN: usize = 255;
 /// checks that fail the build if they drift.
 pub const MLDSA_MESSAGE_MAX_LEN: usize = 586;
 
+/// `MlDsaSign` / `MlDsaVerify` `msg_type`: `message` is the message itself
+/// (pure ML-DSA, FIPS 204 §5.2).
+pub const MLDSA_MSG_TYPE_PURE: u8 = 0;
+/// `MlDsaSign` / `MlDsaVerify` `msg_type`: `message` is an external `μ` of
+/// [`MLDSA_MU_LEN`] bytes, `SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`,
+/// and `ctx` must be empty.  Values 1 and 2 (pre-hash) are reserved.
+pub const MLDSA_MSG_TYPE_EXTERNAL_MU: u8 = 3;
+/// Length of an external `μ`.
+pub const MLDSA_MU_LEN: usize = 64;
+
 /// `MlDsaKeyKind` discriminant for an ML-DSA-44 compact seed (`xi`, 32 B).
 pub const MLDSA_KEY_KIND_44_SEED: u8 = 46;
 /// `MlDsaKeyKind` discriminant for an ML-DSA-65 compact seed (`xi`, 32 B).

@@ -185,7 +185,43 @@ impl MlDsaPublicKey {
     pub(super) fn as_bytes(&self) -> &[u8] {
         &self.encoded
     }
+
+    /// Computes the FIPS 204 message representative `μ` that pure ML-DSA
+    /// signs for `msg` under `ctx` and this key:
+    /// `μ = SHAKE256(SHAKE256(pk, 64) || 0x00 || len(ctx) || ctx || msg, 64)`
+    /// (FIPS 204 Algorithm 2 line 10 and Algorithm 7 lines 6–7).
+    ///
+    /// This is what an [external-μ](MlDsaAlgo::external_mu) engine takes in
+    /// place of the message: a signature over it verifies as a pure
+    /// signature over `msg` and `ctx`, and vice versa.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::MlDsaInvalidContext`] if `ctx` is longer than
+    /// [`MLDSA_CTX_MAX_LEN`] bytes, or the hashing error if SHAKE256 fails.
+    pub fn mu(&self, ctx: &[u8], msg: &[u8]) -> Result<[u8; MLDSA_MU_LEN], CryptoError> {
+        let ctx_len = u8::try_from(ctx.len()).map_err(|_| CryptoError::MlDsaInvalidContext)?;
+        let shake = || HashAlgo::shake256(MU_OUT_LEN);
+
+        let mut tr = [0u8; MLDSA_MU_LEN];
+        Hasher::hash(&mut shake(), &self.encoded, Some(&mut tr))?;
+
+        let mut hasher = shake().hash_init()?;
+        hasher.update(&tr)?;
+        hasher.update(&[0, ctx_len])?;
+        hasher.update(ctx)?;
+        hasher.update(msg)?;
+        let mut mu = [0u8; MLDSA_MU_LEN];
+        hasher.finish(Some(&mut mu))?;
+        Ok(mu)
+    }
 }
+
+/// SHAKE256 output length for `tr` and `μ`.
+const MU_OUT_LEN: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MLDSA_MU_LEN) {
+    Some(len) => len,
+    None => panic!("MLDSA_MU_LEN is zero"),
+};
 
 impl Key for MlDsaPublicKey {
     /// Returns the encoded key length in bytes: 1312, 1952 or 2592.

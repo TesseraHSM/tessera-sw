@@ -53,6 +53,10 @@ pub struct TborMlDsaSignReq {
     #[tbor(max_len = 5160)]
     pub masked_key: Vec<u8>,
 
+    /// How `message` is read: `MLDSA_MSG_TYPE_PURE` (the message itself) or
+    /// `MLDSA_MSG_TYPE_EXTERNAL_MU` (a 64-byte `μ`, with an empty `ctx`).
+    pub msg_type: u8,
+
     /// Message to sign.  The TBOR schema caps inline messages at 586 B; see
     /// [`MLDSA_MESSAGE_MAX_LEN`](crate::MLDSA_MESSAGE_MAX_LEN).
     #[tbor(max_len = 586)]
@@ -81,12 +85,14 @@ mod tests {
     use super::*;
     use crate::mldsa_generate_key::MASKED_MLDSA_KEY_MAX_LEN;
     use crate::mldsa_generate_key::MLDSA_CTX_MAX_LEN;
+    use crate::mldsa_generate_key::MLDSA_MSG_TYPE_PURE;
 
     #[test]
     fn request_encodes_message() {
         let req = TborMlDsaSignReq {
             session_id: 7,
             masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: alloc::vec![0x22u8; 32],
             ctx: alloc::vec![0x44u8; 8],
         };
@@ -103,6 +109,7 @@ mod tests {
         let req = TborMlDsaSignReq {
             session_id: 7,
             masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: alloc::vec![0x22u8; 32],
             ctx: alloc::vec![0x44u8; MLDSA_CTX_MAX_LEN],
         };
@@ -119,6 +126,7 @@ mod tests {
         let req = TborMlDsaSignReq {
             session_id: 7,
             masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
+            msg_type: MLDSA_MSG_TYPE_PURE,
             message: alloc::vec![0x22u8; 32],
             ctx: Vec::new(),
         };

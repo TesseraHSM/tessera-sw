@@ -30,8 +30,10 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
+pub use crate::mldsa_generate_key::MlDsaMsgType;
 pub use crate::mldsa_generate_key::MLDSA_CTX_MAX_LEN;
 pub use crate::mldsa_generate_key::MLDSA_MESSAGE_MAX_LEN;
+pub use crate::mldsa_generate_key::MLDSA_MU_LEN;
 pub use crate::mldsa_generate_key::MLDSA_PUB_KEY_MAX_LEN;
 pub use crate::mldsa_generate_key::MLDSA_SIGNATURE_MAX_LEN;
 
@@ -53,6 +55,11 @@ pub struct TborMlDsaVerifyReq<'a> {
     /// ML-DSA public key bytes.  Up to 2592 B for ML-DSA-87.
     #[tbor(buffer, max_len = 2592)]
     pub pub_key: &'a [u8],
+
+    /// How `message` is read, 1-byte [`MlDsaMsgType`]: the message itself,
+    /// or an external `μ`.
+    #[tbor(U8)]
+    pub msg_type: MlDsaMsgType,
 
     /// Message that was signed.  Capped at 586 B — the residue of the
     /// 8192-byte host staging budget once the maximum public key,
@@ -105,6 +112,8 @@ mod tests {
             .unwrap()
             .pub_key(&pub_key)
             .unwrap()
+            .msg_type(MlDsaMsgType::Pure)
+            .unwrap()
             .message(&message)
             .unwrap()
             .ctx(&ctx)
@@ -127,6 +136,8 @@ mod tests {
             .session_id(SessionId(1))
             .unwrap()
             .pub_key(&pub_key)
+            .unwrap()
+            .msg_type(MlDsaMsgType::Pure)
             .unwrap()
             .message(&message)
             .unwrap()
@@ -153,6 +164,8 @@ mod tests {
             .unwrap()
             .pub_key(&pub_key)
             .unwrap()
+            .msg_type(MlDsaMsgType::Pure)
+            .unwrap()
             .message(&message)
             .unwrap()
             .ctx(&ctx)
@@ -163,7 +176,7 @@ mod tests {
         assert_eq!(frame.message(), &message[..]);
         assert_eq!(frame.ctx(), &ctx[..]);
         assert_eq!(frame.signature(), &signature[..]);
-        assert_eq!(frame.len(), 8088);
+        assert_eq!(frame.len(), 8092);
         assert_eq!(frame.len(), TborMlDsaVerifyReq::MAX_ENCODED_SIZE);
     }
 

@@ -36,9 +36,11 @@
 
 use tsra_fw_ddi_tbor_api::tbor;
 
+pub use crate::mldsa_generate_key::MlDsaMsgType;
 pub use crate::mldsa_generate_key::MASKED_MLDSA_KEY_MAX_LEN;
 pub use crate::mldsa_generate_key::MLDSA_CTX_MAX_LEN;
 pub use crate::mldsa_generate_key::MLDSA_MESSAGE_MAX_LEN;
+pub use crate::mldsa_generate_key::MLDSA_MU_LEN;
 pub use crate::mldsa_generate_key::MLDSA_SIGNATURE_MAX_LEN;
 
 /// TBOR opcode for `MlDsaSign`.
@@ -59,6 +61,11 @@ pub struct TborMlDsaSignReq<'a> {
     /// the wire ships seed-only keys.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
     #[tbor(buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
+
+    /// How `message` is read, 1-byte [`MlDsaMsgType`]: the message itself,
+    /// or an external `μ`.
+    #[tbor(U8)]
+    pub msg_type: MlDsaMsgType,
 
     /// Message to sign.  The TBOR schema caps inline messages at 586 B; see
     /// [`MLDSA_MESSAGE_MAX_LEN`].
@@ -100,6 +107,8 @@ mod tests {
             .unwrap()
             .masked_key(&masked)
             .unwrap()
+            .msg_type(MlDsaMsgType::Pure)
+            .unwrap()
             .message(&message)
             .unwrap()
             .ctx(&ctx)
@@ -119,6 +128,8 @@ mod tests {
             .session_id(SessionId(1))
             .unwrap()
             .masked_key(&masked)
+            .unwrap()
+            .msg_type(MlDsaMsgType::Pure)
             .unwrap()
             .message(&message)
             .unwrap()
@@ -140,6 +151,8 @@ mod tests {
             .unwrap()
             .masked_key(&masked)
             .unwrap()
+            .msg_type(MlDsaMsgType::Pure)
+            .unwrap()
             .message(&message)
             .unwrap()
             .ctx(&ctx)
@@ -148,6 +161,34 @@ mod tests {
         assert_eq!(frame.masked_key(), &masked[..]);
         assert_eq!(frame.message(), &message[..]);
         assert_eq!(frame.ctx(), &ctx[..]);
+    }
+
+    #[test]
+    fn request_round_trips_external_mu_and_unknown_msg_types() {
+        let mut buf = [0u8; 8192];
+        let masked = [0x11u8; MASKED_MLDSA_KEY_MAX_LEN];
+        let mu = [0x55u8; MLDSA_MU_LEN];
+        for msg_type in [
+            MlDsaMsgType::ExternalMu,
+            MlDsaMsgType(1),
+            MlDsaMsgType(0xff),
+        ] {
+            let frame = TborMlDsaSignReq::encode(&mut buf)
+                .unwrap()
+                .session_id(SessionId(1))
+                .unwrap()
+                .masked_key(&masked)
+                .unwrap()
+                .msg_type(msg_type)
+                .unwrap()
+                .message(&mu)
+                .unwrap()
+                .ctx(&[])
+                .unwrap()
+                .finish();
+            assert_eq!(frame.msg_type(), msg_type);
+            assert_eq!(frame.message(), &mu[..]);
+        }
     }
 
     #[test]

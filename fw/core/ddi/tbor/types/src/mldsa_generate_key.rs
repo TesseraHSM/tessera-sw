@@ -120,6 +120,35 @@ pub const MLDSA_CTX_MAX_LEN: usize = 255;
 /// checks that fail the build if they drift.
 pub const MLDSA_MESSAGE_MAX_LEN: usize = 586;
 
+/// Length of the ML-DSA message representative `μ` carried in `message`
+/// when [`MlDsaMsgType::ExternalMu`] is selected.
+pub const MLDSA_MU_LEN: usize = 64;
+
+/// How `MlDsaSign` / `MlDsaVerify` read their `message`, 1-byte wire enum.
+///
+/// The discriminants follow the ML-DSA engine's 2-bit message-type
+/// encoding.  Only [`Pure`](Self::Pure) and
+/// [`ExternalMu`](Self::ExternalMu) are accepted; the other values,
+/// `1` (pre-hash: OID followed by the message digest) and `2` (pre-hash:
+/// OID followed by the message), are reserved and rejected.
+///
+/// Kept as an [`open_enum`] so an unrecognized discriminant round-trips as
+/// `MlDsaMsgType(x)` and is rejected on-device rather than failing to
+/// decode.
+#[repr(u8)]
+#[open_enum]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlDsaMsgType {
+    /// Pure ML-DSA (FIPS 204 §5.2): `message` is the message `M`, signed
+    /// under the context string `ctx`.
+    Pure = 0,
+    /// External `μ`: `message` is the [`MLDSA_MU_LEN`]-byte message
+    /// representative `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`,
+    /// computed by the caller.  `μ` already binds the context string, so
+    /// `ctx` must be empty.
+    ExternalMu = 3,
+}
+
 /// ML-DSA key-kind selector on the TBOR wire — a wire-side mirror of the
 /// ML-DSA subset of the firmware
 /// [`HsmVaultKeyKind`](tsra_fw_hsm_pal_traits::HsmVaultKeyKind) enum.

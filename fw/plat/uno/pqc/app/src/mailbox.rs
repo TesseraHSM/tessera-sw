@@ -120,6 +120,8 @@ mod word {
     pub const SIG_LEN: usize = 24;
     /// Length of the public key in the operand slot (verify only).
     pub const PUB_KEY_LEN: usize = 25;
+    /// How the staged message is read (ML-DSA sign and verify only).
+    pub const MSG_TYPE: usize = 26;
 }
 
 /// Operand slot layout.
@@ -208,6 +210,16 @@ pub const SLOT_SHAKE_IN_OFFSET: usize = SLOT_MSG_OFFSET;
 /// does not use.
 pub const SLOT_SHAKE_OUT_OFFSET: usize = SLOT_PK_OFFSET;
 
+/// ML-DSA message type: the staged message is the message itself.
+pub const MSG_TYPE_PURE: u32 = 0;
+
+/// ML-DSA message type: the staged message is an external `μ` of
+/// [`MU_LEN`] bytes, signed or verified as is, with no context string.
+pub const MSG_TYPE_EXTERNAL_MU: u32 = 3;
+
+/// Length of an external `μ`.
+pub const MU_LEN: usize = 64;
+
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;
 
@@ -288,6 +300,10 @@ pub struct Request {
 
     /// Length of the public key staged in the operand slot (verify only).
     pub pub_key_len: usize,
+
+    /// How the staged message is read, ML-DSA sign and verify only:
+    /// [`MSG_TYPE_PURE`] or [`MSG_TYPE_EXTERNAL_MU`].
+    pub msg_type: u32,
 }
 
 /// Base of this core's operand slot.
@@ -449,6 +465,7 @@ pub fn take_request(core_id: u8) -> Option<Request> {
             ctx_len: read_volatile(mb.add(word::CTX_LEN)) as usize,
             sig_len: read_volatile(mb.add(word::SIG_LEN)) as usize,
             pub_key_len: read_volatile(mb.add(word::PUB_KEY_LEN)) as usize,
+            msg_type: read_volatile(mb.add(word::MSG_TYPE)),
         })
     }
 }

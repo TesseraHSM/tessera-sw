@@ -656,6 +656,20 @@ Authenticates a masked key of any kind without using it; empty response.
 | A session-scoped key is rejected in a different session | ✅ | `verify_key::verify_key_session_scoped_key_rejected_in_different_session` | `AesGcmDecryptTagDoesNotMatch` |
 | Default CO PSK is rejected | ✅ | `verify_key::verify_key_rejects_default_co_psk` | `DefaultPskMustRotate` |
 
+## `MlDsaSign` / `MlDsaVerify` external μ (opcode in-session, gated)
+
+`msg_type` `3` carries the 64-byte message representative `μ` in place of
+the message; `ctx` must then be empty. A signature over `μ` is a pure
+signature over the message it was computed from.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| A signature over a host-computed `μ` verifies as a pure signature | ✅ 🔁 | `mldsa_external_mu::mldsa_sign_external_mu_verifies_as_pure` | ML-DSA-44/65/87; verified by the host (`tsra_crypto`) and the device |
+| Pure signatures verify over `μ`; a modified `μ` does not | ✅ 🔁 | `mldsa_external_mu::mldsa_verify_external_mu_accepts_pure_signatures` | Device- and host-made signatures and keys |
+| NIST ACVP external-`μ` sigVer vectors | ✅ 🔁 | `mldsa_external_mu::mldsa_external_mu_nist_acvp_vectors` | Valid, modified-`μ` and tampered-signature cases; passing ones replayed with a flipped bit |
+| `μ` computed on the device with `Hash` (SHAKE256) matches the host's and signs/verifies as pure | ✅ 🔁 | `mldsa_external_mu::mldsa_external_mu_computed_on_device` | `tr` and `μ` both on the device, all three parameter sets |
+| `μ` not 64 bytes, `μ` with a `ctx`, and `msg_type` other than 0/3 are rejected with `InvalidArg` | ✅ 🔁 | `mldsa_external_mu::mldsa_external_mu_rejects_malformed_requests` | Both commands; 63/65-byte `μ`; `msg_type` 1, 2 (reserved pre-hash), 4, 255 |
+
 ## Known gaps (summary)
 
 The rows marked ⚠️ above, consolidated:

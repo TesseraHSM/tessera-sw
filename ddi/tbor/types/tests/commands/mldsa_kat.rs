@@ -39,6 +39,7 @@ use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
@@ -59,6 +60,7 @@ fn device_verify(
     match ctx.tbor(&TborMlDsaVerifyReq {
         session_id,
         pub_key: pub_key.to_vec(),
+        msg_type: MLDSA_MSG_TYPE_PURE,
         message: message.to_vec(),
         ctx: context.to_vec(),
         signature: signature.to_vec(),
@@ -137,6 +139,7 @@ fn dsa_device_to_host(p: &MlDsaParams, rounds: usize) {
             .tbor(&TborMlDsaSignReq {
                 session_id: session.session_id,
                 masked_key: key.masked_key.clone(),
+                msg_type: MLDSA_MSG_TYPE_PURE,
                 message: message.clone(),
                 ctx: Vec::new(),
             })

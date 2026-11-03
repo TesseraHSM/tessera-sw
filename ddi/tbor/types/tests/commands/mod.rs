@@ -36,6 +36,7 @@ pub mod hkdf_derive;
 pub mod hmac;
 pub mod hmac_generate_key;
 pub mod key_report;
+pub mod mldsa_external_mu;
 pub mod mldsa_generate_key;
 pub mod mldsa_kat;
 pub mod mldsa_sign;
