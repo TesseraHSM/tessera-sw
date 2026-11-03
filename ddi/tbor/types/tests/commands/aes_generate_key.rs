@@ -22,12 +22,9 @@
 // The shared masked-key helpers/constants below stay available under any
 // backend (so the module isn't emu-limited), but only the emu-gated tests
 // exercise them today; suppress dead-code noise in non-emu builds.
-#![cfg_attr(not(feature = "emu"), allow(dead_code))]
 
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::TestCtx;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
