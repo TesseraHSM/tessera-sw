@@ -632,3 +632,41 @@ fn sd_reseal_remote_backup_zero_session_succeeds() {
         "resealed backup must not be all-zero"
     );
 }
+
+/// Reject malformed source owner certificate evidence.
+#[test]
+fn sd_reseal_remote_backup_malformed_src_owner_chain_rejected() {
+    let (ctx, req, mut evidence) = valid_reseal_fixture();
+
+    let leaf_index = req.src_owner_cert_chain[1].index as usize;
+    let leaf = &mut evidence.oob_items[leaf_index];
+
+    // Corrupt the DER certificate tag.
+    assert!(
+        !leaf.is_empty(),
+        "source owner certificate must not be empty"
+    );
+    leaf[0] = 0x00;
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("malformed source owner certificate must be rejected");
+}
+
+/// Reject malformed destination owner certificate evidence.
+#[test]
+fn sd_reseal_remote_backup_malformed_dest_owner_chain_rejected() {
+    let (ctx, req, mut evidence) = valid_reseal_fixture();
+
+    let leaf_index = req.dest_owner_cert_chain[1].index as usize;
+    let leaf = &mut evidence.oob_items[leaf_index];
+
+    // Corrupt the DER certificate tag.
+    assert!(
+        !leaf.is_empty(),
+        "destination owner certificate must not be empty"
+    );
+    leaf[0] = 0x00;
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("malformed destination owner certificate must be rejected");
+}
