@@ -45,6 +45,7 @@ use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CO;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CU;
+use tsra_ddi_tbor_types::PSK_CHANGE_AAD_LEN;
 use tsra_ddi_tbor_types::PSK_LEN;
 
 /// Distinct, non-default 32-byte PSK used by the happy-path tests.
@@ -446,9 +447,9 @@ fn psk_change_tampered_iv_rejected() {
         encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
 
     // Envelope layout:
-    // HEADER(4) | IV(12) | AAD(32) | CT(32) | TAG(16)
-    // Byte 4 is the first IV byte.
-    envelope[4] ^= 0x01;
+    // HEADER(8) | IV(12) | AAD(32) | CT(32) | TAG(16)
+    // The IV starts immediately after the header.
+    envelope[tsra_crypto::aead_envelope::HEADER_LEN] ^= 0x01;
 
     let req = TborPskChangeReq {
         session_id: session.session_id(),
@@ -565,15 +566,16 @@ fn psk_change_rotated_psk_repeated_reopen() {
 fn psk_change_invalid_aad_content_rejected() {
     let ctx = TestCtx::new();
 
-    let session = ctx
-        .open_session(CU, SessionType::PlainText)
-        .expect("open CU session");
-
-    let correct_aad = build_psk_change_aad(session.session_id());
-
-    assert_eq!(correct_aad.len(), 32);
-
     for offset in [0usize, 8, 16, 31] {
+        // Use a fresh session for each malformed-AAD case.
+        let session = ctx
+            .open_session(CU, SessionType::PlainText)
+            .expect("open CU session");
+
+        let correct_aad = build_psk_change_aad(session.session_id());
+
+        assert_eq!(correct_aad.len(), PSK_CHANGE_AAD_LEN);
+
         let mut wrong_aad = correct_aad;
         wrong_aad[offset] ^= 0x01;
 
@@ -586,9 +588,7 @@ fn psk_change_invalid_aad_content_rejected() {
             psk_envelope: envelope,
         };
 
-        let _err = ctx
-            .tbor(&req)
-            .expect_err(&format!("modified AAD at offset {offset} must be rejected"));
+        ctx.expect_fw_reject(&req, TborStatus::AeadEnvelopeAuthFailed);
     }
 }
 

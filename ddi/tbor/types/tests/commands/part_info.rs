@@ -15,6 +15,7 @@
 //! [`tsra_ddi::TsraDdi::default`].
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -486,12 +487,12 @@ fn part_info_does_not_disturb_active_session() {
 }
 
 /// `PartInfo` remains stable while the partition is `Initializing`,
-/// including across a rejected attempt to open a new session.
+/// including across a successful attempt to open a new session.
 ///
 /// Once `PartInit` advances the partition to `Initializing`, opening a
-/// new authenticated session is rejected. That rejected session operation
-/// must not mutate the partition state or any fields reported by
-/// the out-of-session `PartInfo` handler.
+/// new authenticated session with rotated CO credentials remains supported.
+/// The session operation must not mutate the partition state or any fields
+/// reported by the out-of-session `PartInfo` handler.
 #[test]
 fn part_info_initializing_independent_of_session_state() {
     let ctx = TestCtx::new();
@@ -520,40 +521,43 @@ fn part_info_initializing_independent_of_session_state() {
         "partition must be Initializing after PartInit",
     );
 
-    // SessionOpenInit is rejected while the partition is Initializing.
-    // Do not unwrap/expect success here: rejection is the behavior under test.
-    let open_result = ctx.session_open_init(CO_PSK_ID, SessionType::Authenticated);
+    let opts = SessionOpenInitOptions::new(CO_PSK_ID, SessionType::Authenticated)
+        .with_psk(&ROTATED_CO_PSK);
+
+    // SessionOpenInit remains available while the partition is Initializing.
+    // Opening a new session must not change the partition state.
+    let open_result = ctx.session_open_init_with_options(opts);
 
     assert!(
-        open_result.is_err(),
-        "SessionOpenInit must be rejected while partition is Initializing",
+        open_result.is_ok(),
+        "SessionOpenInit should succeed with rotated CO credentials while Initializing",
     );
 
-    // A rejected session-open attempt must not alter PartInfo.
+    // A successful SessionOpenInit must not alter PartInfo.
     let after_rejected_open = ctx
         .tbor(&TborPartInfoReq::new())
-        .expect("PartInfo after rejected SessionOpenInit");
+        .expect("PartInfo after successful SessionOpenInit");
 
     assert_eq!(
         after_rejected_open, baseline,
-        "rejected SessionOpenInit changed PartInfo while Initializing",
+        "SessionOpenInit changed PartInfo while Initializing",
     );
 
     assert_eq!(
         after_rejected_open.part_state, PART_STATE_INITIALIZING,
-        "rejected SessionOpenInit must not change partition lifecycle state",
+        "SessionOpenInit must not change partition lifecycle state",
     );
 
-    // Ensure PartInfo remains stable on subsequent reads after the rejected
-    // session operation.
+    // Ensure PartInfo remains stable on subsequent reads after
+    // the successful SessionOpenInit.
     for i in 0..8 {
         let resp = ctx
             .tbor(&TborPartInfoReq::new())
-            .expect("repeated PartInfo after rejected SessionOpenInit");
+            .expect("repeated PartInfo after successful SessionOpenInit");
 
         assert_eq!(
             resp, baseline,
-            "PartInfo changed after rejected SessionOpenInit on iteration {i}",
+            "PartInfo changed after SessionOpenInit on iteration {i}",
         );
     }
 }
