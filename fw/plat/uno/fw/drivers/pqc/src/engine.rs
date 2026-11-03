@@ -591,22 +591,26 @@ impl PqcEngine<'_> {
         }
     }
 
-    /// Hash `msg` with SHAKE on this engine, filling all of `out`.
+    /// Hash `msg` with SHAKE on this engine.
     ///
     /// # Parameters
-    /// * `algo` — [`HsmHashAlgo::Shake128`] or [`HsmHashAlgo::Shake256`];
-    ///   the output length is `out.len()`, not the length `algo` carries.
+    /// * `algo` — [`HsmHashAlgo::Shake128`] or [`HsmHashAlgo::Shake256`],
+    ///   carrying the number of output bytes (at most [`SHAKE_OUT_MAX`]).
     /// * `msg` — up to [`SHAKE_MSG_MAX`] bytes, staged into the operand slot.
-    /// * `out` — 1 to [`SHAKE_OUT_MAX`] bytes of output.
+    /// * `out` — at least that many bytes; only the first that many are
+    ///   written, as with [`HsmHash`](tsra_fw_hsm_pal_traits::HsmHash).
     pub async fn shake(&mut self, algo: HsmHashAlgo, msg: &[u8], out: &mut [u8]) -> HsmResult<()> {
-        let op = match algo {
-            HsmHashAlgo::Shake128(_) => PqcOp::Shake128,
-            HsmHashAlgo::Shake256(_) => PqcOp::Shake256,
+        let (op, out_len) = match algo {
+            HsmHashAlgo::Shake128(len) => (PqcOp::Shake128, usize::from(len.get())),
+            HsmHashAlgo::Shake256(len) => (PqcOp::Shake256, usize::from(len.get())),
             _ => return Err(HsmError::UnsupportedDigestHashAlgorithm),
         };
-        if msg.len() > SHAKE_MSG_MAX || out.is_empty() || out.len() > SHAKE_OUT_MAX {
+        if msg.len() > SHAKE_MSG_MAX || out_len > SHAKE_OUT_MAX {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
+        let out = out
+            .get_mut(..out_len)
+            .ok_or(PqcError::INVALID_BUFFER_SIZE)?;
         if !mailbox::write_slot(self.id, mailbox::SLOT_SHAKE_IN_OFFSET, msg) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -619,12 +623,12 @@ impl PqcEngine<'_> {
                 rnd: &[0u8; MLDSA_SEED_LEN],
                 msg_len: msg.len() as u32,
                 ctx_len: 0,
-                sig_len: out.len() as u32,
+                sig_len: out_len as u32,
                 pub_key_len: 0,
             })
             .await?;
 
-        if resp.out_len as usize != out.len()
+        if resp.out_len as usize != out_len
             || !mailbox::read_slot_at(self.id, mailbox::SLOT_SHAKE_OUT_OFFSET, out)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);

@@ -120,9 +120,11 @@ impl HsmRsaKey {
         self.modulus_len() - 11
     }
 
-    /// Maximum plaintext length for OAEP encryption: `k - 2*hLen - 2`.
+    /// Maximum plaintext length for OAEP encryption: `k - 2*hLen - 2`, or 0
+    /// if `algo`'s digest is too long for the modulus (e.g. a long SHAKE
+    /// output, which OAEP does not support anyway).
     pub const fn max_oaep_message(&self, algo: HsmHashAlgo) -> usize {
-        self.modulus_len() - 2 * algo.digest_len() - 2
+        self.modulus_len().saturating_sub(2 * algo.digest_len() + 2)
     }
 
     /// Minimum work buffer size for PKCS#1 v1.5 operations.
@@ -134,7 +136,7 @@ impl HsmRsaKey {
     pub const fn oaep_work_len(&self, algo: HsmHashAlgo) -> usize {
         let k = self.modulus_len();
         let h_len = algo.digest_len();
-        let db_len = k - h_len - 1;
+        let db_len = k.saturating_sub(h_len + 1);
         k + algo.mgf1_state_len(db_len)
     }
 
@@ -654,4 +656,25 @@ pub trait HsmRsa: HsmIoTypes {
     ) -> HsmResult<bool>
     where
         Self: 'a;
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU16;
+
+    use super::HsmHashAlgo;
+    use super::HsmRsaKey;
+
+    /// A SHAKE output longer than the modulus must not underflow the OAEP
+    /// sizes: OAEP rejects SHAKE, but these helpers run first.
+    #[test]
+    fn oaep_sizes_do_not_underflow_for_long_shake() {
+        let shake = HsmHashAlgo::Shake256(NonZeroU16::new(300).expect("nonzero"));
+        assert_eq!(HsmRsaKey::Rsa2048Pub.max_oaep_message(shake), 0);
+        let _ = HsmRsaKey::Rsa2048Pub.oaep_work_len(shake);
+        assert_eq!(
+            HsmRsaKey::Rsa2048Pub.max_oaep_message(HsmHashAlgo::Sha256),
+            256 - 2 * 32 - 2
+        );
+    }
 }

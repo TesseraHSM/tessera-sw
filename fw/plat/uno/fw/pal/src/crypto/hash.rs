@@ -205,8 +205,10 @@ impl HsmHash for UnoHsmPal {
     ///
     /// # Returns
     ///
-    /// `Ok(())` on success, or an [`HsmError`] if the message length exceeds
-    /// `u32::MAX` or the hardware submission fails.
+    /// `Ok(())` on success, or an [`HsmError`] if `digest` is too short, the
+    /// message length exceeds `u32::MAX` (for SHAKE, [`SHAKE_MSG_MAX`]), a
+    /// SHAKE output exceeds [`SHAKE_OUT_MAX`], or the hardware submission
+    /// fails.
     async fn hash(
         &self,
         io: &UnoHsmIo,
@@ -221,9 +223,11 @@ impl HsmHash for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
         if algo.is_xof() {
-            self.pqc
-                .shake(algo, data, &mut digest[..digest_len])
-                .await?;
+            // Reject what the PQC core cannot take before claiming one.
+            if data.len() > SHAKE_MSG_MAX || digest_len > SHAKE_OUT_MAX {
+                return Err(HsmError::InvalidArg);
+            }
+            self.pqc.shake(algo, data, digest).await?;
         } else {
             self.sha_oneshot(algo, data, digest).await?;
         }
@@ -300,16 +304,6 @@ impl HsmHash for UnoHsmPal {
         data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let _ = io;
-        if ctx.algo.is_xof() {
-            let start = ctx.byte_count as usize;
-            let end = start
-                .checked_add(data.len())
-                .filter(|&end| end <= ctx.buf.len())
-                .ok_or(HsmError::InvalidArg)?;
-            ctx.buf[start..end].copy_from_slice(data);
-            ctx.byte_count = end as u32;
-            return Ok(());
-        }
         self.hash_continue_bytes(ctx, data).await
     }
 
@@ -348,7 +342,7 @@ impl HsmHash for UnoHsmPal {
 
         if algo.is_xof() {
             let msg = &ctx.buf[..ctx.byte_count as usize];
-            self.pqc.shake(algo, msg, &mut digest[..digest_len]).await?;
+            self.pqc.shake(algo, msg, digest).await?;
         } else {
             let len = ctx.pending_len as usize;
             self.sha_digest_block(&mut ctx, None, len, true).await?;
@@ -366,11 +360,27 @@ impl HsmHash for UnoHsmPal {
 // ---------------------------------------------------------------------------
 
 impl UnoHsmPal {
+    /// [`hash_continue`](HsmHash::hash_continue) on a plain byte slice, for
+    /// internal callers that feed data not in a DMA buffer (RSA-PSS).
+    ///
+    /// For SHAKE, appends `data` to the buffered message instead, failing
+    /// with [`HsmError::InvalidArg`] past [`SHAKE_MSG_MAX`] bytes.
     pub(crate) async fn hash_continue_bytes(
         &self,
         ctx: &mut HsmHashContext<'_>,
         data: &[u8],
     ) -> HsmResult<()> {
+        if ctx.algo.is_xof() {
+            let start = ctx.byte_count as usize;
+            let end = start
+                .checked_add(data.len())
+                .filter(|&end| end <= ctx.buf.len())
+                .ok_or(HsmError::InvalidArg)?;
+            ctx.buf[start..end].copy_from_slice(data);
+            ctx.byte_count = end as u32;
+            return Ok(());
+        }
+
         let block_len = ctx.algo.block_len();
 
         let remaining = if ctx.pending_len > 0 {

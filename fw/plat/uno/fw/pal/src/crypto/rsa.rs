@@ -24,6 +24,7 @@ use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
 use tsra_fw_hsm_pal_traits::HsmRsaPct;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_upka::UpkaModSize;
 use tsra_fw_uno_drivers_upka::UpkaRsaKeyType;
 
@@ -797,6 +798,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -854,6 +858,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -937,6 +944,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -994,6 +1004,9 @@ impl HsmRsa for UnoHsmPal {
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;

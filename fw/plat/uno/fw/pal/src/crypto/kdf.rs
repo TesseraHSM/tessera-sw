@@ -191,8 +191,8 @@ impl HsmKdf for UnoHsmPal {
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.alloc_scoped_async(io, async |scope| {
-            // Reject algorithms the SHA engine cannot run before dividing by
-            // their digest length (0 for the XOFs).
+            // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE)
+            // before sizing anything by their digest length.
             ShaMode::try_from(algo)?;
             let hlen = algo.digest_len();
 

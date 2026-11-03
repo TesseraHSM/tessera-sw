@@ -211,7 +211,8 @@ impl PqcDriver {
             .await
     }
 
-    /// Hash `msg` with SHAKE on whichever FP core is free, filling `out`.
+    /// Hash `msg` with SHAKE on whichever FP core is free, writing the
+    /// output length `algo` carries into the front of `out`.
     /// See [`PqcEngine::shake`].
     pub async fn shake(&self, algo: HsmHashAlgo, msg: &[u8], out: &mut [u8]) -> HsmResult<()> {
         self.with_engine(async |engine| engine.shake(algo, msg, out).await)
