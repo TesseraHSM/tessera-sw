@@ -79,7 +79,10 @@ impl From<SessionControlKind> for u8 {
 }
 
 mod aes_encrypt_decrypt;
+mod aes_gcm_encrypt_decrypt;
 mod aes_generate_key;
+mod aes_xts_encrypt_decrypt;
+mod aes_xts_generate_key;
 mod api_rev;
 mod concat_kdf_derive;
 mod darc_kex_key_gen;
@@ -128,7 +131,10 @@ mod unwrap_key;
 mod verify_key;
 
 pub use aes_encrypt_decrypt::*;
+pub use aes_gcm_encrypt_decrypt::*;
 pub use aes_generate_key::*;
+pub use aes_xts_encrypt_decrypt::*;
+pub use aes_xts_generate_key::*;
 pub use api_rev::*;
 pub use concat_kdf_derive::*;
 pub use darc_kex_key_gen::*;

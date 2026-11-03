@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
 use nix::sys::socket::connect;
@@ -36,6 +37,7 @@ use tsra_ddi_interface::DdiCookie;
 use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_mbor_codec::MborDecode;
 use tsra_ddi_mbor_codec::MborDecoder;
 use tsra_ddi_mbor_codec::MborEncoder;
@@ -47,13 +49,32 @@ use tsra_ddi_mbor_types::DdiRespHdr;
 use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_mbor_types::MborError;
 use tsra_ddi_mbor_types::SessionControlKind;
+use tsra_ddi_sock_proto::OobItem;
 use tsra_ddi_sock_proto::ProtoError;
 use tsra_ddi_sock_proto::Request;
+use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
+use tsra_ddi_sock_proto::ResponseFrame;
+use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
+use tsra_ddi_sock_proto::MAX_OOB_ITEM;
+use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
+use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::BulkDir;
+use tsra_fw_hsm_bulk::BulkParams;
+use tsra_fw_hsm_bulk::BulkSqe;
+use tsra_fw_hsm_bulk::GcmParams;
+use tsra_fw_hsm_bulk::GcmTail;
+use tsra_fw_hsm_bulk::RawBulkCqe;
+use tsra_fw_hsm_bulk::XtsDul;
+use tsra_fw_hsm_bulk::XtsParams;
+use tsra_fw_hsm_bulk::BLOCK_LEN;
+use tsra_fw_hsm_bulk::GCM_AAD_ALIGN;
 use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_io::OP_MBOR;
@@ -70,9 +91,8 @@ pub const DEFAULT_SOCK_PATH: &str = "/tmp/tsra-ddi.sock";
 #[cfg(not(unix))]
 pub const DEFAULT_SOCK_PATH: &str = "tcp://127.0.0.1:1234";
 
-/// Response buffer capacity advertised to the server. Fits MBOR and the
-/// current TBOR command set; larger responses are future work.
-const DST_CAP: u32 = 4096;
+/// Request/response capacity advertised to the server, including PQC commands.
+const DST_CAP: u32 = MAX_DMA_BUFFER;
 
 enum SocketStream {
     Tcp(TcpStream),
@@ -206,9 +226,12 @@ pub(crate) fn socket_path() -> String {
 /// Wraps a single TCP, Unix-domain, or Linux VSOCK connection to the server. Requests
 /// are serialized through a mutex, so the synchronous trait methods can be
 /// shared across threads while each request/response exchange stays atomic.
+/// Clones share the same connection and sessions; disconnect cleanup runs only
+/// after the last clone is dropped.
+#[derive(Clone)]
 pub struct DdiSockDev {
-    stream: Mutex<SocketStream>,
-    cmd_counter: AtomicU16,
+    stream: Arc<Mutex<SocketStream>>,
+    cmd_counter: Arc<AtomicU16>,
     device_kind: DdiDeviceKind,
 }
 
@@ -261,8 +284,8 @@ impl DdiSockDev {
             }
         };
         Ok(Self {
-            stream: Mutex::new(stream),
-            cmd_counter: AtomicU16::new(1),
+            stream: Arc::new(Mutex::new(stream)),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
             // The firmware reports a physical device, so the host codec
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
@@ -273,8 +296,28 @@ impl DdiSockDev {
         self.cmd_counter.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Exchange one submission with the server.
+    ///
+    /// Maps a nonzero transport status to a [`DdiError`].
+    fn exchange(&self, req: &Request) -> DdiResult<Response> {
+        let resp: Response = {
+            let mut stream = self.stream.lock();
+            req.write_to(&mut *stream).map_err(map_proto_err)?;
+            Response::read_from(&mut *stream).map_err(map_proto_err)?
+        };
+
+        // Transport-level status (e.g. server DMA allocation failure).
+        match resp.status {
+            0 => Ok(resp),
+            TRANSPORT_SESSION_NOT_OWNED => Err(DdiError::DdiStatus(
+                DdiStatus::FileHandleSessionIdDoesNotMatch,
+            )),
+            status => Err(DdiError::DdiError(status)),
+        }
+    }
+
     /// Build a submission entry, exchange it with the server, and return
-    /// the response body bytes.
+    /// the response body bytes plus the bytes of each [`OobItem::Out`].
     ///
     /// Mirrors the in-process emulator: the client constructs the SQE
     /// (opcode, command id, lengths, session flags) and reads the returned
@@ -289,11 +332,20 @@ impl DdiSockDev {
         session_ctrl: u8,
         session_id: Option<u16>,
         payload: Vec<u8>,
-    ) -> DdiResult<Vec<u8>> {
+        oob_items: Vec<OobItem>,
+    ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
+        if oob_items.len() > MAX_OOB_ITEMS
+            || oob_items
+                .iter()
+                .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
+        {
+            return Err(DdiError::InvalidParameter);
+        }
         let cmd_id = self.next_cmd_id();
         let sqe = SqeBuilder::new()
             .cmd(CmdDword::new().with_op(op).with_id(cmd_id))
             .buf_lens(payload.len() as u32, DST_CAP)
+            .oob_len((oob_items.len() * 16) as u32)
             .session_flags(
                 SessionFlags::new()
                     .with_ctrl(session_ctrl)
@@ -302,24 +354,32 @@ impl DdiSockDev {
             .session_id(session_id.unwrap_or(0))
             .build();
 
-        let req = Request { sqe, payload };
-
-        let resp: Response = {
-            let mut stream = self.stream.lock();
-            req.write_to(&mut *stream).map_err(map_proto_err)?;
-            Response::read_from(&mut *stream).map_err(map_proto_err)?
+        let req = Request {
+            sqe: sqe.to_vec(),
+            payload,
+            oob_items,
+            tail: Vec::new(),
         };
-
-        // Transport-level status (e.g. server DMA allocation failure).
-        if resp.status != 0 {
-            return Err(DdiError::DdiError(resp.status));
-        }
+        let resp = self.exchange(&req)?;
 
         // Device-level status lives in the completion entry.
-        let mut cqe_raw = resp.cqe;
+        let mut cqe_raw: RawCqe = resp
+            .cqe
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid_data("response CQE is not a command CQE"))?;
         let cqe = Cqe::from(&mut cqe_raw);
         if cqe.status() != 0 {
             return Err(DdiError::DdiError(u32::from(cqe.status())));
+        }
+
+        // Each output item must come back exactly once with its requested length.
+        let out_lens = req.oob_items.iter().filter_map(|item| match item {
+            OobItem::Out(len) => Some(*len as usize),
+            OobItem::In(_) => None,
+        });
+        if !resp.oob_items.iter().map(Vec::len).eq(out_lens) {
+            return Err(invalid_data("response OOB items do not match the request"));
         }
 
         // Don't trust the server's framing for the payload length: the
@@ -333,23 +393,94 @@ impl DdiSockDev {
         // SQE, so a CQE reporting more than that is a protocol integrity failure
         // (malicious or buggy server) — reject it before touching the payload.
         if dst_len > DST_CAP as usize {
-            return Err(DdiError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(invalid_data(
                 "CQE dst_len exceeds requested destination capacity",
-            )));
+            ));
         }
         if payload.len() < dst_len {
             // The server returned fewer bytes than the firmware reported
             // writing: a transport/protocol integrity failure, not a device
             // status. Surface it as malformed data rather than a `0` (success)
             // device status, matching the other protocol-shape errors here.
-            return Err(DdiError::IoError(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "response payload shorter than CQE dst_len",
-            )));
+            return Err(invalid_data("response payload shorter than CQE dst_len"));
         }
         payload.truncate(dst_len);
-        Ok(payload)
+        Ok((payload, resp.oob_items))
+    }
+
+    /// Encode a TBOR request, submit it with `oob_items`, and decode the
+    /// response. Returns the bytes of each [`OobItem::Out`].
+    fn exec_tbor<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: Vec<OobItem>,
+    ) -> DdiResult<(T::OpResp, Vec<Vec<u8>>)> {
+        // ── 1. Encode the TBOR request.
+        let session_ctrl = req.session_ctrl();
+        let session_id = req.get_session_id();
+
+        let mut buf = vec![0u8; DST_CAP as usize];
+        let req_len = {
+            let bytes = req.encode_request(buf.as_mut_slice())?;
+            bytes.len()
+        };
+        buf.truncate(req_len);
+
+        // ── 2. Build the SQE and exchange it over the socket.
+        let (resp_buf, out_items) =
+            self.submit(OP_TBOR, u8::from(session_ctrl), session_id, buf, oob_items)?;
+        if resp_buf.is_empty() {
+            return Err(DdiError::DdiError(0));
+        }
+
+        // ── 3. Decode the typed response.
+        let resp = <T::OpResp>::decode_response(&resp_buf)?;
+        Ok((resp, out_items))
+    }
+
+    /// Submit a bulk SQE with its source bytes and GCM tail input, and
+    /// return the CQE, destination bytes and GCM tail output.
+    ///
+    /// The SQE's buffer addresses are client-local; the server re-homes
+    /// them. A failed CQE maps like the driver's ioctl output: a non-zero
+    /// status code to [`DdiError::FpError`], otherwise a non-zero error
+    /// code to [`DdiError::FpCmdSpecificError`].
+    fn bulk_submit(
+        &self,
+        sqe: &BulkSqe,
+        payload: Vec<u8>,
+        tail: Vec<u8>,
+    ) -> DdiResult<(BulkCqe, Vec<u8>, Vec<u8>)> {
+        let req = Request {
+            sqe: sqe.encode().to_vec(),
+            payload,
+            oob_items: Vec::new(),
+            tail,
+        };
+        let resp = self.exchange(&req)?;
+        let raw: RawBulkCqe = resp
+            .cqe
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid_data("response CQE is not a bulk CQE"))?;
+        let cqe = BulkCqe::decode(&raw);
+        if !cqe.status.is_success() {
+            tracing::warn!(
+                sts = cqe.status.sts,
+                err = cqe.status.err,
+                "DdiSock bulk IO failed"
+            );
+        }
+        if cqe.status.sts != 0 {
+            Err(DdiError::FpError(u32::from(cqe.status.sts)))?;
+        }
+        if cqe.status.err != 0 {
+            Err(DdiError::FpCmdSpecificError(u32::from(cqe.status.err)))?;
+        }
+        if resp.payload.len() != sqe.dst_len as usize {
+            return Err(invalid_data("bulk response payload length mismatch"));
+        }
+        Ok((cqe, resp.payload, resp.tail))
     }
 }
 
@@ -372,6 +503,17 @@ impl DdiDev for DdiSockDev {
         let opcode = req.get_opcode();
         let session_ctrl: SessionControlKind = opcode.into();
         let session_id = req.get_session_id();
+        match session_ctrl {
+            SessionControlKind::NoSession | SessionControlKind::Open if session_id.is_some() => {
+                return Err(DdiError::DdiStatus(DdiStatus::InvalidArg));
+            }
+            SessionControlKind::InSession | SessionControlKind::Close if session_id.is_none() => {
+                return Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch,
+                ));
+            }
+            _ => {}
+        }
 
         let mut buf = vec![0u8; DST_CAP as usize];
         let req_len = {
@@ -383,7 +525,8 @@ impl DdiDev for DdiSockDev {
         buf.truncate(req_len);
 
         // ── 2. Build the SQE and exchange it over the socket.
-        let resp_buf = self.submit(OP_MBOR, u8::from(session_ctrl), session_id, buf)?;
+        let (resp_buf, _) =
+            self.submit(OP_MBOR, u8::from(session_ctrl), session_id, buf, Vec::new())?;
         if resp_buf.is_empty() {
             return Err(DdiError::DdiError(0));
         }
@@ -409,81 +552,234 @@ impl DdiDev for DdiSockDev {
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        // The socket transport (v1) carries only the SQE body; it has no
-        // channel for out-of-band SGL descriptor pages yet.
-        if oob_items.is_some_and(|items| !items.is_empty()) {
-            return Err(DdiError::UnsupportedEncoding);
-        }
-
-        // ── 1. Encode the TBOR request.
-        let session_ctrl = req.session_ctrl();
-        let session_id = req.get_session_id();
-
-        let mut buf = vec![0u8; DST_CAP as usize];
-        let req_len = {
-            let bytes = req.encode_request(buf.as_mut_slice())?;
-            bytes.len()
-        };
-        buf.truncate(req_len);
-
-        // ── 2. Build the SQE and exchange it over the socket.
-        let resp_buf = self.submit(OP_TBOR, u8::from(session_ctrl), session_id, buf)?;
-        if resp_buf.is_empty() {
-            return Err(DdiError::DdiError(0));
-        }
-
-        // ── 3. Decode the typed response.
-        <T::OpResp>::decode_response(&resp_buf).map_err(Into::into)
+        let oob_items = oob_items
+            .unwrap_or(&[])
+            .iter()
+            .map(|item| OobItem::In(item.to_vec()))
+            .collect();
+        self.exec_tbor(req, oob_items).map(|(resp, _)| resp)
     }
 
-    // ── Fast-path crypto ops are not supported over the socket transport
-    //    yet (v1 carries MBOR/TBOR DDI ops only). ─────────────────────
+    /// TBOR exec path with device-writable out-of-band items. Output
+    /// buffers travel as lengths; the server returns their contents.
+    fn exec_op_tbor_oob<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+        _cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let items = oob_items
+            .iter()
+            .map(|item| match item {
+                TborOobItem::In(buf) => Ok(OobItem::In(buf.to_vec())),
+                TborOobItem::Out(buf) => u32::try_from(buf.len())
+                    .map(OobItem::Out)
+                    .map_err(|_| DdiError::InvalidParameter),
+            })
+            .collect::<DdiResult<Vec<_>>>()?;
+        let (resp, out_items) = self.exec_tbor(req, items)?;
+        let outputs = oob_items.iter_mut().filter_map(|item| match item {
+            TborOobItem::Out(buf) => Some(buf),
+            TborOobItem::In(_) => None,
+        });
+        // `submit` verified one item of the requested length per output.
+        for (buf, bytes) in outputs.zip(out_items) {
+            buf.copy_from_slice(&bytes);
+        }
+        Ok(resp)
+    }
 
+    /// Runs an AES-GCM fast-path operation through the server's bulk queue.
+    ///
+    /// Lays the buffers out as the Linux driver does: the AAD zero-padded
+    /// to 32 bytes followed by the block-aligned text in the source /
+    /// destination buffers, and the final partial block (at most 15 bytes)
+    /// in the tail.
     fn exec_op_fp_gcm_slice(
         &self,
-        _mode: DdiAesOp,
-        _gcm_params: DdiAesGcmParams,
-        _src_buf: &[u8],
-        _dst_buf: &mut [u8],
-        _tag: &mut Option<[u8; 16]>,
-        _iv: &mut Option<[u8; 12]>,
-        _fips_approved: &mut bool,
+        mode: DdiAesOp,
+        gcm_params: DdiAesGcmParams,
+        src_buf: &[u8],
+        dst_buf: &mut [u8],
+        tag: &mut Option<[u8; 16]>,
+        iv: &mut Option<[u8; 12]>,
+        fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let dir = bulk_dir(mode);
+        if dir == BulkDir::Decrypt && gcm_params.tag.is_none() {
+            Err(DdiError::DdiStatus(DdiStatus::NoTagProvided))?;
+        }
+        if dst_buf.len() < src_buf.len() {
+            Err(DdiError::InvalidParameter)?;
+        }
+
+        let aad = gcm_params.aad.unwrap_or_default();
+        let aligned_aad_len = aad.len().div_ceil(GCM_AAD_ALIGN as usize) * GCM_AAD_ALIGN as usize;
+        let tail_len = src_buf.len() % BLOCK_LEN as usize;
+        let body_len = src_buf.len() - tail_len;
+
+        let mut src = vec![0u8; aligned_aad_len + body_len];
+        src[..aad.len()].copy_from_slice(&aad);
+        src[aligned_aad_len..].copy_from_slice(&src_buf[..body_len]);
+        let tail = src_buf[body_len..].to_vec();
+
+        let sgl_len = u32::try_from(src.len()).map_err(|_| DdiError::InvalidParameter)?;
+        let sqe = BulkSqe {
+            dir,
+            cid: self.next_cmd_id(),
+            session_id: gcm_params.session_id,
+            short_app_id: gcm_params.short_app_id,
+            src_len: sgl_len,
+            src_addr: src.as_ptr() as u64,
+            dst_len: sgl_len,
+            dst_addr: dst_buf.as_ptr() as u64,
+            params: BulkParams::Gcm(GcmParams {
+                key_id: gcm_params.key_id,
+                aad_len: aad.len() as u32,
+                aligned_aad_len: aligned_aad_len as u32,
+                tag: gcm_params.tag.unwrap_or_default(),
+                iv: gcm_params.iv,
+                tail: (tail_len > 0).then_some(GcmTail {
+                    len: tail_len as u8,
+                    src: tail.as_ptr() as u64,
+                    dst: tail.as_ptr() as u64,
+                }),
+            }),
+        };
+        let (cqe, dst, tail_out) = self.bulk_submit(&sqe, src, tail)?;
+        if cqe.data_len != sgl_len
+            || cqe.tail_len as usize != tail_len
+            || tail_out.len() != tail_len
+        {
+            Err(DdiError::DdiStatus(DdiStatus::InternalError))?;
+        }
+
+        dst_buf[..body_len].copy_from_slice(&dst[aligned_aad_len..]);
+        dst_buf[body_len..src_buf.len()].copy_from_slice(&tail_out);
+        *tag = Some(cqe.tag);
+        *iv = Some(cqe.iv);
+        *fips_approved = cqe.fips_approved;
+        Ok(src_buf.len())
     }
 
     fn exec_op_fp_gcm(
         &self,
-        _mode: DdiAesOp,
-        _gcm_params: DdiAesGcmParams,
-        _src_buf: Vec<u8>,
+        mode: DdiAesOp,
+        gcm_params: DdiAesGcmParams,
+        src_buf: Vec<u8>,
     ) -> Result<DdiAesGcmResult, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let mut data = vec![0u8; src_buf.len()];
+        let mut tag = None;
+        let mut iv = None;
+        let mut fips_approved = false;
+        let len = self.exec_op_fp_gcm_slice(
+            mode,
+            gcm_params,
+            &src_buf,
+            &mut data,
+            &mut tag,
+            &mut iv,
+            &mut fips_approved,
+        )?;
+        data.truncate(len);
+        Ok(DdiAesGcmResult {
+            data,
+            tag,
+            iv,
+            fips_approved,
+        })
+    }
+
+    /// Runs an AES-XTS fast-path operation through the server's bulk queue.
+    fn exec_op_fp_xts_slice(
+        &self,
+        mode: DdiAesOp,
+        xts_params: DdiAesXtsParams,
+        src_buf: &[u8],
+        dst_buf: &mut [u8],
+        fips_approved: &mut bool,
+    ) -> Result<usize, DdiError> {
+        if src_buf.is_empty() || dst_buf.len() < src_buf.len() {
+            Err(DdiError::InvalidParameter)?;
+        }
+        let len = u32::try_from(src_buf.len()).map_err(|_| DdiError::InvalidParameter)?;
+        let dul = match xts_params.data_unit_len {
+            n if n == src_buf.len() => XtsDul::Full,
+            512 => XtsDul::B512,
+            4096 => XtsDul::B4096,
+            8192 => XtsDul::B8192,
+            _ => Err(DdiError::InvalidParameter)?,
+        };
+
+        let sqe = BulkSqe {
+            dir: bulk_dir(mode),
+            cid: self.next_cmd_id(),
+            session_id: xts_params.session_id,
+            short_app_id: xts_params.short_app_id,
+            src_len: len,
+            src_addr: src_buf.as_ptr() as u64,
+            dst_len: len,
+            dst_addr: dst_buf.as_ptr() as u64,
+            params: BulkParams::Xts(XtsParams {
+                dul,
+                key_id1: xts_params.key_id1,
+                key_id2: xts_params.key_id2,
+                tweak: xts_params.tweak,
+            }),
+        };
+        let (cqe, dst, _) = self.bulk_submit(&sqe, src_buf.to_vec(), Vec::new())?;
+        let data_len = cqe.data_len as usize;
+        if data_len > src_buf.len() {
+            Err(DdiError::DdiStatus(DdiStatus::InternalError))?;
+        }
+
+        dst_buf[..data_len].copy_from_slice(&dst[..data_len]);
+        *fips_approved = cqe.fips_approved;
+        Ok(data_len)
     }
 
     fn exec_op_fp_xts(
         &self,
-        _mode: DdiAesOp,
-        _xts_params: DdiAesXtsParams,
-        _src_buf: Vec<u8>,
+        mode: DdiAesOp,
+        xts_params: DdiAesXtsParams,
+        src_buf: Vec<u8>,
     ) -> Result<DdiAesXtsResult, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
-    }
-
-    fn exec_op_fp_xts_slice(
-        &self,
-        _mode: DdiAesOp,
-        _xts_params: DdiAesXtsParams,
-        _src_buf: &[u8],
-        _dst_buf: &mut [u8],
-        _fips_approved: &mut bool,
-    ) -> Result<usize, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let mut data = vec![0u8; src_buf.len()];
+        let mut fips_approved = false;
+        let len =
+            self.exec_op_fp_xts_slice(mode, xts_params, &src_buf, &mut data, &mut fips_approved)?;
+        data.truncate(len);
+        Ok(DdiAesXtsResult {
+            data,
+            fips_approved,
+        })
     }
 
     fn erase(&self) -> Result<(), DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let mut stream = self.stream.lock();
+        RequestFrame::Reset
+            .write_to(&mut *stream)
+            .map_err(map_proto_err)?;
+        match ResponseFrame::read_from(&mut *stream).map_err(map_proto_err)? {
+            ResponseFrame::Reset { status: 0 } => Ok(()),
+            ResponseFrame::Reset { status } => Err(DdiError::DdiError(status)),
+            ResponseFrame::Submit(_) => Err(map_proto_err(ProtoError::Malformed(
+                "expected reset response",
+            ))),
+        }
     }
+}
+
+fn bulk_dir(mode: DdiAesOp) -> BulkDir {
+    if mode == DdiAesOp::Encrypt {
+        BulkDir::Encrypt
+    } else {
+        BulkDir::Decrypt
+    }
+}
+
+fn invalid_data(msg: &'static str) -> DdiError {
+    DdiError::IoError(std::io::Error::new(std::io::ErrorKind::InvalidData, msg))
 }
 
 /// Map a wire-protocol error to a [`DdiError`].
@@ -556,8 +852,8 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .expect("read timeout");
         let device = DdiSockDev {
-            stream: Mutex::new(SocketStream::Unix(client)),
-            cmd_counter: AtomicU16::new(1),
+            stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Physical,
         };
         let peer = std::thread::spawn(move || {
@@ -566,16 +862,19 @@ mod tests {
             assert_eq!(request.sqe[6], DST_CAP);
             Response {
                 status: 0,
-                cqe: [8, 0, 0, 0],
+                cqe: vec![8, 0, 0, 0],
                 payload: b"response".to_vec(),
+                oob_items: Vec::new(),
+                tail: Vec::new(),
             }
             .write_to(&mut server)
             .expect("response");
         });
         assert_eq!(
             device
-                .submit(OP_MBOR, 0, None, b"request".to_vec())
-                .expect("submit"),
+                .submit(OP_MBOR, 0, None, b"request".to_vec(), Vec::new())
+                .expect("submit")
+                .0,
             b"response"
         );
         peer.join().expect("peer");
@@ -596,8 +895,10 @@ mod tests {
                 assert_eq!(request.sqe[6], DST_CAP);
                 Response {
                     status: 0,
-                    cqe: [8, 0, 0, 0],
+                    cqe: vec![8, 0, 0, 0],
                     payload: b"response".to_vec(),
+                    oob_items: Vec::new(),
+                    tail: Vec::new(),
                 }
                 .write_to(&mut server)
                 .expect("response");
@@ -607,10 +908,66 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(
                 device
-                    .submit(OP_MBOR, 0, None, b"request".to_vec())
-                    .expect("submit"),
+                    .submit(OP_MBOR, 0, None, b"request".to_vec(), Vec::new())
+                    .expect("submit")
+                    .0,
                 b"response"
             );
+        }
+        peer.join().expect("peer");
+    }
+
+    #[test]
+    fn cloned_devices_share_connection_and_serialize_requests() {
+        const THREADS: usize = 4;
+        const REQUESTS_PER_THREAD: u8 = 8;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut command_ids = std::collections::HashSet::new();
+            for _ in 0..THREADS * usize::from(REQUESTS_PER_THREAD) {
+                let request = Request::read_from(&mut stream).expect("request");
+                assert!(command_ids.insert(CmdDword::from_bits(request.sqe[0]).id()));
+                Response {
+                    status: 0,
+                    cqe: vec![request.payload.len() as u32, 0, 0, 0],
+                    payload: request.payload,
+                    oob_items: Vec::new(),
+                    tail: Vec::new(),
+                }
+                .write_to(&mut stream)
+                .expect("response");
+            }
+            assert_eq!(stream.read(&mut [0]).expect("last clone disconnected"), 0);
+        });
+        let device = DdiSockDev::connect(&endpoint).expect("device");
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS + 1));
+        let mut workers = Vec::new();
+        for thread in 0..THREADS {
+            let device = device.clone();
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                for request in 0..REQUESTS_PER_THREAD {
+                    let payload = vec![thread as u8, request];
+                    assert_eq!(
+                        device
+                            .submit(OP_MBOR, 0, None, payload.clone(), Vec::new())
+                            .expect("submit through clone")
+                            .0,
+                        payload
+                    );
+                }
+            }));
+        }
+        drop(device);
+        barrier.wait();
+        for worker in workers {
+            worker.join().expect("worker");
         }
         peer.join().expect("peer");
     }
@@ -620,6 +977,87 @@ mod tests {
         for endpoint in ["tcp://", "tcp://localhost", "tcp://127.0.0.1:invalid"] {
             assert!(DdiSockDev::connect(endpoint).is_err(), "{endpoint}");
         }
+    }
+
+    #[test]
+    fn tcp_transfers_oob_and_reset_on_the_same_connection() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            assert!(matches!(
+                RequestFrame::read_from(&mut stream).expect("reset"),
+                RequestFrame::Reset
+            ));
+            ResponseFrame::Reset { status: 0 }
+                .write_to(&mut stream)
+                .expect("reset result");
+            let request = Request::read_from(&mut stream).expect("OOB request");
+            assert_eq!(
+                request.oob_items,
+                [OobItem::In(b"first".to_vec()), OobItem::Out(6)]
+            );
+            assert_eq!(&request.sqe[13..=15], &[0, 0, 32]);
+            for oob_items in [vec![b"output".to_vec()], vec![b"short".to_vec()]] {
+                Response {
+                    status: 0,
+                    cqe: vec![1, 0, 0, 0],
+                    payload: vec![1],
+                    oob_items,
+                    tail: Vec::new(),
+                }
+                .write_to(&mut stream)
+                .expect("response");
+                Request::read_from(&mut stream).expect("OOB request");
+            }
+            Response {
+                status: 0,
+                cqe: vec![1, 0, 0, 0],
+                payload: vec![1],
+                oob_items: Vec::new(),
+                tail: Vec::new(),
+            }
+            .write_to(&mut stream)
+            .expect("response");
+            assert!(matches!(
+                RequestFrame::read_from(&mut stream).expect("reset"),
+                RequestFrame::Reset
+            ));
+            ResponseFrame::Reset { status: 2 }
+                .write_to(&mut stream)
+                .expect("reset failure");
+        });
+        let device = DdiSockDev::connect(&endpoint).expect("device");
+        for items in [
+            vec![OobItem::In(Vec::new())],
+            vec![OobItem::Out(0)],
+            vec![OobItem::In(b"item".to_vec()); MAX_OOB_ITEMS + 1],
+        ] {
+            assert!(matches!(
+                device.submit(OP_TBOR, 0, None, vec![1], items),
+                Err(DdiError::InvalidParameter)
+            ));
+        }
+        device.erase().expect("reset");
+        let items = || vec![OobItem::In(b"first".to_vec()), OobItem::Out(6)];
+        assert_eq!(
+            device
+                .submit(OP_TBOR, 0, None, vec![1], items())
+                .expect("OOB submit"),
+            (vec![1], vec![b"output".to_vec()])
+        );
+        // An output of the wrong length, or a missing output, is rejected.
+        for _ in 0..2 {
+            assert!(matches!(
+                device.submit(OP_TBOR, 0, None, vec![1], items()),
+                Err(DdiError::IoError(error)) if error.kind() == std::io::ErrorKind::InvalidData
+            ));
+        }
+        assert!(matches!(device.erase(), Err(DdiError::DdiError(2))));
+        peer.join().expect("peer");
     }
 
     #[cfg(not(unix))]

@@ -204,4 +204,88 @@ pub trait HsmAesGcm: HsmIoTypes {
         tag: &HsmDmaBuf,
         data: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
+
+    /// AES-GCM encrypt host-to-host over raw SGL descriptors.
+    ///
+    /// The AES engine reads `len` bytes of `[padded_AAD | plaintext]`
+    /// from the host buffer described by `src` and writes
+    /// `[padded_AAD | ciphertext]` (same layout and length) to the host
+    /// buffer described by `dst`; the tag is written to `tag`. Nothing is
+    /// staged in HSM memory, so the message size is bounded only by the
+    /// descriptors (TBOR `AesGcmEncryptDecrypt` passes the in / out SGL
+    /// Data Blocks of its OOB descriptor page).
+    ///
+    /// The buffer layout follows the `pad_aad` convention of
+    /// [`gcm_encrypt`](Self::gcm_encrypt).
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (partition scope; selects the host
+    ///   interface).
+    /// - `key` — AES key (16, 24, or 32 bytes for AES-128/192/256).
+    /// - `iv` — 12-byte (96-bit) nonce. Must be unique per encryption
+    ///   with the same key.
+    /// - `aad_len` — **Unpadded** AAD length in bytes.
+    /// - `len` — total bytes to transfer, `round_up_32(aad_len) +
+    ///   text_len`.
+    /// - `src` — raw 16-byte NVMe SGL descriptor of the host input.
+    /// - `dst` — raw 16-byte NVMe SGL descriptor of the host output.
+    /// - `tag` — Output buffer for the 16-byte authentication tag.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — output written to `dst`, `tag` set.
+    /// - `Err(HsmError::InvalidArg)` — a descriptor does not describe
+    ///   `len` bytes, IV not 12 bytes, or AAD layout malformed.
+    /// - `Err(HsmError)` — AES / DMA failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn gcm_encrypt_sgl(
+        &self,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        src: &[u8; 16],
+        dst: &[u8; 16],
+        tag: &mut HsmDmaBuf,
+    ) -> HsmResult<()>;
+
+    /// AES-GCM decrypt host-to-host over raw SGL descriptors.
+    ///
+    /// The inverse of [`gcm_encrypt_sgl`](Self::gcm_encrypt_sgl): reads
+    /// `[padded_AAD | ciphertext]` from `src`, verifies `tag`, and writes
+    /// `[padded_AAD | plaintext]` to `dst`.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (partition scope).
+    /// - `key` — AES key (16, 24, or 32 bytes for AES-128/192/256).
+    /// - `iv` — 12-byte (96-bit) nonce used during encryption.
+    /// - `aad_len` — **Unpadded** AAD length in bytes.
+    /// - `len` — total bytes to transfer, `round_up_32(aad_len) +
+    ///   text_len`.
+    /// - `tag` — the 16-byte authentication tag from encryption.
+    /// - `src` — raw 16-byte NVMe SGL descriptor of the host input.
+    /// - `dst` — raw 16-byte NVMe SGL descriptor of the host output.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — tag verified, plaintext written to `dst`.
+    /// - `Err(HsmError::InvalidArg)` — descriptor / IV / layout violation.
+    /// - `Err(HsmError::AesGcmDecryptTagDoesNotMatch)` — authentication
+    ///   tag does not match (the contents of `dst` are unspecified).
+    /// - `Err(HsmError)` — AES / DMA failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn gcm_decrypt_sgl(
+        &self,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        tag: &HsmDmaBuf,
+        src: &[u8; 16],
+        dst: &[u8; 16],
+    ) -> HsmResult<()>;
 }

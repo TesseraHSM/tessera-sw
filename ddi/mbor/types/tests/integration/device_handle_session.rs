@@ -40,6 +40,7 @@ fn test_device_handle_session_no_session() {
     );
 }
 
+#[cfg(not(feature = "sock"))]
 #[test]
 fn test_device_handle_session_open_session_twice() {
     ddi_dev_test(
@@ -94,4 +95,67 @@ fn test_device_handle_session_open_session_twice() {
             ));
         },
     );
+}
+
+#[cfg(feature = "sock")]
+#[test]
+fn test_socket_sessions_are_owned_by_connection() {
+    ddi_dev_test(setup, common_cleanup, |dev, ddi, path, _| {
+        helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
+        let mut sessions = Vec::new();
+        for _ in 0..2 {
+            let (credential, public_key) = encrypt_userid_pin_for_open_session(
+                dev,
+                TEST_CRED_ID,
+                TEST_CRED_PIN,
+                TEST_SESSION_SEED,
+            );
+            sessions.push(
+                helper_open_session(
+                    dev,
+                    None,
+                    Some(DdiApiRev { major: 1, minor: 0 }),
+                    credential,
+                    public_key,
+                )
+                .expect("open another session on the same connection")
+                .data
+                .sess_id,
+            );
+        }
+        assert_ne!(sessions[0], sessions[1]);
+        let owner = dev.clone();
+        let foreign = ddi.open_dev(path).expect("another connection");
+        let props = helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
+        for session in sessions {
+            let error = helper_aes_generate(
+                &foreign,
+                Some(session),
+                Some(DdiApiRev { major: 1, minor: 0 }),
+                DdiAesKeySize::Aes128,
+                None,
+                props,
+            )
+            .expect_err("another connection cannot use this session");
+            assert!(matches!(
+                error,
+                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+            ));
+            helper_aes_generate(
+                &owner,
+                Some(session),
+                Some(DdiApiRev { major: 1, minor: 0 }),
+                DdiAesKeySize::Aes128,
+                None,
+                props,
+            )
+            .expect("the owner's clone can use this session");
+            helper_close_session(
+                &owner,
+                Some(session),
+                Some(DdiApiRev { major: 1, minor: 0 }),
+            )
+            .expect("close only this session");
+        }
+    });
 }

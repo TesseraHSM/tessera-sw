@@ -507,9 +507,12 @@ fn variable_hmac_persists_actual_length() {
     assert_eq!(e, HsmError::InvalidArg);
 }
 
+// Only the 2-byte bulk handle is small enough to exhaust the slots before the
+// blob space; without `bulk_crypto` every kind exhausts blob space first.
+#[cfg(feature = "bulk_crypto")]
 #[test]
 fn slot_exhaustion_reports_not_enough_space() {
-    // Tiny keys (bulk index = 2 B) so slots run out before blob space.
+    // Tiny keys (bulk handle = 2 B) so slots run out before blob space.
     let (mut v, g, io) = vault::<1>();
     for _ in 0..ENTRIES_PER_TABLE {
         with_key(&[0u8; 2], |k| {

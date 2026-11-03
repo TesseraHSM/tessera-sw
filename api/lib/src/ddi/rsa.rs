@@ -110,7 +110,7 @@ pub(crate) fn rsa_aes_unwrap_key(
 /// For use under the barrier lock or by callers already inside a
 /// resiliency retry loop (e.g. [`aes_xts_unwrap_key`] which has its
 /// own `#[resiliency_key_op]`). The session selects MBOR or TBOR; TBOR
-/// supports plain AES only. MBOR failures after a successful DDI call
+/// supports symmetric AES keys only. MBOR failures after a successful DDI call
 /// clean up the resident handle via [`HsmKeyIdGuard`]. A successful TBOR
 /// unwrap returns an unpinned masked key and creates no resident handle.
 pub(crate) fn rsa_aes_unwrap_key_raw_no_res(
@@ -168,11 +168,13 @@ fn rsa_aes_unwrap_key_mbor(
     Ok((guard.release(), dev_key_props))
 }
 
-/// Performs one TBOR RSA-AES unwrap of a plain AES key.
+/// Performs one TBOR RSA-AES unwrap of a symmetric AES key.
 ///
-/// TBOR `UnwrapKey` currently decodes raw AES material into `Aes128`,
-/// `Aes192`, or `Aes256`. AES-GCM and AES-XTS require distinct bulk-key
-/// representations and are rejected until TBOR bulk-key import is supported.
+/// TBOR `UnwrapKey` decodes raw AES material into `Aes128`, `Aes192`, or
+/// `Aes256`. An AES-GCM key is a plain AES-256 key on TBOR (consumed by
+/// `AesGcmEncryptDecrypt`), so it is imported as `Aes256` and retagged.
+/// An AES-XTS key is a single wrapped 64-byte `K1 ‖ K2` (PKCS#11
+/// `CKK_AES_XTS`) imported as `AesXts512`.
 /// The returned masked metadata and empty public-key field are validated
 /// before returning an unpinned handle.
 fn rsa_aes_unwrap_key_tbor(
@@ -185,13 +187,12 @@ fn rsa_aes_unwrap_key_tbor(
         return Err(HsmError::InvalidKeyProps);
     }
 
-    let expected_key_kind = match (key_props.kind(), key_props.bits()) {
-        (HsmKeyKind::Aes, 128) => KEY_KIND_AES128,
-        (HsmKeyKind::Aes, 192) => KEY_KIND_AES192,
-        (HsmKeyKind::Aes, 256) => KEY_KIND_AES256,
-        (HsmKeyKind::AesGcm | HsmKeyKind::AesXts, _) => {
-            return Err(HsmError::UnsupportedKeyOperation);
-        }
+    let (key_class, expected_key_kind) = match (key_props.kind(), key_props.bits()) {
+        (HsmKeyKind::Aes, 128) => (KEY_CLASS_AES, KEY_KIND_AES128),
+        (HsmKeyKind::Aes, 192) => (KEY_CLASS_AES, KEY_KIND_AES192),
+        (HsmKeyKind::Aes, 256) => (KEY_CLASS_AES, KEY_KIND_AES256),
+        (HsmKeyKind::AesGcm, 256) => (KEY_CLASS_AES, KEY_KIND_AES256),
+        (HsmKeyKind::AesXts, 512) => (KEY_CLASS_AES_XTS512, KEY_KIND_AES_XTS512),
         _ => return Err(HsmError::InvalidKeyProps),
     };
     let unwrapping_modulus_len = unwrapping_key.size();
@@ -206,7 +207,7 @@ fn rsa_aes_unwrap_key_tbor(
     let req = TborUnwrapKeyReq {
         session_id: unwrapping_key.session().ex_session_id()?,
         scope,
-        key_class: KEY_CLASS_AES,
+        key_class,
         key_usage: tbor_unwrap_key_usage(&key_props)?,
         oaep_hash_algo: oaep_hash_to_tbor(oaep_hash),
         wrapped_blob,
@@ -223,7 +224,10 @@ fn rsa_aes_unwrap_key_tbor(
     }
 
     HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
-    let dev_key_props = HsmMaskedKey::to_key_props(&resp.masked_key)?;
+    let mut dev_key_props = HsmMaskedKey::to_key_props(&resp.masked_key)?;
+    if key_props.kind() == HsmKeyKind::AesGcm {
+        dev_key_props = super::aes::gcm_props_from_aes(dev_key_props)?;
+    }
     if !key_props.validate_dev_props(&dev_key_props) {
         return Err(HsmError::InvalidKeyProps);
     }
@@ -635,7 +639,9 @@ fn hsm_wire_pub_to_crypto(wire: &[u8]) -> HsmResult<crypto::RsaPublicKey> {
 /// Maps API key permissions to a TBOR `KeyUsage` value accepted by `UnwrapKey`.
 fn tbor_unwrap_key_usage(props: &HsmKeyProps) -> HsmResult<u64> {
     match props.kind() {
-        HsmKeyKind::Aes if props.can_encrypt() && props.can_decrypt() => {
+        HsmKeyKind::Aes | HsmKeyKind::AesGcm | HsmKeyKind::AesXts
+            if props.can_encrypt() && props.can_decrypt() =>
+        {
             Ok(KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT)
         }
         HsmKeyKind::Rsa | HsmKeyKind::RsaCrt if props.can_sign() => {

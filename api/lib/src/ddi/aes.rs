@@ -22,11 +22,18 @@ use tsra_ddi_tbor_types::AES_MODE_OFB;
 use tsra_ddi_tbor_types::AES_MSG_MAX_LEN;
 use tsra_ddi_tbor_types::AES_OP_DECRYPT;
 use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
+use tsra_ddi_tbor_types::GCM_DATA_MAX_LEN;
+use tsra_ddi_tbor_types::GCM_IV_SOURCE_HOST;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
+use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
+use tsra_ddi_tbor_types::TborAesXtsEncryptDecryptReq;
+use tsra_ddi_tbor_types::TborAesXtsGenerateKeyReq;
+use tsra_ddi_tbor_types::XTS_DATA_MAX_LEN;
+use tsra_ddi_tbor_types::XTS_TWEAK_LEN;
 
 use super::*;
 
@@ -599,6 +606,9 @@ fn aes_xts_encrypt_decrypt(
     input: &[u8],
     output: &mut [u8],
 ) -> HsmResult<usize> {
+    if key.session().is_ex() {
+        return aes_xts_encrypt_decrypt_tbor(key, op, tweak, dul, input, output);
+    }
     // Setup DDI params for AES XTS encrypt/decrypt
     let xts_params = DdiAesXtsParams {
         key_id1: ddi::get_bulk_key_id(key.handle().0)?.ok_or(HsmError::InvalidKey)? as u32,
@@ -617,12 +627,122 @@ fn aes_xts_encrypt_decrypt(
     Ok(resp)
 }
 
+/// Returns how many data units of `dul` bytes a single XTS DDI call may
+/// carry: the TBOR command takes up to [`XTS_DATA_MAX_LEN`] bytes, the
+/// MBOR fast path one data unit.
+pub(crate) fn aes_xts_units_per_call(key: &HsmAesXtsKey, dul: usize) -> usize {
+    if key.session().is_ex() && dul > 0 {
+        (XTS_DATA_MAX_LEN / dul).max(1)
+    } else {
+        1
+    }
+}
+
+/// Returns the largest tweak value an XTS operation on `key` may reach
+/// after advancing past its last data unit: 64 bits on ex sessions, 128
+/// bits otherwise.
+pub(crate) fn aes_xts_max_tweak(key: &HsmAesXtsKey) -> u128 {
+    if key.session().is_ex() {
+        u64::MAX as u128
+    } else {
+        u128::MAX
+    }
+}
+
+/// Transforms `input` (whole data units, at most [`XTS_DATA_MAX_LEN`]
+/// bytes) over TBOR `AesXtsEncryptDecrypt` with the caller-held masked
+/// key. The data travels out of band: `input` as the in SGL Data Block,
+/// `output` as the out block. The tweak of the first data unit is `tweak`
+/// and must fit in 64 bits, as must the tweak advanced past the last data
+/// unit.
+fn aes_xts_encrypt_decrypt_tbor(
+    key: &HsmAesXtsKey,
+    op: DdiAesOp,
+    tweak: u128,
+    dul: usize,
+    input: &[u8],
+    output: &mut [u8],
+) -> HsmResult<usize> {
+    let len = input.len();
+    if dul == 0 || len == 0 || len > XTS_DATA_MAX_LEN || !len.is_multiple_of(dul) {
+        return Err(HsmError::InvalidArgument);
+    }
+    if output.len() < len {
+        return Err(HsmError::BufferTooSmall);
+    }
+    let first = u64::try_from(tweak).map_err(|_| HsmError::InvalidTweak)?;
+    first
+        .checked_add((len / dul) as u64)
+        .ok_or(HsmError::InvalidTweak)?;
+
+    let props = key.props();
+    let masked = props.masked_key().ok_or(HsmError::InternalError)?;
+    let req = TborAesXtsEncryptDecryptReq {
+        session_id: key.session().ex_session_id()?,
+        op: tbor_aes_op(op)?,
+        data_len: u16::try_from(len).map_err(|_| HsmError::InvalidArgument)?,
+        dul: u16::try_from(dul).map_err(|_| HsmError::InvalidArgument)?,
+        in_index: 0,
+        out_index: 1,
+        tweak: first.to_le_bytes()[..XTS_TWEAK_LEN].to_vec(),
+        masked_key: masked.to_vec(),
+    };
+    let mut items = [TborOobItem::In(input), TborOobItem::Out(&mut output[..len])];
+    key.with_dev(|dev| {
+        dev.exec_op_tbor_oob(&req, &mut items, &mut None)
+            .map_err(HsmError::from)
+    })?;
+    Ok(len)
+}
+
+/// Maps a DDI AES direction to the TBOR `AesOp` discriminant.
+fn tbor_aes_op(op: DdiAesOp) -> HsmResult<u8> {
+    match op {
+        DdiAesOp::Encrypt => Ok(AES_OP_ENCRYPT),
+        DdiAesOp::Decrypt => Ok(AES_OP_DECRYPT),
+        _ => Err(HsmError::InternalError),
+    }
+}
+
+/// Generates an AES-XTS key over TBOR `AesXtsGenerateKey`.
+///
+/// The device returns a single double-wide masked blob (`K1 ‖ K2`); the
+/// key is unpinned (unmasked on use), so both handles are
+/// [`HsmKeyHandle::Unpinned`].
+pub(crate) fn aes_xts_generate_key_tbor(
+    session: &HsmSession,
+    props: &HsmKeyProps,
+) -> HsmResult<(HsmKeyHandle, HsmKeyHandle, HsmKeyProps)> {
+    let key_label = props.label();
+    if key_label.len() > TBOR_KEY_LABEL_MAX_LEN {
+        return Err(HsmError::InvalidKeyProps);
+    }
+    let scope = props.tbor_scope();
+    let req = TborAesXtsGenerateKeyReq {
+        session_id: session.ex_session_id()?,
+        scope,
+        key_usage: aes_tbor_key_usage(props)?,
+        key_label: key_label.to_vec(),
+    };
+    let resp = session.with_dev(|dev| {
+        dev.exec_op_tbor(&req, None, &mut None)
+            .map_err(HsmError::from)
+    })?;
+    HsmMaskedKey::verify_scope(&resp.masked_key, scope)?;
+    let key_props = HsmMaskedKey::to_key_props(&resp.masked_key)?;
+    if !props.validate_dev_props(&key_props) {
+        return Err(HsmError::InvalidKeyProps);
+    }
+    Ok((HsmKeyHandle::Unpinned, HsmKeyHandle::Unpinned, key_props))
+}
+
 /// Generates an AES-GCM key within an HSM session.
 ///
 /// Creates a new AES-GCM key using the specified key properties and returns both
 /// the key handle for performing operations and the masked key material for
 /// secure storage. AES-GCM keys are 256-bit only.
-/// Uses MBOR for legacy sessions; TBOR generation is not yet supported.
+/// Uses MBOR for legacy sessions; TBOR sessions generate a plain AES-256
+/// key (TBOR GCM runs on an AES-256 masked key).
 ///
 /// # Arguments
 ///
@@ -684,12 +804,107 @@ fn aes_gcm_generate_key_mbor(
     Ok((key_id.release(), key_props))
 }
 
-/// Placeholder for TBOR AES-GCM key generation, which is not yet supported.
+/// Generates an AES-GCM key over TBOR `AesGenerateKey` (AES-256).
+///
+/// TBOR GCM keys are plain AES-256 masked keys; the returned props are
+/// re-tagged as [`HsmKeyKind::AesGcm`].
 fn aes_gcm_generate_key_tbor(
-    _session: &HsmSession,
-    _props: HsmKeyProps,
+    session: &HsmSession,
+    props: HsmKeyProps,
 ) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
-    Err(HsmError::UnsupportedAlgorithm)
+    props.ensure_scope_supported(true)?;
+    let (handle, masked_key) = aes_generate_key_tbor(session, &props)?;
+    let key_props = gcm_props_from_aes(HsmMaskedKey::to_key_props(&masked_key)?)?;
+    if !props.validate_dev_props(&key_props) {
+        return Err(HsmError::InvalidKeyProps);
+    }
+    Ok((handle, key_props))
+}
+
+/// Re-tags the props of a TBOR AES-256 masked key as an AES-GCM key.
+pub(crate) fn gcm_props_from_aes(mut props: HsmKeyProps) -> HsmResult<HsmKeyProps> {
+    if props.kind() != HsmKeyKind::Aes || props.bits() != 256 {
+        return Err(HsmError::InvalidKeyProps);
+    }
+    props.set_kind(HsmKeyKind::AesGcm);
+    Ok(props)
+}
+
+/// Runs one AES-GCM operation over TBOR `AesGcmEncryptDecrypt` with the
+/// caller-held masked key.
+///
+/// The OOB in block carries `[padded AAD | input]` (see
+/// `tsra_fw_core_crypto_gcm_buf`), the out block receives the same layout;
+/// the text part is copied to `output`. An empty message carries no OOB
+/// data. Returns the response tag.
+fn aes_gcm_encrypt_decrypt_tbor(
+    key: &HsmAesGcmKey,
+    op: DdiAesOp,
+    iv: [u8; 12],
+    tag: [u8; 16],
+    aad: Option<&[u8]>,
+    input: &[u8],
+    output: &mut [u8],
+) -> HsmResult<[u8; 16]> {
+    let aad = aad.unwrap_or_default();
+    let padded = gcm_padded_aad_len(aad.len());
+    let data_len = padded + input.len();
+    if data_len > GCM_DATA_MAX_LEN {
+        return Err(HsmError::InvalidArgument);
+    }
+    if output.len() < input.len() {
+        return Err(HsmError::BufferTooSmall);
+    }
+
+    let mut inbuf = vec![0u8; data_len];
+    let aad_off = if (1..=16).contains(&(aad.len() % 32)) {
+        16
+    } else {
+        0
+    };
+    inbuf[aad_off..aad_off + aad.len()].copy_from_slice(aad);
+    inbuf[padded..].copy_from_slice(input);
+    let mut outbuf = vec![0u8; data_len];
+
+    let props = key.props();
+    let masked = props.masked_key().ok_or(HsmError::InternalError)?;
+    let req = TborAesGcmEncryptDecryptReq {
+        session_id: key.session().ex_session_id()?,
+        op: tbor_aes_op(op)?,
+        iv_source: GCM_IV_SOURCE_HOST,
+        aad_len: u16::try_from(aad.len()).map_err(|_| HsmError::InvalidArgument)?,
+        data_len: data_len as u16,
+        in_index: 0,
+        out_index: 1,
+        iv: iv.to_vec(),
+        tag: tag.to_vec(),
+        masked_key: masked.to_vec(),
+    };
+    let mut items = [TborOobItem::In(&inbuf), TborOobItem::Out(&mut outbuf)];
+    let items: &mut [TborOobItem<'_>] = if data_len == 0 { &mut [] } else { &mut items };
+    let resp = key.with_dev(|dev| {
+        dev.exec_op_tbor_oob(&req, items, &mut None)
+            .map_err(HsmError::from)
+    })?;
+    let resp_tag: [u8; 16] = resp
+        .tag
+        .as_slice()
+        .try_into()
+        .map_err(|_| HsmError::InternalError)?;
+    output[..input.len()].copy_from_slice(&outbuf[padded..]);
+    Ok(resp_tag)
+}
+
+/// Padded AAD region length of the PAL GCM `[padded AAD | text]` layout:
+/// 0 for no AAD, otherwise a multiple of 32 with a 16-byte zero prefix
+/// when `aad_len % 32` is in `1..=16`.
+fn gcm_padded_aad_len(aad_len: usize) -> usize {
+    match aad_len % 32 {
+        _ if aad_len == 0 => 0,
+        0 => aad_len,
+        1..=16 => (16 + aad_len).next_multiple_of(32),
+        _ => aad_len.next_multiple_of(32),
+    }
 }
 
 /// Encrypts data using AES-GCM mode at the DDI layer.
@@ -724,6 +939,18 @@ pub(crate) fn aes_gcm_encrypt(
     plaintext: &[u8],
     ciphertext: &mut [u8],
 ) -> HsmResult<(usize, [u8; 16])> {
+    if key.session().is_ex() {
+        let tag = aes_gcm_encrypt_decrypt_tbor(
+            key,
+            DdiAesOp::Encrypt,
+            iv,
+            [0u8; 16],
+            aad.as_deref(),
+            plaintext,
+            ciphertext,
+        )?;
+        return Ok((plaintext.len(), tag));
+    }
     let gcm_params = DdiAesGcmParams {
         key_id: ddi::get_bulk_key_id(key.handle())?.ok_or(HsmError::InvalidKey)? as u32,
         iv,
@@ -788,6 +1015,18 @@ pub(crate) fn aes_gcm_decrypt(
     ciphertext: &[u8],
     plaintext: &mut [u8],
 ) -> HsmResult<usize> {
+    if key.session().is_ex() {
+        aes_gcm_encrypt_decrypt_tbor(
+            key,
+            DdiAesOp::Decrypt,
+            iv,
+            tag,
+            aad.as_deref(),
+            ciphertext,
+            plaintext,
+        )?;
+        return Ok(ciphertext.len());
+    }
     let gcm_params = DdiAesGcmParams {
         key_id: ddi::get_bulk_key_id(key.handle())?.ok_or(HsmError::InvalidKey)? as u32,
         iv,

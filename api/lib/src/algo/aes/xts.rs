@@ -19,6 +19,14 @@
 //!
 //! The tweak is stored as internal state and is incremented by one after each
 //! processed data unit.
+//!
+//! ## Tweak width
+//!
+//! The tweak is always passed as 16 bytes. Sessions opened with
+//! `open_session` honor all 128 bits. Sessions opened with `open_session_ex`
+//! support a 64-bit tweak: the upper 8 bytes of the initial tweak and of the
+//! tweak advanced past the last processed data unit must be zero, otherwise
+//! the operation fails with [`HsmError::InvalidTweak`].
 
 use super::*;
 
@@ -71,17 +79,22 @@ impl HsmAesXtsAlgo {
     /// # Arguments
     ///
     /// * `input` - Input buffer used to compute number of data units
+    /// * `max_tweak` - Largest tweak the session supports after advancing
     ///
     /// # Errors
     ///
     /// Returns [`HsmError::InvalidTweak`] if incrementing would overflow.
-    fn validate_tweak_increment(&self, input: &[u8]) -> HsmResult<()> {
+    fn validate_tweak_increment(&self, input: &[u8], max_tweak: u128) -> HsmResult<()> {
         let blocks = input.len() / self.dul;
-        // Check if tweak + inc_val overflows u64.
-        let current = self.tweak;
-        current
+        // Check the whole input up front so no data unit is processed (and
+        // the tweak is not advanced) if any later one would overflow.
+        let end = self
+            .tweak
             .checked_add(blocks as u128)
             .ok_or(HsmError::InvalidTweak)?;
+        if end > max_tweak {
+            Err(HsmError::InvalidTweak)?;
+        }
         Ok(())
     }
 
@@ -144,19 +157,22 @@ impl HsmAesXtsAlgo {
         }
 
         //check if tweak can be incremented for the given input size
-        self.validate_tweak_increment(input)?;
+        self.validate_tweak_increment(input, ddi::aes_xts_max_tweak(key))?;
 
         let mut output_len = 0;
         let mut offset = 0;
 
-        for unit in input.chunks(self.dul) {
-            let end = offset + unit.len();
+        // One DDI call carries as many whole data units as the transport
+        // allows; the device increments the tweak per data unit.
+        let units = ddi::aes_xts_units_per_call(key, self.dul);
+        for chunk in input.chunks(self.dul * units) {
+            let end = offset + chunk.len();
             output_len += if encrypt {
-                ddi::aes_xts_encrypt(key, self.tweak, self.dul, unit, &mut output[offset..end])?
+                ddi::aes_xts_encrypt(key, self.tweak, self.dul, chunk, &mut output[offset..end])?
             } else {
-                ddi::aes_xts_decrypt(key, self.tweak, self.dul, unit, &mut output[offset..end])?
+                ddi::aes_xts_decrypt(key, self.tweak, self.dul, chunk, &mut output[offset..end])?
             };
-            self.increment_tweak(1)?;
+            self.increment_tweak(chunk.len() / self.dul)?;
             offset = end;
         }
 
@@ -167,7 +183,8 @@ impl HsmAesXtsAlgo {
     ///
     /// # Arguments
     ///
-    /// * `tweak` - Initial tweak value (must be 16 bytes)
+    /// * `tweak` - Initial tweak value (must be 16 bytes, little-endian). On
+    ///   ex sessions only the low 8 bytes may be non-zero; see the module docs.
     /// * `dul` - Data unit length in bytes (supported: any non-zero multiple of 16 up to 8192)
     ///
     /// # Returns

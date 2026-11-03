@@ -317,4 +317,74 @@ pub trait DdiDev {
     ) -> DdiResult<T::OpResp> {
         Err(DdiError::UnsupportedEncoding)
     }
+
+    /// Execute a TBOR command whose out-of-band items may be written by
+    /// the device.
+    ///
+    /// Like [`Self::exec_op_tbor`], but each item carries a direction:
+    /// [`TborOobItem::In`] buffers are read by the device and
+    /// [`TborOobItem::Out`] buffers are written by it (e.g. the output of
+    /// an out-of-band AES-GCM / AES-XTS operation). Items are indexed by
+    /// position, as in [`Self::exec_op_tbor`].
+    ///
+    /// # Default
+    ///
+    /// Forwards to [`Self::exec_op_tbor`] when every item is
+    /// [`TborOobItem::In`]; otherwise returns
+    /// [`DdiError::UnsupportedEncoding`]. Override on backends that can
+    /// map device-writable buffers.
+    fn exec_op_tbor_oob<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let mut inputs = Vec::with_capacity(oob_items.len());
+        for item in oob_items.iter() {
+            match item {
+                TborOobItem::In(buf) => inputs.push(*buf),
+                TborOobItem::Out(_) => return Err(DdiError::UnsupportedEncoding),
+            }
+        }
+        self.exec_op_tbor(req, Some(&inputs), cookie)
+    }
+}
+
+/// One out-of-band item of a TBOR command (see
+/// [`DdiDev::exec_op_tbor_oob`]).
+#[derive(Debug)]
+pub enum TborOobItem<'a> {
+    /// A buffer the device reads.
+    In(&'a [u8]),
+    /// A buffer the device writes.
+    Out(&'a mut [u8]),
+}
+
+impl TborOobItem<'_> {
+    /// Host address of the item for DMA. Taken through `&mut self` so an
+    /// [`TborOobItem::Out`] pointer carries write provenance.
+    pub fn dma_ptr(&mut self) -> *mut u8 {
+        match self {
+            Self::In(buf) => buf.as_ptr().cast_mut(),
+            Self::Out(buf) => buf.as_mut_ptr(),
+        }
+    }
+
+    /// Length of the item in bytes.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::In(buf) => buf.len(),
+            Self::Out(buf) => buf.len(),
+        }
+    }
+
+    /// Whether the item is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Whether the device writes this item.
+    pub fn is_out(&self) -> bool {
+        matches!(self, Self::Out(_))
+    }
 }

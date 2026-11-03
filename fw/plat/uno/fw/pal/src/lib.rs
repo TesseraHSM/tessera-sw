@@ -38,6 +38,7 @@
 #[allow(unsafe_code)]
 mod alloc;
 mod asn1;
+mod bulk;
 mod cert;
 mod crypto;
 #[allow(unsafe_code)]

@@ -16,6 +16,15 @@
 #include "utils/auto_key.hpp"
 #include "utils/rsa_keygen.hpp"
 
+// GCM authentication failures surface differently per protocol: TBOR reports
+// a dedicated tag-mismatch status (mapped to MASKED_KEY_AUTHENTICATION_FAILED),
+// while MBOR returns a generic DDI command failure.
+#if SESSION_EX_TESTS
+static constexpr tsra_status kGcmAuthFailureStatus = TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED;
+#else
+static constexpr tsra_status kGcmAuthFailureStatus = TSRA_STATUS_DDI_CMD_FAILURE;
+#endif
+
 class tsra_aes_keygen : public ::testing::Test
 {
   protected:
@@ -452,7 +461,7 @@ TEST_F(tsra_aes_keygen, aes_unmask_wrong_kind_fails)
             session,
             TSRA_ALGO_ID_AES_KEY_GEN,
             TSRA_KEY_KIND_AES,
-            256,
+            128,
             TSRA_KEY_KIND_AES_GCM
         );
     });
@@ -566,7 +575,6 @@ TEST_F(tsra_aes_keygen, aes_key_derive_rejects_unsupported_algorithm)
 // AES XTS Tests
 // ================================
 
-#if !SESSION_EX_TESTS
 /// verifies AES-XTS 512-bit key generation succeeds with correct properties and capabilities
 TEST_F(tsra_aes_keygen, session_aes_xts_512_key_generation)
 {
@@ -1278,7 +1286,7 @@ TEST_F(tsra_aes_keygen, aes_gcm_wrong_tag_fails)
         std::vector<uint8_t> decrypted(plain_buf.len);
         plain_buf.ptr = decrypted.data();
         err = tsra_crypt_decrypt(&crypt_algo, key, &cipher_buf, &plain_buf);
-        ASSERT_EQ(err, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(err, kGcmAuthFailureStatus);
 
         // Clean up
         err = tsra_key_delete(key);
@@ -1406,7 +1414,7 @@ TEST_F(tsra_aes_keygen, aes_gcm_wrong_key_fails)
         std::vector<uint8_t> decrypted(plain_buf.len);
         plain_buf.ptr = decrypted.data();
         err = tsra_crypt_decrypt(&dec_algo, key2, &cipher_buf, &plain_buf);
-        ASSERT_EQ(err, TSRA_STATUS_DDI_CMD_FAILURE);
+        ASSERT_EQ(err, kGcmAuthFailureStatus);
 
         // Clean up
         err = tsra_key_delete(key1);
@@ -1460,8 +1468,6 @@ TEST_F(tsra_aes_keygen, aes_gcm_key_gen_multiple_invalid_capabilities)
         );
     });
 }
-
-#endif
 
 /// verifies AES key generation rejects null algorithm, property list, and output handle
 TEST_F(tsra_aes_keygen, aes_key_gen_rejects_null_arguments)

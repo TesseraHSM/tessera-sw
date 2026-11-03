@@ -2,8 +2,6 @@
 // Licensed under the MIT License.
 
 #![cfg(test)]
-// AES GCM/XTS are not yet supported on emu; disable these tests until support is added.
-#![cfg(not(feature = "emu"))]
 
 use test_with_tracing::test;
 use tsra_crypto::*;
@@ -63,7 +61,8 @@ fn test_aes_xts_encrypt_decrypt() {
             let key_id2_aes_bulk_256 = resp.data.bulk_key_id.unwrap() as u32;
 
             // set up requests for the xts encrypt operations
-            let data = vec![1; 1024 * 1024];
+            // A bulk IO carries at most 16 KiB.
+            let data = vec![1; 16384];
             let tweak = [0x4; 16usize];
             let data_len = data.len();
 
@@ -189,7 +188,8 @@ fn test_aes_xts_encrypt_with_identical_key_content() {
             assert_ne!(key_id1_aes_bulk_256, key_id2_aes_bulk_256);
 
             // set up requests for the xts encrypt operations
-            let data = vec![1; 1024 * 1024];
+            // A bulk IO carries at most 16 KiB.
+            let data = vec![1; 16384];
             let tweak = [0x4; 16usize];
             let data_len = data.len();
 
@@ -300,7 +300,8 @@ fn test_aes_xts_encrypt_with_gcm_key_in_the_mix() {
             assert_ne!(key_id1_aes_bulk_256, key_id2_aes_bulk_256);
 
             // set up requests for the xts encrypt operations
-            let data = vec![1; 1024 * 1024];
+            // A bulk IO carries at most 16 KiB.
+            let data = vec![1; 16384];
             let tweak = [0x4; 16usize];
             let data_len = data.len();
 

@@ -34,7 +34,13 @@ pub fn serve(
     http::serve(listener, |method, path, request| match (method, path) {
         ("GET", "/v1/health") => Ok(jzon::object! {
             status: "ok", name: name, identity: identity.clone(),
-            backend: if cfg!(feature = "emu") { "emu" } else { "device" },
+            backend: if cfg!(feature = "emu") {
+                "emu"
+            } else if cfg!(feature = "sock") {
+                "sock"
+            } else {
+                "device"
+            },
         }),
         ("POST", "/v1/sign") => {
             let challenge = request["challenge"].as_str().context("missing challenge")?;

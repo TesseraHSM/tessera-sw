@@ -88,9 +88,11 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
         HsmVaultKeyKind::Aes128 => 16,
         HsmVaultKeyKind::Aes192 => 24,
         HsmVaultKeyKind::Aes256 => 32,
+        // The std PAL runs bulk crypto itself, so bulk keys keep their
+        // AES-256 material (the reference firmware stored a 2-byte handle).
         HsmVaultKeyKind::AesXtsBulk256
         | HsmVaultKeyKind::AesGcmBulk256
-        | HsmVaultKeyKind::AesGcmBulk256Unapproved => 2,
+        | HsmVaultKeyKind::AesGcmBulk256Unapproved => 32,
         HsmVaultKeyKind::Secret256 => 32,
         HsmVaultKeyKind::Secret384 => 48,
         HsmVaultKeyKind::Secret521 => 68,
@@ -127,6 +129,7 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
         HsmVaultKeyKind::MlKem512Public => 800,
         HsmVaultKeyKind::MlKem768Public => 1184,
         HsmVaultKeyKind::MlKem1024Public => 1568,
+        HsmVaultKeyKind::AesXts512 => 64,
         // `SessionEx` is length-discriminated by session type
         // (PlainText=140, Authenticated=236 — see [`session_ex_len_valid`]);
         // reported as variable length, same handling as VarLenHmac*.
@@ -763,9 +766,9 @@ mod tests {
             (HsmVaultKeyKind::Aes128, 16),
             (HsmVaultKeyKind::Aes192, 24),
             (HsmVaultKeyKind::Aes256, 32),
-            (HsmVaultKeyKind::AesXtsBulk256, 2),
-            (HsmVaultKeyKind::AesGcmBulk256, 2),
-            (HsmVaultKeyKind::AesGcmBulk256Unapproved, 2),
+            (HsmVaultKeyKind::AesXtsBulk256, 32),
+            (HsmVaultKeyKind::AesGcmBulk256, 32),
+            (HsmVaultKeyKind::AesGcmBulk256Unapproved, 32),
             (HsmVaultKeyKind::Secret256, 32),
             (HsmVaultKeyKind::Secret384, 48),
             (HsmVaultKeyKind::Secret521, 68),
@@ -801,6 +804,7 @@ mod tests {
             (HsmVaultKeyKind::MlKem512Public, 800),
             (HsmVaultKeyKind::MlKem768Public, 1184),
             (HsmVaultKeyKind::MlKem1024Public, 1568),
+            (HsmVaultKeyKind::AesXts512, 64),
         ];
         for &(kind, expected) in cases {
             assert_eq!(

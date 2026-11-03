@@ -306,6 +306,9 @@ impl SessionCtrl {
             | opcode::MLKEM_GENERATE_KEY
             | opcode::MLKEM_ENCAPSULATE
             | opcode::MLKEM_DECAPSULATE
+            | opcode::AES_GCM_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_GENERATE_KEY
             | opcode::GET_PUBLIC_KEY
             | opcode::VERIFY_KEY => Self::InSession,
             opcode::SESSION_CLOSE => Self::Close,

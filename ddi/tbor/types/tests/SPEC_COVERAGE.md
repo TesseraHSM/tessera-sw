@@ -62,7 +62,8 @@ All test names below are relative to the
 | Rejected role/type request does not poison the fd | ✅ | `open_session::rejected_role_type_does_not_poison_fd` | Valid session succeeds after rejected CU + Authenticated Phase-1 |
 | Rejected session suite does not consume session state | ✅ | `open_session::rejected_suite_does_not_consume_session_slot` | Valid session succeeds after unsupported suite rejection |
 | Rejected public key does not consume session state | ✅ | `open_session::rejected_pk_init_does_not_consume_session_slot` | Valid session succeeds after invalid `pk_init` rejection |
-| Pending Phase-1 session blocks a second open on the same fd | ✅ | `open_session::pending_session_blocks_second_open_on_same_fd` | Pending session counts toward the per-fd session limit |
+| Pending Phase-1 session blocks a second open on the same fd | ✅ | `open_session::pending_session_blocks_second_open_on_same_fd` | Emulator/native drivers only; socket connections permit multiple sessions |
+| Multiple Pending and Active sessions on one socket connection | ✅ (sock) | `open_session::socket_connection_supports_multiple_sessions` | Both sessions finish and close independently |
 | Malformed `pk_init` (length / curve) | ⚠️ | — | Spec arm exists in handler; no negative test |
 
 ## `SessionOpenFinish` (opcode out-of-session, phase 2 of handshake)
@@ -77,7 +78,8 @@ All test names below are relative to the
 | MAC from one pending session cannot authenticate another | ✅ | `open_session::session_open_finish_rejects_mac_from_another_session` | Cross-session MAC substitution is rejected without damaging the source session |
 | Unknown Finish request does not destroy another pending session | ✅ | `open_session::unknown_finish_does_not_destroy_pending_session` | Valid pending session remains finishable after unrelated unknown-session rejection |
 | Authenticated-session MAC key derivation is deterministic | ✅ | `open_session::authenticated_session_mac_key_derivation_is_stable` | Repeated TX/RX derivation from one handshake is stable and direction-specific |
-| Failed Phase-2 leaves the original fd session-bound | ✅ | `open_session::failed_finish_mac_keeps_original_fd_session_bound` | Original fd continues enforcing the per-fd session limit after authentication failure |
+| Failed Phase-2 leaves the original fd session-bound | ✅ | `open_session::failed_finish_mac_keeps_original_fd_session_bound` | Emulator/native drivers only |
+| Fresh open on the same socket connection after failed Phase-2 | ✅ (sock) | `open_session::socket_connection_can_open_after_failed_finish` | Authentication error remains firmware-signalled; the connection is reusable |
 | Finish against a pending slot whose Init was for a different role | ⚠️ | — | Spec arm exists; not exercised |
 
 ## `SessionClose` (opcode in-session, allow-listed)
@@ -87,8 +89,8 @@ All test names below are relative to the
 | Happy path on Active CU session | ✅ | `session_close::session_close_cu_plaintext_active` |  |
 | Happy path on Active CO session | ✅ | `session_close::session_close_co_authenticated_active` |  |
 | Close a Pending-only slot (between Init and Finish) | ✅ | `session_close::session_close_pending_slot` |  |
-| Unknown `session_id` → FW rejection | 🟡 | `session_close::session_close_unknown_id` | Asserts `DdiError::DdiError(_)` |
-| Double-close of the same id → FW rejection | 🟡 | `session_close::session_close_double_close` | Asserts `DdiError::DdiError(_)` |
+| Unknown `session_id` → rejection | ✅ | `session_close::session_close_unknown_id` | Firmware `SessionNotFound`, or socket ownership rejection before firmware |
+| Double-close of the same id → rejection | ✅ | `session_close::session_close_double_close` | Firmware `SessionNotFound`, or socket ownership rejection before firmware |
 | Slot is freed for subsequent open after close | ✅ | `session_close::session_close_then_reopen` |  |
 | Default-PSK gate bypass (E2, both roles) | ✅ | `default_psk_gate::default_psk_gate_session_close_bypass_emu` |  |
 
@@ -561,6 +563,70 @@ scopes, salt/info handling, deterministic derivation, and invalid requests.
 | Invalid HKDF request does not corrupt the active CU session | ✅ | `hkdf_derive::hkdf_derive_cu_invalid_request_preserves_session` | Invalid hash returns `InvalidArg`; subsequent valid HKDF derivation succeeds |
 
 ---
+
+## `AesXtsGenerateKey` (opcode in-session, gated)
+
+Generates a double-wide AES-256-XTS key and returns it as one masked blob
+(296 bytes).
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Session, Ephemeral, and Local scopes generate fresh masked keys after `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_roundtrip_all_scopes_after_part_final` | Checks the length, that the blob is not all zero, and that each call returns a distinct blob |
+| Session scope works before `PartFinal` | ✅ | `aes_xts_generate_key::tests::aes_xts_generate_key_session_scope_before_finalize` | |
+| Ephemeral and Local scopes are rejected before `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_non_session_scope_before_finalize` | `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_invalid_usage` | `InvalidPermissions` |
+| Invalid session ID is rejected | ✅ | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
+## `UnwrapKey` AES-XTS class (opcode in-session, gated)
+
+Imports an RSA-AES-wrapped 64-byte AES-256-XTS key (`K1 ‖ K2`) as one
+`AesXts512` masked blob.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| A 64-byte `K1 ‖ K2` imports as one `AesXts512` key | ✅ | `unwrap_key::unwrap_key_aes_xts` | No public key |
+| Wrong length, equal halves, or a 64-byte key under the AES class is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_invalid_material` | 32, 48 and 72 bytes; `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_non_cipher_usage` | `InvalidPermissions` |
+| An imported key encrypts like the host AES-XTS reference | ✅ | `aes_xts_encrypt_decrypt::aes_xts_unwrapped_key_matches_host` | DUL 512, 4 units; decrypt round trip |
+
+## `AesXtsEncryptDecrypt` (opcode in-session, gated, OOB in / out)
+
+Processes `data_len / dul` XTS data units in one submission. The device
+reads the in OOB block and writes the out OOB block. The tweak is an
+8-byte little-endian value that increments per data unit. Correctness
+is checked through properties and, for keys imported with `UnwrapKey`,
+by comparing device output against the host AES-XTS reference.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Encrypt / decrypt round trip across data-unit lengths and up to 16 KiB | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_roundtrip_data_unit_lengths` | DUL 16 to 16384, 1 to 32 units, Session and Local keys |
+| A multi-unit submission equals per-unit submissions with incrementing tweaks | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_multi_unit_matches_per_unit` | DUL 512 and 4096, both directions |
+| The tweak and the key change the ciphertext; output is deterministic | ✅ | `aes_xts_encrypt_decrypt::aes_xts_tweak_and_key_change_ciphertext` | Decrypting with the wrong tweak does not recover the plaintext |
+| The tweak after the last unit must fit in 64 bits | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_tweak_overflow` | `AesXtsInvalidBufferSize` |
+| Bad DUL or a `data_len` that is not a multiple of DUL is rejected | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_rejects_invalid_unit_lengths` | `AesXtsInvalidBufferSize` |
+| Oversize data or missing OOB blocks are rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_oversize_and_missing_oob` | `InvalidArg` |
+| A masked key of the same size that is not XTS is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_non_xts_key` | HMAC-SHA512 key; `InvalidKeyType` |
+| A tampered masked key is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_tampered_key` | `AesGcmDecryptTagDoesNotMatch` |
+| Invalid session ID is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
+## `AesGcmEncryptDecrypt` (opcode in-session, gated, OOB in / out)
+
+AES-256-GCM over an OOB `[padded AAD | text]` layout. The AAD region is
+`round_up_32(aad_len)`; the AAD sits at offset 16 when `aad_len % 32`
+is in `1..=16`. An empty message needs no OOB blocks.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| McGrew–Viega AES-256 known answers | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_known_answers` | Test cases 13 (empty, no OOB), 14, and 16 (with AAD) |
+| Round trip across AAD and text lengths | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_roundtrip_aad_and_text_lengths` | AAD 0 to 64 (every padding branch), text 0 to 1024 bytes, Session and Local keys |
+| Maximum `data_len` round trips | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_roundtrip_max_data_len` | With and without AAD |
+| Device-generated IV on encrypt is returned, fresh, and decryptable | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_device_iv_roundtrip` | |
+| Device-generated IV on decrypt is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_device_iv_on_decrypt` | `InvalidArg` |
+| A tampered tag, AAD, ciphertext, or IV fails authentication | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_tampered_inputs` | `AesGcmDecryptTagDoesNotMatch`, including an empty message |
+| A tampered masked key is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_tampered_key` | `AesGcmDecryptTagDoesNotMatch` |
+| A masked key of the same size that is not AES-256 is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_non_aes256_key` | HMAC-SHA256 key; `InvalidKeyType` |
+| Oversize or inconsistent lengths and missing OOB blocks are rejected | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_invalid_lengths_and_missing_oob` | `InvalidArg` |
+| Invalid session ID is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
 
 ## `GetPublicKey` (opcode in-session, gated)
 

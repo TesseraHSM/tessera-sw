@@ -20,10 +20,12 @@
 //! Cross-test isolation comes from `open_dev`'s factory-reset; no
 //! per-test cleanup is required.
 
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_types::SessionType;
+use tsra_ddi_tbor_types::TborStatus;
 
 // ---------------------------------------------------------------------------
 // Happy paths — close an Active session
@@ -73,10 +75,7 @@ fn session_close_unknown_id() {
     let err = ctx
         .session_close(0xFFFF)
         .expect_err("close of unknown id must fail");
-    assert!(
-        matches!(err, tsra_ddi_interface::DdiError::TborStatus(_)),
-        "expected FW-side rejection, got {err:?}",
-    );
+    assert_session_rejects(&err, TborStatus::SessionNotFound);
 }
 
 #[test]
@@ -93,10 +92,7 @@ fn session_close_double_close() {
     let err = ctx
         .session_close(session_id)
         .expect_err("second close against the same id must fail");
-    assert!(
-        matches!(err, tsra_ddi_interface::DdiError::TborStatus(_)),
-        "expected FW-side rejection on double-close, got {err:?}",
-    );
+    assert_session_rejects(&err, TborStatus::SessionNotFound);
 }
 
 // ---------------------------------------------------------------------------

@@ -110,6 +110,31 @@ pub async fn copy_oob<P>(
 where
     P: HsmGdmaController + HsmAlloc,
 {
+    let raw = read_oob_desc(pal, io, oob, index).await?;
+    // Forward the raw descriptor to the GDMA, which interprets it and
+    // copies the item into `dst` (validating `length == dst.len()`).
+    pal.copy_mem_from_host_raw(io, &raw, dst, false).await
+}
+
+/// Read the raw 16-byte SGL descriptor at `index` from the OOB page.
+///
+/// For engines that consume the descriptor themselves (e.g. host-to-host
+/// AES-GCM via `HsmAesGcm::gcm_encrypt_sgl`) rather than having the GDMA
+/// copy the item into HSM memory. The descriptor is returned verbatim;
+/// interpreting it is the consumer's job.
+///
+/// # Errors
+/// * [`HsmError::InvalidArg`] — `index` out of bounds.
+/// * [`HsmError`] — propagated from the GDMA / allocator.
+pub async fn read_oob_desc<P>(
+    pal: &P,
+    io: &P::Io,
+    oob: &OobPtr,
+    index: usize,
+) -> HsmResult<[u8; SGL_ENTRY_LEN]>
+where
+    P: HsmGdmaController + HsmAlloc,
+{
     let entry_addr = entry_addr(oob, index)?;
 
     pal.alloc_scoped_async(io, async |scoped| {
@@ -130,15 +155,8 @@ where
         pal.copy_mem_from_host(io, entry_addr, HsmDmaAddr::ZERO, entry, true)
             .await?;
 
-        // Borrow the descriptor bytes directly as a fixed array (no
-        // copy) — `entry` derefs to a 16-byte `[u8]`.
         let bytes: &[u8] = entry;
-        let raw: &[u8; SGL_ENTRY_LEN] = bytes.try_into().map_err(|_| HsmError::InternalError)?;
-
-        // Forward the raw descriptor to the GDMA, which interprets it and
-        // copies the item into `dst` (validating `length == dst.len()`).
-        pal.copy_mem_from_host_raw(io, raw, dst, false).await?;
-        Ok(())
+        bytes.try_into().map_err(|_| HsmError::InternalError)
     })
     .await
 }

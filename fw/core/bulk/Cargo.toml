@@ -1,0 +1,17 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+description = "Bulk (fast-path) AES-GCM / AES-XTS queue wire formats"
+edition = "2021"
+name = "tsra_fw_hsm_bulk"
+version = "0.1.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+tsra_fw_hsm_pal_traits = { workspace = true }
+
+[lints]
+workspace = true
