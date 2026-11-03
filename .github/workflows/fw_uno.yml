@@ -81,6 +81,9 @@ jobs:
     - name: Run clippy check
       run: cargo xtask precheck --clippy
 
+    - name: Run unit tests
+      run: cargo xtask precheck --test
+
     - name: Run copyright check
       run: cargo xtask precheck --copyright
 

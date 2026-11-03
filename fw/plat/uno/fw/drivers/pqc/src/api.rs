@@ -4,7 +4,6 @@
 //! Public API for the PQC driver.
 
 use core::future::poll_fn;
-use core::task::Poll;
 
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -12,12 +11,17 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_single_cell::SingleCell;
 
 use crate::engine::PqcEngine;
-use crate::error::PqcError;
 use crate::mailbox;
+use crate::pool::Acquire;
 use crate::pool::PqcState;
 use crate::shared_status;
 use crate::types::EngineId;
 use crate::types::ENGINES;
+
+/// How often the head waiter checks whether a draining engine's core has
+/// answered. `Timer::after` rounds up to one embassy tick (31.25 ms on
+/// CP1), which is what this costs in practice.
+const DRAIN_POLL_INTERVAL: embassy_time::Duration = embassy_time::Duration::from_millis(5);
 
 /// Async driver for PQC offload to the fastpath cores.
 ///
@@ -40,13 +44,14 @@ impl PqcDriver {
     /// Waiters are served FIFO: a task that queues is handed the next
     /// engine to be released, rather than racing tasks that arrive later.
     ///
-    /// Draining engines (see [`EngineState`](crate::EngineState))
-    /// rejoin the pool, scrubbed, once their core answers; nothing signals
-    /// that, so a waiter keeps polling while any engine is draining.
+    /// Draining engines (see [`EngineState`](crate::EngineState)) rejoin
+    /// the pool, scrubbed, once their core answers. Nothing signals that, so
+    /// the head waiter checks every [`DRAIN_POLL_INTERVAL`] while any engine
+    /// drains; the other waiters sleep.
     ///
     /// # Errors
-    /// * [`PqcError::QUEUE_FULL`] — every waiter slot is taken.
-    /// * [`PqcError::FP_NOT_READY`] — every engine is draining, so none
+    /// * [`PqcError::QUEUE_FULL`](crate::PqcError::QUEUE_FULL) — every waiter slot is taken.
+    /// * [`PqcError::FP_NOT_READY`](crate::PqcError::FP_NOT_READY) — every engine is draining, so none
     ///   will be released until a core answers a request it has already
     ///   missed its deadline for.
     pub async fn acquire_any(&self) -> HsmResult<PqcEngine<'_>> {
@@ -57,62 +62,28 @@ impl PqcDriver {
             idx: None,
         };
 
-        let result = poll_fn(|cx| {
-            self.state.with(|s| {
-                s.reclaim_drained(mailbox::has_answered, mailbox::scrub);
-
-                // Already queued: take the engine if one has been handed over.
-                if let Some(idx) = wait.idx {
-                    if let Some(id) = s.poll_queue_slot(idx, cx) {
-                        wait.idx = None;
-                        return Poll::Ready(Ok(id));
-                    }
-                    if s.all_draining() {
-                        s.cancel_wait(idx);
-                        wait.idx = None;
-                        return Poll::Ready(Err(PqcError::FP_NOT_READY));
-                    }
-                    if s.has_draining() {
-                        cx.waker().wake_by_ref();
-                    }
-                    return Poll::Pending;
-                }
-
-                // Fast path, but only when nobody is waiting — otherwise a
-                // task arriving now would jump the queue.
-                if !s.has_waiters() {
-                    if let Some(id) = s.claim_free_engine() {
-                        return Poll::Ready(Ok(id));
-                    }
-                }
-                if s.all_draining() {
-                    return Poll::Ready(Err(PqcError::FP_NOT_READY));
-                }
-
-                let Some(idx) = s.reserve_queue_slot() else {
-                    return Poll::Ready(Err(PqcError::QUEUE_FULL));
-                };
-                wait.idx = Some(idx);
-                s.poll_queue_slot(idx, cx);
-                if s.has_draining() {
-                    cx.waker().wake_by_ref();
-                }
-                Poll::Pending
+        let id = loop {
+            let step = poll_fn(|cx| {
+                self.state.with(|s| {
+                    s.poll_acquire(&mut wait.idx, cx, mailbox::has_answered, mailbox::scrub)
+                })
             })
-        })
-        .await;
+            .await;
+            match step {
+                Acquire::Done(result) => break result?,
+                // An engine handed over meanwhile is collected on the next
+                // pass, at most one interval late, and only while a core is
+                // overdue.
+                Acquire::Reap => embassy_time::Timer::after(DRAIN_POLL_INTERVAL).await,
+            }
+        };
 
-        match result {
-            Ok(id) => Ok(PqcEngine {
-                driver: self,
-                id,
-                released: false,
-                in_flight: None,
-            }),
-            // Errors are returned before a slot is reserved, or after the
-            // waiter has withdrawn, so there is never a slot to give back.
-            Err(e) => Err(e),
-        }
+        Ok(PqcEngine {
+            driver: self,
+            id,
+            released: false,
+            in_flight: None,
+        })
     }
 
     /// Acquire an engine, run `f` on it, and release it however `f` ends.
