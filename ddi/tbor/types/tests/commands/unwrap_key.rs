@@ -169,7 +169,7 @@ fn unwrap_key_aes() {
 }
 
 /// Retrieves the unwrapping public key, retrying while generation is pending.
-fn get_unwrapping_key(ctx: &TestCtx, session_id: u16) -> Vec<u8> {
+pub(crate) fn get_unwrapping_key(ctx: &TestCtx, session_id: u16) -> Vec<u8> {
     let timeout = Duration::from_secs(30);
     let retry_delay = Duration::from_millis(100);
     let start = Instant::now();
