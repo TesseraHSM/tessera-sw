@@ -42,12 +42,19 @@ use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_mbor_codec::MborDecode;
 use tsra_ddi_mbor_codec::MborDecoder;
+use tsra_ddi_mbor_codec::MborEncode;
 use tsra_ddi_mbor_codec::MborEncoder;
 use tsra_ddi_mbor_types::DdiAesOp;
+use tsra_ddi_mbor_types::DdiApiRev;
+use tsra_ddi_mbor_types::DdiCloseSessionCmdReq;
+use tsra_ddi_mbor_types::DdiCloseSessionReq;
 use tsra_ddi_mbor_types::DdiDecoder;
 use tsra_ddi_mbor_types::DdiDeviceKind;
+use tsra_ddi_mbor_types::DdiOp;
 use tsra_ddi_mbor_types::DdiOpReq;
+use tsra_ddi_mbor_types::DdiReqHdr;
 use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiRespSessionId;
 use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_mbor_types::MborError;
 use tsra_ddi_mbor_types::SessionControlKind;
@@ -247,7 +254,8 @@ impl std::fmt::Debug for DdiSockDev {
 }
 
 impl DdiSockDev {
-    /// Connect to the server at `path`.
+    /// Connect to the server at `path` (a Unix socket path, `tcp://HOST:PORT`,
+    /// or `vsock://CID:PORT` endpoint).
     pub(crate) fn connect(path: &str) -> DdiResult<Self> {
         let stream = if let Some(address) = path.strip_prefix("tcp://") {
             let stream = TcpStream::connect(address).map_err(DdiError::IoError)?;
@@ -299,12 +307,12 @@ impl DdiSockDev {
         self.cmd_counter.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Exchange one submission with the server.
+    /// Exchange one submission with the server over an already-locked
+    /// `stream`.
     ///
     /// Maps a nonzero transport status to a [`DdiError`].
-    fn exchange(&self, req: &Request) -> DdiResult<Response> {
+    fn exchange_locked(stream: &mut SocketStream, req: &Request) -> DdiResult<Response> {
         let resp: Response = {
-            let mut stream = self.stream.lock();
             req.write_to(&mut *stream).map_err(map_proto_err)?;
             Response::read_from(&mut *stream).map_err(map_proto_err)?
         };
@@ -319,8 +327,44 @@ impl DdiSockDev {
         }
     }
 
+    /// Exchange one submission with the server.
+    ///
+    /// Maps a nonzero transport status to a [`DdiError`].
+    fn exchange(&self, req: &Request) -> DdiResult<Response> {
+        let mut stream = self.stream.lock();
+        Self::exchange_locked(&mut stream, req)
+    }
+
     /// Build a submission entry, exchange it with the server, and return
     /// the response body bytes plus the bytes of each [`OobItem::Out`].
+    ///
+    /// Locks `self.stream` for the duration of the exchange and delegates
+    /// to [`Self::submit_locked`]. Used by paths (e.g. `exec_op_tbor`)
+    /// that don't need to hold the lock across any additional
+    /// post-processing.
+    fn submit(
+        &self,
+        op: u16,
+        session_ctrl: u8,
+        session_id: Option<u16>,
+        payload: Vec<u8>,
+        oob_items: Vec<OobItem>,
+    ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
+        let cmd_id = self.next_cmd_id();
+        let mut stream = self.stream.lock();
+        Self::submit_locked(
+            &mut stream,
+            cmd_id,
+            op,
+            session_ctrl,
+            session_id,
+            payload,
+            oob_items,
+        )
+    }
+
+    /// The I/O-only half of a submit: write the request and read the
+    /// response over an already-locked `stream`.
     ///
     /// Mirrors the in-process emulator: the client constructs the SQE
     /// (opcode, command id, lengths, session flags) and reads the returned
@@ -329,8 +373,16 @@ impl DdiSockDev {
     ///
     /// Maps a nonzero transport status (header) or device status (CQE) to
     /// [`DdiError::DdiError`].
-    fn submit(
-        &self,
+    ///
+    /// Takes an already-locked `stream` (rather than locking
+    /// `self.stream` itself) so [`DdiDev::exec_op_mbor`] can hold that
+    /// lock across the exchange *and* its `OpenSession`/`ReopenSession`
+    /// identity check, so a best-effort leaked-session close (see
+    /// [`Self::close_leaked_session_locked`]) can reuse the same stream
+    /// without racing a concurrent caller's request.
+    fn submit_locked(
+        stream: &mut SocketStream,
+        cmd_id: u16,
         op: u16,
         session_ctrl: u8,
         session_id: Option<u16>,
@@ -344,7 +396,6 @@ impl DdiSockDev {
         {
             return Err(DdiError::InvalidParameter);
         }
-        let cmd_id = self.next_cmd_id();
         let sqe = SqeBuilder::new()
             .cmd(CmdDword::new().with_op(op).with_id(cmd_id))
             .buf_lens(payload.len() as u32, DST_CAP)
@@ -363,7 +414,7 @@ impl DdiSockDev {
             oob_items,
             tail: Vec::new(),
         };
-        let resp = self.exchange(&req)?;
+        let resp = Self::exchange_locked(stream, &req)?;
 
         // Device-level status lives in the completion entry.
         let mut cqe_raw: RawCqe = resp
@@ -409,6 +460,58 @@ impl DdiSockDev {
         }
         payload.truncate(dst_len);
         Ok((payload, resp.oob_items))
+    }
+
+    /// Best-effort cleanup for a session the server reports opening
+    /// (header `status == Success`, carrying the new id) whose response
+    /// body then fails to decode, or whose header/body session ids
+    /// disagree. Issues a raw `CloseSession` for `leaked_id` over the
+    /// already-locked `stream`, so the firmware-side slot isn't left live
+    /// — nothing local ever recorded it (see the call site in
+    /// [`DdiDev::exec_op_mbor`]), so nothing local would otherwise ever
+    /// close it either.
+    ///
+    /// Errors are intentionally discarded by the caller: this is a
+    /// best-effort reclaim on top of an already-failing exchange, and the
+    /// original error is what should surface to the caller either way.
+    fn close_leaked_session_locked(
+        stream: &mut SocketStream,
+        cmd_id: u16,
+        pre_encode: bool,
+        leaked_id: u16,
+    ) -> DdiResult<()> {
+        let req = DdiCloseSessionCmdReq {
+            hdr: DdiReqHdr {
+                op: DdiOp::CloseSession,
+                sess_id: Some(leaked_id),
+                // A `None` rev here makes the firmware reject this
+                // best-effort cleanup outright, permanently leaking the
+                // session slot.
+                rev: Some(DdiApiRev { major: 1, minor: 0 }),
+            },
+            data: DdiCloseSessionReq {},
+            ext: None,
+        };
+
+        let mut buf = vec![0u8; DST_CAP as usize];
+        let req_len = {
+            let mut enc = MborEncoder::new(buf.as_mut_slice(), pre_encode);
+            req.mbor_encode(&mut enc)
+                .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
+            enc.position()
+        };
+        buf.truncate(req_len);
+
+        Self::submit_locked(
+            stream,
+            cmd_id,
+            OP_MBOR,
+            u8::from(SessionControlKind::Close),
+            Some(leaked_id),
+            buf,
+            Vec::new(),
+        )?;
+        Ok(())
     }
 
     /// Encode a TBOR request, submit it with `oob_items`, and decode the
@@ -487,6 +590,40 @@ impl DdiSockDev {
     }
 }
 
+/// Whether a `ReopenSession` response's header and body both agree with
+/// the `requested` session id.
+///
+/// Both must be present and equal to `requested` — a peer that omits
+/// either id, or reports a different one in either place, must not be
+/// trusted enough to be returned to the caller (see the call site in
+/// [`DdiDev::exec_op_mbor`]). A missing `requested` id (no specific
+/// session named) trivially confirms, since there is nothing to check
+/// against.
+fn reopen_identity_confirmed(
+    requested: Option<u16>,
+    header_sess_id: Option<u16>,
+    body_sess_id: Option<u16>,
+) -> bool {
+    match requested {
+        Some(requested) => header_sess_id == Some(requested) && body_sess_id == Some(requested),
+        None => true,
+    }
+}
+
+/// Whether an `OpenSession` response's header and body agree on the
+/// newly assigned session id.
+///
+/// Unlike `ReopenSession` (where the *requested* id is already known
+/// ahead of time, see [`reopen_identity_confirmed`]), `OpenSession` has
+/// no id to check against — the server assigns one, and the header and
+/// body are the only two independent reports of what it is. Both must be
+/// present and equal: a peer that omits either id, or reports a
+/// different one in either place, hasn't actually confirmed the new
+/// session's id (see the call site in [`DdiDev::exec_op_mbor`]).
+fn open_identity_confirmed(header_sess_id: Option<u16>, body_sess_id: Option<u16>) -> bool {
+    header_sess_id.is_some() && header_sess_id == body_sess_id
+}
+
 impl DdiDev for DdiSockDev {
     fn device_kind(&self) -> DdiDeviceKind {
         self.device_kind
@@ -527,9 +664,21 @@ impl DdiDev for DdiSockDev {
         };
         buf.truncate(req_len);
 
-        // ── 2. Build the SQE and exchange it over the socket.
-        let (resp_buf, _) =
-            self.submit(OP_MBOR, u8::from(session_ctrl), session_id, buf, Vec::new())?;
+        // ── 2. Exchange the SQE/CQE and decode the full typed response,
+        //    all while holding `self.stream`'s lock, so a best-effort
+        //    leaked-session close (step 4/5 below) can reuse the same
+        //    stream without an intervening request from another caller.
+        let cmd_id = self.next_cmd_id();
+        let mut stream = self.stream.lock();
+        let (resp_buf, _) = Self::submit_locked(
+            &mut stream,
+            cmd_id,
+            OP_MBOR,
+            u8::from(session_ctrl),
+            session_id,
+            buf,
+            Vec::new(),
+        )?;
         if resp_buf.is_empty() {
             return Err(DdiError::DdiError(0));
         }
@@ -543,10 +692,68 @@ impl DdiDev for DdiSockDev {
             return Err(DdiError::DdiStatus(hdr.status));
         }
 
-        // ── 4. Decode the typed response (header + body).
+        // ── 4. Decode the typed response (header + body). A server
+        //    that already told us (via the header) that it opened a
+        //    session, but whose body then fails to decode, has left a
+        //    live session this call is about to error out of — with
+        //    nothing local ever having recorded it, nothing local would
+        //    otherwise ever close it either. Best-effort close it now,
+        //    still under this same stream lock, before surfacing the
+        //    decode error.
         let mut body_dec = MborDecoder::new(&resp_buf, post_decode);
-        <T::OpResp>::mbor_decode(&mut body_dec)
-            .map_err(|_| DdiError::MborError(MborError::DecodeError))
+        let typed_resp = match <T::OpResp>::mbor_decode(&mut body_dec) {
+            Ok(resp) => resp,
+            Err(_) => {
+                if session_ctrl == SessionControlKind::Open {
+                    if let Some(leaked_id) = hdr.sess_id {
+                        let _ = Self::close_leaked_session_locked(
+                            &mut stream,
+                            self.next_cmd_id(),
+                            pre_encode,
+                            leaked_id,
+                        );
+                    }
+                }
+                return Err(DdiError::MborError(MborError::DecodeError));
+            }
+        };
+
+        // ── 5. For `ReopenSession`, the request already names the id
+        //    being reopened (`session_id`). A conforming peer's header
+        //    *and* body (`DdiRespSessionId::resp_session_id`) both echo
+        //    that same id back; reject before returning the response in
+        //    every other case — a peer that omits either id, or reports
+        //    a different one in either place, hasn't actually confirmed
+        //    this is the session the caller asked to reopen.
+        if opcode == DdiOp::ReopenSession
+            && !reopen_identity_confirmed(session_id, hdr.sess_id, typed_resp.resp_session_id())
+        {
+            return Err(DdiError::DdiStatus(DdiStatus::SessionNotFound));
+        }
+
+        // ── 6. For `OpenSession`, the header carries the server-assigned
+        //    id and the body independently echoes the same id back. A
+        //    peer that omits either id, or reports a different one in
+        //    either place, hasn't actually confirmed the new session's
+        //    id: treat it the same as a body decode failure — best-effort
+        //    close whatever the header told us was opened, and surface a
+        //    decode error rather than returning an untrustworthy id to
+        //    the caller.
+        if session_ctrl == SessionControlKind::Open
+            && !open_identity_confirmed(hdr.sess_id, typed_resp.resp_session_id())
+        {
+            if let Some(leaked_id) = hdr.sess_id {
+                let _ = Self::close_leaked_session_locked(
+                    &mut stream,
+                    self.next_cmd_id(),
+                    pre_encode,
+                    leaked_id,
+                );
+            }
+            return Err(DdiError::MborError(MborError::DecodeError));
+        }
+
+        Ok(typed_resp)
     }
 
     fn exec_op_tbor<T: TborOpReq>(
@@ -799,6 +1006,51 @@ fn map_proto_err(e: ProtoError) -> DdiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `ReopenSession` response is only trusted when both the shared
+    /// header and the op-specific body independently confirm the exact
+    /// id that was requested; a mismatch or a missing id in either place
+    /// must not be mistaken for confirmation (see `exec_op_mbor`'s use
+    /// of this to gate returning the response to the caller).
+    #[test]
+    fn reopen_identity_confirmed_requires_both_ids_to_match_requested() {
+        // Both ids match: confirmed.
+        assert!(reopen_identity_confirmed(Some(9), Some(9), Some(9)));
+        // Header mismatches the requested id: not confirmed, even though
+        // the body matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(1), Some(9)));
+        // Body mismatches the requested id: not confirmed, even though
+        // the header matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), Some(1)));
+        // Header id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), None, Some(9)));
+        // Body id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), None));
+        // No id was requested at all: trivially confirmed (nothing to
+        // check against).
+        assert!(reopen_identity_confirmed(None, Some(9), Some(9)));
+    }
+
+    /// An `OpenSession` response is only trusted when the shared header
+    /// and the op-specific body independently report the *same*
+    /// server-assigned id; unlike `ReopenSession` there's no requested id
+    /// to check against (see `exec_op_mbor`'s use of this to gate
+    /// returning the new session to the caller).
+    #[test]
+    fn open_identity_confirmed_requires_matching_non_empty_ids() {
+        // Both ids agree: confirmed.
+        assert!(open_identity_confirmed(Some(9), Some(9)));
+        // Header and body disagree: not confirmed.
+        assert!(!open_identity_confirmed(Some(9), Some(1)));
+        // Header id missing entirely: not confirmed, even if the body
+        // reports one.
+        assert!(!open_identity_confirmed(None, Some(9)));
+        // Body id missing entirely: not confirmed, even if the header
+        // reports one.
+        assert!(!open_identity_confirmed(Some(9), None));
+        // Neither id present: not confirmed.
+        assert!(!open_identity_confirmed(None, None));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
