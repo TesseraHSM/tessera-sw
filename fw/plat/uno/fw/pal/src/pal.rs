@@ -34,13 +34,19 @@ use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_static_init::static_init;
 use tsra_fw_uno_drivers_aes::AesDriver;
+// Cargo cannot drop a dependency for a feature; the BCP is unused here.
+#[cfg(feature = "bulk_crypto")]
+use tsra_fw_uno_drivers_bcp as _;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_drivers_bcp::BcpDriver;
 use tsra_fw_uno_drivers_boot_status as boot_status;
 use tsra_fw_uno_drivers_boot_status::BootStatus;
 use tsra_fw_uno_drivers_core_status as core_status;
@@ -311,6 +317,11 @@ pub struct UnoHsmPal {
     /// IPC Controller — doorbell-based inter-processor communication.
     pub ipc: &'static Ipc,
 
+    /// Bulk crypto processor (CDMA) — the PAL's AES-256-GCM. Absent with
+    /// `bulk_crypto`, where the FP firmware owns the engine.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bcp: &'static BcpDriver,
+
     /// Boot handshake phase (PAL lifecycle state).
     boot_phase: Cell<BootPhase>,
 
@@ -461,6 +472,9 @@ impl Default for UnoHsmPal {
                 static_init!(Ipc, Ipc::new(ipc_config)),
             )
         };
+        // SAFETY: As above.
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bcp = unsafe { static_init!(BcpDriver, BcpDriver::new()) };
         Self {
             iic,
             oic,
@@ -471,6 +485,8 @@ impl Default for UnoHsmPal {
             rng,
             pqc,
             ipc,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bcp,
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
             io_alloc: IO_ALLOC_INIT,
             io_peak: IO_ALLOC_INIT,
@@ -648,6 +664,10 @@ impl UnoHsmPal {
                 WAKE_TABLE[irq as usize](self, irq);
             }
         }
+
+        // The BCP raises no HSM interrupt; reap its completions every pass.
+        #[cfg(not(feature = "bulk_crypto"))]
+        self.bcp.wake();
     }
 
     /// Handle an incoming IPC message.
@@ -833,12 +853,12 @@ impl UnoHsmPal {
 /// claims nothing.
 impl HsmCustomDispatch for UnoHsmPal {
     #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
-    async fn mbor_dispatch(&self, io: &UnoHsmIo, req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
+    async fn mbor_dispatch(&self, io: &UnoHsmIo, req: &mut HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
         crate::test_hooks::mbor_dispatch(self, io, req).await
     }
 
     #[cfg(not(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks")))]
-    async fn mbor_dispatch(&self, _io: &UnoHsmIo, _req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
+    async fn mbor_dispatch(&self, _io: &UnoHsmIo, _req: &mut HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
         Err(HsmError::UnsupportedCmd)
     }
 
@@ -846,8 +866,8 @@ impl HsmCustomDispatch for UnoHsmPal {
         &self,
         _io: &UnoHsmIo,
         _opcode: u8,
-        _req: &DmaBuf,
-    ) -> HsmResult<&DmaBuf> {
+        _cmd_buf: &mut HsmCmdBuf<'_>,
+    ) -> HsmResult<usize> {
         Err(HsmError::UnsupportedCmd)
     }
 }

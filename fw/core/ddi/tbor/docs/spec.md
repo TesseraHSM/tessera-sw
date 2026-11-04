@@ -2,7 +2,7 @@
 
 ## Version
 
-0.3
+0.4 (wire version `0x01`)
 
 ## Table of Contents
 
@@ -80,22 +80,34 @@ All multi-byte integer fields in the header and TOC structures are encoded in **
 
 ## Request Format
 
-A request is sent by the host to the device to initiate an operation. It consists of a **fixed 4-byte header** followed by 1–32 [TOC entries](#toc-entry-format) and an optional variable-length data section. The TOC entries describe the parameters of the operation; each entry either inlines a small value directly or provides an offset and length into the variable-length data section that follows the TOC.
+A request is sent by the host to the device to initiate an operation. It consists of a **fixed 8-byte header** followed by 1–32 [TOC entries](#toc-entry-format) and an optional variable-length data section. The TOC entries describe the parameters of the operation; each entry either inlines a small value directly or provides an offset and length into the variable-length data section that follows the TOC.
+
+For each command, the request and successful response MUST reserve the same
+number of TOC slots: the larger of their schema entry counts, with at least
+one slot. Unused trailing slots MUST contain `none`. Thus both data sections
+begin at `8 + 4 * toc_count`; replacing metadata does not relocate payloads.
+Firmware validates reserved trailing slots. Generic error responses may use
+one `none` entry because they carry no command payload.
+
+This is the unreleased version-1 framing. Host and firmware MUST use this same
+layout; earlier development layouts are not supported.
 
 **Message size bounds:**
 
 | Component             | Minimum  | Maximum  |
 |-----------------------|----------|----------|
-| Header                | 4 bytes  | 4 bytes  |
+| Header                | 8 bytes  | 8 bytes  |
 | TOC entries (1–32)    | 4 bytes  | 128 bytes|
 | Variable-length data  | 0 bytes  | 8191 bytes |
-| **Total**             | **8 bytes** | **8323 bytes** |
+| **Total**             | **12 bytes** | **8327 bytes** |
 
 ```
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |    Version    |    Reserved   | Rsv |TOC Count|     Opcode    |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                         Reserved (zero)                       |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                          TOC Entry 1                          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -120,6 +132,7 @@ A request is sent by the host to the device to initiate an operation. It consist
 | 2      | 3 bits  | Reserved    | Reserved for future use. MUST be `0b000`.         |
 | 2.3    | 5 bits  | TOC Count   | Number of entries in the Table of Contents (1–32). Encoded as count minus 1 (`0x00` = 1 entry, `0x1F` = 32 entries). |
 | 3      | 1 byte  | Opcode      | Operation code identifying the request type.      |
+| 4      | 4 bytes | Reserved    | MUST be zero; ignored by receivers.               |
 
 ### Field Details
 
@@ -177,7 +190,7 @@ A response is sent by the device back to the host after processing a request. Ev
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|    Version    |     Flags     |    Reserved   | Rsv |TOC Count|
+|    Version    |     Flags     | Rsv |TOC Count|    Reserved   |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                          Status Code                          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -201,9 +214,9 @@ A response is sent by the device back to the host after processing a request. Ev
 |--------|---------|-------------|--------------------------------------------------|
 | 0      | 1 byte  | Version     | Protocol version. MUST match the version of the corresponding request. |
 | 1      | 1 byte  | Flags       | Bit flags (see [Flags](#flags-byte-1) below).     |
-| 2      | 1 byte  | Reserved    | Reserved for future use. MUST be `0x00`.          |
-| 3      | 3 bits  | Reserved    | Reserved for future use. MUST be `0b000`.         |
-| 3.3    | 5 bits  | TOC Count   | Number of TOC entries (1–32). Encoded as count minus 1 (`0x00` = 1 entry, `0x1F` = 32 entries). |
+| 2      | 3 bits  | Reserved    | Reserved for future use. MUST be `0b000`.         |
+| 2.3    | 5 bits  | TOC Count   | Number of TOC entries (1–32). Encoded as count minus 1 (`0x00` = 1 entry, `0x1F` = 32 entries). |
+| 3      | 1 byte  | Reserved    | Reserved for future use. MUST be `0x00`.          |
 | 4      | 4 bytes | Status Code | Application-defined status code indicating the result of the request. See [Well-Known Status Codes](#well-known-status-codes). |
 
 ### Field Details
@@ -232,14 +245,14 @@ Bit layout of byte 1:
 | 0   | FIPS_APPROVED | Set to `1` if the operation was performed using only FIPS 140-2/140-3 approved cryptographic algorithms and modules. Set to `0` otherwise. This flag is informational and MUST NOT be used as the sole mechanism for enforcing compliance policy (see [Security Considerations](#security-considerations)). |
 | 1–7 | Reserved      | MUST be `0`. Reserved for future use.                        |
 
-#### Reserved (Byte 2)
+#### Reserved (Byte 3)
 
 Reserved for future protocol extensions. Senders MUST set this byte to `0x00`. Receivers MUST ignore its value.
 
-#### Reserved / TOC Count (Byte 3)
+#### Reserved / TOC Count (Byte 2)
 
 ```
-Bit layout of byte 3:
+Bit layout of byte 2:
 
   7   6   5   4   3   2   1   0
 +---+---+---+---+---+---+---+---+
@@ -450,7 +463,11 @@ A receiver MUST silently ignore TOC entries whose Entry Type value is not recogn
 
 ### 7. Maximum Message Size
 
-The maximum total size of a single message (header + TOC entries + variable-length data) is **8323 bytes** for a request and **8327 bytes** for a response. These limits are derived from the 32-entry TOC maximum and the 13-bit offset/length fields (maximum addressable data = 8191 bytes). Implementations MUST reject messages that exceed these limits.
+The maximum protocol size of either message is **8327 bytes** (8-byte header,
+32 TOC slots, and 8191 data bytes). Production host transports impose a tighter
+**8192-byte** capacity. Paired command schemas MUST fit that transport bound.
+Typed request encoders reserve the known paired TOC footprint and write data
+directly at its final offset, without staging behind a maximum-sized TOC.
 
 ### 8. Malformed Message Handling
 
@@ -545,37 +562,41 @@ A request with protocol version 1, opcode `0x0A`, containing two TOC entries:
 | 1           | `00`      | Reserved          | Must be zero.                                                 |
 | 2           | `01`      | Rsv(3) + TOC Count(5) | Reserved bits = `000`, TOC Count = `00001` (count minus 1 = 1, so 2 entries). |
 | 3           | `0A`      | Opcode            | Application-defined opcode `0x0A`.                            |
-| 4–7         | `00 00 00 2B` | TOC Entry 1    | Entry Type = `000000` (0 = session_id), Reserved = `0000000000`, Value = `0x002B`. |
-| 8–11        | `1C 0A 00 00` | TOC Entry 2    | Entry Type = `000111` (7 = buffer), Length = `0000000000101` (5), Offset = `0000000000000` (0). |
-| 12–16       | `48 65 6C 6C 6F` | Variable data | The 5-byte buffer payload: "Hello".                          |
+| 4–7         | `00 00 00 00` | Reserved       | Must be zero. |
+| 8–11        | `00 00 00 2B` | TOC Entry 1    | Session ID 43. |
+| 12–15       | `1C 00 A0 00` | TOC Entry 2    | Buffer, length 5, offset 0. |
+| 16–20       | `48 65 6C 6C 6F` | Variable data | The 5-byte buffer payload: "Hello". |
 
-**Total message size:** 17 bytes.
+**Total message size:** 21 bytes.
 
 #### Hex Dump
 
 ```
 Offset  Bytes
  0000   01 00 01 0A
- 0004   00 00 00 2B
- 0008   1C 0A 00 00
- 000C   48 65 6C 6C 6F
+ 0004   00 00 00 00
+ 0008   00 00 00 2B
+ 000C   1C 00 A0 00
+ 0010   48 65 6C 6C 6F
 ```
 
 #### Decoding the TOC Entries
 
-**TOC Entry 1** (`00 00 00 2B` as a 32-bit little-endian value = `0x2B000000`):
+**TOC Entry 1** (`00 00 00 2B` as a 32-bit big-endian value = `0x0000002B`):
 - Bits 31–26: `000000` = Entry Type 0 (`session_id`)
 - Bits 25–16: `0000000000` = Reserved (all zeros)
 - Bits 15–0: `0x002B` = Value 43 (big-endian inline 16-bit)
 
-**TOC Entry 2** (`1C 0A 00 00` as a 32-bit little-endian value = `0x00000A1C`):
+**TOC Entry 2** (`1C 00 A0 00` as a 32-bit big-endian value = `0x1C00A000`):
 - Bits 31–26: `000111` = Entry Type 7 (`buffer`)
 - Bits 25–13: `0000000000101` = Length 5
 - Bits 12–0: `0000000000000` = Offset 0
 
 ### Example 2 — Simple Response
 
-A response to the above request, indicating success with the FIPS_APPROVED flag set, returning a single `buffer` TOC entry containing 3 bytes of output data: `4F 4B 21` (ASCII "OK!").
+A response to the above request, indicating success with the FIPS_APPROVED
+flag set, returning a `buffer` containing `4F 4B 21` (ASCII "OK!"). A trailing
+`none` entry preserves the request's two-slot TOC footprint.
 
 #### Field Breakdown
 
@@ -583,27 +604,29 @@ A response to the above request, indicating success with the FIPS_APPROVED flag 
 |-------------|----------------|----------------------|-----------------------------------------------------------------|
 | 0           | `01`           | Version              | Protocol version 1 (matches the request).                       |
 | 1           | `01`           | Flags                | Bit 0 (FIPS_APPROVED) = 1; bits 1–7 = 0.                       |
-| 2           | `00`           | Reserved             | Must be zero.                                                   |
-| 3           | `00`           | Rsv(3) + TOC Count(5)| Reserved bits = `000`, TOC Count = `00000` (count minus 1 = 0, so 1 entry). |
+| 2           | `01`           | Rsv(3) + TOC Count(5)| Two entries, including the reserved slot. |
+| 3           | `00`           | Reserved             | Must be zero. |
 | 4–7         | `00 00 00 00`  | Status Code          | `0x00000000` = Success.                                         |
-| 8–11        | `1C 06 00 00`  | TOC Entry 1          | Entry Type = `000111` (7 = buffer), Length = `0000000000011` (3), Offset = `0000000000000` (0). |
-| 12–14       | `4F 4B 21`     | Variable data        | The 3-byte buffer payload: "OK!".                               |
+| 8–11        | `1C 00 60 00`  | TOC Entry 1          | Buffer, length 3, offset 0. |
+| 12–15       | `20 00 00 00`  | TOC Entry 2          | Reserved `none` slot. |
+| 16–18       | `4F 4B 21`     | Variable data        | The 3-byte buffer payload: "OK!". |
 
-**Total message size:** 15 bytes.
+**Total message size:** 19 bytes.
 
 #### Hex Dump
 
 ```
 Offset  Bytes
- 0000   01 01 00 00
+ 0000   01 01 01 00
  0004   00 00 00 00
- 0008   1C 06 00 00
- 000C   4F 4B 21
+ 0008   1C 00 60 00
+ 000C   20 00 00 00
+ 0010   4F 4B 21
 ```
 
 #### Decoding the TOC Entry
 
-**TOC Entry 1** (`1C 06 00 00` as a 32-bit little-endian value = `0x0000061C`):
+**TOC Entry 1** (`1C 00 60 00` as a 32-bit big-endian value = `0x1C006000`):
 - Bits 31–26: `000111` = Entry Type 7 (`buffer`)
 - Bits 25–13: `0000000000011` = Length 3
 - Bits 12–0: `0000000000000` = Offset 0
@@ -617,11 +640,12 @@ A request with opcode `0x20`, a required `uint8` field (value 5), an absent opti
 | Offset | Bytes | Description |
 |--------|-------|-------------|
 | 0–3    | `01 00 02 20` | Header: v1, reserved, 3 entries, opcode 0x20 |
-| 4–7    | `0C 00 00 05` | TOC[0]: uint8, value = 5 |
-| 8–11   | `20 00 00 00` | TOC[1]: none (absent optional field) |
-| 12–15  | `0C 00 00 2A` | TOC[2]: uint8, value = 42 |
+| 4–7    | `00 00 00 00` | Reserved |
+| 8–11   | `0C 00 00 05` | TOC[0]: uint8, value = 5 |
+| 12–15  | `20 00 00 00` | TOC[1]: none (absent optional field) |
+| 16–19  | `0C 00 00 2A` | TOC[2]: uint8, value = 42 |
 
-Total message: 16 bytes, no variable-length data section.
+Total message: 20 bytes, no variable-length data section.
 
 ---
 
@@ -632,3 +656,4 @@ Total message: 16 bytes, no variable-length data section.
 | 0.1     | —          | Initial draft. Defined core request/response framing, TOC structure, and basic entry types.    |
 | 0.2     | —          | Added well-known status codes, security considerations, data alignment rules, and worked examples. Expanded protocol rules (pipelining, unknown TOC types, malformed message handling, maximum message size). Clarified endianness convention and FIPS_APPROVED flag semantics. |
 | 0.3     | —          | Added Entry Type 8 (`none`) for optional fields. Added Entry Type 9 (`padding`) for data alignment. Added Schema Features section describing optional fields, alignment, fixed arrays, length constraints, field groups, and dispatch traits. |
+| 0.4     | —          | Unreleased framing alignment under wire version 1: equal 8-byte headers, TOC count at byte 2 in both directions, and paired command TOC footprints with trailing `none` slots. |

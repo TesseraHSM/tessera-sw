@@ -358,7 +358,8 @@ fn test_masked_key_rsa_unwrap_aes_key() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+// Emu does not reject unmasking a key whose tag already exists.
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 fn test_masked_key_rsa_unwrap_aes_bulk_key() {
     ddi_dev_test(

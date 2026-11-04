@@ -169,6 +169,80 @@ fn sd_create_peer_backup_roundtrip() {
     );
 }
 
+#[cfg(feature = "emu")]
+#[test]
+fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
+    use tsra_crypto::EccCurve;
+    use tsra_crypto::EccPrivateKey;
+    use tsra_crypto::ExportableKey;
+    use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+    use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
+    use tsra_ddi_tbor_types::TborKeyReportReq;
+    use tsra_ddi_tbor_types::KEY_CLASS_ECC;
+    use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
+
+    use crate::commands::key_report::verify_key_report;
+    use crate::commands::unwrap_key::unwrap;
+
+    let ctx = TestCtx::new();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+    let part = finalize_peer_partition(&ctx, &mach_seed(), &sata, &pota, true);
+    let sid = part.session.session_id;
+    let (masked, report, rcvr_pub) = masked_key_report_and_pub(&ctx, sid);
+    let genuine = build_receiver_evidence(&part.pid_pub, &rcvr_pub, &sata, &report);
+    let created = ctx
+        .tbor_oob(
+            &backup_request(sid, masked.clone(), &genuine, &part.policy),
+            &genuine.oob(),
+        )
+        .expect("create a genuine local backup");
+
+    let cu_ctx = TestCtx::new_with_path(ctx.path());
+    let cu = bootstrap_rotated_cu(&cu_ctx, &ROTATED_CU_PSK);
+    let host_key = EccPrivateKey::from_curve(EccCurve::P384).expect("host private key");
+    let imported = unwrap(
+        &cu_ctx,
+        cu.session_id,
+        KEY_CLASS_ECC,
+        &host_key.to_vec().expect("host DER"),
+    );
+    let mut request = TborKeyReportReq {
+        session_id: cu.session_id,
+        masked_key: imported.masked_key,
+        report_data: [0u8; KEY_REPORT_DATA_LEN],
+        auth_envelope: Vec::new(),
+    };
+    request.auth_envelope = tsra_session_ex_crypto::seal_key_report_auth(&cu.param_key, &request)
+        .expect("authenticate CU attestation");
+    let report = cu_ctx
+        .tbor(&request)
+        .expect("ordinary imported key remains attestable");
+    let decoded = verify_key_report(
+        &ctx,
+        &report.report,
+        &imported.pub_key,
+        &request.report_data,
+    );
+    assert_eq!(decoded.flags & (1 << 10), 0);
+
+    let mut imported_pub = [0u8; RAW_PUB_LEN];
+    imported_pub.copy_from_slice(&imported.pub_key);
+    imported_pub[..48].reverse();
+    imported_pub[48..].reverse();
+    let evidence = build_receiver_evidence(&part.pid_pub, &imported_pub, &sata, &report.report);
+    let req = create_peer_req(
+        sid,
+        &masked,
+        &evidence,
+        &part.policy,
+        &created.pok_local_backup,
+    );
+    ctx.expect_fw_reject_oob(&req, &evidence.oob(), TborStatus::InvalidArg);
+    cu_ctx.session_close(cu.session_id).expect("close CU");
+    ctx.session_close(sid).expect("close CO");
+}
+
 #[test]
 fn sd_create_peer_backup_rejects_without_peer_cloning() {
     let ctx = TestCtx::new();

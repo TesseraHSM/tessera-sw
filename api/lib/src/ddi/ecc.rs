@@ -169,7 +169,7 @@ fn ecc_curve_to_tbor(curve: HsmEccCurve) -> u8 {
 /// Builds the public key's properties so its capabilities mirror the
 /// private key's usage: a signing key's public half verifies, a
 /// derivation key's public half derives.
-fn ecc_public_props_for(dev_pub: &HsmKeyProps, priv_props: &HsmKeyProps) -> HsmKeyProps {
+pub(crate) fn ecc_public_props_for(dev_pub: &HsmKeyProps, priv_props: &HsmKeyProps) -> HsmKeyProps {
     let caps = HsmKeyFlags::VERIFY | HsmKeyFlags::DERIVE;
     let mut flags = dev_pub.flags() & !caps;
     if priv_props.can_sign() {

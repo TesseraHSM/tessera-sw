@@ -3,12 +3,13 @@
 
 //! Integration tests for the TBOR `Hash` command.
 //!
-//! `Hash` computes a SHA-1 / 256 / 384 / 512 digest of a host-supplied
-//! message.  These tests hash several messages on-device and verify the
-//! result byte-for-byte against the digest computed on the host with
-//! `tsra_crypto` (natural big-endian output), for every algorithm.
+//! `Hash` computes a SHA-1 / 256 / 384 / 512 digest, or SHAKE128 / SHAKE256
+//! output of a requested length, of a host-supplied message.  These tests
+//! hash several messages on-device and verify the result byte-for-byte
+//! against the output computed on the host with `tsra_crypto` (natural
+//! big-endian output), for every algorithm.
 
-#![cfg(feature = "emu")]
+use std::num::NonZeroUsize;
 
 use tsra_crypto::HashAlgo as CryptoHashAlgo;
 use tsra_crypto::Hasher;
@@ -23,6 +24,9 @@ use tsra_ddi_tbor_types::HASH_ALGO_SHA1;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA384;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA512;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE128;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
+use tsra_ddi_tbor_types::HASH_DIGEST_MAX_LEN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
@@ -49,6 +53,7 @@ fn device_digest(ctx: &TestCtx, session_id: u16, algo: u8, msg: Vec<u8>) -> Vec<
     ctx.tbor(&TborHashReq {
         session_id,
         algo,
+        out_len: None,
         msg,
     })
     .expect("Hash")
@@ -118,6 +123,7 @@ fn hash_unknown_algo_rejected() {
         &TborHashReq {
             session_id: session.session_id,
             algo: u8::MAX,
+            out_len: None,
             msg: b"abc".to_vec(),
         },
         TborStatus::InvalidArg,
@@ -132,10 +138,11 @@ fn hash_invalid_session_id_rejected() {
     // u16::MAX selects the CU role; clear its default-PSK gate first.
     rotate_cu_psk_and_close(&ctx);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id: u16::MAX,
             algo: HASH_ALGO_SHA256,
+            out_len: None,
             msg: b"abc".to_vec(),
         },
         TborStatus::SessionNotFound,
@@ -153,11 +160,13 @@ fn hash_invalid_algos_rejected() {
     //   1 = SHA-256
     //   2 = SHA-384
     //   3 = SHA-512
-    for algo in [HASH_ALGO_SHA512.wrapping_add(1), 0x7f, u8::MAX] {
+    //   7 = SHAKE128, 8 = SHAKE256 (4-6 are reserved for SHA-3)
+    for algo in [HASH_ALGO_SHA512.wrapping_add(1), 5, 6, 9, 0x7f, u8::MAX] {
         ctx.expect_fw_reject(
             &TborHashReq {
                 session_id: session.session_id,
                 algo,
+                out_len: None,
                 msg: b"abc".to_vec(),
             },
             TborStatus::InvalidArg,
@@ -231,10 +240,11 @@ fn hash_closed_session_rejected() {
 
     ctx.session_close(session_id).expect("close CO session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id,
             algo: HASH_ALGO_SHA256,
+            out_len: None,
             msg: b"abc".to_vec(),
         },
         TborStatus::SessionNotFound,
@@ -369,6 +379,7 @@ fn hash_default_psk_cu_rejected() {
         &TborHashReq {
             session_id: session.session_id(),
             algo: HASH_ALGO_SHA256,
+            out_len: None,
             msg: b"abc".to_vec(),
         },
         TborStatus::DefaultPskMustRotate,
@@ -423,6 +434,7 @@ fn hash_session_usable_after_invalid_algo() {
         &TborHashReq {
             session_id: session.session_id,
             algo: u8::MAX,
+            out_len: None,
             msg: b"invalid request".to_vec(),
         },
         TborStatus::InvalidArg,
@@ -583,10 +595,11 @@ fn hash_valid_session_usable_after_invalid_session_request() {
     rotate_cu_psk_and_close(&ctx);
     let session = finalized_co_session(&ctx);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id: u16::MAX,
             algo: HASH_ALGO_SHA512,
+            out_len: None,
             msg: b"request with invalid session".to_vec(),
         },
         TborStatus::FileHandleSessionIdDoesNotMatch,
@@ -626,10 +639,11 @@ fn hash_new_session_works_after_previous_session_closed() {
     ctx.session_close(closed_session_id)
         .expect("close CO session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHashReq {
             session_id: closed_session_id,
             algo: HASH_ALGO_SHA256,
+            out_len: None,
             msg: b"closed session".to_vec(),
         },
         TborStatus::SessionNotFound,
@@ -683,11 +697,152 @@ fn hash_over_max_message_length_rejected() {
         let result = ctx.tbor(&TborHashReq {
             session_id: session.session_id,
             algo,
+            out_len: None,
             msg: vec![0x5a; 2049],
         });
         assert!(
             result.is_err(),
             "2049-byte Hash message must be rejected for algo {algo}",
         );
+    }
+}
+
+/// The SHAKE XOFs, whose output length the request chooses.
+const SHAKE_ALGOS: [u8; 2] = [HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256];
+
+/// Hash `msg` on-device with a SHAKE XOF, returning `out_len` bytes.
+fn device_shake(ctx: &TestCtx, session_id: u16, algo: u8, out_len: u16, msg: Vec<u8>) -> Vec<u8> {
+    ctx.tbor(&TborHashReq {
+        session_id,
+        algo,
+        out_len: Some(out_len),
+        msg,
+    })
+    .expect("Hash (SHAKE)")
+    .digest
+}
+
+/// Compute the expected SHAKE output on the host with `tsra_crypto`.
+fn host_shake(algo: u8, out_len: u16, msg: &[u8]) -> Vec<u8> {
+    let len = NonZeroUsize::new(usize::from(out_len)).expect("non-zero out_len");
+    let mut crypto_algo = match algo {
+        HASH_ALGO_SHAKE128 => CryptoHashAlgo::shake128(len),
+        HASH_ALGO_SHAKE256 => CryptoHashAlgo::shake256(len),
+        _ => unreachable!("not a SHAKE algo"),
+    };
+    Hasher::hash_vec(&mut crypto_algo, msg).expect("host SHAKE")
+}
+
+/// Verifies SHAKE128 and SHAKE256 match the host at output lengths from 1 to
+/// the 256-byte maximum (across the 136- and 168-byte sponge rates) for empty,
+/// short, long and maximum-length messages.
+#[test]
+fn hash_shake_matches_host() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let long: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+    let max: Vec<u8> = (0..2048usize).map(|i| (i % 251) as u8).collect();
+
+    for msg in [Vec::new(), b"abc".to_vec(), long, max] {
+        for algo in SHAKE_ALGOS {
+            for out_len in [1u16, 16, 32, 64, 136, 168, 169, 255, 256] {
+                let dev = device_shake(&ctx, session.session_id, algo, out_len, msg.clone());
+                assert_eq!(
+                    dev,
+                    host_shake(algo, out_len, &msg),
+                    "device SHAKE must match host (algo {algo}, out_len {out_len}, msg {} B)",
+                    msg.len(),
+                );
+            }
+        }
+    }
+}
+
+/// Verifies the FIPS 202 "abc" known answers: 32 bytes of SHAKE128 and 64
+/// bytes of SHAKE256.
+#[test]
+fn hash_shake_known_answer_vectors() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let shake128_expected = [
+        0x58, 0x81, 0x09, 0x2d, 0xd8, 0x18, 0xbf, 0x5c, 0xf8, 0xa3, 0xdd, 0xb7, 0x93, 0xfb, 0xcb,
+        0xa7, 0x40, 0x97, 0xd5, 0xc5, 0x26, 0xa6, 0xd3, 0x5f, 0x97, 0xb8, 0x33, 0x51, 0x94, 0x0f,
+        0x2c, 0xc8,
+    ];
+    let shake256_expected = [
+        0x48, 0x33, 0x66, 0x60, 0x13, 0x60, 0xa8, 0x77, 0x1c, 0x68, 0x63, 0x08, 0x0c, 0xc4, 0x11,
+        0x4d, 0x8d, 0xb4, 0x45, 0x30, 0xf8, 0xf1, 0xe1, 0xee, 0x4f, 0x94, 0xea, 0x37, 0xe7, 0x8b,
+        0x57, 0x39, 0xd5, 0xa1, 0x5b, 0xef, 0x18, 0x6a, 0x53, 0x86, 0xc7, 0x57, 0x44, 0xc0, 0x52,
+        0x7e, 0x1f, 0xaa, 0x9f, 0x87, 0x26, 0xe4, 0x62, 0xa1, 0x2a, 0x4f, 0xeb, 0x06, 0xbd, 0x88,
+        0x01, 0xe7, 0x51, 0xe4,
+    ];
+
+    assert_eq!(
+        device_shake(
+            &ctx,
+            session.session_id,
+            HASH_ALGO_SHAKE128,
+            32,
+            b"abc".to_vec()
+        ),
+        shake128_expected,
+    );
+    assert_eq!(
+        device_shake(
+            &ctx,
+            session.session_id,
+            HASH_ALGO_SHAKE256,
+            64,
+            b"abc".to_vec()
+        ),
+        shake256_expected,
+    );
+}
+
+/// Rejects a SHAKE request without `out_len`, or with an `out_len` of 0 or
+/// above the maximum.
+#[test]
+fn hash_shake_invalid_out_len_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let over_max = u16::try_from(HASH_DIGEST_MAX_LEN + 1).expect("out_len bound fits in u16");
+    for algo in SHAKE_ALGOS {
+        for out_len in [None, Some(0), Some(over_max), Some(u16::MAX)] {
+            ctx.expect_fw_reject(
+                &TborHashReq {
+                    session_id: session.session_id,
+                    algo,
+                    out_len,
+                    msg: b"abc".to_vec(),
+                },
+                TborStatus::InvalidArg,
+            );
+        }
+    }
+}
+
+/// Rejects `out_len` on the fixed-length digests, even when it equals the
+/// digest length.
+#[test]
+fn hash_fixed_length_algos_reject_out_len() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    for algo in HASH_ALGOS {
+        let digest_len = u16::try_from(digest_len(algo)).expect("digest length fits in u16");
+        for out_len in [1, digest_len] {
+            ctx.expect_fw_reject(
+                &TborHashReq {
+                    session_id: session.session_id,
+                    algo,
+                    out_len: Some(out_len),
+                    msg: b"abc".to_vec(),
+                },
+                TborStatus::InvalidArg,
+            );
+        }
     }
 }

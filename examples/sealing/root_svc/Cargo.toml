@@ -32,6 +32,7 @@ ureq = { default-features = false, version = "3" }
 
 [features]
 emu = ["tsra_sealing_common/emu"]
+sock = ["tsra_sealing_common/sock"]
 
 [lints]
 workspace = true

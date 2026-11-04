@@ -11,11 +11,11 @@
 //! # Example
 //!
 //! ```ignore
-//! use tsra_fw_hsm_pal_traits::DmaBuf;
+//! use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 //!
 //! let rng = RngDriver::init();
 //! let mut buf = [0u8; 32];
-//! let dma = unsafe { DmaBuf::from_raw_mut(&mut buf) };
+//! let dma = unsafe { HsmDmaBuf::from_raw_mut(&mut buf) };
 //! rng.fill_bytes(dma).unwrap();
 //! ```
 

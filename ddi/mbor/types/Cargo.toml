@@ -65,6 +65,7 @@ pre_encode = [
 # test binary picks up the right mock/table-size combination.
 emu = ["tsra_ddi/emu"]
 mock = ["tsra_ddi/mock"]
+sock = ["tsra_ddi/sock"]
 table-4 = ["tsra_ddi/table-4"]
 table-64 = ["tsra_ddi/table-64"]
 

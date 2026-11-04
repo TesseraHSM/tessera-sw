@@ -74,13 +74,13 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
         #[doc = concat!("[`", stringify!(#name), "::decode()`].")]
         #[derive(Debug)]
         #vis struct #view_name #view_lifetime {
-            buf: &'a tsra_fw_hsm_pal_traits::DmaBuf,
+            buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf,
         }
 
         impl<'a> #view_name<'a> {
             /// Construct from a validated buffer. Not public — use
             #[doc = concat!("[`", stringify!(#name), "::decode()`] instead.")]
-            fn from_validated(buf: &'a tsra_fw_hsm_pal_traits::DmaBuf) -> Self {
+            fn from_validated(buf: &'a tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Self {
                 Self { buf }
             }
 
@@ -94,7 +94,7 @@ pub fn gen_view(schema: &Schema) -> TokenStream {
 
             /// The raw message bytes.
             #[inline]
-            pub fn as_bytes(&self) -> &'a tsra_fw_hsm_pal_traits::DmaBuf { self.buf }
+            pub fn as_bytes(&self) -> &'a tsra_fw_hsm_pal_traits::HsmDmaBuf { self.buf }
 
             #response_accessors
 
@@ -144,7 +144,7 @@ fn gen_accessor(
                 // back to an empty slice rather than panicking.
                 quote! {
                     {
-                        let __b: &tsra_fw_hsm_pal_traits::DmaBuf =
+                        let __b: &tsra_fw_hsm_pal_traits::HsmDmaBuf =
                             tsra_fw_ddi_tbor::toc::read_toc_buffer(self.buf, #header_len, #toc_index, #ds);
                         <[#elem] as ::zerocopy::TryFromBytes>::try_ref_from_bytes(&__b[..]).unwrap_or(&[])
                     }
@@ -155,7 +155,7 @@ fn gen_accessor(
                 // falls back to a zeroed static rather than panicking.
                 quote! {
                     {
-                        let __b: &tsra_fw_hsm_pal_traits::DmaBuf =
+                        let __b: &tsra_fw_hsm_pal_traits::HsmDmaBuf =
                             tsra_fw_ddi_tbor::toc::read_toc_buffer(self.buf, #header_len, #toc_index, #ds);
                         match <#ty as ::zerocopy::TryFromBytes>::try_ref_from_bytes(&__b[..]) {
                             ::core::result::Result::Ok(__r) => __r,
@@ -186,7 +186,7 @@ fn gen_accessor(
             } else if let Some(ty) = &field.single_pod {
                 quote! { &'a #ty }
             } else {
-                quote! { &'a tsra_fw_hsm_pal_traits::DmaBuf }
+                quote! { &'a tsra_fw_hsm_pal_traits::HsmDmaBuf }
             }
         }
     };
@@ -234,14 +234,9 @@ fn gen_accessor(
 
 /// Compute the `data_start` expression used by data-section accessors.
 fn data_start_expr(header_len: &TokenStream, _needs_data_start: bool) -> TokenStream {
-    // TOC count byte position:
-    //   Request: byte 2 (REQ_HEADER_LEN = 4)
-    //   Response: byte 3 (RESP_HEADER_LEN = 8)
-    // Compute from header_len: request → 4-2=2, response → 8-5=3
     quote! {
         {
-            let toc_count_idx: usize = if #header_len == 4 { 2 } else { 3 };
-            let toc_count = (self.buf[toc_count_idx] & 0x1F) as usize + 1;
+            let toc_count = (self.buf[2] & 0x1F) as usize + 1;
             #header_len + toc_count * 4
         }
     }
@@ -256,7 +251,6 @@ pub fn gen_validation_standalone(schema: &Schema) -> TokenStream {
 /// Generate the full validation block for a message schema.
 fn gen_validation(schema: &Schema) -> TokenStream {
     let layout = TocLayout::compute(&schema.fields);
-    let total_toc_count = layout.total_toc_count;
 
     let (parse_call, _header_len_val, opcode_check) = match schema.kind {
         MessageKind::Request { opcode } => (
@@ -282,12 +276,8 @@ fn gen_validation(schema: &Schema) -> TokenStream {
 
     // Included field groups expand the TOC dynamically, so fold their
     // `TOC_COUNT` constants into the expected total.
-    let group_toc_addends: Vec<_> = schema
-        .fields
-        .iter()
-        .filter_map(|f| f.include_group.as_ref().map(|g| quote! { + #g::TOC_COUNT }))
-        .collect();
-    let total_toc_count_expr = quote! { #total_toc_count #(#group_toc_addends)* };
+    let total_toc_count_expr = schema.toc_count_expr();
+    let field_toc_count_expr = schema.field_toc_count_expr();
 
     // Empty schemas synthesise a single `None` TOC placeholder; the
     // decoder must reject any other entry type at TOC[0]. See
@@ -308,8 +298,13 @@ fn gen_validation(schema: &Schema) -> TokenStream {
         #opcode_check
 
         // Exact TOC count validation (fields + padding + group entries).
-        if raw.toc_count() != #total_toc_count_expr {
+        if raw.toc_count() != (#total_toc_count_expr) {
             return Err(tsra_fw_hsm_pal_traits::HsmError::TborMessageTruncated);
+        }
+        for i in (#field_toc_count_expr)..raw.toc_count() {
+            if raw.toc_entry_type(i) != tsra_fw_ddi_tbor::TocType::None as u8 {
+                return Err(tsra_fw_hsm_pal_traits::HsmError::TborUnexpectedTocType);
+            }
         }
 
         // Validate padding entries.

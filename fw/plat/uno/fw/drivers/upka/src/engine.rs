@@ -5,7 +5,7 @@ use core::future::poll_fn;
 use core::task::Context;
 use core::task::Poll;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_uno_error::HsmError;
 use tsra_fw_uno_error::HsmResult;
 
@@ -106,7 +106,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
         }
     }
 
-    fn ensure_result_word(result: &DmaBuf) -> HsmResult<()> {
+    fn ensure_result_word(result: &HsmDmaBuf) -> HsmResult<()> {
         Self::ensure_cmd_input(result.len() >= Self::RESULT_WORD_LEN)
     }
 
@@ -114,7 +114,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     ///
     /// The caller must have validated the buffer with [`Self::ensure_result_word`]
     /// (length ≥ [`Self::RESULT_WORD_LEN`]) before calling this.
-    fn read_result_word(result: &DmaBuf) -> u32 {
+    fn read_result_word(result: &HsmDmaBuf) -> u32 {
         u32::from_le_bytes([result[0], result[1], result[2], result[3]])
     }
 
@@ -152,9 +152,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_sign(
         &mut self,
         curve: UpkaEccCurve,
-        priv_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         Self::ensure_cmd_input(
             !priv_key.is_empty()
@@ -206,12 +206,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_verify(
         &mut self,
         curve: UpkaEccCurve,
-        pub_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &DmaBuf,
-        result: &mut DmaBuf,
-        prime: &DmaBuf,
-        mont_result: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
+        prime: &HsmDmaBuf,
+        mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // pub_key (X || Y) and signature (R || S) are consumed by the PKA in
         // wire format: two coordinates each padded to `hsm_point_size` (P-521
@@ -270,7 +270,7 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_gen_keypair(
         &mut self,
         curve: UpkaEccCurve,
-        key_buf: &mut DmaBuf,
+        key_buf: &mut HsmDmaBuf,
     ) -> HsmResult<usize> {
         let total_len = hsm_point_size(curve) * 3;
         Self::ensure_cmd_input(key_buf.len() >= total_len)?;
@@ -319,12 +319,12 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecdh_derive(
         &mut self,
         curve: UpkaEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &DmaBuf,
-        secret: &mut DmaBuf,
-        prime: &DmaBuf,
-        mont_result: &mut DmaBuf,
-        point_valid: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &HsmDmaBuf,
+        secret: &mut HsmDmaBuf,
+        prime: &HsmDmaBuf,
+        mont_result: &mut HsmDmaBuf,
+        point_valid: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         Self::ensure_cmd_input(
             priv_key.len() >= hsm_point_size(curve)
@@ -400,10 +400,56 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn rsa_mod_exp_priv(
         &mut self,
         key_type: UpkaRsaKeyType,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        let (opcode, param2) = Self::rsa_private_args(
+            key_type,
+            key.len(),
+            input.len(),
+            output.len(),
+            key.as_ptr() as u32,
+        )?;
+        self.execute_cmd(
+            opcode,
+            output.as_mut_ptr() as u32,
+            input.as_ptr() as u32,
+            key.as_ptr() as u32,
+            param2,
+        )
+        .await
+    }
+
+    /// Run the private primitive with the input block reused for result DMA.
+    ///
+    /// Keep a single exclusive input/output borrow through completion.
+    pub async fn rsa_mod_exp_priv_in_place(
+        &mut self,
+        key_type: UpkaRsaKeyType,
+        key: &HsmDmaBuf,
+        input_output: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let key_addr = key.as_ptr() as u32;
+        let (opcode, param2) = Self::rsa_private_args(
+            key_type,
+            key.len(),
+            input_output.len(),
+            input_output.len(),
+            key_addr,
+        )?;
+        let data_addr = input_output.as_mut_ptr() as u32;
+        self.execute_cmd(opcode, data_addr, data_addr, key_addr, param2)
+            .await
+    }
+
+    fn rsa_private_args(
+        key_type: UpkaRsaKeyType,
+        key_len: usize,
+        input_len: usize,
+        output_len: usize,
+        key_addr: u32,
+    ) -> HsmResult<(u32, u32)> {
         let mod_size = rsa_mod_size(key_type);
         let is_crt = matches!(
             key_type,
@@ -420,25 +466,20 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
             2 * mod_size
         };
         Self::ensure_cmd_input(
-            key.len() >= min_key_len && input.len() == mod_size && output.len() == mod_size,
+            key_len >= min_key_len && input_len == mod_size && output_len == mod_size,
         )?;
 
         // CRT needs a non-null `param2` pointer; passing `0` (as for non-CRT)
         // makes the PKA dereference a null operand and fault with a bus error.
         let param2 = if is_crt {
-            key.as_ptr() as u32 + (2 * mod_size) as u32
+            key_addr
+                .checked_add((2 * mod_size) as u32)
+                .ok_or(HsmError::InvalidArg)?
         } else {
             0
         };
 
-        self.execute_cmd(
-            rsa_priv_opcode(key_type),
-            output.as_mut_ptr() as u32,
-            input.as_ptr() as u32,
-            key.as_ptr() as u32,
-            param2,
-        )
-        .await
+        Ok((rsa_priv_opcode(key_type), param2))
     }
 
     /// Run an RSA public-key modular exponentiation.
@@ -461,9 +502,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn rsa_mod_exp_pub(
         &mut self,
         key_type: UpkaRsaKeyType,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let mod_size = rsa_mod_size(key_type);
         Self::ensure_cmd_input(
@@ -496,8 +537,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_gen_pub_key(
         &mut self,
         curve: UpkaEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.execute_cmd(
             ecc_point_mul_opcode(curve),
@@ -531,8 +572,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_mont_const_calc(
         &mut self,
         curve: UpkaEccCurve,
-        modulus: &DmaBuf,
-        mont_result: &mut DmaBuf,
+        modulus: &HsmDmaBuf,
+        mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         Self::ensure_cmd_input(
             modulus.len() >= hsm_point_size(curve) && mont_result.len() >= hsm_point_size(curve),
@@ -558,9 +599,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_point_mul(
         &mut self,
         curve: UpkaEccCurve,
-        point_xy: &DmaBuf,
-        scalar: &DmaBuf,
-        result: &mut DmaBuf,
+        point_xy: &HsmDmaBuf,
+        scalar: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         Self::ensure_cmd_input(
             point_xy.len() >= hsm_point_size(curve) * 2
@@ -583,8 +624,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_mod_reduction(
         &mut self,
         curve: UpkaEccCurve,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let opcode = mod_reduction_opcode(curve);
         Self::ensure_cmd_input(
@@ -604,8 +645,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_mont_repr_in(
         &mut self,
         curve: UpkaEccCurve,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let opcode = mont_repr_in_opcode(curve);
         Self::ensure_cmd_input(
@@ -625,8 +666,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_mont_repr_out(
         &mut self,
         curve: UpkaEccCurve,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let opcode = mont_repr_out_opcode(curve);
         Self::ensure_cmd_input(
@@ -647,8 +688,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_mod_inverse(
         &mut self,
         curve: UpkaEccCurve,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let opcode = mod_inverse_opcode(curve);
         Self::ensure_cmd_input(
@@ -669,9 +710,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_mod_mul(
         &mut self,
         curve: UpkaEccCurve,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
-        arg2: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
+        arg2: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let opcode = mod_multiplication_opcode(curve);
         Self::ensure_cmd_input(
@@ -694,9 +735,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn ecc_mod_add(
         &mut self,
         curve: UpkaEccCurve,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
-        arg2: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
+        arg2: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let opcode = mod_addition_opcode(curve);
         Self::ensure_cmd_input(
@@ -731,8 +772,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn rsa_mont_const_calc(
         &mut self,
         size: UpkaModSize,
-        modulus: &DmaBuf,
-        mont_result: &mut DmaBuf,
+        modulus: &HsmDmaBuf,
+        mont_result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let n = size.operand_len();
         Self::ensure_cmd_input(modulus.len() >= n && mont_result.len() >= n)?;
@@ -752,8 +793,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn rsa_mont_repr_in(
         &mut self,
         size: UpkaModSize,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let n = size.operand_len();
         Self::ensure_cmd_input(result.len() >= n + 4 && arg1.len() >= n)?;
@@ -772,8 +813,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn rsa_mont_repr_out(
         &mut self,
         size: UpkaModSize,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let n = size.operand_len();
         Self::ensure_cmd_input(result.len() >= n && arg1.len() >= n + 4)?;
@@ -793,8 +834,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn rsa_mod_inverse(
         &mut self,
         size: UpkaModSize,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let m = size.operand_len() + 4;
         Self::ensure_cmd_input(result.len() >= m && arg1.len() >= m)?;
@@ -814,9 +855,9 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaEngine<'_, DEPTH, ENGINES> {
     pub async fn rsa_mod_mul(
         &mut self,
         size: UpkaModSize,
-        result: &mut DmaBuf,
-        arg1: &DmaBuf,
-        arg2: &DmaBuf,
+        result: &mut HsmDmaBuf,
+        arg1: &HsmDmaBuf,
+        arg2: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let m = size.operand_len() + 4;
         Self::ensure_cmd_input(result.len() >= m && arg1.len() >= m && arg2.len() >= m)?;

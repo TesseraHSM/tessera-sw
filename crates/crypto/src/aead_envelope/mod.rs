@@ -4,10 +4,11 @@
 //! Host-side AEAD envelopes — bit-identical wire format to the fw
 //! [`aead-envelope`] crate, slice-based API.
 //!
-//! # Scope (v1)
+//! # Algorithm
 //!
-//! AES-256-GCM only. The wire format reserves an `alg` byte so
-//! future algorithms can be added without a format break.
+//! AES-256-GCM (`0x03`, [`AeadAlg::AesGcm256`]) uses a 16-byte IV
+//! slot and 32-byte AAD granularity. Masked-key callers additionally
+//! zero-pad their plaintext to a multiple of 16 bytes.
 //!
 //! # Wire format
 //!
@@ -15,22 +16,22 @@
 //! ┌────────┬─────┬─────┬─────────────┬─────┬─────────────────┬─────────┬─────┐
 //! │ "AEAD" │ alg │ rsv │ aad_len_be  │ IV  │       AAD       │  DATA   │ TAG │
 //! └────────┴─────┴─────┴─────────────┴─────┴─────────────────┴─────────┴─────┘
-//!    4B     1B    1B       2B         12B   0 or 32·k bytes  pt_len    16B
+//!    4B     1B    1B       2B        iv_len    aad_len       pt_len    16B
 //! ```
 //!
 //! | Field        | Size       | Notes                                                |
 //! |--------------|------------|------------------------------------------------------|
 //! | `magic`      | 4 B        | [`FORMAT_TAG`] (`b"AEAD"`) — format + version 1.     |
-//! | `alg`        | 1 B        | [`AeadAlg`] discriminant (`0x03` = AES-256-GCM).     |
+//! | `alg`        | 1 B        | [`AeadAlg`] discriminant (`0x03`).                  |
 //! | `rsv`        | 1 B        | Reserved; MUST be `0`. Future versions may use.      |
-//! | `aad_len_be` | 2 B        | u16 big-endian. Must be `0` or a multiple of `32`.   |
-//! | `iv`         | 12 B       | 96-bit GCM nonce.                                    |
+//! | `aad_len_be` | 2 B        | u16 big-endian; `0` or a multiple of `32`.          |
+//! | `iv`         | 16 B       | First 12 bytes are the 96-bit GCM nonce.            |
 //! | `aad`        | `aad_len`  | Application-supplied associated data.                |
 //! | `data`       | `pt_len`   | Ciphertext after [`seal`], plaintext after [`open`]. |
 //! | `tag`        | 16 B       | Standard NIST GCM tag.                               |
 //!
-//! Total framing overhead for AES-256-GCM: **36 bytes**
-//! (`HEADER_LEN` + IV + TAG = 8 + 12 + 16).
+//! Framing overhead is **40 bytes**. Sealing stores suffix `00 00 00 01`; opening ignores
+//! that suffix rather than authenticating it or using it as nonce bytes.
 //!
 //! # AAD-length invariant
 //!

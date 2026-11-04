@@ -39,7 +39,7 @@ pub(crate) const CU: u8 = 1;
 pub(crate) const ENVELOPE_HEADER_LEN: usize = tsra_crypto::aead_envelope::HEADER_LEN;
 
 /// Length in bytes of the masked-key envelope IV.
-pub(crate) const ENVELOPE_IV_LEN: usize = 12;
+pub(crate) const ENVELOPE_IV_LEN: usize = 16;
 
 /// Length in bytes of the masked-key envelope AAD.
 pub(crate) const ENVELOPE_AAD_LEN: usize = 192;

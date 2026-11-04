@@ -27,8 +27,8 @@ use tsra_fw_ddi_mbor::MborDecode;
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor_derive::Ddi;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -76,7 +76,7 @@ pub(super) fn dispatch<'p>(
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_len: usize,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let request = DdiGetPrivKeyReq::mbor_decode(decoder).map_err(|_| HsmError::DdiDecodeFailed)?;
 

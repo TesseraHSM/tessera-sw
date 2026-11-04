@@ -33,7 +33,8 @@ use tsra_fw_hsm_key_decode::decode;
 use tsra_fw_hsm_key_decode::KeyClass as DecodeKeyClass;
 use tsra_fw_hsm_key_unwrap::unwrap_key;
 use tsra_fw_hsm_key_unwrap::UnwrapParams;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -70,6 +71,7 @@ fn decode_class(class: KeyClass) -> HsmResult<DecodeKeyClass> {
         KeyClass::HmacSha256 => Ok(DecodeKeyClass::HmacSha256),
         KeyClass::HmacSha384 => Ok(DecodeKeyClass::HmacSha384),
         KeyClass::HmacSha512 => Ok(DecodeKeyClass::HmacSha512),
+        KeyClass::AesXts512 => Ok(DecodeKeyClass::AesXts512),
         _ => Err(HsmError::UnsupportedCmd),
     }
 }
@@ -81,7 +83,7 @@ fn decode_class(class: KeyClass) -> HsmResult<DecodeKeyClass> {
 /// Mirrors the MBOR `key_attrs::for_*` policy: `sign`+`verify` and
 /// `encrypt`+`decrypt` are matched pairs, exactly one usage group may be
 /// set, and each key class restricts which group(s) are valid:
-/// - AES → `encrypt`+`decrypt` only;
+/// - AES / AES-XTS → `encrypt`+`decrypt` only;
 /// - RSA → `sign`+`verify` or `encrypt`+`decrypt`;
 /// - ECC → `sign`+`verify` or `derive`;
 /// - HMAC → `sign`+`verify`.
@@ -114,7 +116,9 @@ fn attrs_for_class(
     let base = HsmVaultKeyAttrs::new().with_scope(scope);
     let attrs = match class {
         // Symmetric cipher key: encrypt / decrypt only.
-        KeyClass::Aes if encrypt_decrypt => base.with_encrypt(true).with_decrypt(true),
+        KeyClass::Aes | KeyClass::AesXts512 if encrypt_decrypt => {
+            base.with_encrypt(true).with_decrypt(true)
+        }
         // RSA private key: sign / verify or encrypt / decrypt.
         KeyClass::Rsa | KeyClass::RsaCrt if sign_verify => base.with_sign(true).with_verify(true),
         KeyClass::Rsa | KeyClass::RsaCrt if encrypt_decrypt => {
@@ -129,6 +133,7 @@ fn attrs_for_class(
         }
         // Any recognized class with a usage it does not permit.
         KeyClass::Aes
+        | KeyClass::AesXts512
         | KeyClass::Rsa
         | KeyClass::RsaCrt
         | KeyClass::Ecc
@@ -142,8 +147,9 @@ fn attrs_for_class(
 }
 
 /// Which wire public key (if any) an imported private key kind carries,
-/// and how to re-derive it from the vault-resident private key.
-enum PubDeriv {
+/// and how to re-derive it from the vault-resident private key.  Shared
+/// with [`super::get_public_key`] so both commands emit the same format.
+pub(super) enum PubDeriv {
     /// RSA — wire public key is `n_le ‖ e_le`, via `rsa_priv_pub_key`.
     Rsa,
     /// ECC — wire public key is `x ‖ y`, via `ecc_priv_pub_key`.
@@ -152,7 +158,7 @@ enum PubDeriv {
 
 /// Classify an imported vault key kind for public-key re-derivation.
 /// Symmetric kinds (AES / HMAC) carry no public key → `None`.
-fn pub_deriv(kind: HsmVaultKeyKind) -> Option<PubDeriv> {
+pub(super) fn pub_deriv(kind: HsmVaultKeyKind) -> Option<PubDeriv> {
     match kind {
         HsmVaultKeyKind::Rsa2kPrivate
         | HsmVaultKeyKind::Rsa3kPrivate
@@ -182,7 +188,7 @@ struct MaskCtx<'a> {
     /// Usage attributes recorded in the masked blob's metadata.
     attrs: HsmVaultKeyAttrs,
     /// Caller-supplied label recorded in the masked blob's metadata.
-    key_label: &'a DmaBuf,
+    key_label: &'a HsmDmaBuf,
 }
 
 /// Handle a TBOR `UnwrapKey` request.
@@ -204,109 +210,109 @@ struct MaskCtx<'a> {
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborUnwrapKeyReq::decode(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id()));
-    let scope = HsmKeyScope(req.scope().0);
-    validate_active_session(pal, io, sess_id)?;
+) -> HsmResult<usize> {
+    async {
+        let req = TborUnwrapKeyReq::decode(cmd_buf.request())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id()));
+        let scope = HsmKeyScope(req.scope().0);
+        validate_active_session(pal, io, sess_id)?;
 
-    let oaep_hash_algo = oaep_hsm_hash(req.oaep_hash_algo())?;
-    let class = req.key_class();
-    let dclass = decode_class(class)?;
-    let wrapped_blob = req.wrapped_blob();
-    let key_label = pal.dma_alloc(io, req.key_label().len())?;
-    key_label.copy_from_slice(req.key_label());
+        let oaep_hash_algo = oaep_hsm_hash(req.oaep_hash_algo())?;
+        let class = req.key_class();
+        let dclass = decode_class(class)?;
+        let wrapped_blob = req.wrapped_blob();
+        let key_label = pal.dma_alloc(io, req.key_label().len())?;
+        key_label.copy_from_slice(req.key_label());
 
-    // Resolve the partition's RSA-2048 unwrapping key id; an absent id means
-    // generation is still pending, surfaced so the host retries (call
-    // `GetUnwrappingKey` first).
-    let unwrap_key_id = match part_state::part_unwrapping_key_id(pal, io) {
-        Ok(id) => id,
-        Err(HsmError::PartPropNotFound) => return Err(HsmError::PendingKeyGeneration),
-        Err(e) => return Err(e),
-    };
+        // Resolve the partition's RSA-2048 unwrapping key id; an absent id means
+        // generation is still pending, surfaced so the host retries (call
+        // `GetUnwrappingKey` first).
+        let unwrap_key_id = match part_state::part_unwrapping_key_id(pal, io) {
+            Ok(id) => id,
+            Err(HsmError::PartPropNotFound) => return Err(HsmError::PendingKeyGeneration),
+            Err(e) => return Err(e),
+        };
 
-    // Platform identity bound into the masked blob (anti-rollback on
-    // re-import).
-    let svn = part_state::part_mfgr_svn(pal);
-    let owner = u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
-    let attrs = attrs_for_class(class, scope, req.key_usage())?;
+        // Platform identity bound into the masked blob (anti-rollback on
+        // re-import).
+        let svn = part_state::part_mfgr_svn(pal);
+        let owner =
+            u16::try_from(part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
+        let attrs = attrs_for_class(class, scope, req.key_usage())?;
 
-    // Phase 1 — unwrap, decode, and vault the recovered key inside an
-    // allocation scope.  The (multi-KB, for RSA) unwrap / decode scratch is
-    // freed when the scope exits; the key survives in vault storage (outside
-    // the per-IO DMA arena) and is read back below.
-    let key_id = pal
-        .alloc_scoped_async(io, async |_scope| -> HsmResult<HsmKeyId> {
-            let material = unwrap_key(
-                pal,
-                io,
-                UnwrapParams {
-                    unwrap_key_id,
-                    oaep_hash: oaep_hash_algo,
-                    wrapped_blob,
-                },
-            )
+        // Phase 1 — unwrap, decode, and vault the recovered key inside an
+        // allocation scope.  The (multi-KB, for RSA) unwrap / decode scratch is
+        // freed when the scope exits; the key survives in vault storage (outside
+        // the per-IO DMA arena) and is read back below.
+        let key_id = pal
+            .alloc_scoped_async(io, async |_scope| -> HsmResult<HsmKeyId> {
+                let material = unwrap_key(
+                    pal,
+                    io,
+                    UnwrapParams {
+                        unwrap_key_id,
+                        oaep_hash: oaep_hash_algo,
+                        wrapped_blob,
+                    },
+                )
+                .await?;
+                // Decode and import into the transient vault.
+                let created = async {
+                    let decoded = decode(pal, io, &mut *material, dclass).await?;
+                    // Transient, partition-scoped (`None` session): deleted below.
+                    pal.vault_key_create(io, decoded.material, decoded.kind, None, attrs)
+                        .await
+                }
+                .await;
+                created
+            })
             .await?;
-            // Decode + import into the transient vault inside a nested block
-            // so the `decoded` borrow of `material` ends before the wipe;
-            // then scrub the recovered plaintext from the DMA arena on every
-            // path — scope exit only resets the bump watermark, it does not
-            // wipe freed memory.
-            let created = async {
-                let decoded = decode(pal, io, &mut *material, dclass).await?;
-                // Transient, partition-scoped (`None` session): deleted below.
-                pal.vault_key_create(io, decoded.material, decoded.kind, None, attrs)
-                    .await
-            }
-            .await;
-            material.zeroize();
-            created
-        })
-        .await?;
 
-    // Register the transient key so a failure before the explicit delete
-    // still cleans it up (undo walk → delete).  If the log is full the key
-    // is already vaulted but unregistered, so delete it here rather than
-    // leaking a persisted key holding sensitive material.
-    if let Err(e) = undo.push_vault_create(key_id) {
-        let _ = pal.vault_key_delete(io, key_id).await;
-        return Err(e);
-    }
-
-    // Phase 2 — mask the vault-resident key into the response, then delete
-    // the transient key.  On any error the key is left for the undo walk to
-    // delete; on success we delete it here and discard the log.
-    let mask_ctx = MaskCtx {
-        scope,
-        sess_id,
-        svn,
-        owner,
-        attrs,
-        key_label,
-    };
-    match encode_and_mask(pal, io, key_id, &mask_ctx).await {
-        Ok(resp) => {
-            pal.vault_key_delete(io, key_id).await?;
-            undo.discard();
-            Ok(resp)
+        // Register the transient key so a failure before the explicit delete
+        // still cleans it up (undo walk → delete).  If the log is full the key
+        // is already vaulted but unregistered, so delete it here rather than
+        // leaking a persisted key holding sensitive material.
+        if let Err(e) = undo.push_vault_create(key_id) {
+            let _ = pal.vault_key_delete(io, key_id).await;
+            return Err(e);
         }
-        Err(e) => Err(e),
+
+        // Phase 2 — mask the vault-resident key into the response, then delete
+        // the transient key.  On any error the key is left for the undo walk to
+        // delete; on success we delete it here and discard the log.
+        let mask_ctx = MaskCtx {
+            scope,
+            sess_id,
+            svn,
+            owner,
+            attrs,
+            key_label,
+        };
+        match encode_and_mask(pal, io, key_id, &mask_ctx, cmd_buf).await {
+            Ok(resp) => {
+                pal.vault_key_delete(io, key_id).await?;
+                undo.discard();
+                Ok(resp)
+            }
+            Err(e) => Err(e),
+        }
     }
+    .await
 }
 
 /// Build the `UnwrapKey` response around the vault-resident recovered key:
 /// reserve the `masked_key` and `pub_key` slots, derive the wire public key
 /// (RSA / ECC) straight into its slot, and mask the private key straight
 /// into its slot — no scratch buffers, no copies.
-async fn encode_and_mask<'p, P: HsmPal>(
-    pal: &'p P,
+async fn encode_and_mask<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
     key_id: HsmKeyId,
     ctx: &MaskCtx<'_>,
-) -> HsmResult<&'p DmaBuf> {
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
     let kind = pal.vault_key_kind(io, key_id)?;
     let priv_blob = pal.vault_key(io, key_id)?;
 
@@ -327,20 +333,21 @@ async fn encode_and_mask<'p, P: HsmPal>(
     }
 
     // Build the response with both data slots reserved (sized exactly).
-    let resp = pal.dma_alloc_var(io, |buf| {
-        let frame = TborUnwrapKeyResp::encode(buf, 0, false)?
+    let len = cmd_buf.encode_response(|buf| {
+        Ok(TborUnwrapKeyResp::encode(buf, 0, false)?
             .key_kind(kind.0)?
             .masked_key_reserve(masked_len)?
             .pub_key_reserve(pub_len)?
-            .finish();
-        Ok(frame.as_bytes().len())
+            .finish()
+            .as_bytes()
+            .len())
     })?;
 
     // Fill both slots in place: derive the public key into its slot, then
     // mask the private key into its slot (mask's IV / AAD / label scratch is
     // scoped and freed on return).
     {
-        let out = TborUnwrapKeyResp::decode_mut(resp)?;
+        let out = TborUnwrapKeyResp::decode_mut(&mut cmd_buf.buffer_mut()[..len])?;
         let actual_pub_len = match deriv {
             Some(PubDeriv::Rsa) => pal.rsa_priv_pub_key(io, priv_blob, Some(out.pub_key))?,
             Some(PubDeriv::Ecc) => {
@@ -383,5 +390,5 @@ async fn encode_and_mask<'p, P: HsmPal>(
         .await?;
     }
 
-    Ok(resp)
+    Ok(len)
 }

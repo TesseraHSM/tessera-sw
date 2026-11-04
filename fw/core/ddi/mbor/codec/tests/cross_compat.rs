@@ -14,14 +14,14 @@ use std::vec;
 use tsra_ddi_mbor_codec as old;
 // New crate (this crate)
 use tsra_fw_ddi_mbor as new;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
-/// Test helper: brand a `&[u8]` as `&DmaBuf`. Safe in tests — no real DMA hw.
-fn dma(buf: &mut [u8]) -> &mut DmaBuf {
+/// Test helper: brand a `&[u8]` as `&HsmDmaBuf`. Safe in tests — no real DMA hw.
+fn dma(buf: &mut [u8]) -> &mut HsmDmaBuf {
     // SAFETY: In tests, no real DMA hardware is involved. The
-    // `DmaBuf::from_raw_mut` transmute is safe because the data is
+    // `HsmDmaBuf::from_raw_mut` transmute is safe because the data is
     // only read/written by the decoder, not submitted to a DMA engine.
-    unsafe { DmaBuf::from_raw_mut(buf) }
+    unsafe { HsmDmaBuf::from_raw_mut(buf) }
 }
 
 /// Helper to create an old MborEncoder, supplying the extra `pre_encode` flag

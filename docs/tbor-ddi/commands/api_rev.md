@@ -34,7 +34,7 @@ Wire layout: 8-byte header, followed by the TOC entries, then the
 
 _Empty — both fields are carried inline within their TOC entries._
 
-The shipping firmware currently returns `min = max = 1`.
+The firmware currently returns `min = max = 1`, matching the version-1 framing.
 
 ## Errors
 

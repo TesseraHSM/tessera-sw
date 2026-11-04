@@ -21,7 +21,7 @@
 //! Output:
 //!
 //! * `masked_tmk` — the freshly minted TMK, masked (AEAD-GCM-256) under
-//!   the partition SDMK, as a fixed [`MASKED_TMK_LEN`] (260 B) envelope.
+//!   the partition SDMK, as a fixed [`MASKED_TMK_LEN`] (264 B) envelope.
 //!   Nothing is persisted on-device.
 
 use tsra_fw_ddi_tbor_api::tbor;
@@ -32,15 +32,15 @@ pub use crate::darc_tmk_import::MASKED_TMK_LEN;
 pub const TBOR_OP_DARC_TMK_GEN: u8 = 0x23;
 
 // `masked_tmk` is a masked TMK envelope; the derive needs an integer
-// literal on the field, so the length is spelled out as `260` and pinned
+// literal on the field, so the length is spelled out as `264` and pinned
 // against the canonical `MASKED_TMK_LEN` here.
-const _: () = assert!(MASKED_TMK_LEN == 260);
+const _: () = assert!(MASKED_TMK_LEN == 264);
 
 /// `DarcTmkGen` request schema.
 ///
 /// Originates a fresh DARC Transfer Masking Key under the active
 /// session's partition; the TMK is always security-domain-scoped.
-#[tbor(opcode = 0x23)]
+#[tbor(opcode = 0x23, pair = TborDarcTmkGenResp)]
 pub struct TborDarcTmkGenReq {
     /// CO session id this request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); the dispatcher
@@ -52,11 +52,11 @@ pub struct TborDarcTmkGenReq {
 /// `DarcTmkGen` response schema.
 ///
 /// Carries the freshly minted TMK masked under the partition SDMK.
-#[tbor(response)]
+#[tbor(response, pair = TborDarcTmkGenReq)]
 pub struct TborDarcTmkGenResp<'a> {
     /// The minted TMK, masked (AEAD-GCM-256) under the partition SDMK.
-    /// Always exactly [`MASKED_TMK_LEN`] (260 B).
-    #[tbor(buffer, len = 260)]
+    /// Always exactly [`MASKED_TMK_LEN`] (264 B).
+    #[tbor(buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 }
 
@@ -97,7 +97,7 @@ mod tests {
     fn masked_tmk_len_matches_pinned_value() {
         // The `#[tbor(buffer, len = N)]` attribute must remain a numeric
         // literal; pin it against the exported const.
-        const _: () = assert!(260 == MASKED_TMK_LEN);
-        assert_eq!(MASKED_TMK_LEN, 260);
+        const _: () = assert!(264 == MASKED_TMK_LEN);
+        assert_eq!(MASKED_TMK_LEN, 264);
     }
 }

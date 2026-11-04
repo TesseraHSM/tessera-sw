@@ -123,7 +123,6 @@ fn compare_key_properties(original: &HsmAesKey, unmasked: &HsmAesKey) {
     );
 }
 
-#[cfg(not(feature = "emu"))]
 fn compare_xts_key_properties(original: &HsmAesXtsKey, unmasked: &HsmAesXtsKey) {
     assert_eq!(original.class(), unmasked.class(), "Key class mismatch");
     assert_eq!(original.kind(), unmasked.kind(), "Key kind mismatch");
@@ -246,7 +245,6 @@ use crate::utils::aes_xts::build_xts_wrapped_blob;
 
 // Validate the unwrapped key is usable for AES-XTS encryption/decryption.
 
-#[cfg(not(feature = "emu"))]
 fn tweak_after_units(tweak: &[u8; 16], units: usize) -> [u8; 16] {
     u128::from_le_bytes(*tweak)
         .checked_add(units as u128)
@@ -342,30 +340,18 @@ fn test_aes_256_key_unwrap(session: HsmSession) {
 
 /// Test AES key unmasking for key sizes of 128
 #[session_test]
-#[cfg_attr(
-    feature = "session-ex-tests",
-    should_panic(expected = "Failed to unmask AES key: UnsupportedKeyOperation")
-)]
 fn test_aes_128_key_unmask(session: HsmSession) {
     test_aes_key_unmask_common(&session, 128);
 }
 
 /// Test AES key unmasking for key sizes of 192
 #[session_test]
-#[cfg_attr(
-    feature = "session-ex-tests",
-    should_panic(expected = "Failed to unmask AES key: UnsupportedKeyOperation")
-)]
 fn test_aes_192_key_unmask(session: HsmSession) {
     test_aes_key_unmask_common(&session, 192);
 }
 
 /// Test AES key unmasking for key sizes of 256
 #[session_test]
-#[cfg_attr(
-    feature = "session-ex-tests",
-    should_panic(expected = "Failed to unmask AES key: UnsupportedKeyOperation")
-)]
 fn test_aes_256_key_unmask(session: HsmSession) {
     test_aes_key_unmask_common(&session, 256);
 }
@@ -429,6 +415,79 @@ fn test_aes_unmask_corrupted_blob_fails(session: HsmSession) {
     HsmKeyManager::delete_key(key).unwrap();
 }
 
+#[cfg(feature = "session-ex-tests")]
+#[session_test]
+fn test_aes_unmask_rejects_modified_tag(session: HsmSession) {
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(256)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .scope(HsmKeyScope::Session)
+        .build()
+        .expect("AES session key properties");
+    let original = HsmKeyManager::generate_key(&session, &mut HsmAesKeyGenAlgo::default(), props)
+        .expect("generate AES session key");
+    let plaintext = [0x11; 32];
+    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
+    HsmEncrypter::encrypt_vec(&mut cipher, &original, &plaintext)
+        .expect("original masked key is usable");
+
+    let mut masked = original.masked_key_vec().expect("masked key");
+    *masked.last_mut().expect("AEAD tag") ^= 1;
+    let result = HsmKeyManager::unmask_key(&session, &mut HsmAesKeyUnmaskAlgo::default(), &masked);
+    assert!(
+        matches!(result, Err(HsmError::MaskedKeyAuthenticationFailed)),
+        "unmask must reject the modified authentication tag"
+    );
+}
+
+#[cfg(feature = "session-ex-tests")]
+#[test]
+fn test_aes_unmask_rejects_key_from_another_session() {
+    let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();
+    let (partition, rev, session) = crate::utils::sd_provision::finalized_co_partition();
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(256)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .scope(HsmKeyScope::Session)
+        .build()
+        .expect("AES session key properties");
+    let original =
+        HsmKeyManager::generate_key(&session, &mut HsmAesKeyGenAlgo::default(), props.clone())
+            .expect("generate AES session key");
+    let masked = original.masked_key_vec().expect("masked key");
+
+    let other_partition = HsmPartitionManager::open_partition(&partition.path(), rev)
+        .expect("open another device handle for the same partition");
+    let other = other_partition
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::new(HsmPskId::CU),
+            HsmSessionExType::PlainText,
+        )
+        .expect("open a different session");
+    other
+        .change_psk(&[0x5A; PSK_LEN])
+        .expect("rotate the target session's default CU PSK");
+    let target_key = HsmKeyManager::generate_key(&other, &mut HsmAesKeyGenAlgo::default(), props)
+        .expect("generate a key in the target session");
+    let plaintext = [0x11; 32];
+    let mut cipher = HsmAesCbcAlgo::with_no_padding(test_iv(16)).expect("CBC algorithm");
+    HsmEncrypter::encrypt_vec(&mut cipher, &target_key, &plaintext)
+        .expect("the target session can use its own key");
+
+    let result = HsmKeyManager::unmask_key(&other, &mut HsmAesKeyUnmaskAlgo::default(), &masked);
+    assert!(
+        matches!(result, Err(HsmError::MaskedKeyAuthenticationFailed)),
+        "unmask must reject a key masked for another session"
+    );
+}
+
 /// verifies AES key unwrap fails when unwrapping with wrong algorithm type
 #[session_test]
 fn test_aes_unwrap_wrong_algo_fails(session: HsmSession) {
@@ -461,12 +520,6 @@ fn test_aes_unwrap_wrong_algo_fails(session: HsmSession) {
 /// and that the unmasked key is independent of the original key by deleting the
 /// original key before using the unmasked key
 #[session_test]
-#[cfg_attr(
-    feature = "session-ex-tests",
-    should_panic(
-        expected = "called `Result::unwrap()` on an `Err` value: UnsupportedKeyOperation"
-    )
-)]
 fn test_aes_unmasked_key_independent_handle(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -858,7 +911,7 @@ fn test_aes_unmask_wrong_kind_fails(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Aes)
-        .bits(256)
+        .bits(128)
         .can_encrypt(true)
         .can_decrypt(true)
         .is_session(true)
@@ -1061,7 +1114,6 @@ fn test_aes_unwrapped_key_roundtrip(session: HsmSession) {
 // AES XTS Tests
 // ================================
 /// verifies AES-XTS 512-bit key generation succeeds with correct properties and capabilities
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_xts_512_key_generation(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
@@ -1108,7 +1160,6 @@ fn test_aes_xts_key_generation_invalid_sizes_rejected(session: HsmSession) {
 }
 
 /// Test AES-XTS key unwrapping, and validate the unwrapped key can be used for encryption and decryption with correct tweak handling. Also validates that the unwrapped key has expected properties and capabilities, and is not local to the session.
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_xts_key_unwrap(session: HsmSession) {
     let (unwrapping_priv_key, unwrapping_pub_key) = get_rsa_unwrapping_key_pair(&session);
@@ -1227,12 +1278,7 @@ fn test_aes_xts_key_unwrap(session: HsmSession) {
 /// Test AES-XTS key unmasking, and validate the unmasked key can be used for encryption
 /// and decryption with correct tweak handling. Also validates that the unmasked key has
 ///  expected properties and capabilities, and is not local to the session.
-#[cfg(not(feature = "emu"))]
 #[session_test]
-#[cfg_attr(
-    feature = "session-ex-tests",
-    should_panic(expected = "Failed to unmask AES-XTS key: UnsupportedKeyOperation")
-)]
 fn test_aes_xts_key_unmask(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -1373,7 +1419,6 @@ fn test_aes_xts_key_gen_no_decrypt_flag_fails(session: HsmSession) {
 }
 
 /// verifies AES-XTS key unmasking fails when unmasking with corrupted masked blob
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_xts_unmask_corrupted_blob_fails(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
@@ -1428,7 +1473,6 @@ fn test_aes_xts_key_gen_no_encrypt_flag_fails(session: HsmSession) {
 }
 
 /// verifies AES key unmask fails when using the wrong unmask algorithm
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_xts_unmask_wrong_kind_fails(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
@@ -1515,7 +1559,6 @@ fn test_aes_xts_unwrap_truncated_blob_fails(session: HsmSession) {
 
 /// Test AES-GCM key generation, and validate the generated key has expected properties
 /// and capabilities. Unsupported generation must remain a test failure.
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_256_key_generation(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
@@ -1544,12 +1587,7 @@ fn test_aes_gcm_256_key_generation(session: HsmSession) {
 
 /// Test AES-GCM key unmasking for a 256-bit key, and validate the unmasked key has expected
 /// properties and capabilities, and matches the original key's properties.
-#[cfg(not(feature = "emu"))]
 #[session_test]
-#[cfg_attr(
-    feature = "session-ex-tests",
-    should_panic(expected = "Failed to unmask AES-GCM key: UnsupportedKeyOperation")
-)]
 fn test_aes_gcm_256_key_unmask(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -1582,7 +1620,6 @@ fn test_aes_gcm_256_key_unmask(session: HsmSession) {
 }
 
 /// verifies AES-GCM key can be unwrapped using RSA-AES wrapping
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_256_key_unwrap(session: HsmSession) {
     let (priv_key, pub_key) = get_rsa_unwrapping_key_pair(&session);
@@ -1649,7 +1686,6 @@ fn test_aes_gcm_256_key_unwrap_corrupted_fails(session: HsmSession) {
 }
 
 /// verifies AES-GCM encryption and decryption roundtrip using an unwrapped key
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_unwrapped_key_roundtrip(session: HsmSession) {
     const IV_SIZE: usize = 12;
@@ -1722,7 +1758,6 @@ fn test_aes_gcm_unwrapped_key_roundtrip(session: HsmSession) {
 }
 
 /// verifies AES-GCM key unmask fails when unmasking with wrong algorithm type
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_unmask_wrong_kind_fails(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
@@ -1740,7 +1775,7 @@ fn test_aes_gcm_unmask_wrong_kind_fails(session: HsmSession) {
 
     let masked = key.masked_key_vec().unwrap();
 
-    let mut wrong_unmask_algo = HsmAesKeyUnmaskAlgo::default();
+    let mut wrong_unmask_algo = HsmAesXtsKeyUnmaskAlgo::default();
 
     let result = HsmKeyManager::unmask_key(&session, &mut wrong_unmask_algo, &masked);
 
@@ -1820,7 +1855,6 @@ fn test_aes_gcm_key_gen_no_decrypt_flag_fails(session: HsmSession) {
 
 /// verifies AES-GCM key generation with non-session persistence creates a non-session key
 /// and succeeds with correct properties and capabilities
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_key_gen_persistent(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
@@ -1872,7 +1906,6 @@ fn test_aes_gcm_unwrap_wrong_algo_fails(session: HsmSession) {
 }
 
 /// verifies AES-GCM decryption fails when decrypting with wrong tag
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_wrong_tag_fails(session: HsmSession) {
     const IV_SIZE: usize = 12;
@@ -1949,7 +1982,6 @@ fn test_aes_gcm_unwrap_bits_mismatch_fails(session: HsmSession) {
 }
 
 /// verifies AES-GCM decryption fails when decrypting with wrong key
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_wrong_key_fails(session: HsmSession) {
     const IV_SIZE: usize = 12;
@@ -1995,7 +2027,6 @@ fn test_aes_gcm_wrong_key_fails(session: HsmSession) {
 }
 
 /// verifies AES-GCM key unmasking fails when unmasking with corrupted masked blob
-#[cfg(not(feature = "emu"))]
 #[session_test]
 fn test_aes_gcm_unmask_corrupted_blob_fails(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()

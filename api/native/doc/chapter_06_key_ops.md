@@ -124,9 +124,57 @@ tsra_status tsra_key_unwrap(
  | [in] key_props      | [const tsra_key_prop_list*](#tsra_key_prop_list)     | key properties               |
  | [out] key_handle    | [tsra_handle *](#tsra_handle)                        | key handle for unwrapped key |
 
+**AES-XTS wrapped key format**
+
+For `TSRA_KEY_KIND_AES_XTS` (512 bits) the `wrapped_key` format depends on the
+session type:
+
+- Sessions opened with `tsra_sess_open`: a key-pair blob
+  `header || wrap(K1) || wrap(K2)`, where each half is an RSA-AES-wrapped
+  AES-256 key.
+- Sessions opened with `tsra_sess_ex_open`: a single RSA-AES wrap of the
+  64-byte key `K1 || K2` (PKCS#11 `CKK_AES_XTS`). `K1` and `K2` must differ.
+
 **Returns**
 
 `TSRA_STATUS_SUCCESS` on success, error code otherwise
+
+## tsra_key_unmask
+
+Reconstruct a symmetric or shared-secret key from its masked blob.
+
+```cpp
+tsra_status tsra_key_unmask(
+    tsra_handle sess_handle,
+    tsra_key_kind key_kind,
+    const tsra_buffer *masked_key,
+    tsra_handle *key_handle
+    );
+```
+
+**Parameters**
+
+ | Parameter        | Name                                | Description                       |
+ | ---------------- | ----------------------------------- | --------------------------------- |
+ | [in] sess_handle | [tsra_handle](#tsra_handle)          | session handle                    |
+ | [in] key_kind    | tsra_key_kind                       | supported symmetric/secret kind   |
+ | [in] masked_key  | [const tsra_buffer *](#tsra_buffer) | masked key blob                   |
+ | [out] key_handle | [tsra_handle *](#tsra_handle)       | handle for the reconstructed key  |
+
+**Authentication**
+
+- A legacy session authenticates and imports the key into the device.
+- An extended session authenticates the blob on the device with TBOR
+  `VerifyKey` (AEAD tag over the metadata and key material, and the session
+  binding of session-scoped blobs), then returns an unpinned host handle. No
+  device-resident key is created.
+- A blob with a modified tag, metadata, or key material, or a session-scoped
+  blob supplied to another session, fails with
+  `TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED`.
+
+**Returns**
+
+`TSRA_STATUS_SUCCESS` on successful reconstruction, error code otherwise.
 
 ## tsra_key_unmask_pair
 
@@ -156,6 +204,8 @@ tsra_status tsra_key_unmask_pair(
 
 - `priv_key_handle` and `pub_key_handle` must point to distinct output addresses.
 - Passing the same pointer for both outputs returns `TSRA_STATUS_INVALID_ARGUMENT`.
+- On an extended session the device authenticates the masked key and
+  returns its public key; no device-resident key is created.
 
 **Returns**
 

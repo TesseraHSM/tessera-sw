@@ -170,6 +170,40 @@ pub enum FieldShape {
     TypedFixed(Box<Type>),
     /// `Option<Vec<u8>>`.
     OptVarBuf,
+    /// `Option<u8>` / `Option<u16>` / `Option<u32>` / `Option<u64>`: the
+    /// inline primitive when present, a `none` entry when absent.
+    OptUint(Uint),
+}
+
+/// Width of an optional inline unsigned integer ([`FieldShape::OptUint`]).
+#[derive(Clone, Copy)]
+pub enum Uint {
+    U8,
+    U16,
+    U32,
+    U64,
+}
+
+impl Uint {
+    /// The codec encoder method for this width (e.g. `uint16`).
+    pub fn encoder_method(self) -> &'static str {
+        match self {
+            Uint::U8 => "uint8",
+            Uint::U16 => "uint16",
+            Uint::U32 => "uint32",
+            Uint::U64 => "uint64",
+        }
+    }
+
+    /// The `TocEntry` variant for this width (e.g. `Uint16`).
+    pub fn toc_variant(self) -> &'static str {
+        match self {
+            Uint::U8 => "Uint8",
+            Uint::U16 => "Uint16",
+            Uint::U32 => "Uint32",
+            Uint::U64 => "Uint64",
+        }
+    }
 }
 
 /// One field of the user struct, parsed.
@@ -203,7 +237,8 @@ fn resolve_shape(f: &Field, flags: &FieldFlags) -> syn::Result<FieldShape> {
         syn::Error::new(
             f.ty.span(),
             "#[tbor] field type must be one of: u8, u16, u32, u64, \
-             [u8; N], Vec<u8>, Vec<T>, Option<Vec<u8>>",
+             [u8; N], Vec<u8>, Vec<T>, Option<Vec<u8>>, Option<u8>, \
+             Option<u16>, Option<u32>, Option<u64>",
         )
     })?;
 
@@ -360,11 +395,14 @@ fn classify_type(ty: &Type) -> Option<FieldShape> {
                 Some(FieldShape::TypedVarBuf(Box::new(inner.clone())))
             }
         }
-        "Option" => {
-            let inner = single_generic_type(&last.arguments)?;
-            matches!(classify_type(inner), Some(FieldShape::VarBuf))
-                .then_some(FieldShape::OptVarBuf)
-        }
+        "Option" => match classify_type(single_generic_type(&last.arguments)?)? {
+            FieldShape::VarBuf => Some(FieldShape::OptVarBuf),
+            FieldShape::U8 => Some(FieldShape::OptUint(Uint::U8)),
+            FieldShape::U16 => Some(FieldShape::OptUint(Uint::U16)),
+            FieldShape::U32 => Some(FieldShape::OptUint(Uint::U32)),
+            FieldShape::U64 => Some(FieldShape::OptUint(Uint::U64)),
+            _ => None,
+        },
         // Any other no-generics path type (e.g. `PartPolicy`) is treated
         // as a fixed-size typed buffer: a `#[repr(C)]` zerocopy value
         // serialized as its raw little-endian byte image.

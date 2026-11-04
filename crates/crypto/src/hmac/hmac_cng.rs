@@ -35,7 +35,8 @@ use super::*;
 
 pub struct CngHmacAlgo {
     _hash: HashAlgo,
-    algo_handle: BCRYPT_ALG_HANDLE,
+    /// `None` for hashes HMAC does not support (SHA-3 and the SHAKE XOFs).
+    algo_handle: Option<BCRYPT_ALG_HANDLE>,
 }
 
 impl CngHmacAlgo {
@@ -46,15 +47,23 @@ impl CngHmacAlgo {
         }
     }
 
+    /// Returns the HMAC algorithm handle, or
+    /// `CryptoError::HashUnsupportedAlgorithm` for SHA-3 and the SHAKE XOFs.
+    fn checked_handle(&self) -> Result<BCRYPT_ALG_HANDLE, CryptoError> {
+        self.algo_handle
+            .ok_or(CryptoError::HashUnsupportedAlgorithm)
+    }
+
     #[allow(unsafe_code)]
     fn sig_len(&self) -> Result<usize, CryptoError> {
+        let handle = self.checked_handle()?;
         let mut hash_len = [0u8; std::mem::size_of::<u32>()];
         let mut result_len: u32 = hash_len.len() as u32;
 
         //SAFETY: Calling windows CNG API directly.
         let status = unsafe {
             BCryptGetProperty(
-                self.algo_handle,
+                handle.into(),
                 BCRYPT_HASH_LENGTH,
                 Some(&mut hash_len),
                 &mut result_len,
@@ -67,13 +76,13 @@ impl CngHmacAlgo {
         Ok(u32::from_le_bytes(hash_len) as usize)
     }
 
-    fn hmac_handle(hash: &HashAlgo) -> BCRYPT_ALG_HANDLE {
+    fn hmac_handle(hash: &HashAlgo) -> Option<BCRYPT_ALG_HANDLE> {
         match hash.handle() {
-            BCRYPT_SHA1_ALG_HANDLE => BCRYPT_HMAC_SHA1_ALG_HANDLE,
-            BCRYPT_SHA256_ALG_HANDLE => BCRYPT_HMAC_SHA256_ALG_HANDLE,
-            BCRYPT_SHA384_ALG_HANDLE => BCRYPT_HMAC_SHA384_ALG_HANDLE,
-            BCRYPT_SHA512_ALG_HANDLE => BCRYPT_HMAC_SHA512_ALG_HANDLE,
-            _ => panic!("Unsupported hash algorithm for HMAC"),
+            BCRYPT_SHA1_ALG_HANDLE => Some(BCRYPT_HMAC_SHA1_ALG_HANDLE),
+            BCRYPT_SHA256_ALG_HANDLE => Some(BCRYPT_HMAC_SHA256_ALG_HANDLE),
+            BCRYPT_SHA384_ALG_HANDLE => Some(BCRYPT_HMAC_SHA384_ALG_HANDLE),
+            BCRYPT_SHA512_ALG_HANDLE => Some(BCRYPT_HMAC_SHA512_ALG_HANDLE),
+            _ => None,
         }
     }
 }
@@ -93,13 +102,21 @@ impl SignOp for CngHmacAlgo {
             if signature.len() < sig_len {
                 return Err(CryptoError::HmacBufferTooSmall);
             }
+            let handle = self.checked_handle()?;
             // SAFETY: Calling Windows CNG BCryptHash for one-shot HMAC.
-            // - self.algo_handle is a valid BCRYPT_ALG_HANDLE for HMAC algorithm
+            // - handle is a valid BCRYPT_ALG_HANDLE for HMAC algorithm
             // - key.as_bytes() provides the HMAC key with valid lifetime
             // - data is the input message to authenticate
             // - signature buffer has been validated to have sufficient size (sig_len)
-            let status =
-                unsafe { BCryptHash(self.algo_handle, Some(key.as_bytes()), data, signature) };
+            //   and CNG requires the output length to equal the MAC length exactly
+            let status = unsafe {
+                BCryptHash(
+                    handle,
+                    Some(key.as_bytes()),
+                    data,
+                    &mut signature[..sig_len],
+                )
+            };
             status.ok().map_err(|_| CryptoError::HmacSignError)?;
         }
 
@@ -113,7 +130,7 @@ impl<'a> SignStreamingOp<'a> for CngHmacAlgo {
 
     fn sign_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
         Ok(CngHmacAlgoSignContext {
-            signer: CngHmacHandle::new(self.algo_handle, key.as_bytes())?,
+            signer: CngHmacHandle::new(self.checked_handle()?, key.as_bytes())?,
             algo: self,
         })
     }
@@ -189,7 +206,8 @@ impl<'a> SignStreamingOpContext<'a> for CngHmacAlgoSignContext {
                 return Err(CryptoError::HmacBufferTooSmall);
             }
             //SAFETY: Calling Windows CNG API directly.
-            let status = unsafe { BCryptFinishHash(self.signer.handle(), sig, 0) };
+            // CNG requires the output length to equal the MAC length exactly.
+            let status = unsafe { BCryptFinishHash(self.signer.handle(), &mut sig[..sig_len], 0) };
             status.ok().map_err(|_| CryptoError::HmacSignFinishError)?;
         }
         Ok(sig_len)
@@ -246,7 +264,7 @@ impl<'a> VerifyStreamingOp<'a> for CngHmacAlgo {
 
     fn verify_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
         Ok(CngHmacAlgoVerifyContext {
-            verifier: CngHmacHandle::new(self.algo_handle, key.as_bytes())?,
+            verifier: CngHmacHandle::new(self.checked_handle()?, key.as_bytes())?,
             algo: self,
             _key: key,
         })

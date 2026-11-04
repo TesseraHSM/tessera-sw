@@ -38,7 +38,7 @@ spec](../../../fw/core/ddi/tbor/docs/spec.md).
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 4 | `session_id` | `session_id` (inline) | Session whose `param_key` wraps `psk_envelope`. |
-| 8 | `psk_envelope` | `buffer` (fixed 100 B) | AEAD-GCM envelope (see below); points into the data section. Length is pinned to exactly 100 B (`PSK_CHANGE_ENVELOPE_LEN`); a wrong length is rejected at decode. |
+| 8 | `psk_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below); points into the data section. Length is pinned to exactly 104 B (`PSK_CHANGE_ENVELOPE_LEN`); a wrong length is rejected at decode. |
 
 ### Data section
 
@@ -71,11 +71,11 @@ Built by the host with [`aead_envelope::seal`](
   in the session role, so there is no slot-selection byte the AAD
   needs to pin.
 
-* **Envelope wire layout** (exact 100 bytes for a 32-byte PSK):
+* **Envelope wire layout** (exact 104 bytes for a 32-byte PSK):
 
   ```
   "AEAD"(4) | alg=0x03(1) | rsv=0(1) | aad_len_be=32(2)
-          | IV(12) | AAD(32) | psk_ct(32) | TAG(16)
+          | IV(16) | AAD(32) | psk_ct(32) | TAG(16)
   ```
 
 ## Response
@@ -87,7 +87,7 @@ Built by the host with [`aead_envelope::seal`](
 | Error | Cause |
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an Active slot in the calling partition (slot free, destroyed, or still Pending) |
-| `TborInvalidFixedLength` | `psk_envelope` is not exactly 100 B (rejected at decode before the handler runs) |
+| `TborInvalidFixedLength` | `psk_envelope` is not exactly 104 B (rejected at decode before the handler runs) |
 | `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length on the envelope ≠ 32 |
 | `AeadEnvelopeAuthFailed` | Envelope AEAD-GCM tag verification failed (wrong `param_key`, tampering, or AAD **contents** do not match the expected layout) |
 | `InvalidPermissions` | A `PskChange` has already succeeded on this session (one-rotation-per-session bound) |

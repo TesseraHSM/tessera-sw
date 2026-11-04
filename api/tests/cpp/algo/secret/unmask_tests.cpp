@@ -634,7 +634,13 @@ TEST_F(tsra_secret_unmask, unmask_rejects_corrupted_last_byte)
             unmasked_key.get_ptr()
         );
 
+        // The last byte is in the AEAD tag on ex sessions, so the device reports an
+        // authentication failure; legacy sessions report a decode failure.
+#if SESSION_EX_TESTS
+        ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED);
+#else
         ASSERT_EQ(err, TSRA_STATUS_MASKED_KEY_DECODE_FAILED);
+#endif
         ASSERT_EQ(unmasked_key.get(), 0u);
     });
 }

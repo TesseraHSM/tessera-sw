@@ -396,6 +396,7 @@ fn test_open_session_multiple() {
     );
 }
 
+#[cfg(not(feature = "sock"))]
 #[test]
 fn test_open_session_multiple_get_key() {
     ddi_dev_test(

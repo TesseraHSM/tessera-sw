@@ -305,7 +305,12 @@ impl SessionCtrl {
             | opcode::MLDSA_VERIFY
             | opcode::MLKEM_GENERATE_KEY
             | opcode::MLKEM_ENCAPSULATE
-            | opcode::MLKEM_DECAPSULATE => Self::InSession,
+            | opcode::MLKEM_DECAPSULATE
+            | opcode::AES_GCM_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_ENCRYPT_DECRYPT
+            | opcode::AES_XTS_GENERATE_KEY
+            | opcode::GET_PUBLIC_KEY
+            | opcode::VERIFY_KEY => Self::InSession,
             opcode::SESSION_CLOSE => Self::Close,
             _ => Self::NoSession,
         }
@@ -324,6 +329,9 @@ impl SessionCtrl {
 pub(crate) struct HsmOpStatus {
     /// Encoded response length in smem (written to CQE DW0 dst_len).
     pub(crate) resp_len: u16,
+
+    /// A valid transport response carried a failed DDI command; undo, not commit.
+    pub(crate) ddi_failed: bool,
 
     /// Pre-built CQE DW0 session bits (ctrl, id_valid, vault_valid, closed).
     /// `handle_io` merges this with `resp_len` via `with_dst_len()`.
@@ -352,6 +360,7 @@ impl HsmOpStatus {
             .with_app_vault_id(app_vault_id.unwrap_or(0));
         Self {
             resp_len: resp_len as u16,
+            ddi_failed: false,
             cqe_dw0_session: u32::from(dw0),
             cqe_dw1: u32::from(dw1),
         }
@@ -362,6 +371,7 @@ impl HsmOpStatus {
     pub(crate) fn no_session(resp_len: usize) -> Self {
         Self {
             resp_len: resp_len as u16,
+            ddi_failed: false,
             cqe_dw0_session: 0,
             cqe_dw1: 0,
         }

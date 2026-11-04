@@ -32,7 +32,7 @@
 
 #![no_std]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 
 /// Zero-copy decoders for request and response messages.
@@ -79,7 +79,7 @@ pub trait TborRequest {
     ///
     /// Returns `Err` if the buffer is malformed, the opcode doesn't match,
     /// or the TOC structure doesn't match the schema.
-    fn decode(buf: &DmaBuf) -> Result<Self::View<'_>, HsmError>;
+    fn decode(buf: &HsmDmaBuf) -> Result<Self::View<'_>, HsmError>;
 }
 
 /// Trait implemented by all `#[tbor(response)]` response types.
@@ -90,5 +90,5 @@ pub trait TborResponse {
     type View<'a>;
 
     /// Decode and validate a wire buffer into a typed view.
-    fn decode(buf: &DmaBuf) -> Result<Self::View<'_>, HsmError>;
+    fn decode(buf: &HsmDmaBuf) -> Result<Self::View<'_>, HsmError>;
 }

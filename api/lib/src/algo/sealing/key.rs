@@ -145,3 +145,42 @@ impl HsmKeyGenOp for HsmSealingKeyGenAlgo {
         ))
     }
 }
+
+/// Algorithm for unmasking a security-domain sealing key.
+///
+/// Only valid on a V2 (security-domain) session, where the key is
+/// rebuilt as an unpinned handle over the masked blob; no device-resident
+/// key is created.
+/// Reconstruction authenticates the blob on the device (TBOR `VerifyKey`),
+/// so a tampered or wrong-session blob is rejected at unmask time.
+#[derive(Default)]
+pub struct HsmSealingKeyUnmaskAlgo {}
+
+impl HsmKeyUnmaskOp for HsmSealingKeyUnmaskAlgo {
+    type Session = HsmSession;
+    type Key = HsmSealingKey;
+    type Error = HsmError;
+
+    /// Unmasks a sealing key from its masked-key blob.
+    ///
+    /// # Arguments
+    ///
+    /// * `session` - The V2 HSM session the key is used in.
+    /// * `masked_key` - The masked sealing key blob.
+    ///
+    /// # Returns
+    ///
+    /// Returns the unpinned sealing key on success.
+    fn unmask_key(
+        &mut self,
+        session: &HsmSession,
+        masked_key: &[u8],
+    ) -> Result<Self::Key, Self::Error> {
+        if !session.is_ex() {
+            return Err(HsmError::InvalidSession);
+        }
+        let (handle, props) = ddi::unmask_key(session, masked_key)?;
+        HsmSealingKey::validate_props(&props)?;
+        Ok(HsmSealingKey::new(session.clone(), props, handle))
+    }
+}

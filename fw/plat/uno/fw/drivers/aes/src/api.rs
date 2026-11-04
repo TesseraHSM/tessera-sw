@@ -10,7 +10,7 @@ use bitfield_struct::bitfield;
 use embassy_sync::waitqueue::WakerRegistration;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_single_cell::SingleCell;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_nvic::Nvic;
@@ -66,7 +66,7 @@ struct AesCmdCode {
     #[bits(7)]
     _rsvd2: u8,
 
-    /// Cipher mode (1=ECB, 2=CBC, 3=CTR).
+    /// Cipher mode (1=ECB, 2=CBC, 3=CTR, 4=CFB, 5=OFB).
     #[bits(4)]
     mode: u8,
 
@@ -85,6 +85,10 @@ pub enum AesMode {
     Cbc = 2,
     /// Counter mode — requires a 16-byte counter block IV.
     Ctr = 3,
+    /// 128-bit cipher feedback — requires a 16-byte IV.
+    Cfb = 4,
+    /// Output feedback — requires a 16-byte IV.
+    Ofb = 5,
 }
 
 /// AES operation direction.
@@ -109,18 +113,20 @@ pub struct AesRequest<'a> {
     pub mode: AesMode,
     pub op: AesOp,
     /// AES key bytes. Length must be 16, 24, or 32.
-    pub key: &'a DmaBuf,
-    /// IV for CBC/CTR (exactly 16 bytes). May be `None` for ECB.
+    pub key: &'a HsmDmaBuf,
+    /// IV for CBC/CTR/CFB/OFB (exactly 16 bytes). May be `None` for ECB.
     /// If `update_iv` is true, the IV is written back with the final
     /// chaining block.
-    pub iv: Option<&'a mut DmaBuf>,
+    pub iv: Option<&'a mut HsmDmaBuf>,
     /// When true (CBC only), the hardware writes the updated IV back.
     pub update_iv: bool,
-    /// Plaintext or ciphertext input. ECB/CBC lengths must be a non-zero
-    /// multiple of 16; CTR lengths may be any non-zero byte count.
-    pub message: &'a DmaBuf,
-    /// Output buffer. Must be at least as large as `message`.
-    pub result: &'a mut DmaBuf,
+    /// Optional plaintext or ciphertext input. When `None`, the entire
+    /// `result` buffer is transformed in place. ECB/CBC lengths must be a
+    /// non-zero multiple of 16; CTR lengths may be any non-zero byte count.
+    /// CFB/OFB lengths must be a non-zero multiple of 16.
+    pub message: Option<&'a HsmDmaBuf>,
+    /// Output buffer. Must be at least as large as `message` when supplied.
+    pub result: &'a mut HsmDmaBuf,
 }
 
 struct WaiterSlot {
@@ -218,6 +224,9 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
     ///
     /// Concurrent callers are queued (up to `DEPTH`) and served in FIFO
     /// order. Returns [`AesError::QUEUE_FULL`] if all slots are occupied.
+    ///
+    /// With `message: None`, input and output DMA addresses are identical.
+    /// No overlapping Rust references are constructed.
     pub fn encrypt_decrypt<'a>(
         &'a self,
         req: AesRequest<'a>,
@@ -228,9 +237,10 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
             self.state.with(|s| {
                 // First poll: validate, claim a slot, build descriptor, enqueue.
                 if slot_idx.is_none() {
-                    if let Err(e) = validate(&req) {
-                        return Poll::Ready(Err(e));
-                    }
+                    let byte_count = match validate(&req) {
+                        Ok(len) => len,
+                        Err(e) => return Poll::Ready(Err(e)),
+                    };
                     let Ok(key_len) = key_len_field(req.key.len()) else {
                         return Poll::Ready(Err(AesError::INVALID_KEY_LEN));
                     };
@@ -257,8 +267,12 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
                     let entry = &AES_Q.aes_cmd[idx];
                     entry.cmd_code.set(cmd_code.into());
                     entry.result.set(req.result.as_ptr() as u32);
-                    entry.byte_count.set(req.message.len() as u32);
-                    entry.message.set(req.message.as_ptr() as u32);
+                    entry.byte_count.set(byte_count);
+                    entry.message.set(
+                        req.message
+                            .map_or(req.result.as_ptr(), |message| message.as_ptr())
+                            as u32,
+                    );
                     entry.key.set(req.key.as_ptr() as u32);
                     entry.iv.set(iv_addr);
 
@@ -459,7 +473,7 @@ impl<const DEPTH: usize> AesExclusive<'_, DEPTH> {
     /// consuming the status to prevent stale pending bits from triggering
     /// a spurious [`AesDriver::wake`] call when normal polling resumes.
     fn submit_and_spin(&self, req: &AesRequest<'_>) -> HsmResult<u8> {
-        validate(req)?;
+        let byte_count = validate(req)?;
         let key_len = key_len_field(req.key.len())?;
         let idx = self.slot_idx & (DEPTH - 1);
 
@@ -476,8 +490,11 @@ impl<const DEPTH: usize> AesExclusive<'_, DEPTH> {
         let entry = &AES_Q.aes_cmd[idx];
         entry.cmd_code.set(cmd_code.into());
         entry.result.set(req.result.as_ptr() as u32);
-        entry.byte_count.set(req.message.len() as u32);
-        entry.message.set(req.message.as_ptr() as u32);
+        entry.byte_count.set(byte_count);
+        entry.message.set(
+            req.message
+                .map_or(req.result.as_ptr(), |message| message.as_ptr()) as u32,
+        );
         entry.key.set(req.key.as_ptr() as u32);
         entry.iv.set(iv_addr);
 
@@ -507,27 +524,30 @@ fn submit_cmd(slot: usize) {
     AES.command.set(desc_addr);
 }
 
-fn validate(req: &AesRequest<'_>) -> HsmResult<()> {
+fn validate(req: &AesRequest<'_>) -> HsmResult<u32> {
     match req.key.len() {
         16 | 24 | 32 => {}
         _ => return Err(AesError::INVALID_KEY_LEN),
     }
-    if req.message.is_empty() {
+    let message_len = req
+        .message
+        .map_or(req.result.len(), |message| message.len());
+    if message_len == 0 {
         return Err(AesError::INVALID_MSG_LEN);
     }
-    if req.mode != AesMode::Ctr && !req.message.len().is_multiple_of(AES_BLOCK_SIZE) {
+    if req.mode != AesMode::Ctr && !message_len.is_multiple_of(AES_BLOCK_SIZE) {
         return Err(AesError::INVALID_MSG_LEN);
     }
-    if req.result.len() < req.message.len() {
+    if req.result.len() < message_len {
         return Err(AesError::RESULT_BUF_TOO_SMALL);
     }
-    if matches!(req.mode, AesMode::Cbc | AesMode::Ctr) {
+    if req.mode != AesMode::Ecb {
         match req.iv.as_deref() {
             Some(iv) if iv.len() == AES_IV_SIZE => {}
             _ => return Err(AesError::INVALID_IV),
         }
     }
-    Ok(())
+    u32::try_from(message_len).map_err(|_| AesError::INVALID_MSG_LEN)
 }
 
 fn map_status(status: u8) -> HsmResult<()> {
@@ -546,4 +566,66 @@ fn map_status(status: u8) -> HsmResult<()> {
         return Err(AesError::FAULT_ERROR);
     }
     Err(AesError::FAULT_ERROR)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn in_place_requests_validate_result_length_for_each_mode() {
+        let key = [0; 32];
+        let mut iv = [0; AES_IV_SIZE];
+        let mut data = [0; 32];
+        for (mode, len, expected) in [
+            (AesMode::Ctr, 0, Err(AesError::INVALID_MSG_LEN)),
+            (AesMode::Ctr, 1, Ok(1)),
+            (AesMode::Ctr, 17, Ok(17)),
+            (AesMode::Ecb, 15, Err(AesError::INVALID_MSG_LEN)),
+            (AesMode::Ecb, 16, Ok(16)),
+            (AesMode::Cbc, 17, Err(AesError::INVALID_MSG_LEN)),
+            (AesMode::Cbc, 32, Ok(32)),
+        ] {
+            // SAFETY: These buffers are only validated, never submitted to DMA.
+            let req = unsafe {
+                AesRequest {
+                    mode,
+                    op: AesOp::Encrypt,
+                    key: HsmDmaBuf::from_raw(&key),
+                    iv: Some(HsmDmaBuf::from_raw_mut(&mut iv)),
+                    update_iv: false,
+                    message: None,
+                    result: HsmDmaBuf::from_raw_mut(&mut data[..len]),
+                }
+            };
+            assert_eq!(validate(&req), expected);
+        }
+    }
+
+    #[test]
+    fn separate_requests_use_message_length_and_reject_short_results() {
+        let key = [0; 32];
+        let mut iv = [0; AES_IV_SIZE];
+        let message = [0; 32];
+        let mut result = [0; 33];
+        for (mode, message_len, result_len, expected) in [
+            (AesMode::Ecb, 32, 33, Ok(32)),
+            (AesMode::Ctr, 7, 33, Ok(7)),
+            (AesMode::Cbc, 32, 31, Err(AesError::RESULT_BUF_TOO_SMALL)),
+        ] {
+            // SAFETY: These buffers are only validated, never submitted to DMA.
+            let req = unsafe {
+                AesRequest {
+                    mode,
+                    op: AesOp::Decrypt,
+                    key: HsmDmaBuf::from_raw(&key),
+                    iv: Some(HsmDmaBuf::from_raw_mut(&mut iv)),
+                    update_iv: false,
+                    message: Some(HsmDmaBuf::from_raw(&message[..message_len])),
+                    result: HsmDmaBuf::from_raw_mut(&mut result[..result_len]),
+                }
+            };
+            assert_eq!(validate(&req), expected);
+        }
+    }
 }

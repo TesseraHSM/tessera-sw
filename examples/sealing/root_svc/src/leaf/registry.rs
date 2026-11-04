@@ -17,7 +17,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use tsra_api::HsmKeyManager;
-use tsra_api::HsmSealingKey;
+use tsra_api::HsmSealingKeyUnmaskAlgo;
 use tsra_api::PartPolicy;
 use tsra_api::PartPolicyBuilder;
 use tsra_api::PolicyKeyKind;
@@ -131,7 +131,11 @@ impl Registration {
     }
 
     fn receiver(&self, domain: &RootDomain, session: &SealingSession) -> Result<JsonValue> {
-        let mut key = HsmSealingKey::from_masked_key(&session.session, &self.masked_receiver)?;
+        let mut key = HsmKeyManager::unmask_key(
+            &session.session,
+            &mut HsmSealingKeyUnmaskAlgo::default(),
+            &self.masked_receiver,
+        )?;
         let report = HsmKeyManager::generate_key_report_vec(&mut key, &[0; KEY_REPORT_DATA_LEN])?;
         let manufacturer = device_cert_chain(&session.partition, 0)?;
         let (partition, _) = load_local_recovery(domain.env().store())?;

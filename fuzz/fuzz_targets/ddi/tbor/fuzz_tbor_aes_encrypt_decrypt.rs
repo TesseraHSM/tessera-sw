@@ -30,8 +30,21 @@ struct FuzzInput {
 struct FuzzAesEncryptDecryptReq {
     masked_key: Vec<u8>,
     op: u8,
-    msg: Vec<u8>,
+    mode: u8,
+    /// Size the IV to the mode's expected length instead of `iv_len`.
+    canonical_iv: bool,
+    iv_len: u8,
     iv: [u8; AES_IV_LEN],
+    msg: Vec<u8>,
+}
+
+/// Expected IV length for a known `mode`, or `None` for an unknown mode.
+fn mode_iv_len(mode: u8) -> Option<usize> {
+    match mode {
+        AES_MODE_ECB => Some(0),
+        AES_MODE_CBC | AES_MODE_CFB | AES_MODE_OFB | AES_MODE_CTR => Some(AES_IV_LEN),
+        _ => None,
+    }
 }
 
 fuzz_target!(|input: FuzzInput| {
@@ -55,18 +68,27 @@ fuzz_target!(|input: FuzzInput| {
 
         let msg = &input.cmdreq_data.msg;
         let op = input.cmdreq_data.op;
+        let mode = input.cmdreq_data.mode;
+        let iv_len = match (input.cmdreq_data.canonical_iv, mode_iv_len(mode)) {
+            (true, Some(len)) => len,
+            _ => usize::from(input.cmdreq_data.iv_len) % (AES_IV_LEN + 1),
+        };
+        let iv = input.cmdreq_data.iv[..iv_len].to_vec();
+        let block_mode = mode == AES_MODE_CBC || mode == AES_MODE_ECB;
         let expect_success = input.use_valid_key
             && (op == AES_OP_ENCRYPT || op == AES_OP_DECRYPT)
+            && mode_iv_len(mode) == Some(iv_len)
             && !msg.is_empty()
-            && msg.len().is_multiple_of(AES_IV_LEN)
+            && (!block_mode || msg.len().is_multiple_of(AES_IV_LEN))
             && msg.len() <= AES_MSG_MAX_LEN;
 
         let req = TborAesEncryptDecryptReq {
             session_id: session.session_id,
             masked_key: masked_key.clone(),
             op,
+            mode,
+            iv: iv.clone(),
             msg: msg.clone(),
-            iv: input.cmdreq_data.iv,
         };
         let result = ctx.tbor(&req);
 
@@ -80,8 +102,9 @@ fuzz_target!(|input: FuzzInput| {
                             session_id: session.session_id,
                             masked_key,
                             op: AES_OP_DECRYPT,
+                            mode,
+                            iv: iv.clone(),
                             msg: resp.msg.clone(),
-                            iv: input.cmdreq_data.iv,
                         })
                         .expect("decrypting valid ciphertext should succeed");
                     assert_eq!(&decrypted.msg, msg, "AES round trip must recover plaintext");
@@ -97,8 +120,9 @@ fuzz_target!(|input: FuzzInput| {
                             session_id: session.session_id,
                             masked_key,
                             op: AES_OP_ENCRYPT,
+                            mode,
+                            iv: iv.clone(),
                             msg: resp.msg.clone(),
-                            iv: input.cmdreq_data.iv,
                         })
                         .expect("re-encrypting decrypted plaintext should succeed");
                     assert_eq!(

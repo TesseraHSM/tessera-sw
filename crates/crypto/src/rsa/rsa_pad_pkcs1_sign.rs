@@ -188,6 +188,7 @@ impl EncodeOp for RsaPadPkcs1SignAlgo {
     ///
     /// * `Ok(usize)` - The length of the padded message (equal to `modulus_size`)
     /// * `Err(CryptoError::RsaUnsupportedModulusSize)` - If the modulus size is not 256, 384, or 512
+    /// * `Err(CryptoError::HashUnsupportedAlgorithm)` - If the hash is SHA-3 or SHAKE
     /// * `Err(CryptoError::RsaMessageTooLong)` - If the DigestInfo is too long for the given key size
     /// * `Err(CryptoError::RsaBufferTooSmall)` - If the output buffer is too small
     ///
@@ -197,13 +198,16 @@ impl EncodeOp for RsaPadPkcs1SignAlgo {
     /// This is appropriate for signatures where determinism is desired.
     fn to_bytes(&mut self, output: Option<&mut [u8]>) -> Result<usize, CryptoError> {
         let k = self.modulus_size;
+        // Resolve the digest algorithm first so a size query also rejects
+        // unsupported hashes (SHA-3, SHAKE).
+        let der_algo = self.hash_algo.der_algo()?;
         let Some(em) = output else { return Ok(k) };
 
         if em.len() != k {
             return Err(CryptoError::RsaBufferTooSmall);
         }
 
-        let digest_info = DerDigestInfo::new(self.hash_algo.der_algo(), &self.digest)?;
+        let digest_info = DerDigestInfo::new(der_algo, &self.digest)?;
         let der = digest_info.to_der_vec()?;
 
         // copy to end of the em buffer
@@ -275,7 +279,7 @@ impl DecodeOp for RsaPadPkcs1SignAlgo {
         }
 
         let digest_info = DerDigestInfo::from_der(&input[pos + 3..])?;
-        if digest_info.algo() != params.hash_algo.der_algo() {
+        if digest_info.algo() != params.hash_algo.der_algo()? {
             return Err(CryptoError::RsaInvalidPadding);
         }
 

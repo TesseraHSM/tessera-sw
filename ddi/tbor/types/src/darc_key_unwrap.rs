@@ -26,7 +26,7 @@ pub const TBOR_OP_DARC_KEY_UNWRAP: u8 = 0x22;
 /// (matches the firmware schema's `MASKED_TMK_LEN`).  Kept module-private
 /// to avoid an ambiguous glob re-export with `darc_tmk_import`'s public
 /// `MASKED_TMK_LEN`; callers use that one.
-const MASKED_TMK_LEN: usize = 260;
+const MASKED_TMK_LEN: usize = 264;
 
 /// Max AES-KWP-wrapped `COSE_Key` length (matches the firmware schema's
 /// `DARC_UNWRAP_WRAPPED_KEY_MAX_LEN`).
@@ -34,7 +34,7 @@ pub const DARC_UNWRAP_WRAPPED_KEY_MAX_LEN: usize = 512;
 
 /// Max masked recovered-key envelope length (matches the firmware
 /// schema's `DARC_UNWRAP_MASKED_KEY_MAX_LEN`).
-pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 296;
+pub const DARC_UNWRAP_MASKED_KEY_MAX_LEN: usize = 312;
 
 /// Max recovered public-key length (matches the firmware schema's
 /// `DARC_UNWRAP_PUB_KEY_MAX_LEN`).
@@ -69,7 +69,7 @@ pub struct TborDarcKeyUnwrapReq {
     pub key_usage: u64,
 
     /// The masked TMK envelope from `DarcTmkImport`, exactly
-    /// [`MASKED_TMK_LEN`] (260 B).
+    /// [`MASKED_TMK_LEN`] (264 B).
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
     /// The AES-KWP-wrapped EC2 `COSE_Key`.
@@ -89,7 +89,7 @@ pub struct TborDarcKeyUnwrapResp {
     pub key_kind: u8,
 
     /// The recovered EC private key, masked under the scope's masking key.
-    #[tbor(max_len = 296)]
+    #[tbor(max_len = 312)]
     pub masked_key: Vec<u8>,
 
     /// The recovered key's wire public key (`x ‖ y`, wire-LE).

@@ -14,5 +14,10 @@ bitfield-struct = { workspace = true }
 tsra_fw_hsm_pal_traits.workspace = true
 zerocopy = { workspace = true }
 
+[features]
+# Bulk keys are fast-path engine handles (2 bytes) rather than AES-256
+# material; set by the PAL's `bulk_crypto` build.
+bulk_crypto = []
+
 [lints]
 workspace = true

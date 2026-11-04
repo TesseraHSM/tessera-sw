@@ -11,6 +11,8 @@
 //!
 //! Coverage:
 //! * AES key — the masked blob is non-zero and there is no public key.
+//! * AES-XTS key — a 64-byte `K1 ‖ K2` imports as `AesXts512`; wrong
+//!   lengths, equal halves, and non-cipher usage are rejected.
 //! * HMAC key — the recovered key's kind is `VarLenHmacSha256` and it
 //!   carries no public key.  (Using the recovered key via `Hmac` to
 //!   compute a MAC is exercised by the HMAC command's own emu tests,
@@ -19,8 +21,6 @@
 //! * RSA-4096 (CRT and non-CRT) — the largest supported key and the
 //!   tightest on the per-IO DMA budget; exercises the transient-vault
 //!   unwrap path that keeps it within 8 KB.
-
-#![cfg(feature = "emu")]
 
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -73,7 +73,7 @@ fn rsa_aes_wrap(hsm_pub: &[u8], data: &[u8], oaep_hash: HashAlgo) -> Vec<u8> {
 /// `unwrap` helper so callers need not spell out permissions.
 fn usage_for_class(class: u8) -> u64 {
     match class {
-        KEY_CLASS_AES => KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+        KEY_CLASS_AES | KEY_CLASS_AES_XTS512 => KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
         KEY_CLASS_RSA | KEY_CLASS_RSA_CRT => KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
         KEY_CLASS_ECC => KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
         KEY_CLASS_HMAC_SHA256 | KEY_CLASS_HMAC_SHA384 | KEY_CLASS_HMAC_SHA512 => {
@@ -115,6 +115,30 @@ pub(crate) fn unwrap_with_usage(
     .expect("UnwrapKey")
 }
 
+/// Wrap `key` for `class` against the partition's unwrapping key and build
+/// the `UnwrapKey` request without sending it — for rejection tests.
+fn unwrap_req(
+    ctx: &TestCtx,
+    session_id: u16,
+    class: u8,
+    usage: u64,
+    key: &[u8],
+) -> TborUnwrapKeyReq {
+    let hsm_pub = ctx
+        .tbor(&TborGetUnwrappingKeyReq { session_id })
+        .expect("GetUnwrappingKey")
+        .pub_key;
+    TborUnwrapKeyReq {
+        session_id,
+        scope: SCOPE_LOCAL,
+        key_class: class,
+        key_usage: usage,
+        oaep_hash_algo: HASH_ALGO_SHA256,
+        wrapped_blob: rsa_aes_wrap(&hsm_pub, key, HashAlgo::sha256()),
+        key_label: Vec::new(),
+    }
+}
+
 /// Import a host-generated RSA-4096 key via `UnwrapKey` and check its
 /// masked blob and public-key size. RSA-4096 is the largest supported key
 /// and the tightest on the per-IO DMA budget, exercising the transient-vault
@@ -146,17 +170,17 @@ fn rsa_4k_unwrap_roundtrip(crt: bool) {
 }
 
 #[test]
-fn unwrap_key_rsa_4k_emu() {
+fn unwrap_key_rsa_4k() {
     rsa_4k_unwrap_roundtrip(false);
 }
 
 #[test]
-fn unwrap_key_rsa_4k_crt_emu() {
+fn unwrap_key_rsa_4k_crt() {
     rsa_4k_unwrap_roundtrip(true);
 }
 
 #[test]
-fn unwrap_key_aes_emu() {
+fn unwrap_key_aes() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -172,7 +196,7 @@ fn unwrap_key_aes_emu() {
 
 /// Verifies all OAEP hashes unwrap symmetric keys and preserve an ECC public key.
 #[test]
-fn unwrap_key_all_oaep_hashes_emu() {
+fn unwrap_key_all_oaep_hashes() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = ctx
@@ -230,9 +254,10 @@ fn unwrap_key_all_oaep_hashes_emu() {
     }
 }
 
-/// Verifies an unknown OAEP selector is rejected even for a valid wrapped key.
+/// Verifies unknown OAEP selectors, including the SHAKE XOFs, are rejected
+/// even for a valid wrapped key.
 #[test]
-fn unwrap_key_unknown_oaep_hash_rejected_emu() {
+fn unwrap_key_unknown_oaep_hash_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = ctx
@@ -242,28 +267,30 @@ fn unwrap_key_unknown_oaep_hash_rejected_emu() {
         .expect("GetUnwrappingKey")
         .pub_key;
     let wrapped_blob = rsa_aes_wrap(&hsm_pub, &[0x42u8; 32], HashAlgo::sha256());
-    ctx.expect_fw_reject(
-        &TborUnwrapKeyReq {
-            session_id: session.session_id,
-            scope: SCOPE_LOCAL,
-            key_class: KEY_CLASS_AES,
-            key_usage: usage_for_class(KEY_CLASS_AES),
-            oaep_hash_algo: u8::MAX,
-            wrapped_blob,
-            key_label: Vec::new(),
-        },
-        TborStatus::InvalidArg,
-    );
+    for oaep_hash_algo in [HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
+        ctx.expect_fw_reject(
+            &TborUnwrapKeyReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                key_class: KEY_CLASS_AES,
+                key_usage: usage_for_class(KEY_CLASS_AES),
+                oaep_hash_algo,
+                wrapped_blob: wrapped_blob.clone(),
+                key_label: Vec::new(),
+            },
+            TborStatus::InvalidArg,
+        );
+    }
 }
 
 #[test]
-fn unwrap_key_ecc_p256_emu() {
+fn unwrap_key_ecc_p256() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
     // Import a host-generated P-256 key (PKCS#8 DER) and check the decode +
     // public-key re-derivation path.
-    let key = EccPrivateKey::generate(32).expect("generate P-256 key");
+    let key = EccPrivateKey::from_curve(EccCurve::P256).expect("generate P-256 key");
     let der = key.to_vec().expect("ECC PKCS#8 DER export");
     let resp = unwrap(&ctx, session.session_id, KEY_CLASS_ECC, &der);
 
@@ -280,7 +307,7 @@ fn unwrap_key_ecc_p256_emu() {
 }
 
 #[test]
-fn unwrap_key_hmac_emu() {
+fn unwrap_key_hmac() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -303,7 +330,7 @@ fn unwrap_key_hmac_emu() {
 }
 
 #[test]
-fn unwrap_key_rejects_invalid_usage_for_class_emu() {
+fn unwrap_key_rejects_invalid_usage_for_class() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
@@ -327,4 +354,66 @@ fn unwrap_key_rejects_invalid_usage_for_class_emu() {
         key_label: Vec::new(),
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+}
+
+/// A 64-byte `K1 ‖ K2` imports as a single `AesXts512` key with no public
+/// key.
+#[test]
+fn unwrap_key_aes_xts() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    let mut xts_key = [0x11u8; 64];
+    xts_key[32..].fill(0x22);
+    let resp = unwrap(&ctx, session.session_id, KEY_CLASS_AES_XTS512, &xts_key);
+
+    assert_eq!(resp.key_kind, KEY_KIND_AES_XTS512);
+    assert!(
+        resp.masked_key.iter().any(|&b| b != 0),
+        "masked AES-XTS key must not be all-zero",
+    );
+    assert!(resp.pub_key.is_empty(), "a symmetric key has no public key");
+}
+
+/// The AES-XTS class accepts exactly 64 bytes with distinct halves, and the
+/// plain AES class does not accept a 64-byte key.
+#[test]
+fn unwrap_key_aes_xts_rejects_invalid_material() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let usage = KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT;
+
+    let mut distinct = [0x11u8; 64];
+    distinct[32..].fill(0x22);
+    let cases: [(u8, &[u8]); 5] = [
+        (KEY_CLASS_AES_XTS512, &distinct[..32]),
+        (KEY_CLASS_AES_XTS512, &distinct[..48]),
+        (KEY_CLASS_AES_XTS512, &[0x11u8; 72]),
+        // IEEE 1619: K1 must differ from K2.
+        (KEY_CLASS_AES_XTS512, &[0x33u8; 64]),
+        (KEY_CLASS_AES, &distinct),
+    ];
+    for (class, key) in cases {
+        let req = unwrap_req(&ctx, sid, class, usage, key);
+        ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+    }
+}
+
+/// An AES-XTS key is a cipher key: any usage other than encrypt+decrypt is
+/// rejected.
+#[test]
+fn unwrap_key_aes_xts_rejects_non_cipher_usage() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+
+    let mut xts_key = [0x11u8; 64];
+    xts_key[32..].fill(0x22);
+    for usage in [
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        KEY_USAGE_DERIVE,
+        KEY_USAGE_ENCRYPT,
+    ] {
+        let req = unwrap_req(&ctx, sid, KEY_CLASS_AES_XTS512, usage, &xts_key);
+        ctx.expect_fw_reject(&req, TborStatus::InvalidPermissions);
+    }
 }

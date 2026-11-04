@@ -12,7 +12,7 @@
 //! Flow:
 //!
 //! 1. **Parse + gate** — CO-only; partition must be in
-//!    [`PartState::Initializing`]; the re-supplied `part_policy` must hash
+//!    [`HsmPartState::Initializing`]; the re-supplied `part_policy` must hash
 //!    to the stored `policy_hash`; and the supplied PTA certificate chain
 //!    (`cert_descriptors`, read out of band) must be anchored to the
 //!    policy `POTAPubKey` with its terminal (PTA) certificate's public
@@ -22,7 +22,7 @@
 //!    from `prev_local_mk_backup`; provision the random `EphemeralMK`.
 //! 3. **Commit** — vault the new keys (recording their ids), replace UMS
 //!    with UPS in the partition root slot, and advance the lifecycle to
-//!    [`PartState::Initialized`].
+//!    [`HsmPartState::Initialized`].
 //! 4. **Respond** — return the current `local_mk_backup`.
 
 use tsra_fw_core_crypto_key_derive::derive_masking_key;
@@ -43,16 +43,16 @@ use tsra_fw_ddi_tbor_types::TborPartFinalResp;
 use tsra_fw_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
 use tsra_fw_hsm_oob::copy_oob;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
-use tsra_fw_hsm_pal_traits::PartState;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
@@ -115,19 +115,19 @@ const EPHEMERAL_MK_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
-    let req = parse_request(req_buf)?;
-
-    // Lifecycle gate: PartFinal only runs against a partition that
-    // `PartInit` left in `Initializing`.
-    if super::super::part_state::part_state(pal, io)? != PartState::Initializing {
-        return Err(HsmError::InvalidArg);
-    }
-
+) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
+        let req = parse_request(cmd_buf.request_mut())?;
+
+        // Lifecycle gate: PartFinal only runs against a partition that
+        // `PartInit` left in `Initializing`.
+        if super::super::part_state::part_state(pal, io)? != HsmPartState::Initializing {
+            return Err(HsmError::InvalidArg);
+        }
+
         // Integrity gate: the re-supplied policy must match the one
         // bound at `PartInit` (`SHA-384(part_policy) == policy_hash`).
         verify_policy_hash(pal, io, alloc, req.part_policy).await?;
@@ -201,7 +201,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let (local_id, ephemeral_id, ups_id) =
             stage_final_keys(pal, io, ups, part_local_mk, ephemeral_mk, undo).await?;
         commit_final(pal, io, ums_key_id, local_id, ephemeral_id, ups_id, undo)?;
-        encode_response(pal, io, curr_backup)
+        encode_response(cmd_buf, curr_backup)
     })
     .await
 }
@@ -212,30 +212,30 @@ struct ParsedRequest<'a> {
     sess_id: HsmSessId,
     /// Re-supplied unified `PartPolicy` blob (584 B), as a sub-view of
     /// the inbound buffer.
-    part_policy: &'a DmaBuf,
+    part_policy: &'a HsmDmaBuf,
     /// PTA certificate-chain descriptors (`(index, length)` into the OOB
     /// SGL page), root → leaf.  The schema pins `1..=MAX_CERTS` entries.
     cert_descriptors: &'a [CertDescriptor],
     /// Optional previous `local_mk` backup to restore (`None` when the
     /// field is empty; otherwise exactly [`LOCAL_MK_BACKUP_LEN`]).  A
     /// **mutable** sub-view so the envelope can be AEAD-unmasked in place.
-    prev_local_mk_backup: Option<&'a mut DmaBuf>,
+    prev_local_mk_backup: Option<&'a mut HsmDmaBuf>,
 }
 
 /// Decode the wire request, enforce the CO-only role gate, extract the
 /// PTA `cert_descriptors`, and length-check the optional
 /// `prev_local_mk_backup`.
-fn parse_request<'a>(req_buf: &'a mut DmaBuf) -> HsmResult<ParsedRequest<'a>> {
+fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     let req = TborPartFinalReq::decode_mut(req_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id));
 
     // PartFinal is CO-only (parity with PartInit).
-    if sess_id.role() != SessionRole::CryptoOfficer {
+    if sess_id.role() != HsmSessionRole::CryptoOfficer {
         return Err(HsmError::InvalidPermissions);
     }
 
     // `decode_mut`'s view exposes shared (non-mutable) buffer fields as
-    // raw `&DmaBuf` bytes, so reinterpret the packed `cert_descriptors`
+    // raw `&HsmDmaBuf` bytes, so reinterpret the packed `cert_descriptors`
     // bytes as a typed slice here; a byte length that is not a whole
     // number of descriptors fails the cast and is rejected as `InvalidArg`.
     let cert_descriptors =
@@ -376,7 +376,7 @@ async fn validate_pta_chain<P: HsmPal>(
 
     // The chain is cryptographically valid and POTA-anchored; its
     // terminal (PTA) certificate must carry this partition's PTA key.
-    // Compare as byte slices (`pta` is a `DmaBuf` DST over `[u8]`).
+    // Compare as byte slices (`pta` is a `HsmDmaBuf` DST over `[u8]`).
     let expected_pta: &[u8] = pta;
     if &pta_from_chain[..] != expected_pta {
         return Err(HsmError::PartFinalPtaMismatch);
@@ -401,10 +401,10 @@ async fn derive_local_bmk<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    ups: &DmaBuf,
+    ups: &HsmDmaBuf,
     svn: u64,
     owner: u16,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let local_bmk = alloc.dma_alloc(MASKING_KEY_LEN)?;
     derive_masking_key(
         pal,
@@ -426,7 +426,7 @@ pub(crate) async fn verify_policy_hash<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    part_policy: &DmaBuf,
+    part_policy: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let digest = alloc.dma_alloc(SHA384_LEN)?;
     pal.hash(io, HsmHashAlgo::Sha384, part_policy, digest, true)
@@ -452,10 +452,10 @@ async fn restore_part_local_mk<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    ups: &DmaBuf,
+    ups: &HsmDmaBuf,
     cur_svn: u64,
-    prev: &mut DmaBuf,
-    out_mk: &mut DmaBuf,
+    prev: &mut HsmDmaBuf,
+    out_mk: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     // Peek the cleartext `{svn, owner}` bindings.  These are needed *now*
     // to re-derive the unmasking key, but they are NOT yet authenticated
@@ -474,11 +474,6 @@ async fn restore_part_local_mk<P: HsmPal>(
     if len_ok {
         out_mk.copy_from_slice(view.target_key);
     }
-    // `view`'s borrow of `prev` ends at its last use above, so we can now
-    // wipe the recovered plaintext `PartLocalMK` left in the request DMA
-    // buffer so it does not linger (until the IO slot is recycled) longer
-    // than necessary.
-    prev.fill(0);
 
     // Anti-rollback, enforced on the now-authenticated `svn`: a backup
     // minted under a newer SVN cannot be restored on this (older)
@@ -486,8 +481,6 @@ async fn restore_part_local_mk<P: HsmPal>(
     // tampered cleartext `svn` fails `unmask` (generic AEAD error) rather
     // than being able to spoof this specific rollback error.
     if prev_svn > cur_svn {
-        // Don't hand back / leave the recovered key on a rejected restore.
-        out_mk.fill(0);
         return Err(HsmError::PartFinalBackupSvnRollback);
     }
     if !len_ok {
@@ -507,11 +500,11 @@ async fn mask_part_local_mk<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    ups: &DmaBuf,
+    ups: &HsmDmaBuf,
     svn: u64,
     owner: u16,
-    part_local_mk: &DmaBuf,
-    out: &mut DmaBuf,
+    part_local_mk: &HsmDmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let local_bmk = derive_local_bmk(pal, io, alloc, ups, svn, owner).await?;
 
@@ -545,7 +538,7 @@ async fn mask_part_local_mk<P: HsmPal>(
 /// key.  Offsets are fixed by the AES-256-GCM envelope layout
 /// (`header(8) ‖ iv(12) ‖ metadata(96)`), pinned by the
 /// [`LOCAL_MK_BACKUP_LEN`] length check.
-fn peek_backup_svn_owner(blob: &DmaBuf) -> HsmResult<(u64, u16)> {
+fn peek_backup_svn_owner(blob: &HsmDmaBuf) -> HsmResult<(u64, u16)> {
     // Read the `{svn, owner_seed_id}` platform-identity bindings from the
     // envelope's cleartext metadata.  These are tag-bound but not yet
     // authenticated here — the subsequent `unmask` verifies the tag.
@@ -567,9 +560,9 @@ fn peek_backup_svn_owner(blob: &DmaBuf) -> HsmResult<(u64, u16)> {
 async fn stage_final_keys<'p, P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    ups: &DmaBuf,
-    part_local_mk: &DmaBuf,
-    ephemeral_mk: &DmaBuf,
+    ups: &HsmDmaBuf,
+    part_local_mk: &HsmDmaBuf,
+    ephemeral_mk: &HsmDmaBuf,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<(HsmKeyId, HsmKeyId, HsmKeyId)> {
     let local_id = pal
@@ -611,7 +604,7 @@ async fn stage_final_keys<'p, P: HsmPal>(
 /// Commit the finalized partition state in a single **await-free**
 /// guards-first block: record the masking-key ids, replace UMS → UPS in the
 /// root slot (soft-deleting the old UMS key), and advance the lifecycle to
-/// [`PartState::Initialized`].
+/// [`HsmPartState::Initialized`].
 ///
 /// The three vault keys are already staged by [`stage_final_keys`]; only
 /// their `key_id`s flow in here.  Each mutation's inverse is recorded
@@ -640,7 +633,7 @@ fn commit_final<P: HsmPal>(
     // partition is no longer `Initializing` (e.g. a racing PartFinal already
     // finalized).  Recording the inverses and then failing would otherwise
     // clobber the winner's just-committed state.
-    if part_state::part_state(pal, io)? != PartState::Initializing {
+    if part_state::part_state(pal, io)? != HsmPartState::Initializing {
         return Err(HsmError::InvalidArg);
     }
 
@@ -648,32 +641,28 @@ fn commit_final<P: HsmPal>(
     // reverses them): clear the two new masking-key ids, restore UPS_KEY_ID
     // to the prior UMS id, re-enable the soft-deleted UMS key, and restore
     // STATE to `Initializing`.
-    undo.push_prop_restore_absent(PartPropId::LOCAL_MK_KEY_ID)?;
-    undo.push_prop_restore_absent(PartPropId::EPHEMERAL_MK_KEY_ID)?;
-    undo.push_prop_restore_scalar(PartPropId::UPS_KEY_ID, u32::from(u16::from(ums_key_id)))?;
+    undo.push_prop_restore_absent(HsmPartPropId::LOCAL_MK_KEY_ID)?;
+    undo.push_prop_restore_absent(HsmPartPropId::EPHEMERAL_MK_KEY_ID)?;
+    undo.push_prop_restore_scalar(HsmPartPropId::UPS_KEY_ID, u32::from(u16::from(ums_key_id)))?;
     undo.push_vault_disable(ums_key_id)?;
-    undo.push_prop_restore_scalar(PartPropId::STATE, PartState::Initializing as u32)?;
+    undo.push_prop_restore_scalar(HsmPartPropId::PART_STATE, HsmPartState::Initializing as u32)?;
 
     // Apply the mutations in the same order as the inverses above.
     part_state::part_set_local_mk_key_id(pal, io, local_id)?;
     part_state::part_set_ephemeral_mk_key_id(pal, io, ephemeral_id)?;
     // The UPS_KEY_ID slot is write-once, so clear it before re-pointing.
-    pal.part_prop_clear(io, PartPropId::UPS_KEY_ID)?;
+    pal.part_prop_clear(io, HsmPartPropId::UPS_KEY_ID)?;
     part_state::part_set_ups_key_id(pal, io, ups_id)?;
     // Soft-delete the old UMS key: the commit walk zeroizes it, the undo
     // walk re-enables it (see the recorded `push_vault_disable`).
     pal.vault_key_disable(io, ums_key_id)?;
 
-    part_state::part_set_state(pal, io, PartState::Initialized)
+    part_state::part_set_state(pal, io, HsmPartState::Initialized)
 }
 
-/// Encode the `TborPartFinalResp` into a fresh IO-scoped DmaBuf.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &P::Io,
-    backup: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+/// Encode the `TborPartFinalResp` into a fresh IO-scoped HsmDmaBuf.
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, backup: &HsmDmaBuf) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborPartFinalResp::encode(buf, 0, false)?
             .local_mk_backup(backup)?
             .finish();

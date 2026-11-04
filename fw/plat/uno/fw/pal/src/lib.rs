@@ -38,6 +38,7 @@
 #[allow(unsafe_code)]
 mod alloc;
 mod asn1;
+mod bulk;
 mod cert;
 mod crypto;
 #[allow(unsafe_code)]
@@ -63,12 +64,12 @@ mod vault;
 pub use io::*;
 pub use ipc::*;
 pub use pal::*;
+pub use tsra_fw_hsm_pal_traits::HsmAlloc;
 /// Re-export of the PAL trait types consumed by uno-PAL users.
 ///
 /// Lets downstream crates (test harness, integration tests, sample
 /// firmware) depend solely on `tsra_fw_uno_pal` without taking an
 /// additional path-dep into `tsra_fw_hsm_pal_traits`.
-pub use tsra_fw_hsm_pal_traits::DmaBuf;
-pub use tsra_fw_hsm_pal_traits::HsmAlloc;
+pub use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 pub use tsra_fw_hsm_pal_traits::HsmIo;
 pub use tsra_fw_hsm_pal_traits::HsmPal;

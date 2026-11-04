@@ -73,24 +73,11 @@ pub(crate) trait HsmKeyHandleDelOp: Copy + PartialEq {
     ///
     /// `Ok(())` on success, otherwise an [`HsmError`].
     fn delete_key(session: HsmSession, handle: Self, epoch: u64) -> Result<(), HsmError>;
-
-    /// Returns the handle value for an *unpinned* key — one whose material
-    /// lives only as a masked blob in its properties, with nothing
-    /// device-resident to address or delete.
-    ///
-    /// Used to construct a key wrapper directly from a masked blob (see the
-    /// `from_masked_key` constructors). [`delete_key`](Self::delete_key) is a
-    /// no-op for this handle, so such a key is never deleted on drop.
-    fn unpinned() -> Self;
 }
 
 impl HsmKeyHandleDelOp for ddi::HsmKeyHandle {
     fn delete_key(session: HsmSession, handle: Self, epoch: u64) -> Result<(), HsmError> {
         ddi::delete_key(&session, handle, epoch)
-    }
-
-    fn unpinned() -> Self {
-        ddi::HsmKeyHandle::Unpinned
     }
 }
 
@@ -99,10 +86,6 @@ impl HsmKeyHandleDelOp for (ddi::HsmKeyHandle, ddi::HsmKeyHandle) {
         let res1 = ddi::delete_key(&session, handle.0, epoch);
         let res2 = ddi::delete_key(&session, handle.1, epoch);
         res1.and(res2)
-    }
-
-    fn unpinned() -> Self {
-        (ddi::HsmKeyHandle::Unpinned, ddi::HsmKeyHandle::Unpinned)
     }
 }
 
@@ -277,42 +260,6 @@ macro_rules! define_hsm_key {
                             session, props, handle,
                         ))),
                     }
-                }
-
-                /// Reconstructs this key wrapper directly from a stored
-                /// masked-key blob, with no device round-trip.
-                ///
-                /// In the TBOR security-domain model a key *is* its masked
-                /// blob: the firmware unmasks it on use for every operation,
-                /// so a caller that only retains the masked bytes — for
-                /// example after restoring a security domain from a local
-                /// backup, where the key was never in plaintext on the host
-                /// and no unmask/unwrap produced a device handle — can
-                /// rebuild a usable key object and operate with it as usual.
-                ///
-                /// The resulting key is *unpinned*: its material lives only
-                /// as the masked blob in its properties, so there is nothing
-                /// device-resident to delete and dropping it is a no-op.
-                ///
-                /// # Arguments
-                ///
-                /// * `session` - The security-domain (TBOR) session the key
-                ///   is used in.
-                /// * `masked_key` - The stored masked-key blob.
-                ///
-                /// # Errors
-                ///
-                /// Returns an error if the masked blob cannot be parsed.
-                pub fn from_masked_key(
-                    session: &HsmSession,
-                    masked_key: &[u8],
-                ) -> HsmResult<Self> {
-                    let props = ddi::HsmMaskedKey::to_key_props(masked_key)?;
-                    Ok(Self::new(
-                        session.clone(),
-                        props,
-                        <$handle_ty as HsmKeyHandleDelOp>::unpinned(),
-                    ))
                 }
 
                 /// Returns a clone of the shared key state for safe cross-type conversions.
@@ -555,56 +502,6 @@ macro_rules! define_hsm_key_pair {
                             HsmKeyPairInner::new(session, props, handle, pub_key),
                         )),
                     }
-                }
-
-                /// Reconstructs this private-key wrapper directly from a
-                /// stored masked-key blob and the matching public key, with
-                /// no device round-trip.
-                ///
-                /// In the TBOR security-domain model a key *is* its masked
-                /// blob: the firmware unmasks it on use for every operation,
-                /// so a caller that only retains the masked bytes — for
-                /// example after restoring a security domain from a local
-                /// backup, where the private key was never in plaintext on
-                /// the host and no unmask/unwrap produced a device handle —
-                /// can rebuild a usable signing/derivation key and operate
-                /// with it as usual.
-                ///
-                /// The resulting key is *unpinned*: its material lives only
-                /// as the masked blob in its properties, so there is nothing
-                /// device-resident to delete and dropping it is a no-op.
-                ///
-                /// # Arguments
-                ///
-                /// * `session` - The security-domain (TBOR) session the key
-                ///   is used in.
-                /// * `masked_key` - The stored masked private-key blob.
-                /// * `pub_key_der` - The matching public key, DER-encoded
-                ///   (`SubjectPublicKeyInfo`).
-                ///
-                /// # Errors
-                ///
-                /// Returns an error if the masked blob or public key cannot
-                /// be parsed.
-                pub fn from_masked_key(
-                    session: &HsmSession,
-                    masked_key: &[u8],
-                    pub_key_der: &[u8],
-                ) -> HsmResult<Self> {
-                    use crypto::ImportableKey;
-
-                    let (priv_props, pub_props) =
-                        ddi::HsmMaskedKey::to_key_pair_props(masked_key, pub_key_der)?;
-                    let crypto_key = <$pub_key_ty>::from_bytes(pub_key_der)
-                        .map_hsm_err(HsmError::InternalError)?;
-                    let pub_key = $pub_name::new(pub_props, crypto_key);
-
-                    Ok(Self::new(
-                        session.clone(),
-                        priv_props,
-                        ddi::HsmKeyHandle::Unpinned,
-                        pub_key,
-                    ))
                 }
 
                 /// Returns the key handle.

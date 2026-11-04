@@ -25,7 +25,7 @@
 
 use minicbor::Decoder;
 use minicbor::Encoder;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -119,11 +119,11 @@ pub struct Ec2PrivateCoseKey<'a> {
     /// Permitted key operations (`key_ops`), always non-empty.
     pub key_ops: CoseKeyOps,
     /// Big-endian affine X coordinate (`curve.priv_key_len()` bytes).
-    pub x: &'a DmaBuf,
+    pub x: &'a HsmDmaBuf,
     /// Big-endian affine Y coordinate (`curve.priv_key_len()` bytes).
-    pub y: &'a DmaBuf,
+    pub y: &'a HsmDmaBuf,
     /// Big-endian private scalar (`curve.priv_key_len()` bytes).
-    pub d: &'a DmaBuf,
+    pub d: &'a HsmDmaBuf,
 }
 
 /// Map a `minicbor` decode error to [`HsmError::InvalidArg`].
@@ -211,7 +211,7 @@ fn decode_key_ops(d: &mut Decoder<'_>) -> HsmResult<CoseKeyOps> {
 ///
 /// # Errors
 /// * [`HsmError::InvalidArg`] — any malformed or out-of-profile input.
-pub fn parse_ec2_private_cose_key(cose_key: &DmaBuf) -> HsmResult<Ec2PrivateCoseKey<'_>> {
+pub fn parse_ec2_private_cose_key(cose_key: &HsmDmaBuf) -> HsmResult<Ec2PrivateCoseKey<'_>> {
     let mut kty_seen = false;
     let mut kid_seen = false;
     let mut alg: Option<i32> = None;
@@ -392,16 +392,16 @@ pub fn encode_ec2_private_cose_key(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use tsra_fw_hsm_pal_traits::DmaBuf;
+    use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
     use super::*;
 
-    /// Brand a borrowed slice as a `DmaBuf` for the parser under test.
+    /// Brand a borrowed slice as a `HsmDmaBuf` for the parser under test.
     #[allow(unsafe_code)]
-    fn dbuf(bytes: &[u8]) -> &DmaBuf {
+    fn dbuf(bytes: &[u8]) -> &HsmDmaBuf {
         // SAFETY: test-only; the slice is ordinary heap/stack memory and
         // the parser never issues DMA against it.
-        unsafe { DmaBuf::from_raw(bytes) }
+        unsafe { HsmDmaBuf::from_raw(bytes) }
     }
 
     /// Build a P-256 private-key COSE blob with a single `sign` op.

@@ -35,7 +35,10 @@ pub mod tbor_int {
 }
 
 pub mod aes_encrypt_decrypt;
+pub mod aes_gcm_encrypt_decrypt;
 pub mod aes_generate_key;
+pub mod aes_xts_encrypt_decrypt;
+pub mod aes_xts_generate_key;
 pub mod api_rev;
 pub mod concat_kdf_derive;
 pub mod darc_kex_key_gen;
@@ -50,6 +53,7 @@ pub mod ecdh_derive;
 pub mod evidence;
 pub mod get_cert;
 pub mod get_cert_chain_info;
+pub mod get_public_key;
 pub mod get_unwrapping_key;
 pub mod hash;
 pub mod hkdf_derive;
@@ -80,9 +84,13 @@ pub mod session_close;
 pub mod session_open_finish;
 pub mod session_open_init;
 pub mod unwrap_key;
+pub mod verify_key;
 
 pub use aes_encrypt_decrypt::*;
+pub use aes_gcm_encrypt_decrypt::*;
 pub use aes_generate_key::*;
+pub use aes_xts_encrypt_decrypt::*;
+pub use aes_xts_generate_key::*;
 pub use api_rev::*;
 pub use concat_kdf_derive::*;
 pub use darc_kex_key_gen::*;
@@ -97,6 +105,7 @@ pub use ecdh_derive::*;
 pub use evidence::*;
 pub use get_cert::*;
 pub use get_cert_chain_info::*;
+pub use get_public_key::*;
 pub use get_unwrapping_key::*;
 pub use hash::*;
 pub use hkdf_derive::*;
@@ -127,3 +136,4 @@ pub use session_close::*;
 pub use session_open_finish::*;
 pub use session_open_init::*;
 pub use unwrap_key::*;
+pub use verify_key::*;

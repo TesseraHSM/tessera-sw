@@ -120,9 +120,11 @@ impl HsmRsaKey {
         self.modulus_len() - 11
     }
 
-    /// Maximum plaintext length for OAEP encryption: `k - 2*hLen - 2`.
+    /// Maximum plaintext length for OAEP encryption: `k - 2*hLen - 2`, or 0
+    /// if `algo`'s digest is too long for the modulus (e.g. a long SHAKE
+    /// output, which OAEP does not support anyway).
     pub const fn max_oaep_message(&self, algo: HsmHashAlgo) -> usize {
-        self.modulus_len() - 2 * algo.digest_len() - 2
+        self.modulus_len().saturating_sub(2 * algo.digest_len() + 2)
     }
 
     /// Minimum work buffer size for PKCS#1 v1.5 operations.
@@ -134,7 +136,7 @@ impl HsmRsaKey {
     pub const fn oaep_work_len(&self, algo: HsmHashAlgo) -> usize {
         let k = self.modulus_len();
         let h_len = algo.digest_len();
-        let db_len = k - h_len - 1;
+        let db_len = k.saturating_sub(h_len + 1);
         k + algo.mgf1_state_len(db_len)
     }
 
@@ -195,8 +197,8 @@ pub trait HsmRsa: HsmIoTypes {
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
-        priv_key: &mut DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &mut HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
         pct: HsmRsaPct,
     ) -> Result<(), HsmError>;
 
@@ -229,9 +231,23 @@ pub trait HsmRsa: HsmIoTypes {
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
-        key: &DmaBuf,
-        y: &DmaBuf,
-        x: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        y: &HsmDmaBuf,
+        x: &mut HsmDmaBuf,
+    ) -> Result<(), HsmError>;
+
+    /// Compute the private primitive, replacing the input integer with its result.
+    ///
+    /// `key_type` selects the modulus size and CRT/non-CRT layout.
+    /// `y_x` is exactly `key_type.modulus_len()` bytes and disjoint from `key`.
+    /// The implementation must consume the input before publishing the result.
+    /// Operand sizes, byte order, and input bounds match [`Self::mod_exp_priv`].
+    async fn mod_exp_priv_in_place(
+        &self,
+        io: &Self::Io,
+        key_type: HsmRsaKey,
+        key: &HsmDmaBuf,
+        y_x: &mut HsmDmaBuf,
     ) -> Result<(), HsmError>;
 
     /// Public-key modular exponentiation: `y = x^e mod n`.
@@ -260,9 +276,9 @@ pub trait HsmRsa: HsmIoTypes {
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
-        key: &DmaBuf,
-        x: &DmaBuf,
-        y: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        x: &HsmDmaBuf,
+        y: &mut HsmDmaBuf,
     ) -> Result<(), HsmError>;
 
     /// Derive the raw wire-format public key (`n_le || e_le`) from a
@@ -299,8 +315,8 @@ pub trait HsmRsa: HsmIoTypes {
     fn rsa_priv_pub_key(
         &self,
         io: &Self::Io,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Convert a DER-encoded RSA private key (recovered from a
@@ -333,9 +349,9 @@ pub trait HsmRsa: HsmIoTypes {
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
         io: &Self::Io,
-        der: &'a mut DmaBuf,
+        der: &'a mut HsmDmaBuf,
         crt: bool,
-    ) -> HsmResult<(&'a DmaBuf, usize)>;
+    ) -> HsmResult<(&'a HsmDmaBuf, usize)>;
 
     /// PKCS#1 v1.5 encrypt (EME-PKCS1-v1_5).
     ///
@@ -365,9 +381,9 @@ pub trait HsmRsa: HsmIoTypes {
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
-        pub_key: &DmaBuf,
-        message: &DmaBuf,
-        output: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -402,9 +418,9 @@ pub trait HsmRsa: HsmIoTypes {
         &self,
         io: &Self::Io,
         key_size: HsmRsaKey,
-        priv_key: &DmaBuf,
-        ciphertext: &DmaBuf,
-        output: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
@@ -440,9 +456,9 @@ pub trait HsmRsa: HsmIoTypes {
         io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        message_hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -477,9 +493,9 @@ pub trait HsmRsa: HsmIoTypes {
         io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message_hash: &DmaBuf,
-        signature: &DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
@@ -513,10 +529,10 @@ pub trait HsmRsa: HsmIoTypes {
         io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message: &DmaBuf,
-        label: &DmaBuf,
-        output: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -558,10 +574,10 @@ pub trait HsmRsa: HsmIoTypes {
         io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        ciphertext: &DmaBuf,
-        label: &DmaBuf,
-        output: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
@@ -595,10 +611,10 @@ pub trait HsmRsa: HsmIoTypes {
         io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        message_hash: &DmaBuf,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &mut DmaBuf,
+        signature: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -632,12 +648,33 @@ pub trait HsmRsa: HsmIoTypes {
         io: &Self::Io,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message_hash: &DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &DmaBuf,
+        signature: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
         Self: 'a;
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU16;
+
+    use super::HsmHashAlgo;
+    use super::HsmRsaKey;
+
+    /// A SHAKE output longer than the modulus must not underflow the OAEP
+    /// sizes: OAEP rejects SHAKE, but these helpers run first.
+    #[test]
+    fn oaep_sizes_do_not_underflow_for_long_shake() {
+        let shake = HsmHashAlgo::Shake256(NonZeroU16::new(300).expect("nonzero"));
+        assert_eq!(HsmRsaKey::Rsa2048Pub.max_oaep_message(shake), 0);
+        let _ = HsmRsaKey::Rsa2048Pub.oaep_work_len(shake);
+        assert_eq!(
+            HsmRsaKey::Rsa2048Pub.max_oaep_message(HsmHashAlgo::Sha256),
+            256 - 2 * 32 - 2
+        );
+    }
 }

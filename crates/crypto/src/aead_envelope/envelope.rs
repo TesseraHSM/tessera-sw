@@ -18,7 +18,7 @@ use crate::CryptoError;
 pub struct AeadEnvelope<'a> {
     /// AEAD algorithm read from the envelope header.
     pub alg: AeadAlg,
-    /// The 12-byte GCM nonce.
+    /// The 16-byte IV slot; only its first 12 bytes are the GCM nonce.
     pub iv: &'a [u8],
     /// Additional authenticated data (may be empty).
     pub aad: &'a [u8],

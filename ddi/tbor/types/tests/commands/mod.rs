@@ -7,7 +7,10 @@
 
 pub mod aes_ctr_block_alignment;
 pub mod aes_encrypt_decrypt;
+pub mod aes_gcm_encrypt_decrypt;
 pub mod aes_generate_key;
+pub mod aes_xts_encrypt_decrypt;
+pub mod aes_xts_generate_key;
 pub mod api_rev;
 pub mod common;
 pub mod concat_kdf_derive;
@@ -26,6 +29,7 @@ pub mod forward_compat;
 pub mod fw_error_decode;
 pub mod get_cert;
 pub mod get_cert_chain_info;
+pub mod get_public_key;
 pub mod get_unwrapping_key;
 pub mod hash;
 pub mod hkdf_derive;
@@ -56,3 +60,4 @@ pub mod sd_sealing_key_gen;
 pub mod session_close;
 pub mod unexpected_toc_type;
 pub mod unwrap_key;
+pub mod verify_key;

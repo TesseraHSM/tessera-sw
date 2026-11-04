@@ -58,7 +58,7 @@ pub struct TborMlKemEncapsulateResp {
     pub ciphertext: Vec<u8>,
 
     /// The 32-byte shared secret, masked under the requested scope's masking key.
-    #[tbor(max_len = 260)]
+    #[tbor(max_len = 264)]
     pub masked_shared_secret: Vec<u8>,
 }
 

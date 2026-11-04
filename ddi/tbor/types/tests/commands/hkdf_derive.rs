@@ -33,8 +33,8 @@ use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// AEAD-GCM-256 masked-key envelope overhead:
-/// `header(8) ‖ iv(12) ‖ aad(192) ‖ tag(16)` = 228 B around the plaintext.
-const MASK_OVERHEAD: usize = 8 + 12 + 192 + 16;
+/// `header(8) ‖ iv(16) ‖ aad(192) ‖ tag(16)` = 232 B around padded plaintext.
+const MASK_OVERHEAD: usize = 8 + 16 + 192 + 16;
 
 /// Derive a fresh masked ECDH shared secret on the requested curve.
 fn fresh_masked_secret_for_curve(ctx: &TestCtx, session_id: u16, curve: u8) -> Vec<u8> {
@@ -138,7 +138,7 @@ fn hkdf_derive_all_key_types() {
             );
             assert_eq!(
                 masked.len(),
-                MASK_OVERHEAD + okm_len,
+                MASK_OVERHEAD + okm_len.next_multiple_of(16),
                 "masked derived-key envelope length must match the output type (type {key_type})",
             );
             assert!(
@@ -312,27 +312,29 @@ fn hkdf_derive_is_stable_and_salt_info_separate_outputs() {
     }
 }
 
-/// Rejects an unsupported HKDF hash algorithm.
+/// Rejects unsupported HKDF hash algorithms, including the SHAKE XOFs.
 #[test]
 fn hkdf_derive_unknown_hash_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
 
-    ctx.expect_fw_reject(
-        &TborHkdfDeriveReq {
-            session_id: session.session_id,
-            scope: SCOPE_LOCAL,
-            hash_algo: u8::MAX,
-            key_type: KDF_KEY_TYPE_AES256,
-            key_length: 0,
-            masked_secret: ikm,
-            salt: Vec::new(),
-            info: Vec::new(),
-            key_label: Vec::new(),
-        },
-        TborStatus::InvalidArg,
-    );
+    for hash_algo in [HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
+        ctx.expect_fw_reject(
+            &TborHkdfDeriveReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                hash_algo,
+                key_type: KDF_KEY_TYPE_AES256,
+                key_length: 0,
+                masked_secret: ikm.clone(),
+                salt: Vec::new(),
+                info: Vec::new(),
+                key_label: Vec::new(),
+            },
+            TborStatus::InvalidArg,
+        );
+    }
 }
 
 /// Rejects an unsupported derived-key type.

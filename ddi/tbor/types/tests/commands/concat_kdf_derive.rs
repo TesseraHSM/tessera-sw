@@ -32,6 +32,8 @@ use tsra_ddi_tbor_types::CONCAT_KDF_ALG_X963;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE128;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
 use tsra_ddi_tbor_types::KDF_KEY_TYPE_AES128;
 use tsra_ddi_tbor_types::KDF_KEY_TYPE_AES192;
 use tsra_ddi_tbor_types::KDF_KEY_TYPE_AES256;
@@ -60,8 +62,8 @@ const HASH_SHA384: u8 = 2;
 const HASH_SHA512: u8 = 3;
 
 /// AEAD-GCM-256 masked-key envelope overhead:
-/// `header(8) ‖ iv(12) ‖ aad(192) ‖ tag(16)` = 228 B around the plaintext.
-const MASK_OVERHEAD: usize = 8 + 12 + 192 + 16;
+/// `header(8) ‖ iv(16) ‖ aad(192) ‖ tag(16)` = 232 B around padded plaintext.
+const MASK_OVERHEAD: usize = 8 + 16 + 192 + 16;
 
 /// Derive a fresh masked ECDH shared secret (the KDF IKM) on-device.
 fn fresh_masked_secret_for_curve(ctx: &TestCtx, session_id: u16, curve: u8) -> Vec<u8> {
@@ -164,7 +166,7 @@ fn concat_kdf_all_key_types_both_algs() {
 
             assert_eq!(
                 masked.len(),
-                MASK_OVERHEAD + okm_len,
+                MASK_OVERHEAD + okm_len.next_multiple_of(16),
                 "masked derived-key length must match the output type (alg {kdf_alg}, type {key_type})",
             );
 
@@ -418,26 +420,28 @@ fn concat_kdf_var_hmac256_above_max_length_rejected() {
     );
 }
 
-/// Rejects an unsupported hash algorithm.
+/// Rejects unsupported hash algorithms: SHA-1 and the SHAKE XOFs.
 #[test]
 fn concat_kdf_unknown_hash_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let ikm = fresh_masked_secret(&ctx, session.session_id);
 
-    ctx.expect_fw_reject(
-        &TborConcatKdfDeriveReq {
-            session_id: session.session_id,
-            scope: SCOPE_LOCAL,
-            hash_algo: 0,
-            kdf_alg: CONCAT_KDF_ALG_X963,
-            key_type: KDF_KEY_TYPE_AES256,
-            key_length: 0,
-            masked_secret: ikm,
-            info: Vec::new(),
-        },
-        TborStatus::InvalidArg,
-    );
+    for hash_algo in [0, HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256] {
+        ctx.expect_fw_reject(
+            &TborConcatKdfDeriveReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                hash_algo,
+                kdf_alg: CONCAT_KDF_ALG_X963,
+                key_type: KDF_KEY_TYPE_AES256,
+                key_length: 0,
+                masked_secret: ikm.clone(),
+                info: Vec::new(),
+            },
+            TborStatus::InvalidArg,
+        );
+    }
 }
 
 /// Rejects an unsupported concatenation-KDF algorithm.
@@ -753,7 +757,7 @@ fn concat_kdf_garbage_masked_secret_rejected() {
     // 12-byte IV. Corrupt its magic while preserving valid TBOR/envelope
     // framing so firmware reaches masked-key metadata decoding.
     let metadata_magic = garbage
-        .get_mut(8 + 12)
+        .get_mut(8 + 16)
         .expect("masked ECDH secret must contain metadata");
     *metadata_magic ^= 0xff;
 

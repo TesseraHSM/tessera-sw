@@ -22,7 +22,7 @@ pub(crate) async fn sha_digest<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiShaDigestReq<'_> = decoder.decode_data()?;
 
     let algo = super::from_ddi::hash(body.sha_mode)?;

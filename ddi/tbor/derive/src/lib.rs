@@ -51,6 +51,7 @@
 //! | `[u8; N]` | fixed-length buffer |
 //! | `Vec<u8>` | variable buffer |
 //! | `Option<Vec<u8>>` | optional variable buffer |
+//! | `Option<u8>`/`Option<u16>`/`Option<u32>`/`Option<u64>` | optional inline primitive |
 //!
 //! [`TborOpReq`]: ../tsra_ddi_tbor_types/trait.TborOpReq.html
 //! [`TborResp`]: ../tsra_ddi_tbor_types/trait.TborResp.html
@@ -141,6 +142,7 @@ fn gen_request(
     fields: &[ParsedField],
 ) -> syn::Result<TokenStream2> {
     let name = &item.ident;
+    let field_toc_count = fields.len().max(1);
     let opcode = attrs.opcode.as_ref().ok_or_else(|| {
         syn::Error::new(
             name.span(),
@@ -204,12 +206,19 @@ fn gen_request(
                 &self,
                 __buf: &'__b mut [u8],
             ) -> ::core::result::Result<&'__b [u8], ::tsra_ddi_tbor_codec::EncodeError> {
+                let __slots = (#field_toc_count).max(
+                    <#resp_ty as ::tsra_ddi_tbor_types::TborResp>::FIELD_TOC_COUNT,
+                );
                 let __enc = ::tsra_ddi_tbor_codec::RequestEncoder::new(
                     __buf,
                     ::tsra_ddi_tbor_codec::PROTOCOL_VERSION,
                     <Self as ::tsra_ddi_tbor_types::TborOpReq>::OPCODE,
-                );
+                ).with_toc_slots(__slots)?;
                 #encode_chain
+                let mut __enc = __enc;
+                for _ in #field_toc_count..__slots {
+                    __enc = __enc.none()?;
+                }
                 __enc.finish()
             }
         }
@@ -242,6 +251,8 @@ fn gen_response(item: &ItemStruct, fields: &[ParsedField]) -> TokenStream2 {
 
     quote! {
         impl ::tsra_ddi_tbor_types::TborResp for #name {
+            const FIELD_TOC_COUNT: usize = #expected_toc;
+
             fn decode_response(
                 __buf: &[u8],
             ) -> ::core::result::Result<Self, ::tsra_ddi_tbor_codec::DecodeError> {
@@ -322,6 +333,15 @@ fn gen_encode_step(f: &ParsedField) -> TokenStream2 {
                 ::core::option::Option::None => __enc.none()?,
             };
         },
+        FieldShape::OptUint(width) => {
+            let method = format_ident!("{}", width.encoder_method());
+            quote! {
+                let __enc = match self.#name {
+                    ::core::option::Option::Some(__v) => __enc.#method(__v)?,
+                    ::core::option::Option::None => __enc.none()?,
+                };
+            }
+        }
     }
 }
 
@@ -430,6 +450,18 @@ fn gen_decode_step(idx: usize, f: &ParsedField) -> TokenStream2 {
                 #unexpected
             }
         },
+        FieldShape::OptUint(width) => {
+            let variant = format_ident!("{}", width.toc_variant());
+            quote! {
+                match __raw.toc_entry(#idx) {
+                    ::tsra_ddi_tbor_codec::TocEntry::#variant(__v) =>
+                        ::core::option::Option::Some(__v),
+                    ::tsra_ddi_tbor_codec::TocEntry::None =>
+                        ::core::option::Option::None,
+                    #unexpected
+                }
+            }
+        }
     };
     quote! {
         let #name = #body;

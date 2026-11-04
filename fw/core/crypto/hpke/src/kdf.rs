@@ -15,8 +15,8 @@
 //! [`HsmScopedAlloc`], while the PAL allocates any internal HKDF scratch
 //! per call.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -38,7 +38,10 @@ const HPKE_V1: &[u8] = b"HPKE-v1";
 ///
 /// The returned buffer is scoped to the surrounding PAL allocation
 /// region and is released automatically when that alloc ends.
-fn concat_alloc<'a>(parts: &[&[u8]], alloc: &'a impl HsmScopedAlloc) -> HsmResult<&'a mut DmaBuf> {
+fn concat_alloc<'a>(
+    parts: &[&[u8]],
+    alloc: &'a impl HsmScopedAlloc,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let total: usize = parts.iter().map(|p| p.len()).sum();
     let dst = alloc.dma_alloc(total)?;
     let mut pos = 0;
@@ -96,10 +99,10 @@ pub async fn labeled_extract<'a, P>(
     io: &P::Io,
     algo: HsmHashAlgo,
     suite_id: &[u8],
-    salt: Option<&DmaBuf>,
+    salt: Option<&HsmDmaBuf>,
     label: &[u8],
     ikm: &[u8],
-    prk_out: &mut DmaBuf,
+    prk_out: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -153,10 +156,10 @@ pub async fn labeled_expand<'a, P>(
     io: &P::Io,
     algo: HsmHashAlgo,
     suite_id: &[u8],
-    prk: &DmaBuf,
+    prk: &HsmDmaBuf,
     label: &[u8],
     info: &[u8],
-    out: &mut DmaBuf,
+    out: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where

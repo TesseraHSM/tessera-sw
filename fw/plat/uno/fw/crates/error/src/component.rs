@@ -49,4 +49,7 @@ pub enum ComponentId {
 
     /// PQC offload driver (ML-DSA / ML-KEM on the FP cores).
     PQC = 13,
+
+    /// BCP (bulk crypto processor / CDMA) driver.
+    BCP = 14,
 }

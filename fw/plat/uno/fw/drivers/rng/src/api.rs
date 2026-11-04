@@ -20,7 +20,7 @@ use cortex_m::asm::nop;
 use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::rng::regs::RngRegs;
@@ -147,7 +147,7 @@ impl RngDriver {
     /// transient TRBG/DRBG faults are transparently recovered inside
     /// `wait_for_random_data`; the call only returns once `buf` is
     /// fully written.
-    pub fn fill_bytes(&self, buf: &mut DmaBuf) -> HsmResult<()> {
+    pub fn fill_bytes(&self, buf: &mut HsmDmaBuf) -> HsmResult<()> {
         for chunk in buf.chunks_mut(core::mem::size_of::<u32>()) {
             Self::wait_for_random_data();
             let word = REGS.rn_data.read(RN_DATA::DATA);

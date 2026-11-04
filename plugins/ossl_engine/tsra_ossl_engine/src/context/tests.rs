@@ -12,6 +12,7 @@ use std::ptr::NonNull;
 
 use tsra_ossl_engine_core::engine::Engine;
 use tsra_ossl_engine_core::ffi;
+use tsra_ossl_engine_core::rsa_pkey_method::ANY_KEYTYPE;
 
 use super::*;
 
@@ -128,7 +129,7 @@ fn evp_pkey_sign(pkey: *mut ffi::EVP_PKEY, digest: &[u8], md: *const ffi::EVP_MD
         assert_eq!(
             ffi::EVP_PKEY_CTX_ctrl(
                 ctx,
-                -1,
+                ANY_KEYTYPE,
                 ffi::EVP_PKEY_OP_TYPE_SIG_CONST,
                 ffi::EVP_PKEY_CTRL_MD_CONST,
                 0,
@@ -174,6 +175,7 @@ mod round_trips {
     use std::ffi::CString;
     use std::ffi::c_int;
     use std::ffi::c_void;
+    use std::os::unix::fs::PermissionsExt;
     use std::ptr::null;
     use std::ptr::null_mut;
 
@@ -186,21 +188,28 @@ mod round_trips {
     use openssl::pkey::Public;
     use openssl::sign::Verifier;
     use tsra_api::HsmAesCbcAlgo;
+    use tsra_api::HsmAesGcmKeyUnmaskAlgo;
     use tsra_api::HsmAesKey;
     use tsra_api::HsmAesKeyGenAlgo;
+    use tsra_api::HsmAesKeyUnmaskAlgo;
+    use tsra_api::HsmAesXtsKeyUnmaskAlgo;
     use tsra_api::HsmEccCurve;
     use tsra_api::HsmEccKeyGenAlgo;
     #[cfg(feature = "mock")]
     use tsra_api::HsmEccPrivateKey;
     use tsra_api::HsmEncrypter;
+    use tsra_api::HsmError;
     use tsra_api::HsmGenericSecretKeyUnmaskAlgo;
     use tsra_api::HsmHmacAlgo;
     use tsra_api::HsmHmacKeyUnmaskAlgo;
     use tsra_api::HsmKeyClass;
     use tsra_api::HsmKeyCommonProps;
+    use tsra_api::HsmKeyDeleteOp;
     use tsra_api::HsmKeyKind;
     use tsra_api::HsmKeyManager;
     use tsra_api::HsmKeyPropsBuilder;
+    use tsra_api::HsmKeyUnmaskOp;
+    use tsra_api::HsmSession;
     use tsra_api::HsmSigner;
     use tsra_ossl_engine_core::cipher_method::AES_BLOCK;
     use tsra_ossl_engine_core::cipher_method::TSRA_CTRL_SET_KEY_URI;
@@ -209,6 +218,7 @@ mod round_trips {
     use tsra_ossl_engine_core::error::RetCode;
 
     use super::*;
+    use crate::uri::AesKind;
 
     /// Generate a persistent EC P-384 signing key pair on the open HSM and
     /// return the private-key handle. Only the mock-only deletion tests take a
@@ -900,6 +910,195 @@ mod round_trips {
         Ok(())
     }
 
+    /// Run the `GENERATE_KEY` ctrl command on `engine_raw` with `uri`, as
+    /// `ENGINE_ctrl_cmd_string` callers and `openssl engine -post` do; `true`
+    /// on success.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    fn generate_key_cmd(engine_raw: *mut ffi::ENGINE, uri: &str) -> bool {
+        let uri = CString::new(uri).unwrap();
+        // SAFETY: engine_raw is a live ENGINE; name and argument are
+        // NUL-terminated.
+        unsafe {
+            let rc =
+                ffi::ENGINE_ctrl_cmd_string(engine_raw, c"GENERATE_KEY".as_ptr(), uri.as_ptr(), 0);
+            ffi::ERR_clear_error();
+            rc == RetCode::Success as c_int
+        }
+    }
+
+    /// Unmask `masked` with `algo` and return the key's kind and size; the key
+    /// is deleted again.
+    fn unmasked_kind_bits<A>(
+        data: &EngineData,
+        mut algo: A,
+        masked: &[u8],
+    ) -> EngineResult<(HsmKeyKind, u32)>
+    where
+        A: HsmKeyUnmaskOp<Session = HsmSession, Error = HsmError>,
+        A::Key: HsmKeyCommonProps + HsmKeyDeleteOp,
+    {
+        data.with_session(|session| {
+            let key = HsmKeyManager::unmask_key(session, &mut algo, masked)
+                .map_err(|e| EngineError::wrap("unmask generated key", e))?;
+            let found = (key.kind(), key.bits());
+            crate::context::delete_hsm_key(key, "generated test key");
+            Ok(found)
+        })
+    }
+
+    /// The `GENERATE_KEY` ctrl command: every AES key kind and size writes an
+    /// owner-only masked blob that unmasks to a key of that kind and size
+    /// (`type=aes` defaulting to 256 bits); a CBC key serves the AES-CBC
+    /// cipher of its size, matching the SDK's AES-CBC, also through the
+    /// generating URI; GCM and XTS keys, and a URI whose `bits=` disagrees with
+    /// the cipher, do not attach; a second run replaces the blob; bad types,
+    /// sizes and paths fail without writing a file. Backend-agnostic.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_generate_key(data: EngineData, dir: &Path) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        engine.set_ctrl::<crate::engine_impl::TsraCtrl>()?;
+        register_aes_cbc_ciphers::<crate::aes::TsraAesCbc>(&engine)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let data = slot
+            .get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        let pid = std::process::id();
+        let iv = [0x24u8; AES_BLOCK];
+        let msg = pattern(4113);
+        let nid = |n: u32| c_int::try_from(n).unwrap();
+        let aes256 = nid(ffi::NID_aes_256_cbc);
+
+        // (type, bits=, kind, key size, AES-CBC cipher of that size)
+        let cases = [
+            (
+                "aes",
+                Some(128u32),
+                AesKind::Cbc,
+                128u32,
+                Some(nid(ffi::NID_aes_128_cbc)),
+            ),
+            (
+                "aes",
+                Some(192),
+                AesKind::Cbc,
+                192,
+                Some(nid(ffi::NID_aes_192_cbc)),
+            ),
+            ("aes", Some(256), AesKind::Cbc, 256, Some(aes256)),
+            ("aes", None, AesKind::Cbc, 256, Some(aes256)),
+            ("aes-gcm", None, AesKind::Gcm, 256, None),
+            ("aes-gcm", Some(256), AesKind::Gcm, 256, None),
+            ("aes-xts", None, AesKind::Xts, 512, None),
+            ("aes-xts", Some(512), AesKind::Xts, 512, None),
+        ];
+        for (i, (ty, bits, kind, key_bits, cbc)) in cases.into_iter().enumerate() {
+            let path = dir.join(format!("generated-{i}-{pid}.bin"));
+            let _guard = TempFile(path.clone());
+            let bits_attr = bits.map(|b| format!(";bits={b}")).unwrap_or_default();
+            let uri = format!("tsra://{};type={ty}{bits_attr}", path.display());
+            assert!(generate_key_cmd(engine_raw, &uri), "{uri}");
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| EngineError::wrap("stat generated blob", e))?;
+            // Permission bits: all but the file type.
+            assert_eq!(
+                meta.permissions().mode() & !libc::S_IFMT,
+                SECRET_FILE_MODE,
+                "{uri}"
+            );
+            let masked =
+                std::fs::read(&path).map_err(|e| EngineError::wrap("read generated blob", e))?;
+            let (found, expected_kind) = match kind {
+                AesKind::Cbc => (
+                    unmasked_kind_bits(data, HsmAesKeyUnmaskAlgo::default(), &masked)?,
+                    HsmKeyKind::Aes,
+                ),
+                AesKind::Gcm => (
+                    unmasked_kind_bits(data, HsmAesGcmKeyUnmaskAlgo::default(), &masked)?,
+                    HsmKeyKind::AesGcm,
+                ),
+                AesKind::Xts => (
+                    unmasked_kind_bits(data, HsmAesXtsKeyUnmaskAlgo::default(), &masked)?,
+                    HsmKeyKind::AesXts,
+                ),
+            };
+            assert_eq!(found, (expected_kind, key_bits), "{uri}");
+
+            let plain_uri = format!("tsra://{};type=aes", path.display());
+            let Some(cbc) = cbc else {
+                // Refused by type, or by the HSM's key-kind check.
+                for key_uri in [&uri, &plain_uri] {
+                    assert!(
+                        aes_cbc(engine_raw, aes256, key_uri, &iv, true, b"x", AES_BLOCK).is_none(),
+                        "{key_uri} must not attach to AES-256-CBC"
+                    );
+                }
+                continue;
+            };
+            let key = data.with_session(|session| {
+                HsmKeyManager::unmask_key(session, &mut HsmAesKeyUnmaskAlgo::default(), &masked)
+                    .map_err(|e| EngineError::wrap("unmask generated key", e))
+            })?;
+            let expected = sdk_cbc_encrypt(&key, &iv, &msg);
+            crate::context::delete_hsm_key(key, "generated test key");
+            let expected = expected?;
+            for key_uri in [&uri, &plain_uri] {
+                let ct = aes_cbc(engine_raw, cbc, key_uri, &iv, true, &msg, 1000);
+                assert_eq!(ct.as_ref(), Some(&expected), "{key_uri}");
+                let pt = aes_cbc(engine_raw, cbc, key_uri, &iv, false, &expected, 1000);
+                assert_eq!(pt.as_ref(), Some(&msg), "{key_uri}");
+            }
+        }
+
+        // bits= that disagrees with the cipher is refused, even for a key of
+        // the cipher's size; a second run replaces the blob with a new key's.
+        let path = dir.join(format!("generated-again-{pid}.bin"));
+        let _guard = TempFile(path.clone());
+        let uri = format!("tsra://{};type=aes", path.display());
+        assert!(generate_key_cmd(engine_raw, &uri), "{uri}");
+        let mismatched = format!("{uri};bits=128");
+        assert!(
+            aes_cbc(engine_raw, aes256, &mismatched, &iv, true, b"x", AES_BLOCK).is_none(),
+            "{mismatched} must not attach to AES-256-CBC"
+        );
+        let first = std::fs::read(&path).map_err(|e| EngineError::wrap("read blob", e))?;
+        assert!(generate_key_cmd(engine_raw, &uri), "{uri} again");
+        let second = std::fs::read(&path).map_err(|e| EngineError::wrap("read blob", e))?;
+        assert_ne!(first, second, "a second run must write a new key's blob");
+
+        // Bad types, sizes and paths fail and write nothing.
+        let bad = dir.join(format!("generated-bad-{pid}.bin"));
+        let _bad_guard = TempFile(bad.clone());
+        let bad_path = bad.display();
+        let missing_dir = dir.join(format!("no-such-dir-{pid}")).join("key.bin");
+        for uri in [
+            format!("tsra://{bad_path};type=aes;bits=100"),
+            format!("tsra://{bad_path};type=aes;bits=512"),
+            format!("tsra://{bad_path};type=aes-gcm;bits=128"),
+            format!("tsra://{bad_path};type=aes-xts;bits=256"),
+            format!("tsra://{bad_path};type=ec"),
+            format!("tsra://{bad_path};type=rsa"),
+            format!("tsra://{bad_path}"),
+            format!("tsra://{bad_path};type=aes;foo=bar"),
+            format!("{bad_path};type=aes"),
+            format!("tsra://{};type=aes", missing_dir.display()),
+        ] {
+            assert!(!generate_key_cmd(engine_raw, &uri), "{uri}");
+            assert!(!bad.exists(), "{uri} must not write a file");
+        }
+
+        let _ = slot.take(&mut engine)?;
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // SAFETY: every cipher context above is freed; engine_raw is the
+        // ENGINE_new ref from new_test_engine.
+        unsafe {
+            release_aes_cbc_ciphers(&engine);
+            ffi::ENGINE_free(engine_raw);
+        }
+        Ok(())
+    }
+
     /// Import a software RSA key into the HSM, then sign a digest through the
     /// engine (HSM PKCS#1 v1.5 via `EVP_DigestSign`, routed to our RSA_METHOD
     /// sign slot) and verify the signature against the public half in software.
@@ -1042,7 +1241,7 @@ mod round_trips {
             assert_eq!(
                 ffi::EVP_PKEY_CTX_ctrl(
                     ctx,
-                    -1,
+                    ANY_KEYTYPE,
                     ffi::EVP_PKEY_OP_TYPE_SIG_CONST,
                     ffi::EVP_PKEY_CTRL_MD_CONST,
                     0,
@@ -1124,8 +1323,9 @@ mod round_trips {
             ],
         )
         .expect_err("keyWrapping must reject a non-2048 size");
+        let bits = crate::context::RSA_UNWRAPPING_KEY_BITS;
         assert!(
-            err.contains("requires rsa_keygen_bits=2048"),
+            err.contains(&format!("requires rsa_keygen_bits={bits}")),
             "unexpected error: {err}"
         );
 
@@ -1133,7 +1333,7 @@ mod round_trips {
         let raw = try_rsa_import(
             engine_raw,
             &[
-                ("rsa_keygen_bits", "2048"),
+                ("rsa_keygen_bits", bits.to_string().as_str()),
                 ("tsra.key_usage", "keyWrapping"),
             ],
         )
@@ -1143,8 +1343,11 @@ mod round_trips {
         let rsa = exported
             .rsa()
             .map_err(|e| EngineError::wrap("exported key is not RSA", e))?;
-        // size() is the modulus in bytes; 256 bytes == 2048 bits.
-        assert_eq!(rsa.size(), 256, "unwrapping key must be a 2048-bit RSA key");
+        assert_eq!(
+            rsa.size().checked_mul(u8::BITS),
+            Some(bits),
+            "unwrapping key must be a {bits}-bit RSA key"
+        );
 
         // Teardown.
         drop(exported);
@@ -1167,7 +1370,6 @@ mod round_trips {
     pub(super) fn run_rsa_import_wrapped(data: EngineData, dir: &Path) -> EngineResult<()> {
         use openssl::rsa::Rsa;
         use tsra_api::HsmEncrypter;
-        use tsra_api::HsmHashAlgo;
         use tsra_api::HsmKeyCommonProps;
         use tsra_api::HsmKeyKind;
         use tsra_api::HsmKeyManager;
@@ -1199,7 +1401,10 @@ mod round_trips {
                 .ok_or(EngineError::NullParam("engine_data"))?;
             ed.with_session(|session| {
                 ed.with_unwrapping_key(session, |_unwrap_priv, unwrap_pub| {
-                    let mut wrap = HsmRsaAesWrapAlgo::new(HsmHashAlgo::Sha256, 32);
+                    let mut wrap = HsmRsaAesWrapAlgo::new(
+                        crate::rsaimport::WRAP_HASH,
+                        crate::rsaimport::WRAP_KEK_BYTES,
+                    );
                     HsmEncrypter::encrypt_vec(&mut wrap, unwrap_pub, &pkcs8)
                         .map_err(|e| EngineError::wrap("external RSA-AES wrap", e))
                 })
@@ -1333,7 +1538,10 @@ mod round_trips {
             err
         };
         assert!(
-            err.contains("requires rsa_keygen_bits=2048"),
+            err.contains(&format!(
+                "requires rsa_keygen_bits={}",
+                crate::context::RSA_UNWRAPPING_KEY_BITS
+            )),
             "unexpected error: {err}"
         );
 
@@ -1603,7 +1811,10 @@ mod round_trips {
             let k = HsmKeyManager::unmask_key(session, &mut unmask, &aes_blob)
                 .map_err(|e| EngineError::wrap("unmask aes blob", e))?;
             assert_eq!(k.kind(), HsmKeyKind::Aes);
-            assert_eq!(k.bits(), 256);
+            assert_eq!(
+                k.bits(),
+                tsra_ossl_engine_core::hkdf_method::DEFAULT_DERIVED_KEY_BITS
+            );
             assert!(k.can_encrypt() && k.can_decrypt(), "aes usage flags");
             crate::context::delete_hsm_key(k, "hkdf test aes props key");
 
@@ -1714,7 +1925,12 @@ mod round_trips {
                 1,
                 "derive size query"
             );
-            assert_eq!(len, if output_file.is_some() { 1 } else { 8192 });
+            let expected = if output_file.is_some() {
+                tsra_ossl_engine_core::FILE_OUTPUT_SIZE_HINT
+            } else {
+                tsra_ossl_engine_core::MASKED_KEY_MAX_BUFFER
+            };
+            assert_eq!(len, expected);
             let mut buf = vec![0u8; len];
             assert_eq!(
                 ffi::EVP_PKEY_derive(ctx, buf.as_mut_ptr(), &mut len),
@@ -2126,7 +2342,7 @@ mod mock {
         let obk_path = scratch.0.join("obk.bin");
         fs::write(&priv_path, &priv_der).unwrap();
         fs::write(&pub_path, &pub_der).unwrap();
-        fs::write(&obk_path, vec![0u8; 48]).unwrap();
+        fs::write(&obk_path, vec![0u8; tsra_ossl_engine_resiliency::OBK_LEN]).unwrap();
 
         ResiliencySettings {
             enabled: true,
@@ -2340,6 +2556,21 @@ mod mock {
         )
         .unwrap();
         round_trips::run_aes_cbc(data, &scratch.0).unwrap();
+    }
+
+    // The GENERATE_KEY ctrl command for every AES key kind and size (see
+    // round_trips::run_generate_key).
+    #[test]
+    #[serial]
+    fn generate_key_via_engine_ctrl() {
+        let scratch = Scratch::new("generate-key");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_generate_key(data, &scratch.0).unwrap();
     }
 
     // A signature produced through a loaded/imported RSA key (HSM PKCS#1 v1.5
@@ -2589,20 +2820,21 @@ mod mock {
 
     #[test]
     fn hex_decode_rejects_wrong_length() {
-        assert!(hex_decode_16("abcd", "X").is_err());
+        assert!(decode_credential_hex("abcd", "X").is_err());
     }
 
     #[test]
     fn hex_decode_rejects_non_hex() {
-        let s = "g".repeat(32);
-        assert!(hex_decode_16(&s, "X").is_err());
+        let s = "g".repeat(CREDENTIALS_HEX_SIZE);
+        let err = decode_credential_hex(&s, "X").unwrap_err();
+        assert!(err.to_string().contains("non-hex"), "{err}");
     }
 
     #[test]
     fn hex_decode_round_trip() {
         let s = "000102030405060708090a0b0c0d0e0f";
         assert_eq!(
-            hex_decode_16(s, "X").unwrap(),
+            decode_credential_hex(s, "X").unwrap(),
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
         );
     }
@@ -2839,5 +3071,19 @@ mod hw_tests {
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_aes_cbc(data, &std::env::temp_dir())
+    }
+
+    /// Hardware `GENERATE_KEY`, same flow as the mock test (see
+    /// [`super::round_trips::run_generate_key`]); env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine generate_key_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn generate_key_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_generate_key(data, &std::env::temp_dir())
     }
 }

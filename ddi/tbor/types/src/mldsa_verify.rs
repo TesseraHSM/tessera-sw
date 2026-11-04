@@ -125,7 +125,7 @@ mod tests {
     }
 
     /// The worst-case verify request must fit the 8192-byte transport
-    /// buffer with the data section staged at offset 132.
+    /// buffer with the data written directly after the paired TOC.
     #[test]
     fn max_sized_request_fits_the_transport_buffer() {
         let req = TborMlDsaVerifyReq {
@@ -137,15 +137,8 @@ mod tests {
         };
         let mut buf = [0u8; 8192];
         let frame = req.encode_request(&mut buf).expect("encode");
-        // header(4) + 5 TOC entries * 4 + data(8060).
-        //
-        // The emitted frame regained a TOC entry (4 B) when `session_id`
-        // came back in `bind the PQC commands to a session`, but the
-        // *staging* budget is unchanged: the encoder always reserves the
-        // worst-case 32 TOC entries, so data still starts at offset 132
-        // and 132 + 8060 == 8192 exactly.  `MLDSA_MESSAGE_MAX_LEN` must
-        // therefore stay at 586 -- binding to a session cost no headroom.
-        assert_eq!(frame.len(), 8084);
+        // header(8) + 5 TOC entries * 4 + data(8060).
+        assert_eq!(frame.len(), 8088);
     }
 
     #[test]

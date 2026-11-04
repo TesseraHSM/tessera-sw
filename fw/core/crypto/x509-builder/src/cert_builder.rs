@@ -17,9 +17,9 @@
 //! pass plain `&str` values.
 
 use bitfield_struct::bitfield;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -218,7 +218,7 @@ pub async fn build_root_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &RootCertParams<'_>,
-    priv_key: &DmaBuf,
+    priv_key: &HsmDmaBuf,
     out: Option<&mut [u8]>,
 ) -> HsmResult<usize> {
     use crate::root_cert::TBS_TEMPLATE;
@@ -250,7 +250,7 @@ pub async fn build_leaf_cert<'a, P: HsmCrypto + HsmAlloc + 'a>(
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     params: &LeafCertParams<'_>,
-    priv_key: &DmaBuf,
+    priv_key: &HsmDmaBuf,
     out: Option<&mut [u8]>,
 ) -> HsmResult<usize> {
     // Validate `priv_key` up front so even the query path (`out = None`)
@@ -282,7 +282,7 @@ pub trait TbsSigner<I: HsmIo> {
     /// (`r || s`, LE-by-half, 96 B). The signer converts the digest to its
     /// backend's operand order (a PKA/`ecc_sign_deterministic` signer reverses
     /// it to little-endian).
-    async fn sign_digest(&self, io: &I, digest: &DmaBuf, sig: &mut DmaBuf) -> HsmResult<()>;
+    async fn sign_digest(&self, io: &I, digest: &HsmDmaBuf, sig: &mut HsmDmaBuf) -> HsmResult<()>;
 }
 
 /// Build a Leaf certificate whose TBS signature is produced by `signer`
@@ -360,11 +360,16 @@ async fn build_signed_from_template<'a, P: HsmCrypto + HsmAlloc + 'a>(
 struct EccP384Signer<'a, P: HsmCrypto, A: HsmScopedAlloc> {
     pal: &'a P,
     alloc: &'a A,
-    priv_key: &'a DmaBuf,
+    priv_key: &'a HsmDmaBuf,
 }
 
 impl<P: HsmCrypto, A: HsmScopedAlloc> TbsSigner<P::Io> for EccP384Signer<'_, P, A> {
-    async fn sign_digest(&self, io: &P::Io, digest: &DmaBuf, sig: &mut DmaBuf) -> HsmResult<()> {
+    async fn sign_digest(
+        &self,
+        io: &P::Io,
+        digest: &HsmDmaBuf,
+        sig: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
         // `ecc_sign` consumes the message hash in PKA-native little-endian: the
         // full byte reversal of the natural big-endian SHA-384 digest that
         // `build_signed_from_template` produces (per the `TbsSigner` contract).
@@ -378,7 +383,7 @@ impl<P: HsmCrypto, A: HsmScopedAlloc> TbsSigner<P::Io> for EccP384Signer<'_, P, 
     }
 }
 
-fn preflight(priv_key: &DmaBuf, tbs_len: usize) -> HsmResult<()> {
+fn preflight(priv_key: &HsmDmaBuf, tbs_len: usize) -> HsmResult<()> {
     if priv_key.len() != PRIV_KEY_LEN {
         return Err(HsmError::InvalidArg);
     }
@@ -396,10 +401,10 @@ async fn sign<'a, P: HsmCrypto + HsmAlloc + 'a, F>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    priv_key: &DmaBuf,
+    priv_key: &HsmDmaBuf,
     tbs_len: usize,
     patch: F,
-) -> HsmResult<(&'a mut DmaBuf, &'a mut DmaBuf)>
+) -> HsmResult<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)>
 where
     F: FnOnce(&mut [u8]) -> HsmResult<()>,
 {
@@ -480,7 +485,7 @@ fn patch_field(tbs: &mut [u8], offset: usize, value: &[u8]) {
 /// Assemble `SEQUENCE { TBS, AlgId, BIT STRING sig }` into `out`.
 /// PAL signature is `r || s` LE-by-half; convert each half to BE for
 /// the DER INTEGERs.
-fn assemble_signed(out: &mut [u8], tbs: &DmaBuf, sig_le: &DmaBuf) -> HsmResult<usize> {
+fn assemble_signed(out: &mut [u8], tbs: &HsmDmaBuf, sig_le: &HsmDmaBuf) -> HsmResult<usize> {
     let (sig_r_be, sig_s_be) = sig_le_halves_to_be(sig_le)?;
 
     let mut sig_buf = [0u8; MAX_ECDSA384_SIG_DER_LEN];
@@ -513,7 +518,7 @@ fn assemble_signed(out: &mut [u8], tbs: &DmaBuf, sig_le: &DmaBuf) -> HsmResult<u
     Ok(pos)
 }
 
-fn sig_le_halves_to_be(sig_le: &DmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
+fn sig_le_halves_to_be(sig_le: &HsmDmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
     let bytes: &[u8] = sig_le;
     if bytes.len() != SIGNATURE_LEN {
         return Err(HsmError::InternalError);

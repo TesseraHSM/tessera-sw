@@ -7,7 +7,7 @@
 #![allow(unsafe_code)]
 
 use tsra_fw_ddi_tbor_api::tbor;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use zerocopy::little_endian::U16 as Le16;
 use zerocopy::FromBytes;
 use zerocopy::Immutable;
@@ -19,9 +19,93 @@ use zerocopy::Unaligned;
 // SAFETY: test-only branding. Host-side tests have no real DMA engine,
 // so the DMA-reachability contract is moot; the brand is needed purely
 // to satisfy the parse/decode signatures.
-fn brand(b: &[u8]) -> &DmaBuf {
+fn brand(b: &[u8]) -> &HsmDmaBuf {
     // SAFETY: see fn-level doc comment.
-    unsafe { DmaBuf::from_raw(b) }
+    unsafe { HsmDmaBuf::from_raw(b) }
+}
+
+#[tbor(opcode = 0xFE, pair = PairedResp)]
+pub struct PairedReq {}
+
+#[tbor(response, pair = PairedReq)]
+pub struct PairedResp<'a> {
+    code: u8,
+    #[tbor(buffer, max_len = 8, mutable)]
+    data: &'a [u8],
+}
+
+#[test]
+fn paired_frames_reuse_metadata_without_moving_payload() {
+    let mut buffer = [0xA5; 32];
+    let request = PairedReq::encode(&mut buffer).unwrap().finish();
+    let request = tsra_fw_ddi_tbor::RequestView::parse(brand(request.as_bytes())).unwrap();
+    let base = request.data_start();
+    assert_eq!(request.toc_count(), 2);
+    for entry in request.toc_iter() {
+        assert!(matches!(entry, tsra_fw_ddi_tbor::TocEntry::None));
+    }
+
+    let bytes = b"output";
+    buffer[base..base + bytes.len()].copy_from_slice(bytes);
+    let payload_address = buffer[base..].as_ptr();
+    let response = PairedResp::encode(&mut buffer, 0, false)
+        .unwrap()
+        .code(7)
+        .unwrap()
+        .data_existing(bytes.len())
+        .unwrap()
+        .finish();
+    assert_eq!(response.data(), bytes);
+    assert_eq!(response.data().as_ptr(), payload_address);
+    let response = tsra_fw_ddi_tbor::ResponseView::parse(brand(response.as_bytes())).unwrap();
+    assert_eq!(response.data_start(), base);
+}
+
+#[test]
+fn paired_request_rejects_nonempty_reserved_toc_slot() {
+    let mut buffer = [0; 32];
+    let len = PairedReq::encode(&mut buffer).unwrap().finish().len();
+    tsra_fw_ddi_tbor::toc::write_toc_word(
+        &mut buffer,
+        tsra_fw_ddi_tbor::REQ_HEADER_LEN,
+        1,
+        tsra_fw_ddi_tbor::toc::build_toc_inline_u8(tsra_fw_ddi_tbor::TocType::Uint8 as u8, 7),
+    );
+    assert_eq!(
+        PairedReq::decode(brand(&buffer[..len])).unwrap_err(),
+        tsra_fw_hsm_pal_traits::HsmError::TborUnexpectedTocType,
+    );
+}
+
+#[test]
+fn existing_payload_still_checks_length_and_capacity() {
+    use tsra_fw_hsm_pal_traits::HsmError;
+
+    for (len, capacity, error) in [
+        (9, 32, HsmError::TborDataTooLarge),
+        (8, 23, HsmError::TborBufferTooSmall),
+    ] {
+        let mut buffer = [0xA5; 32];
+        let result = PairedResp::encode(&mut buffer[..capacity], 0, false)
+            .unwrap()
+            .code(7)
+            .unwrap()
+            .data_existing(len);
+        assert_eq!(result.err(), Some(error));
+    }
+}
+
+#[test]
+fn reserved_payload_clears_previous_contents() {
+    let mut buffer = [0xA5; 32];
+    let response = PairedResp::encode(&mut buffer, 0, false)
+        .unwrap()
+        .code(7)
+        .unwrap()
+        .data_reserve(6)
+        .unwrap()
+        .finish();
+    assert_eq!(response.data(), &[0; 6]);
 }
 
 // ── Request with scalar fields ─────────────────────────────────────────
@@ -43,14 +127,14 @@ fn request_scalar_encode_decode() {
         .unwrap()
         .finish();
 
-    assert_eq!(frame.len(), 12); // 4 header + 2*4 TOC
+    assert_eq!(frame.len(), 16); // 8 header + 2*4 TOC
     assert_eq!(frame.slot_id(), 3);
     assert_eq!(frame.cert_id(), 1);
 
     let view = GetCertificateReq::decode(brand(frame.as_bytes())).unwrap();
     assert_eq!(view.slot_id(), 3);
     assert_eq!(view.cert_id(), 1);
-    assert_eq!(view.len(), 12);
+    assert_eq!(view.len(), 16);
 }
 
 // ── Response with buffer field ─────────────────────────────────────────
@@ -223,13 +307,14 @@ fn view_display() {
 #[test]
 fn decode_wrong_opcode() {
     let mut buf = [0u8; 256];
-    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, 0x01, 0xFF)
-        .uint8(1)
-        .unwrap()
-        .uint8(2)
-        .unwrap()
-        .finish()
-        .unwrap();
+    let msg =
+        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0xFF)
+            .uint8(1)
+            .unwrap()
+            .uint8(2)
+            .unwrap()
+            .finish()
+            .unwrap();
 
     let err = GetCertificateReq::decode(brand(msg)).unwrap_err();
     assert_eq!(err, tsra_fw_hsm_pal_traits::HsmError::TborOpcodeMismatch);
@@ -238,15 +323,16 @@ fn decode_wrong_opcode() {
 #[test]
 fn decode_wrong_toc_count() {
     let mut buf = [0u8; 256];
-    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, 0x01, 0x09)
-        .uint8(1)
-        .unwrap()
-        .uint8(2)
-        .unwrap()
-        .uint8(3)
-        .unwrap()
-        .finish()
-        .unwrap();
+    let msg =
+        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x09)
+            .uint8(1)
+            .unwrap()
+            .uint8(2)
+            .unwrap()
+            .uint8(3)
+            .unwrap()
+            .finish()
+            .unwrap();
 
     let err = GetCertificateReq::decode(brand(msg)).unwrap_err();
     assert_eq!(err, tsra_fw_hsm_pal_traits::HsmError::TborMessageTruncated);
@@ -255,13 +341,14 @@ fn decode_wrong_toc_count() {
 #[test]
 fn decode_wrong_toc_type() {
     let mut buf = [0u8; 256];
-    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, 0x01, 0x09)
-        .session_id(1)
-        .unwrap()
-        .uint8(2)
-        .unwrap()
-        .finish()
-        .unwrap();
+    let msg =
+        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x09)
+            .session_id(1)
+            .unwrap()
+            .uint8(2)
+            .unwrap()
+            .finish()
+            .unwrap();
 
     let err = GetCertificateReq::decode(brand(msg)).unwrap_err();
     assert_eq!(err, tsra_fw_hsm_pal_traits::HsmError::TborUnexpectedTocType);
@@ -412,8 +499,8 @@ fn optional_buffer_absent_early_finish() {
     assert_eq!(view.data(), b"hello");
     assert_eq!(view.opt_extra(), None);
 
-    // 4 header + 3*4 TOC + 5 data = 21
-    assert_eq!(frame.len(), 21);
+    // 8 header + 3*4 TOC + 5 data = 21
+    assert_eq!(frame.len(), 25);
 }
 
 // ── Optional with offset types: Some/None/Some pattern ────────────────
@@ -444,8 +531,8 @@ fn some_none_some_offset_compression() {
     assert_eq!(frame.last(), b"BBBB");
 
     // Data section: 4 (first) + 0 (middle absent) + 4 (last) = 8
-    // Total: 4 header + 3*4 TOC + 8 data = 24
-    assert_eq!(frame.len(), 24);
+    // Total: 8 header + 3*4 TOC + 8 data = 24
+    assert_eq!(frame.len(), 28);
 
     let view = SomeNoneSomeReq::decode(brand(frame.as_bytes())).unwrap();
     assert_eq!(view.first(), b"AAAA");
@@ -470,7 +557,7 @@ fn some_some_some_full() {
     assert_eq!(frame.middle(), Some(0xDEAD));
     assert_eq!(frame.last(), b"BBBB");
 
-    assert_eq!(frame.len(), 28);
+    assert_eq!(frame.len(), 32);
 }
 
 // ── Optional response ─────────────────────────────────────────────────
@@ -564,7 +651,7 @@ fn typed_u8_newtype_round_trips() {
         .finish();
 
     // Wire is identical to two inline u8 fields: 4 header + 2*4 TOC.
-    assert_eq!(frame.len(), 12);
+    assert_eq!(frame.len(), 16);
     // Typed accessor returns the newtype.
     assert_eq!(frame.suite_id(), WireTag(0x07));
 
@@ -861,13 +948,14 @@ fn fixed_array_round_trip() {
 fn fixed_array_wrong_length_rejected() {
     // Manually encode with wrong length for the nonce field.
     let mut buf = [0u8; 256];
-    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, 0x01, 0x40)
-        .buffer(b"short") // only 5 bytes instead of 12
-        .unwrap()
-        .buffer(b"payload")
-        .unwrap()
-        .finish()
-        .unwrap();
+    let msg =
+        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x40)
+            .buffer(b"short") // only 5 bytes instead of 12
+            .unwrap()
+            .buffer(b"payload")
+            .unwrap()
+            .finish()
+            .unwrap();
 
     let err = FixedArrayReq::decode(brand(msg)).unwrap_err();
     assert_eq!(
@@ -931,13 +1019,14 @@ fn len_constraint_too_long() {
 fn len_constraint_decode_too_short() {
     // Manually encode with empty tag (violates min_len=1).
     let mut buf = [0u8; 256];
-    let msg = tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, 0x01, 0x41)
-        .buffer(&[]) // empty tag
-        .unwrap()
-        .buffer(b"data")
-        .unwrap()
-        .finish()
-        .unwrap();
+    let msg =
+        tsra_fw_ddi_tbor::RequestEncoder::new(&mut buf, tsra_fw_ddi_tbor::PROTOCOL_VERSION, 0x41)
+            .buffer(&[]) // empty tag
+            .unwrap()
+            .buffer(b"data")
+            .unwrap()
+            .finish()
+            .unwrap();
 
     let err = ConstrainedReq::decode(brand(msg)).unwrap_err();
     assert_eq!(
@@ -1120,15 +1209,20 @@ fn enum_u16_try_from_and_into() {
 #[test]
 fn derive_response_wrong_toc_count() {
     let mut buf = [0u8; 256];
-    let msg = tsra_fw_ddi_tbor::ResponseEncoder::new(&mut buf, 0x01, 0, false)
-        .uint8(1)
-        .unwrap()
-        .uint8(2)
-        .unwrap()
-        .uint8(3)
-        .unwrap()
-        .finish()
-        .unwrap();
+    let msg = tsra_fw_ddi_tbor::ResponseEncoder::new(
+        &mut buf,
+        tsra_fw_ddi_tbor::PROTOCOL_VERSION,
+        0,
+        false,
+    )
+    .uint8(1)
+    .unwrap()
+    .uint8(2)
+    .unwrap()
+    .uint8(3)
+    .unwrap()
+    .finish()
+    .unwrap();
 
     // DeviceInfoResp expects 2 TOC entries, not 3.
     let err = DeviceInfoResp::decode(brand(msg)).unwrap_err();
@@ -1360,7 +1454,7 @@ fn decode_mut_with_uint32_uint64_siblings() {
     let frame_len = frame.len();
     // SAFETY: test-only re-branding of a stack-allocated wire buffer
     // that outlives `wire_mut` and is not aliased for the borrow.
-    let wire_mut: &mut DmaBuf = unsafe { DmaBuf::from_raw_mut(&mut buf[..frame_len]) };
+    let wire_mut: &mut HsmDmaBuf = unsafe { HsmDmaBuf::from_raw_mut(&mut buf[..frame_len]) };
     let view = MixedMutableReq::decode_mut(wire_mut).unwrap();
     assert_eq!(view.epoch, 0xCAFEBABE);
     assert_eq!(view.serial, 0x0011_2233_4455_6677);
@@ -1538,7 +1632,7 @@ fn decode_mut_with_include_group_sibling() {
     {
         // SAFETY: test-only re-branding of a stack-allocated wire buffer
         // that outlives `wire_mut` and is not aliased for the borrow.
-        let wire_mut: &mut DmaBuf = unsafe { DmaBuf::from_raw_mut(&mut buf[..frame_len]) };
+        let wire_mut: &mut HsmDmaBuf = unsafe { HsmDmaBuf::from_raw_mut(&mut buf[..frame_len]) };
         let view = GroupMutableReq::decode_mut(wire_mut).unwrap();
         assert_eq!(&**view.secret, b"initial-secret!!");
         assert_eq!(&**view.tail, b"TAIL");

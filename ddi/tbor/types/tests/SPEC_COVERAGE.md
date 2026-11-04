@@ -17,7 +17,7 @@ Source of truth for the `TborStatus` enum:
 [`ddi/tbor/types/src/status.rs`](../src/status.rs).
 
 Test counts:
-* emu: 273 tests
+* emu: 281 tests
 * mock: 6 tests
 
 ## Legend
@@ -62,7 +62,8 @@ All test names below are relative to the
 | Rejected role/type request does not poison the fd | ✅ | `open_session::rejected_role_type_does_not_poison_fd` | Valid session succeeds after rejected CU + Authenticated Phase-1 |
 | Rejected session suite does not consume session state | ✅ | `open_session::rejected_suite_does_not_consume_session_slot` | Valid session succeeds after unsupported suite rejection |
 | Rejected public key does not consume session state | ✅ | `open_session::rejected_pk_init_does_not_consume_session_slot` | Valid session succeeds after invalid `pk_init` rejection |
-| Pending Phase-1 session blocks a second open on the same fd | ✅ | `open_session::pending_session_blocks_second_open_on_same_fd` | Pending session counts toward the per-fd session limit |
+| Pending Phase-1 session blocks a second open on the same fd | ✅ | `open_session::pending_session_blocks_second_open_on_same_fd` | Emulator/native drivers only; socket connections permit multiple sessions |
+| Multiple Pending and Active sessions on one socket connection | ✅ (sock) | `open_session::socket_connection_supports_multiple_sessions` | Both sessions finish and close independently |
 | Malformed `pk_init` (length / curve) | ⚠️ | — | Spec arm exists in handler; no negative test |
 
 ## `SessionOpenFinish` (opcode out-of-session, phase 2 of handshake)
@@ -77,7 +78,8 @@ All test names below are relative to the
 | MAC from one pending session cannot authenticate another | ✅ | `open_session::session_open_finish_rejects_mac_from_another_session` | Cross-session MAC substitution is rejected without damaging the source session |
 | Unknown Finish request does not destroy another pending session | ✅ | `open_session::unknown_finish_does_not_destroy_pending_session` | Valid pending session remains finishable after unrelated unknown-session rejection |
 | Authenticated-session MAC key derivation is deterministic | ✅ | `open_session::authenticated_session_mac_key_derivation_is_stable` | Repeated TX/RX derivation from one handshake is stable and direction-specific |
-| Failed Phase-2 leaves the original fd session-bound | ✅ | `open_session::failed_finish_mac_keeps_original_fd_session_bound` | Original fd continues enforcing the per-fd session limit after authentication failure |
+| Failed Phase-2 leaves the original fd session-bound | ✅ | `open_session::failed_finish_mac_keeps_original_fd_session_bound` | Emulator/native drivers only |
+| Fresh open on the same socket connection after failed Phase-2 | ✅ (sock) | `open_session::socket_connection_can_open_after_failed_finish` | Authentication error remains firmware-signalled; the connection is reusable |
 | Finish against a pending slot whose Init was for a different role | ⚠️ | — | Spec arm exists; not exercised |
 
 ## `SessionClose` (opcode in-session, allow-listed)
@@ -87,8 +89,8 @@ All test names below are relative to the
 | Happy path on Active CU session | ✅ | `session_close::session_close_cu_plaintext_active` |  |
 | Happy path on Active CO session | ✅ | `session_close::session_close_co_authenticated_active` |  |
 | Close a Pending-only slot (between Init and Finish) | ✅ | `session_close::session_close_pending_slot` |  |
-| Unknown `session_id` → FW rejection | 🟡 | `session_close::session_close_unknown_id` | Asserts `DdiError::DdiError(_)` |
-| Double-close of the same id → FW rejection | 🟡 | `session_close::session_close_double_close` | Asserts `DdiError::DdiError(_)` |
+| Unknown `session_id` → rejection | ✅ | `session_close::session_close_unknown_id` | Firmware `SessionNotFound`, or socket ownership rejection before firmware |
+| Double-close of the same id → rejection | ✅ | `session_close::session_close_double_close` | Firmware `SessionNotFound`, or socket ownership rejection before firmware |
 | Slot is freed for subsequent open after close | ✅ | `session_close::session_close_then_reopen` |  |
 | Default-PSK gate bypass (E2, both roles) | ✅ | `default_psk_gate::default_psk_gate_session_close_bypass_emu` |  |
 
@@ -153,7 +155,7 @@ full native certificate-chain validation remains M1.5 work.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
-| First instantiation returns a 260-byte `local_mk_backup` | ✅ | `part_final::part_final_smoke_roundtrip` | Original test body |
+| First instantiation returns a 264-byte `local_mk_backup` | ✅ | `part_final::part_final_smoke_roundtrip` | Original test body |
 | Restore a prior backup with the same provisioning identity | ✅ | `part_final::part_final_restore_prev_backup` | Original test body |
 | Tampered prior backup is rejected | 🟡 | `part_final::part_final_reject_tampered_backup` | Original test body; exact status is not pinned |
 | Command before `PartInit` is rejected | 🟡 | `part_final::part_final_reject_wrong_state` | Original test body; exact status is not pinned |
@@ -188,16 +190,18 @@ role's partition PSK still matches the compiled-in default.
 ## 'Hash' (opcode in-session, gated)
 
 Firmware integration coverage for the TBOR `Hash` command. These tests exercise
-SHA-1, SHA-256, SHA-384, and SHA-512 through `TestCtx::tbor` and validate successful
-responses byte-for-byte against `tsra_crypto`. Supported discriminants are
-`0` = SHA-1, `1` = SHA-256, `2` = SHA-384, and `3` = SHA-512.
+SHA-1, SHA-256, SHA-384, SHA-512, SHAKE128, and SHAKE256 through `TestCtx::tbor` and
+validate successful responses byte-for-byte against `tsra_crypto`. Supported
+discriminants are `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512,
+`7` = SHAKE128, and `8` = SHAKE256; the SHAKE XOFs take an `out_len` of 1 to 256 bytes.
+The tests run on silicon as well as the emulator.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
 | SHA-1, SHA-256, SHA-384, and SHA-512 match the host implementation for empty, short, and longer messages | ✅ 🔁 | `hash::hash_matches_host_all_algos` | Loops over all four algorithms via `HASH_ALGOS` and varied message sizes |
 | Unsupported hash algorithm is rejected with `InvalidArg` | ✅ | `hash::hash_unknown_algo_rejected` | Uses unsupported discriminant `255` (`u8::MAX`) |
 | Unknown session id is rejected with `SessionNotFound` | ✅ | `hash::hash_invalid_session_id_rejected` | Rotates the CU PSK and closes the bootstrap session before sending `u16::MAX` with no active session |
-| Multiple invalid algorithm discriminants are rejected with `InvalidArg` | ✅ 🔁 | `hash::hash_invalid_algos_rejected` | Rejects unsupported discriminants `4`, `127`, and `255`; `0` is SHA-1 |
+| Multiple invalid algorithm discriminants are rejected with `InvalidArg` | ✅ 🔁 | `hash::hash_invalid_algos_rejected` | Rejects `4`–`6` (reserved for SHA-3), `9`, `127`, and `255`; `0` is SHA-1 |
 | Arbitrary binary input hashes correctly | ✅ 🔁 | `hash::hash_binary_message_matches_host` | Includes `0x00`, `0x80`, and `0xff` bytes |
 | Different messages produce different digests | ✅ 🔁 | `hash::hash_different_messages_produce_different_digests` | Exercises all four supported algorithms |
 | SHA padding and compression-block boundaries match the host | ✅ 🔁 | `hash::hash_block_boundary_lengths_match_host` | Covers 55/56, 63/64/65, 111/112, and 127/128/129-byte boundaries |
@@ -218,6 +222,10 @@ responses byte-for-byte against `tsra_crypto`. Supported discriminants are
 | Closing a CO session releases it and a subsequently opened CU session can Hash normally | ✅ 🔁 | `hash::hash_new_session_works_after_previous_session_closed` | Also confirms the closed session id is rejected |
 | Maximum 2048-byte Hash message succeeds | ✅ 🔁 | `hash::hash_max_message_length_matches_host` | Exercises the protocol maximum for all four supported algorithms |
 | 2049-byte Hash message is rejected | ✅ 🔁 | `hash::hash_over_max_message_length_rejected` | Exercises all four algorithms; accepts rejection at the TBOR/firmware boundary without pinning where length validation occurs |
+| SHAKE128 and SHAKE256 match the host at output lengths from 1 to 256 bytes | ✅ 🔁 | `hash::hash_shake_matches_host` | Lengths 1, 16, 32, 64, 136, 168, 169, 255, and 256 (both sponge rates); empty, 3-, 1000-, and 2048-byte messages |
+| SHAKE128 and SHAKE256 known-answer vectors match | ✅ | `hash::hash_shake_known_answer_vectors` | FIPS 202 `"abc"` outputs: 32 bytes of SHAKE128, 64 bytes of SHAKE256 |
+| SHAKE without `out_len`, or with `out_len` 0 or above 256, is rejected with `InvalidArg` | ✅ 🔁 | `hash::hash_shake_invalid_out_len_rejected` | Also covers `u16::MAX` |
+| Fixed-length digests reject `out_len` with `InvalidArg` | ✅ 🔁 | `hash::hash_fixed_length_algos_reject_out_len` | Even when `out_len` equals the digest length |
 
 ## `GetCertChainInfo` (opcode out-of-session)
 
@@ -327,7 +335,7 @@ masked-key integrity, and unsupported SHA-1 generation.
 | Session-scoped generation succeeds before partition finalization | ✅ | `hmac_generate_key::hmac_generate_key_session_scope_before_finalize` | Uses rotated CO session before `PartFinal` |
 | SecurityDomain scope without a provisioned masking key → `UnsupportedKeyScope` | ✅ | `hmac_generate_key::hmac_generate_key_rejects_security_domain_scope` | SecurityDomain masking key is unavailable |
 | Ephemeral scope before partition finalization → `InvalidArg` | ✅ | `hmac_generate_key::hmac_generate_key_rejects_non_session_scopes_before_finalize` | Tests Ephemeral scope before `PartFinal` |
-| Unsupported HMAC hash algorithms → `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_rejects_unknown_hash` | CO; covers SHA-1 discriminant `0` and unsupported values `4` and `255` |
+| Unsupported HMAC hash algorithms → `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_rejects_unknown_hash` | CO; covers SHA-1 discriminant `0`, SHAKE `7` and `8`, and unsupported values `4` and `255` |
 | Unsupported key scopes → `UnsupportedKeyScope` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_rejects_unknown_scope` | Tests scope values `0`, `5`, and `255` |
 | CU can generate and use SHA-256/384/512 HMAC keys | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_crypto_user_session_scope` | Rotated CU session; Session scope |
 | Accept non-empty key label and generate usable key | ✅ | `hmac_generate_key::hmac_generate_key_accepts_non_empty_key_label` | Verifies successful generation and subsequent HMAC usage |
@@ -344,7 +352,7 @@ masked-key integrity, and unsupported SHA-1 generation.
 | Truncated masked-key envelope → `TborInvalidFixedLength` | ✅ | `hmac_generate_key::hmac_generate_key_truncated_masked_key_rejected` | Removes one byte before HMAC usage |
 | CU accepts valid variable HMAC key lengths | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_variable_lengths` | Tests nine SHA-256/384/512 key-length combinations |
 | CU rejects invalid key lengths with `InvalidKeyLength` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_rejects_invalid_lengths` | Tests zero, below-minimum, and above-maximum values |
-| CU rejects unsupported algorithms with `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_rejects_unknown_hash` | Covers SHA-1 discriminant `0` and unsupported values `4` and `255` |
+| CU rejects unsupported algorithms with `InvalidArg` | ✅ 🔁 | `hmac_generate_key::hmac_generate_key_cu_rejects_unknown_hash` | Covers SHA-1 discriminant `0`, SHAKE `7` and `8`, and unsupported values `4` and `255` |
 | CU accepts binary key labels | ✅ | `hmac_generate_key::hmac_generate_key_cu_accepts_binary_key_label` | Verifies generated key can be used for HMAC |
 | Closed CU session → `SessionNotFound` | ✅ | `hmac_generate_key::hmac_generate_key_cu_rejects_closed_session` | Rotated CU session closed before command |
 | SHA-256 rejects a 20-byte key with `InvalidKeyLength` | ✅ | `hmac_generate_key::hmac_generate_key_sha256_rejects_sha1_sized_key` | Verifies SHA-256 minimum length of 32 bytes |
@@ -442,8 +450,8 @@ Firmware integration coverage for the TBOR `KeyReport` command. Tests validate P
 | Local-scoped sealing key produces a valid signed attestation report | ✅ | `key_report::key_report_local_roundtrip` | Verifies COSE_Sign1 signature and embedded COSE_Key coordinates |
 | Tampered masked-key authentication tag is rejected | ✅ | `key_report::key_report_rejects_tampered_masked_key` | Expects `AesGcmDecryptTagDoesNotMatch` |
 | KeyReport before partition finalization is rejected | ✅ | `key_report::key_report_rejects_before_finalize` | Expects `InvalidArg` |
-| Crypto-User session is rejected | ✅ | `key_report::key_report_rejected_on_cu_session` | Expects `InvalidPermissions` |
-| Default CO PSK is rejected | ✅ | `key_report::key_report_rejected_on_default_psk` | Expects `DefaultPskMustRotate` |
+| Crypto-User requests before finalization are rejected | ✅ | `key_report::key_report_cu_rejects_before_finalize` | Expects `InvalidArg` |
+| Default CO and CU PSKs are rejected | ✅ 🔁 | `key_report::key_report_rejected_on_default_psk` | Expects `DefaultPskMustRotate` for both roles |
 | Different report-data patterns are preserved in signed reports | ✅ 🔁 | `key_report::key_report_report_data_patterns` | Covers zero-filled, 0xFF-filled, and patterned report data under Ephemeral and Local scopes |
 | Generated ECC keys on all supported curves can be attested | ✅ 🔁 | `key_report::key_report_generated_ecc_all_curves` | Tests P-256, P-384, and P-521 under Ephemeral and Local scopes; verifies Generated and Sign flags |
 | Symmetric key classes are rejected | ✅ 🔁 | `key_report::key_report_rejects_all_symmetric_key_classes` | AES and HMAC-SHA256/384/512; expects `UnsupportedKeyType` |
@@ -452,7 +460,10 @@ Firmware integration coverage for the TBOR `KeyReport` command. Tests validate P
 | Invalid session ID is rejected | ✅ | `key_report::key_report_rejects_invalid_session` | Uses `u16::MAX`; expects `FileHandleSessionIdDoesNotMatch` |
 | Tampered IV and ciphertext are rejected without affecting the original key | ✅ 🔁 | `key_report::key_report_rejects_tampered_iv_and_ciphertext` | Expects `AesGcmDecryptTagDoesNotMatch`; original masked key remains attestable |
 | Imported ECC keys on all supported curves can be attested | ✅ 🔁 | `key_report::key_report_imported_ecc_all_curves` | P-256, P-384, and P-521; verifies Imported, Sign, and Verify flags |
-| Crypto-User cannot attest a valid Local-scoped key after finalization | ✅ | `key_report::key_report_rejects_cu_with_valid_key_after_finalize` | Expects `InvalidPermissions` |
+| Crypto-User can attest a valid Local-scoped key after finalization | ✅ | `key_report::key_report_cu_attests_valid_key_after_finalize` | Verifies PID signature, public-key binding and report data; tampered keys still fail authentication |
+| CU request authentication binds the key, report data and session | ✅ | `key_report::key_report_cu_authentication_binds_key_data_and_session` | Missing/tampered proof, modified inputs and cross-session proof are rejected |
+| CU sessions cannot attest under a newer PSK identity | ✅ | `key_report::key_report_cu_rejects_sessions_authenticated_before_psk_rotation` | Stale Active and Pending sessions fail; a fresh session's signed AppId is verified |
+| Ordinary CU key reports cannot authorize SD peer backups | ✅ | `sd_create_peer_backup::sd_create_peer_backup_rejects_ordinary_cu_key_attestation` | A valid signed report for an externally known imported P-384 key is not sealing evidence |
 | Generated ECC key with a non-empty label can be attested | ✅ | `key_report::key_report_generated_ecc_non_empty_label` | Verifies Generated and Sign flags |
 | Generated ECC key with maximum-length label can be attested | ✅ | `key_report::key_report_generated_ecc_max_label` | Uses `TBOR_KEY_LABEL_MAX_LEN` |
 | Generated DERIVE-only ECC key can be attested | ✅ | `key_report::key_report_generated_ecc_derive_usage` | Verifies Generated and Derive flags |
@@ -531,7 +542,7 @@ scopes, salt/info handling, deterministic derivation, and invalid requests.
 | Empty and non-empty salt/info combinations are accepted | ✅ 🔁 | `hkdf_derive::hkdf_derive_optional_salt_info` | Covers all four combinations using SHA-1 and SHA-256 |
 | Maximum supported salt and info lengths are accepted | ✅ | `hkdf_derive::hkdf_derive_maximum_salt_and_info` | Uses SHA-512 and maximum-length salt/info buffers |
 | Identical inputs derive stable key material; changing salt or info changes the key | ✅ 🔁 | `hkdf_derive::hkdf_derive_is_stable_and_salt_info_separate_outputs` | Covers SHA-1 and SHA-256 using HMAC tags |
-| Unknown hash algorithm → `InvalidArg` | ✅ | `hkdf_derive::hkdf_derive_unknown_hash_rejected` | Uses unsupported discriminant `u8::MAX` |
+| Unknown hash algorithm → `InvalidArg` | ✅ | `hkdf_derive::hkdf_derive_unknown_hash_rejected` | Uses SHAKE discriminants `7` and `8` and unsupported `u8::MAX` |
 | Unknown derived-key type → `InvalidKeyType` | ✅ | `hkdf_derive::hkdf_derive_unknown_key_type_rejected` | Uses key type `99` |
 | SecurityDomain output scope → `UnsupportedKeyScope` | ✅ | `hkdf_derive::hkdf_derive_unsupported_scope_rejected` | Requests unsupported SecurityDomain scope |
 | Variable-length HMAC without explicit length → `InvalidKeyType` | ✅ | `hkdf_derive::hkdf_derive_var_hmac_missing_length_rejected` | Uses `key_length = 0` |
@@ -552,6 +563,98 @@ scopes, salt/info handling, deterministic derivation, and invalid requests.
 | Invalid HKDF request does not corrupt the active CU session | ✅ | `hkdf_derive::hkdf_derive_cu_invalid_request_preserves_session` | Invalid hash returns `InvalidArg`; subsequent valid HKDF derivation succeeds |
 
 ---
+
+## `AesXtsGenerateKey` (opcode in-session, gated)
+
+Generates a double-wide AES-256-XTS key and returns it as one masked blob
+(296 bytes).
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Session, Ephemeral, and Local scopes generate fresh masked keys after `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_roundtrip_all_scopes_after_part_final` | Checks the length, that the blob is not all zero, and that each call returns a distinct blob |
+| Session scope works before `PartFinal` | ✅ | `aes_xts_generate_key::tests::aes_xts_generate_key_session_scope_before_finalize` | |
+| Ephemeral and Local scopes are rejected before `PartFinal` | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_non_session_scope_before_finalize` | `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_invalid_usage` | `InvalidPermissions` |
+| Invalid session ID is rejected | ✅ | `aes_xts_generate_key::tests::aes_xts_generate_key_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
+## `UnwrapKey` AES-XTS class (opcode in-session, gated)
+
+Imports an RSA-AES-wrapped 64-byte AES-256-XTS key (`K1 ‖ K2`) as one
+`AesXts512` masked blob.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| A 64-byte `K1 ‖ K2` imports as one `AesXts512` key | ✅ | `unwrap_key::unwrap_key_aes_xts` | No public key |
+| Wrong length, equal halves, or a 64-byte key under the AES class is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_invalid_material` | 32, 48 and 72 bytes; `InvalidArg` |
+| Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_non_cipher_usage` | `InvalidPermissions` |
+| An imported key encrypts like the host AES-XTS reference | ✅ | `aes_xts_encrypt_decrypt::aes_xts_unwrapped_key_matches_host` | DUL 512, 4 units; decrypt round trip |
+
+## `AesXtsEncryptDecrypt` (opcode in-session, gated, OOB in / out)
+
+Processes `data_len / dul` XTS data units in one submission. The device
+reads the in OOB block and writes the out OOB block. The tweak is an
+8-byte little-endian value that increments per data unit. Correctness
+is checked through properties and, for keys imported with `UnwrapKey`,
+by comparing device output against the host AES-XTS reference.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Encrypt / decrypt round trip across data-unit lengths and up to 16 KiB | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_roundtrip_data_unit_lengths` | DUL 16 to 16384, 1 to 32 units, Session and Local keys |
+| A multi-unit submission equals per-unit submissions with incrementing tweaks | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_multi_unit_matches_per_unit` | DUL 512 and 4096, both directions |
+| The tweak and the key change the ciphertext; output is deterministic | ✅ | `aes_xts_encrypt_decrypt::aes_xts_tweak_and_key_change_ciphertext` | Decrypting with the wrong tweak does not recover the plaintext |
+| The tweak after the last unit must fit in 64 bits | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_tweak_overflow` | `AesXtsInvalidBufferSize` |
+| Bad DUL or a `data_len` that is not a multiple of DUL is rejected | ✅ 🔁 | `aes_xts_encrypt_decrypt::aes_xts_rejects_invalid_unit_lengths` | `AesXtsInvalidBufferSize` |
+| Oversize data or missing OOB blocks are rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_oversize_and_missing_oob` | `InvalidArg` |
+| A masked key of the same size that is not XTS is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_non_xts_key` | HMAC-SHA512 key; `InvalidKeyType` |
+| A tampered masked key is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_tampered_key` | `AesGcmDecryptTagDoesNotMatch` |
+| Invalid session ID is rejected | ✅ | `aes_xts_encrypt_decrypt::aes_xts_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
+## `AesGcmEncryptDecrypt` (opcode in-session, gated, OOB in / out)
+
+AES-256-GCM over an OOB `[padded AAD | text]` layout. The AAD region is
+`round_up_32(aad_len)`; the AAD sits at offset 16 when `aad_len % 32`
+is in `1..=16`. An empty message needs no OOB blocks.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| McGrew–Viega AES-256 known answers | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_known_answers` | Test cases 13 (empty, no OOB), 14, and 16 (with AAD) |
+| Round trip across AAD and text lengths | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_roundtrip_aad_and_text_lengths` | AAD 0 to 64 (every padding branch), text 0 to 1024 bytes, Session and Local keys |
+| Maximum `data_len` round trips | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_roundtrip_max_data_len` | With and without AAD |
+| Device-generated IV on encrypt is returned, fresh, and decryptable | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_device_iv_roundtrip` | |
+| Device-generated IV on decrypt is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_device_iv_on_decrypt` | `InvalidArg` |
+| A tampered tag, AAD, ciphertext, or IV fails authentication | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_tampered_inputs` | `AesGcmDecryptTagDoesNotMatch`, including an empty message |
+| A tampered masked key is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_tampered_key` | `AesGcmDecryptTagDoesNotMatch` |
+| A masked key of the same size that is not AES-256 is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_non_aes256_key` | HMAC-SHA256 key; `InvalidKeyType` |
+| Oversize or inconsistent lengths and missing OOB blocks are rejected | ✅ 🔁 | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_invalid_lengths_and_missing_oob` | `InvalidArg` |
+| Invalid session ID is rejected | ✅ | `aes_gcm_encrypt_decrypt::aes_gcm_rejects_invalid_session` | `FileHandleSessionIdDoesNotMatch` |
+
+## `GetPublicKey` (opcode in-session, gated)
+
+Unmasks a masked RSA / ECC private key and returns its wire public key, in
+the same format as `UnwrapKey` / `EccGenerateKey`.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Returns the same public key as `EccGenerateKey` | ✅ 🔁 | `get_public_key::get_public_key_matches_ecc_generate_key_all_curves` | P-256, P-384, P-521 |
+| Returns the same public key as `UnwrapKey` for imported ECC keys | ✅ 🔁 | `get_public_key::get_public_key_matches_unwrapped_ecc_key` | P-256, P-384, P-521 |
+| Returns the same public key as `UnwrapKey` for RSA keys | ✅ 🔁 | `get_public_key::get_public_key_matches_unwrapped_rsa_key` | RSA-2048/3072/4096, CRT and non-CRT |
+| Crypto-User sessions are allowed | ✅ | `get_public_key::get_public_key_allowed_on_crypto_user_session` | |
+| A symmetric masked key is rejected | ✅ | `get_public_key::get_public_key_symmetric_key_rejected` | AES-256; `InvalidKeyType` |
+| A tampered masked key is rejected | ✅ | `get_public_key::get_public_key_tampered_masked_key_rejected` | `AesGcmDecryptTagDoesNotMatch` |
+| A session-scoped key is rejected in a different session | ✅ | `get_public_key::get_public_key_session_scoped_key_rejected_in_different_session` | `AesGcmDecryptTagDoesNotMatch` |
+| Default CO PSK is rejected | ✅ | `get_public_key::get_public_key_rejects_default_co_psk` | `DefaultPskMustRotate` |
+
+## `VerifyKey` (opcode in-session, gated)
+
+Authenticates a masked key of any kind without using it; empty response.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Intact symmetric and asymmetric keys are accepted | ✅ 🔁 | `verify_key::verify_key_accepts_intact_keys` | AES-256, RSA, RSA-CRT, ECC |
+| Crypto-User sessions are allowed | ✅ | `verify_key::verify_key_allowed_on_crypto_user_session` | |
+| A tampered tag, metadata, or key material is rejected | ✅ 🔁 | `verify_key::verify_key_tampered_masked_key_rejected` | `AesGcmDecryptTagDoesNotMatch` |
+| A session-scoped key is rejected in a different session | ✅ | `verify_key::verify_key_session_scoped_key_rejected_in_different_session` | `AesGcmDecryptTagDoesNotMatch` |
+| Default CO PSK is rejected | ✅ | `verify_key::verify_key_rejects_default_co_psk` | `DefaultPskMustRotate` |
 
 ## Known gaps (summary)
 

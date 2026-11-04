@@ -30,7 +30,7 @@ pub struct MlDsaParams {
     /// Signature length in bytes.
     pub sig_len: usize,
     /// Masked private-key length: seed + expanded secret key + the
-    /// 228-byte AEAD envelope.
+    /// 232-byte AEAD envelope.
     ///
     /// Parameter-set dependent, because the blob carries the expanded key
     /// so that signing does not have to re-derive it.
@@ -48,7 +48,7 @@ pub struct MlKemParams {
     /// Ciphertext length in bytes.
     pub ciphertext_len: usize,
     /// Masked private-key length: `(d ‖ z)` seed pair + expanded
-    /// decapsulation key + the 228-byte AEAD envelope.
+    /// decapsulation key + the 232-byte AEAD envelope.
     pub masked_key_len: usize,
 }
 
@@ -57,7 +57,7 @@ pub const ML_DSA_44: MlDsaParams = MlDsaParams {
     key_kind: tsra_ddi_tbor_types::MLDSA_KEY_KIND_44_SEED,
     pub_key_len: 1312,
     sig_len: 2420,
-    masked_key_len: 228 + 32 + 2560, // AEAD envelope + seed + expanded key
+    masked_key_len: 232 + 32 + 2560, // AEAD envelope + seed + expanded key
 };
 
 pub const ML_DSA_65: MlDsaParams = MlDsaParams {
@@ -65,7 +65,7 @@ pub const ML_DSA_65: MlDsaParams = MlDsaParams {
     key_kind: tsra_ddi_tbor_types::MLDSA_KEY_KIND_65_SEED,
     pub_key_len: 1952,
     sig_len: 3309,
-    masked_key_len: 228 + 32 + 4032, // AEAD envelope + seed + expanded key
+    masked_key_len: 232 + 32 + 4032, // AEAD envelope + seed + expanded key
 };
 
 pub const ML_DSA_87: MlDsaParams = MlDsaParams {
@@ -73,7 +73,7 @@ pub const ML_DSA_87: MlDsaParams = MlDsaParams {
     key_kind: tsra_ddi_tbor_types::MLDSA_KEY_KIND_87_SEED,
     pub_key_len: 2592,
     sig_len: 4627,
-    masked_key_len: 228 + 32 + 4896, // AEAD envelope + seed + expanded key
+    masked_key_len: 232 + 32 + 4896, // AEAD envelope + seed + expanded key
 };
 
 pub const ML_KEM_512: MlKemParams = MlKemParams {
@@ -81,7 +81,7 @@ pub const ML_KEM_512: MlKemParams = MlKemParams {
     key_kind: tsra_ddi_tbor_types::MLKEM_KEY_KIND_512_SEED,
     pub_key_len: 800,
     ciphertext_len: 768,
-    masked_key_len: 228 + 64 + 1632, // AEAD envelope + seed + expanded key
+    masked_key_len: 232 + 64 + 1632, // AEAD envelope + seed + expanded key
 };
 
 pub const ML_KEM_768: MlKemParams = MlKemParams {
@@ -89,7 +89,7 @@ pub const ML_KEM_768: MlKemParams = MlKemParams {
     key_kind: tsra_ddi_tbor_types::MLKEM_KEY_KIND_768_SEED,
     pub_key_len: 1184,
     ciphertext_len: 1088,
-    masked_key_len: 228 + 64 + 2400, // AEAD envelope + seed + expanded key
+    masked_key_len: 232 + 64 + 2400, // AEAD envelope + seed + expanded key
 };
 
 pub const ML_KEM_1024: MlKemParams = MlKemParams {
@@ -97,7 +97,7 @@ pub const ML_KEM_1024: MlKemParams = MlKemParams {
     key_kind: tsra_ddi_tbor_types::MLKEM_KEY_KIND_1024_SEED,
     pub_key_len: 1568,
     ciphertext_len: 1568,
-    masked_key_len: 228 + 64 + 3168, // AEAD envelope + seed + expanded key
+    masked_key_len: 232 + 64 + 3168, // AEAD envelope + seed + expanded key
 };
 
 /// Host-DMA page size. A response is carried to the host as a PRP pair of

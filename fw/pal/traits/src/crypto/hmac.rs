@@ -78,7 +78,7 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &mut DmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Compute an HMAC tag (sign) in a single call.
@@ -107,9 +107,9 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Verify an HMAC tag in a single call using constant-time
@@ -134,9 +134,9 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool>;
 
     /// Begin a multi-step HMAC computation.
@@ -166,7 +166,7 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HmacCtx<'a>>
     where
@@ -194,7 +194,7 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         ctx: &mut Self::HmacCtx<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Finalise the inner hash, compute the outer hash, and write
@@ -217,7 +217,7 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
-        tag: &mut DmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Finalise the HMAC and write the tag directly to `dest`.
@@ -245,7 +245,7 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
-        dest: &mut DmaBuf,
+        dest: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Finalise and verify the running HMAC against an expected
@@ -267,6 +267,6 @@ pub trait HsmHmac: HsmIoTypes {
         &self,
         io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
-        tag: &DmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool>;
 }

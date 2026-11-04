@@ -18,7 +18,7 @@
 //! The crate speaks only [`tsra_fw_hsm_pal_traits`], so it is reusable
 //! across wire protocols and import paths.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -48,6 +48,8 @@ pub enum KeyClass {
     HmacSha384,
     /// A raw variable-length HMAC-SHA-512 key (`VarLenHmacSha512`).
     HmacSha512,
+    /// A raw 64-byte AES-256-XTS key `K1 ‖ K2` (`AesXts512`).
+    AesXts512,
 }
 
 /// A decoded key in vault-ready form, for the caller to persist.
@@ -62,11 +64,11 @@ pub struct DecodedKey<'p> {
     pub kind: HsmVaultKeyKind,
     /// The key in the PAL's vault representation, ready for
     /// `vault_key_create`.
-    pub material: &'p DmaBuf,
+    pub material: &'p HsmDmaBuf,
     /// Wire-format public key for asymmetric keys; `None` for symmetric
     /// keys.  Mutable so the caller can frame it into a response slot
     /// without a copy.
-    pub pub_key: Option<&'p mut DmaBuf>,
+    pub pub_key: Option<&'p mut HsmDmaBuf>,
 }
 
 /// Decode recovered key material into vault-ready form.
@@ -80,13 +82,13 @@ pub struct DecodedKey<'p> {
 ///
 /// # Errors
 /// - [`HsmError::InvalidArg`](tsra_fw_hsm_pal_traits::HsmError::InvalidArg)
-///   — the AES key is not 16 / 24 / 32 B, or the RSA / ECC DER fails to
-///   parse.
+///   — the AES key is not 16 / 24 / 32 B, the AES-XTS key is not 64 B
+///   or has equal halves, or the RSA / ECC DER fails to parse.
 /// - Propagated PAL conversion / public-key derivation failures.
 pub async fn decode<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
-    material: &'p mut DmaBuf,
+    material: &'p mut HsmDmaBuf,
     class: KeyClass,
 ) -> HsmResult<DecodedKey<'p>> {
     match class {
@@ -97,5 +99,6 @@ pub async fn decode<'p, P: HsmPal>(
         KeyClass::HmacSha256 => hmac::decode(material, HsmVaultKeyKind::VarLenHmacSha256),
         KeyClass::HmacSha384 => hmac::decode(material, HsmVaultKeyKind::VarLenHmacSha384),
         KeyClass::HmacSha512 => hmac::decode(material, HsmVaultKeyKind::VarLenHmacSha512),
+        KeyClass::AesXts512 => aes::decode_xts(material),
     }
 }

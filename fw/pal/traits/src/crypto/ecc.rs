@@ -248,7 +248,7 @@ pub trait HsmEcc: HsmIoTypes {
         io: &Self::Io,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)>;
 
@@ -296,8 +296,8 @@ pub trait HsmEcc: HsmIoTypes {
         io: &Self::Io,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        root: &DmaBuf,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        root: &HsmDmaBuf,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)>;
 
@@ -342,9 +342,9 @@ pub trait HsmEcc: HsmIoTypes {
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Raw EC verify of `signature` against a pre-computed message
@@ -392,10 +392,10 @@ pub trait HsmEcc: HsmIoTypes {
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
-        pub_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &DmaBuf,
-        result: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Convert a PKCS#8 DER-encoded ECC private key (recovered from a
@@ -413,8 +413,8 @@ pub trait HsmEcc: HsmIoTypes {
     fn ecc_priv_der_to_vault(
         &self,
         io: &Self::Io,
-        der: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        der: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<(usize, HsmEccCurve)>;
 
     /// Convert a raw big-endian ECC private scalar `d` on `curve` into
@@ -446,8 +446,8 @@ pub trait HsmEcc: HsmIoTypes {
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
-        d: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        d: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Serialize a vault-stored ECC private key back to the raw
@@ -478,8 +478,8 @@ pub trait HsmEcc: HsmIoTypes {
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
-        vault: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        vault: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Derive the wire-format public key (`x || y`, wire-LE, P-521
@@ -499,8 +499,8 @@ pub trait HsmEcc: HsmIoTypes {
     async fn ecc_priv_pub_key(
         &self,
         io: &Self::Io,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Derive the public key from a raw private scalar (`pub = priv · G`).
@@ -537,8 +537,8 @@ pub trait HsmEcc: HsmIoTypes {
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// ECDH key agreement: derives a shared secret from a local
@@ -575,9 +575,9 @@ pub trait HsmEcc: HsmIoTypes {
         &self,
         io: &Self::Io,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &DmaBuf,
-        secret: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &HsmDmaBuf,
+        secret: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 }
 

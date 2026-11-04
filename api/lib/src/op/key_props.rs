@@ -342,6 +342,10 @@ impl HsmKeyProps {
         self.pub_key_der = Some(pub_key_der.to_vec());
     }
 
+    pub(crate) fn set_kind(&mut self, kind: HsmKeyKind) {
+        self.kind = kind;
+    }
+
     pub(crate) fn set_flags(&mut self, flags: HsmKeyFlags) {
         self.flags = flags;
     }

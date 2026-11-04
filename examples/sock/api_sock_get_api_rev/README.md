@@ -15,8 +15,10 @@ which is a portable transport for native Windows applications. TCP is supported
 by Rust's standard library and the server's existing Tokio runtime on Windows
 and Linux, without introducing another transport dependency.
 
-TCP carries the existing length-delimited SQE/CQE protocol and opaque MBOR/TBOR
-payloads. It does not introduce a new API protocol or change public API call
+TCP carries the length-delimited SQE/CQE protocol and opaque MBOR/TBOR
+payloads, with ordered TBOR OOB bytes, fast-path AES-GCM/XTS bulk requests and
+sideband partition reset. It does not
+introduce a new API protocol or change public API call
 signatures. The application uses `tsra_api`; transport selection stays in the
 DDI layer through the opt-in `tsra_api/sock` feature.
 
@@ -119,6 +121,34 @@ These are separate, concurrently running terminal commands, not a sequential
 script. Alternatively, build the packages and run the executables directly from
 `target/debug` with the same arguments.
 
+## DDI Integration Tests
+
+Use a dedicated server: these suites reset its shared partition. Set
+`RUST_LOG=info` on both the server and test processes for informational logging.
+Run each suite serially:
+
+```sh
+RUST_LOG=info TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
+  -p tsra_ddi_mbor_types --features sock --test tsra_ddi_tests --test-threads 1
+RUST_LOG=info TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
+  -p tsra_ddi_tbor_types --features sock --test tsra_ddi_tbor_tests --test-threads 1
+```
+
+The API tests, including the C++ suite, run the same way; add
+`session-ex-tests` for TBOR (`open_session_ex`) sessions:
+
+```sh
+TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
+  -p tsra_api_tests --features sock --test-threads 1
+```
+
+Use the test package's `sock` feature, not just `tsra_ddi/sock`: it selects
+socket-specific session expectations and excludes hardware-only MBOR bulk
+crypto tests, as the existing `emu` feature does. Tests of the removed
+`key_tag`/named-key lookup feature are disabled.
+Connections may own multiple sessions; cloned device handles share their
+connection and sessions. A different connection cannot use those sessions.
+
 ## Other Transports
 
 The explicit TCP commands above also work on Linux. For backward compatibility,
@@ -145,11 +175,23 @@ Neither transport is required for the TCP setup on Windows or Linux.
   session per worker as appropriate.
 - `sock`, `mock`, and `emu` select mutually exclusive DDI backends. Do not combine
   their feature flags in the same build.
-- The socket transport carries ordinary MBOR/TBOR commands, with a 4096-byte
-  request/response capacity. Fast-path AES-GCM/XTS, erase/reset, and TBOR
-  out-of-band buffers are not supported.
+- The socket transport carries ordinary MBOR/TBOR commands, with an 8192-byte
+  main request/response capacity. TBOR supports up to 64 OOB buffers of up to
+  64 KiB each, reconstructed as server-owned SGL descriptors. Reset disables
+  and re-enables the existing partition, waiting for active submissions.
+  Fast-path AES-GCM/XTS requests carry a 32-dword bulk SQE with up to 16 KiB of
+  data inline; the server copies it into its own buffers. Bulk requests require
+  an owned Active session: a pending TBOR handshake cannot submit bulk IO.
+  Reset preserves ownership for cleanup but blocks bulk IO until the session
+  is successfully reopened or authenticated again.
+- Client and server must be updated together; the protocol does not provide
+  backward compatibility. Disconnected clients' sessions are closed by the
+  server rather than left occupying firmware session slots.
 - Calls are synchronous. Each connection allows one exchange at a time; this
   example uses multiple connections rather than multiplexing one connection.
+
+For a complete provisioning, signing, and recovery workflow, see the
+[socket sealing example](../../sealing/leaf_svc/README.md).
 
 ## Troubleshooting
 

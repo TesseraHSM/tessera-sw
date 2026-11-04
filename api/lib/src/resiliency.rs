@@ -926,6 +926,64 @@ mod tests {
         assert_eq!(state.restore_epoch, 0);
     }
 
+    #[cfg(any(feature = "emu", feature = "sock"))]
+    #[test]
+    fn aes_gcm_restore_preserves_ex_key_properties() {
+        use crate::*;
+
+        let info = HsmPartitionManager::partition_info_list()
+            .into_iter()
+            .next()
+            .expect("partition");
+        let rev = info.api_rev_range.expect("API revision range").max();
+        let part = HsmPartitionManager::open_partition(&info.path, rev).expect("open partition");
+        part.reset().expect("reset partition");
+        let session = part
+            .open_session_ex(
+                rev,
+                HsmSessionPsk::new(HsmPskId::CO),
+                HsmSessionExType::Authenticated,
+            )
+            .expect("open EX session");
+        session.change_psk(&[0xA5; PSK_LEN]).expect("rotate CO PSK");
+        let props = HsmKeyPropsBuilder::default()
+            .class(HsmKeyClass::Secret)
+            .key_kind(HsmKeyKind::AesGcm)
+            .bits(256)
+            .can_encrypt(true)
+            .can_decrypt(true)
+            .is_session(true)
+            .build()
+            .expect("GCM properties");
+        let key = HsmKeyManager::generate_key(&session, &mut HsmAesGcmKeyGenAlgo::default(), props)
+            .expect("generate GCM key");
+        let shared_key = key.clone();
+        let masked = key.masked_key_vec().expect("masked GCM key");
+
+        // Advance only the host epoch to isolate key restoration from session recovery.
+        let mut state = ResiliencyState::new(
+            mock_config(true, true),
+            test_creds(),
+            HsmOwnerBackupKeySource::Caller,
+            caller_pota(),
+        )
+        .expect("resiliency state");
+        state.restore_epoch = 1;
+        part.inner().write().set_resiliency_state(state);
+        key.restore_from_masked().expect("restore GCM key");
+
+        assert_eq!(shared_key.kind(), HsmKeyKind::AesGcm);
+        assert_eq!(shared_key.bits(), 256);
+        assert!(shared_key.can_encrypt());
+        assert!(shared_key.can_decrypt());
+        assert_eq!(
+            shared_key.masked_key_vec().expect("restored masked key"),
+            masked
+        );
+        assert_eq!(shared_key.last_restore_epoch(), 1);
+        HsmAesGcmKey::validate_props(&shared_key.props()).expect("restored GCM properties");
+    }
+
     #[test]
     fn resiliency_state_caches_credentials() {
         let creds = test_creds();
