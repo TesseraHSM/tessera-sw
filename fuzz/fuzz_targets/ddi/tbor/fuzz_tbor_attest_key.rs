@@ -387,6 +387,7 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id,
             masked_key,
             report_data: input.fuzzed_key_data.report_data,
+            auth_envelope: Vec::new(),
         };
         let result = ctx.tbor(&req);
 

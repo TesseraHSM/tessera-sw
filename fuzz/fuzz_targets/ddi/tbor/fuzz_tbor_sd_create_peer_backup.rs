@@ -258,6 +258,7 @@ fuzz_target!(|input: FuzzInput| {
                 session_id: session.session_id,
                 masked_key: recipient.masked_key.to_vec(),
                 report_data: input.report_data,
+                auth_envelope: Vec::new(),
             })
             .expect("recipient KeyReport should succeed");
         let recipient_pub = public_key_be(&recipient.pub_key);

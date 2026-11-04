@@ -205,6 +205,7 @@ fn sealing_key_report_and_pub(
             session_id,
             masked_key: masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
+            auth_envelope: Vec::new(),
         })
         .expect("KeyReport")
         .report;

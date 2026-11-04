@@ -555,6 +555,7 @@ pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
             session_id: session.session_id,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
+            auth_envelope: Vec::new(),
         })
         .expect("sealing-key report generation should succeed");
 
