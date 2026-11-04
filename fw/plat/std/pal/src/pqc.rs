@@ -37,6 +37,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -95,6 +96,15 @@ fn external_mu(msg_type: HsmMlDsaMsgType, message: &[u8], ctx: &[u8]) -> HsmResu
     }
 }
 
+/// Whether to sign deterministically: the std PAL can always draw
+/// randomness, so it hedges unless the caller requires deterministic signing.
+fn deterministic(hedge: HsmMlDsaHedge) -> bool {
+    match hedge {
+        HsmMlDsaHedge::Preferred | HsmMlDsaHedge::Required => false,
+        HsmMlDsaHedge::Deterministic => true,
+    }
+}
+
 impl HsmMlDsa for StdHsmPal {
     async fn mldsa_sign_in_place(
         &self,
@@ -102,6 +112,7 @@ impl HsmMlDsa for StdHsmPal {
         kind: HsmVaultKeyKind,
         key_signature: &mut HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
+        hedge: HsmMlDsaHedge,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -116,7 +127,14 @@ impl HsmMlDsa for StdHsmPal {
         }
         let result = self
             .pqc
-            .mldsa_sign(variant, &key_signature[key_at..], external_mu, message, ctx)
+            .mldsa_sign(
+                variant,
+                &key_signature[key_at..],
+                external_mu,
+                deterministic(hedge),
+                message,
+                ctx,
+            )
             .await?;
         write_exact(&mut key_signature[..variant.sig_len()], &result)
     }
@@ -148,6 +166,7 @@ impl HsmMlDsa for StdHsmPal {
         kind: HsmVaultKeyKind,
         sec_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
+        hedge: HsmMlDsaHedge,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
@@ -160,7 +179,14 @@ impl HsmMlDsa for StdHsmPal {
         // as it does the ECDSA nonce.
         let outcome = self
             .pqc
-            .mldsa_sign(variant, sec_key, external_mu, message, ctx)
+            .mldsa_sign(
+                variant,
+                sec_key,
+                external_mu,
+                deterministic(hedge),
+                message,
+                ctx,
+            )
             .await;
 
         // Not a long-term secret, but it is signing input; do not leave
@@ -268,7 +294,10 @@ impl HsmMlKem for StdHsmPal {
 mod tests {
     use tokio::runtime::Handle;
     use tsra_crypto::ImportableKey;
+    use tsra_crypto::MlDsaAlgo;
+    use tsra_crypto::MlDsaPrivateKey;
     use tsra_crypto::MlDsaPublicKey;
+    use tsra_crypto::Signer;
     use tsra_fw_hsm_pal_traits::HsmAlloc;
 
     use super::*;
@@ -338,6 +367,7 @@ mod tests {
                     kind,
                     buffer,
                     HsmMlDsaMsgType::Pure,
+                    HsmMlDsaHedge::Preferred,
                     dma(b"m"),
                     dma(b"ctx"),
                 )
@@ -397,6 +427,7 @@ mod tests {
                     HsmVaultKeyKind::MlDsa44Seed,
                     &mut buffer[..key_len],
                     HsmMlDsaMsgType::Pure,
+                    HsmMlDsaHedge::Preferred,
                     dma(b""),
                     dma(b""),
                 )
@@ -453,6 +484,7 @@ mod tests {
                 kind,
                 dma(&sk),
                 HsmMlDsaMsgType::Pure,
+                HsmMlDsaHedge::Preferred,
                 dma(b"message"),
                 dma(b"ctx"),
                 dma_mut(&mut sig),
@@ -588,15 +620,21 @@ mod tests {
         }
     }
 
-    /// Signing is hedged, as it is on Uno: signing the same message
-    /// twice under the same key must not produce the same bytes, and
-    /// both must verify.  A regression to deterministic signing would
-    /// still verify, so only the inequality catches it.
+    /// Signing is hedged unless the caller requires deterministic signing,
+    /// as on Uno: signing the same message twice under the same key must not
+    /// produce the same bytes, and both must verify.  A regression to
+    /// deterministic signing would still verify, so only the inequality
+    /// catches it.
     #[tokio::test]
     async fn mldsa_signing_is_hedged() {
         let (pal, io) = pal_and_io();
 
-        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+        for ((kind, pk_len, sk_len, sig_len), hedge) in MLDSA_SETS.into_iter().flat_map(|set| {
+            [
+                (set, HsmMlDsaHedge::Preferred),
+                (set, HsmMlDsaHedge::Required),
+            ]
+        }) {
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
@@ -617,6 +655,7 @@ mod tests {
                     kind,
                     dma(&sk),
                     HsmMlDsaMsgType::Pure,
+                    hedge,
                     dma(b"same message"),
                     dma(b""),
                     dma_mut(&mut sig),
@@ -641,7 +680,94 @@ mod tests {
             }
             assert_ne!(
                 sigs[0], sigs[1],
-                "{kind:?}: signing is deterministic; Uno signs hedged"
+                "{kind:?}: {hedge:?} signing is deterministic; Uno signs hedged"
+            );
+        }
+    }
+
+    /// Deterministic signing is FIPS 204's all-zero-randomness variant: the
+    /// same key and input give `tsra_crypto`'s deterministic signature
+    /// whether the input is the message or its `μ`, in place too, and it
+    /// verifies.
+    #[tokio::test]
+    async fn mldsa_deterministic_signing_repeats() {
+        let (pal, io) = pal_and_io();
+
+        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+            let (mut seed, mut pk, mut sk) =
+                ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
+            pal.mldsa_gen_key(
+                &io,
+                kind,
+                dma_mut(&mut seed),
+                dma_mut(&mut pk),
+                dma_mut(&mut sk),
+            )
+            .await
+            .expect("gen_key");
+            let mu = MlDsaPublicKey::from_bytes(&pk)
+                .and_then(|pk| pk.mu(b"ctx", b"message"))
+                .expect("host mu");
+            let expected = Signer::sign_vec(
+                &mut MlDsaAlgo::new(b"ctx").unwrap().deterministic(),
+                &MlDsaPrivateKey::from_bytes(&sk).unwrap(),
+                b"message",
+            )
+            .unwrap();
+
+            let inputs: [(HsmMlDsaMsgType, &[u8], &[u8]); 3] = [
+                (HsmMlDsaMsgType::Pure, b"message", b"ctx"),
+                (HsmMlDsaMsgType::Pure, b"message", b"ctx"),
+                (HsmMlDsaMsgType::ExternalMu, &mu, b""),
+            ];
+            for (msg_type, message, ctx) in inputs {
+                let mut sig = vec![0u8; sig_len];
+                pal.mldsa_sign(
+                    &io,
+                    kind,
+                    dma(&sk),
+                    msg_type,
+                    HsmMlDsaHedge::Deterministic,
+                    dma(message),
+                    dma(ctx),
+                    dma_mut(&mut sig),
+                )
+                .await
+                .expect("sign");
+                assert_eq!(sig, expected, "{kind:?}: {msg_type:?} signature");
+            }
+
+            let buffer = pal.dma_alloc(&io, sk_len).unwrap();
+            buffer.copy_from_slice(&sk);
+            pal.mldsa_sign_in_place(
+                &io,
+                kind,
+                buffer,
+                HsmMlDsaMsgType::Pure,
+                HsmMlDsaHedge::Deterministic,
+                dma(b"message"),
+                dma(b"ctx"),
+            )
+            .await
+            .expect("sign in place");
+            assert_eq!(
+                &buffer[..sig_len],
+                &expected[..],
+                "{kind:?}: in-place signature"
+            );
+            assert!(
+                pal.mldsa_verify(
+                    &io,
+                    kind,
+                    dma(&pk),
+                    HsmMlDsaMsgType::Pure,
+                    dma(b"message"),
+                    dma(b"ctx"),
+                    dma(&expected)
+                )
+                .await
+                .expect("verify"),
+                "{kind:?}: deterministic signature failed to verify"
             );
         }
     }
@@ -675,6 +801,7 @@ mod tests {
                 kind,
                 dma(&sk),
                 HsmMlDsaMsgType::ExternalMu,
+                HsmMlDsaHedge::Preferred,
                 dma(&mu),
                 dma(b""),
                 dma_mut(&mut sig),
@@ -701,6 +828,7 @@ mod tests {
                 kind,
                 dma(&sk),
                 HsmMlDsaMsgType::Pure,
+                HsmMlDsaHedge::Preferred,
                 dma(b"message"),
                 dma(b"ctx"),
                 dma_mut(&mut sig),
@@ -729,6 +857,7 @@ mod tests {
                 kind,
                 buffer,
                 HsmMlDsaMsgType::ExternalMu,
+                HsmMlDsaHedge::Preferred,
                 dma(&mu),
                 dma(b""),
             )
@@ -811,6 +940,7 @@ mod tests {
                     kind,
                     dma(&sk),
                     msg_type,
+                    HsmMlDsaHedge::Preferred,
                     dma(message),
                     dma(ctx),
                     dma_mut(&mut sig),
@@ -838,8 +968,16 @@ mod tests {
             let buffer = pal.dma_alloc(&io, sk_len).unwrap();
             buffer.copy_from_slice(&sk);
             assert_eq!(
-                pal.mldsa_sign_in_place(&io, kind, buffer, msg_type, dma(message), dma(ctx))
-                    .await,
+                pal.mldsa_sign_in_place(
+                    &io,
+                    kind,
+                    buffer,
+                    msg_type,
+                    HsmMlDsaHedge::Preferred,
+                    dma(message),
+                    dma(ctx)
+                )
+                .await,
                 Err(expected),
                 "{msg_type:?} sign in place, {} B",
                 message.len()

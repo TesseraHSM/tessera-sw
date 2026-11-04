@@ -22,6 +22,7 @@ use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_SIGN;
 
@@ -37,6 +38,7 @@ fn mldsa_sign_request_wire_shape() {
         session_id: 0,
         masked_key: vec![0xAA; 164],
         msg_type: MLDSA_MSG_TYPE_PURE,
+        hedge: MLDSA_HEDGE_PREFERRED,
         message: vec![0xBB; 32],
         ctx: Vec::new(),
     };
@@ -49,7 +51,7 @@ fn mldsa_sign_request_wire_shape() {
     let bytes = req.encode_request(&mut buf).expect("encode request");
     let view = RequestView::parse(bytes).expect("parse request");
     assert_eq!(view.opcode(), TBOR_OP_MLDSA_SIGN);
-    assert_eq!(view.toc_count(), 5);
+    assert_eq!(view.toc_count(), 6);
 }
 
 /// Happy path: generate a key, sign a message, and check the signature
@@ -75,6 +77,7 @@ fn sign_case(p: &MlDsaParams) {
             session_id: session.session_id,
             masked_key: key.masked_key,
             msg_type: MLDSA_MSG_TYPE_PURE,
+            hedge: MLDSA_HEDGE_PREFERRED,
             message: b"tsra pqc bring-up".to_vec(),
             ctx: Vec::new(),
         })
@@ -146,6 +149,7 @@ fn masking_case(p: &MlDsaParams) {
         session_id: session.session_id,
         masked_key: tampered,
         msg_type: MLDSA_MSG_TYPE_PURE,
+        hedge: MLDSA_HEDGE_PREFERRED,
         message: b"tsra pqc bring-up".to_vec(),
         ctx: Vec::new(),
     });

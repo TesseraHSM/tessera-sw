@@ -22,6 +22,7 @@ use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_VERIFY;
 
@@ -79,6 +80,7 @@ fn verify_case(p: &MlDsaParams) {
             session_id: session.session_id,
             masked_key: key.masked_key,
             msg_type: MLDSA_MSG_TYPE_PURE,
+            hedge: MLDSA_HEDGE_PREFERRED,
             message: message.clone(),
             ctx: Vec::new(),
         })

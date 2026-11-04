@@ -1689,6 +1689,8 @@ mod tests {
                 .unwrap()
                 .msg_type(types::MlDsaMsgType::Pure)
                 .unwrap()
+                .hedge(types::MlDsaHedge::Preferred)
+                .unwrap()
                 .message(&message)
                 .unwrap()
                 .ctx(&ctx)
@@ -1704,7 +1706,7 @@ mod tests {
             let mut noncanonical = request_with_payload_gap(
                 req.as_bytes(),
                 types::TborMlDsaSignReq::TOC_COUNT,
-                &[1, 3, 4],
+                &[1, 4, 5],
             );
             types::TborMlDsaSignReq::decode(dma(&mut noncanonical)).unwrap();
             assert_eq!(

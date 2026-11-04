@@ -67,13 +67,35 @@ impl HsmMlDsaMsgType {
     }
 }
 
+/// How an ML-DSA signature gets its per-signature randomness `rnd`
+/// (FIPS 204, Algorithm 2): drawn fresh for a hedged signature, or fixed at
+/// `{0}^32` for a deterministic one, which always yields the same signature
+/// for the same key and input.
+///
+/// Values and meanings follow PKCS#11's `CK_HEDGE_TYPE`.  Only signing takes
+/// one; verification is the same for both variants.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmMlDsaHedge {
+    /// Hedged or deterministic, as the implementation chooses
+    /// (`CKH_HEDGE_PREFERRED`).
+    Preferred = 0,
+
+    /// Hedged, or fail (`CKH_HEDGE_REQUIRED`).
+    Required = 1,
+
+    /// Deterministic, or fail (`CKH_DETERMINISTIC_REQUIRED`).
+    Deterministic = 2,
+}
+
 /// Asynchronous ML-DSA signature operations.
 ///
 /// Async because every method is a round trip to an FP core: the
 /// implementation yields while the request is in flight.
 ///
 /// Every signing and verification method takes an [`HsmMlDsaMsgType`]
-/// saying how its `message` is to be read.
+/// saying how its `message` is to be read; the signing methods also take an
+/// [`HsmMlDsaHedge`] saying how the signature is randomized.
 pub trait HsmMlDsa {
     /// Replace the prefix of a key/signature region with an ML-DSA signature.
     ///
@@ -83,14 +105,17 @@ pub trait HsmMlDsa {
     /// `message` and `ctx` are disjoint from it. The caller wipes private bytes
     /// not replaced by the signature.
     ///
-    /// `msg_type` says how `message` is to be read; see
-    /// [`mldsa_sign`](Self::mldsa_sign) for the errors.
+    /// `msg_type` says how `message` is to be read and `hedge` how the
+    /// signature is randomized; see [`mldsa_sign`](Self::mldsa_sign) for the
+    /// errors.
+    #[allow(clippy::too_many_arguments)]
     async fn mldsa_sign_in_place(
         &self,
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         key_signature: &mut HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
+        hedge: HsmMlDsaHedge,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
     ) -> HsmResult<()>;
@@ -136,6 +161,7 @@ pub trait HsmMlDsa {
     /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
     /// - `sec_key` — expanded secret key (2560 / 4032 / 4896 bytes).
     /// - `msg_type` — how `message` is to be read.
+    /// - `hedge` — whether the signature is hedged or deterministic.
     /// - `message` — the input to sign, as `msg_type` defines it: the
     ///   message itself, or the 64-byte `μ`.
     /// - `ctx` — FIPS 204 context string, up to 255 bytes; empty for an
@@ -148,7 +174,8 @@ pub trait HsmMlDsa {
     /// - `Ok(())` — `signature` populated.
     /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length, or a
     ///   `message`/`ctx` not valid for `msg_type`.
-    /// - `Err(HsmError::UnsupportedCmd)` — `msg_type` is a pre-hash type.
+    /// - `Err(HsmError::UnsupportedCmd)` — `msg_type` is a pre-hash type,
+    ///   or the implementation cannot sign as `hedge` requires.
     /// - `Err(HsmError)` — propagated from the FP offload path.
     #[allow(clippy::too_many_arguments)]
     async fn mldsa_sign(
@@ -157,6 +184,7 @@ pub trait HsmMlDsa {
         kind: HsmVaultKeyKind,
         sec_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
+        hedge: HsmMlDsaHedge,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,

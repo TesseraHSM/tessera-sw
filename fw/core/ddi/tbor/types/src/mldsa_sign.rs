@@ -12,7 +12,8 @@
 //! self-describing.  Its authenticated key kind already tells the firmware
 //! which parameter set the key belongs to.
 //!
-//! Inputs: `session_id`, the `masked_key`, the message bytes, and the
+//! Inputs: `session_id`, the `masked_key`, the message type `msg_type`, the
+//! hedge variant `hedge`, the message bytes (or an external `μ`), and the
 //! FIPS 204 context string `ctx`.  Output: the ML-DSA signature bytes.
 //!
 //! `ctx` is the caller-chosen context string of `ML-DSA.Sign(sk, M, ctx)`
@@ -34,6 +35,7 @@
 //! **no authentication, no authorization and no key protection**.
 //! Not fit to ship.
 
+use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
 
 pub use crate::mldsa_generate_key::MlDsaMsgType;
@@ -45,6 +47,27 @@ pub use crate::mldsa_generate_key::MLDSA_SIGNATURE_MAX_LEN;
 
 /// TBOR opcode for `MlDsaSign`.
 pub const TBOR_OP_MLDSA_SIGN: u8 = 0x27;
+
+/// How `MlDsaSign` randomizes the signature: FIPS 204's hedged variant,
+/// which draws fresh randomness for every signature, or its deterministic
+/// variant, which fixes it at zero so the same key and input always yield
+/// the same signature.
+///
+/// Values and meanings follow PKCS#11's `CK_HEDGE_TYPE`.  Kept as an
+/// [`open_enum`] so an unrecognized value round-trips as `MlDsaHedge(n)`
+/// and the handler can reject it, rather than failing decode.
+#[repr(u8)]
+#[open_enum]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlDsaHedge {
+    /// Hedged or deterministic, as the device chooses
+    /// (`CKH_HEDGE_PREFERRED`).
+    Preferred = 0,
+    /// Hedged, or fail (`CKH_HEDGE_REQUIRED`).
+    Required = 1,
+    /// Deterministic, or fail (`CKH_DETERMINISTIC_REQUIRED`).
+    Deterministic = 2,
+}
 
 /// `MlDsaSign` request schema.
 ///
@@ -66,6 +89,11 @@ pub struct TborMlDsaSignReq<'a> {
     /// or an external `μ`.
     #[tbor(U8)]
     pub msg_type: MlDsaMsgType,
+
+    /// How the signature is randomized, 1-byte [`MlDsaHedge`]: hedged or
+    /// deterministic.
+    #[tbor(U8)]
+    pub hedge: MlDsaHedge,
 
     /// Message to sign.  The TBOR schema caps inline messages at 586 B; see
     /// [`MLDSA_MESSAGE_MAX_LEN`].
@@ -109,6 +137,8 @@ mod tests {
             .unwrap()
             .msg_type(MlDsaMsgType::Pure)
             .unwrap()
+            .hedge(MlDsaHedge::Preferred)
+            .unwrap()
             .message(&message)
             .unwrap()
             .ctx(&ctx)
@@ -131,6 +161,8 @@ mod tests {
             .unwrap()
             .msg_type(MlDsaMsgType::Pure)
             .unwrap()
+            .hedge(MlDsaHedge::Preferred)
+            .unwrap()
             .message(&message)
             .unwrap()
             .ctx(&[])
@@ -152,6 +184,8 @@ mod tests {
             .masked_key(&masked)
             .unwrap()
             .msg_type(MlDsaMsgType::Pure)
+            .unwrap()
+            .hedge(MlDsaHedge::Preferred)
             .unwrap()
             .message(&message)
             .unwrap()
@@ -181,6 +215,8 @@ mod tests {
                 .unwrap()
                 .msg_type(msg_type)
                 .unwrap()
+                .hedge(MlDsaHedge::Preferred)
+                .unwrap()
                 .message(&mu)
                 .unwrap()
                 .ctx(&[])
@@ -188,6 +224,38 @@ mod tests {
                 .finish();
             assert_eq!(frame.msg_type(), msg_type);
             assert_eq!(frame.message(), &mu[..]);
+        }
+    }
+
+    #[test]
+    fn request_round_trips_every_hedge_and_unknown_values() {
+        let mut buf = [0u8; 8192];
+        let masked = [0x11u8; MASKED_MLDSA_KEY_MAX_LEN];
+        let message = [0x22u8; 32];
+        for hedge in [
+            MlDsaHedge::Preferred,
+            MlDsaHedge::Required,
+            MlDsaHedge::Deterministic,
+            MlDsaHedge(3),
+            MlDsaHedge(0xff),
+        ] {
+            let frame = TborMlDsaSignReq::encode(&mut buf)
+                .unwrap()
+                .session_id(SessionId(1))
+                .unwrap()
+                .masked_key(&masked)
+                .unwrap()
+                .msg_type(MlDsaMsgType::Pure)
+                .unwrap()
+                .hedge(hedge)
+                .unwrap()
+                .message(&message)
+                .unwrap()
+                .ctx(&[])
+                .unwrap()
+                .finish();
+            assert_eq!(frame.hedge(), hedge);
+            assert_eq!(frame.message(), &message[..]);
         }
     }
 

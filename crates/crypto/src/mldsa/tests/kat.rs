@@ -96,6 +96,37 @@ fn external_mu_signing_matches_nist_vectors() {
     }
 }
 
+/// NIST's deterministic signing vectors, reproduced by a
+/// [`deterministic`](MlDsaAlgo::deterministic) engine rather than by pinning
+/// `rnd`: the variant itself must supply FIPS 204's all-zero randomness, for
+/// the message and for an external `μ`.
+#[test]
+fn deterministic_engine_matches_nist_deterministic_vectors() {
+    for v in MLDSA_SIGGEN_TEST_VECTORS.iter().filter(|v| v.deterministic) {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let mut algo = MlDsaAlgo::new(v.ctx).unwrap().deterministic();
+        assert_eq!(
+            Signer::sign_vec(&mut algo, &sk, v.msg).unwrap(),
+            v.sig,
+            "ML-DSA-{} deterministic signature disagrees with NIST",
+            v.param_set
+        );
+    }
+    for v in MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS
+        .iter()
+        .filter(|v| v.deterministic)
+    {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let mut algo = MlDsaAlgo::external_mu().deterministic();
+        assert_eq!(
+            Signer::sign_vec(&mut algo, &sk, v.mu).unwrap(),
+            v.sig,
+            "ML-DSA-{} deterministic external-mu signature disagrees with NIST",
+            v.param_set
+        );
+    }
+}
+
 /// NIST's external-`μ` verification vectors, including a modified `μ` and
 /// the tampered-signature cases.
 #[test]

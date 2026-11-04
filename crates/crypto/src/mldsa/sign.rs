@@ -13,6 +13,9 @@
 //! string bound into the signature, and per-signature randomness. Neither fits
 //! the [`SignOp::sign`] signature, so both are held by the engine — the same
 //! shape [`EcdsaAlgo`](crate::EcdsaAlgo) uses to carry its hash algorithm.
+//! The randomness is held as a choice of variant rather than as bytes: hedged,
+//! drawn fresh for each signature, or deterministic (see
+//! [`MlDsaAlgo::deterministic`]).
 //!
 //! So is the choice of input: the message itself, or an external `μ`
 //! computed by the caller (see [`MlDsaAlgo::external_mu`]).
@@ -45,11 +48,13 @@ use super::*;
 ///
 /// # Randomness
 ///
-/// Signing randomness is drawn from the platform generator, freshly for every
-/// signature, and is never a parameter — the same arrangement ECDSA's nonce
-/// and RSA-PSS's salt already have in this crate. Signing is hedged, so a
-/// given `(key, message, ctx)` yields a different, equally valid signature
-/// each time.
+/// Signing is hedged by default: its randomness is drawn from the platform
+/// generator, freshly for every signature, and is never a parameter — the
+/// same arrangement ECDSA's nonce and RSA-PSS's salt already have in this
+/// crate. A given `(key, message, ctx)` then yields a different, equally valid
+/// signature each time. An engine made [`deterministic`](Self::deterministic)
+/// signs with FIPS 204's deterministic variant instead, whose randomness is
+/// fixed at zero, so the same input always yields the same signature.
 pub struct MlDsaAlgo {
     /// FIPS 204 context string, bound into the signature. Empty for an
     /// external `μ`, which already binds it.
@@ -58,8 +63,13 @@ pub struct MlDsaAlgo {
     /// Whether `data` is an external `μ` rather than the message.
     external_mu: bool,
 
+    /// Whether signing uses the deterministic variant, `rnd = {0}^32`,
+    /// rather than fresh randomness.
+    deterministic: bool,
+
     /// Randomness pinned by a known-answer test; see
-    /// [`with_randomness`](Self::with_randomness). Production always draws.
+    /// [`with_randomness`](Self::with_randomness). Production draws it, or
+    /// fixes it at zero when deterministic.
     #[cfg(test)]
     pinned_rnd: Option<[u8; MLDSA_RND_LEN]>,
 }
@@ -78,6 +88,7 @@ impl MlDsaAlgo {
         Ok(Self {
             ctx: check_ctx(ctx)?,
             external_mu: false,
+            deterministic: false,
             #[cfg(test)]
             pinned_rnd: None,
         })
@@ -93,9 +104,23 @@ impl MlDsaAlgo {
         Self {
             ctx: Vec::new(),
             external_mu: true,
+            deterministic: false,
             #[cfg(test)]
             pinned_rnd: None,
         }
+    }
+
+    /// Switches the engine to FIPS 204's deterministic signing variant, in
+    /// which `ML-DSA.Sign` fixes its randomness at `rnd = {0}^32` instead of
+    /// drawing it.
+    ///
+    /// The same key and input then always produce the same signature. Hedged
+    /// signing, the default, also resists fault and side-channel attacks that
+    /// exploit signing the same input repeatedly, so prefer it unless the
+    /// signatures must be reproducible. Verification is unaffected.
+    pub fn deterministic(mut self) -> Self {
+        self.deterministic = true;
+        self
     }
 
     /// Creates an engine that signs under fixed randomness.
@@ -118,6 +143,7 @@ impl MlDsaAlgo {
         Ok(Self {
             ctx: check_ctx(ctx)?,
             external_mu: false,
+            deterministic: false,
             pinned_rnd: Some(rnd),
         })
     }
@@ -150,8 +176,13 @@ impl MlDsaAlgo {
         }
     }
 
-    /// Draws the randomness for one signature.
+    /// The randomness for one signature: zero for the deterministic variant,
+    /// otherwise drawn.
     fn signing_rnd(&self) -> Result<[u8; MLDSA_RND_LEN], CryptoError> {
+        if self.deterministic {
+            return Ok([0u8; MLDSA_RND_LEN]);
+        }
+
         #[cfg(test)]
         if let Some(rnd) = self.pinned_rnd {
             return Ok(rnd);
@@ -167,7 +198,8 @@ impl SignOp for MlDsaAlgo {
     /// Expanded ML-DSA signing key.
     type Key = MlDsaPrivateKey;
 
-    /// Produces a hedged ML-DSA signature over `data`.
+    /// Produces an ML-DSA signature over `data`: hedged, or deterministic for
+    /// a [`deterministic`](MlDsaAlgo::deterministic) engine.
     ///
     /// # Arguments
     ///
@@ -317,7 +349,8 @@ fn check_ctx(ctx: &[u8]) -> Result<Vec<u8>, CryptoError> {
 /// crate do it.
 ///
 /// [`signing_rnd`](MlDsaAlgo::signing_rnd) has already resolved where the block
-/// came from — drawn, or pinned by a known-answer test — so this only has to
+/// came from — drawn, zero for deterministic signing, or pinned by a
+/// known-answer test — so this only has to
 /// hand it over. It refuses a second draw: signing consumes exactly one
 /// 32-byte value today, and if that ever changes this fails loudly instead of
 /// silently repeating the same bytes.

@@ -54,6 +54,7 @@ use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
@@ -714,6 +715,7 @@ impl<'e> Worker<'e> {
             session_id: env.session_id,
             masked_key: key.masked.clone(),
             msg_type: MLDSA_MSG_TYPE_PURE,
+            hedge: MLDSA_HEDGE_PREFERRED,
             message: self.pools.mldsa[m].clone(),
             ctx: Vec::new(),
         };
@@ -837,6 +839,7 @@ impl<'e> Worker<'e> {
                 session_id: env.session_id,
                 masked_key,
                 msg_type: MLDSA_MSG_TYPE_PURE,
+                hedge: MLDSA_HEDGE_PREFERRED,
                 message: message.clone(),
                 ctx: Vec::new(),
             })

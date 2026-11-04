@@ -39,6 +39,17 @@ use crate::tbor;
 /// TBOR opcode for `MlDsaSign`.
 pub const TBOR_OP_MLDSA_SIGN: u8 = 0x27;
 
+/// `MlDsaHedge` discriminant: hedged or deterministic, as the device chooses
+/// (PKCS#11 `CKH_HEDGE_PREFERRED`).  The device signs hedged.
+pub const MLDSA_HEDGE_PREFERRED: u8 = 0;
+/// `MlDsaHedge` discriminant: hedged, or fail (PKCS#11
+/// `CKH_HEDGE_REQUIRED`).
+pub const MLDSA_HEDGE_REQUIRED: u8 = 1;
+/// `MlDsaHedge` discriminant: deterministic, or fail (PKCS#11
+/// `CKH_DETERMINISTIC_REQUIRED`).  FIPS 204's deterministic variant, so the
+/// same key and input always yield the same signature.
+pub const MLDSA_HEDGE_DETERMINISTIC: u8 = 2;
+
 /// Host-facing TBOR `MlDsaSign` request.
 #[tbor(opcode = TBOR_OP_MLDSA_SIGN, session_ctrl = in_session)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -56,6 +67,11 @@ pub struct TborMlDsaSignReq {
     /// How `message` is read: `MLDSA_MSG_TYPE_PURE` (the message itself) or
     /// `MLDSA_MSG_TYPE_EXTERNAL_MU` (a 64-byte `μ`, with an empty `ctx`).
     pub msg_type: u8,
+
+    /// How the signature is randomized: `MLDSA_HEDGE_PREFERRED`,
+    /// `MLDSA_HEDGE_REQUIRED` or `MLDSA_HEDGE_DETERMINISTIC`, following
+    /// PKCS#11's `CK_HEDGE_TYPE`.
+    pub hedge: u8,
 
     /// Message to sign.  The TBOR schema caps inline messages at 586 B; see
     /// [`MLDSA_MESSAGE_MAX_LEN`](crate::MLDSA_MESSAGE_MAX_LEN).
@@ -93,6 +109,7 @@ mod tests {
             session_id: 7,
             masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
             msg_type: MLDSA_MSG_TYPE_PURE,
+            hedge: MLDSA_HEDGE_PREFERRED,
             message: alloc::vec![0x22u8; 32],
             ctx: alloc::vec![0x44u8; 8],
         };
@@ -110,6 +127,7 @@ mod tests {
             session_id: 7,
             masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
             msg_type: MLDSA_MSG_TYPE_PURE,
+            hedge: MLDSA_HEDGE_PREFERRED,
             message: alloc::vec![0x22u8; 32],
             ctx: alloc::vec![0x44u8; MLDSA_CTX_MAX_LEN],
         };
@@ -127,6 +145,7 @@ mod tests {
             session_id: 7,
             masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
             msg_type: MLDSA_MSG_TYPE_PURE,
+            hedge: MLDSA_HEDGE_PREFERRED,
             message: alloc::vec![0x22u8; 32],
             ctx: Vec::new(),
         };

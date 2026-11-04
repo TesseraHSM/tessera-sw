@@ -11,6 +11,10 @@
 //! the pre-hash message types are not supported on Uno and are refused with
 //! [`HsmError::UnsupportedCmd`].
 //!
+//! Signing is hedged, with randomness from the TRNG, unless the caller
+//! requires deterministic signing, which uses FIPS 204's all-zero `rnd` and
+//! draws nothing.
+//!
 //! With `bulk_crypto` the FP cores run the bulk-crypto firmware, which
 //! has no PQC engine, so every call is refused with
 //! [`HsmError::UnsupportedCmd`] before anything is drawn from the RNG or
@@ -21,6 +25,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -49,6 +54,15 @@ fn check_msg_type(msg_type: HsmMlDsaMsgType, message: &[u8], ctx: &[u8]) -> HsmR
     }
 }
 
+/// Whether to sign hedged: Uno always has the TRNG, so it hedges unless the
+/// caller requires deterministic signing.
+fn hedged(hedge: HsmMlDsaHedge) -> bool {
+    match hedge {
+        HsmMlDsaHedge::Preferred | HsmMlDsaHedge::Required => true,
+        HsmMlDsaHedge::Deterministic => false,
+    }
+}
+
 /// Length of the compact ML-DSA private seed (`xi`), identical for every
 /// parameter set — which is why `kind` has to be carried alongside it.
 const MLDSA_SEED_LEN: usize = 32;
@@ -63,6 +77,7 @@ impl HsmMlDsa for UnoHsmPal {
         kind: HsmVaultKeyKind,
         key_signature: &mut HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
+        hedge: HsmMlDsaHedge,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -71,7 +86,9 @@ impl HsmMlDsa for UnoHsmPal {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             check_msg_type(msg_type, message, ctx)?;
-            self.rng_fill_bytes(io, &mut rnd)?;
+            if hedged(hedge) {
+                self.rng_fill_bytes(io, &mut rnd)?;
+            }
             self.pqc
                 .with_engine(async |engine| {
                     engine
@@ -135,6 +152,7 @@ impl HsmMlDsa for UnoHsmPal {
         kind: HsmVaultKeyKind,
         sec_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
+        hedge: HsmMlDsaHedge,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
@@ -146,8 +164,9 @@ impl HsmMlDsa for UnoHsmPal {
             check_msg_type(msg_type, message, ctx)?;
             // Per-signature randomness for the hedged variant, drawn here for
             // the same reason as the seed: an FP core has no entropy source.
+            // The deterministic variant leaves it zero.
             let mut rnd = [0u8; MLDSA_SEED_LEN];
-            {
+            if hedged(hedge) {
                 // SAFETY: `rnd` is a local of exactly the length the RNG driver
                 // fills; `from_raw_mut` only re-types it.
                 let dma = unsafe { HsmDmaBuf::from_raw_mut(&mut rnd[..]) };

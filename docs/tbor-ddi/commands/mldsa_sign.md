@@ -13,8 +13,7 @@ Licensed under the MIT License.
 Signs a host-supplied message, or an external `μ`, with a caller-held
 **masked** ML-DSA secret key from
 [`MlDsaGenerateKey`](./mldsa_generate_key.md).  The device unmasks the key
-on use and signs; signing is hedged, so the same input yields a different,
-equally valid signature each time.
+on use and signs, hedged or deterministically as `hedge` selects.
 
 There is intentionally no `key_kind` request field. The masked blob is
 self-describing: its authenticated key kind tells firmware which ML-DSA
@@ -41,6 +40,20 @@ output): once over the public key for `tr`, then over
 `tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M`.  Values `1` and `2` are reserved
 (pre-hash ML-DSA) and rejected, as are all others.
 
+`hedge` selects how the signature is randomized.  Its values and meanings
+follow PKCS#11's `CK_HEDGE_TYPE`:
+
+| `hedge` | PKCS#11 | Signature |
+|---|---|---|
+| `0` — preferred | `CKH_HEDGE_PREFERRED` | Hedged or deterministic, as the device chooses.  The device signs hedged. |
+| `1` — required | `CKH_HEDGE_REQUIRED` | Hedged: FIPS 204's default variant, with fresh randomness `rnd` from the device's TRNG, so the same input yields a different, equally valid signature each time. |
+| `2` — deterministic | `CKH_DETERMINISTIC_REQUIRED` | Deterministic: FIPS 204's variant with `rnd = {0}^32`, so the same key and input always yield the same signature. |
+
+Both variants verify the same way, so `MlDsaVerify` has no `hedge`.
+Hedged signing also resists fault and side-channel attacks that exploit
+signing the same input repeatedly; prefer it unless signatures must be
+reproducible.  Other values are rejected.
+
 Available to **both Crypto-Officer and Crypto-User** sessions.
 
 ## Request
@@ -52,6 +65,7 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | — | `masked_key` | `buffer` (up to 5160 B) | The complete masked blob returned by `MlDsaGenerateKey`; unmasked on-device.  The 32-byte `xi` seed followed by the expanded secret key, plus the 232 B envelope: 2824 / 4296 / 5160 B for ML-DSA-44 / 65 / 87. |
 | — | `msg_type` | `u8` | `0` = `message` is the message; `3` = `message` is an external `μ`. |
+| — | `hedge` | `u8` | `0` = hedge preferred; `1` = hedge required; `2` = deterministic required. |
 | — | `message` | `buffer` (up to 586 B) | Message bytes to sign, or the 64-byte `μ`. |
 | — | `ctx` | `buffer` (0..=255 B) | FIPS 204 context string.  Empty is the default; must be empty with `μ`. |
 
@@ -65,8 +79,9 @@ must also be verifiable.  `MlDsaSign` on its own would allow
 `8192 - 132 - 5160 - 255 = 2645` B.
 
 Worst-case frame (ML-DSA-87 key): data `5160 + 586 + 255 = 6001` B; staged
-`132 + 6001 = 6133` B and encoded `8 + 5*4 + 6001 = 6029` B — both inside
-the 8192-byte transport buffer.
+`132 + 6001 = 6133` B and encoded `8 + 6*4 + 6001 = 6033` B — both inside
+the 8192-byte transport buffer.  `msg_type` and `hedge` travel in their TOC
+entries, so they cost the data section nothing.
 
 ## Response
 
@@ -85,7 +100,7 @@ Carries the signature.
 | Error | Cause |
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
-| `InvalidArg` | `msg_type` other than `0` or `3`; with `3`, a `message` that is not 64 bytes or a non-empty `ctx` |
+| `InvalidArg` | `msg_type` other than `0` or `3`; with `3`, a `message` that is not 64 bytes or a non-empty `ctx`; `hedge` other than `0`, `1` or `2` |
 | `InvalidPermissions` | The key may not sign |
 | `DdiDecodeFailed` | Malformed request body (e.g. `message` exceeds 586 B) |
 

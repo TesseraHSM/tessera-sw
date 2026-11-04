@@ -104,12 +104,14 @@ impl StdPqc {
     /// Sign `message` with an expanded ML-DSA secret key.
     ///
     /// With `external_mu`, `message` is the 64-byte `μ` and `ctx` is unused.
-    /// Signing is hedged; the randomness is drawn by the crypto layer.
+    /// Signing is hedged, the crypto layer drawing the randomness, unless
+    /// `deterministic`.
     pub async fn mldsa_sign(
         &self,
         variant: MlDsaVariant,
         sec_key: &[u8],
         external_mu: bool,
+        deterministic: bool,
         message: &[u8],
         ctx: &[u8],
     ) -> HsmResult<Vec<u8>> {
@@ -121,6 +123,9 @@ impl StdPqc {
                     return Err(HsmError::InvalidArg);
                 }
                 let mut algo = mldsa_algo(external_mu, &ctx)?;
+                if deterministic {
+                    algo = algo.deterministic();
+                }
                 Signer::sign_vec(&mut algo, &sk, &message).map_err(|_| HsmError::InvalidArg)
             })
             .await

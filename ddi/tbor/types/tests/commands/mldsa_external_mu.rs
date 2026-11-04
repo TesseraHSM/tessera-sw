@@ -34,6 +34,7 @@ use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_EXTERNAL_MU;
 use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 use tsra_ddi_tbor_types::MLDSA_MU_LEN;
@@ -84,6 +85,7 @@ fn sign_req(
         session_id,
         masked_key: masked_key.to_vec(),
         msg_type,
+        hedge: MLDSA_HEDGE_PREFERRED,
         message: message.to_vec(),
         ctx: context.to_vec(),
     }

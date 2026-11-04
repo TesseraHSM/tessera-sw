@@ -39,6 +39,7 @@ use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -140,6 +141,7 @@ fn dsa_device_to_host(p: &MlDsaParams, rounds: usize) {
                 session_id: session.session_id,
                 masked_key: key.masked_key.clone(),
                 msg_type: MLDSA_MSG_TYPE_PURE,
+                hedge: MLDSA_HEDGE_PREFERRED,
                 message: message.clone(),
                 ctx: Vec::new(),
             })

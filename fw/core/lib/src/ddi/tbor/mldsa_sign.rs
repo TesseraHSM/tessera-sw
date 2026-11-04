@@ -18,16 +18,19 @@
 //! envelope prefix with the signature at its final response offset.
 //!
 //! `msg_type` selects what `message` is: the message itself, or an external
-//! `μ` the caller computed (64 bytes, with an empty `ctx`).  Both are checked
-//! before the key is unmasked.
+//! `μ` the caller computed (64 bytes, with an empty `ctx`).  `hedge` selects
+//! hedged or deterministic signing, as PKCS#11's `CK_HEDGE_TYPE` does.  All
+//! are checked before the key is unmasked.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor_types::MlDsaHedge;
 use tsra_fw_ddi_tbor_types::MlDsaMsgType;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -61,6 +64,16 @@ pub(super) fn mldsa_msg_type(msg_type: MlDsaMsgType) -> HsmResult<HsmMlDsaMsgTyp
     }
 }
 
+/// Map the wire hedge variant onto the PAL's; unknown values are invalid.
+fn mldsa_hedge(hedge: MlDsaHedge) -> HsmResult<HsmMlDsaHedge> {
+    match hedge {
+        MlDsaHedge::Preferred => Ok(HsmMlDsaHedge::Preferred),
+        MlDsaHedge::Required => Ok(HsmMlDsaHedge::Required),
+        MlDsaHedge::Deterministic => Ok(HsmMlDsaHedge::Deterministic),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
 /// Handle a TBOR `MlDsaSign` request.
 ///
 /// Persists nothing and takes no partition lock: it reads the caller's
@@ -82,6 +95,7 @@ pub(crate) async fn handle<P: HsmPal>(
             }
             let msg_type = mldsa_msg_type(MlDsaMsgType(req.msg_type))?;
             msg_type.check_input(req.message, req.ctx)?;
+            let hedge = mldsa_hedge(MlDsaHedge(req.hedge))?;
             let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlDsaSignReq::TOC_COUNT * 4;
             let masked_at = req.masked_key.as_ptr() as usize;
             if masked_at.checked_sub(base) != Some(data_start) {
@@ -116,6 +130,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 kind,
                 &mut req.masked_key[..key_end],
                 msg_type,
+                hedge,
                 req.message,
                 req.ctx,
             )
