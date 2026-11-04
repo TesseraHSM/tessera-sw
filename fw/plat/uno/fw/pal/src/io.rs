@@ -41,15 +41,18 @@ use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
+use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
 use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
+use tsra_fw_uno_trace::tracing::*;
 
 use crate::UnoHsmPal;
 use crate::alloc::ADMIN_IO_INDEX;
+use crate::alloc::SELF_TEST_IO_INDEX;
 use crate::alloc::UnoScopedAlloc;
 use crate::alloc::reset_io_alloc;
 
@@ -79,6 +82,9 @@ impl UnoHsmIo {
 
     /// Returns the queue ID from IO_META.
     fn queue_id(&self) -> u16 {
+        if self.index as u32 >= IO_META_COUNT {
+            return 0;
+        }
         self.io_meta().queue.read(IO_META_QUEUE::QUEUE_ID) as u16
     }
 
@@ -119,7 +125,35 @@ impl UnoHsmIo {
         io
     }
 
+    /// Constructs an IO handle over the dedicated self-test slot
+    /// ([`SELF_TEST_IO_INDEX`]).
+    ///
+    /// Used by the cryptographic algorithm self-tests (CAST), which run
+    /// without a host IO. KAT operands are allocated from this slot's
+    /// `SRAM_IO_BUF` via the bump allocator. No partition context applies,
+    /// so `IO_META` is left untouched ([`pid`](HsmIo::pid) is unused by the
+    /// self-test path).
+    ///
+    /// # Restrictions
+    ///
+    /// This handle is for DMA allocation only. Its index ([`SELF_TEST_IO_INDEX`]) is outside the
+    /// host queue ranges (`IO_SQ_COUNT`/`IO_CQ_COUNT`/`IO_META_COUNT`), so
+    /// [`sqe`](HsmIo::sqe) and [`cqe`](HsmIo::cqe) have no backing entry and must not be
+    /// called on it; the host-IO dispatch that reads them never runs for the self-test.
+    ///
+    /// [`SELF_TEST_IO_INDEX`]: crate::alloc::SELF_TEST_IO_INDEX
+    pub(crate) fn self_test() -> Self {
+        Self {
+            index: SELF_TEST_IO_INDEX,
+        }
+    }
+
     /// Returns a reference to the IO_META entry for this slot.
+    ///
+    /// Only valid for host and admin slots — `IO_META` has
+    /// [`IO_META_COUNT`] entries (host `0..32` plus [`ADMIN_IO_INDEX`]).
+    /// The self-test slot ([`SELF_TEST_IO_INDEX`]) has no `IO_META` entry;
+    /// callers must guard against it (see [`pid`](HsmIo::pid)).
     #[inline]
     fn io_meta(&self) -> &IoMetaEntry {
         &IO_Q.io_meta[self.index as usize]
@@ -131,7 +165,14 @@ impl UnoHsmIo {
     /// are indexed by the dense PcieFunction id, so translate here. An axi_id
     /// naming no function yields an out-of-range id, which the partition
     /// lookup rejects with `InvalidArg` rather than aliasing a valid slot.
+    ///
+    /// The self-test slot ([`SELF_TEST_IO_INDEX`]) has no `IO_META` entry or
+    /// partition context, so it returns the invalid `NO_PARTITION` sentinel
+    /// rather than aliasing a real partition or indexing `IO_META`.
     pub(crate) fn pid(&self) -> HsmPartId {
+        if self.index as u32 >= IO_META_COUNT {
+            return HsmPartId::from(crate::pal::NO_PARTITION);
+        }
         let axi_id = self.io_meta().ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
         HsmPartId::from(crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION))
     }
@@ -177,10 +218,17 @@ impl HsmIoTypes for UnoHsmPal {
 
 impl HsmIoController for UnoHsmPal {
     /// Awaits the next inbound IO from the IIC driver.
+    ///
+    /// Every IO handed out is counted in flight until
+    /// [`drop_io`](HsmIoController::drop_io) returns its slot.
     async fn poll_io(&self) -> HsmResult<Self::Io> {
-        let index = self.iic.recv().await;
-        reset_io_alloc(self, index);
-        Ok(UnoHsmIo { index })
+        loop {
+            let io = self.accept_io(self.iic.recv().await);
+            if !self.io_paused() {
+                return Ok(io);
+            }
+            self.recycle_reset_io(io).await;
+        }
     }
 
     /// Posts the completion (CQE) to the host via OIC.
@@ -201,7 +249,8 @@ impl HsmIoController for UnoHsmPal {
     /// This is the universal IO teardown point (the core dispatch loop
     /// calls it on both the completed and the dropped paths), so the
     /// per-IO buffer scrub lives here. See
-    /// [`scrub_io_slot`](UnoHsmPal::scrub_io_slot).
+    /// [`scrub_io_slot`](UnoHsmPal::scrub_io_slot). It also ends the IO's
+    /// in-flight count, in the same step that returns the slot.
     async fn drop_io(&self, io: Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
         // Scrub both per-IO scratch buffers *before* returning the slot to
@@ -209,11 +258,41 @@ impl HsmIoController for UnoHsmPal {
         // next IO that reuses the slot.
         self.scrub_io_slot(io.index).await;
         self.iic.free_io(io.index, queue_id);
+        self.io_in_flight_dec();
         Ok(())
     }
 }
 
 impl UnoHsmPal {
+    /// Turns IO_SQ slot `index` received from the IIC driver into an IO:
+    /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io))
+    /// and resets the slot's scratch allocator.
+    pub(crate) fn accept_io(&self, index: u16) -> UnoHsmIo {
+        self.io_in_flight_inc();
+        reset_io_alloc(self, index);
+        UnoHsmIo { index }
+    }
+
+    /// Recycles an IO received during a PCIe reset without dispatching it:
+    /// the slot is scrubbed and returned, and no CQE is posted. Such an IO
+    /// belongs to the host state being torn down. See
+    /// [`handle_ipc_event`](UnoHsmPal::handle_ipc_event).
+    pub(crate) async fn recycle_reset_io(&self, io: UnoHsmIo) {
+        if let Err(_e) = self.drop_io(io).await {
+            error!(
+                "pcie",
+                _e, "reset: failed to recycle IO received during reset"
+            );
+        }
+    }
+}
+
+impl UnoHsmPal {
+    /// All accepted host IOs have completed and no inbound IO remains unclaimed.
+    pub(crate) fn host_io_drained(&self) -> bool {
+        self.io_in_flight() == 0 && !self.iic.has_pending_io()
+    }
+
     /// Runs `f` as an *admin session* over the dedicated admin IO slot
     /// ([`ADMIN_IO_INDEX`]), scrubbing that slot when `f` completes.
     ///

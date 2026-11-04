@@ -10,6 +10,7 @@ members = [
   "crates/error",
   "crates/fault",
   "crates/key_vault",
+  "crates/pct",
   "crates/single_cell",
   "crates/static_init",
   "crates/static_ref",
@@ -81,6 +82,7 @@ tsra_fw_uno_fault = { path = "crates/fault" }
 tsra_fw_uno_key_vault = { path = "crates/key_vault" }
 tsra_fw_uno_pac = { path = "drivers/pac" }
 tsra_fw_uno_pal = { path = "pal" }
+tsra_fw_uno_pct = { path = "crates/pct" }
 tsra_fw_uno_reg_soc = { path = "reg/soc" }
 tsra_fw_uno_trace = { path = "crates/trace" }
 
@@ -97,7 +99,7 @@ tsra_fw_hsm_io = { path = "../../../core/io" }
 tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
 
 bitfield-struct = "0.13.0"
-cortex-m = "0.7.7"
+cortex-m = { features = ["inline-asm"], version = "0.7.7" }
 cortex-m-rt = "0.7.5"
 critical-section = "1.2.0"
 der = { default-features = false, features = [

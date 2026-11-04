@@ -19,18 +19,21 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmRsaPct;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
 use super::DecodedKey;
 
 /// Convert a DER-encoded RSA private key into the vault representation
 /// (in place) and derive its wire public key.  `crt` selects the CRT vault
-/// kind (and, on real hardware, the CRT vault layout).
+/// kind (and, on real hardware, the CRT vault layout).  `pct` is passed to
+/// the PAL's conversion.
 pub(super) async fn decode<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     material: &'p mut HsmDmaBuf,
     crt: bool,
+    pct: HsmRsaPct,
 ) -> HsmResult<DecodedKey<'p>> {
     // Convert the recovered DER into the PAL's vault representation and
     // classify it by modulus size (the PAL parses the DER — the crate cannot).
@@ -40,7 +43,7 @@ pub(super) async fn decode<'p, P: HsmPal>(
     // operand is larger (the Uno CRT PKA form, needing async PKA to derive
     // `n1q`/`n2p`). Either way it returns the vault bytes and scrubs any
     // plaintext DER it leaves behind.
-    let (vault, modulus_len) = pal.rsa_priv_der_to_vault(io, material, crt).await?;
+    let (vault, modulus_len) = pal.rsa_priv_der_to_vault(io, material, crt, pct).await?;
 
     let kind = vault_kind(modulus_len, crt)?;
 

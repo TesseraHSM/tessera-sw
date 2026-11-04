@@ -29,6 +29,7 @@ cortex-m.workspace = true
 cortex-m-rt.workspace = true
 tock-registers.workspace = true
 tsra_fw_hsm_core_tracing.workspace = true
+tsra_fw_static_ref.workspace = true
 tsra_fw_uno_crashdump.workspace = true
 tsra_fw_uno_drivers_nvic.workspace = true
 tsra_fw_uno_drivers_semihosting = { optional = true, workspace = true }
@@ -36,6 +37,7 @@ tsra_fw_uno_drivers_tcon.workspace = true
 tsra_fw_uno_error.workspace = true
 tsra_fw_uno_pac.workspace = true
 tsra_fw_uno_reg_cortex_m.workspace = true
+tsra_fw_uno_reg_soc.workspace = true
 
 [lints]
 workspace = true

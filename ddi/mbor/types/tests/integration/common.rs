@@ -7,6 +7,7 @@
 #[allow(unused_imports)]
 pub mod helpers;
 
+use std::panic::AssertUnwindSafe;
 use std::thread;
 
 pub use helpers::*;
@@ -2453,8 +2454,15 @@ pub fn ddi_dev_test(
         let mut dev = ddi.open_dev(&dev_info.path).unwrap();
 
         let setup_session_id = setup(&mut dev, &ddi, &dev_info.path);
-        test(&mut dev, &ddi, &dev_info.path, setup_session_id);
+        // Migration preserves session IDs, so erase cannot replace cleanup
+        // when a failed test leaves its session open.
+        let test_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            test(&mut dev, &ddi, &dev_info.path, setup_session_id);
+        }));
         cleanup(&mut dev, &ddi, &dev_info.path, Some(setup_session_id));
+        if let Err(payload) = test_result {
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 

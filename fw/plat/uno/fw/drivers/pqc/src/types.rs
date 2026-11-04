@@ -27,7 +27,7 @@ pub const QUEUE_DEPTH: usize = 32;
 /// and must cover every host IO slot that could be waiting at once.
 const _: () = assert!(QUEUE_DEPTH.is_power_of_two());
 const _: () = assert!(
-    QUEUE_DEPTH as u32 >= tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_COUNT - 1,
+    QUEUE_DEPTH as u32 >= tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT,
     "PQC waiter queue is smaller than the host IO slot count; a busy host \
      would see QUEUE_FULL instead of backpressure"
 );
