@@ -68,8 +68,9 @@ pub const SEED_LEN: usize = 32;
 
 /// Bytes in each core's operand slot.
 ///
-/// Sized for the largest PQC working set: `MlDsaVerify` needs public key
-/// (2592) + message (586) + ctx (255) + signature (4627) = 8060 B. Three
+/// Sized for the largest PQC working set: verifying a pure message needs
+/// public key (2592) + message (586) + ctx (255) + signature (4627) =
+/// 8060 B. Three
 /// slots of this size fit either side of the only part of PSRAM still
 /// spoken for (`0x3AFC`-`0x4004`); everything else is legacy fastpath
 /// structure that nothing reads, including the 12 KB of FP debug-log rings

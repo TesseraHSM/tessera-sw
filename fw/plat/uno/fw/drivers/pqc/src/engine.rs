@@ -56,10 +56,11 @@ const SUBMIT_YIELD_WINDOW: embassy_time::Duration = embassy_time::Duration::from
 /// parameter set, which is why the key kind has to travel with it.
 pub const MLDSA_SEED_LEN: usize = 32;
 
-/// Largest message the wire carries (`MLDSA_MESSAGE_MAX_LEN`).
+/// Largest message a pure sign or verify accepts: what the operand slot is
+/// sized for alongside the largest key, context string and signature.
 pub const MLDSA_MSG_MAX: usize = 586;
 
-/// Largest context string the wire carries (`MLDSA_CTX_MAX_LEN`).
+/// Largest context string, the FIPS 204 limit.
 pub const MLDSA_CTX_MAX: usize = 255;
 
 /// Length of the ML-KEM seed pair `(d ‖ z)`.

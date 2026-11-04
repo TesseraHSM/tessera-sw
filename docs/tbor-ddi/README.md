@@ -86,7 +86,7 @@ envelope metadata for the signature while the key and digest remain disjoint
 live inputs. RSA places the input integer before the masked key and uses an
 in-place PAL operation to replace that integer with its result while the key
 remains disjoint. ML-DSA uses one key/signature buffer with a tail-aligned
-expanded key and prefix output; its message and context remain disjoint.
+expanded key and prefix output; its `μ` input remains disjoint.
 ML-KEM reuses a public-key/ciphertext buffer with a separate DMA-branded
 shared-secret output. Both consume inputs before overwriting them.
 The dispatcher validates the response prefix without modifying unpublished storage.

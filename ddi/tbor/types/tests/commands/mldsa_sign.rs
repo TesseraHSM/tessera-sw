@@ -5,8 +5,8 @@
 //!
 //! One host-only wire-shape check, a generate-then-sign round-trip for
 //! every FIPS 204 parameter set, and a check that the private key really
-//! is masked.  Context-string separation and length bounds are still to
-//! come.
+//! is masked.  What a signature over `μ` covers is checked in
+//! `mldsa_external_mu`.
 //!
 //! The command is in-session: each test brings up a finalized CO
 //! session and binds the request to it, as the ECC/AES tests do.
@@ -23,7 +23,7 @@ use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
-use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
+use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_SIGN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -37,10 +37,8 @@ fn mldsa_sign_request_wire_shape() {
     let req = TborMlDsaSignReq {
         session_id: 0,
         masked_key: vec![0xAA; 164],
-        msg_type: MLDSA_MSG_TYPE_PURE,
+        mu: vec![0xBB; MLDSA_MU_LEN],
         hedge: MLDSA_HEDGE_PREFERRED,
-        message: vec![0xBB; 32],
-        ctx: Vec::new(),
     };
 
     assert_eq!(TborMlDsaSignReq::OPCODE, TBOR_OP_MLDSA_SIGN);
@@ -51,10 +49,10 @@ fn mldsa_sign_request_wire_shape() {
     let bytes = req.encode_request(&mut buf).expect("encode request");
     let view = RequestView::parse(bytes).expect("parse request");
     assert_eq!(view.opcode(), TBOR_OP_MLDSA_SIGN);
-    assert_eq!(view.toc_count(), 6);
+    assert_eq!(view.toc_count(), 4);
 }
 
-/// Happy path: generate a key, sign a message, and check the signature
+/// Happy path: generate a key, sign a `μ`, and check the signature
 /// is the right length and non-trivial.
 ///
 /// Signing re-derives the key pair from the seed on the FP core, so the
@@ -76,10 +74,8 @@ fn sign_case(p: &MlDsaParams) {
         .tbor(&TborMlDsaSignReq {
             session_id: session.session_id,
             masked_key: key.masked_key,
-            msg_type: MLDSA_MSG_TYPE_PURE,
+            mu: vec![0x5A; MLDSA_MU_LEN],
             hedge: MLDSA_HEDGE_PREFERRED,
-            message: b"tsra pqc bring-up".to_vec(),
-            ctx: Vec::new(),
         })
         .unwrap_or_else(|e| panic!("MlDsaSign({}): {e:?}", p.name));
 
@@ -148,10 +144,8 @@ fn masking_case(p: &MlDsaParams) {
     let outcome = ctx.tbor(&TborMlDsaSignReq {
         session_id: session.session_id,
         masked_key: tampered,
-        msg_type: MLDSA_MSG_TYPE_PURE,
+        mu: vec![0x5A; MLDSA_MU_LEN],
         hedge: MLDSA_HEDGE_PREFERRED,
-        message: b"tsra pqc bring-up".to_vec(),
-        ctx: Vec::new(),
     });
     assert!(
         outcome.is_err(),

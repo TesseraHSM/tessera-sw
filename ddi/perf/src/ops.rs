@@ -55,11 +55,10 @@ use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
-use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
+use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
 use crate::pqc;
-use crate::pqc::MLDSA_MSG_LEN;
 use crate::setup::harness_call;
 use crate::setup::Env;
 use crate::setup::SCOPE_LOCAL;
@@ -116,22 +115,22 @@ pub(crate) enum OpKind {
     /// TBOR `MlDsaGenerateKey`, ML-DSA-87.
     #[value(name = "tbor-mldsa-keygen-87")]
     MlDsaKeygen87,
-    /// TBOR `MlDsaSign`, ML-DSA-44, 64-byte message.
+    /// TBOR `MlDsaSign`, ML-DSA-44, 64-byte `μ`.
     #[value(name = "tbor-mldsa-sign-44")]
     MlDsaSign44,
-    /// TBOR `MlDsaSign`, ML-DSA-65, 64-byte message.
+    /// TBOR `MlDsaSign`, ML-DSA-65, 64-byte `μ`.
     #[value(name = "tbor-mldsa-sign-65")]
     MlDsaSign65,
-    /// TBOR `MlDsaSign`, ML-DSA-87, 64-byte message.
+    /// TBOR `MlDsaSign`, ML-DSA-87, 64-byte `μ`.
     #[value(name = "tbor-mldsa-sign-87")]
     MlDsaSign87,
-    /// TBOR `MlDsaVerify`, ML-DSA-44, 64-byte message.
+    /// TBOR `MlDsaVerify`, ML-DSA-44, 64-byte `μ`.
     #[value(name = "tbor-mldsa-verify-44")]
     MlDsaVerify44,
-    /// TBOR `MlDsaVerify`, ML-DSA-65, 64-byte message.
+    /// TBOR `MlDsaVerify`, ML-DSA-65, 64-byte `μ`.
     #[value(name = "tbor-mldsa-verify-65")]
     MlDsaVerify65,
-    /// TBOR `MlDsaVerify`, ML-DSA-87, 64-byte message.
+    /// TBOR `MlDsaVerify`, ML-DSA-87, 64-byte `μ`.
     #[value(name = "tbor-mldsa-verify-87")]
     MlDsaVerify87,
     /// TBOR `MlKemGenerateKey`, ML-KEM-512.
@@ -271,7 +270,7 @@ impl OpKind {
         } else if self.is_cbc() {
             format!("{}B", args.cbc_len)
         } else if let Some((MlDsaCmd::Sign | MlDsaCmd::Verify, _)) = self.mldsa() {
-            format!("{MLDSA_MSG_LEN}B msg")
+            format!("{MLDSA_MU_LEN}B mu")
         } else if let Some((MlKemCmd::Encap | MlKemCmd::Decap, p)) = self.mlkem() {
             format!("{}B ct", p.ciphertext_len)
         } else {
@@ -386,9 +385,9 @@ impl Pools {
             .any(|k| matches!(k.mldsa(), Some((MlDsaCmd::Sign, _))))
         {
             pools.mldsa = (0..n)
-                .map(|_| Rng::rand_vec(MLDSA_MSG_LEN))
+                .map(|_| Rng::rand_vec(MLDSA_MU_LEN))
                 .collect::<Result<_, _>>()
-                .map_err(|e| format!("host ML-DSA messages: {e:?}"))?;
+                .map_err(|e| format!("host ML-DSA mu: {e:?}"))?;
         }
         Ok(pools)
     }
@@ -714,15 +713,13 @@ impl<'e> Worker<'e> {
         let req = TborMlDsaSignReq {
             session_id: env.session_id,
             masked_key: key.masked.clone(),
-            msg_type: MLDSA_MSG_TYPE_PURE,
+            mu: self.pools.mldsa[m].clone(),
             hedge: MLDSA_HEDGE_PREFERRED,
-            message: self.pools.mldsa[m].clone(),
-            ctx: Vec::new(),
         };
         let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
         let result = resp.and_then(|r| {
             if verify {
-                pqc::check_mldsa_sig(p, &key.public, &req.message, &r.signature)
+                pqc::check_mldsa_sig(p, &key.public, &req.mu, &r.signature)
             } else {
                 Ok(())
             }
@@ -736,13 +733,11 @@ impl<'e> Worker<'e> {
         let (_, p) = op.mldsa().expect("ML-DSA operation");
         let env = self.env;
         let signed = &env.keys.mldsa_signed[&p.key_kind];
-        let (k, m) = self.rotate_shared(signed.keys.len(), signed.messages.len());
+        let (k, m) = self.rotate_shared(signed.keys.len(), signed.mus.len());
         let req = TborMlDsaVerifyReq {
             session_id: env.session_id,
             pub_key: signed.keys[k].pub_key.clone(),
-            msg_type: MLDSA_MSG_TYPE_PURE,
-            message: signed.messages[m].clone(),
-            ctx: Vec::new(),
+            mu: signed.mus[m].clone(),
             signature: signed.keys[k].sigs[m].clone(),
         };
         // The device error is kept so that a rejection is reported by name.
@@ -831,20 +826,17 @@ impl<'e> Worker<'e> {
             .last_mldsa_keygen
             .take()
             .ok_or("no checked ML-DSA keygen response to prove")?;
-        let message =
-            Rng::rand_vec(MLDSA_MSG_LEN).map_err(|e| format!("host ML-DSA message: {e:?}"))?;
+        let mu = Rng::rand_vec(MLDSA_MU_LEN).map_err(|e| format!("host ML-DSA mu: {e:?}"))?;
         let signed = env
             .session_ctx()
             .tbor(&TborMlDsaSignReq {
                 session_id: env.session_id,
                 masked_key,
-                msg_type: MLDSA_MSG_TYPE_PURE,
+                mu: mu.clone(),
                 hedge: MLDSA_HEDGE_PREFERRED,
-                message: message.clone(),
-                ctx: Vec::new(),
             })
             .map_err(|e| format!("MlDsaSign with a generated key: {e:?}"))?;
-        pqc::check_mldsa_sig(p, &public, &message, &signed.signature)
+        pqc::check_mldsa_sig(p, &public, &mu, &signed.signature)
     }
 
     /// `MlDsaVerify` must reject a signature with a flipped bit. Tampers
@@ -862,9 +854,7 @@ impl<'e> Worker<'e> {
         let resp = env.session_ctx().tbor(&TborMlDsaVerifyReq {
             session_id: env.session_id,
             pub_key: signed.keys[k].pub_key.clone(),
-            msg_type: MLDSA_MSG_TYPE_PURE,
-            message: signed.messages[m].clone(),
-            ctx: Vec::new(),
+            mu: signed.mus[m].clone(),
             signature,
         });
         match resp {

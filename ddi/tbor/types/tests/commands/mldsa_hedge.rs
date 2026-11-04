@@ -4,10 +4,9 @@
 //! `MlDsaSign`'s `hedge`: hedged or deterministic signing, selected as
 //! PKCS#11's `CK_HEDGE_TYPE` does.
 //!
-//! A hedged signature draws fresh randomness, so signing the same input
-//! twice gives two different signatures. A deterministic one fixes the
-//! randomness at zero, so it gives the same signature every time, whether
-//! the input is the message or its external `μ`. Every signature must
+//! A hedged signature draws fresh randomness, so signing the same `μ` twice
+//! gives two different signatures. A deterministic one fixes the randomness
+//! at zero, so it gives the same signature every time. Every signature must
 //! verify under an independent host implementation (`tsra_crypto`).
 //!
 //! The device has no key import, so its deterministic signatures cannot be
@@ -29,8 +28,7 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MLDSA_HEDGE_DETERMINISTIC;
 use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_HEDGE_REQUIRED;
-use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_EXTERNAL_MU;
-use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
+use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
@@ -40,7 +38,7 @@ const SCOPE_LOCAL: u8 = 0b011;
 /// Every parameter set.
 const PARAMS: [&MlDsaParams; 3] = [&ML_DSA_44, &ML_DSA_65, &ML_DSA_87];
 
-/// The message signed, and the context string bound with it.
+/// The message whose `μ` is signed, and the context string bound with it.
 const MSG: &[u8] = b"hedge message";
 const CTX: &[u8] = b"hedge context";
 
@@ -57,39 +55,28 @@ fn generate(ctx: &TestCtx, session_id: u16, p: &MlDsaParams) -> (Vec<u8>, Vec<u8
 }
 
 /// `MlDsaSign` on the device.
-fn sign_req(
-    session_id: u16,
-    masked_key: &[u8],
-    msg_type: u8,
-    hedge: u8,
-    message: &[u8],
-    context: &[u8],
-) -> TborMlDsaSignReq {
+fn sign_req(session_id: u16, masked_key: &[u8], hedge: u8, mu: &[u8]) -> TborMlDsaSignReq {
     TborMlDsaSignReq {
         session_id,
         masked_key: masked_key.to_vec(),
-        msg_type,
+        mu: mu.to_vec(),
         hedge,
-        message: message.to_vec(),
-        ctx: context.to_vec(),
     }
 }
 
 /// Sign on the device, returning the signature.
-fn device_sign(
-    ctx: &TestCtx,
-    session_id: u16,
-    masked_key: &[u8],
-    msg_type: u8,
-    hedge: u8,
-    message: &[u8],
-    context: &[u8],
-) -> Vec<u8> {
-    ctx.tbor(&sign_req(
-        session_id, masked_key, msg_type, hedge, message, context,
-    ))
-    .unwrap_or_else(|e| panic!("MlDsaSign(msg_type {msg_type}, hedge {hedge}): {e:?}"))
-    .signature
+fn device_sign(ctx: &TestCtx, session_id: u16, masked_key: &[u8], hedge: u8, mu: &[u8]) -> Vec<u8> {
+    ctx.tbor(&sign_req(session_id, masked_key, hedge, mu))
+        .unwrap_or_else(|e| panic!("MlDsaSign(hedge {hedge}): {e:?}"))
+        .signature
+}
+
+/// `μ` for `MSG` under `CTX` and `pub_key`, computed on the host.
+fn host_mu(pub_key: &[u8]) -> Vec<u8> {
+    MlDsaPublicKey::from_bytes(pub_key)
+        .and_then(|pk| pk.mu(CTX, MSG))
+        .expect("host mu")
+        .to_vec()
 }
 
 /// Pure verification of `MSG` under `CTX` on the host.
@@ -102,7 +89,7 @@ fn host_verify(pub_key: &[u8], signature: &[u8]) -> bool {
 }
 
 /// Hedged signing, preferred or required, draws fresh randomness: two
-/// signatures over the same input differ, and both verify. A device that
+/// signatures over the same `μ` differ, and both verify. A device that
 /// signed deterministically would still verify, so only the inequality
 /// catches it.
 #[test]
@@ -113,13 +100,14 @@ fn mldsa_sign_hedged_signatures_differ() {
 
     for p in PARAMS {
         let (masked_key, pub_key) = generate(&ctx, sid, p);
+        let mu = host_mu(&pub_key);
         for hedge in [MLDSA_HEDGE_PREFERRED, MLDSA_HEDGE_REQUIRED] {
             let sigs: Vec<Vec<u8>> = (0..2)
-                .map(|_| device_sign(&ctx, sid, &masked_key, MLDSA_MSG_TYPE_PURE, hedge, MSG, CTX))
+                .map(|_| device_sign(&ctx, sid, &masked_key, hedge, &mu))
                 .collect();
             assert_ne!(
                 sigs[0], sigs[1],
-                "{} hedge {hedge}: two signatures over the same input are identical",
+                "{} hedge {hedge}: two signatures over the same mu are identical",
                 p.name
             );
             for sig in &sigs {
@@ -133,8 +121,8 @@ fn mldsa_sign_hedged_signatures_differ() {
     }
 }
 
-/// Deterministic signing gives the same signature every time, over the
-/// message or its external `μ` alike, and it verifies.
+/// Deterministic signing gives the same signature every time, and it
+/// verifies.
 #[test]
 fn mldsa_sign_deterministic_signatures_repeat() {
     let ctx = TestCtx::new();
@@ -143,37 +131,18 @@ fn mldsa_sign_deterministic_signatures_repeat() {
 
     for p in PARAMS {
         let (masked_key, pub_key) = generate(&ctx, sid, p);
-        let mu = MlDsaPublicKey::from_bytes(&pub_key)
-            .and_then(|pk| pk.mu(CTX, MSG))
-            .expect("host mu");
+        let mu = host_mu(&pub_key);
 
-        let sign = |msg_type, message: &[u8], context: &[u8]| {
-            device_sign(
-                &ctx,
-                sid,
-                &masked_key,
-                msg_type,
-                MLDSA_HEDGE_DETERMINISTIC,
-                message,
-                context,
-            )
-        };
-        let first = sign(MLDSA_MSG_TYPE_PURE, MSG, CTX);
+        let first = device_sign(&ctx, sid, &masked_key, MLDSA_HEDGE_DETERMINISTIC, &mu);
         assert!(
             host_verify(&pub_key, &first),
             "{}: deterministic signature does not verify",
             p.name
         );
         assert_eq!(
-            sign(MLDSA_MSG_TYPE_PURE, MSG, CTX),
+            device_sign(&ctx, sid, &masked_key, MLDSA_HEDGE_DETERMINISTIC, &mu),
             first,
-            "{}: deterministic signing over the message did not repeat",
-            p.name
-        );
-        assert_eq!(
-            sign(MLDSA_MSG_TYPE_EXTERNAL_MU, &mu, &[]),
-            first,
-            "{}: deterministic signature over mu differs from the one over the message",
+            "{}: deterministic signing did not repeat",
             p.name
         );
     }
@@ -189,7 +158,7 @@ fn mldsa_sign_rejects_unknown_hedge() {
 
     for hedge in [3u8, 4, 0x80, 0xFF] {
         ctx.expect_fw_reject(
-            &sign_req(sid, &masked_key, MLDSA_MSG_TYPE_PURE, hedge, MSG, CTX),
+            &sign_req(sid, &masked_key, hedge, &[0x5A; MLDSA_MU_LEN]),
             TborStatus::InvalidArg,
         );
     }

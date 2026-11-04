@@ -656,19 +656,21 @@ Authenticates a masked key of any kind without using it; empty response.
 | A session-scoped key is rejected in a different session | ✅ | `verify_key::verify_key_session_scoped_key_rejected_in_different_session` | `AesGcmDecryptTagDoesNotMatch` |
 | Default CO PSK is rejected | ✅ | `verify_key::verify_key_rejects_default_co_psk` | `DefaultPskMustRotate` |
 
-## `MlDsaSign` / `MlDsaVerify` external μ (opcode in-session, gated)
+## `MlDsaSign` / `MlDsaVerify` over `μ` (opcode in-session, gated)
 
-`msg_type` `3` carries the 64-byte message representative `μ` in place of
-the message; `ctx` must then be empty. A signature over `μ` is a pure
-signature over the message it was computed from.
+Both commands take the 64-byte message representative
+`μ = SHAKE256(tr ‖ 0x00 ‖ len(ctx) ‖ ctx ‖ M, 64)` rather than a message,
+as `EccSign` takes a digest.  A signature over `μ` is a pure ML-DSA
+signature over `M` under `ctx`.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
-| A signature over a host-computed `μ` verifies as a pure signature | ✅ 🔁 | `mldsa_external_mu::mldsa_sign_external_mu_verifies_as_pure` | ML-DSA-44/65/87; verified by the host (`tsra_crypto`) and the device |
-| Pure signatures verify over `μ`; a modified `μ` does not | ✅ 🔁 | `mldsa_external_mu::mldsa_verify_external_mu_accepts_pure_signatures` | Device- and host-made signatures and keys |
+| A signature over a host-computed `μ` verifies as a pure signature, and over `μ` on the device | ✅ 🔁 | `mldsa_external_mu::mldsa_sign_external_mu_verifies_as_pure` | ML-DSA-44/65/87; pure verification by the host (`tsra_crypto`) |
+| Host pure signatures verify over `μ`; a modified `μ` does not | ✅ 🔁 | `mldsa_external_mu::mldsa_verify_external_mu_accepts_pure_signatures` | Host-made and device-made signatures |
 | NIST ACVP external-`μ` sigVer vectors | ✅ 🔁 | `mldsa_external_mu::mldsa_external_mu_nist_acvp_vectors` | Valid, modified-`μ` and tampered-signature cases; passing ones replayed with a flipped bit |
-| `μ` computed on the device with `Hash` (SHAKE256) matches the host's and signs/verifies as pure | ✅ 🔁 | `mldsa_external_mu::mldsa_external_mu_computed_on_device` | `tr` and `μ` both on the device, all three parameter sets |
-| `μ` not 64 bytes, `μ` with a `ctx`, and `msg_type` other than 0/3 are rejected with `InvalidArg` | ✅ 🔁 | `mldsa_external_mu::mldsa_external_mu_rejects_malformed_requests` | Both commands; 63/65-byte `μ`; `msg_type` 1, 2 (reserved pre-hash), 4, 255 |
+| NIST ACVP pure sigVer vectors, over each message's host-computed `μ` | ✅ 🔁 | `mldsa_kat::mldsa_nist_acvp_vectors` | All 36 embedded vectors, long messages included; passing ones replayed with a flipped bit |
+| `μ` computed on the device with `Hash` (SHAKE256) matches the host's, and a signature over it is a pure signature | ✅ 🔁 | `mldsa_external_mu::mldsa_external_mu_computed_on_device` | `tr` and `μ` both on the device, all three parameter sets |
+| `mu` other than 64 bytes is rejected with `TborInvalidFixedLength` | ✅ 🔁 | `mldsa_external_mu::mldsa_rejects_mu_of_the_wrong_length` | Both commands; 0, 63 and 65 bytes |
 
 ## `MlDsaSign` hedge (opcode in-session, gated)
 
@@ -678,8 +680,8 @@ deterministic signing is required.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
-| Hedge preferred and hedge required sign hedged: two signatures over the same input differ, and both verify | ✅ 🔁 | `mldsa_hedge::mldsa_sign_hedged_signatures_differ` | ML-DSA-44/65/87; verified by the host (`tsra_crypto`) |
-| Deterministic signing repeats exactly, over the message and over its external `μ`, and verifies | ✅ 🔁 | `mldsa_hedge::mldsa_sign_deterministic_signatures_repeat` | ML-DSA-44/65/87.  The device has no key import, so NIST's deterministic vectors run in `tsra_crypto` instead |
+| Hedge preferred and hedge required sign hedged: two signatures over the same `μ` differ, and both verify | ✅ 🔁 | `mldsa_hedge::mldsa_sign_hedged_signatures_differ` | ML-DSA-44/65/87; verified by the host (`tsra_crypto`) |
+| Deterministic signing repeats exactly and verifies | ✅ 🔁 | `mldsa_hedge::mldsa_sign_deterministic_signatures_repeat` | ML-DSA-44/65/87.  The device has no key import, so NIST's deterministic vectors run in `tsra_crypto` instead |
 | `hedge` other than 0/1/2 is rejected with `InvalidArg` | ✅ 🔁 | `mldsa_hedge::mldsa_sign_rejects_unknown_hedge` | 3, 4, 128, 255 |
 
 ## Known gaps (summary)

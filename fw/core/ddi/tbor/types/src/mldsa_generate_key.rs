@@ -73,81 +73,18 @@ pub const MLDSA_PUB_KEY_MAX_LEN: usize = 2592;
 /// `MlDsaSign` / `MlDsaVerify` and pinned into their signature buffers.
 pub const MLDSA_SIGNATURE_MAX_LEN: usize = 4627;
 
-/// Maximum ML-DSA context-string length: 255 bytes.
+/// Length of the ML-DSA message representative `μ`, the input of `MlDsaSign`
+/// and `MlDsaVerify`.
 ///
-/// FIPS 204 defines `ML-DSA.Sign(sk, M, ctx)` and
-/// `ML-DSA.Verify(pk, M, sigma, ctx)` over a caller-chosen context string
-/// with `0 <= |ctx| <= 255`.  The bound is a hard specification limit, not
-/// a wire-budget choice: the signed message representative embeds `|ctx|`
-/// as a single byte of the domain separator, so a longer context string
-/// is not representable.  An empty `ctx` is the FIPS 204 default and
-/// reproduces the pre-context behaviour.
+/// `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`, with
+/// `tr = SHAKE256(pk, 64)`, is what pure ML-DSA signs for a message `M` under
+/// the FIPS 204 context string `ctx` (Algorithm 7, line 6).  The commands
+/// take `μ`, as `EccSign` takes a digest, rather than the message: the caller
+/// computes it, on the host or on the device with `Hash` (SHAKE256).
 ///
-/// Shared by `MlDsaSign` / `MlDsaVerify` and pinned into the
-/// `#[tbor(buffer, max_len = 255)]` literals on their `ctx` fields.
-pub const MLDSA_CTX_MAX_LEN: usize = 255;
-
-/// Maximum message length accepted by the TBOR ML-DSA sign and verify
-/// schemas.
-///
-/// The binding constraint is the worst-case `MlDsaVerify` request — the
-/// largest PQC frame — and the limit is the **host encoder's staging
-/// budget**, not TBOR's 8191-byte `MAX_DATA_SIZE`.  The encoder stages
-/// the data section at offset 132 (`header(4) + 32 TOC entries * 4`; see
-/// `stage_base()` in `ddi/tbor/codec/src/encode.rs`) inside an 8192-byte
-/// transport buffer (`REQ_BUF_LEN` in `ddi/nix/src/dev.rs` and
-/// `ddi/win/src/dev.rs`):
-///
-/// ```text
-///   transport buffer  =  8192
-///   stage offset      =  -132   header(4) + 32 * 4 TOC bytes
-///   pub_key           = -2592   ML-DSA-87
-///   signature         = -4627   ML-DSA-87
-///   ctx               =  -255   MLDSA_CTX_MAX_LEN
-///   message budget    =   586
-/// ```
-///
-/// `MlDsaSign` shares the same cap: sign and verify are inverse
-/// operations over pure ML-DSA, so a message that can be signed must also
-/// be verifiable.  `MlDsaSign` on its own would allow
-/// `8192 - 132 - 164 - 255 = 7641` bytes.
-///
-/// The cap is therefore dictated entirely by `MlDsaVerify`.  If
-/// `MlDsaVerify` is ever removed as a command, raising the cap is a
-/// deliberate **one-constant change**: nothing else in the schema derives
-/// from it, and the `max_len` literals on the `message` fields are
-/// mechanically pinned to this constant by `const _: () = assert!(...)`
-/// checks that fail the build if they drift.
-pub const MLDSA_MESSAGE_MAX_LEN: usize = 586;
-
-/// Length of the ML-DSA message representative `μ` carried in `message`
-/// when [`MlDsaMsgType::ExternalMu`] is selected.
+/// Pinned into the `#[tbor(buffer, len = 64)]` literals on their `mu`
+/// fields.
 pub const MLDSA_MU_LEN: usize = 64;
-
-/// How `MlDsaSign` / `MlDsaVerify` read their `message`, 1-byte wire enum.
-///
-/// The discriminants follow the ML-DSA engine's 2-bit message-type
-/// encoding.  Only [`Pure`](Self::Pure) and
-/// [`ExternalMu`](Self::ExternalMu) are accepted; the other values,
-/// `1` (pre-hash: OID followed by the message digest) and `2` (pre-hash:
-/// OID followed by the message), are reserved and rejected.
-///
-/// Kept as an [`open_enum`] so an unrecognized discriminant round-trips as
-/// `MlDsaMsgType(x)` and is rejected on-device rather than failing to
-/// decode.
-#[repr(u8)]
-#[open_enum]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MlDsaMsgType {
-    /// Pure ML-DSA (FIPS 204 §5.2): `message` is the message `M`, signed
-    /// under the context string `ctx`.
-    Pure = 0,
-    /// External `μ`: `message` is the [`MLDSA_MU_LEN`]-byte message
-    /// representative `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`,
-    /// computed by the caller.  `μ` already binds the context string, so
-    /// `ctx` must be empty.
-    ExternalMu = 3,
-}
 
 /// ML-DSA key-kind selector on the TBOR wire — a wire-side mirror of the
 /// ML-DSA subset of the firmware
@@ -302,25 +239,7 @@ mod tests {
         const _: () = assert!(5160 == MASKED_MLDSA_KEY_MAX_LEN);
         const _: () = assert!(2592 == MLDSA_PUB_KEY_MAX_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);
-        const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
-        const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
+        const _: () = assert!(64 == MLDSA_MU_LEN);
         assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5160);
-    }
-
-    /// The message cap is the residue of the worst-case `MlDsaVerify`
-    /// request against the host encoder's 8192-byte staging budget.
-    #[test]
-    fn message_cap_is_the_mldsa_verify_staging_residue() {
-        const TRANSPORT_BUF_LEN: usize = 8192;
-        const STAGE_OFFSET: usize = 132;
-
-        assert_eq!(
-            TRANSPORT_BUF_LEN
-                - STAGE_OFFSET
-                - MLDSA_PUB_KEY_MAX_LEN
-                - MLDSA_SIGNATURE_MAX_LEN
-                - MLDSA_CTX_MAX_LEN,
-            MLDSA_MESSAGE_MAX_LEN,
-        );
     }
 }

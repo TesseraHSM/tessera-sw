@@ -1,16 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `MlDsaSign` / `MlDsaVerify` over an external `μ`.
+//! `MlDsaSign` / `MlDsaVerify` over the message representative `μ`.
 //!
 //! `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`, with
-//! `tr = SHAKE256(pk, 64)`, is the message representative ML-DSA actually
-//! signs. A caller that supplies it signs and verifies exactly what a pure
-//! signature over `M` and `ctx` covers, so these tests check that
-//! equivalence in both directions against an independent host
-//! implementation (`tsra_crypto`), replay NIST's external-`μ` vectors,
-//! compute `μ` on the device itself with `Hash` (SHAKE256), and pin the
-//! argument checks.
+//! `tr = SHAKE256(pk, 64)`, is what pure ML-DSA signs for a message `M` under
+//! a context string `ctx`, and the commands take it in place of the message,
+//! as `EccSign` takes a digest. These tests check that a signature over `μ`
+//! is a pure signature over `M` and `ctx` in both directions, against an
+//! independent host implementation (`tsra_crypto`); replay NIST's
+//! external-`μ` vectors; compute `μ` on the device itself with `Hash`
+//! (SHAKE256); and pin the length of `μ`.
 
 use tsra_crypto::testvectors::mldsa::MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS;
 use tsra_crypto::ExportableKey;
@@ -35,8 +35,6 @@ use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
 use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
-use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_EXTERNAL_MU;
-use tsra_ddi_tbor_types::MLDSA_MSG_TYPE_PURE;
 use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -74,56 +72,30 @@ fn generate(ctx: &TestCtx, session_id: u16, p: &MlDsaParams) -> (Vec<u8>, Vec<u8
 }
 
 /// `MlDsaSign` on the device.
-fn sign_req(
-    session_id: u16,
-    masked_key: &[u8],
-    msg_type: u8,
-    message: &[u8],
-    context: &[u8],
-) -> TborMlDsaSignReq {
+fn sign_req(session_id: u16, masked_key: &[u8], mu: &[u8]) -> TborMlDsaSignReq {
     TborMlDsaSignReq {
         session_id,
         masked_key: masked_key.to_vec(),
-        msg_type,
+        mu: mu.to_vec(),
         hedge: MLDSA_HEDGE_PREFERRED,
-        message: message.to_vec(),
-        ctx: context.to_vec(),
     }
 }
 
 /// `MlDsaVerify` on the device.
-fn verify_req(
-    session_id: u16,
-    pub_key: &[u8],
-    msg_type: u8,
-    message: &[u8],
-    context: &[u8],
-    signature: &[u8],
-) -> TborMlDsaVerifyReq {
+fn verify_req(session_id: u16, pub_key: &[u8], mu: &[u8], signature: &[u8]) -> TborMlDsaVerifyReq {
     TborMlDsaVerifyReq {
         session_id,
         pub_key: pub_key.to_vec(),
-        msg_type,
-        message: message.to_vec(),
-        ctx: context.to_vec(),
+        mu: mu.to_vec(),
         signature: signature.to_vec(),
     }
 }
 
-/// Sign on the device, returning the signature.
-fn device_sign(
-    ctx: &TestCtx,
-    session_id: u16,
-    masked_key: &[u8],
-    msg_type: u8,
-    message: &[u8],
-    context: &[u8],
-) -> Vec<u8> {
-    ctx.tbor(&sign_req(
-        session_id, masked_key, msg_type, message, context,
-    ))
-    .unwrap_or_else(|e| panic!("MlDsaSign(msg_type {msg_type}): {e:?}"))
-    .signature
+/// Sign `mu` on the device, returning the signature.
+fn device_sign(ctx: &TestCtx, session_id: u16, masked_key: &[u8], mu: &[u8]) -> Vec<u8> {
+    ctx.tbor(&sign_req(session_id, masked_key, mu))
+        .unwrap_or_else(|e| panic!("MlDsaSign: {e:?}"))
+        .signature
 }
 
 /// Verify on the device: `true` when accepted, `false` on the dedicated
@@ -132,16 +104,13 @@ fn device_verify(
     ctx: &TestCtx,
     session_id: u16,
     pub_key: &[u8],
-    msg_type: u8,
-    message: &[u8],
-    context: &[u8],
+    mu: &[u8],
     signature: &[u8],
 ) -> bool {
-    let req = verify_req(session_id, pub_key, msg_type, message, context, signature);
-    match ctx.tbor(&req) {
+    match ctx.tbor(&verify_req(session_id, pub_key, mu, signature)) {
         Ok(_) => true,
         Err(DdiError::TborStatus(TborStatus::MlDsaVerifyFailed)) => false,
-        Err(e) => panic!("MlDsaVerify(msg_type {msg_type}) fault: {e:?}"),
+        Err(e) => panic!("MlDsaVerify fault: {e:?}"),
     }
 }
 
@@ -186,8 +155,8 @@ fn device_mu(ctx: &TestCtx, session_id: u16, pub_key: &[u8]) -> Vec<u8> {
     device_shake256_64(ctx, session_id, &m_prime)
 }
 
-/// A signature over an external `μ` is a pure signature over the message
-/// it was computed from: the host and the device both accept it as one.
+/// A signature over `μ` is a pure signature over the message it was computed
+/// from: the host accepts it as one, and the device accepts it over `μ`.
 #[test]
 fn mldsa_sign_external_mu_verifies_as_pure() {
     let ctx = TestCtx::new();
@@ -198,7 +167,7 @@ fn mldsa_sign_external_mu_verifies_as_pure() {
         let (masked_key, pub_key) = generate(&ctx, sid, p);
         let mu = host_mu(&pub_key);
 
-        let sig = device_sign(&ctx, sid, &masked_key, MLDSA_MSG_TYPE_EXTERNAL_MU, &mu, &[]);
+        let sig = device_sign(&ctx, sid, &masked_key, &mu);
         assert_eq!(sig.len(), p.sig_len, "{} signature length", p.name);
         assert!(
             host_verify(&pub_key, &sig),
@@ -206,15 +175,16 @@ fn mldsa_sign_external_mu_verifies_as_pure() {
             p.name
         );
         assert!(
-            device_verify(&ctx, sid, &pub_key, MLDSA_MSG_TYPE_PURE, MSG, CTX, &sig),
-            "{}: device rejected a signature over mu as a pure signature",
+            device_verify(&ctx, sid, &pub_key, &mu, &sig),
+            "{}: device rejected its own signature over mu",
             p.name
         );
     }
 }
 
-/// A pure signature verifies over the external `μ` of its message, whether
-/// the device or the host made it; any change to `μ` breaks it.
+/// A pure signature made by the host verifies on the device over the `μ` of
+/// its message; any change to `μ` breaks it, for the device's signatures
+/// too.
 #[test]
 fn mldsa_verify_external_mu_accepts_pure_signatures() {
     let ctx = TestCtx::new();
@@ -224,37 +194,16 @@ fn mldsa_verify_external_mu_accepts_pure_signatures() {
     for p in PARAMS {
         let (masked_key, pub_key) = generate(&ctx, sid, p);
         let mu = host_mu(&pub_key);
-        let sig = device_sign(&ctx, sid, &masked_key, MLDSA_MSG_TYPE_PURE, MSG, CTX);
-        assert!(
-            device_verify(
-                &ctx,
-                sid,
-                &pub_key,
-                MLDSA_MSG_TYPE_EXTERNAL_MU,
-                &mu,
-                &[],
-                &sig
-            ),
-            "{}: device rejected its pure signature over mu",
-            p.name
-        );
+        let sig = device_sign(&ctx, sid, &masked_key, &mu);
         let mut bad_mu = mu.clone();
         bad_mu[0] ^= 0x01;
         assert!(
-            !device_verify(
-                &ctx,
-                sid,
-                &pub_key,
-                MLDSA_MSG_TYPE_EXTERNAL_MU,
-                &bad_mu,
-                &[],
-                &sig
-            ),
+            !device_verify(&ctx, sid, &pub_key, &bad_mu, &sig),
             "{}: device accepted a signature over a modified mu",
             p.name
         );
 
-        // Host-made key and signature: only the public key crosses.
+        // Host-made key and pure signature: only the public key crosses.
         let sk = MlDsaPrivateKey::from_seed(variant(p), &[0x3C; 32]).expect("host keygen");
         let mut host_pk = vec![0u8; p.pub_key_len];
         sk.public_key()
@@ -268,16 +217,15 @@ fn mldsa_verify_external_mu_accepts_pure_signatures() {
             .expect("host sign");
         let host_pk_mu = host_mu(&host_pk);
         assert!(
-            device_verify(
-                &ctx,
-                sid,
-                &host_pk,
-                MLDSA_MSG_TYPE_EXTERNAL_MU,
-                &host_pk_mu,
-                &[],
-                &host_sig
-            ),
+            device_verify(&ctx, sid, &host_pk, &host_pk_mu, &host_sig),
             "{}: device rejected a host pure signature over mu",
+            p.name
+        );
+        let mut bad_mu = host_pk_mu;
+        bad_mu[MLDSA_MU_LEN - 1] ^= 0x80;
+        assert!(
+            !device_verify(&ctx, sid, &host_pk, &bad_mu, &host_sig),
+            "{}: device accepted a host signature over a modified mu",
             p.name
         );
     }
@@ -294,15 +242,7 @@ fn mldsa_external_mu_nist_acvp_vectors() {
 
     assert!(!MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS.is_empty());
     for v in MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS {
-        let got = device_verify(
-            &ctx,
-            sid,
-            v.pub_key,
-            MLDSA_MSG_TYPE_EXTERNAL_MU,
-            v.mu,
-            &[],
-            v.sig,
-        );
+        let got = device_verify(&ctx, sid, v.pub_key, v.mu, v.sig);
         assert_eq!(
             got, v.expected_pass,
             "ML-DSA-{}: device said {got}, NIST says {} ({})",
@@ -313,15 +253,7 @@ fn mldsa_external_mu_nist_acvp_vectors() {
             let last = bad.len() - 1;
             bad[last] ^= 0x01;
             assert!(
-                !device_verify(
-                    &ctx,
-                    sid,
-                    v.pub_key,
-                    MLDSA_MSG_TYPE_EXTERNAL_MU,
-                    v.mu,
-                    &[],
-                    &bad
-                ),
+                !device_verify(&ctx, sid, v.pub_key, v.mu, &bad),
                 "ML-DSA-{}: device accepted a tampered signature ({})",
                 v.param_set,
                 v.reason
@@ -331,7 +263,8 @@ fn mldsa_external_mu_nist_acvp_vectors() {
 }
 
 /// The device can compute `μ` itself, with two SHAKE256 `Hash` calls: it
-/// matches the host's, and signs and verifies as the message does.
+/// matches the host's, and a signature over it is a pure signature over the
+/// message.
 #[test]
 fn mldsa_external_mu_computed_on_device() {
     let ctx = TestCtx::new();
@@ -348,36 +281,24 @@ fn mldsa_external_mu_computed_on_device() {
             p.name
         );
 
-        let sig = device_sign(&ctx, sid, &masked_key, MLDSA_MSG_TYPE_EXTERNAL_MU, &mu, &[]);
+        let sig = device_sign(&ctx, sid, &masked_key, &mu);
         assert!(
-            device_verify(&ctx, sid, &pub_key, MLDSA_MSG_TYPE_PURE, MSG, CTX, &sig),
-            "{}: signature over the device's mu failed pure verification",
+            host_verify(&pub_key, &sig),
+            "{}: host rejected a signature over the device's mu",
             p.name
         );
-        assert!(host_verify(&pub_key, &sig), "{}: host rejected it", p.name);
-
-        let sig = device_sign(&ctx, sid, &masked_key, MLDSA_MSG_TYPE_PURE, MSG, CTX);
         assert!(
-            device_verify(
-                &ctx,
-                sid,
-                &pub_key,
-                MLDSA_MSG_TYPE_EXTERNAL_MU,
-                &mu,
-                &[],
-                &sig
-            ),
-            "{}: pure signature failed verification over the device's mu",
+            device_verify(&ctx, sid, &pub_key, &mu, &sig),
+            "{}: device rejected a signature over its own mu",
             p.name
         );
     }
 }
 
-/// An external `μ` is exactly 64 bytes with an empty context string, and
-/// only the pure (0) and external-`μ` (3) message types are accepted; the
-/// pre-hash values (1, 2) are reserved. Each is refused by both commands.
+/// `μ` is exactly 64 bytes; any other length fails to decode, on both
+/// commands.
 #[test]
-fn mldsa_external_mu_rejects_malformed_requests() {
+fn mldsa_rejects_mu_of_the_wrong_length() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let sid = session.session_id;
@@ -386,23 +307,14 @@ fn mldsa_external_mu_rejects_malformed_requests() {
     let sig = vec![0u8; p.sig_len];
 
     let mu = [0x5Au8; MLDSA_MU_LEN + 1];
-    let cases: [(u8, &[u8], &[u8]); 7] = [
-        (MLDSA_MSG_TYPE_EXTERNAL_MU, &mu[..MLDSA_MU_LEN - 1], b""),
-        (MLDSA_MSG_TYPE_EXTERNAL_MU, &mu[..], b""),
-        (MLDSA_MSG_TYPE_EXTERNAL_MU, &mu[..MLDSA_MU_LEN], b"ctx"),
-        (1, MSG, b""),
-        (2, MSG, b""),
-        (4, MSG, b""),
-        (0xFF, MSG, b""),
-    ];
-    for (msg_type, message, context) in cases {
+    for len in [0, MLDSA_MU_LEN - 1, MLDSA_MU_LEN + 1] {
         ctx.expect_fw_reject(
-            &sign_req(sid, &masked_key, msg_type, message, context),
-            TborStatus::InvalidArg,
+            &sign_req(sid, &masked_key, &mu[..len]),
+            TborStatus::TborInvalidFixedLength,
         );
         ctx.expect_fw_reject(
-            &verify_req(sid, &pub_key, msg_type, message, context, &sig),
-            TborStatus::InvalidArg,
+            &verify_req(sid, &pub_key, &mu[..len], &sig),
+            TborStatus::TborInvalidFixedLength,
         );
     }
 }

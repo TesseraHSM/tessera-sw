@@ -1658,8 +1658,7 @@ mod tests {
         let (pal, io, sess_id) = crypto_fixture().await;
         crate::part_state::part_set_psk(&pal, &io, 1, dma(&mut [3; 32])).unwrap();
         let mut request = [0; 8192];
-        let message = vec![0x42; types::MLDSA_MESSAGE_MAX_LEN];
-        let mut ctx = vec![0x24; types::MLDSA_CTX_MAX_LEN];
+        let mut mu = [0x42; types::MLDSA_MU_LEN];
         for kind in [
             types::MlDsaKeyKind::MlDsa44Seed,
             types::MlDsaKeyKind::MlDsa65Seed,
@@ -1687,13 +1686,9 @@ mod tests {
                 .unwrap()
                 .masked_key(&masked_key)
                 .unwrap()
-                .msg_type(types::MlDsaMsgType::Pure)
+                .mu(&mu)
                 .unwrap()
                 .hedge(types::MlDsaHedge::Preferred)
-                .unwrap()
-                .message(&message)
-                .unwrap()
-                .ctx(&ctx)
                 .unwrap()
                 .finish();
             let mut signature = Box::pin(bounded_exchange(&pal, &io, req.as_bytes(), 8192))
@@ -1706,7 +1701,7 @@ mod tests {
             let mut noncanonical = request_with_payload_gap(
                 req.as_bytes(),
                 types::TborMlDsaSignReq::TOC_COUNT,
-                &[1, 4, 5],
+                &[1, 2],
             );
             types::TborMlDsaSignReq::decode(dma(&mut noncanonical)).unwrap();
             assert_eq!(
@@ -1719,7 +1714,7 @@ mod tests {
                 .to_vec();
             for valid in [true, false] {
                 if !valid {
-                    ctx[0] ^= 1;
+                    mu[0] ^= 1;
                 }
                 let req = types::TborMlDsaVerifyReq::encode(&mut request)
                     .unwrap()
@@ -1727,11 +1722,7 @@ mod tests {
                     .unwrap()
                     .pub_key(&public_key)
                     .unwrap()
-                    .msg_type(types::MlDsaMsgType::Pure)
-                    .unwrap()
-                    .message(&message)
-                    .unwrap()
-                    .ctx(&ctx)
+                    .mu(&mu)
                     .unwrap()
                     .signature(&signature)
                     .unwrap()
@@ -1740,11 +1731,11 @@ mod tests {
                 if valid {
                     result.unwrap();
                     if kind == types::MlDsaKeyKind::MlDsa87Seed {
-                        assert_eq!(req.len(), 8092);
+                        assert_eq!(req.len(), 7307);
                     }
                 } else {
                     assert_eq!(result, Err(HsmError::MlDsaVerifyFailed));
-                    ctx[0] ^= 1;
+                    mu[0] ^= 1;
                 }
             }
         }
