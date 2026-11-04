@@ -87,10 +87,8 @@ impl<P: HsmPal> Hsm<P> {
             }
         };
 
-        // The per-command undo log (TBOR only), owned here so it outlives
-        // `complete_io` and the post-completion walk.  Stays `None` for
-        // MBOR / flush / invalid SQEs; a TBOR command binds it once parsed
-        // and **fails before mutating** if its DMA buffer can't be carved.
+        // Own the undo log here so it outlives `complete_io` and its
+        // post-completion walk for both MBOR and TBOR.
         let mut undo: Option<UndoLog<'_>> = None;
         let mut credential_guard = None;
 
@@ -98,7 +96,10 @@ impl<P: HsmPal> Hsm<P> {
         let op_result = match validated {
             Err(e) => Err(e),
             Ok(()) => match op {
-                OP_MBOR => self.handle_mbor_op(&mut io).await,
+                OP_MBOR => match self.bind_undo(&io) {
+                    Ok(log) => self.handle_mbor_op(&mut io, undo.insert(log)).await,
+                    Err(e) => Err(e),
+                },
                 OP_TBOR => self
                     .handle_tbor_op(&mut io, &mut undo, &mut credential_guard)
                     .await
@@ -152,9 +153,9 @@ impl<P: HsmPal> Hsm<P> {
         let handler_ok = op_result.as_ref().is_ok_and(|status| !status.ddi_failed);
 
         // Post the completion (CQE) to the host, then run the undo/commit
-        // walk, then free the slot.  Splitting `complete_io` from
-        // `drop_io` lets the walk run over `io` *after* the CQE post, so a
-        // failed post reverts too.
+        // walk, then free the slot. Splitting `complete_io` from `drop_io`
+        // lets that walk run over `io` after the CQE post, so a failed post
+        // reverts command mutations too.
         let completion = match Self::finalize_cqe(&mut io, op_result) {
             Ok(()) => self.pal().complete_io(&mut io).await,
             Err(e) => Err(e),
@@ -172,7 +173,7 @@ impl<P: HsmPal> Hsm<P> {
             }
         };
 
-        // Walk the undo log (TBOR only): commit iff the handler succeeded
+        // Walk the undo log: commit iff the handler succeeded
         // *and* the CQE posted; otherwise revert unconditionally.  Safe
         // against admin teardown, which cannot race an in-flight IO.
         // Credential mutations retain their partition guard through this walk
@@ -236,8 +237,8 @@ impl<P: HsmPal> Hsm<P> {
         }
     }
 
-    /// Bind the per-command undo log for a TBOR command that can record undo
-    /// entries ([`ddi::tbor::records_undo`]), carved from `io`'s DMA heap.
+    /// Bind the per-command undo log for an MBOR or TBOR command, carved from `io`'s
+    /// DMA heap.
     ///
     /// [`UNDO_LOG_SIZE`] bytes are taken from `io`'s DMA heap so the byte
     /// pre-images the undo walk restores are DMA-accessible.  The undo log
@@ -322,7 +323,12 @@ impl<P: HsmPal> Hsm<P> {
     ///
     /// **Phase 2 (post-decode)** — Session validation, DDI dispatch.
     /// Errors → DDI error response DMA'd to host, CQE Success.
-    async fn handle_mbor_op(&self, io: &mut P::Io) -> Result<HsmOpStatus, OpError> {
+    /// The undo log remains live through outbound DMA and CQE completion.
+    async fn handle_mbor_op<'s>(
+        &'s self,
+        io: &mut P::Io,
+        undo: &mut UndoLog<'s>,
+    ) -> Result<HsmOpStatus, OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
         let req_buf = self
@@ -347,7 +353,7 @@ impl<P: HsmPal> Hsm<P> {
             )?;
 
         // ── Phase 2: decode + validate + dispatch (no yield) ───────
-        let (resp, session_ctrl, cqe_sess_id, cqe_app_vault_id, cqe_closed) = {
+        let (resp, session_ctrl, cqe_sess_id, cqe_app_vault_id, cqe_closed, ddi_failed) = {
             let req = &mut req_buf[..params.src_len];
             let mut decoder = DdiDecoder::new(req);
             let hdr: DdiReqHdr = decoder.decode_hdr().op_err(
@@ -371,7 +377,7 @@ impl<P: HsmPal> Hsm<P> {
                 )
                 .and_then(|()| self.validate_session_live(io, &hdr, session_ctrl))
                 {
-                    Ok(()) => ddi::mbor::dispatch(self.pal(), io, &mut decoder, &hdr).await,
+                    Ok(()) => ddi::mbor::dispatch(self.pal(), io, &mut decoder, &hdr, undo).await,
                     Err(e) => Err(e),
                 }
             };
@@ -393,8 +399,9 @@ impl<P: HsmPal> Hsm<P> {
                     .mbor_dispatch(io, &mut req_buf[..params.src_len])
                     .await
                     .map(ddi::mbor::DispatchResult::from_resp),
-                other => other,
+                result => result,
             };
+            let ddi_failed = dispatch_result.is_err();
 
             // Fill the CQE session fields so the host can track the session
             // per file handle: a successful OpenSession carries the newly
@@ -428,6 +435,7 @@ impl<P: HsmPal> Hsm<P> {
                 cqe_sess_id,
                 cqe_app_vault_id,
                 cqe_closed,
+                ddi_failed,
             )
         };
 
@@ -443,13 +451,15 @@ impl<P: HsmPal> Hsm<P> {
                 HostStatus::DMA_TXN_ERROR,
             )?;
 
-        Ok(HsmOpStatus::new(
+        let mut status = HsmOpStatus::new(
             resp_len,
             session_ctrl,
             cqe_sess_id,
             cqe_app_vault_id,
             cqe_closed,
-        ))
+        );
+        status.ddi_failed = ddi_failed;
+        Ok(status)
     }
 
     /// Handles an [`OP_TBOR`] IO command.

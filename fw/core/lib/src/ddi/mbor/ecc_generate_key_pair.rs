@@ -14,6 +14,7 @@ use tsra_fw_core_crypto_key_masking::cbc::mask;
 use tsra_fw_ddi_mbor_types::ecc_generate_key_pair::DdiEccGenerateKeyPairReq;
 use tsra_fw_ddi_mbor_types::ecc_generate_key_pair::DdiEccGenerateKeyPairResp;
 use tsra_fw_hsm_key_decode::ecc_pct_for;
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 
@@ -32,6 +33,7 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiEccGenerateKeyPairReq<'_> = decoder.decode_data()?;
 
@@ -82,7 +84,7 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
     } else {
         None
     };
-    let private_key_id: u16 = pal
+    let private_key_id = pal
         .vault_key_create(
             io,
             &priv_key[..priv_len],
@@ -90,8 +92,11 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
             session_binding,
             attrs,
         )
-        .await?
-        .into();
+        .await?;
+    // The dispatcher preallocates one empty entry before invoking this
+    // handler, so the inverse fits without a fallible allocation here.
+    undo.push_vault_create(private_key_id)?;
+    let private_key_id: u16 = private_key_id.into();
 
     // Build the host's re-import blob.  ECC envelopes the private-key
     // blob followed by the public point so the unmask path can restore

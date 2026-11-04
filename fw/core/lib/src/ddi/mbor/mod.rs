@@ -70,6 +70,7 @@ use tsra_fw_ddi_mbor_api::DdiDecoder;
 use tsra_fw_ddi_mbor_api::DdiEncoder;
 use tsra_fw_ddi_mbor_types::error::DdiErrResp;
 use tsra_fw_ddi_mbor_types::*;
+use tsra_fw_hsm_undo::UndoLog;
 pub(crate) use unmask_key::*;
 
 use super::*;
@@ -156,6 +157,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<DispatchResult<'p>> {
     check_api_rev(hdr)?;
 
@@ -189,7 +191,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::DeleteKey => delete_key(pal, io, decoder, hdr).await,
         DdiOp::AesGenerateKey => aes_generate_key(pal, io, decoder, hdr).await,
         DdiOp::AesEncryptDecrypt => aes_encrypt_decrypt(pal, io, decoder, hdr).await,
-        DdiOp::EccGenerateKeyPair => ecc_generate_key_pair(pal, io, decoder, hdr).await,
+        DdiOp::EccGenerateKeyPair => ecc_generate_key_pair(pal, io, decoder, hdr, undo).await,
         DdiOp::EccSign => ecc_sign(pal, io, decoder, hdr).await,
         DdiOp::EcdhKeyExchange => ecdh_key_exchange(pal, io, decoder, hdr).await,
         DdiOp::HkdfDerive => hkdf_derive(pal, io, decoder, hdr).await,
