@@ -257,22 +257,29 @@ pub trait HsmMlKem {
     ///   (`MlKem512Seed` / `MlKem768Seed` / `MlKem1024Seed`).
     /// - `seed` — output; must be exactly 64 bytes.  Filled from the
     ///   device's entropy source, for the same reason as ML-DSA's seed.
-    /// - `pub_key` — output; the encapsulation key, exactly the parameter
-    ///   set's length (800 / 1184 / 1568).
-    /// - `sec_key` — output; expanded decapsulation key (1632 / 2400 / 3168 bytes).
+    /// - `output` — output, the encapsulation key followed by the expanded
+    ///   decapsulation key, exactly 2432 / 3584 / 4736 bytes for
+    ///   ML-KEM-512 / 768 / 1024:
+    ///
+    ///   | Offset | Length | Field |
+    ///   |---|---|---|
+    ///   | 0 | 800 / 1184 / 1568 | Encapsulation (public) key |
+    ///   | 800 / 1184 / 1568 | 1632 / 2400 / 3168 | Expanded decapsulation (private) key |
+    ///
+    ///   The decapsulation key is private key material.
     ///
     /// # Returns
     ///
-    /// - `Ok(())` — `seed`, `pub_key`, and `sec_key` populated.
-    /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length.
+    /// - `Ok(())` — `seed` and `output` populated.
+    /// - `Err(HsmError::InvalidArg)` — bad kind, `seed` not 64 bytes, or
+    ///   `output` not exactly the two key lengths combined.
     /// - `Err(HsmError)` — propagated from the FP offload path.
     async fn mlkem_gen_key(
         &self,
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         seed: &mut HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
-        sec_key: &mut HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Encapsulate to an ML-KEM public key.

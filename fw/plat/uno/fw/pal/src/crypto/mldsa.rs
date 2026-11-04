@@ -33,6 +33,7 @@ use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
 use tsra_fw_uno_drivers_pqc::mlkem_ct_len;
+use tsra_fw_uno_drivers_pqc::mlkem_sec_key_len;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::UnoHsmPal;
@@ -248,18 +249,19 @@ impl HsmMlKem for UnoHsmPal {
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         seed: &mut HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
-        sec_key: &mut HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Bracketed so validation and RNG failures still reach the closing
         // mark; see `mldsa_gen_key`.
         let outcome: HsmResult<()> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            let expected_pub = mlkem_pub_key_len(kind)?;
-            if seed.len() != MLKEM_SEED_LEN || pub_key.len() != expected_pub {
+            // `output` is the public key followed by the expanded private key.
+            let pub_len = mlkem_pub_key_len(kind)?;
+            if seed.len() != MLKEM_SEED_LEN || output.len() != pub_len + mlkem_sec_key_len(kind)? {
                 return Err(HsmError::InvalidArg);
             }
+            let (pub_key, sec_key) = output.split_at_mut(pub_len);
 
             // Same reasoning as ML-DSA: the seed pair is the private key and an
             // FP core has no entropy source, so it is drawn here.

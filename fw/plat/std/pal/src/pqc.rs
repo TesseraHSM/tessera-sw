@@ -242,16 +242,19 @@ impl HsmMlKem for StdHsmPal {
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         seed: &mut HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
-        sec_key: &mut HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let variant = mlkem_variant(kind)?;
-        if seed.len() != MLKEM_SEED_LEN {
+        if seed.len() != MLKEM_SEED_LEN
+            || output.len() != variant.pub_key_len() + variant.sec_key_len()
+        {
             return Err(HsmError::InvalidArg);
         }
         self.rng_fill_bytes(io, seed)?;
 
         let (pk, sk) = self.pqc.mlkem_keygen(variant, seed).await?;
+        let sk = Zeroizing::new(sk);
+        let (pub_key, sec_key) = output.split_at_mut(variant.pub_key_len());
         write_exact(pub_key, &pk)?;
         write_exact(sec_key, &sk)
     }
@@ -395,25 +398,19 @@ mod tests {
 
         for (kind, pk_len, sk_len, ct_len) in MLKEM_SETS {
             let (pal, io) = pal_and_io();
-            let (mut seed, mut pk, mut sk) =
-                ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
-            pal.mlkem_gen_key(
-                &io,
-                kind,
-                dma_mut(&mut seed),
-                dma_mut(&mut pk),
-                dma_mut(&mut sk),
-            )
-            .await
-            .unwrap();
+            let (mut seed, mut keys) = ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len + sk_len]);
+            pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+                .await
+                .unwrap();
+            let (pk, sk) = keys.split_at(pk_len);
             let buffer = pal.dma_alloc(&io, pk_len.max(ct_len)).unwrap();
-            buffer[..pk_len].copy_from_slice(dma(&pk));
+            buffer[..pk_len].copy_from_slice(dma(pk));
             let mut ss = [0u8; SS_LEN];
             pal.mlkem_encaps_in_place(&io, kind, buffer, dma_mut(&mut ss))
                 .await
                 .unwrap();
             let mut decaps = [0u8; SS_LEN];
-            pal.mlkem_decaps(&io, kind, dma(&sk), &buffer[..ct_len], dma_mut(&mut decaps))
+            pal.mlkem_decaps(&io, kind, dma(sk), &buffer[..ct_len], dma_mut(&mut decaps))
                 .await
                 .unwrap();
             assert_eq!(ss, decaps);
@@ -582,6 +579,28 @@ mod tests {
         }
     }
 
+    /// `mlkem_gen_key` writes the public key then the expanded private key
+    /// into one output of exactly their combined length; any other length
+    /// is refused before the seed is drawn, so neither buffer is written.
+    #[tokio::test]
+    async fn mlkem_gen_key_rejects_a_mis_sized_output() {
+        let (pal, io) = pal_and_io();
+        let (kind, pk_len, sk_len, _) = MLKEM_SETS[0];
+        for len in [0, pk_len, pk_len + sk_len - 1, pk_len + sk_len + 1] {
+            let (mut seed, mut keys) = ([0x5a; MLKEM_SEED_LEN], vec![0x5a; len]);
+            assert_eq!(
+                pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+                    .await,
+                Err(HsmError::InvalidArg),
+                "{len}-byte output"
+            );
+            assert!(
+                seed.iter().chain(&keys).all(|b| *b == 0x5a),
+                "{len}-byte output written"
+            );
+        }
+    }
+
     /// `mlkem_encaps` writes the shared secret then the ciphertext into one
     /// output of exactly their combined length; any other length, including
     /// one too short for the secret alone, is refused without writing.
@@ -589,17 +608,11 @@ mod tests {
     async fn mlkem_encaps_rejects_a_mis_sized_output() {
         let (pal, io) = pal_and_io();
         let (kind, pk_len, sk_len, ct_len) = MLKEM_SETS[0];
-        let (mut seed, mut pk, mut sk) =
-            ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
-        pal.mlkem_gen_key(
-            &io,
-            kind,
-            dma_mut(&mut seed),
-            dma_mut(&mut pk),
-            dma_mut(&mut sk),
-        )
-        .await
-        .expect("gen_key");
+        let (mut seed, mut keys) = ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len + sk_len]);
+        pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+            .await
+            .expect("gen_key");
+        let pk = &keys[..pk_len];
 
         for len in [
             0,
@@ -610,7 +623,7 @@ mod tests {
         ] {
             let mut out = vec![0x5a; len];
             assert_eq!(
-                pal.mlkem_encaps(&io, kind, dma(&pk), dma_mut(&mut out))
+                pal.mlkem_encaps(&io, kind, dma(pk), dma_mut(&mut out))
                     .await,
                 Err(HsmError::InvalidArg),
                 "{len}-byte output"
@@ -627,34 +640,28 @@ mod tests {
         let (pal, io) = pal_and_io();
 
         for (kind, pk_len, sk_len, ct_len) in MLKEM_SETS {
-            let (mut seed, mut pk, mut sk) =
-                ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
-            pal.mlkem_gen_key(
-                &io,
-                kind,
-                dma_mut(&mut seed),
-                dma_mut(&mut pk),
-                dma_mut(&mut sk),
-            )
-            .await
-            .expect("gen_key");
+            let (mut seed, mut keys) = ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len + sk_len]);
+            pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+                .await
+                .expect("gen_key");
+            let (pk, sk) = keys.split_at(pk_len);
 
             let mut out = vec![0u8; SS_LEN + ct_len];
-            pal.mlkem_encaps(&io, kind, dma(&pk), dma_mut(&mut out))
+            pal.mlkem_encaps(&io, kind, dma(pk), dma_mut(&mut out))
                 .await
                 .expect("encaps");
             let (ss_enc, ct) = out.split_at(SS_LEN);
             let (ss_enc, mut ct) = (ss_enc.to_vec(), ct.to_vec());
 
             let mut ss_dec = [0u8; SS_LEN];
-            pal.mlkem_decaps(&io, kind, dma(&sk), dma(&ct), dma_mut(&mut ss_dec))
+            pal.mlkem_decaps(&io, kind, dma(sk), dma(&ct), dma_mut(&mut ss_dec))
                 .await
                 .expect("decaps");
             assert_eq!(ss_enc, ss_dec, "{kind:?}: shared secrets disagree");
 
             ct[0] ^= 1;
             let mut ss_rej = [0u8; SS_LEN];
-            pal.mlkem_decaps(&io, kind, dma(&sk), dma(&ct), dma_mut(&mut ss_rej))
+            pal.mlkem_decaps(&io, kind, dma(sk), dma(&ct), dma_mut(&mut ss_rej))
                 .await
                 .expect("decaps must not fail on a corrupted ciphertext");
             assert_ne!(

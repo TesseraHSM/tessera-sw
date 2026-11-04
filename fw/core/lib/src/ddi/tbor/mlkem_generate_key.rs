@@ -128,8 +128,11 @@ pub(crate) async fn handle<P: HsmPal>(
         let sec_len = mlkem_sec_key_len(vault_kind)?;
         let plain_len = MLKEM_SEED_LEN + sec_len;
 
-        // Generate directly into the final slots. The exchange is scrubbed
-        // on every failure, including partial key generation or masking.
+        // The seed pair is generated straight into its final slot. The PAL
+        // returns the key pair as one buffer, public key first, so the two
+        // keys are copied into their slots from a scrubbed scratch buffer.
+        // The exchange is scrubbed on every failure, including partial key
+        // generation or masking.
         let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
         let resp = cmd_buf.buffer_mut();
         let len = TborMlKemGenerateKeyResp::encode(resp, 0, false)?
@@ -150,8 +153,19 @@ pub(crate) async fn handle<P: HsmPal>(
                 }
                 let payload = &mut out.masked_key[at..end];
                 let (seed, sec_key) = payload.split_at_mut(MLKEM_SEED_LEN);
-                pal.mlkem_gen_key(io, vault_kind, seed, out.pub_key, sec_key)
-                    .await?;
+                let pub_key = &mut *out.pub_key;
+                pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
+                    let keys = alloc.dma_alloc(pub_len + sec_len)?;
+                    let result = pal.mlkem_gen_key(io, vault_kind, seed, keys).await;
+                    if result.is_ok() {
+                        let (pub_half, sec_half) = keys.split_at(pub_len);
+                        pub_key.copy_from_slice(pub_half);
+                        sec_key.copy_from_slice(sec_half);
+                    }
+                    keys.fill(0);
+                    result
+                })
+                .await?;
             }
             // Mask the seed+expanded decapsulation key as one unit, straight
             // into the reserved response slot.
