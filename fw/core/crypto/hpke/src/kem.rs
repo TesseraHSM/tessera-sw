@@ -208,9 +208,10 @@ where
     }
 
     // Query-alloc-use ECC keygen.  PAL writes `pk_e_le` as
-    // `X_le ‖ Y_le` (no SEC1 prefix), `npk_pal` bytes.
+    // `X_le ‖ Y_le` (no SEC1 prefix), `npk_pal` bytes.  The ephemeral key
+    // is used for ECDH, so its generation runs a key-agreement PCT.
     let (priv_size, pub_size) = pal
-        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::None)
+        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::KeyAgreement)
         .await?;
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
@@ -224,7 +225,7 @@ where
             alloc,
             curve,
             Some((&mut *sk_e, &mut *pk_e_le)),
-            HsmEccPct::None,
+            HsmEccPct::KeyAgreement,
         )
         .await?;
     if pk_len != npk_pal {
@@ -362,7 +363,7 @@ where
 
     // Query-alloc-use ECC keygen — same flow as `encap`.
     let (priv_size, pub_size) = pal
-        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::None)
+        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::KeyAgreement)
         .await?;
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
@@ -376,7 +377,7 @@ where
             alloc,
             curve,
             Some((&mut *sk_e, &mut *pk_e_le)),
-            HsmEccPct::None,
+            HsmEccPct::KeyAgreement,
         )
         .await?;
     if pk_len != npk_pal {

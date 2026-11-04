@@ -32,6 +32,9 @@ tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_pal = { workspace = true }
 tsra_fw_uno_trace = { workspace = true }
 
+[build-dependencies]
+tsra_fw_uno_reg_soc = { workspace = true }
+
 [features]
 #default = ["trace-uart"]
 default = []
