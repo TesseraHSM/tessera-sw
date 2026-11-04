@@ -26,8 +26,9 @@
 //!   the opcode, and hands the request data to the matching handler.
 //! - [`test_action`] — the `TestAction` (`DdiOp` 2004) handler.
 //! - [`get_priv_key`] / [`raw_key_import`] — FIPS-validation action handlers.
+//! - [`get_rng`] — the `GetRng` FIPS-validation action handler.
 //!
-//! # `TestAction` is an in-session command
+//! # Test hooks are in-session commands
 //!
 //! The core classifies any opcode it does not know as
 //! `DdiSessionKind::User`, and the IO layer runs session validation
@@ -47,16 +48,23 @@
 //! `tsra_ddi_mbor_test_hooks` host crate, which encodes the matching opaque
 //! request. Each action retains its existing typed response.
 //!
-//! The refactor also routes `GetPrivKey` and `RawKeyImport` as TestAction
-//! values 25 and 26. It does not accept their legacy standalone opcodes 2005
-//! and 2008, so the refactor host package and firmware must be updated
-//! together.
+//! `GetPrivKey`, `RawKeyImport`, and `GetRng` use TestAction values 25, 26,
+//! and 27, respectively, enabled only by `fips_validation_hooks`. Their legacy
+//! standalone opcodes 2005, 2008, and 2007 are not accepted. The host package
+//! and firmware must use the same action selectors and payload schemas.
+
+use core::future::Future;
+use core::pin::Pin;
+use core::task::Context;
+use core::task::Poll;
 
 #[cfg(feature = "tsra_test_hooks")]
 mod clear_user_credentials;
 mod common;
 #[cfg(feature = "fips_validation_hooks")]
 mod get_priv_key;
+#[cfg(feature = "fips_validation_hooks")]
+mod get_rng;
 #[cfg(feature = "fips_validation_hooks")]
 mod raw_key_import;
 #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
@@ -74,6 +82,18 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 
 use crate::UnoHsmIo;
 use crate::pal::UnoHsmPal;
+
+/// Keep test-hook polling out of the shared host-IO state machine.
+pub(crate) struct Outlined<F>(pub(crate) Pin<F>);
+
+impl<F: Future> Future for Outlined<&mut F> {
+    type Output = F::Output;
+
+    #[inline(never)]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.get_mut().0.as_mut().poll(cx)
+    }
+}
 
 /// `DdiOp::TestAction` — the fixed discriminant the host tooling uses.
 #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]

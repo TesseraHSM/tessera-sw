@@ -167,8 +167,18 @@ pub enum IpcMessageOpCode {
     /// FP error log.
     FpErrLog = 0x9,
 
+    /// IDFU prepare-for-shutdown request from Admin.
+    Shutdown = 0x42,
+
     /// Trigger a crash on a remote core (test hook).
     TriggerCrash = 0x47,
+
+    /// HSM asks Admin to quiesce for the RNG self-test. Admin replies once
+    /// quiesced (`Success`) or declines (`Deferred`).
+    RngSelfTestPrepare = 0x4C,
+
+    /// HSM releases the RNG self-test quiesce.
+    RngSelfTestDone = 0x4D,
 
     /// Set resource.
     SetResource = 0x7f,
@@ -185,7 +195,10 @@ impl TryFrom<u8> for IpcMessageOpCode {
             0x06 => Self::CdmaIo,
             0x07 => Self::AesKeyUpdate,
             0x09 => Self::FpErrLog,
+            0x42 => Self::Shutdown,
             0x47 => Self::TriggerCrash,
+            0x4C => Self::RngSelfTestPrepare,
+            0x4D => Self::RngSelfTestDone,
             0x7F => Self::SetResource,
             _ => return Err(IpcMessageErr::InvalidOpcodeConversion.into()),
         })
@@ -257,6 +270,9 @@ pub enum IpcMessageStatusCode {
     /// Operation still pending.
     Pending = 6,
 
+    /// Declined without side effects; retry later.
+    Deferred = 7,
+
     /// Unknown / catch-all status.
     UnknownStatus = 0xF,
 }
@@ -277,6 +293,7 @@ impl From<u32> for IpcMessageStatusCode {
             4 => Self::OperationTimeout,
             5 => Self::OperationFailed,
             6 => Self::Pending,
+            7 => Self::Deferred,
             _ => Self::UnknownStatus,
         }
     }
@@ -311,6 +328,9 @@ pub enum IpcMessageErr {
 
     /// Target partition id is out of range.
     InvalidPartitionId = 14,
+
+    /// Shutdown drain-time budget is outside the supported range.
+    InvalidDrainTimeConfig = 15,
 }
 
 impl From<IpcMessageErr> for u32 {
@@ -530,8 +550,10 @@ pub struct SetResInfo {
     /// `u16` -- a wider field shifts `vm_launch_guid` and corrupts `pfn`.
     pub pfn: u8,
 
-    /// VM launch GUID (unused by the emulator; retained for wire
-    /// compatibility with the reference firmware).
+    /// VM launch GUID supplied by the host. Captured into the partition
+    /// persistent store on a non-zero (allocate) `SetResource`, so a later
+    /// `InitBk3` reports the correct VM identity and migration preserves it
+    /// (mirrors the reference firmware's `part_init::handle_set_res_cnt`).
     pub vm_launch_guid: [u8; 16],
 }
 
@@ -944,6 +966,60 @@ impl IpcMessageType for IpcMessageTriggerCrash {
     }
 }
 
+// ---------------------------------------------------------------------------
+// IpcMessageShutdown (opcode 0x42)
+// ---------------------------------------------------------------------------
+
+/// `Shutdown` payload: the IDFU drain-time budget in milliseconds.
+///
+/// Mirrors the reference firmware's `ShutdownInfo`. Admin sends the
+/// enclosing message (`IPC_CP_HSM_SHUTDOWN_REQ`) only after every host SQ
+/// credit has been restored, so the HSM does not act on `drain_time_ms`
+/// itself; the field is decoded for wire compatibility with Admin.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, IntoBytes, Immutable, FromBytes)]
+pub struct ShutdownInfo {
+    /// IDFU drain-time budget in milliseconds.
+    pub drain_time_ms: u32,
+}
+
+/// `Shutdown` IPC message body (opcode `Shutdown`, 0x42).
+#[repr(C)]
+#[derive(Debug, IntoBytes, Immutable, FromBytes)]
+pub struct IpcMessageShutdown {
+    /// IPC header fields.
+    pub header: IpcMessageHeader,
+
+    /// Shutdown command payload.
+    pub info: ShutdownInfo,
+
+    /// Reserved padding so the body fills the 60-byte payload area.
+    pub _rsvd: [u8; IPC_MESSAGE_PAYLOAD_LEN - IpcMessageShutdown::LEN],
+}
+
+const _: () =
+    assert!(core::mem::size_of::<IpcMessageShutdown>() == core::mem::size_of::<IpcMessage>());
+
+// Lock the payload size: a single `u32` drain-time budget.
+const _: () = assert!(core::mem::size_of::<ShutdownInfo>() == 4);
+
+impl IpcMessageType for IpcMessageShutdown {
+    const OP: IpcMessageOpCode = IpcMessageOpCode::Shutdown;
+    const LEN: usize = core::mem::size_of::<ShutdownInfo>();
+
+    fn validate(&self) -> IpcResult<()> {
+        // The declared payload must be exactly the drain-time word.
+        if self.header.length() != Self::LEN as u32 {
+            return Err(IpcMessageErr::InvalidInputMessageForDecode.into());
+        }
+        // Match the reference firmware's accepted drain-time window.
+        if !matches!(self.info.drain_time_ms, 0..=60000) {
+            return Err(IpcMessageErr::InvalidDrainTimeConfig.into());
+        }
+        Ok(())
+    }
+}
+
 /// Encode a `TriggerCrash` request targeting `cpu_id`.
 ///
 /// `tag` is echoed by the responder, matching the reference request/response
@@ -964,4 +1040,130 @@ pub fn encode_trigger_crash(
         _rsvd: [0; IPC_MESSAGE_PAYLOAD_LEN - IpcMessageTriggerCrash::LEN],
     };
     IpcMessageEncoder::encode(msg).data
+}
+
+/// Decode a raw IPC buffer into an [`IpcMessageShutdown`].
+///
+/// Returns `None` if the opcode does not match or the body fails to
+/// decode/validate.
+pub fn decode_shutdown(buf: &[u32; IPC_MESSAGE_LENGTH]) -> Option<IpcMessageShutdown> {
+    let msg = IpcMessage { data: *buf };
+    IpcMessageDecoder::decode::<IpcMessageShutdown>(msg).ok()
+}
+
+/// Encode an ACK reply for a `Shutdown` message.
+///
+/// Copies the original header, sets the response bit and `status`.
+pub fn encode_shutdown_ack(
+    original_buf: &[u32; IPC_MESSAGE_LENGTH],
+    status: IpcMessageStatusCode,
+) -> [u32; IPC_MESSAGE_LENGTH] {
+    let original_header = IpcMessageHeader::read_from_bytes(original_buf[0].as_bytes())
+        .unwrap_or(IpcMessageHeader::new());
+
+    let ack_header = original_header
+        .with_response(true)
+        .with_status(status as u32);
+
+    let mut out = *original_buf;
+    out[0] = ack_header.into_bits();
+    out
+}
+
+// ---------------------------------------------------------------------------
+// RNG self-test quiesce (opcodes 0x4C / 0x4D)
+// ---------------------------------------------------------------------------
+
+/// Tag of HSM RNG self-test requests, distinct from the `TriggerCrash` test
+/// hook's tag 0 on the same channel. Admin echoes it in its reply.
+pub const RNG_IPC_TAG: u8 = 0x52;
+
+/// Encodes a zero-payload RNG self-test request (`Prepare` or `Done`).
+pub fn encode_rng_self_test(op: IpcMessageOpCode) -> [u32; IPC_MESSAGE_LENGTH] {
+    let header = IpcMessageHeader::new()
+        .with_msg_op(op as u32)
+        .with_tag(RNG_IPC_TAG as u32)
+        .with_length(0);
+    let mut out = [0u32; IPC_MESSAGE_LENGTH];
+    out[0] = header.into();
+    out
+}
+
+/// Validates that `resp` is Admin's reply to the RNG self-test request `expected`
+/// and returns its status.
+pub fn response_status(
+    resp: &[u32; IPC_MESSAGE_LENGTH],
+    expected: IpcMessageOpCode,
+) -> IpcResult<IpcMessageStatusCode> {
+    let header = IpcMessageHeader::from(resp[0]);
+    if !header.response()
+        || header.msg_op() != expected as u32
+        || header.tag() != RNG_IPC_TAG as u32
+        || header.length() != 0
+    {
+        return Err(IpcMessageErr::InvalidInputMessageForDecode.into());
+    }
+    Ok(IpcMessageStatusCode::from(header.status()))
+}
+
+#[cfg(test)]
+mod rng_response_tests {
+    use super::*;
+
+    const OP: IpcMessageOpCode = IpcMessageOpCode::RngSelfTestPrepare;
+
+    fn response(status: IpcMessageStatusCode) -> [u32; IPC_MESSAGE_LENGTH] {
+        let mut resp = encode_rng_self_test(OP);
+        resp[0] = IpcMessageHeader::from(resp[0])
+            .with_response(true)
+            .with_status(u32::from(status))
+            .into();
+        resp
+    }
+
+    #[test]
+    fn request_carries_rng_tag() {
+        let header = IpcMessageHeader::from(encode_rng_self_test(OP)[0]);
+        assert_eq!(header.msg_op(), OP as u32);
+        assert_eq!(header.tag(), RNG_IPC_TAG as u32);
+        assert!(!header.response());
+    }
+
+    #[test]
+    fn accepts_matching_response_and_preserves_status() {
+        for status in [
+            IpcMessageStatusCode::Success,
+            IpcMessageStatusCode::Deferred,
+            IpcMessageStatusCode::InvalidField,
+        ] {
+            assert_eq!(response_status(&response(status), OP), Ok(status));
+        }
+    }
+
+    #[test]
+    fn rejects_unpopulated_and_mismatched_responses() {
+        assert!(response_status(&[0; IPC_MESSAGE_LENGTH], OP).is_err());
+        // The request itself (response bit clear) is not a reply.
+        assert!(response_status(&encode_rng_self_test(OP), OP).is_err());
+
+        let resp = response(IpcMessageStatusCode::Success);
+        assert!(response_status(&resp, IpcMessageOpCode::RngSelfTestDone).is_err());
+
+        let mut wrong_tag = resp;
+        wrong_tag[0] = IpcMessageHeader::from(resp[0]).with_tag(0).into();
+        assert!(response_status(&wrong_tag, OP).is_err());
+
+        let mut wrong_len = resp;
+        wrong_len[0] = IpcMessageHeader::from(resp[0]).with_length(4).into();
+        assert!(response_status(&wrong_len, OP).is_err());
+    }
+
+    #[test]
+    fn unused_opcode_is_rejected() {
+        assert!(IpcMessageOpCode::try_from(0x4E).is_err());
+        assert_eq!(
+            IpcMessageStatusCode::from(7),
+            IpcMessageStatusCode::Deferred
+        );
+    }
 }

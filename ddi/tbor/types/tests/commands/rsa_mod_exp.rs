@@ -18,16 +18,12 @@
 
 #![cfg(feature = "emu")]
 
-use tsra_crypto::Encrypter;
 use tsra_crypto::ExportableKey;
 use tsra_crypto::Key;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
-use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
-use tsra_crypto::RsaSignAlgo;
-use tsra_crypto::Verifier;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -38,26 +34,13 @@ use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
-use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
+use crate::commands::common::assert_rsa_decrypts;
+use crate::commands::common::assert_rsa_signs;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 use crate::commands::unwrap_key::unwrap_with_usage;
-
-/// Reverse `bytes` into a fresh vec (wire-LE ↔ OpenSSL-BE conversion).
-fn rev(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().rev().copied().collect()
-}
-
-/// A non-palindrome big-endian integer of `modulus_len` bytes that stays
-/// below the modulus (leading byte `0x01`, so `m < n`).  The non-symmetry
-/// exercises the wire little-endian operand handling.
-fn test_integer(modulus_len: usize) -> Vec<u8> {
-    let mut m = vec![0x02u8; modulus_len];
-    m[0] = 0x01;
-    m
-}
 
 /// Generate a host RSA private key of `modulus_bytes` (256 / 384 / 512 for
 /// RSA-2048 / 3072 / 4096), import it on-device via `UnwrapKey` under the
@@ -90,24 +73,6 @@ fn import_rsa(
     (resp.masked_key, pubkey, modulus_len)
 }
 
-/// Run `RsaModExp` and return the wire-LE `x` result.
-fn mod_exp(
-    ctx: &TestCtx,
-    session_id: u16,
-    masked_key: Vec<u8>,
-    op_type: u8,
-    y_le: Vec<u8>,
-) -> Vec<u8> {
-    ctx.tbor(&TborRsaModExpReq {
-        session_id,
-        masked_key,
-        op_type,
-        y: y_le,
-    })
-    .expect("RsaModExp")
-    .x
-}
-
 /// Import an RSA key, produce `s = m^d mod n` via `RsaModExp { Sign }`, and
 /// verify on the host that `s^e mod n == m`.
 fn sign_roundtrip(ctx: &TestCtx, session_id: u16, modulus_bytes: usize, crt: bool) {
@@ -118,23 +83,7 @@ fn sign_roundtrip(ctx: &TestCtx, session_id: u16, modulus_bytes: usize, crt: boo
         crt,
         KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
     );
-    let m = test_integer(modulus_len);
-
-    // Device consumes wire-LE `y`, returns wire-LE `x`.
-    let x_le = mod_exp(ctx, session_id, masked_key, RSA_OP_SIGN, rev(&m));
-    assert_eq!(
-        x_le.len(),
-        modulus_len,
-        "result length equals the modulus length"
-    );
-    let signature = rev(&x_le);
-
-    let verified = Verifier::verify(&mut RsaSignAlgo::with_no_padding(), &pubkey, &m, &signature)
-        .expect("raw RSA verify");
-    assert!(
-        verified,
-        "RsaModExp Sign must produce a signature verifying over the message (crt={crt}, k={modulus_bytes})",
-    );
+    assert_rsa_signs(ctx, session_id, masked_key, &pubkey, modulus_len);
 }
 
 /// Import an RSA key, raw-encrypt a message with the host public key, and
@@ -147,23 +96,7 @@ fn decrypt_roundtrip(ctx: &TestCtx, session_id: u16, modulus_bytes: usize, crt: 
         crt,
         KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
     );
-    let m = test_integer(modulus_len);
-
-    // c = m^e mod n (big-endian), then fed to the device as wire-LE `y`.
-    let ciphertext = Encrypter::encrypt_vec(&mut RsaEncryptAlgo::with_no_padding(), &pubkey, &m)
-        .expect("raw RSA encrypt");
-    let x_le = mod_exp(
-        ctx,
-        session_id,
-        masked_key,
-        RSA_OP_DECRYPT,
-        rev(&ciphertext),
-    );
-    assert_eq!(
-        rev(&x_le),
-        m,
-        "RsaModExp Decrypt must recover the original message"
-    );
+    assert_rsa_decrypts(ctx, session_id, masked_key, &pubkey, modulus_len);
 }
 
 #[test]
