@@ -39,6 +39,10 @@
 
 #[allow(unsafe_code)]
 mod aes;
+// Host bulk IOs on the BCP; with `bulk_crypto` the FP firmware runs them.
+#[cfg(not(feature = "bulk_crypto"))]
+#[allow(unsafe_code)]
+mod bulk_bcp;
 mod ecc;
 mod ecc_det;
 // AES-GCM: on the BCP by default; in software with `bulk_crypto`, where the

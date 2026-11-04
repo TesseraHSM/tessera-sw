@@ -59,20 +59,16 @@ impl<P: HsmPal> Hsm<P> {
     ///
     /// Populates CQE header fields, runs the command pipeline, then
     /// writes session fields and status to the CQE before completion.
-    pub async fn handle_io(&self, mut io: P::Io) {
-        // Gate on partition state — drop IOs for non-enabled partitions.
-        if !self.partition_enabled(&io) {
-            debug!("core", "dropping IO for disabled partition");
-            if let Err(_e) = self.pal().drop_io(io).await {
-                error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
-            }
-            return;
-        }
-
+    pub async fn handle_io(&self, io: P::Io) {
         if io.kind() == HsmIoKind::Bulk {
             self.handle_bulk_io(io).await;
             return;
         }
+
+        // Gate on partition state — drop IOs for non-enabled partitions.
+        let Some(mut io) = self.gate_partition(io).await else {
+            return;
+        };
 
         // Single SQE parse — extract all fields once, populate CQE, validate,
         // and dispatch.
@@ -172,12 +168,31 @@ impl<P: HsmPal> Hsm<P> {
         }
     }
 
+    /// Drops `io` if its partition is not enabled; otherwise hands it back.
+    async fn gate_partition(&self, io: P::Io) -> Option<P::Io> {
+        if self.partition_enabled(&io) {
+            return Some(io);
+        }
+        debug!("core", "dropping IO for disabled partition");
+        if let Err(_e) = self.pal().drop_io(io).await {
+            error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
+        }
+        None
+    }
+
     /// Runs a bulk (fast-path) IO and posts its CQE.
+    ///
+    /// Equivalent to [`handle_io`](Self::handle_io) for a
+    /// [`Bulk`](HsmIoKind::Bulk) IO, without the command pipeline, so a
+    /// platform can run bulk IOs on tasks sized for this path alone.
     ///
     /// The PAL writes the success CQE into the IO's CQE; on error the
     /// core writes the failure CQE from the IO's SQE. The SQ id is stamped
     /// by [`complete_io`](HsmIoController::complete_io).
-    async fn handle_bulk_io(&self, mut io: P::Io) {
+    pub async fn handle_bulk_io(&self, io: P::Io) {
+        let Some(mut io) = self.gate_partition(io).await else {
+            return;
+        };
         if let Err(e) = self.pal().bulk_crypt(&mut io).await {
             debug!("core", "bulk IO failed: {:?}", e);
             let cqe = BulkCqe::error(io.sqe(), 0, e);

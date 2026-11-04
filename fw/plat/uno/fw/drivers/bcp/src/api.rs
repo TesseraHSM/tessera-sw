@@ -63,7 +63,7 @@ const MASK: u16 = (DEPTH - 1) as u16;
 const NUM_ELEMENTS: u32 = DEPTH.trailing_zeros() - 3;
 
 /// Chunks one command may span; see [`BCP_MAX_SRC_LEN`].
-const MAX_CHUNKS: usize = 2;
+const MAX_CHUNKS: usize = 4;
 
 /// SQEs the commands in flight may have outstanding. Each command reserves
 /// one per chunk from submission until it completes: the engine may not
@@ -83,7 +83,7 @@ const IDS: usize = SQE_BUDGET;
 const ID_WAITERS: usize = 32;
 
 /// `free` bitmap with every command ID free.
-const ALL_FREE: u8 = ((1u16 << IDS) - 1) as u8;
+const ALL_FREE: u32 = ((1u64 << IDS) - 1) as u32;
 
 /// Command deadline. One chunk takes microseconds; past this the engine is
 /// presumed stuck, reset, and the commands in flight fail. Well inside the
@@ -96,7 +96,7 @@ const RESET_SPIN: u32 = 100_000;
 /// Driver-internal status for a command abandoned by a reset.
 const STATUS_STALLED: u8 = 0xFF;
 
-const _: () = assert!(DEPTH.is_power_of_two() && DEPTH >= 8 && DEPTH <= 64);
+const _: () = assert!(DEPTH.is_power_of_two() && DEPTH >= 8 && DEPTH <= 32);
 const _: () = assert!(BCP_CQ_COUNT as usize == DEPTH && BCP_DFL_COUNT as usize == DEPTH);
 
 /// AES-256 key length; the engine has no other key size.
@@ -107,6 +107,9 @@ pub const BCP_IV_LEN: usize = 12;
 
 /// GCM tag length.
 pub const BCP_TAG_LEN: usize = 16;
+
+/// XTS tweak length.
+pub const BCP_TWEAK_LEN: usize = 16;
 
 /// Bytes per SQE (chunk), as the FP firmware chunked host commands. The
 /// engine mis-processes a single chunk larger than this, so longer
@@ -138,6 +141,11 @@ pub const BCP_ERR1_TAG_MISMATCH: u32 = 1 << 13;
 /// Key-vault words per key slot.
 const KEY_WORDS: usize = BCP_KEY_LEN / 4;
 
+/// Key-vault slots per command ID: the data key, and the XTS tweak key.
+const KEYS_PER_ID: usize = 2;
+
+const _: () = assert!(IDS * KEYS_PER_ID * KEY_WORDS <= 4096);
+
 /// DFL element size in DWORDs (host command + GCM/XTS aux command).
 const DFL_DWORDS: usize = 32;
 
@@ -168,8 +176,14 @@ const OPCODE_DATA_TRANSFER: u8 = 0;
 /// SQE `CmdOpcode`: abort the command (frees a failed command's slot).
 const OPCODE_ABORT: u8 = 2;
 
+/// SQE `DataProcessType` for XTS encrypt (decrypt is one more).
+const PROCESS_XTS_ENCRYPT: u8 = 1;
+
 /// SQE `DataProcessType` for GCM encrypt (decrypt is one more).
 const PROCESS_GCM_ENCRYPT: u8 = 3;
+
+/// SGL descriptor type (high nibble of byte 15): data block.
+const SGL_TYPE_DATA_BLOCK: u8 = 0;
 
 /// Global error checks the FP firmware enabled: key-vault ECC (16), AXI
 /// write response (20), and AXI read response (25).
@@ -258,12 +272,15 @@ struct CqeDw0 {
     dfl_num: u8,
 }
 
-/// GCM direction.
+/// Cipher direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GcmOp {
+pub enum BcpOp {
     Encrypt,
     Decrypt,
 }
+
+/// GCM direction.
+pub type GcmOp = BcpOp;
 
 /// Source and destination of a GCM command: `[padded_AAD | text]`, which
 /// the engine writes back whole, copying the padded AAD through. Buffers
@@ -319,6 +336,60 @@ pub struct GcmRequest<'a> {
     pub data: GcmData<'a>,
 }
 
+/// Cipher of a [`HostRequest`].
+#[derive(Debug)]
+pub enum HostCipher<'a> {
+    /// AES-256-GCM over `[padded_AAD | text]`, as in [`GcmRequest`], except
+    /// that the text may be empty: an AAD-only command yields the tag over
+    /// the padded AAD and copies the AAD through, as on the FP engine.
+    Gcm {
+        /// AES-256 key ([`BCP_KEY_LEN`] bytes).
+        key: &'a [u8],
+        iv: &'a [u8; BCP_IV_LEN],
+        /// Padded AAD length; a multiple of [`BCP_AAD_ALIGN`] no longer
+        /// than the whole length.
+        aad_len: usize,
+        /// Unpadded AAD length.
+        unpadded_aad_len: usize,
+        /// Expected (engine) tag of a decrypt; ignored on encrypt.
+        tag: &'a [u8; BCP_TAG_LEN],
+    },
+    /// AES-256-XTS.
+    Xts {
+        /// Data key ([`BCP_KEY_LEN`] bytes).
+        key1: &'a [u8],
+        /// Tweak key ([`BCP_KEY_LEN`] bytes).
+        key2: &'a [u8],
+        /// Initial tweak.
+        tweak: &'a [u8; BCP_TWEAK_LEN],
+        /// Data unit length encoding (0 = whole transfer, 1 = 512 B,
+        /// 2 = 4 KiB, 3 = 8 KiB), as in the host submission entry.
+        dul: u8,
+    },
+}
+
+/// One command on host memory: the engine walks the host's SGL
+/// descriptors itself, over the host interface `if_sel`. The source and
+/// destination are both `len` bytes.
+///
+/// The caller validates the descriptors' shape; the engine bounds its
+/// accesses by them and by `len`.
+#[derive(Debug)]
+pub struct HostRequest<'a> {
+    pub op: BcpOp,
+    pub cipher: HostCipher<'a>,
+    /// Bytes to process: a non-zero multiple of [`BCP_TEXT_ALIGN`], at
+    /// most [`BCP_MAX_SRC_LEN`].
+    pub len: usize,
+    /// Source SGL descriptor, as the host wrote it.
+    pub src: &'a [u8; 16],
+    /// Destination SGL descriptor, as the host wrote it.
+    pub dst: &'a [u8; 16],
+    /// AXI interface select of the host function owning the buffers
+    /// (PF `0x10`, VF `n` `0x20 + n`); never 0, which is the SoC.
+    pub if_sel: u8,
+}
+
 /// Engine completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GcmCompletion {
@@ -371,7 +442,7 @@ struct BcpState {
     /// Next completion ring index.
     cq_ci: u16,
     /// Free command IDs (bit N = ID N free).
-    free: u8,
+    free: u32,
     /// SQEs reserved by the commands in flight (at most [`SQE_BUDGET`]).
     reserved: usize,
     /// Tasks waiting for a free command ID.
@@ -442,9 +513,23 @@ impl BcpDriver {
         &'a self,
         req: GcmRequest<'a>,
     ) -> impl Future<Output = HsmResult<GcmCompletion>> + 'a {
-        GcmFuture {
+        CmdFuture {
             bcp: self,
-            req,
+            cmd: Cmd::local(req),
+            id: None,
+        }
+    }
+
+    /// Submit an AES-256-GCM or AES-256-XTS command on host memory and
+    /// await its completion; see [`HostRequest`]. Behaves as
+    /// [`gcm`](Self::gcm) otherwise, cancellation included.
+    pub fn host<'a>(
+        &'a self,
+        req: HostRequest<'a>,
+    ) -> impl Future<Output = HsmResult<GcmCompletion>> + 'a {
+        CmdFuture {
+            bcp: self,
+            cmd: Cmd::host(req),
             id: None,
         }
     }
@@ -481,17 +566,148 @@ impl BcpDriver {
     }
 }
 
-/// The future [`BcpDriver::gcm`] returns. It owns its command from
-/// submission until the completion is consumed, so that dropping it
-/// mid-flight can wait for the engine before the buffers go.
-struct GcmFuture<'a> {
+/// Crypto input of a [`Cmd`].
+enum Aux<'a> {
+    Gcm {
+        iv: &'a [u8; BCP_IV_LEN],
+        aad_len: usize,
+        unpadded_aad_len: usize,
+        /// Expected tag (decrypt only).
+        tag: Option<&'a [u8; BCP_TAG_LEN]>,
+    },
+    Xts {
+        tweak: &'a [u8; BCP_TWEAK_LEN],
+    },
+}
+
+/// A validated command, as the DFL element and SQEs carry it.
+struct Cmd<'a> {
+    process_type: u8,
+    /// XTS data unit length encoding.
+    dul: u8,
+    key1: &'a [u8],
+    key2: Option<&'a [u8]>,
+    /// Source (and destination) length.
+    len: usize,
+    src: [u8; 16],
+    dst: [u8; 16],
+    /// Interface select of all four data / descriptor accesses.
+    if_sel: u8,
+    aux: Aux<'a>,
+}
+
+impl<'a> Cmd<'a> {
+    /// A GCM command on GSRAM buffers, described by data-block descriptors
+    /// over the SoC interface.
+    fn local(req: GcmRequest<'a>) -> HsmResult<Self> {
+        validate(&req)?;
+        let (src, len) = req.data.src();
+        let (dst, _) = req.data.dst();
+        let process_type = match req.op {
+            BcpOp::Encrypt => PROCESS_GCM_ENCRYPT,
+            BcpOp::Decrypt => PROCESS_GCM_ENCRYPT + 1,
+        };
+        Ok(Self {
+            process_type,
+            dul: 0,
+            key1: req.key,
+            key2: None,
+            len,
+            src: data_block(src, len),
+            dst: data_block(dst, len),
+            if_sel: 0,
+            aux: Aux::Gcm {
+                iv: req.iv,
+                aad_len: req.aad_len,
+                unpadded_aad_len: req.unpadded_aad_len,
+                tag: (req.op == BcpOp::Decrypt).then_some(req.tag),
+            },
+        })
+    }
+
+    /// A command on host memory.
+    fn host(req: HostRequest<'a>) -> HsmResult<Self> {
+        if req.len == 0
+            || !req.len.is_multiple_of(BCP_TEXT_ALIGN)
+            || req.len > BCP_MAX_SRC_LEN
+            || req.if_sel == 0
+        {
+            return Err(BcpError::INVALID_DATA_LEN);
+        }
+        let dir = u8::from(req.op == BcpOp::Decrypt);
+        let (process_type, dul, key1, key2, aux) = match req.cipher {
+            HostCipher::Gcm {
+                key,
+                iv,
+                aad_len,
+                unpadded_aad_len,
+                tag,
+            } => {
+                if !aad_len.is_multiple_of(BCP_AAD_ALIGN)
+                    || unpadded_aad_len > aad_len
+                    || aad_len > req.len
+                {
+                    return Err(BcpError::INVALID_DATA_LEN);
+                }
+                let aux = Aux::Gcm {
+                    iv,
+                    aad_len,
+                    unpadded_aad_len,
+                    tag: (req.op == BcpOp::Decrypt).then_some(tag),
+                };
+                (PROCESS_GCM_ENCRYPT + dir, 0, key, None, aux)
+            }
+            HostCipher::Xts {
+                key1,
+                key2,
+                tweak,
+                dul,
+            } => {
+                if dul > 3 || key2.len() != BCP_KEY_LEN {
+                    return Err(BcpError::INVALID_DATA_LEN);
+                }
+                let aux = Aux::Xts { tweak };
+                (PROCESS_XTS_ENCRYPT + dir, dul, key1, Some(key2), aux)
+            }
+        };
+        if key1.len() != BCP_KEY_LEN {
+            return Err(BcpError::INVALID_KEY_LEN);
+        }
+        Ok(Self {
+            process_type,
+            dul,
+            key1,
+            key2,
+            len: req.len,
+            src: *req.src,
+            dst: *req.dst,
+            if_sel: req.if_sel,
+            aux,
+        })
+    }
+}
+
+/// SGL data-block descriptor for `len` bytes at the GSRAM address `addr`.
+fn data_block(addr: u32, len: usize) -> [u8; 16] {
+    let mut d = [0u8; 16];
+    d[..4].copy_from_slice(&addr.to_le_bytes());
+    d[8..12].copy_from_slice(&(len as u32).to_le_bytes());
+    d[15] = SGL_TYPE_DATA_BLOCK << 4;
+    d
+}
+
+/// The future [`BcpDriver::gcm`] and [`BcpDriver::host`] return. It owns
+/// its command from submission until the completion is consumed, so that
+/// dropping it mid-flight can wait for the engine before the buffers go.
+struct CmdFuture<'a> {
     bcp: &'a BcpDriver,
-    req: GcmRequest<'a>,
+    /// The command, or why it is invalid.
+    cmd: HsmResult<Cmd<'a>>,
     /// Command ID while submitted and not yet consumed.
     id: Option<usize>,
 }
 
-impl Future for GcmFuture<'_> {
+impl Future for CmdFuture<'_> {
     type Output = HsmResult<GcmCompletion>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -501,14 +717,14 @@ impl Future for GcmFuture<'_> {
             let id = match this.id {
                 Some(id) => id,
                 None => {
-                    let req = &this.req;
-                    if let Err(e) = validate(req) {
-                        return Poll::Ready(Err(e));
-                    }
+                    let cmd = match &this.cmd {
+                        Ok(cmd) => cmd,
+                        Err(e) => return Poll::Ready(Err(*e)),
+                    };
                     if s.stalled {
                         return Poll::Ready(Err(BcpError::TIMEOUT));
                     }
-                    let chunks = req.data.src().1.div_ceil(BCP_CHUNK_LEN);
+                    let chunks = cmd.len.div_ceil(BCP_CHUNK_LEN);
                     if s.free == 0 || s.reserved + chunks > SQE_BUDGET {
                         s.id_waiters.register(cx.waker());
                         return Poll::Pending;
@@ -531,9 +747,12 @@ impl Future for GcmFuture<'_> {
                     s.reserved += chunks;
                     this.id = Some(id);
 
-                    load_key(id, req.key);
-                    write_dfl(id, req);
-                    submit(s, id, req.op, req.data.src().1);
+                    load_key(key_slot(id, 0), cmd.key1);
+                    if let Some(key2) = cmd.key2 {
+                        load_key(key_slot(id, 1), key2);
+                    }
+                    write_dfl(id, cmd);
+                    submit(s, id, cmd);
                     id
                 }
             };
@@ -552,7 +771,7 @@ impl Future for GcmFuture<'_> {
     }
 }
 
-impl Drop for GcmFuture<'_> {
+impl Drop for CmdFuture<'_> {
     /// Dropped with its command in flight, and the caller is about to free
     /// the command's buffers: wait for the engine to finish with them (or
     /// to be reset past the command's deadline), then release the command.
@@ -798,18 +1017,23 @@ fn bring_up() -> bool {
     true
 }
 
-/// Write a key into the vault slot of command `id`, as little-endian words.
-fn load_key(id: usize, key: &[u8]) {
+/// Key-vault slot `n` (0 = data key, 1 = XTS tweak key) of command `id`.
+fn key_slot(id: usize, n: usize) -> usize {
+    id * KEYS_PER_ID + n
+}
+
+/// Write a key into vault slot `slot`, as little-endian words.
+fn load_key(slot: usize, key: &[u8]) {
     let (words, _) = key.as_chunks::<4>();
     for (i, word) in words.iter().enumerate() {
-        BCP.key_vault[id * KEY_WORDS + i].set(u32::from_le_bytes(*word));
+        BCP.key_vault[slot * KEY_WORDS + i].set(u32::from_le_bytes(*word));
     }
 }
 
-/// Wipe the vault slot of command `id`.
+/// Wipe the vault slots of command `id`.
 fn clear_key(id: usize) {
-    for i in 0..KEY_WORDS {
-        BCP.key_vault[id * KEY_WORDS + i].set(0);
+    for i in 0..KEYS_PER_ID * KEY_WORDS {
+        BCP.key_vault[key_slot(id, 0) * KEY_WORDS + i].set(0);
     }
 }
 
@@ -827,34 +1051,41 @@ fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
     }
 }
 
-/// Fill the DFL element of command `id`: the 64-byte host command with
-/// SGL data-block descriptors (DW6-15), then the GCM aux command (key
-/// index, unpadded AAD length, expected tag, IV, padded AAD length).
+/// Fill the DFL element of command `id`, laid out as the host submission
+/// entry the FP firmware handed the engine: the source length and SGL
+/// descriptor (DW6-10), the destination's (DW11-15), then the crypto
+/// input: for GCM the key slot, unpadded AAD length, expected tag, IV and
+/// padded AAD length; for XTS the tweak.
 ///
-/// The destination is as long as the source: the engine writes the padded
-/// AAD through ahead of the text, as the host fast path expected.
-fn write_dfl(id: usize, req: &GcmRequest<'_>) {
+/// The destination is as long as the source: for GCM the engine writes
+/// the padded AAD through ahead of the text, as the host fast path
+/// expected.
+fn write_dfl(id: usize, cmd: &Cmd<'_>) {
     let mut dw = [0u32; DFL_DWORDS];
-    let (src, src_len) = req.data.src();
-    let (dst, _) = req.data.dst();
-    let len = src_len as u32;
+    let len = cmd.len as u32;
 
-    // Source: length, then an SGL data-block descriptor {addr, len, type 0}.
     dw[6] = len;
-    dw[7] = src;
-    dw[9] = len;
-    // Destination: likewise, as long as the source.
+    put_bytes(&mut dw, 7, &cmd.src);
     dw[11] = len;
-    dw[12] = dst;
-    dw[14] = len;
+    put_bytes(&mut dw, 12, &cmd.dst);
 
-    dw[17] = id as u32;
-    dw[18] = req.unpadded_aad_len as u32;
-    if req.op == GcmOp::Decrypt {
-        put_bytes(&mut dw, 19, req.tag);
+    match cmd.aux {
+        Aux::Gcm {
+            iv,
+            aad_len,
+            unpadded_aad_len,
+            tag,
+        } => {
+            dw[17] = key_slot(id, 0) as u32;
+            dw[18] = unpadded_aad_len as u32;
+            if let Some(tag) = tag {
+                put_bytes(&mut dw, 19, tag);
+            }
+            put_bytes(&mut dw, 23, iv);
+            dw[26] = aad_len as u32;
+        }
+        Aux::Xts { tweak } => put_bytes(&mut dw, DFL_CRYPTO_IN_DW as usize, tweak),
     }
-    put_bytes(&mut dw, 23, req.iv);
-    dw[26] = req.aad_len as u32;
 
     // Burst-write the element: the ring sits in memory the CPU writes
     // uncached, one bus transaction per store, while a store-multiple
@@ -899,14 +1130,14 @@ fn write_abort(sq_idx: usize, id: usize) {
 }
 
 /// Queue command `id`: one SQE per [`BCP_CHUNK_LEN`] chunk of its
-/// `len`-byte source, the first NEW and the last LAST, as the FP firmware
-/// chunked host commands. Later chunks carry only their byte count; the
+/// source, the first NEW and the last LAST, as the FP firmware chunked
+/// host commands. Later chunks carry only their byte count in DW1; the
 /// engine keeps the rest from the first.
-fn submit(s: &mut BcpState, id: usize, op: GcmOp, len: usize) {
-    let process_type = match op {
-        GcmOp::Encrypt => PROCESS_GCM_ENCRYPT,
-        GcmOp::Decrypt => PROCESS_GCM_ENCRYPT + 1,
-    };
+fn submit(s: &mut BcpState, id: usize, cmd: &Cmd<'_>) {
+    let len = cmd.len;
+    // The interface select of the source / destination descriptors and
+    // data, one byte each.
+    let dw3 = u32::from(cmd.if_sel) * 0x0101_0101;
     let mut off = 0;
     while off < len {
         let chunk = (len - off).min(BCP_CHUNK_LEN);
@@ -925,19 +1156,23 @@ fn submit(s: &mut BcpState, id: usize, op: GcmOp, len: usize) {
             .with_dfl_idx(id as u16)
             .with_dfl_num(0);
         let dw1 = if first {
-            SqeDw1::new().with_process_type(process_type).with_sgl(true)
+            SqeDw1::new()
+                .with_process_type(cmd.process_type)
+                .with_sgl(true)
+                .with_xts_data_unit_len(cmd.dul)
         } else {
             SqeDw1::new()
         }
         .with_chunk_byte_cnt(chunk as u16);
-        let dw2 = SqeDw2::new().with_key1_idx(id as u16);
+        let dw2 = SqeDw2::new()
+            .with_key1_idx(key_slot(id, 0) as u16)
+            .with_key2_idx(key_slot(id, 1) as u16);
 
         let e = &GSRAM.bcp_sq[s.sq_pi as usize];
         e.dw0.set(dw0.into());
         e.dw1.set(dw1.into());
         e.dw2.set(dw2.into());
-        // DW3: interface selects, all 0 = SoC AXI.
-        e.dw3.set(0);
+        e.dw3.set(dw3);
         ring(s);
     }
 }

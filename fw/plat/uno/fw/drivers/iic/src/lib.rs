@@ -26,6 +26,7 @@
 //! use tsra_fw_uno_drivers_iic::*;
 //!
 //! let iic = IicDriver::<32>::new(ChannelConfig {
+//!     controller: 0,
 //!     channel: 0,
 //!     isq_base: 0x6109_0000,
 //!     io_pool_base: 0x6108_0000,

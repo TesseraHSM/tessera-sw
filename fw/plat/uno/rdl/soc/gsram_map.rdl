@@ -18,7 +18,10 @@
 //   0x0F000 - 0x11824  Reserved: Admin (CP0) GDMA rings — do not place HSM data here
 //   0x11840 - 0x11E44  OIC queues (OSQ, OCQ, IO_CQ, OCQ tail shadow)
 //   0x12840 - 0x15064  GDMA queues
-//   0x15064 - 0x1BA38  Crypto command buffers (AES, UPKA, SHA)
+//   0x15064 - 0x155A4  Crypto command buffers (AES, UPKA, SHA)
+//   0x16000 - 0x17400  BCP (CDMA) rings
+//   0x17400 - 0x19460  Bulk IIC/OIC queues (controller 1, channel 0)
+//   0x19460 - 0x1A460  Bulk crypto per-IO scratch
 //   0x20C58 - 0xA8D60  Heap (IO_META + SRAM_IO_BUF)
 //   0xA9000 - 0xB8000  HSM self-test/test-hook code and known-answer vectors
 //   0xB8000 - 0xB8041  FP bulk-key slot map (65 × 1-byte table bitmaps)
@@ -333,6 +336,68 @@ regfile io_cq_entry_t {
     io_cq_dw_t DW3 @ 0xC;
 };
 
+// -- Bulk IO SQ Entry - 128 bytes (32 DWORDs) --
+
+regfile bulk_io_sq_entry_t {
+    name = "Bulk IO SQ Entry";
+    desc = "128-byte bulk (fast-path) SQE plus aux, DMA'd from host.";
+    io_sq_dw_t DW0  @ 0x00;
+    io_sq_dw_t DW1  @ 0x04;
+    io_sq_dw_t DW2  @ 0x08;
+    io_sq_dw_t DW3  @ 0x0C;
+    io_sq_dw_t DW4  @ 0x10;
+    io_sq_dw_t DW5  @ 0x14;
+    io_sq_dw_t DW6  @ 0x18;
+    io_sq_dw_t DW7  @ 0x1C;
+    io_sq_dw_t DW8  @ 0x20;
+    io_sq_dw_t DW9  @ 0x24;
+    io_sq_dw_t DW10 @ 0x28;
+    io_sq_dw_t DW11 @ 0x2C;
+    io_sq_dw_t DW12 @ 0x30;
+    io_sq_dw_t DW13 @ 0x34;
+    io_sq_dw_t DW14 @ 0x38;
+    io_sq_dw_t DW15 @ 0x3C;
+    io_sq_dw_t DW16 @ 0x40;
+    io_sq_dw_t DW17 @ 0x44;
+    io_sq_dw_t DW18 @ 0x48;
+    io_sq_dw_t DW19 @ 0x4C;
+    io_sq_dw_t DW20 @ 0x50;
+    io_sq_dw_t DW21 @ 0x54;
+    io_sq_dw_t DW22 @ 0x58;
+    io_sq_dw_t DW23 @ 0x5C;
+    io_sq_dw_t DW24 @ 0x60;
+    io_sq_dw_t DW25 @ 0x64;
+    io_sq_dw_t DW26 @ 0x68;
+    io_sq_dw_t DW27 @ 0x6C;
+    io_sq_dw_t DW28 @ 0x70;
+    io_sq_dw_t DW29 @ 0x74;
+    io_sq_dw_t DW30 @ 0x78;
+    io_sq_dw_t DW31 @ 0x7C;
+};
+
+// -- Bulk IO CQ Entry - 64 bytes (16 DWORDs) --
+
+regfile bulk_io_cq_entry_t {
+    name = "Bulk IO CQ Entry";
+    desc = "64-byte bulk (fast-path) completion written by firmware.";
+    io_cq_dw_t DW0  @ 0x00;
+    io_cq_dw_t DW1  @ 0x04;
+    io_cq_dw_t DW2  @ 0x08;
+    io_cq_dw_t DW3  @ 0x0C;
+    io_cq_dw_t DW4  @ 0x10;
+    io_cq_dw_t DW5  @ 0x14;
+    io_cq_dw_t DW6  @ 0x18;
+    io_cq_dw_t DW7  @ 0x1C;
+    io_cq_dw_t DW8  @ 0x20;
+    io_cq_dw_t DW9  @ 0x24;
+    io_cq_dw_t DW10 @ 0x28;
+    io_cq_dw_t DW11 @ 0x2C;
+    io_cq_dw_t DW12 @ 0x30;
+    io_cq_dw_t DW13 @ 0x34;
+    io_cq_dw_t DW14 @ 0x38;
+    io_cq_dw_t DW15 @ 0x3C;
+};
+
 
 // ══════════════════════════════════════════════════════════════
 // GDMA queue structures
@@ -509,6 +574,13 @@ mem hsm_code_t {
     desc = "Executable HSM self-test/test-hook code and known-answer vectors, loaded by 1SP.";
     mementries = 61440; // 0xA9000..0xB8000; FP slot map begins at 0xB8000.
     memwidth = 8;
+};
+
+mem bulk_scratch_t {
+    desc = "128-byte per-bulk-IO scratch (AES blocks and the GCM tail)
+            that bulk IOs use instead of the per-IO bump allocator.";
+    mementries = 32;
+    memwidth = 32;
 };
 
 
@@ -736,11 +808,27 @@ addrmap io_gsram {
 
     // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
     // may master (0x0F000 - 0xB8000) ───
-    bcp_sqe_t        BCP_SQ[8]           @ 0x16000 += 0x10;   // 0x16000 - 0x16080
-    bcp_cqe_t        BCP_CQ[8]           @ 0x16100 += 0x08;   // 0x16100 - 0x16140
-    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16180;
-    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16184;
-    bcp_dfl_entry_t  BCP_DFL[8]          @ 0x16200 += 0x80;   // 0x16200 - 0x16600
+    bcp_sqe_t        BCP_SQ[32]          @ 0x16000 += 0x10;   // 0x16000 - 0x16200
+    bcp_cqe_t        BCP_CQ[32]          @ 0x16200 += 0x08;   // 0x16200 - 0x16300
+    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16300;
+    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16304;
+    bcp_dfl_entry_t  BCP_DFL[32]         @ 0x16400 += 0x80;   // 0x16400 - 0x17400
+
+    // ─── Bulk IIC/OIC (controller 1, channel 0) — 0x20-aligned; inside
+    // the CDMA window ───
+    isq_entry_t        BULK_ISQ[32]             @ 0x17400 += 0x08;  // 0x17400 - 0x17500
+    icq_entry_t        BULK_ICQ[32]             @ 0x17500 += 0x10;  // 0x17500 - 0x17700
+    queue_shadow_t     BULK_ICQ_TAIL_SHADOW     @ 0x17700;
+    bulk_io_sq_entry_t BULK_IO_SQ[32]           @ 0x17720 += 0x80;  // 0x17720 - 0x18720
+    osq_entry_t        BULK_OSQ[32]             @ 0x18720 += 0x10;  // 0x18720 - 0x18920
+    ocq_entry_t        BULK_OCQ[32]             @ 0x18920 += 0x10;  // 0x18920 - 0x18B20
+    queue_shadow_t     BULK_OCQ_TAIL_SHADOW     @ 0x18B20;
+    bulk_io_cq_entry_t BULK_IO_CQ[32]           @ 0x18B60 += 0x40;  // 0x18B60 - 0x19360
+    io_meta_entry_t    BULK_IO_META[32]         @ 0x19360 += 0x08;  // 0x19360 - 0x19460
+
+    // ─── Bulk crypto per-IO scratch; inside the CDMA / GDMA window. Must
+    // end before 0x1AC58 (Admin heap). ───
+    bulk_scratch_t     BULK_SCRATCH[32]         @ 0x19460 += 0x80;  // 0x19460 - 0x1A460
 
     // ─── Heap (per-IO buffers) — 34 SRAM slots: 0..31 host (IIC), 32 admin,
     //     33 self-test (CAST). IO_META stays 33: only host+admin slots carry

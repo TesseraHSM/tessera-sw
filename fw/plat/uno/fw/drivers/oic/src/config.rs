@@ -6,6 +6,10 @@
 /// Per-channel configuration for [`OicDriver::init`](super::OicDriver::init).
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelConfig {
+    /// Controller index: 0 = Core0 (command path), 1 = fast path. Selects
+    /// the register block at `OIC_BASE + controller * CONTROLLER_STRIDE`.
+    pub controller: u8,
+
     /// Physical channel index (shared for OSQ and OCQ).
     pub channel: u8,
 
@@ -20,6 +24,9 @@ pub struct ChannelConfig {
 
     /// Base address of the IO_CQ array in DTCM.
     pub io_cq_base: u32,
+
+    /// Stride between IO_CQ entries in bytes (e.g. 16, or 64 for bulk).
+    pub io_cq_size: u32,
 
     /// Base address of the IO_META sidecar array in DTCM.
     pub io_meta_base: u32,

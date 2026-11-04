@@ -15,7 +15,6 @@ use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_soc::reset_type;
 use tsra_fw_uno_drivers_soc::SocResetType;
 use tsra_fw_uno_error::HsmResult;
-use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OcqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OsqEntry;
@@ -29,6 +28,9 @@ use tsra_fw_uno_trace::tracing::*;
 
 use crate::ChannelConfig;
 use crate::OicError;
+
+/// Byte stride between the per-controller register blocks.
+pub const CONTROLLER_STRIDE: u32 = 0x4000;
 
 struct TagSlot {
     waker: WakerRegistration,
@@ -46,7 +48,7 @@ struct OicState<const DEPTH: usize> {
 /// Async OIC (Outbound IO Controller) driver.
 ///
 /// One instance per (controller, channel) pair. The controller base
-/// address comes from the generated `OIC_BASE` constant.
+/// address is `OIC_BASE + controller * CONTROLLER_STRIDE`.
 ///
 /// Zero-copy: the OSQ entry points directly to the IO CQ entry in DTCM.
 /// Work item metadata (controller_id, queue_id, queue_index) is read
@@ -69,7 +71,7 @@ pub struct OicDriver<const DEPTH: usize> {
     ocq_tail_shadow: *const u32,
 
     /// IO_CQ array in DTCM.
-    io_cq: *const IoCqEntry,
+    io_cq: *const u8,
 
     /// IO_META sidecar array in DTCM.
     io_meta: *const IoMetaEntry,
@@ -93,6 +95,7 @@ impl<const DEPTH: usize> core::fmt::Debug for OicDriver<DEPTH> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("OicDriver")
             .field("DEPTH", &DEPTH)
+            .field("controller", &self.config.controller)
             .field("channel", &self.channel)
             .finish()
     }
@@ -125,8 +128,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             let _ = Self::_ASSERT_MIN;
         }
 
-        // SAFETY: OIC_BASE is the aligned, permanently mapped OIC register block.
-        let regs = unsafe { StaticRef::new(OIC_BASE as *const OicRegs) };
+        let base = OIC_BASE + u32::from(config.controller) * CONTROLLER_STRIDE;
+        // SAFETY: Each controller's register block is aligned and permanently
+        // mapped at its stride from OIC_BASE.
+        let regs = unsafe { StaticRef::new(base as *const OicRegs) };
 
         let tags = core::array::from_fn(|_| TagSlot {
             waker: WakerRegistration::new(),
@@ -145,7 +150,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             osq_ring: config.osq_base as *mut OsqEntry,
             ocq_ring: config.ocq_base as *const OcqEntry,
             ocq_tail_shadow: config.ocq_tail_shadow as *const u32,
-            io_cq: config.io_cq_base as *const IoCqEntry,
+            io_cq: config.io_cq_base as *const u8,
             io_meta: config.io_meta_base as *const IoMetaEntry,
             state: SingleCell::new(OicState {
                 ocq_head: 0,
@@ -282,8 +287,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     /// and ring the doorbell.
     fn submit(&self, index: u16) -> HsmResult<u16> {
         // SAFETY: The caller supplies an active IO slot whose completion remains live until send.
-        let io_cq_entry = unsafe { &*self.io_cq.add(index as usize) };
-        let data_addr = io_cq_entry as *const _ as u32;
+        let data_addr = unsafe {
+            self.io_cq
+                .add(index as usize * self.config.io_cq_size as usize)
+        } as u32;
         // SAFETY: The active IO slot has a corresponding initialized metadata entry.
         let meta = unsafe { &*self.io_meta.add(index as usize) };
         let queue_id = meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u8;

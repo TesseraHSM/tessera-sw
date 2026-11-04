@@ -25,6 +25,9 @@ use crate::IoMetaEntry;
 use crate::IoMetaQueue;
 use crate::IsqEntry;
 
+/// Byte stride between the per-controller register blocks.
+pub const CONTROLLER_STRIDE: u32 = 0x4000;
+
 /// Mutable driver state — ring indices and async waker.
 struct ChannelState {
     /// ICQ consumer index — FW advances after reading completions.
@@ -94,6 +97,7 @@ impl<const DEPTH: usize> core::fmt::Debug for IicDriver<DEPTH> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("IicDriver")
             .field("DEPTH", &DEPTH)
+            .field("controller", &self.config.controller)
             .field("channel", &self.channel)
             .finish()
     }
@@ -130,8 +134,10 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             let _ = Self::_ASSERT_MIN;
         }
 
-        // SAFETY: IIC_BASE is the aligned, permanently mapped IIC register block.
-        let regs = unsafe { StaticRef::new(IIC_BASE as *const IicRegs) };
+        let base = IIC_BASE + u32::from(config.controller) * CONTROLLER_STRIDE;
+        // SAFETY: Each controller's register block is aligned and permanently
+        // mapped at its stride from IIC_BASE.
+        let regs = unsafe { StaticRef::new(base as *const IicRegs) };
         let isq_ring = config.isq_base as *mut IsqEntry;
 
         Self {

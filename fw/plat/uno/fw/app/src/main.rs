@@ -81,9 +81,10 @@ static HSM: OnceLock<Hsm<UnoHsmPal>> = OnceLock::new();
 /// IO receive loop — runs forever as a single Embassy task.
 ///
 /// Awaits [`HsmIoController::poll_io`] for the next inbound IO from
-/// the IIC driver, then spawns a [`handle_io`] task from the 32-slot
-/// pool. If no pool slots are available, the IO token is silently
-/// dropped and the loop retries on the next iteration.
+/// the IIC drivers, then spawns a [`handle_io`] (command) or
+/// [`handle_bulk_io`] (bulk) task. Each pool is sized to its queue depth
+/// and a task frees its slot in `drop_io` as its last step, so a pool
+/// slot is always available for a received IO.
 ///
 /// # Parameters
 /// - `spawner`: Embassy task spawner used to enqueue [`handle_io`] jobs.
@@ -102,10 +103,17 @@ async fn poll_io(spawner: Spawner) -> ! {
             continue;
         };
 
+        #[cfg(not(feature = "bulk_crypto"))]
+        if io.kind() == HsmIoKind::Bulk {
+            if let Ok(token) = handle_bulk_io(io) {
+                spawner.spawn(token);
+            }
+            continue;
+        }
+
         let Ok(token) = handle_io(io) else {
             continue;
         };
-
         spawner.spawn(token);
     }
 }
@@ -134,6 +142,20 @@ async fn handle_io(io: UnoHsmIo) {
     let hsm = HSM.get().await;
     hsm.pal().certify_pending_unwrapping_key(&io).await;
     hsm.handle_io(io).await;
+}
+
+/// Processes a single bulk (fast-path) IO to completion.
+///
+/// Runs on its own pool, sized to the bulk queue depth, so bulk IOs
+/// cannot exhaust the command pool and the task future carries only the
+/// bulk path.
+///
+/// # Parameters
+/// - `io`: Owned bulk IO token.
+#[cfg(not(feature = "bulk_crypto"))]
+#[embassy_executor::task(pool_size = 32)]
+async fn handle_bulk_io(io: UnoHsmIo) {
+    HSM.get().await.handle_bulk_io(io).await;
 }
 
 /// Dedicated core-liveliness heartbeat task.

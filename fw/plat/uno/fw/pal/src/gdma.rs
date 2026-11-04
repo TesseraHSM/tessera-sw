@@ -39,6 +39,8 @@ use tsra_fw_uno_reg_soc::zero::ZERO_SIZE;
 use tsra_fw_uno_trace::tracing::*;
 use zeroize::Zeroize;
 
+#[cfg(not(feature = "bulk_crypto"))]
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 /// Converts an [`HsmDmaAddr`] (the trait-level 64-bit address) into a
@@ -127,6 +129,73 @@ fn host_interface(part_id: HsmPartId) -> HsmResult<MemInterface> {
     Ok(MemInterface::Host { ctrl_id })
 }
 
+/// Validates a raw host SGL descriptor `desc` for a `len`-byte transfer and
+/// returns the transfer length.
+///
+/// Shared by every engine handed a host descriptor verbatim (GDMA, BCP).
+pub(crate) fn sgl_xfer_len(desc: &[u8; 16], len: usize) -> HsmResult<u32> {
+    // The descriptor's type is the high nibble of its last byte; the
+    // low nibble is `sub_type`.
+    //
+    // A Data Block names the payload directly, so its embedded
+    // length is the transfer length and must match it exactly. A
+    // Segment / Last Segment descriptor instead names a run of
+    // descriptors for the engine to walk, so its length field is a
+    // count of *descriptor* bytes and says nothing about the payload — the transfer length is what the caller asked for,
+    // and the engine gathers that many bytes by following the
+    // segment. Treating a segment descriptor as a data block would
+    // reject the transfer outright and, if forced through, move the
+    // 16-byte descriptor instead of the item.
+    const SGL_TYPE_DATA_BLOCK: u8 = 0x0;
+    const SGL_TYPE_SEGMENT: u8 = 0x2;
+    const SGL_TYPE_LAST_SEGMENT: u8 = 0x3;
+
+    /// One NVMe SGL descriptor on the wire.
+    const SGL_DESC_LEN: u32 = 16;
+    /// The driver backs every SGL segment with whole pages
+    /// (`coh_mem_sz = seg_cnt * PAGE_SIZE`, `tsra_dma_io.c`) and
+    /// rejects an item needing more than one page of descriptors, so
+    /// a segment can never legitimately exceed this.
+    const SGL_SEGMENT_MAX_LEN: u32 = 4096;
+
+    let desc_len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]);
+    let xfer = match desc[15] >> 4 {
+        SGL_TYPE_DATA_BLOCK => {
+            if desc_len as usize != len {
+                return Err(HsmError::InvalidArg);
+            }
+            desc_len
+        }
+        ty @ (SGL_TYPE_SEGMENT | SGL_TYPE_LAST_SEGMENT) => {
+            // The descriptor is forwarded to the engine verbatim, and
+            // the engine uses `desc_len` to bound how many descriptor
+            // bytes it walks. It comes from host memory, so validate
+            // its shape here rather than letting a malformed value
+            // send the engine reading past the segment page.
+            //
+            // A `SEGMENT` needs at least two descriptors: its last one
+            // chains to the next segment rather than describing data,
+            // so a single-descriptor segment would carry no payload
+            // and leave the engine following a chain pointer that is
+            // really the only entry.
+            let min_len = if ty == SGL_TYPE_SEGMENT {
+                2 * SGL_DESC_LEN
+            } else {
+                SGL_DESC_LEN
+            };
+            if desc_len < min_len
+                || desc_len > SGL_SEGMENT_MAX_LEN
+                || !desc_len.is_multiple_of(SGL_DESC_LEN)
+            {
+                return Err(HsmError::InvalidArg);
+            }
+            u32::try_from(len).map_err(|_| HsmError::InvalidArg)?
+        }
+        _ => return Err(HsmError::InvalidArg),
+    };
+    Ok(xfer)
+}
+
 /// Uno platform implementation of [`HsmGdmaController`].
 impl HsmGdmaController for UnoHsmPal {
     async fn copy_mem(
@@ -210,66 +279,7 @@ impl HsmGdmaController for UnoHsmPal {
             return Err(HsmError::UnsupportedCmd);
         }
 
-        // The descriptor's type is the high nibble of its last byte; the
-        // low nibble is `sub_type`.
-        //
-        // A Data Block names the payload directly, so its embedded
-        // length is the transfer length and must match the destination
-        // exactly. A Segment / Last Segment descriptor instead names a
-        // run of descriptors for the engine to walk, so its length field
-        // is a count of *descriptor* bytes and says nothing about the
-        // payload — the transfer length is what the caller asked for,
-        // and the engine gathers that many bytes by following the
-        // segment. Treating a segment descriptor as a data block would
-        // reject the transfer outright and, if forced through, move the
-        // 16-byte descriptor instead of the item.
-        const SGL_TYPE_DATA_BLOCK: u8 = 0x0;
-        const SGL_TYPE_SEGMENT: u8 = 0x2;
-        const SGL_TYPE_LAST_SEGMENT: u8 = 0x3;
-
-        /// One NVMe SGL descriptor on the wire.
-        const SGL_DESC_LEN: u32 = 16;
-        /// The driver backs every SGL segment with whole pages
-        /// (`coh_mem_sz = seg_cnt * PAGE_SIZE`, `tsra_dma_io.c`) and
-        /// rejects an item needing more than one page of descriptors, so
-        /// a segment can never legitimately exceed this.
-        const SGL_SEGMENT_MAX_LEN: u32 = 4096;
-
-        let desc_len = u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]);
-        let len = match desc[15] >> 4 {
-            SGL_TYPE_DATA_BLOCK => {
-                if desc_len as usize != dst.len() {
-                    return Err(HsmError::InvalidArg);
-                }
-                desc_len
-            }
-            ty @ (SGL_TYPE_SEGMENT | SGL_TYPE_LAST_SEGMENT) => {
-                // The descriptor is forwarded to the engine verbatim, and
-                // the engine uses `desc_len` to bound how many descriptor
-                // bytes it walks. It comes from host memory, so validate
-                // its shape here rather than letting a malformed value
-                // send the engine reading past the segment page.
-                //
-                // A `SEGMENT` needs at least two descriptors: its last one
-                // chains to the next segment rather than describing data,
-                // so a single-descriptor segment would carry no payload
-                // and leave the engine following a chain pointer that is
-                // really the only entry.
-                let min_len = if ty == SGL_TYPE_SEGMENT {
-                    2 * SGL_DESC_LEN
-                } else {
-                    SGL_DESC_LEN
-                };
-                if desc_len < min_len
-                    || desc_len > SGL_SEGMENT_MAX_LEN
-                    || !desc_len.is_multiple_of(SGL_DESC_LEN)
-                {
-                    return Err(HsmError::InvalidArg);
-                }
-                u32::try_from(dst.len()).map_err(|_| HsmError::InvalidArg)?
-            }
-            _ => return Err(HsmError::InvalidArg),
-        };
+        let len = sgl_xfer_len(desc, dst.len())?;
 
         let src_addr = sgl_desc_buf(desc);
         let dst_addr = device_dma_buf(dst.as_mut_ptr(), len);
@@ -310,6 +320,46 @@ impl HsmGdmaController for UnoHsmPal {
 }
 
 impl UnoHsmPal {
+    /// Copy `len` bytes of device memory at `src` to the host buffer named
+    /// by the raw SGL descriptor `desc`, which must describe exactly `len`
+    /// bytes.
+    #[cfg(not(feature = "bulk_crypto"))]
+    async fn copy_to_host_sgl_raw(
+        &self,
+        io: &UnoHsmIo,
+        src: *const u8,
+        len: usize,
+        desc: &[u8; 16],
+    ) -> HsmResult<()> {
+        let len = sgl_xfer_len(desc, len)?;
+        self.gdma
+            .copy_mem(
+                device_dma_buf(src, len),
+                MemInterface::Device,
+                len,
+                sgl_desc_buf(desc),
+                host_interface(io.pid())?,
+                len,
+            )?
+            .await
+    }
+
+    /// Zero the first `len` (at most [`ZERO_SIZE`]) bytes of the host
+    /// buffer named by the raw SGL descriptor `desc`.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) async fn zero_host_sgl(
+        &self,
+        io: &UnoHsmIo,
+        desc: &[u8; 16],
+        len: usize,
+    ) -> HsmResult<()> {
+        if len > ZERO_SIZE as usize {
+            return Err(HsmError::InvalidArg);
+        }
+        self.copy_to_host_sgl_raw(io, ZERO_BASE as *const u8, len, desc)
+            .await
+    }
+
     /// GDMA-zero a GDMA-reachable device region `[dst_ptr, dst_ptr + len)`.
     ///
     /// Copies zeros from the [`ZERO_BASE`] window, chunked to its
@@ -414,7 +464,7 @@ impl UnoHsmPal {
 ///
 /// `ptr` must be valid for writes of `len` bytes.
 #[inline]
-unsafe fn cpu_zeroize(ptr: *mut u8, len: usize) {
+pub(crate) unsafe fn cpu_zeroize(ptr: *mut u8, len: usize) {
     // Byte-wise head up to the first 8-byte boundary (empty when the
     // caller passes an 8-aligned region base, which is the normal case).
     let head = ((8 - (ptr as usize & 7)) & 7).min(len);

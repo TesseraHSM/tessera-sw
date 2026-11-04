@@ -19,6 +19,16 @@ pub mod interrupt {
         #[allow(non_camel_case_types)]
         OIC_OCQ = 110,
 
+        /// IIC inbound completion queue, FP1 (bulk) channel (IRQ100,
+        /// ISPR3 bit 4).
+        #[allow(non_camel_case_types)]
+        IIC_ICQ_FP1 = 100,
+
+        /// OIC outbound completion queue, FP1 (bulk) channel (IRQ107,
+        /// ISPR3 bit 11).
+        #[allow(non_camel_case_types)]
+        OIC_OCQ_FP1 = 107,
+
         /// GDMA completion queue (IRQ66, ISPR2 bit 2).
         #[allow(non_camel_case_types)]
         GDMA_CQ = 66,
@@ -172,5 +182,6 @@ pub static __INTERRUPTS: [Option<unsafe extern "C" fn()>; 224] = {
     // `tsra_fw_uno_fault`); NVIC-vectored so it preempts a spinning/halted core.
     table[89] = Some(TCON_WAKEUP1);
     // 129 = INTC_IPC — polled, no ISR
+    // 100 = IIC_ICQ_FP1, 107 = OIC_OCQ_FP1 — polled, no ISR
     table
 };

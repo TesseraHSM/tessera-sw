@@ -6,6 +6,10 @@
 /// Per-channel configuration for [`IicDriver::init`](super::IicDriver::init).
 #[derive(Debug, Clone, Copy)]
 pub struct ChannelConfig {
+    /// Controller index: 0 = Core0 (command path), 1 = fast path. Selects
+    /// the register block at `IIC_BASE + controller * CONTROLLER_STRIDE`.
+    pub controller: u8,
+
     /// Physical channel index (shared for ISQ and ICQ).
     pub channel: u8,
 
@@ -15,7 +19,7 @@ pub struct ChannelConfig {
     /// Base address of the IO_SQ receive buffer pool.
     pub io_pool_base: u32,
 
-    /// Size of each receive buffer in bytes (e.g. 64).
+    /// Size of each receive buffer in bytes (e.g. 64, or 128 for bulk).
     /// Must be a multiple of 16. Used as both the stride between
     /// buffers and encoded as `buf_size >> 4` for the hardware register.
     pub io_size: u32,
