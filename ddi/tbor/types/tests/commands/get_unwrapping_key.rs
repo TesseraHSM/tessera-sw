@@ -13,8 +13,6 @@
 //! * Stability — a second call returns the same (stable) key.
 //! * Role access — Crypto-User sessions can also fetch the key.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
@@ -28,6 +26,7 @@ use tsra_ddi_tbor_types::PSK_LEN;
 use tsra_ddi_tbor_types::UNWRAPPING_PUB_KEY_LEN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
+use crate::commands::unwrap_key::get_unwrapping_key;
 
 const RSA_2048_MODULUS_LEN: usize = 256;
 const RSA_PUBLIC_EXPONENT: u32 = 65_537;
@@ -41,12 +40,9 @@ fn get_unwrapping_key_returns_rsa_pub_key() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
-    let req = TborGetUnwrappingKeyReq {
-        session_id: session.session_id,
-    };
-    let resp = ctx.tbor(&req).expect("GetUnwrappingKey");
+    let pub_key = get_unwrapping_key(&ctx, session.session_id);
 
-    assert_valid_unwrapping_pub_key(&resp.pub_key);
+    assert_valid_unwrapping_pub_key(&pub_key);
 }
 
 /// Returns the same stable partition unwrapping key across repeated calls.
@@ -55,15 +51,12 @@ fn get_unwrapping_key_is_stable() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
-    let req = TborGetUnwrappingKeyReq {
-        session_id: session.session_id,
-    };
-    let first = ctx.tbor(&req).expect("first GetUnwrappingKey");
-    let second = ctx.tbor(&req).expect("second GetUnwrappingKey");
+    let first = get_unwrapping_key(&ctx, session.session_id);
+    let second = get_unwrapping_key(&ctx, session.session_id);
 
     // The unwrapping key is a stable partition key — not regenerated.
     assert_eq!(
-        first.pub_key, second.pub_key,
+        first, second,
         "the unwrapping key must be stable across calls",
     );
 }
@@ -97,19 +90,14 @@ fn get_unwrapping_key_available_to_cu() {
 
     let session = ctx.session_open_finish(pending).expect("finish CU session");
 
-    let resp = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey must be available to Crypto-User sessions");
-
+    let pub_key = get_unwrapping_key(&ctx, session.session_id);
     assert_eq!(
-        resp.pub_key.len(),
+        pub_key.len(),
         UNWRAPPING_PUB_KEY_LEN,
         "unwrapping pub key must be the pinned length",
     );
 
-    let (modulus, exponent) = resp.pub_key.split_at(RSA_2048_MODULUS_LEN);
+    let (modulus, exponent) = pub_key.split_at(RSA_2048_MODULUS_LEN);
 
     assert!(
         modulus.iter().any(|&byte| byte != 0),
@@ -141,7 +129,7 @@ fn get_unwrapping_key_closed_session_rejected() {
 
     ctx.session_close(session_id).expect("close CO session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborGetUnwrappingKeyReq { session_id },
         TborStatus::SessionNotFound,
     );
@@ -155,11 +143,7 @@ fn get_unwrapping_key_stable_across_co_sessions() {
     // Provision/finalize the partition once.
     let first_session = finalized_co_session(&ctx);
 
-    let first = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: first_session.session_id,
-        })
-        .expect("GetUnwrappingKey from first CO session");
+    let first = get_unwrapping_key(&ctx, first_session.session_id);
 
     ctx.session_close(first_session.session_id)
         .expect("close first CO session");
@@ -176,14 +160,10 @@ fn get_unwrapping_key_stable_across_co_sessions() {
         .session_open_finish(pending)
         .expect("finish second CO session");
 
-    let second = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: second_session.session_id,
-        })
-        .expect("GetUnwrappingKey from second CO session");
+    let second = get_unwrapping_key(&ctx, second_session.session_id);
 
     assert_eq!(
-        first.pub_key, second.pub_key,
+        first, second,
         "partition unwrapping key must remain stable across CO sessions",
     );
 }
@@ -196,11 +176,7 @@ fn get_unwrapping_key_same_for_co_and_cu() {
     // Finalize the partition and read the unwrapping key as CO.
     let co_session = finalized_co_session(&ctx);
 
-    let co_resp = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: co_session.session_id,
-        })
-        .expect("GetUnwrappingKey from CO session");
+    let co_pub_key = get_unwrapping_key(&ctx, co_session.session_id);
 
     // Close CO before opening the CU bootstrap session.
     ctx.session_close(co_session.session_id)
@@ -226,14 +202,10 @@ fn get_unwrapping_key_same_for_co_and_cu() {
 
     let cu_session = ctx.session_open_finish(pending).expect("finish CU session");
 
-    let cu_resp = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: cu_session.session_id,
-        })
-        .expect("GetUnwrappingKey from CU session");
+    let cu_pub_key = get_unwrapping_key(&ctx, cu_session.session_id);
 
     assert_eq!(
-        co_resp.pub_key, cu_resp.pub_key,
+        co_pub_key, cu_pub_key,
         "CO and CU must observe the same partition unwrapping key",
     );
 }
@@ -271,7 +243,7 @@ fn get_unwrapping_key_unknown_session_rejected() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborGetUnwrappingKeyReq {
             session_id: u16::MAX,
         },
@@ -310,11 +282,7 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
         .session_open_finish(pending)
         .expect("finish first CU session");
 
-    let first = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: first_session.session_id,
-        })
-        .expect("GetUnwrappingKey from first CU session");
+    let first = get_unwrapping_key(&ctx, first_session.session_id);
 
     ctx.session_close(first_session.session_id)
         .expect("close first CU session");
@@ -330,14 +298,10 @@ fn get_unwrapping_key_stable_across_cu_sessions() {
         .session_open_finish(pending)
         .expect("finish second CU session");
 
-    let second = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: second_session.session_id,
-        })
-        .expect("GetUnwrappingKey from second CU session");
+    let second = get_unwrapping_key(&ctx, second_session.session_id);
 
     assert_eq!(
-        first.pub_key, second.pub_key,
+        first, second,
         "partition unwrapping key must remain stable across CU sessions",
     );
 }
@@ -349,23 +313,15 @@ fn get_unwrapping_key_stable_across_co_psk_rotation() {
 
     let session = finalized_co_session(&ctx);
 
-    let before = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey before CO PSK rotation");
+    let before = get_unwrapping_key(&ctx, session.session_id);
 
     ctx.psk_change(&session, &SECOND_ROTATED_CO_PSK)
         .expect("rotate CO PSK a second time");
 
-    let after = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey after CO PSK rotation");
+    let after = get_unwrapping_key(&ctx, session.session_id);
 
     assert_eq!(
-        before.pub_key, after.pub_key,
+        before, after,
         "CO PSK rotation must not change the partition unwrapping key",
     );
 }
@@ -397,26 +353,17 @@ fn get_unwrapping_key_stable_across_cu_psk_rotation() {
         .expect("open CU session");
 
     let session = ctx.session_open_finish(pending).expect("finish CU session");
-
-    let before = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey before CU PSK rotation");
+    let before = get_unwrapping_key(&ctx, session.session_id);
 
     let second_cu_psk = [0x6B; PSK_LEN];
 
     ctx.psk_change(&session, &second_cu_psk)
         .expect("rotate CU PSK a second time");
 
-    let after = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey after CU PSK rotation");
+    let after = get_unwrapping_key(&ctx, session.session_id);
 
     assert_eq!(
-        before.pub_key, after.pub_key,
+        before, after,
         "CU PSK rotation must not change the partition unwrapping key",
     );
 }
@@ -428,11 +375,7 @@ fn get_unwrapping_key_stable_across_role_transitions() {
 
     let first_co = finalized_co_session(&ctx);
 
-    let first = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: first_co.session_id,
-        })
-        .expect("GetUnwrappingKey from first CO session");
+    let first = get_unwrapping_key(&ctx, first_co.session_id);
 
     ctx.session_close(first_co.session_id)
         .expect("close first CO session");
@@ -455,11 +398,7 @@ fn get_unwrapping_key_stable_across_role_transitions() {
 
     let cu_session = ctx.session_open_finish(pending).expect("finish CU session");
 
-    let middle = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: cu_session.session_id,
-        })
-        .expect("GetUnwrappingKey from CU session");
+    let middle = get_unwrapping_key(&ctx, cu_session.session_id);
 
     ctx.session_close(cu_session.session_id)
         .expect("close CU session");
@@ -476,17 +415,13 @@ fn get_unwrapping_key_stable_across_role_transitions() {
         .session_open_finish(pending)
         .expect("finish second CO session");
 
-    let last = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: second_co.session_id,
-        })
-        .expect("GetUnwrappingKey from second CO session");
+    let last = get_unwrapping_key(&ctx, second_co.session_id);
 
-    assert_eq!(first.pub_key, middle.pub_key);
-    assert_eq!(first.pub_key, last.pub_key);
+    assert_eq!(first, middle);
+    assert_eq!(first, last);
 }
 
-/// Validates the HSM wire-format RSA-2048 unwrapping public key.
+/// validates the HSM wire-format RSA-2048 unwrapping public key.
 fn assert_valid_unwrapping_pub_key(pub_key: &[u8]) {
     assert_eq!(
         pub_key.len(),

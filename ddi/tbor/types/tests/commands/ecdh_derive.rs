@@ -16,8 +16,6 @@
 //! primitive's correctness is covered by the MBOR `EcdhKeyExchange` tests and
 //! the std-PAL ECC driver tests, which share the same `pal.ecdh_derive`.
 
-#![cfg(feature = "emu")]
-
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::ExportableKey;
@@ -402,7 +400,7 @@ fn ecdh_derive_unknown_session_rejected() {
     let (_, peer_pub) = generate_in_scope(&ctx, session.session_id, SCOPE_LOCAL, ECC_CURVE_P256);
     assert_ne!(session.session_id, u16::MAX, "test requires an unused id");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborEcdhDeriveReq {
             session_id: u16::MAX,
             scope: SCOPE_LOCAL,

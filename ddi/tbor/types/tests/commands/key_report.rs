@@ -29,17 +29,11 @@
 //! * IV/ciphertext tampering fails authentication; the original key still works.
 //! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
 
-#[cfg(feature = "emu")]
 use tsra_crypto::EccKeyOp;
-#[cfg(feature = "emu")]
 use tsra_crypto::EccPrivateKey;
-#[cfg(feature = "emu")]
 use tsra_crypto::ExportableKey;
-#[cfg(feature = "emu")]
 use tsra_crypto::KeyGenerationOp;
-#[cfg(feature = "emu")]
 use tsra_crypto::RsaKeyOp;
-#[cfg(feature = "emu")]
 use tsra_crypto::RsaPrivateKey;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
@@ -56,19 +50,12 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_AES;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_ECC;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_HMAC_SHA256;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_HMAC_SHA384;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_HMAC_SHA512;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_RSA;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_RSA_CRT;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::KEY_REPORT_MASKED_KEY_MAX_LEN;
@@ -82,11 +69,9 @@ use crate::commands::common::SCOPE_EPHEMERAL;
 use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
-#[cfg(feature = "emu")]
 use crate::commands::unwrap_key::unwrap;
 
 /// Verifies an imported RSA or RSA-CRT key report against the host public key.
-#[cfg(feature = "emu")]
 fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
     use tsra_ddi_mbor_sim::attestation::KeyAttester;
     use tsra_ddi_mbor_sim::crypto::ecc::EccOp;
@@ -536,7 +521,6 @@ fn key_report_generated_ecc_all_curves() {
 
 /// Rejects every supported symmetric key class because KeyReport only
 /// attests asymmetric keys that have a public component.
-#[cfg(feature = "emu")]
 #[test]
 fn key_report_rejects_all_symmetric_key_classes() {
     let ctx = TestCtx::new();
@@ -675,7 +659,6 @@ fn key_report_rejects_tampered_iv_and_ciphertext() {
 
 /// Attests imported ECC keys across P-256, P-384, and P-521 using platform-appropriate key sizes.
 /// Verifies imported ECC key reports against independently generated host public keys.
-#[cfg(feature = "emu")]
 #[test]
 fn key_report_imported_ecc_all_curves() {
     let ctx = TestCtx::new();
@@ -1190,49 +1173,42 @@ fn key_report_p521_with_max_label() {
 
 /// Verifies a signed report for an imported RSA-2048 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA, 256);
 }
 
 /// Verifies a signed report for an imported RSA-CRT-2048 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA_CRT, 256);
 }
 
 /// Verifies a signed report for an imported RSA-3072 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_3072_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA, 384);
 }
 
 /// Verifies a signed report for an imported RSA-4096 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_4096_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA, 512);
 }
 
 /// Verifies a signed report for an imported RSA-CRT-3072 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_3072_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA_CRT, 384);
 }
 
 /// Verifies a signed report for an imported RSA-CRT-4096 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_4096_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA_CRT, 512);
 }
 
 /// Verifies that tampering with an imported RSA/RSA-CRT masked key
 /// is rejected without invalidating the original key.
-#[cfg(feature = "emu")]
 fn imported_rsa_tampering_rejected(class: u8) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
@@ -1285,20 +1261,17 @@ fn imported_rsa_tampering_rejected(class: u8) {
 
 /// Rejects tampered imported RSA masked keys.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_tampering_rejected() {
     imported_rsa_tampering_rejected(KEY_CLASS_RSA);
 }
 
 /// Rejects tampered imported RSA-CRT masked keys.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_tampering_rejected() {
     imported_rsa_tampering_rejected(KEY_CLASS_RSA_CRT);
 }
 
 /// Verifies RSA/RSA-CRT authenticated metadata tampering fails GCM verification.
-#[cfg(feature = "emu")]
 fn imported_rsa_metadata_tampering_rejected(class: u8) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
@@ -1346,20 +1319,17 @@ fn imported_rsa_metadata_tampering_rejected(class: u8) {
 
 /// Rejects authenticated metadata tampering on an imported RSA key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_metadata_tampering_rejected() {
     imported_rsa_metadata_tampering_rejected(KEY_CLASS_RSA);
 }
 
 /// Rejects authenticated metadata tampering on an imported RSA-CRT key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_metadata_tampering_rejected() {
     imported_rsa_metadata_tampering_rejected(KEY_CLASS_RSA_CRT);
 }
 
 /// Rejects an RSA/RSA-CRT KeyReport request with an invalid session ID.
-#[cfg(feature = "emu")]
 fn imported_rsa_invalid_session_rejected(class: u8) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
@@ -1373,7 +1343,7 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
     let masked_key = imported.masked_key;
     let report_data = sample_report_data();
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: u16::MAX,
@@ -1398,14 +1368,12 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
 
 /// Rejects an imported RSA KeyReport request with an invalid session.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_invalid_session_rejected() {
     imported_rsa_invalid_session_rejected(KEY_CLASS_RSA);
 }
 
 /// Rejects an imported RSA-CRT KeyReport request with an invalid session.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_invalid_session_rejected() {
     imported_rsa_invalid_session_rejected(KEY_CLASS_RSA_CRT);
 }

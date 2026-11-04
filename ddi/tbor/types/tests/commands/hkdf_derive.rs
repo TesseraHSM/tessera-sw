@@ -18,8 +18,6 @@
 //! covered by the MBOR `HkdfDerive` tests and the std-PAL KDF driver
 //! tests, which share the same `pal.hkdf_extract` / `pal.hkdf_expand`.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
@@ -528,7 +526,7 @@ fn hkdf_derive_invalid_session_id_rejected() {
     let session = finalized_co_session(&ctx);
     let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHkdfDeriveReq {
             session_id: u16::MAX,
             scope: SCOPE_LOCAL,
@@ -720,7 +718,7 @@ fn hkdf_derive_cu_invalid_session_id_rejected() {
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHkdfDeriveReq {
             session_id: u16::MAX,
             scope: SCOPE_LOCAL,
