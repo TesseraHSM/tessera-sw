@@ -10,9 +10,11 @@ use std::net::TcpStream;
 use std::os::fd::IntoRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use nix::sys::socket::connect;
@@ -111,6 +113,22 @@ enum SocketStream {
     Vsock(VsockStream),
 }
 
+impl SocketStream {
+    /// Set (or, with `None`, clear) a read deadline, regardless of
+    /// transport. Used to bound the best-effort leaked-session cleanup
+    /// ([`DdiSockDev::close_leaked_session_locked`]) so an unresponsive
+    /// peer can't hold the stream mutex forever.
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_read_timeout(timeout),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.set_read_timeout(timeout),
+            #[cfg(target_os = "linux")]
+            Self::Vsock(stream) => stream.set_read_timeout(timeout),
+        }
+    }
+}
+
 impl Read for SocketStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -152,6 +170,41 @@ struct VsockStream {
 
 #[cfg(target_os = "linux")]
 impl VsockStream {
+    /// Set (or, with `None`, clear) `SO_RCVTIMEO` on the raw `AF_VSOCK`
+    /// socket. Neither `std` nor `nix` 0.26 expose a safe wrapper for
+    /// this option on a bare fd, so it's set directly via `libc`.
+    #[allow(unsafe_code)]
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        let tv = match timeout {
+            Some(d) => libc::timeval {
+                tv_sec: d.as_secs() as libc::time_t,
+                tv_usec: libc::suseconds_t::from(d.subsec_micros()),
+            },
+            // A zeroed timeval disables the timeout (block indefinitely),
+            // matching `SO_RCVTIMEO`'s documented default.
+            None => libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+        };
+        // SAFETY: `self.fd` is a valid, open socket for the lifetime of
+        // `self` (closed only by `Drop`); `tv` is a valid, correctly
+        // sized `timeval` for the duration of this call.
+        let ret = unsafe {
+            libc::setsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                std::ptr::addr_of!(tv).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     fn connect(cid: u32, port: u32) -> std::io::Result<Self> {
         let fd = socket(
             AddressFamily::Vsock,
@@ -231,6 +284,12 @@ pub(crate) fn socket_path() -> String {
     std::env::var(SOCK_PATH_ENV).unwrap_or_else(|_| DEFAULT_SOCK_PATH.to_owned())
 }
 
+/// Deadline for the best-effort leaked-session `CloseSession` cleanup
+/// (see [`DdiSockDev::close_leaked_session_locked`]). Bounds how long an
+/// unresponsive peer can hold the stream mutex; on expiry the connection
+/// is retired rather than reused.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A connected socket DDI device.
 ///
 /// Wraps a single TCP, Unix-domain, or Linux VSOCK connection to the server. Requests
@@ -243,6 +302,14 @@ pub struct DdiSockDev {
     stream: Arc<Mutex<SocketStream>>,
     cmd_counter: Arc<AtomicU16>,
     device_kind: DdiDeviceKind,
+    // Set once a best-effort leaked-session cleanup exchange (see
+    // `close_leaked_session_locked`) times out: a late response for that
+    // exchange may still be unread on the wire, so reusing the stream for
+    // any further request risks reading that stale response instead.
+    // Every clone shares this flag (and the stream), so every clone is
+    // retired together rather than only the one that observed the
+    // timeout.
+    retired: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for DdiSockDev {
@@ -251,6 +318,20 @@ impl std::fmt::Debug for DdiSockDev {
             .field("device_kind", &self.device_kind)
             .finish_non_exhaustive()
     }
+}
+
+/// Outcome of [`DdiSockDev::close_leaked_session_locked`].
+enum CloseLeakedSessionOutcome {
+    /// The cleanup either succeeded or failed for an ordinary reason
+    /// (bad encode, device error, etc.); the stream had no exchange left
+    /// outstanding and is safe for the next caller to reuse.
+    Done,
+    /// The cleanup's `CloseSession` exchange hit `CLEANUP_TIMEOUT` before
+    /// the peer replied. A late response may still arrive on the wire
+    /// for it, so the stream can no longer be trusted to pair reads with
+    /// the request that caused them; the connection must be retired
+    /// instead of reused.
+    TimedOut,
 }
 
 impl DdiSockDev {
@@ -300,11 +381,21 @@ impl DdiSockDev {
             // The firmware reports a physical device, so the host codec
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
+            retired: Arc::new(AtomicBool::new(false)),
         })
     }
 
     fn next_cmd_id(&self) -> u16 {
         self.cmd_counter.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Error returned for any request on a connection the best-effort
+    /// leaked-session cleanup has already retired (see `retired`).
+    fn retired_err() -> DdiError {
+        DdiError::IoError(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "connection retired after a leaked-session cleanup timeout",
+        ))
     }
 
     /// Exchange one submission with the server over an already-locked
@@ -331,6 +422,9 @@ impl DdiSockDev {
     ///
     /// Maps a nonzero transport status to a [`DdiError`].
     fn exchange(&self, req: &Request) -> DdiResult<Response> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
         let mut stream = self.stream.lock();
         Self::exchange_locked(&mut stream, req)
     }
@@ -350,6 +444,9 @@ impl DdiSockDev {
         payload: Vec<u8>,
         oob_items: Vec<OobItem>,
     ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
         let cmd_id = self.next_cmd_id();
         let mut stream = self.stream.lock();
         Self::submit_locked(
@@ -471,15 +568,19 @@ impl DdiSockDev {
     /// [`DdiDev::exec_op_mbor`]), so nothing local would otherwise ever
     /// close it either.
     ///
-    /// Errors are intentionally discarded by the caller: this is a
-    /// best-effort reclaim on top of an already-failing exchange, and the
-    /// original error is what should surface to the caller either way.
+    /// This exchange is bounded by `CLEANUP_TIMEOUT`: a peer that never
+    /// answers `CloseSession` must not block the caller (or any clone
+    /// sharing this stream, since they share the same mutex) forever.
+    /// Errors other than that timeout are intentionally discarded by the
+    /// caller: this is a best-effort reclaim on top of an
+    /// already-failing exchange, and the original error is what should
+    /// surface to the caller either way.
     fn close_leaked_session_locked(
         stream: &mut SocketStream,
         cmd_id: u16,
         pre_encode: bool,
         leaked_id: u16,
-    ) -> DdiResult<()> {
+    ) -> CloseLeakedSessionOutcome {
         let req = DdiCloseSessionCmdReq {
             hdr: DdiReqHdr {
                 op: DdiOp::CloseSession,
@@ -496,13 +597,20 @@ impl DdiSockDev {
         let mut buf = vec![0u8; DST_CAP as usize];
         let req_len = {
             let mut enc = MborEncoder::new(buf.as_mut_slice(), pre_encode);
-            req.mbor_encode(&mut enc)
-                .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
+            if req.mbor_encode(&mut enc).is_err() {
+                return CloseLeakedSessionOutcome::Done;
+            }
             enc.position()
         };
         buf.truncate(req_len);
 
-        Self::submit_locked(
+        if stream.set_read_timeout(Some(CLEANUP_TIMEOUT)).is_err() {
+            // Couldn't even arm the deadline: don't risk an unbounded
+            // wait, retire the connection without attempting the
+            // exchange.
+            return CloseLeakedSessionOutcome::TimedOut;
+        }
+        let result = Self::submit_locked(
             stream,
             cmd_id,
             OP_MBOR,
@@ -510,8 +618,22 @@ impl DdiSockDev {
             Some(leaked_id),
             buf,
             Vec::new(),
-        )?;
-        Ok(())
+        );
+        // Clear the deadline so ordinary (non-cleanup) exchanges sharing
+        // this stream aren't bounded by it.
+        let _ = stream.set_read_timeout(None);
+
+        match result {
+            Err(DdiError::IoError(ref e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                CloseLeakedSessionOutcome::TimedOut
+            }
+            _ => CloseLeakedSessionOutcome::Done,
+        }
     }
 
     /// Encode a TBOR request, submit it with `oob_items`, and decode the
@@ -652,6 +774,9 @@ impl DdiDev for DdiSockDev {
         req: &T,
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
         let (pre_encode, post_decode) = match self.device_kind {
             DdiDeviceKind::Physical => (true, true),
             _ => (false, false),
@@ -724,12 +849,17 @@ impl DdiDev for DdiSockDev {
             Err(_) => {
                 if session_ctrl == SessionControlKind::Open {
                     if let Some(leaked_id) = hdr.sess_id {
-                        let _ = Self::close_leaked_session_locked(
-                            &mut stream,
-                            self.next_cmd_id(),
-                            pre_encode,
-                            leaked_id,
-                        );
+                        if matches!(
+                            Self::close_leaked_session_locked(
+                                &mut stream,
+                                self.next_cmd_id(),
+                                pre_encode,
+                                leaked_id,
+                            ),
+                            CloseLeakedSessionOutcome::TimedOut
+                        ) {
+                            self.retired.store(true, Ordering::Release);
+                        }
                     }
                 }
                 return Err(DdiError::MborError(MborError::DecodeError));
@@ -763,12 +893,17 @@ impl DdiDev for DdiSockDev {
             if let Some(leaked_id) =
                 open_session_leaked_id(hdr.sess_id, typed_resp.resp_session_id())
             {
-                let _ = Self::close_leaked_session_locked(
-                    &mut stream,
-                    self.next_cmd_id(),
-                    pre_encode,
-                    leaked_id,
-                );
+                if matches!(
+                    Self::close_leaked_session_locked(
+                        &mut stream,
+                        self.next_cmd_id(),
+                        pre_encode,
+                        leaked_id,
+                    ),
+                    CloseLeakedSessionOutcome::TimedOut
+                ) {
+                    self.retired.store(true, Ordering::Release);
+                }
             }
             return Err(DdiError::MborError(MborError::DecodeError));
         }
@@ -1147,6 +1282,7 @@ mod tests {
             stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
             cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Physical,
+            retired: Arc::new(AtomicBool::new(false)),
         };
         let peer = std::thread::spawn(move || {
             let request = Request::read_from(&mut server).expect("request");

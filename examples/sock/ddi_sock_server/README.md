@@ -111,8 +111,14 @@ endpoint:
 
 ```bash
 TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run --test-threads 1 --features sock --package tsra_api_tests
-TSRA_DDI_SOCK=unix:///tmp/ddi_sock_server.sock cargo nextest run --test-threads 1 --features sock --package tsra_ddi_mbor_types --test tsra_ddi_tests
+TSRA_DDI_SOCK=/tmp/ddi_sock_server.sock cargo nextest run --test-threads 1 --features sock --package tsra_ddi_mbor_types --test tsra_ddi_tests
 ```
+
+Note the bare path (no `unix://` prefix) for the Unix client: only the
+server CLI accepts `unix://`; `DdiSockDev::connect` recognizes `tcp://` and
+VSOCK prefixes but passes anything else straight to `UnixStream::connect`,
+so a `unix://` prefix would be treated as a literal (and nonexistent)
+filesystem path.
 
 See the [`api_sock_get_api_rev` README](../api_sock_get_api_rev/README.md) for
 a fuller walkthrough (two-terminal setup, alternative ports, VSOCK client

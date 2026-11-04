@@ -129,7 +129,29 @@ pub(crate) struct OpenSessionExResult {
     pub(crate) ddi_cookie: Option<u64>,
 }
 
-/// Look up the partition identity public key (`pk_hsm`) via the
+/// Exchange one TBOR request as part of the SD handshake, threading
+/// `cookie_in` into the call and returning the (possibly refreshed)
+/// token the backend reports back.
+///
+/// Both handshake phases ([`open_session_ex_init`] and
+/// [`open_session_ex_finish`]) route their `exec_op_tbor` call through
+/// this one function so they can't drift in how they treat the cookie,
+/// and so the exact cookie-continuity contract (Phase 1's token must be
+/// threaded into Phase 2; a refreshed Phase-2 token must be retained)
+/// is independently testable against a `DdiDev` double that actually
+/// enforces continuity — unlike the FW emulator, whose `exec_op_tbor`
+/// ignores the cookie outright, so a test that only exercises the emu
+/// would still pass even if this threading silently broke.
+fn exec_handshake_tbor<D: DdiDev, T: TborOpReq>(
+    dev: &D,
+    req: &T,
+    cookie_in: Option<DdiCookie>,
+) -> DdiResult<(T::OpResp, Option<DdiCookie>)> {
+    let mut cookie = cookie_in;
+    let resp = dev.exec_op_tbor(req, None, &mut cookie)?;
+    Ok((resp, cookie))
+}
+
 /// production cert chain. Uses [`fetch_cert_chain_checked_tbor`] — the
 /// out-of-session TBOR `GetCertChainInfo` / `GetCertificate` commands,
 /// so the whole handshake stays on the TBOR transport — whose leaf cert
@@ -289,10 +311,7 @@ fn open_session_ex_init(
         pk_init: eph.pk_sec1,
     };
 
-    let mut cookie = None;
-    let resp = dev
-        .exec_op_tbor(&req, None, &mut cookie)
-        .map_err(HsmError::from)?;
+    let (resp, cookie) = exec_handshake_tbor(&**dev, &req, None).map_err(HsmError::from)?;
 
     // Derive the 48-byte HPKE `exported` secret, then verify the FW's
     // Phase-1 confirm MAC binds the negotiated role/type/suite.
@@ -386,10 +405,8 @@ fn open_session_ex_finish(
     // Carry the Phase-1 `Open` token forward so the Phase-2
     // `InSession` exchange is recognized as the same handshake rather
     // than rejected for lacking one.
-    let mut cookie = pending.ddi_cookie;
-    let resp = dev
-        .exec_op_tbor(&req, None, &mut cookie)
-        .map_err(HsmError::from)?;
+    let (resp, cookie) =
+        exec_handshake_tbor(&**dev, &req, pending.ddi_cookie).map_err(HsmError::from)?;
 
     Ok(OpenSessionExResult {
         session_id: pending.session_id,
@@ -659,6 +676,240 @@ mod tests {
         assert_eq!(
             mbor, tbor,
             "MBOR (1.0) and TBOR (1.1) cert paths must return the same PID public key"
+        );
+    }
+
+    /// `DdiDev` test double used only to validate
+    /// [`exec_handshake_tbor`]'s cookie-continuity contract
+    /// end-to-end. Delegates every op to the wrapped `&HsmDev` (so
+    /// `T::OpResp` always comes from a genuine, correctly-typed emu
+    /// round trip) except `exec_op_tbor`, where it independently
+    /// issues, enforces, and refreshes its own continuity token
+    /// around the `Open` / `InSession` exchanges -- unlike the real
+    /// emu backend, whose `exec_op_tbor` ignores the cookie outright
+    /// (see [`exec_handshake_tbor`]'s doc comment), so a regression in
+    /// the threading between phases would still pass a test that only
+    /// drives emu directly.
+    struct CookieEnforcingDev<'a> {
+        inner: &'a HsmDev,
+        issued: Mutex<Option<DdiCookie>>,
+        next_token: std::sync::atomic::AtomicU64,
+    }
+
+    impl<'a> CookieEnforcingDev<'a> {
+        fn new(inner: &'a HsmDev) -> Self {
+            Self {
+                inner,
+                issued: Mutex::new(None),
+                next_token: std::sync::atomic::AtomicU64::new(1),
+            }
+        }
+    }
+
+    impl DdiDev for CookieEnforcingDev<'_> {
+        fn device_kind(&self) -> DdiDeviceKind {
+            self.inner.device_kind()
+        }
+
+        fn exec_op_fp_gcm_slice(
+            &self,
+            mode: DdiAesOp,
+            gcm_params: DdiAesGcmParams,
+            src_buf: &[u8],
+            dst_buf: &mut [u8],
+            tag: &mut Option<[u8; 16]>,
+            iv: &mut Option<[u8; 12]>,
+            fips_approved: &mut bool,
+        ) -> Result<usize, DdiError> {
+            self.inner.exec_op_fp_gcm_slice(
+                mode,
+                gcm_params,
+                src_buf,
+                dst_buf,
+                tag,
+                iv,
+                fips_approved,
+            )
+        }
+
+        fn exec_op_fp_gcm(
+            &self,
+            mode: DdiAesOp,
+            gcm_params: DdiAesGcmParams,
+            src_buf: Vec<u8>,
+        ) -> Result<DdiAesGcmResult, DdiError> {
+            self.inner.exec_op_fp_gcm(mode, gcm_params, src_buf)
+        }
+
+        fn exec_op_fp_xts(
+            &self,
+            mode: DdiAesOp,
+            xts_params: DdiAesXtsParams,
+            src_buf: Vec<u8>,
+        ) -> Result<DdiAesXtsResult, DdiError> {
+            self.inner.exec_op_fp_xts(mode, xts_params, src_buf)
+        }
+
+        fn exec_op_fp_xts_slice(
+            &self,
+            mode: DdiAesOp,
+            xts_params: DdiAesXtsParams,
+            src_buf: &[u8],
+            dst_buf: &mut [u8],
+            fips_approved: &mut bool,
+        ) -> Result<usize, DdiError> {
+            self.inner
+                .exec_op_fp_xts_slice(mode, xts_params, src_buf, dst_buf, fips_approved)
+        }
+
+        fn erase(&self) -> Result<(), DdiError> {
+            self.inner.erase()
+        }
+
+        fn exec_op_mbor<T: DdiOpReq>(
+            &self,
+            req: &T,
+            cookie: &mut Option<DdiCookie>,
+        ) -> DdiResult<T::OpResp> {
+            self.inner.exec_op_mbor(req, cookie)
+        }
+
+        fn exec_op_tbor<T: TborOpReq>(
+            &self,
+            req: &T,
+            oob_items: Option<&[&[u8]]>,
+            cookie: &mut Option<DdiCookie>,
+        ) -> DdiResult<T::OpResp> {
+            match req.session_ctrl() {
+                tsra_ddi_tbor_types::SessionControlKind::Open => {
+                    // emu ignores the cookie outright, so pass it a
+                    // scratch slot and issue our own token instead.
+                    let resp = self.inner.exec_op_tbor(req, oob_items, &mut None)?;
+                    let token = self
+                        .next_token
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    *self.issued.lock() = Some(token);
+                    *cookie = Some(token);
+                    Ok(resp)
+                }
+                tsra_ddi_tbor_types::SessionControlKind::InSession => {
+                    let expected = *self.issued.lock();
+                    if cookie.is_none() || *cookie != expected {
+                        return Err(DdiError::InvalidParameter);
+                    }
+                    let resp = self.inner.exec_op_tbor(req, oob_items, &mut None)?;
+                    let refreshed = self
+                        .next_token
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    *self.issued.lock() = Some(refreshed);
+                    *cookie = Some(refreshed);
+                    Ok(resp)
+                }
+                _ => self.inner.exec_op_tbor(req, oob_items, cookie),
+            }
+        }
+    }
+
+    /// Reviewer-requested regression coverage: [`exec_handshake_tbor`]
+    /// must thread Phase 1's issued cookie into Phase 2 unmodified,
+    /// and must retain a refreshed Phase-2 token rather than
+    /// discarding it. Drives the real HPKE handshake crypto (so Phase
+    /// 2 genuinely succeeds against emu) through [`CookieEnforcingDev`]
+    /// -- a backend that actually enforces continuity, unlike emu
+    /// itself -- so a regression in the cookie threading between
+    /// [`open_session_ex_init`] and [`open_session_ex_finish`] fails
+    /// this test even though it would silently pass against emu alone.
+    #[test]
+    fn handshake_cookie_is_threaded_and_refreshed() {
+        let _guard = EMU_LOCK.lock();
+        let part = fresh_emu_partition();
+        let rev = part.inner().read().api_rev();
+        let inner = part.inner().read();
+        let dev = inner.dev();
+        let fake = CookieEnforcingDev::new(dev);
+
+        let psk_id = CO;
+        let session_type = SessionType::Authenticated;
+        let suite_id = SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256;
+
+        // Phase 1 ("Open"): no cookie may be supplied; the backend
+        // issues a fresh token that must come back to the caller.
+        let eph = generate_vm_ephemeral().expect("vm ephemeral generation");
+        let (pk_hsm_key, pk_hsm_sec1) = fetch_pk_hsm(dev, rev).expect("fetch pk_hsm");
+        let req1 = TborSessionOpenInitReq {
+            psk_id,
+            session_type: session_type.to_u8(),
+            suite_id,
+            pk_init: eph.pk_sec1,
+        };
+        let (resp1, cookie1) =
+            exec_handshake_tbor(&fake, &req1, None).expect("phase 1 exchange must succeed");
+        assert!(cookie1.is_some(), "phase 1 must return an issued token");
+
+        // Reject Phase 2 ("InSession") outright when Phase 1's token
+        // isn't threaded in -- the exact regression a test against
+        // emu alone would miss, since emu ignores the cookie.
+        let bad_req2 = TborSessionOpenFinishReq {
+            session_id: resp1.session_id,
+            ..Default::default()
+        };
+        let err = exec_handshake_tbor(&fake, &bad_req2, None)
+            .expect_err("phase 2 must be rejected without phase 1's token");
+        assert!(matches!(err, DdiError::InvalidParameter));
+
+        // Phase 2 with Phase 1's token correctly threaded in: drive
+        // the same HPKE crypto `open_session_ex_init` / `_finish` use
+        // so the exchange genuinely succeeds against emu, and a real
+        // refreshed Phase-2 token is retained rather than discarded.
+        let info = build_hpke_info(psk_id, session_type.to_u8(), suite_id);
+        let psk = default_psk(psk_id).expect("default CO psk");
+        let exported = receive_exported(
+            &eph.sk,
+            &eph.pk,
+            &pk_hsm_key,
+            &resp1.pk_resp,
+            &info,
+            psk,
+            &[psk_id],
+        )
+        .expect("hpke receive_export");
+        verify_phase1_mac(
+            &exported,
+            resp1.session_id,
+            &eph.pk_sec1,
+            &pk_hsm_sec1,
+            &resp1.pk_resp,
+            &resp1.mac_resp,
+        )
+        .expect("phase 1 confirm mac must verify");
+
+        let param_key = derive_param_key(&exported).expect("derive param_key");
+        let seed = [7u8; SESSION_SEED_LEN];
+        let envelope = seal_seed_envelope(&param_key, &seed).expect("seal seed envelope");
+        let seed_envelope: [u8; SEED_ENVELOPE_LEN] = envelope
+            .as_slice()
+            .try_into()
+            .expect("seed envelope length");
+        let mac_fin = build_phase2_mac(
+            &exported,
+            resp1.session_id,
+            &eph.pk_sec1,
+            &pk_hsm_sec1,
+            &resp1.pk_resp,
+        )
+        .expect("build phase2 mac");
+
+        let req2 = TborSessionOpenFinishReq {
+            session_id: resp1.session_id,
+            mac_fin,
+            seed_envelope,
+        };
+        let (_, cookie2) = exec_handshake_tbor(&fake, &req2, cookie1)
+            .expect("phase 2 exchange must succeed once phase 1's token is threaded in");
+        assert!(cookie2.is_some(), "phase 2 must return a (refreshed) token");
+        assert_ne!(
+            cookie1, cookie2,
+            "phase 2's token must be a genuine refresh, not a stale echo of phase 1's"
         );
     }
 }
