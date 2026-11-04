@@ -89,6 +89,7 @@ Carries the signature.
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
 | `InvalidArg` | `hedge` other than `0`, `1` or `2` |
+| `InvalidKeyType` | The masked blob is not an ML-DSA key |
 | `InvalidPermissions` | The key may not sign |
 | `TborInvalidFixedLength` | `mu` is not 64 bytes |
 | `DdiDecodeFailed` | Malformed request body |

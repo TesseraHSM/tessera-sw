@@ -80,12 +80,13 @@ pub(crate) async fn handle<P: HsmPal>(
 
             // Unmask in place. The AAD carries the parameter set, so the kind
             // comes from the envelope rather than being inferred from length.
+            // A key of another type is rejected before its permissions are
+            // checked, as `EccSign` does.
             let view = unmask(pal, io, masking_key, req.masked_key).await?;
-            let kind = view.key_kind;
+            let param_set = mldsa_param_set(view.key_kind)?;
             if !view.key_attrs.sign() {
                 return Err(HsmError::InvalidPermissions);
             }
-            let param_set = mldsa_param_set(kind)?;
             let sig_len = param_set.sig_len();
             let sec_len = param_set.sec_key_len();
             if view.target_key.len() != MLDSA_SEED_LEN + sec_len {

@@ -709,6 +709,17 @@ deterministic signing is required.
 | Deterministic signing repeats exactly and verifies | ✅ 🔁 | `mldsa_hedge::mldsa_sign_deterministic_signatures_repeat` | ML-DSA-44/65/87.  The device has no key import, so NIST's deterministic vectors run in `tsra_crypto` instead |
 | `hedge` other than 0/1/2 is rejected with `InvalidArg` | ✅ 🔁 | `mldsa_hedge::mldsa_sign_rejects_unknown_hedge` | 3, 4, 128, 255 |
 
+## `MlDsaSign` / `MlKemDecapsulate` key type (opcode in-session, gated)
+
+Both commands take the parameter set from the masked key's authenticated
+key kind, and check it before the key's usage attributes, as `EccSign`
+and `EcdhDerive` do.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Masked key is not an ML-DSA key → `InvalidKeyType` | ✅ | `mldsa_sign::mldsa_sign_wrong_key_class_rejected` | Supplies a valid masked ML-KEM-512 key, which also lacks `sign` |
+| Masked key is not an ML-KEM key → `InvalidKeyType` | ✅ | `mlkem_decapsulate::mlkem_decapsulate_wrong_key_class_rejected` | Supplies a valid masked ML-DSA-44 key, which also lacks `derive` |
+
 ## Known gaps (summary)
 
 The rows marked ⚠️ above, consolidated:

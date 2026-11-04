@@ -94,26 +94,27 @@ pub(crate) fn rsa_key(kind: HsmVaultKeyKind) -> HsmResult<HsmRsaKey> {
 
 /// Map an ML-DSA seed vault key kind to its PAL parameter set, strictly.
 ///
-/// Only the three seed kinds are accepted; any other kind maps to
-/// [`HsmError::InvalidArg`], which is what the ML-DSA handlers report for
-/// a key of the wrong family.
+/// Only the three ML-DSA seed kinds are accepted; any other kind maps to
+/// [`HsmError::InvalidKeyType`], so a masked blob of the wrong class is
+/// rejected before use, as [`rsa_key`] and [`ecc_private_curve`] do.
 pub(crate) fn mldsa_param_set(kind: HsmVaultKeyKind) -> HsmResult<HsmMlDsaParamSet> {
     match kind {
         HsmVaultKeyKind::MlDsa44Seed => Ok(HsmMlDsaParamSet::MlDsa44),
         HsmVaultKeyKind::MlDsa65Seed => Ok(HsmMlDsaParamSet::MlDsa65),
         HsmVaultKeyKind::MlDsa87Seed => Ok(HsmMlDsaParamSet::MlDsa87),
-        _ => Err(HsmError::InvalidArg),
+        _ => Err(HsmError::InvalidKeyType),
     }
 }
 
 /// Map an ML-KEM seed vault key kind to its PAL parameter set, strictly:
-/// as with [`mldsa_param_set`], any other kind is [`HsmError::InvalidArg`].
+/// as with [`mldsa_param_set`], any other kind is
+/// [`HsmError::InvalidKeyType`].
 pub(crate) fn mlkem_param_set(kind: HsmVaultKeyKind) -> HsmResult<HsmMlKemParamSet> {
     match kind {
         HsmVaultKeyKind::MlKem512Seed => Ok(HsmMlKemParamSet::MlKem512),
         HsmVaultKeyKind::MlKem768Seed => Ok(HsmMlKemParamSet::MlKem768),
         HsmVaultKeyKind::MlKem1024Seed => Ok(HsmMlKemParamSet::MlKem1024),
-        _ => Err(HsmError::InvalidArg),
+        _ => Err(HsmError::InvalidKeyType),
     }
 }
 

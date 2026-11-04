@@ -17,11 +17,14 @@ use tsra_ddi_tbor_test_harness::pqc::MlDsaParams;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_44;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_65;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_87;
+use tsra_ddi_tbor_test_harness::pqc::ML_KEM_512;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
+use tsra_ddi_tbor_types::TborMlKemGenerateKeyReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_SIGN;
@@ -167,4 +170,32 @@ fn mldsa_sign_rejects_a_tampered_masked_key_65() {
 #[test]
 fn mldsa_sign_rejects_a_tampered_masked_key_87() {
     masking_case(&ML_DSA_87);
+}
+
+/// Rejects a valid masked key of another type with `InvalidKeyType`.
+///
+/// The key is an ML-KEM key, which may not sign either, so this also checks
+/// that the key type is checked before the key's permissions, as `EccSign`
+/// does.
+#[test]
+fn mldsa_sign_wrong_key_class_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = ctx
+        .tbor(&TborMlKemGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_KEM_512.key_kind,
+        })
+        .expect("MlKemGenerateKey");
+
+    ctx.expect_fw_reject(
+        &TborMlDsaSignReq {
+            session_id: session.session_id,
+            masked_key: key.masked_key,
+            mu: vec![0x5A; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_PREFERRED,
+        },
+        TborStatus::InvalidKeyType,
+    );
 }

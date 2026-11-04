@@ -89,13 +89,15 @@ pub(crate) async fn handle<P: HsmPal>(
         let key_scope = peek_scope(req.masked_key)?;
         let masking_key_in = resolve_masking_key(pal, io, key_scope, sess_id)?;
 
-        // Unmask in place; the AAD carries the parameter set.
+        // Unmask in place; the AAD carries the parameter set. A key of another
+        // type is rejected before its permissions are checked, as
+        // `EcdhDerive` does.
         let view = unmask(pal, io, masking_key_in, req.masked_key).await?;
         let kind = view.key_kind;
+        let param_set = mlkem_param_set(kind)?;
         if !view.key_attrs.derive() {
             return Err(HsmError::InvalidPermissions);
         }
-        let param_set = mlkem_param_set(kind)?;
         let sec_len = param_set.sec_key_len();
         if view.target_key.len() != MLKEM_SEED_LEN + sec_len {
             return Err(HsmError::InvalidArg);
