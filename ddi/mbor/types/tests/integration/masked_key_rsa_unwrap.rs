@@ -4,6 +4,7 @@
 #![cfg(test)]
 
 use test_with_tracing::test;
+use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_types::*;
 
@@ -358,7 +359,9 @@ fn test_masked_key_rsa_unwrap_aes_key() {
     );
 }
 
-// Emu does not reject unmasking a key whose tag already exists.
+// Bulk keys are validated through a fast-path AES-GCM round trip rather than a
+// key-tag lookup: data encrypted with the original unwrapped key must decrypt
+// (and authenticate) with the key restored from its masked blob.
 #[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 fn test_masked_key_rsa_unwrap_aes_bulk_key() {
@@ -366,6 +369,13 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
+            if get_device_kind(dev) != DdiDeviceKind::Physical {
+                println!("Physical device NOT found. Test only supported on physical device.");
+                return;
+            }
+
+            let (session_id, short_app_id) = reopen_session_with_short_app_id(dev, session_id);
+
             let (unwrap_key_id, unwrap_pub_key_der, _) = get_unwrapping_key(dev, session_id);
 
             let aes_256_wrapped = wrap_data(unwrap_pub_key_der, TEST_AES_256.as_slice());
@@ -374,10 +384,6 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
             der[..aes_256_wrapped.len()].copy_from_slice(&aes_256_wrapped);
 
             let der_len = aes_256_wrapped.len();
-
-            let mut blob = [0u8; 3072];
-            blob[..TEST_AES_256_CKM_WRAPPED.len()].copy_from_slice(&TEST_AES_256_CKM_WRAPPED);
-            let key_tag = 0x5566;
 
             let resp = helper_rsa_unwrap(
                 dev,
@@ -388,7 +394,7 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
                 DdiKeyClass::AesGcmBulkUnapproved,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                Some(key_tag),
+                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
@@ -396,6 +402,7 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
             let resp = resp.unwrap();
             assert_eq!(resp.data.kind, DdiKeyType::AesGcmBulk256Unapproved);
             let unwrapped_key_id = resp.data.key_id;
+            let unwrapped_bulk_key_id = resp.data.bulk_key_id.expect("bulk key ID");
             assert!(resp.data.pub_key.is_none());
             let masked_key = resp.data.masked_key;
 
@@ -406,29 +413,42 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
                 MaskedKeyAttributes::ENCRYPT | MaskedKeyAttributes::DECRYPT
             ));
 
+            let aad = [0x4u8; 32];
+            let plaintext = vec![0x5Au8; 1024];
+            let mut params = DdiAesGcmParams {
+                key_id: u32::from(unwrapped_bulk_key_id),
+                iv: [0x3u8; 12],
+                aad: Some(aad.to_vec()),
+                tag: None,
+                session_id,
+                short_app_id,
+            };
+
+            let resp = dev.exec_op_fp_gcm(DdiAesOp::Encrypt, params.clone(), plaintext.clone());
+            assert!(resp.is_ok(), "encrypt with unwrapped key {:?}", resp);
+            let encrypted = resp.unwrap();
+            assert_eq!(encrypted.data.len(), plaintext.len());
+            assert_ne!(encrypted.data, plaintext);
+
+            // Delete the unwrapped key and restore it from the masked blob.
             let resp = helper_get_new_key_id_from_unmask(
                 dev,
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 unwrapped_key_id,
-                true,
+                false,
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let (new_key_id, _, _) = resp.unwrap();
+            let (_, new_bulk_key_id, new_pub_key) = resp.unwrap();
+            assert!(new_pub_key.is_none());
+            let new_bulk_key_id = new_bulk_key_id.expect("unmasked bulk key ID");
 
-            // Confirm we can find the unwrapped key by tag
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                key_tag,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-
-            assert_eq!(resp.data.key_id, new_key_id);
-            assert_eq!(resp.data.key_kind, DdiKeyType::AesGcmBulk256Unapproved);
+            params.key_id = u32::from(new_bulk_key_id);
+            params.tag = encrypted.tag;
+            let resp = dev.exec_op_fp_gcm(DdiAesOp::Decrypt, params, encrypted.data);
+            assert!(resp.is_ok(), "decrypt with unmasked key {:?}", resp);
+            assert_eq!(resp.unwrap().data, plaintext);
         },
     );
 }
