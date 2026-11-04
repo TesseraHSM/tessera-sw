@@ -15,6 +15,10 @@ use super::*;
 /// Length of the ML-DSA message representative μ (FIPS 204).
 pub const MLDSA_MU_LEN: usize = 64;
 
+/// Length of an ML-KEM shared secret (FIPS 203), the same for every
+/// parameter set.
+pub const MLKEM_SHARED_SECRET_LEN: usize = 32;
+
 /// How the `message` input of an ML-DSA signature operation is interpreted.
 ///
 /// FIPS 204 signs and verifies the 64-byte message representative
@@ -279,20 +283,32 @@ pub trait HsmMlKem {
     /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
     /// - `pub_key` — the encapsulation key, exactly the parameter set's
     ///   length.
-    /// - `ciphertext` — output, exactly the parameter set's ciphertext
-    ///   length (768 / 1088 / 1568).
-    /// - `shared_secret` — output, 32 bytes.  This is key material: the
-    ///   caller is expected to mask it before it leaves the device.
+    /// - `output` — output, the shared secret followed by the ciphertext,
+    ///   exactly 800 / 1120 / 1600 bytes for ML-KEM-512 / 768 / 1024:
+    ///
+    ///   | Offset | Length | Field |
+    ///   |---|---|---|
+    ///   | 0 | [`MLKEM_SHARED_SECRET_LEN`] (32) | Shared secret |
+    ///   | 32 | 768 / 1088 / 1568 | Ciphertext |
+    ///
+    ///   The shared secret is key material: the caller is expected to mask
+    ///   it before it leaves the device.
     ///
     /// The randomness encapsulation needs is drawn by the implementation
     /// from the device's entropy source, for the same reason as the seeds.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — `output` populated.
+    /// - `Err(HsmError::InvalidArg)` — bad kind, or `output` not exactly
+    ///   the shared secret and ciphertext lengths combined.
+    /// - `Err(HsmError)` — propagated from the FP offload path.
     async fn mlkem_encaps(
         &self,
         io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         pub_key: &HsmDmaBuf,
-        ciphertext: &mut HsmDmaBuf,
-        shared_secret: &mut HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Decapsulate an ML-KEM ciphertext.

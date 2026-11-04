@@ -31,6 +31,8 @@ use tsra_fw_hsm_pal_traits::HsmMlKem;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
+use tsra_fw_uno_drivers_pqc::mlkem_ct_len;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::UnoHsmPal;
@@ -275,13 +277,18 @@ impl HsmMlKem for UnoHsmPal {
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         pub_key: &HsmDmaBuf,
-        ciphertext: &mut HsmDmaBuf,
-        shared_secret: &mut HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Bracketed so a failed RNG draw still reaches the closing mark.
         let outcome: HsmResult<()> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
+            // `output` is the shared secret followed by the ciphertext.
+            if output.len() != MLKEM_SHARED_SECRET_LEN + mlkem_ct_len(kind)? {
+                return Err(HsmError::InvalidArg);
+            }
+            let (shared_secret, ciphertext) = output.split_at_mut(MLKEM_SHARED_SECRET_LEN);
+
             // Encapsulation randomness, drawn here for the same reason as the
             // seeds: an FP core has no entropy source.
             let mut m = [0u8; 32];

@@ -43,6 +43,7 @@ use tsra_fw_hsm_pal_traits::HsmMlKem;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
 use zeroize::Zeroizing;
 
 use crate::StdHsmPal;
@@ -260,18 +261,20 @@ impl HsmMlKem for StdHsmPal {
         _io: &impl HsmIo,
         kind: HsmVaultKeyKind,
         pub_key: &HsmDmaBuf,
-        ciphertext: &mut HsmDmaBuf,
-        shared_secret: &mut HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let variant = mlkem_variant(kind)?;
+        if output.len() != MLKEM_SHARED_SECRET_LEN + variant.ciphertext_len() {
+            return Err(HsmError::InvalidArg);
+        }
 
         // As with signing, the encapsulation message never leaves the crypto
         // layer, so that layer draws it.
-        let outcome = self.pqc.mlkem_encapsulate(variant, pub_key).await;
-
-        let (ct, ss) = outcome?;
-        write_exact(ciphertext, &ct)?;
-        write_exact(shared_secret, &ss)
+        let (ct, ss) = self.pqc.mlkem_encapsulate(variant, pub_key).await?;
+        let ss = Zeroizing::new(ss);
+        let (shared_secret, ciphertext) = output.split_at_mut(MLKEM_SHARED_SECRET_LEN);
+        write_exact(shared_secret, &ss)?;
+        write_exact(ciphertext, &ct)
     }
 
     async fn mlkem_decaps(
@@ -579,6 +582,43 @@ mod tests {
         }
     }
 
+    /// `mlkem_encaps` writes the shared secret then the ciphertext into one
+    /// output of exactly their combined length; any other length, including
+    /// one too short for the secret alone, is refused without writing.
+    #[tokio::test]
+    async fn mlkem_encaps_rejects_a_mis_sized_output() {
+        let (pal, io) = pal_and_io();
+        let (kind, pk_len, sk_len, ct_len) = MLKEM_SETS[0];
+        let (mut seed, mut pk, mut sk) =
+            ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
+        pal.mlkem_gen_key(
+            &io,
+            kind,
+            dma_mut(&mut seed),
+            dma_mut(&mut pk),
+            dma_mut(&mut sk),
+        )
+        .await
+        .expect("gen_key");
+
+        for len in [
+            0,
+            SS_LEN - 1,
+            SS_LEN,
+            SS_LEN + ct_len - 1,
+            SS_LEN + ct_len + 1,
+        ] {
+            let mut out = vec![0x5a; len];
+            assert_eq!(
+                pal.mlkem_encaps(&io, kind, dma(&pk), dma_mut(&mut out))
+                    .await,
+                Err(HsmError::InvalidArg),
+                "{len}-byte output"
+            );
+            assert!(out.iter().all(|b| *b == 0x5a), "{len}-byte output written");
+        }
+    }
+
     /// Encapsulate then decapsulate: both sides must derive the same
     /// secret, and a corrupted ciphertext must yield a *different* secret
     /// rather than an error -- FIPS 203 implicit rejection.
@@ -599,10 +639,12 @@ mod tests {
             .await
             .expect("gen_key");
 
-            let (mut ct, mut ss_enc) = (vec![0u8; ct_len], [0u8; SS_LEN]);
-            pal.mlkem_encaps(&io, kind, dma(&pk), dma_mut(&mut ct), dma_mut(&mut ss_enc))
+            let mut out = vec![0u8; SS_LEN + ct_len];
+            pal.mlkem_encaps(&io, kind, dma(&pk), dma_mut(&mut out))
                 .await
                 .expect("encaps");
+            let (ss_enc, ct) = out.split_at(SS_LEN);
+            let (ss_enc, mut ct) = (ss_enc.to_vec(), ct.to_vec());
 
             let mut ss_dec = [0u8; SS_LEN];
             pal.mlkem_decaps(&io, kind, dma(&sk), dma(&ct), dma_mut(&mut ss_dec))
