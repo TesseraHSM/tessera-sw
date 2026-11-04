@@ -38,9 +38,9 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 
+use super::from_pal::mlkem_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
-use crate::ddi::tbor::mlkem_generate_key::mlkem_sec_key_len;
 use crate::ddi::tbor::mlkem_generate_key::MLKEM_SEED_LEN;
 use crate::part_state;
 
@@ -95,7 +95,8 @@ pub(crate) async fn handle<P: HsmPal>(
         if !view.key_attrs.derive() {
             return Err(HsmError::InvalidPermissions);
         }
-        let sec_len = mlkem_sec_key_len(kind)?;
+        let param_set = mlkem_param_set(kind)?;
+        let sec_len = param_set.sec_key_len();
         if view.target_key.len() != MLKEM_SEED_LEN + sec_len {
             return Err(HsmError::InvalidArg);
         }
@@ -104,7 +105,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let shared_secret = pal.dma_alloc(io, SHARED_SECRET_LEN)?;
         pal.mlkem_decaps(
             io,
-            kind,
+            param_set,
             &key_blob[MLKEM_SEED_LEN..],
             req.ciphertext,
             shared_secret,

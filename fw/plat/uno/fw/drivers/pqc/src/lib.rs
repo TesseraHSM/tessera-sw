@@ -63,7 +63,6 @@ pub use engine::mldsa_pub_key_len;
 pub use engine::mldsa_sig_len;
 pub use engine::mlkem_ct_len;
 pub use engine::mlkem_pub_key_len;
-pub use engine::mlkem_sec_key_len;
 pub use engine::PqcEngine;
 pub use engine::MLDSA_CTX_MAX;
 pub use engine::MLDSA_MSG_MAX;

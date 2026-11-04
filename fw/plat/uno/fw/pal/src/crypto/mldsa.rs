@@ -27,24 +27,34 @@ use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
 use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
+use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
-use tsra_fw_uno_drivers_pqc::mlkem_ct_len;
-use tsra_fw_uno_drivers_pqc::mlkem_sec_key_len;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::UnoHsmPal;
 
-/// Public key length for each ML-DSA parameter set (FIPS 204 Table 2).
-fn mldsa_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlDsa44Seed => Ok(1312),
-        HsmVaultKeyKind::MlDsa65Seed => Ok(1952),
-        HsmVaultKeyKind::MlDsa87Seed => Ok(2592),
-        _ => Err(HsmError::InvalidArg),
+/// The vault key kind the PQC driver, and the FP core behind it, name an
+/// ML-DSA parameter set by.
+fn mldsa_kind(param_set: HsmMlDsaParamSet) -> HsmVaultKeyKind {
+    match param_set {
+        HsmMlDsaParamSet::MlDsa44 => HsmVaultKeyKind::MlDsa44Seed,
+        HsmMlDsaParamSet::MlDsa65 => HsmVaultKeyKind::MlDsa65Seed,
+        HsmMlDsaParamSet::MlDsa87 => HsmVaultKeyKind::MlDsa87Seed,
+    }
+}
+
+/// The vault key kind the PQC driver, and the FP core behind it, name an
+/// ML-KEM parameter set by.
+fn mlkem_kind(param_set: HsmMlKemParamSet) -> HsmVaultKeyKind {
+    match param_set {
+        HsmMlKemParamSet::MlKem512 => HsmVaultKeyKind::MlKem512Seed,
+        HsmMlKemParamSet::MlKem768 => HsmVaultKeyKind::MlKem768Seed,
+        HsmMlKemParamSet::MlKem1024 => HsmVaultKeyKind::MlKem1024Seed,
     }
 }
 
@@ -67,7 +77,7 @@ fn hedged(hedge: HsmMlDsaHedge) -> bool {
 }
 
 /// Length of the compact ML-DSA private seed (`xi`), identical for every
-/// parameter set — which is why `kind` has to be carried alongside it.
+/// parameter set — which is why `param_set` has to be carried alongside it.
 const MLDSA_SEED_LEN: usize = 32;
 
 // With `bulk_crypto` each method returns before reaching the PQC driver; see
@@ -77,7 +87,7 @@ impl HsmMlDsa for UnoHsmPal {
     async fn mldsa_sign_in_place(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         key_signature: &mut HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         hedge: HsmMlDsaHedge,
@@ -95,7 +105,14 @@ impl HsmMlDsa for UnoHsmPal {
             self.pqc
                 .with_engine(async |engine| {
                     engine
-                        .mldsa_sign_in_place(kind, key_signature, &rnd, msg_type, message, ctx)
+                        .mldsa_sign_in_place(
+                            mldsa_kind(param_set),
+                            key_signature,
+                            &rnd,
+                            msg_type,
+                            message,
+                            ctx,
+                        )
                         .await
                 })
                 .await
@@ -108,7 +125,7 @@ impl HsmMlDsa for UnoHsmPal {
     async fn mldsa_gen_key(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         seed: &mut HsmDmaBuf,
         pub_key: &mut HsmDmaBuf,
         sec_key: &mut HsmDmaBuf,
@@ -120,7 +137,7 @@ impl HsmMlDsa for UnoHsmPal {
             return Err(HsmError::UnsupportedCmd);
             // Validate before handing anything to the driver, so buffer-size
             // bugs surface here rather than as a malformed FP request.
-            let expected_pub = mldsa_pub_key_len(kind)?;
+            let expected_pub = param_set.pub_key_len();
             if seed.len() != MLDSA_SEED_LEN || pub_key.len() != expected_pub {
                 error!(
                     "pqc",
@@ -142,7 +159,9 @@ impl HsmMlDsa for UnoHsmPal {
             // what lets signing skip the derivation entirely.
             self.rng.fill_bytes(seed)?;
 
-            self.pqc.mldsa_gen_key(kind, seed, pub_key, sec_key).await
+            self.pqc
+                .mldsa_gen_key(mldsa_kind(param_set), seed, pub_key, sec_key)
+                .await
         }
         .await;
 
@@ -152,7 +171,7 @@ impl HsmMlDsa for UnoHsmPal {
     async fn mldsa_sign(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         sec_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         hedge: HsmMlDsaHedge,
@@ -178,7 +197,15 @@ impl HsmMlDsa for UnoHsmPal {
 
             let result = self
                 .pqc
-                .mldsa_sign(kind, sec_key, &rnd, msg_type, message, ctx, signature)
+                .mldsa_sign(
+                    mldsa_kind(param_set),
+                    sec_key,
+                    &rnd,
+                    msg_type,
+                    message,
+                    ctx,
+                    signature,
+                )
                 .await;
 
             // The randomness is not a long-term secret, but it is signing input;
@@ -194,7 +221,7 @@ impl HsmMlDsa for UnoHsmPal {
     async fn mldsa_verify(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         pub_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
@@ -208,7 +235,14 @@ impl HsmMlDsa for UnoHsmPal {
             return Err(HsmError::UnsupportedCmd);
             check_msg_type(msg_type, message, ctx)?;
             self.pqc
-                .mldsa_verify(kind, pub_key, msg_type, message, ctx, signature)
+                .mldsa_verify(
+                    mldsa_kind(param_set),
+                    pub_key,
+                    msg_type,
+                    message,
+                    ctx,
+                    signature,
+                )
                 .await
         }
         .await;
@@ -222,7 +256,7 @@ impl HsmMlKem for UnoHsmPal {
     async fn mlkem_encaps_in_place(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         pub_key_ciphertext: &mut HsmDmaBuf,
         shared_secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -234,7 +268,12 @@ impl HsmMlKem for UnoHsmPal {
             self.pqc
                 .with_engine(async |engine| {
                     engine
-                        .mlkem_encaps_in_place(kind, pub_key_ciphertext, &m, shared_secret)
+                        .mlkem_encaps_in_place(
+                            mlkem_kind(param_set),
+                            pub_key_ciphertext,
+                            &m,
+                            shared_secret,
+                        )
                         .await
                 })
                 .await
@@ -247,7 +286,7 @@ impl HsmMlKem for UnoHsmPal {
     async fn mlkem_gen_key(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         seed: &mut HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -257,8 +296,8 @@ impl HsmMlKem for UnoHsmPal {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             // `output` is the public key followed by the expanded private key.
-            let pub_len = mlkem_pub_key_len(kind)?;
-            if seed.len() != MLKEM_SEED_LEN || output.len() != pub_len + mlkem_sec_key_len(kind)? {
+            let pub_len = param_set.pub_key_len();
+            if seed.len() != MLKEM_SEED_LEN || output.len() != pub_len + param_set.sec_key_len() {
                 return Err(HsmError::InvalidArg);
             }
             let (pub_key, sec_key) = output.split_at_mut(pub_len);
@@ -267,7 +306,9 @@ impl HsmMlKem for UnoHsmPal {
             // FP core has no entropy source, so it is drawn here.
             self.rng.fill_bytes(seed)?;
 
-            self.pqc.mlkem_gen_key(kind, seed, pub_key, sec_key).await
+            self.pqc
+                .mlkem_gen_key(mlkem_kind(param_set), seed, pub_key, sec_key)
+                .await
         }
         .await;
 
@@ -277,7 +318,7 @@ impl HsmMlKem for UnoHsmPal {
     async fn mlkem_encaps(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         pub_key: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -286,7 +327,7 @@ impl HsmMlKem for UnoHsmPal {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             // `output` is the shared secret followed by the ciphertext.
-            if output.len() != MLKEM_SHARED_SECRET_LEN + mlkem_ct_len(kind)? {
+            if output.len() != MLKEM_SHARED_SECRET_LEN + param_set.ciphertext_len() {
                 return Err(HsmError::InvalidArg);
             }
             let (shared_secret, ciphertext) = output.split_at_mut(MLKEM_SHARED_SECRET_LEN);
@@ -303,7 +344,13 @@ impl HsmMlKem for UnoHsmPal {
 
             let result = self
                 .pqc
-                .mlkem_encaps(kind, pub_key, &m, ciphertext, shared_secret)
+                .mlkem_encaps(
+                    mlkem_kind(param_set),
+                    pub_key,
+                    &m,
+                    ciphertext,
+                    shared_secret,
+                )
                 .await;
 
             // The randomness determines the shared secret; do not leave it on
@@ -319,7 +366,7 @@ impl HsmMlKem for UnoHsmPal {
     async fn mlkem_decaps(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         sec_key: &HsmDmaBuf,
         ciphertext: &HsmDmaBuf,
         shared_secret: &mut HsmDmaBuf,
@@ -330,22 +377,12 @@ impl HsmMlKem for UnoHsmPal {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
             self.pqc
-                .mlkem_decaps(kind, sec_key, ciphertext, shared_secret)
+                .mlkem_decaps(mlkem_kind(param_set), sec_key, ciphertext, shared_secret)
                 .await
         }
         .await;
 
         outcome
-    }
-}
-
-/// Encapsulation-key length per ML-KEM parameter set (FIPS 203 Table 3).
-fn mlkem_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlKem512Seed => Ok(800),
-        HsmVaultKeyKind::MlKem768Seed => Ok(1184),
-        HsmVaultKeyKind::MlKem1024Seed => Ok(1568),
-        _ => Err(HsmError::InvalidArg),
     }
 }
 

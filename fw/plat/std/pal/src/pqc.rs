@@ -4,7 +4,7 @@
 //! [`HsmMlDsa`] and [`HsmMlKem`] for the std PAL.
 //!
 //! Thin layer over [`StdPqc`](crate::drivers::pqc::StdPqc): it maps the
-//! vault key kind onto a parameter set, draws whatever entropy the
+//! PAL parameter set onto its [`tsra_crypto`] variant, draws whatever entropy the
 //! operation needs, and checks the caller's buffers. The arithmetic
 //! itself lives in [`tsra_crypto`], and the driver dispatches it to a
 //! worker thread.
@@ -39,32 +39,31 @@ use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
 use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
+use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
 use zeroize::Zeroizing;
 
 use crate::StdHsmPal;
 
-/// Map a vault key kind onto its ML-DSA parameter set.
-fn mldsa_variant(kind: HsmVaultKeyKind) -> HsmResult<MlDsaVariant> {
-    match kind {
-        HsmVaultKeyKind::MlDsa44Seed => Ok(MlDsaVariant::MlDsa44),
-        HsmVaultKeyKind::MlDsa65Seed => Ok(MlDsaVariant::MlDsa65),
-        HsmVaultKeyKind::MlDsa87Seed => Ok(MlDsaVariant::MlDsa87),
-        _ => Err(HsmError::InvalidArg),
+/// Map an ML-DSA parameter set onto its [`tsra_crypto`] variant.
+fn mldsa_variant(param_set: HsmMlDsaParamSet) -> MlDsaVariant {
+    match param_set {
+        HsmMlDsaParamSet::MlDsa44 => MlDsaVariant::MlDsa44,
+        HsmMlDsaParamSet::MlDsa65 => MlDsaVariant::MlDsa65,
+        HsmMlDsaParamSet::MlDsa87 => MlDsaVariant::MlDsa87,
     }
 }
 
-/// Map a vault key kind onto its ML-KEM parameter set.
-fn mlkem_variant(kind: HsmVaultKeyKind) -> HsmResult<MlKemVariant> {
-    match kind {
-        HsmVaultKeyKind::MlKem512Seed => Ok(MlKemVariant::MlKem512),
-        HsmVaultKeyKind::MlKem768Seed => Ok(MlKemVariant::MlKem768),
-        HsmVaultKeyKind::MlKem1024Seed => Ok(MlKemVariant::MlKem1024),
-        _ => Err(HsmError::InvalidArg),
+/// Map an ML-KEM parameter set onto its [`tsra_crypto`] variant.
+fn mlkem_variant(param_set: HsmMlKemParamSet) -> MlKemVariant {
+    match param_set {
+        HsmMlKemParamSet::MlKem512 => MlKemVariant::MlKem512,
+        HsmMlKemParamSet::MlKem768 => MlKemVariant::MlKem768,
+        HsmMlKemParamSet::MlKem1024 => MlKemVariant::MlKem1024,
     }
 }
 
@@ -110,14 +109,14 @@ impl HsmMlDsa for StdHsmPal {
     async fn mldsa_sign_in_place(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         key_signature: &mut HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         hedge: HsmMlDsaHedge,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
     ) -> HsmResult<()> {
-        let variant = mldsa_variant(kind)?;
+        let variant = mldsa_variant(param_set);
         let external_mu = external_mu(msg_type, message, ctx)?;
         let key_at = key_signature
             .len()
@@ -143,12 +142,12 @@ impl HsmMlDsa for StdHsmPal {
     async fn mldsa_gen_key(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         seed: &mut HsmDmaBuf,
         pub_key: &mut HsmDmaBuf,
         sec_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let variant = mldsa_variant(kind)?;
+        let variant = mldsa_variant(param_set);
         if seed.len() != MLDSA_SEED_LEN {
             return Err(HsmError::InvalidArg);
         }
@@ -164,7 +163,7 @@ impl HsmMlDsa for StdHsmPal {
     async fn mldsa_sign(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         sec_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         hedge: HsmMlDsaHedge,
@@ -172,7 +171,7 @@ impl HsmMlDsa for StdHsmPal {
         ctx: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let variant = mldsa_variant(kind)?;
+        let variant = mldsa_variant(param_set);
         let external_mu = external_mu(msg_type, message, ctx)?;
 
         // Unlike the seed, the per-signature randomness is not drawn here:
@@ -198,14 +197,14 @@ impl HsmMlDsa for StdHsmPal {
     async fn mldsa_verify(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         pub_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
         ctx: &HsmDmaBuf,
         signature: &HsmDmaBuf,
     ) -> HsmResult<bool> {
-        let variant = mldsa_variant(kind)?;
+        let variant = mldsa_variant(param_set);
         let external_mu = external_mu(msg_type, message, ctx)?;
         self.pqc
             .mldsa_verify(variant, pub_key, external_mu, message, ctx, signature)
@@ -217,11 +216,11 @@ impl HsmMlKem for StdHsmPal {
     async fn mlkem_encaps_in_place(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         pub_key_ciphertext: &mut HsmDmaBuf,
         shared_secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let variant = mlkem_variant(kind)?;
+        let variant = mlkem_variant(param_set);
         if pub_key_ciphertext.len() != variant.pub_key_len()
             || pub_key_ciphertext.len() < variant.ciphertext_len()
             || shared_secret.len() != tsra_crypto::MLKEM_SHARED_SECRET_LEN
@@ -240,11 +239,11 @@ impl HsmMlKem for StdHsmPal {
     async fn mlkem_gen_key(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         seed: &mut HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let variant = mlkem_variant(kind)?;
+        let variant = mlkem_variant(param_set);
         if seed.len() != MLKEM_SEED_LEN
             || output.len() != variant.pub_key_len() + variant.sec_key_len()
         {
@@ -262,11 +261,11 @@ impl HsmMlKem for StdHsmPal {
     async fn mlkem_encaps(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         pub_key: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let variant = mlkem_variant(kind)?;
+        let variant = mlkem_variant(param_set);
         if output.len() != MLKEM_SHARED_SECRET_LEN + variant.ciphertext_len() {
             return Err(HsmError::InvalidArg);
         }
@@ -283,12 +282,12 @@ impl HsmMlKem for StdHsmPal {
     async fn mlkem_decaps(
         &self,
         _io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         sec_key: &HsmDmaBuf,
         ciphertext: &HsmDmaBuf,
         shared_secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let variant = mlkem_variant(kind)?;
+        let variant = mlkem_variant(param_set);
         let ss = self
             .pqc
             .mlkem_decapsulate(variant, sec_key, ciphertext)
@@ -313,18 +312,18 @@ mod tests {
     use crate::StdHsmIo;
     use crate::StdHsmPal;
 
-    /// ML-DSA `(kind, pub_key, sec_key, signature)` lengths, FIPS 204.
-    const MLDSA_SETS: [(HsmVaultKeyKind, usize, usize, usize); 3] = [
-        (HsmVaultKeyKind::MlDsa44Seed, 1312, 2560, 2420),
-        (HsmVaultKeyKind::MlDsa65Seed, 1952, 4032, 3309),
-        (HsmVaultKeyKind::MlDsa87Seed, 2592, 4896, 4627),
+    /// ML-DSA `(param_set, pub_key, sec_key, signature)` lengths, FIPS 204.
+    const MLDSA_SETS: [(HsmMlDsaParamSet, usize, usize, usize); 3] = [
+        (HsmMlDsaParamSet::MlDsa44, 1312, 2560, 2420),
+        (HsmMlDsaParamSet::MlDsa65, 1952, 4032, 3309),
+        (HsmMlDsaParamSet::MlDsa87, 2592, 4896, 4627),
     ];
 
-    /// ML-KEM `(kind, pub_key, sec_key, ciphertext)` lengths, FIPS 203.
-    const MLKEM_SETS: [(HsmVaultKeyKind, usize, usize, usize); 3] = [
-        (HsmVaultKeyKind::MlKem512Seed, 800, 1632, 768),
-        (HsmVaultKeyKind::MlKem768Seed, 1184, 2400, 1088),
-        (HsmVaultKeyKind::MlKem1024Seed, 1568, 3168, 1568),
+    /// ML-KEM `(param_set, pub_key, sec_key, ciphertext)` lengths, FIPS 203.
+    const MLKEM_SETS: [(HsmMlKemParamSet, usize, usize, usize); 3] = [
+        (HsmMlKemParamSet::MlKem512, 800, 1632, 768),
+        (HsmMlKemParamSet::MlKem768, 1184, 2400, 1088),
+        (HsmMlKemParamSet::MlKem1024, 1568, 3168, 1568),
     ];
 
     /// Shared-secret length, identical across ML-KEM parameter sets.
@@ -352,13 +351,13 @@ mod tests {
 
     #[tokio::test]
     async fn overlapping_outputs_consume_pqc_inputs_first() {
-        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+        for (param_set, pk_len, sk_len, sig_len) in MLDSA_SETS {
             let (pal, io) = pal_and_io();
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
                 &io,
-                kind,
+                param_set,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk),
                 dma_mut(&mut sk),
@@ -372,7 +371,7 @@ mod tests {
                 buffer[prefix..].copy_from_slice(&sk);
                 pal.mldsa_sign_in_place(
                     &io,
-                    kind,
+                    param_set,
                     buffer,
                     HsmMlDsaMsgType::Pure,
                     HsmMlDsaHedge::Preferred,
@@ -384,7 +383,7 @@ mod tests {
                 assert!(pal
                     .mldsa_verify(
                         &io,
-                        kind,
+                        param_set,
                         dma(&pk),
                         HsmMlDsaMsgType::Pure,
                         dma(b"m"),
@@ -396,23 +395,29 @@ mod tests {
             }
         }
 
-        for (kind, pk_len, sk_len, ct_len) in MLKEM_SETS {
+        for (param_set, pk_len, sk_len, ct_len) in MLKEM_SETS {
             let (pal, io) = pal_and_io();
             let (mut seed, mut keys) = ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len + sk_len]);
-            pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+            pal.mlkem_gen_key(&io, param_set, dma_mut(&mut seed), dma_mut(&mut keys))
                 .await
                 .unwrap();
             let (pk, sk) = keys.split_at(pk_len);
             let buffer = pal.dma_alloc(&io, pk_len.max(ct_len)).unwrap();
             buffer[..pk_len].copy_from_slice(dma(pk));
             let mut ss = [0u8; SS_LEN];
-            pal.mlkem_encaps_in_place(&io, kind, buffer, dma_mut(&mut ss))
+            pal.mlkem_encaps_in_place(&io, param_set, buffer, dma_mut(&mut ss))
                 .await
                 .unwrap();
             let mut decaps = [0u8; SS_LEN];
-            pal.mlkem_decaps(&io, kind, dma(sk), &buffer[..ct_len], dma_mut(&mut decaps))
-                .await
-                .unwrap();
+            pal.mlkem_decaps(
+                &io,
+                param_set,
+                dma(sk),
+                &buffer[..ct_len],
+                dma_mut(&mut decaps),
+            )
+            .await
+            .unwrap();
             assert_eq!(ss, decaps);
         }
     }
@@ -426,7 +431,7 @@ mod tests {
             assert_eq!(
                 pal.mldsa_sign_in_place(
                     &io,
-                    HsmVaultKeyKind::MlDsa44Seed,
+                    HsmMlDsaParamSet::MlDsa44,
                     &mut buffer[..key_len],
                     HsmMlDsaMsgType::Pure,
                     HsmMlDsaHedge::Preferred,
@@ -447,7 +452,7 @@ mod tests {
             assert_eq!(
                 pal.mlkem_encaps_in_place(
                     &io,
-                    HsmVaultKeyKind::MlKem512Seed,
+                    HsmMlKemParamSet::MlKem512,
                     &mut buffer[..key_len],
                     dma_mut(&mut ss[..secret_len]),
                 )
@@ -466,24 +471,27 @@ mod tests {
     async fn mldsa_round_trip_verifies_and_rejects_tampering() {
         let (pal, io) = pal_and_io();
 
-        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+        for (param_set, pk_len, sk_len, sig_len) in MLDSA_SETS {
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
                 &io,
-                kind,
+                param_set,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk),
                 dma_mut(&mut sk),
             )
             .await
             .expect("gen_key");
-            assert_ne!(seed, [0u8; MLDSA_SEED_LEN], "{kind:?}: seed left unset");
+            assert_ne!(
+                seed, [0u8; MLDSA_SEED_LEN],
+                "{param_set:?}: seed left unset"
+            );
 
             let mut sig = vec![0u8; sig_len];
             pal.mldsa_sign(
                 &io,
-                kind,
+                param_set,
                 dma(&sk),
                 HsmMlDsaMsgType::Pure,
                 HsmMlDsaHedge::Preferred,
@@ -497,7 +505,7 @@ mod tests {
             assert!(
                 pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::Pure,
                     dma(b"message"),
@@ -506,12 +514,12 @@ mod tests {
                 )
                 .await
                 .expect("verify"),
-                "{kind:?}: own signature failed to verify"
+                "{param_set:?}: own signature failed to verify"
             );
             assert!(
                 !pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::Pure,
                     dma(b"messagf"),
@@ -520,14 +528,14 @@ mod tests {
                 )
                 .await
                 .expect("verify"),
-                "{kind:?}: signature verified for the wrong message"
+                "{param_set:?}: signature verified for the wrong message"
             );
             // The context string is bound into the signature, so changing
             // it must invalidate it just as changing the message does.
             assert!(
                 !pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::Pure,
                     dma(b"message"),
@@ -536,7 +544,7 @@ mod tests {
                 )
                 .await
                 .expect("verify"),
-                "{kind:?}: signature verified under the wrong context"
+                "{param_set:?}: signature verified under the wrong context"
             );
         }
     }
@@ -548,12 +556,12 @@ mod tests {
     async fn mldsa_verify_reports_false_for_garbage_signature() {
         let (pal, io) = pal_and_io();
 
-        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+        for (param_set, pk_len, sk_len, sig_len) in MLDSA_SETS {
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
                 &io,
-                kind,
+                param_set,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk),
                 dma_mut(&mut sk),
@@ -565,7 +573,7 @@ mod tests {
             assert!(
                 !pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::Pure,
                     dma(b"m"),
@@ -574,7 +582,7 @@ mod tests {
                 )
                 .await
                 .expect("verify must not error on a bad signature"),
-                "{kind:?}: garbage signature verified"
+                "{param_set:?}: garbage signature verified"
             );
         }
     }
@@ -585,11 +593,11 @@ mod tests {
     #[tokio::test]
     async fn mlkem_gen_key_rejects_a_mis_sized_output() {
         let (pal, io) = pal_and_io();
-        let (kind, pk_len, sk_len, _) = MLKEM_SETS[0];
+        let (param_set, pk_len, sk_len, _) = MLKEM_SETS[0];
         for len in [0, pk_len, pk_len + sk_len - 1, pk_len + sk_len + 1] {
             let (mut seed, mut keys) = ([0x5a; MLKEM_SEED_LEN], vec![0x5a; len]);
             assert_eq!(
-                pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+                pal.mlkem_gen_key(&io, param_set, dma_mut(&mut seed), dma_mut(&mut keys))
                     .await,
                 Err(HsmError::InvalidArg),
                 "{len}-byte output"
@@ -607,9 +615,9 @@ mod tests {
     #[tokio::test]
     async fn mlkem_encaps_rejects_a_mis_sized_output() {
         let (pal, io) = pal_and_io();
-        let (kind, pk_len, sk_len, ct_len) = MLKEM_SETS[0];
+        let (param_set, pk_len, sk_len, ct_len) = MLKEM_SETS[0];
         let (mut seed, mut keys) = ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len + sk_len]);
-        pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+        pal.mlkem_gen_key(&io, param_set, dma_mut(&mut seed), dma_mut(&mut keys))
             .await
             .expect("gen_key");
         let pk = &keys[..pk_len];
@@ -623,7 +631,7 @@ mod tests {
         ] {
             let mut out = vec![0x5a; len];
             assert_eq!(
-                pal.mlkem_encaps(&io, kind, dma(pk), dma_mut(&mut out))
+                pal.mlkem_encaps(&io, param_set, dma(pk), dma_mut(&mut out))
                     .await,
                 Err(HsmError::InvalidArg),
                 "{len}-byte output"
@@ -639,34 +647,34 @@ mod tests {
     async fn mlkem_round_trip_agrees_and_implicitly_rejects() {
         let (pal, io) = pal_and_io();
 
-        for (kind, pk_len, sk_len, ct_len) in MLKEM_SETS {
+        for (param_set, pk_len, sk_len, ct_len) in MLKEM_SETS {
             let (mut seed, mut keys) = ([0u8; MLKEM_SEED_LEN], vec![0u8; pk_len + sk_len]);
-            pal.mlkem_gen_key(&io, kind, dma_mut(&mut seed), dma_mut(&mut keys))
+            pal.mlkem_gen_key(&io, param_set, dma_mut(&mut seed), dma_mut(&mut keys))
                 .await
                 .expect("gen_key");
             let (pk, sk) = keys.split_at(pk_len);
 
             let mut out = vec![0u8; SS_LEN + ct_len];
-            pal.mlkem_encaps(&io, kind, dma(pk), dma_mut(&mut out))
+            pal.mlkem_encaps(&io, param_set, dma(pk), dma_mut(&mut out))
                 .await
                 .expect("encaps");
             let (ss_enc, ct) = out.split_at(SS_LEN);
             let (ss_enc, mut ct) = (ss_enc.to_vec(), ct.to_vec());
 
             let mut ss_dec = [0u8; SS_LEN];
-            pal.mlkem_decaps(&io, kind, dma(sk), dma(&ct), dma_mut(&mut ss_dec))
+            pal.mlkem_decaps(&io, param_set, dma(sk), dma(&ct), dma_mut(&mut ss_dec))
                 .await
                 .expect("decaps");
-            assert_eq!(ss_enc, ss_dec, "{kind:?}: shared secrets disagree");
+            assert_eq!(ss_enc, ss_dec, "{param_set:?}: shared secrets disagree");
 
             ct[0] ^= 1;
             let mut ss_rej = [0u8; SS_LEN];
-            pal.mlkem_decaps(&io, kind, dma(sk), dma(&ct), dma_mut(&mut ss_rej))
+            pal.mlkem_decaps(&io, param_set, dma(sk), dma(&ct), dma_mut(&mut ss_rej))
                 .await
                 .expect("decaps must not fail on a corrupted ciphertext");
             assert_ne!(
                 ss_enc, ss_rej,
-                "{kind:?}: corrupted ciphertext produced the real secret"
+                "{param_set:?}: corrupted ciphertext produced the real secret"
             );
         }
     }
@@ -680,17 +688,19 @@ mod tests {
     async fn mldsa_signing_is_hedged() {
         let (pal, io) = pal_and_io();
 
-        for ((kind, pk_len, sk_len, sig_len), hedge) in MLDSA_SETS.into_iter().flat_map(|set| {
-            [
-                (set, HsmMlDsaHedge::Preferred),
-                (set, HsmMlDsaHedge::Required),
-            ]
-        }) {
+        for ((param_set, pk_len, sk_len, sig_len), hedge) in
+            MLDSA_SETS.into_iter().flat_map(|set| {
+                [
+                    (set, HsmMlDsaHedge::Preferred),
+                    (set, HsmMlDsaHedge::Required),
+                ]
+            })
+        {
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
                 &io,
-                kind,
+                param_set,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk),
                 dma_mut(&mut sk),
@@ -703,7 +713,7 @@ mod tests {
                 let mut sig = vec![0u8; sig_len];
                 pal.mldsa_sign(
                     &io,
-                    kind,
+                    param_set,
                     dma(&sk),
                     HsmMlDsaMsgType::Pure,
                     hedge,
@@ -716,7 +726,7 @@ mod tests {
                 assert!(
                     pal.mldsa_verify(
                         &io,
-                        kind,
+                        param_set,
                         dma(&pk),
                         HsmMlDsaMsgType::Pure,
                         dma(b"same message"),
@@ -725,13 +735,13 @@ mod tests {
                     )
                     .await
                     .expect("verify"),
-                    "{kind:?}: hedged signature failed to verify"
+                    "{param_set:?}: hedged signature failed to verify"
                 );
                 sigs.push(sig);
             }
             assert_ne!(
                 sigs[0], sigs[1],
-                "{kind:?}: {hedge:?} signing is deterministic; Uno signs hedged"
+                "{param_set:?}: {hedge:?} signing is deterministic; Uno signs hedged"
             );
         }
     }
@@ -744,12 +754,12 @@ mod tests {
     async fn mldsa_deterministic_signing_repeats() {
         let (pal, io) = pal_and_io();
 
-        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+        for (param_set, pk_len, sk_len, sig_len) in MLDSA_SETS {
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
                 &io,
-                kind,
+                param_set,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk),
                 dma_mut(&mut sk),
@@ -776,7 +786,7 @@ mod tests {
                 let mut sig = vec![0u8; sig_len];
                 pal.mldsa_sign(
                     &io,
-                    kind,
+                    param_set,
                     dma(&sk),
                     msg_type,
                     HsmMlDsaHedge::Deterministic,
@@ -786,14 +796,14 @@ mod tests {
                 )
                 .await
                 .expect("sign");
-                assert_eq!(sig, expected, "{kind:?}: {msg_type:?} signature");
+                assert_eq!(sig, expected, "{param_set:?}: {msg_type:?} signature");
             }
 
             let buffer = pal.dma_alloc(&io, sk_len).unwrap();
             buffer.copy_from_slice(&sk);
             pal.mldsa_sign_in_place(
                 &io,
-                kind,
+                param_set,
                 buffer,
                 HsmMlDsaMsgType::Pure,
                 HsmMlDsaHedge::Deterministic,
@@ -805,12 +815,12 @@ mod tests {
             assert_eq!(
                 &buffer[..sig_len],
                 &expected[..],
-                "{kind:?}: in-place signature"
+                "{param_set:?}: in-place signature"
             );
             assert!(
                 pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::Pure,
                     dma(b"message"),
@@ -819,7 +829,7 @@ mod tests {
                 )
                 .await
                 .expect("verify"),
-                "{kind:?}: deterministic signature failed to verify"
+                "{param_set:?}: deterministic signature failed to verify"
             );
         }
     }
@@ -831,12 +841,12 @@ mod tests {
     async fn mldsa_external_mu_matches_pure() {
         let (pal, io) = pal_and_io();
 
-        for (kind, pk_len, sk_len, sig_len) in MLDSA_SETS {
+        for (param_set, pk_len, sk_len, sig_len) in MLDSA_SETS {
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
                 &io,
-                kind,
+                param_set,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk),
                 dma_mut(&mut sk),
@@ -851,7 +861,7 @@ mod tests {
             let mut sig = vec![0u8; sig_len];
             pal.mldsa_sign(
                 &io,
-                kind,
+                param_set,
                 dma(&sk),
                 HsmMlDsaMsgType::ExternalMu,
                 HsmMlDsaHedge::Preferred,
@@ -864,7 +874,7 @@ mod tests {
             assert!(
                 pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::Pure,
                     dma(b"message"),
@@ -873,12 +883,12 @@ mod tests {
                 )
                 .await
                 .expect("verify"),
-                "{kind:?}: signature over mu failed pure verification"
+                "{param_set:?}: signature over mu failed pure verification"
             );
 
             pal.mldsa_sign(
                 &io,
-                kind,
+                param_set,
                 dma(&sk),
                 HsmMlDsaMsgType::Pure,
                 HsmMlDsaHedge::Preferred,
@@ -891,7 +901,7 @@ mod tests {
             assert!(
                 pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::ExternalMu,
                     dma(&mu),
@@ -900,14 +910,14 @@ mod tests {
                 )
                 .await
                 .expect("verify mu"),
-                "{kind:?}: pure signature failed verification over mu"
+                "{param_set:?}: pure signature failed verification over mu"
             );
 
             let buffer = pal.dma_alloc(&io, sk_len).unwrap();
             buffer.copy_from_slice(&sk);
             pal.mldsa_sign_in_place(
                 &io,
-                kind,
+                param_set,
                 buffer,
                 HsmMlDsaMsgType::ExternalMu,
                 HsmMlDsaHedge::Preferred,
@@ -919,7 +929,7 @@ mod tests {
             assert!(
                 pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     HsmMlDsaMsgType::Pure,
                     dma(b"message"),
@@ -928,7 +938,7 @@ mod tests {
                 )
                 .await
                 .expect("verify"),
-                "{kind:?}: in-place signature over mu failed pure verification"
+                "{param_set:?}: in-place signature over mu failed pure verification"
             );
         }
     }
@@ -939,12 +949,12 @@ mod tests {
     #[tokio::test]
     async fn mldsa_rejects_malformed_mu_and_prehash() {
         let (pal, io) = pal_and_io();
-        let (kind, pk_len, sk_len, sig_len) = MLDSA_SETS[0];
+        let (param_set, pk_len, sk_len, sig_len) = MLDSA_SETS[0];
         let (mut seed, mut pk, mut sk) =
             ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
         pal.mldsa_gen_key(
             &io,
-            kind,
+            param_set,
             dma_mut(&mut seed),
             dma_mut(&mut pk),
             dma_mut(&mut sk),
@@ -990,7 +1000,7 @@ mod tests {
             assert_eq!(
                 pal.mldsa_sign(
                     &io,
-                    kind,
+                    param_set,
                     dma(&sk),
                     msg_type,
                     HsmMlDsaHedge::Preferred,
@@ -1006,7 +1016,7 @@ mod tests {
             assert_eq!(
                 pal.mldsa_verify(
                     &io,
-                    kind,
+                    param_set,
                     dma(&pk),
                     msg_type,
                     dma(message),
@@ -1023,7 +1033,7 @@ mod tests {
             assert_eq!(
                 pal.mldsa_sign_in_place(
                     &io,
-                    kind,
+                    param_set,
                     buffer,
                     msg_type,
                     HsmMlDsaHedge::Preferred,
@@ -1045,14 +1055,14 @@ mod tests {
     async fn gen_key_is_not_deterministic() {
         let (pal, io) = pal_and_io();
 
-        let (kind, pk_len, sk_len, _) = MLDSA_SETS[0];
+        let (param_set, pk_len, sk_len, _) = MLDSA_SETS[0];
         let mut pks = Vec::new();
         for _ in 0..2 {
             let (mut seed, mut pk, mut sk) =
                 ([0u8; MLDSA_SEED_LEN], vec![0u8; pk_len], vec![0u8; sk_len]);
             pal.mldsa_gen_key(
                 &io,
-                kind,
+                param_set,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk),
                 dma_mut(&mut sk),
@@ -1064,33 +1074,19 @@ mod tests {
         assert_ne!(pks[0], pks[1], "two generations produced the same key");
     }
 
-    /// A non-PQC key kind, and a correctly-sized buffer for the wrong
-    /// parameter set, are both caller errors rather than panics.
+    /// A correctly-sized buffer for the wrong parameter set is a caller
+    /// error rather than a panic.
     #[tokio::test]
-    async fn rejects_wrong_kind_and_wrong_buffer_length() {
+    async fn rejects_wrong_buffer_length() {
         let (pal, io) = pal_and_io();
 
-        let (mut seed, mut pk, mut sk) = ([0u8; MLDSA_SEED_LEN], vec![0u8; 1312], vec![0u8; 2560]);
-        assert_eq!(
-            pal.mldsa_gen_key(
-                &io,
-                HsmVaultKeyKind::Ecc256Private,
-                dma_mut(&mut seed),
-                dma_mut(&mut pk),
-                dma_mut(&mut sk)
-            )
-            .await,
-            Err(HsmError::InvalidArg),
-            "an ECC kind must not reach the ML-DSA path"
-        );
-
-        // ML-DSA-65 sizes requested under the ML-DSA-44 kind.
+        // ML-DSA-65 sizes requested under ML-DSA-44.
         let (mut seed, mut pk65, mut sk65) =
             ([0u8; MLDSA_SEED_LEN], vec![0u8; 1952], vec![0u8; 4032]);
         assert_eq!(
             pal.mldsa_gen_key(
                 &io,
-                HsmVaultKeyKind::MlDsa44Seed,
+                HsmMlDsaParamSet::MlDsa44,
                 dma_mut(&mut seed),
                 dma_mut(&mut pk65),
                 dma_mut(&mut sk65)

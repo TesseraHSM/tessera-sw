@@ -35,22 +35,11 @@ use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
+use super::from_pal::mldsa_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
-use crate::ddi::tbor::mldsa_generate_key::mldsa_sec_key_len;
 use crate::ddi::tbor::mldsa_generate_key::MLDSA_SEED_LEN;
-
-/// Signature length per ML-DSA parameter set (FIPS 204 Table 2).
-fn mldsa_sig_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlDsa44Seed => Ok(2420),
-        HsmVaultKeyKind::MlDsa65Seed => Ok(3309),
-        HsmVaultKeyKind::MlDsa87Seed => Ok(4627),
-        _ => Err(HsmError::InvalidArg),
-    }
-}
 
 /// Map the wire hedge variant onto the PAL's; unknown values are invalid.
 fn mldsa_hedge(hedge: MlDsaHedge) -> HsmResult<HsmMlDsaHedge> {
@@ -96,8 +85,9 @@ pub(crate) async fn handle<P: HsmPal>(
             if !view.key_attrs.sign() {
                 return Err(HsmError::InvalidPermissions);
             }
-            let sig_len = mldsa_sig_len(kind)?;
-            let sec_len = mldsa_sec_key_len(kind)?;
+            let param_set = mldsa_param_set(kind)?;
+            let sig_len = param_set.sig_len();
+            let sec_len = param_set.sec_key_len();
             if view.target_key.len() != MLDSA_SEED_LEN + sec_len {
                 return Err(HsmError::InvalidArg);
             }
@@ -110,7 +100,7 @@ pub(crate) async fn handle<P: HsmPal>(
             }
             pal.mldsa_sign_in_place(
                 io,
-                kind,
+                param_set,
                 &mut req.masked_key[..key_end],
                 HsmMlDsaMsgType::ExternalMu,
                 hedge,

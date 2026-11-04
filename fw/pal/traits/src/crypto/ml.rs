@@ -19,6 +19,121 @@ pub const MLDSA_MU_LEN: usize = 64;
 /// parameter set.
 pub const MLKEM_SHARED_SECRET_LEN: usize = 32;
 
+/// ML-DSA parameter set (FIPS 204).
+///
+/// The PAL's own selector, as [`HsmRsaKey`] is for RSA: ML-DSA operations
+/// take it rather than a vault key kind, and callers map a stored key's
+/// kind onto it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmMlDsaParamSet {
+    /// ML-DSA-44.
+    MlDsa44,
+
+    /// ML-DSA-65.
+    MlDsa65,
+
+    /// ML-DSA-87.
+    MlDsa87,
+}
+
+impl HsmMlDsaParamSet {
+    /// Encoded public key length: 1312 / 1952 / 2592 bytes.
+    pub const fn pub_key_len(&self) -> usize {
+        match self {
+            Self::MlDsa44 => 1312,
+            Self::MlDsa65 => 1952,
+            Self::MlDsa87 => 2592,
+        }
+    }
+
+    /// Expanded secret key length: 2560 / 4032 / 4896 bytes.
+    pub const fn sec_key_len(&self) -> usize {
+        match self {
+            Self::MlDsa44 => 2560,
+            Self::MlDsa65 => 4032,
+            Self::MlDsa87 => 4896,
+        }
+    }
+
+    /// Signature length: 2420 / 3309 / 4627 bytes.
+    pub const fn sig_len(&self) -> usize {
+        match self {
+            Self::MlDsa44 => 2420,
+            Self::MlDsa65 => 3309,
+            Self::MlDsa87 => 4627,
+        }
+    }
+
+    /// The parameter set whose public key is `len` bytes long, if any.  The
+    /// three lengths are distinct, so this is unambiguous.
+    pub const fn from_pub_key_len(len: usize) -> Option<Self> {
+        match len {
+            1312 => Some(Self::MlDsa44),
+            1952 => Some(Self::MlDsa65),
+            2592 => Some(Self::MlDsa87),
+            _ => None,
+        }
+    }
+}
+
+/// ML-KEM parameter set (FIPS 203).
+///
+/// The PAL's own selector, as [`HsmRsaKey`] is for RSA: ML-KEM operations
+/// take it rather than a vault key kind, and callers map a stored key's
+/// kind onto it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HsmMlKemParamSet {
+    /// ML-KEM-512.
+    MlKem512,
+
+    /// ML-KEM-768.
+    MlKem768,
+
+    /// ML-KEM-1024.
+    MlKem1024,
+}
+
+impl HsmMlKemParamSet {
+    /// Encapsulation (public) key length: 800 / 1184 / 1568 bytes.
+    pub const fn pub_key_len(&self) -> usize {
+        match self {
+            Self::MlKem512 => 800,
+            Self::MlKem768 => 1184,
+            Self::MlKem1024 => 1568,
+        }
+    }
+
+    /// Expanded decapsulation (private) key length: 1632 / 2400 / 3168
+    /// bytes.
+    pub const fn sec_key_len(&self) -> usize {
+        match self {
+            Self::MlKem512 => 1632,
+            Self::MlKem768 => 2400,
+            Self::MlKem1024 => 3168,
+        }
+    }
+
+    /// Ciphertext length: 768 / 1088 / 1568 bytes.
+    pub const fn ciphertext_len(&self) -> usize {
+        match self {
+            Self::MlKem512 => 768,
+            Self::MlKem768 => 1088,
+            Self::MlKem1024 => 1568,
+        }
+    }
+
+    /// The parameter set whose encapsulation key is `len` bytes long, if
+    /// any.  The three lengths are distinct, so this is unambiguous.
+    pub const fn from_pub_key_len(len: usize) -> Option<Self> {
+        match len {
+            800 => Some(Self::MlKem512),
+            1184 => Some(Self::MlKem768),
+            1568 => Some(Self::MlKem1024),
+            _ => None,
+        }
+    }
+}
+
 /// How the `message` input of an ML-DSA signature operation is interpreted.
 ///
 /// FIPS 204 signs and verifies the 64-byte message representative
@@ -116,7 +231,7 @@ pub trait HsmMlDsa {
     async fn mldsa_sign_in_place(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         key_signature: &mut HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         hedge: HsmMlDsaHedge,
@@ -131,10 +246,7 @@ pub trait HsmMlDsa {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`]
-    ///   ([`MlDsa44Seed`](HsmVaultKeyKind::MlDsa44Seed) /
-    ///   [`MlDsa65Seed`](HsmVaultKeyKind::MlDsa65Seed) /
-    ///   [`MlDsa87Seed`](HsmVaultKeyKind::MlDsa87Seed)).
+    /// - `param_set` — the ML-DSA parameter set.
     /// - `seed` — output; must be exactly 32 bytes.  The implementation
     ///   fills it from the device's entropy source: the seed is the private
     ///   key, and the fastpath cores have no entropy source of their own.
@@ -145,13 +257,12 @@ pub trait HsmMlDsa {
     /// # Returns
     ///
     /// - `Ok(())` — `seed`, `pub_key`, and `sec_key` populated.
-    /// - `Err(HsmError::InvalidArg)` — `kind` is not a seed kind, or an
-    ///   output buffer is the wrong length.
+    /// - `Err(HsmError::InvalidArg)` — an output buffer is the wrong length.
     /// - `Err(HsmError)` — propagated from the FP offload path.
     async fn mldsa_gen_key(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         seed: &mut HsmDmaBuf,
         pub_key: &mut HsmDmaBuf,
         sec_key: &mut HsmDmaBuf,
@@ -162,7 +273,7 @@ pub trait HsmMlDsa {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
+    /// - `param_set` — the ML-DSA parameter set.
     /// - `sec_key` — expanded secret key (2560 / 4032 / 4896 bytes).
     /// - `msg_type` — how `message` is to be read.
     /// - `hedge` — whether the signature is hedged or deterministic.
@@ -176,7 +287,7 @@ pub trait HsmMlDsa {
     /// # Returns
     ///
     /// - `Ok(())` — `signature` populated.
-    /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length, or a
+    /// - `Err(HsmError::InvalidArg)` — bad buffer length, or a
     ///   `message`/`ctx` not valid for `msg_type`.
     /// - `Err(HsmError::UnsupportedCmd)` — `msg_type` is a pre-hash type,
     ///   or the implementation cannot sign as `hedge` requires.
@@ -185,7 +296,7 @@ pub trait HsmMlDsa {
     async fn mldsa_sign(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         sec_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         hedge: HsmMlDsaHedge,
@@ -199,7 +310,7 @@ pub trait HsmMlDsa {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
+    /// - `param_set` — the ML-DSA parameter set.
     /// - `pub_key` — encoded public key, exactly the parameter set's length.
     /// - `msg_type` — how `message` is to be read.
     /// - `message`, `ctx` — the signed input, as `msg_type` defines it, and
@@ -211,7 +322,7 @@ pub trait HsmMlDsa {
     /// - `Ok(true)` / `Ok(false)` — the signature verified, or did not.
     ///   An invalid signature is an ordinary outcome, not an error, so it
     ///   cannot be conflated with a transport fault.
-    /// - `Err(HsmError::InvalidArg)` — bad kind or buffer length, or a
+    /// - `Err(HsmError::InvalidArg)` — bad buffer length, or a
     ///   `message`/`ctx` not valid for `msg_type`.
     /// - `Err(HsmError::UnsupportedCmd)` — `msg_type` is a pre-hash type.
     /// - `Err(HsmError)` — propagated from the FP offload path.
@@ -219,7 +330,7 @@ pub trait HsmMlDsa {
     async fn mldsa_verify(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlDsaParamSet,
         pub_key: &HsmDmaBuf,
         msg_type: HsmMlDsaMsgType,
         message: &HsmDmaBuf,
@@ -241,7 +352,7 @@ pub trait HsmMlKem {
     async fn mlkem_encaps_in_place(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         pub_key_ciphertext: &mut HsmDmaBuf,
         shared_secret: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
@@ -253,8 +364,7 @@ pub trait HsmMlKem {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`]
-    ///   (`MlKem512Seed` / `MlKem768Seed` / `MlKem1024Seed`).
+    /// - `param_set` — the ML-KEM parameter set.
     /// - `seed` — output; must be exactly 64 bytes.  Filled from the
     ///   device's entropy source, for the same reason as ML-DSA's seed.
     /// - `output` — output, the encapsulation key followed by the expanded
@@ -271,13 +381,13 @@ pub trait HsmMlKem {
     /// # Returns
     ///
     /// - `Ok(())` — `seed` and `output` populated.
-    /// - `Err(HsmError::InvalidArg)` — bad kind, `seed` not 64 bytes, or
+    /// - `Err(HsmError::InvalidArg)` — `seed` not 64 bytes, or
     ///   `output` not exactly the two key lengths combined.
     /// - `Err(HsmError)` — propagated from the FP offload path.
     async fn mlkem_gen_key(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         seed: &mut HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
@@ -287,7 +397,7 @@ pub trait HsmMlKem {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
+    /// - `param_set` — the ML-KEM parameter set.
     /// - `pub_key` — the encapsulation key, exactly the parameter set's
     ///   length.
     /// - `output` — output, the shared secret followed by the ciphertext,
@@ -307,13 +417,13 @@ pub trait HsmMlKem {
     /// # Returns
     ///
     /// - `Ok(())` — `output` populated.
-    /// - `Err(HsmError::InvalidArg)` — bad kind, or `output` not exactly
+    /// - `Err(HsmError::InvalidArg)` — `output` not exactly
     ///   the shared secret and ciphertext lengths combined.
     /// - `Err(HsmError)` — propagated from the FP offload path.
     async fn mlkem_encaps(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         pub_key: &HsmDmaBuf,
         output: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
@@ -325,7 +435,7 @@ pub trait HsmMlKem {
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (per-IO scope).
-    /// - `kind` — parameter set as a seed-kind [`HsmVaultKeyKind`].
+    /// - `param_set` — the ML-KEM parameter set.
     /// - `sec_key` — expanded decapsulation key (1632 / 2400 / 3168 bytes).
     /// - `ciphertext` — exactly the parameter set's ciphertext length.
     /// - `shared_secret` — output, 32 bytes.  Key material; the caller is
@@ -337,7 +447,7 @@ pub trait HsmMlKem {
     async fn mlkem_decaps(
         &self,
         io: &impl HsmIo,
-        kind: HsmVaultKeyKind,
+        param_set: HsmMlKemParamSet,
         sec_key: &HsmDmaBuf,
         ciphertext: &HsmDmaBuf,
         shared_secret: &mut HsmDmaBuf,
