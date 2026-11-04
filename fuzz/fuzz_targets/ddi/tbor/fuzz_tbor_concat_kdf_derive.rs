@@ -281,7 +281,10 @@ fn make_secret(
         })
         .expect("valid ECDH secret derivation")
         .masked_secret;
-    assert_eq!(secret.len(), MASK_OVERHEAD + curve.coord_len());
+    assert_eq!(
+        secret.len(),
+        aead::masked_blob_len(aead::AeadAlg::AesGcm256, curve.coord_len())
+    );
     secret
 }
 
@@ -397,7 +400,7 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
         },
         key_type,
         key_length,
-        masked_secret: vec![0; MASK_OVERHEAD + curve.coord_len()],
+        masked_secret: vec![0; aead::masked_blob_len(aead::AeadAlg::AesGcm256, curve.coord_len())],
         info: payload(input, info_len(input.info_length)),
     };
     let mut secret_error = None;
@@ -524,7 +527,11 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
             }
             Scenario::SecretLength if secret_len != req.masked_secret.len() => {
                 req.masked_secret.resize(secret_len, input.mask);
-                secret_error = Some(TborStatus::AesGcmDecryptTagDoesNotMatch);
+                secret_error = Some(if (secret_len - MASK_OVERHEAD).is_multiple_of(16) {
+                    TborStatus::AesGcmDecryptTagDoesNotMatch
+                } else {
+                    TborStatus::MaskedKeyDecodeFailed
+                });
             }
             _ => {}
         }
@@ -533,7 +540,10 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
     let expected = expected_outcome(&req, session.session_id, partition, secret_error);
     match (ctx.tbor(&req), expected) {
         (Ok(resp), Ok(len)) => {
-            assert_eq!(resp.masked_key.len(), MASK_OVERHEAD + len);
+            assert_eq!(
+                resp.masked_key.len(),
+                aead::masked_blob_len(aead::AeadAlg::AesGcm256, len)
+            );
             assert!(resp.masked_key.len() <= CONCAT_MASKED_KEY_MAX_LEN);
         }
         (Err(err), Err(status)) => assert_rejection(&err, status),
@@ -546,16 +556,18 @@ fn run(input: &FuzzInput<'_>, ctx: &TestCtx) {
         .expect("close caller session");
 }
 
-/// Cover exact curve envelope lengths and both wire-limit neighbors.
+/// Cover padded curve envelopes and aligned/unaligned wire-limit neighbors.
 fn secret_boundary(value: u16) -> usize {
     [
         0,
         CONCAT_MASKED_SECRET_MIN_LEN - 1,
         CONCAT_MASKED_SECRET_MIN_LEN,
-        MASK_OVERHEAD + common::EccCurve::P384.coord_len(),
+        aead::masked_blob_len(aead::AeadAlg::AesGcm256, common::EccCurve::P384.coord_len()),
         CONCAT_MASKED_SECRET_MAX_LEN,
         CONCAT_MASKED_SECRET_MAX_LEN + 1,
-    ][usize::from(value % 6)]
+        CONCAT_MASKED_SECRET_MIN_LEN + 1,
+        CONCAT_MASKED_SECRET_MAX_LEN - 1,
+    ][usize::from(value % 8)]
 }
 
 fuzz_target!(|input: FuzzInput<'_>| {

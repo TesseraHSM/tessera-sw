@@ -46,7 +46,7 @@ enum MalformedRequest {
     MissingSlot,
     /// A present slot uses `Uint16`, not the required `Uint8`.
     WrongType(u8),
-    /// The firmware schema requires exactly one TOC entry, not two.
+    /// The paired schema requires two TOC entries, not three.
     ExtraEntry(u8),
 }
 
@@ -58,9 +58,9 @@ impl TborOpReq for MalformedRequest {
     fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
         let encoder = RequestEncoder::new(buf, PROTOCOL_VERSION, Self::OPCODE);
         match self {
-            Self::MissingSlot => encoder.none()?.finish(),
-            Self::WrongType(slot_id) => encoder.uint16(u16::from(*slot_id))?.finish(),
-            Self::ExtraEntry(slot_id) => encoder.uint8(*slot_id)?.uint8(*slot_id)?.finish(),
+            Self::MissingSlot => encoder.none()?.none()?.finish(),
+            Self::WrongType(slot_id) => encoder.uint16(u16::from(*slot_id))?.none()?.finish(),
+            Self::ExtraEntry(slot_id) => encoder.uint8(*slot_id)?.none()?.uint8(*slot_id)?.finish(),
         }
     }
 }
