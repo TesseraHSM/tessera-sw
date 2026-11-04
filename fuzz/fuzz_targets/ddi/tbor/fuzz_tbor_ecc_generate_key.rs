@@ -22,6 +22,7 @@ use libfuzzer_sys::fuzz_target;
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
+use tsra_fw_core_crypto_key_masking::aead;
 
 /// Partition/session lifecycle established before issuing the fuzzed request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,10 +270,7 @@ fn check_response(req: &TborEccGenerateKeyReq, resp: &TborEccGenerateKeyResp) ->
     assert_eq!(resp.pub_key.len(), curve.wire_pub_key_len());
     assert_eq!(
         resp.masked_key.len(),
-        tsra_fw_core_crypto_key_masking::aead::masked_blob_len(
-            tsra_fw_core_crypto_key_masking::aead::AeadAlg::AesGcm256,
-            curve.wire_pub_key_len() / 2,
-        ),
+        aead::masked_blob_len(aead::AeadAlg::AesGcm256, curve.wire_pub_key_len() / 2),
     );
     assert!(resp.masked_key.iter().any(|&byte| byte != 0));
     assert!(resp.pub_key.iter().any(|&byte| byte != 0));
@@ -348,7 +346,7 @@ fn check_derivation_key(
         .expect("generated derivation key must be usable");
     assert_eq!(
         derived.masked_secret.len(),
-        MASKED_SECRET_MIN_LEN - EccCurve::P256.coord_len() + curve.coord_len(),
+        aead::masked_blob_len(aead::AeadAlg::AesGcm256, curve.coord_len()),
     );
     assert!(derived.masked_secret.iter().any(|&byte| byte != 0));
 }

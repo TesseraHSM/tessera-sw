@@ -16,6 +16,7 @@ use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_types::*;
+use tsra_fw_core_crypto_key_masking::aead;
 
 /// Fuzzed parameters mirroring the TBOR `EcdhDerive` request fields (the
 /// TBOR equivalent of the MBOR `EcdhKeyExchange` command).
@@ -129,7 +130,7 @@ fuzz_target!(|input: FuzzInput| {
             Err(err @ DdiError::DriverError(_)) => panic!("Crash Detected: {err}"),
             Ok(resp) if valid_keys && session_scope => assert_eq!(
                 resp.masked_secret.len(),
-                MASKED_SECRET_MIN_LEN - 32 + input.curve.coord_len(),
+                aead::masked_blob_len(aead::AeadAlg::AesGcm256, input.curve.coord_len()),
                 "masked secret length must match the curve secret length"
             ),
             Ok(_) => panic!("invalid ECDH request unexpectedly succeeded"),
