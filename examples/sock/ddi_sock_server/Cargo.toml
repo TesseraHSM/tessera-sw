@@ -23,6 +23,7 @@ tsra_fw_hsm_std.workspace = true
 
 [dev-dependencies]
 parking_lot.workspace = true
+tokio = { features = ["test-util"], workspace = true }
 tsra_crypto.workspace = true
 tsra_ddi_interface.workspace = true
 tsra_ddi_sock.workspace = true

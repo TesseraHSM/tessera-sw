@@ -26,11 +26,15 @@ rather than succeeding or corrupting that session.
 When a connection disconnects, only *its own* sessions are cleaned up (each is
 flush-closed), not the whole partition. An in-band `RequestFrame::Reset`
 (sent by `tsra_ddi_sock`'s client before each test, and available to any
-client) disables and re-enables the partition but preserves `Active` session
-ownership across the reset, marking those sessions `NeedsRenegotiation`
-instead of destroying them; only `Pending` (not-yet-authenticated) session
-slots are discarded. This lets multiple clients/tests run in parallel against
-the same server without serializing on `--test-threads 1`.
+client) disables and re-enables the **whole partition** — not just the
+issuing connection — but preserves `Active` session ownership across the
+reset, marking *every* connection's sessions `NeedsRenegotiation` instead of
+destroying them; only `Pending` (not-yet-authenticated) session slots are
+discarded. Because `Reset` affects every connection sharing the partition,
+test suites that call it (as `tsra_ddi_sock`'s client does before each test)
+must serialize against a shared server with `--test-threads 1`; running them
+at nextest's default parallelism races one test's reset against another
+test's in-flight operations.
 
 ## Timeouts
 
@@ -95,14 +99,17 @@ is shared by every connection and is lost when the process exits.
 
 ## Testing against this server
 
-Because connections are handled concurrently and disconnects don't reset
-other clients' sessions, test suites built against `tsra_ddi_sock`/`-F sock`
-can usually run with nextest's default parallelism (no `--test-threads 1`
-needed). Point `TSRA_DDI_SOCK` at the server's endpoint:
+Connections are handled concurrently and a disconnect only cleans up that
+connection's own sessions, but `tsra_ddi_sock`'s client issues a
+partition-wide `Reset` before each test, which affects every connection
+sharing the server. Test suites built against `tsra_ddi_sock`/`-F sock`
+against a shared server must therefore serialize with `--test-threads 1` to
+avoid one test's reset racing another test's in-flight operations. Point
+`TSRA_DDI_SOCK` at the server's endpoint:
 
 ```bash
-TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo xtask nextest --features sock --package tsra_api_tests
-TSRA_DDI_SOCK=unix:///tmp/ddi_sock_server.sock cargo xtask nextest --features sock --package tsra_ddi_mbor_types --test tsra_ddi_tests
+TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo xtask nextest --test-threads 1 --features sock --package tsra_api_tests
+TSRA_DDI_SOCK=unix:///tmp/ddi_sock_server.sock cargo xtask nextest --test-threads 1 --features sock --package tsra_ddi_mbor_types --test tsra_ddi_tests
 ```
 
 See the [`api_sock_get_api_rev` README](../api_sock_get_api_rev/README.md) for

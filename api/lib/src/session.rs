@@ -295,6 +295,7 @@ impl HsmSession {
                 receiver_cert_chain,
                 receiver_evidence,
                 part_policy.as_bytes(),
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -390,6 +391,7 @@ impl HsmSession {
                 dest_evidence,
                 part_policy.as_bytes(),
                 src_remote_backup,
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -424,6 +426,7 @@ impl HsmSession {
                 part_policy.as_bytes(),
                 src_remote_backup,
                 prev_sd_mk_backup,
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -452,6 +455,7 @@ impl HsmSession {
                 dst_evidence,
                 part_policy.as_bytes(),
                 pok_local_backup,
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -484,6 +488,7 @@ impl HsmSession {
                 part_policy.as_bytes(),
                 pok_peer_backup,
                 prev_sd_mk_backup,
+                &inner.ddi_cookie,
             ),
             SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
         }
@@ -614,9 +619,11 @@ struct HsmSessionInner {
     /// transport-level reset) relies on seeing the same cookie on every
     /// call for a given session id — including calls issued outside
     /// `with_dev`'s automatic `with_session_cookie` scope (see
-    /// `ddi/partition_ex.rs`, `ddi/sd_restore_local_backup.rs`), which
-    /// must read, pass, and write back this field explicitly instead of
-    /// passing `&mut None`.
+    /// `ddi/partition_ex.rs`, `ddi/sd_restore_local_backup.rs`,
+    /// `ddi/sd_create_remote_backup.rs`, `ddi/sd_reseal_remote_backup.rs`,
+    /// `ddi/sd_restore_remote_backup.rs`, `ddi/sd_create_peer_backup.rs`,
+    /// `ddi/sd_restore_peer_backup.rs`), which must read, pass, and write
+    /// back this field explicitly instead of passing `&mut None`.
     ddi_cookie: Mutex<Option<u64>>,
     /// The partition restore epoch at which this session was last reopened.
     /// Compared against `ResiliencyState::restore_epoch` to decide whether

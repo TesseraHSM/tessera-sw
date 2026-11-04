@@ -1331,6 +1331,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+
     use super::*;
 
     #[test]
@@ -1340,5 +1342,55 @@ mod tests {
         let worker = std::thread::spawn(test_hsm);
         let other = worker.join().expect("fixture worker");
         assert!(Arc::ptr_eq(&hsm, &other));
+    }
+
+    /// Builds a paused-time, single-threaded runtime: pausing `Instant::now`
+    /// requires `current_thread`, and letting a `sleep` auto-advance through
+    /// the idle/active deadlines (rather than real wall-clock time) is what
+    /// makes it practical to actually let those deadlines expire in a test.
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused runtime")
+    }
+
+    #[test]
+    fn read_request_with_timeout_disconnects_an_idle_connection() {
+        paused_runtime().block_on(async {
+            let (mut server, _client) = tokio::io::duplex(64);
+            let read = tokio::spawn(async move { read_request_with_timeout(&mut server).await });
+            // Nothing is ever written: the idle-wait deadline must elapse and
+            // be treated as a clean disconnect, not an error.
+            tokio::time::sleep(IDLE_WAIT_TIMEOUT).await;
+            let frame = read.await.expect("read task").expect("no I/O error");
+            assert!(
+                frame.is_none(),
+                "an idle connection must be treated as a clean disconnect"
+            );
+        });
+    }
+
+    #[test]
+    fn read_request_with_timeout_disconnects_a_stalled_mid_frame_connection() {
+        paused_runtime().block_on(async {
+            let (mut server, mut client) = tokio::io::duplex(64);
+            let read = tokio::spawn(async move { read_request_with_timeout(&mut server).await });
+            // Send only the frame length prefix's first byte: once it
+            // arrives the peer is mid-request (no longer idle), so the rest
+            // of the read must be bound by the tighter active timeout, not
+            // the far more generous idle one.
+            client
+                .write_all(&[0])
+                .await
+                .expect("write first length byte");
+            tokio::time::sleep(CONNECTION_READ_TIMEOUT).await;
+            let frame = read.await.expect("read task").expect("no I/O error");
+            assert!(
+                frame.is_none(),
+                "a stalled mid-frame peer must be disconnected once the active timeout elapses"
+            );
+        });
     }
 }

@@ -3,6 +3,7 @@
 use std::io;
 use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
@@ -61,6 +62,36 @@ async fn run_server(listener: UnixListener, hsm: Arc<SocketHsm>) -> Result<(), S
     }
 }
 
+/// Bound on the connect probe in [`remove_stale_socket`]: long enough to
+/// distinguish "busy but alive" from "stale", short enough that a live
+/// listener with a momentarily full accept backlog doesn't hang server
+/// startup indefinitely.
+const STALE_SOCKET_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Acquires an exclusive, cross-process lock serializing the
+/// stale-socket-check-and-bind sequence for `path`.
+///
+/// Two server instances racing to start on the same `path` could otherwise
+/// both see [`remove_stale_socket`]'s connect probe refused (both sockets
+/// look stale before either has bound), then both proceed to remove and
+/// bind: whichever binds second would silently steal the endpoint out from
+/// under the first. Holding this lock across the whole check-then-bind
+/// sequence (released once this process has bound, or failed to) makes a
+/// second racing instance's probe correctly observe the first's listener
+/// as live instead of racing its removal.
+fn lock_startup(path: &str) -> Result<std::fs::File, String> {
+    let lock_path = format!("{path}.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("failed to open startup lock {lock_path}: {error}"))?;
+    file.lock()
+        .map_err(|error| format!("failed to acquire startup lock {lock_path}: {error}"))?;
+    Ok(file)
+}
+
 /// Removes a stale Unix socket left behind by a previous server instance
 /// at `path`, so `UnixListener::bind` can reuse the path.
 ///
@@ -71,7 +102,10 @@ async fn run_server(listener: UnixListener, hsm: Arc<SocketHsm>) -> Result<(), S
 /// `path` names an unrelated regular file (e.g. a typo'd endpoint), it
 /// would delete that file instead of failing loudly. Only remove the
 /// entry when it's confirmed to be a socket that nothing is listening on.
-fn remove_stale_socket(path: &str) -> Result<(), String> {
+/// Callers must hold [`lock_startup`]'s lock across this call and the
+/// subsequent bind, so a concurrently starting instance can't race the
+/// check against this process's own not-yet-bound listener.
+async fn remove_stale_socket(path: &str) -> Result<(), String> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -84,27 +118,43 @@ fn remove_stale_socket(path: &str) -> Result<(), String> {
     }
     // Probe whether a server is still listening: a stale socket from a
     // crashed/previous run refuses the connection, while a live listener
-    // accepts it.
-    match std::os::unix::net::UnixStream::connect(path) {
-        Ok(_) => Err(format!(
+    // accepts it. Bound the probe (via a non-blocking async connect) so a
+    // live-but-busy listener times out loudly rather than hanging startup.
+    match tokio::time::timeout(STALE_SOCKET_PROBE_TIMEOUT, UnixStream::connect(path)).await {
+        Ok(Ok(_)) => Err(format!(
             "refusing to bind Unix listener at {path}: another server is already listening"
         )),
-        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => {
             std::fs::remove_file(path)
                 .map_err(|error| format!("failed to remove stale Unix socket at {path}: {error}"))
         }
-        Err(error) => Err(format!(
+        Ok(Err(error)) => Err(format!(
             "failed to probe existing socket at {path}: {error}"
+        )),
+        Err(_elapsed) => Err(format!(
+            "refusing to bind Unix listener at {path}: timed out probing existing socket; it may be a live but busy listener"
         )),
     }
 }
 
 pub(super) fn run(path: &str) -> Result<(), String> {
-    remove_stale_socket(path)?;
     let path = path.to_owned();
     super::run_with_hsm(|hsm| async move {
+        // `File::lock` is a blocking syscall; run it on a blocking-pool
+        // thread rather than stalling an async worker.
+        let lock_path = path.clone();
+        let _lock = tokio::task::spawn_blocking(move || lock_startup(&lock_path))
+            .await
+            .map_err(|error| format!("startup lock task panicked: {error}"))??;
+        remove_stale_socket(&path).await?;
         let listener = UnixListener::bind(&path)
             .map_err(|error| format!("failed to bind Unix listener at {path}: {error}"))?;
+        // Release the startup lock as soon as the bind succeeds: holding it
+        // for the server's entire lifetime would make a second, racing
+        // instance block forever in `lock_startup` instead of having its
+        // `remove_stale_socket` probe correctly observe this process's now-
+        // bound listener as live and fail fast.
+        drop(_lock);
         super::init_partition(&hsm).await?;
         println!("TSRA DDI server listening on unix://{path}; partition 10");
         run_server(listener, hsm).await
@@ -145,7 +195,10 @@ mod tests {
             drop(listener);
         }
         assert!(path.exists());
-        remove_stale_socket(path.to_str().expect("utf8 path")).expect("removes stale socket");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(remove_stale_socket(path.to_str().expect("utf8 path")))
+            .expect("removes stale socket");
         assert!(!path.exists());
     }
 
@@ -153,7 +206,8 @@ mod tests {
     fn remove_stale_socket_refuses_a_non_socket_file() {
         let path = socket_path();
         std::fs::write(&path, b"not a socket").expect("write regular file");
-        let result = remove_stale_socket(path.to_str().expect("utf8 path"));
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result = runtime.block_on(remove_stale_socket(path.to_str().expect("utf8 path")));
         assert!(result.is_err());
         // The regular file must be left untouched.
         assert!(path.exists());
@@ -164,12 +218,43 @@ mod tests {
     fn remove_stale_socket_refuses_a_live_listener() {
         let path = socket_path();
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
-        let result = remove_stale_socket(path.to_str().expect("utf8 path"));
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result = runtime.block_on(remove_stale_socket(path.to_str().expect("utf8 path")));
         assert!(result.is_err());
         // The live listener's path must be left untouched.
         assert!(path.exists());
         drop(listener);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Two server instances starting on the same endpoint must not be able
+    /// to both pass the stale-socket check before either binds: the
+    /// cross-process startup lock must serialize them. This directly
+    /// exercises the locking primitive (`lock_startup`), since reliably
+    /// forcing the underlying race in `remove_stale_socket` itself would
+    /// require saturating a Unix listener's accept backlog, which isn't
+    /// practical to do deterministically in a unit test.
+    #[test]
+    fn lock_startup_serializes_concurrent_acquires() {
+        let path = socket_path();
+        let path_str = path.to_str().expect("utf8 path").to_owned();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let path_for_thread = path_str.clone();
+        let handle = std::thread::spawn(move || {
+            let _lock = lock_startup(&path_for_thread).expect("first lock");
+            ready_tx.send(()).expect("send ready");
+            std::thread::sleep(Duration::from_millis(200));
+            // `_lock` is released here, on drop.
+        });
+        ready_rx.recv().expect("first lock acquired");
+        let start = std::time::Instant::now();
+        let _second_lock = lock_startup(&path_str).expect("second lock");
+        // The second acquire can only have succeeded once the first thread's
+        // sleep elapsed and dropped its lock, proving the two were
+        // serialized rather than both holding the lock concurrently.
+        assert!(start.elapsed() >= Duration::from_millis(150));
+        handle.join().expect("first lock thread");
+        std::fs::remove_file(format!("{path_str}.lock")).ok();
     }
 
     #[test]
