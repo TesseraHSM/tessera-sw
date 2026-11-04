@@ -29,8 +29,6 @@ struct Stage {
     /// Run clippy checks (firmware).
     #[clap(long)]
     clippy: bool,
-    #[clap(long)]
-    test: bool,
     /// Run copyright header check.
     #[clap(long)]
     copyright: bool,
@@ -40,6 +38,9 @@ struct Stage {
     /// Run release build (firmware).
     #[clap(long)]
     build: bool,
+    /// Run unit tests (firmware, host target).
+    #[clap(long)]
+    test: bool,
 }
 
 impl Stage {
@@ -48,10 +49,10 @@ impl Stage {
             || self.reggen
             || self.fmt
             || self.clippy
-            || self.test
             || self.copyright
             || self.audit
             || self.build
+            || self.test
     }
 
     fn all() -> Self {
@@ -60,10 +61,10 @@ impl Stage {
             reggen: true,
             fmt: true,
             clippy: true,
-            test: true,
             copyright: true,
             audit: true,
             build: true,
+            test: true,
         }
     }
 }

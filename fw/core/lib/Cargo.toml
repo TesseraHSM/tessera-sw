@@ -35,6 +35,7 @@ tsra_fw_hsm_pal_traits.workspace = true
 tsra_fw_hsm_undo.workspace = true
 
 zerocopy.workspace = true
+zeroize = { default-features = false, version = "1.8.1" }
 
 [dev-dependencies]
 async-channel.workspace = true
