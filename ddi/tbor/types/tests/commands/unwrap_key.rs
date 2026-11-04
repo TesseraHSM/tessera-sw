@@ -68,11 +68,7 @@ pub(crate) fn unwrap_with_usage(
     usage: u64,
     key: &[u8],
 ) -> TborUnwrapKeyResp {
-    let hsm_pub = ctx
-        .tbor(&TborGetUnwrappingKeyReq { session_id })
-        .expect("GetUnwrappingKey")
-        .pub_key;
-
+    let hsm_pub = get_unwrapping_key(ctx, session_id);
     import_ok(ctx, session_id, &hsm_pub, class, usage, key)
 }
 
@@ -85,10 +81,8 @@ fn unwrap_req(
     usage: u64,
     key: &[u8],
 ) -> TborUnwrapKeyReq {
-    let hsm_pub = ctx
-        .tbor(&TborGetUnwrappingKeyReq { session_id })
-        .expect("GetUnwrappingKey")
-        .pub_key;
+    let hsm_pub = get_unwrapping_key(ctx, session_id);
+
     TborUnwrapKeyReq {
         session_id,
         scope: SCOPE_LOCAL,
