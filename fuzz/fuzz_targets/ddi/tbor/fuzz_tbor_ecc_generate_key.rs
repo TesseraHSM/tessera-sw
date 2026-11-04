@@ -269,8 +269,10 @@ fn check_response(req: &TborEccGenerateKeyReq, resp: &TborEccGenerateKeyResp) ->
     assert_eq!(resp.pub_key.len(), curve.wire_pub_key_len());
     assert_eq!(
         resp.masked_key.len(),
-        MASKED_ECC_KEY_MIN_LEN - EccCurve::P256.wire_pub_key_len() / 2
-            + curve.wire_pub_key_len() / 2,
+        tsra_fw_core_crypto_key_masking::aead::masked_blob_len(
+            tsra_fw_core_crypto_key_masking::aead::AeadAlg::AesGcm256,
+            curve.wire_pub_key_len() / 2,
+        ),
     );
     assert!(resp.masked_key.iter().any(|&byte| byte != 0));
     assert!(resp.pub_key.iter().any(|&byte| byte != 0));
@@ -309,8 +311,9 @@ fn check_signing_key(
     for coord in signature.chunks_exact(wire_coord) {
         sig_be.extend(coord[..curve.coord_len()].iter().rev().copied());
     }
+    let digest_be: Vec<u8> = digest.iter().rev().copied().collect();
     assert!(
-        Verifier::verify(&mut EccAlgo::default(), &public, &digest, &sig_be)
+        Verifier::verify(&mut EccAlgo::default(), &public, &digest_be, &sig_be)
             .expect("host verification must run"),
         "generated private key must match returned public key",
     );
