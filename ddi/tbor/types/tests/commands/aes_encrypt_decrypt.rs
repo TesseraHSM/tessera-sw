@@ -880,7 +880,7 @@ fn aes_encrypt_decrypt_rejects_invalid_session() {
         iv: random_iv(),
     };
 
-    ctx.expect_fw_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
+    ctx.expect_session_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
 }
 
 /// Decodes a hex string into bytes.
