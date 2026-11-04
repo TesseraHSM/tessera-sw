@@ -13,6 +13,8 @@
 //! replayed against NIST's known answers here; `tsra_crypto`'s known-answer
 //! tests cover the variant itself.
 
+use tsra_crypto::HashAlgo;
+use tsra_crypto::Hasher;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::MlDsaAlgo;
 use tsra_crypto::MlDsaPublicKey;
@@ -74,9 +76,9 @@ fn device_sign(ctx: &TestCtx, session_id: u16, masked_key: &[u8], hedge: u8, mu:
 /// `μ` for `MSG` under `CTX` and `pub_key`, computed on the host.
 fn host_mu(pub_key: &[u8]) -> Vec<u8> {
     MlDsaPublicKey::from_bytes(pub_key)
-        .and_then(|pk| pk.mu(CTX, MSG))
+        .and_then(|pk| HashAlgo::mldsa_mu(&pk, CTX))
+        .and_then(|mut algo| Hasher::hash_vec(&mut algo, MSG))
         .expect("host mu")
-        .to_vec()
 }
 
 /// Pure verification of `MSG` under `CTX` on the host.

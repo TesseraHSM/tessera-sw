@@ -14,6 +14,8 @@
 
 use tsra_crypto::testvectors::mldsa::MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS;
 use tsra_crypto::ExportableKey;
+use tsra_crypto::HashAlgo;
+use tsra_crypto::Hasher;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::MlDsaAlgo;
 use tsra_crypto::MlDsaPrivateKey;
@@ -117,9 +119,9 @@ fn device_verify(
 /// `μ` for `MSG` under `CTX` and `pub_key`, computed on the host.
 fn host_mu(pub_key: &[u8]) -> Vec<u8> {
     MlDsaPublicKey::from_bytes(pub_key)
-        .and_then(|pk| pk.mu(CTX, MSG))
+        .and_then(|pk| HashAlgo::mldsa_mu(&pk, CTX))
+        .and_then(|mut algo| Hasher::hash_vec(&mut algo, MSG))
         .expect("host mu")
-        .to_vec()
 }
 
 /// Pure verification of `MSG` under `CTX` on the host.

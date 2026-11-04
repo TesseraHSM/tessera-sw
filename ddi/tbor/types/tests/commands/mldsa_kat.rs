@@ -24,6 +24,8 @@
 use tsra_crypto::testvectors::mldsa::MLDSA_SIGVER_SHORT_MSG_TEST_VECTORS;
 use tsra_crypto::testvectors::mldsa::MLDSA_SIGVER_TEST_VECTORS;
 use tsra_crypto::ExportableKey;
+use tsra_crypto::HashAlgo;
+use tsra_crypto::Hasher;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::MlDsaAlgo;
 use tsra_crypto::MlDsaPrivateKey;
@@ -52,9 +54,9 @@ const SCOPE_LOCAL: u8 = 0b011;
 /// host: the input `MlDsaSign` and `MlDsaVerify` take.
 fn host_mu(pub_key: &[u8], context: &[u8], message: &[u8]) -> Vec<u8> {
     MlDsaPublicKey::from_bytes(pub_key)
-        .and_then(|pk| pk.mu(context, message))
+        .and_then(|pk| HashAlgo::mldsa_mu(&pk, context))
+        .and_then(|mut algo| Hasher::hash_vec(&mut algo, message))
         .expect("host mu")
-        .to_vec()
 }
 
 /// `MlDsaVerify` on the device, over the `μ` of `message` under `context`:

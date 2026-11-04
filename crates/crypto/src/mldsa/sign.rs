@@ -98,8 +98,8 @@ impl MlDsaAlgo {
     ///
     /// Its `data` is then the [`MLDSA_MU_LEN`]-byte message representative
     /// `μ = SHAKE256(tr || M', 64)` (FIPS 204 Algorithm 7, line 6), computed by
-    /// the caller and used as is. `μ` already binds the context string, so
-    /// this engine has none.
+    /// the caller, for example with [`HashAlgo::mldsa_mu`], and used as is. `μ`
+    /// already binds the context string, so this engine has none.
     pub fn external_mu() -> Self {
         Self {
             ctx: Vec::new(),

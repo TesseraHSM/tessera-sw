@@ -56,6 +56,10 @@ pub struct OsslHashAlgo {
     md: MessageDigest,
     /// Output length of the SHAKE XOFs; `None` for fixed-length digests.
     xof_len: Option<NonZeroUsize>,
+    /// Input absorbed ahead of the message: ML-DSA `μ`'s
+    /// `tr || 0x00 || len(ctx) || ctx` (see `HashAlgo::mldsa_mu`); empty for
+    /// every other algorithm.
+    prefix: Vec<u8>,
 }
 
 impl OsslHashAlgo {
@@ -72,7 +76,17 @@ impl OsslHashAlgo {
     ///
     /// A new `OsslHash` instance ready to perform hash operations.
     pub fn new(md: MessageDigest) -> Self {
-        Self { md, xof_len: None }
+        Self {
+            md,
+            xof_len: None,
+            prefix: Vec::new(),
+        }
+    }
+
+    /// Absorbs `prefix` ahead of every message; see `HashAlgo::mldsa_mu`.
+    pub(super) fn with_prefix(mut self, prefix: Vec<u8>) -> Self {
+        self.prefix = prefix;
+        self
     }
 
     /// Creates a new SHA-1 hash instance.
@@ -166,6 +180,7 @@ impl OsslHashAlgo {
         Self {
             md: MessageDigest::shake_128(),
             xof_len: Some(len),
+            prefix: Vec::new(),
         }
     }
 
@@ -183,6 +198,7 @@ impl OsslHashAlgo {
         Self {
             md: MessageDigest::shake_256(),
             xof_len: Some(len),
+            prefix: Vec::new(),
         }
     }
 
@@ -277,6 +293,13 @@ impl HashOp for OsslHashAlgo {
             if hash.len() < size {
                 Err(CryptoError::HashBufferTooSmall)?;
             }
+            if !self.prefix.is_empty() {
+                // The one-shot functions take a single input; the streaming
+                // path absorbs the prefix first.
+                let mut ctx = self.clone().hash_init()?;
+                ctx.update(data)?;
+                return ctx.finish(Some(hash));
+            }
             if self.is_xof() {
                 hash::hash_xof(self.md, data, &mut hash[..size])
                     .map_err(|_| CryptoError::HashError)?;
@@ -310,8 +333,13 @@ impl HashStreamingOp for OsslHashAlgo {
     /// initialization fails, which may occur due to memory allocation
     /// failures or invalid algorithm configurations.
     fn hash_init(self) -> Result<Self::Context, CryptoError> {
-        let context =
+        let mut context =
             openssl::hash::Hasher::new(self.md).map_err(|_| CryptoError::HashInitError)?;
+        if !self.prefix.is_empty() {
+            context
+                .update(&self.prefix)
+                .map_err(|_| CryptoError::HashUpdateError)?;
+        }
         Ok(OsslHashAlgoContext {
             algo: self,
             hasher: context,

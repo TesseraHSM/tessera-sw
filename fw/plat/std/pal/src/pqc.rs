@@ -293,6 +293,8 @@ impl HsmMlKem for StdHsmPal {
 #[cfg(test)]
 mod tests {
     use tokio::runtime::Handle;
+    use tsra_crypto::HashAlgo;
+    use tsra_crypto::Hasher;
     use tsra_crypto::ImportableKey;
     use tsra_crypto::MlDsaAlgo;
     use tsra_crypto::MlDsaPrivateKey;
@@ -706,7 +708,8 @@ mod tests {
             .await
             .expect("gen_key");
             let mu = MlDsaPublicKey::from_bytes(&pk)
-                .and_then(|pk| pk.mu(b"ctx", b"message"))
+                .and_then(|pk| HashAlgo::mldsa_mu(&pk, b"ctx"))
+                .and_then(|mut algo| Hasher::hash_vec(&mut algo, b"message"))
                 .expect("host mu");
             let expected = Signer::sign_vec(
                 &mut MlDsaAlgo::new(b"ctx").unwrap().deterministic(),
@@ -718,7 +721,7 @@ mod tests {
             let inputs: [(HsmMlDsaMsgType, &[u8], &[u8]); 3] = [
                 (HsmMlDsaMsgType::Pure, b"message", b"ctx"),
                 (HsmMlDsaMsgType::Pure, b"message", b"ctx"),
-                (HsmMlDsaMsgType::ExternalMu, &mu, b""),
+                (HsmMlDsaMsgType::ExternalMu, &mu[..], b""),
             ];
             for (msg_type, message, ctx) in inputs {
                 let mut sig = vec![0u8; sig_len];
@@ -792,7 +795,8 @@ mod tests {
             .await
             .expect("gen_key");
             let mu = MlDsaPublicKey::from_bytes(&pk)
-                .and_then(|pk| pk.mu(b"ctx", b"message"))
+                .and_then(|pk| HashAlgo::mldsa_mu(&pk, b"ctx"))
+                .and_then(|mut algo| Hasher::hash_vec(&mut algo, b"message"))
                 .expect("host mu");
 
             let mut sig = vec![0u8; sig_len];

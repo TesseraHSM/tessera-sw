@@ -25,6 +25,10 @@
 //!   functions, and PKCS #11 v3.2 defines no HMAC, KDF, RSA or ECDSA
 //!   mechanism over SHAKE, so those consumers reject it with
 //!   `CryptoError::HashUnsupportedAlgorithm`.
+//! - **ML-DSA-MU**: the ML-DSA external-`μ` hash of a message under a public
+//!   key and context string (FIPS 204), as OpenSSL's `ML-DSA-MU` digest; see
+//!   [`HashAlgo::mldsa_mu`]. Being SHAKE256 underneath, it is likewise
+//!   supported for hashing only.
 //!
 //! # Architecture
 //!
@@ -65,7 +69,48 @@ mod hash_cng;
 define_type!(pub HashAlgo, hash_ossl::OsslHashAlgo, hash_cng::CngHashAlgo);
 define_type!(pub HashAlgoContext, hash_ossl::OsslHashAlgoContext, hash_cng::CngHashAlgoContext);
 
+/// SHAKE256 output length for ML-DSA's `tr` and `μ`.
+const MLDSA_MU_OUT_LEN: core::num::NonZeroUsize = match core::num::NonZeroUsize::new(MLDSA_MU_LEN) {
+    Some(len) => len,
+    None => panic!("MLDSA_MU_LEN is zero"),
+};
+
 impl HashAlgo {
+    /// Creates the ML-DSA external-`μ` hash (FIPS 204) for messages signed
+    /// under `pub_key` and the context string `ctx`.
+    ///
+    /// Hashing a message `M` gives the [`MLDSA_MU_LEN`]-byte message
+    /// representative that pure ML-DSA signs for it:
+    ///
+    /// ```text
+    /// tr = SHAKE256(pk, 64)
+    /// μ  = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)
+    /// ```
+    ///
+    /// This is OpenSSL's `ML-DSA-MU` digest, whose `pub` and `context-string`
+    /// parameters are taken here. The message is hashed as with any other
+    /// algorithm, in one call or streamed, and the result signs and verifies
+    /// with [`MlDsaAlgo::external_mu`]: a signature over it is a pure ML-DSA
+    /// signature over `M` under `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::MlDsaInvalidContext`] if `ctx` is longer than
+    /// [`MLDSA_CTX_MAX_LEN`] bytes, or the hashing error if `tr` cannot be
+    /// computed.
+    pub fn mldsa_mu(pub_key: &MlDsaPublicKey, ctx: &[u8]) -> Result<Self, CryptoError> {
+        let ctx_len = u8::try_from(ctx.len()).map_err(|_| CryptoError::MlDsaInvalidContext)?;
+        let mut prefix = vec![0u8; MLDSA_MU_LEN];
+        Hasher::hash(
+            &mut Self::shake256(MLDSA_MU_OUT_LEN),
+            pub_key.as_bytes(),
+            Some(&mut prefix),
+        )?;
+        prefix.extend_from_slice(&[0x00, ctx_len]);
+        prefix.extend_from_slice(ctx);
+        Ok(Self::shake256(MLDSA_MU_OUT_LEN).with_prefix(prefix))
+    }
+
     /// Rejects the SHAKE XOFs with `CryptoError::HashUnsupportedAlgorithm`.
     ///
     /// Every consumer that uses a `HashAlgo` as a fixed-length hash (HKDF,
