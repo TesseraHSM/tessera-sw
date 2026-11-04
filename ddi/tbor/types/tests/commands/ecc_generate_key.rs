@@ -270,7 +270,7 @@ fn ecc_generate_key_mismatched_session_id_rejected() {
     );
 
     for curve in SUPPORTED_CURVES {
-        ctx.expect_fw_reject(
+        ctx.expect_session_reject(
             &TborEccGenerateKeyReq {
                 session_id: u16::MAX,
                 scope: SCOPE_LOCAL,
@@ -484,7 +484,7 @@ fn ecc_generate_key_closed_session_rejected() {
         .expect("close CO session");
 
     for curve in SUPPORTED_CURVES {
-        ctx.expect_fw_reject(
+        ctx.expect_session_reject(
             &TborEccGenerateKeyReq {
                 session_id: closed_session_id,
                 scope: SCOPE_SESSION,

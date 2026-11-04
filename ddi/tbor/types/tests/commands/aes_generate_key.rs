@@ -261,7 +261,7 @@ mod tests {
 
         let req = generate_key_req(mismatched_session_id, SCOPE_SESSION, AES_KEY_SIZE_256);
 
-        ctx.expect_fw_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
+        ctx.expect_session_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
     }
 
     /// Verifies repeated generations do not reuse an earlier masked-key blob.

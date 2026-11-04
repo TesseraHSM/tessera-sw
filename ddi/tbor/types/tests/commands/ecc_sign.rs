@@ -447,7 +447,7 @@ fn ecc_sign_mismatched_session_id_rejected() {
                 "test requires a mismatched session id",
             );
 
-            ctx.expect_fw_reject(
+            ctx.expect_session_reject(
                 &TborEccSignReq {
                     session_id: mismatched_session_id,
                     masked_key,

@@ -526,7 +526,7 @@ fn hkdf_derive_invalid_session_id_rejected() {
     let session = finalized_co_session(&ctx);
     let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHkdfDeriveReq {
             session_id: u16::MAX,
             scope: SCOPE_LOCAL,
@@ -718,7 +718,7 @@ fn hkdf_derive_cu_invalid_session_id_rejected() {
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     let ikm = fresh_masked_secret_for_curve(&ctx, session.session_id, ECC_CURVE_P256);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHkdfDeriveReq {
             session_id: u16::MAX,
             scope: SCOPE_LOCAL,

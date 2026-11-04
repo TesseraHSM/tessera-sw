@@ -1343,7 +1343,7 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
     let masked_key = imported.masked_key;
     let report_data = sample_report_data();
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: u16::MAX,

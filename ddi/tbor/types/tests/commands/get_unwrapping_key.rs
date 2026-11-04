@@ -129,7 +129,7 @@ fn get_unwrapping_key_closed_session_rejected() {
 
     ctx.session_close(session_id).expect("close CO session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborGetUnwrappingKeyReq { session_id },
         TborStatus::SessionNotFound,
     );
@@ -243,7 +243,7 @@ fn get_unwrapping_key_unknown_session_rejected() {
 
     bootstrap.close().expect("close bootstrap CU session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborGetUnwrappingKeyReq {
             session_id: u16::MAX,
         },
