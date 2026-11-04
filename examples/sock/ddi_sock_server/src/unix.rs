@@ -238,23 +238,43 @@ mod tests {
     fn lock_startup_serializes_concurrent_acquires() {
         let path = socket_path();
         let path_str = path.to_str().expect("utf8 path").to_owned();
+        let lock_path = format!("{path_str}.lock");
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let path_for_thread = path_str.clone();
         let handle = std::thread::spawn(move || {
             let _lock = lock_startup(&path_for_thread).expect("first lock");
             ready_tx.send(()).expect("send ready");
-            std::thread::sleep(Duration::from_millis(200));
+            release_rx.recv().expect("release signal");
             // `_lock` is released here, on drop.
         });
         ready_rx.recv().expect("first lock acquired");
-        let start = std::time::Instant::now();
-        let _second_lock = lock_startup(&path_str).expect("second lock");
-        // The second acquire can only have succeeded once the first thread's
-        // sleep elapsed and dropped its lock, proving the two were
-        // serialized rather than both holding the lock concurrently.
-        assert!(start.elapsed() >= Duration::from_millis(150));
+
+        // A second, independently opened handle on the same lock file must
+        // observe `WouldBlock` while the first lock is held, rather than
+        // blocking or silently succeeding. Asserting on elapsed wall-clock
+        // time instead would be flaky: a descheduled first thread can make
+        // the second acquire appear to wait less than expected even though
+        // locking is correct.
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .expect("open lock file for probe");
+        assert!(matches!(
+            probe.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+
+        release_tx.send(()).expect("signal release");
         handle.join().expect("first lock thread");
-        std::fs::remove_file(format!("{path_str}.lock")).ok();
+
+        // Once the first lock is released, the same probe handle must be
+        // able to acquire it, proving the two acquisitions were genuinely
+        // serialized rather than independent no-ops.
+        probe.try_lock().expect("second lock after release");
+        std::fs::remove_file(&lock_path).ok();
     }
 
     #[test]

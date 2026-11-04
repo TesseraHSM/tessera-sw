@@ -104,12 +104,14 @@ connection's own sessions, but `tsra_ddi_sock`'s client issues a
 partition-wide `Reset` before each test, which affects every connection
 sharing the server. Test suites built against `tsra_ddi_sock`/`-F sock`
 against a shared server must therefore serialize with `--test-threads 1` to
-avoid one test's reset racing another test's in-flight operations. Point
-`TSRA_DDI_SOCK` at the server's endpoint:
+avoid one test's reset racing another test's in-flight operations. The
+`cargo xtask nextest` wrapper doesn't define or forward that option, so
+invoke `cargo nextest run` directly. Point `TSRA_DDI_SOCK` at the server's
+endpoint:
 
 ```bash
-TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo xtask nextest --test-threads 1 --features sock --package tsra_api_tests
-TSRA_DDI_SOCK=unix:///tmp/ddi_sock_server.sock cargo xtask nextest --test-threads 1 --features sock --package tsra_ddi_mbor_types --test tsra_ddi_tests
+TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run --test-threads 1 --features sock --package tsra_api_tests
+TSRA_DDI_SOCK=unix:///tmp/ddi_sock_server.sock cargo nextest run --test-threads 1 --features sock --package tsra_ddi_mbor_types --test tsra_ddi_tests
 ```
 
 See the [`api_sock_get_api_rev` README](../api_sock_get_api_rev/README.md) for
