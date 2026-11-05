@@ -21,11 +21,13 @@
 
 use crate::DSA_N;
 
-/// Matrix elements one signature can spill.
+/// Matrix elements one signature can keep in the spill.
 ///
-/// ML-DSA-87 is the worst case: a 56-element matrix with 16 of them held in
-/// dTCM. No parameter set spills more.
-pub const MATRIX_SLOTS: usize = 40;
+/// ML-DSA-87 is the worst case: a 56-element matrix, of which the spill
+/// holds every element that is neither in a near region nor in the work
+/// buffer, and a copy of each one in the work buffer (see
+/// [`crate::dsa::sign`]). No parameter set needs more.
+pub const MATRIX_SLOTS: usize = 56;
 
 /// Words in a matrix slot. Matrix elements are stored three bytes to a
 /// coefficient, so they need a quarter less room than a raw polynomial.
@@ -172,9 +174,20 @@ pub(crate) fn pack(dst: &mut [i32], src: &[i32; DSA_N]) {
 ///
 /// # Safety
 /// `src` must come from [`slot`] and must have been written by
-/// [`store_packed`]; `dst` must hold at least [`PACKED_WORDS`] words.
+/// [`store_packed`] or [`store_packed_words`]; `dst` must hold at least
+/// [`PACKED_WORDS`] words.
 pub(crate) unsafe fn load_packed_words(dst: &mut [i32], src: *const i32) {
     burst(dst[..PACKED_WORDS].as_mut_ptr(), src, PACKED_WORDS);
+}
+
+/// Copy a matrix element already packed, as [`pack`] leaves it, out to a
+/// spill slot.
+///
+/// # Safety
+/// `dst` must come from [`slot`]; `src` must hold at least
+/// [`PACKED_WORDS`] words.
+pub(crate) unsafe fn store_packed_words(dst: *mut i32, src: &[i32]) {
+    burst(dst, src[..PACKED_WORDS].as_ptr(), PACKED_WORDS);
 }
 
 /// Move `words` words, eight at a time.
@@ -219,8 +232,9 @@ pub(crate) struct ACache {
     /// The public seed the elements were expanded from.
     pub(crate) rho: [u8; 32],
     /// The matrix shape and where its elements went: rows, columns, the
-    /// elements held in the signer's work buffer (re-derived per request,
-    /// as the buffer is), in each near region, and in all.
+    /// elements held in the signer's work buffer (whose copies in the
+    /// spill outlive the request's buffer), in each near region, and in
+    /// all.
     pub(crate) layout: [u16; 6],
 }
 
