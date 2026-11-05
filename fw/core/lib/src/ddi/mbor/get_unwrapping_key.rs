@@ -34,7 +34,7 @@ pub(crate) async fn get_unwrapping_key<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetUnwrappingKeyReq = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 
@@ -100,9 +100,6 @@ pub(crate) async fn get_unwrapping_key<'p, P: HsmPal>(
         return Err(HsmError::InvalidArg);
     }
 
-    // `mask` requires `out[..total_len]` to be zero on entry; zero the
-    // reserved slot before filling it with the envelope.
-    frame.masked_key.fill(0);
     mask(
         pal,
         io,

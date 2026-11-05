@@ -7,6 +7,7 @@
 #[allow(unused_imports)]
 pub mod helpers;
 
+use std::panic::AssertUnwindSafe;
 use std::thread;
 
 pub use helpers::*;
@@ -841,8 +842,8 @@ pub fn get_unwrapping_key(
         }
         assert!(resp.is_ok(), "resp {:?}", resp);
         let resp = resp.unwrap();
-        // Both the sim (mock) and emu (firmware) backends now return a
-        // populated masked-key envelope for the unwrapping key.
+        // Firmware (including emu) returns a populated masked-key envelope
+        // for the unwrapping key.
         assert!(!resp.data.masked_key.is_empty());
 
         return (
@@ -1512,8 +1513,7 @@ pub enum Bk3State {
 ///
 /// Only the four documented statuses are expected; any other status (a
 /// transport fault or protocol regression) is surfaced by panicking rather than
-/// being silently treated as fresh or not-sealed. Firmware and the mock return
-/// identical statuses here.
+/// being silently treated as fresh or not-sealed.
 #[allow(dead_code)]
 pub fn bk3_state(dev: &<DdiTest as Ddi>::Dev) -> Bk3State {
     match helper_get_sealed_bk3(dev) {
@@ -2453,8 +2453,15 @@ pub fn ddi_dev_test(
         let mut dev = ddi.open_dev(&dev_info.path).unwrap();
 
         let setup_session_id = setup(&mut dev, &ddi, &dev_info.path);
-        test(&mut dev, &ddi, &dev_info.path, setup_session_id);
+        // Migration preserves session IDs, so erase cannot replace cleanup
+        // when a failed test leaves its session open.
+        let test_result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            test(&mut dev, &ddi, &dev_info.path, setup_session_id);
+        }));
         cleanup(&mut dev, &ddi, &dev_info.path, Some(setup_session_id));
+        if let Err(payload) = test_result {
+            std::panic::resume_unwind(payload);
+        }
     }
 }
 

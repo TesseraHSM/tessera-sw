@@ -26,8 +26,8 @@
 //! by the other key-producing handlers and the reference firmware.  This
 //! keeps the largest RSA-4096 keys within the fixed per-IO DMA budget.
 //! The AES, RSA (plain / CRT), and ECC key classes are wired; the AES bulk
-//! variants (GCM / XTS) recover the raw AES key, register it with the
-//! bulk-crypto backend, and return its `bulk_key_id`.
+//! variants (GCM / XTS) recover the raw AES key, create it through the
+//! platform bulk-crypto path, and return its `bulk_key_id`.
 //! RSA and ECC imports return the imported key's wire public key,
 //! re-derived from the committed vault key.
 
@@ -51,7 +51,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiRsaUnwrapReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
 
@@ -88,8 +88,8 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
     let unwrap_key_id = HsmKeyId::from(body.key_id);
 
     // AES-256 bulk keys (GCM / XTS) follow a distinct import path: the
-    // recovered key is handed to the bulk-crypto backend and only its 2-byte
-    // `bulk_key_id` handle is kept in the vault (mirroring
+    // recovered key is created through the platform bulk-crypto path, which
+    // assigns its `bulk_key_id` (mirroring
     // [`aes_generate_key`](super::aes_generate_key)'s bulk path).  Handle
     // and return here, before the asymmetric / AES import flow below.
     if let Some(bulk_kind) = match body.wrapped_blob_key_class {
@@ -118,8 +118,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
         // bulk-crypto backend and stores only the 2-byte handle in the
         // vault (scoped to the creating session so later bulk ops
         // match), returning the backend id.  RSA-unwrap always produces a
-        // bulk key, so `bulk_key_id` is present.  Scrub the recovered
-        // material if the commit fails, before propagating the error.
+        // bulk key, so `bulk_key_id` is present.
         let (key_id, bulk_id) = match super::bulk::commit_key(
             pal,
             io,
@@ -132,7 +131,6 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
         {
             Ok(v) => v,
             Err(e) => {
-                material.zeroize();
                 return Err(e);
             }
         };
@@ -172,11 +170,6 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
         }
         .await;
 
-        // Scrub the recovered key material now that the backend owns it and
-        // masking has consumed it.  Wipe on all paths — including a masking
-        // error — since the per-IO arena is not guaranteed to be wiped on
-        // teardown.
-        material.zeroize();
         return super::bulk::rollback_on_err(pal, io, key_id, result.map(|b| &*b)).await;
     }
 
@@ -238,8 +231,10 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
                 )
                 .await?;
 
-                // Decode the recovered material into vault-ready form.
-                let decoded = decode(pal, io, material, key_class).await?;
+                // Decode the recovered material into vault-ready form.  The
+                // import attributes select the PCT passed to the PAL for an
+                // RSA / ECC key.
+                let decoded = decode(pal, io, material, key_class, import_attrs).await?;
                 let vault_kind = decoded.kind;
 
                 // Persist the decoded key, session-bound iff its attrs ask.
@@ -323,10 +318,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
         Ok((encoder.position(), layout))
     })?;
 
-    // `mask` requires `out[..total_len]` zeroed on entry; the encoder does
-    // not zero the reserved slot, so clear it before filling.
     let frame = DdiRsaUnwrapResp::from_layout(resp, &layout);
-    frame.masked_key.fill(0);
     mask(
         pal,
         io,

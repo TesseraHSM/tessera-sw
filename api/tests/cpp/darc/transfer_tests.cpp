@@ -12,13 +12,6 @@
 // happy path — mint an ECC signing key, wrap it under the TMK, unwrap it
 // back, then sign with the recovered key and verify against the original
 // public key.
-//
-// The whole file needs the two-phase TBOR HPKE handshake and a fully
-// provisioned, SD-initialized partition, which the mock backend does not
-// implement, so it is excluded from the mock lane and runs on the emu and
-// hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -39,9 +32,9 @@ namespace
 // (`MASKED_KEX_KEY_LEN`, `KEX_PUB_KEY_LEN`, `MASKED_TMK_LEN`,
 // `SEALED_TMK_LEN`, `DARC_WRAP_WRAPPED_KEY_MAX_LEN`), which are not exposed
 // in the C header.
-constexpr uint32_t kMaskedKexKeyLen = 276;
+constexpr uint32_t kMaskedKexKeyLen = 280;
 constexpr uint32_t kKexPubKeyLen = 96;
-constexpr uint32_t kMaskedTmkLen = 260;
+constexpr uint32_t kMaskedTmkLen = 264;
 constexpr uint32_t kSealedTmkLen = 145;
 constexpr uint32_t kWrapWrappedKeyMaxLen = 512;
 
@@ -459,5 +452,3 @@ TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
             << "an unanchored target chain must be rejected with INVALID_ARGUMENT";
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

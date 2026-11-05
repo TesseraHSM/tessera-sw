@@ -26,9 +26,9 @@
 //! before unpadding so a tag mismatch never reveals padding-oracle
 //! information.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 #[cfg(feature = "cbc")]
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
@@ -92,11 +92,11 @@ pub async fn seal<'a, P>(
     pal: &P,
     io: &P::Io,
     suite: HpkeSuite,
-    key: &DmaBuf,
-    base_nonce: &DmaBuf,
+    key: &HsmDmaBuf,
+    base_nonce: &HsmDmaBuf,
     aad: &[u8],
-    pt: &DmaBuf,
-    ct: &mut DmaBuf,
+    pt: &HsmDmaBuf,
+    ct: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<usize>
 where
@@ -190,11 +190,11 @@ where
 async fn seal_gcm<'a, P>(
     pal: &P,
     io: &P::Io,
-    key: &DmaBuf,
-    nonce: &DmaBuf,
+    key: &HsmDmaBuf,
+    nonce: &HsmDmaBuf,
     aad: &[u8],
-    pt: &DmaBuf,
-    ct: &mut DmaBuf,
+    pt: &HsmDmaBuf,
+    ct: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<usize>
 where
@@ -226,7 +226,7 @@ where
         }
         let work = alloc.dma_alloc(buf_len)?;
         // Format [padded_aad | pt] directly into DMA work buffer.
-        // SAFETY: work derefs to &mut [u8] via DmaBuf::DerefMut.
+        // SAFETY: work derefs to &mut [u8] via HsmDmaBuf::DerefMut.
         let aad_len = tsra_fw_core_crypto_gcm_buf::format_gcm_buf(aad, pt, &mut work[..buf_len]);
         let (ct_text, rest) = ct.split_at_mut(text_len);
         let (ct_tag, _) = rest.split_at_mut(GCM_TAG_LEN);
@@ -288,7 +288,7 @@ where
         }
         let work = alloc.dma_alloc(buf_len)?;
         // Format [padded_aad | ciphertext] into DMA work buffer.
-        // SAFETY: work derefs to &mut [u8] via DmaBuf::DerefMut.
+        // SAFETY: work derefs to &mut [u8] via HsmDmaBuf::DerefMut.
         let aad_len =
             tsra_fw_core_crypto_gcm_buf::format_gcm_buf(aad, &ct[..pt_len], &mut work[..buf_len]);
         pal.gcm_decrypt_in_place(io, key_dma, nonce_dma, aad_len, tag_dma, work)

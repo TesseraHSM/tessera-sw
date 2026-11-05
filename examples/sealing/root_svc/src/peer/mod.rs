@@ -73,7 +73,16 @@ pub fn serve(
             return crate::leaf::handle(&domain, &session, method, path, request);
         }
         match (method, path) {
-            ("GET", "/v1/health") => Ok(jzon::object! { status: "ok" }),
+            ("GET", "/v1/health") => Ok(jzon::object! {
+                status: "ok",
+                backend: if cfg!(feature = "emu") {
+                    "emu"
+                } else if cfg!(feature = "sock") {
+                    "sock"
+                } else {
+                    "device"
+                },
+            }),
             // The full bound policy, never reconstructed from partial config.
             ("GET", "/v1/policy") => {
                 Ok(jzon::object! { policy: hex::encode(env.policy().as_bytes()) })

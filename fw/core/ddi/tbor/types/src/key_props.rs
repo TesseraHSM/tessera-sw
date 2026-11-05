@@ -42,14 +42,16 @@ pub enum KeyScope {
 
 /// Hash algorithm selector on the TBOR wire.
 ///
-/// The 1-byte discriminants mirror the firmware
-/// [`HsmHashAlgo`](tsra_fw_hsm_pal_traits::HsmHashAlgo) values
-/// (`Sha1 = 0`, `Sha256 = 1`, `Sha384 = 2`, `Sha512 = 3`) so the two convert
-/// losslessly. Shared by hashing, KDF, HMAC key generation, and OAEP
+/// The 1-byte wire discriminants (`Sha1 = 0`, `Sha256 = 1`, `Sha384 = 2`,
+/// `Sha512 = 3`, `Shake128 = 7`, `Shake256 = 8`) differ from the firmware
+/// [`HsmHashAlgo`](tsra_fw_hsm_pal_traits::HsmHashAlgo) values; each handler
+/// maps one onto the other with a `match`. `4`–`6` are reserved for
+/// SHA3-256/384/512. Shared by hashing, KDF, HMAC key generation, and OAEP
 /// unwrapping schemas. Kept as an [`open_enum`] so an unrecognized
-/// discriminant round-trips as `HashAlgo(x)` and is rejected on-device
-/// rather than failing to decode. Each command restricts which algorithms
-/// it accepts; SHA-1 is supported by `Hash`, `HkdfDerive`, and `UnwrapKey`.
+/// discriminant round-trips as `HashAlgo(x)` and is rejected on-device rather
+/// than failing to decode. Each command restricts which algorithms it
+/// accepts; SHA-1 is supported by `Hash`, `HkdfDerive`, and `UnwrapKey`, and
+/// the SHAKE XOFs by `Hash` only.
 #[repr(u8)]
 #[open_enum]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +67,14 @@ pub enum HashAlgo {
 
     /// SHA-512 (64-byte digest; 64-byte HMAC key / tag).
     Sha512 = 3,
+
+    /// SHAKE128 extendable-output function; the output length is chosen
+    /// per request.
+    Shake128 = 7,
+
+    /// SHAKE256 extendable-output function; the output length is chosen
+    /// per request.
+    Shake256 = 8,
 }
 
 /// Requested key-usage permissions on the TBOR wire — a bitfield carried

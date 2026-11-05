@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use resiliency_macro::resiliency_key_gen;
+use tsra_ddi_tbor_types::TborGetPublicKeyReq;
+use tsra_ddi_tbor_types::TborVerifyKeyReq;
 
 use super::*;
 
@@ -149,24 +151,6 @@ pub(crate) fn delete_key(
     delete_key_raw_no_res(session, key_id)
 }
 
-/// Dispatches the unmask key operation to the session's protocol.
-///
-/// # Arguments
-///
-/// * `session` - The HSM session context
-/// * `masked_key` - The masked key data to be unmasked
-///
-/// # Returns
-///
-/// Returns the DDI unmask key command response.
-fn unmask_key_exec(session: &HsmSession, masked_key: &[u8]) -> HsmResult<DdiUnmaskKeyCmdResp> {
-    if session.is_ex() {
-        unmask_key_exec_tbor(session, masked_key)
-    } else {
-        unmask_key_exec_mbor(session, masked_key)
-    }
-}
-
 /// Executes the MBOR unmask key operation.
 fn unmask_key_exec_mbor(session: &HsmSession, masked_key: &[u8]) -> HsmResult<DdiUnmaskKeyCmdResp> {
     let req = DdiUnmaskKeyCmdReq {
@@ -179,15 +163,6 @@ fn unmask_key_exec_mbor(session: &HsmSession, masked_key: &[u8]) -> HsmResult<Dd
     };
 
     session.with_dev(|dev| dev.exec_op_mbor(&req, &mut None).map_err(HsmError::from))
-}
-
-/// Placeholder for standalone TBOR unmasking, which is not currently supported.
-/// TBOR authenticates and unmasks caller-held blobs on use by crypto operations.
-fn unmask_key_exec_tbor(
-    _session: &HsmSession,
-    _masked_key: &[u8],
-) -> HsmResult<DdiUnmaskKeyCmdResp> {
-    Err(HsmError::UnsupportedKeyOperation)
 }
 
 /// Unmasks a masked key within the HSM.
@@ -238,11 +213,50 @@ pub(crate) fn unmask_key_raw_no_res(
     session: &HsmSession,
     masked_key: &[u8],
 ) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
-    let resp = unmask_key_exec(session, masked_key)?;
+    if session.is_ex() {
+        return unmask_key_tbor(session, masked_key);
+    }
+    let resp = unmask_key_exec_mbor(session, masked_key)?;
     let key_id = to_key_handle(resp.data.key_id, resp.data.bulk_key_id);
     let guard = HsmKeyIdGuard::new(session, key_id);
     let key_props = HsmMaskedKey::to_key_props(resp.data.masked_key.as_slice())?;
     Ok((guard.release(), key_props))
+}
+
+/// Unmasks a single TBOR masked key.
+///
+/// TBOR keys are not device-resident: the key is an unpinned handle whose
+/// props carry the caller-held blob. After host-side envelope and metadata
+/// validation, the blob is authenticated on the device with TBOR `VerifyKey`
+/// (AEAD tag over metadata and key material, under the scope's masking key),
+/// so a tampered or wrong-session blob is rejected here rather than on use.
+pub(crate) fn unmask_key_tbor(
+    session: &HsmSession,
+    masked_key: &[u8],
+) -> HsmResult<(HsmKeyHandle, HsmKeyProps)> {
+    let key_props = HsmMaskedKey::to_tbor_key_props(masked_key)?;
+    if matches!(
+        key_props.kind(),
+        HsmKeyKind::Rsa | HsmKeyKind::RsaCrt | HsmKeyKind::Ecc
+    ) {
+        return Err(HsmError::UnsupportedKeyOperation);
+    }
+    verify_key_tbor(session, masked_key)?;
+    Ok((HsmKeyHandle::Unpinned, key_props))
+}
+
+/// Authenticates a TBOR masked key on the device with `VerifyKey`.
+fn verify_key_tbor(session: &HsmSession, masked_key: &[u8]) -> HsmResult<()> {
+    let req = TborVerifyKeyReq {
+        session_id: session.ex_session_id()?,
+        masked_key: masked_key.to_vec(),
+    };
+    let mut cookie = None;
+    session.with_dev(|dev| {
+        dev.exec_op_tbor(&req, None, &mut cookie)
+            .map_err(HsmError::from)
+    })?;
+    Ok(())
 }
 
 /// Raw unmask for key pairs — no resiliency retry.
@@ -255,7 +269,10 @@ pub(crate) fn unmask_key_pair_raw_no_res(
     session: &HsmSession,
     masked_key: &[u8],
 ) -> HsmResult<(HsmKeyHandle, HsmKeyProps, HsmKeyProps)> {
-    let resp = unmask_key_exec(session, masked_key)?;
+    if session.is_ex() {
+        return unmask_key_pair_tbor(session, masked_key);
+    }
+    let resp = unmask_key_exec_mbor(session, masked_key)?;
     let key_id = to_key_handle(resp.data.key_id, resp.data.bulk_key_id);
     let guard = HsmKeyIdGuard::new(session, key_id);
 
@@ -265,6 +282,45 @@ pub(crate) fn unmask_key_pair_raw_no_res(
     let masked_key_data = resp.data.masked_key.as_slice();
     let (priv_key_props, pub_key_props) = HsmMaskedKey::to_key_pair_props(masked_key_data, der)?;
     Ok((guard.release(), priv_key_props, pub_key_props))
+}
+
+/// Unmasks a TBOR masked RSA / ECC private key into an unpinned key pair.
+///
+/// The masked blob carries no public key, so it is fetched with TBOR
+/// `GetPublicKey`, which also authenticates the blob on the device.
+fn unmask_key_pair_tbor(
+    session: &HsmSession,
+    masked_key: &[u8],
+) -> HsmResult<(HsmKeyHandle, HsmKeyProps, HsmKeyProps)> {
+    let props = HsmMaskedKey::to_tbor_key_props(masked_key)?;
+    if !matches!(
+        props.kind(),
+        HsmKeyKind::Rsa | HsmKeyKind::RsaCrt | HsmKeyKind::Ecc
+    ) {
+        return Err(HsmError::UnsupportedKeyOperation);
+    }
+
+    let req = TborGetPublicKeyReq {
+        session_id: session.ex_session_id()?,
+        masked_key: masked_key.to_vec(),
+    };
+    let mut cookie = None;
+    let resp = session.with_dev(|dev| {
+        dev.exec_op_tbor(&req, None, &mut cookie)
+            .map_err(HsmError::from)
+    })?;
+
+    let pub_key_der = tbor_wire_pub_key_to_der(&props, &resp.pub_key)?;
+    let (priv_key_props, pub_key_props) =
+        HsmMaskedKey::to_key_pair_props(masked_key, &pub_key_der)?;
+    // TBOR metadata carries only the private usage; derive the ECC public
+    // key's VERIFY / DERIVE from it, as `ecc_generate_key` does.
+    let pub_key_props = if props.kind() == HsmKeyKind::Ecc {
+        ecc_public_props_for(&pub_key_props, &priv_key_props)
+    } else {
+        pub_key_props
+    };
+    Ok((HsmKeyHandle::Unpinned, priv_key_props, pub_key_props))
 }
 
 /// Generates a key report (attestation) for the specified key.

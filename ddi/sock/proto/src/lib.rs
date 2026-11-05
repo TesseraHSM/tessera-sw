@@ -47,8 +47,23 @@
 //! Data = field payloads located by (offset, length) in the data section
 //! ```
 //!
-//! v1 request fields: [`FieldId::Sqe`] (64 B) + [`FieldId::Payload`].
-//! v1 response fields: [`FieldId::Cqe`] (16 B) + [`FieldId::Payload`].
+//! Submission request fields: [`FieldId::Sqe`], [`FieldId::Payload`],
+//! [`FieldId::OobItems`] and [`FieldId::Tail`]. The SQE is either a 64-byte
+//! command SQE or a 128-byte bulk (fast-path AES-GCM/XTS) SQE; its length
+//! selects the queue. The request OOB field holds `count:u32` followed by
+//! `dir:u32 + length:u32` for each item in index order, with the item bytes
+//! after an input (`dir` 0) item; an output (`dir` 1) item carries no bytes.
+//! Addresses never travel in this field; the server reconstructs SGL
+//! descriptors in its own memory. The bulk SQE's buffer addresses are
+//! client-local and are replaced by the server.
+//!
+//! Submission response fields: [`FieldId::Cqe`] (16 B command / 64 B bulk),
+//! [`FieldId::Payload`], [`FieldId::OobItems`] and [`FieldId::Tail`]. The
+//! response OOB field holds `count:u32` followed by `length:u32 + bytes` for
+//! each output item, in index order.
+//! Reset request/response kinds are 3/4, have no TOC fields, and use the same
+//! request/response headers (the reset response carries transport status).
+//! Client and server must be updated together; only one protocol is supported.
 
 use std::io::Read;
 use std::io::Write;
@@ -67,18 +82,42 @@ pub const MAGIC: u32 = 0x3149_4444;
 /// Protocol version carried in every frame.
 pub const VERSION: u8 = 1;
 
-/// Submission queue entry size in bytes (16 dwords).
-pub const SQE_BYTES: usize = 64;
+/// Transport rejection when a session allocation is not owned by the connection.
+pub const TRANSPORT_SESSION_NOT_OWNED: u32 = 3;
 
-/// Completion queue entry size in bytes (4 dwords).
-pub const CQE_BYTES: usize = 16;
+/// Maximum main request/response buffer, matching the firmware's two-page limit.
+pub const MAX_DMA_BUFFER: u32 = 8192;
+
+/// Submission queue entry size in dwords.
+pub const SQE_DWORDS: usize = 16;
+
+/// Completion queue entry size in dwords.
+pub const CQE_DWORDS: usize = 4;
+
+/// Bulk (fast-path) submission queue entry size in dwords.
+pub const BULK_SQE_DWORDS: usize = 32;
+
+/// Bulk (fast-path) completion queue entry size in dwords.
+pub const BULK_CQE_DWORDS: usize = 16;
+
+/// Maximum GCM tail (final partial block) length in bytes.
+pub const MAX_TAIL: usize = 15;
 
 /// Maximum size of a single field's data (guards against malformed
 /// lengths). Sized above the firmware's 4 KiB DMA page.
 pub const MAX_FIELD: u32 = 64 * 1024;
 
-/// Maximum total frame body accepted on either side.
-pub const MAX_FRAME: u32 = 128 * 1024;
+/// Maximum number of OOB items, matching the native Linux transport.
+pub const MAX_OOB_ITEMS: usize = 64;
+
+/// Maximum byte length of one OOB item.
+pub const MAX_OOB_ITEM: u32 = 64 * 1024;
+
+/// Maximum encoded OOB field, including count and per-item headers.
+pub const MAX_OOB_FIELD: u32 = MAX_OOB_ITEMS as u32 * (MAX_OOB_ITEM + 8) + 4;
+
+/// Maximum total frame body accepted on either side, including framing.
+pub const MAX_FRAME: u32 = MAX_OOB_FIELD + MAX_FIELD + 1024;
 
 /// Maximum number of TOC entries accepted in a frame.
 pub const MAX_TOC: u8 = 16;
@@ -89,6 +128,8 @@ pub const MAX_TOC: u8 = 16;
 enum Kind {
     Request = 1,
     Response = 2,
+    ResetRequest = 3,
+    ResetResponse = 4,
 }
 
 impl Kind {
@@ -96,6 +137,8 @@ impl Kind {
         match v {
             1 => Ok(Self::Request),
             2 => Ok(Self::Response),
+            3 => Ok(Self::ResetRequest),
+            4 => Ok(Self::ResetResponse),
             other => Err(ProtoError::BadKind(other)),
         }
     }
@@ -115,6 +158,15 @@ pub enum FieldId {
     /// is the source-buffer content; on a response it is the
     /// destination-buffer content the firmware produced.
     Payload = 3,
+
+    /// Ordered OOB items, without addresses. On a request these are the
+    /// device-read inputs and device-written output lengths; on a response
+    /// the bytes the device wrote to each output.
+    OobItems = 4,
+
+    /// GCM tail (final partial block) bytes: the input on a bulk request,
+    /// the output on its response. Empty otherwise.
+    Tail = 5,
 }
 
 impl FieldId {
@@ -127,6 +179,8 @@ impl FieldId {
             1 => Some(Self::Sqe),
             2 => Some(Self::Cqe),
             3 => Some(Self::Payload),
+            4 => Some(Self::OobItems),
+            5 => Some(Self::Tail),
             _ => None,
         }
     }
@@ -155,16 +209,57 @@ impl FieldType {
     }
 }
 
+/// One request OOB item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OobItem {
+    /// Bytes the device reads.
+    In(Vec<u8>),
+    /// Length of a buffer the device writes; returned in the response.
+    Out(u32),
+}
+
+impl OobItem {
+    /// Item length in bytes.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::In(bytes) => bytes.len(),
+            Self::Out(len) => *len as usize,
+        }
+    }
+
+    /// Whether the item is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// A request frame: the submission entry plus its source-buffer payload.
 #[derive(Clone, Debug)]
 pub struct Request {
-    /// Raw submission queue entry. The server fills in the source and
-    /// destination PRP1 addresses; all other fields (opcode, command id,
-    /// lengths, session flags) are set by the client.
-    pub sqe: [u32; 16],
+    /// Raw submission queue entry: [`SQE_DWORDS`] for a command or
+    /// [`BULK_SQE_DWORDS`] for a bulk operation. The server assigns every
+    /// buffer address; all other fields (opcode, command id, lengths,
+    /// session) are set by the client.
+    pub sqe: Vec<u32>,
 
-    /// Source DDI body bytes (MBOR or TBOR encoded).
+    /// Source buffer bytes: the DDI body (MBOR or TBOR encoded) of a
+    /// command, or the source SGL data of a bulk operation.
     pub payload: Vec<u8>,
+
+    /// Ordered OOB items. Each item becomes one server-owned SGL descriptor.
+    pub oob_items: Vec<OobItem>,
+
+    /// GCM tail input of a bulk operation.
+    pub tail: Vec<u8>,
+}
+
+/// A submission or a sideband partition-reset request.
+#[derive(Clone, Debug)]
+pub enum RequestFrame {
+    /// Submit an opaque firmware command with its buffers.
+    Submit(Request),
+    /// Disable and re-enable the endpoint's existing partition.
+    Reset,
 }
 
 /// A response frame: the completion entry plus its destination-buffer
@@ -175,11 +270,31 @@ pub struct Response {
     /// completion entry ([`cqe`](Self::cqe)).
     pub status: u32,
 
-    /// Raw completion queue entry produced by the firmware.
-    pub cqe: [u32; 4],
+    /// Raw completion queue entry produced by the firmware:
+    /// [`CQE_DWORDS`] for a command or [`BULK_CQE_DWORDS`] for a bulk
+    /// operation.
+    pub cqe: Vec<u32>,
 
-    /// Destination DDI body bytes the firmware produced.
+    /// Destination buffer bytes the firmware produced.
     pub payload: Vec<u8>,
+
+    /// Bytes written to each request [`OobItem::Out`], in index order.
+    pub oob_items: Vec<Vec<u8>>,
+
+    /// GCM tail output of a bulk operation.
+    pub tail: Vec<u8>,
+}
+
+/// A firmware submission response or a sideband reset result.
+#[derive(Clone, Debug)]
+pub enum ResponseFrame {
+    /// Firmware completion and output bytes.
+    Submit(Response),
+    /// Reset transport status (zero only after disable and enable succeed).
+    Reset {
+        /// Transport status.
+        status: u32,
+    },
 }
 
 /// Errors produced while reading or writing protocol frames.
@@ -255,10 +370,16 @@ struct TocEntryRaw {
 impl Request {
     /// Encode this request as a complete length-delimited frame.
     pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        if !matches!(self.sqe.len(), SQE_DWORDS | BULK_SQE_DWORDS) {
+            return Err(ProtoError::Malformed("SQE field has wrong size"));
+        }
         let sqe_bytes = dwords_to_le_bytes(&self.sqe);
+        let oob_bytes = encode_oob_req(&self.oob_items)?;
         let fields = [
             (FieldId::Sqe, sqe_bytes.as_slice()),
             (FieldId::Payload, self.payload.as_slice()),
+            (FieldId::OobItems, oob_bytes.as_slice()),
+            (FieldId::Tail, self.tail.as_slice()),
         ];
         encode_frame(Kind::Request, 0, &fields)
     }
@@ -266,11 +387,209 @@ impl Request {
     /// Decode a request from a complete frame body (no length prefix).
     pub fn decode(body: &[u8]) -> Result<Self, ProtoError> {
         let frame = Frame::parse(body, Kind::Request)?;
-        let sqe = frame.dword16(FieldId::Sqe)?;
+        let sqe = frame.dwords(FieldId::Sqe, &[SQE_DWORDS, BULK_SQE_DWORDS])?;
         let payload = frame.bytes(FieldId::Payload)?.to_vec();
-        Ok(Self { sqe, payload })
+        let oob_items = decode_oob_req(frame.bytes(FieldId::OobItems)?)?;
+        let tail = frame.tail()?;
+        Ok(Self {
+            sqe,
+            payload,
+            oob_items,
+            tail,
+        })
+    }
+}
+
+impl RequestFrame {
+    /// Encode a complete frame body.
+    pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        match self {
+            Self::Submit(request) => request.encode(),
+            Self::Reset => encode_frame(Kind::ResetRequest, 0, &[]),
+        }
     }
 
+    /// Decode a complete frame body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtoError> {
+        match frame_kind(body)? {
+            Kind::Request => Request::decode(body).map(Self::Submit),
+            Kind::ResetRequest => {
+                let frame = Frame::parse(body, Kind::ResetRequest)?;
+                if !frame.toc.is_empty() || !frame.data.is_empty() {
+                    return Err(ProtoError::Malformed("reset request has fields or data"));
+                }
+                Ok(Self::Reset)
+            }
+            _ => Err(ProtoError::Malformed("unexpected request frame kind")),
+        }
+    }
+
+    /// Write a length-delimited frame.
+    pub fn write_to(&self, w: &mut impl Write) -> Result<(), ProtoError> {
+        write_framed(w, &self.encode()?)
+    }
+
+    /// Read a length-delimited frame.
+    pub fn read_from(r: &mut impl Read) -> Result<Self, ProtoError> {
+        Self::decode(&read_framed(r)?)
+    }
+}
+
+impl ResponseFrame {
+    /// Encode a complete frame body.
+    pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        match self {
+            Self::Submit(response) => response.encode(),
+            Self::Reset { status } => encode_frame(Kind::ResetResponse, *status, &[]),
+        }
+    }
+
+    /// Decode a complete frame body.
+    pub fn decode(body: &[u8]) -> Result<Self, ProtoError> {
+        match frame_kind(body)? {
+            Kind::Response => Response::decode(body).map(Self::Submit),
+            Kind::ResetResponse => {
+                let frame = Frame::parse(body, Kind::ResetResponse)?;
+                if !frame.toc.is_empty() || !frame.data.is_empty() {
+                    return Err(ProtoError::Malformed("reset response has fields or data"));
+                }
+                Ok(Self::Reset {
+                    status: frame.status,
+                })
+            }
+            _ => Err(ProtoError::Malformed("unexpected response frame kind")),
+        }
+    }
+
+    /// Write a length-delimited frame.
+    pub fn write_to(&self, w: &mut impl Write) -> Result<(), ProtoError> {
+        write_framed(w, &self.encode()?)
+    }
+
+    /// Read a length-delimited frame.
+    pub fn read_from(r: &mut impl Read) -> Result<Self, ProtoError> {
+        Self::decode(&read_framed(r)?)
+    }
+}
+
+fn frame_kind(body: &[u8]) -> Result<Kind, ProtoError> {
+    let (header, _) = FrameHeader::ref_from_prefix(body)
+        .map_err(|_| ProtoError::Malformed("frame too short for header"))?;
+    Kind::from_u8(header.kind)
+}
+
+fn field_limit(id: u16) -> u32 {
+    if FieldId::from_u16(id) == Some(FieldId::OobItems) {
+        MAX_OOB_FIELD
+    } else {
+        MAX_FIELD
+    }
+}
+
+const OOB_DIR_IN: u32 = 0;
+const OOB_DIR_OUT: u32 = 1;
+
+fn check_oob_len(len: usize) -> Result<u32, ProtoError> {
+    let len = u32::try_from(len).map_err(|_| ProtoError::TooLarge(u32::MAX))?;
+    if len == 0 {
+        return Err(ProtoError::Malformed("empty OOB item"));
+    }
+    if len > MAX_OOB_ITEM {
+        return Err(ProtoError::TooLarge(len));
+    }
+    Ok(len)
+}
+
+fn check_oob_count(count: usize) -> Result<(), ProtoError> {
+    if count > MAX_OOB_ITEMS {
+        return Err(ProtoError::Malformed("too many OOB items"));
+    }
+    Ok(())
+}
+
+fn read_u32(bytes: &mut &[u8]) -> Result<u32, ProtoError> {
+    let (value, rest) =
+        U32::ref_from_prefix(bytes).map_err(|_| ProtoError::Malformed("truncated OOB length"))?;
+    *bytes = rest;
+    Ok(value.get())
+}
+
+fn read_item<'a>(bytes: &mut &'a [u8], len: u32) -> Result<&'a [u8], ProtoError> {
+    if len as usize > bytes.len() {
+        return Err(ProtoError::Malformed("truncated OOB item"));
+    }
+    let (item, rest) = bytes.split_at(len as usize);
+    *bytes = rest;
+    Ok(item)
+}
+
+fn encode_oob_req(items: &[OobItem]) -> Result<Vec<u8>, ProtoError> {
+    check_oob_count(items.len())?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    for item in items {
+        let len = check_oob_len(item.len())?;
+        let dir = match item {
+            OobItem::In(_) => OOB_DIR_IN,
+            OobItem::Out(_) => OOB_DIR_OUT,
+        };
+        bytes.extend_from_slice(&dir.to_le_bytes());
+        bytes.extend_from_slice(&len.to_le_bytes());
+        if let OobItem::In(data) = item {
+            bytes.extend_from_slice(data);
+        }
+    }
+    Ok(bytes)
+}
+
+fn decode_oob_req(mut bytes: &[u8]) -> Result<Vec<OobItem>, ProtoError> {
+    let count = read_u32(&mut bytes)? as usize;
+    check_oob_count(count)?;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let dir = read_u32(&mut bytes)?;
+        let len = read_u32(&mut bytes)?;
+        check_oob_len(len as usize)?;
+        items.push(match dir {
+            OOB_DIR_IN => OobItem::In(read_item(&mut bytes, len)?.to_vec()),
+            OOB_DIR_OUT => OobItem::Out(len),
+            _ => return Err(ProtoError::Malformed("bad OOB item direction")),
+        });
+    }
+    if !bytes.is_empty() {
+        return Err(ProtoError::Malformed("trailing OOB data"));
+    }
+    Ok(items)
+}
+
+fn encode_oob(items: &[Vec<u8>]) -> Result<Vec<u8>, ProtoError> {
+    check_oob_count(items.len())?;
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    for item in items {
+        let len = check_oob_len(item.len())?;
+        bytes.extend_from_slice(&len.to_le_bytes());
+        bytes.extend_from_slice(item);
+    }
+    Ok(bytes)
+}
+
+fn decode_oob(mut bytes: &[u8]) -> Result<Vec<Vec<u8>>, ProtoError> {
+    let count = read_u32(&mut bytes)? as usize;
+    check_oob_count(count)?;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = read_u32(&mut bytes)?;
+        check_oob_len(len as usize)?;
+        items.push(read_item(&mut bytes, len)?.to_vec());
+    }
+    if !bytes.is_empty() {
+        return Err(ProtoError::Malformed("trailing OOB data"));
+    }
+    Ok(items)
+}
+
+impl Request {
     /// Write a complete length-delimited request frame to `w`.
     pub fn write_to(&self, w: &mut impl Write) -> Result<(), ProtoError> {
         write_framed(w, &self.encode()?)
@@ -285,10 +604,16 @@ impl Request {
 impl Response {
     /// Encode this response as a complete length-delimited frame.
     pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        if !matches!(self.cqe.len(), CQE_DWORDS | BULK_CQE_DWORDS) {
+            return Err(ProtoError::Malformed("CQE field has wrong size"));
+        }
         let cqe_bytes = dwords_to_le_bytes(&self.cqe);
+        let oob_bytes = encode_oob(&self.oob_items)?;
         let fields = [
             (FieldId::Cqe, cqe_bytes.as_slice()),
             (FieldId::Payload, self.payload.as_slice()),
+            (FieldId::OobItems, oob_bytes.as_slice()),
+            (FieldId::Tail, self.tail.as_slice()),
         ];
         encode_frame(Kind::Response, self.status, &fields)
     }
@@ -296,12 +621,16 @@ impl Response {
     /// Decode a response from a complete frame body (no length prefix).
     pub fn decode(body: &[u8]) -> Result<Self, ProtoError> {
         let frame = Frame::parse(body, Kind::Response)?;
-        let cqe = frame.dword4(FieldId::Cqe)?;
+        let cqe = frame.dwords(FieldId::Cqe, &[CQE_DWORDS, BULK_CQE_DWORDS])?;
         let payload = frame.bytes(FieldId::Payload)?.to_vec();
+        let oob_items = decode_oob(frame.bytes(FieldId::OobItems)?)?;
+        let tail = frame.tail()?;
         Ok(Self {
             status: frame.status,
             cqe,
             payload,
+            oob_items,
+            tail,
         })
     }
 
@@ -340,7 +669,7 @@ fn encode_frame(
         _rsvd: 0,
     };
     body.extend_from_slice(header.as_bytes());
-    if kind == Kind::Response {
+    if matches!(kind, Kind::Response | Kind::ResetResponse) {
         body.extend_from_slice(U32::new(status).as_bytes());
     }
 
@@ -349,7 +678,7 @@ fn encode_frame(
     let mut offset: u32 = 0;
     for (id, data) in fields {
         let len = u32::try_from(data.len()).map_err(|_| ProtoError::TooLarge(u32::MAX))?;
-        if len > MAX_FIELD {
+        if len > field_limit(id.as_u16()) {
             return Err(ProtoError::TooLarge(len));
         }
         let entry = TocEntryRaw {
@@ -412,7 +741,7 @@ impl<'a> Frame<'a> {
             return Err(ProtoError::TooManyToc(toc_count));
         }
 
-        let status = if kind == Kind::Response {
+        let status = if matches!(kind, Kind::Response | Kind::ResetResponse) {
             let (s, r) = U32::ref_from_prefix(rest)
                 .map_err(|_| ProtoError::Malformed("frame too short for status"))?;
             rest = r;
@@ -431,7 +760,7 @@ impl<'a> Frame<'a> {
         for raw in toc_raw {
             let offset = raw.offset.get();
             let length = raw.length.get();
-            if length > MAX_FIELD {
+            if length > field_limit(raw.field_id.get()) {
                 return Err(ProtoError::TooLarge(length));
             }
             // Reject duplicate known field IDs: `bytes()` resolves a field by
@@ -481,26 +810,25 @@ impl<'a> Frame<'a> {
         Err(ProtoError::Malformed("required field missing"))
     }
 
-    /// Read a fixed 16-dword field (the SQE).
-    fn dword16(&self, id: FieldId) -> Result<[u32; 16], ProtoError> {
+    /// Read a dword field (the SQE or CQE) whose length is one of `sizes`.
+    fn dwords(&self, id: FieldId, sizes: &[usize]) -> Result<Vec<u32>, ProtoError> {
         let bytes = self.bytes(id)?;
-        if bytes.len() != SQE_BYTES {
-            return Err(ProtoError::Malformed("SQE field has wrong size"));
+        if !sizes.iter().any(|&dwords| bytes.len() == dwords * 4) {
+            return Err(ProtoError::Malformed("SQE/CQE field has wrong size"));
         }
-        let mut dwords = [0u32; 16];
-        le_bytes_to_dwords(bytes, &mut dwords);
-        Ok(dwords)
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect())
     }
 
-    /// Read a fixed 4-dword field (the CQE).
-    fn dword4(&self, id: FieldId) -> Result<[u32; 4], ProtoError> {
-        let bytes = self.bytes(id)?;
-        if bytes.len() != CQE_BYTES {
-            return Err(ProtoError::Malformed("CQE field has wrong size"));
+    /// Read the GCM tail field.
+    fn tail(&self) -> Result<Vec<u8>, ProtoError> {
+        let bytes = self.bytes(FieldId::Tail)?;
+        if bytes.len() > MAX_TAIL {
+            return Err(ProtoError::Malformed("tail field too long"));
         }
-        let mut dwords = [0u32; 4];
-        le_bytes_to_dwords(bytes, &mut dwords);
-        Ok(dwords)
+        Ok(bytes.to_vec())
     }
 }
 
@@ -533,20 +861,14 @@ fn dwords_to_le_bytes(dwords: &[u32]) -> Vec<u8> {
     out
 }
 
-fn le_bytes_to_dwords(bytes: &[u8], out: &mut [u32]) {
-    for (dw, chunk) in out.iter_mut().zip(bytes.chunks_exact(4)) {
-        *dw = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
 
-    fn sample_sqe() -> [u32; 16] {
-        let mut sqe = [0u32; 16];
+    fn sample_sqe() -> Vec<u32> {
+        let mut sqe = vec![0u32; SQE_DWORDS];
         sqe[0] = 0x0001_0002; // cmd dword
         sqe[1] = 8; // src_len
         sqe[6] = 4096; // dst_len
@@ -558,6 +880,8 @@ mod tests {
         let req = Request {
             sqe: sample_sqe(),
             payload: vec![1, 2, 3, 4, 5],
+            oob_items: vec![OobItem::In(vec![0x11, 0x22]), OobItem::Out(7)],
+            tail: vec![0xee; MAX_TAIL],
         };
         let mut buf = Vec::new();
         req.write_to(&mut buf).unwrap();
@@ -565,14 +889,53 @@ mod tests {
         let got = Request::read_from(&mut buf.as_slice()).unwrap();
         assert_eq!(got.sqe, sample_sqe());
         assert_eq!(got.payload, vec![1, 2, 3, 4, 5]);
+        assert_eq!(got.oob_items, req.oob_items);
+        assert_eq!(got.tail, req.tail);
+    }
+
+    #[test]
+    fn bulk_request_round_trips() {
+        let req = Request {
+            sqe: (0..BULK_SQE_DWORDS as u32).collect(),
+            payload: vec![0x5a; 32],
+            oob_items: Vec::new(),
+            tail: vec![1, 2, 3],
+        };
+        let got = Request::decode(&req.encode().unwrap()).unwrap();
+        assert_eq!(got.sqe, req.sqe);
+        assert_eq!(got.tail, req.tail);
+    }
+
+    #[test]
+    fn wrong_sized_entries_are_rejected() {
+        let mut req = Request {
+            sqe: vec![0; SQE_DWORDS + 1],
+            payload: Vec::new(),
+            oob_items: Vec::new(),
+            tail: Vec::new(),
+        };
+        assert!(req.encode().is_err());
+        req.sqe = vec![0; SQE_DWORDS];
+        req.tail = vec![0; MAX_TAIL + 1];
+        assert!(Request::decode(&req.encode().unwrap()).is_err());
+        let resp = Response {
+            status: 0,
+            cqe: vec![0; CQE_DWORDS + 1],
+            payload: Vec::new(),
+            oob_items: Vec::new(),
+            tail: Vec::new(),
+        };
+        assert!(resp.encode().is_err());
     }
 
     #[test]
     fn response_round_trips() {
         let resp = Response {
             status: 0,
-            cqe: [0x000C_0000, 0, 0, 0x0001_0000],
+            cqe: vec![0x000C_0000, 0, 0, 0x0001_0000],
             payload: vec![9, 8, 7],
+            oob_items: vec![vec![4; 7]],
+            tail: vec![5; 2],
         };
         let mut buf = Vec::new();
         resp.write_to(&mut buf).unwrap();
@@ -581,26 +944,33 @@ mod tests {
         assert_eq!(got.status, 0);
         assert_eq!(got.cqe, [0x000C_0000, 0, 0, 0x0001_0000]);
         assert_eq!(got.payload, vec![9, 8, 7]);
+        assert_eq!(got.oob_items, resp.oob_items);
+        assert_eq!(got.tail, resp.tail);
     }
 
     #[test]
     fn empty_payload_round_trips() {
         let req = Request {
-            sqe: [0u32; 16],
+            sqe: vec![0u32; SQE_DWORDS],
             payload: Vec::new(),
+            oob_items: Vec::new(),
+            tail: Vec::new(),
         };
         let mut buf = Vec::new();
         req.write_to(&mut buf).unwrap();
         let got = Request::read_from(&mut buf.as_slice()).unwrap();
         assert!(got.payload.is_empty());
+        assert!(got.oob_items.is_empty());
     }
 
     #[test]
     fn transport_status_survives() {
         let resp = Response {
             status: 0x8001,
-            cqe: [0u32; 4],
+            cqe: vec![0u32; CQE_DWORDS],
             payload: Vec::new(),
+            oob_items: Vec::new(),
+            tail: Vec::new(),
         };
         let mut buf = Vec::new();
         resp.write_to(&mut buf).unwrap();
@@ -639,13 +1009,10 @@ mod tests {
 
     #[test]
     fn encode_rejects_frame_over_max_frame() {
-        // Two fields each at MAX_FIELD exceed MAX_FRAME once header + TOC
-        // overhead is added, so encoding must reject the aggregate size even
-        // though each individual field is within MAX_FIELD.
-        let field = vec![0u8; MAX_FIELD as usize];
+        let field = vec![0u8; MAX_OOB_FIELD as usize];
         let fields = [
-            (FieldId::Sqe, field.as_slice()),
-            (FieldId::Payload, field.as_slice()),
+            (FieldId::OobItems, field.as_slice()),
+            (FieldId::OobItems, field.as_slice()),
         ];
         let err = encode_frame(Kind::Request, 0, &fields).unwrap_err();
         assert!(matches!(err, ProtoError::TooLarge(_)));
@@ -690,13 +1057,15 @@ mod tests {
         body.extend_from_slice(&MAGIC.to_le_bytes());
         body.push(VERSION);
         body.push(Kind::Response as u8);
-        body.push(3); // toc_count
+        body.push(5); // toc_count
         body.push(0);
         body.extend_from_slice(&0u32.to_le_bytes()); // status
         for (id, offset, len) in [
             (FieldId::Cqe.as_u16(), 0u32, 16u32),
             (99u16, 16u32, 2u32),
             (FieldId::Payload.as_u16(), 18u32, 1u32),
+            (FieldId::OobItems.as_u16(), 19u32, 4u32),
+            (FieldId::Tail.as_u16(), 23u32, 0u32),
         ] {
             body.extend_from_slice(&id.to_le_bytes());
             body.push(FieldType::Buffer.as_u8());
@@ -707,6 +1076,7 @@ mod tests {
         body.extend_from_slice(&cqe_bytes); // Cqe data
         body.extend_from_slice(&[0xAA, 0xBB]); // Unknown data
         body.extend_from_slice(&[0xCD]); // Payload data
+        body.extend_from_slice(&0u32.to_le_bytes()); // Empty OOB list
 
         let got = Response::decode(&body).unwrap();
         assert_eq!(got.payload, vec![0xCD]);
@@ -726,13 +1096,16 @@ mod tests {
         body.extend_from_slice(&MAGIC.to_le_bytes());
         body.push(VERSION);
         body.push(Kind::Request as u8);
-        body.push(2); // toc_count
+        body.push(4); // toc_count
         body.push(0); // reserved
 
         // TOC: SQE at offset 3 (after payload), Payload at offset 0.
+        let sqe_len = sqe_bytes.len() as u32;
         for (id, offset, len) in [
-            (FieldId::Sqe.as_u16(), 3u32, SQE_BYTES as u32),
+            (FieldId::Sqe.as_u16(), 3u32, sqe_len),
             (FieldId::Payload.as_u16(), 0u32, payload.len() as u32),
+            (FieldId::OobItems.as_u16(), 3 + sqe_len, 4),
+            (FieldId::Tail.as_u16(), 7 + sqe_len, 0),
         ] {
             body.extend_from_slice(&id.to_le_bytes());
             body.push(FieldType::Buffer.as_u8());
@@ -744,9 +1117,83 @@ mod tests {
         // Data section: payload first, then SQE.
         body.extend_from_slice(&payload);
         body.extend_from_slice(&sqe_bytes);
+        body.extend_from_slice(&0u32.to_le_bytes());
 
         let got = Request::decode(&body).unwrap();
         assert_eq!(got.sqe, sqe);
         assert_eq!(got.payload, payload);
+    }
+
+    #[test]
+    fn maximum_oob_request_round_trips() {
+        let req = Request {
+            sqe: sample_sqe(),
+            payload: vec![0x55; MAX_FIELD as usize],
+            oob_items: vec![OobItem::In(vec![0xaa; MAX_OOB_ITEM as usize]); MAX_OOB_ITEMS],
+            tail: Vec::new(),
+        };
+        let body = req.encode().unwrap();
+        assert!(body.len() <= MAX_FRAME as usize);
+        let got = Request::decode(&body).unwrap();
+        assert_eq!(got.oob_items, req.oob_items);
+        assert_eq!(got.payload, req.payload);
+    }
+
+    #[test]
+    fn malformed_oob_lists_are_rejected() {
+        for bytes in [
+            Vec::new(),
+            65u32.to_le_bytes().to_vec(),
+            [1u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+            [1u32.to_le_bytes(), (MAX_OOB_ITEM + 1).to_le_bytes()].concat(),
+            [1u32.to_le_bytes(), 2u32.to_le_bytes(), [0, 0, 0, 0]].concat()[..9].to_vec(),
+            [0u32.to_le_bytes(), [1, 0, 0, 0]].concat(),
+        ] {
+            assert!(decode_oob(&bytes).is_err(), "{bytes:?}");
+        }
+        assert!(encode_oob(&[Vec::new()]).is_err());
+        assert!(encode_oob(&vec![vec![1]; MAX_OOB_ITEMS + 1]).is_err());
+        assert!(encode_oob(&[vec![1; MAX_OOB_ITEM as usize + 1]]).is_err());
+
+        let item = |dir: u32, len: u32| [1u32.to_le_bytes(), dir.to_le_bytes(), len.to_le_bytes()];
+        for bytes in [
+            item(2, 1).concat(),
+            item(OOB_DIR_OUT, 0).concat(),
+            item(OOB_DIR_OUT, MAX_OOB_ITEM + 1).concat(),
+            item(OOB_DIR_IN, 1).concat(),
+            [item(OOB_DIR_OUT, 1).concat(), vec![0]].concat(),
+        ] {
+            assert!(decode_oob_req(&bytes).is_err(), "{bytes:?}");
+        }
+        assert!(encode_oob_req(&[OobItem::Out(0)]).is_err());
+    }
+
+    #[test]
+    fn reset_frames_round_trip_and_reject_wrong_shapes() {
+        let mut bytes = Vec::new();
+        RequestFrame::Reset.write_to(&mut bytes).unwrap();
+        assert!(matches!(
+            RequestFrame::read_from(&mut bytes.as_slice()).unwrap(),
+            RequestFrame::Reset
+        ));
+        assert!(Request::decode(&bytes[4..]).is_err());
+        for status in [0, 2] {
+            let mut bytes = Vec::new();
+            ResponseFrame::Reset { status }
+                .write_to(&mut bytes)
+                .unwrap();
+            assert!(matches!(
+                ResponseFrame::read_from(&mut bytes.as_slice()).unwrap(),
+                ResponseFrame::Reset { status: value } if value == status
+            ));
+            assert!(Response::decode(&bytes[4..]).is_err());
+        }
+        let body = encode_frame(Kind::ResetRequest, 0, &[(FieldId::Payload, &[1])]).unwrap();
+        assert!(RequestFrame::decode(&body).is_err());
+        let mut body = RequestFrame::Reset.encode().unwrap();
+        body.push(1);
+        assert!(RequestFrame::decode(&body).is_err());
+        let body = encode_frame(Kind::ResetResponse, 0, &[(FieldId::Payload, &[])]).unwrap();
+        assert!(ResponseFrame::decode(&body).is_err());
     }
 }

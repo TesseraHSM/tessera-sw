@@ -37,7 +37,7 @@ pub(crate) fn set_sealed_bk3<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiSetSealedBk3Req<'_> = decoder.decode_data()?;
 
     if body.sealed_bk3.len() > usize::from(SEALED_BK3_MAX_LEN) {

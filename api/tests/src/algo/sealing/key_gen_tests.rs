@@ -185,6 +185,72 @@ fn sealing_key_gen_roundtrip_generates_usable_sealing_key() {
     assert!(!pub_der.is_empty());
 }
 
+#[test]
+fn sealing_key_unmask_roundtrip_attests_reconstructed_key() {
+    let _guard = PARTITION_LOCK.lock();
+    let session = sd_provision::finalized_co_session();
+    let generated = HsmKeyManager::generate_key(
+        &session,
+        &mut HsmSealingKeyGenAlgo::default(),
+        sealing_props(),
+    )
+    .expect("generate sealing key");
+    let masked = generated.masked_key_vec().expect("masked sealing key");
+    drop(generated);
+
+    let reconstructed =
+        HsmKeyManager::unmask_key(&session, &mut HsmSealingKeyUnmaskAlgo::default(), &masked)
+            .expect("reconstruct sealing key");
+    assert_eq!(reconstructed.masked_key_vec().expect("masked key"), masked);
+    assert_eq!(reconstructed.kind(), HsmKeyKind::Sealing);
+    assert_eq!(reconstructed.class(), HsmKeyClass::Secret);
+    assert_eq!(reconstructed.bits(), SEALING_KEY_BITS);
+    assert!(reconstructed.can_derive());
+
+    let report_data = [0x5A; KEY_REPORT_DATA_LEN];
+    let report_len = reconstructed
+        .generate_key_report(&report_data, None)
+        .expect("report size");
+    let mut report = vec![0; report_len];
+    let written = reconstructed
+        .generate_key_report(&report_data, Some(&mut report))
+        .expect("authenticate and attest reconstructed sealing key");
+    assert!(written > 0);
+    assert!(written <= report.len());
+}
+
+#[test]
+fn sealing_key_unmask_rejects_legacy_session() {
+    let _guard = PARTITION_LOCK.lock();
+    let info = HsmPartitionManager::partition_info_list()
+        .into_iter()
+        .next()
+        .expect("test partition");
+    let session = crate::utils::session::open_session_test_session(&info.path);
+    let result = HsmKeyManager::unmask_key(&session, &mut HsmSealingKeyUnmaskAlgo::default(), &[]);
+    assert!(matches!(result, Err(HsmError::InvalidSession)));
+}
+
+#[test]
+fn sealing_key_unmask_rejects_incompatible_key_properties() {
+    let _guard = PARTITION_LOCK.lock();
+    let session = sd_provision::finalized_co_session();
+    let props = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::Aes)
+        .bits(128)
+        .can_encrypt(true)
+        .can_decrypt(true)
+        .build()
+        .expect("AES properties");
+    let key = HsmKeyManager::generate_key(&session, &mut HsmAesKeyGenAlgo::default(), props)
+        .expect("generate a non-sealing key");
+    let masked = key.masked_key_vec().expect("masked AES key");
+    let result =
+        HsmKeyManager::unmask_key(&session, &mut HsmSealingKeyUnmaskAlgo::default(), &masked);
+    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
+}
+
 /// Explicit deletion exercises the `Unpinned` no-op instead of relying on
 /// `Drop`, which intentionally ignores deletion errors.
 #[test]

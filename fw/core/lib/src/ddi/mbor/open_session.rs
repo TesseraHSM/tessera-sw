@@ -101,23 +101,38 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
     let mk_session = pal.dma_alloc(io, BK_LEN)?;
     pal.rng_fill_bytes(io, mk_session)?;
 
+    // Resolve the SVNs *before* allocating the slot so the only fallible step
+    // left after `session_create` is the response encode, which we roll back.
+    let mfgr_svn = crate::part_state::part_mfgr_svn(pal);
+    let owner_svn =
+        u16::try_from(crate::part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
+
     let api_rev_bytes = pack_api_rev(api_rev);
     let sess_id = pal
         .session_create(io, &api_rev_bytes, mk_session, None)
         .await?;
 
     // ── Step 9: Encode response + envelope MK_SESSION under BK_SESSION
-    let resp = encode_response(
-        pal,
-        io,
-        hdr,
-        sess_id,
-        bk_session,
-        mk_session,
-        crate::part_state::part_mfgr_svn(pal),
-        u16::try_from(crate::part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?,
+    //
+    // The slot is now allocated. If the encode (crypto + DMA + MBOR) fails,
+    // roll the slot back — otherwise the logical slot and its session-vault
+    // key stay allocated forever: `sess_id` is never surfaced to the CQE, so
+    // the host never registers the session and can never `CloseSession` it,
+    // leaking a slot for the rest of the boot. This mirrors the reference
+    // firmware's FSM `rollback_open_session` backstop.
+    let resp = match encode_response(
+        pal, io, hdr, sess_id, bk_session, mk_session, mfgr_svn, owner_svn,
     )
-    .await?;
+    .await
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            // Best-effort teardown of the just-allocated slot; surface the
+            // original failure to the host regardless of teardown result.
+            let _ = pal.session_destroy(io, sess_id).await;
+            return Err(err);
+        }
+    };
 
     // Surface the new session id to the IO layer for the CQE (only on the
     // success path, since the `?` above returns early on failure), letting the
@@ -144,7 +159,7 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
 pub(super) fn check_fail_fast<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    nonce: &DmaBuf,
+    nonce: &HsmDmaBuf,
     pub_key: &DdiPublicKey<'_>,
     is_reopen: bool,
 ) -> HsmResult<()> {
@@ -208,8 +223,8 @@ pub(super) async fn authenticate_and_derive_bk_session<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     enc_cred: &mut DdiEncryptedSessionCredential<'_>,
-    pub_key_raw: &DmaBuf,
-) -> HsmResult<&'p mut DmaBuf> {
+    pub_key_raw: &HsmDmaBuf,
+) -> HsmResult<&'p mut HsmDmaBuf> {
     // Steps 2-3: ECDH + HKDF → 80-byte OKM (aes_key ‖ hmac_key).
     let okm = pal.dma_alloc(io, BK_LEN)?;
     derive_session_credential_keys(pal, io, pub_key_raw, enc_cred.nonce, okm).await?;
@@ -271,9 +286,9 @@ pub(super) async fn authenticate_and_derive_bk_session<'p, P: HsmPal>(
 pub(super) async fn derive_session_credential_keys<P: HsmPal>(
     pal: &P,
     io: &P::Io,
-    host_eph_pub_key_raw: &DmaBuf,
-    nonce: &DmaBuf,
-    okm_out: &mut DmaBuf,
+    host_eph_pub_key_raw: &HsmDmaBuf,
+    nonce: &HsmDmaBuf,
+    okm_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let sess_enc_key_id = crate::part_state::part_session_enc_key_id(pal, io)?;
 
@@ -323,7 +338,7 @@ async fn verify_credential_hmac<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     enc_cred: &tsra_fw_ddi_mbor_types::open_session::DdiEncryptedSessionCredential<'_>,
-    hmac_key: &DmaBuf,
+    hmac_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let id_len = enc_cred.encrypted_id.len();
     let pin_len = enc_cred.encrypted_pin.len();
@@ -368,7 +383,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     enc_cred: &mut tsra_fw_ddi_mbor_types::open_session::DdiEncryptedSessionCredential<'_>,
-    aes_key: &DmaBuf,
+    aes_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let iv_chain_a = pal.dma_alloc(io, enc_cred.iv.len())?;
     let iv_chain_b = pal.dma_alloc(io, enc_cred.iv.len())?;
@@ -377,7 +392,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     // iv_chain_a for use as block 2's IV.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_id,
         enc_cred.iv,
@@ -389,7 +404,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     // ciphertext into iv_chain_b for use as block 3's IV.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_pin,
         iv_chain_a,
@@ -401,7 +416,7 @@ async fn decrypt_session_credential<P: HsmPal>(
     // place with iv_chain_b.  No subsequent block needs the IV-out.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_seed,
         iv_chain_b,
@@ -423,11 +438,11 @@ async fn encode_response<'p, P: HsmPal>(
     io: &P::Io,
     hdr: &DdiReqHdr,
     sess_id: HsmSessId,
-    bk_session: &DmaBuf,
-    mk_session: &DmaBuf,
+    bk_session: &HsmDmaBuf,
+    mk_session: &HsmDmaBuf,
     svn: u64,
     bks2_id: u16,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let bmk_metadata = DdiMaskedKeyMetadata {
         svn,
         key_type: DdiKeyType::AesCbc256Hmac384,
@@ -455,9 +470,6 @@ async fn encode_response<'p, P: HsmPal>(
     })?;
     let frame = DdiOpenSessionResp::from_layout(resp, &layout);
 
-    // `key_masking::cbc::mask` requires `out[..total_len]` to be zero
-    // on entry.
-    frame.bmk_session.fill(0);
     mask(
         pal,
         io,

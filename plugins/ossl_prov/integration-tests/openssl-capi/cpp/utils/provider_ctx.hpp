@@ -31,7 +31,7 @@ class ProviderCtx
         // main() calls OPENSSL_init_crypto(OPENSSL_INIT_NO_LOAD_CONFIG)
         // to suppress default-context auto-loading from OPENSSL_CONF, so
         // we can safely use the standard env var here without the provider
-        // being loaded twice (which would deadlock the mock HSM device).
+        // being loaded twice (which would deadlock the emu HSM device).
         const char *conf = std::getenv("OPENSSL_CONF");
         if (conf == nullptr)
         {

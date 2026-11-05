@@ -13,16 +13,28 @@
 //!
 //! All state is in GSRAM, so a [`KeyVault`] is constructed per call over a
 //! lightweight [`VaultStorage`](tsra_fw_uno_drivers_vault::VaultStorage)
-//! handle that carries only the calling partition's resource mask.  The only
-//! PAL-resident state is the fast-path bulk-key slot bitmap and the lock
-//! that serializes bulk-key registration against teardown.
+//! handle that carries only the calling partition's resource mask.  The
+//! fast-path bulk-key slot bitmap is in GSRAM too
+//! ([`FpSlotMap`](tsra_fw_uno_drivers_vault::FpSlotMap)); the only
+//! PAL-resident state is the lock that serializes bulk-key registration
+//! against teardown.
 //!
-//! Bulk (AES-GCM / XTS) keys exist only in the `bulk_crypto` build, where
-//! the fast-path cores run the firmware that hosts the bulk-crypto engine.
-//! The default build pairs with the PQC fast-path firmware, which
-//! has no such engine and never answers bulk-key messages, so there bulk
-//! kinds are refused with [`HsmError::UnsupportedCmd`] and the engine paths
-//! are compiled out.
+//! [`HsmVault::vault_key_create`] runs the pairwise consistency test of the
+//! partition's unwrapping key when `EstablishCredential` restores it from its
+//! masked backup (see [`crate::unwrapping_key`]).
+//!
+//! Bulk (AES-GCM / XTS) keys are created through
+//! [`HsmBulkCrypto`](tsra_fw_hsm_pal_traits::HsmBulkCrypto) (see
+//! [`crate::bulk`]); [`HsmVault::vault_key_create`] refuses bulk kinds.
+//! Where their material lives depends on the build:
+//!
+//! - **default** — the HSM core runs bulk crypto itself, so a bulk key is
+//!   an ordinary vault entry holding its AES-256 material.
+//! - **`bulk_crypto`** — the fast-path cores run the firmware that hosts
+//!   the bulk-crypto engine; the key is registered with that engine over
+//!   IPC and the vault keeps only its 2-byte handle.  The engine paths
+//!   below exist only in this build: the PQC fast-path firmware never
+//!   answers bulk-key messages.
 //!
 //! Following the reference firmware, the SDK `meta` (key label) is not
 //! stored (see the [`KeyVault`] crate docs).
@@ -30,8 +42,8 @@
 #![allow(unsafe_code)]
 
 use tsra_fw_hsm_io::Sqe;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
@@ -59,18 +71,18 @@ pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
     KeyVault::new(VaultStorage::new(res_mask))
 }
 
-/// Build a `'static` [`DmaBuf`] over a key's blob location in GSRAM.
+/// Build a `'static` [`HsmDmaBuf`] over a key's blob location in GSRAM.
 ///
 /// `(table, off, len)` must come from `KeyVault::key_location` or
 /// `key_location_present`, which validate that the range lies inside that
 /// table's blob region.  The region is `'static` GSRAM, so the reference
 /// outlives the transient [`KeyVault`] the location was read from.
 #[inline]
-fn blob_ref(table: usize, off: usize, len: usize) -> &'static DmaBuf {
+fn blob_ref(table: usize, off: usize, len: usize) -> &'static HsmDmaBuf {
     let addr = VaultStorage::blob_addr(table) + off;
     // SAFETY: the caller's `key_location{,_present}` validated that
     // `addr..addr+len` lies within that table's 'static GSRAM blob region.
-    unsafe { DmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) }
+    unsafe { HsmDmaBuf::from_raw(core::slice::from_raw_parts(addr as *const u8, len)) }
 }
 
 impl UnoHsmPal {
@@ -94,38 +106,28 @@ impl HsmVault for UnoHsmPal {
     async fn vault_key_create(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
     ) -> HsmResult<HsmKeyId> {
-        // Bulk keys (AES-GCM / XTS) are consumed by the fast-path engine,
-        // not stored as material in the vault: register the key with the
-        // engine and keep only the 2-byte handle here.  Ordinary keys are
-        // stored directly.  Only the bulk-crypto fast-path firmware has
-        // that engine.
+        // Bulk keys are created through `HsmBulkCrypto::bulk_key_create`.
         if is_bulk_kind(kind) {
-            #[cfg(not(feature = "bulk_crypto"))]
-            return Err(HsmError::UnsupportedCmd);
-            #[cfg(feature = "bulk_crypto")]
-            return fp_bulk_create(self, io, key, kind, session_id, attrs).await;
+            return Err(HsmError::InvalidKeyType);
+        }
+        // The partition's unwrapping key, restored from its masked backup or
+        // installed by the `RawKeyImport` test hook, gets its pairwise
+        // consistency test before it's stored. A key that fails sends the
+        // module to the FIPS error state.
+        if crate::unwrapping_key::is_unwrapping_key(kind, attrs)
+            && !self.unwrapping_key_pct(io, key).await?
+        {
+            tsra_fw_uno_fault::enter_error_state(HsmError::PctValidationUnwrappingKeyFailed);
         }
         let app_id = u8::from(io.pid());
         let session = session_id.map(u16::from);
         let mut v = vault(io);
         v.create(self, io, app_id, key, kind, session, attrs).await
-    }
-
-    fn bulk_key_id(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<Option<u16>> {
-        if !is_bulk_kind(self.vault_key_kind(io, key_id)?) {
-            return Ok(None);
-        }
-        let blob = self.vault_key(io, key_id)?;
-        let bytes: &[u8] = blob;
-        if bytes.len() != core::mem::size_of::<u16>() {
-            return Err(HsmError::InternalError);
-        }
-        Ok(Some(u16::from_le_bytes([bytes[0], bytes[1]])))
     }
 
     // Without `bulk_crypto` the engine path below is compiled out; see the
@@ -145,10 +147,8 @@ impl HsmVault for UnoHsmPal {
             return vault(io).delete(self, io, key_id).await;
         }
 
-        // Without `bulk_crypto` there is no engine to release a bulk key
-        // from: bulk kinds are refused at create, so one can only be left in
-        // GSRAM by a `bulk_crypto` image across a warm reset.  Delete it from
-        // the vault alone.
+        // Without `bulk_crypto` a bulk key is an ordinary vault entry
+        // holding its material; there is no engine to release it from.
         #[cfg(not(feature = "bulk_crypto"))]
         return vault(io).delete(self, io, key_id).await;
 
@@ -223,7 +223,7 @@ impl HsmVault for UnoHsmPal {
         Ok(())
     }
 
-    fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
         self.enforce_session_key_isolation(io, key_id)?;
         let (table, off, len) = vault(io).key_location(key_id)?;
         Ok(blob_ref(table, off, len))
@@ -285,8 +285,13 @@ pub(crate) async fn delete_session_keys(
 /// Collect the FP slots (one bitmap byte per table) referenced by the bulk
 /// keys bound to `session`, live or disabled.  A malformed stored handle is
 /// [`HsmError::InternalError`].
+///
+/// Without `bulk_crypto` bulk keys hold no FP slot, so the set is empty.
 fn session_bulk_slots(io: &UnoHsmIo, session: u16) -> HsmResult<[u8; NUM_FP_TABLES]> {
     let mut slots = [0u8; NUM_FP_TABLES];
+    if !cfg!(feature = "bulk_crypto") {
+        return Ok(slots);
+    }
     vault(io).for_each_session_key(session, |_key_id, kind, blob| {
         if is_bulk_kind(kind) {
             let bytes: &[u8] = blob;
@@ -309,7 +314,8 @@ fn session_bulk_slots(io: &UnoHsmIo, session: u16) -> HsmResult<[u8; NUM_FP_TABL
 // Fast-path (FP) bulk-key IPC helpers
 // ---------------------------------------------------------------------------
 
-use tsra_fw_single_cell::SingleCell;
+use tsra_fw_uno_drivers_vault::FP_SLOT_TABLES;
+use tsra_fw_uno_drivers_vault::FpSlotMap;
 
 use crate::ipc::AesBulk256KeyId;
 use crate::ipc::AesBulkKeyType;
@@ -326,15 +332,14 @@ use crate::ipc::KeyUpdateInfo;
 use crate::pal::IpcChannel;
 
 /// AES-256 bulk key length in bytes.
-const FP_BULK_KEY_LEN: usize = 32;
+pub(crate) const FP_BULK_KEY_LEN: usize = 32;
 
 /// FP application id reported to the fast-path engine.  The firmware
 /// reports `short_app_id = 0` to the host, so the engine `app_id` is 0.
 const FP_APP_ID: u8 = 0;
 
-/// True for the AES bulk vault kinds mirrored in the fast-path engine
-/// rather than stored as material in the vault.
-fn is_bulk_kind(kind: HsmVaultKeyKind) -> bool {
+/// True for the AES bulk (GCM / XTS) vault kinds.
+pub(crate) fn is_bulk_kind(kind: HsmVaultKeyKind) -> bool {
     matches!(
         kind,
         HsmVaultKeyKind::AesGcmBulk256
@@ -343,21 +348,43 @@ fn is_bulk_kind(kind: HsmVaultKeyKind) -> bool {
     )
 }
 
+/// Rejects a bulk-key create bound to a session that is not established.
+///
+/// The caller must hold [`UnoHsmPal::fp_bulk_lock`], so session teardown
+/// (which holds it while scrubbing the session's keys) cannot run between
+/// this check and the vault insert and leave a key bound to a freed session.
+pub(crate) fn check_bulk_session(
+    pal: &UnoHsmPal,
+    io: &UnoHsmIo,
+    session_id: Option<HsmSessId>,
+) -> HsmResult<()> {
+    if session_id.is_some_and(|sid| {
+        matches!(
+            pal.session_state(io, sid),
+            HsmSessionState::Pending | HsmSessionState::Invalid
+        )
+    }) {
+        return Err(HsmError::SessionNotFound);
+    }
+    Ok(())
+}
+
 /// Maximum FP bulk-key slots per resource-group table (FP addresses a key
 /// within a table by a 0..=6 sub-index).
 const FP_MAX_SLOTS_PER_PART: u8 = 7;
 
 /// Number of global FP key-vault tables (resource groups), ids `0..=64`.
-const NUM_FP_TABLES: usize = 65;
+const NUM_FP_TABLES: usize = FP_SLOT_TABLES;
 
-/// Per-table FP bulk-key slot occupancy bitmap (bit `i` set = slot `i` in
-/// use).  Tables are global and each is owned by at most one partition;
-/// a partition may own several (its `res_mask`), so a bulk key is placed
-/// in a free slot of one of the calling partition's owned tables — the
-/// same table-based scheme the HSM key vault uses, giving `7 × owned`
-/// capacity rather than a single table's 7 slots.  The FP engine
-/// addresses bulk keys by `(vault_id = table, key_index = slot)`.
-static FP_SLOTS: SingleCell<[u8; NUM_FP_TABLES]> = SingleCell::new([0u8; NUM_FP_TABLES]);
+// Per-table FP bulk-key slot occupancy bitmap ([`FpSlotMap`], bit `i` set =
+// slot `i` in use).  Tables are global and each is owned by at most one
+// partition; a partition may own several (its `res_mask`), so a bulk key is
+// placed in a free slot of one of the calling partition's owned tables — the
+// same table-based scheme the HSM key vault uses, giving `7 × owned`
+// capacity rather than a single table's 7 slots.  The FP engine addresses
+// bulk keys by `(vault_id = table, key_index = slot)`.  The map is in GSRAM
+// beside the vault holding those handles, so both survive warm and
+// fw-update resets together (reference `cdma_key_vault_meta_data`).
 
 /// Validate the IO's private partition ID as the PCIe function number the
 /// fast-path engine matches against.
@@ -380,7 +407,7 @@ fn part_id_to_pcie_fn(part_id: u8) -> HsmResult<u8> {
 /// bulk-key capacity scales with the partition's owned tables.
 #[cfg_attr(not(feature = "bulk_crypto"), allow(dead_code))]
 fn fp_slot_alloc(res_mask: u128) -> HsmResult<(u8, u8)> {
-    FP_SLOTS.with(|slots| {
+    FpSlotMap::with(|slots| {
         for (table, used) in slots.iter_mut().enumerate().take(NUM_FP_TABLES) {
             if res_mask & (1u128 << table) == 0 {
                 continue; // table not owned by this partition
@@ -398,7 +425,7 @@ fn fp_slot_alloc(res_mask: u128) -> HsmResult<(u8, u8)> {
 
 /// Release a previously allocated FP bulk-key slot in table `vault_id`.
 fn fp_slot_free(vault_id: u8, key_index: u8) {
-    FP_SLOTS.with(|slots| {
+    FpSlotMap::with(|slots| {
         let idx = usize::from(vault_id);
         if idx < slots.len() && key_index < FP_MAX_SLOTS_PER_PART {
             slots[idx] &= !(1 << key_index);
@@ -409,7 +436,7 @@ fn fp_slot_free(vault_id: u8, key_index: u8) {
 /// Clear the slot bits set in `bits` (one bitmap byte per table).  Used to
 /// release a batch of slots after their vault entries have been removed.
 fn fp_slots_free_bits(bits: &[u8; NUM_FP_TABLES]) {
-    FP_SLOTS.with(|slots| {
+    FpSlotMap::with(|slots| {
         for (used, clear) in slots.iter_mut().zip(bits.iter()) {
             *used &= !*clear;
         }
@@ -420,7 +447,7 @@ fn fp_slots_free_bits(bits: &[u8; NUM_FP_TABLES]) {
 /// partition reset, where the engine's own function teardown removes the
 /// keys (see `vault_clear`).
 fn fp_slots_free_mask(res_mask: u128) {
-    FP_SLOTS.with(|slots| {
+    FpSlotMap::with(|slots| {
         for (table, used) in slots.iter_mut().enumerate().take(NUM_FP_TABLES) {
             if res_mask & (1u128 << table) != 0 {
                 *used = 0;
@@ -442,10 +469,10 @@ fn fp_slots_free_mask(res_mask: u128) {
 /// rejected with [`HsmError::SessionNotFound`] once its session has been
 /// torn down, so session teardown never misses a registration.
 #[cfg_attr(not(feature = "bulk_crypto"), allow(dead_code))]
-async fn fp_bulk_create(
+pub(crate) async fn fp_bulk_create(
     pal: &UnoHsmPal,
     io: &UnoHsmIo,
-    key: &DmaBuf,
+    key: &HsmDmaBuf,
     kind: HsmVaultKeyKind,
     session_id: Option<HsmSessId>,
     attrs: HsmVaultKeyAttrs,
@@ -462,14 +489,7 @@ async fn fp_bulk_create(
     };
 
     let _guard = pal.fp_bulk_lock.lock().await;
-    if session_id.is_some_and(|sid| {
-        matches!(
-            pal.session_state(io, sid),
-            HsmSessionState::Pending | HsmSessionState::Invalid
-        )
-    }) {
-        return Err(HsmError::SessionNotFound);
-    }
+    check_bulk_session(pal, io, session_id)?;
 
     // The engine scopes a bulk key by PCIe function, which `io.pid()` carries.
     let pcie_fn = part_id_to_pcie_fn(u8::from(io.pid()))?;
@@ -500,7 +520,9 @@ async fn fp_bulk_create(
     // `info` is scrubbed on drop, on every exit from this future.
     let sent = fp_send_key_update(pal, &info).await;
     // On failure the backend may already own the key; keep the slot reserved
-    // (don't free it) so a later create can't alias it — reclaimed on reset.
+    // (don't free it) so a later create can't alias it — reclaimed on
+    // partition reset. The reservation is in GSRAM, so it also holds across
+    // a warm / fw-update reset.
     sent?;
 
     let bulk_id = AesBulk256KeyId::new()

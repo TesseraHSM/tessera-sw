@@ -485,9 +485,27 @@ impl HsmKeyUnmaskOp for HsmAesXtsKeyUnmaskAlgo {
 }
 
 // AES-GCM Key Type
-define_hsm_key!(pub HsmAesGcmKey);
+define_hsm_key!(pub HsmAesGcmKey, ddi::HsmKeyHandle);
 
 impl HsmAesGcmKey {
+    pub(crate) fn restore_from_masked(&self) -> HsmResult<()> {
+        acquire_restore_guard!(self => session, part_restore_epoch, inner);
+
+        let masked_key = inner
+            .key_props()
+            .masked_key()
+            .ok_or(HsmError::InternalError)?
+            .to_vec();
+        let (handle, mut props) = ddi::unmask_key_raw_no_res(&session, &masked_key)?;
+        let key_id = ddi::HsmKeyIdGuard::new(&session, handle);
+        if session.is_ex() {
+            props = ddi::gcm_props_from_aes(props)?;
+        }
+        Self::validate_props(&props)?;
+        inner.restore(key_id.release(), props, part_restore_epoch);
+        Ok(())
+    }
+
     /// Validates that `bits` is a supported AES-GCM key size.
     ///
     /// The device only supports 256-bit keys for AES-GCM.
@@ -676,11 +694,15 @@ impl HsmKeyUnmaskOp for HsmAesGcmKeyUnmaskAlgo {
         session: &HsmSession,
         masked_key: &[u8],
     ) -> Result<Self::Key, Self::Error> {
-        let (handle, props) = ddi::unmask_key(session, masked_key)?;
+        let (handle, mut props) = ddi::unmask_key(session, masked_key)?;
 
         // Create key guard first to ensure handle is released if validation fails
         let key_id = ddi::HsmKeyIdGuard::new(session, handle);
 
+        // TBOR GCM keys are plain AES-256 masked keys (PKCS#11 `CKK_AES`).
+        if session.is_ex() {
+            props = ddi::gcm_props_from_aes(props)?;
+        }
         HsmAesGcmKey::validate_props(&props)?;
         let key = HsmAesGcmKey::new(session.clone(), props, key_id.release());
         Ok(key)

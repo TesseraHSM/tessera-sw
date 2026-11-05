@@ -14,7 +14,7 @@ tsra_crypto = { path = "../crates/crypto" }
 tsra_ddi = { path = "../ddi/lib" }
 tsra_ddi_emu = { optional = true, path = "../ddi/emu" }
 tsra_ddi_interface = { path = "../ddi/interface" }
-tsra_ddi_mbor_sim = { path = "../ddi/mbor/sim" }
+tsra_ddi_mbor_test_helpers = { path = "../ddi/mbor/test_helpers" }
 tsra_ddi_tbor_codec = { path = "../ddi/tbor/codec" }
 tsra_ddi_tbor_test_harness = { path = "../crates/tbor_test_harness" }
 tsra_ddi_tbor_types = { path = "../ddi/tbor/types" }

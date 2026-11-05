@@ -18,7 +18,7 @@ tsra_fw_hsm_pal_traits = { workspace = true }
 
 [dev-dependencies]
 minicbor = { features = ["derive", "std"], workspace = true }
-tsra_ddi_mbor_sim = { workspace = true }
+tsra_ddi_mbor_test_helpers = { workspace = true }
 
 [lints]
 workspace = true

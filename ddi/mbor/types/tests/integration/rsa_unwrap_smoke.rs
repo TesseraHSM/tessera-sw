@@ -328,11 +328,8 @@ fn test_rsa_unwrap_rsa_key_smoke() {
 }
 
 /// An oversized OAEP-recovered KEK (a "KEK" longer than any valid AES key)
-/// must be rejected rather than used.  On the firmware backends the PAL's
-/// oversized-plaintext error is remapped to the command-specific
-/// `RsaUnwrapInvalidKek`; the sim (mock) rejects it later, at AES-key
-/// construction, with a different status — so we assert the specific status
-/// only off-mock.
+/// must be rejected rather than used.  The PAL's oversized-plaintext error is
+/// remapped to the command-specific `RsaUnwrapInvalidKek`.
 #[test]
 fn test_rsa_unwrap_oversized_kek_smoke() {
     ddi_dev_test(
@@ -358,7 +355,6 @@ fn test_rsa_unwrap_oversized_kek_smoke() {
 
             assert!(resp.is_err(), "oversized KEK must be rejected: {:?}", resp);
 
-            #[cfg(not(feature = "mock"))]
             assert!(
                 matches!(
                     resp.unwrap_err(),

@@ -611,7 +611,7 @@ fn test_hkdf_matrix_p521(session: HsmSession) {
 }
 
 /// Verifies HKDF-SHA1 output against host derivation across AES sizes and salt/info cases.
-/// Firmware uses little-endian ECDH input; mock retains the host's big-endian bytes.
+/// Firmware uses little-endian ECDH input.
 #[session_test]
 fn test_hkdf_sha1_matches_host(session: HsmSession) {
     const IV_SIZE: usize = 16;
@@ -655,7 +655,6 @@ fn test_hkdf_sha1_matches_host(session: HsmSession) {
         written, secret_len,
         "ECDH secret length must match the curve size"
     );
-    #[cfg(not(feature = "mock"))]
     host_secret_bytes.reverse();
     let host_ikm = crypto::GenericSecretKey::from_bytes(&host_secret_bytes)
         .expect("Failed to import ECDH input for HKDF");

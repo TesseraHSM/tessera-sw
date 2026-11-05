@@ -21,14 +21,14 @@
 //! ```ignore
 //! let aes = static_init!(AesDriver<32>, AesDriver::init(true));
 //! // `key`, `iv`, `plaintext`, and `ciphertext` must live in a
-//! // DMA-addressable region (branded as `DmaBuf`).
+//! // DMA-addressable region (branded as `HsmDmaBuf`).
 //! aes.encrypt_decrypt(AesRequest {
 //!     mode: AesMode::Cbc,
 //!     op: AesOp::Encrypt,
 //!     key,
 //!     iv: Some(iv),
 //!     update_iv: false,
-//!     message: plaintext,
+//!     message: Some(plaintext),
 //!     result: ciphertext,
 //! }).await?;
 //! ```

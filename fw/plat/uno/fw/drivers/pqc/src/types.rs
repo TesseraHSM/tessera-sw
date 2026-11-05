@@ -27,7 +27,7 @@ pub const QUEUE_DEPTH: usize = 32;
 /// and must cover every host IO slot that could be waiting at once.
 const _: () = assert!(QUEUE_DEPTH.is_power_of_two());
 const _: () = assert!(
-    QUEUE_DEPTH as u32 >= tsra_fw_uno_reg_soc::io_gsram::SRAM_IO_BUF_COUNT - 1,
+    QUEUE_DEPTH as u32 >= tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT,
     "PQC waiter queue is smaller than the host IO slot count; a busy host \
      would see QUEUE_FULL instead of backpressure"
 );
@@ -99,6 +99,13 @@ pub enum EngineState {
 
     /// Assigned to a task, which may or may not have work in flight.
     Busy,
+
+    /// Released while request `seq` may still be running on the core: a
+    /// timeout or a cancelled future let go of it before the answer
+    /// arrived. Withheld from the pool until the core answers, so a new
+    /// request cannot overwrite operands it is still reading or receive its
+    /// late output, then scrubbed before reuse.
+    Draining(u32),
 }
 
 /// Lifecycle state of one queue slot.

@@ -169,6 +169,115 @@ fn test_reopen_session() {
     );
 }
 
+#[cfg(feature = "sock")]
+#[test]
+fn test_reopen_session_restores_socket_bulk_access() {
+    ddi_dev_test(
+        |_, _, _| 0,
+        common_cleanup,
+        |dev, ddi, path, _session_id| {
+            let setup = common_setup_for_lm(dev, ddi, path);
+            dev.erase().expect("reset for session renegotiation");
+            let _ = helper_common_establish_credential_with_bmk(
+                dev,
+                TEST_CRED_ID,
+                TEST_CRED_PIN,
+                setup.masked_bk3,
+                setup.partition_bmk,
+                MborByteArray::from_slice(&[]).expect("empty unwrapping key"),
+            );
+            let mut params = DdiAesGcmParams {
+                key_id: u32::MAX,
+                iv: [0x33; 12],
+                aad: None,
+                tag: None,
+                session_id: setup.session_id,
+                short_app_id: 0,
+            };
+            assert!(matches!(
+                dev.exec_op_fp_gcm(DdiAesOp::Encrypt, params.clone(), vec![0; 32]),
+                Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                ))
+            ));
+
+            let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
+                dev,
+                TEST_CRED_ID,
+                TEST_CRED_PIN,
+                setup.random_seed,
+            );
+            let failed = helper_reopen_session(
+                dev,
+                setup.session_id,
+                Some(DdiApiRev { major: 1, minor: 0 }),
+                encrypted_credential,
+                pub_key,
+                MborByteArray::from_slice(&[]).expect("invalid session backup"),
+            );
+            assert!(
+                failed.is_err(),
+                "invalid backup must not reopen: {failed:?}"
+            );
+            assert!(matches!(
+                dev.exec_op_fp_gcm(DdiAesOp::Encrypt, params.clone(), vec![0; 32]),
+                Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                ))
+            ));
+
+            let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
+                dev,
+                TEST_CRED_ID,
+                TEST_CRED_PIN,
+                setup.random_seed,
+            );
+            let request = DdiReopenSessionCmdReq {
+                hdr: DdiReqHdr {
+                    op: DdiOp::ReopenSession,
+                    sess_id: Some(setup.session_id),
+                    rev: Some(DdiApiRev { major: 1, minor: 0 }),
+                },
+                data: DdiReopenSessionReq {
+                    encrypted_credential,
+                    pub_key,
+                    bmk_session: setup.session_bmk,
+                },
+                ext: None,
+            };
+            let foreign = ddi.open_dev(path).expect("foreign connection");
+            assert!(matches!(
+                foreign.exec_op_mbor(&request, &mut None),
+                Err(DdiError::DdiStatus(
+                    DdiStatus::FileHandleSessionIdDoesNotMatch
+                ))
+            ));
+            let reopened = dev
+                .exec_op_mbor(&request, &mut None)
+                .expect("owner reopens retained session");
+            assert_eq!(reopened.data.sess_id, setup.session_id);
+            let key = generate_aes_bulk_256_key(
+                dev,
+                &setup.session_id,
+                None,
+                DdiAesKeySize::AesGcmBulk256Unapproved,
+            )
+            .expect("generate bulk key");
+            params.key_id = u32::from(key.data.bulk_key_id.expect("bulk key ID"));
+            params.short_app_id = reopened.data.short_app_id;
+            let plaintext = vec![0x5A; 32];
+            let encrypted = dev
+                .exec_op_fp_gcm(DdiAesOp::Encrypt, params.clone(), plaintext.clone())
+                .expect("bulk encrypt after reopen");
+            params.tag = Some(encrypted.tag.expect("GCM authentication tag"));
+            let decrypted = dev
+                .exec_op_fp_gcm(DdiAesOp::Decrypt, params, encrypted.data)
+                .expect("bulk decrypt after reopen");
+            assert_eq!(decrypted.data, plaintext);
+        },
+    );
+}
+
 #[test]
 fn test_reopen_session_mismatch_sessions() {
     ddi_dev_test(
@@ -1658,6 +1767,7 @@ fn test_reopen_session_with_invalid_session_id() {
                 assert_eq!(resp.hdr.op, DdiOp::OpenSession);
                 assert_eq!(resp.hdr.status, DdiStatus::Success);
 
+                let active_session_id = resp.hdr.sess_id.unwrap();
                 let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
                     &new_dev,
                     TEST_CRED_ID,
@@ -1667,7 +1777,7 @@ fn test_reopen_session_with_invalid_session_id() {
 
                 let resp = helper_reopen_session(
                     &new_dev,
-                    resp.hdr.sess_id.unwrap(), // valid session id but doesn't need to be reopened
+                    active_session_id,
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     encrypted_credential,
                     pub_key,
@@ -1678,6 +1788,12 @@ fn test_reopen_session_with_invalid_session_id() {
                     "ReopenSession on a session that doesn't need reopening should fail, got: {:?}",
                     resp
                 );
+                helper_close_session(
+                    &new_dev,
+                    Some(active_session_id),
+                    Some(DdiApiRev { major: 1, minor: 0 }),
+                )
+                .expect("a rejected reopen must leave the active session intact");
             }
         },
     );

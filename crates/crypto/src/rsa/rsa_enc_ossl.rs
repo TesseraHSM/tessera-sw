@@ -106,14 +106,17 @@ impl EncryptOp for OsslRsaEncryptAlgo<'_> {
         // resolves to tsra; kept alive for the whole op via `oaep_md`.
         let oaep_md = if self.padding == Padding::PKCS1_OAEP {
             match &self.hash {
-                Some(hash) => Some(
-                    openssl::md::Md::fetch(
-                        Some(crate::libctx::crypto_libctx()),
-                        hash.md_name()?,
-                        None,
+                Some(hash) => {
+                    hash.ensure_not_xof()?;
+                    Some(
+                        openssl::md::Md::fetch(
+                            Some(crate::libctx::crypto_libctx()),
+                            hash.md_name()?,
+                            None,
+                        )
+                        .map_err(|_| CryptoError::RsaSetPropertyError)?,
                     )
-                    .map_err(|_| CryptoError::RsaSetPropertyError)?,
-                ),
+                }
                 None => None,
             }
         } else {
@@ -216,14 +219,17 @@ impl DecryptOp for OsslRsaEncryptAlgo<'_> {
         // decrypter behaviour (see `configure_ctx`).
         let oaep_md = if self.padding == Padding::PKCS1_OAEP {
             match &self.hash {
-                Some(hash) => Some(
-                    openssl::md::Md::fetch(
-                        Some(crate::libctx::crypto_libctx()),
-                        hash.md_name()?,
-                        None,
+                Some(hash) => {
+                    hash.ensure_not_xof()?;
+                    Some(
+                        openssl::md::Md::fetch(
+                            Some(crate::libctx::crypto_libctx()),
+                            hash.md_name()?,
+                            None,
+                        )
+                        .map_err(|_| CryptoError::RsaSetPropertyError)?,
                     )
-                    .map_err(|_| CryptoError::RsaSetPropertyError)?,
-                ),
+                }
                 None => None,
             }
         } else {

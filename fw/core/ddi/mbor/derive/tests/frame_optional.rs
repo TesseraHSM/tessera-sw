@@ -23,7 +23,7 @@
 use tsra_fw_ddi_mbor::MborEncode;
 use tsra_fw_ddi_mbor::MborEncoder;
 use tsra_fw_ddi_mbor_derive::Ddi;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 /// A nested struct with a borrowed field, used below as an *optional*
 /// by-value field so the codegen's `Option<T<'a>>` lifetime handling is
@@ -74,10 +74,10 @@ struct OptSliceOnly<'a> {
     tail: &'a [u8],
 }
 
-/// Brand a `&mut [u8]` as `&mut DmaBuf` — safe in tests (no DMA hw).
-fn dma(buf: &mut [u8]) -> &mut DmaBuf {
+/// Brand a `&mut [u8]` as `&mut HsmDmaBuf` — safe in tests (no DMA hw).
+fn dma(buf: &mut [u8]) -> &mut HsmDmaBuf {
     // SAFETY: tests only read/write the bytes; no DMA engine is involved.
-    unsafe { DmaBuf::from_raw_mut(buf) }
+    unsafe { HsmDmaBuf::from_raw_mut(buf) }
 }
 
 fn assert_reserve_matches_encode(with_inner: bool, with_b: bool, with_slice: bool) {

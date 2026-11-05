@@ -36,9 +36,9 @@ pub enum DeviceKind {
 }
 
 /// Partition lifecycle state on the `PartInfo` wire — a wire-side mirror
-/// of the firmware `PartState` enum
-/// ([`tsra_fw_hsm_pal_traits::PartState`]).  Kept as a dedicated
-/// [`open_enum`] so the closed domain `PartState` stays untouched and an
+/// of the firmware `HsmPartState` enum
+/// ([`tsra_fw_hsm_pal_traits::HsmPartState`]).  Kept as a dedicated
+/// [`open_enum`] so the closed domain `HsmPartState` stays untouched and an
 /// unrecognized discriminant round-trips as `PartStateId(x)`.
 #[repr(u8)]
 #[open_enum]
@@ -81,7 +81,7 @@ pub const PID_PUB_KEY_LEN: usize = 96;
 /// The `tbor` derive requires an integer literal here, so the opcode is
 /// spelled out rather than referencing [`TBOR_OP_PART_INFO`]; the two
 /// MUST stay in sync (both `0x02`).
-#[tbor(opcode = 0x02)]
+#[tbor(opcode = 0x02, pair = TborPartInfoResp)]
 pub struct TborPartInfoReq;
 
 /// `PartInfo` response schema.
@@ -92,13 +92,13 @@ pub struct TborPartInfoReq;
 /// The module-wide FIPS approval status is carried in the standard TBOR
 /// response header flag (set via the `encode` builder), not as a body
 /// field, so it is not declared here.
-#[tbor(response)]
+#[tbor(response, pair = TborPartInfoReq)]
 pub struct TborPartInfoResp<'a> {
     /// Device kind, matching MBOR `DdiDeviceKind` (`2` = Physical).
     #[tbor(U8)]
     pub device_kind: DeviceKind,
 
-    /// Partition lifecycle state (mirror of the firmware `PartState`).
+    /// Partition lifecycle state (mirror of the firmware `HsmPartState`).
     #[tbor(U8)]
     pub part_state: PartStateId,
 

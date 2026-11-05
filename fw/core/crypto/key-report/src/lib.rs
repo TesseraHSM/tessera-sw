@@ -5,13 +5,13 @@
 //! firmware.
 //!
 //! Emits and parses CBOR / `COSE_Sign1` key-attestation reports whose
-//! wire format matches the TSRA simulator
-//! (`ddi/mbor/sim/src/report.rs`) byte-for-byte. The attested public key
+//! wire format matches the host report codec
+//! (`ddi/mbor/test_helpers/src/report.rs`) byte-for-byte. The attested public key
 //! may be ECC, RSA, or symmetric; the report is always signed with ES384
 //! (ECDSA-P384). SHA-384 + ECDSA signing/verification are routed through
 //! the supplied [`HsmCrypto`](tsra_fw_hsm_pal_traits::HsmCrypto)
 //! implementation, and all working buffers are
-//! [`DmaBuf`](tsra_fw_hsm_pal_traits::DmaBuf) allocations.
+//! [`HsmDmaBuf`](tsra_fw_hsm_pal_traits::HsmDmaBuf) allocations.
 //!
 //! * [`key_report`] — build a signed report (query/copy convention).
 //! * [`parse_key_report`] — zero-copy decode into a [`KeyReportView`].

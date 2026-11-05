@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! v2 masked-key format: AEAD envelope over
+//! v1 masked-key format: AEAD envelope over
 //! [`tsra_fw_core_crypto_aead_envelope`].
 //!
 //! Firmware-internal format used for session BMK wrapping and any

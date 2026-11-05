@@ -15,11 +15,16 @@
 //! | [`HsmRng`] | Cryptographically secure random bytes |
 //! | [`HsmHash`] | SHA-1 / SHA-256 / SHA-384 / SHA-512 digest |
 //! | [`HsmHmac`] | HMAC sign / verify with the same SHA family |
-//! | [`HsmAes`] | AES key gen + ECB / CBC / GCM / KW / KWP / XTS |
+//! | [`HsmAes`] | AES key gen + ECB / CBC |
+//! | [`HsmAesGcm`] | AES-GCM authenticated encryption |
+//! | [`HsmAesKw`] | AES-KW / AES-KWP key wrap |
+//! | [`HsmAesXts`] | AES-XTS (currently disabled) |
+//! | [`HsmBulkCrypto`] | Bulk AES-GCM / AES-XTS keys and queue IOs |
 //! | [`HsmEcc`] | ECC key gen, raw EC sign / verify, ECDH (NIST P-256/384/521) |
 //! | [`HsmRsa`] | RSA key gen + raw mod-exp + PKCS#1 v1.5 / OAEP / PSS |
 //! | [`HsmKdf`] | HKDF, KBKDF (SP 800-108), MGF1, X9.63, SP 800-56A |
-//! | [`HsmMlDsa`] | ML-DSA (FIPS 204) keygen — offloaded to an FP core |
+//! | [`HsmMlDsa`] | ML-DSA (FIPS 204) key generation, signing, and verification |
+//! | [`HsmMlKem`] | ML-KEM (FIPS 203) key generation, encapsulation, and decapsulation |
 //!
 //! ## Conventions
 //!
@@ -36,20 +41,22 @@
 //! before they return.
 
 mod aes;
+mod bulk;
 mod ecc;
 mod hash;
 mod hmac;
 mod kdf;
-mod mldsa;
+mod ml;
 mod rng;
 mod rsa;
 
 pub use aes::*;
+pub use bulk::*;
 pub use ecc::*;
 pub use hash::*;
 pub use hmac::*;
 pub use kdf::*;
-pub use mldsa::*;
+pub use ml::*;
 pub use rng::*;
 pub use rsa::*;
 
@@ -63,6 +70,18 @@ use super::*;
 /// a new crypto family means adding a sub-trait here and a method
 /// table to the standard PAL.
 pub trait HsmCrypto:
-    HsmRng + HsmHash + HsmHmac + HsmAes + HsmEcc + HsmRsa + HsmKdf + HsmMlDsa
+    HsmRng
+    + HsmHash
+    + HsmHmac
+    + HsmAes
+    + HsmAesGcm
+    + HsmAesKw
+    + HsmAesXts
+    + HsmBulkCrypto
+    + HsmEcc
+    + HsmRsa
+    + HsmKdf
+    + HsmMlDsa
+    + HsmMlKem
 {
 }

@@ -5,8 +5,8 @@
 //!
 //! One host-only wire-shape check, a generate-then-sign round-trip for
 //! every FIPS 204 parameter set, and a check that the private key really
-//! is masked.  Context-string separation and length bounds are still to
-//! come.
+//! is masked.  What a signature over `μ` covers is checked in
+//! `mldsa_external_mu`.
 //!
 //! The command is in-session: each test brings up a finalized CO
 //! session and binds the request to it, as the ECC/AES tests do.
@@ -17,11 +17,16 @@ use tsra_ddi_tbor_test_harness::pqc::MlDsaParams;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_44;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_65;
 use tsra_ddi_tbor_test_harness::pqc::ML_DSA_87;
+use tsra_ddi_tbor_test_harness::pqc::ML_KEM_512;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
+use tsra_ddi_tbor_types::TborMlKemGenerateKeyReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
+use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_SIGN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -35,8 +40,8 @@ fn mldsa_sign_request_wire_shape() {
     let req = TborMlDsaSignReq {
         session_id: 0,
         masked_key: vec![0xAA; 164],
-        message: vec![0xBB; 32],
-        ctx: Vec::new(),
+        mu: vec![0xBB; MLDSA_MU_LEN],
+        hedge: MLDSA_HEDGE_PREFERRED,
     };
 
     assert_eq!(TborMlDsaSignReq::OPCODE, TBOR_OP_MLDSA_SIGN);
@@ -50,7 +55,7 @@ fn mldsa_sign_request_wire_shape() {
     assert_eq!(view.toc_count(), 4);
 }
 
-/// Happy path: generate a key, sign a message, and check the signature
+/// Happy path: generate a key, sign a `μ`, and check the signature
 /// is the right length and non-trivial.
 ///
 /// Signing re-derives the key pair from the seed on the FP core, so the
@@ -72,8 +77,8 @@ fn sign_case(p: &MlDsaParams) {
         .tbor(&TborMlDsaSignReq {
             session_id: session.session_id,
             masked_key: key.masked_key,
-            message: b"tsra pqc bring-up".to_vec(),
-            ctx: Vec::new(),
+            mu: vec![0x5A; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_PREFERRED,
         })
         .unwrap_or_else(|e| panic!("MlDsaSign({}): {e:?}", p.name));
 
@@ -142,8 +147,8 @@ fn masking_case(p: &MlDsaParams) {
     let outcome = ctx.tbor(&TborMlDsaSignReq {
         session_id: session.session_id,
         masked_key: tampered,
-        message: b"tsra pqc bring-up".to_vec(),
-        ctx: Vec::new(),
+        mu: vec![0x5A; MLDSA_MU_LEN],
+        hedge: MLDSA_HEDGE_PREFERRED,
     });
     assert!(
         outcome.is_err(),
@@ -165,4 +170,32 @@ fn mldsa_sign_rejects_a_tampered_masked_key_65() {
 #[test]
 fn mldsa_sign_rejects_a_tampered_masked_key_87() {
     masking_case(&ML_DSA_87);
+}
+
+/// Rejects a valid masked key of another type with `InvalidKeyType`.
+///
+/// The key is an ML-KEM key, which may not sign either, so this also checks
+/// that the key type is checked before the key's permissions, as `EccSign`
+/// does.
+#[test]
+fn mldsa_sign_wrong_key_class_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = ctx
+        .tbor(&TborMlKemGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_KEM_512.key_kind,
+        })
+        .expect("MlKemGenerateKey");
+
+    ctx.expect_fw_reject(
+        &TborMlDsaSignReq {
+            session_id: session.session_id,
+            masked_key: key.masked_key,
+            mu: vec![0x5A; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_PREFERRED,
+        },
+        TborStatus::InvalidKeyType,
+    );
 }

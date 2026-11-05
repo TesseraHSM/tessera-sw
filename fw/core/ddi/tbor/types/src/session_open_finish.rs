@@ -16,21 +16,21 @@ pub const SEED_LEN: usize = 32;
 ///
 /// Layout (see [`tsra_fw_core_crypto_aead_envelope`]):
 /// `"AEAD"(4) ‖ alg=AesGcm256(1) ‖ rsv=0(1) ‖ aad_len_be=0(2) ‖
-///  IV(12) ‖ seed(32) ‖ TAG(16)` = 68 B.  No AAD: `param_key` is
+///  IV(16) ‖ seed(32) ‖ TAG(16)` = 72 B.  No AAD: `param_key` is
 /// HPKE-derived per session, so the envelope is structurally bound
 /// to the active session by key uniqueness.
-pub const SEED_ENVELOPE_LEN: usize = 8 + 12 + SEED_LEN + 16;
+pub const SEED_ENVELOPE_LEN: usize = 8 + 16 + SEED_LEN + 16;
 
 /// Upper bound on the `bmk_session` envelope length on the wire.
 ///
 /// Today's tight layout (AEAD-GCM with 32-byte AAD wrapping the
-/// 80-byte `masking_key`): `8 + 12 + 32 + 80 + 16` = 148 B.  The
+/// 80-byte `masking_key`): `8 + 16 + 32 + 80 + 16` = 152 B.  The
 /// declared cap is kept generous to accommodate future AAD growth
 /// without breaking the schema.
 pub const BMK_SESSION_MAX_LEN: usize = 512;
 
 /// `SessionOpenFinish` request schema.
-#[tbor(opcode = 0x04)]
+#[tbor(opcode = 0x04, pair = TborSessionOpenFinishResp)]
 pub struct TborSessionOpenFinishReq<'a> {
     /// Pending session identifier the handshake reserved in Phase 1.
     /// Typed [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); marked
@@ -53,7 +53,7 @@ pub struct TborSessionOpenFinishReq<'a> {
     /// envelope in place — the field is exposed as the
     /// `seed_envelope` member of the generated
     /// `TborSessionOpenFinishReqViewMut` destructured view.
-    #[tbor(buffer, len = 68, mutable)]
+    #[tbor(buffer, len = 72, mutable)]
     pub seed_envelope: &'a [u8],
 }
 
@@ -65,7 +65,7 @@ pub struct TborSessionOpenFinishReq<'a> {
 /// host persists this blob and replays it through the MBOR
 /// `ReopenSession` command to recover masked-key compatibility
 /// after the device resets or the slot is destroyed.
-#[tbor(response)]
+#[tbor(response, pair = TborSessionOpenFinishReq)]
 pub struct TborSessionOpenFinishResp<'a> {
     /// Wrapped session-key blob.  Variable length up to
     /// [`BMK_SESSION_MAX_LEN`].

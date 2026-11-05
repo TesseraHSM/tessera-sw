@@ -10,12 +10,6 @@
 // `tsra_sd_create_remote_backup` and validates the three returned
 // backups. This is a self-backup (sender == receiver): the partition seals
 // to its own attested identity key.
-//
-// The whole file needs the two-phase TBOR HPKE handshake and a fully
-// provisioned partition, which the mock backend does not implement, so it is
-// excluded from the mock lane and runs on the emu and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -409,5 +403,3 @@ TEST_F(tsra_sd_create_backup_test, create_backup_rejects_aliased_output_buffers)
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

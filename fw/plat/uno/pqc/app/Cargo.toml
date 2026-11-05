@@ -23,3 +23,4 @@ embassy-time = { workspace = true }
 pqc_ml = { workspace = true }
 tsra_fw_uno_drivers_systick = { workspace = true }
 zerocopy = { workspace = true }
+zeroize = { workspace = true }

@@ -36,7 +36,7 @@ pub const SEALED_TMK_LEN: usize = 145;
 
 /// On-the-wire length of the `masked_tmk` output envelope (matches the
 /// firmware schema's `MASKED_TMK_LEN`).
-pub const MASKED_TMK_LEN: usize = 260;
+pub const MASKED_TMK_LEN: usize = 264;
 
 /// Host-facing TBOR `DarcTmkImport` request.
 ///
@@ -52,7 +52,7 @@ pub struct TborDarcTmkImportReq {
     pub session_id: u16,
 
     /// The receiver's masked DARC key-exchange key (from `DarcKexKeyGen`),
-    /// exactly [`MASKED_KEX_KEY_LEN`] (276 B).  Unmasked on-device to
+    /// exactly [`MASKED_KEX_KEY_LEN`] (280 B).  Unmasked on-device to
     /// recover the receiver's private HPKE key (`RcvrPriv`).
     pub masked_kex_key: [u8; MASKED_KEX_KEY_LEN],
 
@@ -79,9 +79,9 @@ pub struct TborDarcTmkImportReq {
 #[tbor(response)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborDarcTmkImportResp {
-    /// The imported TMK, masked under the partition SDMK (exactly 260 B on
+    /// The imported TMK, masked under the partition SDMK (exactly 264 B on
     /// the wire; the firmware schema is the length authority).
-    #[tbor(max_len = 260)]
+    #[tbor(max_len = 264)]
     pub masked_tmk: Vec<u8>,
 }
 

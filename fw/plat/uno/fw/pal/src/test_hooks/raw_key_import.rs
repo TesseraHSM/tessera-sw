@@ -30,18 +30,20 @@ use tsra_fw_ddi_mbor_types::DdiKeyType;
 use tsra_fw_ddi_mbor_types::DdiTargetKeyMetadata;
 use tsra_fw_ddi_mbor_types::DdiTargetKeyProperties;
 use tsra_fw_ddi_mbor_types::masked_key::DdiMaskedKeyMetadata;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSeedStore;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
 use tsra_fw_uno_drivers_part_store::PartStore;
+use tsra_fw_uno_drivers_part_store::Partition;
+use tsra_fw_uno_drivers_part_store::UnwrappingKeySlot;
 
 use super::common::ReqHdr;
 use super::common::encode_resp;
@@ -61,7 +63,7 @@ use crate::pal::UnoHsmPal;
 struct DdiRawKeyImportReq<'a> {
     /// Raw plaintext key material (≤ 3072 bytes).
     #[ddi(id = 1, max_len = 3072)]
-    raw: &'a mut DmaBuf,
+    raw: &'a mut HsmDmaBuf,
     /// On-wire key kind the raw bytes are imported as.
     #[ddi(id = 2)]
     key_kind: DdiKeyType,
@@ -105,31 +107,23 @@ struct DdiRawKeyImportResp<'a> {
 /// path accepts only an initial installation and prepares its response
 /// before a final synchronous state commit.
 ///
-/// The outer router wipes the complete encoded request after this
-/// function returns, including decode failures that occur after the raw
-/// plaintext field has been borrowed.
+/// IO teardown scrubs the request and raw-key scratch.
 pub(super) async fn dispatch<'p>(
     pal: &'p UnoHsmPal,
     io: &UnoHsmIo,
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_len: usize,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let mut request =
         DdiRawKeyImportReq::mbor_decode(decoder).map_err(|_| HsmError::DdiDecodeFailed)?;
 
-    let result = if decoder.position() != request_len {
+    if decoder.position() != request_len {
         Err(HsmError::DdiDecodeFailed)
     } else {
         dispatch_request(pal, io, hdr, sess_id, &mut request).await
-    };
-
-    // The request DMA allocation is reusable and is not scrubbed
-    // automatically. Wipe plaintext on every returning decoded path,
-    // including validation and allocation failures.
-    request.raw.zeroize();
-    result
+    }
 }
 
 async fn dispatch_request<'p>(
@@ -138,7 +132,7 @@ async fn dispatch_request<'p>(
     hdr: &ReqHdr,
     sess_id: u16,
     request: &mut DdiRawKeyImportReq<'_>,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     // Key tags are not supported end to end in the refactor yet:
     // HsmVault::vault_key_create cannot persist a tag, Uno has no tag
     // lookup path, and OpenKey is not implemented. Reject the field
@@ -171,19 +165,10 @@ async fn dispatch_request<'p>(
     // commit it as a partition-scoped application key.
     let key_buf = pal.dma_alloc(io, request.raw.len())?;
     key_buf.copy_from_slice(request.raw);
-    // The plaintext now lives only in `key_buf`; scrub the host-supplied
-    // copy from the request DMA so it does not linger there. `DmaBuf::
-    // zeroize` is a volatile, un-elidable wipe.
-    request.raw.zeroize();
 
     let key_handle = pal
         .vault_key_create(io, key_buf, vault_kind, None, attrs)
         .await;
-
-    // Scrub the plaintext scratch before propagating a create failure —
-    // per-IO DMA is not implicitly wiped on reuse. `DmaBuf::zeroize` is
-    // a volatile, un-elidable wipe.
-    key_buf.zeroize();
 
     let key_handle = key_handle?;
     let key_id: u16 = key_handle.into();
@@ -237,6 +222,11 @@ async fn dispatch_request<'p>(
 /// command may still be reading and avoids leaking an unreferenced vault
 /// entry.
 ///
+/// `vault_key_create` runs the unwrapping key's pairwise consistency test
+/// before it stores the key, so the key must be a consistent RSA-2048 key in
+/// the vault layout, `d ‖ n ‖ e`. A key that fails the test sends the module
+/// to the FIPS error state.
+///
 /// The response carries a masked envelope tagged [`DdiKeyType::RsaUnwrap`]
 /// — matching how the unwrapping key is masked elsewhere — so the
 /// credential-establishment re-import path recognizes it as the partition
@@ -248,7 +238,7 @@ async fn raw_import_unwrapping_key<'p>(
     hdr: &ReqHdr,
     sess_id: u16,
     request: &mut DdiRawKeyImportReq<'_>,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     // Unwrap-only; SignVerify / EncryptDecrypt -> InvalidPermissions.
     let attrs = for_rsa_unwrap(&request.key_properties.key_metadata)?;
     let source_state = prepare_initial_unwrapping_key_import(io)?;
@@ -257,18 +247,10 @@ async fn raw_import_unwrapping_key<'p>(
     // create an unpublished partition-internal unwrapping key.
     let key_buf = pal.dma_alloc(io, request.raw.len())?;
     key_buf.copy_from_slice(request.raw);
-    // The plaintext now lives only in `key_buf`; scrub the host-supplied
-    // copy from the request DMA so it does not linger there.
-    request.raw.zeroize();
 
     let key_id = pal
         .vault_key_create(io, key_buf, HsmVaultKeyKind::Rsa2kPrivate, None, attrs)
         .await;
-
-    // Scrub the plaintext scratch before propagating a create failure or
-    // updating partition state. `DmaBuf::zeroize` is a volatile,
-    // un-elidable wipe.
-    key_buf.zeroize();
 
     let key_id = key_id?;
 
@@ -339,6 +321,18 @@ struct UnwrappingKeySourceState {
     backup_valid: bool,
 }
 
+/// Whether the HSP has published an unwrapping key into the slot, whether or
+/// not the key has passed its pairwise consistency test yet, so a key that
+/// passes the test during an import doesn't trip the recheck in
+/// [`publish_initial_unwrapping_key`].
+///
+/// A key that fails the test is wiped from the slot only as the module enters
+/// the FIPS error state, so no check here sees a slot that a failed test
+/// emptied.
+fn backup_published(partition: Partition) -> bool {
+    partition.unwrapping_key_slot() != Some(UnwrappingKeySlot::Empty)
+}
+
 /// Admit the partition for a validation-only raw unwrapping-key import.
 ///
 /// An already materialized vault key is never replaced because another
@@ -357,7 +351,7 @@ fn prepare_initial_unwrapping_key_import(io: &UnoHsmIo) -> HsmResult<UnwrappingK
 
     let state = UnwrappingKeySourceState {
         required: partition.unwrapping_key_required(),
-        backup_valid: partition.unwrapping_key_bk_valid(),
+        backup_valid: backup_published(partition),
     };
 
     // The SP is armed but has not completed publication. Do not race it.
@@ -392,7 +386,7 @@ fn publish_initial_unwrapping_key(
 
     if partition.unwrapping_key_id().is_some()
         || partition.unwrapping_key_required() != expected.required
-        || partition.unwrapping_key_bk_valid() != expected.backup_valid
+        || backup_published(partition) != expected.backup_valid
     {
         return Err(HsmError::InvalidArg);
     }
@@ -624,7 +618,7 @@ async fn mask_blob<'p>(
     let mk_id = part_mk_key_id(pal, io)?;
     let masking_key = pal.vault_key(io, mk_id)?;
 
-    let bks2_id = u16::try_from(pal.owner_svn()).map_err(|_| HsmError::InvalidArg)?;
+    let bks2_id = u16::try_from(pal.dev_owner_svn()).map_err(|_| HsmError::InvalidArg)?;
     let metadata = DdiMaskedKeyMetadata {
         svn: pal.mfgr_svn(),
         key_type,
@@ -647,6 +641,6 @@ async fn mask_blob<'p>(
 /// has none (a persistent masked blob requested before
 /// `EstablishCredential`).
 fn part_mk_key_id(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<HsmKeyId> {
-    let raw = pal.part_prop_get_u16(io, PartPropId::MK_KEY_ID)?;
+    let raw = pal.part_prop_get_u16(io, HsmPartPropId::MK_KEY_ID)?;
     Ok(HsmKeyId::from(raw))
 }

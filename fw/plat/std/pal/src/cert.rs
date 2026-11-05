@@ -383,7 +383,7 @@ impl StdHsmPal {
             // a zeroed one).  Allocated is fine: `part_alloc`
             // provisions `id_pub_key` before transitioning.
             let state = table.entries[idx].state;
-            if state == PartState::Unallocated || state == PartState::Disabled {
+            if state == HsmPartState::Unallocated || state == HsmPartState::Disabled {
                 return Err(HsmError::InvalidArg);
             }
             if table.entries[idx].leaf_cert_len > 0 {
@@ -462,9 +462,14 @@ impl StdHsmPal {
 // ---------------------------------------------------------------------------
 
 impl HsmCertStore for StdHsmPal {
-    async fn get_cert_chain_info(&self, io: &StdHsmIo, slot_id: u8) -> HsmResult<CertChainInfo> {
+    async fn get_cert_chain_info(
+        &self,
+        io: &StdHsmIo,
+        slot: HsmCertSlot,
+        bank: HsmCertBank,
+    ) -> HsmResult<HsmCertChainInfo> {
         let pid = u8::from(io.pid());
-        if slot_id != 0 {
+        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
             return Err(HsmError::InvalidArg);
         }
 
@@ -502,7 +507,7 @@ impl HsmCertStore for StdHsmPal {
             .hash(HashAlgo::sha256(), &combined, &mut thumbprint)
             .await?;
 
-        Ok(CertChainInfo {
+        Ok(HsmCertChainInfo {
             count: SLOT0_CERT_COUNT,
             thumbprint,
         })
@@ -511,12 +516,13 @@ impl HsmCertStore for StdHsmPal {
     async fn get_cert(
         &self,
         io: &StdHsmIo,
-        slot_id: u8,
+        slot: HsmCertSlot,
+        bank: HsmCertBank,
         idx: u8,
         cert: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
         let pid = u8::from(io.pid());
-        if slot_id != 0 {
+        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
             return Err(HsmError::InvalidArg);
         }
 
@@ -552,5 +558,70 @@ impl HsmCertStore for StdHsmPal {
             buf[..len].copy_from_slice(&entry.leaf_cert[..len]);
         }
         Ok(len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unsupported_slots_and_banks_reject_metadata_queries_and_certificate_reads() {
+        let (_, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (tx, _) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, tx);
+
+        for (slot, bank) in [
+            (HsmCertSlot::DevOwner, HsmCertBank::Ecc),
+            (HsmCertSlot::PartOwner, HsmCertBank::Ecc),
+            (HsmCertSlot(u8::MAX), HsmCertBank::Ecc),
+            (HsmCertSlot::Mfgr, HsmCertBank::MlDsa),
+            (HsmCertSlot::Mfgr, HsmCertBank(u8::MAX)),
+        ] {
+            assert_eq!(
+                pal.get_cert_chain_info(&io, slot, bank).await,
+                Err(HsmError::InvalidArg)
+            );
+            for idx in [0, SLOT0_CERT_COUNT - 1] {
+                assert_eq!(
+                    pal.get_cert(&io, slot, bank, idx, None).await,
+                    Err(HsmError::InvalidArg)
+                );
+                let mut out = [0xA5; MAX_CERT_DER_LEN];
+                assert_eq!(
+                    pal.get_cert(&io, slot, bank, idx, Some(&mut out)).await,
+                    Err(HsmError::InvalidArg)
+                );
+                assert!(out.iter().all(|&byte| byte == 0xA5));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ecc_bank_preserves_certificate_query_and_copy() -> HsmResult<()> {
+        let (_, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (tx, _) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, tx);
+        pal.init_cert_store().await?;
+
+        let len = pal
+            .get_cert(&io, HsmCertSlot::Mfgr, HsmCertBank::Ecc, 0, None)
+            .await?;
+        let mut out = [0xA5; MAX_CERT_DER_LEN];
+        assert_eq!(
+            pal.get_cert(&io, HsmCertSlot::Mfgr, HsmCertBank::Ecc, 0, Some(&mut out))
+                .await?,
+            len
+        );
+        assert_eq!(
+            &out[..len],
+            pal.cert_store()
+                .shared_cert(0)
+                .ok_or(HsmError::InternalError)?
+        );
+        assert!(out[len..].iter().all(|&byte| byte == 0xA5));
+        Ok(())
     }
 }

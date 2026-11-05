@@ -41,8 +41,7 @@ use crate::CryptoError;
 /// touching crypto, then call again with `Some(&mut buf)` sized at
 /// least to that length to actually seal.
 ///
-/// Dispatches on `alg`. In v1 the only accepted variant is
-/// [`AeadAlg::AesGcm256`].
+/// Dispatches on `alg`; AES-256-GCM uses a 16-byte stored IV.
 ///
 /// # Parameters
 ///
@@ -51,7 +50,8 @@ use crate::CryptoError;
 ///   `alg.key_len()`; validated only when `buf` is `Some`.
 /// * `iv`   — nonce (`alg.iv_len()` bytes; must be unique per
 ///   encryption with the same key; validated only when `buf` is
-///   `Some`).
+///   `Some`). AES-256-GCM uses only the first 12 bytes and stores
+///   a canonical `00 00 00 01` suffix.
 /// * `aad`  — additional authenticated data; length must be `0` or
 ///   a multiple of `alg.aad_granularity()`, and `<= MAX_AAD_LEN`.
 ///   Validated in both modes — an illegal AAD length is not a
@@ -127,7 +127,7 @@ pub fn open<'a>(key: &AesKey, buf: &'a mut [u8]) -> Result<AeadEnvelope<'a>, Cry
 /// # Errors
 /// * [`CryptoError::GcmBufferTooSmall`] — `buf.len()` is shorter
 ///   than the minimum envelope length implied by the parsed header.
-/// * [`CryptoError::AeadEnvelopeInvalidFormat`] — bad magic byte.
+/// * [`CryptoError::AeadEnvelopeInvalidFormat`] — bad magic or reserved byte.
 /// * [`CryptoError::AeadEnvelopeUnsupportedAlg`] — `alg` byte not
 ///   supported in v1.
 /// * [`CryptoError::AeadEnvelopeInvalidAadLength`] — encoded

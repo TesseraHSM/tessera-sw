@@ -12,7 +12,8 @@
 //! has no import command and none is required:
 //!
 //! * **NIST ACVP vectors.** `MlDsaVerify` takes the public key on the
-//!   wire, so NIST's known keys, messages and signatures replay directly.
+//!   wire, so NIST's known keys and signatures replay directly, over the
+//!   `μ` of each message, computed on the host.
 //!   Each positive vector is replayed a second time with a flipped
 //!   signature bit, which must be rejected.
 //! * **Device/host interop.** Both directions, and only public keys
@@ -21,7 +22,10 @@
 //!   generates and signs while the device verifies.
 
 use tsra_crypto::testvectors::mldsa::MLDSA_SIGVER_SHORT_MSG_TEST_VECTORS;
+use tsra_crypto::testvectors::mldsa::MLDSA_SIGVER_TEST_VECTORS;
 use tsra_crypto::ExportableKey;
+use tsra_crypto::HashAlgo;
+use tsra_crypto::Hasher;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::MlDsaAlgo;
 use tsra_crypto::MlDsaPrivateKey;
@@ -39,15 +43,26 @@ use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `KeyScope::Local` discriminant.
 const SCOPE_LOCAL: u8 = 0b011;
 
-/// `MlDsaVerify` on the device: `Ok(())` means accepted, the dedicated
-/// `MlDsaVerifyFailed` status means a well-formed rejection. Anything
-/// else is a transport or argument fault and is not a verdict.
+/// The `μ` of `message` under `context` and `pub_key`, computed on the
+/// host: the input `MlDsaSign` and `MlDsaVerify` take.
+fn host_mu(pub_key: &[u8], context: &[u8], message: &[u8]) -> Vec<u8> {
+    MlDsaPublicKey::from_bytes(pub_key)
+        .and_then(|pk| HashAlgo::mldsa_mu(&pk, context))
+        .and_then(|mut algo| Hasher::hash_vec(&mut algo, message))
+        .expect("host mu")
+}
+
+/// `MlDsaVerify` on the device, over the `μ` of `message` under `context`:
+/// `Ok(())` means accepted, the dedicated `MlDsaVerifyFailed` status means
+/// a well-formed rejection. Anything else is a transport or argument fault
+/// and is not a verdict.
 fn device_verify(
     ctx: &TestCtx,
     session_id: u16,
@@ -59,8 +74,7 @@ fn device_verify(
     match ctx.tbor(&TborMlDsaVerifyReq {
         session_id,
         pub_key: pub_key.to_vec(),
-        message: message.to_vec(),
-        ctx: context.to_vec(),
+        mu: host_mu(pub_key, context, message),
         signature: signature.to_vec(),
     }) {
         Ok(_) => true,
@@ -77,13 +91,17 @@ fn mldsa_nist_acvp_vectors() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
-    // `tsra_crypto` owns the NIST ACVP vectors; this short-message subset
-    // is the one whose messages and contexts fit the TBOR inline wire
-    // limits, so every entry replays directly through `MlDsaVerify`.
-    let vectors = MLDSA_SIGVER_SHORT_MSG_TEST_VECTORS;
-    assert!(!vectors.is_empty(), "no NIST vectors were embedded");
+    // `tsra_crypto` owns the NIST ACVP vectors.  The wire carries `μ`
+    // rather than the message, so messages of any length replay.
+    assert!(
+        !MLDSA_SIGVER_TEST_VECTORS.is_empty() && !MLDSA_SIGVER_SHORT_MSG_TEST_VECTORS.is_empty(),
+        "no NIST vectors were embedded"
+    );
 
-    for v in vectors {
+    for v in MLDSA_SIGVER_TEST_VECTORS
+        .iter()
+        .chain(MLDSA_SIGVER_SHORT_MSG_TEST_VECTORS)
+    {
         let got = device_verify(&ctx, session.session_id, v.pub_key, v.msg, v.ctx, v.sig);
         assert_eq!(
             got, v.expected_pass,
@@ -137,8 +155,8 @@ fn dsa_device_to_host(p: &MlDsaParams, rounds: usize) {
             .tbor(&TborMlDsaSignReq {
                 session_id: session.session_id,
                 masked_key: key.masked_key.clone(),
-                message: message.clone(),
-                ctx: Vec::new(),
+                mu: host_mu(&key.pub_key, &[], &message),
+                hedge: MLDSA_HEDGE_PREFERRED,
             })
             .unwrap_or_else(|e| panic!("MlDsaSign({}): {e:?}", p.name));
 

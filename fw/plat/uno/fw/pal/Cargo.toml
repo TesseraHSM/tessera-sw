@@ -24,6 +24,7 @@ tsra_fw_static_init = { workspace = true }
 tsra_fw_static_ref = { workspace = true }
 tsra_fw_uno_cert_blob = { workspace = true }
 tsra_fw_uno_drivers_aes = { workspace = true }
+tsra_fw_uno_drivers_bcp = { workspace = true }
 tsra_fw_uno_drivers_bks_store = { workspace = true }
 tsra_fw_uno_drivers_boot_status = { workspace = true }
 tsra_fw_uno_drivers_core_status = { workspace = true }
@@ -47,6 +48,7 @@ tsra_fw_uno_error = { workspace = true }
 tsra_fw_uno_fault = { workspace = true }
 tsra_fw_uno_key_vault = { workspace = true }
 tsra_fw_uno_pac = { workspace = true }
+tsra_fw_uno_pct = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
 tsra_fw_uno_trace = { workspace = true }
 
@@ -66,8 +68,12 @@ default = []
 # Optional host-poll path: also signal SYS_READY via ARM semihosting in
 # addition to the silicon boot_handshake::set_boot_status(Run). Hosts
 # that cannot snoop semihosting (e.g. production) should disable this
-# feature — boot_handshake alone is sufficient.
-semihosting = ["dep:tsra_fw_uno_drivers_semihosting"]
+# feature — boot_handshake alone is sufficient. The FIPS error state then
+# also exits through semihosting instead of signalling the SP.
+semihosting = [
+  "dep:tsra_fw_uno_drivers_semihosting",
+  "tsra_fw_uno_fault/semihosting",
+]
 
 # Test-only DDI commands, routed through the `HsmCustomDispatch` PAL hook
 # rather than the core opcode tables. Never enable either feature in a
@@ -84,10 +90,12 @@ tsra_test_hooks = ["dep:tsra_fw_ddi_mbor", "dep:tsra_fw_ddi_mbor_derive"]
 # instead of the Rust PQC fastpath firmware (`fw/plat/uno/pqc`). The
 # fastpath cores then host the bulk AES-GCM/XTS engine, so bulk keys are
 # registered with it over the HSM→FP IPC channel, and ML-DSA / ML-KEM are
-# refused because there is no PQC engine. The two firmwares use the same
-# PSRAM window differently (IPC rings vs PQC mailboxes), so the PAL must
-# match the FP image; `make_manticore.sh --bulk_crypto` selects both.
-bulk_crypto = []
+# refused because there is no PQC engine. That firmware owns the BCP
+# (CDMA), so the PAL's AES-GCM runs in software rather than on the BCP.
+# The two firmwares use the same PSRAM window differently (IPC rings vs
+# PQC mailboxes), so the PAL must match the FP image;
+# `make_manticore.sh --bulk_crypto` selects both.
+bulk_crypto = ["tsra_fw_uno_key_vault/bulk_crypto"]
 
 [lints]
 workspace = true

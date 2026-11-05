@@ -2,8 +2,6 @@
 // Licensed under the MIT License.
 
 #![cfg(test)]
-// AES GCM/XTS are not yet supported on emu; disable these tests until support is added.
-#![cfg(not(feature = "emu"))]
 
 use std::thread;
 use std::time::Instant;
@@ -131,7 +129,8 @@ fn test_aes_xts_encrypt_decrypt_thread_fn(
     assert!(key_id2_aes_bulk_256.is_some());
 
     // set up requests for the xts encrypt operations
-    let data = vec![1; 1024 * 1024];
+    // A bulk IO carries at most 16 KiB.
+    let data = vec![1; 16384];
     let tweak = [0x4; 16usize];
     let data_len = data.len();
 

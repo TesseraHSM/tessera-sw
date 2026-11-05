@@ -34,8 +34,8 @@ pub mod fixture_aad0_pt11 {
         0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d,
         0x1e, 0x1f,
     ];
-    pub const IV: [u8; 12] = [
-        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab,
+    pub const IV: [u8; 16] = [
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xab, 0, 0, 0, 1,
     ];
     pub const AAD: &[u8] = &[];
     pub const PT: &[u8] = b"hello world";
@@ -48,8 +48,8 @@ pub mod fixture_aad32_pt17 {
         0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d,
         0x3e, 0x3f,
     ];
-    pub const IV: [u8; 12] = [
-        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb,
+    pub const IV: [u8; 16] = [
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xbb, 0, 0, 0, 1,
     ];
     pub const AAD: &[u8; 32] = &[0xCC; 32];
     pub const PT: &[u8] = b"AAD-protected msg";
@@ -59,7 +59,9 @@ pub mod fixture_aad32_pt17 {
 /// + IV + AAD + tag only).
 pub mod fixture_aad64_pt0 {
     pub const KEY: [u8; 32] = [0x55; 32];
-    pub const IV: [u8; 12] = [0x77; 12];
+    pub const IV: [u8; 16] = [
+        0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0x77, 0, 0, 0, 1,
+    ];
     pub const AAD: &[u8; 64] = &[0xEE; 64];
     pub const PT: &[u8] = &[];
 }
@@ -71,7 +73,7 @@ fn round_trip(key_bytes: &[u8], iv: &[u8], aad: &[u8], pt: &[u8]) {
 
     // Size query.
     let needed = seal(AeadAlg::AesGcm256, &key, iv, aad, pt, None).expect("size query");
-    assert_eq!(needed, 8 + 12 + aad.len() + pt.len() + 16);
+    assert_eq!(needed, 8 + 16 + aad.len() + pt.len() + 16);
 
     let mut env = vec![0u8; needed];
     let n = seal(AeadAlg::AesGcm256, &key, iv, aad, pt, Some(&mut env)).expect("seal");
@@ -86,8 +88,8 @@ fn round_trip(key_bytes: &[u8], iv: &[u8], aad: &[u8], pt: &[u8]) {
         aad.len(),
         "aad_len_be"
     );
-    assert_eq!(&env[8..20], iv, "IV slot");
-    assert_eq!(&env[20..20 + aad.len()], aad, "AAD slot");
+    assert_eq!(&env[8..24], iv, "IV slot");
+    assert_eq!(&env[24..24 + aad.len()], aad, "AAD slot");
 
     // Open in place.
     let view = open(&key, &mut env).expect("open");

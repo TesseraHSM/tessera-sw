@@ -29,8 +29,8 @@
 //!                 }
 //! ```
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 pub use crate::alg::AeadAlg;
@@ -90,11 +90,11 @@ pub async fn seal<P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
-    pt: &DmaBuf,
-    buf: Option<&mut DmaBuf>,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
+    pt: &HsmDmaBuf,
+    buf: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize> {
     // Validate AAD length against the alg's granularity (and the
     // wire-format `u16` cap) up-front so a `None` size query still
@@ -126,11 +126,11 @@ pub async fn seal_in_place<P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
     pt_len: usize,
-    buf: &mut DmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     if !is_valid_aad_len(aad.len(), alg.aad_granularity()) {
         return Err(Error::InvalidAadLength.into());
@@ -175,8 +175,8 @@ pub const fn payload_offset(alg: AeadAlg, aad_len: usize) -> usize {
 pub async fn open<'a, P: HsmCrypto>(
     crypto: &P,
     io: &P::Io,
-    key: &DmaBuf,
-    buf: &'a mut DmaBuf,
+    key: &HsmDmaBuf,
+    buf: &'a mut HsmDmaBuf,
 ) -> HsmResult<AeadEnvelope<'a>> {
     let header = read_header(buf)?;
     let env = match header.alg {
@@ -217,7 +217,7 @@ pub async fn open<'a, P: HsmCrypto>(
 ///   [`AeadError::UnsupportedAlg`], [`AeadError::InvalidAadLength`], or
 ///   [`AeadError::BufferTooSmall`] (buffer shorter than the framing
 ///   implies).
-pub fn peek(buf: &DmaBuf) -> HsmResult<AeadPeek<'_>> {
+pub fn peek(buf: &HsmDmaBuf) -> HsmResult<AeadPeek<'_>> {
     let header = read_header(buf)?;
     // Validates the minimum envelope length (HEADER + iv + aad + tag)
     // and yields the region boundaries; iv_len / tag_len are derived

@@ -27,20 +27,6 @@ const MAX_DATA_SIZE: usize = 8191;
 /// Maximum TOC entries in a message.  Mirrors `codec::MAX_TOC_ENTRIES`.
 const MAX_TOC_ENTRIES: usize = 32;
 
-/// Bytes per TOC entry.  Mirrors `codec::toc::TOC_ENTRY_LEN`.
-const TOC_ENTRY_LEN: usize = 4;
-
-/// Request header length.  Mirrors `codec::header::RequestHeader::LEN`.
-const REQUEST_HEADER_LEN: usize = 4;
-
-/// Response header length.  Mirrors `codec::header::ResponseHeader::LEN`.
-const RESPONSE_HEADER_LEN: usize = 8;
-
-/// Buffer size the production host transports hand to the encoder
-/// (`REQ_BUF_LEN` / `RESP_BUF_LEN` in `ddi/nix/src/dev.rs` and
-/// `ddi/win/src/dev.rs`).
-const TRANSPORT_BUF_LEN: usize = 8192;
-
 /// A parsed field from the schema struct.
 #[derive(Debug, Clone)]
 pub struct SchemaField {
@@ -62,7 +48,7 @@ pub struct SchemaField {
     /// permitted on non-optional `Buffer` / `SealedKey` fields. When
     /// any field in the schema is `mutable`, the codegen emits a
     /// parallel `decode_mut` entry point and a `ViewMut` accessor
-    /// type whose mut-marked fields hand out `&mut DmaBuf`.
+    /// type whose mut-marked fields hand out `&mut HsmDmaBuf`.
     ///
     /// A `mutable` field additionally gets a `<field>_reserve(len)`
     /// encoder setter (alongside the value setter) that reserves the
@@ -201,6 +187,7 @@ pub struct Schema {
     pub name: syn::Ident,
     pub vis: syn::Visibility,
     pub kind: MessageKind,
+    pub pair: Option<syn::Path>,
     pub fields: Vec<SchemaField>,
     pub needs_data_start: bool,
     /// Whether the message borrows variable-length data (reserved for
@@ -270,6 +257,32 @@ impl TocLayout {
 }
 
 impl Schema {
+    /// Number of schema entries, including flattened field groups.
+    pub fn field_toc_count_expr(&self) -> proc_macro2::TokenStream {
+        let count = TocLayout::compute(&self.fields).total_toc_count;
+        let groups = self.fields.iter().filter_map(|f| {
+            f.include_group
+                .as_ref()
+                .map(|g| quote::quote! { + #g::TOC_COUNT })
+        });
+        quote::quote! { #count #(#groups)* }
+    }
+
+    /// Shared request/response metadata footprint.
+    pub fn toc_count_expr(&self) -> proc_macro2::TokenStream {
+        let fields = self.field_toc_count_expr();
+        match &self.pair {
+            Some(pair) => quote::quote! {
+                if (#fields) > #pair::FIELD_TOC_COUNT {
+                    #fields
+                } else {
+                    #pair::FIELD_TOC_COUNT
+                }
+            },
+            None => fields,
+        }
+    }
+
     /// Compute the worst-case data section size (all optional fields present,
     /// maximum-length slices, worst-case padding).
     pub fn worst_case_data_size(&self) -> usize {
@@ -338,14 +351,20 @@ impl Schema {
     }
 
     /// Compute MAX_ENCODED_SIZE (header + TOC + worst-case data).
-    pub fn max_encoded_size(&self) -> usize {
-        let header_len = match self.kind {
-            MessageKind::Request { .. } => 4, // REQ_HEADER_LEN
+    pub fn max_encoded_size(&self) -> proc_macro2::TokenStream {
+        let header_len: usize = match self.kind {
+            MessageKind::Request { .. } => 8, // REQ_HEADER_LEN
             MessageKind::Response => 8,       // RESP_HEADER_LEN
             MessageKind::Fields => 0,         // no header
         };
-        let layout = TocLayout::compute(&self.fields);
-        header_len + layout.total_toc_count * 4 + self.worst_case_data_size()
+        let toc_count = self.toc_count_expr();
+        let data = self.worst_case_data_size();
+        let groups = self.fields.iter().filter_map(|f| {
+            f.include_group.as_ref().map(|g| {
+                quote::quote! { + #g::WORST_CASE_DATA_SIZE }
+            })
+        });
+        quote::quote! { #header_len + (#toc_count) * 4 + #data #(#groups)* }
     }
 }
 
@@ -364,7 +383,7 @@ pub fn parse_struct_schema(
     attr: proc_macro2::TokenStream,
     input: &syn::ItemStruct,
 ) -> syn::Result<Schema> {
-    let kind = parse_message_kind(attr)?;
+    let (kind, pair) = parse_message_kind(attr)?;
 
     let mut fields = Vec::new();
     let mut needs_data_start = false;
@@ -401,7 +420,7 @@ pub fn parse_struct_schema(
 
     // Validate total TOC count doesn't exceed protocol limit.
     let layout = TocLayout::compute(&fields);
-    if layout.total_toc_count > 32 {
+    if layout.total_toc_count > MAX_TOC_ENTRIES {
         return Err(syn::Error::new(
             input.ident.span(),
             format!(
@@ -417,6 +436,7 @@ pub fn parse_struct_schema(
         name: input.ident.clone(),
         vis: input.vis.clone(),
         kind,
+        pair,
         fields,
         needs_data_start,
         has_lifetime,
@@ -456,39 +476,8 @@ pub fn parse_struct_schema(
             ));
         }
 
-        // `MAX_DATA_SIZE` bounds the data section, but it is not the limit a
-        // message actually hits first.  The encoder stages the data section
-        // after the header and a *full* 32-entry TOC (`stage_base()` in
-        // `tsra_ddi_tbor_codec::encode`) inside the caller's buffer, then
-        // shifts it down once the real TOC length is known.  Production
-        // transports supply an 8192-byte buffer (`REQ_BUF_LEN` /
-        // `RESP_BUF_LEN` in `ddi/nix/src/dev.rs` and `ddi/win/src/dev.rs`),
-        // so staging binds before `MAX_DATA_SIZE` does: a schema can satisfy
-        // the protocol limit and still fail to encode at run time with
-        // `EncodeError::BufferTooSmall`.  Catch that here instead.
-        //
-        // The final frame (`header + toc_count * 4 + data`) is never larger
-        // than the staged form, since `toc_count <= MAX_TOC_ENTRIES`, so this
-        // one check covers both.
-        let header_len = match schema.kind {
-            MessageKind::Response => RESPONSE_HEADER_LEN,
-            _ => REQUEST_HEADER_LEN,
-        };
-        let stage_base = header_len + MAX_TOC_ENTRIES * TOC_ENTRY_LEN;
-        if stage_base + worst_data > TRANSPORT_BUF_LEN {
-            return Err(syn::Error::new(
-                input.ident.span(),
-                format!(
-                    "worst-case encoded size ({} bytes: {}-byte staging offset + {}-byte data \
-                     section) exceeds the {}-byte transport buffer by {}; reduce max_len values",
-                    stage_base + worst_data,
-                    stage_base,
-                    worst_data,
-                    TRANSPORT_BUF_LEN,
-                    stage_base + worst_data - TRANSPORT_BUF_LEN
-                ),
-            ));
-        }
+        // The paired TOC footprint is evaluated in the generated transport
+        // size assertion, after both schemas and included groups are known.
     }
 
     Ok(schema)
@@ -728,41 +717,60 @@ fn parse_mutable_attr(attrs: &[syn::Attribute]) -> syn::Result<bool> {
 }
 
 /// Parse `opcode = 0x09`, `response`, or `fields` from the attribute token stream.
-fn parse_message_kind(attr: proc_macro2::TokenStream) -> syn::Result<MessageKind> {
-    let attr_str = attr.to_string();
-
-    if attr_str.trim() == "response" {
-        return Ok(MessageKind::Response);
-    }
-
-    if attr_str.trim() == "fields" {
-        return Ok(MessageKind::Fields);
-    }
-
-    // Parse "opcode = <int>"
-    if attr_str.contains("opcode") {
-        // Parse as: opcode = LIT
-        let parsed: syn::MetaNameValue = syn::parse2(attr)?;
-        if parsed.path.is_ident("opcode") {
-            if let syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Int(lit),
-                ..
-            }) = &parsed.value
-            {
-                let opcode: u8 = lit.base10_parse()?;
-                return Ok(MessageKind::Request { opcode });
+fn parse_message_kind(
+    attr: proc_macro2::TokenStream,
+) -> syn::Result<(MessageKind, Option<syn::Path>)> {
+    let mut kind = None;
+    let mut pair = None;
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("pair") {
+            if pair.is_some() {
+                return Err(meta.error("duplicate pair"));
             }
-            return Err(syn::Error::new_spanned(
-                &parsed.value,
-                "opcode must be an integer literal",
-            ));
+            pair = Some(meta.value()?.parse()?);
+            return Ok(());
         }
+        let value = if meta.path.is_ident("opcode") {
+            let expr: syn::Expr = meta.value()?.parse()?;
+            let syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Int(opcode),
+                ..
+            }) = &expr
+            else {
+                return Err(syn::Error::new_spanned(
+                    expr,
+                    "opcode must be an integer literal",
+                ));
+            };
+            MessageKind::Request {
+                opcode: opcode.base10_parse()?,
+            }
+        } else if meta.path.is_ident("response") {
+            MessageKind::Response
+        } else if meta.path.is_ident("fields") {
+            MessageKind::Fields
+        } else {
+            return Err(meta.error("expected opcode, response, fields, or pair"));
+        };
+        if kind.replace(value).is_some() {
+            return Err(meta.error("message kinds are mutually exclusive"));
+        }
+        Ok(())
+    });
+    syn::parse::Parser::parse2(parser, attr)?;
+    let kind = kind.ok_or_else(|| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[tbor] requires `opcode = N`, `response`, or `fields`",
+        )
+    })?;
+    if matches!(kind, MessageKind::Fields) && pair.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "field groups cannot have a message pair",
+        ));
     }
-
-    Err(syn::Error::new(
-        proc_macro2::Span::call_site(),
-        "#[tbor] requires `opcode = N`, `response`, or `fields`",
-    ))
+    Ok((kind, pair))
 }
 
 /// Infer the wire type from a Rust field type.

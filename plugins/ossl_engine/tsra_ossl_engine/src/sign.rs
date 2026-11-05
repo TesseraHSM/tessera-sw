@@ -31,6 +31,7 @@ use tsra_ossl_engine_core::ec_method::EcdsaSignHandler;
 use tsra_ossl_engine_core::ec_method::new_ecdsa_method;
 use tsra_ossl_engine_core::error::EngineError;
 use tsra_ossl_engine_core::error::EngineResult;
+use tsra_ossl_engine_core::error::ossl_check;
 use tsra_ossl_engine_core::ffi;
 
 /// Marker type carrying the engine's ECDSA sign logic (see [`EcdsaSignHandler`]).
@@ -102,15 +103,16 @@ fn raw_to_ecdsa_sig(raw: &[u8]) -> EngineResult<*mut ffi::ECDSA_SIG> {
         }
         return Err(EngineError::Other("ECDSA_SIG_new failed".into()));
     }
-    // SAFETY: sig is fresh; set0 takes ownership of r and s on success (returns 1).
-    if unsafe { ffi::ECDSA_SIG_set0(sig, r, s) } != 1 {
+    // SAFETY: sig is fresh; set0 takes ownership of r and s on success.
+    let rc = unsafe { ffi::ECDSA_SIG_set0(sig, r, s) };
+    if let Err(e) = ossl_check(rc, "ECDSA_SIG_set0 failed") {
         // SAFETY: set0 failed, so it did not take r/s; free everything.
         unsafe {
             ffi::BN_free(r);
             ffi::BN_free(s);
             ffi::ECDSA_SIG_free(sig);
         }
-        return Err(EngineError::Other("ECDSA_SIG_set0 failed".into()));
+        return Err(e);
     }
     Ok(sig)
 }

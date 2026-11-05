@@ -11,8 +11,9 @@
 use core::mem;
 use core::ops::AsyncFnOnce;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaAllocation;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -33,15 +34,30 @@ const HEAPS: usize = 2;
 
 pub(crate) const IO_SLOTS: usize = SRAM_IO_BUF_COUNT as usize;
 
-/// Dedicated admin/internal IO slot — the last of [`IO_SLOTS`].
+/// Dedicated admin/internal IO slot.
 ///
 /// IIC only hands out the host slots `0..ADMIN_IO_INDEX` (the first
-/// [`IO_SLOTS`]` - 1` slots); the PAL reserves this final slot for
-/// internal provisioning crypto (partition identity and enable-time
-/// keygen), so its bump heaps never collide with a concurrent host IO.
-/// It has full DMA (`SRAM_IO_BUF`) and NonDma (`DTCM_IO_BUF`) backing,
-/// like any host slot.
-pub(crate) const ADMIN_IO_INDEX: u16 = (IO_SLOTS - 1) as u16;
+/// 32 slots); the PAL reserves this slot for internal provisioning
+/// crypto (partition identity and enable-time keygen), so its bump
+/// heaps never collide with a concurrent host IO. It has full DMA
+/// (`SRAM_IO_BUF`) and NonDma (`DTCM_IO_BUF`) backing, like any host
+/// slot.
+pub(crate) const ADMIN_IO_INDEX: u16 = (IO_SLOTS - 2) as u16;
+
+/// Dedicated self-test (CAST) IO slot — the last of [`IO_SLOTS`].
+///
+/// Reserved for the pre-operational and periodic cryptographic
+/// algorithm self-tests, separate from [`ADMIN_IO_INDEX`] so the
+/// periodic self-test never races partition provisioning over a
+/// shared bump heap.
+///
+/// Unlike host and admin slots, this slot is **DMA-only**: it has
+/// `SRAM_IO_BUF` (Dma) backing but no `DTCM_IO_BUF` (NonDma) entry —
+/// `DTCM_IO_BUF` covers only the 33 host+admin slots (see
+/// `dtcm_map.rdl`). NonDma allocations against this slot are rejected
+/// by the bump allocator so an accidental one cannot address past the
+/// `DTCM_IO_BUF` region into the crashdump/status area.
+pub(crate) const SELF_TEST_IO_INDEX: u16 = (IO_SLOTS - 1) as u16;
 
 // DTCM IO buffer region — per-IO NonDma scratch in upper DTCM.
 // See dtcm_map.rdl: DTCM_IO_BUF[33] @ offset 0x2EC00 from DTCM base.
@@ -248,7 +264,7 @@ pub(crate) fn clear_io_peak(pal: &UnoHsmPal, io_index: u16) {
 /// - `slice`: mutable view over the newly allocated region.
 ///
 /// Returns [`HsmError::NotEnoughSpace`] if aligned allocation would exceed heap capacity.
-#[inline(always)]
+#[inline(never)]
 fn bump(
     pal: &UnoHsmPal,
     io_index: u16,
@@ -256,6 +272,14 @@ fn bump(
     size: usize,
     align: usize,
 ) -> HsmResult<(usize, &'static mut [u8])> {
+    // The self-test slot is DMA-only: it has SRAM_IO_BUF (Dma) backing but no
+    // DTCM_IO_BUF (NonDma) entry. Reject NonDma allocations rather than
+    // computing a DTCM address past the buffer region, which would overlap the
+    // crashdump/status area.
+    if heap == NONDMA && io_index == SELF_TEST_IO_INDEX {
+        return Err(HsmError::InvalidArg);
+    }
+
     let (base_ptr, cap) = heap_base_cap(io_index, heap);
     let w = wm(pal, io_index, heap);
     let mark = w.with(|v| *v).min(cap);
@@ -340,11 +364,11 @@ impl HsmScopedAlloc for UnoScopedAlloc<'_> {
     /// - `size`: Number of DMA-visible bytes to allocate.
     ///
     /// # Returns
-    /// Mutable [`DmaBuf`] view, or [`HsmError::NotEnoughSpace`].
-    fn dma_alloc(&self, size: usize) -> HsmResult<&mut DmaBuf> {
+    /// Mutable [`HsmDmaBuf`] view, or [`HsmError::NotEnoughSpace`].
+    fn dma_alloc(&self, size: usize) -> HsmResult<&mut HsmDmaBuf> {
         let s = bump(self.pal, self.io_index, DMA, size, 4).map(|(_, s)| s)?;
         // SAFETY: SRAM region returned by `bump` is DMA-accessible.
-        Ok(unsafe { DmaBuf::from_raw_mut(s) })
+        Ok(unsafe { HsmDmaBuf::from_raw_mut(s) })
     }
 
     #[inline(always)]
@@ -354,8 +378,8 @@ impl HsmScopedAlloc for UnoScopedAlloc<'_> {
     /// - `size`: Number of DMA-visible bytes to allocate.
     ///
     /// # Returns
-    /// Mutable zeroed [`DmaBuf`], or [`HsmError::NotEnoughSpace`].
-    fn dma_alloc_zeroed(&self, size: usize) -> HsmResult<&mut DmaBuf> {
+    /// Mutable zeroed [`HsmDmaBuf`], or [`HsmError::NotEnoughSpace`].
+    fn dma_alloc_zeroed(&self, size: usize) -> HsmResult<&mut HsmDmaBuf> {
         let s = self.dma_alloc(size)?;
         s.fill(0);
         Ok(s)
@@ -435,11 +459,51 @@ impl HsmAlloc for UnoHsmPal {
     /// - `size`: Number of DMA-visible bytes to allocate.
     ///
     /// # Returns
-    /// Mutable [`DmaBuf`], or [`HsmError::NotEnoughSpace`].
-    fn dma_alloc(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
+    /// Mutable [`HsmDmaBuf`], or [`HsmError::NotEnoughSpace`].
+    fn dma_alloc(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut HsmDmaBuf> {
         let s = bump(self, io.index(), DMA, size, 4).map(|(_, s)| s)?;
         // SAFETY: SRAM region returned by `bump` is DMA-accessible.
-        Ok(unsafe { DmaBuf::from_raw_mut(s) })
+        Ok(unsafe { HsmDmaBuf::from_raw_mut(s) })
+    }
+
+    fn dma_alloc_exchange(&self, io: &UnoHsmIo, size: usize) -> HsmResult<HsmDmaAllocation<'_>> {
+        let index = io.index();
+        let (start, _) = bump(self, index, DMA, size, 4)?;
+        let (base, _) = heap_base_cap(index, DMA);
+        // SAFETY: bump reserved this exclusive SRAM range; retain the heap's
+        // raw pointer provenance so later growth does not extend a slice.
+        Ok(unsafe { HsmDmaAllocation::from_raw_parts(base.add(start), size) })
+    }
+
+    fn dma_grow(
+        &self,
+        io: &UnoHsmIo,
+        allocation: &mut HsmDmaAllocation<'_>,
+        size: usize,
+    ) -> HsmResult<()> {
+        let index = io.index();
+        let (base, capacity) = heap_base_cap(index, DMA);
+        let start = (allocation.as_ptr() as usize)
+            .checked_sub(base as usize)
+            .ok_or(HsmError::InvalidArg)?;
+        let watermark = wm(self, index, DMA);
+        let mark = watermark.with(|v| *v);
+        if size < allocation.len()
+            || start.checked_add(allocation.len()) != Some(mark)
+            || mark > capacity
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let end = start.checked_add(size).ok_or(HsmError::NotEnoughSpace)?;
+        if end > capacity {
+            return Err(HsmError::NotEnoughSpace);
+        }
+        watermark.with(|v| *v = end);
+        pk(self, index, DMA).with(|v| *v = (*v).max(end));
+        // SAFETY: the exclusive handle borrow excludes live views. The added
+        // SRAM is unallocated, and the pointer retains heap provenance.
+        *allocation = unsafe { HsmDmaAllocation::from_raw_parts(base.add(start), size) };
+        Ok(())
     }
 
     #[inline(always)]
@@ -450,8 +514,8 @@ impl HsmAlloc for UnoHsmPal {
     /// - `size`: Number of DMA-visible bytes to allocate.
     ///
     /// # Returns
-    /// Mutable zeroed [`DmaBuf`], or [`HsmError::NotEnoughSpace`].
-    fn dma_alloc_zeroed(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut DmaBuf> {
+    /// Mutable zeroed [`HsmDmaBuf`], or [`HsmError::NotEnoughSpace`].
+    fn dma_alloc_zeroed(&self, io: &UnoHsmIo, size: usize) -> HsmResult<&mut HsmDmaBuf> {
         let s = self.dma_alloc(io, size)?;
         s.fill(0);
         Ok(s)
@@ -487,8 +551,8 @@ impl HsmAlloc for UnoHsmPal {
     /// over ~1.7k IOs.
     ///
     /// # Returns
-    /// Mutable [`DmaBuf`] of length selected by `f`, or error from `f`/allocator.
-    fn dma_alloc_var<F>(&self, io: &UnoHsmIo, f: F) -> HsmResult<&mut DmaBuf>
+    /// Mutable [`HsmDmaBuf`] of length selected by `f`, or error from `f`/allocator.
+    fn dma_alloc_var<F>(&self, io: &UnoHsmIo, f: F) -> HsmResult<&mut HsmDmaBuf>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<usize>,
     {
@@ -521,7 +585,7 @@ impl HsmAlloc for UnoHsmPal {
                 w.with(|v| *v = end);
                 pk(self, io_index, DMA).with(|v| *v = peak_before.max(end));
                 // SAFETY: `buf` came from the SRAM Dma pool.
-                Ok(unsafe { DmaBuf::from_raw_mut(&mut buf[..len]) })
+                Ok(unsafe { HsmDmaBuf::from_raw_mut(&mut buf[..len]) })
             }
             Err(e) => {
                 w.with(|v| *v = start);
@@ -548,8 +612,8 @@ impl HsmAlloc for UnoHsmPal {
     /// the teardown scrub will miss those bytes.
     ///
     /// # Returns
-    /// Tuple `(&mut DmaBuf, T)` on success, or error from `f`/allocator.
-    fn dma_alloc_var_with<F, T>(&self, io: &UnoHsmIo, f: F) -> HsmResult<(&mut DmaBuf, T)>
+    /// Tuple `(&mut HsmDmaBuf, T)` on success, or error from `f`/allocator.
+    fn dma_alloc_var_with<F, T>(&self, io: &UnoHsmIo, f: F) -> HsmResult<(&mut HsmDmaBuf, T)>
     where
         F: FnOnce(&mut [u8]) -> HsmResult<(usize, T)>,
     {
@@ -576,7 +640,7 @@ impl HsmAlloc for UnoHsmPal {
                 w.with(|v| *v = end);
                 pk(self, io_index, DMA).with(|v| *v = peak_before.max(end));
                 // SAFETY: `buf` came from the SRAM Dma pool.
-                Ok((unsafe { DmaBuf::from_raw_mut(&mut buf[..len]) }, extra))
+                Ok((unsafe { HsmDmaBuf::from_raw_mut(&mut buf[..len]) }, extra))
             }
             Err(e) => {
                 w.with(|v| *v = start);

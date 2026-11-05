@@ -1152,7 +1152,14 @@ tsra_status tsra_open_device_and_session(
         status =
             get_part_property(*device, TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY, &retrieved_mobk);
 
-        if ((status != TSRA_STATUS_SUCCESS) || (retrieved_mobk.ptr == NULL))
+        // Re-init with the cached MOBK on a partition whose credentials are
+        // already established does not populate the MOBK property; the file
+        // we loaded it from is already the persisted copy, so keep it.
+        if (status == TSRA_STATUS_PROPERTY_NOT_PRESENT && mobk_buf.ptr != NULL)
+        {
+            status = TSRA_STATUS_SUCCESS;
+        }
+        else if ((status != TSRA_STATUS_SUCCESS) || (retrieved_mobk.ptr == NULL))
         {
             ERR_raise_data(
                 ERR_LIB_PROV,
@@ -1165,11 +1172,13 @@ tsra_status tsra_open_device_and_session(
             status = (status == TSRA_STATUS_SUCCESS) ? TSRA_STATUS_INTERNAL_ERROR : status;
             goto cleanup;
         }
-
-        status = write_buffer_to_file(config->mobk_path, &retrieved_mobk);
-        if (status != TSRA_STATUS_SUCCESS)
+        else
         {
-            goto cleanup;
+            status = write_buffer_to_file(config->mobk_path, &retrieved_mobk);
+            if (status != TSRA_STATUS_SUCCESS)
+            {
+                goto cleanup;
+            }
         }
     }
 

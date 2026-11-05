@@ -12,13 +12,6 @@
 // restored — and the security domain is restored from the device-local
 // backups via `tsra_sd_restore_local_backup`. Unlike the
 // remote/peer restores, this carries no attestation evidence.
-//
-// Like the create/reseal/restore tests this needs the two-phase TBOR HPKE
-// handshake and a fully provisioned partition, which the mock backend does
-// not implement, so it is excluded from the mock lane and runs on the emu
-// and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -348,5 +341,3 @@ TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_is_one_shot)
         );
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

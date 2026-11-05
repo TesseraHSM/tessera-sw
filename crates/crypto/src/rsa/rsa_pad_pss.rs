@@ -207,6 +207,7 @@ impl RsaPadPssAlgoParams {
 impl EncodeOp for RsaPadPssAlgo {
     fn to_bytes(&mut self, output: Option<&mut [u8]>) -> Result<usize, CryptoError> {
         // RFC 8017 Section 9.1.1: EMSA-PSS-ENCODE (M, emBits)
+        self.hash_algo.ensure_sha1_or_sha2()?;
         let h_len = self.hash_algo.size();
         let s_len = self.salt_len;
 
@@ -289,6 +290,7 @@ impl DecodeOp for RsaPadPssAlgo {
         let modulus_size = params.modulus_size();
         let hash_algo = params.hash_algo();
         let m_hash = params.hash();
+        hash_algo.ensure_sha1_or_sha2()?;
         let h_len = hash_algo.size();
 
         // Validate message hash length matches hash algorithm

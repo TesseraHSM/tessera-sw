@@ -15,6 +15,7 @@ use crate::copyright::Copyright;
 use crate::coverage::Coverage;
 use crate::coverage_report::CoverageReport;
 use crate::fmt::Fmt;
+use crate::fw_precheck::FwPrecheck;
 use crate::nextest::Nextest;
 use crate::nextest_report::NextestReport;
 use crate::setup::Setup;
@@ -54,7 +55,7 @@ struct Stage {
     /// Run nextest with cli options (features, package, profile, exclude)
     #[clap(long, conflicts_with_all = ["nextest_min", "nextest_full"])]
     nextest: bool,
-    /// Run minimal nextest tests (skips resiliency, openssl, and native/cpp tests)
+    /// Run default nextest tests (skip the extra emu resource-count runs)
     #[clap(long, conflicts_with_all = ["nextest", "nextest_full"])]
     nextest_min: bool,
     /// Run the full nextest tests
@@ -63,6 +64,9 @@ struct Stage {
     /// Run nextest-report
     #[clap(long)]
     nextest_report: bool,
+    /// Run firmware precheck after all other stages
+    #[clap(long)]
+    fw_precheck: bool,
 }
 
 impl Stage {
@@ -81,9 +85,10 @@ impl Stage {
         self.nextest_min = self.nextest_min || other.nextest_min;
         self.nextest_full = self.nextest_full || other.nextest_full;
         self.nextest_report = self.nextest_report || other.nextest_report;
+        self.fw_precheck = self.fw_precheck || other.fw_precheck;
     }
 
-    /// Return a Stage instance with minimal checks enabled (fmt and nextest_min)
+    /// Return a Stage instance with minimal checks enabled (fmt, clippy, nextest_min and fw_precheck)
     fn min() -> Stage {
         Stage {
             setup: false,
@@ -92,13 +97,14 @@ impl Stage {
             validate_members: false,
             audit: false,
             fmt: true,
-            clippy: false,
+            clippy: true,
             coverage: false,
             coverage_report: false,
             nextest: false,
             nextest_min: true,
             nextest_full: false,
             nextest_report: false,
+            fw_precheck: true,
         }
     }
 
@@ -121,6 +127,7 @@ impl Stage {
             nextest_min: false,
             nextest_full: true,
             nextest_report: false, // nextest report is optional (intended only for CI)
+            fw_precheck: true,
         }
     }
 
@@ -141,6 +148,7 @@ impl Stage {
             nextest_min: false, // subset of nextest_full
             nextest_full: true,
             nextest_report: true,
+            fw_precheck: true,
         }
     }
 }
@@ -153,7 +161,7 @@ pub struct Precheck {
     #[clap(flatten)]
     stage: Option<Stage>,
     /// Run the full set of checks:
-    /// setup, copyright, validate_members, audit, fmt, clippy, nextest_full
+    /// setup, copyright, validate_members, audit, fmt, clippy, nextest_full, fw_precheck
     #[clap(
         long,
         conflicts_with = "all",
@@ -312,8 +320,7 @@ impl Xtask for Precheck {
         }
 
         if stage.nextest_min {
-            // Run min tests
-            let tests = min_tests(&self.exclude, self.profile.clone());
+            let tests = default_tests(&self.exclude, self.profile.clone());
             run_tests(tests, false, self.skip_clean, ctx.clone())?;
         }
 
@@ -324,9 +331,13 @@ impl Xtask for Precheck {
 
             #[cfg(not(target_os = "windows"))]
             {
-                // Run tsra_ddi mock tests
-                let ddi_test_runs = ddi_tests(&self.exclude, self.profile.clone());
-                run_tests(ddi_test_runs, false, self.skip_clean, ctx.clone())?;
+                // Run emu tests with the extra partition resource counts
+                for (count, test) in resource_count_tests(&self.exclude, self.profile.clone()) {
+                    std::env::set_var(EMU_RESOURCE_COUNT_ENV, count.to_string());
+                    let result = test.run(ctx.clone());
+                    std::env::remove_var(EMU_RESOURCE_COUNT_ENV);
+                    result?;
+                }
             }
         }
 
@@ -371,91 +382,65 @@ impl Xtask for Precheck {
             .run(ctx.clone())?;
         }
 
+        if stage.fw_precheck {
+            FwPrecheck {
+                skip_audit: self.skip_audit,
+            }
+            .run(ctx)?;
+        }
+
         log::trace!("done precheck");
         Ok(())
     }
 }
 
-// Helper function to define test parameters for --nextest-min
-fn min_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
-    let mut tests = Vec::new();
-
-    let mut mock_exclude = exclude.to_owned();
-
-    for pkg in [
-        "tsra_api_tests",
-        "tsra_ossl_provider",
-        "tsra_res_test_dev",
-        "tsra_resiliency_test_helpers",
-        "provider-integration-tests-cli",
-        "provider-integration-tests-capi",
-        "provider-integration-tests-nginx",
-        "resiliency_stress",
-        "resiliency_macro",
-    ] {
-        if !mock_exclude.iter().any(|e| e == pkg) {
-            mock_exclude.push(pkg.to_string());
-        }
-    }
-
-    // SDK Run min mock tests
-    tests.push(Nextest {
-        features: Some("mock".to_string()),
-        package: None,
-        no_default_features: false,
-        filterset: None,
-        profile: profile.clone().or_else(|| Some("ci-mock".to_string())),
-        exclude: mock_exclude,
-        test: None,
-        filter: vec![],
-    });
-
-    tests
-}
-
-// Helper function to define default test parameters for --nextest-full and --coverage
+// Helper function to define test parameters for --nextest-min, --nextest-full and --coverage
 fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
     let mut tests = Vec::new();
 
-    let mut mock_exclude = exclude.to_owned();
+    let mut emu_exclude = exclude.to_owned();
 
     for pkg in [
+        "tsra_api_tests",
         "provider-integration-tests-cli",
         "provider-integration-tests-capi",
         "provider-integration-tests-nginx",
     ] {
-        if !mock_exclude.iter().any(|e| e == pkg) {
-            mock_exclude.push(pkg.to_string());
+        if !emu_exclude.iter().any(|e| e == pkg) {
+            emu_exclude.push(pkg.to_string());
         }
     }
 
-    // SDK Run all mock tests
+    // Run all emu tests (except tsra_api_tests)
+    // CI job: test_*_emu
     tests.push(Nextest {
-        features: Some("mock".to_string()),
+        features: Some("emu".to_string()),
         package: None,
         no_default_features: false,
         filterset: None,
-        profile: profile.clone().or(Some("ci-mock".to_string())),
-        exclude: mock_exclude,
+        profile: profile.clone().or(Some("ci-emu".to_string())),
+        exclude: emu_exclude,
         test: None,
         filter: vec![],
     });
 
-    // SDK Run resiliency fault-injection tests (requires res-test
-    // feature for the fault-injection DDI device)
+    // Run tsra_api_tests
+    // CI job: test_*_api
     if !exclude.iter().any(|e| e == "tsra_api_tests") {
         tests.push(Nextest {
-            features: Some("mock,res-test".to_string()),
+            features: Some("emu".to_string()),
             package: Some("tsra_api_tests".to_string()),
             no_default_features: false,
-            filterset: Some("test(resiliency::fault_injection::)".to_string()),
-            profile: profile.clone().or(Some("ci-mock-res".to_string())),
+            filterset: None,
+            profile: profile.clone().or(Some("ci-api".to_string())),
             exclude: exclude.to_owned(),
             test: None,
             filter: vec![],
         });
     }
 
+    // Run tsra_api_tests with EX sessions against emu
+    // CI job: test_*_api
     if !exclude.iter().any(|e| e == "tsra_api_tests") {
         tests.push(Nextest {
             features: Some("emu,session-ex-tests".to_string()),
@@ -469,67 +454,37 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
         });
     }
 
-    // Run emu smoke tests
-    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-emu-smoke".to_string())),
-            exclude: exclude.to_owned(),
-            test: Some("tsra_ddi_tests".to_string()),
-            filter: vec!["smoke".to_string()],
-        });
-    }
-
     tests
 }
 
-// Helper function to define test parameters for Linux-specific tsra_ddi mock tests
+/// Env var the emu transport reads for the partition resource count
+/// (mirrors `tsra_ddi_emu::EMU_RESOURCE_COUNT_ENV`).
 #[cfg(not(target_os = "windows"))]
-fn ddi_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
+const EMU_RESOURCE_COUNT_ENV: &str = "TSRA_EMU_RESOURCE_COUNT";
+
+// Helper function to define the Linux-specific tsra_ddi emu runs with extra
+// partition resource counts. Each entry is (resource count, test run).
+#[cfg(not(target_os = "windows"))]
+fn resource_count_tests(exclude: &[String], profile: Option<String>) -> Vec<(u32, Nextest)> {
     let mut tests = Vec::new();
 
     if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        // SDK Run tsra_ddi_mbor_types mock tests table-4
-        tests.push(Nextest {
-            features: Some("mock,table-4".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-mock-table-4".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
-
-        // SDK Run tsra_ddi_mbor_types mock tests table-64
-        tests.push(Nextest {
-            features: Some("mock,table-64".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-mock-table-64".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
-    }
-
-    if !exclude.iter().any(|e| e == "tsra_ddi_tbor_types") {
-        // SDK Run tsra_ddi_tbor_types tests through the emu
-        // backend (in-process firmware).
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_tbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-tbor-emu".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
+        // CI job: test_ubuntu_misc
+        for count in [4u32, 64] {
+            tests.push((
+                count,
+                Nextest {
+                    features: Some("emu".to_string()),
+                    package: Some("tsra_ddi_mbor_types".to_string()),
+                    no_default_features: false,
+                    filterset: None,
+                    profile: profile.clone().or(Some(format!("ci-emu-res-{count}"))),
+                    exclude: exclude.to_owned(),
+                    test: None,
+                    filter: vec![],
+                },
+            ));
+        }
     }
 
     tests

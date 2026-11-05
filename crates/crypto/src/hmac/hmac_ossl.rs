@@ -234,6 +234,7 @@ impl SignOp for OsslHmacAlgo {
         data: &[u8],
         signature: Option<&mut [u8]>,
     ) -> Result<usize, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let len = self.hash.size();
         if let Some(signature) = signature {
             if signature.len() < len {
@@ -274,6 +275,7 @@ impl<'a> SignStreamingOp<'a> for OsslHmacAlgo {
     /// - `CryptoError::HmacKeyError` - the key bytes could not be extracted.
     /// - `CryptoError::HmacInitError` - the `EVP_MAC` context could not be keyed.
     fn sign_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let key = key_bytes(&key)?;
         let mac = IsolatedHmac::new(&self.hash, &key)?;
         Ok(OsslHmacAlgoSignContext {
@@ -387,6 +389,7 @@ impl VerifyOp for OsslHmacAlgo {
         data: &[u8],
         signature: &[u8],
     ) -> Result<bool, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let mut result = vec![0u8; self.hash.size()];
 
         let key = key_bytes(key)?;
@@ -429,6 +432,7 @@ impl<'a> VerifyStreamingOp<'a> for OsslHmacAlgo {
     /// - `CryptoError::HmacVerifyInitError` - the `EVP_MAC` context could not be
     ///   keyed.
     fn verify_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let key = key_bytes(&key)?;
         let mac =
             IsolatedHmac::new(&self.hash, &key).map_err(|_| CryptoError::HmacVerifyInitError)?;

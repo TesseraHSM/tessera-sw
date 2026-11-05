@@ -68,9 +68,9 @@ pub const PSK_CHANGE_AAD_LEN: usize = 32;
 ///
 /// The envelope is fully deterministic for the current scheme:
 /// AEAD-GCM around a 32-byte plaintext with a 32-byte AAD —
-/// `header(8) + iv(12) + aad(32) + ct(32) + tag(16)` = 100 B. Pinned as
+/// `header(8) + iv(16) + aad(32) + ct(32) + tag(16)` = 104 B. Pinned as
 /// a fixed-length field so a malformed length is rejected at decode.
-pub const PSK_CHANGE_ENVELOPE_LEN: usize = 8 + 12 + PSK_CHANGE_AAD_LEN + 32 + 16;
+pub const PSK_CHANGE_ENVELOPE_LEN: usize = 8 + 16 + PSK_CHANGE_AAD_LEN + 32 + 16;
 
 /// Maximum bytes the wrapped `psk_envelope` may occupy on the wire.
 ///
@@ -87,7 +87,7 @@ pub const PSK_CHANGE_ENVELOPE_MAX_LEN: usize = 160;
 /// `param_key`.  The target PSK slot is derived from the session role
 /// (CO session → CO slot, CU session → CU slot); there is no
 /// slot-selection field on the wire.
-#[tbor(opcode = 0x06)]
+#[tbor(opcode = 0x06, pair = TborPskChangeResp)]
 pub struct TborPskChangeReq<'a> {
     /// Logical session id the request is bound to.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId) and pulled out as
@@ -99,20 +99,20 @@ pub struct TborPskChangeReq<'a> {
 
     /// AEAD envelope wrapping the 32-byte new PSK under the active
     /// session's `param_key`.  Fixed length [`PSK_CHANGE_ENVELOPE_LEN`]
-    /// (100 B); a malformed length is rejected at decode with
+    /// (104 B); a malformed length is rejected at decode with
     /// `TborInvalidFixedLength`.  See module docs for AAD layout.
     ///
     /// Marked `#[tbor(mutable)]` so the FW handler can AEAD-open the
     /// envelope in place — the field is exposed as the
     /// `psk_envelope` member of the generated
     /// `TborPskChangeReqViewMut` destructured view.
-    #[tbor(buffer, len = 100, mutable)]
+    #[tbor(buffer, len = 104, mutable)]
     pub psk_envelope: &'a [u8],
 }
 
 /// `PskChange` response schema (empty acknowledgement; status
 /// lives in the TBOR response header).
-#[tbor(response)]
+#[tbor(response, pair = TborPskChangeReq)]
 pub struct TborPskChangeResp;
 
 /// Builds the 32-byte AEAD AAD bound into a `PskChange` envelope.

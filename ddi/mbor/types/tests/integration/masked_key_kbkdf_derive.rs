@@ -178,7 +178,6 @@ fn test_masked_key_secret_kbkdf_aes192() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
 #[test]
 fn test_masked_key_secret_kbkdf_aes_gcm_secret256() {
     ddi_dev_test(
@@ -216,7 +215,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret256() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
 #[test]
 fn test_masked_key_secret_kbkdf_aes_gcm_secret384() {
     ddi_dev_test(
@@ -254,7 +252,6 @@ fn test_masked_key_secret_kbkdf_aes_gcm_secret384() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
 #[test]
 fn test_masked_key_secret_kbkdf_aes_gcm_secret521() {
     ddi_dev_test(
@@ -432,7 +429,6 @@ fn test_secret_kbkdf_helper(
     assert_eq!(resp.data.msg.len(), msg_len);
 }
 
-#[cfg(not(feature = "emu"))]
 #[allow(clippy::too_many_arguments)]
 fn test_secret_kbkdf_aes_gcm_helper(
     dev: &mut <DdiTest as Ddi>::Dev,
@@ -522,8 +518,9 @@ fn test_secret_kbkdf_aes_gcm_helper(
     let derived_key_id2 = resp.unwrap().data.bulk_key_id.unwrap();
 
     // set up requests for the gcm encrypt operations
-    let data = vec![1; 16384];
     let aad = [0x4; 32usize];
+    // A bulk IO carries at most 16 KiB, including the 32-byte-aligned AAD.
+    let data = vec![1; 16384 - aad.len()];
     let iv = [0x3u8; 12];
 
     // setup params for encrypt operation

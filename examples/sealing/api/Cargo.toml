@@ -27,6 +27,7 @@ minicbor = { features = ["std"], workspace = true }
 
 [features]
 emu = ["tsra_api/emu"]
+sock = ["tsra_api/sock"]
 
 [lints]
 workspace = true

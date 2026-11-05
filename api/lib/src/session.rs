@@ -175,6 +175,20 @@ impl HsmSession {
         }
     }
 
+    pub(crate) fn key_report_auth(
+        &self,
+        request: &tsra_ddi_tbor_types::TborKeyReportReq,
+    ) -> HsmResult<Vec<u8>> {
+        let inner = self.inner.read();
+        match &inner.kind {
+            SessionKind::Ver2 { param_key, .. } => {
+                tsra_session_ex_crypto::seal_key_report_auth(param_key, request)
+                    .map_err(|_| HsmError::InternalError)
+            }
+            SessionKind::Ver1 { .. } => Err(HsmError::InvalidSession),
+        }
+    }
+
     /// Issues TBOR `PartInit` (opcode `0x07`) on this CO session.
     ///
     /// Seals `mach_seed` under the session `param_key` and ships it

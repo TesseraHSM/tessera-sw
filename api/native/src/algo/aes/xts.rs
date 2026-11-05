@@ -21,7 +21,11 @@ use crate::utils::validate_output_buffer;
 pub struct TsraAlgoAesXtsParams {
     /// Sector number (tweak value) in little-endian byte format.
     /// This is a 128-bit value that provides additional security by
-    /// varying the encryption for each data unit.
+    /// varying the encryption for each data unit. On sessions opened with
+    /// `tsra_sess_ex_open` the tweak is 64-bit: bytes 8..16 must be zero for
+    /// the initial tweak and for the tweak advanced past the last processed
+    /// data unit, otherwise the operation fails with
+    /// `TSRA_STATUS_INVALID_TWEAK`.
     pub sector_num: [u8; 16],
 
     /// Data Unit Length in bytes.

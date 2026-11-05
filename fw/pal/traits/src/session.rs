@@ -75,15 +75,15 @@ pub enum HsmSessionState {
 /// range the session occupies and which TBOR commands the session may
 /// invoke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionRole {
+pub enum HsmSessionRole {
     /// Crypto Officer — administrative role.  Sessions land in
     /// slot 0.  CO sessions are pinned to
-    /// [`SessionType::Authenticated`] (request rejected otherwise).
+    /// [`HsmSessionType::Authenticated`] (request rejected otherwise).
     CryptoOfficer,
 
     /// Crypto User — regular role.  Sessions land in slots 1..=7.
     /// CU sessions are pinned to
-    /// [`SessionType::PlainText`] (request rejected otherwise).
+    /// [`HsmSessionType::PlainText`] (request rejected otherwise).
     CryptoUser,
 }
 
@@ -97,16 +97,16 @@ pub enum SessionRole {
 ///
 /// Role pairing is enforced at handshake time:
 ///
-/// | Role | Allowed `SessionType` |
+/// | Role | Allowed `HsmSessionType` |
 /// |---|---|
-/// | [`SessionRole::CryptoOfficer`] | [`Authenticated`](Self::Authenticated) |
-/// | [`SessionRole::CryptoUser`]    | [`PlainText`](Self::PlainText) |
+/// | [`HsmSessionRole::CryptoOfficer`] | [`Authenticated`](Self::Authenticated) |
+/// | [`HsmSessionRole::CryptoUser`]    | [`PlainText`](Self::PlainText) |
 ///
 /// Any other combination is rejected with
 /// [`HsmError::InvalidSessionType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum SessionType {
+pub enum HsmSessionType {
     /// Channel transports MBOR bodies without per-message MAC.
     /// `param_key` is still derived so callers can opt-in to encrypt
     /// individual sensitive parameters via the `aead_envelope` envelope.
@@ -119,14 +119,14 @@ pub enum SessionType {
     Authenticated = 1,
 }
 
-impl SessionType {
-    /// Wire-encode this `SessionType` to its `u8` discriminant.
+impl HsmSessionType {
+    /// Wire-encode this `HsmSessionType` to its `u8` discriminant.
     #[inline]
     pub const fn to_u8(self) -> u8 {
         self as u8
     }
 
-    /// Parse a wire `u8` into a `SessionType`.
+    /// Parse a wire `u8` into a `HsmSessionType`.
     ///
     /// Returns [`HsmError::InvalidSessionType`] for any value other
     /// than `0` (PlainText) or `1` (Authenticated).
@@ -139,14 +139,14 @@ impl SessionType {
         }
     }
 
-    /// Validate that this `SessionType` is the only one allowed for
-    /// the given [`SessionRole`].  Returns
+    /// Validate that this `HsmSessionType` is the only one allowed for
+    /// the given [`HsmSessionRole`].  Returns
     /// [`HsmError::InvalidSessionType`] for any disallowed pairing.
     #[inline]
-    pub const fn validate_for_role(self, role: SessionRole) -> HsmResult<()> {
+    pub const fn validate_for_role(self, role: HsmSessionRole) -> HsmResult<()> {
         match (role, self) {
-            (SessionRole::CryptoOfficer, Self::Authenticated)
-            | (SessionRole::CryptoUser, Self::PlainText) => Ok(()),
+            (HsmSessionRole::CryptoOfficer, Self::Authenticated)
+            | (HsmSessionRole::CryptoUser, Self::PlainText) => Ok(()),
             _ => Err(HsmError::InvalidSessionType),
         }
     }
@@ -181,7 +181,7 @@ impl SessionType {
 /// [`open_session_finish`]: crate::open_session_finish
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum SessionSuite {
+pub enum HsmSessionSuite {
     /// HPKE `DHKEM(P-384, HKDF-SHA-384) + HKDF-SHA-384 + AES-256-GCM`.
     ///
     /// Authenticated PSK mode bound to the partition identity key.
@@ -190,14 +190,14 @@ pub enum SessionSuite {
     P384HkdfSha384AesGcm256 = 0x01,
 }
 
-impl SessionSuite {
-    /// Wire-encode this `SessionSuite` to its `u8` discriminant.
+impl HsmSessionSuite {
+    /// Wire-encode this `HsmSessionSuite` to its `u8` discriminant.
     #[inline]
     pub const fn to_u8(self) -> u8 {
         self as u8
     }
 
-    /// Parse a wire `u8` into a `SessionSuite`.
+    /// Parse a wire `u8` into a `HsmSessionSuite`.
     ///
     /// Returns [`HsmError::UnsupportedSessionSuite`] for any value
     /// that this firmware build does not implement (including `0x00`
@@ -257,24 +257,32 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// - `id` — `None` to allocate a new slot; `Some(existing)` to
     ///   re-key an already-open session in place (post-migration
     ///   renegotiation).  The existing session must currently be in
-    ///   either [`HsmSessionState::Active`] or
-    ///   [`HsmSessionState::NeedsRenegotiation`].
+    ///   [`HsmSessionState::NeedsRenegotiation`]; other states and
+    ///   out-of-range IDs are rejected before any vault state is
+    ///   touched (see the errors below).
     ///
     /// # Returns
     ///
     /// - `Ok(sess_id)` — the new session's [`HsmSessId`].
     /// - `Err(HsmError::VaultSessionLimitReached)` — `id == None` and
     ///   no slots are free (see
-    ///   [`session_limit_reached`](Self::session_limit_reached)).
-    /// - `Err(HsmError::InvalidArg)` — `id == Some(_)` and the slot
-    ///   is free, or `api_rev`/`masking_key` is the wrong length.
+    ///   [`session_limit_reached`](Self::session_limit_reached)), or
+    ///   `id == Some(_)` and the ID is out of range.
+    /// - `Err(HsmError::SessionNotFound)` — `id == Some(_)` and the
+    ///   slot is not allocated.
+    /// - `Err(HsmError::ProcessedIoEventInInvalidState)` — `id == Some(_)`
+    ///   and the slot is Active or Pending rather than awaiting
+    ///   renegotiation.
+    /// - `Err(HsmError::InvalidArg)` — `api_rev` or `masking_key` is
+    ///   the wrong length. Lengths are checked before the session ID
+    ///   or state.
     /// - `Err(HsmError::NotEnoughSpace)` — vault is full and cannot
     ///   store the masking blob.
     async fn session_create(
         &self,
         io: &Self::Io,
         api_rev: &[u8],
-        masking_key: &[u8],
+        masking_key: &HsmDmaBuf,
         id: Option<HsmSessId>,
     ) -> HsmResult<HsmSessId>;
 
@@ -300,6 +308,42 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to an allocated
     ///   session in the caller's partition.
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
+
+    /// Rolls back an in-place re-key performed by
+    /// [`session_create`](Self::session_create) with `id == Some(_)`
+    /// (the post-migration `ReopenSession` path).
+    ///
+    /// A `ReopenSession` re-keys a
+    /// [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation) slot:
+    /// it installs a fresh masking-key vault entry and clears the slot's
+    /// renegotiation flag, flipping it to [`Active`](HsmSessionState::Active).
+    /// If a later step of the same command fails (e.g. the response
+    /// cannot be encoded), the host never learns the session was
+    /// re-keyed and will retry the reopen — but the now-`Active` slot
+    /// would reject that retry.  This call undoes the re-key so the slot
+    /// returns to a freshly-migrated `NeedsRenegotiation` state:
+    ///
+    /// 1. Deletes the fresh masking-key vault entry that
+    ///    [`session_create`](Self::session_create) installed.
+    /// 2. Restores the slot's renegotiation flag and clears its physical
+    ///    vault mapping.
+    ///
+    /// The slot itself is **not** freed (it still represents a migrated
+    /// session awaiting renegotiation), mirroring the reference
+    /// firmware's `rollback_open_session` reopen branch
+    /// (`session_table().rollback_recreation(id)`).
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — caller's I/O context (partition scope).
+    /// - `id` — session that was just re-keyed and must be restored.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` on success.
+    /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to a
+    ///   live slot in the caller's partition.
+    async fn session_rollback_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 
     /// Queries the lifecycle state of a session slot.
     ///
@@ -329,8 +373,8 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// The chosen slot is constrained by `role`:
     ///
-    /// - [`SessionRole::CryptoOfficer`] → slot 0 only.
-    /// - [`SessionRole::CryptoUser`] → slots 1..=7.
+    /// - [`HsmSessionRole::CryptoOfficer`] → slot 0 only.
+    /// - [`HsmSessionRole::CryptoUser`] → slots 1..=7.
     ///
     /// Allocation policy within the eligible range:
     ///
@@ -368,8 +412,8 @@ pub trait HsmSessionManager: HsmIoTypes {
     async fn session_create_pending(
         &self,
         io: &Self::Io,
-        role: SessionRole,
-        handshake_state: &DmaBuf,
+        role: HsmSessionRole,
+        handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId>;
 
     /// Borrows the opaque handshake state of a
@@ -396,7 +440,7 @@ pub trait HsmSessionManager: HsmIoTypes {
         &self,
         io: &Self::Io,
         id: HsmSessId,
-        out: Option<&mut [u8]>,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Promotes a [`Pending`](HsmSessionState::Pending) slot to
@@ -433,9 +477,11 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///   [`tsra_fw_core_crypto_aead_envelope`] for per-parameter
     ///   authenticated encryption (and to unseal the `seed_envelope`
     ///   in `OpenSessionFinish`).
-    /// - `masking_key` — 80-byte AES-CBC-256 + HMAC-SHA-384 blob;
-    ///   required for both CO and CU sessions.  Consumed by the
-    ///   `key_masking::cbc` masked-key system, not by the per-session AEAD.
+    /// - `masking_key` — 32-byte AES-256-GCM key, required for both CO and
+    ///   CU sessions. Consumed by the `key_masking::aead` masked-key system,
+    ///   separately from the per-parameter `param_key`.
+    /// - `auth_binding` — [`SESSION_AUTH_BINDING_LEN`] bytes captured from
+    ///   the authenticated handshake: role, AppId and PSK digest.
     /// - `mac_tx_key` — `Some(48 B)` for Authenticated sessions
     ///   (VM→HSM message-MAC key); `None` for PlainText.
     /// - `mac_rx_key` — `Some(48 B)` for Authenticated sessions
@@ -455,17 +501,18 @@ pub trait HsmSessionManager: HsmIoTypes {
         io: &Self::Io,
         id: HsmSessId,
         api_rev: &[u8],
-        param_key: &[u8],
-        masking_key: &[u8],
-        mac_tx_key: Option<&[u8]>,
-        mac_rx_key: Option<&[u8]>,
+        param_key: &HsmDmaBuf,
+        masking_key: &HsmDmaBuf,
+        auth_binding: &HsmDmaBuf,
+        mac_tx_key: Option<&HsmDmaBuf>,
+        mac_rx_key: Option<&HsmDmaBuf>,
     ) -> HsmResult<()>;
 
     /// Returns a borrowed view of the active session's `param_key`
     /// (a 32-byte AES-256 key used by
     /// [`tsra_fw_core_crypto_aead_envelope`]).
     ///
-    /// Zero-copy: the returned `&DmaBuf` borrows directly from the
+    /// Zero-copy: the returned `&HsmDmaBuf` borrows directly from the
     /// PAL's session-schedule storage, so callers can hand it to
     /// PAL crypto primitives without an intermediate allocation.
     /// This hides the layout of the session schedule blob from
@@ -481,14 +528,20 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// # Returns
     ///
-    /// - `Ok(&DmaBuf)` — a sub-view of the schedule blob, exactly
+    /// - `Ok(&HsmDmaBuf)` — a sub-view of the schedule blob, exactly
     ///   [`SESSION_PARAM_KEY_LEN`] bytes long.
     /// - `Err(HsmError::SessionNotFound)` — `id` does not refer to a
     ///   live Active session in the caller's partition (slot free,
     ///   destroyed, or still Pending).
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
-    fn session_param_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&DmaBuf>;
+    fn session_param_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
+
+    /// Returns the credential binding captured by the TBOR handshake.
+    ///
+    /// Legacy MBOR sessions must return `InvalidPermissions`, not a view
+    /// into their unrelated masking-key schedule.
+    fn session_auth_binding(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
 
     /// Returns a borrowed view of the active session's masking key.  Its
     /// length depends on the session's schedule-blob format:
@@ -503,7 +556,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// rather than assuming a single fixed size.
     ///
     /// Zero-copy: like [`session_param_key`](Self::session_param_key)
-    /// the returned `&DmaBuf` borrows directly from the PAL's
+    /// the returned `&HsmDmaBuf` borrows directly from the PAL's
     /// session-schedule storage, so in-session key-creating handlers
     /// can hand it to the masking primitive without an intermediate
     /// allocation to envelope a session-scoped key into a
@@ -518,7 +571,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///
     /// # Returns
     ///
-    /// - `Ok(&DmaBuf)` — a sub-view of the schedule blob whose length
+    /// - `Ok(&HsmDmaBuf)` — a sub-view of the schedule blob whose length
     ///   depends on the blob format: 32 B ([`SESSION_MASKING_KEY_LEN`])
     ///   for a TBOR `SessionEx` session, or 80 B for a legacy MBOR
     ///   `Session` blob.
@@ -527,7 +580,7 @@ pub trait HsmSessionManager: HsmIoTypes {
     ///   destroyed, or still Pending).
     /// - `Err(HsmError::InternalError)` — schedule blob is shorter
     ///   than expected (corruption indicator).
-    fn session_masking_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&DmaBuf>;
+    fn session_masking_key(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<&HsmDmaBuf>;
 
     /// Atomically reserves the session's one-shot "PSK change"
     /// budget.  Each session may successfully consume this budget at

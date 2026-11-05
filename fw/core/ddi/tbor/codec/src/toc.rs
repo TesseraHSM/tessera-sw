@@ -12,7 +12,7 @@
 //! (`to_be_bytes`), so the high bits of the in-memory `u32` are the
 //! first bits on the wire.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 /// Maximum number of TOC entries per message.
 pub const MAX_TOC_ENTRIES: usize = 32;
@@ -21,7 +21,7 @@ pub const MAX_TOC_ENTRIES: usize = 32;
 pub const MAX_DATA_SIZE: usize = 8191;
 
 /// Request header size in bytes.
-pub const REQ_HEADER_LEN: usize = 4;
+pub const REQ_HEADER_LEN: usize = 8;
 
 /// Response header size in bytes.
 pub const RESP_HEADER_LEN: usize = 8;
@@ -87,7 +87,7 @@ pub enum TocEntry<'a> {
     /// Key identifier (type 1, inline 16-bit).
     KeyId(u16),
     /// Sealed key blob (type 2, offset/length).
-    SealedKey(&'a DmaBuf),
+    SealedKey(&'a HsmDmaBuf),
     /// 8-bit unsigned integer (type 3, inline 8-bit).
     Uint8(u8),
     /// 16-bit unsigned integer (type 4, inline 16-bit).
@@ -97,11 +97,11 @@ pub enum TocEntry<'a> {
     /// 64-bit unsigned integer (type 6, offset/length, len must be 8).
     Uint64(u64),
     /// Variable-length byte buffer (type 7, offset/length).
-    Buffer(&'a DmaBuf),
+    Buffer(&'a HsmDmaBuf),
     /// Absent value (type 8). Used as a placeholder for optional fields.
     None,
     /// Alignment padding (type 9, offset/length). Data bytes are ignored.
-    Padding(&'a DmaBuf),
+    Padding(&'a HsmDmaBuf),
     /// Unrecognized entry type (10–63). Preserved for forward compatibility.
     Unknown { entry_type: u8, raw_bits: u32 },
 }
@@ -169,16 +169,16 @@ pub fn read_toc_inline_u16(buf: &[u8], header_len: usize, toc_index: usize) -> u
 }
 
 /// Read a DMA-branded buffer slice from the data section via an
-/// offset/length TOC entry.  Sub-slicing a `&DmaBuf` preserves the
+/// offset/length TOC entry.  Sub-slicing a `&HsmDmaBuf` preserves the
 /// brand so handlers can hand the result directly to PAL crypto
 /// primitives without copying.
 #[inline(always)]
 pub fn read_toc_buffer(
-    buf: &DmaBuf,
+    buf: &HsmDmaBuf,
     header_len: usize,
     toc_index: usize,
     data_start: usize,
-) -> &DmaBuf {
+) -> &HsmDmaBuf {
     let word = read_toc_word(buf, header_len, toc_index);
     let length = raw_toc_length(word);
     let offset = raw_toc_offset(word);
@@ -256,7 +256,7 @@ pub fn write_toc_word(buf: &mut [u8], header_len: usize, toc_index: usize, word:
 /// (header, TOC count, offset/length bounds). It is used by `RequestView`
 /// and `ResponseView` iterators.
 pub fn decode_toc_entry<'a>(
-    buf: &'a DmaBuf,
+    buf: &'a HsmDmaBuf,
     header_len: usize,
     toc_index: usize,
     data_start: usize,

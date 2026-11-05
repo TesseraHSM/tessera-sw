@@ -10,8 +10,8 @@
 //! parent buffer and exposes each field as a directly-accessible
 //! public field at the parent buffer's lifetime `'a`.
 //!
-//! * Mutable-marked buffer/sealed_key fields: `&'a mut DmaBuf`.
-//! * Non-mutable buffer/sealed_key fields: `&'a DmaBuf` (reborrowed
+//! * Mutable-marked buffer/sealed_key fields: `&'a mut HsmDmaBuf`.
+//! * Non-mutable buffer/sealed_key fields: `&'a HsmDmaBuf` (reborrowed
 //!   from a split-off mutable region; all field borrows are disjoint).
 //! * Scalar fields (`u8`/`u16`/`u32`/`u64`/`SessionId`/`KeyId`): owned
 //!   by value, copied out of the TOC during construction.
@@ -67,7 +67,7 @@ pub fn gen_view_mut(schema: &Schema) -> TokenStream {
 
     quote! {
         /// Destructured zero-copy view over an encoded message. All
-        /// fields are pre-split from the parent `&mut DmaBuf` during
+        /// fields are pre-split from the parent `&mut HsmDmaBuf` during
         #[doc = concat!("[`", stringify!(#name), "::decode_mut()`],")]
         /// so mutable-marked and shared-marked fields can be held
         /// simultaneously without borrow conflicts.
@@ -82,7 +82,7 @@ pub fn gen_view_mut(schema: &Schema) -> TokenStream {
 /// schema, or `None` when the schema has no `#[tbor(mutable)]` field.
 ///
 /// The body validates the wire message via the standard validation
-/// pass (using a shared reborrow of the input `&mut DmaBuf`), then
+/// pass (using a shared reborrow of the input `&mut HsmDmaBuf`), then
 /// drops that borrow, performs a pipelined `split_at_mut` of the
 /// data section, and constructs the `ViewMut` struct with all
 /// per-field borrows pre-split.
@@ -218,7 +218,7 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
         .map(|(_, field)| {
             let field_var = format_ident!("__field_{}", field.name);
             quote! {
-                let #field_var: &tsra_fw_hsm_pal_traits::DmaBuf = &*#field_var;
+                let #field_var: &tsra_fw_hsm_pal_traits::HsmDmaBuf = &*#field_var;
             }
         })
         .collect();
@@ -277,8 +277,7 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
 
     let data_start_expr = quote! {
         {
-            let toc_count_idx: usize = if #header_len == 4 { 2 } else { 3 };
-            let toc_count = ((&*buf)[toc_count_idx] & 0x1F) as usize + 1;
+            let toc_count = ((&*buf)[2] & 0x1F) as usize + 1;
             #header_len + toc_count * 4
         }
     };
@@ -286,7 +285,7 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
     Some(quote! {
         // ── Phase 1a: validation pass (shared reborrow).
         {
-            let buf: &tsra_fw_hsm_pal_traits::DmaBuf = &*buf;
+            let buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf = &*buf;
             #validation
         }
 
@@ -323,9 +322,9 @@ fn field_type_tokens(field: &SchemaField) -> TokenStream {
         WireType::KeyId => quote! { tsra_fw_ddi_tbor_api::KeyId },
         WireType::Buffer | WireType::SealedKey => {
             if field.mutable {
-                quote! { &'a mut tsra_fw_hsm_pal_traits::DmaBuf }
+                quote! { &'a mut tsra_fw_hsm_pal_traits::HsmDmaBuf }
             } else {
-                quote! { &'a tsra_fw_hsm_pal_traits::DmaBuf }
+                quote! { &'a tsra_fw_hsm_pal_traits::HsmDmaBuf }
             }
         }
     }

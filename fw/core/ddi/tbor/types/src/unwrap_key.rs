@@ -89,10 +89,13 @@ pub enum KeyClass {
     HmacSha384 = 5,
     /// A raw variable-length HMAC-SHA-512 key (`VarLenHmacSha512`).
     HmacSha512 = 6,
+    /// A raw 64-byte AES-256-XTS key `K1 ‖ K2` with `K1 != K2`
+    /// (`AesXts512`).
+    AesXts512 = 7,
 }
 
 /// `UnwrapKey` request schema.
-#[tbor(opcode = 0x14)]
+#[tbor(opcode = 0x14, pair = TborUnwrapKeyResp)]
 pub struct TborUnwrapKeyReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -127,7 +130,7 @@ pub struct TborUnwrapKeyReq<'a> {
 }
 
 /// `UnwrapKey` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborUnwrapKeyReq)]
 pub struct TborUnwrapKeyResp<'a> {
     /// The recovered key's vault-kind discriminant (`HsmVaultKeyKind`).
     #[tbor(U8)]

@@ -47,6 +47,16 @@ pub type HsmSqe = [u32];
 /// Length and layout are platform-defined and validated by the protocol codec.
 pub type HsmCqe = [u32];
 
+/// Queue kind of an [`HsmIo`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HsmIoKind {
+    /// Command (DDI) IO with request / response buffers.
+    Cmd,
+
+    /// Bulk (fast-path) AES-GCM / AES-XTS IO.
+    Bulk,
+}
+
 /// Handle to a single in-flight I/O.
 ///
 /// Represents a submission/completion pair: the caller reads the
@@ -88,6 +98,20 @@ pub trait HsmIo {
     /// A mutable reference to the [`HsmCqe`] dword slice. Borrow
     /// lives for the duration of the `&mut self` borrow.
     fn cqe(&mut self) -> &mut HsmCqe;
+
+    /// Returns which queue kind this IO came from.
+    ///
+    /// A [`Bulk`](HsmIoKind::Bulk) IO is run through
+    /// [`HsmBulkCrypto::bulk_crypt`] instead of command dispatch; its
+    /// [`sqe`](Self::sqe) is the 32-dword bulk submission entry and its
+    /// [`cqe`](Self::cqe) the 16-dword bulk completion entry.
+    ///
+    /// # Returns
+    ///
+    /// The IO kind; [`Cmd`](HsmIoKind::Cmd) by default.
+    fn kind(&self) -> HsmIoKind {
+        HsmIoKind::Cmd
+    }
 }
 
 /// Shared IO type for platform capabilities.
@@ -168,7 +192,7 @@ pub trait HsmIoController: HsmIoTypes {
     ///
     /// Posts no CQE of its own.  Called either to silently discard an IO
     /// — for example one that arrived for a
-    /// non-[`PartState::Enabled`](crate::PartState::Enabled) partition and
+    /// non-[`HsmPartState::Enabled`](crate::HsmPartState::Enabled) partition and
     /// core wants to drop without surfacing anything to the host — or to
     /// release the slot after [`complete_io`](Self::complete_io) has
     /// already posted the completion.

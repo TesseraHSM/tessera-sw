@@ -35,7 +35,7 @@ if [ ! -f "$KEYDIR/pota_priv.der" ]; then
 fi
 
 # Environment the generator and the engine both read (see EngineData::open_hsm_from_env).
-# Credentials are left unset so the mock's built-in test credentials are used on
+# Credentials are left unset so the emu build's built-in test credentials are used on
 # both sides.
 export TSRA_RESILIENCY_ENABLED=1
 export TSRA_RESILIENCY_STORAGE_DIR="$KEYDIR/res"
@@ -58,3 +58,7 @@ dynamic_path = $ENGINE_SO
 init = 1
 EOF
 export OPENSSL_CONF="$KEYDIR/openssl.cnf"
+
+# The engine's armed derive size-query answer in buffer mode (core
+# method_table.rs MASKED_KEY_MAX_BUFFER).
+MASKED_KEY_MAX_BUFFER=8192

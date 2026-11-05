@@ -31,7 +31,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiEcdhKeyExchangeReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let priv_key_id = HsmKeyId::from(body.priv_key_id);
@@ -65,12 +65,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
         return Err(HsmError::InvalidArg);
     }
 
-    // Derive the shared secret into a per-IO DMA scratch slot. The fallible
-    // work between derivation and response encoding runs inside an `async`
-    // block so the raw secret can be scrubbed unconditionally afterwards —
-    // Uno does not clear per-IO DMA on scope rewind / IO teardown (only the
-    // bump watermark is reset), so an unscrubbed secret would linger in GSRAM
-    // and could leak into a later allocation.
+    // Derive the shared secret into a per-IO DMA scratch slot.
     //
     // Allocate the secret zeroed to wire (word-padded) coordinate length
     // to match vault storage format and ensure P-521 pad bytes are zero.
@@ -122,14 +117,9 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
                 buf,
             )
         })?;
-        Ok::<&'p DmaBuf, HsmError>(resp)
+        Ok::<&'p HsmDmaBuf, HsmError>(resp)
     }
     .await;
 
-    // Scrub the raw shared secret on every exit path — success and the `?`
-    // errors inside the block above — before the per-IO scratch is reused
-    // (Uno does not scrub per-IO DMA on teardown). `DmaBuf::zeroize` is a
-    // volatile, un-elidable wipe.
-    secret.zeroize();
     res
 }

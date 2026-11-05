@@ -111,6 +111,7 @@ impl SignOp for EcdsaAlgo {
         data: &[u8],
         signature: Option<&mut [u8]>,
     ) -> Result<usize, CryptoError> {
+        self.hash.ensure_not_xof()?;
         let len = Hasher::hash(&mut self.hash, data, None)?;
         let mut hash_buf = vec![0u8; len];
         Hasher::hash(&mut self.hash, data, Some(&mut hash_buf))?;
@@ -151,6 +152,7 @@ impl SignStreamingOp<'_> for EcdsaAlgo {
     /// Returns an error if the hash streaming context cannot be initialized
     /// due to internal state issues or resource constraints.
     fn sign_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_not_xof()?;
         Ok(EcdsaAlgoSignContext {
             ctx: Hasher::hash_init(self.hash.clone())?,
             algo: self,
@@ -305,6 +307,7 @@ impl VerifyOp for EcdsaAlgo {
         data: &[u8],
         signature: &[u8],
     ) -> Result<bool, CryptoError> {
+        self.hash.ensure_not_xof()?;
         let len = Hasher::hash(&mut self.hash, data, None)?;
         let mut hash_buf = vec![0u8; len];
         Hasher::hash(&mut self.hash, data, Some(&mut hash_buf))?;
@@ -345,6 +348,7 @@ impl VerifyStreamingOp<'_> for EcdsaAlgo {
     /// Returns an error if the hash streaming context cannot be initialized
     /// due to internal state issues or resource constraints.
     fn verify_init<'b>(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_not_xof()?;
         Ok(EcdsaAlgoVerifyContext {
             ctx: Hasher::hash_init(self.hash.clone())?,
             algo: self,

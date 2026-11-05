@@ -15,15 +15,13 @@
 //!
 //! [`mgf1`](HsmKdf::mgf1), [`x963_kdf`](HsmKdf::x963_kdf), and
 //! [`sp800_56a_kdf`](HsmKdf::sp800_56a_kdf) all use
-//! [`ShaDriver::with_exclusive`] to acquire the SHA engine once (async),
-//! then run the hash loop synchronously via busy-polled
-//! [`ShaExclusive::digest`] calls — one async boundary, N sync hashes,
-//! one wake on release. The three variants share the same internal
+//! [`ShaDriver::with_exclusive`] to retain their FIFO slot across
+//! multiple async [`ShaExclusive::digest`] calls. The three variants share the same internal
 //! concatenation-KDF hashing loop and differ only in how each variant
 //! lays out and encodes its input material.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
@@ -60,10 +58,13 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        salt: Option<&DmaBuf>,
-        ikm: &DmaBuf,
-        prk: &mut DmaBuf,
+        salt: Option<&HsmDmaBuf>,
+        ikm: &HsmDmaBuf,
+        prk: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             if prk.len() < algo.digest_len() {
                 return Err(HsmError::InvalidArg);
@@ -72,7 +73,7 @@ impl HsmKdf for UnoHsmPal {
             // RFC 5869: if salt is empty, use a zero-filled salt of digest_len
             // bytes in DMA-accessible memory.
             let zero_salt;
-            let salt: &DmaBuf = match salt {
+            let salt: &HsmDmaBuf = match salt {
                 Some(salt) if !salt.is_empty() => salt,
                 _ => {
                     zero_salt = scope.dma_alloc_zeroed(algo.digest_len())?;
@@ -114,10 +115,13 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        prk: &DmaBuf,
-        info: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        prk: &HsmDmaBuf,
+        info: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             let hlen = algo.digest_len();
 
@@ -185,11 +189,14 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        label: Option<&DmaBuf>,
-        context: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        label: Option<&HsmDmaBuf>,
+        context: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             let hlen = algo.digest_len();
 
@@ -255,8 +262,8 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.run_concat_kdf(io, algo, ConcatKdf::Mgf1, seed, &seed[..0], mask)
             .await
@@ -282,9 +289,12 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             if mask.is_empty() {
                 return Ok::<(), HsmError>(());
@@ -293,7 +303,9 @@ impl HsmKdf for UnoHsmPal {
             let state = scope.dma_alloc(algo.mgf1_state_len(seed.len()))?;
 
             self.sha
-                .with_exclusive(|sha| ConcatKdf::Mgf1.run_xor(sha, algo, seed, mask, state))
+                .with_exclusive(async |sha| {
+                    ConcatKdf::Mgf1.run_xor(sha, algo, seed, mask, state).await
+                })
                 .await
         })
         .await
@@ -321,9 +333,9 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        shared_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        shared_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.run_concat_kdf(io, algo, ConcatKdf::X963, z, shared_info, key)
             .await
@@ -351,9 +363,9 @@ impl HsmKdf for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        other_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        other_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.run_concat_kdf(io, algo, ConcatKdf::Sp80056a, z, other_info, key)
             .await
@@ -388,10 +400,13 @@ impl UnoHsmPal {
         io: &UnoHsmIo,
         algo: HsmHashAlgo,
         kdf: ConcatKdf,
-        z: &DmaBuf,
-        info: &DmaBuf,
-        output: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        info: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // the empty-output shortcut and any allocation sized by them.
+        ShaMode::try_from(algo)?;
         self.alloc_scoped_async(io, async |scope| {
             if output.is_empty() {
                 return Ok::<(), HsmError>(());
@@ -411,10 +426,10 @@ impl UnoHsmPal {
         &self,
         algo: HsmHashAlgo,
         kdf: ConcatKdf,
-        z: &DmaBuf,
-        info: &DmaBuf,
-        output: &mut DmaBuf,
-        state: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        info: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
+        state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let required = kdf.required_state_len(algo, z.len(), info.len());
         if state.len() < required {
@@ -427,7 +442,7 @@ impl UnoHsmPal {
         let state = &mut state[..required];
 
         self.sha
-            .with_exclusive(|sha| kdf.run(sha, algo, z, info, output, state))
+            .with_exclusive(async |sha| kdf.run(sha, algo, z, info, output, state).await)
             .await
     }
 }
@@ -478,7 +493,7 @@ impl ConcatKdf {
     ///
     /// # Returns
     /// * Total length in bytes of the populated input region.
-    fn init_input(&self, buf: &mut DmaBuf, z: &DmaBuf, info: &DmaBuf) -> usize {
+    fn init_input(&self, buf: &mut HsmDmaBuf, z: &HsmDmaBuf, info: &HsmDmaBuf) -> usize {
         match self {
             ConcatKdf::Mgf1 => {
                 buf[..z.len()].copy_from_slice(z);
@@ -506,7 +521,7 @@ impl ConcatKdf {
     /// * `z_len` — length of the `Z`/seed field (used to locate the
     ///   counter slot).
     /// * `counter` — value to write.
-    fn write_counter(&self, buf: &mut DmaBuf, z_len: usize, counter: u32) {
+    fn write_counter(&self, buf: &mut HsmDmaBuf, z_len: usize, counter: u32) {
         let off = self.counter_offset(z_len);
         buf[off..off + 4].copy_from_slice(&counter.to_be_bytes());
     }
@@ -555,16 +570,16 @@ impl ConcatKdf {
     ///
     /// # Errors
     /// * Any [`HsmError`] surfaced by the SHA driver.
-    fn run<const DEPTH: usize>(
+    async fn run<const DEPTH: usize>(
         &self,
-        sha: &ShaExclusive<'_, DEPTH>,
+        sha: &mut ShaExclusive<'_, DEPTH>,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        info: &DmaBuf,
-        output: &mut DmaBuf,
-        state: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        info: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
+        state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let mode: ShaMode = algo.into();
+        let mode = ShaMode::try_from(algo)?;
         let hlen = algo.digest_len();
         let (hash, input) = state.split_at_mut(hlen);
         let counter_start = self.counter_start();
@@ -584,13 +599,15 @@ impl ConcatKdf {
                 sha.digest(
                     ShaRequest::new(mode, &input[..input_len], &mut output[start..start + len])
                         .with_auto_pad(input_len as u32),
-                )?;
+                )
+                .await?;
             } else {
                 // Truncated last chunk: SHA writes to scratch, copy prefix.
                 sha.digest(
                     ShaRequest::new(mode, &input[..input_len], hash)
                         .with_auto_pad(input_len as u32),
-                )?;
+                )
+                .await?;
                 output[start..start + len].copy_from_slice(&hash[..len]);
             }
         }
@@ -618,15 +635,15 @@ impl ConcatKdf {
     ///
     /// # Errors
     /// * Any [`HsmError`] surfaced by the SHA driver.
-    fn run_xor<const DEPTH: usize>(
+    async fn run_xor<const DEPTH: usize>(
         &self,
-        sha: &ShaExclusive<'_, DEPTH>,
+        sha: &mut ShaExclusive<'_, DEPTH>,
         algo: HsmHashAlgo,
-        seed: &DmaBuf,
-        mask: &mut DmaBuf,
-        state: &mut DmaBuf,
+        seed: &HsmDmaBuf,
+        mask: &mut HsmDmaBuf,
+        state: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let mode: ShaMode = algo.into();
+        let mode = ShaMode::try_from(algo)?;
         let hlen = algo.digest_len();
         let (hash, input) = state.split_at_mut(hlen);
 
@@ -639,7 +656,8 @@ impl ConcatKdf {
 
             sha.digest(
                 ShaRequest::new(mode, &input[..input_len], hash).with_auto_pad(input_len as u32),
-            )?;
+            )
+            .await?;
 
             let start = i * hlen;
             let len = hlen.min(mask.len() - start);

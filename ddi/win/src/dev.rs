@@ -273,7 +273,7 @@ pub struct TsraCpGenericIoctlOutData {
 #[derive(Clone, Copy, Default)]
 struct DataXferBuffer {
     xfer_length: u32,
-    buffer_addr: *const u8,
+    buffer_addr: *mut u8,
 }
 
 /// Contains the caller-supplied OOB buffers for one data-transfer IOCTL.
@@ -1015,6 +1015,25 @@ impl DdiDev for DdiWinDev {
         &self,
         req: &T,
         oob_items: Option<&[&[u8]]>,
+        cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let mut items: Vec<TborOobItem<'_>> = oob_items
+            .unwrap_or(&[])
+            .iter()
+            .map(|item| TborOobItem::In(item))
+            .collect();
+        self.exec_op_tbor_oob(req, &mut items, cookie)
+    }
+
+    /// Execute a TBOR command whose OOB items may be written by the device.
+    ///
+    /// Uses the same data-transfer IOCTL as [`Self::exec_op_tbor`]. Its
+    /// buffer table carries no direction, so the driver must map every
+    /// item for device writes for [`TborOobItem::Out`] results to land.
+    fn exec_op_tbor_oob<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
         /// SQE opcode that routes the command through the firmware's
@@ -1026,15 +1045,14 @@ impl DdiDev for DdiWinDev {
         // Some(non-empty), the driver pins those user buffers, builds
         // per-buffer NVMe SGL segments, and attaches a 4 KB Metadata
         // Page through the SQE's metadata-with-session source data.
-        let oob_slice: &[&[u8]] = oob_items.unwrap_or(&[]);
-        if oob_slice.len() > TSRA_MAX_DATA_XFER_BUFFERS
-            || oob_slice
+        if oob_items.len() > TSRA_MAX_DATA_XFER_BUFFERS
+            || oob_items
                 .iter()
                 .any(|item| item.is_empty() || item.len() > TSRA_MAX_DATA_XFER_PER_BUFFER as usize)
         {
             return Err(DdiError::InvalidParameter);
         }
-        let use_data_xfer = !oob_slice.is_empty();
+        let use_data_xfer = !oob_items.is_empty();
 
         const REQ_BUF_LEN: usize = 8192;
         const RESP_BUF_LEN: usize = 8192;
@@ -1094,11 +1112,11 @@ impl DdiDev for DdiWinDev {
             // SAFETY: `input_data` was fully zero-initialized. All-zero
             // bytes are a valid representation of `DataXferBuffers`.
             let data_xfer = unsafe { &mut ioctl_in_buffer.input_data.data_xfer };
-            data_xfer.buffer_count = oob_slice.len() as u32;
-            for (i, item) in oob_slice.iter().enumerate() {
+            data_xfer.buffer_count = oob_items.len() as u32;
+            for (i, item) in oob_items.iter_mut().enumerate() {
                 data_xfer.buffers[i] = DataXferBuffer {
                     xfer_length: item.len() as u32,
-                    buffer_addr: item.as_ptr(),
+                    buffer_addr: item.dma_ptr(),
                 };
             }
         }
@@ -1397,14 +1415,12 @@ impl DdiDev for DdiWinDev {
 
         self.map_ioctl_status(ioctl_out_buffer.extended_status)?;
 
-        if ioctl_out_buffer.result != 0 {
-            Err(DdiError::FpError(ioctl_out_buffer.result))?
-        }
-
-        if ioctl_out_buffer.extended_status != 0 {
-            Err(DdiError::FpCmdSpecificError(
-                ioctl_out_buffer.extended_status,
-            ))?
+        // The driver reports the CQE status code in `result` and its error
+        // code in `extended_status`.
+        if let Some(err) =
+            DdiError::from_fp_status(ioctl_out_buffer.result, ioctl_out_buffer.extended_status)
+        {
+            Err(err)?
         }
 
         // Copy the actual data (excluding AAD) to the destination buffer
@@ -1649,14 +1665,12 @@ impl DdiDev for DdiWinDev {
 
         self.map_ioctl_status(ioctl_out_buffer.extended_status)?;
 
-        if ioctl_out_buffer.result != 0 {
-            Err(DdiError::FpError(ioctl_out_buffer.result))?
-        }
-
-        if ioctl_out_buffer.extended_status != 0 {
-            Err(DdiError::FpCmdSpecificError(
-                ioctl_out_buffer.extended_status,
-            ))?
+        // The driver reports the CQE status code in `result` and its error
+        // code in `extended_status`.
+        if let Some(err) =
+            DdiError::from_fp_status(ioctl_out_buffer.result, ioctl_out_buffer.extended_status)
+        {
+            Err(err)?
         }
 
         let total_size = ioctl_out_buffer.byte_count as usize;

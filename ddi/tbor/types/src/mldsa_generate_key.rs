@@ -38,9 +38,9 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 /// Maximum masked ML-DSA private-key envelope length.
 ///
 /// The masked plaintext is the 32-byte `xi` seed **concatenated with the
-/// expanded secret key**, seed first: `32 + 4896 + 228 = 5156` B at
-/// ML-DSA-87, where 228 is the AEAD-GCM-256 masked-envelope overhead
-/// `header(8) + iv(12) + aad(96) + tag(16)`.
+/// expanded secret key**, seed first: `32 + 4896 + 232 = 5160` B at
+/// ML-DSA-87, where 232 is the AEAD-GCM-256 masked-envelope overhead
+/// `header(8) + iv(16) + aad(192) + tag(16)`. The payload is padded to 16 B.
 ///
 /// Carrying both is what makes signing cheap. The seed alone would be
 /// smaller on the wire, but every signature would have to re-derive the
@@ -52,56 +52,24 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 /// One AEAD tag covers the pair, so the two halves cannot disagree without
 /// failing to unmask — the device does not need to re-derive to check them.
 ///
-/// Note this makes the masked length **parameter-set dependent** (2724 /
-/// 4196 / 5156 for ML-DSA-44 / 65 / 87), where the seed-only form was a
-/// constant 164 regardless. The `key_kind` in the AAD is therefore no
+/// Note this makes the masked length **parameter-set dependent** (2824 /
+/// 4296 / 5160 for ML-DSA-44 / 65 / 87), where the seed-only form is a
+/// constant 264 regardless. The `key_kind` in the AAD is therefore no
 /// longer the only thing distinguishing parameter sets.
-pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 12 + 192 + 32 + 4896 + 16;
+pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 16 + 192 + 32 + 4896 + 16;
 /// Maximum ML-DSA public-key length: 2592 B for ML-DSA-87.
 pub const MLDSA_PUB_KEY_MAX_LEN: usize = 2592;
 /// Maximum ML-DSA signature length: 4627 B for ML-DSA-87.
 pub const MLDSA_SIGNATURE_MAX_LEN: usize = 4627;
-/// Maximum ML-DSA context-string length: 255 B.
+/// Length of the ML-DSA message representative `μ`, the input of `MlDsaSign`
+/// and `MlDsaVerify`.
 ///
-/// FIPS 204 defines `ML-DSA.Sign(sk, M, ctx)` and
-/// `ML-DSA.Verify(pk, M, sigma, ctx)` over a caller-chosen context string
-/// with `0 <= |ctx| <= 255`.  The bound is a hard specification limit, not
-/// a wire-budget choice: the signed message representative embeds `|ctx|`
-/// as a single byte of the domain separator, so a longer context string
-/// is not representable.  An empty `ctx` is the FIPS 204 default.
-pub const MLDSA_CTX_MAX_LEN: usize = 255;
-/// Maximum message length accepted by the TBOR ML-DSA sign and verify
-/// schemas.
-///
-/// The binding constraint is the worst-case `MlDsaVerify` request — the
-/// largest PQC frame — and the limit is the **host encoder's staging
-/// budget**, not TBOR's 8191-byte `MAX_DATA_SIZE`.  The encoder stages
-/// the data section at offset 132 (`header(4) + 32 TOC entries * 4`; see
-/// `stage_base()` in `ddi/tbor/codec/src/encode.rs`) inside an 8192-byte
-/// transport buffer (`REQ_BUF_LEN` in `ddi/nix/src/dev.rs` and
-/// `ddi/win/src/dev.rs`):
-///
-/// ```text
-///   transport buffer  =  8192
-///   stage offset      =  -132   header(4) + 32 * 4 TOC bytes
-///   pub_key           = -2592   ML-DSA-87
-///   signature         = -4627   ML-DSA-87
-///   ctx               =  -255   MLDSA_CTX_MAX_LEN
-///   message budget    =   586
-/// ```
-///
-/// `MlDsaSign` shares the same cap: sign and verify are inverse
-/// operations over pure ML-DSA, so a message that can be signed must also
-/// be verifiable.  `MlDsaSign` on its own would allow
-/// `8192 - 132 - 164 - 255 = 7641` bytes.
-///
-/// The cap is therefore dictated entirely by `MlDsaVerify`.  If
-/// `MlDsaVerify` is ever removed as a command, raising the cap is a
-/// deliberate **one-constant change**: nothing else in the schema derives
-/// from it, and the `max_len` literals on the `message` fields are
-/// mechanically pinned to this constant by `const _: () = assert!(...)`
-/// checks that fail the build if they drift.
-pub const MLDSA_MESSAGE_MAX_LEN: usize = 586;
+/// `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`, with
+/// `tr = SHAKE256(pk, 64)`, is what pure ML-DSA signs for a message `M` under
+/// the FIPS 204 context string `ctx`.  The commands take `μ`, as `EccSign`
+/// takes a digest, rather than the message: compute it on the host, or on
+/// the device with `Hash` (SHAKE256).
+pub const MLDSA_MU_LEN: usize = 64;
 
 /// `MlDsaKeyKind` discriminant for an ML-DSA-44 compact seed (`xi`, 32 B).
 pub const MLDSA_KEY_KIND_44_SEED: u8 = 46;
@@ -135,7 +103,7 @@ pub struct TborMlDsaGenerateKeyResp {
     /// The generated ML-DSA private key, masked under the scope's masking
     /// key.  Always 164 B: the wire is seed-only, so the plaintext is the
     /// 32-byte `xi` seed.  See [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(max_len = 5156)]
+    #[tbor(max_len = 5160)]
     pub masked_key: Vec<u8>,
 
     /// The ML-DSA public key bytes.
@@ -197,28 +165,10 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(5156 == MASKED_MLDSA_KEY_MAX_LEN);
+        const _: () = assert!(5160 == MASKED_MLDSA_KEY_MAX_LEN);
         const _: () = assert!(2592 == MLDSA_PUB_KEY_MAX_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);
-        const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
-        const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
-        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5156);
-    }
-
-    /// The message cap is the residue of the worst-case `MlDsaVerify`
-    /// request against the host encoder's 8192-byte staging budget.
-    #[test]
-    fn message_cap_is_the_mldsa_verify_staging_residue() {
-        const TRANSPORT_BUF_LEN: usize = 8192;
-        const STAGE_OFFSET: usize = 132;
-
-        assert_eq!(
-            TRANSPORT_BUF_LEN
-                - STAGE_OFFSET
-                - MLDSA_PUB_KEY_MAX_LEN
-                - MLDSA_SIGNATURE_MAX_LEN
-                - MLDSA_CTX_MAX_LEN,
-            MLDSA_MESSAGE_MAX_LEN,
-        );
+        const _: () = assert!(64 == MLDSA_MU_LEN);
+        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5160);
     }
 }

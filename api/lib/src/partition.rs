@@ -661,8 +661,8 @@ impl HsmPartition {
             // `init_bk3` is one-shot per device power cycle, so on
             // restore we must reuse the MOBK rather than re-deriving
             // it. Fall back to the OBK callback only when MOBK is not
-            // yet cached (should not happen in practice — init must
-            // have run before restore).
+            // yet cached, such as when this handle's init found
+            // credentials already established by another handle.
             let obk_config = match rs.cached_obk_source {
                 HsmOwnerBackupKeySource::Caller => {
                     let cached_mobk = inner.mobk();
@@ -922,6 +922,10 @@ impl HsmPartition {
 
     /// Retrieves the masked owner backup key that was set during partition initialization.
     ///
+    /// Only successful credential establishment or restore populates this cache.
+    /// Initialization of an already-established partition does not cache an
+    /// unvalidated caller-supplied MOBK.
+    ///
     /// # Arguments
     /// * `mobk` - Optional output buffer to receive the MOBK.
     ///
@@ -943,6 +947,7 @@ impl HsmPartition {
     /// Returns the masked owner backup key (MOBK).
     ///
     /// Retrieves the masked owner backup key that was set during partition initialization.
+    /// See [`Self::mobk`] for cache availability after an already-established init.
     ///
     /// # Returns
     ///
@@ -1347,6 +1352,8 @@ impl HsmPartitionInner {
                     .map(Self::read_bmk_from_storage)
                     .transpose()?
                     .unwrap_or_default();
+                // This error does not validate the attempted MOBK. Preserve
+                // any previously validated cache; otherwise restore uses the callback.
                 (bmk, pota_endorsement)
             }
             // Any other error is propagated to the caller.

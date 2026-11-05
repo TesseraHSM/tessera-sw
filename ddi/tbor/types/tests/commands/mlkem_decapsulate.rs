@@ -18,15 +18,18 @@
 use tsra_ddi_tbor_codec::RequestView;
 use tsra_ddi_tbor_test_harness::pqc::assert_not_truncated_at_page;
 use tsra_ddi_tbor_test_harness::pqc::MlKemParams;
+use tsra_ddi_tbor_test_harness::pqc::ML_DSA_44;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_1024;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_512;
 use tsra_ddi_tbor_test_harness::pqc::ML_KEM_768;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::SessionControlKind;
+use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlKemDecapsulateReq;
 use tsra_ddi_tbor_types::TborMlKemEncapsulateReq;
 use tsra_ddi_tbor_types::TborMlKemGenerateKeyReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_MLKEM_SHARED_SECRET_MAX_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLKEM_DECAPSULATE;
 
@@ -221,4 +224,32 @@ fn mlkem_decapsulate_rejects_a_tampered_masked_key_768() {
 #[test]
 fn mlkem_decapsulate_rejects_a_tampered_masked_key_1024() {
     masking_case(&ML_KEM_1024);
+}
+
+/// Rejects a valid masked key of another type with `InvalidKeyType`.
+///
+/// The key is an ML-DSA key, which may not derive either, so this also
+/// checks that the key type is checked before the key's permissions, as
+/// `EcdhDerive` does.
+#[test]
+fn mlkem_decapsulate_wrong_key_class_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+
+    ctx.expect_fw_reject(
+        &TborMlKemDecapsulateReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            masked_key: key.masked_key,
+            ciphertext: vec![0u8; ML_KEM_512.ciphertext_len],
+        },
+        TborStatus::InvalidKeyType,
+    );
 }

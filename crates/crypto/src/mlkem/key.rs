@@ -25,6 +25,7 @@
 use ml_kem::ExpandedKeyEncoding;
 use ml_kem::Key as MlKemEncoded;
 use ml_kem::KeyExport;
+use zeroize::Zeroizing;
 
 use super::*;
 
@@ -35,7 +36,7 @@ use super::*;
 #[derive(Clone)]
 pub struct MlKemPrivateKey {
     variant: MlKemVariant,
-    expanded: Vec<u8>,
+    expanded: Zeroizing<Vec<u8>>,
 }
 
 impl MlKemPrivateKey {
@@ -62,7 +63,10 @@ impl MlKemPrivateKey {
                     .to_vec(),
             )
         })?;
-        Ok(Self { variant, expanded })
+        Ok(Self {
+            variant,
+            expanded: Zeroizing::new(expanded),
+        })
     }
 
     /// Returns the parameter set this key belongs to.
@@ -134,7 +138,7 @@ impl ImportableKey for MlKemPrivateKey {
             MlKemVariant::from_sec_key_len(bytes.len()).ok_or(CryptoError::MlKemKeyImportError)?;
         Ok(Self {
             variant,
-            expanded: bytes.to_vec(),
+            expanded: Zeroizing::new(bytes.to_vec()),
         })
     }
 }

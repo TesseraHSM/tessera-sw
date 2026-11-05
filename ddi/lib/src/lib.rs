@@ -7,14 +7,8 @@
 
 pub use tsra_ddi_interface::*;
 
-#[cfg(all(feature = "emu", feature = "mock"))]
-compile_error!("features `emu` and `mock` are mutually exclusive; enable at most one");
-
 #[cfg(all(feature = "emu", feature = "sock"))]
 compile_error!("features `emu` and `sock` are mutually exclusive; enable at most one");
-
-#[cfg(all(feature = "mock", feature = "sock"))]
-compile_error!("features `mock` and `sock` are mutually exclusive; enable at most one");
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "emu")] {
@@ -23,9 +17,6 @@ cfg_if::cfg_if! {
     } else if #[cfg(feature = "sock")] {
         /// Tsra DDI socket implementation (firmware behind a socket server).
         pub type TsraDdi = tsra_ddi_sock::DdiSock;
-    } else if #[cfg(feature = "mock")] {
-        /// Tsra DDI mock implementation.
-        pub type TsraDdi = tsra_ddi_mock::DdiMock;
     } else if #[cfg(target_os = "linux")] {
         /// Tsra DDI Linux implementation.
         pub type TsraDdi = tsra_ddi_nix::DdiNix;

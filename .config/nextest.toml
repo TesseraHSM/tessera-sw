@@ -4,31 +4,22 @@
 # as a workaround to prevent each nextest run from overwriting the same output
 # file (saved to target/nextest/<profile>/<path>) during CI runs.
 
-# profile for running all mock tests
+# profile for running all workspace tests against the emu backend
 # Resiliency stress tests are timing-sensitive; reserve the whole runner so
 # they do not run in parallel with any other test or each other.
-[[profile.ci-mock.overrides]]
+[[profile.ci-emu.overrides]]
 filter = "test(resiliency::stress::) or test(_resiliency_stress::)"
 # threads-required = "num-cpus"
 
-[profile.ci-mock.junit]
+[profile.ci-emu.junit]
 path = "junit.xml"
 
-# profile for running resiliency fault-injection tests
-[profile.ci-mock-res.junit]
+# profile for running the MBOR types tests on emu w/ TSRA_EMU_RESOURCE_COUNT=4
+[profile.ci-emu-res-4.junit]
 path = "junit.xml"
 
-# profile for running all mock tests w/ table-4
-[profile.ci-mock-table-4.junit]
-path = "junit.xml"
-
-# profile for running all mock tests w/ table-64
-[profile.ci-mock-table-64.junit]
-path = "junit.xml"
-
-# profile for running the TBOR types tests against the emu backend
-# (in-process firmware).
-[profile.ci-tbor-emu.junit]
+# profile for running the MBOR types tests on emu w/ TSRA_EMU_RESOURCE_COUNT=64
+[profile.ci-emu-res-64.junit]
 path = "junit.xml"
 
 # profile for running integration tests
@@ -44,13 +35,4 @@ path = "junit.xml"
 path = "junit.xml"
 
 [profile.ci-api-ex.junit]
-path = "junit.xml"
-
-# profile for running emu smoke tests
-# (in-process firmware).
-[profile.ci-emu-smoke.junit]
-path = "junit.xml"
-
-# profile for running emu ddi tests
-[profile.ci-emu-ddi.junit]
 path = "junit.xml"

@@ -17,7 +17,7 @@
 ///
 /// Sealing key generation is only valid on a V2 (security-domain)
 /// session, which requires the two-phase TBOR HPKE handshake implemented
-/// by a real backend (emu or hardware), not mock. A *complete* end-to-end
+/// by a real backend (emu or hardware). A *complete* end-to-end
 /// generation additionally needs a fully provisioned partition (the FW
 /// handler requires the `Initialized` lifecycle state and a
 /// Crypto-Officer session), which no test harness sets up. These tests
@@ -156,13 +156,11 @@ TEST_F(tsra_sealing_keygen, key_gen_null_prop_list)
     ASSERT_EQ(key_handle, 0u);
 }
 
-// ── Host-side dispatch + property validation (not mock) ─────────────────────
+// ── Host-side dispatch + property validation ────────────────────────────────
 // The checks below run inside the sealing key-gen dispatch, which needs a
 // live security-domain (V2) session — provided by a real backend (emu or
-// hardware), not mock. They complete *before* the device produces a key, so
+// hardware). They complete *before* the device produces a key, so
 // they are deterministic on an unprovisioned partition.
-#if !defined(TSRA_FEATURE_MOCK)
-
 // Sealing key generation takes no algorithm-specific parameters; a
 // non-NULL `params` (with non-zero `len`) is rejected up front.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_algo_params_present)
@@ -519,4 +517,3 @@ TEST_F(tsra_sealing_keygen, key_gen_roundtrip_yields_distinct_keys)
         ASSERT_NE(pub1, pub2);
     });
 }
-#endif // !defined(TSRA_FEATURE_MOCK)

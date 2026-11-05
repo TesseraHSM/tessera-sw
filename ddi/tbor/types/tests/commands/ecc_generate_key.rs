@@ -13,8 +13,6 @@
 //! [`ecc_sign`](super::ecc_sign) and [`ecdh_derive`](super::ecdh_derive)
 //! tests, which build on this command.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -57,12 +55,12 @@ fn wire_pub_len(curve: u8) -> usize {
 }
 
 /// Expected masked private-key envelope length per curve:
-/// `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(wire_priv) ‖ tag(16)` = 228 + priv.
+/// `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(padded wire_priv) ‖ tag(16)`.
 fn masked_key_len(curve: u8) -> usize {
     match curve {
-        ECC_CURVE_P256 => 228 + 32,
-        ECC_CURVE_P384 => 228 + 48,
-        ECC_CURVE_P521 => 228 + 68,
+        ECC_CURVE_P256 => 232 + 32,
+        ECC_CURVE_P384 => 232 + 48,
+        ECC_CURVE_P521 => 232 + 80,
         _ => unreachable!(),
     }
 }
@@ -272,7 +270,7 @@ fn ecc_generate_key_mismatched_session_id_rejected() {
     );
 
     for curve in SUPPORTED_CURVES {
-        ctx.expect_fw_reject(
+        ctx.expect_session_reject(
             &TborEccGenerateKeyReq {
                 session_id: u16::MAX,
                 scope: SCOPE_LOCAL,
@@ -486,7 +484,7 @@ fn ecc_generate_key_closed_session_rejected() {
         .expect("close CO session");
 
     for curve in SUPPORTED_CURVES {
-        ctx.expect_fw_reject(
+        ctx.expect_session_reject(
             &TborEccGenerateKeyReq {
                 session_id: closed_session_id,
                 scope: SCOPE_SESSION,

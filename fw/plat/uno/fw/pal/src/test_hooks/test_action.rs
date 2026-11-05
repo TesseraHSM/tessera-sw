@@ -14,9 +14,9 @@ use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor::MborMap;
 #[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_ddi_mbor_derive::Ddi;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 #[cfg(feature = "tsra_test_hooks")]
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -29,6 +29,8 @@ use super::common::encode_resp;
 use super::common::success_hdr;
 #[cfg(feature = "fips_validation_hooks")]
 use super::get_priv_key;
+#[cfg(feature = "fips_validation_hooks")]
+use super::get_rng;
 #[cfg(feature = "fips_validation_hooks")]
 use super::raw_key_import;
 #[cfg(feature = "tsra_test_hooks")]
@@ -71,6 +73,9 @@ enum SupportedTestAction {
     /// Import raw key material.
     #[cfg(feature = "fips_validation_hooks")]
     RawKeyImport = 26,
+    /// Generate random bytes for validation.
+    #[cfg(feature = "fips_validation_hooks")]
+    GetRng = 27,
 }
 
 /// Decoded action and field count from the outer TestAction request map.
@@ -102,6 +107,10 @@ impl TryFrom<u32> for SupportedTestAction {
         if value == Self::RawKeyImport as u32 {
             return Ok(Self::RawKeyImport);
         }
+        #[cfg(feature = "fips_validation_hooks")]
+        if value == Self::GetRng as u32 {
+            return Ok(Self::GetRng);
+        }
         Err(HsmError::UnsupportedCmd)
     }
 }
@@ -113,7 +122,7 @@ pub(super) async fn dispatch<'p>(
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_len: usize,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let selector = decode_action_selector(decoder)?;
 
     match selector.action {
@@ -149,10 +158,17 @@ pub(super) async fn dispatch<'p>(
             let mut payload_decoder = MborDecoder::new(payload);
             raw_key_import::dispatch(pal, io, hdr, &mut payload_decoder, payload_len).await
         }
+        #[cfg(feature = "fips_validation_hooks")]
+        SupportedTestAction::GetRng => {
+            let payload = decode_payload_bytes(decoder, selector.request_field_count, request_len)?;
+            let payload_len = payload.len();
+            let mut payload_decoder = MborDecoder::new(payload);
+            get_rng::dispatch(pal, io, hdr, &mut payload_decoder, payload_len)
+        }
     }
 }
 
-fn decode_action_selector(decoder: &mut MborDecoder) -> HsmResult<TestActionSelector> {
+fn decode_action_selector(decoder: &mut MborDecoder<'_>) -> HsmResult<TestActionSelector> {
     let request_map = MborMap::mbor_decode(decoder).map_err(|_| HsmError::DdiDecodeFailed)?;
     if request_map.0 != 2 {
         return Err(HsmError::DdiDecodeFailed);
@@ -219,7 +235,7 @@ fn decode_payload_bytes<'a>(
     decoder: &mut MborDecoder<'a>,
     request_field_count: u8,
     request_len: usize,
-) -> HsmResult<&'a mut DmaBuf> {
+) -> HsmResult<&'a mut HsmDmaBuf> {
     if request_field_count != 2 {
         return Err(HsmError::DdiDecodeFailed);
     }
@@ -245,7 +261,7 @@ pub(super) fn encode_success<'p>(
     pal: &'p UnoHsmPal,
     io: &UnoHsmIo,
     hdr: &ReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let resp = pal.dma_alloc_var(io, |buf| {
         encode_resp(
             &success_hdr(hdr, hdr.sess_id),

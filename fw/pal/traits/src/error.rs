@@ -271,7 +271,7 @@ pub enum HsmError {
 
     /// `OpenSessionInit` rejected the caller-supplied `suite_id`
     /// because no such suite is implemented (or it has been retired).
-    /// See [`SessionSuite`] for the registered values.
+    /// See [`HsmSessionSuite`] for the registered values.
     UnsupportedSessionSuite = 0x087000E7,
 
     /// X.509 DER parsing failed (malformed structure, bad tag/length,
@@ -339,14 +339,14 @@ pub enum HsmError {
     /// Returned by the property-based getters on
     /// [`HsmPartitionManager`](crate::HsmPartitionManager)
     /// (`part_prop_get_*` / `part_prop_get_bytes`) when the addressed
-    /// [`PartPropId`](crate::PartPropId) slot is absent (i.e. has not
+    /// [`HsmPartPropId`](crate::HsmPartPropId) slot is absent (i.e. has not
     /// been populated, or was last
     /// [`part_prop_clear`](crate::HsmPartitionManager::part_prop_clear)ed).
     /// Distinct from [`HsmError::InvalidArg`], which signals a
     /// caller bug (unknown id, kind mismatch, etc.).
     PartPropNotFound = 0x087000FF,
     /// Returned by [`HsmSeedStore`](crate::HsmSeedStore)
-    /// (`mfgr_seed` / `owner_seed`) when no provisioned BKS seed row
+    /// (`mfgr_seed` / `dev_owner_seed`) when no provisioned BKS seed row
     /// carries the requested selector (SVN / owner id).
     SeedNotFound = 0x08700100,
 
@@ -403,7 +403,7 @@ pub enum HsmError {
 
     /// The TBOR `SdCreateRemoteBackup` handler was asked to create a
     /// security domain on a partition whose one-shot
-    /// [`SD_INITIALIZED`](crate::PartPropId::SD_INITIALIZED) flag is
+    /// [`SD_INITIALIZED`](crate::HsmPartPropId::SD_INITIALIZED) flag is
     /// already set (the security-domain masking key `SDMK` is already
     /// provisioned in this partition incarnation).  The one-shot gate
     /// permits only `false → true`; reset happens PAL-internally on
@@ -453,6 +453,16 @@ pub enum HsmError {
     /// inspect the response cannot silently treat a bad signature as
     /// valid.  Mirrors [`EccVerifyFailed`](Self::EccVerifyFailed).
     MlDsaVerifyFailed = 0x0870010D,
+
+    /// A cryptographic algorithm self-test (CAST) produced output that
+    /// did not match its known-answer vector.
+    SelfTestKatMismatch = 0x08700110,
+
+    /// Admin did not answer a periodic RNG self-test quiesce request in time.
+    RngSelfTestAdminTimeout = 0x08700111,
+
+    /// Admin could not quiesce host IO for the periodic RNG test after all retries.
+    RngSelfTestRetriesExhausted = 0x08700112,
 
     // Firmware-internal diagnostic codes logged by the CPU fault and panic
     // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol

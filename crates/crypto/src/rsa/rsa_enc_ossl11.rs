@@ -279,6 +279,7 @@ impl<'a> OsslRsaEncryptAlgo<'a> {
 
         if self.padding == Padding::PKCS1_OAEP {
             if let Some(hash) = &self.hash {
+                hash.ensure_not_xof()?;
                 encrypter
                     .set_rsa_oaep_md(hash.message_digest())
                     .map_err(|_| CryptoError::RsaSetPropertyError)?;
@@ -325,6 +326,7 @@ impl<'a> OsslRsaEncryptAlgo<'a> {
 
         if self.padding == Padding::PKCS1_OAEP {
             if let Some(hash) = &self.hash {
+                hash.ensure_not_xof()?;
                 decrypter
                     .set_rsa_oaep_md(hash.message_digest())
                     .map_err(|_| CryptoError::RsaSetPropertyError)?;

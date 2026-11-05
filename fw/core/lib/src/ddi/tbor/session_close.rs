@@ -29,7 +29,7 @@
 
 use tsra_fw_ddi_tbor_types::TborSessionCloseReq;
 use tsra_fw_ddi_tbor_types::TborSessionCloseResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -38,12 +38,12 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 ///
 /// Routes through `pal.session_destroy` to free the slot and any
 /// associated vault state.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborSessionCloseReq::decode(req_buf)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    let req = TborSessionCloseReq::decode(cmd_buf.request())?;
     let session_id: u16 = req.session_id().into();
     let id = HsmSessId::from(session_id);
     // SECURITY: This is a destructive operation gated only by
@@ -53,7 +53,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     // lands; until then this is vulnerable to same-partition DoS by
     // a caller who guesses an active slot id.
     pal.session_destroy(io, id).await?;
-    let resp = pal.dma_alloc_var(io, |buf| {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborSessionCloseResp::encode(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())
     })?;

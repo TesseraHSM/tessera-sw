@@ -20,21 +20,22 @@
 //! the read-only probes (`session_pending_state`, `session_param_key`,
 //! `session_try_consume_psk_change`) are synchronous.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MAC_DIR_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_MASKING_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_pal_traits::SESSION_PENDING_BLOB_MAX;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_uno_drivers_session_store::SessionStore;
 
 use crate::UnoHsmIo;
@@ -51,14 +52,16 @@ const SESSION_MASKING_KEY_SIZE: usize = 80;
 const SESSION_BLOB_SIZE: usize = SESSION_API_REV_SIZE + SESSION_MASKING_KEY_SIZE;
 
 /// `SessionEx` plaintext (CU) blob:
-/// `[api_rev(8) || param_key(32) || masking_key(32)]` = 72 bytes.  The
+/// `[api_rev(8) || param_key(32) || masking_key(32) || auth_binding(68)]` = 140 bytes.  The
 /// SessionEx masking key is the 32 B AES-256-GCM `key_masking::aead` key
 /// ([`SESSION_MASKING_KEY_LEN`]), not the legacy 80 B cbc key.
-const SESSION_CU_BLOB_SIZE: usize =
-    SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN + SESSION_MASKING_KEY_LEN;
+const SESSION_CU_BLOB_SIZE: usize = SESSION_API_REV_SIZE
+    + SESSION_PARAM_KEY_LEN
+    + SESSION_MASKING_KEY_LEN
+    + SESSION_AUTH_BINDING_LEN;
 
 /// `SessionEx` authenticated (CO) blob: the plaintext blob followed by
-/// `mac_tx(48) || mac_rx(48)` = 168 bytes.
+/// `mac_tx(48) || mac_rx(48)` = 236 bytes.
 const SESSION_CU_AUTH_BLOB_SIZE: usize = SESSION_CU_BLOB_SIZE + 2 * SESSION_MAC_DIR_KEY_LEN;
 
 impl HsmSessionManager for UnoHsmPal {
@@ -73,7 +76,7 @@ impl HsmSessionManager for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         api_rev: &[u8],
-        masking_key: &[u8],
+        masking_key: &HsmDmaBuf,
         id: Option<HsmSessId>,
     ) -> HsmResult<HsmSessId> {
         if api_rev.len() != SESSION_API_REV_SIZE || masking_key.len() != SESSION_MASKING_KEY_SIZE {
@@ -86,25 +89,18 @@ impl HsmSessionManager for UnoHsmPal {
 
         let table = SessionStore::partition(io.pid())?;
 
-        // On re-key: tear down the old session-scoped keys and the old
-        // session key before creating the replacement.
-        //
-        // A slot awaiting renegotiation after a partition disable is the
-        // exception: `mark_all_needs_renego` already dropped its physical-id
+        // On re-key, only a slot awaiting renegotiation may be recreated:
+        // `mark_all_needs_renego` already dropped its physical-id
         // indirection (the caller deleted the backing vault keys), so there
-        // is nothing left to tear down. Resolving it anyway would either
-        // fail with `KeyNotFound` or — worse — delete key id 0, which is the
-        // valid id for vault table 0 / entry 0 rather than a "no mapping"
-        // sentinel. `recreate` below simply installs the fresh mapping.
-        // Mirrors the std PAL and the reference firmware's
-        // `recreate_session`.
-        let stale_reopen = id.filter(|reopen_id| {
-            !matches!(table.state(*reopen_id), HsmSessionState::NeedsRenegotiation)
-        });
-        if let Some(reopen_id) = stale_reopen {
-            let old_phys = table.physical_id(reopen_id)?;
-            crate::vault::delete_session_keys(self, io, reopen_id).await?;
-            crate::vault::vault(io).delete(self, io, old_phys).await?;
+        // is nothing to tear down and `recreate` below simply installs the
+        // fresh mapping. Reject every other state up front, before touching
+        // any vault state: `recreate` refuses a non-renegotiating slot
+        // anyway, and tearing down a live session's keys first would leave
+        // its slot pointing at a deleted key, so a later close/flush could
+        // never free it (leaking the slot). Mirrors the std PAL and the
+        // reference firmware's `recreate_session`.
+        if let Some(reopen_id) = id {
+            table.validate_recreation(reopen_id)?;
         }
 
         // Build the 88-byte session blob in a DMA buffer:
@@ -113,8 +109,7 @@ impl HsmSessionManager for UnoHsmPal {
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
         blob[SESSION_API_REV_SIZE..].copy_from_slice(masking_key);
 
-        // Store as an internal session key, then wipe the scratch copy of the
-        // masking key whether or not the store succeeded.
+        // Store as an internal session key; IO teardown scrubs the scratch copy.
         let attrs = HsmVaultKeyAttrs::new().with_internal(true);
         let created = {
             let mut v = crate::vault::vault(io);
@@ -129,7 +124,6 @@ impl HsmSessionManager for UnoHsmPal {
             )
             .await
         };
-        blob.zeroize();
         let physical_id = created?;
 
         // Allocate (or re-map, on re-key) the logical session slot.
@@ -191,6 +185,31 @@ impl HsmSessionManager for UnoHsmPal {
         Ok(())
     }
 
+    /// Roll back a failed post-migration re-key (`ReopenSession`).
+    ///
+    /// Deletes the fresh masking-key vault entry that
+    /// [`session_create`](Self::session_create) installed, then restores
+    /// the slot to [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation)
+    /// (clearing its physical mapping), so neither the vault nor the slot
+    /// leaks and the host can retry the reopen. Mirrors the reference
+    /// firmware's `rollback_open_session` reopen branch.
+    async fn session_rollback_reopen(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<()> {
+        // Hold the bulk-key lock for the same reason as `session_destroy`.
+        let _guard = self.fp_bulk_lock.lock().await;
+
+        let mut table = SessionStore::partition(io.pid())?;
+
+        // Resolve the physical vault key id the failed reopen installed
+        // before the vault await; delete it, then restore the slot's
+        // renegotiation state (zeroing its physical mapping).
+        let physical_id = table.physical_id(id)?;
+        crate::vault::vault(io)
+            .delete(self, io, physical_id)
+            .await?;
+        table.rollback_recreation(id)?;
+        Ok(())
+    }
+
     fn session_state(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmSessionState {
         let Ok(table) = SessionStore::partition(io.pid()) else {
             return HsmSessionState::Invalid;
@@ -201,8 +220,8 @@ impl HsmSessionManager for UnoHsmPal {
     async fn session_create_pending(
         &self,
         io: &UnoHsmIo,
-        role: SessionRole,
-        handshake_state: &DmaBuf,
+        role: HsmSessionRole,
+        handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId> {
         if handshake_state.is_empty() || handshake_state.len() > SESSION_PENDING_BLOB_MAX {
             return Err(HsmError::InvalidArg);
@@ -250,7 +269,7 @@ impl HsmSessionManager for UnoHsmPal {
         &self,
         io: &UnoHsmIo,
         id: HsmSessId,
-        out: Option<&mut [u8]>,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.pending_phys(id)?;
@@ -273,14 +292,16 @@ impl HsmSessionManager for UnoHsmPal {
         io: &UnoHsmIo,
         id: HsmSessId,
         api_rev: &[u8],
-        param_key: &[u8],
-        masking_key: &[u8],
-        mac_tx_key: Option<&[u8]>,
-        mac_rx_key: Option<&[u8]>,
+        param_key: &HsmDmaBuf,
+        masking_key: &HsmDmaBuf,
+        auth_binding: &HsmDmaBuf,
+        mac_tx_key: Option<&HsmDmaBuf>,
+        mac_rx_key: Option<&HsmDmaBuf>,
     ) -> HsmResult<()> {
         if api_rev.len() != SESSION_API_REV_SIZE
             || param_key.len() != SESSION_PARAM_KEY_LEN
             || masking_key.len() != SESSION_MASKING_KEY_LEN
+            || auth_binding.len() != SESSION_AUTH_BINDING_LEN
         {
             return Err(HsmError::InvalidArg);
         }
@@ -304,8 +325,8 @@ impl HsmSessionManager for UnoHsmPal {
         }
 
         // Build the length-discriminated SessionEx blob:
-        //   PlainText:     api_rev(8) ‖ param_key(32) ‖ masking_key(32)        = 72 B
-        //   Authenticated: above ‖ mac_tx(48) ‖ mac_rx(48)                     = 168 B
+        //   PlainText:     api_rev(8) ‖ param_key(32) ‖ masking_key(32)        = 140 B
+        //   Authenticated: above ‖ mac_tx(48) ‖ mac_rx(48)                     = 236 B
         let blob_len = match mac_pair {
             None => SESSION_CU_BLOB_SIZE,
             Some(_) => SESSION_CU_AUTH_BLOB_SIZE,
@@ -314,8 +335,11 @@ impl HsmSessionManager for UnoHsmPal {
         blob[..SESSION_API_REV_SIZE].copy_from_slice(api_rev);
         blob[SESSION_API_REV_SIZE..SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN]
             .copy_from_slice(param_key);
-        blob[SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN..SESSION_CU_BLOB_SIZE]
+        blob[SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN
+            ..SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN]
             .copy_from_slice(masking_key);
+        blob[SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN..SESSION_CU_BLOB_SIZE]
+            .copy_from_slice(auth_binding);
         if let Some((tx, rx)) = mac_pair {
             blob[SESSION_CU_BLOB_SIZE..SESSION_CU_BLOB_SIZE + SESSION_MAC_DIR_KEY_LEN]
                 .copy_from_slice(tx);
@@ -350,7 +374,7 @@ impl HsmSessionManager for UnoHsmPal {
         Ok(())
     }
 
-    fn session_param_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_param_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.physical_id(id)?;
         // The param_key is the 32-byte field following the 8-byte api_rev
@@ -360,8 +384,8 @@ impl HsmSessionManager for UnoHsmPal {
         // param_key; a short blob indicates vault corruption, not a caller
         // error — surface it as `InternalError` (matches the trait contract
         // and the std PAL).
-        if blob.len() < SESSION_API_REV_SIZE + SESSION_PARAM_KEY_LEN {
-            return Err(HsmError::InternalError);
+        if !matches!(blob.len(), SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE) {
+            return Err(HsmError::InvalidPermissions);
         }
         Ok(blob
             .split_at(SESSION_API_REV_SIZE)
@@ -370,7 +394,7 @@ impl HsmSessionManager for UnoHsmPal {
             .0)
     }
 
-    fn session_masking_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&DmaBuf> {
+    fn session_masking_key(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
         let table = SessionStore::partition(io.pid())?;
         let physical_id = table.physical_id(id)?;
         let blob = self.vault_key(io, physical_id)?;
@@ -397,5 +421,18 @@ impl HsmSessionManager for UnoHsmPal {
     fn session_try_consume_psk_change(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<()> {
         let mut table = SessionStore::partition(io.pid())?;
         table.try_consume_psk_change(id)
+    }
+
+    fn session_auth_binding(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<&HsmDmaBuf> {
+        let table = SessionStore::partition(io.pid())?;
+        let blob = self.vault_key(io, table.physical_id(id)?)?;
+        if !matches!(blob.len(), SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE) {
+            return Err(HsmError::InvalidPermissions);
+        }
+        Ok(blob
+            .split_at(SESSION_CU_BLOB_SIZE - SESSION_AUTH_BINDING_LEN)
+            .1
+            .split_at(SESSION_AUTH_BINDING_LEN)
+            .0)
     }
 }

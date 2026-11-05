@@ -41,8 +41,8 @@ pub const TBOR_OP_RSA_MOD_EXP: u8 = 0x1A;
 /// floor (an RSA-2048 masked key is far larger — its modulus alone is
 /// 256 B); the authoritative gate is `unmask` (AEAD-tag verification) plus
 /// the key-kind check in the handler.  Pinned into the `#[tbor(buffer,
-/// min_len = 260)]` literal on [`TborRsaModExpReq::masked_key`].
-pub const RSA_MASKED_KEY_MIN_LEN: usize = 260;
+/// min_len = 264)]` literal on [`TborRsaModExpReq::masked_key`].
+pub const RSA_MASKED_KEY_MIN_LEN: usize = 264;
 
 /// Maximum accepted masked RSA private-key envelope length — the largest
 /// masked key [`UnwrapKey`](crate::unwrap_key) can produce (RSA-4096-CRT).
@@ -82,34 +82,34 @@ pub enum RsaOp {
 /// `masked_key` is `#[tbor(mutable)]` so the handler can `unmask` it **in
 /// place** in the request buffer (via `decode_mut`) — no scratch copy — and
 /// compute directly from the recovered key.
-#[tbor(opcode = 0x1A)]
+#[tbor(opcode = 0x1A, pair = TborRsaModExpResp)]
 pub struct TborRsaModExpReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
     pub session_id: SessionId,
 
+    /// The input integer `y` in wire little-endian order, exactly the key's
+    /// modulus length (256 / 384 / 512 B), replaced in place by the result.
+    #[tbor(buffer, max_len = 512, mutable)]
+    pub y: &'a [u8],
+
     /// The masked RSA private key (from `UnwrapKey`), an AEAD-GCM-256
-    /// envelope of 260..=3168 B.  Its kind recovers the modulus size and
+    /// envelope of 264..=3168 B.  Its kind recovers the modulus size and
     /// CRT form.
-    #[tbor(buffer, min_len = 260, max_len = 3168, mutable)]
+    #[tbor(buffer, min_len = 264, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
     /// The private-key operation, 1-byte [`RsaOp`] (gates on `decrypt` /
     /// `sign`).
     #[tbor(U8)]
     pub op_type: RsaOp,
-
-    /// The input integer `y` in wire little-endian order, exactly the key's
-    /// modulus length (256 / 384 / 512 B).
-    #[tbor(buffer, max_len = 512)]
-    pub y: &'a [u8],
 }
 
 /// `RsaModExp` response schema.
 ///
 /// `x` is `#[tbor(mutable)]` so the handler can reserve the slot and have
 /// the PAL write `y^d mod n` straight into it (`decode_mut`).
-#[tbor(response)]
+#[tbor(response, pair = TborRsaModExpReq)]
 pub struct TborRsaModExpResp<'a> {
     /// The result `x = y^d mod n` in wire little-endian order, exactly the
     /// key's modulus length (256 / 384 / 512 B).
@@ -134,11 +134,11 @@ mod tests {
             .unwrap()
             .session_id(SessionId(7))
             .unwrap()
+            .y(&y)
+            .unwrap()
             .masked_key(&masked)
             .unwrap()
             .op_type(RsaOp::Sign)
-            .unwrap()
-            .y(&y)
             .unwrap()
             .finish();
         assert_eq!(frame.op_type(), RsaOp::Sign);
@@ -161,6 +161,6 @@ mod tests {
     fn lengths_match_pinned_values() {
         assert_eq!(RSA_MOD_EXP_MAX_LEN, 512);
         assert_eq!(RSA_MASKED_KEY_MAX_LEN, 3168);
-        assert_eq!(RSA_MASKED_KEY_MIN_LEN, 260);
+        assert_eq!(RSA_MASKED_KEY_MIN_LEN, 264);
     }
 }

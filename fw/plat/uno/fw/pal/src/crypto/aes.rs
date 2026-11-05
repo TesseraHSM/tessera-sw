@@ -1,22 +1,28 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! AES (ECB, CBC, and GCM) trait implementations for the Uno PAL.
+//! AES (ECB, CBC, CFB, OFB, CTR, GCM, and KW/KWP) trait implementations
+//! for the Uno PAL.
 //!
 //! This module is organized as follows:
 //!
 //! 1. Constants and module-level helpers.
 //! 2. Private `impl UnoHsmPal` — internal AES driver wrappers.
-//! 3. `impl HsmAes for UnoHsmPal` — the public trait surface.
+//! 3. `impl HsmAes` / `HsmAesGcm` / `HsmAesKw` / `HsmAesXts` for
+//!    `UnoHsmPal` — the public trait surfaces.
 
 #![allow(clippy::unused_async)]
 
 use core::slice;
 
-use tsra_fw_hsm_pal_traits::AesOp as PalAesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmAesGcm;
+use tsra_fw_hsm_pal_traits::HsmAesKw;
+use tsra_fw_hsm_pal_traits::HsmAesMode;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
+use tsra_fw_hsm_pal_traits::HsmAesXts;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
@@ -47,10 +53,10 @@ pub const AES_BLOCK_SIZE: usize = 16;
 
 /// Map the PAL AES direction selector to the AES driver enum.
 #[inline]
-fn aes_op(op: PalAesOp) -> DriverAesOp {
+fn aes_op(op: HsmAesOp) -> DriverAesOp {
     match op {
-        PalAesOp::Encrypt => DriverAesOp::Encrypt,
-        PalAesOp::Decrypt => DriverAesOp::Decrypt,
+        HsmAesOp::Encrypt => DriverAesOp::Encrypt,
+        HsmAesOp::Decrypt => DriverAesOp::Decrypt,
     }
 }
 
@@ -74,6 +80,43 @@ fn require_block_multiple(input: &[u8], output_len: usize) -> HsmResult<()> {
         return Err(HsmError::InvalidArg);
     }
     Ok(())
+}
+
+/// Map the PAL generic AES mode to the AES driver (hardware) mode.
+#[inline]
+fn hw_mode(mode: HsmAesMode) -> AesMode {
+    match mode {
+        HsmAesMode::Cbc => AesMode::Cbc,
+        HsmAesMode::Ecb => AesMode::Ecb,
+        HsmAesMode::Cfb => AesMode::Cfb,
+        HsmAesMode::Ofb => AesMode::Ofb,
+        HsmAesMode::Ctr => AesMode::Ctr,
+    }
+}
+
+/// Validates a generic-mode `[IV | data]` buffer of `len` bytes and returns
+/// `(iv_len, data_len)`.
+fn generic_lens(mode: HsmAesMode, key_len: usize, len: usize) -> HsmResult<(usize, usize)> {
+    if !matches!(key_len, 16 | 24 | 32) {
+        return Err(HsmError::InvalidArg);
+    }
+    let data_len = mode.data_len(len).ok_or(HsmError::InvalidArg)?;
+    Ok((mode.iv_len(), data_len))
+}
+
+/// Copies one AES block out of `buf` starting at `offset`.
+#[inline]
+fn block_at(buf: &[u8], offset: usize) -> [u8; AES_BLOCK_SIZE] {
+    let mut block = [0u8; AES_BLOCK_SIZE];
+    block.copy_from_slice(&buf[offset..offset + AES_BLOCK_SIZE]);
+    block
+}
+
+/// XORs two AES blocks.
+#[inline]
+fn xor_block(mut a: [u8; AES_BLOCK_SIZE], b: [u8; AES_BLOCK_SIZE]) -> [u8; AES_BLOCK_SIZE] {
+    a.iter_mut().zip(&b).for_each(|(x, y)| *x ^= y);
+    a
 }
 
 #[inline]
@@ -137,7 +180,7 @@ impl UnoHsmPal {
     ///
     /// # Parameters
     /// * `mode` — [`AesMode::Cbc`] or [`AesMode::Ecb`].
-    /// * `op` — [`AesOp::Encrypt`] or [`AesOp::Decrypt`].
+    /// * `op` — [`DriverAesOp::Encrypt`] or [`DriverAesOp::Decrypt`].
     /// * `key` — AES key. Must be 16, 24, or 32 bytes (AES-128/192/256);
     ///   the AES driver itself enforces this.
     /// * `iv` — Optional 16-byte IV. Required for CBC, must be `None` for
@@ -159,10 +202,10 @@ impl UnoHsmPal {
         &self,
         mode: AesMode,
         op: DriverAesOp,
-        key: &DmaBuf,
-        iv: Option<&mut DmaBuf>,
-        message: &DmaBuf,
-        result: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        iv: Option<&mut HsmDmaBuf>,
+        message: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let update_iv = iv.is_some();
         self.aes
@@ -172,7 +215,7 @@ impl UnoHsmPal {
                 key,
                 iv,
                 update_iv,
-                message,
+                message: Some(message),
                 result,
             })
             .await
@@ -187,7 +230,7 @@ impl UnoHsmPal {
     ///
     /// # Parameters
     /// * `mode` — [`AesMode::Cbc`] or [`AesMode::Ecb`].
-    /// * `op` — [`PalAesOp::Encrypt`] or [`PalAesOp::Decrypt`].
+    /// * `op` — [`HsmAesOp::Encrypt`] or [`HsmAesOp::Decrypt`].
     /// * `key` — AES key (16, 24, or 32 bytes).
     /// * `iv` — Optional 16-byte IV (required for CBC, `None` for ECB).
     ///   Updated in-place when present.
@@ -204,26 +247,184 @@ impl UnoHsmPal {
     async fn aes_run_in_place(
         &self,
         mode: AesMode,
-        op: PalAesOp,
-        key: &DmaBuf,
-        iv: Option<&mut DmaBuf>,
-        data: &mut DmaBuf,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        iv: Option<&mut HsmDmaBuf>,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let (ptr, len) = (data.as_ptr(), data.len());
         // Safety: AES reads block N before writing block N (see method docs).
         // The aliased slice covers `data`, which is DMA-resident, so branding
-        // it as a `DmaBuf` is sound.
-        let message = unsafe { DmaBuf::from_raw(alias_immutable(ptr, len)) };
+        // it as a `HsmDmaBuf` is sound.
+        let message = unsafe { HsmDmaBuf::from_raw(alias_immutable(ptr, len)) };
         self.aes_run(mode, aes_op(op), key, iv, message, data).await
+    }
+
+    /// Generic AES from `src` = `[IV | data]` into `dst` = `[data | IV out]`.
+    ///
+    /// `src` and `dst` have equal length and may be the same memory (see
+    /// [`Self::aes_generic_in_place`]). Every CPU read of `src` happens
+    /// before the first write to `dst`; after that `src` is only read by
+    /// the engine, which consumes each input block before writing the
+    /// output block that trails it by `iv_len` bytes.
+    ///
+    /// Zero copy: a single engine submission reads `src[iv_len..]` and
+    /// writes `dst[..len]` directly. The IV is staged in a 16-byte DMA block
+    /// so the engine never reads it from a region that may be overwritten.
+    /// The engine accepts any length for CTR, but CFB and OFB require whole
+    /// blocks: a partial final CFB/OFB block (< 16 bytes) is run as a second
+    /// submission through a zero-padded 16-byte DMA block, chained from the
+    /// first. That tail is the only data copied.
+    ///
+    /// The IV out is derived in software from blocks captured on the stack
+    /// rather than relying on hardware IV write-back, which is only defined
+    /// for CBC. CTR assumes the engine increments the full 128-bit
+    /// big-endian counter block.
+    async fn aes_generic(
+        &self,
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        mode: HsmAesMode,
+        key: &HsmDmaBuf,
+        src: &HsmDmaBuf,
+        dst: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let (iv_len, data_len) = generic_lens(mode, key.len(), src.len())?;
+        if dst.len() != src.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        let full = data_len - data_len % AES_BLOCK_SIZE;
+        // Bytes the engine cannot take in the main submission.
+        let tail = match mode {
+            HsmAesMode::Cfb | HsmAesMode::Ofb => data_len - full,
+            _ => 0,
+        };
+        let main = data_len - tail;
+
+        let mut iv_in = [0u8; AES_BLOCK_SIZE];
+        iv_in[..iv_len].copy_from_slice(&src[..iv_len]);
+        let last_full_in = match full {
+            0 => iv_in,
+            _ => block_at(src, iv_len + full - AES_BLOCK_SIZE),
+        };
+
+        self.alloc_scoped_async(io, async |scope| {
+            let mut iv = match iv_len {
+                0 => None,
+                _ => {
+                    let iv = scope.dma_alloc(AES_BLOCK_SIZE)?;
+                    iv.copy_from_slice(&iv_in);
+                    Some(iv)
+                }
+            };
+            let tail_block = match tail {
+                0 => None,
+                _ => {
+                    let block = scope.dma_alloc(AES_BLOCK_SIZE)?;
+                    block.fill(0);
+                    block[..tail].copy_from_slice(&src[iv_len + main..iv_len + data_len]);
+                    Some(block)
+                }
+            };
+
+            if main > 0 {
+                self.aes
+                    .encrypt_decrypt(AesRequest {
+                        mode: hw_mode(mode),
+                        op: aes_op(op),
+                        key,
+                        iv: iv.as_deref_mut(),
+                        update_iv: false,
+                        message: Some(&src[iv_len..iv_len + main]),
+                        result: &mut dst[..main],
+                    })
+                    .await?;
+            }
+
+            // Chaining value after the whole blocks: CFB uses the last
+            // ciphertext block, OFB the last keystream block.
+            let chain = match (mode, op) {
+                _ if full == 0 => iv_in,
+                (HsmAesMode::Cfb, HsmAesOp::Encrypt) => block_at(dst, full - AES_BLOCK_SIZE),
+                (HsmAesMode::Ofb, _) => {
+                    xor_block(block_at(dst, full - AES_BLOCK_SIZE), last_full_in)
+                }
+                _ => last_full_in,
+            };
+
+            let mut tail_keystream = None;
+            if let Some(block) = tail_block {
+                let padded_in = block_at(block, 0);
+                let iv = iv.take().ok_or(HsmError::InvalidArg)?;
+                iv.copy_from_slice(&chain);
+                self.aes
+                    .encrypt_decrypt(AesRequest {
+                        mode: hw_mode(mode),
+                        op: aes_op(op),
+                        key,
+                        iv: Some(iv),
+                        update_iv: false,
+                        message: None,
+                        result: block,
+                    })
+                    .await?;
+                dst[main..data_len].copy_from_slice(&block[..tail]);
+                // Zero padding makes the padded output block the raw
+                // keystream XOR the padded input block.
+                tail_keystream = Some(xor_block(block_at(block, 0), padded_in));
+            }
+
+            let iv_out = match (mode, op) {
+                (HsmAesMode::Ecb, _) => [0u8; AES_BLOCK_SIZE],
+                _ if data_len == 0 => iv_in,
+                (HsmAesMode::Cbc, HsmAesOp::Encrypt) => block_at(dst, data_len - AES_BLOCK_SIZE),
+                (HsmAesMode::Cbc, HsmAesOp::Decrypt) => last_full_in,
+                (HsmAesMode::Cfb, _) => chain,
+                (HsmAesMode::Ofb, _) => tail_keystream.unwrap_or(chain),
+                (HsmAesMode::Ctr, _) => {
+                    let blocks = data_len.div_ceil(AES_BLOCK_SIZE) as u128;
+                    u128::from_be_bytes(iv_in)
+                        .wrapping_add(blocks)
+                        .to_be_bytes()
+                }
+            };
+            dst[data_len..].copy_from_slice(&iv_out[..iv_len]);
+            Ok::<(), HsmError>(())
+        })
+        .await
+    }
+
+    /// In-place generic AES over `buf` = `[IV | data]` → `[data | IV out]`.
+    ///
+    /// Runs [`Self::aes_generic`] with `buf` as both source and destination.
+    /// The engine's output trails its input by `iv_len` bytes, so output
+    /// block N overwrites input block N - 1 (or the IV for N = 0), which the
+    /// engine has already read because it processes blocks sequentially
+    /// (see [`Self::aes_run_in_place`]).
+    async fn aes_generic_in_place(
+        &self,
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        mode: HsmAesMode,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let (ptr, len) = (buf.as_ptr(), buf.len());
+        // Safety: the alias covers `buf`, which is DMA-resident and outlives
+        // the call. `aes_generic` finishes every CPU read of `src` before it
+        // first writes `dst`; afterwards only the engine reads `src`, ahead
+        // of the trailing writes (see method docs).
+        let src = unsafe { HsmDmaBuf::from_raw(alias_immutable(ptr, len)) };
+        self.aes_generic(io, op, mode, key, src, buf).await
     }
 }
 
 // =============================================================================
-// HsmAes trait impl
+// AES trait impls
 // =============================================================================
 //
 // The primary contract for each method (intended semantics, parameter
-// shapes, panic conditions) is documented on the [`HsmAes`] trait itself.
+// shapes, panic conditions) is documented on the AES traits themselves.
 // The implementation notes below describe only the Uno-specific
 // validation and the building blocks each method delegates to.
 
@@ -246,18 +447,54 @@ impl HsmAes for UnoHsmPal {
         self.rng_fill_bytes(io, key)
     }
 
+    /// Validates lengths before touching `output`; in query mode returns
+    /// the required length, otherwise copies `input` into `output` and
+    /// runs [`Self::aes_generic_in_place`] on it.
+    async fn aes_enc_dec(
+        &self,
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        mode: HsmAesMode,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        generic_lens(mode, key.len(), input.len())?;
+        let Some(output) = output else {
+            return Ok(input.len());
+        };
+        if output.len() < input.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        self.aes_generic(io, op, mode, key, input, &mut output[..input.len()])
+            .await?;
+        Ok(input.len())
+    }
+
+    /// See [`Self::aes_generic_in_place`].
+    async fn aes_enc_dec_in_place(
+        &self,
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        mode: HsmAesMode,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        self.aes_generic_in_place(io, op, mode, key, buf).await
+    }
+
     /// Validates `iv_in` / `iv_out` lengths and that `input` / `output`
     /// satisfy [`require_block_multiple`], then dispatches a single CBC
     /// submission via [`Self::aes_run`].
     async fn aes_cbc_enc_dec(
         &self,
         io: &UnoHsmIo,
-        op: PalAesOp,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        iv_in: &DmaBuf,
-        output: &mut DmaBuf,
-        mut iv_out: Option<&mut DmaBuf>,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        iv_in: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
+        mut iv_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<()> {
         require_cbc_iv(iv_in)?;
         if let Some(iv_out) = iv_out.as_deref() {
@@ -285,11 +522,11 @@ impl HsmAes for UnoHsmPal {
     async fn aes_cbc_enc_dec_in_place(
         &self,
         io: &UnoHsmIo,
-        op: PalAesOp,
-        key: &DmaBuf,
-        data: &mut DmaBuf,
-        iv_in: &DmaBuf,
-        mut iv_out: Option<&mut DmaBuf>,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
+        iv_in: &HsmDmaBuf,
+        mut iv_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<()> {
         require_cbc_iv(iv_in)?;
         if let Some(iv_out) = iv_out.as_deref() {
@@ -316,10 +553,10 @@ impl HsmAes for UnoHsmPal {
     async fn aes_ecb_enc_dec(
         &self,
         _io: &UnoHsmIo,
-        op: PalAesOp,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         require_block_multiple(input, output.len())?;
         self.aes_run(AesMode::Ecb, aes_op(op), key, None, input, output)
@@ -331,26 +568,28 @@ impl HsmAes for UnoHsmPal {
     async fn aes_ecb_enc_dec_in_place(
         &self,
         _io: &UnoHsmIo,
-        op: PalAesOp,
-        key: &DmaBuf,
-        data: &mut DmaBuf,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         require_block_multiple(data, data.len())?;
         self.aes_run_in_place(AesMode::Ecb, op, key, None, data)
             .await
     }
+}
 
+impl HsmAesGcm for UnoHsmPal {
     /// AES-GCM encrypt using AES-CTR plus software GHASH.
     #[allow(clippy::too_many_arguments)]
     async fn gcm_encrypt(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        plaintext: &DmaBuf,
-        ciphertext: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        plaintext: &HsmDmaBuf,
+        ciphertext: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -363,11 +602,11 @@ impl HsmAes for UnoHsmPal {
     async fn gcm_encrypt_in_place(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        data: &mut DmaBuf,
-        tag: &mut DmaBuf,
+        data: &mut HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -381,12 +620,12 @@ impl HsmAes for UnoHsmPal {
     async fn gcm_decrypt(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        ciphertext: &DmaBuf,
-        plaintext: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        plaintext: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -399,11 +638,11 @@ impl HsmAes for UnoHsmPal {
     async fn gcm_decrypt_in_place(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        iv: &DmaBuf,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
         aad_len: usize,
-        tag: &DmaBuf,
-        data: &mut DmaBuf,
+        tag: &HsmDmaBuf,
+        data: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         if iv.len() != GCM_IV_LEN || tag.len() != GCM_TAG_LEN {
             return Err(HsmError::InvalidArg);
@@ -412,6 +651,38 @@ impl HsmAes for UnoHsmPal {
             .await
     }
 
+    /// Not yet supported on Uno.
+    async fn gcm_encrypt_sgl(
+        &self,
+        _io: &UnoHsmIo,
+        _key: &HsmDmaBuf,
+        _iv: &HsmDmaBuf,
+        _aad_len: usize,
+        _len: usize,
+        _src: &[u8; 16],
+        _dst: &[u8; 16],
+        _tag: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
+
+    /// Not yet supported on Uno.
+    async fn gcm_decrypt_sgl(
+        &self,
+        _io: &UnoHsmIo,
+        _key: &HsmDmaBuf,
+        _iv: &HsmDmaBuf,
+        _aad_len: usize,
+        _len: usize,
+        _tag: &HsmDmaBuf,
+        _src: &[u8; 16],
+        _dst: &[u8; 16],
+    ) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
+}
+
+impl HsmAesKw for UnoHsmPal {
     // ── AES Key Wrap (RFC 3394) / Key Wrap with Padding (RFC 5649) ──
 
     /// AES-KW wrap (RFC 3394 §2.2.1).
@@ -425,11 +696,12 @@ impl HsmAes for UnoHsmPal {
     /// * `input` — plaintext to wrap. Must be at least 16 bytes, a
     ///   whole multiple of 8, and at most 3 KiB.
     /// * `output` — destination buffer. Must be at least
-    ///   `input.len() + 8` bytes.
+    ///   `input.len() + 8` bytes. `None` only validates and returns the
+    ///   wrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on success. `output[..input.len() + 8]` contains the
-    ///   wrapped key.
+    /// * `Ok(input.len() + 8)` on success. When `output` is `Some`,
+    ///   `output[..input.len() + 8]` contains the wrapped key.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if a length constraint is violated.
@@ -437,11 +709,21 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kw_wrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
-    ) -> HsmResult<()> {
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         self.kw_wrap_impl(io, key, input, output).await
+    }
+
+    /// AES-KW wrap in place. See [`UnoHsmPal::kw_wrap_in_place_impl`].
+    async fn aes_kw_wrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kw_wrap_in_place_impl(io, key, buf).await
     }
 
     /// AES-KW unwrap (RFC 3394 §2.2.2).
@@ -454,11 +736,12 @@ impl HsmAes for UnoHsmPal {
     /// * `input` — wrapped ciphertext. Must be at least 24 bytes, a
     ///   whole multiple of 8, and at most `3 KiB + 8` bytes.
     /// * `output` — destination buffer. Must be at least
-    ///   `input.len() - 8` bytes.
+    ///   `input.len() - 8` bytes. `None` only validates and returns the
+    ///   unwrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on a verified unwrap. `output[..input.len() - 8]`
-    ///   contains the recovered key.
+    /// * `Ok(input.len() - 8)` on a verified unwrap. When `output` is
+    ///   `Some`, `output[..input.len() - 8]` contains the recovered key.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if a length constraint is violated.
@@ -468,11 +751,21 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kw_unwrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
-    ) -> HsmResult<()> {
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         self.kw_unwrap_impl(io, key, input, output).await
+    }
+
+    /// AES-KW unwrap in place. See [`UnoHsmPal::kw_unwrap_in_place_impl`].
+    async fn aes_kw_unwrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kw_unwrap_in_place_impl(io, key, buf).await
     }
 
     /// AES-KWP wrap (RFC 5649 §4.1).
@@ -486,10 +779,11 @@ impl HsmAes for UnoHsmPal {
     /// * `key` — AES key (16, 24, or 32 bytes).
     /// * `input` — plaintext to wrap (1–3 KiB, any length).
     /// * `output` — destination buffer. Must be at least
-    ///   `next_multiple_of(input.len(), 8) + 8` bytes.
+    ///   `next_multiple_of(input.len(), 8) + 8` bytes. `None` only
+    ///   validates and returns the wrapped length.
     ///
     /// # Returns
-    /// * `Ok(())` on success.
+    /// * `Ok(next_multiple_of(input.len(), 8) + 8)` on success.
     ///
     /// # Errors
     /// * [`HsmError::InvalidArg`] if a length constraint is violated.
@@ -497,11 +791,22 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kwp_wrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
-    ) -> HsmResult<()> {
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         self.kwp_wrap_impl(io, key, input, output).await
+    }
+
+    /// AES-KWP wrap in place. See [`UnoHsmPal::kwp_wrap_in_place_impl`].
+    async fn aes_kwp_wrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        data_len: usize,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kwp_wrap_in_place_impl(io, key, data_len, buf).await
     }
 
     /// AES-KWP unwrap (RFC 5649 §4.2).
@@ -516,7 +821,8 @@ impl HsmAes for UnoHsmPal {
     ///   whole multiple of 8, and at most `3 KiB + 8` bytes.
     /// * `output` — destination buffer. Must be at least the recovered
     ///   `mli` bytes (and at least `input.len() - 8` bytes for inputs
-    ///   larger than one AES block).
+    ///   larger than one AES block). `None` only validates and returns
+    ///   the maximum unwrapped length, `input.len() - 8`.
     ///
     /// # Returns
     /// * `Ok(mli)` — the recovered message length. `output[..mli]`
@@ -529,10 +835,41 @@ impl HsmAes for UnoHsmPal {
     async fn aes_kwp_unwrap(
         &self,
         io: &UnoHsmIo,
-        key: &DmaBuf,
-        input: &DmaBuf,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        input: &HsmDmaBuf,
+        output: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         self.kwp_unwrap_impl(io, key, input, output).await
+    }
+
+    /// AES-KWP unwrap in place. See [`UnoHsmPal::kwp_unwrap_in_place_impl`].
+    async fn aes_kwp_unwrap_in_place(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        buf: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        self.kwp_unwrap_in_place_impl(io, key, buf).await
+    }
+}
+
+// AES-XTS is not yet supported on Uno.
+impl HsmAesXts for UnoHsmPal {
+    async fn aes_xts_gen_key(&self, _io: &UnoHsmIo, _key: &mut [u8]) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
+
+    async fn aes_xts_enc_dec_sgl(
+        &self,
+        _io: &UnoHsmIo,
+        _op: HsmAesOp,
+        _key: &HsmDmaBuf,
+        _tweak: &HsmDmaBuf,
+        _len: usize,
+        _dul: usize,
+        _src: &[u8; 16],
+        _dst: &[u8; 16],
+    ) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
     }
 }

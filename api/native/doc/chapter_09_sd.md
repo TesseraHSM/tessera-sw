@@ -17,8 +17,10 @@ are sufficiently sized. The C ABI and DDI wire format are unchanged.
 ### Masked sealing-key metadata
 
 The host masked-key decoder recognizes the SD sealing-key metadata kind and
-validates the envelope shape. This is metadata parsing, not authentication:
-the HSM must authenticate the blob when it is used. Local-scoped receivers
+validates the envelope shape. Decoding alone does not authenticate the blob;
+on an extended session, `HsmSealingKeyUnmaskAlgo` authenticates it on the
+device with TBOR `VerifyKey`, so a tampered or wrong-session blob fails at
+unmask with `MaskedKeyAuthenticationFailed`. Local-scoped receivers
 require the original partition-local masking key to be restored first.
 Generating a replacement key cannot recover backups sealed to the original
 receiver. This decoder support does not add a public key-import API or a

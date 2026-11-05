@@ -40,20 +40,20 @@ pub const TBOR_OP_ECDH_DERIVE: u8 = 0x19;
 pub const ECDH_PEER_PUB_MAX_LEN: usize = 136;
 
 /// Minimum masked derived-secret envelope length (P-256, 32-byte secret):
-/// `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(32) ‖ tag(16)`.
-pub const MASKED_SECRET_MIN_LEN: usize = 8 + 12 + 192 + 32 + 16;
+/// `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(32) ‖ tag(16)`.
+pub const MASKED_SECRET_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
 
 /// Maximum masked derived-secret envelope length (P-521, 66-byte secret).
-/// Pinned into the `#[tbor(buffer, max_len = 294)]` literal on
+/// Pinned into the `#[tbor(buffer, max_len = 312)]` literal on
 /// [`TborEcdhDeriveResp::masked_secret`].
-pub const MASKED_SECRET_MAX_LEN: usize = 8 + 12 + 192 + 66 + 16;
+pub const MASKED_SECRET_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
 
 /// `EcdhDerive` request schema.
 ///
 /// `masked_key` is `#[tbor(mutable)]` so the handler can `unmask` the local
 /// key **in place** in the request buffer (via `decode_mut`) — no scratch
 /// copy — and derive directly from the recovered key.
-#[tbor(opcode = 0x19)]
+#[tbor(opcode = 0x19, pair = TborEcdhDeriveResp)]
 pub struct TborEcdhDeriveReq<'a> {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -64,9 +64,9 @@ pub struct TborEcdhDeriveReq<'a> {
     pub scope: KeyScope,
 
     /// The masked local ECC private key (from `EccGenerateKey` /
-    /// `UnwrapKey`), an AEAD-GCM-256 envelope of 260..=296 B.  Its kind
+    /// `UnwrapKey`), an AEAD-GCM-256 envelope of 264..=312 B.  Its kind
     /// recovers the curve.
-    #[tbor(buffer, min_len = 260, max_len = 296, mutable)]
+    #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
     /// The peer's wire public key `x ‖ y` (little-endian, P-521 padded),
@@ -85,11 +85,11 @@ pub struct TborEcdhDeriveReq<'a> {
 ///
 /// `masked_secret` is `#[tbor(mutable)]` so the handler can reserve the
 /// slot and mask the derived secret straight into it (`decode_mut`).
-#[tbor(response)]
+#[tbor(response, pair = TborEcdhDeriveReq)]
 pub struct TborEcdhDeriveResp<'a> {
     /// The derived ECDH shared secret, masked (AEAD-GCM-256) under the
-    /// scope's masking key.  260 / 276 / 294 B for P-256 / P-384 / P-521.
-    #[tbor(buffer, max_len = 294, mutable)]
+    /// scope's masking key.  264 / 280 / 312 B for P-256 / P-384 / P-521.
+    #[tbor(buffer, max_len = 312, mutable)]
     pub masked_secret: &'a [u8],
 }
 
@@ -139,8 +139,8 @@ mod tests {
     #[test]
     fn lengths_match_pinned_values() {
         const _: () = assert!(136 == ECDH_PEER_PUB_MAX_LEN);
-        const _: () = assert!(294 == MASKED_SECRET_MAX_LEN);
-        assert_eq!(MASKED_SECRET_MIN_LEN, 260);
-        assert_eq!(MASKED_SECRET_MAX_LEN, 294);
+        const _: () = assert!(312 == MASKED_SECRET_MAX_LEN);
+        assert_eq!(MASKED_SECRET_MIN_LEN, 264);
+        assert_eq!(MASKED_SECRET_MAX_LEN, 312);
     }
 }

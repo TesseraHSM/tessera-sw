@@ -19,7 +19,8 @@ use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_ddi_tbor_types::TborEccSignReq;
 use tsra_fw_ddi_tbor_types::TborEccSignResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -34,50 +35,71 @@ use super::validate_active_session;
 ///
 /// No partition lock or undo log is required: the command reads no mutable
 /// partition state and **persists nothing** — it unmasks the caller's key,
-/// signs, and returns the signature.  Takes `req_buf: &mut DmaBuf` so the
-/// masked key can be unmasked in place (`decode_mut`).
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
+/// signs, and returns the signature in consumed envelope metadata storage.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
     io: &P::Io,
-    req_buf: &mut DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborEccSignReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
-    validate_active_session(pal, io, sess_id)?;
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    async {
+        let base = cmd_buf.request().as_ptr() as usize;
+        let (curve, key_at, key_len, digest_at, digest_len) = {
+            let req = TborEccSignReq::decode_mut(cmd_buf.request_mut())?;
+            let sess_id = HsmSessId::from(u16::from(req.session_id));
+            validate_active_session(pal, io, sess_id)?;
+            if ![
+                HsmHashAlgo::Sha256,
+                HsmHashAlgo::Sha384,
+                HsmHashAlgo::Sha512,
+            ]
+            .iter()
+            .any(|algo| algo.digest_len() == req.digest.len())
+            {
+                return Err(HsmError::InvalidArg);
+            }
+            let scope = peek_scope(req.masked_key)?;
+            let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+            let view = unmask(pal, io, masking_key, req.masked_key).await?;
+            let curve = ecc_private_curve(view.key_kind)?;
+            if !view.key_attrs.sign() {
+                return Err(HsmError::InvalidPermissions);
+            }
+            (
+                curve,
+                (view.target_key.as_ptr() as usize)
+                    .checked_sub(base)
+                    .ok_or(HsmError::InvalidArg)?,
+                view.target_key.len(),
+                (req.digest.as_ptr() as usize)
+                    .checked_sub(base)
+                    .ok_or(HsmError::InvalidArg)?,
+                req.digest.len(),
+            )
+        };
 
-    // EccSign consumes a host pre-computed digest.  ECDSA here uses only
-    // fixed-length SHA-2 digests, so the hash algorithm is implied by the
-    // digest length (there is no SHAKE/XOF variant); reject any length that
-    // is not a supported SHA-2 digest length rather than carrying a
-    // redundant algorithm selector on the wire. The digest stays in wire
-    // little-endian order when normalized to the signing operand below.
-    if ![
-        HsmHashAlgo::Sha256,
-        HsmHashAlgo::Sha384,
-        HsmHashAlgo::Sha512,
-    ]
-    .iter()
-    .any(|algo| algo.digest_len() == req.digest.len())
-    {
-        return Err(HsmError::InvalidArg);
-    }
-
-    // The scope that masked this key is recorded (cleartext, tag-bound) in
-    // the blob metadata; resolve its masking key before unmasking.  The
-    // peek borrow is transient — it ends before the in-place unmask.
-    let scope = peek_scope(req.masked_key)?;
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-
-    // Unmask the private key in place, sign, and build the response inside a
-    // block that yields a `Result`, so **every** post-unmask path (success
-    // or error) falls through to the `masked_key` wipe below — the recovered
-    // plaintext must never survive in the request buffer.
-    let outcome: HsmResult<&'p DmaBuf> = async {
-        let view = unmask(pal, io, masking_key, req.masked_key).await?;
-        let curve = ecc_private_curve(view.key_kind)?;
-        if !view.key_attrs.sign() {
-            return Err(HsmError::InvalidPermissions);
+        let digest_end = digest_at
+            .checked_add(digest_len)
+            .ok_or(HsmError::InvalidArg)?;
+        let digest_offset = digest_at.checked_sub(key_at).ok_or(HsmError::InvalidArg)?;
+        let len = tsra_fw_ddi_tbor::RESP_HEADER_LEN
+            + TborEccSignResp::TOC_COUNT * 4
+            + curve.wire_sig_len();
+        // Authenticated envelope metadata is dead; the private key and
+        // digest remain live beyond it. Check disjointness before encoding.
+        let buffer = cmd_buf.buffer_mut();
+        if len > key_at || key_at > digest_end || digest_end > buffer.len() {
+            return Err(HsmError::InvalidArg);
         }
+        let (response, input) = buffer[..digest_end].split_at_mut(key_at);
+        let response = &mut response[..len];
+        TborEccSignResp::encode(response, 0, false)?
+            .signature_reserve(curve.wire_sig_len())?
+            .finish();
+        if key_len > input.len() || digest_offset > input.len() {
+            return Err(HsmError::InvalidArg);
+        }
+        let key = &input[..key_len];
+        let supplied_digest = &input[digest_offset..];
 
         // The PKA DMA-reads the full curve operand width for the digest
         // (`wire_coord_len` = 32 / 48 / 68), which exceeds the ECDSA digest
@@ -86,9 +108,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // Zero-pad shorter digests and the backing operand so the engine's
         // full-width reads stay in bounds.
         let sign_len = curve.ecdsa_digest_len();
-        let digest = req
-            .digest
-            .get(req.digest.len().saturating_sub(sign_len)..)
+        let digest = supplied_digest
+            .get(supplied_digest.len().saturating_sub(sign_len)..)
             .ok_or(HsmError::InvalidArg)?;
         // When the digest already fills the operand width the request
         // buffer *is* a valid operand -- it is DMA-backed and the engine's
@@ -96,8 +117,8 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // P-384 case (32/32 and 48/48), so the common path needs neither
         // the allocation nor the copy. Only P-521 genuinely differs
         // (64-byte digest, 68-byte operand) and still needs zero pad.
-        let operand: &DmaBuf = if req.digest.len() == curve.wire_coord_len() {
-            req.digest
+        let operand: &HsmDmaBuf = if supplied_digest.len() == curve.wire_coord_len() {
+            supplied_digest
         } else {
             let staged = pal.dma_alloc_zeroed(io, curve.wire_coord_len())?;
             staged
@@ -107,34 +128,10 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             staged
         };
 
-        // Reserve the wire-format signature slot (`r ‖ s`, curve-sized) and
-        // have the PAL sign straight into it — no scratch, no copy.
-        let resp = pal.dma_alloc_var(io, |buf| {
-            let frame = TborEccSignResp::encode(buf, 0, false)?
-                .signature_reserve(curve.wire_sig_len())?
-                .finish();
-            Ok(frame.as_bytes().len())
-        })?;
-        {
-            let out = TborEccSignResp::decode_mut(resp)?;
-            pal.ecc_sign(
-                io,
-                curve,
-                view.target_key,
-                &operand[..sign_len],
-                out.signature,
-            )
+        let out = TborEccSignResp::decode_mut(response)?;
+        pal.ecc_sign(io, curve, key, &operand[..sign_len], out.signature)
             .await?;
-        }
-        // Coerce the `&mut` response buffer to a shared `&DmaBuf` (preserving
-        // the `'p` allocator lifetime) so the async block's output matches
-        // the handler's `&'p DmaBuf` return.
-        let resp: &'p DmaBuf = resp;
-        Ok(resp)
+        Ok(len)
     }
-    .await;
-
-    // Scrub the recovered plaintext key from the request buffer.
-    req.masked_key.zeroize();
-    outcome
+    .await
 }

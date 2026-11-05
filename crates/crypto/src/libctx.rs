@@ -5,12 +5,12 @@
 //!
 //! # Why this exists
 //!
-//! When this crate is built with the mock backend and loaded *inside* the
+//! When this crate is built with the emu backend and loaded *inside* the
 //! tsra OpenSSL provider, its OpenSSL operations run in the process-global
 //! default `OSSL_LIB_CTX` — the same one that has the `tsra` provider loaded.
 //! On OpenSSL 3.5 a bare (no-propquery) algorithm fetch in that libctx resolves
 //! to the `tsra` provider instead of the default one (3.0.x resolved it to
-//! `default`). So a digest/MAC the mock SDK computes *while opening the HSM
+//! `default`). So a digest/MAC the emu SDK computes *while opening the HSM
 //! session* re-enters tsra's own digest/MAC, which calls back into the
 //! session-open path — fatal re-entry that fails every operation on 3.5.
 //!

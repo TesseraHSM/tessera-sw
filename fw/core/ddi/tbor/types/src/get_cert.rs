@@ -36,7 +36,7 @@ pub const TBOR_OP_GET_CERTIFICATE: u8 = 0x1F;
 pub const CERT_MAX_LEN: usize = 2048;
 
 /// `GetCertificate` request schema.
-#[tbor(opcode = 0x1F)]
+#[tbor(opcode = 0x1F, pair = TborGetCertResp)]
 pub struct TborGetCertReq {
     /// Certificate chain slot within the caller's partition.
     #[tbor(U8)]
@@ -53,7 +53,7 @@ pub struct TborGetCertReq {
 /// `certificate` is `#[tbor(mutable)]` so the handler can reserve the
 /// slot (via `certificate_reserve`) and have the PAL copy the DER bytes
 /// straight into it (`decode_mut`) — no scratch buffer and no copy.
-#[tbor(response)]
+#[tbor(response, pair = TborGetCertReq)]
 pub struct TborGetCertResp<'a> {
     /// The DER-encoded X.509 certificate, up to [`CERT_MAX_LEN`] (2048)
     /// bytes.

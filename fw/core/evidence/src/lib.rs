@@ -27,6 +27,8 @@
 //!    **SAPOTA** key instead;
 //! 4. all supplied chains share the **same** leaf public key;
 //! 5. that shared leaf key signed the COSE_Sign1 attestation report.
+//! 6. when requested by a peer/reseal consumer, the signed report proves
+//!    HSM-generated SD-sealing-key provenance.
 //!
 //! The anchor choice reflects two distinct trust models. For the
 //! evidence-based reseal and peer commands, [`verify_evidence`] is the sole
@@ -51,6 +53,7 @@
 use tsra_fw_core_crypto_key_report::parse_ec2_cose_key;
 use tsra_fw_core_crypto_key_report::parse_key_report;
 use tsra_fw_core_crypto_key_report::verify_key_report;
+use tsra_fw_core_crypto_key_report::KeyFlags;
 use tsra_fw_core_crypto_key_report::KEY_REPORT_MAX_LEN;
 use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
 use tsra_fw_core_crypto_x509_chain::validate_chain as validate_cert_chain;
@@ -58,9 +61,9 @@ use tsra_fw_ddi_tbor_types::CertDescriptor;
 use tsra_fw_ddi_tbor_types::ReportDescriptor;
 use tsra_fw_hsm_oob::copy_oob;
 use tsra_fw_hsm_oob::OobPtr;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
@@ -122,6 +125,8 @@ pub struct TrustAnchors<'a> {
     /// [`SdCreateRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdCreateRemoteBackupReq
     /// [`SdRestoreRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupReq
     pub part_owner_anchor: &'a [u8],
+    /// Require an HSM-generated SD sealing key, not an ordinary attested key.
+    pub require_sd_sealing: bool,
 }
 
 /// Validate a receiver key certificate chain and recover its leaf key.
@@ -149,7 +154,7 @@ pub async fn verify_receiver_cert_chain<P>(
     oob: &OobPtr,
     chain: &[CertDescriptor],
     sata_anchor: &[u8],
-    rcvr_pub: &mut DmaBuf,
+    rcvr_pub: &mut HsmDmaBuf,
 ) -> HsmResult<()>
 where
     P: HsmGdmaController + HsmAlloc + HsmCrypto,
@@ -199,8 +204,8 @@ pub async fn verify_evidence<P>(
     oob: &OobPtr,
     refs: &EvidenceRefs<'_>,
     anchors: &TrustAnchors<'_>,
-    attested_key: &mut DmaBuf,
-    policy_hash_out: Option<&mut DmaBuf>,
+    attested_key: &mut HsmDmaBuf,
+    policy_hash_out: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<()>
 where
     P: HsmGdmaController + HsmAlloc + HsmCrypto,
@@ -269,6 +274,12 @@ where
         // The report is now authenticated: recover the attested public key
         // (SEC1 uncompressed big-endian) from its COSE_Key.
         let view = parse_key_report(report)?;
+        let flags = KeyFlags::from(view.flags);
+        if anchors.require_sd_sealing
+            && (!flags.is_sd_sealing() || !flags.is_generated() || flags.is_imported())
+        {
+            return Err(HsmError::InvalidArg);
+        }
         let cose_key = &view.public_key[..view.public_key_size as usize];
         let rcvr = parse_ec2_cose_key(cose_key)?;
         if rcvr.curve != CURVE {
@@ -326,7 +337,7 @@ where
             chain,
             anchor,
             leaf_out,
-            async |index: usize, buf: &mut DmaBuf| copy_oob(pal, io, oob, index, buf).await,
+            async |index: usize, buf: &mut HsmDmaBuf| copy_oob(pal, io, oob, index, buf).await,
         )
         .await
     })

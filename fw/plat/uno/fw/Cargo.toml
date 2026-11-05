@@ -10,11 +10,13 @@ members = [
   "crates/error",
   "crates/fault",
   "crates/key_vault",
+  "crates/pct",
   "crates/single_cell",
   "crates/static_init",
   "crates/static_ref",
   "crates/trace",
   "drivers/aes",
+  "drivers/bcp",
   "drivers/bks_store",
   "drivers/boot_status",
   "drivers/core_status",
@@ -53,6 +55,7 @@ tsra_fw_uno_crashdump = { path = "crates/crashdump" }
 tsra_fw_uno_reg_cortex_m = { path = "reg/cortex-m" }
 
 tsra_fw_uno_drivers_aes = { path = "drivers/aes" }
+tsra_fw_uno_drivers_bcp = { path = "drivers/bcp" }
 tsra_fw_uno_drivers_bks_store = { path = "drivers/bks_store" }
 tsra_fw_uno_drivers_boot_status = { path = "drivers/boot_status" }
 tsra_fw_uno_drivers_core_status = { path = "drivers/core_status" }
@@ -79,6 +82,7 @@ tsra_fw_uno_fault = { path = "crates/fault" }
 tsra_fw_uno_key_vault = { path = "crates/key_vault" }
 tsra_fw_uno_pac = { path = "drivers/pac" }
 tsra_fw_uno_pal = { path = "pal" }
+tsra_fw_uno_pct = { path = "crates/pct" }
 tsra_fw_uno_reg_soc = { path = "reg/soc" }
 tsra_fw_uno_trace = { path = "crates/trace" }
 
@@ -88,13 +92,14 @@ tsra_fw_core_crypto_x509_builder = { path = "../../../core/crypto/x509-builder" 
 tsra_fw_ddi_mbor = { path = "../../../core/ddi/mbor/codec" }
 tsra_fw_ddi_mbor_derive = { path = "../../../core/ddi/mbor/derive" }
 tsra_fw_ddi_mbor_types = { path = "../../../core/ddi/mbor/types" }
+tsra_fw_hsm_bulk = { path = "../../../core/bulk" }
 tsra_fw_hsm_core = { default-features = false, path = "../../../core/lib" }
 tsra_fw_hsm_core_tracing = { path = "../../../core/tracing" }
 tsra_fw_hsm_io = { path = "../../../core/io" }
 tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
 
 bitfield-struct = "0.13.0"
-cortex-m = "0.7.7"
+cortex-m = { features = ["inline-asm"], version = "0.7.7" }
 cortex-m-rt = "0.7.5"
 critical-section = "1.2.0"
 der = { default-features = false, features = [

@@ -38,6 +38,9 @@ struct Stage {
     /// Run release build (firmware).
     #[clap(long)]
     build: bool,
+    /// Run unit tests (firmware, host target).
+    #[clap(long)]
+    test: bool,
 }
 
 impl Stage {
@@ -49,6 +52,7 @@ impl Stage {
             || self.copyright
             || self.audit
             || self.build
+            || self.test
     }
 
     fn all() -> Self {
@@ -60,13 +64,16 @@ impl Stage {
             copyright: true,
             audit: true,
             build: true,
+            test: true,
         }
     }
 }
 
 /// Run pre-commit checks across the uno firmware workspace.
 #[derive(Parser)]
-#[clap(about = "Run all pre-commit checks (setup, fmt, clippy, copyright, audit, build, reggen)")]
+#[clap(
+    about = "Run all pre-commit checks (setup, fmt, clippy, test, copyright, audit, build, reggen)"
+)]
 pub struct Precheck {
     #[clap(flatten)]
     stage: Stage,
@@ -146,6 +153,13 @@ impl Xtask for Precheck {
             log::info!("=== clippy (firmware) ===");
             if let Err(e) = (crate::clippy::Clippy {}).run(ctx.clone()) {
                 errors.push(("clippy", e));
+            }
+        }
+
+        if stage.test {
+            log::info!("=== test (firmware, host) ===");
+            if let Err(e) = (crate::test::Test {}).run(ctx.clone()) {
+                errors.push(("test", e));
             }
         }
 

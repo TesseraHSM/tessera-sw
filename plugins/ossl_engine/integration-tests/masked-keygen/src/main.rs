@@ -3,7 +3,7 @@
 
 //! Generate a masked EC key blob for the engine integration tests.
 //!
-//! Opens the mock HSM from the ambient `TSRA_*` environment — the same
+//! Opens the emu HSM from the ambient `TSRA_*` environment — the same
 //! environment the engine-loading `openssl` process uses — generates a
 //! persistent EC key on the requested curve (default P-384), and writes its
 //! masked blob to the path given as the first argument. Because both processes
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
+        .mode(tsra_ossl_engine::integration::SECRET_FILE_MODE)
         .open(&out)?;
     f.write_all(&blob)?;
     Ok(())

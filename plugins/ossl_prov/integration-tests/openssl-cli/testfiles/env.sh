@@ -47,7 +47,7 @@ export LD_LIBRARY_PATH="$OPENSSL_LIB"
 
 # --- Credentials via hex env vars (preferred) ---
 # The provider reads credentials from these env vars first, falling back to
-# default files in CWD if unset.  Values match the mock HSM's test credentials.
+# default files in CWD if unset.  Values match the emu HSM's test credentials.
 export TSRA_CREDENTIALS_ID="${TSRA_CREDENTIALS_ID:-70fcf730b8764238b8358010ce8a3f76}"
 export TSRA_CREDENTIALS_PIN="${TSRA_CREDENTIALS_PIN:-db3dc77fc22e430080d41b31b6f04800}"
 

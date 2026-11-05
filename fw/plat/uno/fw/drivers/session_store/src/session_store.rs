@@ -10,8 +10,8 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmSessionState;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_part_store::Partition;
@@ -124,10 +124,10 @@ impl SessionTable {
     /// Slot range eligible for a Pending session of `role`:
     /// CryptoOfficer → slot 0 only; CryptoUser → slots `1..=MAX_SESSIONS-1`.
     #[inline]
-    fn role_slot_range(role: SessionRole) -> (usize, usize) {
+    fn role_slot_range(role: HsmSessionRole) -> (usize, usize) {
         match role {
-            SessionRole::CryptoOfficer => (0, 0),
-            SessionRole::CryptoUser => (1, MAX_SESSIONS - 1),
+            HsmSessionRole::CryptoOfficer => (0, 0),
+            HsmSessionRole::CryptoUser => (1, MAX_SESSIONS - 1),
         }
     }
 
@@ -189,23 +189,63 @@ impl SessionTable {
         Ok(HsmKeyId::from(self.phys_id(slot)))
     }
 
+    /// Validates recreation before allocating a replacement vault key.
+    ///
+    /// Matches the reference firmware's `recreate_session` errors without
+    /// changing the slot or its key mapping.
+    #[inline(never)]
+    pub fn validate_recreation(&self, id: HsmSessId) -> HsmResult<()> {
+        if u16::from(id) as usize >= MAX_SESSIONS {
+            return Err(HsmError::VaultSessionLimitReached);
+        }
+        match self.state(id) {
+            HsmSessionState::NeedsRenegotiation => Ok(()),
+            HsmSessionState::Invalid => Err(HsmError::SessionNotFound),
+            _ => Err(HsmError::ProcessedIoEventInInvalidState),
+        }
+    }
+
     /// Re-keys a session that needs renegotiation with a new physical vault
     /// key ID, clearing its renegotiation flag.
     ///
     /// # Errors
     ///
-    /// - [`HsmError::SessionNotFound`] — `id` is not an allocated slot.
-    /// - [`HsmError::InvalidArg`] — the session is not in the
+    /// - [`HsmError::VaultSessionLimitReached`] — `id` is out of range.
+    /// - [`HsmError::SessionNotFound`] — `id` is an unallocated slot.
+    /// - [`HsmError::ProcessedIoEventInInvalidState`] — the session is not in the
     ///   [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation) state.
     #[inline(never)]
     pub fn recreate(&mut self, id: HsmSessId, new_physical: HsmKeyId) -> HsmResult<HsmSessId> {
-        let slot = self.active_slot(id)?;
-        if (self.renego_mask() & (1 << slot)) == 0 {
-            return Err(HsmError::InvalidArg);
-        }
+        self.validate_recreation(id)?;
+        let slot = u16::from(id) as usize;
         self.region_mut()[RENEGO_MASK] &= !(1u8 << slot);
         self.set_phys_id(slot, u16::from(new_physical));
         Ok(id)
+    }
+
+    /// Rolls back a [`recreate`](Self::recreate): restores the
+    /// renegotiation flag and clears the physical vault mapping.
+    ///
+    /// The caller must delete the orphaned vault entry (resolved via
+    /// [`physical_id`](Self::physical_id)) before calling this, so the
+    /// physical mapping is read while still intact.
+    ///
+    /// This is the slot-table half of the reference firmware's
+    /// `rollback_open_session` reopen branch
+    /// (`session_table().rollback_recreation(id)`): a `ReopenSession`
+    /// whose later steps fail must leave the slot exactly as a
+    /// freshly-migrated [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation)
+    /// slot — zeroed physical id — so the host can retry the reopen.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::SessionNotFound`] — `id` is not an allocated slot.
+    #[inline(never)]
+    pub fn rollback_recreation(&mut self, id: HsmSessId) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        self.region_mut()[RENEGO_MASK] |= 1u8 << slot;
+        self.set_phys_id(slot, 0);
+        Ok(())
     }
 
     /// Returns the persistent state of a session slot.
@@ -257,9 +297,12 @@ impl SessionTable {
     /// physical-id indirection is dropped because the caller deletes the
     /// backing session-blob vault keys.
     ///
-    /// An NSSR (`Migrate`) and a free use [`clear_all`](Self::clear_all)
-    /// instead: both regenerate or discard the partition identity that a
-    /// renegotiating slot would have to be reopened against.
+    /// NSSR (`Migrate`) uses the same transition so established IDs can be
+    /// reopened after the host restores provisioning. Partition free uses
+    /// [`clear_all`](Self::clear_all) instead.
+    ///
+    /// Call after deleting the backing vault keys, but before clearing the
+    /// volatile session metadata needed to identify Pending slots.
     ///
     /// [`Pending`](HsmSessionState::Pending) slots are released because the
     /// reset invalidates their handshake state. The host may already have
@@ -268,7 +311,7 @@ impl SessionTable {
     ///
     /// Mirrors the reference firmware's
     /// `session_table().restore(session_table().backup())` in
-    /// `PartState::disable` / `PartState::migrate`, and the std PAL's
+    /// `HsmPartState::disable` / `HsmPartState::migrate`, and the std PAL's
     /// `backup`/`restore` pair, whose `backup` is likewise
     /// `alloc_mask & !pending_mask`.
     #[inline(never)]
@@ -285,12 +328,11 @@ impl SessionTable {
     /// the physical-id indirection, and the volatile pending / PSK-change
     /// masks.
     ///
-    /// Used on partition free and NSSR (`Migrate`), which discard or regenerate
-    /// the partition identity and release the prior session context. A plain
-    /// disable uses [`mark_all_needs_renego`](Self::mark_all_needs_renego)
-    /// instead, retaining established logical IDs so the host can still close
-    /// its sessions. Mirrors the reference firmware's
-    /// `session_table().restore(0)` in `PartState::clear_partition_info`.
+    /// Used on partition free, which releases the prior session context.
+    /// Disable and NSSR (`Migrate`) use
+    /// [`mark_all_needs_renego`](Self::mark_all_needs_renego) instead, retaining
+    /// established logical IDs for reopen or close. Mirrors the reference
+    /// firmware's `session_table().restore(0)` in `HsmPartState::clear_partition_info`.
     #[inline(never)]
     pub fn clear_all(&mut self) {
         self.region_mut().fill(0);
@@ -346,7 +388,7 @@ impl SessionTable {
     #[inline(never)]
     pub fn create_pending(
         &mut self,
-        role: SessionRole,
+        role: HsmSessionRole,
         physical_id: HsmKeyId,
     ) -> HsmResult<(HsmSessId, Option<HsmKeyId>)> {
         let (start, end) = Self::role_slot_range(role);

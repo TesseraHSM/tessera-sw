@@ -26,11 +26,15 @@
 //!  ├── HsmCertStore        — per-partition certificate chains
 //!  ├── HsmSessionManager   — session allocation and state
 //!  ├── HsmVault            — key storage and metadata
+//!  ├── HsmKeyMasking       — in-place key masking
 //!  └── HsmCrypto           — cryptographic operations
 //!       ├── HsmRng         — random number generation
 //!       ├── HsmHash        — SHA digest
 //!       ├── HsmHmac        — HMAC sign/verify
-//!       ├── HsmAes         — AES encrypt/decrypt
+//!       ├── HsmAes         — AES keygen + ECB/CBC
+//!       ├── HsmAesGcm      — AES-GCM
+//!       ├── HsmAesKw       — AES-KW/KWP key wrap
+//!       ├── HsmAesXts      — AES-XTS
 //!       ├── HsmEcc         — ECC keygen/sign/verify/ECDH
 //!       ├── HsmRsa         — RSA keygen/mod_exp
 //!       └── HsmKdf         — HKDF and KBKDF key derivation
@@ -101,11 +105,13 @@
 
 mod alloc;
 mod cert;
+mod cmd_buf;
 mod crypto;
 mod dispatch;
 mod error;
 mod gdma;
 mod io;
+mod key_masking;
 mod lock;
 mod pal;
 mod part;
@@ -116,11 +122,13 @@ mod vault;
 pub use alloc::*;
 
 pub use cert::*;
+pub use cmd_buf::*;
 pub use crypto::*;
 pub use dispatch::*;
 pub use error::*;
 pub use gdma::*;
 pub use io::*;
+pub use key_masking::*;
 pub use lock::*;
 pub use pal::*;
 pub use part::*;
@@ -236,23 +244,23 @@ impl From<HsmSessId> for u16 {
 }
 
 impl HsmSessId {
-    /// Returns the [`SessionRole`] implied by this session's slot index.
+    /// Returns the [`HsmSessionRole`] implied by this session's slot index.
     ///
-    /// Slot 0 is reserved for [`SessionRole::CryptoOfficer`] sessions;
-    /// slots 1..=7 are [`SessionRole::CryptoUser`].  The mapping is
+    /// Slot 0 is reserved for [`HsmSessionRole::CryptoOfficer`] sessions;
+    /// slots 1..=7 are [`HsmSessionRole::CryptoUser`].  The mapping is
     /// pinned by the session-establishment protocol and matches the
     /// PSK-based role gating performed in `OpenSessionInit`.
     ///
     /// # Returns
     ///
-    /// [`SessionRole::CryptoOfficer`] if this is slot 0, otherwise
-    /// [`SessionRole::CryptoUser`].
+    /// [`HsmSessionRole::CryptoOfficer`] if this is slot 0, otherwise
+    /// [`HsmSessionRole::CryptoUser`].
     #[inline]
-    pub fn role(self) -> SessionRole {
+    pub fn role(self) -> HsmSessionRole {
         if self.0 == 0 {
-            SessionRole::CryptoOfficer
+            HsmSessionRole::CryptoOfficer
         } else {
-            SessionRole::CryptoUser
+            HsmSessionRole::CryptoUser
         }
     }
 }
@@ -307,10 +315,14 @@ pub const SESSION_SEED_LEN: usize = 32;
 ///
 /// Holds: HPKE `exported` (48 B) ‖ `pk_init` (97 B, SEC1
 /// uncompressed P-384) ‖ `pk_resp` (97 B, same) ‖ `session_type`
-/// (1 B) — the host-supplied `seed` is no longer part of the Pending
+/// (1 B), suite (1 B), and credential binding (68 B). The host-supplied
+/// `seed` is no longer part of the Pending
 /// blob (it arrives encrypted in `OpenSessionFinish` instead).
 /// Rounded up to give a small implementation margin.
-pub const SESSION_PENDING_BLOB_MAX: usize = 256;
+pub const SESSION_PENDING_BLOB_MAX: usize = 320;
+
+/// Session credential binding: role (4 B), AppId (16 B), PSK SHA-384 (48 B).
+pub const SESSION_AUTH_BINDING_LEN: usize = 4 + APP_ID_LEN + 48;
 
 /// HPKE `info` string for the session-establishment handshake.
 ///

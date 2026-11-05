@@ -14,7 +14,7 @@
 use tsra_fw_core_crypto_key_masking::aead::mask;
 use tsra_fw_core_crypto_key_masking::aead::AeadAlg;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -50,11 +50,11 @@ pub(super) async fn mask_tmk<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
-    sdmk: &DmaBuf,
+    sdmk: &HsmDmaBuf,
     svn: u64,
     owner: u16,
-    tmk: &DmaBuf,
-    out: &mut DmaBuf,
+    tmk: &HsmDmaBuf,
+    out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let key_label = alloc.dma_alloc(DARC_TMK_KEY_LABEL.len())?;
     key_label.copy_from_slice(DARC_TMK_KEY_LABEL);

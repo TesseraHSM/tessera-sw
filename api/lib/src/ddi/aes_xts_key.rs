@@ -46,6 +46,10 @@ pub(crate) fn aes_xts_generate_key(
     session: &HsmSession,
     props: HsmKeyProps,
 ) -> HsmResult<(HsmKeyHandle, HsmKeyHandle, HsmKeyProps)> {
+    props.ensure_scope_supported(session.is_ex())?;
+    if session.is_ex() {
+        return ddi::aes_xts_generate_key_tbor(session, &props);
+    }
     // Generate first key
     let (handle1, dev_key_props1) = aes_xts_generate_half_key(session, props.clone())?;
 
@@ -93,6 +97,11 @@ pub(crate) fn aes_xts_generate_key(
 ///
 /// On success, the returned `HsmKeyProps.masked_key` contains a *single* encoded blob
 /// `header || part1_masked || part2_masked`.
+///
+/// On ex (TBOR) sessions the key is a single `AesXts512` key, so `wrapped_key` is
+/// one RSA-AES wrap of the 64-byte `K1 || K2` (PKCS#11 `CKK_AES_XTS`) with no
+/// header; both returned handles are unpinned and `masked_key` is the single
+/// `AesXts512` masked blob.
 #[resiliency_key_op(key = "unwrapping_key")]
 pub(crate) fn aes_xts_unwrap_key(
     unwrapping_key: &HsmRsaPrivateKey,
@@ -100,6 +109,12 @@ pub(crate) fn aes_xts_unwrap_key(
     wrapped_key: &[u8],
     key_props: HsmKeyProps,
 ) -> HsmResult<(HsmKeyHandle, HsmKeyHandle, HsmKeyProps)> {
+    if unwrapping_key.session().is_ex() {
+        let (_, props) =
+            ddi::rsa_aes_unwrap_key_raw_no_res(unwrapping_key, wrapped_key, hash_algo, key_props)?;
+        return Ok((HsmKeyHandle::Unpinned, HsmKeyHandle::Unpinned, props));
+    }
+
     let (key1_wrapped_blob, key2_wrapped_blob) = HsmAesXtsKeyPairBlob::parse_blob(wrapped_key)?;
 
     let (key1_props, key2_props) = split_xts_props(&key_props)?;
@@ -153,6 +168,11 @@ pub(crate) fn aes_xts_unmask_key_raw_no_res(
     session: &HsmSession,
     masked_key: &[u8],
 ) -> HsmResult<(HsmKeyHandle, HsmKeyHandle, HsmKeyProps)> {
+    // TBOR XTS keys are a single `AesXts512` masked blob, not a half-key pair.
+    if session.is_ex() {
+        let (_, props) = ddi::unmask_key_tbor(session, masked_key)?;
+        return Ok((HsmKeyHandle::Unpinned, HsmKeyHandle::Unpinned, props));
+    }
     let (key1_masked_blob, key2_masked_blob) = HsmAesXtsKeyPairBlob::parse_blob(masked_key)?;
 
     let (handle1, key1_props) = ddi::unmask_key_raw_no_res(session, key1_masked_blob)?;

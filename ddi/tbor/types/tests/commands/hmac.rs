@@ -28,8 +28,6 @@
 //! * Oversized messages and out-of-range masked-key lengths are rejected.
 //! * IV and ciphertext tampering fail authentication without damaging the key.
 
-#![cfg(feature = "emu")]
-
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HmacAlgo;
 use tsra_crypto::HmacKey;
@@ -321,7 +319,7 @@ fn hmac_rejects_invalid_session() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let masked = generate_key(&ctx, session.session_id, SCOPE_EPHEMERAL, HMAC_HASH_SHA256);
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHmacReq {
             session_id: u16::MAX,
             masked_key: masked,
@@ -505,7 +503,7 @@ fn hmac_rejects_closed_session() {
 
     ctx.session_close(session_id).expect("close HMAC session");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborHmacReq {
             session_id,
             masked_key: masked,

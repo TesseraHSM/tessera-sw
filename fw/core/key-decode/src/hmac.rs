@@ -13,7 +13,7 @@
 //! bounds at `vault_key_create`.  The raw key is itself the vault
 //! material.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -27,7 +27,7 @@ use super::DecodedKey;
 /// key class); any other kind is a caller contract violation. The key
 /// material is passed through verbatim — its length is validated against
 /// the kind's bounds later, by `vault_key_create`.
-pub(super) fn decode(material: &DmaBuf, kind: HsmVaultKeyKind) -> HsmResult<DecodedKey<'_>> {
+pub(super) fn decode(material: &HsmDmaBuf, kind: HsmVaultKeyKind) -> HsmResult<DecodedKey<'_>> {
     match kind {
         HsmVaultKeyKind::VarLenHmacSha256
         | HsmVaultKeyKind::VarLenHmacSha384

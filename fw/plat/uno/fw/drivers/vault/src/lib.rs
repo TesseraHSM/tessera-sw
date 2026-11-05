@@ -18,7 +18,7 @@
 #![no_std]
 #![allow(unsafe_code)]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_uno_key_vault::Entry;
@@ -27,6 +27,8 @@ use tsra_fw_uno_key_vault::BITMAP_WORDS;
 use tsra_fw_uno_key_vault::BLOB_SIZE;
 use tsra_fw_uno_key_vault::ENTRIES_PER_TABLE;
 use tsra_fw_uno_key_vault::MAX_TABLE_COUNT;
+use tsra_fw_uno_reg_soc::io_gsram::FP_SLOT_MAP_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::FP_SLOT_MAP_SIZE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BITMAP_OFFSET;
 use tsra_fw_uno_reg_soc::key_vault_table_t::BLOB_OFFSET;
@@ -253,9 +255,9 @@ impl TableStorage for VaultStorage {
     ///
     /// # Returns
     ///
-    /// A shared [`DmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob in
+    /// A shared [`HsmDmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob in
     /// GSRAM.
-    fn blob(&self, table: usize) -> HsmResult<&DmaBuf> {
+    fn blob(&self, table: usize) -> HsmResult<&HsmDmaBuf> {
         if table >= TABLE_COUNT {
             return Err(HsmError::InvalidArg);
         }
@@ -263,7 +265,7 @@ impl TableStorage for VaultStorage {
         // `BLOB_SIZE` bytes of 'static GSRAM; the single-threaded executor
         // guarantees no aliasing mutation.
         Ok(unsafe {
-            DmaBuf::from_raw(core::slice::from_raw_parts(
+            HsmDmaBuf::from_raw(core::slice::from_raw_parts(
                 Self::blob_addr(table) as *const u8,
                 BLOB_SIZE,
             ))
@@ -278,19 +280,59 @@ impl TableStorage for VaultStorage {
     ///
     /// # Returns
     ///
-    /// An exclusive [`DmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob
+    /// An exclusive [`HsmDmaBuf`] view of the table's [`BLOB_SIZE`]-byte blob
     /// in GSRAM.
-    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut DmaBuf> {
+    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut HsmDmaBuf> {
         if table >= TABLE_COUNT {
             return Err(HsmError::InvalidArg);
         }
         // SAFETY: as `blob`, with exclusive access for the duration of the
         // `&mut self` borrow on the single-threaded executor.
         Ok(unsafe {
-            DmaBuf::from_raw_mut(core::slice::from_raw_parts_mut(
+            HsmDmaBuf::from_raw_mut(core::slice::from_raw_parts_mut(
                 Self::blob_addr(table) as *mut u8,
                 BLOB_SIZE,
             ))
         })
+    }
+}
+
+/// Number of fast-path bulk-key tables tracked by [`FpSlotMap`] (one bitmap
+/// byte per table, ids `0..=64`).
+pub const FP_SLOT_TABLES: usize = FP_SLOT_MAP_SIZE as usize;
+
+const _: () = assert!(FP_SLOT_TABLES == TABLE_COUNT);
+
+/// Absolute GSRAM address of the fast-path bulk-key slot map.
+const FP_SLOT_MAP_ADDR: usize = (IO_GSRAM_BASE + FP_SLOT_MAP_OFFSET) as usize;
+
+/// GSRAM-resident fast-path bulk-key slot map.
+///
+/// One byte per FP table; bit `i` set means slot `i` of that table is held
+/// by a bulk key. It lives in GSRAM next to the key vault (whose bulk-key
+/// handles reference these slots), mirroring the reference
+/// `cdma_key_vault_meta_data`, so it survives warm and fw-update resets.
+pub struct FpSlotMap;
+
+impl FpSlotMap {
+    /// Borrows the slot map mutably for the duration of a closure.
+    ///
+    /// Same contract as `SingleCell::with`: single-core execution, no ISR
+    /// access, and no reentrant call from inside `f`.
+    ///
+    /// # Parameters
+    ///
+    /// - `f`: Closure receiving the GSRAM slot map.
+    ///
+    /// # Returns
+    ///
+    /// The value returned by `f`.
+    #[inline(always)]
+    pub fn with<R>(f: impl FnOnce(&mut [u8; FP_SLOT_TABLES]) -> R) -> R {
+        // SAFETY: `FP_SLOT_MAP_ADDR` is the RDL-defined 65-byte GSRAM region
+        // owned solely by this driver; byte-aligned plain SRAM, and every bit
+        // pattern is a valid `u8`. The single-core, no-ISR, non-reentrant
+        // contract gives exclusive access for the closure's duration.
+        f(unsafe { &mut *(FP_SLOT_MAP_ADDR as *mut [u8; FP_SLOT_TABLES]) })
     }
 }

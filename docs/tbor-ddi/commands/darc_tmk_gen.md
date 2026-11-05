@@ -29,7 +29,7 @@ Handler flow:
    the output is masked under is provisioned by SD setup).
 2. Draw a fresh 32-byte TMK from the RNG.
 3. Mask the TMK (AEAD-GCM-256) under the SDMK and return the masked
-   envelope. The raw TMK is zeroized on every exit path.
+   envelope. IO teardown scrubs the raw TMK.
 
 The TMK is always security-domain-scoped, so the request carries no scope
 selector. The command **persists nothing** (no vault write, no lifecycle

@@ -4,11 +4,11 @@
 //! Clear the partition's stored user credential.
 
 use tsra_fw_ddi_mbor::MborDecoder;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
 use tsra_fw_hsm_pal_traits::HsmPartitionLock;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
-use tsra_fw_hsm_pal_traits::PartPropId;
 
 use super::common::ReqHdr;
 use super::test_action::encode_success;
@@ -24,12 +24,12 @@ pub(super) async fn dispatch<'p>(
     decoder: &mut MborDecoder<'_>,
     request_field_count: u8,
     request_len: usize,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     expect_empty_payload(decoder, request_field_count, request_len)?;
     execute(pal, io, hdr).await
 }
 
-async fn execute<'p>(pal: &'p UnoHsmPal, io: &UnoHsmIo, hdr: &ReqHdr) -> HsmResult<&'p DmaBuf> {
+async fn execute<'p>(pal: &'p UnoHsmPal, io: &UnoHsmIo, hdr: &ReqHdr) -> HsmResult<&'p HsmDmaBuf> {
     // Serialize with EstablishCredential/ChangePin, which hold this lock
     // across their own validation and CREDENTIAL commit: without it, a
     // concurrent request could interleave with the clear below and leave
@@ -39,6 +39,6 @@ async fn execute<'p>(pal: &'p UnoHsmPal, io: &UnoHsmIo, hdr: &ReqHdr) -> HsmResu
     // Prepare the response before mutating credential state so an allocation
     // or encoding failure cannot clear the credential and return an error.
     let resp = encode_success(pal, io, hdr)?;
-    pal.part_prop_clear(io, PartPropId::CREDENTIAL)?;
+    pal.part_prop_clear(io, HsmPartPropId::CREDENTIAL)?;
     Ok(resp)
 }
