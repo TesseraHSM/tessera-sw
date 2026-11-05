@@ -14,10 +14,12 @@ fn main() {
             .file("asm/keccakf1600.S")
             .file("asm/dilithium_intt.S")
             .file("asm/dsa_ntt.S")
+            .file("asm/dsa_unpack_z.S")
             .compile("pqc_ml_asm");
 
         println!("cargo:rerun-if-changed=asm/keccakf1600.S");
         println!("cargo:rerun-if-changed=asm/dilithium_intt.S");
         println!("cargo:rerun-if-changed=asm/dsa_ntt.S");
+        println!("cargo:rerun-if-changed=asm/dsa_unpack_z.S");
     }
 }
