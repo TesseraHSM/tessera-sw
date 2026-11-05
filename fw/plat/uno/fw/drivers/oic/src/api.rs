@@ -414,6 +414,24 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         })
     }
 
+    /// Record the completion whose OCQ tag word is `word` for its tag, and
+    /// wake its awaiter (or mark a detached post done).
+    #[inline(always)]
+    fn complete(s: &mut OicState<DEPTH>, word: u32) {
+        let word = tock_registers::LocalRegisterCopy::<u32, OCQ_TAG::Register>::new(word);
+        let tag = word.read(OCQ_TAG::TAG) as usize;
+        if tag < DEPTH {
+            let slot = &mut s.tags[tag];
+            slot.status = word.read(OCQ_TAG::STATUS) as u8;
+            slot.completed = true;
+            if slot.detached {
+                s.detached_done |= 1u32 << tag;
+            } else {
+                slot.waker.wake();
+            }
+        }
+    }
+
     /// Drain all available OCQ entries and wake their awaiters.
     pub fn wake(&self, irq: u16) {
         self.state.with(|s| {
@@ -423,23 +441,23 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             while s.ocq_head != tail {
                 let ocq_slot = (s.ocq_head & Self::MASK) as usize;
                 // SAFETY: The masked consumer index selects an available entry in the OCQ ring.
-                let ocq_entry = unsafe { &*self.ocq_ring.add(ocq_slot) };
-
-                let word = ocq_entry.tag.extract();
-                let tag = word.read(OCQ_TAG::TAG) as u16;
-                let status = word.read(OCQ_TAG::STATUS) as u8;
-
-                s.ocq_head = (s.ocq_head + 1) & Self::MASK;
-
-                if (tag as usize) < DEPTH {
-                    let slot = &mut s.tags[tag as usize];
-                    slot.status = status;
-                    slot.completed = true;
-                    if slot.detached {
-                        s.detached_done |= 1u32 << tag;
-                    } else {
-                        slot.waker.wake();
-                    }
+                let tag_word =
+                    unsafe { &(*self.ocq_ring.add(ocq_slot)).tag } as *const _ as *const u32;
+                let next = (s.ocq_head + 1) & Self::MASK;
+                // Two completions in one burst when both are there and
+                // adjacent in the ring.
+                if next != tail && ocq_slot + 1 < DEPTH {
+                    // SAFETY: entries `ocq_slot` and `ocq_slot + 1` are both
+                    // available, so the 20 bytes from `tag_word` (the first
+                    // entry's last word to the second's) are.
+                    let (w0, w1) = unsafe { read_pair(tag_word) };
+                    Self::complete(s, w0);
+                    Self::complete(s, w1);
+                    s.ocq_head = (next + 1) & Self::MASK;
+                } else {
+                    // SAFETY: as above, for entry `ocq_slot` alone.
+                    Self::complete(s, unsafe { tag_word.read_volatile() });
+                    s.ocq_head = next;
                 }
             }
 
@@ -475,5 +493,39 @@ mod tests {
         assert!(!should_attach(true, false, true)); // queues not running
         assert!(!should_attach(true, true, false)); // foreign ring base
         assert!(!should_attach(false, false, false));
+    }
+}
+
+/// Words 0 and 4 from `p`, read with one five-word burst: the status
+/// words of two consecutive 16-byte ring entries, which sit in memory the
+/// CPU reads uncached, where a burst costs about as much as one load.
+///
+/// # Safety
+///
+/// `p` must be word-aligned and five words from it readable.
+#[inline(always)]
+unsafe fn read_pair(p: *const u32) -> (u32, u32) {
+    #[cfg(target_arch = "arm")]
+    {
+        let (w0, w4): (u32, u32);
+        // SAFETY: per the function contract.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r2, r3, r4, r5, r8}}",
+                p = in(reg) p,
+                out("r2") w0,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") w4,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (w0, w4)
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: per the function contract.
+    unsafe {
+        (p.read_volatile(), p.add(4).read_volatile())
     }
 }

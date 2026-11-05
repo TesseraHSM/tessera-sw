@@ -410,6 +410,28 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         })
     }
 
+    /// Record the completion whose CQ status word is `st` for its tag, and
+    /// wake its awaiter (or mark a detached copy done).
+    #[inline(always)]
+    fn complete(s: &mut GdmaState<DEPTH>, st: u32) {
+        let st = tock_registers::LocalRegisterCopy::<u32, GDMA_CQ_STATUS::Register>::new(st);
+        let tag = st.read(GDMA_CQ_STATUS::TAG) as usize;
+        if tag < DEPTH {
+            let slot = &mut s.tags[tag];
+            slot.status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
+                0
+            } else {
+                1
+            };
+            slot.completed = true;
+            if slot.detached {
+                s.detached_done |= 1u32 << tag;
+            } else {
+                slot.waker.wake();
+            }
+        }
+    }
+
     /// Drain all available CQ entries and wake their awaiters.
     ///
     /// Processes every pending completion in one call, amortizing the
@@ -425,27 +447,22 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             while s.cq_head != tail {
                 let cq_slot = (s.cq_head & Self::MASK) as usize;
                 // SAFETY: The masked consumer index selects an available entry in the CQ ring.
-                let cq_entry = unsafe { &*self.cq_ring.add(cq_slot) };
-
-                let st = cq_entry.status.extract();
-                let tag = st.read(GDMA_CQ_STATUS::TAG) as u16;
-                let status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
-                    0u8
+                let status_word =
+                    unsafe { &(*self.cq_ring.add(cq_slot)).status } as *const _ as *const u32;
+                let next = (s.cq_head + 1) & Self::MASK;
+                // Two completions in one burst when both are there and
+                // adjacent in the ring.
+                if next != tail && cq_slot + 1 < DEPTH {
+                    // SAFETY: entries `cq_slot` and `cq_slot + 1` are both
+                    // available, so their 32 bytes from `status_word` are.
+                    let (st0, st1) = unsafe { read_pair(status_word) };
+                    Self::complete(s, st0);
+                    Self::complete(s, st1);
+                    s.cq_head = (next + 1) & Self::MASK;
                 } else {
-                    1u8
-                };
-
-                s.cq_head = (s.cq_head + 1) & Self::MASK;
-
-                if (tag as usize) < DEPTH {
-                    let slot = &mut s.tags[tag as usize];
-                    slot.status = status;
-                    slot.completed = true;
-                    if slot.detached {
-                        s.detached_done |= 1u32 << tag;
-                    } else {
-                        slot.waker.wake();
-                    }
+                    // SAFETY: as above, for entry `cq_slot` alone.
+                    Self::complete(s, unsafe { status_word.read_volatile() });
+                    s.cq_head = next;
                 }
             }
 
@@ -454,5 +471,39 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 .write(CQ_CHANNEL_HEAD::HEAD.val(s.cq_head.into()));
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
         });
+    }
+}
+
+/// Words 0 and 4 from `p`, read with one five-word burst: the status
+/// words of two consecutive 16-byte ring entries, which sit in memory the
+/// CPU reads uncached, where a burst costs about as much as one load.
+///
+/// # Safety
+///
+/// `p` must be word-aligned and five words from it readable.
+#[inline(always)]
+unsafe fn read_pair(p: *const u32) -> (u32, u32) {
+    #[cfg(target_arch = "arm")]
+    {
+        let (w0, w4): (u32, u32);
+        // SAFETY: per the function contract.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r2, r3, r4, r5, r8}}",
+                p = in(reg) p,
+                out("r2") w0,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") w4,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (w0, w4)
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: per the function contract.
+    unsafe {
+        (p.read_volatile(), p.add(4).read_volatile())
     }
 }
