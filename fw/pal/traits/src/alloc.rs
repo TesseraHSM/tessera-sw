@@ -207,6 +207,71 @@ impl HsmDmaBuf {
         // SAFETY: The disjoint subslices retain DMA accessibility and exclusive borrows.
         unsafe { (HsmDmaBuf::from_raw_mut(a), HsmDmaBuf::from_raw_mut(b)) }
     }
+
+    /// Copies the first `dst.len()` bytes of this buffer into `dst`, which
+    /// must not be longer than it.
+    ///
+    /// DMA memory can be uncached (it is on Uno): every CPU load waits out
+    /// the interconnect's latency whatever its width, while an eight-word
+    /// burst costs little more than one load. When both buffers are
+    /// word-aligned this moves whole 32-byte blocks with burst loads on Arm,
+    /// so a structure read once out of DMA memory and worked on as a copy
+    /// beats reading it field by field in place.
+    ///
+    /// Returns `false`, copying nothing, if `dst` is longer than this buffer.
+    #[inline]
+    pub fn copy_to_slice(&self, dst: &mut [u8]) -> bool {
+        let Some(src) = self.inner.get(..dst.len()) else {
+            return false;
+        };
+        #[cfg(target_arch = "arm")]
+        if (src.as_ptr() as usize | dst.as_ptr() as usize) % 4 == 0 {
+            let blocks = src.len() / 32;
+            // SAFETY: both buffers are word-aligned and hold at least
+            // `blocks * 32` bytes, and `dst` is exclusively borrowed.
+            unsafe { burst_copy(dst.as_mut_ptr(), src.as_ptr(), blocks) };
+            let done = blocks * 32;
+            dst[done..].copy_from_slice(&src[done..]);
+            return true;
+        }
+        dst.copy_from_slice(src);
+        true
+    }
+}
+
+/// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word
+/// LDM/STM bursts.
+///
+/// # Safety
+///
+/// `src` and `dst` must be word-aligned, valid for `blocks * 32` bytes, and
+/// must not overlap.
+#[cfg(target_arch = "arm")]
+#[inline(always)]
+unsafe fn burst_copy(dst: *mut u8, src: *const u8, blocks: usize) {
+    let mut s = src;
+    let mut d = dst;
+    for _ in 0..blocks {
+        // SAFETY: the caller guarantees both 32-byte blocks are in bounds,
+        // word-aligned and disjoint.
+        unsafe {
+            core::arch::asm!(
+                "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+                "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+                s = inout(reg) s,
+                d = inout(reg) d,
+                out("r2") _,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") _,
+                out("r9") _,
+                out("r10") _,
+                out("r11") _,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
 }
 
 impl core::ops::Deref for HsmDmaBuf {
