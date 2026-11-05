@@ -13,8 +13,29 @@ use crate::engine::UpkaEngine;
 use crate::executor::EngineExecutor;
 use crate::opcode::map_status;
 use crate::opcode::UPKA_MEM_WIPE;
+use crate::pool::StagedCmd;
 use crate::pool::UpkaState;
 use crate::UpkaError;
+
+/// The ticket of a [`Scheduler::run_staged`] call, given up if the call is
+/// dropped before it has the result.
+struct TicketGuard<'a, const DEPTH: usize, const ENGINES: usize> {
+    driver: &'a UpkaDriver<DEPTH, ENGINES>,
+    ticket: Option<u8>,
+}
+
+impl<const DEPTH: usize, const ENGINES: usize> Drop for TicketGuard<'_, DEPTH, ENGINES> {
+    fn drop(&mut self) {
+        if let Some(t) = self.ticket {
+            let running = self.driver.state.with(|s| s.abandon_staged(t));
+            if let Some(id) = running {
+                // The command still uses the caller's buffers: wait for the
+                // engine to finish with them, as dropping a held engine does.
+                EngineExecutor::wait_until_idle(id);
+            }
+        }
+    }
+}
 
 /// Schedules queue/engine assignment and completion handling for UPKA commands.
 #[derive(Debug, Clone, Copy)]
@@ -148,11 +169,51 @@ impl<'a, const DEPTH: usize, const ENGINES: usize> Scheduler<'a, DEPTH, ENGINES>
             Nvic::unpend_raw(Interrupt::UPKA_0_ERROR as u16 + id as u16);
             if slot.wiping {
                 Self::finish_wipe(s, id, flags as u8);
+            } else if let Some(t) = slot.ticket {
+                s.finish_staged(id as u8, t, flags as u8);
             } else {
                 slot.capture_completion_status(flags as u8);
                 slot.wake_waiter();
             }
         }
+    }
+
+    /// Run one command on any engine without holding the engine across
+    /// awaits: the command is started now if an engine is free, or else
+    /// queued in the driver and started by whichever completion frees the
+    /// next engine, and its own completion starts the engine's wipe. So the
+    /// caller is woken once, with the result, and an engine never idles
+    /// waiting for a task to run.
+    ///
+    /// # Errors
+    ///
+    /// [`UpkaError::QUEUE_FULL`] if the driver cannot take the command;
+    /// otherwise the command's status.
+    pub(crate) async fn run_staged(&self, cmd: StagedCmd) -> HsmResult<()> {
+        let mut ticket = TicketGuard {
+            driver: self.driver,
+            ticket: None,
+        };
+        poll_fn(|cx| {
+            self.driver.state.with(|s| match ticket.ticket {
+                None => match s.submit_staged(cmd) {
+                    Some(t) => {
+                        ticket.ticket = Some(t);
+                        s.tickets[t as usize].waker.register(cx.waker());
+                        Poll::Pending
+                    }
+                    None => Poll::Ready(Err(UpkaError::QUEUE_FULL)),
+                },
+                Some(t) => match s.take_staged(t, cx) {
+                    Some(status) => {
+                        ticket.ticket = None;
+                        Poll::Ready(map_status(status))
+                    }
+                    None => Poll::Pending,
+                },
+            })
+        })
+        .await
     }
 
     /// Complete a post-operation wipe started by
