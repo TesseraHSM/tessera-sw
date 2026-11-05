@@ -13,6 +13,7 @@
 
 use tsra_fw_ddi_mbor_types::ecdh_key_exchange::DdiEcdhKeyExchangeReq;
 use tsra_fw_ddi_mbor_types::ecdh_key_exchange::DdiEcdhKeyExchangeResp;
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 
@@ -31,6 +32,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiEcdhKeyExchangeReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
@@ -84,7 +86,7 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
 
         // Commit the derived shared secret to the vault, session-scoped
         // iff requested.
-        let key_id: u16 = pal
+        let key_id = pal
             .vault_key_create(
                 io,
                 secret,
@@ -92,8 +94,10 @@ pub(crate) async fn ecdh_key_exchange<'p, P: HsmPal>(
                 target_attrs.session().then_some(HsmSessId::from(sess_id)),
                 target_attrs,
             )
-            .await?
-            .into();
+            .await?;
+        undo.push_vault_create(key_id)?;
+        pal.check_io_failure(io)?;
+        let key_id: u16 = key_id.into();
 
         // Envelope the derived shared secret into the host's re-import blob.
         let masked_key = super::masking::mask_blob(

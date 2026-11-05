@@ -193,7 +193,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::AesEncryptDecrypt => aes_encrypt_decrypt(pal, io, decoder, hdr).await,
         DdiOp::EccGenerateKeyPair => ecc_generate_key_pair(pal, io, decoder, hdr, undo).await,
         DdiOp::EccSign => ecc_sign(pal, io, decoder, hdr).await,
-        DdiOp::EcdhKeyExchange => ecdh_key_exchange(pal, io, decoder, hdr).await,
+        DdiOp::EcdhKeyExchange => ecdh_key_exchange(pal, io, decoder, hdr, undo).await,
         DdiOp::HkdfDerive => hkdf_derive(pal, io, decoder, hdr).await,
         DdiOp::KbkdfCounterHmacDerive => kbkdf_counter_hmac_derive(pal, io, decoder, hdr).await,
         DdiOp::Hmac => hmac(pal, io, decoder, hdr).await,
