@@ -76,24 +76,74 @@ pub fn pack_t0(buf: &mut [u8], a: &Poly) {
 /// shapes is smaller than any one of them was.
 #[inline(never)]
 pub(crate) fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
-    let mut words = buf[..32 * d as usize].as_chunks::<4>().0.iter();
+    // The stream is 8d words. It is first copied into the top of `a` --
+    // from PSRAM a burst of eight words at a time, where a lone word load
+    // costs 35 cycles -- and unpacked from there downwards into `a`, which
+    // overtakes no word before reading it: coefficient i is written only
+    // after the ceil(d*(i+1)/32) words holding it have been read, and the
+    // stream starts 8d words from the end.
+    let words = 8 * d as usize;
+    let top = N - words;
+    let src = &buf[..4 * words];
+    #[cfg(target_arch = "arm")]
+    let staged = (src.as_ptr() as usize).is_multiple_of(4) && {
+        // SAFETY: `a[top..]` holds `words` words, a multiple of eight, and
+        // `src` is word aligned and as long.
+        unsafe { crate::spill::burst(a.as_mut_ptr().add(top), src.as_ptr().cast(), words) };
+        true
+    };
+    #[cfg(not(target_arch = "arm"))]
+    let staged = false;
+    if !staged {
+        for (k, w) in src.as_chunks::<4>().0.iter().enumerate() {
+            a[top + k] = i32::from_le_bytes(*w);
+        }
+    }
+
+    // The secret key's s1 and s2, eta - f in 3 or 4 bits, and t0, 2^12 - f
+    // in 13: eight fields to every d bytes, each group a word load or a few
+    // (asm/dsa_unpack_key.S), not a test a coefficient for the word running
+    // out.
+    #[cfg(target_arch = "arm")]
+    if d <= 4 || d == 13 {
+        extern "C" {
+            fn pqc_ml_dsa_unpack_eta(r: *mut i32, s: *const u8, eta: i32, d: u32);
+            fn pqc_ml_dsa_unpack_t0(r: *mut i32, s: *const u8);
+        }
+        // SAFETY: `a` is 256 coefficients with the 8d-word stream staged at
+        // its end, which the routines read from there, as they may.
+        unsafe {
+            let a = a.as_mut_ptr();
+            let s = a.add(top).cast();
+            if d == 13 {
+                debug_assert_eq!(bias, 1 << 12);
+                pqc_ml_dsa_unpack_t0(a, s);
+            } else {
+                pqc_ml_dsa_unpack_eta(a, s, bias, d);
+            }
+        }
+        return;
+    }
+
     let mask = (1u32 << d) - 1;
     let mut acc: u32 = 0;
     let mut bits: u32 = 0;
-    for c in a.iter_mut() {
+    let mut next = top;
+    for i in 0..N {
         let t = if bits >= d {
             let t = acc & mask;
             acc >>= d;
             bits -= d;
             t
         } else {
-            let w = words.next().map_or(0, |w| u32::from_le_bytes(*w));
+            let w = a[next] as u32;
+            next += 1;
             let t = (acc | (w << bits)) & mask;
             acc = w >> (d - bits);
             bits += 32 - d;
             t
         };
-        *c = bias - t as i32;
+        a[i] = bias - t as i32;
     }
 }
 

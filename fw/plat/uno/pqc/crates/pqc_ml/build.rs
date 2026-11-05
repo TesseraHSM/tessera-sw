@@ -16,6 +16,7 @@ fn main() {
             .file("asm/dsa_ntt.S")
             .file("asm/dsa_unpack_z.S")
             .file("asm/dsa_check.S")
+            .file("asm/dsa_unpack_key.S")
             .compile("pqc_ml_asm");
 
         println!("cargo:rerun-if-changed=asm/keccakf1600.S");
@@ -23,5 +24,6 @@ fn main() {
         println!("cargo:rerun-if-changed=asm/dsa_ntt.S");
         println!("cargo:rerun-if-changed=asm/dsa_unpack_z.S");
         println!("cargo:rerun-if-changed=asm/dsa_check.S");
+        println!("cargo:rerun-if-changed=asm/dsa_unpack_key.S");
     }
 }
