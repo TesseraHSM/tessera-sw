@@ -44,31 +44,37 @@ const NEEDED_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS + KEY_SLOTS * KEY_WORDS;
 
 static mut BASE: *mut i32 = core::ptr::null_mut();
 
-static mut NEAR: *mut i32 = core::ptr::null_mut();
-static mut NEAR_WORDS: usize = 0;
+/// Near regions given so far, in order; unused entries are empty.
+static mut NEAR: [(*mut i32, usize); 2] = [(core::ptr::null_mut(), 0); 2];
 
 /// Hand the signer memory to keep matrix elements in ahead of the spill:
 /// memory the core reads at dTCM speed but that its stack does not cover.
 /// Elements there are read in place, like the ones the work buffer holds.
 ///
+/// A platform whose fast memory is in two pieces calls this once for each,
+/// the first filled before the second; any call past the second is ignored.
+///
 /// # Safety
 /// `base` must be valid for `words` `i32` reads and writes, word aligned,
 /// and reserved for this core alone for the lifetime of the program.
 pub unsafe fn init_near(base: *mut i32, words: usize) {
-    NEAR = base;
-    NEAR_WORDS = words;
+    if let Some(slot) = (*core::ptr::addr_of_mut!(NEAR)).iter_mut().find(|r| r.0.is_null()) {
+        *slot = (base, words);
+    }
 }
 
-/// The region [`init_near`] gave, empty if none.
+/// The regions [`init_near`] gave, in order, empty where none.
 ///
 /// # Safety
-/// The caller must be its only user for as long as the slice lives.
-pub(crate) unsafe fn near() -> &'static mut [i32] {
-    if NEAR.is_null() {
-        &mut []
-    } else {
-        core::slice::from_raw_parts_mut(NEAR, NEAR_WORDS)
-    }
+/// The caller must be their only user for as long as the slices live.
+pub(crate) unsafe fn near() -> [&'static mut [i32]; 2] {
+    (*core::ptr::addr_of!(NEAR)).map(|(base, words)| {
+        if base.is_null() {
+            &mut []
+        } else {
+            core::slice::from_raw_parts_mut(base, words)
+        }
+    })
 }
 
 /// Hand the signer a region to spill into.
