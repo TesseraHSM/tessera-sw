@@ -145,7 +145,9 @@ TEST(tsra_part, mobk_cache_path)
     }
 
     const std::filesystem::path cache_path(path);
-    EXPECT_EQ(cache_path.parent_path(), std::filesystem::temp_directory_path());
+    EXPECT_TRUE(
+        std::filesystem::equivalent(cache_path.parent_path(), std::filesystem::temp_directory_path())
+    );
 #ifdef TSRA_FEATURE_EMU
     EXPECT_EQ(cache_path.filename().string().find("tsra-mobk-"), 0u);
     EXPECT_EQ(cache_path.extension(), ".bin");
