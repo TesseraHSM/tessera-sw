@@ -50,7 +50,10 @@ static mut NEAR: [(*mut i32, usize); 2] = [(core::ptr::null_mut(), 0); 2];
 /// `base` must be valid for `words` `i32` reads and writes, word aligned,
 /// and reserved for this core alone for the lifetime of the program.
 pub unsafe fn init_near(base: *mut i32, words: usize) {
-    if let Some(slot) = (*core::ptr::addr_of_mut!(NEAR)).iter_mut().find(|r| r.0.is_null()) {
+    if let Some(slot) = (*core::ptr::addr_of_mut!(NEAR))
+        .iter_mut()
+        .find(|r| r.0.is_null())
+    {
         *slot = (base, words);
     }
 }
@@ -202,4 +205,37 @@ unsafe fn burst(dst: *mut i32, src: *const i32, words: usize) {
 
     #[cfg(not(target_arch = "arm"))]
     core::ptr::copy_nonoverlapping(src, dst, words);
+}
+
+/// Which matrix the near regions and the spill hold, as the last signature
+/// on this core left it (see [`a_cache_hit`]).
+///
+/// The matrix A is expanded from the public seed rho, so it is public, and
+/// a core that signs again with the same key can use the elements it kept
+/// rather than expanding them again -- by far the largest cost of a
+/// signature. Only [`crate::dsa::sign`] writes these regions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ACache {
+    /// The public seed the elements were expanded from.
+    pub(crate) rho: [u8; 32],
+    /// The matrix shape and where its elements went: rows, columns, the
+    /// elements held in the signer's work buffer (re-derived per request,
+    /// as the buffer is), in each near region, and in all.
+    pub(crate) layout: [u16; 6],
+}
+
+static mut A_CACHE: Option<ACache> = None;
+
+/// Whether the near regions and the spill hold the elements of `want`.
+pub(crate) fn a_cache_hit(want: &ACache) -> bool {
+    // SAFETY: one core, one signer at a time, and only it touches this.
+    unsafe { (*core::ptr::addr_of!(A_CACHE)).as_ref() == Some(want) }
+}
+
+/// Record what the near regions and the spill hold: `Some` once a
+/// signature has stored every element it keeps there, `None` before it
+/// starts overwriting them.
+pub(crate) fn a_cache_set(cache: Option<ACache>) {
+    // SAFETY: as in `a_cache_hit`.
+    unsafe { *core::ptr::addr_of_mut!(A_CACHE) = cache };
 }

@@ -88,6 +88,27 @@ pub fn sign_internal(
     let held = cache_slots + near_a1 + near_a2;
     let mut a_cached = false;
 
+    // The near regions and the spill keep their elements across
+    // signatures: a signature with the key (rho) and layout the last one on
+    // this core used finds them there, and derives only the work buffer's,
+    // which go with each request's buffer. Any other forgets them before it
+    // overwrites them.
+    let a_cache = crate::spill::ACache {
+        rho: *rho,
+        layout: [
+            k as u16,
+            l as u16,
+            cache_slots as u16,
+            near_a1 as u16,
+            near_a2 as u16,
+            whole as u16,
+        ],
+    };
+    let reuse = crate::spill::a_cache_hit(&a_cache);
+    if !reuse {
+        crate::spill::a_cache_set(None);
+    }
+
     // s1 and s2 coefficients are packed eta - f in d-bit fields.
     let eta_d = if params.eta == 2 { 3 } else { 4 };
     let eta_bias = params.eta as i32;
@@ -139,10 +160,17 @@ pub fn sign_internal(
                 // Kept whole: derived straight into its slot the first
                 // time, and used from there.
                 let kept_whole = whole && t < cache_slots;
-                if kept_whole || !a_cached || (t >= held && spill.is_none()) {
+                // Already in its near region or spill slot: from an earlier
+                // attempt, or from an earlier signature with this matrix.
+                let have = a_cached || (reuse && t >= cache_slots && (t < held || spill.is_some()));
+                if kept_whole || !have || (t >= held && spill.is_none()) {
                     // Otherwise the first attempt, or an element with
                     // nowhere to be kept: derive it.
-                    let a = if kept_whole { &mut a_polys[t] } else { &mut c_hat };
+                    let a = if kept_whole {
+                        &mut a_polys[t]
+                    } else {
+                        &mut c_hat
+                    };
                     if !(kept_whole && a_cached) {
                         sampling::poly_uniform(a, rho, i as u8, j as u8);
                     }
@@ -151,17 +179,14 @@ pub fn sign_internal(
                     } else {
                         ntt::poly_pointwise_acc_montgomery(&mut w[i], a, y_hat);
                     }
-                    if !a_cached && !kept_whole {
+                    if !have && !kept_whole {
                         if t < cache_slots {
                             crate::spill::pack(
                                 &mut a_polys.as_flattened_mut()[t * PACKED_WORDS..],
                                 &c_hat,
                             );
                         } else if t < held {
-                            crate::spill::pack(
-                                near_elem(near1, near2, t - cache_slots),
-                                &c_hat,
-                            );
+                            crate::spill::pack(near_elem(near1, near2, t - cache_slots), &c_hat);
                         } else if let Some(p) = spill {
                             // SAFETY: `p` is this core's own slot, sized for
                             // one packed element by `spill::init`.
@@ -193,6 +218,9 @@ pub fn sign_internal(
                 }
                 t += 1;
             }
+        }
+        if !a_cached && !reuse {
+            crate::spill::a_cache_set(Some(a_cache));
         }
         a_cached = true;
 
@@ -440,7 +468,11 @@ fn close_ok(
         let mut cs = 0i32;
         for &e in c {
             let p = (e & 0xff) as usize;
-            let v = if n >= p { scratch[n - p] } else { -scratch[n + N - p] };
+            let v = if n >= p {
+                scratch[n - p]
+            } else {
+                -scratch[n + N - p]
+            };
             cs += if e & 0x100 != 0 { -v } else { v };
         }
         if ((a[n] >> shift) + sign * cs).abs() >= bound {
