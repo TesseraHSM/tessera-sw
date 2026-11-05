@@ -412,7 +412,24 @@ impl DdiEmuDev {
 
 impl Drop for DdiEmuDev {
     fn drop(&mut self) {
-        self.close_live_session();
+        if self.session.lock().session_id.is_none() {
+            return;
+        }
+        // Close on a helper thread: the dropping thread may be tearing down
+        // (e.g. OpenSSL's `atexit` cleanup at process exit) with Tokio's
+        // thread-locals already destroyed, where `block_on` would panic.
+        let this = &*self;
+        std::thread::scope(|s| {
+            match std::thread::Builder::new()
+                .name("tsra-emu-close".into())
+                .spawn_scoped(s, || this.close_live_session())
+            {
+                Ok(t) => {
+                    let _ = t.join();
+                }
+                Err(err) => tracing::warn!(?err, "DdiEmu: failed to close session on drop"),
+            }
+        });
     }
 }
 
@@ -1014,5 +1031,35 @@ mod tests {
                 max_ver: 1,
             }
         );
+    }
+
+    /// Dropping a device with a live session from a thread-local destructor
+    /// that runs after Tokio's own thread-locals are gone (as at process
+    /// exit, e.g. from OpenSSL's `atexit` cleanup) must not panic.
+    #[test]
+    fn drop_after_tokio_thread_locals_destroyed_does_not_panic() {
+        use std::cell::RefCell;
+
+        thread_local! {
+            static DEV: RefCell<Option<super::DdiEmuDev>> = const { RefCell::new(None) };
+        }
+
+        let dev = DdiEmu::default()
+            .open_dev(EMU_DEVICE_PATH)
+            .expect("open emu device");
+        dev.session.lock().session_id = Some(1);
+
+        std::thread::spawn(move || {
+            // Registered first, so destroyed after Tokio's thread-locals,
+            // which the I/O below registers.
+            DEV.with(|d| *d.borrow_mut() = Some(dev));
+            DEV.with(|d| {
+                let d = d.borrow();
+                let dev = d.as_ref().expect("device stored");
+                dev.block_on_io(async {});
+            });
+        })
+        .join()
+        .expect("device drop during thread-local teardown panicked");
     }
 }
