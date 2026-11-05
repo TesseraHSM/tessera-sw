@@ -446,6 +446,95 @@ pub fn poly_pointwise_montgomery_inplace(a: &mut [i32; N], b: &[i32; N]) {
     }
 }
 
+/// Pointwise Montgomery multiply-accumulate with `a` packed three bytes to
+/// a coefficient, as [`crate::spill`] packs matrix elements: c += a * b.
+///
+/// The unpacking rides in the gaps of the multiply chain -- the loop is
+/// bound by the single MAC pipe, which the shifts do not use -- so a packed
+/// operand costs no more than an unpacked one, and the signer gets to keep
+/// a third more of the matrix in dTCM and to skip unpacking spilled
+/// elements into a scratch polynomial first.
+///
+/// # Panics
+/// If `a` holds fewer than `N * 3 / 4` words.
+pub fn poly_pointwise_acc_montgomery_packed(c: &mut [i32; N], a: &[i32], b: &[i32; N]) {
+    let a = &a[..N * 3 / 4];
+
+    #[cfg(target_arch = "arm")]
+    {
+        // SAFETY: `c` and `b` are `[i32; N]` and `a` holds the 3N/4 packed
+        // words of N coefficients; all are word aligned, and `c` is the
+        // only one written and a distinct borrow. Four coefficients a pass.
+        unsafe {
+            core::arch::asm!(
+                "2:",
+                "ldrd   {w0}, {w1}, [{ap}], #8",
+                "ldrd   {x0}, {x1}, [{bp}], #8",
+                "ubfx   {t0}, {w0}, #0, #24",
+                "lsr    {w0}, {w0}, #24",
+                "orr    {w0}, {w0}, {w1}, lsl #8",
+                "bic    {w0}, {w0}, #0xFF000000",
+                "smull  {t1}, {t2}, {t0}, {x0}",
+                "smull  {t0}, {x0}, {w0}, {x1}",
+                "mul    {w0}, {t1}, {qinv}",
+                "mul    {x1}, {t0}, {qinv}",
+                "smlal  {t1}, {t2}, {w0}, {q}",
+                "smlal  {t0}, {x0}, {x1}, {q}",
+                "ldrd   {t0}, {t1}, [{cp}]",
+                "add    {t0}, {t0}, {t2}",
+                "add    {t1}, {t1}, {x0}",
+                "strd   {t0}, {t1}, [{cp}], #8",
+                "ldr    {w0}, [{ap}], #4",
+                "ldrd   {x0}, {x1}, [{bp}], #8",
+                "lsr    {t0}, {w1}, #16",
+                "orr    {t0}, {t0}, {w0}, lsl #16",
+                "bic    {t0}, {t0}, #0xFF000000",
+                "lsr    {w0}, {w0}, #8",
+                "smull  {t1}, {t2}, {t0}, {x0}",
+                "smull  {t0}, {x0}, {w0}, {x1}",
+                "mul    {w0}, {t1}, {qinv}",
+                "mul    {x1}, {t0}, {qinv}",
+                "smlal  {t1}, {t2}, {w0}, {q}",
+                "smlal  {t0}, {x0}, {x1}, {q}",
+                "ldrd   {t0}, {t1}, [{cp}]",
+                "add    {t0}, {t0}, {t2}",
+                "add    {t1}, {t1}, {x0}",
+                "strd   {t0}, {t1}, [{cp}], #8",
+                "subs   {n}, {n}, #1",
+                "bne    2b",
+                cp = inout(reg) c.as_mut_ptr() => _,
+                ap = inout(reg) a.as_ptr() => _,
+                bp = inout(reg) b.as_ptr() => _,
+                n = inout(reg) N / 4 => _,
+                qinv = in(reg) QINV_I,
+                q = in(reg) Q_I,
+                w0 = out(reg) _,
+                w1 = out(reg) _,
+                x0 = out(reg) _,
+                x1 = out(reg) _,
+                t0 = out(reg) _,
+                t1 = out(reg) _,
+                t2 = out(reg) _,
+                options(nostack),
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    for (g, w) in a.as_chunks::<3>().0.iter().enumerate() {
+        let (w0, w1, w2) = (w[0] as u32, w[1] as u32, w[2] as u32);
+        let v = [
+            w0 & 0x00FF_FFFF,
+            ((w0 >> 24) | (w1 << 8)) & 0x00FF_FFFF,
+            ((w1 >> 16) | (w2 << 16)) & 0x00FF_FFFF,
+            w2 >> 8,
+        ];
+        for (k, &x) in v.iter().enumerate() {
+            c[4 * g + k] += montgomery_reduce(x as i64 * b[4 * g + k] as i64);
+        }
+    }
+}
+
 /// Pointwise Montgomery multiply-accumulate: c += a * b.
 pub fn poly_pointwise_acc_montgomery(c: &mut [i32; N], a: &[i32; N], b: &[i32; N]) {
     #[cfg(target_arch = "arm")]

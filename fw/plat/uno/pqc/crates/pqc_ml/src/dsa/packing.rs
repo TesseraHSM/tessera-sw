@@ -66,32 +66,39 @@ pub fn pack_t0(buf: &mut [u8], a: &Poly) {
 }
 
 pub fn unpack_t0(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..416];
-    for i in 0..N / 8 {
-        let off = 13 * i;
-        a[8 * i] = (buf[off] as i32) | ((buf[off + 1] as i32 & 0x1F) << 8);
-        a[8 * i + 1] = ((buf[off + 1] as i32) >> 5)
-            | ((buf[off + 2] as i32) << 3)
-            | ((buf[off + 3] as i32 & 0x03) << 11);
-        a[8 * i + 2] = ((buf[off + 3] as i32) >> 2) | ((buf[off + 4] as i32 & 0x7F) << 6);
-        a[8 * i + 3] = ((buf[off + 4] as i32) >> 7)
-            | ((buf[off + 5] as i32) << 1)
-            | ((buf[off + 6] as i32 & 0x0F) << 9);
-        a[8 * i + 4] = ((buf[off + 6] as i32) >> 4)
-            | ((buf[off + 7] as i32) << 4)
-            | ((buf[off + 8] as i32 & 0x01) << 12);
-        a[8 * i + 5] = ((buf[off + 8] as i32) >> 1) | ((buf[off + 9] as i32 & 0x3F) << 7);
-        a[8 * i + 6] = ((buf[off + 9] as i32) >> 6)
-            | ((buf[off + 10] as i32) << 2)
-            | ((buf[off + 11] as i32 & 0x07) << 10);
-        a[8 * i + 7] = ((buf[off + 11] as i32) >> 3) | ((buf[off + 12] as i32) << 5);
+    // Centered: [0, 2^d) maps to [-(2^(d-1)-1), 2^(d-1)].
+    unpack_centered(a, buf, D, 1 << (D - 1));
+}
 
-        // Convert from [0, 2^d) to centered [-(2^(d-1)-1), 2^(d-1)]
-        for j in 0..8 {
-            a[8 * i + j] = (1 << (D - 1)) - a[8 * i + j];
-        }
+/// Unpack 256 `d`-bit fields, little-endian as FIPS 204's BitPack writes
+/// them, as `bias - field`: the form of `t0`, and of `s1`/`s2` for both
+/// values of eta.
+///
+/// Signing reads these straight out of the secret key where it lies, in
+/// PSRAM, which charges about 35 cycles an access whether the access is a
+/// byte or a word. Taking the stream a word at a time is a quarter of the
+/// accesses the byte-wise unpackers made, and one routine for all three
+/// shapes is smaller than any one of them was.
+#[inline(never)]
+fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
+    let mut words = buf[..32 * d as usize].as_chunks::<4>().0.iter();
+    let mask = (1u32 << d) - 1;
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for c in a.iter_mut() {
+        let t = if bits >= d {
+            let t = acc & mask;
+            acc >>= d;
+            bits -= d;
+            t
+        } else {
+            let w = words.next().map_or(0, |w| u32::from_le_bytes(*w));
+            let t = (acc | (w << bits)) & mask;
+            acc = w >> (d - bits);
+            bits += 32 - d;
+            t
+        };
+        *c = bias - t as i32;
     }
 }
 
@@ -106,9 +113,11 @@ pub fn pack_eta(buf: &mut [u8], a: &Poly, eta: u8) {
 }
 
 pub fn unpack_eta(a: &mut Poly, buf: &[u8], eta: u8) {
+    // Three bits a coefficient for eta = 2, four for eta = 4; either way
+    // the field f stands for eta - f.
     match eta {
-        2 => unpack_eta2(a, buf),
-        4 => unpack_eta4(a, buf),
+        2 => unpack_centered(a, buf, 3, 2),
+        4 => unpack_centered(a, buf, 4, 4),
         _ => {}
     }
 }
@@ -129,25 +138,6 @@ fn pack_eta2(buf: &mut [u8], a: &Poly) {
     }
 }
 
-fn unpack_eta2(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..96];
-    for i in 0..N / 8 {
-        a[8 * i] = (buf[3 * i] & 0x07) as i32;
-        a[8 * i + 1] = ((buf[3 * i] >> 3) & 0x07) as i32;
-        a[8 * i + 2] = ((buf[3 * i] >> 6) | ((buf[3 * i + 1] & 0x01) << 2)) as i32;
-        a[8 * i + 3] = ((buf[3 * i + 1] >> 1) & 0x07) as i32;
-        a[8 * i + 4] = ((buf[3 * i + 1] >> 4) & 0x07) as i32;
-        a[8 * i + 5] = ((buf[3 * i + 1] >> 7) | ((buf[3 * i + 2] & 0x03) << 1)) as i32;
-        a[8 * i + 6] = ((buf[3 * i + 2] >> 2) & 0x07) as i32;
-        a[8 * i + 7] = ((buf[3 * i + 2] >> 5) & 0x07) as i32;
-        for j in 0..8 {
-            a[8 * i + j] = 2 - a[8 * i + j]; // map [0,4] -> [2,-2]
-        }
-    }
-}
-
 // eta=4: 4 bits per coefficient, pack 2 coefficients per byte
 fn pack_eta4(buf: &mut [u8], a: &Poly) {
     // Narrow to the exact encoded length once, so the byte accesses
@@ -157,18 +147,6 @@ fn pack_eta4(buf: &mut [u8], a: &Poly) {
         let t0 = (4 - a[2 * i]) as u8;
         let t1 = (4 - a[2 * i + 1]) as u8;
         buf[i] = t0 | (t1 << 4);
-    }
-}
-
-fn unpack_eta4(a: &mut Poly, buf: &[u8]) {
-    // Narrow to the exact encoded length once, so the byte accesses
-    // below are provably in range and carry no bounds check each.
-    let buf = &buf[..128];
-    for i in 0..N / 2 {
-        a[2 * i] = (buf[i] & 0x0F) as i32;
-        a[2 * i + 1] = (buf[i] >> 4) as i32;
-        a[2 * i] = 4 - a[2 * i];
-        a[2 * i + 1] = 4 - a[2 * i + 1];
     }
 }
 
