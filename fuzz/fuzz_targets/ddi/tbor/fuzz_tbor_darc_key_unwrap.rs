@@ -599,14 +599,14 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
                 } else { vec![input.mask; len] };
                 assert_eq!(req.wrapped_key.len(), len);
                 expected = if len > DARC_UNWRAP_WRAPPED_KEY_MAX_LEN {
-                    Expected::EncodeError
+                    Expected::Reject(TborStatus::TborInvalidFixedLength)
                 } else { Expected::Reject(TborStatus::InvalidArg) };
             }
             Scenario::RawWrapped => {
                 req.wrapped_key = input.extra[..input.extra.len().min(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN)].to_vec();
                 if req.wrapped_key.len().is_multiple_of(8) { req.wrapped_key.push(input.mask); }
                 expected = if req.wrapped_key.len() > DARC_UNWRAP_WRAPPED_KEY_MAX_LEN {
-                    Expected::EncodeError
+                    Expected::Reject(TborStatus::TborInvalidFixedLength)
                 } else { Expected::Reject(TborStatus::InvalidArg) };
             }
             Scenario::WrappedTruncate => {

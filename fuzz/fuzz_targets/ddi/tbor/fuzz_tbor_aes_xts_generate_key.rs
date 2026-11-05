@@ -195,7 +195,10 @@ fn assert_roundtrip(
         dul: plaintext.len() as u16,
         in_index: 0,
         out_index: 1,
-        tweak: tweak.to_vec(),
+        tweak: u64::from_le_bytes(*tweak)
+            .min(u64::MAX - 1)
+            .to_le_bytes()
+            .to_vec(),
         masked_key: masked_key.to_vec(),
     };
     let mut ciphertext = [0u8; 32];

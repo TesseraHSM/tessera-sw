@@ -151,7 +151,10 @@ fn expected(
     if wrong_kind {
         return reject(TborStatus::InvalidKeyType);
     }
-    if req.masked_key != pristine {
+    // The last four stored IV bytes are ignored when unmasking.
+    if req.masked_key[..20] != pristine[..20]
+        || req.masked_key[24..] != pristine[24..]
+    {
         return if tag_only {
             reject(TborStatus::AesGcmDecryptTagDoesNotMatch)
         } else {
