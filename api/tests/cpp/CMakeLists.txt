@@ -141,20 +141,10 @@ endif()
 # Expose the selected DDI backend and session-test mode to the C++ sources as
 # compile definitions.
 # `CARGO_FEATURE_*` env vars only exist during the Rust build script, not during
-# C++ compilation. Backend-specific setup uses `TSRA_FEATURE_MOCK` and
-# `TSRA_FEATURE_EMU`; suite selection uses `SESSION_EX_TESTS`.
-if(TEST_FEATURES MATCHES "(^| )mock($| )")
-    target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_FEATURE_MOCK)
-endif()
-
+# C++ compilation. Backend-specific setup uses `TSRA_FEATURE_EMU`; suite
+# selection uses `SESSION_EX_TESTS`.
 if(TEST_FEATURES MATCHES "(^| )emu($| )")
     target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_FEATURE_EMU)
-endif()
-
-if(SESSION_EX_TESTS)
-    if(TEST_FEATURES MATCHES "(^| )mock($| )")
-        message(FATAL_ERROR "mock and session_ex tests cannot be enabled together")
-    endif()
 endif()
 
 target_compile_definitions(

@@ -51,6 +51,7 @@
 //! | `[u8; N]` | fixed-length buffer |
 //! | `Vec<u8>` | variable buffer |
 //! | `Option<Vec<u8>>` | optional variable buffer |
+//! | `Option<u8>`/`Option<u16>`/`Option<u32>`/`Option<u64>` | optional inline primitive |
 //!
 //! [`TborOpReq`]: ../tsra_ddi_tbor_types/trait.TborOpReq.html
 //! [`TborResp`]: ../tsra_ddi_tbor_types/trait.TborResp.html
@@ -332,6 +333,15 @@ fn gen_encode_step(f: &ParsedField) -> TokenStream2 {
                 ::core::option::Option::None => __enc.none()?,
             };
         },
+        FieldShape::OptUint(width) => {
+            let method = format_ident!("{}", width.encoder_method());
+            quote! {
+                let __enc = match self.#name {
+                    ::core::option::Option::Some(__v) => __enc.#method(__v)?,
+                    ::core::option::Option::None => __enc.none()?,
+                };
+            }
+        }
     }
 }
 
@@ -440,6 +450,18 @@ fn gen_decode_step(idx: usize, f: &ParsedField) -> TokenStream2 {
                 #unexpected
             }
         },
+        FieldShape::OptUint(width) => {
+            let variant = format_ident!("{}", width.toc_variant());
+            quote! {
+                match __raw.toc_entry(#idx) {
+                    ::tsra_ddi_tbor_codec::TocEntry::#variant(__v) =>
+                        ::core::option::Option::Some(__v),
+                    ::tsra_ddi_tbor_codec::TocEntry::None =>
+                        ::core::option::Option::None,
+                    #unexpected
+                }
+            }
+        }
     };
     quote! {
         let #name = #body;

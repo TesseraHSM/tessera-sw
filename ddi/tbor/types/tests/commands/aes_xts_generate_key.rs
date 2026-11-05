@@ -113,6 +113,6 @@ mod tests {
         let ctx = TestCtx::new();
         let _session = finalized_co_session(&ctx);
         let req = generate_xts_key_req(u16::MAX, SCOPE_LOCAL);
-        ctx.expect_fw_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
+        ctx.expect_session_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
     }
 }

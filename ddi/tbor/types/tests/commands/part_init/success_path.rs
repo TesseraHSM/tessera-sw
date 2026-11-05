@@ -19,11 +19,6 @@ use std::sync::Barrier;
 
 use minicbor::data::Type as CborType;
 use tsra_crypto::DerEccPublicKey;
-use tsra_ddi_mbor_sim::attestation::KeyAttester;
-use tsra_ddi_mbor_sim::crypto::ecc::EccOp;
-use tsra_ddi_mbor_sim::crypto::ecc::EccPublicKey as SimEccPublicKey;
-use tsra_ddi_mbor_sim::report::CoseSign1Object;
-use tsra_ddi_mbor_sim::report::KeyAttestationReport;
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::build_part_init_mach_seed_aad;
@@ -237,12 +232,11 @@ fn part_init_multi_threaded_single_winner() {
 ///    pull the SubjectPublicKeyInfo as the PID pubkey.
 ///
 /// 2. Verify the COSE_Sign1 signature with
-///    [`tsra_ddi_mbor_sim::attestation::KeyAttester::verify`],
-///    which rebuilds the COSE `Sig_structure`, hashes it with
-///    SHA-384, and runs ECDSA-P384 verify under the PID pubkey.
+///    [`crate::commands::key_report::verify_cose_sign1`], which
+///    rebuilds the COSE `Sig_structure`, hashes it with SHA-384, runs
+///    ECDSA-P384 verify under the PID pubkey, and decodes the payload.
 ///
-/// 3. Cross-bind: re-decode the COSE_Sign1 to recover the raw
-///    payload, parse it as a [`KeyAttestationReport`], and walk
+/// 3. Cross-bind: walk
 ///    the embedded COSE_Key map to recover the attested `pk_x` /
 ///    `pk_y`.  These must match the X/Y coordinates parsed out of
 ///    the CSR's SubjectPublicKeyInfo — proving the report
@@ -260,25 +254,17 @@ fn verify_pta_report(ctx: &TestCtx, pta_report: &[u8], pta_spki_der: &[u8]) {
     let leaf_bytes = leaf_resp.data.certificate.as_slice();
     let leaf = X509Certificate::from_der(leaf_bytes).expect("PID leaf parses as X.509 certificate");
     let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
-    let pid_pub =
-        SimEccPublicKey::from_der(&pid_spki, None).expect("PID pubkey loads from leaf SPKI");
 
     // 2. COSE_Sign1 signature verify under PID pubkey.
-    let attester = KeyAttester::parse(pta_report).expect("PTAReport parses as COSE_Sign1");
-    attester
-        .verify(&pid_pub)
-        .expect("PTAReport COSE_Sign1 must verify under PID pubkey");
+    let report = crate::commands::key_report::verify_cose_sign1(pta_report, &pid_spki);
 
     // 3. Cross-binding: report's embedded COSE_Key matches CSR pub.
-    let cose = CoseSign1Object::decode(pta_report).expect("re-decode COSE_Sign1 envelope");
-    let report: KeyAttestationReport =
-        minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport");
     let cose_key = &report.public_key[..report.public_key_size as usize];
 
     // Walk the COSE_Key CBOR map and pull labels -2 (`x`) and -3
     // (`y`).  We could call `CoseKey::EccPublic { ... }` if there
     // were a `Decode` impl, but only `encode` is exposed; a manual
-    // walk keeps the test independent of sim-side CBOR plumbing.
+    // walk keeps the test independent of CBOR plumbing.
     let mut decoder = minicbor::Decoder::new(cose_key);
     let entries = decoder
         .map()

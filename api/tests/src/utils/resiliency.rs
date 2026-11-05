@@ -40,25 +40,10 @@ use std::sync::atomic::Ordering;
 
 use tsra_api::*;
 use tsra_crypto::*;
-#[cfg(feature = "res-test")]
-use tsra_res_test_dev::DdiOp;
 use tsra_resiliency_test_helpers::FileLock;
 use tsra_resiliency_test_helpers::FileStorage;
 
 use crate::utils::partition::*;
-
-/// Returns the DDI op that signals `init_part` / `restore_partition`
-/// executed.
-///
-/// Historically this returned the BK3 op (`InitBk3` / `GetSealedBk3`),
-/// but `restore_partition` now reuses the cached MOBK rather than
-/// re-running the BK3 flow (real-HW `init_bk3` is one-shot per power
-/// cycle). `EstablishCredential` is always invoked by both init and
-/// restore, so it is the reliable signal going forward.
-#[cfg(feature = "res-test")]
-pub(crate) fn bk3_op() -> DdiOp {
-    DdiOp::EstablishCredential
-}
 
 /// Well-known directory name for resiliency test data.
 const RESILIENCY_DIR_NAME: &str = "tsra_resiliency_test";

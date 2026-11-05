@@ -1223,8 +1223,9 @@ fn test_secret_hkdf_aes_xts_secret521() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_secret_hkdf_name() {
     ddi_dev_test(
         common_setup,
@@ -1571,7 +1572,7 @@ fn test_secret_hkdf_and_unmask() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            // Run this test only for Mock device
+            // Run this test only for a virtual device
             if get_device_kind(dev) != DdiDeviceKind::Virtual {
                 println!("Unmask key Not supported for Physical Device.");
                 return;
@@ -1714,7 +1715,7 @@ fn test_secret_hkdf_and_unmask() {
 #[test]
 fn test_secret_hkdf_and_unmask_ecdh_key() {
     ddi_dev_test(common_setup, common_cleanup, |dev, _ddi, _path, sess_id| {
-        // Run this test only for Mock device
+        // Run this test only for a virtual device
         if get_device_kind(dev) != DdiDeviceKind::Virtual {
             println!("Unmask key Not supported for Physical Device.");
             return;

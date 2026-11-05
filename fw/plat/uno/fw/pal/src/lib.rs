@@ -54,11 +54,14 @@ mod lock;
 #[allow(unsafe_code)]
 mod pal;
 mod part;
+mod pct;
 mod seed;
+mod self_test;
 mod session;
 /// Test-only DDI commands, reached through the `HsmCustomDispatch` hook.
 #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
 mod test_hooks;
+mod unwrapping_key;
 mod vault;
 
 pub use io::*;

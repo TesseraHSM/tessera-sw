@@ -38,9 +38,9 @@ use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 
+use super::from_pal::mlkem_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
-use crate::ddi::tbor::mlkem_generate_key::mlkem_sec_key_len;
 use crate::ddi::tbor::mlkem_generate_key::MLKEM_SEED_LEN;
 use crate::part_state;
 
@@ -89,13 +89,16 @@ pub(crate) async fn handle<P: HsmPal>(
         let key_scope = peek_scope(req.masked_key)?;
         let masking_key_in = resolve_masking_key(pal, io, key_scope, sess_id)?;
 
-        // Unmask in place; the AAD carries the parameter set.
+        // Unmask in place; the AAD carries the parameter set. A key of another
+        // type is rejected before its permissions are checked, as
+        // `EcdhDerive` does.
         let view = unmask(pal, io, masking_key_in, req.masked_key).await?;
         let kind = view.key_kind;
+        let param_set = mlkem_param_set(kind)?;
         if !view.key_attrs.derive() {
             return Err(HsmError::InvalidPermissions);
         }
-        let sec_len = mlkem_sec_key_len(kind)?;
+        let sec_len = param_set.sec_key_len();
         if view.target_key.len() != MLKEM_SEED_LEN + sec_len {
             return Err(HsmError::InvalidArg);
         }
@@ -104,7 +107,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let shared_secret = pal.dma_alloc(io, SHARED_SECRET_LEN)?;
         pal.mlkem_decaps(
             io,
-            kind,
+            param_set,
             &key_blob[MLKEM_SEED_LEN..],
             req.ciphertext,
             shared_secret,

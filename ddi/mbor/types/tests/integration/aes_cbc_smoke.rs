@@ -139,7 +139,7 @@ fn test_aes_cbc_unknown_key_smoke() {
             .expect_err("AesEncryptDecrypt must reject an unknown key id");
 
             // The exact error code differs across backends — emu's
-            // vault returns `KeyNotFound`, the mock returns
+            // vault returns `KeyNotFound`, others may return
             // `InvalidKeyNumber`.  Both are acceptable as long as the
             // request fails.
             assert!(

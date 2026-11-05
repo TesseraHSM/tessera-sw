@@ -11,6 +11,7 @@
 //! `session_open_finish` on `TestCtx` directly.
 
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::build_mac_fin;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
@@ -170,7 +171,7 @@ fn session_open_finish_unknown_session_id() {
     let err = ctx
         .tbor(&req)
         .expect_err("finish against unknown session_id must fail");
-    assert_fw_rejects(&err, TborStatus::SessionNotFound);
+    assert_session_rejects(&err, TborStatus::SessionNotFound);
 }
 
 /// Rejects a second finish request for an already active session.
@@ -246,6 +247,7 @@ fn open_session_multiple_concurrent() {
 }
 
 /// Enforces the per-file-descriptor limit of one active session.
+#[cfg(not(feature = "sock"))]
 #[test]
 fn open_session_second_on_same_fd_rejected() {
     let ctx = TestCtx::new();
@@ -766,6 +768,7 @@ fn rejected_pk_init_does_not_consume_session_slot() {
 }
 
 /// Verifies a pending Phase-1 session blocks another open on the same handle.
+#[cfg(not(feature = "sock"))]
 #[test]
 fn pending_session_blocks_second_open_on_same_fd() {
     let ctx = TestCtx::new();
@@ -819,7 +822,7 @@ fn failed_finish_mac_reclaims_session_state() {
         .tbor(&replay)
         .expect_err("failed authentication must destroy the pending slot");
 
-    assert_fw_rejects(&err, TborStatus::SessionNotFound);
+    assert_session_rejects(&err, TborStatus::SessionNotFound);
 
     // The original fd may remain session-bound after failed Phase-2.
     // Open the full CU capacity on fresh fds. If the failed pending slot
@@ -901,7 +904,7 @@ fn unknown_finish_does_not_destroy_pending_session() {
         .tbor(&unknown)
         .expect_err("unknown session id must be rejected");
 
-    assert_fw_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
+    assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 
     let handshake = ctx
         .session_open_finish_with_mac(pending, mac_fin)
@@ -934,6 +937,7 @@ fn authenticated_session_mac_key_derivation_is_stable() {
 }
 
 /// Verifies failed Phase-2 authentication leaves the original handle session-bound.
+#[cfg(not(feature = "sock"))]
 #[test]
 fn failed_finish_mac_keeps_original_fd_session_bound() {
     let ctx = TestCtx::new();
@@ -956,4 +960,48 @@ fn failed_finish_mac_keeps_original_fd_session_bound() {
         .expect_err("original fd must remain session-bound");
 
     assert_fw_rejects(&err, TborStatus::FileHandleSessionLimitReached);
+}
+
+/// Socket connections support multiple Pending and Active sessions.
+#[cfg(feature = "sock")]
+#[test]
+fn socket_connection_supports_multiple_sessions() {
+    let ctx = TestCtx::new();
+    let first = ctx
+        .session_open_init(CU, SessionType::PlainText)
+        .expect("first Pending session");
+    let second = ctx
+        .session_open_init(CU, SessionType::PlainText)
+        .expect("second Pending session on the same connection");
+    assert_ne!(first.session_id, second.session_id);
+    let first = ctx
+        .session_open_finish(first)
+        .expect("activate first session");
+    let second = ctx
+        .session_open_finish(second)
+        .expect("activate second session");
+    ctx.session_close(first.session_id)
+        .expect("close first session");
+    ctx.session_close(second.session_id)
+        .expect("close second session");
+}
+
+/// Failed authentication does not prevent a fresh open on a socket connection.
+#[cfg(feature = "sock")]
+#[test]
+fn socket_connection_can_open_after_failed_finish() {
+    let ctx = TestCtx::new();
+    let pending = ctx
+        .session_open_init(CU, SessionType::PlainText)
+        .expect("Pending session");
+    let mut mac = build_mac_fin(&pending).expect("phase 2 MAC");
+    mac[0] ^= 1;
+    let err = ctx
+        .session_open_finish_with_mac(pending, mac)
+        .expect_err("tampered MAC must fail");
+    assert_fw_rejects(&err, TborStatus::SessionAuthFailure);
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("fresh session on the original connection");
+    session.close().expect("close fresh session");
 }

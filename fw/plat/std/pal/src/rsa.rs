@@ -115,11 +115,13 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         der: &'a mut HsmDmaBuf,
         crt: bool,
+        _pct: HsmRsaPct,
     ) -> HsmResult<(&'a HsmDmaBuf, usize)> {
         // Parse the recovered DER and re-serialize it in place into the vault
         // HSM byte format: the CRT layout (`n|e|d|p|q|dp|dq|qinv`) when `crt`,
         // else non-CRT (`n|e|p|q`). Both HSM layouts are no larger than the
         // source DER, so `der` doubles as the vault buffer (no second buffer).
+        // Like key generation here, it runs no PCT.
         let pk = RsaPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
         let modulus_len = pk.size();
         let hsm_len = if crt {
@@ -236,7 +238,7 @@ impl HsmRsa for StdHsmPal {
         // then OAEP decrypt the wire-LE ciphertext (the driver flips
         // LE->BE).  An empty `label` maps to the default empty OAEP label.
         let pk = RsaPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
-        let hash = crate::hash::to_hash_algo(algo);
+        let hash = crate::hash::to_hash_algo(algo)?;
         let label = if label.is_empty() {
             None
         } else {

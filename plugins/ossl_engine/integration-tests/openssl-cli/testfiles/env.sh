@@ -35,7 +35,7 @@ if [ ! -f "$KEYDIR/pota_priv.der" ]; then
 fi
 
 # Environment the generator and the engine both read (see EngineData::open_hsm_from_env).
-# Credentials are left unset so the mock's built-in test credentials are used on
+# Credentials are left unset so the emu build's built-in test credentials are used on
 # both sides.
 export TSRA_RESILIENCY_ENABLED=1
 export TSRA_RESILIENCY_STORAGE_DIR="$KEYDIR/res"

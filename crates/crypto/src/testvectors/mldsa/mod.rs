@@ -3,15 +3,19 @@
 
 //! NIST ACVP known-answer vectors for ML-DSA (FIPS 204).
 //!
-//! Only the *external* interface in *pure* mode is represented, which is what
-//! [`crate::MlDsaAlgo`] implements. The vectors are derived from the published
-//! NIST ACVP files.
+//! The *external* interface in *pure* mode is represented, which is what
+//! [`crate::MlDsaAlgo`] implements by default, and the *internal* interface
+//! over an external `μ`, which [`crate::MlDsaAlgo::external_mu`] implements.
+//! The vectors are derived from the published NIST ACVP files.
 
+mod mldsa_external_mu_test_vectors;
 mod mldsa_keygen_test_vectors;
 mod mldsa_siggen_test_vectors;
 mod mldsa_sigver_short_msg_test_vectors;
 mod mldsa_sigver_test_vectors;
 
+pub use mldsa_external_mu_test_vectors::MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS;
+pub use mldsa_external_mu_test_vectors::MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS;
 pub use mldsa_keygen_test_vectors::MLDSA_KEYGEN_TEST_VECTORS;
 pub use mldsa_siggen_test_vectors::MLDSA_SIGGEN_TEST_VECTORS;
 pub use mldsa_sigver_short_msg_test_vectors::MLDSA_SIGVER_SHORT_MSG_TEST_VECTORS;
@@ -64,6 +68,44 @@ pub struct MlDsaSigVerTestVector {
     pub msg: &'static [u8],
     /// - `ctx`: The context string bound into the signature.
     pub ctx: &'static [u8],
+    /// - `sig`: The signature to check.
+    pub sig: &'static [u8],
+    /// - `expected_pass`: Whether verification must succeed.
+    pub expected_pass: bool,
+    /// - `reason`: NIST's description of the case, for failure messages.
+    pub reason: &'static str,
+}
+
+/// An ACVP `sigGen` vector over an external `μ`: the signature these inputs
+/// must produce.
+///
+/// As for [`MlDsaSigGenTestVector`], deterministic groups use `rnd = 0^32`.
+#[derive(Debug, Clone)]
+pub struct MlDsaMuSigGenTestVector {
+    /// - `param_set`: Parameter set, one of 44, 65 or 87.
+    pub param_set: u16,
+    /// - `deterministic`: Whether the ACVP group was the deterministic one.
+    pub deterministic: bool,
+    /// - `sec_key`: The expanded signing key.
+    pub sec_key: &'static [u8],
+    /// - `mu`: The 64-byte message representative to sign.
+    pub mu: &'static [u8],
+    /// - `rnd`: The 32-byte per-signature randomness.
+    pub rnd: &'static [u8],
+    /// - `sig`: The expected signature.
+    pub sig: &'static [u8],
+}
+
+/// An ACVP `sigVer` vector over an external `μ`: a signature that must be
+/// accepted or rejected.
+#[derive(Debug, Clone)]
+pub struct MlDsaMuSigVerTestVector {
+    /// - `param_set`: Parameter set, one of 44, 65 or 87.
+    pub param_set: u16,
+    /// - `pub_key`: The encoded verifying key.
+    pub pub_key: &'static [u8],
+    /// - `mu`: The 64-byte message representative the signature is over.
+    pub mu: &'static [u8],
     /// - `sig`: The signature to check.
     pub sig: &'static [u8],
     /// - `expected_pass`: Whether verification must succeed.

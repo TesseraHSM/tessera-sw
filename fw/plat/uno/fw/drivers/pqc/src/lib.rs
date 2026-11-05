@@ -7,7 +7,8 @@
 //!
 //! Post-quantum operations do not run on the HSM core.  They are
 //! dispatched to the three FP Cortex-M7 cores, which own the ML-DSA /
-//! ML-KEM implementations.  This driver is the HSM-side end of that link.
+//! ML-KEM implementations, and SHAKE, which the HSM's SHA engine lacks.
+//! This driver is the HSM-side end of that link.
 //!
 //! Structurally this mirrors the UPKA driver: where UPKA manages sixteen
 //! hardware PKA engines as a shared pool, this manages **three FP cores as
@@ -67,6 +68,8 @@ pub use engine::MLDSA_CTX_MAX;
 pub use engine::MLDSA_MSG_MAX;
 pub use engine::MLDSA_SEED_LEN;
 pub use engine::MLKEM_SEED_LEN;
+pub use engine::SHAKE_MSG_MAX;
+pub use engine::SHAKE_OUT_MAX;
 pub use error::PqcError;
 pub use mailbox::map_normal as map_mailbox_normal;
 pub use request::PqcOp;

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! SecureInitBk3 / SetInitBk3Pin smoke tests for mock and hardware backends.
+//! SecureInitBk3 / SetInitBk3Pin smoke tests for emu and hardware backends.
 //!
 //! - `test_secure_init_bk3_smoke` mirrors `helper_get_or_init_bk3`, but on the
 //!   secure BK3 path:
@@ -15,7 +15,7 @@
 //! - `test_secure_init_bk3_transport_tag_mismatch`,
 //!   `test_secure_init_bk3_pin_tag_mismatch`, and
 //!   `test_secure_init_bk3_pin_already_set` cover the remaining authentication
-//!   and one-shot guards. These are mock-only: they set the one-shot Phase-2 PIN
+//!   and one-shot guards. These are emu-only: they set the one-shot Phase-2 PIN
 //!   without completing Phase 4, which on real HW persists until reboot (NSSR
 //!   won't clear it) and would block the other PIN-setting tests.
 
@@ -71,7 +71,7 @@ fn test_secure_init_bk3_smoke() {
 /// On a fresh partition the in-flight provisioning PIN is unset, so a
 /// `secure_init_bk3` attempt must fail `Bk3PinNotSet`. This is the basic
 /// ordering guard, independent of any live-migration semantics. It fails
-/// cleanly without advancing the (process-global, monotonic) mock BK3 store, so
+/// cleanly without advancing the (process-global, monotonic) emu BK3 store, so
 /// it is kept as a separate test and run one-at-a-time via an exact filter.
 #[test]
 fn test_secure_init_bk3_requires_pin() {
@@ -105,10 +105,10 @@ fn test_secure_init_bk3_requires_pin() {
 /// return `Bk3TransportTagMismatch`. The failure happens before the one-shot
 /// state advances, so the partition stays fresh.
 ///
-/// Mock-only: it sets the one-shot Phase-2 PIN without completing Phase 4, which
+/// Emu-only: it sets the one-shot Phase-2 PIN without completing Phase 4, which
 /// on real HW persists until reboot (NSSR won't clear it) and would block the
-/// other PIN-setting tests.
-#[cfg(feature = "mock")]
+/// other PIN-setting tests. Each emu test process starts with a fresh device.
+#[cfg(feature = "emu")]
 #[test]
 fn test_secure_init_bk3_transport_tag_mismatch() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
@@ -140,9 +140,9 @@ fn test_secure_init_bk3_transport_tag_mismatch() {
 /// valid) passes the transport check and fails the PIN HMAC check, so
 /// `secure_init_bk3` must return `Bk3PinTagMismatch`.
 ///
-/// Mock-only: same one-shot Phase-2 PIN reason as
+/// Emu-only: same one-shot Phase-2 PIN reason as
 /// `test_secure_init_bk3_transport_tag_mismatch`.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[test]
 fn test_secure_init_bk3_pin_tag_mismatch() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
@@ -173,9 +173,9 @@ fn test_secure_init_bk3_pin_tag_mismatch() {
 /// A second `set_init_bk3_pin`, before `secure_init_bk3` consumes the stored PIN,
 /// must be rejected with `Bk3PinAlreadySet`.
 ///
-/// Mock-only: the first `set_init_bk3_pin` leaves a one-shot Phase-2 PIN that on
+/// Emu-only: the first `set_init_bk3_pin` leaves a one-shot Phase-2 PIN that on
 /// real HW persists until reboot (NSSR won't clear it).
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[test]
 fn test_secure_init_bk3_pin_already_set() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {

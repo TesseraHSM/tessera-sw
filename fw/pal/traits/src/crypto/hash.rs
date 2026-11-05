@@ -14,53 +14,96 @@
 //! that provide SHA digest support. Higher-level DDI commands can build on it
 //! for operations such as signing and key derivation.
 
+use core::num::NonZeroU16;
+
 use super::*;
 
 /// Supported hash algorithms.
 ///
-/// Discriminant values are `u32` for direct mapping to hardware register
-/// selectors on Cortex-M7.
+/// Discriminants are fixed `u32` values. Platforms map them to their engine's
+/// own selectors (e.g. the Uno SHA driver's `ShaMode`, which numbers the
+/// algorithms differently) with a `match`, never by casting.
+///
+/// The SHAKE XOFs carry their output length, so [`digest_len`] is the length
+/// they produce. The SHA-3 variants are not implemented yet: PALs reject them
+/// with [`HsmError::UnsupportedDigestHashAlgorithm`].
+///
+/// [`digest_len`]: Self::digest_len
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HsmHashAlgo {
     /// SHA-1 (160-bit digest). **Not FIPS-approved for signing.**
-    Sha1,
+    Sha1 = 2,
 
     /// SHA-256 (256-bit / 32-byte digest).
-    Sha256,
+    Sha256 = 4,
 
     /// SHA-384 (384-bit / 48-byte digest).
-    Sha384,
+    Sha384 = 5,
 
     /// SHA-512 (512-bit / 64-byte digest).
-    Sha512,
+    Sha512 = 6,
+
+    /// SHA3-256 (256-bit / 32-byte digest).
+    Sha3_256 = 11,
+
+    /// SHA3-384 (384-bit / 48-byte digest).
+    Sha3_384 = 12,
+
+    /// SHA3-512 (512-bit / 64-byte digest).
+    Sha3_512 = 13,
+
+    /// SHAKE128 extendable output (XOF), producing the given number of bytes.
+    Shake128(NonZeroU16) = 14,
+
+    /// SHAKE256 extendable output (XOF), producing the given number of bytes.
+    Shake256(NonZeroU16) = 15,
 }
 
 impl HsmHashAlgo {
-    /// Returns the output digest length in bytes for the given algorithm.
+    /// Returns the output length in bytes: the digest length, or the
+    /// requested output length of a SHAKE XOF.
     pub const fn digest_len(&self) -> usize {
         match self {
             HsmHashAlgo::Sha1 => 20,
-            HsmHashAlgo::Sha256 => 32,
-            HsmHashAlgo::Sha384 => 48,
-            HsmHashAlgo::Sha512 => 64,
+            HsmHashAlgo::Sha256 | HsmHashAlgo::Sha3_256 => 32,
+            HsmHashAlgo::Sha384 | HsmHashAlgo::Sha3_384 => 48,
+            HsmHashAlgo::Sha512 | HsmHashAlgo::Sha3_512 => 64,
+            HsmHashAlgo::Shake128(len) | HsmHashAlgo::Shake256(len) => len.get() as usize,
         }
     }
 
-    /// Block size in bytes for the algorithm.
+    /// Returns `true` for the extendable-output functions (SHAKE128 and
+    /// SHAKE256).
+    pub const fn is_xof(&self) -> bool {
+        matches!(self, HsmHashAlgo::Shake128(_) | HsmHashAlgo::Shake256(_))
+    }
+
+    /// Block size in bytes for the algorithm; for SHA-3 and SHAKE, the
+    /// sponge rate.
     pub const fn block_len(&self) -> usize {
         match self {
             HsmHashAlgo::Sha1 | HsmHashAlgo::Sha256 => 64,
             HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512 => 128,
+            HsmHashAlgo::Sha3_256 | HsmHashAlgo::Shake256(_) => 136,
+            HsmHashAlgo::Sha3_384 => 104,
+            HsmHashAlgo::Sha3_512 => 72,
+            HsmHashAlgo::Shake128(_) => 168,
         }
     }
 
-    /// Working-variable state size in bytes (intermediate hash state).
+    /// Working-variable state size in bytes (intermediate hash state); for
+    /// SHA-3 and SHAKE, the 200-byte Keccak-f\[1600\] state.
     pub const fn state_len(&self) -> usize {
         match self {
             HsmHashAlgo::Sha1 => 20,
             HsmHashAlgo::Sha256 => 32,
             HsmHashAlgo::Sha384 | HsmHashAlgo::Sha512 => 64,
+            HsmHashAlgo::Sha3_256
+            | HsmHashAlgo::Sha3_384
+            | HsmHashAlgo::Sha3_512
+            | HsmHashAlgo::Shake128(_)
+            | HsmHashAlgo::Shake256(_) => 200,
         }
     }
 
@@ -169,9 +212,12 @@ pub trait HsmHash: HsmIoTypes {
     ///
     /// - `Ok(ctx)` — fresh hash context ready for
     ///   [`hash_continue`](Self::hash_continue).
+    /// - `Err(HsmError::UnsupportedDigestHashAlgorithm)` — the platform
+    ///   cannot run `algo`.
     /// - `Err(HsmError::NotEnoughSpace)` — `alloc` cannot satisfy
-    ///   the state-buffer allocation
-    ///   ([`HsmHashAlgo::hash_state_len`] bytes).
+    ///   the context allocation (typically
+    ///   [`HsmHashAlgo::hash_state_len`] bytes; a PAL that buffers the
+    ///   message for an XOF needs more).
     fn hash_begin<'a>(
         &self,
         io: &Self::Io,

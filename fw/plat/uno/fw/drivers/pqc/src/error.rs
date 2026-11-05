@@ -22,11 +22,10 @@ impl PqcError {
     /// The FP core reported that it could not service the request.
     pub const FP_ERROR: HsmError = make_component_error(ComponentId::PQC, 3);
 
-    /// The FP offload transport is not available yet.
+    /// An FP core did not answer.
     ///
-    /// Returned while the FP firmware has no PQC responder: the engine pool
-    /// and request encoding are exercised, but nothing is submitted over IPC
-    /// because no reply would ever arrive.
+    /// A request timed out, an engine is still waiting for its core to
+    /// answer an earlier one, or every engine is.
     pub const FP_NOT_READY: HsmError = make_component_error(ComponentId::PQC, 4);
 
     /// An output buffer was not the length the parameter set requires.

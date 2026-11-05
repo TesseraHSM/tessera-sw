@@ -454,6 +454,16 @@ pub enum HsmError {
     /// valid.  Mirrors [`EccVerifyFailed`](Self::EccVerifyFailed).
     MlDsaVerifyFailed = 0x0870010D,
 
+    /// A cryptographic algorithm self-test (CAST) produced output that
+    /// did not match its known-answer vector.
+    SelfTestKatMismatch = 0x08700110,
+
+    /// Admin did not answer a periodic RNG self-test quiesce request in time.
+    RngSelfTestAdminTimeout = 0x08700111,
+
+    /// Admin could not quiesce host IO for the periodic RNG test after all retries.
+    RngSelfTestRetriesExhausted = 0x08700112,
+
     // Firmware-internal diagnostic codes logged by the CPU fault and panic
     // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol
     // statuses: they use the PAL diagnostic facility (`0x08F`) to stay clear of

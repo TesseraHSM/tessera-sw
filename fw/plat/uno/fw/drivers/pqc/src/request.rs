@@ -45,6 +45,12 @@ pub enum PqcOp {
 
     /// Decapsulate an ML-KEM ciphertext.
     MlKemDecapsulate = 6,
+
+    /// Hash a message with SHAKE128.
+    Shake128 = 7,
+
+    /// Hash a message with SHAKE256.
+    Shake256 = 8,
 }
 
 /// Number of `u32` words in a request message.

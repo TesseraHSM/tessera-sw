@@ -12,7 +12,9 @@ use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use parking_lot::Condvar;
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use tokio::runtime::Handle;
 use tsra_ddi_interface::DdiAesGcmParams;
 use tsra_ddi_interface::DdiAesGcmResult;
@@ -55,6 +57,7 @@ use tsra_fw_hsm_bulk::BLOCK_LEN;
 use tsra_fw_hsm_bulk::GCM_AAD_ALIGN;
 use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_io::OP_MBOR;
@@ -69,12 +72,46 @@ pub const EMU_DEVICE_PATH: &str = "/dev/tsra-emu";
 
 /// Hard-coded partition index used by the emulator.
 ///
-/// All IOs submitted via [`DdiEmuDev`] target this partition. The
-/// matching resource bit is set in [`EMU_PART_RES_MASK`].
+/// All IOs submitted via [`DdiEmuDev`] target this partition. Its
+/// resource mask starts at this bit; see [`emu_part_res_mask`].
 const EMU_PID: u8 = 10;
 
+/// Environment variable selecting how many vault tables (resources) the
+/// emulator partition is allocated. Accepts `1..=EMU_MAX_RESOURCES`;
+/// defaults to 1 when unset.
+pub const EMU_RESOURCE_COUNT_ENV: &str = "TSRA_EMU_RESOURCE_COUNT";
+
+/// Number of resource bits the std platform accepts in a partition mask.
+const EMU_MAX_RESOURCES: u32 = 65;
+
 /// Resource bitmask passed to [`StdHsm::part_alloc`].
-const EMU_PART_RES_MASK: u128 = 1u128 << EMU_PID;
+///
+/// Sets `count` contiguous bits starting at [`EMU_PID`], wrapping at
+/// [`EMU_MAX_RESOURCES`], so a count of 1 yields `1 << EMU_PID`.
+fn emu_part_res_mask(count: u32) -> u128 {
+    (0..count).fold(0u128, |mask, i| {
+        mask | 1u128 << ((EMU_PID as u32 + i) % EMU_MAX_RESOURCES)
+    })
+}
+
+/// Reads [`EMU_RESOURCE_COUNT_ENV`]; unset means 1.
+fn emu_resource_count() -> DdiResult<u32> {
+    let Ok(value) = std::env::var(EMU_RESOURCE_COUNT_ENV) else {
+        return Ok(1);
+    };
+    match value.trim().parse::<u32>() {
+        Ok(count) if (1..=EMU_MAX_RESOURCES).contains(&count) => Ok(count),
+        _ => {
+            tracing::error!(
+                ?value,
+                env = EMU_RESOURCE_COUNT_ENV,
+                max = EMU_MAX_RESOURCES,
+                "DdiEmuDev: invalid resource count"
+            );
+            Err(DdiError::InvalidParameter)
+        }
+    }
+}
 
 /// Size of the scratch buffers used for DDI request/response DMA.
 ///
@@ -100,13 +137,22 @@ const OOB_ENTRY_LEN: usize = 16;
 /// Page size enforced by the firmware platform.
 const PAGE_4K: usize = 4096;
 
+/// Upper bound on the best-effort session close run from `Drop`.
+const CLOSE_ON_DROP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Process-wide rolling SQE command identifier.
 ///
 /// The CQE echoes back the cmd_id in `DW3 [15:0]`; we use a unique value
 /// per IO mostly for diagnostic correlation.
 static CMD_COUNTER: AtomicU16 = AtomicU16::new(1);
 
-/// Per-handle session bookkeeping (mirrors the mock backend).
+/// Quiesces IO across [`DdiEmuDev::erase`], like the driver does across
+/// NSSR: IOs hold a read guard, erase holds the write guard. Without it an
+/// IO racing the partition disable/enable fails with `InternalError`
+/// instead of seeing either the old or the reset partition.
+static RESET_FENCE: RwLock<()> = RwLock::new(());
+
+/// Per-handle session bookkeeping.
 #[derive(Debug, Default)]
 struct SessionState {
     session_id: Option<u16>,
@@ -119,8 +165,8 @@ struct SessionState {
 /// instantiated by [`DdiEmu`](crate::DdiEmu). State that is unique to the
 /// handle (the open session id) lives in [`SessionState`].
 ///
-/// `Clone` matches the sibling backends (`DdiMockDev`, `DdiNixDev`,
-/// `DdiWinDev`); cloning produces another handle to the same `StdHsm`
+/// `Clone` matches the sibling backends (`DdiNixDev`, `DdiWinDev`);
+/// cloning produces another handle to the same `StdHsm`
 /// and shares the same session table.
 #[derive(Clone, Debug)]
 pub struct DdiEmuDev {
@@ -133,8 +179,8 @@ pub struct DdiEmuDev {
 impl DdiEmuDev {
     /// Open the emulator device.
     ///
-    /// Validates the path, then performs a best-effort
-    /// `part_alloc` + `part_enable` for the emulator partition. Both
+    /// Validates the path and [`EMU_RESOURCE_COUNT_ENV`], then performs a
+    /// best-effort `part_alloc` + `part_enable` for the emulator partition. Both
     /// operations are idempotent — on a second open they return errors
     /// (already allocated / already enabled), which we deliberately
     /// ignore. Real partition failures surface on the first IO.
@@ -147,11 +193,13 @@ impl DdiEmuDev {
             );
             return Err(DdiError::DeviceNotFound);
         }
+        let res_mask = emu_part_res_mask(emu_resource_count()?);
 
         // Drive partition lifecycle on the embedded runtime. The `let _`
         // pattern matches `fw/plat/std/lib/tests/echo_test.rs::ensure_io_part`.
+        let _fence = RESET_FENCE.read();
         handle.block_on(async {
-            let _ = hsm.part_alloc(EMU_PID, EMU_PART_RES_MASK).await;
+            let _ = hsm.part_alloc(EMU_PID, res_mask).await;
             let _ = hsm.part_enable(EMU_PID).await;
         });
 
@@ -161,6 +209,13 @@ impl DdiEmuDev {
             session: Arc::new(Mutex::new(SessionState::default())),
             device_kind: DdiDeviceKind::Physical,
         })
+    }
+
+    /// Drives `io` to completion while holding a read guard on
+    /// [`RESET_FENCE`].
+    fn block_on_io<F: std::future::Future>(&self, io: F) -> F::Output {
+        let _fence = RESET_FENCE.read();
+        self.handle.block_on(io)
     }
 
     /// Checks a fast-path session id against the handle's open session,
@@ -178,13 +233,11 @@ impl DdiEmuDev {
     /// Submits a bulk SQE and returns its CQE.
     ///
     /// The buffers referenced by `sqe` must stay alive until this returns.
-    /// A failed CQE maps like the driver's ioctl output: a non-zero status
-    /// code to [`DdiError::FpError`], otherwise a non-zero error code to
-    /// [`DdiError::FpCmdSpecificError`].
+    /// A failed CQE maps through [`DdiError::from_fp_status`], as the
+    /// drivers' ioctl output does.
     fn bulk_submit(&self, sqe: &BulkSqe) -> Result<BulkCqe, DdiError> {
         let raw = self
-            .handle
-            .block_on(self.hsm.bulk_io(sqe.encode(), EMU_PID, EMU_BULK_QID, 0))
+            .block_on_io(self.hsm.bulk_io(sqe.encode(), EMU_PID, EMU_BULK_QID, 0))
             .map_err(|_| DdiError::DeviceNotReady)?;
         let cqe = BulkCqe::decode(&raw);
         if !cqe.status.is_success() {
@@ -194,19 +247,58 @@ impl DdiEmuDev {
                 "DdiEmu bulk IO failed"
             );
         }
-        if cqe.status.sts != 0 {
-            Err(DdiError::FpError(u32::from(cqe.status.sts)))?;
-        }
-        if cqe.status.err != 0 {
-            Err(DdiError::FpCmdSpecificError(u32::from(cqe.status.err)))?;
+        if let Some(err) =
+            DdiError::from_fp_status(u32::from(cqe.status.sts), u32::from(cqe.status.err))
+        {
+            Err(err)?
         }
         Ok(cqe)
     }
 
-    /// Best-effort close of the device's live session.
+    /// Encodes `req` into `src` and builds the MBOR SQE that points the
+    /// firmware at `src` (request) and `dst` (response).
+    fn mbor_sqe<T: DdiOpReq>(
+        req: &T,
+        pre_encode: bool,
+        session_ctrl: SessionControlKind,
+        src: &mut AlignedBuf,
+        dst: &mut AlignedBuf,
+    ) -> DdiResult<RawSqe> {
+        let req_len = {
+            let mut enc = MborEncoder::new(src.as_mut_slice(), pre_encode);
+            req.mbor_encode(&mut enc)
+                .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
+            enc.position()
+        };
+        let req_buf = &src.as_slice()[..req_len];
+        tracing::debug!(opcode = ?req.get_opcode(), len = req_len, "DdiEmu request (in hex): {:02x?}", req_buf);
+
+        let req_session_id = req.get_session_id();
+        let cmd_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(SqeBuilder::new()
+            .cmd(CmdDword::new().with_op(OP_MBOR).with_id(cmd_id))
+            .buf_lens(req_len as u32, SCRATCH_LEN as u32)
+            .src_prp1(req_buf.as_ptr() as u64)
+            .dst_prp1(dst.as_mut_slice().as_mut_ptr() as u64)
+            .session_flags(
+                SessionFlags::new()
+                    .with_ctrl(u8::from(session_ctrl))
+                    .with_id_valid(req_session_id.is_some()),
+            )
+            .session_id(req_session_id.unwrap_or(0))
+            .build())
+    }
+
+    /// Best-effort close of the device's live session, used on drop.
+    ///
+    /// The dropping thread may be tearing down its thread-locals (e.g.
+    /// OpenSSL's `atexit` cleanup, or a Windows TLS destructor holding the
+    /// loader lock). `Handle::block_on` needs Tokio's thread-locals and a
+    /// helper thread can't start under the loader lock, so the request runs
+    /// as a task that owns its buffers while this thread waits on a `std`
+    /// condvar.
     fn close_live_session(&self) {
-        let session_id = self.session.lock().session_id;
-        let Some(sess_id) = session_id else {
+        let Some(sess_id) = self.session.lock().session_id else {
             return;
         };
         let req = DdiCloseSessionCmdReq {
@@ -218,7 +310,37 @@ impl DdiEmuDev {
             data: DdiCloseSessionReq {},
             ext: None,
         };
-        let _ = self.exec_op_mbor(&req, &mut None);
+        let pre_encode = self.device_kind == DdiDeviceKind::Physical;
+        let mut src = AlignedBuf::new(SCRATCH_LEN);
+        let mut dst = AlignedBuf::new(SCRATCH_LEN);
+        let Ok(sqe) = Self::mbor_sqe(
+            &req,
+            pre_encode,
+            SessionControlKind::Close,
+            &mut src,
+            &mut dst,
+        ) else {
+            return;
+        };
+
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let signal = Arc::clone(&done);
+        let hsm = Arc::clone(&self.hsm);
+        let _fence = RESET_FENCE.read();
+        self.handle.spawn(async move {
+            let _bufs = (src, dst);
+            let _ = hsm.io(sqe, EMU_PID, 0, 0).await;
+            let (lock, cvar) = &*signal;
+            *lock.lock() = true;
+            cvar.notify_one();
+        });
+        let (lock, cvar) = &*done;
+        let mut finished = lock.lock();
+        let wait = cvar.wait_while_for(&mut finished, |done| !*done, CLOSE_ON_DROP_TIMEOUT);
+        if wait.timed_out() {
+            tracing::warn!(sess_id, "DdiEmu: timed out closing session on drop");
+        }
+        self.session.lock().session_id = None;
     }
 
     /// TBOR exec path — mirrors [`Self::exec_op_mbor`] but uses the
@@ -301,8 +423,7 @@ impl DdiEmuDev {
             .build();
 
         let mut raw_cqe = self
-            .handle
-            .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
+            .block_on_io(self.hsm.io(sqe, EMU_PID, 0, 0))
             .map_err(|_| DdiError::DeviceNotReady)?;
         let cqe = Cqe::from(&mut raw_cqe);
 
@@ -406,36 +527,13 @@ impl DdiDev for DdiEmuDev {
         validate_session_request(opcode, req_session_id, current_session_id)?;
 
         // ── 2. Encode DDI request via host MBOR (wire-compat with fw) ─
+        // ── 3. Build SQE and submit on the embedded tokio runtime ─────
         let mut src = AlignedBuf::new(SCRATCH_LEN);
         let mut dst = AlignedBuf::new(SCRATCH_LEN);
-
-        let req_len = {
-            let mut enc = MborEncoder::new(src.as_mut_slice(), pre_encode);
-            req.mbor_encode(&mut enc)
-                .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
-            enc.position()
-        };
-        let req_buf = &src.as_slice()[..req_len];
-        tracing::debug!(opcode = ?opcode, len = req_len, "DdiEmu request (in hex): {:02x?}", req_buf);
-
-        // ── 3. Build SQE and submit on the embedded tokio runtime ─────
-        let cmd_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let sqe = SqeBuilder::new()
-            .cmd(CmdDword::new().with_op(OP_MBOR).with_id(cmd_id))
-            .buf_lens(req_len as u32, SCRATCH_LEN as u32)
-            .src_prp1(req_buf.as_ptr() as u64)
-            .dst_prp1(dst.as_mut_slice().as_mut_ptr() as u64)
-            .session_flags(
-                SessionFlags::new()
-                    .with_ctrl(u8::from(session_ctrl))
-                    .with_id_valid(req_session_id.is_some()),
-            )
-            .session_id(req_session_id.unwrap_or(0))
-            .build();
+        let sqe = Self::mbor_sqe(req, pre_encode, session_ctrl, &mut src, &mut dst)?;
 
         let mut raw_cqe = self
-            .handle
-            .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
+            .block_on_io(self.hsm.io(sqe, EMU_PID, 0, 0))
             .map_err(|_| DdiError::DeviceNotReady)?;
         let cqe = Cqe::from(&mut raw_cqe);
 
@@ -470,8 +568,7 @@ impl DdiDev for DdiEmuDev {
         }
 
         // ── 7. Decode the typed response (whole-buffer decode — the
-        //         response type wraps both the header and body, matching
-        //         what the mock backend does) ────────────────────────
+        //         response type wraps both the header and body) ─────────
         let mut body_dec = MborDecoder::new(resp_buf, post_decode);
         let resp = <T::OpResp>::mbor_decode(&mut body_dec)
             .map_err(|_| DdiError::MborError(MborError::DecodeError))?;
@@ -707,6 +804,7 @@ impl DdiDev for DdiEmuDev {
     fn erase(&self) -> Result<(), DdiError> {
         // Reset partition state: disable then re-enable. This
         // matches what real hardware does on NSSR.
+        let _fence = RESET_FENCE.write();
         self.handle
             .block_on(async {
                 self.hsm.part_disable(EMU_PID).await.map_err(|_| ())?;
@@ -739,9 +837,8 @@ fn bulk_dir(mode: DdiAesOp) -> BulkDir {
 
 /// Validate a request against the current session state.
 ///
-/// Mirrors `tsra_ddi_mock::dev::validate_request`. The host driver
-/// performs this check too, but doing it here means we surface mismatches
-/// as `DdiError` before constructing an SQE.
+/// Mirrors the session check the host driver performs, so mismatches
+/// surface as `DdiError` before constructing an SQE.
 fn validate_session_request(
     opcode: DdiOp,
     req_session_id: Option<u16>,
@@ -880,6 +977,47 @@ mod tests {
     use crate::EMU_DEVICE_PATH;
 
     #[test]
+    fn part_res_mask_has_count_bits_from_pid() {
+        use super::emu_part_res_mask;
+        use super::EMU_MAX_RESOURCES;
+        use super::EMU_PID;
+
+        assert_eq!(emu_part_res_mask(1), 1u128 << EMU_PID);
+        assert_eq!(emu_part_res_mask(4), 0b1111u128 << EMU_PID);
+        let all = (1u128 << EMU_MAX_RESOURCES) - 1;
+        assert_eq!(emu_part_res_mask(EMU_MAX_RESOURCES), all);
+        let m64 = emu_part_res_mask(64);
+        assert_eq!(m64.count_ones(), 64);
+        assert_eq!(m64 & !all, 0);
+        assert_eq!(m64 & (1u128 << (EMU_PID - 1)), 0);
+    }
+
+    #[test]
+    fn fp_status_maps_firmware_invalid_key_to_key_not_found() {
+        use tsra_ddi_interface::DdiError;
+        use tsra_ddi_mbor_types::DdiStatus;
+        use tsra_fw_hsm_bulk::BulkCipher;
+        use tsra_fw_hsm_bulk::BulkStatus;
+        use tsra_fw_hsm_pal_traits::HsmError;
+
+        let map = |cipher, err| {
+            let s = BulkStatus::from_error(cipher, err);
+            DdiError::from_fp_status(u32::from(s.sts), u32::from(s.err))
+        };
+        for cipher in [BulkCipher::Gcm, BulkCipher::Xts] {
+            assert!(matches!(
+                map(cipher, HsmError::KeyNotFound),
+                Some(DdiError::DdiStatus(DdiStatus::KeyNotFound))
+            ));
+            assert!(matches!(
+                map(cipher, HsmError::SessionNotFound),
+                Some(DdiError::FpError(_))
+            ));
+        }
+        assert!(DdiError::from_fp_status(0, 0).is_none());
+    }
+
+    #[test]
     fn get_api_rev_round_trips_through_emulator() {
         let ddi = DdiEmu::default();
         let dev = ddi.open_dev(EMU_DEVICE_PATH).expect("open emu device");
@@ -930,5 +1068,68 @@ mod tests {
                 max_ver: 1,
             }
         );
+    }
+
+    #[test]
+    fn open_waits_for_reset() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let ddi = DdiEmu::default();
+        ddi.open_dev(EMU_DEVICE_PATH)
+            .expect("initialize emu device");
+
+        let reset_fence = super::RESET_FENCE.write();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (opened_sender, opened_receiver) = mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            started_sender.send(()).expect("signal device open");
+            opened_sender
+                .send(ddi.open_dev(EMU_DEVICE_PATH))
+                .expect("return opened device");
+        });
+        started_receiver.recv().expect("wait for device open");
+        let before_reset = opened_receiver.recv_timeout(Duration::from_millis(100));
+        drop(reset_fence);
+        opener.join().expect("join device opener");
+
+        assert!(
+            matches!(before_reset, Err(mpsc::RecvTimeoutError::Timeout)),
+            "opening the device must wait for the reset fence"
+        );
+        opened_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("device open should finish after reset")
+            .expect("open emu device");
+    }
+
+    /// Dropping a device with a live session from a thread-local destructor
+    /// that runs after Tokio's own thread-locals are gone (as at process
+    /// exit, e.g. from OpenSSL's `atexit` cleanup) must not panic.
+    #[test]
+    fn drop_after_tokio_thread_locals_destroyed_does_not_panic() {
+        use std::cell::RefCell;
+
+        thread_local! {
+            static DEV: RefCell<Option<super::DdiEmuDev>> = const { RefCell::new(None) };
+        }
+
+        let dev = DdiEmu::default()
+            .open_dev(EMU_DEVICE_PATH)
+            .expect("open emu device");
+        dev.session.lock().session_id = Some(1);
+
+        std::thread::spawn(move || {
+            // Registered first, so destroyed after Tokio's thread-locals,
+            // which the I/O below registers.
+            DEV.with(|d| *d.borrow_mut() = Some(dev));
+            DEV.with(|d| {
+                let d = d.borrow();
+                let dev = d.as_ref().expect("device stored");
+                dev.block_on_io(async {});
+            });
+        })
+        .join()
+        .expect("device drop during thread-local teardown panicked");
     }
 }

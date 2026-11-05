@@ -36,6 +36,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
+use super::from_pal::mlkem_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
@@ -45,29 +46,6 @@ pub(crate) const MLKEM_SEED_LEN: usize = 64;
 
 /// Envelope key-label recorded in the masked blob's metadata.
 const MLKEM_KEY_LABEL: &[u8] = b"MlKemKey";
-
-/// Encapsulation-key length per ML-KEM parameter set (FIPS 203 Table 3).
-/// ML-KEM decapsulation-key length for a parameter set (FIPS 203).
-///
-/// Carried in the masked blob after the `(d, z)` seed pair, so
-/// decapsulation does not have to re-derive the key pair.
-pub(crate) fn mlkem_sec_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlKem512Seed => Ok(1632),
-        HsmVaultKeyKind::MlKem768Seed => Ok(2400),
-        HsmVaultKeyKind::MlKem1024Seed => Ok(3168),
-        _ => Err(HsmError::InvalidArg),
-    }
-}
-
-fn mlkem_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlKem512Seed => Ok(800),
-        HsmVaultKeyKind::MlKem768Seed => Ok(1184),
-        HsmVaultKeyKind::MlKem1024Seed => Ok(1568),
-        _ => Err(HsmError::InvalidArg),
-    }
-}
 
 /// Attributes recorded in the masked blob's metadata and re-applied on
 /// unmask.  An ML-KEM key is used to derive a shared secret, so it is a
@@ -114,7 +92,8 @@ pub(crate) async fn handle<P: HsmPal>(
         // in-session now, so the restriction no longer has a reason.
 
         let vault_kind = HsmVaultKeyKind(key_kind.0);
-        let pub_len = mlkem_pub_key_len(vault_kind)?;
+        let param_set = mlkem_param_set(vault_kind)?;
+        let pub_len = param_set.pub_key_len();
 
         let svn = part_state::part_mfgr_svn(pal);
         let owner =
@@ -125,11 +104,14 @@ pub(crate) async fn handle<P: HsmPal>(
         // decapsulation key, masked as a unit. The seeds still regenerate the
         // encapsulation key; the expanded key keeps a full key generation out
         // of every decapsulation.
-        let sec_len = mlkem_sec_key_len(vault_kind)?;
+        let sec_len = param_set.sec_key_len();
         let plain_len = MLKEM_SEED_LEN + sec_len;
 
-        // Generate directly into the final slots. The exchange is scrubbed
-        // on every failure, including partial key generation or masking.
+        // The seed pair is generated straight into its final slot. The PAL
+        // returns the key pair as one buffer, public key first, so the two
+        // keys are copied into their slots from a scrubbed scratch buffer.
+        // The exchange is scrubbed on every failure, including partial key
+        // generation or masking.
         let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
         let resp = cmd_buf.buffer_mut();
         let len = TborMlKemGenerateKeyResp::encode(resp, 0, false)?
@@ -150,8 +132,19 @@ pub(crate) async fn handle<P: HsmPal>(
                 }
                 let payload = &mut out.masked_key[at..end];
                 let (seed, sec_key) = payload.split_at_mut(MLKEM_SEED_LEN);
-                pal.mlkem_gen_key(io, vault_kind, seed, out.pub_key, sec_key)
-                    .await?;
+                let pub_key = &mut *out.pub_key;
+                pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
+                    let keys = alloc.dma_alloc(pub_len + sec_len)?;
+                    let result = pal.mlkem_gen_key(io, param_set, seed, keys).await;
+                    if result.is_ok() {
+                        let (pub_half, sec_half) = keys.split_at(pub_len);
+                        pub_key.copy_from_slice(pub_half);
+                        sec_key.copy_from_slice(sec_half);
+                    }
+                    keys.fill(0);
+                    result
+                })
+                .await?;
             }
             // Mask the seed+expanded decapsulation key as one unit, straight
             // into the reserved response slot.

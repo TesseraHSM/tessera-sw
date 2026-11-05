@@ -3,8 +3,6 @@
 
 #include "sd_provision.hpp"
 
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -1773,5 +1771,3 @@ DarcCertChainHolder darc_make_chain(
     holder.wire();
     return holder;
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

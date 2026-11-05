@@ -253,6 +253,7 @@ impl EncodeOp for RsaPadOaepAlgo {
             return Err(CryptoError::RsaUnsupportedModulusSize);
         }
 
+        self.hash_algo.ensure_not_xof()?;
         let h_len = self.hash_algo.size();
         let m_len = self.message.len();
 
@@ -349,6 +350,7 @@ impl DecodeOp for RsaPadOaepAlgo {
 
         let mut em = input.to_vec();
         let hash_algo = &mut params.hash_algo;
+        hash_algo.ensure_not_xof()?;
         let h_len = hash_algo.size();
 
         // Check that we have enough space for the minimum OAEP structure

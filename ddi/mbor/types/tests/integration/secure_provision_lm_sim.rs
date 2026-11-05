@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Secure-provisioning live-migration simulation tests for mock and hardware backends.
+//! Secure-provisioning live-migration simulation tests for emu and hardware backends.
 //!
 //! `migrate_sim` (NSSR) reproduces what a live migration does to a
 //! partition: the volatile state (the ECDH tunnel key and the in-flight
@@ -75,7 +75,7 @@ fn assert_pin_not_set(err: &DdiError, ctx: &str) {
 ///   tunnel, THEN migrate (both the tunnel key and the volatile PIN are lost and
 ///   NSSR regenerates the tunnel nonce) — the pre-built payload now carries a
 ///   stale nonce. `secure_init_bk3` verifies the nonce before the PIN (firmware
-///   `on_start`, which the mock mirrors), so the stale/replayed payload is
+///   `on_start`), so the stale/replayed payload is
 ///   rejected with `NonceMismatch`.
 /// - no-partial-state: `get_sealed_bk3` stays gated and `fips_approved` stays
 ///   false, confirming no partial persistent state landed.
@@ -132,9 +132,8 @@ fn test_secure_provision_lm_midflow_restart() {
         // encrypted-BK3 payload over a second tunnel, THEN migrate so both the
         // tunnel key and PIN are lost and the tunnel nonce is regenerated. The
         // pre-built payload now carries a stale nonce, and secure_init_bk3
-        // verifies the nonce before the PIN (firmware `on_start`; the mock
-        // mirrors this), so the stale/replayed payload is rejected with
-        // NonceMismatch.
+        // verifies the nonce before the PIN (firmware `on_start`), so the
+        // stale/replayed payload is rejected with NonceMismatch.
         let pin_resp = set_init_bk3_pin(dev, TEST_CRED_ID, TEST_CRED_PIN);
         assert!(pin_resp.is_ok(), "pin_resp {pin_resp:?}");
         let payload = build_secure_init_bk3_payload(dev, TEST_CRED_ID, TEST_CRED_PIN, &bk3);
@@ -162,8 +161,7 @@ fn test_secure_provision_lm_midflow_restart() {
         assert!(result.is_ok(), "provision + seal {result:?}");
         let sealed_before = result.unwrap();
 
-        // `fips_approved` reflects the module's FIPS provisioning status: the
-        // mock marks it approved once secure provisioning completes, while real
+        // `fips_approved` reflects the module's FIPS provisioning status:
         // firmware ties it to the power-on image measurement (so it stays false
         // on a debug/non-FIPS image). Its value is therefore backend-dependent;
         // capture it once here and assert only that migration preserves it.

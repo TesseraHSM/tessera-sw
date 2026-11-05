@@ -136,7 +136,7 @@ impl SignOp for CngRsaSignAlgo {
         data: &[u8],
         signature: Option<&mut [u8]>,
     ) -> Result<usize, CryptoError> {
-        let (pad, flags) = self.padding_info();
+        let (pad, flags) = self.padding_info()?;
         let pad_ptr = pad_ptr(&pad);
         let mut len = 0u32;
         // SAFETY: Calling Windows CNG BCryptSignHash/BCryptDecrypt APIs.
@@ -202,7 +202,7 @@ impl VerifyOp for CngRsaSignAlgo {
         data: &[u8],
         signature: &[u8],
     ) -> Result<bool, CryptoError> {
-        let (pad, flags) = self.padding_info();
+        let (pad, flags) = self.padding_info()?;
         let pad_ptr = pad_ptr(&pad);
 
         // Windows CNG's `BCryptVerifySignature` only supports `BCRYPT_PAD_PKCS1`
@@ -290,7 +290,7 @@ impl VerifyRecoverOp for CngRsaSignAlgo {
         signature: &[u8],
         output: Option<&mut [u8]>,
     ) -> Result<usize, CryptoError> {
-        let (pad, flags) = self.padding_info();
+        let (pad, flags) = self.padding_info()?;
         let pad_ptr = pad_ptr(&pad);
 
         let mut len = 0u32;
@@ -406,8 +406,11 @@ impl CngRsaSignAlgo {
     /// A tuple containing:
     /// - The padding information structure (PKCS#1 or PSS)
     /// - The corresponding flags for Windows CNG APIs
-    fn padding_info(&self) -> (PaddingInfo, BCRYPT_FLAGS) {
-        match self.padding {
+    ///
+    /// or `CryptoError::HashUnsupportedAlgorithm` for a SHA-3 or SHAKE hash.
+    fn padding_info(&self) -> Result<(PaddingInfo, BCRYPT_FLAGS), CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
+        Ok(match self.padding {
             Padding::None => (PaddingInfo::None, BCRYPT_PAD_NONE),
             Padding::Pkcs1 => (
                 PaddingInfo::Pkcs1(BCRYPT_PKCS1_PADDING_INFO {
@@ -422,7 +425,7 @@ impl CngRsaSignAlgo {
                 }),
                 BCRYPT_PAD_PSS,
             ),
-        }
+        })
     }
 }
 

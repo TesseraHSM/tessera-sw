@@ -8,9 +8,12 @@
 //! runs their work, so the only entry point is "give me any free engine".
 
 use core::task::Context;
+use core::task::Poll;
 
 use embassy_sync::waitqueue::WakerRegistration;
+use tsra_fw_hsm_pal_traits::HsmResult;
 
+use crate::error::PqcError;
 use crate::types::EngineId;
 use crate::types::EngineState;
 use crate::types::QueueSlotState;
@@ -65,6 +68,17 @@ impl QueueSlot {
 }
 
 /// Shared mutable state for the engine pool.
+/// Outcome of one [`PqcState::poll_acquire`].
+pub(crate) enum Acquire {
+    /// Finished: the engine claimed, or why none can be.
+    Done(HsmResult<EngineId>),
+
+    /// Still queued, at the head while an engine drains: look again after a
+    /// pause. Nothing signals a core's late answer, and polling on every
+    /// executor pass would spin.
+    Reap,
+}
+
 pub(crate) struct PqcState {
     /// Bitmask of free engines; bit `i` set means engine `i` is idle.
     pub(crate) free_mask: u8,
@@ -202,14 +216,179 @@ impl PqcState {
 
         match waiter {
             Some(idx) => {
-                // Stays busy: ownership transfers directly to the waiter.
+                // Ownership transfers directly to the waiter. Marked busy
+                // explicitly: a reclaimed engine arrives here draining.
+                self.engines[id.raw() as usize].state = EngineState::Busy;
                 self.queue[idx].state = QueueSlotState::Assigned(id);
                 self.queue[idx].waker.wake();
+                self.wake_head_if_draining();
             }
             None => {
                 self.engines[id.raw() as usize].state = EngineState::Idle;
                 self.free_mask |= 1u8 << id.raw();
             }
+        }
+    }
+
+    /// Withhold an engine released while request `seq` may still be running
+    /// on its core; see [`EngineState::Draining`].
+    ///
+    /// Wakes every waiter: the head starts watching for the core's answer,
+    /// and if no engine is left that will ever be released, all give up
+    /// (see [`poll_acquire`](Self::poll_acquire)).
+    pub(crate) fn quarantine_engine(&mut self, id: EngineId, seq: u32) {
+        self.engines[id.raw() as usize].state = EngineState::Draining(seq);
+        let mut idx = self.wait_head;
+        while idx != NO_SLOT {
+            self.queue[idx as usize].waker.wake();
+            idx = self.queue[idx as usize].next;
+        }
+    }
+
+    /// True if any engine is draining.
+    pub(crate) fn has_draining(&self) -> bool {
+        self.engines
+            .iter()
+            .any(|e| matches!(e.state, EngineState::Draining(_)))
+    }
+
+    /// True if every engine is draining, so none is idle and none will be
+    /// released until a core answers a request it has already missed the
+    /// deadline for.
+    pub(crate) fn all_draining(&self) -> bool {
+        self.engines
+            .iter()
+            .all(|e| matches!(e.state, EngineState::Draining(_)))
+    }
+
+    /// Return draining engines whose cores have since answered.
+    ///
+    /// `answered(id, seq)` reports whether core `id` has answered request
+    /// `seq`; `scrub(id)` wipes what the request left in shared memory and
+    /// runs before the engine is handed on.
+    pub(crate) fn reclaim_drained(
+        &mut self,
+        mut answered: impl FnMut(EngineId, u32) -> bool,
+        mut scrub: impl FnMut(EngineId),
+    ) {
+        for i in 0..ENGINES {
+            if let EngineState::Draining(seq) = self.engines[i].state {
+                let id = EngineId::new(i as u8);
+                if answered(id, seq) {
+                    scrub(id);
+                    self.release_engine(id);
+                }
+            }
+        }
+    }
+
+    /// Withdraw the waiter in queue slot `idx`, which has stopped waiting.
+    ///
+    /// An engine already handed to it goes to the next waiter instead, so a
+    /// waiter that leaves cannot strand one.
+    pub(crate) fn cancel_wait(&mut self, idx: u8) {
+        match self.queue[idx as usize].state {
+            QueueSlotState::Free => return,
+            QueueSlotState::Pending => {
+                let was_head = self.wait_head == idx;
+                self.unlink_waiter(idx);
+                if was_head {
+                    self.wake_head_if_draining();
+                }
+            }
+            // Left the wait ring when it was assigned.
+            QueueSlotState::Assigned(id) => self.release_engine(id),
+        }
+        let slot = &mut self.queue[idx as usize];
+        slot.state = QueueSlotState::Free;
+        slot.next = self.free_head;
+        self.free_head = idx;
+    }
+
+    /// One poll of [`PqcDriver::acquire_any`](crate::PqcDriver::acquire_any)
+    /// for the waiter whose queue slot is `slot` (`None` until it queues).
+    ///
+    /// `answered` and `scrub` are as for [`reclaim_drained`](Self::reclaim_drained).
+    pub(crate) fn poll_acquire(
+        &mut self,
+        slot: &mut Option<u8>,
+        cx: &Context<'_>,
+        answered: impl FnMut(EngineId, u32) -> bool,
+        scrub: impl FnMut(EngineId),
+    ) -> Poll<Acquire> {
+        self.reclaim_drained(answered, scrub);
+
+        let idx = match *slot {
+            // Already queued: take the engine if one has been handed over.
+            Some(idx) => {
+                if let Some(id) = self.poll_queue_slot(idx, cx) {
+                    *slot = None;
+                    return Poll::Ready(Acquire::Done(Ok(id)));
+                }
+                idx
+            }
+            None => {
+                // Fast path, but only when nobody is waiting -- otherwise a
+                // task arriving now would jump the queue.
+                if !self.has_waiters() {
+                    if let Some(id) = self.claim_free_engine() {
+                        return Poll::Ready(Acquire::Done(Ok(id)));
+                    }
+                }
+                if self.all_draining() {
+                    return Poll::Ready(Acquire::Done(Err(PqcError::FP_NOT_READY)));
+                }
+                let Some(idx) = self.reserve_queue_slot() else {
+                    return Poll::Ready(Acquire::Done(Err(PqcError::QUEUE_FULL)));
+                };
+                *slot = Some(idx);
+                self.poll_queue_slot(idx, cx);
+                idx
+            }
+        };
+
+        // No engine will be released until a core answers a request it has
+        // already missed its deadline for: give up rather than wait forever.
+        if self.all_draining() {
+            self.cancel_wait(idx);
+            *slot = None;
+            return Poll::Ready(Acquire::Done(Err(PqcError::FP_NOT_READY)));
+        }
+        // Only the head waiter watches draining engines; the rest sleep until
+        // an engine is handed over or the head moves on.
+        if self.wait_head == idx && self.has_draining() {
+            return Poll::Ready(Acquire::Reap);
+        }
+        Poll::Pending
+    }
+
+    /// Wake the head waiter if an engine is draining, so it takes over
+    /// watching it from a waiter that has just left the head.
+    fn wake_head_if_draining(&mut self) {
+        if self.wait_head != NO_SLOT && self.has_draining() {
+            self.queue[self.wait_head as usize].waker.wake();
+        }
+    }
+
+    /// Remove `idx` from the wait ring.
+    fn unlink_waiter(&mut self, idx: u8) {
+        let mut prev = NO_SLOT;
+        let mut cur = self.wait_head;
+        while cur != NO_SLOT && cur != idx {
+            prev = cur;
+            cur = self.queue[cur as usize].next;
+        }
+        if cur != idx {
+            return;
+        }
+        let next = self.queue[idx as usize].next;
+        if prev == NO_SLOT {
+            self.wait_head = next;
+        } else {
+            self.queue[prev as usize].next = next;
+        }
+        if self.wait_tail == idx {
+            self.wait_tail = prev;
         }
     }
 }
@@ -334,5 +513,153 @@ mod tests {
                 "slot {expected} should have been served in turn"
             );
         }
+    }
+
+    /// An engine released with a request still running stays out of the
+    /// pool until its core answers, and is scrubbed before anyone gets it.
+    #[test]
+    fn draining_engine_waits_for_its_core_and_is_scrubbed() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+        let waiter = state.reserve_queue_slot().expect("slot");
+
+        state.quarantine_engine(EngineId::new(1), 7);
+        state.reclaim_drained(
+            |_, _| false,
+            |_| panic!("scrubbed before the core answered"),
+        );
+        assert!(state.has_draining());
+        assert!(
+            collect(&mut state, waiter).is_none(),
+            "a draining engine must not be handed out"
+        );
+
+        let mut scrubbed = None;
+        state.reclaim_drained(
+            |id, seq| id == EngineId::new(1) && seq == 7,
+            |id| scrubbed = Some(id),
+        );
+        assert_eq!(scrubbed, Some(EngineId::new(1)));
+        assert!(!state.has_draining());
+        assert_eq!(collect(&mut state, waiter), Some(EngineId::new(1)));
+        assert_eq!(state.engines[1].state, EngineState::Busy);
+    }
+
+    /// Only when every engine is draining is there nothing left to wait for.
+    #[test]
+    fn all_draining_only_when_every_engine_is() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+        for i in 0..ENGINES as u8 - 1 {
+            state.quarantine_engine(EngineId::new(i), u32::from(i));
+        }
+        assert!(!state.all_draining());
+        state.quarantine_engine(EngineId::new(ENGINES as u8 - 1), 9);
+        assert!(state.all_draining());
+    }
+
+    /// A waiter that leaves is skipped, and one that leaves after being
+    /// handed an engine passes it on instead of stranding it.
+    #[test]
+    fn cancelled_waiters_leave_the_queue_and_pass_on_engines() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+
+        let a = state.reserve_queue_slot().expect("slot");
+        let b = state.reserve_queue_slot().expect("slot");
+        let c = state.reserve_queue_slot().expect("slot");
+        state.cancel_wait(b);
+        state.release_engine(EngineId::new(0));
+        assert_eq!(collect(&mut state, a), Some(EngineId::new(0)));
+        state.release_engine(EngineId::new(1));
+        assert_eq!(collect(&mut state, c), Some(EngineId::new(1)));
+        assert!(!state.has_waiters());
+
+        let d = state.reserve_queue_slot().expect("slot");
+        let e = state.reserve_queue_slot().expect("slot");
+        state.release_engine(EngineId::new(2));
+        state.cancel_wait(d);
+        assert_eq!(collect(&mut state, e), Some(EngineId::new(2)));
+
+        // Every slot is back on the free list.
+        reserve_all(&mut state);
+    }
+
+    /// A context whose waker does nothing, for driving `poll_acquire`.
+    fn noop_cx() -> Context<'static> {
+        Context::from_waker(core::task::Waker::noop())
+    }
+
+    /// Only the head waiter watches a draining engine; once the head is
+    /// served the next waiter takes over, and stops when nothing drains.
+    #[test]
+    fn only_the_head_waiter_watches_draining_engines() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+        state.quarantine_engine(EngineId::new(0), 1);
+        let cx = noop_cx();
+        let never = |_: EngineId, _: u32| false;
+
+        let mut head = None;
+        let mut next = None;
+        let first = state.poll_acquire(&mut head, &cx, never, |_| {});
+        assert!(matches!(first, Poll::Ready(Acquire::Reap)));
+        assert!(state
+            .poll_acquire(&mut next, &cx, never, |_| {})
+            .is_pending());
+
+        // The core answers: the head collects the scrubbed engine, and with
+        // nothing left draining the next waiter simply waits.
+        let got = state.poll_acquire(&mut head, &cx, |_, seq| seq == 1, |_| {});
+        assert!(matches!(got, Poll::Ready(Acquire::Done(Ok(id))) if id == EngineId::new(0)));
+        assert!(state
+            .poll_acquire(&mut next, &cx, never, |_| {})
+            .is_pending());
+
+        // Another engine drains: the waiter now at the head watches it.
+        state.quarantine_engine(EngineId::new(1), 2);
+        let watch = state.poll_acquire(&mut next, &cx, never, |_| {});
+        assert!(matches!(watch, Poll::Ready(Acquire::Reap)));
+    }
+
+    /// With every engine draining, queued and arriving waiters give up
+    /// rather than wait for cores that may never answer.
+    #[test]
+    fn waiters_give_up_when_every_engine_is_draining() {
+        let mut state = PqcState::new();
+        for _ in 0..ENGINES {
+            state.claim_free_engine().expect("engine free");
+        }
+        let cx = noop_cx();
+        let never = |_: EngineId, _: u32| false;
+
+        let mut queued = None;
+        assert!(state
+            .poll_acquire(&mut queued, &cx, never, |_| {})
+            .is_pending());
+        for i in 0..ENGINES as u8 {
+            state.quarantine_engine(EngineId::new(i), u32::from(i));
+        }
+
+        let gave_up = state.poll_acquire(&mut queued, &cx, never, |_| {});
+        assert!(
+            matches!(gave_up, Poll::Ready(Acquire::Done(Err(e))) if e == PqcError::FP_NOT_READY)
+        );
+        assert_eq!(queued, None);
+        assert!(!state.has_waiters());
+
+        let mut late = None;
+        let refused = state.poll_acquire(&mut late, &cx, never, |_| {});
+        assert!(
+            matches!(refused, Poll::Ready(Acquire::Done(Err(e))) if e == PqcError::FP_NOT_READY)
+        );
     }
 }

@@ -14,18 +14,8 @@
 
 use core::ops::Deref;
 
-use tsra_crypto::HashAlgo;
-
 use super::*;
-
-fn to_hash_algo(algo: HsmHashAlgo) -> HashAlgo {
-    match algo {
-        HsmHashAlgo::Sha1 => HashAlgo::sha1(),
-        HsmHashAlgo::Sha256 => HashAlgo::sha256(),
-        HsmHashAlgo::Sha384 => HashAlgo::sha384(),
-        HsmHashAlgo::Sha512 => HashAlgo::sha512(),
-    }
-}
+use crate::hash::to_hash_algo;
 
 impl HsmKdf for StdHsmPal {
     async fn hkdf_extract(
@@ -39,7 +29,7 @@ impl HsmKdf for StdHsmPal {
         self.kdf
             .hkdf(
                 ikm,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::HkdfMode::Extract,
                 salt.map(|s| s.deref()),
                 None,
@@ -59,7 +49,7 @@ impl HsmKdf for StdHsmPal {
         self.kdf
             .hkdf(
                 prk,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::HkdfMode::Expand,
                 None,
                 info.map(|s| s.deref()),
@@ -80,7 +70,7 @@ impl HsmKdf for StdHsmPal {
         self.kdf
             .kbkdf(
                 key,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 label.map(|s| s.deref()),
                 context.map(|s| s.deref()),
                 output,
@@ -119,7 +109,7 @@ impl HsmKdf for StdHsmPal {
         self.kdf
             .concat_kdf(
                 z,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::ConcatKdfMode::X963,
                 Some(shared_info.deref()),
                 key,
@@ -138,7 +128,7 @@ impl HsmKdf for StdHsmPal {
         self.kdf
             .concat_kdf(
                 z,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::ConcatKdfMode::Sp800_56a,
                 Some(other_info.deref()),
                 key,

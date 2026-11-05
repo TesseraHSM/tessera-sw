@@ -126,6 +126,31 @@ pub enum DdiError {
     TborDecodeError,
 }
 
+impl DdiError {
+    /// Maps a fast-path completion's status code (`sts`) and error code
+    /// (`err`) to an error, or `None` on success.
+    ///
+    /// An invalid-key completion (GCM `INVALID_KEY` / XTS `INVALID_KEY1`)
+    /// maps to `DdiStatus::KeyNotFound` so callers can restore the key
+    /// (e.g. after a reset) and retry. Otherwise a non-zero `sts` maps to
+    /// [`DdiError::FpError`] and a non-zero `err` to
+    /// [`DdiError::FpCmdSpecificError`].
+    pub fn from_fp_status(sts: u32, err: u32) -> Option<Self> {
+        const STS_INVALID_FIELD_XTS: u32 = 0x1;
+        const STS_INVALID_FIELD_GCM: u32 = 0x2;
+        const ERR_INVALID_KEY: u32 = 0x1;
+
+        match (sts, err) {
+            (0, 0) => None,
+            (STS_INVALID_FIELD_XTS | STS_INVALID_FIELD_GCM, ERR_INVALID_KEY) => {
+                Some(Self::DdiStatus(DdiStatus::KeyNotFound))
+            }
+            (0, err) => Some(Self::FpCmdSpecificError(err)),
+            (sts, _) => Some(Self::FpError(sts)),
+        }
+    }
+}
+
 // ── Codec error → DdiError conversions ──────────────────────────────
 //
 // Wire encode/decode failures convert into per-codec variants so `?`

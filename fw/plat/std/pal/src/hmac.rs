@@ -37,7 +37,6 @@
 
 use core::marker::PhantomData;
 
-use tsra_crypto::HashAlgo;
 use tsra_crypto::HmacAlgo;
 use tsra_crypto::HmacAlgoSignContext;
 use tsra_crypto::HmacKey;
@@ -46,19 +45,11 @@ use tsra_crypto::SignStreamingOpContext;
 use tsra_crypto::Signer;
 
 use super::*;
+use crate::hash::to_hash_algo;
 
 /// Largest HMAC tag we may need to materialise locally for verify
 /// (== SHA-512 digest length).
 const MAX_HMAC_TAG_LEN: usize = 64;
-
-fn to_hash_algo(algo: HsmHashAlgo) -> HashAlgo {
-    match algo {
-        HsmHashAlgo::Sha1 => HashAlgo::sha1(),
-        HsmHashAlgo::Sha256 => HashAlgo::sha256(),
-        HsmHashAlgo::Sha384 => HashAlgo::sha384(),
-        HsmHashAlgo::Sha512 => HashAlgo::sha512(),
-    }
-}
 
 /// Constant-time byte slice comparison.
 ///
@@ -117,7 +108,7 @@ impl HsmHmac for StdHsmPal {
         data: &HsmDmaBuf,
         tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.hmac.sign(to_hash_algo(algo), key, data, tag).await
+        self.hmac.sign(to_hash_algo(algo)?, key, data, tag).await
     }
 
     async fn hmac_verify(
@@ -128,7 +119,7 @@ impl HsmHmac for StdHsmPal {
         data: &HsmDmaBuf,
         tag: &HsmDmaBuf,
     ) -> HsmResult<bool> {
-        self.hmac.verify(to_hash_algo(algo), key, data, tag).await
+        self.hmac.verify(to_hash_algo(algo)?, key, data, tag).await
     }
 
     async fn hmac_begin<'a>(
@@ -147,7 +138,7 @@ impl HsmHmac for StdHsmPal {
         // scope's zero-on-free allocator contract.
         let hmac_key = HmacKey::from_bytes(key).map_err(|_| HsmError::HmacError)?;
 
-        let hmac_algo = HmacAlgo::new(to_hash_algo(algo));
+        let hmac_algo = HmacAlgo::new(to_hash_algo(algo)?);
         let sign_ctx: HmacAlgoSignContext<'static> =
             Signer::sign_init::<'static, HmacAlgo>(hmac_algo, hmac_key)
                 .map_err(|_| HsmError::HmacError)?;
@@ -193,7 +184,7 @@ impl HsmHmac for StdHsmPal {
         tag: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         let mut computed = [0u8; MAX_HMAC_TAG_LEN];
-        let digest_len = to_hash_algo(ctx.algo).size();
+        let digest_len = to_hash_algo(ctx.algo)?.size();
         if digest_len > computed.len() {
             return Err(HsmError::HmacError);
         }
@@ -215,7 +206,7 @@ impl HsmHmac for StdHsmPal {
 /// Shared helper for the two non-verify finishers.  Writes the HMAC
 /// tag into `out[..digest_len]`.
 fn finish_into_tag(ctx: &mut StdHmacCtx<'_>, out: &mut HsmDmaBuf) -> HsmResult<()> {
-    let digest_len = to_hash_algo(ctx.algo).size();
+    let digest_len = to_hash_algo(ctx.algo)?.size();
     if out.len() < digest_len {
         return Err(HsmError::HmacError);
     }

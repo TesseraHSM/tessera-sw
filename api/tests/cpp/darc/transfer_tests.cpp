@@ -12,13 +12,6 @@
 // happy path — mint an ECC signing key, wrap it under the TMK, unwrap it
 // back, then sign with the recovered key and verify against the original
 // public key.
-//
-// The whole file needs the two-phase TBOR HPKE handshake and a fully
-// provisioned, SD-initialized partition, which the mock backend does not
-// implement, so it is excluded from the mock lane and runs on the emu and
-// hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -459,5 +452,3 @@ TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
             << "an unanchored target chain must be rejected with INVALID_ARGUMENT";
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

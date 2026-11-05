@@ -33,6 +33,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartResetKind;
 use tsra_fw_uno_drivers_part_store::PartStore;
+use tsra_fw_uno_drivers_part_store::UnwrappingKeySlot;
 use tsra_fw_uno_drivers_session_store::SessionStore;
 
 use crate::UnoHsmPal;
@@ -79,6 +80,7 @@ impl UnoHsmPal {
         &self,
         pid: HsmPartId,
         mask: u128,
+        vm_launch_guid: &[u8; 16],
         is_pf: bool,
     ) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
@@ -102,13 +104,34 @@ impl UnoHsmPal {
         // and `rollback_alloc` clear it and `part_migrate` re-provisions it,
         // so a partially-provisioned slot never short-circuits here.
         //
+        // A `Faulted` partition (its free failed on a PCIe reset) still holds
+        // its mask and identity, so it never short-circuits: it falls through
+        // to retry `part_free` and reprovision, which clears the fault.
+        //
         // Nothing is re-run on this path. Gate 1 in particular is already
         // re-armed for every partition with a non-zero `res_mask` by
         // `PartStore::rearm_unwrapping_key_required()` in `init()`.
-        if mask == part.res_mask() && part.id_key_id().is_some() {
+        let state = part.state()?;
+        if state != HsmPartState::Faulted && mask == part.res_mask() && part.id_key_id().is_some() {
             return Ok(());
         }
 
+        // A partition quarantined as `Faulted` (its free failed on a PCIe
+        // reset) still holds its tables and the keys inside them. Refuse to
+        // hand any of those tables to a different partition until the faulted
+        // owner is freed, so a failed cleanup can never expose its keys.
+        for idx in 0..NUM_PARTITIONS {
+            let other = HsmPartId::from(idx as u8);
+            if other == pid {
+                continue;
+            }
+            if let Ok(p) = PartStore::partition(other)
+                && matches!(p.state(), Ok(HsmPartState::Faulted))
+                && p.res_mask() & mask != 0
+            {
+                return Err(HsmError::NotEnoughSpace);
+            }
+        }
         // A PF enabled before its resources were assigned is `Enabled` with no
         // resource mask yet (its identity/enabled keys are deferred); freeing
         // it would tear the enable down, so skip the free only in that exact
@@ -116,11 +139,20 @@ impl UnoHsmPal {
         // fully-provisioned `Enabled` partition being reallocated under a
         // *different* mask — is freed so keygen starts from a clean slate (no
         // leaked vault keys, no stale resource mask).
-        let pre_enabled = is_pf && part.state()? == HsmPartState::Enabled && part.res_mask() == 0;
+        let pre_enabled = is_pf && state == HsmPartState::Enabled && part.res_mask() == 0;
         if !pre_enabled {
             self.part_free(pid).await?;
         }
         part.set_res_mask(mask);
+
+        // Capture the host-provided VM-launch GUID carried by this
+        // `SetResource` into the persistent store, so a later `InitBk3`
+        // reports the correct VM identity to the host (and migration-restore
+        // preserves it). Mirrors the reference firmware's
+        // `part_init::handle_set_res_cnt`, which records the GUID alongside
+        // the resource mask. `part_free` above cleared any prior value, so
+        // reallocation always rebinds to the current launch's GUID.
+        part.set_vm_launch_guid(vm_launch_guid);
 
         // Arm Gate 1 so the SP may stage an unwrapping key for this partition;
         // gate on `mask != 0` to never arm an idle PFN. The SP polls
@@ -263,6 +295,11 @@ impl UnoHsmPal {
         // The masked boot key persists across enable/disable; it is wiped
         // only here, on free.
         part.clear_masked_bk_boot();
+        // Disarm Gate 1 and wipe the SP-published unwrapping key. Like the
+        // masked boot key, it persists across enable/disable and belongs to
+        // the allocation; a later `SetResource` re-arms Gate 1 so the SP
+        // stages a fresh key for the next tenant.
+        part.clear_unwrapping_key();
 
         // Release resources and reset lifecycle state.
         part.set_res_mask(0);
@@ -504,24 +541,35 @@ impl UnoHsmPal {
     ///
     /// - **VF / re-enable** (`Allocated | Disabled → Enabled`): the
     ///   establish-credential and session-encryption ECC P-384 key pairs are
-    ///   generated here with a fresh nonce, then host IO is accepted.
+    ///   generated here with a fresh nonce and default PSKs are installed,
+    ///   then host IO is accepted. Each role must rotate its PSK again.
     /// - **PF enable-before-SetResource** (`Unallocated → Enabled`, only when
     ///   `is_pf`): `res_mask` is not yet assigned, so the enable-time keys
     ///   cannot be provisioned (the vault has no table). The enable is
     ///   recorded and key provisioning is *deferred* to [`part_alloc`], which
     ///   runs when `SetResource` arrives.
     ///
-    /// Re-enabling an already-`Enabled` partition preserves its keys and nonce.
+    /// Re-enabling an already-`Enabled` partition preserves its keys, PSKs,
+    /// and nonce.
     /// Certificates and BK_BOOT are out of scope.
+    ///
+    /// A PF left `Faulted` by a failed PCIe-reset free is freed again first,
+    /// because its enable arrives before the `SetResource` whose
+    /// [`part_alloc`] would otherwise recover it; a failed free is returned
+    /// and the partition stays `Faulted`.
     ///
     /// Returns [`HsmError::InvalidArg`] for an illegal transition.
     ///
     /// [`part_alloc`]: Self::part_alloc
     pub(crate) async fn part_enable(&self, pid: HsmPartId, is_pf: bool) -> HsmResult<()> {
         let part = PartStore::partition(pid)?;
+        if is_pf && part.state()? == HsmPartState::Faulted {
+            self.part_free(pid).await?;
+        }
         match part.state()? {
             HsmPartState::Allocated | HsmPartState::Disabled => {
                 self.provision_enabled_keys(pid).await?;
+                part.bake_default_psks();
                 part.set_state(HsmPartState::Enabled);
                 Ok(())
             }
@@ -589,12 +637,11 @@ impl UnoHsmPal {
     /// always provisions a fresh identity. Finally refreshes the nonce and regenerates
     /// the establish-credential and session-encryption keys.
     ///
-    /// The session slots are **released** (`SessionTable::clear_all`), a
-    /// second deliberate divergence from `state.migrate()`, which preserves
-    /// them for renegotiation via `restore(backup())`. Uno regenerates the
-    /// identity and does not preserve the pre-reset session context. This
-    /// preserves the behaviour of the original `clear_state(PartResetKind::Migrate)`, which
-    /// zeroized the session table itself before that policy moved here.
+    /// Established session slots are marked for renegotiation
+    /// (`SessionTable::mark_all_needs_renego`), mirroring `state.migrate()`'s
+    /// `restore(backup())`: in-session ops fail with
+    /// `SessionNeedsRenegotiation` until the host reopens the session, and
+    /// `CloseSession` still succeeds. Pending handshakes are released.
     ///
     /// Provisioning survives NSSR with a freshly regenerated identity, and
     /// credentials can be re-established. A full [`part_disable`] additionally
@@ -605,9 +652,7 @@ impl UnoHsmPal {
     ///
     /// Applies to a partition in **any** lifecycle state, mirroring the
     /// reference firmware's unconditional `state.migrate()`; it does not
-    /// require `Enabled`. An earlier revision rejected every non-`Enabled`
-    /// state with [`HsmError::InvalidArg`], which left the session table
-    /// leaked whenever a partition was migrated while disabled.
+    /// require `Enabled`.
     ///
     /// - `Unallocated` — no resources and no vault table: no-op, `Ok(())`.
     /// - `res_mask == 0` (the PF enabled before `SetResource` assigned it
@@ -647,16 +692,6 @@ impl UnoHsmPal {
             return Ok(());
         }
 
-        // Reap ALL per-tenant state regardless of the current lifecycle
-        // state (Enabled / Allocated / Disabled), mirroring the reference
-        // firmware's unconditional `state.migrate()`. uno previously
-        // guarded on `Enabled` and returned `InvalidArg` for every other
-        // state, which left a leaked session table intact whenever a
-        // partition was migrated while not Enabled (e.g. after the owning
-        // host fd closed and disabled it) — perpetuating
-        // `VaultSessionLimitReached` across the NSSR that `erase()` drives,
-        // because the session slots were never freed.
-
         // Wipe every vault key (app + session + internal) so no prior
         // tenant key material survives the reset, and release the partition's
         // fast-path engine bulk-key slots. Runs inside a `with_admin_io`
@@ -667,15 +702,11 @@ impl UnoHsmPal {
             self.vault_clear(admin_io).await
         })
         .await?;
-        // Clear the per-tenant persistent state, preserving the partition's
-        // provisioning material. Every session slot is released outright;
-        // the identity is regenerated below rather than preserving pre-reset
-        // session context. The vault clear above already deleted the backing
-        // session-blob keys.
+        // The vault clear above deleted the backing session-blob keys; keep
+        // established session IDs for reopen/close. Must run before
+        // clear_state, which erases the Pending mask used to drop handshakes.
+        SessionStore::partition(pid)?.mark_all_needs_renego();
         part.clear_state(PartResetKind::Migrate);
-        if let Ok(mut sessions) = SessionStore::partition(pid) {
-            sessions.clear_all();
-        }
         // The `vault.clear()` above also deleted the identity private key.
         // Zero the identity fields (id, `id_key_id`, cached public key)
         // *before* awaiting so no concurrent reader can observe `id_key_id`
@@ -695,9 +726,10 @@ impl UnoHsmPal {
     }
 
     /// Materialise the partition's RSA-2048 unwrapping key into the vault on
-    /// first use, if the HSP has published it into the GSRAM backup slot but it
-    /// is not yet imported. No-op if it is already imported or not yet
-    /// published.
+    /// first use, if the HSP has published it into the GSRAM backup slot and
+    /// it passed its pairwise consistency test, but it is not yet imported.
+    /// No-op if it is already imported, not yet published, or not yet tested
+    /// (see [`certify_pending_unwrapping_key`](Self::certify_pending_unwrapping_key)).
     ///
     /// Runs synchronously — a CPU-copy vault insert via
     /// [`create_sync`](tsra_fw_uno_key_vault::KeyVault::create_sync), with no
@@ -712,13 +744,14 @@ impl UnoHsmPal {
             if part.unwrapping_key_id().is_some() {
                 return Ok(());
             }
-            if !part.unwrapping_key_bk_valid() {
+            if part.unwrapping_key_slot() != Some(UnwrappingKeySlot::PctPassed) {
                 // The HSP has not published a key into this partition's GSRAM
-                // slot yet. Leave the id absent so the read surfaces
+                // slot yet, or the key hasn't passed its pairwise consistency
+                // test yet. Leave the id absent so the read surfaces
                 // `PartPropNotFound` → `PendingKeyGeneration` and the host
                 // retries once the key is available. `unwrapping_key_bk` returns
                 // `&'static` GSRAM memory that stays valid while the slot is
-                // marked valid.
+                // occupied.
                 return Ok(());
             }
             part.unwrapping_key_bk()
@@ -957,7 +990,19 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::PSK_CO => p.set_psk_co(data),
             HsmPartPropId::PSK_CU => p.set_psk_cu(data),
             HsmPartPropId::CREDENTIAL => p.set_credential(data),
-            HsmPartPropId::SEALED_BK3 => p.set_sealed_bk3(data),
+            // Write-once per power cycle: a second `SetSealedBk3` without an
+            // intervening clear (partition free / NSSR) returns
+            // `SealedBk3AlreadySet`, matching the std PAL (`part.rs` setter)
+            // and the `part_set_sealed_bk3` contract. The blob is preserved
+            // across `Migrate` (NSSR), so this one-shot gate must survive a
+            // live migration. The low-level store accessor keeps plain
+            // overwrite semantics; the policy lives here.
+            HsmPartPropId::SEALED_BK3 => {
+                if !p.sealed_bk3().is_empty() {
+                    return Err(HsmError::SealedBk3AlreadySet);
+                }
+                p.set_sealed_bk3(data)
+            }
             HsmPartPropId::MASKED_BK_BOOT => p.set_masked_bk_boot(data),
             HsmPartPropId::BK3_SESSION => p.set_bk3_session(data),
             HsmPartPropId::POTA_THUMBPRINT => p.set_pota_thumbprint(data),

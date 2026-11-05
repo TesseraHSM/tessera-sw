@@ -16,6 +16,7 @@ use crate::Xtask;
 use crate::XtaskCtx;
 
 /// Version constants for installed dependencies
+const CARGO_NEXTEST_VERSION: &str = "0.9.132";
 const CARGO_AUDIT_VERSION: &str = "0.22.0";
 
 /// Xtask to run various repo-specific checks
@@ -47,6 +48,19 @@ impl Xtask for Setup {
             cmd!(sh, "rustup target add {tgt}").quiet().run()?;
             cmd!(sh, "rustup +nightly target add {tgt}").quiet().run()?;
         }
+
+        // Run Install Cargo nextest
+        let install_cargo_nextest = install::Install {
+            crate_name: format!("cargo-nextest@{}", CARGO_NEXTEST_VERSION),
+            force: self.force,
+            config: self.config.clone(),
+            no_default_features: true,
+            features: Some(vec!["default-no-update".to_string()]),
+        };
+        install_cargo_nextest.run(ctx.clone())?;
+
+        // Check cargo-nextest version
+        cmd!(sh, "cargo nextest --version").quiet().run()?;
 
         // Run Install cargo-audit
         if !self.skip_audit {

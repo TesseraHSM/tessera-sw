@@ -14,8 +14,8 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::TborStatus;
 
 /// Assert that `err` is a backend-side "this wire encoding is not
-/// implemented" rejection. The `mock` backend returns this for every
-/// `exec_op_tbor` call (it has not opted into TBOR).
+/// implemented" rejection, as returned by a backend that has not opted
+/// into TBOR.
 #[track_caller]
 pub fn assert_unsupported_encoding(err: &DdiError) {
     assert!(
@@ -58,4 +58,21 @@ pub fn assert_fw_rejects(err: &DdiError, expected: TborStatus) {
         ),
         other => panic!("expected DdiError::TborStatus({expected:?}), got {other:?}"),
     }
+}
+
+/// Assert a session rejection, including socket ownership checks that reject
+/// unknown or closed allocations before the command reaches firmware.
+#[track_caller]
+pub fn assert_session_rejects(err: &DdiError, expected: TborStatus) {
+    #[cfg(feature = "sock")]
+    if matches!(
+        expected,
+        TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+    ) && matches!(
+        err,
+        DdiError::DdiStatus(tsra_ddi_mbor_types::DdiStatus::FileHandleSessionIdDoesNotMatch)
+    ) {
+        return;
+    }
+    assert_fw_rejects(err, expected);
 }

@@ -63,8 +63,11 @@ Use cargo-nextest (recommended):
 
 ```bash
 # Run tests in specific packages you are modifying against simulator
-cargo xtask nextest --features mock --package <package-name>
+cargo xtask nextest --features emu --package <package-name>
 ```
+
+The emulator exposes one partition resource by default. Set
+`TSRA_EMU_RESOURCE_COUNT` (for example `4` or `64`) to test with more.
 
 ### C++ Session Modes
 
@@ -75,10 +78,8 @@ The C++ algorithm fixtures select the session API at compile time. Use
 cargo nextest run --package tsra_api_tests --features emu,session-ex-tests --test cpp
 ```
 
-Omit `session-ex-tests` for legacy/MBOR sessions, or use `--features mock` for the
-legacy mock backend. Mock and `session-ex-tests` cannot be combined. Run builds
-for different backends or session modes sequentially because they share native
-build outputs.
+Omit `session-ex-tests` for legacy/MBOR sessions. Run builds for different
+backends or session modes sequentially because they share native build outputs.
 
 EX coverage includes SHA, ECC, RSA, HMAC, HKDF, AES-CBC, and plain-AES key management.
 Standalone unmask cases assert that EX returns an unsupported-operation error;

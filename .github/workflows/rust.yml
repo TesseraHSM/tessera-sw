@@ -46,7 +46,7 @@ jobs:
     - name: Check committed C header is up to date
       run: cargo xtask precheck --cbindgen
 
-  test_ubuntu_mock:
+  test_ubuntu_emu:
 
     runs-on: ubuntu-24.04
 
@@ -57,15 +57,15 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/ubuntu-setup
-    - name: Run all mock tests (except tsra_api_tests)
-      id: test-mock
-      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx -F mock --profile ci-mock
+    - name: Run all emu tests (except tsra_api_tests)
+      id: test-emu
+      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx -F emu --profile ci-emu
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-mock.outcome == 'failure' }}
+      if: ${{ steps.test-emu.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -83,7 +83,7 @@ jobs:
     - uses: ./.github/actions/ubuntu-setup
     - name: Run tsra_api_tests
       id: test-api
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F mock --profile ci-api
+      run: cargo xtask precheck --nextest -p tsra_api_tests -F emu --profile ci-api
       continue-on-error: true
     - name: Run tsra_api_tests with EX sessions against emu
       id: test-api-ex
@@ -109,75 +109,23 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/ubuntu-setup
-    - name: SDK Run all mock tests table-4
-      id: test-mock-table-4
-      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types -F mock,table-4 --profile ci-mock-table-4
+    - name: SDK Run MBOR types tests on emu with 4 partition resources
+      id: test-emu-res-4
+      env:
+        TSRA_EMU_RESOURCE_COUNT: "4"
+      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types -F emu --profile ci-emu-res-4
       continue-on-error: true
-    - name: SDK Run all mock tests table-64
-      id: test-mock-table-64
-      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types -F mock,table-64 --profile ci-mock-table-64
-      continue-on-error: true
-    - name: SDK Run TBOR types tests against emu backend
-      id: test-tbor-emu
-      run: cargo xtask precheck --nextest -p tsra_ddi_tbor_types -F emu --profile ci-tbor-emu
-      continue-on-error: true
-    - name: Run resiliency fault injection tests
-      id: test-res-fault
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F mock,res-test -E 'test(resiliency::fault_injection::)' --profile ci-mock-res
+    - name: SDK Run MBOR types tests on emu with 64 partition resources
+      id: test-emu-res-64
+      env:
+        TSRA_EMU_RESOURCE_COUNT: "64"
+      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types -F emu --profile ci-emu-res-64
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-mock-table-4.outcome == 'failure' || steps.test-mock-table-64.outcome == 'failure' || steps.test-tbor-emu.outcome == 'failure' || steps.test-res-fault.outcome == 'failure' }}
-      run: |
-        echo "One or more tests failed."
-        exit 1
-
-  test_ubuntu_smoke:
-
-    runs-on: ubuntu-24.04
-
-    defaults:
-      run:
-        working-directory: .
-
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - uses: ./.github/actions/ubuntu-setup
-    - name: Run emu smoke tests
-      id: test-emu-smoke
-      run: cargo xtask precheck --nextest --package tsra_ddi_mbor_types --features emu --test tsra_ddi_tests --filter smoke --profile ci-emu-smoke
-      continue-on-error: true
-    - name: Generate nextest report
-      id: nextest-report
-      run: cargo xtask precheck --nextest-report
-    - name: Fail if any tests failed
-      if: ${{ steps.test-emu-smoke.outcome == 'failure' }}
-      run: |
-        echo "One or more tests failed."
-        exit 1
-
-  test_ubuntu_emu_ddi:
-
-    runs-on: ubuntu-24.04
-
-    defaults:
-      run:
-        working-directory: .
-
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - uses: ./.github/actions/ubuntu-setup
-    - name: Run emu DDI tests
-      id: test-emu-ddi
-      run: cargo xtask precheck --nextest --package tsra_ddi_mbor_types --features emu --test tsra_ddi_tests --profile ci-emu-ddi
-      continue-on-error: true
-    - name: Generate nextest report
-      id: nextest-report
-      run: cargo xtask precheck --nextest-report
-    - name: Fail if any tests failed
-      if: ${{ steps.test-emu-ddi.outcome == 'failure' }}
+      if: ${{ steps.test-emu-res-4.outcome == 'failure' || steps.test-emu-res-64.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -209,7 +157,7 @@ jobs:
     - name: Cargo Clippy
       run: cargo xtask precheck --clippy
 
-  test_windows_mock:
+  test_windows_emu:
 
     runs-on: windows-2025-vs2026
 
@@ -220,15 +168,15 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/windows-setup
-    - name: Run all mock tests (except tsra_api_tests)
-      id: test-mock
-      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx -F mock --profile ci-mock
+    - name: Run all emu tests (except tsra_api_tests)
+      id: test-emu
+      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx -F emu --profile ci-emu
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-mock.outcome == 'failure' }}
+      if: ${{ steps.test-emu.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -246,7 +194,7 @@ jobs:
     - uses: ./.github/actions/windows-setup
     - name: Run tsra_api_tests
       id: test-api
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F mock --profile ci-api
+      run: cargo xtask precheck --nextest -p tsra_api_tests -F emu --profile ci-api
       continue-on-error: true
     - name: Run tsra_api_tests with EX sessions against emu
       id: test-api-ex
@@ -257,78 +205,6 @@ jobs:
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
       if: ${{ steps.test-api.outcome == 'failure' || steps.test-api-ex.outcome == 'failure' }}
-      run: |
-        echo "One or more tests failed."
-        exit 1
-
-  test_windows_misc:
-
-    runs-on: windows-2025-vs2026
-
-    defaults:
-      run:
-        working-directory: .
-
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - uses: ./.github/actions/windows-setup
-    - name: Run resiliency fault injection tests
-      id: test-res-fault
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F mock,res-test -E 'test(resiliency::fault_injection::)' --profile ci-mock-res
-      continue-on-error: true
-    - name: Generate nextest report
-      id: nextest-report
-      run: cargo xtask precheck --nextest-report
-    - name: Fail if any tests failed
-      if: ${{ steps.test-res-fault.outcome == 'failure' }}
-      run: |
-        echo "One or more tests failed."
-        exit 1
-
-  test_windows_smoke:
-
-    runs-on: windows-2025-vs2026
-
-    defaults:
-      run:
-        working-directory: .
-
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - uses: ./.github/actions/windows-setup
-    - name: Run emu smoke tests
-      id: test-emu-smoke
-      run: cargo xtask precheck --nextest --package tsra_ddi_mbor_types --features emu --test tsra_ddi_tests --filter smoke --profile ci-emu-smoke
-      continue-on-error: true
-    - name: Generate nextest report
-      id: nextest-report
-      run: cargo xtask precheck --nextest-report
-    - name: Fail if any tests failed
-      if: ${{ steps.test-emu-smoke.outcome == 'failure' }}
-      run: |
-        echo "One or more tests failed."
-        exit 1
-
-  test_windows_emu_ddi:
-
-    runs-on: windows-2025-vs2026
-
-    defaults:
-      run:
-        working-directory: .
-
-    steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - uses: ./.github/actions/windows-setup
-    - name: Run emu DDI tests
-      id: test-emu-ddi
-      run: cargo xtask precheck --nextest --package tsra_ddi_mbor_types --features emu --test tsra_ddi_tests --profile ci-emu-ddi
-      continue-on-error: true
-    - name: Generate nextest report
-      id: nextest-report
-      run: cargo xtask precheck --nextest-report
-    - name: Fail if any tests failed
-      if: ${{ steps.test-emu-ddi.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1

@@ -784,8 +784,9 @@ fn test_secret_kbkdf_aes192() {
     );
 }
 
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_secret_kbkdf_name() {
     ddi_dev_test(
         common_setup,
@@ -1691,7 +1692,7 @@ fn test_secret_kbkdf_and_unmask() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            // Run this test only for Mock device
+            // Run this test only for a virtual device
             if get_device_kind(dev) != DdiDeviceKind::Virtual {
                 println!("Unmask key Not supported for Physical Device.");
                 return;

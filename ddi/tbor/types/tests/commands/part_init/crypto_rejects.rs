@@ -636,7 +636,7 @@ fn part_init_envelope_rejected_after_session_closed() {
     ctx.session_close(session.session_id)
         .expect("close session before PartInit");
 
-    ctx.expect_fw_reject(&req, TborStatus::SessionNotFound);
+    ctx.expect_session_reject(&req, TborStatus::SessionNotFound);
 }
 
 /// Submit the same valid PartInit request twice.

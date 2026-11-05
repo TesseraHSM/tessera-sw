@@ -161,6 +161,7 @@ impl DeriveOp for KbkdfAlgo {
         if derive_len == 0 {
             Err(CryptoError::KbkdfInvalidDerivedKeyLength)?
         }
+        self.hash_algo.ensure_sha1_or_sha2()?;
 
         // calculate number of rounds required
         let rounds = derive_len.div_ceil(self.hash_algo.size());

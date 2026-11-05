@@ -35,13 +35,51 @@ fn buf(bytes: &[u8]) -> &HsmDmaBuf {
     unsafe { HsmDmaBuf::from_raw(bytes) }
 }
 
+#[test]
+fn disable_zeroizes_psks_and_default_baking_restores_bootstrap() {
+    let p = Partition(14);
+    p.reset();
+    p.bake_default_psks();
+
+    for round in 0..2u8 {
+        let psk_co = [0xA1 + round; PSK_LEN];
+        let psk_cu = [0xB1 + round; PSK_LEN];
+        p.set_psk_co(buf(&psk_co)).unwrap();
+        p.set_psk_cu(buf(&psk_cu)).unwrap();
+        assert_eq!(&p.psk_co()[..], &psk_co);
+        assert_eq!(&p.psk_cu()[..], &psk_cu);
+
+        p.clear_state(PartResetKind::Disable);
+        assert_eq!(&p.psk_co()[..], &[0u8; PSK_LEN]);
+        assert_eq!(&p.psk_cu()[..], &[0u8; PSK_LEN]);
+
+        p.bake_default_psks();
+        assert_eq!(&p.psk_co()[..], &DEFAULT_PSK_CO);
+        assert_eq!(&p.psk_cu()[..], &DEFAULT_PSK_CU);
+
+        p.set_psk_co(buf(&psk_co)).unwrap();
+        assert_eq!(&p.psk_co()[..], &psk_co);
+        assert_eq!(&p.psk_cu()[..], &DEFAULT_PSK_CU);
+        p.set_psk_cu(buf(&psk_cu)).unwrap();
+        assert_eq!(&p.psk_co()[..], &psk_co);
+        assert_eq!(&p.psk_cu()[..], &psk_cu);
+    }
+
+    p.reset();
+    assert_eq!(&p.psk_co()[..], &[0u8; PSK_LEN]);
+    assert_eq!(&p.psk_cu()[..], &[0u8; PSK_LEN]);
+    p.bake_default_psks();
+    assert_eq!(&p.psk_co()[..], &DEFAULT_PSK_CO);
+    assert_eq!(&p.psk_cu()[..], &DEFAULT_PSK_CU);
+}
+
 /// `clear_state(Migrate)` must wipe per-tenant runtime state while keeping the
 /// partition's provisioning material intact (mirrors the reference
 /// `state.migrate()`). This is the regression guard for that split.
 ///
 /// This helper leaves the persistent session table untouched. The Uno PAL
-/// preserves established reservations on disable and releases all slots on
-/// NSSR/migrate or free.
+/// preserves established reservations on disable and NSSR/migrate, and
+/// releases all slots on free.
 #[test]
 fn preserves_provisioning_and_clears_tenant_state() {
     // A child module may address the parent module's private slot constructor
@@ -64,7 +102,7 @@ fn preserves_provisioning_and_clears_tenant_state() {
         let p = Partition(pid);
         p.set_psk_co(buf(&psk_co)).unwrap();
         p.set_psk_cu(buf(&psk_cu)).unwrap();
-        p.set_vm_launch_guid(buf(&guid)).unwrap();
+        p.set_vm_launch_guid(&guid);
         p.set_pta_pub_key(buf(&pta)).unwrap();
         p.set_bk3_initialized(true);
 
@@ -155,7 +193,7 @@ fn preserves_provisioning_and_clears_tenant_state() {
         p.session_table(),
         &[0xABu8; SESSION_TABLE_LEN],
         "session table must be left untouched: the caller preserves established \
-         reservations on disable and releases all slots on NSSR/migrate or free"
+         reservations on disable and NSSR/migrate, and releases all slots on free"
     );
     assert_eq!(p.session_meta(), &[0u8; 2], "session meta must be cleared");
 
@@ -217,7 +255,7 @@ fn clear_identity_zeros_id_handle_and_pub_key() {
 }
 
 #[test]
-fn sealed_bk3_is_write_once_until_cleared() {
+fn sealed_bk3_raw_setter_overwrites_and_bounds_length() {
     let p = Partition(10);
     let sealed = [0xA5u8; SEALED_BK3_DATA_LEN];
     let replacement = [0x5Au8; 16];
@@ -225,38 +263,120 @@ fn sealed_bk3_is_write_once_until_cleared() {
 
     p.set_sealed_bk3(buf(&[])).unwrap();
     p.set_sealed_bk3(buf(&sealed)).unwrap();
-    assert_eq!(
-        p.set_sealed_bk3(buf(&replacement)),
-        Err(HsmError::SealedBk3AlreadySet)
-    );
-    assert_eq!(
-        p.set_sealed_bk3(buf(&[])),
-        Err(HsmError::SealedBk3AlreadySet)
-    );
-    assert_eq!(p.set_sealed_bk3(buf(&oversized)), Err(HsmError::InvalidArg));
     assert_eq!(&p.sealed_bk3()[..], &sealed);
 
-    p.clear_sealed_bk3();
+    // The low-level setter is a raw store: write-once enforcement now lives in
+    // the PAL property layer, so repeated writes overwrite rather than
+    // returning `SealedBk3AlreadySet`.
     p.set_sealed_bk3(buf(&replacement)).unwrap();
     assert_eq!(&p.sealed_bk3()[..], &replacement);
+
+    // Oversized blobs are still rejected, leaving the prior value intact.
+    assert_eq!(p.set_sealed_bk3(buf(&oversized)), Err(HsmError::InvalidArg));
+    assert_eq!(&p.sealed_bk3()[..], &replacement);
+
+    p.clear_sealed_bk3();
+    assert!(p.sealed_bk3().is_empty());
+    p.set_sealed_bk3(buf(&sealed)).unwrap();
+    assert_eq!(&p.sealed_bk3()[..], &sealed);
 }
 
 #[test]
-fn sealed_bk3_stays_write_once_after_migrate() {
+fn sealed_bk3_survives_migrate_and_clears_on_disable() {
     let p = Partition(11);
     let sealed = [0xA5u8; 64];
     let replacement = [0x5Au8; 16];
 
     p.set_sealed_bk3(buf(&sealed)).unwrap();
+
+    // Sealed BK3 is write-once provisioning material: preserved across a
+    // migrate (NSSR) alongside the rest of the provisioning state.
     p.clear_state(PartResetKind::Migrate);
     assert_eq!(&p.sealed_bk3()[..], &sealed);
-    assert_eq!(
-        p.set_sealed_bk3(buf(&replacement)),
-        Err(HsmError::SealedBk3AlreadySet)
-    );
-    assert_eq!(&p.sealed_bk3()[..], &sealed);
 
-    p.clear_state(PartResetKind::Disable);
+    // The driver setter overwrites (write-once enforcement is in the PAL).
     p.set_sealed_bk3(buf(&replacement)).unwrap();
     assert_eq!(&p.sealed_bk3()[..], &replacement);
+
+    // A `Disable` reset deallocates the slot, wiping the sealed blob.
+    p.clear_state(PartResetKind::Disable);
+    assert!(p.sealed_bk3().is_empty());
+}
+
+/// Gate-1 re-arm (consumed by the SP on every warm / fw-update boot) must set
+/// `unwrapping_key_required` for every partition that still owns resources
+/// (`res_mask != 0`) and leave resource-free partitions untouched, so an
+/// un-provisioned slot is not made to demand a key it never had.
+#[test]
+fn rearm_sets_gate1_only_for_resourced_partitions() {
+    let resourced = Partition(61);
+    let empty = Partition(62);
+    resourced.set_res_mask(0x1);
+    resourced.set_unwrapping_key_required(false);
+    empty.set_res_mask(0);
+    empty.set_unwrapping_key_required(false);
+
+    PartStore::rearm_unwrapping_key_required();
+
+    assert!(resourced.unwrapping_key_required());
+    assert!(!empty.unwrapping_key_required());
+}
+
+/// The unwrapping-key slot's validity byte decodes to its three states, and
+/// any other byte decodes to `None`, which callers treat as not importable.
+#[test]
+fn unwrapping_key_slot_decodes_validity_byte() {
+    assert_eq!(UnwrappingKeySlot::Empty as u8, 0);
+    assert_eq!(UnwrappingKeySlot::PendingPct as u8, 1);
+    assert_eq!(UnwrappingKeySlot::PctPassed as u8, 2);
+    for byte in [3u8, 0x7F, 0xFF] {
+        assert_eq!(UnwrappingKeySlot::try_from(byte), Err(byte));
+    }
+
+    let pid = 12usize;
+    let mut p = Partition(pid);
+    p.slot_mut().unwrapping_key_bk_valid = UnwrappingKeySlot::PendingPct as u8;
+    assert_eq!(
+        Partition(pid).unwrapping_key_slot(),
+        Some(UnwrappingKeySlot::PendingPct)
+    );
+    Partition(pid).mark_unwrapping_key_pct_passed();
+    assert_eq!(
+        Partition(pid).unwrapping_key_slot(),
+        Some(UnwrappingKeySlot::PctPassed)
+    );
+    Partition(pid).discard_unwrapping_key();
+    assert_eq!(
+        Partition(pid).unwrapping_key_slot(),
+        Some(UnwrappingKeySlot::Empty)
+    );
+    p.slot_mut().unwrapping_key_bk_valid = 7;
+    assert_eq!(Partition(pid).unwrapping_key_slot(), None);
+}
+
+/// Neither reset kind of `clear_state` may touch the SP-published unwrapping
+/// key slot: the key belongs to the allocation and is re-imported after a
+/// disable or NSSR. Only `clear_unwrapping_key` (partition free) wipes it.
+#[test]
+fn clear_state_preserves_unwrapping_key_slot() {
+    let mut p = Partition(13);
+    p.set_unwrapping_key_required(true);
+    {
+        let slot = p.slot_mut();
+        slot.unwrapping_key_bk = [0x3Cu8; UNWRAPPING_KEY_BK_LEN];
+        slot.unwrapping_key_bk_valid = UnwrappingKeySlot::PctPassed as u8;
+    }
+
+    for kind in [PartResetKind::Disable, PartResetKind::Migrate] {
+        p.clear_state(kind);
+        assert!(p.unwrapping_key_required());
+        assert_eq!(p.unwrapping_key_slot(), Some(UnwrappingKeySlot::PctPassed));
+        assert!(p.unwrapping_key_bk().iter().all(|&b| b == 0x3C));
+        assert_eq!(p.unwrapping_key_id(), None);
+    }
+
+    p.clear_unwrapping_key();
+    assert!(!p.unwrapping_key_required());
+    assert_eq!(p.unwrapping_key_slot(), Some(UnwrappingKeySlot::Empty));
+    assert!(p.unwrapping_key_bk().iter().all(|&b| b == 0));
 }

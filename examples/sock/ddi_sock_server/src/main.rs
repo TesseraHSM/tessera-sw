@@ -9,59 +9,563 @@
 //! `vsock://CID:1234`, where CID is the server guest's VSOCK context ID.
 //! This unauthenticated test transport is for trusted, isolated environments;
 //! it is not a production service. Emulator state is lost when the server exits.
-//! Requests with OOB pointers or lengths are rejected: this wire format cannot
-//! transfer descriptor arrays or the buffers they reference.
+//! OOB bytes are re-homed into server-owned SGL descriptors, and bulk
+//! (fast-path AES-GCM/XTS) buffers into server-owned SGL data. Sideband reset
+//! disables and re-enables this endpoint's partition, coordinated across all
+//! connections. Independent root/leaf instances need separate server processes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
+use tsra_ddi_mbor_types::DdiDecoder;
+use tsra_ddi_mbor_types::DdiOp;
+use tsra_ddi_mbor_types::DdiReopenSessionResp;
+use tsra_ddi_mbor_types::DdiReqHdr;
+use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiStatus;
+use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
+use tsra_ddi_sock_proto::MAX_OOB_ITEM;
+use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
+use tsra_ddi_sock_proto::OobItem;
 use tsra_ddi_sock_proto::Request;
+use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
+use tsra_ddi_sock_proto::ResponseFrame;
+use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
+use tsra_ddi_tbor_types::SessionControlKind;
+use tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_FINISH;
+use tsra_ddi_tbor_types::TborResp;
+use tsra_ddi_tbor_types::TborSessionOpenFinishResp;
+use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::codec::RequestView;
+use tsra_fw_hsm_bulk::BLOCK_LEN;
+use tsra_fw_hsm_bulk::BULK_SQE_DWORDS;
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::BulkParams;
+use tsra_fw_hsm_bulk::BulkSqe;
+use tsra_fw_hsm_bulk::RawBulkSqe;
+use tsra_fw_hsm_io::CmdDword;
+use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::CqeDw0;
+use tsra_fw_hsm_io::CqeDw1;
+use tsra_fw_hsm_io::OP_FLUSH;
+use tsra_fw_hsm_io::OP_MBOR;
+use tsra_fw_hsm_io::OP_TBOR;
+use tsra_fw_hsm_io::SessionFlags;
+use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_std::StdHsm;
 
 mod tcp;
 
 const HSM_PARTITION_ID: u8 = 10;
+const HSM_BULK_QID: u16 = 1;
 const DMA_PAGE_SIZE: usize = 4096;
+const DMA_BUF_SIZE: usize = MAX_DMA_BUFFER as usize;
 const TRANSPORT_INVALID_REQUEST: u32 = 1;
 const TRANSPORT_HSM_ERROR: u32 = 2;
 
 #[repr(align(4096))]
-struct DmaPage([u8; DMA_PAGE_SIZE]);
+struct DmaBuf<const N: usize>([u8; N]);
+
+struct SocketHsm {
+    hsm: Arc<StdHsm>,
+    execution: tokio::sync::RwLock<()>,
+    sessions: tokio::sync::RwLock<HashMap<u16, SessionOwner>>,
+    pending_cleanups: AtomicUsize,
+    cleanup_completed: tokio::sync::Notify,
+    #[cfg(test)]
+    submission_probe: tokio::sync::Mutex<Option<SubmissionProbe>>,
+    #[cfg(test)]
+    cleanup_probe: tokio::sync::Mutex<Option<CleanupProbe>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionState {
+    Pending,
+    Active,
+    NeedsRenegotiation,
+}
+
+struct SessionOwner {
+    generation: Arc<()>,
+    state: SessionState,
+}
+
+#[cfg(test)]
+struct SubmissionProbe {
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+    completed: tokio::sync::oneshot::Sender<Response>,
+}
+
+#[cfg(test)]
+struct CleanupProbe {
+    started: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+}
+
+struct SessionLease {
+    id: u16,
+    generation: Arc<()>,
+}
+
+impl SessionLease {
+    fn is_current(&self, sessions: &HashMap<u16, SessionOwner>) -> bool {
+        sessions
+            .get(&self.id)
+            .is_some_and(|owner| Arc::ptr_eq(&owner.generation, &self.generation))
+    }
+}
+
+impl SocketHsm {
+    fn new(hsm: Arc<StdHsm>) -> Self {
+        Self {
+            hsm,
+            execution: tokio::sync::RwLock::new(()),
+            sessions: tokio::sync::RwLock::new(HashMap::new()),
+            pending_cleanups: AtomicUsize::new(0),
+            cleanup_completed: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            submission_probe: tokio::sync::Mutex::new(None),
+            #[cfg(test)]
+            cleanup_probe: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn wait_for_cleanup(&self) {
+        loop {
+            let completed = self.cleanup_completed.notified();
+            tokio::pin!(completed);
+            completed.as_mut().enable();
+            if self.pending_cleanups.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            completed.await;
+        }
+    }
+}
+
+struct CleanupCompletion(Arc<SocketHsm>);
+
+impl Drop for CleanupCompletion {
+    fn drop(&mut self) {
+        if self.0.pending_cleanups.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.cleanup_completed.notify_waiters();
+        }
+    }
+}
+
+struct Connection {
+    server: Arc<SocketHsm>,
+    state: Arc<tokio::sync::Mutex<ConnectionState>>,
+}
+
+#[derive(Default)]
+struct ConnectionState {
+    sessions: Vec<SessionLease>,
+    closed: bool,
+}
+
+impl ConnectionState {
+    fn owns_session(&self, id: u16, sessions: &HashMap<u16, SessionOwner>) -> bool {
+        self.sessions
+            .iter()
+            .any(|session| session.id == id && session.is_current(sessions))
+    }
+}
+
+impl Connection {
+    fn new(server: Arc<SocketHsm>) -> Self {
+        Self {
+            server,
+            state: Arc::new(tokio::sync::Mutex::new(ConnectionState::default())),
+        }
+    }
+
+    async fn execute(&self, request: RequestFrame) -> Result<ResponseFrame, String> {
+        let server = Arc::clone(&self.server);
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            server.wait_for_cleanup().await;
+            // Disconnect cleanup must wait for any in-flight open/close to
+            // complete and record its CQE, even if its waiter was cancelled.
+            let mut state = state.lock().await;
+            if state.closed {
+                return Err("connection closed before submission".into());
+            }
+            let RequestFrame::Submit(submission) = &request else {
+                return Ok(execute_frame(server, request).await);
+            };
+            if submission.sqe.len() == BULK_SQE_DWORDS {
+                // Partition-scoped bulk keys do not validate session state in
+                // firmware, so ownership alone is insufficient here.
+                let session_id = BulkSqe::parse(&submission.sqe).map(|sqe| sqe.session_id);
+                let sessions = server.sessions.read().await;
+                if session_id.is_ok_and(|id| {
+                    !state.owns_session(id, &sessions)
+                        || !sessions
+                            .get(&id)
+                            .is_some_and(|owner| owner.state == SessionState::Active)
+                }) {
+                    return Ok(ResponseFrame::Submit(transport_error(
+                        TRANSPORT_SESSION_NOT_OWNED,
+                    )));
+                }
+                let response = execute_frame(Arc::clone(&server), request).await;
+                drop(sessions);
+                return Ok(response);
+            }
+            let op = CmdDword::from(submission.sqe[0]).op();
+            let session_flags = SessionFlags::from(submission.sqe[11]);
+            let session_id = submission.sqe[12] as u16;
+            let session_ctrl = session_flags.ctrl();
+            let scoped = session_ctrl == u8::from(SessionControlKind::InSession)
+                || session_ctrl == u8::from(SessionControlKind::Close);
+            if scoped && !session_flags.id_valid() {
+                return Ok(ResponseFrame::Submit(transport_error(
+                    TRANSPORT_INVALID_REQUEST,
+                )));
+            }
+            let finish = op == OP_TBOR
+                && RequestView::parse(&submission.payload)
+                    .is_ok_and(|view| view.opcode() == TBOR_OP_SESSION_OPEN_FINISH);
+            let reopen = op == OP_MBOR
+                && DdiDecoder::new(&submission.payload, false)
+                    .decode_hdr::<DdiReqHdr>()
+                    .is_ok_and(|hdr| hdr.op == DdiOp::ReopenSession);
+            let lifecycle = session_ctrl == u8::from(SessionControlKind::Open)
+                || session_ctrl == u8::from(SessionControlKind::Close)
+                || op == OP_FLUSH
+                || finish
+                || reopen;
+            if !lifecycle {
+                if !scoped {
+                    return Ok(execute_frame(server, request).await);
+                }
+                let sessions = server.sessions.read().await;
+                if !state.owns_session(session_id, &sessions) {
+                    return Ok(ResponseFrame::Submit(transport_error(
+                        TRANSPORT_SESSION_NOT_OWNED,
+                    )));
+                }
+                // Keep this allocation pinned until firmware completes without
+                // serializing ordinary commands on other connections.
+                let response = execute_frame(Arc::clone(&server), request).await;
+                drop(sessions);
+                return Ok(response);
+            }
+            // Serialize slot mutations through firmware completion and ownership
+            // publication; ordinary in-session commands can still run concurrently.
+            let mut sessions = server.sessions.write().await;
+            if (scoped || reopen) && !state.owns_session(session_id, &sessions) {
+                return Ok(ResponseFrame::Submit(transport_error(
+                    TRANSPORT_SESSION_NOT_OWNED,
+                )));
+            }
+            let response = execute_frame(Arc::clone(&server), request).await;
+            if let ResponseFrame::Submit(response) = &response {
+                let mut raw = cqe_dwords(&response.cqe);
+                let cqe = Cqe::from(&mut raw);
+                let flags = CqeDw0::from(response.cqe[0]);
+                if response.status == 0 && cqe.status() == 0 && flags.session_id_valid() && !reopen
+                {
+                    let id = CqeDw1::from(response.cqe[1]).session_id();
+                    if flags.session_closed() {
+                        sessions.remove(&id);
+                        state.sessions.retain(|session| session.id != id);
+                    } else {
+                        // Allocation identity is independent of the reusable slot ID.
+                        let generation = Arc::new(());
+                        sessions.insert(
+                            id,
+                            SessionOwner {
+                                generation: Arc::clone(&generation),
+                                state: if op == OP_TBOR {
+                                    SessionState::Pending
+                                } else {
+                                    SessionState::Active
+                                },
+                            },
+                        );
+                        state.sessions.retain(|session| session.id != id);
+                        state.sessions.push(SessionLease { id, generation });
+                    }
+                }
+                if response.status == 0 && cqe.status() == 0 && reopen {
+                    // Reopen re-keys an existing slot without publishing a CQE
+                    // session ID. Only its successful MBOR body reactivates the lease.
+                    let mut decoder = DdiDecoder::new(&response.payload, false);
+                    if decoder.decode_hdr::<DdiRespHdr>().is_ok_and(|hdr| {
+                        hdr.op == DdiOp::ReopenSession
+                            && hdr.status == DdiStatus::Success
+                            && hdr.sess_id == Some(session_id)
+                    }) && decoder
+                        .decode_data::<DdiReopenSessionResp>()
+                        .is_ok_and(|data| data.sess_id == session_id)
+                        && let Some(owner) = sessions.get_mut(&session_id)
+                    {
+                        owner.state = SessionState::Active;
+                    }
+                }
+                if response.status == 0
+                    && cqe.status() == 0
+                    && finish
+                    && TborSessionOpenFinishResp::decode_response(&response.payload).is_ok()
+                    && let Some(owner) = sessions.get_mut(&session_id)
+                {
+                    owner.state = SessionState::Active;
+                } else if response.status == 0
+                    && finish
+                    && matches!(
+                        TborSessionOpenFinishResp::decode_response(&response.payload),
+                        Err(tsra_ddi_tbor_types::codec::DecodeError::FwError(status))
+                            if status == TborStatus::SessionAuthFailure.0
+                    )
+                    && sessions
+                        .get(&session_id)
+                        .is_some_and(|owner| owner.state == SessionState::Pending)
+                {
+                    sessions.remove(&session_id);
+                    state.sessions.retain(|session| session.id != session_id);
+                }
+            }
+            Ok(response)
+        })
+        .await
+        .map_err(|error| format!("connection execution task failed: {error}"))?
+    }
+}
+
+impl Drop for Connection {
+    fn drop(&mut self) {
+        let server = Arc::clone(&self.server);
+        let state = Arc::clone(&self.state);
+        // Register synchronously: replacement requests must observe cleanup
+        // even before the spawned task first runs.
+        server.pending_cleanups.fetch_add(1, Ordering::AcqRel);
+        let completion = CleanupCompletion(Arc::clone(&server));
+        tokio::spawn(async move {
+            let _completion = completion;
+            #[cfg(test)]
+            if let Some(probe) = server.cleanup_probe.lock().await.take() {
+                probe.started.send(()).expect("cleanup probe listener");
+                probe.resume.await.expect("cleanup probe resume");
+            }
+            let mut state = state.lock().await;
+            state.closed = true;
+            let mut sessions = server.sessions.write().await;
+            for session in state.sessions.drain(..) {
+                if !session.is_current(&sessions) {
+                    continue;
+                }
+                // Keep the ownership check atomic with the firmware close so
+                // another connection cannot replace this slot between them.
+                match close_session(Arc::clone(&server), session.id).await {
+                    Ok(()) => {
+                        sessions.remove(&session.id);
+                    }
+                    Err(error) => {
+                        eprintln!("disconnected client session cleanup failed: {error}");
+                    }
+                }
+            }
+        });
+    }
+}
+
+async fn close_session(server: Arc<SocketHsm>, id: u16) -> Result<(), String> {
+    // Driver-style flush is idempotent if a failed handshake already
+    // destroyed its Pending slot. Caller holds the ownership write lock.
+    let sqe = SqeBuilder::new()
+        .cmd(CmdDword::new().with_op(OP_FLUSH))
+        .buf_lens(0, MAX_DMA_BUFFER)
+        .session_flags(
+            SessionFlags::new()
+                .with_ctrl(u8::from(SessionControlKind::Close))
+                .with_id_valid(true),
+        )
+        .session_id(id)
+        .build();
+    let response = execute_frame(
+        server,
+        RequestFrame::Submit(Request {
+            sqe: sqe.to_vec(),
+            payload: Vec::new(),
+            oob_items: Vec::new(),
+            tail: Vec::new(),
+        }),
+    )
+    .await;
+    let ResponseFrame::Submit(response) = response else {
+        return Err("unexpected disconnect session-close response".into());
+    };
+    let mut raw = cqe_dwords(&response.cqe);
+    let cqe = Cqe::from(&mut raw);
+    if response.status != 0 || cqe.status() != 0 {
+        return Err(format!(
+            "disconnect session-close failed: transport={}, device={}",
+            response.status,
+            cqe.status()
+        ));
+    }
+    Ok(())
+}
 
 fn patch_prp1(sqe: &mut [u32; 16], low_dword: usize, address: u64) {
     sqe[low_dword] = address as u32;
     sqe[low_dword + 1] = (address >> 32) as u32;
 }
 
+/// Copies a normal-queue CQE out of a response; transport errors carry zeros.
+fn cqe_dwords(cqe: &[u32]) -> [u32; 4] {
+    cqe.try_into().unwrap_or_default()
+}
+
 fn transport_error(status: u32) -> Response {
     Response {
         status,
-        cqe: [0; 4],
+        cqe: vec![0; 4],
         payload: Vec::new(),
+        oob_items: Vec::new(),
+        tail: Vec::new(),
     }
 }
 
-async fn execute_request(hsm: &StdHsm, request: Request) -> Response {
-    let src_len = request.sqe[1] as usize;
-    let dst_cap = request.sqe[6] as usize;
-    if request.sqe[13..=15].iter().any(|&word| word != 0)
-        || src_len != request.payload.len()
-        || src_len > DMA_PAGE_SIZE
-        || dst_cap == 0
-        || dst_cap > DMA_PAGE_SIZE
+async fn execute_request(server: &SocketHsm, request: Request) -> Response {
+    match <RawBulkSqe>::try_from(request.sqe.as_slice()) {
+        Ok(sqe) => execute_bulk(server, sqe, request).await,
+        Err(_) => execute_normal(server, request).await,
+    }
+}
+
+/// Runs a fast-path AES-GCM/XTS request. Client buffer addresses in the SQE
+/// are placeholders and are replaced with server-owned buffers.
+async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> Response {
+    let mut sqe = match BulkSqe::parse(&raw) {
+        Ok(sqe) => sqe,
+        Err(error) => {
+            return Response {
+                status: 0,
+                cqe: BulkCqe::error(&raw, HSM_BULK_QID, error).encode().to_vec(),
+                payload: Vec::new(),
+                oob_items: Vec::new(),
+                tail: Vec::new(),
+            };
+        }
+    };
+    let tail_len = match &sqe.params {
+        BulkParams::Gcm(gcm) => gcm.tail.map_or(0, |tail| usize::from(tail.len)),
+        BulkParams::Xts(_) => 0,
+    };
+    if !request.oob_items.is_empty()
+        || request.payload.len() != sqe.src_len as usize
+        || request.tail.len() != tail_len
     {
         return transport_error(TRANSPORT_INVALID_REQUEST);
     }
 
-    let mut src = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
-    let mut dst = Box::new(DmaPage([0; DMA_PAGE_SIZE]));
-    src.0[..src_len].copy_from_slice(&request.payload);
+    let src = request.payload;
+    let mut dst = vec![0u8; sqe.dst_len as usize];
+    let mut tail = [0u8; BLOCK_LEN as usize];
+    tail[..tail_len].copy_from_slice(&request.tail);
+    sqe.src_addr = src.as_ptr() as u64;
+    sqe.dst_addr = dst.as_mut_ptr() as u64;
+    if let BulkParams::Gcm(gcm) = &mut sqe.params
+        && let Some(gcm_tail) = &mut gcm.tail
+    {
+        // Firmware reads the tail input and writes its output in place.
+        gcm_tail.src = tail.as_mut_ptr() as u64;
+        gcm_tail.dst = gcm_tail.src;
+    }
 
-    let mut sqe = request.sqe;
+    let _execution = server.execution.read().await;
+    let cqe = match server
+        .hsm
+        .bulk_io(sqe.encode(), HSM_PARTITION_ID, HSM_BULK_QID, 0)
+        .await
+    {
+        Ok(cqe) => cqe,
+        Err(error) => {
+            eprintln!("StdHsm bulk request failed: {error:?}");
+            return transport_error(TRANSPORT_HSM_ERROR);
+        }
+    };
+    drop(src);
+    Response {
+        status: 0,
+        cqe: cqe.to_vec(),
+        payload: dst,
+        oob_items: Vec::new(),
+        tail: tail[..tail_len].to_vec(),
+    }
+}
+
+async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
+    let Ok(mut sqe) = <[u32; 16]>::try_from(request.sqe.as_slice()) else {
+        return transport_error(TRANSPORT_INVALID_REQUEST);
+    };
+    let src_len = sqe[1] as usize;
+    let dst_cap = sqe[6] as usize;
+    if sqe[2..6].iter().any(|&word| word != 0)
+        || sqe[7..11].iter().any(|&word| word != 0)
+        || sqe[13..15].iter().any(|&word| word != 0)
+        || request.oob_items.len() > MAX_OOB_ITEMS
+        || request
+            .oob_items
+            .iter()
+            .any(|item| item.is_empty() || item.len() > MAX_OOB_ITEM as usize)
+        || sqe[15] as usize != request.oob_items.len() * 16
+        || (!request.oob_items.is_empty() && sqe[0] & 0x3ff != 2)
+        || src_len != request.payload.len()
+        || src_len > DMA_BUF_SIZE
+        || dst_cap == 0
+        || dst_cap > DMA_BUF_SIZE
+    {
+        return transport_error(TRANSPORT_INVALID_REQUEST);
+    }
+
+    let mut src = Box::new(DmaBuf([0; DMA_BUF_SIZE]));
+    let mut dst = Box::new(DmaBuf([0; DMA_BUF_SIZE]));
+    let mut oob_page = Box::new(DmaBuf([0; DMA_PAGE_SIZE]));
+    src.0[..src_len].copy_from_slice(&request.payload);
+    let mut oob: Vec<(bool, Vec<u8>)> = request
+        .oob_items
+        .into_iter()
+        .map(|item| match item {
+            OobItem::In(bytes) => (false, bytes),
+            OobItem::Out(len) => (true, vec![0; len as usize]),
+        })
+        .collect();
+    for (index, (_, item)) in oob.iter_mut().enumerate() {
+        let off = index * 16;
+        oob_page.0[off..off + 8].copy_from_slice(&(item.as_mut_ptr() as u64).to_le_bytes());
+        oob_page.0[off + 8..off + 12].copy_from_slice(&(item.len() as u32).to_le_bytes());
+    }
+
     patch_prp1(&mut sqe, 2, src.0.as_ptr() as u64);
     patch_prp1(&mut sqe, 7, dst.0.as_mut_ptr() as u64);
+    if src_len > DMA_PAGE_SIZE {
+        patch_prp1(&mut sqe, 4, src.0[DMA_PAGE_SIZE..].as_ptr() as u64);
+    }
+    if dst_cap > DMA_PAGE_SIZE {
+        patch_prp1(&mut sqe, 9, dst.0[DMA_PAGE_SIZE..].as_mut_ptr() as u64);
+    }
+    if !oob.is_empty() {
+        patch_prp1(&mut sqe, 13, oob_page.0.as_ptr() as u64);
+    }
 
-    let cqe = match hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
+    let _execution = server.execution.read().await;
+    #[cfg(test)]
+    let completion = if let Some(probe) = server.submission_probe.lock().await.take() {
+        probe.started.send(()).expect("submission observer");
+        probe.resume.await.expect("resume submission");
+        Some(probe.completed)
+    } else {
+        None
+    };
+    let cqe = match server.hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
         Ok(cqe) => cqe,
         Err(error) => {
             eprintln!("StdHsm request failed: {error:?}");
@@ -73,23 +577,89 @@ async fn execute_request(hsm: &StdHsm, request: Request) -> Response {
         return transport_error(TRANSPORT_HSM_ERROR);
     }
 
-    Response {
+    let response = Response {
         status: 0,
-        cqe,
+        cqe: cqe.to_vec(),
         payload: dst.0[..dst_len].to_vec(),
+        oob_items: oob
+            .into_iter()
+            .filter_map(|(out, item)| out.then_some(item))
+            .collect(),
+        tail: Vec::new(),
+    };
+    #[cfg(test)]
+    if let Some(completion) = completion {
+        completion
+            .send(response.clone())
+            .expect("submission completion observer");
+    }
+    response
+}
+
+async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> ResponseFrame {
+    let reset = matches!(&request, RequestFrame::Reset);
+    // Own every DMA buffer and the execution gate until firmware completes,
+    // even if the connection task is cancelled while awaiting this task.
+    match tokio::spawn(async move {
+        match request {
+            RequestFrame::Submit(request) => {
+                ResponseFrame::Submit(execute_request(&server, request).await)
+            }
+            RequestFrame::Reset => {
+                let mut sessions = server.sessions.write().await;
+                let _execution = server.execution.write().await;
+                let result = async {
+                    server.hsm.part_disable(HSM_PARTITION_ID).await?;
+                    // NSSR discards Pending slots but preserves Active slots
+                    // for renegotiation, including their connection ownership.
+                    sessions.retain(|_, owner| owner.state != SessionState::Pending);
+                    for owner in sessions.values_mut() {
+                        owner.state = SessionState::NeedsRenegotiation;
+                    }
+                    server.hsm.part_enable(HSM_PARTITION_ID).await
+                }
+                .await;
+                let status = match result {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        eprintln!("StdHsm reset failed: {error:?}");
+                        TRANSPORT_HSM_ERROR
+                    }
+                };
+                ResponseFrame::Reset { status }
+            }
+        }
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            eprintln!("StdHsm execution task failed: {error}");
+            if reset {
+                ResponseFrame::Reset {
+                    status: TRANSPORT_HSM_ERROR,
+                }
+            } else {
+                ResponseFrame::Submit(transport_error(TRANSPORT_HSM_ERROR))
+            }
+        }
     }
 }
 
-async fn init_partition(hsm: &StdHsm) -> Result<(), String> {
-    hsm.part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
+async fn init_partition(server: &SocketHsm) -> Result<(), String> {
+    server
+        .hsm
+        .part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
         .await
         .map_err(|error| format!("failed to allocate HSM partition: {error:?}"))?;
-    hsm.part_enable(HSM_PARTITION_ID)
+    server
+        .hsm
+        .part_enable(HSM_PARTITION_ID)
         .await
         .map_err(|error| format!("failed to enable HSM partition: {error:?}"))
 }
 
-fn run_with_hsm<F>(serve: impl FnOnce(Arc<StdHsm>) -> F) -> Result<(), String>
+fn run_with_hsm<F>(serve: impl FnOnce(Arc<SocketHsm>) -> F) -> Result<(), String>
 where
     F: std::future::Future<Output = Result<(), String>>,
 {
@@ -102,15 +672,25 @@ where
     // The Embassy executor is process-global and its destructor cannot terminate
     // it. Retain an owner until process exit so errors can reach main without
     // hanging in StdHsm::drop.
-    static HSM: std::sync::OnceLock<Arc<StdHsm>> = std::sync::OnceLock::new();
-    let hsm = HSM.get_or_init(|| Arc::new(StdHsm::with_tokio(runtime.handle().clone())));
+    static HSM: std::sync::OnceLock<Arc<SocketHsm>> = std::sync::OnceLock::new();
+    let hsm = HSM.get_or_init(|| {
+        Arc::new(SocketHsm::new(Arc::new(StdHsm::with_tokio(
+            runtime.handle().clone(),
+        ))))
+    });
     runtime.block_on(serve(Arc::clone(hsm)))
 }
 
 #[cfg(test)]
-fn test_hsm() -> Arc<StdHsm> {
-    static HSM: std::sync::LazyLock<Arc<StdHsm>> =
-        std::sync::LazyLock::new(|| Arc::new(StdHsm::new()));
+fn test_partition_lock() -> parking_lot::MutexGuard<'static, ()> {
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    LOCK.lock()
+}
+
+#[cfg(test)]
+fn test_hsm() -> Arc<SocketHsm> {
+    static HSM: std::sync::LazyLock<Arc<SocketHsm>> =
+        std::sync::LazyLock::new(|| Arc::new(SocketHsm::new(Arc::new(StdHsm::new()))));
     static PARTITION: std::sync::LazyLock<()> = std::sync::LazyLock::new(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -134,15 +714,21 @@ mod linux {
     use tokio::io::unix::AsyncFd;
     use tsra_ddi_sock_proto::MAX_FRAME;
     use tsra_ddi_sock_proto::ProtoError;
+    #[cfg(test)]
     use tsra_ddi_sock_proto::Request;
+    use tsra_ddi_sock_proto::RequestFrame;
+    #[cfg(test)]
     use tsra_ddi_sock_proto::Response;
-    use tsra_fw_hsm_std::StdHsm;
+    use tsra_ddi_sock_proto::ResponseFrame;
 
+    use super::Connection;
+    #[cfg(test)]
+    use super::DMA_BUF_SIZE;
     #[cfg(test)]
     use super::DMA_PAGE_SIZE;
+    use super::SocketHsm;
     #[cfg(test)]
     use super::TRANSPORT_INVALID_REQUEST;
-    use super::execute_request;
 
     const AF_VSOCK: c_int = 40;
     const SOCK_STREAM: c_int = 1;
@@ -319,7 +905,7 @@ mod linux {
         Ok(())
     }
 
-    async fn read_request(stream: &AsyncFd<Socket>) -> Result<Request, ProtoError> {
+    async fn read_request(stream: &AsyncFd<Socket>) -> Result<RequestFrame, ProtoError> {
         let mut length = [0; 4];
         read_exact(stream, &mut length).await?;
         let length = u32::from_le_bytes(length);
@@ -328,12 +914,12 @@ mod linux {
         }
         let mut body = vec![0; length as usize];
         read_exact(stream, &mut body).await?;
-        Request::decode(&body)
+        RequestFrame::decode(&body)
     }
 
     async fn write_response(
         stream: &AsyncFd<Socket>,
-        response: &Response,
+        response: &ResponseFrame,
     ) -> Result<(), ProtoError> {
         let body = response.encode()?;
         write_all(stream, &(body.len() as u32).to_le_bytes()).await?;
@@ -341,7 +927,8 @@ mod linux {
         Ok(())
     }
 
-    async fn serve_connection(stream: AsyncFd<Socket>, hsm: Arc<StdHsm>) -> Result<(), String> {
+    async fn serve_connection(stream: AsyncFd<Socket>, hsm: Arc<SocketHsm>) -> Result<(), String> {
+        let connection = Connection::new(hsm);
         loop {
             let request = match read_request(&stream).await {
                 Ok(request) => request,
@@ -350,7 +937,7 @@ mod linux {
                 }
                 Err(error) => return Err(format!("failed to read DDI request: {error}")),
             };
-            let response = execute_request(&hsm, request).await;
+            let response = connection.execute(request).await?;
             write_response(&stream, &response)
                 .await
                 .map_err(|error| format!("failed to write DDI response: {error}"))?;
@@ -382,7 +969,7 @@ mod linux {
         Ok(listener)
     }
 
-    async fn run_server(hsm: Arc<StdHsm>, listener: Socket) -> Result<(), String> {
+    async fn run_server(hsm: Arc<SocketHsm>, listener: Socket) -> Result<(), String> {
         let listener = listener
             .into_async_fd()
             .map_err(|error| format!("failed to register vsock listener: {error}"))?;
@@ -475,6 +1062,7 @@ mod linux {
 
         #[test]
         fn serves_repeated_requests_after_invalid_dma_and_oob_fields() {
+            let _guard = crate::test_partition_lock();
             let hsm = crate::test_hsm();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
@@ -508,14 +1096,16 @@ mod linux {
                     .expect("encode GetApiRev");
                     payload.truncate(len);
                     let mut request = Request {
-                        sqe: [0; 16],
+                        sqe: vec![0; 16],
                         payload,
+                        oob_items: Vec::new(),
+                        tail: Vec::new(),
                     };
                     request.sqe[1] = len as u32;
                     request.sqe[6] = DMA_PAGE_SIZE as u32;
 
                     for (src_len, dst_cap) in
-                        [(len + 1, DMA_PAGE_SIZE), (len, 0), (len, DMA_PAGE_SIZE + 1)]
+                        [(len + 1, DMA_PAGE_SIZE), (len, 0), (len, DMA_BUF_SIZE + 1)]
                     {
                         request.sqe[1] = src_len as u32;
                         request.sqe[6] = dst_cap as u32;
@@ -606,6 +1196,7 @@ mod tests {
 
     #[test]
     fn shared_test_hsm_initializes_partition_once() {
+        let _guard = test_partition_lock();
         let hsm = test_hsm();
         let worker = std::thread::spawn(test_hsm);
         let other = worker.join().expect("fixture worker");

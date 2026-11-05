@@ -12,14 +12,15 @@
 //! self-describing.  Its authenticated key kind already tells the firmware
 //! which parameter set the key belongs to.
 //!
-//! Inputs: `session_id`, the `masked_key`, the message bytes, and the
-//! FIPS 204 context string `ctx`.  Output: the ML-DSA signature bytes.
+//! Inputs: `session_id`, the `masked_key`, the 64-byte message
+//! representative `mu`, and the hedge variant `hedge`.  Output: the ML-DSA
+//! signature bytes.
 //!
-//! `ctx` is the caller-chosen context string of `ML-DSA.Sign(sk, M, ctx)`
-//! (FIPS 204 §5.2).  It is domain-separation input that is bound into the
-//! signature, so a signature produced under one `ctx` never verifies
-//! under another.  It is carried as a buffer of 0..=255 bytes; an empty
-//! `ctx` is the FIPS 204 default.  See [`MLDSA_CTX_MAX_LEN`].
+//! Like `EccSign`, which signs a digest rather than a message, `MlDsaSign`
+//! signs `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)` rather than
+//! `M`.  The caller computes it, binding its FIPS 204 context string `ctx`,
+//! and the result is a pure ML-DSA signature over `M` under `ctx`.  See
+//! [`MLDSA_MU_LEN`].
 //!
 //! # TEMPORARY: out-of-session bring-up
 //!
@@ -34,15 +35,36 @@
 //! **no authentication, no authorization and no key protection**.
 //! Not fit to ship.
 
+use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;
 
 pub use crate::mldsa_generate_key::MASKED_MLDSA_KEY_MAX_LEN;
-pub use crate::mldsa_generate_key::MLDSA_CTX_MAX_LEN;
-pub use crate::mldsa_generate_key::MLDSA_MESSAGE_MAX_LEN;
+pub use crate::mldsa_generate_key::MLDSA_MU_LEN;
 pub use crate::mldsa_generate_key::MLDSA_SIGNATURE_MAX_LEN;
 
 /// TBOR opcode for `MlDsaSign`.
 pub const TBOR_OP_MLDSA_SIGN: u8 = 0x27;
+
+/// How `MlDsaSign` randomizes the signature: FIPS 204's hedged variant,
+/// which draws fresh randomness for every signature, or its deterministic
+/// variant, which fixes it at zero so the same key and input always yield
+/// the same signature.
+///
+/// Values and meanings follow PKCS#11's `CK_HEDGE_TYPE`.  Kept as an
+/// [`open_enum`] so an unrecognized value round-trips as `MlDsaHedge(n)`
+/// and the handler can reject it, rather than failing decode.
+#[repr(u8)]
+#[open_enum]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MlDsaHedge {
+    /// Hedged or deterministic, as the device chooses
+    /// (`CKH_HEDGE_PREFERRED`).
+    Preferred = 0,
+    /// Hedged, or fail (`CKH_HEDGE_REQUIRED`).
+    Required = 1,
+    /// Deterministic, or fail (`CKH_DETERMINISTIC_REQUIRED`).
+    Deterministic = 2,
+}
 
 /// `MlDsaSign` request schema.
 ///
@@ -60,16 +82,15 @@ pub struct TborMlDsaSignReq<'a> {
     #[tbor(buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 
-    /// Message to sign.  The TBOR schema caps inline messages at 586 B; see
-    /// [`MLDSA_MESSAGE_MAX_LEN`].
-    #[tbor(buffer, max_len = 586)]
-    pub message: &'a [u8],
+    /// The message representative `μ` to sign, exactly [`MLDSA_MU_LEN`]
+    /// bytes.
+    #[tbor(buffer, len = 64)]
+    pub mu: &'a [u8],
 
-    /// FIPS 204 context string `ctx` for `ML-DSA.Sign(sk, M, ctx)`,
-    /// 0..=255 bytes.  Empty is the FIPS 204 default.  See
-    /// [`MLDSA_CTX_MAX_LEN`].
-    #[tbor(buffer, max_len = 255)]
-    pub ctx: &'a [u8],
+    /// How the signature is randomized, 1-byte [`MlDsaHedge`]: hedged or
+    /// deterministic.
+    #[tbor(U8)]
+    pub hedge: MlDsaHedge,
 }
 
 /// `MlDsaSign` response schema.
@@ -88,66 +109,57 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn request_round_trips_fields() {
-        let mut buf = [0u8; 8192];
-        let masked = [0x11u8; MASKED_MLDSA_KEY_MAX_LEN];
-        let message = [0x22u8; 32];
-        let ctx = [0x44u8; 8];
-        let frame = TborMlDsaSignReq::encode(&mut buf)
+    fn encode<'a>(
+        buf: &'a mut [u8],
+        masked: &[u8],
+        mu: &[u8],
+        hedge: MlDsaHedge,
+    ) -> TborMlDsaSignReqFrame<'a> {
+        TborMlDsaSignReq::encode(buf)
             .unwrap()
             .session_id(SessionId(1))
             .unwrap()
-            .masked_key(&masked)
+            .masked_key(masked)
             .unwrap()
-            .message(&message)
+            .mu(mu)
             .unwrap()
-            .ctx(&ctx)
+            .hedge(hedge)
             .unwrap()
-            .finish();
-        assert_eq!(frame.message(), &message[..]);
-        assert_eq!(frame.ctx(), &ctx[..]);
+            .finish()
     }
 
+    /// The maximum request is the ML-DSA-87 masked key and `μ`, with its
+    /// paired TOC footprint.
     #[test]
-    fn request_round_trips_empty_ctx() {
+    fn max_sized_request_round_trips_fields() {
         let mut buf = [0u8; 8192];
         let masked = [0x11u8; MASKED_MLDSA_KEY_MAX_LEN];
-        let message = [0x22u8; 32];
-        let frame = TborMlDsaSignReq::encode(&mut buf)
-            .unwrap()
-            .session_id(SessionId(1))
-            .unwrap()
-            .masked_key(&masked)
-            .unwrap()
-            .message(&message)
-            .unwrap()
-            .ctx(&[])
-            .unwrap()
-            .finish();
-        assert!(frame.ctx().is_empty());
-    }
-
-    #[test]
-    fn request_round_trips_max_sized_fields() {
-        let mut buf = [0u8; 8192];
-        let masked = [0x11u8; MASKED_MLDSA_KEY_MAX_LEN];
-        let message = [0x22u8; MLDSA_MESSAGE_MAX_LEN];
-        let ctx = [0x44u8; MLDSA_CTX_MAX_LEN];
-        let frame = TborMlDsaSignReq::encode(&mut buf)
-            .unwrap()
-            .session_id(SessionId(1))
-            .unwrap()
-            .masked_key(&masked)
-            .unwrap()
-            .message(&message)
-            .unwrap()
-            .ctx(&ctx)
-            .unwrap()
-            .finish();
+        let mu = [0x55u8; MLDSA_MU_LEN];
+        let frame = encode(&mut buf, &masked, &mu, MlDsaHedge::Deterministic);
         assert_eq!(frame.masked_key(), &masked[..]);
-        assert_eq!(frame.message(), &message[..]);
-        assert_eq!(frame.ctx(), &ctx[..]);
+        assert_eq!(frame.mu(), &mu[..]);
+        assert_eq!(frame.hedge(), MlDsaHedge::Deterministic);
+        // header(8) + 4 TOC entries * 4 + data(5160 + 64).
+        assert_eq!(frame.len(), 5248);
+        assert_eq!(frame.len(), TborMlDsaSignReq::MAX_ENCODED_SIZE);
+    }
+
+    #[test]
+    fn request_round_trips_every_hedge_and_unknown_values() {
+        let mut buf = [0u8; 8192];
+        let masked = [0x11u8; MASKED_MLDSA_KEY_MAX_LEN];
+        let mu = [0x55u8; MLDSA_MU_LEN];
+        for hedge in [
+            MlDsaHedge::Preferred,
+            MlDsaHedge::Required,
+            MlDsaHedge::Deterministic,
+            MlDsaHedge(3),
+            MlDsaHedge(0xff),
+        ] {
+            let frame = encode(&mut buf, &masked, &mu, hedge);
+            assert_eq!(frame.hedge(), hedge);
+            assert_eq!(frame.mu(), &mu[..]);
+        }
     }
 
     #[test]
@@ -165,8 +177,7 @@ mod tests {
     #[test]
     fn lengths_match_pinned_values() {
         const _: () = assert!(5160 == MASKED_MLDSA_KEY_MAX_LEN);
-        const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
-        const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
+        const _: () = assert!(64 == MLDSA_MU_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);
         assert_eq!(MLDSA_SIGNATURE_MAX_LEN, 4627);
     }
