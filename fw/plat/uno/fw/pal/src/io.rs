@@ -24,10 +24,11 @@
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
 //! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
 //!
-//! Bulk (fast-path) IOs arrive on a separate IIC/OIC channel pair and use
-//! their own `BULK_IO_SQ` (128B), `BULK_IO_CQ` (64B) and `BULK_IO_META`
-//! arrays. They have no per-IO heaps: a bulk IO must not reach the
-//! allocator, whose tables are indexed by command slot.
+//! Bulk (fast-path) IOs arrive on the fast-path controller's FP1 and FP2
+//! IIC/OIC channel pairs and use their own `BULK_IO_SQ` (128B),
+//! `BULK_IO_CQ` (64B) and `BULK_IO_META` arrays, shared by both channels:
+//! each posts its own range of the slots. They have no per-IO heaps: a bulk
+//! IO must not reach the allocator, whose tables are indexed by command slot.
 
 use core::mem;
 use core::ops::AsyncFnOnce;
@@ -96,6 +97,11 @@ pub struct UnoHsmIo {
 
     /// Queue kind the IO arrived on.
     kind: HsmIoKind,
+
+    /// The IO's completion was posted with its inbound-queue credit
+    /// (bulk OIC `return_credit`), so `drop_io` returns only the buffer.
+    #[cfg_attr(feature = "bulk_crypto", allow(dead_code))]
+    credit_returned: bool,
 }
 
 impl UnoHsmIo {
@@ -159,6 +165,7 @@ impl UnoHsmIo {
         let io = Self {
             index: ADMIN_IO_INDEX,
             kind: HsmIoKind::Cmd,
+            credit_returned: false,
         };
         // CONTROLLER_ID holds the hardware axi_id (what IIC `recv` records for
         // a host IO), so an internally created admin IO stores the same
@@ -191,6 +198,7 @@ impl UnoHsmIo {
         Self {
             index: SELF_TEST_IO_INDEX,
             kind: HsmIoKind::Cmd,
+            credit_returned: false,
         }
     }
 
@@ -291,30 +299,33 @@ impl HsmIoTypes for UnoHsmPal {
 }
 
 impl HsmIoController for UnoHsmPal {
-    /// Awaits the next inbound IO from the command or bulk IIC driver.
+    /// Awaits the next inbound IO from the command or a bulk IIC driver.
     ///
-    /// When both have work, the queue polled first alternates per call so
-    /// neither can starve the other. Every IO handed out is counted in
+    /// When several have work, the queue polled first rotates per call so
+    /// none can starve the others. Every IO handed out is counted in
     /// flight until [`drop_io`](HsmIoController::drop_io) returns its slot.
     async fn poll_io(&self) -> HsmResult<Self::Io> {
         loop {
             #[cfg(not(feature = "bulk_crypto"))]
             let (index, kind) = {
-                use embassy_futures::select::Either;
-                use embassy_futures::select::select;
+                use embassy_futures::select::Either3;
+                use embassy_futures::select::select3;
 
-                let bulk_first = !self.poll_bulk_first.get();
-                self.poll_bulk_first.set(bulk_first);
+                fn first<T>(e: Either3<T, T, T>) -> T {
+                    match e {
+                        Either3::First(r) | Either3::Second(r) | Either3::Third(r) => r,
+                    }
+                }
+
+                let turn = self.poll_turn.get();
+                self.poll_turn.set((turn + 1) % 3);
                 let cmd = async { (self.iic.recv().await, HsmIoKind::Cmd) };
-                let bulk = async { (self.bulk_iic.recv().await, HsmIoKind::Bulk) };
-                if bulk_first {
-                    match select(bulk, cmd).await {
-                        Either::First(r) | Either::Second(r) => r,
-                    }
-                } else {
-                    match select(cmd, bulk).await {
-                        Either::First(r) | Either::Second(r) => r,
-                    }
+                let fp1 = async { (self.bulk_iic.recv().await, HsmIoKind::Bulk) };
+                let fp2 = async { (self.bulk_fp2_iic.recv().await, HsmIoKind::Bulk) };
+                match turn {
+                    0 => first(select3(cmd, fp1, fp2).await),
+                    1 => first(select3(fp1, fp2, cmd).await),
+                    _ => first(select3(fp2, cmd, fp1).await),
                 }
             };
             #[cfg(feature = "bulk_crypto")]
@@ -346,7 +357,11 @@ impl HsmIoController for UnoHsmPal {
                     .try_into()
                     .map_err(|_| tsra_fw_hsm_pal_traits::HsmError::InternalError)?;
                 BulkCqe::set_sq_id(cqe, queue_id);
-                self.bulk_oic.send(io.index)?.await
+                let sent = self.bulk_oic_for(io.index).send(io.index)?;
+                // The OSQ entry is posted with the IO's credit, which the
+                // hardware returns even if the wait below fails.
+                io.credit_returned = true;
+                sent.await
             }
             #[cfg(feature = "bulk_crypto")]
             HsmIoKind::Bulk => Err(tsra_fw_hsm_pal_traits::HsmError::InternalError),
@@ -373,7 +388,12 @@ impl HsmIoController for UnoHsmPal {
                 // SAFETY: the IO's own scratch region, writable over its
                 // whole length, and no longer in use.
                 unsafe { crate::gdma::cpu_zeroize(ptr, len) };
-                self.bulk_iic.free_io(io.index, queue_id);
+                let iic = self.bulk_iic_for(io.index);
+                if io.credit_returned {
+                    iic.release_buffer(io.index);
+                } else {
+                    iic.free_io(io.index, queue_id);
+                }
                 let bit = bulk_bit(io.index);
                 self.bulk_busy.set(self.bulk_busy.get() & !bit);
                 self.bulk_freed.set(self.bulk_freed.get() | bit);
@@ -401,6 +421,26 @@ fn bulk_bit(index: u16) -> u32 {
 
 #[cfg(not(feature = "bulk_crypto"))]
 impl UnoHsmPal {
+    /// The IIC driver that posts bulk slot `index`: FP1 below
+    /// [`BULK_FP1_SLOTS`](crate::pal::BULK_FP1_SLOTS), FP2 above. The slot
+    /// must go back to the channel that posted it.
+    fn bulk_iic_for(&self, index: u16) -> &crate::pal::BulkIic {
+        if index < crate::pal::BULK_FP1_SLOTS {
+            self.bulk_iic
+        } else {
+            self.bulk_fp2_iic
+        }
+    }
+
+    /// The OIC driver paired with [`bulk_iic_for`](Self::bulk_iic_for).
+    fn bulk_oic_for(&self, index: u16) -> &crate::pal::BulkOic {
+        if index < crate::pal::BULK_FP1_SLOTS {
+            self.bulk_oic
+        } else {
+            self.bulk_fp2_oic
+        }
+    }
+
     /// Starts draining device SQ `sq` of the function at `axi_id`: returns
     /// the mask of bulk slots it has in flight, which are done once all of
     /// them are set in [`bulk_freed`](UnoHsmPal::bulk_freed).
@@ -439,7 +479,11 @@ impl UnoHsmPal {
             #[cfg(feature = "bulk_crypto")]
             HsmIoKind::Bulk => {}
         }
-        UnoHsmIo { index, kind }
+        UnoHsmIo {
+            index,
+            kind,
+            credit_returned: false,
+        }
     }
 
     /// Recycles an IO received during a PCIe reset without dispatching it:
@@ -460,7 +504,7 @@ impl UnoHsmPal {
     /// All accepted host IOs have completed and no inbound IO remains unclaimed.
     pub(crate) fn host_io_drained(&self) -> bool {
         #[cfg(not(feature = "bulk_crypto"))]
-        if self.bulk_iic.has_pending_io() {
+        if self.bulk_iic.has_pending_io() || self.bulk_fp2_iic.has_pending_io() {
             return false;
         }
         self.io_in_flight() == 0 && !self.iic.has_pending_io()

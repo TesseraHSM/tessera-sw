@@ -33,4 +33,10 @@ pub struct ChannelConfig {
 
     /// Enable interrupt for this channel during init.
     pub interrupt: bool,
+
+    /// Return one inbound-queue credit with each completion, through the OSQ
+    /// entry's `RX_CREDIT` field: hardware applies it atomically, unlike a
+    /// firmware read-modify-write of the credit register, which can lose a
+    /// concurrent hardware decrement.
+    pub return_credit: bool,
 }

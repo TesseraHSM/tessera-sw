@@ -250,8 +250,10 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         // The free list is initialized together with the queue pointers
         // below; it is never partially retained. A fw-update attach returns
         // before this point and leaves the free list and its indices intact.
+        let count = self.io_count();
         for i in 0..DEPTH {
-            let buf_addr = config.io_pool_base + (i as u32) * config.io_size;
+            let slot = initial_slot(config.io_first, count, i);
+            let buf_addr = self.buf_addr(slot);
             // SAFETY: Configuration reserves DEPTH aligned ISQ entries, initialized before enable.
             let entry = unsafe { &mut *self.isq_ring.add(i) };
             entry.addr_lo = buf_addr;
@@ -289,8 +291,10 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         isq.base_lo.set(config.isq_base);
         isq.base_hi.set(0);
         isq.status.write(ISQ_CHANNEL_STATUS::EMPTY::SET);
+        // Only this channel's `count` buffers are posted; the entries past
+        // them lie beyond the tail until `free_io` overwrites them.
         isq.tail
-            .write(ISQ_CHANNEL_TAIL::TAIL.val((DEPTH as u32) - 1));
+            .write(ISQ_CHANNEL_TAIL::TAIL.val(u32::from(count) - 1));
         isq.head.write(ISQ_CHANNEL_HEAD::HEAD.val(0));
         isq.ctrl.modify(
             ISQ_CHANNEL_CTRL::DEPTH.val(Self::ENCODED_DEPTH)
@@ -325,6 +329,14 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// Both DFL refill and IQ credit release happen together when an IO
     /// is fully processed.
     pub fn free_io(&self, index: u16, queue_id: u16) {
+        self.release_buffer(index);
+        self.grant_credit(queue_id);
+    }
+
+    /// Return slot `index`'s buffer to the ISQ for hardware reuse, without
+    /// granting a credit: for an IO whose completion already returned it
+    /// (the OIC `return_credit` option).
+    pub fn release_buffer(&self, index: u16) {
         // Return buffer to DFL (read PI from HW each time)
         let buf_addr = self.buf_addr(index);
         let pi = self.regs.isq_ch[self.channel as usize]
@@ -342,8 +354,11 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         self.regs.isq_ch[self.channel as usize]
             .tail
             .write(ISQ_CHANNEL_TAIL::TAIL.val(new_pi.into()));
+    }
 
-        // Grant one credit back to the source queue
+    /// Grant one credit back to source queue `queue_id` by a read-modify-write
+    /// of its credit register.
+    fn grant_credit(&self, queue_id: u16) {
         let iq = &self.regs.iq[queue_id as usize];
         let current = iq.credit.read(IQ_QUEUE_CREDIT::CREDIT);
         iq.credit.write(IQ_QUEUE_CREDIT::CREDIT.val(current + 1));
@@ -483,22 +498,33 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         ((addr - self.buf_pool_base) / self.buf_size) as u16
     }
 
-    /// Returns `true` if every ISQ entry addresses a receive buffer in this
-    /// firmware's pool.
+    /// Buffers this channel posts: `config.io_count`, held to `1..=DEPTH`.
+    #[inline]
+    fn io_count(&self) -> u16 {
+        self.config.io_count.clamp(1, DEPTH as u16)
+    }
+
+    /// Returns `true` if every ISQ entry addresses one of this channel's
+    /// receive buffers.
     fn isq_entries_ours(&self) -> bool {
+        let first = self.buf_addr(self.config.io_first);
+        let count = u32::from(self.io_count());
         (0..DEPTH).all(|i| {
             // SAFETY: `isq_ring` is the `DEPTH`-entry ISQ ring at
             // `config.isq_base`, owned by this driver; `i < DEPTH`.
             let entry = unsafe { self.isq_ring.add(i).read_volatile() };
-            isq_addr_in_pool(
-                entry.addr_lo,
-                entry.addr_hi,
-                self.buf_pool_base,
-                self.buf_size,
-                DEPTH as u32,
-            )
+            isq_addr_in_pool(entry.addr_lo, entry.addr_hi, first, self.buf_size, count)
         })
     }
+}
+
+/// Pool slot written to ISQ entry `i` at init: the channel's `count` slots
+/// from `first` in turn. Entries from `count` on repeat earlier slots; they
+/// lie past the posted tail, so the hardware never takes them, but they keep
+/// every entry inside the channel's range for the fw-update attach check.
+#[inline]
+fn initial_slot(first: u16, count: u16, i: usize) -> u16 {
+    first + (i % usize::from(count.max(1))) as u16
 }
 
 /// Whether an ISQ entry address is the start of one of the `depth` receive
@@ -527,8 +553,22 @@ fn should_attach(fw_update: bool, already_enabled: bool, ours: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::initial_slot;
     use super::isq_addr_in_pool;
     use super::should_attach;
+
+    /// The first `count` ISQ entries post each of the channel's slots once,
+    /// and no entry addresses a slot outside the channel's range.
+    #[test]
+    fn initial_slots_stay_in_channel_range() {
+        for (first, count) in [(0u16, 32u16), (0, 24), (24, 8), (31, 1)] {
+            let slots: Vec<u16> = (0..32).map(|i| initial_slot(first, count, i)).collect();
+            assert!(slots.iter().all(|&s| s >= first && s < first + count));
+            let mut posted = slots[..count as usize].to_vec();
+            posted.sort_unstable();
+            assert_eq!(posted, (first..first + count).collect::<Vec<_>>());
+        }
+    }
 
     /// Only buffer-start addresses inside the `depth`-entry pool are accepted.
     #[test]

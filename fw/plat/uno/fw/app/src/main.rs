@@ -82,9 +82,10 @@ static HSM: OnceLock<Hsm<UnoHsmPal>> = OnceLock::new();
 ///
 /// Awaits [`HsmIoController::poll_io`] for the next inbound IO from
 /// the IIC drivers, then spawns a [`handle_io`] (command) or
-/// [`handle_bulk_io`] (bulk) task. Each pool is sized to its queue depth
-/// and a task frees its slot in `drop_io` as its last step, so a pool
-/// slot is always available for a received IO.
+/// [`handle_bulk_io`] (bulk) task. Each pool is sized to its IO slot count
+/// (the bulk pool to the bulk slots both bulk channels share) and a task
+/// frees its slot in `drop_io` as its last step, so a pool slot is always
+/// available for a received IO.
 ///
 /// # Parameters
 /// - `spawner`: Embassy task spawner used to enqueue [`handle_io`] jobs.
@@ -146,9 +147,9 @@ async fn handle_io(io: UnoHsmIo) {
 
 /// Processes a single bulk (fast-path) IO to completion.
 ///
-/// Runs on its own pool, sized to the bulk queue depth, so bulk IOs
-/// cannot exhaust the command pool and the task future carries only the
-/// bulk path.
+/// Runs on its own pool, sized to the 32 bulk slots shared by the FP1 and
+/// FP2 channels, so bulk IOs cannot exhaust the command pool and the task
+/// future carries only the bulk path.
 ///
 /// # Parameters
 /// - `io`: Owned bulk IO token.

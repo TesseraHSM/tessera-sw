@@ -38,7 +38,6 @@ use tsra_fw_hsm_bulk::BulkParams;
 use tsra_fw_hsm_bulk::BulkSqe;
 use tsra_fw_hsm_bulk::GcmParams;
 use tsra_fw_hsm_bulk::XtsDul;
-use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
@@ -197,20 +196,23 @@ fn mul_h(h: &Block, x: &Block) -> HsmResult<Block> {
     Ok(g.finish())
 }
 
-/// Host address of a tail buffer.
-fn host_addr(addr: u64) -> HsmDmaAddr {
-    HsmDmaAddr {
-        lo: addr as u32,
-        hi: (addr >> 32) as u32,
-    }
+/// SGL data-block descriptor for the `len`-byte host tail buffer at `addr`.
+///
+/// The GDMA takes a host buffer's length from its descriptor, so the tail
+/// needs one naming its length; type 0 (data block) is the zero top byte.
+fn tail_desc(addr: u64, len: usize) -> [u8; 16] {
+    let mut d = [0u8; 16];
+    d[..8].copy_from_slice(&addr.to_le_bytes());
+    d[8..12].copy_from_slice(&(len as u32).to_le_bytes());
+    d
 }
 
 /// Raw SGL descriptor at SQE dword `dw`.
 fn sgl_desc(sqe: &[u32], dw: usize) -> HsmResult<[u8; 16]> {
     let words = sqe.get(dw..dw + 4).ok_or(HsmError::UnsupportedCmd)?;
     let mut d = [0u8; 16];
-    for (b, w) in d.chunks_exact_mut(4).zip(words) {
-        b.copy_from_slice(&w.to_le_bytes());
+    for (b, w) in d.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *b = w.to_le_bytes();
     }
     Ok(d)
 }
@@ -388,7 +390,7 @@ impl UnoHsmPal {
         }
         if let Some(t) = &gcm.tail {
             let buf = &mut s.tail_in[..tail_len];
-            self.copy_mem_from_host(io, host_addr(t.src), HsmDmaAddr::ZERO, buf, false)
+            self.copy_mem_from_host_raw(io, &tail_desc(t.src, tail_len), buf, false)
                 .await?;
             s.crypt_tail(tail_len);
         }
@@ -424,7 +426,7 @@ impl UnoHsmPal {
         }
         if let Some(t) = &g.gcm.tail {
             let buf = &s.tail_out[..g.f.tail_len];
-            self.copy_mem_to_host(io, buf, host_addr(t.dst), HsmDmaAddr::ZERO, false)
+            self.copy_to_host_sgl(io, buf, &tail_desc(t.dst, g.f.tail_len))
                 .await?;
         }
         if g.f.encrypt {

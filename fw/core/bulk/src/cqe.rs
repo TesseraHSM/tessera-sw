@@ -110,7 +110,7 @@ impl BulkCqe {
             data_len: 0,
             sq_head: 0,
             sq_id,
-            status: BulkStatus::from_error(BulkCipher::from_attr(attr), err),
+            status: BulkStatus::from_io_error(BulkCipher::from_attr(attr), err, sqe_src_len(sqe)),
             phase: false,
         }
     }

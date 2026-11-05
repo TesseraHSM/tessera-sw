@@ -320,7 +320,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             entry.addr_hi.set(0);
             entry.desc.write(
                 OSQ_DESC::RX_QUEUE_ID.val(queue_id.into())
-                    + OSQ_DESC::RX_CREDIT.val(0)
+                    + OSQ_DESC::RX_CREDIT.val(u32::from(self.config.return_credit))
                     + OSQ_DESC::TX_QUEUE_ID.val(queue_id.into())
                     + OSQ_DESC::AXI_ID.val(0),
             );

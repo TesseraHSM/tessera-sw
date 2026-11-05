@@ -344,6 +344,19 @@ impl UnoHsmPal {
             .await
     }
 
+    /// Copy `src` to the host buffer named by the raw SGL descriptor `desc`,
+    /// which must describe exactly `src.len()` bytes.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) async fn copy_to_host_sgl(
+        &self,
+        io: &UnoHsmIo,
+        src: &HsmDmaBuf,
+        desc: &[u8; 16],
+    ) -> HsmResult<()> {
+        self.copy_to_host_sgl_raw(io, src.as_ptr(), src.len(), desc)
+            .await
+    }
+
     /// Zero the first `len` (at most [`ZERO_SIZE`]) bytes of the host
     /// buffer named by the raw SGL descriptor `desc`.
     #[cfg(not(feature = "bulk_crypto"))]

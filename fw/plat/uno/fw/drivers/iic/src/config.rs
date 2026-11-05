@@ -24,6 +24,14 @@ pub struct ChannelConfig {
     /// buffers and encoded as `buf_size >> 4` for the hardware register.
     pub io_size: u32,
 
+    /// First buffer of the pool this channel posts. Slot indices count
+    /// from `io_pool_base`, so channels sharing one pool post disjoint
+    /// ranges and their IOs keep pool-wide indices.
+    pub io_first: u16,
+
+    /// Buffers this channel posts, from `io_first`; `1..=DEPTH`.
+    pub io_count: u16,
+
     /// Base address of the ICQ ring buffer (32B-aligned).
     pub icq_base: u32,
 

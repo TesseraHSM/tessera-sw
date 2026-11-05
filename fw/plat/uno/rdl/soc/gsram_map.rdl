@@ -22,6 +22,7 @@
 //   0x16000 - 0x17400  BCP (CDMA) rings
 //   0x17400 - 0x19460  Bulk IIC/OIC queues (controller 1, channel 0)
 //   0x19460 - 0x1A460  Bulk crypto per-IO scratch
+//   0x1A460 - 0x1AB84  Bulk IIC/OIC rings (controller 1, channel 1)
 //   0x20C58 - 0xA8D60  Heap (IO_META + SRAM_IO_BUF)
 //   0xA9000 - 0xB8000  HSM self-test/test-hook code and known-answer vectors
 //   0xB8000 - 0xB8041  FP bulk-key slot map (65 × 1-byte table bitmaps)
@@ -829,6 +830,18 @@ addrmap io_gsram {
     // ─── Bulk crypto per-IO scratch; inside the CDMA / GDMA window. Must
     // end before 0x1AC58 (Admin heap). ───
     bulk_scratch_t     BULK_SCRATCH[32]         @ 0x19460 += 0x80;  // 0x19460 - 0x1A460
+
+    // ─── Bulk IIC/OIC rings (controller 1, channel 1: the queues of the
+    // 65th function resource) — 0x20-aligned. The channel shares
+    // BULK_IO_SQ / BULK_IO_CQ / BULK_IO_META / BULK_SCRATCH with channel 0,
+    // each posting its own range of those slots. Must end before 0x1AC58
+    // (Admin heap). ───
+    isq_entry_t        BULK_FP2_ISQ[32]         @ 0x1A460 += 0x08;  // 0x1A460 - 0x1A560
+    icq_entry_t        BULK_FP2_ICQ[32]         @ 0x1A560 += 0x10;  // 0x1A560 - 0x1A760
+    queue_shadow_t     BULK_FP2_ICQ_TAIL_SHADOW @ 0x1A760;
+    osq_entry_t        BULK_FP2_OSQ[32]         @ 0x1A780 += 0x10;  // 0x1A780 - 0x1A980
+    ocq_entry_t        BULK_FP2_OCQ[32]         @ 0x1A980 += 0x10;  // 0x1A980 - 0x1AB80
+    queue_shadow_t     BULK_FP2_OCQ_TAIL_SHADOW @ 0x1AB80;
 
     // ─── Heap (per-IO buffers) — 34 SRAM slots: 0..31 host (IIC), 32 admin,
     //     33 self-test (CAST). IO_META stays 33: only host+admin slots carry

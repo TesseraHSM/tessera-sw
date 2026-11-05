@@ -24,6 +24,8 @@ pub const BCP_SQ_CI_SHADOW_OFFSET: u32 = 0x16300;
 pub const BCP_CQ_PI_SHADOW_OFFSET: u32 = 0x16304;
 pub const BULK_ICQ_TAIL_SHADOW_OFFSET: u32 = 0x17700;
 pub const BULK_OCQ_TAIL_SHADOW_OFFSET: u32 = 0x18B20;
+pub const BULK_FP2_ICQ_TAIL_SHADOW_OFFSET: u32 = 0x1A760;
+pub const BULK_FP2_OCQ_TAIL_SHADOW_OFFSET: u32 = 0x1AB80;
 pub const IPC_ADMIN_HSM_RX_RING_OFFSET: u32 = 0x7014;
 pub const IPC_ADMIN_HSM_RX_RING_COUNT: u32 = 2;
 pub const IPC_ADMIN_HSM_RX_RING_STRIDE: u32 = 0x40;
@@ -99,6 +101,18 @@ pub const BULK_IO_CQ_STRIDE: u32 = 0x40;
 pub const BULK_IO_META_OFFSET: u32 = 0x19360;
 pub const BULK_IO_META_COUNT: u32 = 32;
 pub const BULK_IO_META_STRIDE: u32 = 0x08;
+pub const BULK_FP2_ISQ_OFFSET: u32 = 0x1A460;
+pub const BULK_FP2_ISQ_COUNT: u32 = 32;
+pub const BULK_FP2_ISQ_STRIDE: u32 = 0x08;
+pub const BULK_FP2_ICQ_OFFSET: u32 = 0x1A560;
+pub const BULK_FP2_ICQ_COUNT: u32 = 32;
+pub const BULK_FP2_ICQ_STRIDE: u32 = 0x10;
+pub const BULK_FP2_OSQ_OFFSET: u32 = 0x1A780;
+pub const BULK_FP2_OSQ_COUNT: u32 = 32;
+pub const BULK_FP2_OSQ_STRIDE: u32 = 0x10;
+pub const BULK_FP2_OCQ_OFFSET: u32 = 0x1A980;
+pub const BULK_FP2_OCQ_COUNT: u32 = 32;
+pub const BULK_FP2_OCQ_STRIDE: u32 = 0x10;
 pub const IO_META_OFFSET: u32 = 0x20C58;
 pub const IO_META_COUNT: u32 = 33;
 pub const IO_META_STRIDE: u32 = 0x08;
@@ -207,6 +221,14 @@ tock_registers::register_bitfields! [u32,
     ],
     /// 'DMA shadow of a queue producer/consumer index.'
     pub BULK_OCQ_TAIL_SHADOW [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'DMA shadow of a queue producer/consumer index.'
+    pub BULK_FP2_ICQ_TAIL_SHADOW [
+        VAL OFFSET(0) NUMBITS(32) [],
+    ],
+    /// 'DMA shadow of a queue producer/consumer index.'
+    pub BULK_FP2_OCQ_TAIL_SHADOW [
         VAL OFFSET(0) NUMBITS(32) [],
     ],
     /// 'Inbound Completion Queue info: status and interface select.'
@@ -591,13 +613,20 @@ pub mod regs {
             (0x18b60 => pub bulk_io_cq: [super::BulkIoCqEntry; 32]),
             (0x19360 => pub bulk_io_meta: [super::IoMetaEntry; 32]),
             (0x19460 => pub bulk_scratch: [u8; 4096]),
-            (0x1a460 => _reserved11),
+            (0x1a460 => pub bulk_fp2_isq: [super::IsqEntry; 32]),
+            (0x1a560 => pub bulk_fp2_icq: [super::IcqEntry; 32]),
+            (0x1a760 => pub bulk_fp2_icq_tail_shadow: crate::RW<u32, super::BULK_FP2_ICQ_TAIL_SHADOW::Register>),
+            (0x1a764 => _reserved11),
+            (0x1a780 => pub bulk_fp2_osq: [super::OsqEntry; 32]),
+            (0x1a980 => pub bulk_fp2_ocq: [super::OcqEntry; 32]),
+            (0x1ab80 => pub bulk_fp2_ocq_tail_shadow: crate::RW<u32, super::BULK_FP2_OCQ_TAIL_SHADOW::Register>),
+            (0x1ab84 => _reserved12),
             (0x20c58 => pub io_meta: [super::IoMetaEntry; 33]),
             (0x20d60 => pub sram_io_buf: [u8; 557056]),
-            (0xa8d60 => _reserved12),
+            (0xa8d60 => _reserved13),
             (0xa9000 => pub hsm_code: [u8; 61440]),
             (0xb8000 => pub fp_slot_map: [u8; 65]),
-            (0xb8041 => _reserved13),
+            (0xb8041 => _reserved14),
             (0x1d0000 => pub fp_dsa_cache: [u8; 196608]),
             (0x200000 => @END),
         }
