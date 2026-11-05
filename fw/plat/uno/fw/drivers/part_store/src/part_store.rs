@@ -32,6 +32,15 @@ pub const NUM_PARTITIONS: usize = 65;
 /// to either PSK.
 static PSK_DEFAULT: [AtomicU8; NUM_PARTITIONS] = [const { AtomicU8::new(0) }; NUM_PARTITIONS];
 
+/// Per partition, whether its unwrapping-key slot has been read as
+/// [`UnwrappingKeySlot::PctPassed`], which every command checks for a key
+/// awaiting its test. The SP only ever writes an empty slot, so a passed one
+/// changes only when the HSM writes the slot, which clears this (see
+/// [`Partition::slot_mut`]); until then the slot need not be read out of
+/// GSRAM again.
+static UNWRAP_PASSED: [AtomicBool; NUM_PARTITIONS] =
+    [const { AtomicBool::new(false) }; NUM_PARTITIONS];
+
 /// The [`PSK_DEFAULT`] bits of the crypto-officer (`co`) or crypto-user
 /// PSK: whether it has been compared with its default, and whether it
 /// matched.
@@ -594,6 +603,7 @@ impl Partition {
         // Any write may change a PSK or a shadowed field: forget them.
         PSK_DEFAULT[self.0].store(0, Relaxed);
         SHADOWS[self.0].valid.store(false, Relaxed);
+        UNWRAP_PASSED[self.0].store(false, Relaxed);
         // SAFETY: the index is in range by construction (see
         // `PartStore::partition`), keeping the slot within the reserved
         // partition-store GSRAM region. The `&mut self` receiver scopes the
@@ -1494,9 +1504,14 @@ impl Partition {
     ///
     /// The SP writes `PendingPct` when it publishes a key and treats any
     /// non-zero value as occupied, so the HSM can advance the slot to
-    /// `PctPassed` without the SP noticing.
+    /// `PctPassed` without the SP noticing. A slot once read as passed is
+    /// remembered as such until the HSM next writes it (see
+    /// [`UNWRAP_PASSED`]).
     #[inline(never)]
     pub fn unwrapping_key_slot(self) -> Option<UnwrappingKeySlot> {
+        if UNWRAP_PASSED[self.0].load(Relaxed) {
+            return Some(UnwrappingKeySlot::PctPassed);
+        }
         // Volatile read: the SP writes this mailbox byte from another processor,
         // so a cached/hoisted load could miss the publish.
         // SAFETY: valid, aligned, readable byte in this partition's GSRAM slot.
@@ -1505,7 +1520,11 @@ impl Partition {
         // `unwrapping_key_bk` payload before it sets this byte, so the HSM must
         // not read the payload until it has read this byte.
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        UnwrappingKeySlot::try_from(value).ok()
+        let slot = UnwrappingKeySlot::try_from(value).ok();
+        if slot == Some(UnwrappingKeySlot::PctPassed) {
+            UNWRAP_PASSED[self.0].store(true, Relaxed);
+        }
+        slot
     }
 
     /// Marks the published unwrapping key as having passed its pairwise
