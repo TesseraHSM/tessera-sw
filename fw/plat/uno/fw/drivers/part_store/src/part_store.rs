@@ -5,6 +5,8 @@
 //! accessor handle.
 
 use core::mem::size_of;
+use core::sync::atomic::AtomicU8;
+use core::sync::atomic::Ordering::Relaxed;
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -18,6 +20,25 @@ use tsra_fw_uno_reg_soc::part_store_t::PART_STORE_T_BASE;
 
 /// Number of partition slots in the persistent store.
 pub const NUM_PARTITIONS: usize = 65;
+
+/// Per partition, what has been found of whether each PSK still holds its
+/// well-known default (see [`Partition::psk_default_memo`]), so the
+/// default-PSK gate need not read a PSK back out of GSRAM, which the CPU
+/// reads uncached, for every command. Every write to the partition's slot
+/// clears it (see [`Partition::slot_mut`]), so no answer outlives a change
+/// to either PSK.
+static PSK_DEFAULT: [AtomicU8; NUM_PARTITIONS] = [const { AtomicU8::new(0) }; NUM_PARTITIONS];
+
+/// The [`PSK_DEFAULT`] bits of the crypto-officer (`co`) or crypto-user
+/// PSK: whether it has been compared with its default, and whether it
+/// matched.
+const fn psk_memo_bits(co: bool) -> (u8, u8) {
+    if co {
+        (1 << 0, 1 << 1)
+    } else {
+        (1 << 2, 1 << 3)
+    }
+}
 
 /// Logical partition ID shared by Uno's PAL and persistent-store drivers.
 ///
@@ -474,6 +495,8 @@ impl Partition {
     /// other task observes a slot mid-mutation.
     #[inline]
     fn slot_mut(&mut self) -> &mut Storage {
+        // Any write may change a PSK: forget what is known of them.
+        PSK_DEFAULT[self.0].store(0, Relaxed);
         // SAFETY: the index is in range by construction (see
         // `PartStore::partition`), keeping the slot within the reserved
         // partition-store GSRAM region. The `&mut self` receiver scopes the
@@ -628,6 +651,29 @@ impl Partition {
             slot.psk_cu = [0u8; PSK_LEN];
             slot.vm_launch_guid = [0u8; GUID_LEN];
         }
+    }
+
+    /// What has been found of whether the crypto-officer (`co`) or
+    /// crypto-user PSK still holds its default, if it has been compared
+    /// since the slot was last written (see [`Self::memo_psk_default`]).
+    pub fn psk_default_memo(self, co: bool) -> Option<bool> {
+        let (checked, default) = psk_memo_bits(co);
+        let known = PSK_DEFAULT[self.0].load(Relaxed);
+        (known & checked != 0).then_some(known & default != 0)
+    }
+
+    /// Remembers whether the crypto-officer (`co`) or crypto-user PSK holds
+    /// its default, as a comparison just found, until the slot is next
+    /// written.
+    pub fn memo_psk_default(self, co: bool, is_default: bool) {
+        let (checked, default) = psk_memo_bits(co);
+        let found = if is_default {
+            checked | default
+        } else {
+            checked
+        };
+        let known = PSK_DEFAULT[self.0].load(Relaxed);
+        PSK_DEFAULT[self.0].store(known | found, Relaxed);
     }
 
     /// Bakes the default pre-shared keys into the slot.
