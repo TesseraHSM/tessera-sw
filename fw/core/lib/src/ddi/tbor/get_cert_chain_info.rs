@@ -7,8 +7,8 @@
 //! `GetCertChainInfo`.  Returns the number of certificates and the
 //! leaf-certificate SHA-256 thumbprint for the caller's partition at the
 //! requested chain slot.  No session is required; the chain is read for
-//! the caller's own bound partition (`io.pid()`), mirroring the MBOR
-//! handler.
+//! the caller's own bound partition, resolved internally by the PAL,
+//! mirroring the MBOR handler.
 //!
 //! The handler is `async` because the underlying
 //! [`HsmCertStore::get_cert_chain_info`](tsra_fw_hsm_pal_traits::HsmCertStore::get_cert_chain_info)
@@ -16,8 +16,9 @@
 
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoReq;
 use tsra_fw_ddi_tbor_types::TborGetCertChainInfoResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
-use tsra_fw_hsm_pal_traits::HsmIo;
+use tsra_fw_hsm_pal_traits::HsmCertBank;
+use tsra_fw_hsm_pal_traits::HsmCertSlot;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -26,21 +27,21 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 /// Slot 2 generates a fresh PID leaf and fingerprints it; because each read
 /// mints a new leaf, later reads need not match this fingerprint. No undo
 /// log is needed.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborGetCertChainInfoReq::decode(req_buf)?;
-    let slot_id = req.slot_id();
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    let req = TborGetCertChainInfoReq::decode(cmd_buf.request())?;
+    let slot = HsmCertSlot(req.slot_id());
 
-    let info = if slot_id == 2 {
+    let info = if slot == HsmCertSlot::PartOwner {
         super::pta::chain_info(pal, io).await?
     } else {
-        pal.get_cert_chain_info(io, io.pid(), slot_id).await?
+        pal.get_cert_chain_info(io, slot, HsmCertBank::Ecc).await?
     };
 
-    let resp = pal.dma_alloc_var(io, |buf| {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborGetCertChainInfoResp::encode(buf, 0, false)?
             .num_certs(info.count)?
             .thumbprint(&info.thumbprint)?

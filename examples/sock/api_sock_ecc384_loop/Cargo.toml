@@ -1,0 +1,21 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+[package]
+edition = "2021"
+name = "tsra_api_sock_ecc384_loop"
+version = "0.1.0"
+
+[[bin]]
+name = "tsra_api_sock_ecc384_loop"
+path = "src/main.rs"
+required-features = ["sock"]
+
+[features]
+sock = ["dep:openssl", "dep:tsra_api"]
+
+[dependencies]
+openssl = { optional = true, workspace = true }
+tsra_api = { features = ["sock"], optional = true, workspace = true }
+
+[lints]
+workspace = true

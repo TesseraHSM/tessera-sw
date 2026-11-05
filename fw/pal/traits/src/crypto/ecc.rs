@@ -172,16 +172,17 @@ impl HsmEccCurve {
     }
 }
 
-/// ECC Pairwise Consistency Test (PCT) mode for key generation.
+/// ECC Pairwise Consistency Test (PCT) mode for key generation and key
+/// import.
 ///
-/// FIPS 140-3 requires a PCT after key generation to verify the key
-/// pair is functional.  The variant selects which operation is used
-/// for verification, or skips the test entirely.
+/// FIPS 140-3 requires a PCT after key generation and key import to
+/// verify the key pair is functional.  The variant selects which
+/// operation is used for verification, or skips the test entirely.
 pub enum HsmEccPct {
     /// No PCT — skip the consistency test.
     None,
 
-    /// Sign / verify round-trip with the freshly generated key pair.
+    /// Sign / verify round-trip with the key pair under test.
     SignVerify,
 
     /// ECDH key-agreement self-test against a known public-key
@@ -198,7 +199,7 @@ pub enum HsmEccPct {
 /// Key parameters are byte slices in raw `priv || pub_x || pub_y`
 /// format — not DER — sized per [`HsmEccCurve::priv_key_len`] /
 /// [`HsmEccCurve::pub_key_len`].
-pub trait HsmEcc {
+pub trait HsmEcc: HsmIoTypes {
     /// Generates an ECC key pair on the chosen curve, optionally
     /// writing the keys into caller-provided buffers.
     ///
@@ -245,10 +246,10 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — PKA / RNG / PCT / DMA failure.
     async fn ecc_gen_keypair(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)>;
 
@@ -293,11 +294,11 @@ pub trait HsmEcc {
     ///   mode agree.
     async fn ecc_gen_keypair_from_root(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
-        root: &DmaBuf,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        root: &HsmDmaBuf,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)>;
 
@@ -340,11 +341,11 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — PKA / RNG failure.
     async fn ecc_sign(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Raw EC verify of `signature` against a pre-computed message
@@ -390,12 +391,12 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — propagated from the PKA driver.
     async fn ecc_verify(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
-        pub_key: &DmaBuf,
-        hash: &DmaBuf,
-        signature: &DmaBuf,
-        result: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
+        result: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Convert a PKCS#8 DER-encoded ECC private key (recovered from a
@@ -407,14 +408,27 @@ pub trait HsmEcc {
     /// [`wire_coord_len`](HsmEccCurve::wire_coord_len)), then
     /// `out = Some(buf)` to serialize.
     ///
+    /// In use mode, a PAL that checks imported keys runs the pairwise
+    /// consistency test that `pct` selects on the converted key pair before
+    /// it returns; query mode ignores `pct`.  Such a PAL can also check the
+    /// key's structure, such as whether the public key that `der` carries
+    /// matches the private key.
+    ///
     /// # Errors
     /// - [`HsmError::InvalidArg`] — `der` is not a valid PKCS#8 ECC
     ///   private key, or `out` is too small.
-    fn ecc_priv_der_to_vault(
+    /// - [`HsmError::KeyDecodeFailed`] — the PAL's structure check found no
+    ///   public key in `der`, or found `[0]` curve parameters.
+    /// - [`HsmError::KeyStructuralValidationFailed`] — the PAL's structure
+    ///   check rejected the key's public key.
+    /// - [`HsmError::PctValidationRsaUnwrapEccKeyFailed`] — the key pair
+    ///   failed its PCT.
+    async fn ecc_priv_der_to_vault(
         &self,
-        io: &impl HsmIo,
-        der: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        io: &Self::Io,
+        der: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
+        pct: HsmEccPct,
     ) -> HsmResult<(usize, HsmEccCurve)>;
 
     /// Convert a raw big-endian ECC private scalar `d` on `curve` into
@@ -444,10 +458,10 @@ pub trait HsmEcc {
     ///   width, is out of range (`0` or `>= n`), or `out` is too small.
     fn ecc_priv_to_vault(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
-        d: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        d: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Serialize a vault-stored ECC private key back to the raw
@@ -476,10 +490,10 @@ pub trait HsmEcc {
     ///   scalar, or `out` is too small.
     fn ecc_vault_to_priv(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
-        vault: &DmaBuf,
-        out: Option<&mut DmaBuf>,
+        vault: &HsmDmaBuf,
+        out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Derive the wire-format public key (`x || y`, wire-LE, P-521
@@ -498,9 +512,9 @@ pub trait HsmEcc {
     ///   ECC private key, or `pub_out` is too small.
     async fn ecc_priv_pub_key(
         &self,
-        io: &impl HsmIo,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        io: &Self::Io,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize>;
 
     /// Derive the public key from a raw private scalar (`pub = priv · G`).
@@ -535,10 +549,10 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — propagated from the PKA driver.
     async fn ecc_pub_from_priv(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// ECDH key agreement: derives a shared secret from a local
@@ -573,11 +587,11 @@ pub trait HsmEcc {
     /// - `Err(HsmError)` — PKA driver failure.
     async fn ecdh_derive(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         curve: HsmEccCurve,
-        priv_key: &DmaBuf,
-        pub_key: &DmaBuf,
-        secret: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        pub_key: &HsmDmaBuf,
+        secret: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 }
 

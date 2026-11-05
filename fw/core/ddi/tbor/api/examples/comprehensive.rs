@@ -18,13 +18,13 @@
 use std::println;
 
 use tsra_fw_ddi_tbor_api::tbor;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 // SAFETY: example-only branding. Host-side examples have no real DMA
 // engine, so the DMA-reachability contract is moot.
-fn brand(b: &[u8]) -> &DmaBuf {
+fn brand(b: &[u8]) -> &HsmDmaBuf {
     // SAFETY: see fn-level doc comment.
-    unsafe { DmaBuf::from_raw(b) }
+    unsafe { HsmDmaBuf::from_raw(b) }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

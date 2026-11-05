@@ -24,10 +24,10 @@ use super::*;
 ///    revision into a heap-allocated response buffer.
 pub(crate) fn get_api_rev<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     // GetApiRev is the bootstrap command — rev must not be set.
     if hdr.rev.is_some() {
         return Err(HsmError::UnsupportedRevision);

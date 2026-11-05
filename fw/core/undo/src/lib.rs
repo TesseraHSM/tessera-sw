@@ -38,17 +38,17 @@
 // methods; an explicit future type buys nothing here.
 #![allow(async_fn_in_trait)]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
+use tsra_fw_hsm_pal_traits::HsmPartPropKind;
 use tsra_fw_hsm_pal_traits::HsmPartitionManager;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionManager;
 use tsra_fw_hsm_pal_traits::HsmVault;
-use tsra_fw_hsm_pal_traits::PartPropId;
-use tsra_fw_hsm_pal_traits::PartPropKind;
 
 /// Serialized size of one undo entry slot in the backing buffer (bytes).
 pub const ENTRY_SIZE: usize = 8;
@@ -96,7 +96,7 @@ const MODE_BYTES: u8 = 2;
 /// |--------|-------|----------------------------------------------------|
 /// | `tag`  | 1     | action kind + (for `PropRestore`) the `data` mode  |
 /// | `aux`  | 1     | reserved (0 today)                                 |
-/// | `id`   | 2     | [`HsmKeyId`] or [`PartPropId`] raw value           |
+/// | `id`   | 2     | [`HsmKeyId`] or [`HsmPartPropId`] raw value           |
 /// | `data` | 4     | inline scalar, or packed `{offset:u16, len:u16}`   |
 #[derive(Clone, Copy)]
 struct UndoEntry {
@@ -150,7 +150,7 @@ impl UndoEntry {
     }
 
     #[inline]
-    fn prop_restore_absent(id: PartPropId) -> Self {
+    fn prop_restore_absent(id: HsmPartPropId) -> Self {
         Self {
             tag: KIND_PROP_RESTORE | (MODE_ABSENT << MODE_SHIFT),
             aux: 0,
@@ -160,7 +160,7 @@ impl UndoEntry {
     }
 
     #[inline]
-    fn prop_restore_scalar(id: PartPropId, prior: u32) -> Self {
+    fn prop_restore_scalar(id: HsmPartPropId, prior: u32) -> Self {
         Self {
             tag: KIND_PROP_RESTORE | (MODE_SCALAR << MODE_SHIFT),
             aux: 0,
@@ -170,7 +170,7 @@ impl UndoEntry {
     }
 
     #[inline]
-    fn prop_restore_bytes(id: PartPropId, handle: u32) -> Self {
+    fn prop_restore_bytes(id: HsmPartPropId, handle: u32) -> Self {
         Self {
             tag: KIND_PROP_RESTORE | (MODE_BYTES << MODE_SHIFT),
             aux: 0,
@@ -256,7 +256,7 @@ pub enum WalkOutcome {
 /// log carries no partition lock guard.
 pub struct UndoLog<'a> {
     /// Double-ended backing: entry slots front, byte arena back.
-    buf: &'a mut DmaBuf,
+    buf: &'a mut HsmDmaBuf,
     /// Entry slots used (each [`ENTRY_SIZE`] bytes, from the front).
     nentries: usize,
     /// Bytes used by the pre-image arena (from the back).
@@ -264,16 +264,15 @@ pub struct UndoLog<'a> {
 }
 
 impl<'a> UndoLog<'a> {
-    /// Create an empty log over a single caller-provided [`DmaBuf`].
+    /// Create an empty log over a single caller-provided [`HsmDmaBuf`].
     ///
     /// `buf.len()` bounds the combined cost of entry slots ([`ENTRY_SIZE`]
     /// bytes each, from the front) and byte pre-images (from the back).
     /// The dispatcher carves `buf` from the per-io DMA heap (sized from
     /// [`UNDO_LOG_SIZE`] / a per-opcode table); tests pass a fixed array
-    /// branded as a `DmaBuf`. A `DmaBuf` is required (not a plain slice)
-    /// so the log's internal `zeroize` on walk completion can securely
-    /// scrub captured secret pre-images with volatile writes.
-    pub fn new(buf: &'a mut DmaBuf) -> Self {
+    /// branded as a `HsmDmaBuf`. IO teardown scrubs captured secret pre-images
+    /// after the undo or commit walk finishes.
+    pub fn new(buf: &'a mut HsmDmaBuf) -> Self {
         Self {
             buf,
             nentries: 0,
@@ -358,7 +357,7 @@ impl<'a> UndoLog<'a> {
     /// Record that a property was set while previously **absent**.
     ///
     /// undo → clear the slot; commit → keep.
-    pub fn push_prop_restore_absent(&mut self, id: PartPropId) -> HsmResult<()> {
+    pub fn push_prop_restore_absent(&mut self, id: HsmPartPropId) -> HsmResult<()> {
         self.push_entry(UndoEntry::prop_restore_absent(id))
     }
 
@@ -366,7 +365,7 @@ impl<'a> UndoLog<'a> {
     /// widened to `u32`).
     ///
     /// undo → write `prior` back (raw, overwriting); commit → keep.
-    pub fn push_prop_restore_scalar(&mut self, id: PartPropId, prior: u32) -> HsmResult<()> {
+    pub fn push_prop_restore_scalar(&mut self, id: HsmPartPropId, prior: u32) -> HsmResult<()> {
         self.push_entry(UndoEntry::prop_restore_scalar(id, prior))
     }
 
@@ -375,7 +374,7 @@ impl<'a> UndoLog<'a> {
     /// undo → write the bytes back; commit → keep.  Fails with
     /// [`HsmError::UndoLogFull`] if the buffer cannot hold the slot plus
     /// `prior`.
-    pub fn push_prop_restore_bytes(&mut self, id: PartPropId, prior: &[u8]) -> HsmResult<()> {
+    pub fn push_prop_restore_bytes(&mut self, id: HsmPartPropId, prior: &[u8]) -> HsmResult<()> {
         let len = prior.len();
         // Pre-images sit at the back; this one's offset is from the start.
         let new_arena_used = self
@@ -396,14 +395,14 @@ impl<'a> UndoLog<'a> {
         Ok(())
     }
 
-    fn bytes_from_handle(&self, handle: u32) -> HsmResult<&DmaBuf> {
+    fn bytes_from_handle(&self, handle: u32) -> HsmResult<&HsmDmaBuf> {
         let (off, len) = unpack_bytes_handle(handle);
         let end = off.checked_add(len).ok_or(HsmError::InvalidArg)?;
         if end > self.buf.len() {
             return Err(HsmError::InvalidArg);
         }
-        // `self.buf` is a `&mut DmaBuf`; indexing a `DmaBuf` by range yields
-        // a `DmaBuf` sub-view, so this stays DMA-typed with no re-branding.
+        // `self.buf` is a `&mut HsmDmaBuf`; indexing a `HsmDmaBuf` by range yields
+        // a `HsmDmaBuf` sub-view, so this stays DMA-typed with no re-branding.
         Ok(&self.buf[off..end])
     }
 
@@ -411,9 +410,8 @@ impl<'a> UndoLog<'a> {
     ///
     /// Consumes the log.  Returns [`WalkOutcome::Poisoned`] if any
     /// `Poison`-class step failed; the walk always runs to completion
-    /// (best-effort for the rest).  Zeroizes the backing buffer last, so
-    /// any captured secret pre-image (e.g. a prior PSK) does not linger.
-    pub async fn apply_undo<V: UndoVerbs>(mut self, verbs: &V, io: &impl HsmIo) -> WalkOutcome {
+    /// (best-effort for the rest). IO teardown scrubs the backing buffer.
+    pub async fn apply_undo<V: UndoVerbs>(self, verbs: &V, io: &V::Io) -> WalkOutcome {
         let mut outcome = WalkOutcome::Ok;
         let mut i = self.nentries;
         while i > 0 {
@@ -425,7 +423,6 @@ impl<'a> UndoLog<'a> {
                 outcome = WalkOutcome::Poisoned;
             }
         }
-        self.zeroize();
         outcome
     }
 
@@ -434,50 +431,36 @@ impl<'a> UndoLog<'a> {
     /// Consumes the log.  All commit-side failures are best-effort
     /// (benign orphans), so this always returns [`WalkOutcome::Ok`]; the
     /// return type mirrors [`apply_undo`](Self::apply_undo) for a uniform
-    /// dispatcher.  Zeroizes the backing buffer last, so any captured
-    /// secret pre-image (e.g. a prior PSK) does not linger.
-    pub async fn apply_commit<V: UndoVerbs>(mut self, verbs: &V, io: &impl HsmIo) -> WalkOutcome {
+    /// dispatcher. IO teardown scrubs the backing buffer.
+    pub async fn apply_commit<V: UndoVerbs>(self, verbs: &V, io: &V::Io) -> WalkOutcome {
         for i in 0..self.nentries {
             let entry = self.entry_at(i);
             // Best-effort: a failed zeroise leaves a benign orphan.
             let _ = self.commit_one(&entry, verbs, io).await;
         }
-        self.zeroize();
         WalkOutcome::Ok
-    }
-
-    /// Scrub the backing buffer (entries + arena) before the borrow ends,
-    /// so captured secret pre-images do not linger in the per-IO DMA heap
-    /// (which is only watermark-reset, not cleared, on the next IO).
-    fn zeroize(&mut self) {
-        // Delegate to `DmaBuf::zeroize`, which uses per-byte volatile
-        // writes + a compiler fence so the wipe cannot be elided even
-        // though these bytes are never read again through this reference.
-        self.buf.zeroize();
-        self.nentries = 0;
-        self.arena_used = 0;
     }
 
     async fn undo_one<V: UndoVerbs>(
         &self,
         entry: &UndoEntry,
         verbs: &V,
-        io: &impl HsmIo,
+        io: &V::Io,
     ) -> HsmResult<()> {
         match entry.kind() {
             KIND_VAULT_CREATE => verbs.vault_delete(io, HsmKeyId::from(entry.id)).await,
             KIND_VAULT_DISABLE => verbs.vault_enable(io, HsmKeyId::from(entry.id)),
             KIND_PROP_RESTORE => {
-                let id = PartPropId::from_raw(entry.id);
+                let id = HsmPartPropId::from_raw(entry.id);
                 match entry.mode() {
                     MODE_ABSENT => verbs.prop_clear(io, id),
                     MODE_SCALAR => {
                         let meta = id.meta().ok_or(HsmError::InvalidArg)?;
                         match meta.kind {
-                            PartPropKind::U8 => verbs.prop_set_u8(io, id, entry.data as u8),
-                            PartPropKind::U16 => verbs.prop_set_u16(io, id, entry.data as u16),
-                            PartPropKind::U32 => verbs.prop_set_u32(io, id, entry.data),
-                            PartPropKind::Bool => verbs.prop_set_bool(io, id, entry.data != 0),
+                            HsmPartPropKind::U8 => verbs.prop_set_u8(io, id, entry.data as u8),
+                            HsmPartPropKind::U16 => verbs.prop_set_u16(io, id, entry.data as u16),
+                            HsmPartPropKind::U32 => verbs.prop_set_u32(io, id, entry.data),
+                            HsmPartPropKind::Bool => verbs.prop_set_bool(io, id, entry.data != 0),
                             _ => Err(HsmError::InvalidArg),
                         }
                     }
@@ -497,7 +480,7 @@ impl<'a> UndoLog<'a> {
         &self,
         entry: &UndoEntry,
         verbs: &V,
-        io: &impl HsmIo,
+        io: &V::Io,
     ) -> HsmResult<()> {
         match entry.kind() {
             // Finalise a soft-delete: zeroise the retired key.
@@ -531,66 +514,71 @@ fn undo_policy(kind: u8) -> FailurePolicy {
 /// supply a tiny mock.  The PAL stays undo-unaware — these map onto the
 /// same id-keyed verbs handlers already use.
 pub trait UndoVerbs {
+    /// IO context accepted by these PAL verbs.
+    type Io: HsmIo;
+
     /// Delete (zeroise) a vault key.
-    async fn vault_delete(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()>;
+    async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()>;
     /// Re-enable a soft-deleted (disabled) vault key.
-    fn vault_enable(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()>;
+    fn vault_enable(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()>;
     /// Clear a property slot (restore-to-absent).
-    fn prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()>;
+    fn prop_clear(&self, io: &Self::Io, id: HsmPartPropId) -> HsmResult<()>;
     /// Restore a `U8` property.
-    fn prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()>;
+    fn prop_set_u8(&self, io: &Self::Io, id: HsmPartPropId, value: u8) -> HsmResult<()>;
     /// Restore a `U16` property.
-    fn prop_set_u16(&self, io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()>;
+    fn prop_set_u16(&self, io: &Self::Io, id: HsmPartPropId, value: u16) -> HsmResult<()>;
     /// Restore a `U32` property.
-    fn prop_set_u32(&self, io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()>;
+    fn prop_set_u32(&self, io: &Self::Io, id: HsmPartPropId, value: u32) -> HsmResult<()>;
     /// Restore a `Bool` property.
-    fn prop_set_bool(&self, io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()>;
+    fn prop_set_bool(&self, io: &Self::Io, id: HsmPartPropId, value: bool) -> HsmResult<()>;
     /// Restore a byte property from arena bytes.
-    fn prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()>;
+    fn prop_set_bytes(&self, io: &Self::Io, id: HsmPartPropId, data: &HsmDmaBuf) -> HsmResult<()>;
     /// Destroy a session (its slot + backing vault keys) — the coarse
     /// inverse of session create/promote.
-    async fn session_destroy(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()>;
+    async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 }
 
 impl<P> UndoVerbs for P
 where
     P: HsmVault + HsmPartitionManager + HsmSessionManager,
 {
-    async fn vault_delete(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+    type Io = P::Io;
+
+    async fn vault_delete(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
         HsmVault::vault_key_delete(self, io, id).await
     }
 
-    fn vault_enable(&self, io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+    fn vault_enable(&self, io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
         HsmVault::vault_key_enable(self, io, id)
     }
 
-    fn prop_clear(&self, io: &impl HsmIo, id: PartPropId) -> HsmResult<()> {
+    fn prop_clear(&self, io: &Self::Io, id: HsmPartPropId) -> HsmResult<()> {
         HsmPartitionManager::part_prop_clear(self, io, id)
     }
 
-    fn prop_set_u8(&self, io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+    fn prop_set_u8(&self, io: &Self::Io, id: HsmPartPropId, value: u8) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_u8(self, io, id, value)
     }
 
-    fn prop_set_u16(&self, io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
+    fn prop_set_u16(&self, io: &Self::Io, id: HsmPartPropId, value: u16) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_u16(self, io, id, value)
     }
 
-    fn prop_set_u32(&self, io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()> {
+    fn prop_set_u32(&self, io: &Self::Io, id: HsmPartPropId, value: u32) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_u32(self, io, id, value)
     }
 
-    fn prop_set_bool(&self, io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
+    fn prop_set_bool(&self, io: &Self::Io, id: HsmPartPropId, value: bool) -> HsmResult<()> {
         HsmPartitionManager::part_prop_set_bool(self, io, id, value)
     }
 
-    fn prop_set_bytes(&self, io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
-        // `data` is already a `&DmaBuf` sub-view of the per-IO undo arena
+    fn prop_set_bytes(&self, io: &Self::Io, id: HsmPartPropId, data: &HsmDmaBuf) -> HsmResult<()> {
+        // `data` is already a `&HsmDmaBuf` sub-view of the per-IO undo arena
         // (itself carved from the DMA heap), so no re-branding is needed.
         HsmPartitionManager::part_prop_set_bytes(self, io, id, data)
     }
 
-    async fn session_destroy(&self, io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+    async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
         HsmSessionManager::session_destroy(self, io, id).await
     }
 }
@@ -612,9 +600,8 @@ mod tests {
     use core::task::Waker;
 
     use tsra_fw_hsm_pal_traits::HsmCqe;
-    use tsra_fw_hsm_pal_traits::HsmPartId;
+    use tsra_fw_hsm_pal_traits::HsmPartState;
     use tsra_fw_hsm_pal_traits::HsmSqe;
-    use tsra_fw_hsm_pal_traits::PartState;
 
     use super::*;
 
@@ -639,23 +626,11 @@ mod tests {
 
     #[derive(Default)]
     struct FakeIo {
-        sqe: HsmSqe,
-        cqe: HsmCqe,
+        sqe: [u32; 16],
+        cqe: [u32; 4],
     }
 
     impl HsmIo for FakeIo {
-        fn index(&self) -> u16 {
-            0
-        }
-        fn pid(&self) -> HsmPartId {
-            HsmPartId::from(0u8)
-        }
-        fn queue_id(&self) -> u16 {
-            0
-        }
-        fn queue_idx(&self) -> u16 {
-            0
-        }
         fn sqe(&self) -> &HsmSqe {
             &self.sqe
         }
@@ -738,7 +713,9 @@ mod tests {
     }
 
     impl UndoVerbs for MockVerbs {
-        async fn vault_delete(&self, _io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+        type Io = FakeIo;
+
+        async fn vault_delete(&self, _io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
             self.record(OP_DELETE, u16::from(id), 0);
             if self.fail_delete.get() {
                 Err(HsmError::KeyNotFound)
@@ -746,7 +723,7 @@ mod tests {
                 Ok(())
             }
         }
-        fn vault_enable(&self, _io: &impl HsmIo, id: HsmKeyId) -> HsmResult<()> {
+        fn vault_enable(&self, _io: &Self::Io, id: HsmKeyId) -> HsmResult<()> {
             self.record(OP_ENABLE, u16::from(id), 0);
             if self.fail_enable.get() {
                 Err(HsmError::KeyNotFound)
@@ -754,33 +731,38 @@ mod tests {
                 Ok(())
             }
         }
-        fn prop_clear(&self, _io: &impl HsmIo, id: PartPropId) -> HsmResult<()> {
+        fn prop_clear(&self, _io: &Self::Io, id: HsmPartPropId) -> HsmResult<()> {
             self.record(OP_CLEAR, id.raw(), 0);
             Ok(())
         }
-        fn prop_set_u8(&self, _io: &impl HsmIo, id: PartPropId, value: u8) -> HsmResult<()> {
+        fn prop_set_u8(&self, _io: &Self::Io, id: HsmPartPropId, value: u8) -> HsmResult<()> {
             self.record(OP_SET_U8, id.raw(), u32::from(value));
             Ok(())
         }
-        fn prop_set_u16(&self, _io: &impl HsmIo, id: PartPropId, value: u16) -> HsmResult<()> {
+        fn prop_set_u16(&self, _io: &Self::Io, id: HsmPartPropId, value: u16) -> HsmResult<()> {
             self.record(OP_SET_U16, id.raw(), u32::from(value));
             Ok(())
         }
-        fn prop_set_u32(&self, _io: &impl HsmIo, id: PartPropId, value: u32) -> HsmResult<()> {
+        fn prop_set_u32(&self, _io: &Self::Io, id: HsmPartPropId, value: u32) -> HsmResult<()> {
             self.record(OP_SET_U32, id.raw(), value);
             Ok(())
         }
-        fn prop_set_bool(&self, _io: &impl HsmIo, id: PartPropId, value: bool) -> HsmResult<()> {
+        fn prop_set_bool(&self, _io: &Self::Io, id: HsmPartPropId, value: bool) -> HsmResult<()> {
             self.record(OP_SET_BOOL, id.raw(), u32::from(value));
             Ok(())
         }
-        fn prop_set_bytes(&self, _io: &impl HsmIo, id: PartPropId, data: &DmaBuf) -> HsmResult<()> {
+        fn prop_set_bytes(
+            &self,
+            _io: &Self::Io,
+            id: HsmPartPropId,
+            data: &HsmDmaBuf,
+        ) -> HsmResult<()> {
             self.record(OP_SET_BYTES, id.raw(), data.len() as u32);
             self.last_bytes.borrow_mut()[..data.len()].copy_from_slice(data);
             self.last_bytes_len.set(data.len());
             Ok(())
         }
-        async fn session_destroy(&self, _io: &impl HsmIo, id: HsmSessId) -> HsmResult<()> {
+        async fn session_destroy(&self, _io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
             self.record(OP_SESSION_DESTROY, u16::from(id), 0);
             if self.fail_session_destroy.get() {
                 Err(HsmError::InvalidArg)
@@ -795,9 +777,9 @@ mod tests {
     macro_rules! log {
         ($name:ident) => {
             let mut buf = [0u8; UNDO_LOG_SIZE];
-            // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
+            // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
             #[allow(unsafe_code)]
-            let dma = unsafe { DmaBuf::from_raw_mut(&mut buf) };
+            let dma = unsafe { HsmDmaBuf::from_raw_mut(&mut buf) };
             let mut $name: UndoLog<'_> = UndoLog::new(dma);
         };
     }
@@ -810,7 +792,7 @@ mod tests {
     fn undo_walk_is_lifo_and_dispatches() {
         log!(log);
         log.push_vault_create(key(11)).unwrap();
-        log.push_prop_restore_scalar(PartPropId::UPS_KEY_ID, 0x42)
+        log.push_prop_restore_scalar(HsmPartPropId::UPS_KEY_ID, 0x42)
             .unwrap();
         log.push_vault_disable(key(22)).unwrap();
 
@@ -821,7 +803,7 @@ mod tests {
         // LIFO: disable→enable(22), then prop→set_u16(UPS, 0x42), then create→delete(11).
         assert_eq!(m.count(), 3);
         m.assert_rec(0, OP_ENABLE, 22, 0);
-        m.assert_rec(1, OP_SET_U16, PartPropId::UPS_KEY_ID.raw(), 0x42);
+        m.assert_rec(1, OP_SET_U16, HsmPartPropId::UPS_KEY_ID.raw(), 0x42);
         m.assert_rec(2, OP_DELETE, 11, 0);
     }
 
@@ -830,7 +812,7 @@ mod tests {
         log!(log);
         log.push_vault_create(key(11)).unwrap();
         log.push_vault_disable(key(22)).unwrap();
-        log.push_prop_restore_scalar(PartPropId::UPS_KEY_ID, 7)
+        log.push_prop_restore_scalar(HsmPartPropId::UPS_KEY_ID, 7)
             .unwrap();
 
         let m = MockVerbs::new();
@@ -845,33 +827,33 @@ mod tests {
     #[test]
     fn prop_restore_absent_clears_on_undo() {
         log!(log);
-        log.push_prop_restore_absent(PartPropId::UPS_KEY_ID)
+        log.push_prop_restore_absent(HsmPartPropId::UPS_KEY_ID)
             .unwrap();
         let m = MockVerbs::new();
         let io = FakeIo::default();
         assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
         assert_eq!(m.count(), 1);
-        m.assert_rec(0, OP_CLEAR, PartPropId::UPS_KEY_ID.raw(), 0);
+        m.assert_rec(0, OP_CLEAR, HsmPartPropId::UPS_KEY_ID.raw(), 0);
     }
 
     #[test]
     fn scalar_restore_picks_kind_width() {
         log!(log);
         // STATE is U8, UPS_KEY_ID is U16.
-        log.push_prop_restore_scalar(PartPropId::STATE, PartState::Enabled as u32)
+        log.push_prop_restore_scalar(HsmPartPropId::PART_STATE, HsmPartState::Enabled as u32)
             .unwrap();
-        log.push_prop_restore_scalar(PartPropId::UPS_KEY_ID, 0x1234)
+        log.push_prop_restore_scalar(HsmPartPropId::UPS_KEY_ID, 0x1234)
             .unwrap();
         let m = MockVerbs::new();
         let io = FakeIo::default();
         assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
         // LIFO: UPS first (U16), then STATE (U8).
-        m.assert_rec(0, OP_SET_U16, PartPropId::UPS_KEY_ID.raw(), 0x1234);
+        m.assert_rec(0, OP_SET_U16, HsmPartPropId::UPS_KEY_ID.raw(), 0x1234);
         m.assert_rec(
             1,
             OP_SET_U8,
-            PartPropId::STATE.raw(),
-            PartState::Enabled as u32,
+            HsmPartPropId::PART_STATE.raw(),
+            HsmPartState::Enabled as u32,
         );
     }
 
@@ -879,12 +861,12 @@ mod tests {
     fn bytes_restore_round_trips_through_arena() {
         log!(log);
         let prior = [0xABu8; 32];
-        log.push_prop_restore_bytes(PartPropId::PSK_CU, &prior)
+        log.push_prop_restore_bytes(HsmPartPropId::PSK_CU, &prior)
             .unwrap();
         let m = MockVerbs::new();
         let io = FakeIo::default();
         assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
-        m.assert_rec(0, OP_SET_BYTES, PartPropId::PSK_CU.raw(), 32);
+        m.assert_rec(0, OP_SET_BYTES, HsmPartPropId::PSK_CU.raw(), 32);
         m.assert_last_bytes(&prior);
     }
 
@@ -956,12 +938,12 @@ mod tests {
         // Two arena-sized payloads cannot coexist (their slots + bytes
         // exceed the buffer), but one fits; discard resets the back
         // pointer so the second still fits afterwards.
-        log.push_prop_restore_bytes(PartPropId::PSK_CU, &[1u8; UNDO_ARENA])
+        log.push_prop_restore_bytes(HsmPartPropId::PSK_CU, &[1u8; UNDO_ARENA])
             .unwrap();
         assert!(!log.is_empty());
         log.discard();
         assert!(log.is_empty());
-        log.push_prop_restore_bytes(PartPropId::PSK_CU, &[2u8; UNDO_ARENA])
+        log.push_prop_restore_bytes(HsmPartPropId::PSK_CU, &[2u8; UNDO_ARENA])
             .unwrap();
         assert_eq!(log.len(), 1);
     }
@@ -970,11 +952,11 @@ mod tests {
     fn bytes_push_overflows_when_buffer_full() {
         log!(log);
         // One payload that, with its slot, exactly fills the buffer.
-        log.push_prop_restore_bytes(PartPropId::PSK_CU, &[1u8; UNDO_LOG_SIZE - ENTRY_SIZE])
+        log.push_prop_restore_bytes(HsmPartPropId::PSK_CU, &[1u8; UNDO_LOG_SIZE - ENTRY_SIZE])
             .unwrap();
         // Even a single further byte now overflows.
         assert_eq!(
-            log.push_prop_restore_bytes(PartPropId::PSK_CU, &[2u8; 1]),
+            log.push_prop_restore_bytes(HsmPartPropId::PSK_CU, &[2u8; 1]),
             Err(HsmError::UndoLogFull)
         );
     }

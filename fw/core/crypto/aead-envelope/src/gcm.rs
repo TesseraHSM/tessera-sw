@@ -4,7 +4,7 @@
 //! AES-256-GCM `seal` / `open` implementation.
 //!
 //! Both operations are in-place on a single caller-owned
-//! [`DmaBuf`](tsra_fw_hsm_pal_traits::DmaBuf):
+//! [`HsmDmaBuf`](tsra_fw_hsm_pal_traits::HsmDmaBuf):
 //!
 //! * [`seal_gcm`] assembles `[HEADER | IV | AAD | DATA | TAG]` into
 //!   the buffer (small memcpys for IV / AAD / plaintext, dictated
@@ -18,10 +18,9 @@
 //! Public dispatch lives in [`crate::ops`]; this module never sees
 //! a non-`AES-256-GCM` `alg` value.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 
 use crate::alg::AeadAlg;
 use crate::envelope::region_offsets;
@@ -36,15 +35,15 @@ use crate::format::Header;
 ///
 /// Assumes `alg == AeadAlg::AesGcm256`; the dispatcher in
 /// [`crate::ops`] is the only caller and guarantees this.
-pub(crate) async fn seal_gcm(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub(crate) async fn seal_gcm<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
-    pt: &DmaBuf,
-    buf: &mut DmaBuf,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
+    pt: &HsmDmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> Result<usize> {
     seal_gcm_inner(crypto, io, alg, key, iv, aad, Some(pt), pt.len(), buf).await
 }
@@ -56,30 +55,30 @@ pub(crate) async fn seal_gcm(
 /// response slot avoid a second live copy of it.  For an ML-DSA-87 key
 /// that is 4928 bytes of the per-IO DMA heap, which is the difference
 /// between fitting and `NotEnoughSpace`.
-pub(crate) async fn seal_gcm_in_place(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub(crate) async fn seal_gcm_in_place<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
     pt_len: usize,
-    buf: &mut DmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> Result<usize> {
     seal_gcm_inner(crypto, io, alg, key, iv, aad, None, pt_len, buf).await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn seal_gcm_inner(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+async fn seal_gcm_inner<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
-    pt: Option<&DmaBuf>,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
+    pt: Option<&HsmDmaBuf>,
     pt_len: usize,
-    buf: &mut DmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> Result<usize> {
     // Length validation -------------------------------------------------
     if key.len() != alg.key_len() {
@@ -118,6 +117,7 @@ async fn seal_gcm_inner(
             needed: envelope_len,
         })?
         .copy_from_slice(iv);
+    body[iv_off + 12..aad_off].copy_from_slice(&[0, 0, 0, 1]);
     body.get_mut(aad_off..data_off)
         .ok_or(Error::BufferTooSmall {
             needed: envelope_len,
@@ -143,7 +143,7 @@ async fn seal_gcm_inner(
     let (tag, _trailing) = tag_region.split_at_mut(alg.tag_len());
 
     crypto
-        .gcm_encrypt_in_place(io, key, iv, aad_len, aad_dat, tag)
+        .gcm_encrypt_in_place(io, key, &iv[..12], aad_len, aad_dat, tag)
         .await
         .map_err(Error::Backend)?;
 
@@ -155,11 +155,11 @@ async fn seal_gcm_inner(
 ///
 /// `header` has already been parsed and the alg has been verified
 /// to be `AeadAlg::AesGcm256` by the dispatcher.
-pub(crate) async fn open_gcm<'a>(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
-    key: &DmaBuf,
-    buf: &'a mut DmaBuf,
+pub(crate) async fn open_gcm<'a, P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
+    key: &HsmDmaBuf,
+    buf: &'a mut HsmDmaBuf,
     header: Header,
 ) -> Result<AeadEnvelope<'a>> {
     let total_len = buf.len();
@@ -181,14 +181,14 @@ pub(crate) async fn open_gcm<'a>(
     // PAL decrypts in place; on tag mismatch the AAD+DATA region is
     // left in an unspecified state per the PAL contract.
     crypto
-        .gcm_decrypt_in_place(io, key, iv_region, header.aad_len, tag, aad_dat)
+        .gcm_decrypt_in_place(io, key, &iv_region[..12], header.aad_len, tag, aad_dat)
         .await
         .map_err(|e| match e {
             HsmError::AesGcmDecryptTagDoesNotMatch => Error::AuthFailed,
             other => Error::Backend(other),
         })?;
 
-    // Re-borrow `buf` immutably to construct the DmaBuf sub-views.
+    // Re-borrow `buf` immutably to construct the HsmDmaBuf sub-views.
     // All ranges are validated by `region_offsets`; the indexed
     // accesses below cannot panic.
     let view = &*buf;

@@ -9,6 +9,8 @@
 //! cases, which a roundtrip test cannot produce.
 
 use super::*;
+use crate::testvectors::mldsa::MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS;
+use crate::testvectors::mldsa::MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS;
 use crate::testvectors::mldsa::MLDSA_KEYGEN_TEST_VECTORS;
 use crate::testvectors::mldsa::MLDSA_SIGGEN_TEST_VECTORS;
 use crate::testvectors::mldsa::MLDSA_SIGVER_SHORT_MSG_TEST_VECTORS;
@@ -77,6 +79,71 @@ fn verification_matches_nist_vectors() {
     }
 }
 
+/// NIST's external-`μ` signing vectors, reproduced exactly as for the pure
+/// interface: the engine signs the supplied `μ` without computing its own.
+#[test]
+fn external_mu_signing_matches_nist_vectors() {
+    for v in MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let mut algo = MlDsaAlgo::external_mu_with_randomness(v.rnd.try_into().unwrap());
+        assert_eq!(
+            Signer::sign_vec(&mut algo, &sk, v.mu).unwrap(),
+            v.sig,
+            "ML-DSA-{} external-mu signature disagrees with NIST (deterministic={})",
+            v.param_set,
+            v.deterministic
+        );
+    }
+}
+
+/// NIST's deterministic signing vectors, reproduced by a
+/// [`deterministic`](MlDsaAlgo::deterministic) engine rather than by pinning
+/// `rnd`: the variant itself must supply FIPS 204's all-zero randomness, for
+/// the message and for an external `μ`.
+#[test]
+fn deterministic_engine_matches_nist_deterministic_vectors() {
+    for v in MLDSA_SIGGEN_TEST_VECTORS.iter().filter(|v| v.deterministic) {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let mut algo = MlDsaAlgo::new(v.ctx).unwrap().deterministic();
+        assert_eq!(
+            Signer::sign_vec(&mut algo, &sk, v.msg).unwrap(),
+            v.sig,
+            "ML-DSA-{} deterministic signature disagrees with NIST",
+            v.param_set
+        );
+    }
+    for v in MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS
+        .iter()
+        .filter(|v| v.deterministic)
+    {
+        let sk = MlDsaPrivateKey::from_bytes(v.sec_key).unwrap();
+        let mut algo = MlDsaAlgo::external_mu().deterministic();
+        assert_eq!(
+            Signer::sign_vec(&mut algo, &sk, v.mu).unwrap(),
+            v.sig,
+            "ML-DSA-{} deterministic external-mu signature disagrees with NIST",
+            v.param_set
+        );
+    }
+}
+
+/// NIST's external-`μ` verification vectors, including a modified `μ` and
+/// the tampered-signature cases.
+#[test]
+fn external_mu_verification_matches_nist_vectors() {
+    for v in MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS {
+        let pk = MlDsaPublicKey::from_bytes(v.pub_key).unwrap();
+        let mut algo = MlDsaAlgo::external_mu();
+        assert_eq!(
+            Verifier::verify(&mut algo, &pk, v.mu, v.sig).unwrap(),
+            v.expected_pass,
+            "ML-DSA-{} external-mu verification disagrees with NIST: {}",
+            v.param_set,
+            v.reason
+        );
+    }
+}
+
 /// The vectors must cover all three parameter sets, both signing modes, and
 /// both verification outcomes. A silently truncated table would leave the
 /// tests above passing while checking far less than they appear to.
@@ -103,6 +170,20 @@ fn vectors_cover_every_parameter_set_and_mode() {
                     .iter()
                     .any(|v| v.param_set == param_set && v.expected_pass == expected),
                 "ML-DSA-{param_set} has no expected_pass={expected} sigver vectors"
+            );
+            assert!(
+                MLDSA_EXTERNAL_MU_SIGVER_TEST_VECTORS
+                    .iter()
+                    .any(|v| v.param_set == param_set && v.expected_pass == expected),
+                "ML-DSA-{param_set} has no expected_pass={expected} external-mu sigver vectors"
+            );
+        }
+        for deterministic in [true, false] {
+            assert!(
+                MLDSA_EXTERNAL_MU_SIGGEN_TEST_VECTORS
+                    .iter()
+                    .any(|v| v.param_set == param_set && v.deterministic == deterministic),
+                "ML-DSA-{param_set} has no deterministic={deterministic} external-mu siggen vectors"
             );
         }
     }

@@ -13,15 +13,16 @@
 //! happy-path tests first drive `PartInit → PartFinal`.
 //!
 //! Coverage:
-//! * Happy path (Ephemeral + Local) — returns a non-zero 276-byte masked
+//! * Happy path (Ephemeral + Local) — returns a non-zero 280-byte masked
 //!   key + 96-byte public key; a second call yields a distinct keypair.
-//! * Unsupported scope (Session + SecurityDomain) → `UnsupportedKeyScope`.
+//! * Session scope and SecurityDomain before SD provisioning return
+//!   `UnsupportedKeyScope`.
 //! * Before finalize (partition not `Initialized`) → `InvalidArg`.
 //! * Crypto-User session → `InvalidPermissions`.
 //! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
 //!
 //! `SdSealingKeyGen` itself carries no out-of-band data — the request is a
-//! session id plus a 1-byte scope, and the response is a 276-byte masked
+//! session id plus a 1-byte scope, and the response is a 280-byte masked
 //! key plus a 96-byte public key — so the command runs on any transport.
 //! The *setup* is what needs OOB: [`finalized_co_session`] drives
 //! `PartFinal`, whose PTA chain travels out of band, so the tests that
@@ -128,9 +129,9 @@ fn sd_sealing_key_gen_rejects_unsupported_scope() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
-    // Session and SecurityDomain masking keys are not yet provisioned
-    // (session-key masking / CreateSD's SDKMK), so both must be rejected
-    // with the dedicated UnsupportedKeyScope error.
+    // Session scope is unsupported for sealing keys. SecurityDomain is
+    // unavailable until SD creation or restoration provisions its masking
+    // key; this fixture only finalizes the partition.
     for scope in [SCOPE_SESSION, SCOPE_SECURITY_DOMAIN] {
         let req = TborSdSealingKeyGenReq {
             session_id: session.session_id,

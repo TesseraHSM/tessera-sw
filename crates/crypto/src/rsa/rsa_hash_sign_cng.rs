@@ -134,6 +134,7 @@ impl SignOp for CngRsaHashSignAlgo {
         data: &[u8],
         signature: Option<&mut [u8]>,
     ) -> Result<usize, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let (pad, flags) = self.padding_info();
         let pad_ptr = pad_ptr(&pad);
         let hash = Hasher::hash_vec(&mut self.hash, data)?;
@@ -173,6 +174,7 @@ impl<'a> SignStreamingOp<'a> for CngRsaHashSignAlgo {
     /// This method returns a context stub that needs to be implemented with
     /// Windows CNG BCryptCreateHash and related APIs.
     fn sign_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let hasher = Hasher::hash_init(self.hash.clone())?;
         Ok(CngRsaHashSignAlgoSignContext {
             algo: self,
@@ -316,6 +318,7 @@ impl VerifyOp for CngRsaHashSignAlgo {
         data: &[u8],
         signature: &[u8],
     ) -> Result<bool, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let (pad, flags) = self.padding_info();
         let pad_ptr = pad_ptr(&pad);
         let hash = Hasher::hash_vec(&mut self.hash, data)?;
@@ -351,6 +354,7 @@ impl VerifyStreamingOp<'_> for CngRsaHashSignAlgo {
     /// This method returns a context stub that needs to be implemented with
     /// Windows CNG BCryptCreateHash and related APIs.
     fn verify_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        self.hash.ensure_sha1_or_sha2()?;
         let hasher = Hasher::hash_init(self.hash.clone())?;
         Ok(CngRsaHashSignAlgoVerifyContext {
             algo: self,

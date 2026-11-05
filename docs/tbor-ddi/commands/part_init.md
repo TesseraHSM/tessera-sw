@@ -77,7 +77,7 @@ spec](../../../fw/core/ddi/tbor/docs/spec.md).
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 4  | `session_id` | `session_id` (inline) | CO session whose `param_key` wraps `mach_seed_envelope`; cross-checked against the SQE-carried session id. |
-| 8  | `mach_seed_envelope` | `buffer` (fixed 100 B) | AEAD-GCM envelope (see below) carrying the 32-byte `mach_seed`. Length is pinned to exactly 100 B (`MACH_SEED_ENVELOPE_LEN`); a wrong length is rejected at decode. |
+| 8  | `mach_seed_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below) carrying the 32-byte `mach_seed`. Length is pinned to exactly 104 B (`MACH_SEED_ENVELOPE_LEN`); a wrong length is rejected at decode. |
 | 12 | `part_policy` | `buffer` (fixed 584 B) | Unified `PartPolicy` blob bound into the partition's attested state. Length pinned to `PART_POLICY_LEN` (584 B); a wrong length is rejected at decode. |
 | 16 | `pota_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the POTA certificate the partition is being provisioned under. |
 | 20 | `sata_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the SATA certificate bound to the security domain. |
@@ -105,11 +105,11 @@ Built by the host with [`aead_envelope::seal`](
   reconstructs the identical buffer via the same helper and rejects
   any contents mismatch with `AeadEnvelopeAuthFailed`.
 
-* **Envelope wire layout** (exact 100 bytes for a 32-byte plaintext):
+* **Envelope wire layout** (exact 104 bytes for a 32-byte plaintext):
 
   ```
   "AEAD"(4) | alg=0x03(1) | rsv=0(1) | aad_len_be=32(2)
-          | IV(12) | AAD(32) | mach_seed_ct(32) | TAG(16)
+          | IV(16) | AAD(32) | mach_seed_ct(32) | TAG(16)
   ```
 
 ## Response
@@ -138,7 +138,7 @@ back to the partition in the upcoming `FinalizePart` opcode.
 |---|---|
 | `InvalidPermissions` | Calling session is not Crypto Officer. |
 | `SessionNotFound` | `session_id` does not refer to an Active CO slot in the calling partition. |
-| `TborInvalidFixedLength` | `mach_seed_envelope` is not exactly 100 B, or `part_policy` is not 584 B (rejected at decode before the handler runs). |
+| `TborInvalidFixedLength` | `mach_seed_envelope` is not exactly 104 B, or `part_policy` is not 584 B (rejected at decode before the handler runs). |
 | `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length on the envelope ≠ 32; `part_policy` fails schema validation. |
 | `AeadEnvelopeAuthFailed` | Envelope AEAD-GCM tag verification failed (wrong `param_key`, tampering, or AAD **contents** do not match the expected layout / `session_id`). |
 | `PartStateInvalid` | Partition is not in `Enabled`; e.g. already `Initializing` or `Initialized` (write-once gate via `part_mark_initializing`). |

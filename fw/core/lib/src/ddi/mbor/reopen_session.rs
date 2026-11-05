@@ -54,10 +54,10 @@ use super::*;
 /// reference firmware's `is_reopen` path in the OpenSession FSM.
 pub(crate) async fn reopen_session<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let mut body: DdiReopenSessionReq<'_> = decoder.decode_data()?;
     let reopen_id = HsmSessId::from(hdr.sess_id.ok_or(HsmError::SessionExpected)?);
 
@@ -96,26 +96,40 @@ pub(crate) async fn reopen_session<'p, P: HsmPal>(
         &body.bmk_session[layout.plaintext_offset..layout.plaintext_offset + BK_LEN],
     );
 
+    // Re-envelope MK_SESSION under BK_SESSION for the host to persist
+    // (the SVN etc. recorded in the metadata may have advanced), mirroring
+    // OpenSession's response.  Resolve the SVNs *before* re-keying the slot
+    // so the only fallible step left after `session_create` is the response
+    // encode, which the rollback arm below covers — otherwise a `try_from`
+    // failure here would return early and leak the just-recreated slot.
+    let mfgr_svn = crate::part_state::part_mfgr_svn(pal);
+    let owner_svn =
+        u16::try_from(crate::part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
+
     // Recreate the migrated session's own slot with the recovered key.
     let api_rev_bytes = pack_api_rev(api_rev);
     let sess_id = pal
         .session_create(io, &api_rev_bytes, mk_session, Some(reopen_id))
         .await?;
 
-    // Re-envelope MK_SESSION under BK_SESSION for the host to persist
-    // (the SVN etc. recorded in the metadata may have advanced), mirroring
-    // OpenSession's response.
-    let resp = encode_reopen_response(
-        pal,
-        io,
-        hdr,
-        sess_id,
-        bk_session,
-        mk_session,
-        crate::part_state::part_mfgr_svn(pal),
-        u16::try_from(crate::part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?,
+    let resp = match encode_reopen_response(
+        pal, io, hdr, sess_id, bk_session, mk_session, mfgr_svn, owner_svn,
     )
-    .await?;
+    .await
+    {
+        Ok(resp) => resp,
+        // The slot was already re-keyed by `session_create` above (flipped
+        // from NeedsRenegotiation to Active with a fresh masking key).  If
+        // the response cannot be encoded, the host never learns the reopen
+        // succeeded and will retry it — but a now-Active slot would reject
+        // that retry and the fresh vault key would orphan.  Restore the
+        // slot to NeedsRenegotiation and drop the fresh key, mirroring the
+        // reference firmware's `rollback_open_session` reopen branch.
+        Err(err) => {
+            let _ = pal.session_rollback_reopen(io, sess_id).await;
+            return Err(err);
+        }
+    };
 
     // `ReopenSession` is an in-session command: it reuses the caller's
     // existing session id (echoed in the response header), so unlike
@@ -131,14 +145,14 @@ pub(crate) async fn reopen_session<'p, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn encode_reopen_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     hdr: &DdiReqHdr,
     sess_id: HsmSessId,
-    bk_session: &DmaBuf,
-    mk_session: &DmaBuf,
+    bk_session: &HsmDmaBuf,
+    mk_session: &HsmDmaBuf,
     svn: u64,
     bks2_id: u16,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let bmk_metadata = DdiMaskedKeyMetadata {
         svn,
         key_type: DdiKeyType::AesCbc256Hmac384,
@@ -164,9 +178,6 @@ async fn encode_reopen_response<'p, P: HsmPal>(
     })?;
     let frame = DdiReopenSessionResp::from_layout(resp, &layout);
 
-    // `key_masking::cbc::mask` requires `out[..total_len]` to be zero
-    // on entry.
-    frame.bmk_session.fill(0);
     mask(
         pal,
         io,

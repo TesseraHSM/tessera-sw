@@ -23,11 +23,10 @@
 use core::ops::AsyncFnMut;
 
 use tsra_fw_ddi_tbor_types::evidence::CertDescriptor;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -126,7 +125,7 @@ impl ChainValidator {
     /// * `io` — I/O context for the current operation.
     /// * `alloc` — scoped allocator for temporary DMA buffers
     ///   (digest and decoded signature). The caller's DER buffers
-    ///   must already be in DMA-accessible memory (`&DmaBuf`).
+    ///   must already be in DMA-accessible memory (`&HsmDmaBuf`).
     /// * `prev` — the parsed previous certificate, or `None` for the
     ///   root (index 0). The previous cert's DER buffer must still be
     ///   alive so `prev`'s slices are valid.
@@ -142,7 +141,7 @@ impl ChainValidator {
     pub async fn step<'a, P>(
         &mut self,
         pal: &P,
-        io: &impl HsmIo,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
         prev: Option<&CertInfo<'_>>,
         curr: &'a CertInfo<'a>,
@@ -332,7 +331,7 @@ impl ChainValidator {
     async fn verify_signature<P>(
         &self,
         pal: &P,
-        io: &impl HsmIo,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
         verify_key: &EcPubKey<'_>,
         curr: &CertInfo<'_>,
@@ -451,7 +450,7 @@ pub const MAX_CERT_DER_LEN: usize = 2048;
 ///   verification.
 pub async fn validate_chain<P, F>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8]>,
@@ -460,7 +459,7 @@ pub async fn validate_chain<P, F>(
 ) -> HsmResult<()>
 where
     P: HsmHash + HsmEcc,
-    F: for<'a> AsyncFnMut(usize, &'a mut DmaBuf) -> HsmResult<()>,
+    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, false).await
 }
@@ -479,7 +478,7 @@ where
 /// certificate's public key.
 pub async fn validate_issuing_chain<P, F>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8]>,
@@ -488,7 +487,7 @@ pub async fn validate_issuing_chain<P, F>(
 ) -> HsmResult<()>
 where
     P: HsmHash + HsmEcc,
-    F: for<'a> AsyncFnMut(usize, &'a mut DmaBuf) -> HsmResult<()>,
+    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     validate_chain_inner(pal, io, alloc, descriptors, anchor, leaf_out, fetch, true).await
 }
@@ -496,7 +495,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn validate_chain_inner<P, F>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     descriptors: &[CertDescriptor],
     anchor: Option<&[u8]>,
@@ -506,7 +505,7 @@ async fn validate_chain_inner<P, F>(
 ) -> HsmResult<()>
 where
     P: HsmHash + HsmEcc,
-    F: for<'a> AsyncFnMut(usize, &'a mut DmaBuf) -> HsmResult<()>,
+    F: for<'a> AsyncFnMut(usize, &'a mut HsmDmaBuf) -> HsmResult<()>,
 {
     if descriptors.is_empty() || descriptors.len() > u16::MAX as usize {
         return Err(HsmError::InvalidArg);

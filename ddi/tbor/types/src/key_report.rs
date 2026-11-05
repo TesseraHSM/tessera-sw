@@ -11,6 +11,10 @@
 //!
 //! The request carries the masked-key envelope to attest plus a
 //! caller-supplied 128-byte `report_data` bound into the report payload.
+//! Both active Crypto-Officer and Crypto-User sessions may attest keys on
+//! a finalized partition after rotating their role's default PSK.
+//! CU requests also prove possession of their session parameter key through
+//! `auth_envelope`; both roles must use their current TBOR credential.
 
 use alloc::vec::Vec;
 
@@ -29,6 +33,17 @@ pub const KEY_REPORT_MASKED_KEY_MAX_LEN: usize = crate::UNWRAP_MASKED_KEY_MAX_LE
 
 /// Length of the caller-supplied `report_data` bound into the report.
 pub const KEY_REPORT_DATA_LEN: usize = 128;
+
+/// AEAD authentication envelope: 32 B AAD and a 48 B request digest.
+pub const KEY_REPORT_AUTH_ENVELOPE_LEN: usize = 120;
+
+/// Bind request authentication to this command and session.
+pub fn build_key_report_auth_aad(session_id: u16) -> [u8; 32] {
+    let mut aad = [0u8; 32];
+    aad[..13].copy_from_slice(b"key-report-v1");
+    aad[13..15].copy_from_slice(&session_id.to_le_bytes());
+    aad
+}
 
 /// Maximum wire length of the returned COSE_Sign1 `report`.
 pub const KEY_REPORT_MAX_LEN: usize = 1024;
@@ -49,6 +64,11 @@ pub struct TborKeyReportReq {
 
     /// Caller-supplied [`KEY_REPORT_DATA_LEN`] (128 B) report data.
     pub report_data: [u8; KEY_REPORT_DATA_LEN],
+
+    /// Session-param-key AEAD envelope of SHA-384(masked_key || report_data).
+    /// Required for CU requests; CO may omit it with an empty buffer.
+    #[tbor(max_len = 160)]
+    pub auth_envelope: Vec<u8>,
 }
 
 /// Host-facing TBOR `KeyReport` response.
@@ -70,6 +90,7 @@ mod tests {
     #[test]
     fn request_encodes_session_and_masked_key() {
         let req = TborKeyReportReq {
+            auth_envelope: Vec::new(),
             session_id: 9,
             masked_key: alloc::vec![0xCD; 180],
             report_data: [0xAB; KEY_REPORT_DATA_LEN],

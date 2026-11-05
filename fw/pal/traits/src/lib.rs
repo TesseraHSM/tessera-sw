@@ -26,21 +26,28 @@
 //!  ├── HsmCertStore        — per-partition certificate chains
 //!  ├── HsmSessionManager   — session allocation and state
 //!  ├── HsmVault            — key storage and metadata
+//!  ├── HsmKeyMasking       — in-place key masking
 //!  └── HsmCrypto           — cryptographic operations
 //!       ├── HsmRng         — random number generation
 //!       ├── HsmHash        — SHA digest
 //!       ├── HsmHmac        — HMAC sign/verify
-//!       ├── HsmAes         — AES encrypt/decrypt
+//!       ├── HsmAes         — AES keygen + ECB/CBC
+//!       ├── HsmAesGcm      — AES-GCM
+//!       ├── HsmAesKw       — AES-KW/KWP key wrap
+//!       ├── HsmAesXts      — AES-XTS
 //!       ├── HsmEcc         — ECC keygen/sign/verify/ECDH
 //!       ├── HsmRsa         — RSA keygen/mod_exp
 //!       └── HsmKdf         — HKDF and KBKDF key derivation
 //! ```
 //!
+//! Capabilities that use the platform's IO type share [`HsmIoTypes`].
+//! This type-only trait does not require polling or completion methods;
+//! only [`HsmPal`] requires [`HsmIoController`] alongside those capabilities.
+//!
 //! # Identifier newtypes
 //!
-//! Three lightweight newtypes — [`HsmPartId`], [`HsmKeyId`], and
-//! [`HsmSessId`] — prevent accidental mixing of partition, key, and
-//! session indices.  Each wraps a small integer, is
+//! Two lightweight newtypes — [`HsmKeyId`] and [`HsmSessId`] — prevent
+//! accidental mixing of key and session indices. Each wraps a small integer, is
 //! `#[repr(transparent)]`, and provides zero-cost [`From`] / [`Into`]
 //! conversions to/from its underlying primitive.
 //!
@@ -69,10 +76,10 @@
 //!
 //! Methods that operate on partition-scoped state (sessions, vault
 //! keys, certificate chains, partition metadata) take an
-//! `&impl HsmIo` handle rather than an explicit [`HsmPartId`].  The
-//! partition is resolved internally via [`HsmIo::pid`].  This makes
-//! cross-partition access impossible by construction and keeps the
-//! call sites uniform.
+//! `&Self::Io` handle from [`HsmIoTypes`] rather than an explicit
+//! partition identifier. The platform resolves the partition from private IO
+//! metadata, keeping partition selection out of generic command handlers
+//! and the call sites uniform.
 //!
 //! ## Query/copy pattern for variable-length output
 //!
@@ -98,11 +105,13 @@
 
 mod alloc;
 mod cert;
+mod cmd_buf;
 mod crypto;
 mod dispatch;
 mod error;
 mod gdma;
 mod io;
+mod key_masking;
 mod lock;
 mod pal;
 mod part;
@@ -113,75 +122,19 @@ mod vault;
 pub use alloc::*;
 
 pub use cert::*;
+pub use cmd_buf::*;
 pub use crypto::*;
 pub use dispatch::*;
 pub use error::*;
 pub use gdma::*;
 pub use io::*;
+pub use key_masking::*;
 pub use lock::*;
 pub use pal::*;
 pub use part::*;
 pub use seed::*;
 pub use session::*;
 pub use vault::*;
-
-/// Partition identifier — an opaque `u8` index into the HSM's
-/// partition table.
-///
-/// Each HSM build supports a fixed number of partitions (typically up
-/// to 65).  A `HsmPartId` uniquely selects one partition for session,
-/// vault, and certificate operations.  Within the firmware, partition
-/// IDs are usually obtained indirectly through [`HsmIo::pid`] rather
-/// than being constructed directly.
-///
-/// `#[repr(transparent)]` over `u8` so a slice of `HsmPartId` is
-/// layout-compatible with `&[u8]`.
-///
-/// # Conversions
-///
-/// ```
-/// # use tsra_fw_hsm_pal_traits::HsmPartId;
-/// let pid = HsmPartId::from(3u8);
-/// assert_eq!(u8::from(pid), 3);
-/// ```
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HsmPartId(u8);
-
-impl From<u8> for HsmPartId {
-    /// Wraps a raw `u8` index into a [`HsmPartId`].
-    ///
-    /// # Parameters
-    ///
-    /// - `v` — partition index in `0..HSM_NUM_PARTITIONS`.  Out-of-range
-    ///   values are accepted here and rejected later by the trait
-    ///   method that consumes them (typically with
-    ///   [`HsmError::InvalidArg`]).
-    ///
-    /// # Returns
-    ///
-    /// A [`HsmPartId`] wrapping `v`.
-    #[inline]
-    fn from(v: u8) -> Self {
-        Self(v)
-    }
-}
-
-impl From<HsmPartId> for u8 {
-    /// Unwraps a [`HsmPartId`] to its raw `u8` index.
-    ///
-    /// # Parameters
-    ///
-    /// - `id` — partition identifier.
-    ///
-    /// # Returns
-    ///
-    /// The underlying `u8` slot index.
-    #[inline]
-    fn from(id: HsmPartId) -> Self {
-        id.0
-    }
-}
 
 /// Key identifier — an opaque `u16` index into the vault's key table.
 ///
@@ -291,23 +244,23 @@ impl From<HsmSessId> for u16 {
 }
 
 impl HsmSessId {
-    /// Returns the [`SessionRole`] implied by this session's slot index.
+    /// Returns the [`HsmSessionRole`] implied by this session's slot index.
     ///
-    /// Slot 0 is reserved for [`SessionRole::CryptoOfficer`] sessions;
-    /// slots 1..=7 are [`SessionRole::CryptoUser`].  The mapping is
+    /// Slot 0 is reserved for [`HsmSessionRole::CryptoOfficer`] sessions;
+    /// slots 1..=7 are [`HsmSessionRole::CryptoUser`].  The mapping is
     /// pinned by the session-establishment protocol and matches the
     /// PSK-based role gating performed in `OpenSessionInit`.
     ///
     /// # Returns
     ///
-    /// [`SessionRole::CryptoOfficer`] if this is slot 0, otherwise
-    /// [`SessionRole::CryptoUser`].
+    /// [`HsmSessionRole::CryptoOfficer`] if this is slot 0, otherwise
+    /// [`HsmSessionRole::CryptoUser`].
     #[inline]
-    pub fn role(self) -> SessionRole {
+    pub fn role(self) -> HsmSessionRole {
         if self.0 == 0 {
-            SessionRole::CryptoOfficer
+            HsmSessionRole::CryptoOfficer
         } else {
-            SessionRole::CryptoUser
+            HsmSessionRole::CryptoUser
         }
     }
 }
@@ -362,10 +315,14 @@ pub const SESSION_SEED_LEN: usize = 32;
 ///
 /// Holds: HPKE `exported` (48 B) ‖ `pk_init` (97 B, SEC1
 /// uncompressed P-384) ‖ `pk_resp` (97 B, same) ‖ `session_type`
-/// (1 B) — the host-supplied `seed` is no longer part of the Pending
+/// (1 B), suite (1 B), and credential binding (68 B). The host-supplied
+/// `seed` is no longer part of the Pending
 /// blob (it arrives encrypted in `OpenSessionFinish` instead).
 /// Rounded up to give a small implementation margin.
-pub const SESSION_PENDING_BLOB_MAX: usize = 256;
+pub const SESSION_PENDING_BLOB_MAX: usize = 320;
+
+/// Session credential binding: role (4 B), AppId (16 B), PSK SHA-384 (48 B).
+pub const SESSION_AUTH_BINDING_LEN: usize = 4 + APP_ID_LEN + 48;
 
 /// HPKE `info` string for the session-establishment handshake.
 ///

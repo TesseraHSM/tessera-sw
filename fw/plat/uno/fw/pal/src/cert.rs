@@ -17,20 +17,22 @@
 use tsra_fw_core_crypto_x509_builder::cert_builder::LeafCertParams;
 use tsra_fw_core_crypto_x509_builder::cert_builder::TbsSigner;
 use tsra_fw_core_crypto_x509_builder::cert_builder::build_leaf_cert_with_signer;
-use tsra_fw_hsm_pal_traits::CertChainInfo;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmCertBank;
+use tsra_fw_hsm_pal_traits::HsmCertChainInfo;
+use tsra_fw_hsm_pal_traits::HsmCertSlot;
 use tsra_fw_hsm_pal_traits::HsmCertStore;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_drivers_part_store::PartStore;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 use crate::dev_id_cblob;
 use crate::gsram_alias;
@@ -77,12 +79,12 @@ struct AliasSigner<'a> {
     alias_key: &'a [u8],
 }
 
-impl TbsSigner for AliasSigner<'_> {
+impl TbsSigner<UnoHsmIo> for AliasSigner<'_> {
     async fn sign_digest(
         &self,
-        io: &impl HsmIo,
-        digest: &DmaBuf,
-        sig: &mut DmaBuf,
+        io: &UnoHsmIo,
+        digest: &HsmDmaBuf,
+        sig: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // The GSRAM alias key is a SEC1 `ECPrivateKey` DER blob
         // (`ECC_DER_P384_PRIVATE_NO_PUB_LENGTH`), not a raw scalar: the private
@@ -115,12 +117,9 @@ impl TbsSigner for AliasSigner<'_> {
                     e[i] = digest[P384_FIELD - 1 - i];
                 }
                 let (r, s) = sig.split_at_mut(P384_FIELD);
-                let res = self
-                    .pal
+                self.pal
                     .ecc_sign_deterministic(io, UpkaEccCurve::P384, e, d, r, s)
-                    .await;
-                d.zeroize();
-                res
+                    .await
             })
             .await
     }
@@ -158,7 +157,7 @@ impl UnoHsmPal {
     /// deterministic ECDSA-P384.
     async fn generate_pid_cert(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         part_id: HsmPartId,
         out: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
@@ -243,7 +242,7 @@ impl UnoHsmPal {
     }
 
     /// SHA-1 over `data`, returning the 20-byte digest.
-    async fn sha1_20(&self, io: &impl HsmIo, data: &[u8]) -> HsmResult<[u8; SKI_LEN]> {
+    async fn sha1_20(&self, io: &UnoHsmIo, data: &[u8]) -> HsmResult<[u8; SKI_LEN]> {
         self.alloc_scoped_async(io, async |scope| {
             let inp = scope.dma_alloc(data.len())?;
             inp.copy_from_slice(data);
@@ -260,7 +259,7 @@ impl UnoHsmPal {
     }
 
     /// SHA-256 over `data`, returning the 32-byte digest.
-    async fn sha256_32(&self, io: &impl HsmIo, data: &[u8]) -> HsmResult<[u8; SHA256_LEN]> {
+    async fn sha256_32(&self, io: &UnoHsmIo, data: &[u8]) -> HsmResult<[u8; SHA256_LEN]> {
         self.alloc_scoped_async(io, async |scope| {
             let inp = scope.dma_alloc(data.len())?;
             inp.copy_from_slice(data);
@@ -432,7 +431,7 @@ mod der {
 }
 
 impl HsmCertStore for UnoHsmPal {
-    /// Certificate-chain metadata for `(part_id, slot_id)`.
+    /// Certificate-chain metadata for `(part_id, slot, bank)`.
     ///
     /// Returns the served chain length (`device-id chain + alias + PID leaf`)
     /// and the chain thumbprint
@@ -443,21 +442,22 @@ impl HsmCertStore for UnoHsmPal {
     /// matches the bytes [`get_cert`] serves.
     ///
     /// # Parameters
-    /// * `io` — operation-scoped I/O context.
-    /// * `part_id` — partition whose chain is queried.
-    /// * `slot_id` — chain slot; only slot 0 is supported.
+    /// * `io` — operation-scoped I/O context bound to the target partition.
+    /// * `slot` — chain owner; only [`HsmCertSlot::Mfgr`] is supported.
+    /// * `bank` — chain bank; only [`HsmCertBank::Ecc`] is supported.
     ///
     /// # Returns
-    /// * `Ok(CertChainInfo)` — chain length + thumbprint.
-    /// * `Err(HsmError::InvalidArg)` — non-zero slot, missing/invalid device-id
+    /// * `Ok(HsmCertChainInfo)` — chain length + thumbprint.
+    /// * `Err(HsmError::InvalidArg)` — non-zero slot or bank, missing/invalid device-id
     ///   CBLOB, missing GSRAM alias certificate, or unprovisioned partition.
     async fn get_cert_chain_info(
         &self,
-        io: &impl HsmIo,
-        part_id: HsmPartId,
-        slot_id: u8,
-    ) -> HsmResult<CertChainInfo> {
-        if slot_id != 0 {
+        io: &UnoHsmIo,
+        slot: HsmCertSlot,
+        bank: HsmCertBank,
+    ) -> HsmResult<HsmCertChainInfo> {
+        let part_id = io.pid();
+        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
             return Err(HsmError::InvalidArg);
         }
 
@@ -491,7 +491,7 @@ impl HsmCertStore for UnoHsmPal {
             combined[2 * SHA256_LEN..].copy_from_slice(&leaf_hash);
             let thumbprint = self.sha256_32(io, &combined).await?;
 
-            Ok(CertChainInfo { count, thumbprint })
+            Ok(HsmCertChainInfo { count, thumbprint })
         })
         .await
     }
@@ -504,25 +504,26 @@ impl HsmCertStore for UnoHsmPal {
     /// returns the size; `Some(buf)` copies the DER into `buf`.
     ///
     /// # Parameters
-    /// * `io` — operation-scoped I/O context.
-    /// * `part_id` — partition whose chain is read.
-    /// * `slot_id` — chain slot; only slot 0 is supported.
+    /// * `io` — operation-scoped I/O context bound to the target partition.
+    /// * `slot` — chain owner; only [`HsmCertSlot::Mfgr`] is supported.
+    /// * `bank` — chain bank; only [`HsmCertBank::Ecc`] is supported.
     /// * `idx` — zero-based certificate index (`< count`).
     /// * `cert` — `None` to query size, `Some(buf)` to copy.
     ///
     /// # Returns
     /// * `Ok(size)` — DER length that was (or would be) written.
-    /// * `Err(HsmError::InvalidArg)` — bad slot/index, small buffer, missing
+    /// * `Err(HsmError::InvalidArg)` — bad slot/bank/index, small buffer, missing
     ///   CBLOB/alias cert, or unprovisioned partition.
     async fn get_cert(
         &self,
-        io: &impl HsmIo,
-        part_id: HsmPartId,
-        slot_id: u8,
+        io: &UnoHsmIo,
+        slot: HsmCertSlot,
+        bank: HsmCertBank,
         idx: u8,
         cert: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
-        if slot_id != 0 {
+        let part_id = io.pid();
+        if slot != HsmCertSlot::Mfgr || bank != HsmCertBank::Ecc {
             return Err(HsmError::InvalidArg);
         }
 

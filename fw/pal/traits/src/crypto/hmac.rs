@@ -46,7 +46,7 @@ use super::*;
 /// [`hmac_verify`](Self::hmac_verify)) and multi-step
 /// ([`hmac_begin`](Self::hmac_begin) / [`hmac_continue`](Self::hmac_continue)
 /// / [`hmac_finish`](Self::hmac_finish)) forms are provided.
-pub trait HsmHmac {
+pub trait HsmHmac: HsmIoTypes {
     /// Platform-specific multi-step HMAC context.
     ///
     /// Created by [`hmac_begin`](Self::hmac_begin) and consumed by
@@ -76,9 +76,9 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — propagated from the CSPRNG.
     async fn hmac_gen_key(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &mut DmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Compute an HMAC tag (sign) in a single call.
@@ -105,11 +105,11 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_sign(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Verify an HMAC tag in a single call using constant-time
@@ -132,11 +132,11 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_verify(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool>;
 
     /// Begin a multi-step HMAC computation.
@@ -164,9 +164,9 @@ pub trait HsmHmac {
     ///   prelude.
     async fn hmac_begin<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HmacCtx<'a>>
     where
@@ -192,9 +192,9 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_continue(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: &mut Self::HmacCtx<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Finalise the inner hash, compute the outer hash, and write
@@ -215,9 +215,9 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_finish(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
-        tag: &mut DmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Finalise the HMAC and write the tag directly to `dest`.
@@ -243,9 +243,9 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_finish_into(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
-        dest: &mut DmaBuf,
+        dest: &mut HsmDmaBuf,
     ) -> HsmResult<()>;
 
     /// Finalise and verify the running HMAC against an expected
@@ -265,8 +265,8 @@ pub trait HsmHmac {
     /// - `Err(HsmError)` — SHA driver failure.
     async fn hmac_finish_verify(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         ctx: Self::HmacCtx<'_>,
-        tag: &DmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool>;
 }

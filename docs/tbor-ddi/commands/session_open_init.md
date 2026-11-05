@@ -126,6 +126,10 @@ mac_resp = HMAC-SHA-384(
 A successful verify by the VM proves the responder holds `sk_hsm` and
 the correct PSK.
 
+The HSM captures the authenticated role, PSK AppId and SHA-384 PSK digest
+in its opaque Pending state. `SessionOpenFinish` rejects this handshake
+if the role's credential has changed before completion.
+
 ## Errors
 
 | Error | Cause |

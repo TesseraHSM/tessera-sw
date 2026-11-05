@@ -17,12 +17,31 @@ are sufficiently sized. The C ABI and DDI wire format are unchanged.
 ### Masked sealing-key metadata
 
 The host masked-key decoder recognizes the SD sealing-key metadata kind and
-validates the envelope shape. This is metadata parsing, not authentication:
-the HSM must authenticate the blob when it is used. Local-scoped receivers
+validates the envelope shape. Decoding alone does not authenticate the blob;
+on an extended session, `HsmSealingKeyUnmaskAlgo` authenticates it on the
+device with TBOR `VerifyKey`, so a tampered or wrong-session blob fails at
+unmask with `MaskedKeyAuthenticationFailed`. Local-scoped receivers
 require the original partition-local masking key to be restored first.
 Generating a replacement key cannot recover backups sealed to the original
 receiver. This decoder support does not add a public key-import API or a
 native C entry point.
+
+### Sealing-key masking scope
+
+Rust sealing-key generation accepts explicit `HsmKeyScope::Ephemeral`,
+`Local`, or `SecurityDomain` scope. The default remains `Local`; `Session`
+scope is rejected. SecurityDomain scope requires the SD masking key to
+have been provisioned by SD creation or restoration.
+
+Keep a Local- or Ephemeral-scoped key for SD bootstrap. An SD-scoped key
+cannot create or restore its own SD because its masking key must already
+be available. After a reset, restore the SD independently before using an
+SD-scoped sealing key. The caller must retain the masked blob; it is not
+stored on-device. Copies are usable wherever the same SD masking key is
+available, subject to command authorization.
+
+Key attestation does not distinguish Local scope from SecurityDomain
+scope; the report alone does not establish partition-local custody.
 
 ### Attestation certificate chains
 

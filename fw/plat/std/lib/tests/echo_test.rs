@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use tsra_fw_hsm_io::CqeDw2;
 use tsra_fw_hsm_std::StdHsm;
 
 /// A 4K-aligned buffer for DMA testing.
@@ -109,16 +110,19 @@ async fn single_io_with_dma() {
     let req_len = DdiEncoder::encode_parts(req_hdr, DdiGetApiRevReq {}, src.as_mut_slice(), false)
         .expect("encode");
 
+    let queue_id = 0x1234;
     let c = HSM
         .io(
             sqe_with_dma(99, &src.as_slice()[..req_len], dst.as_mut_slice()),
             IO_PID,
-            0,
+            queue_id,
             0,
         )
         .await
         .expect("io");
     assert_eq!(c[3] & 0xFFFF, 99);
+    assert_eq!(CqeDw2::from(c[2]).sq_id(), queue_id);
+    assert_eq!(cqe_status(&c), 0);
 
     // Verify response was written
     let resp_len = (c[0] & 0xFFFF) as usize;
@@ -225,8 +229,10 @@ fn cqe_status(cqe: &[u32; 4]) -> u32 {
 async fn cqe_status_on_invalid_src_len() {
     ensure_io_part().await;
     // SQE with src_len=0 → InvalidSrcLenFieldInCommand (0x0C1)
-    let c = HSM.io(sqe(500), IO_PID, 0, 0).await.expect("io");
+    let queue_id = u16::MAX;
+    let c = HSM.io(sqe(500), IO_PID, queue_id, 0).await.expect("io");
     assert_eq!(c[3] & 0xFFFF, 500, "cmd_id");
+    assert_eq!(CqeDw2::from(c[2]).sq_id(), queue_id);
     assert_eq!(cqe_status(&c), 0x0C1, "expected InvalidSrcLen");
 }
 
@@ -785,7 +791,7 @@ async fn get_cert_thumbprint_consistency() {
     ensure_io_part().await;
 
     // Call GetCertChainInfo twice — thumbprint must be identical
-    let get_thumbprint = || async {
+    let get_thumbprint = |pid| async move {
         let mut src = AlignedBuf::new(4096);
         let mut dst = AlignedBuf::new(4096);
 
@@ -805,7 +811,7 @@ async fn get_cert_thumbprint_consistency() {
         let c = HSM
             .io(
                 sqe_with_dma(1108, &src.as_slice()[..req_len], dst.as_mut_slice()),
-                IO_PID,
+                pid,
                 0,
                 0,
             )
@@ -819,9 +825,30 @@ async fn get_cert_thumbprint_consistency() {
         data.thumbprint.as_slice().to_vec()
     };
 
-    let tp1 = get_thumbprint().await;
-    let tp2 = get_thumbprint().await;
+    let tp1 = get_thumbprint(IO_PID).await;
+    let tp2 = get_thumbprint(IO_PID).await;
     assert_eq!(tp1, tp2, "thumbprint must be stable across calls");
+
+    let other_pid = 11;
+    HSM.part_alloc(other_pid, 1u128 << other_pid)
+        .await
+        .expect("allocate second partition");
+    HSM.part_enable(other_pid)
+        .await
+        .expect("enable second partition");
+    let other_tp = get_thumbprint(other_pid).await;
+    assert_ne!(tp1, other_tp, "thumbprint must follow the IO's partition");
+    assert_eq!(
+        tp1,
+        get_thumbprint(IO_PID).await,
+        "querying another partition must not change the original chain"
+    );
+    HSM.part_disable(other_pid)
+        .await
+        .expect("disable second partition");
+    HSM.part_free(other_pid)
+        .await
+        .expect("free second partition");
 }
 
 #[tokio::test]

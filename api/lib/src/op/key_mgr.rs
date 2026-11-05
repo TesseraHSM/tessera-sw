@@ -176,6 +176,15 @@ impl HsmKeyManager {
     /// # Returns
     ///
     /// Returns the unmasked key on success.
+    ///
+    /// # Authentication
+    ///
+    /// On extended HSM sessions, the built-in unmask algorithms reconstruct
+    /// an unpinned host handle (no device-resident key is created). The
+    /// device authenticates the blob first — TBOR `VerifyKey` for single
+    /// keys, `GetPublicKey` for key pairs — so a modified blob or a
+    /// session-scoped blob from another session fails here with
+    /// [`HsmError::MaskedKeyAuthenticationFailed`].
     pub fn unmask_key<Algo: HsmKeyUnmaskOp>(
         session: &Algo::Session,
         algo: &mut Algo,

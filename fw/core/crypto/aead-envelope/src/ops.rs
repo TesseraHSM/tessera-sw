@@ -29,9 +29,8 @@
 //!                 }
 //! ```
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
-use tsra_fw_hsm_pal_traits::HsmIo;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 pub use crate::alg::AeadAlg;
@@ -87,15 +86,15 @@ use crate::gcm::seal_gcm_in_place;
 /// * `Err(_)` — see [`AeadError`] for the precise failure modes;
 ///   mapped to [`HsmError`](tsra_fw_hsm_pal_traits::HsmError) via
 ///   [`From`].
-pub async fn seal(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn seal<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
-    pt: &DmaBuf,
-    buf: Option<&mut DmaBuf>,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
+    pt: &HsmDmaBuf,
+    buf: Option<&mut HsmDmaBuf>,
 ) -> HsmResult<usize> {
     // Validate AAD length against the alg's granularity (and the
     // wire-format `u16` cap) up-front so a `None` size query still
@@ -123,15 +122,15 @@ pub async fn seal(
 /// `payload_offset` gives the offset the caller must have written to.
 /// See [`seal`] for the copying form; everything else is identical.
 #[allow(clippy::too_many_arguments)]
-pub async fn seal_in_place(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
+pub async fn seal_in_place<P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
     alg: AeadAlg,
-    key: &DmaBuf,
-    iv: &DmaBuf,
-    aad: &DmaBuf,
+    key: &HsmDmaBuf,
+    iv: &HsmDmaBuf,
+    aad: &HsmDmaBuf,
     pt_len: usize,
-    buf: &mut DmaBuf,
+    buf: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     if !is_valid_aad_len(aad.len(), alg.aad_granularity()) {
         return Err(Error::InvalidAadLength.into());
@@ -173,11 +172,11 @@ pub const fn payload_offset(alg: AeadAlg, aad_len: usize) -> usize {
 /// * `Err(_)` — see [`AeadError`]. A tag mismatch surfaces as
 ///   [`AeadError::AuthFailed`] mapped to
 ///   [`HsmError::AesGcmDecryptTagDoesNotMatch`](tsra_fw_hsm_pal_traits::HsmError::AesGcmDecryptTagDoesNotMatch).
-pub async fn open<'a>(
-    crypto: &impl HsmCrypto,
-    io: &impl HsmIo,
-    key: &DmaBuf,
-    buf: &'a mut DmaBuf,
+pub async fn open<'a, P: HsmCrypto>(
+    crypto: &P,
+    io: &P::Io,
+    key: &HsmDmaBuf,
+    buf: &'a mut HsmDmaBuf,
 ) -> HsmResult<AeadEnvelope<'a>> {
     let header = read_header(buf)?;
     let env = match header.alg {
@@ -218,7 +217,7 @@ pub async fn open<'a>(
 ///   [`AeadError::UnsupportedAlg`], [`AeadError::InvalidAadLength`], or
 ///   [`AeadError::BufferTooSmall`] (buffer shorter than the framing
 ///   implies).
-pub fn peek(buf: &DmaBuf) -> HsmResult<AeadPeek<'_>> {
+pub fn peek(buf: &HsmDmaBuf) -> HsmResult<AeadPeek<'_>> {
     let header = read_header(buf)?;
     // Validates the minimum envelope length (HEADER + iv + aad + tag)
     // and yields the region boundaries; iv_len / tag_len are derived

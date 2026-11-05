@@ -43,6 +43,7 @@ use crate::utils::partition_ex_helpers::new_partition;
 
 const SEC1_PUB_LEN: usize = 97;
 pub(crate) const RAW_PUB_LEN: usize = 96;
+pub(crate) const SEALING_KEY_BITS: u32 = 384;
 const NOT_BEFORE: &[u8; 15] = b"20250101000000Z";
 const NOT_AFTER: &[u8; 15] = b"20350101000000Z";
 const ROOT_CN: &str = "TSRA POTA Root CA";
@@ -67,7 +68,7 @@ const LEAF_SN: &str = "EVLEAF001";
 const BACKUP_PART_ID_LEN: usize = 16;
 
 /// A fixed non-default CO PSK used to clear the default-PSK gate.
-const ROTATED_CO_PSK: [u8; PSK_LEN] = [
+pub(crate) const ROTATED_CO_PSK: [u8; PSK_LEN] = [
     0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0,
     0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0,
 ];
@@ -935,7 +936,7 @@ pub(crate) fn sealing_props() -> HsmKeyProps {
     HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
         .key_kind(HsmKeyKind::Sealing)
-        .bits(384)
+        .bits(SEALING_KEY_BITS)
         .can_derive(true)
         .build()
         .expect("build sealing props")

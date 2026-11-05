@@ -5,7 +5,7 @@
 //!
 //! The canonical byte layout — structs, derives, layout asserts — is
 //! defined in [`tsra_fw_ddi_tbor_types::policy`].  That crate must
-//! stay free of firmware deps (`DmaBuf`, `HsmError`), so the
+//! stay free of firmware deps (`HsmDmaBuf`, `HsmError`), so the
 //! validation/parser surface that consumes those primitives lives
 //! here as a thin free function over the canonical type.
 //!
@@ -32,7 +32,7 @@ use tsra_fw_ddi_tbor_types::policy::PolicyPubKey;
 use tsra_fw_ddi_tbor_types::policy::PART_POLICY_LEN;
 use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::policy::POLICY_VERSION_MAJOR;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use zerocopy::TryFromBytes;
@@ -83,9 +83,9 @@ fn validate_pubkey(key: &PolicyPubKey, required: bool) -> HsmResult<()> {
 /// directly from the (arbitrarily-aligned) wire buffer with
 /// `try_ref_from_bytes` — no copy.  The returned reference borrows `buf`
 /// for its lifetime; callers that also need the raw bytes for hashing or
-/// persistence keep the same `&DmaBuf` and thread it into the next DMA
+/// persistence keep the same `&HsmDmaBuf` and thread it into the next DMA
 /// primitive.
-pub fn from_bytes(buf: &DmaBuf) -> HsmResult<&PartPolicy> {
+pub fn from_bytes(buf: &HsmDmaBuf) -> HsmResult<&PartPolicy> {
     if buf.len() != PART_POLICY_LEN {
         return Err(HsmError::InvalidArg);
     }

@@ -251,21 +251,52 @@ impl SessionTable {
         Ok(HsmKeyId::from(self.phys_ids[slot]))
     }
 
+    /// Validate recreation before allocating a replacement vault key.
+    ///
+    /// Matches the reference firmware's `recreate_session` errors without
+    /// changing the slot or its key mapping.
+    pub fn validate_recreation(&self, id: HsmSessId) -> HsmResult<()> {
+        if u16::from(id) as usize >= MAX_SESSIONS {
+            return Err(HsmError::VaultSessionLimitReached);
+        }
+        match self.state(id) {
+            HsmSessionState::NeedsRenegotiation => Ok(()),
+            HsmSessionState::Invalid => Err(HsmError::SessionNotFound),
+            _ => Err(HsmError::ProcessedIoEventInInvalidState),
+        }
+    }
+
     /// Re-key an existing session with a new physical vault key ID.
     ///
     /// The session must be in [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation)
     /// state.  On success, clears the renegotiation bit and updates the
     /// physical mapping.
     pub fn recreate(&mut self, id: HsmSessId, new_physical: HsmKeyId) -> HsmResult<HsmSessId> {
-        let slot = self.active_slot(id)?;
-        if (self.renego_mask & (1 << slot)) == 0 {
-            return Err(HsmError::InvalidArg);
-        }
+        self.validate_recreation(id)?;
+        let slot = u16::from(id) as usize;
         self.renego_mask &= !(1u8 << slot);
         // Fresh key material → fresh one-shot PSK-change budget.
         self.psk_change_mask &= !(1u8 << slot);
         self.phys_ids[slot] = u16::from(new_physical);
         Ok(id)
+    }
+
+    /// Roll back a [`recreate`](Self::recreate): restore the
+    /// renegotiation bit and clear the physical mapping.
+    ///
+    /// The caller is responsible for deleting the orphaned vault entry
+    /// (via [`physical_id`](Self::physical_id)) before invoking this, so
+    /// the physical mapping is read while still intact.
+    ///
+    /// Leaves the slot as a freshly-migrated
+    /// [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation) slot
+    /// so the host can retry a failed `ReopenSession` (mirrors the
+    /// reference firmware's `session_table().rollback_recreation(id)`).
+    pub fn rollback_recreation(&mut self, id: HsmSessId) -> HsmResult<()> {
+        let slot = self.active_slot(id)?;
+        self.renego_mask |= 1 << slot;
+        self.phys_ids[slot] = 0;
+        Ok(())
     }
 
     /// Query the current state of a session slot.
@@ -308,7 +339,7 @@ impl SessionTable {
     /// uniform with the Active deletion path).
     pub fn create_pending(
         &mut self,
-        role: SessionRole,
+        role: HsmSessionRole,
         handshake_state: &[u8],
     ) -> HsmResult<HsmSessId> {
         if handshake_state.len() > SESSION_PENDING_BLOB_MAX {
@@ -416,10 +447,10 @@ impl SessionTable {
 }
 
 /// Returns the inclusive `(start, end)` slot range for a session role.
-fn role_slot_range(role: SessionRole) -> (usize, usize) {
+fn role_slot_range(role: HsmSessionRole) -> (usize, usize) {
     match role {
-        SessionRole::CryptoOfficer => (0, 0),
-        SessionRole::CryptoUser => (1, MAX_SESSIONS - 1),
+        HsmSessionRole::CryptoOfficer => (0, 0),
+        HsmSessionRole::CryptoUser => (1, MAX_SESSIONS - 1),
     }
 }
 
@@ -548,7 +579,38 @@ mod tests {
         let id = table.create(HsmKeyId::from(10)).unwrap();
         // Active, not NeedsRenegotiation — should fail.
         let err = table.recreate(id, HsmKeyId::from(20)).unwrap_err();
-        assert_eq!(err, HsmError::InvalidArg);
+        assert_eq!(err, HsmError::ProcessedIoEventInInvalidState);
+        assert!(matches!(table.state(id), HsmSessionState::Active));
+        assert_eq!(u16::from(table.physical_id(id).unwrap()), 10);
+    }
+
+    #[test]
+    fn recreate_rejects_missing_and_out_of_range_sessions() {
+        let mut table = SessionTable::new();
+        for (raw_id, expected) in [
+            (0u16, HsmError::SessionNotFound),
+            (7, HsmError::SessionNotFound),
+            (8, HsmError::VaultSessionLimitReached),
+            (9, HsmError::VaultSessionLimitReached),
+            (u16::MAX, HsmError::VaultSessionLimitReached),
+        ] {
+            let id = HsmSessId::from(raw_id);
+            assert_eq!(table.validate_recreation(id), Err(expected));
+            assert_eq!(table.recreate(id, HsmKeyId::from(20)), Err(expected));
+        }
+        assert_eq!(table.alloc_mask, 0);
+        assert_eq!(table.renego_mask, 0);
+        assert_eq!(table.phys_ids, [0; MAX_SESSIONS]);
+    }
+
+    #[test]
+    fn recreate_status_codes_match_reference_firmware() {
+        assert_eq!(u32::from(HsmError::VaultSessionLimitReached), 0x08700001);
+        assert_eq!(u32::from(HsmError::SessionNotFound), 0x08700004);
+        assert_eq!(
+            u32::from(HsmError::ProcessedIoEventInInvalidState),
+            0x08700087
+        );
     }
 
     #[test]
@@ -565,7 +627,7 @@ mod tests {
     fn create_pending_co_lands_in_slot_zero() {
         let mut table = SessionTable::new();
         let id = table
-            .create_pending(SessionRole::CryptoOfficer, b"co-handshake")
+            .create_pending(HsmSessionRole::CryptoOfficer, b"co-handshake")
             .unwrap();
         assert_eq!(u16::from(id), 0);
         assert!(matches!(table.state(id), HsmSessionState::Pending));
@@ -576,7 +638,7 @@ mod tests {
     fn create_pending_cu_lands_in_one_through_seven() {
         let mut table = SessionTable::new();
         let id = table
-            .create_pending(SessionRole::CryptoUser, b"cu-handshake")
+            .create_pending(HsmSessionRole::CryptoUser, b"cu-handshake")
             .unwrap();
         assert_eq!(u16::from(id), 1);
         assert!(matches!(table.state(id), HsmSessionState::Pending));
@@ -587,7 +649,7 @@ mod tests {
         let mut table = SessionTable::new();
         for expected in 1u16..=7 {
             let id = table
-                .create_pending(SessionRole::CryptoUser, &[expected as u8])
+                .create_pending(HsmSessionRole::CryptoUser, &[expected as u8])
                 .unwrap();
             assert_eq!(u16::from(id), expected);
         }
@@ -597,7 +659,9 @@ mod tests {
     fn eighth_cu_init_evicts_oldest_pending() {
         let mut table = SessionTable::new();
         for _ in 1u16..=7 {
-            table.create_pending(SessionRole::CryptoUser, b"x").unwrap();
+            table
+                .create_pending(HsmSessionRole::CryptoUser, b"x")
+                .unwrap();
         }
         let oldest = HsmSessId::from(1);
         let oldest_blob_before = table.pending_state(oldest).unwrap().to_vec();
@@ -605,7 +669,7 @@ mod tests {
 
         // 8th request must evict the oldest (slot 1) and re-use it.
         let evicted_slot = table
-            .create_pending(SessionRole::CryptoUser, b"fresh")
+            .create_pending(HsmSessionRole::CryptoUser, b"fresh")
             .unwrap();
         assert_eq!(u16::from(evicted_slot), 1);
         assert_eq!(table.pending_state(evicted_slot).unwrap(), b"fresh");
@@ -620,7 +684,7 @@ mod tests {
             table.create(HsmKeyId::from(0x100 + i)).unwrap();
         }
         let err = table
-            .create_pending(SessionRole::CryptoUser, b"x")
+            .create_pending(HsmSessionRole::CryptoUser, b"x")
             .unwrap_err();
         assert_eq!(err, HsmError::VaultSessionLimitReached);
     }
@@ -632,7 +696,7 @@ mod tests {
         // (slot 0 is reserved for CO; an Active CO blocks new pending.)
         table.create(HsmKeyId::from(0xCAFE)).unwrap();
         let err = table
-            .create_pending(SessionRole::CryptoOfficer, b"x")
+            .create_pending(HsmSessionRole::CryptoOfficer, b"x")
             .unwrap_err();
         assert_eq!(err, HsmError::VaultSessionLimitReached);
     }
@@ -644,7 +708,7 @@ mod tests {
         // is reserved for its own ReopenSession — a fresh CO handshake must
         // NOT reclaim it, and reports the table full instead.
         let id = table
-            .create_pending(SessionRole::CryptoOfficer, b"hs")
+            .create_pending(HsmSessionRole::CryptoOfficer, b"hs")
             .unwrap();
         table.promote(id, HsmKeyId::from(0xCAFE)).unwrap();
         table.set_needs_renego(id);
@@ -653,7 +717,7 @@ mod tests {
             HsmSessionState::NeedsRenegotiation
         ));
         let err = table
-            .create_pending(SessionRole::CryptoOfficer, b"fresh")
+            .create_pending(HsmSessionRole::CryptoOfficer, b"fresh")
             .unwrap_err();
         assert_eq!(err, HsmError::VaultSessionLimitReached);
     }
@@ -667,13 +731,13 @@ mod tests {
         // their own ReopenSession — and reports the table full instead.
         for _ in 1u16..=7 {
             let id = table
-                .create_pending(SessionRole::CryptoUser, b"cu")
+                .create_pending(HsmSessionRole::CryptoUser, b"cu")
                 .unwrap();
             table.promote(id, HsmKeyId::from(0x100)).unwrap();
             table.set_needs_renego(id);
         }
         let err = table
-            .create_pending(SessionRole::CryptoUser, b"fresh")
+            .create_pending(HsmSessionRole::CryptoUser, b"fresh")
             .unwrap_err();
         assert_eq!(err, HsmError::VaultSessionLimitReached);
     }
@@ -717,10 +781,14 @@ mod tests {
         // slot 0: Active (CO); slot 1: NeedsRenegotiation (CU); slot 2:
         // Pending (CU, in-flight handshake).
         table.create(HsmKeyId::from(0xA0)).unwrap(); // slot 0 Active
-        let renego = table.create_pending(SessionRole::CryptoUser, b"r").unwrap();
+        let renego = table
+            .create_pending(HsmSessionRole::CryptoUser, b"r")
+            .unwrap();
         table.promote(renego, HsmKeyId::from(0xA1)).unwrap();
         table.set_needs_renego(renego); // slot 1 renego
-        table.create_pending(SessionRole::CryptoUser, b"p").unwrap(); // slot 2 Pending
+        table
+            .create_pending(HsmSessionRole::CryptoUser, b"p")
+            .unwrap(); // slot 2 Pending
 
         // Active + renego preserved; the in-flight Pending is excluded.
         assert_eq!(table.backup(), 0b0000_0011);
@@ -730,7 +798,9 @@ mod tests {
     fn restore_marks_all_survivors_renego_and_drops_pending() {
         let mut table = SessionTable::new();
         // A Pending in-flight handshake must not survive the disable.
-        table.create_pending(SessionRole::CryptoUser, b"p").unwrap();
+        table
+            .create_pending(HsmSessionRole::CryptoUser, b"p")
+            .unwrap();
         // Re-apply a snapshot of slots 0 and 3.
         table.restore(0b0000_1001);
 
@@ -768,7 +838,7 @@ mod tests {
     fn promote_pending_to_active() {
         let mut table = SessionTable::new();
         let id = table
-            .create_pending(SessionRole::CryptoUser, b"hs")
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
             .unwrap();
         let phys = HsmKeyId::from(0x999);
         table.promote(id, phys).unwrap();
@@ -792,7 +862,7 @@ mod tests {
         let mut table = SessionTable::new();
         let payload = [0xAAu8; 200];
         let id = table
-            .create_pending(SessionRole::CryptoUser, &payload)
+            .create_pending(HsmSessionRole::CryptoUser, &payload)
             .unwrap();
         assert_eq!(table.pending_state(id).unwrap(), &payload[..]);
     }
@@ -802,7 +872,7 @@ mod tests {
         let mut table = SessionTable::new();
         let oversized = vec![0u8; SESSION_PENDING_BLOB_MAX + 1];
         let err = table
-            .create_pending(SessionRole::CryptoUser, &oversized)
+            .create_pending(HsmSessionRole::CryptoUser, &oversized)
             .unwrap_err();
         assert_eq!(err, HsmError::InvalidArg);
     }
@@ -811,7 +881,7 @@ mod tests {
     fn delete_pending_frees_slot_without_vault_key() {
         let mut table = SessionTable::new();
         let id = table
-            .create_pending(SessionRole::CryptoUser, b"hs")
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
             .unwrap();
         // delete() returns HsmKeyId::from(0) for pending slots.
         let phys = table.delete(id).unwrap();
@@ -869,7 +939,7 @@ mod tests {
     fn psk_change_flag_cleared_by_promote() {
         let mut table = SessionTable::new();
         let id = table
-            .create_pending(SessionRole::CryptoUser, b"hs")
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
             .unwrap();
         // Force the flag on (it shouldn't normally be touched on a
         // Pending slot, but the invariant must hold across promote).
@@ -912,7 +982,7 @@ mod tests {
     fn psk_change_ops_on_pending_slot_error() {
         let mut table = SessionTable::new();
         let id = table
-            .create_pending(SessionRole::CryptoUser, b"hs")
+            .create_pending(HsmSessionRole::CryptoUser, b"hs")
             .unwrap();
         // Both the read and the consume path report SessionNotFound
         // on a Pending slot (matches `physical_id`'s convention —

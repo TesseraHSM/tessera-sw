@@ -296,13 +296,26 @@ const TSRA_MAX_DATA_XFER_PER_BUFFER: u32 = 64 * 1024;
 
 /// Describes one caller-supplied OOB buffer for the driver.
 ///
-/// Its layout matches one anonymous `{ xfer_length, buf_addr }` entry in
-/// `struct tsra_hsm_dataxfer_buffers`.
+/// Its layout matches one anonymous `{ xfer_length, flags, buf_addr }`
+/// entry in `struct tsra_hsm_dataxfer_buffers`.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct DataXferBuffer {
     xfer_length: u32,
+    /// `TSRA_DATA_XFER_BUF_*` flags; occupies what was implicit padding.
+    flags: u32,
     buffer_addr: *const u8,
+}
+
+/// `DataXferBuffer::flags` bit: the device writes this buffer
+/// (`DMA_FROM_DEVICE`) instead of reading it.
+const TSRA_DATA_XFER_BUF_DEV_WRITE: u32 = 0x1;
+
+/// One out-of-band item passed to [`DdiNixDev::exec_tbor`].
+struct OobRaw {
+    addr: *const u8,
+    len: usize,
+    dev_write: bool,
 }
 
 /// Contains the caller-supplied OOB buffers for one data-transfer IOCTL.
@@ -799,6 +812,161 @@ impl DdiNixDev {
         }
         self.map_ioctl_status(ioctl_status)
     }
+
+    /// Shared TBOR exec path (see [`DdiDev::exec_op_tbor`]). `oob` items
+    /// must stay borrowed by the caller for the duration of the call.
+    fn exec_tbor<T: TborOpReq>(&self, req: &T, oob: &[OobRaw]) -> DdiResult<T::OpResp> {
+        /// SQE opcode that routes the command through the firmware's
+        /// TBOR dispatcher (see `fw/core/lib/src/op.rs::OP_TBOR`).
+        const OP_TBOR: u16 = 2;
+
+        // Determine whether this TBOR call needs to route through
+        // the driver's Large-Data-Transfer path.
+        // When `oob` is non-empty, the driver
+        // pins those user buffers, builds per-buffer NVMe SGL
+        // segments, and attaches a 4 KB Metadata Page — reported to
+        // firmware via `sqe.src_data.metadata_with_session
+        // .metadata_page_addr` and gated by
+        // `sqe.cmd.set == CP_CMD_SET_DATA_XFER (0x1)`.
+        if oob.len() > TSRA_MAX_DATA_XFER_BUFFERS
+            || oob
+                .iter()
+                .any(|item| item.len == 0 || item.len > TSRA_MAX_DATA_XFER_PER_BUFFER as usize)
+        {
+            return Err(DdiError::InvalidParameter);
+        }
+        let use_data_xfer = !oob.is_empty();
+
+        const REQ_BUF_LEN: usize = 8192;
+        const RESP_BUF_LEN: usize = 8192;
+
+        // ── 1. Encode the TBOR request ───────────────────────────
+        let mut req_buf = [0u8; REQ_BUF_LEN];
+        let req_bytes = req.encode_request(&mut req_buf)?;
+        let req_len = req_bytes.len();
+
+        // Do not log raw request bytes: TBOR requests can carry
+        // sensitive material (e.g. `TborPskChangeReq.psk_envelope`).
+        // Opcode + length is enough to trace the transport path.
+        tracing::debug!(opcode = T::OPCODE, req_len, "TBOR request encoded");
+
+        let mut resp_buf = Box::<[u8; RESP_BUF_LEN]>::new([0u8; RESP_BUF_LEN]);
+
+        // ── 2. Build the ioctl command (populate the shared
+        //       TsraCpGenericCmd payload; may be wrapped in
+        //       TsraCpDataXferCmd below). ─────────────────────────
+        let mut inner = TsraCpGenericCmd::default();
+        inner.hdr.app_cmd_id = 0xCD1DDEAD;
+        inner.hdr.timeout = 100; // ms
+
+        // The Rust field `rsvd1` aliases the driver UAPI's
+        // `__u16 opc` field. OP_TBOR routes the request through
+        // `handle_tbor_op` instead of `handle_mbor_op`.
+        inner.in_data.rsvd1 = OP_TBOR;
+        // `command_set` (`sqe.cmd.set` on the wire) selects between
+        // the legacy session flow (`Generic == 0x0`) and the new
+        // Large-Data-Transfer flow (`0x1`). Firmware uses this to
+        // decide whether to parse `src_data` as `metadata_with_session`.
+        inner.in_data.command_set = if use_data_xfer {
+            TsraCpCmdSet::DataXfer
+        } else {
+            TsraCpCmdSet::Generic
+        };
+
+        // Session control flags come from the TBOR request type.
+        let session_ctrl = req.session_ctrl();
+        inner
+            .in_data
+            .session_control_flags
+            .set_kind(u8::from(session_ctrl));
+        if let Some(sid) = req.get_session_id() {
+            inner.in_data.session_id = sid;
+            inner
+                .in_data
+                .session_control_flags
+                .set_session_id_is_valid(true);
+        }
+
+        inner.in_data.src_length = req_len as u32;
+        inner.in_data.src_buf = req_buf.as_ptr();
+        inner.in_data.dst_length = resp_buf.len() as u32;
+        inner.in_data.dst_buf = resp_buf.as_mut_ptr();
+
+        // ── 3. Issue the ioctl ───────────────────────────────────
+        // SAFETY: src/dst pointers above are valid for the duration
+        // of the ioctl call; the buffers outlive `cmd`. When
+        // `use_data_xfer`, oob entries must outlive the ioctl
+        // too — they do: they are borrowed for the entire fn.
+        let (status, ioctl_status, byte_count) = if use_data_xfer {
+            let mut cmd = TsraCpDataXferCmd {
+                generic_cmd: inner,
+                ..Default::default()
+            };
+            cmd.generic_cmd.hdr.ioctl_data_size = mem::size_of::<TsraCpDataXferCmd>() as u32;
+            cmd.data_xfer.buffer_count = oob.len() as u32;
+            for (i, item) in oob.iter().enumerate() {
+                cmd.data_xfer.buffers[i] = DataXferBuffer {
+                    xfer_length: item.len as u32,
+                    flags: if item.dev_write {
+                        TSRA_DATA_XFER_BUF_DEV_WRITE
+                    } else {
+                        0
+                    },
+                    buffer_addr: item.addr,
+                };
+            }
+            // SAFETY: `cmd` is a valid, initialized ioctl buffer for
+            // TSRA_CTRL_PATH_DATA_XFER; the file descriptor is
+            // guaranteed open for the duration of the call.
+            let res = unsafe { tsra_ctrl_path_data_xfer(self.file.read().as_raw_fd(), &mut cmd) };
+            if res.is_err() {
+                self.map_ioctl_status_tbor(cmd.generic_cmd.out_data.ioctl_status)?;
+                res.map_err(DdiError::NixError)?;
+            }
+            (
+                cmd.generic_cmd.out_data.status,
+                cmd.generic_cmd.out_data.ioctl_status,
+                cmd.generic_cmd.out_data.byte_count,
+            )
+        } else {
+            let mut cmd = inner;
+            cmd.hdr.ioctl_data_size = mem::size_of::<TsraCpGenericCmd>() as u32;
+            // SAFETY: `cmd` is a valid, initialized ioctl buffer for
+            // the legacy generic ioctl; the file descriptor is
+            // guaranteed open for the duration of the call.
+            let res =
+                unsafe { tsra_ctrl_cmd_generic_ioctl(self.file.read().as_raw_fd(), &mut cmd) };
+            if res.is_err() {
+                self.map_ioctl_status_tbor(cmd.out_data.ioctl_status)?;
+                res.map_err(DdiError::NixError)?;
+            }
+            (
+                cmd.out_data.status,
+                cmd.out_data.ioctl_status,
+                cmd.out_data.byte_count,
+            )
+        };
+        let _ = ioctl_status;
+        if status != 0 {
+            return Err(DdiError::DdiError(status));
+        }
+
+        // ── 4. Decode the typed response ─────────────────────────
+        // `byte_count` comes from the driver / firmware and is
+        // therefore across a trust boundary — clamp it against the
+        // allocated response buffer before indexing to avoid a
+        // host-side panic on a bogus device value.
+        let resp_len = byte_count as usize;
+        if resp_len > RESP_BUF_LEN {
+            return Err(DdiError::InvalidParameter);
+        }
+        let resp_bytes = &resp_buf[..resp_len];
+        // Do not log raw response bytes: responses can carry
+        // sensitive data depending on opcode.
+        tracing::debug!(opcode = T::OPCODE, resp_len, "TBOR response received");
+
+        Ok(<T::OpResp>::decode_response(resp_bytes)?)
+    }
 }
 
 /// Align AAD in place according to the following rules:
@@ -970,152 +1138,37 @@ impl DdiDev for DdiNixDev {
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        /// SQE opcode that routes the command through the firmware's
-        /// TBOR dispatcher (see `fw/core/lib/src/op.rs::OP_TBOR`).
-        const OP_TBOR: u16 = 2;
+        let oob: Vec<OobRaw> = oob_items
+            .unwrap_or(&[])
+            .iter()
+            .map(|item| OobRaw {
+                addr: item.as_ptr(),
+                len: item.len(),
+                dev_write: false,
+            })
+            .collect();
+        self.exec_tbor(req, &oob)
+    }
 
-        // Determine whether this TBOR call needs to route through
-        // the driver's Large-Data-Transfer path.
-        // When `oob_items` is Some(non-empty), the driver
-        // pins those user buffers, builds per-buffer NVMe SGL
-        // segments, and attaches a 4 KB Metadata Page — reported to
-        // firmware via `sqe.src_data.metadata_with_session
-        // .metadata_page_addr` and gated by
-        // `sqe.cmd.set == CP_CMD_SET_DATA_XFER (0x1)`.
-        let oob_slice: &[&[u8]] = oob_items.unwrap_or(&[]);
-        if oob_slice.len() > TSRA_MAX_DATA_XFER_BUFFERS
-            || oob_slice
-                .iter()
-                .any(|item| item.is_empty() || item.len() > TSRA_MAX_DATA_XFER_PER_BUFFER as usize)
-        {
-            return Err(DdiError::InvalidParameter);
-        }
-        let use_data_xfer = !oob_slice.is_empty();
-
-        const REQ_BUF_LEN: usize = 8192;
-        const RESP_BUF_LEN: usize = 8192;
-
-        // ── 1. Encode the TBOR request ───────────────────────────
-        let mut req_buf = [0u8; REQ_BUF_LEN];
-        let req_bytes = req.encode_request(&mut req_buf)?;
-        let req_len = req_bytes.len();
-
-        // Do not log raw request bytes: TBOR requests can carry
-        // sensitive material (e.g. `TborPskChangeReq.psk_envelope`).
-        // Opcode + length is enough to trace the transport path.
-        tracing::debug!(opcode = T::OPCODE, req_len, "TBOR request encoded");
-
-        let mut resp_buf = Box::<[u8; RESP_BUF_LEN]>::new([0u8; RESP_BUF_LEN]);
-
-        // ── 2. Build the ioctl command (populate the shared
-        //       TsraCpGenericCmd payload; may be wrapped in
-        //       TsraCpDataXferCmd below). ─────────────────────────
-        let mut inner = TsraCpGenericCmd::default();
-        inner.hdr.app_cmd_id = 0xCD1DDEAD;
-        inner.hdr.timeout = 100; // ms
-
-        // The Rust field `rsvd1` aliases the driver UAPI's
-        // `__u16 opc` field. OP_TBOR routes the request through
-        // `handle_tbor_op` instead of `handle_mbor_op`.
-        inner.in_data.rsvd1 = OP_TBOR;
-        // `command_set` (`sqe.cmd.set` on the wire) selects between
-        // the legacy session flow (`Generic == 0x0`) and the new
-        // Large-Data-Transfer flow (`0x1`). Firmware uses this to
-        // decide whether to parse `src_data` as `metadata_with_session`.
-        inner.in_data.command_set = if use_data_xfer {
-            TsraCpCmdSet::DataXfer
-        } else {
-            TsraCpCmdSet::Generic
-        };
-
-        // Session control flags come from the TBOR request type.
-        let session_ctrl = req.session_ctrl();
-        inner
-            .in_data
-            .session_control_flags
-            .set_kind(u8::from(session_ctrl));
-        if let Some(sid) = req.get_session_id() {
-            inner.in_data.session_id = sid;
-            inner
-                .in_data
-                .session_control_flags
-                .set_session_id_is_valid(true);
-        }
-
-        inner.in_data.src_length = req_len as u32;
-        inner.in_data.src_buf = req_buf.as_ptr();
-        inner.in_data.dst_length = resp_buf.len() as u32;
-        inner.in_data.dst_buf = resp_buf.as_mut_ptr();
-
-        // ── 3. Issue the ioctl ───────────────────────────────────
-        // SAFETY: src/dst pointers above are valid for the duration
-        // of the ioctl call; the buffers outlive `cmd`. When
-        // `use_data_xfer`, oob_slice entries must outlive the ioctl
-        // too — they do: they are borrowed for the entire fn.
-        let (status, ioctl_status, byte_count) = if use_data_xfer {
-            let mut cmd = TsraCpDataXferCmd {
-                generic_cmd: inner,
-                ..Default::default()
-            };
-            cmd.generic_cmd.hdr.ioctl_data_size = mem::size_of::<TsraCpDataXferCmd>() as u32;
-            cmd.data_xfer.buffer_count = oob_slice.len() as u32;
-            for (i, item) in oob_slice.iter().enumerate() {
-                cmd.data_xfer.buffers[i] = DataXferBuffer {
-                    xfer_length: item.len() as u32,
-                    buffer_addr: item.as_ptr(),
-                };
-            }
-            // SAFETY: `cmd` is a valid, initialized ioctl buffer for
-            // TSRA_CTRL_PATH_DATA_XFER; the file descriptor is
-            // guaranteed open for the duration of the call.
-            let res = unsafe { tsra_ctrl_path_data_xfer(self.file.read().as_raw_fd(), &mut cmd) };
-            if res.is_err() {
-                self.map_ioctl_status_tbor(cmd.generic_cmd.out_data.ioctl_status)?;
-                res.map_err(DdiError::NixError)?;
-            }
-            (
-                cmd.generic_cmd.out_data.status,
-                cmd.generic_cmd.out_data.ioctl_status,
-                cmd.generic_cmd.out_data.byte_count,
-            )
-        } else {
-            let mut cmd = inner;
-            cmd.hdr.ioctl_data_size = mem::size_of::<TsraCpGenericCmd>() as u32;
-            // SAFETY: `cmd` is a valid, initialized ioctl buffer for
-            // the legacy generic ioctl; the file descriptor is
-            // guaranteed open for the duration of the call.
-            let res =
-                unsafe { tsra_ctrl_cmd_generic_ioctl(self.file.read().as_raw_fd(), &mut cmd) };
-            if res.is_err() {
-                self.map_ioctl_status_tbor(cmd.out_data.ioctl_status)?;
-                res.map_err(DdiError::NixError)?;
-            }
-            (
-                cmd.out_data.status,
-                cmd.out_data.ioctl_status,
-                cmd.out_data.byte_count,
-            )
-        };
-        let _ = ioctl_status;
-        if status != 0 {
-            return Err(DdiError::DdiError(status));
-        }
-
-        // ── 4. Decode the typed response ─────────────────────────
-        // `byte_count` comes from the driver / firmware and is
-        // therefore across a trust boundary — clamp it against the
-        // allocated response buffer before indexing to avoid a
-        // host-side panic on a bogus device value.
-        let resp_len = byte_count as usize;
-        if resp_len > RESP_BUF_LEN {
-            return Err(DdiError::InvalidParameter);
-        }
-        let resp_bytes = &resp_buf[..resp_len];
-        // Do not log raw response bytes: responses can carry
-        // sensitive data depending on opcode.
-        tracing::debug!(opcode = T::OPCODE, resp_len, "TBOR response received");
-
-        Ok(<T::OpResp>::decode_response(resp_bytes)?)
+    /// TBOR exec path with device-writable out-of-band items:
+    /// [`TborOobItem::Out`] buffers are flagged
+    /// `TSRA_DATA_XFER_BUF_DEV_WRITE` so the driver maps them
+    /// `DMA_FROM_DEVICE`.
+    fn exec_op_tbor_oob<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+        _cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let oob: Vec<OobRaw> = oob_items
+            .iter_mut()
+            .map(|item| OobRaw {
+                dev_write: item.is_out(),
+                len: item.len(),
+                addr: item.dma_ptr(),
+            })
+            .collect();
+        self.exec_tbor(req, &oob)
     }
 
     /// Execute AES GCM operation (encryption/decryption) with slice-based buffers

@@ -27,10 +27,9 @@ use tsra_fw_ddi_mbor::MborDecode;
 use tsra_fw_ddi_mbor::MborDecoder;
 use tsra_fw_ddi_mbor_derive::Ddi;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVault;
@@ -39,6 +38,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use super::common::ReqHdr;
 use super::common::encode_resp;
 use super::common::success_hdr;
+use crate::UnoHsmIo;
 use crate::pal::UnoHsmPal;
 
 /// DDI `GetPrivKey` request data.
@@ -72,11 +72,11 @@ struct DdiGetPrivKeyResp<'a> {
 /// by the caller; `decoder` is positioned at the request data map.
 pub(super) fn dispatch<'p>(
     pal: &'p UnoHsmPal,
-    io: &impl HsmIo,
+    io: &UnoHsmIo,
     hdr: &ReqHdr,
     decoder: &mut MborDecoder<'_>,
     request_len: usize,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
     let request = DdiGetPrivKeyReq::mbor_decode(decoder).map_err(|_| HsmError::DdiDecodeFailed)?;
 

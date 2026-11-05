@@ -11,7 +11,7 @@
 use tsra_fw_ddi_tbor_api::tbor;
 
 /// `SessionClose` request schema.
-#[tbor(opcode = 0x05)]
+#[tbor(opcode = 0x05, pair = TborSessionCloseResp)]
 pub struct TborSessionCloseReq {
     /// Session identifier to tear down.  Typed
     /// [`SessionId`](tsra_fw_ddi_tbor_api::SessionId); marked
@@ -25,5 +25,5 @@ pub struct TborSessionCloseReq {
 ///
 /// No semantic payload — the wire derive emits a `none` TOC entry to
 /// satisfy the `toc_count >= 1` codec requirement.
-#[tbor(response)]
+#[tbor(response, pair = TborSessionCloseReq)]
 pub struct TborSessionCloseResp;

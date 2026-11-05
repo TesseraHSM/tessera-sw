@@ -2174,7 +2174,7 @@ impl Dispatcher {
             nonce: req.encrypted_credential.nonce,
             tag: req.encrypted_credential.tag,
         };
-        vault.establish_credential(
+        let credentials = vault.prepare_establish_credential(
             encrypted_credential,
             &req.pub_key.der.data()[..req.pub_key.der.len()],
         )?;
@@ -2208,6 +2208,8 @@ impl Dispatcher {
 
             bmk
         };
+
+        vault.commit_establish_credential(credentials);
 
         let resp = DdiEstablishCredentialResp {
             bmk: MborByteArray::from_slice(&bmk_result).map_err(|_| TesseraError::InternalError)?,
@@ -2833,6 +2835,133 @@ mod tests {
             let dispatcher = result.unwrap();
             assert_eq!(dispatcher.function.tables_max(), 4);
         }
+    }
+
+    #[test]
+    fn test_establish_credential_retries_after_provisioning_failure() {
+        let dispatcher = create_dispatcher(4);
+        let state = dispatcher.function.get_function_state();
+        let vault = state.get_vault(DEFAULT_VAULT_ID).unwrap();
+        let api_rev = dispatcher.function.get_api_rev_range().max;
+        let masked_bk3 = dispatcher.function.init_bk3([42; BK3_SIZE_BYTES]).unwrap();
+        let key_num = vault.get_establish_cred_encryption_key_id().unwrap();
+        let client_pub_key = TEST_ECC_384_PUBLIC_KEY;
+
+        let attest_entry = vault
+            .get_key_entry(state.get_attestation_key_num().unwrap())
+            .unwrap();
+        let EccPrivate(attest_key) = attest_entry.key() else {
+            panic!("Expected an ECC attestation key");
+        };
+        let attest_der = attest_key.extract_pub_key_der().unwrap();
+        let attest_pub = tsra_crypto::DerEccPublicKey::from_der(&attest_der).unwrap();
+        let mut attest_uncompressed = vec![0x04];
+        attest_uncompressed.extend_from_slice(attest_pub.x());
+        attest_uncompressed.extend_from_slice(attest_pub.y());
+        let pota_key = crate::crypto::ecc::EccPrivateKey::from_der(
+            &TEST_ECC_384_PRIVATE_KEY,
+            Some(Kind::Ecc384Private),
+        )
+        .unwrap();
+        let pota_sig = pota_key
+            .sign(&sha(HashAlgorithm::Sha384, &attest_uncompressed).unwrap())
+            .unwrap();
+
+        let establish = |credential: EncryptedCredential, masked_bk3: &[u8]| {
+            let hdr = DdiReqHdr {
+                rev: Some(DdiApiRev {
+                    major: api_rev.major,
+                    minor: api_rev.minor,
+                }),
+                op: DdiOp::EstablishCredential,
+                sess_id: None,
+            };
+            let req = DdiEstablishCredentialReq {
+                encrypted_credential: DdiEncryptedEstablishCredential {
+                    encrypted_id: MborByteArray::from_slice(&credential.id).unwrap(),
+                    encrypted_pin: MborByteArray::from_slice(&credential.pin).unwrap(),
+                    iv: MborByteArray::from_slice(&credential.iv).unwrap(),
+                    nonce: credential.nonce,
+                    tag: credential.tag,
+                },
+                pub_key: DdiDerPublicKey {
+                    der: MborByteArray::from_slice(&client_pub_key).unwrap(),
+                    key_kind: DdiKeyType::Ecc384Public,
+                },
+                masked_bk3: MborByteArray::from_slice(masked_bk3).unwrap(),
+                bmk: MborByteArray::from_slice(&[]).unwrap(),
+                masked_unwrapping_key: MborByteArray::from_slice(&[]).unwrap(),
+                pota_sig: MborByteArray::from_slice(&pota_sig).unwrap(),
+                pota_pub_key: DdiDerPublicKey {
+                    der: MborByteArray::from_slice(&TEST_ECC_384_PUBLIC_KEY).unwrap(),
+                    key_kind: DdiKeyType::Ecc384Public,
+                },
+            };
+            let mut in_data = [0; 4096];
+            let size = DdiEncoder::encode_parts(hdr, req, &mut in_data, false).unwrap();
+            let mut decoder = DdiDecoder::new(&in_data[..size], false);
+            let hdr = decoder.decode_hdr::<DdiReqHdr>().unwrap();
+            dispatcher.dispatch_establish_credential(&mut decoder, &hdr, &mut [0; 4096])
+        };
+
+        for (id, pin) in [(TEST_CRED_ID, [0; 16]), ([0; 16], TEST_CRED_PIN)] {
+            let (invalid_credential, _) =
+                helper_encrypt_credential(&vault, key_num, id, pin).unwrap();
+            assert!(matches!(
+                establish(invalid_credential, &masked_bk3),
+                Err(TesseraError::InvalidAppCredentials)
+            ));
+            assert_ne!(vault.get_nonce(), invalid_credential.nonce);
+            assert!(matches!(
+                state.get_bk_partition(),
+                Err(TesseraError::PartitionNotProvisioned)
+            ));
+        }
+
+        let (credential, _) =
+            helper_encrypt_credential(&vault, key_num, TEST_CRED_ID, TEST_CRED_PIN).unwrap();
+        assert!(matches!(
+            establish(credential, &[0]),
+            Err(TesseraError::MaskedKeyDecodeFailed)
+        ));
+        assert!(matches!(
+            state.get_bk_partition(),
+            Err(TesseraError::PartitionNotProvisioned)
+        ));
+        assert!(!vault.user_credentials_established());
+        assert_eq!(vault.get_nonce(), credential.nonce);
+        assert_eq!(
+            vault.get_establish_cred_encryption_key_id().unwrap(),
+            key_num
+        );
+
+        let retry = establish(credential, &masked_bk3);
+        assert!(
+            retry.is_ok(),
+            "Provisioning failure must not consume credential establishment: {retry:?}"
+        );
+        assert!(matches!(
+            establish(credential, &masked_bk3),
+            Err(TesseraError::VaultAppLimitReached)
+        ));
+
+        let session_key = vault.get_session_encryption_key_id().unwrap();
+        let (session_credential, session_pub_key) = helper_encrypt_session_credential(
+            &vault,
+            session_key,
+            TEST_CRED_ID,
+            TEST_CRED_PIN,
+            TEST_SESSION_SEED,
+        )
+        .unwrap();
+        vault
+            .open_session(
+                session_credential,
+                &session_pub_key,
+                api_rev,
+                &state.get_bk_partition().unwrap(),
+            )
+            .expect("Session open must succeed after retrying provisioning");
     }
 
     #[test]

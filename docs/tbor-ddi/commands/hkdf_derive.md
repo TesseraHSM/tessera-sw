@@ -27,8 +27,8 @@ The device unmasks the input secret **in place** in the request buffer,
 checks that its kind is an ECDH shared secret (`Secret256` / `Secret384` /
 `Secret521`) carrying the `derive` usage attribute, runs
 HKDF-Extract(`salt`, IKM) then HKDF-Expand(PRK, `info`) into scratch,
-re-masks the output key under the target scope, and scrubs the recovered
-IKM and the derived scratch on every path.  This is the TBOR analogue of
+re-masks the output key under the target scope. IO teardown scrubs the
+recovered IKM and derived scratch. This is the TBOR analogue of
 MBOR `HkdfDerive`, but re-masking the derived key instead of vaulting it.
 
 An **empty** `salt` selects the RFC 5869 default (all-zero) salt; an empty

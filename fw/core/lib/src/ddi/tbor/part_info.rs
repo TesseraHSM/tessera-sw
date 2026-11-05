@@ -21,9 +21,8 @@ use tsra_fw_ddi_tbor_types::tbor_int::U64;
 use tsra_fw_ddi_tbor_types::DeviceKind;
 use tsra_fw_ddi_tbor_types::PartStateId;
 use tsra_fw_ddi_tbor_types::TborPartInfoResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -44,16 +43,17 @@ const P384_PUB_RAW_LEN: usize = 2 * 48;
 /// `PART_INFO`, so the request body is not re-inspected here. This
 /// handler gathers the device/partition fields and encodes the
 /// response.
-pub(crate) fn handle<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
-    _req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
+pub(crate) fn handle<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
     let part_state_val = part_state::part_state(pal, io)? as u8;
     let generation = part_state::part_gen(pal, io)?;
     let owner_svn = part_state::part_owner_svn(pal);
     let mfgr_svn = part_state::part_mfgr_svn(pal);
     let pid = part_state::part_id(pal, io)?;
+    let sd_initialized = u8::from(part_state::part_is_sd_initialized(pal, io)?);
 
     // The identity public key is returned in natural big-endian SEC1 order by
     // `part_id_pub_key` (normalized at the PAL), which is exactly what the host
@@ -72,7 +72,7 @@ pub(crate) fn handle<'p, P: HsmPal>(
         pid_pub_key[..key_len].copy_from_slice(&pk[..key_len]);
     }
 
-    let resp = pal.dma_alloc_var(io, |buf| {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborPartInfoResp::encode(buf, 0, FIPS_APPROVED)?
             .device_kind(DeviceKind::Physical)?
             .part_state(PartStateId(part_state_val))?
@@ -81,6 +81,7 @@ pub(crate) fn handle<'p, P: HsmPal>(
             .mfgr_svn(U64::new(mfgr_svn))?
             .pid(pid)?
             .pid_pub_key(pid_pub_key)?
+            .sd_initialized(sd_initialized)?
             .finish();
         Ok(frame.as_bytes().len())
     })?;

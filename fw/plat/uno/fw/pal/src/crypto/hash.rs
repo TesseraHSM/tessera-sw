@@ -37,16 +37,33 @@
 //! [`hash_finish`](HsmHash::hash_finish) flushes whatever remains in
 //! `pending` with `auto_pad` enabled so the hardware appends standard SHA
 //! padding and writes the final truncated NIST digest.
+//!
+//! ## SHAKE
+//!
+//! The SHA engine has no SHA-3 modes, so SHAKE128 / SHAKE256 run on a PQC
+//! (fastpath) core via [`PqcDriver::shake`](tsra_fw_uno_drivers_pqc::PqcDriver::shake),
+//! which takes the whole message at once. The multi-step path therefore
+//! buffers the message (up to [`SHAKE_MSG_MAX`] bytes) in the context and
+//! submits it at [`hash_finish`](HsmHash::hash_finish).
+//!
+//! With `bulk_crypto` the FP cores run the bulk-crypto firmware, which has
+//! no PQC engine, so SHAKE is refused with
+//! [`HsmError::UnsupportedDigestHashAlgorithm`] before anything is written to
+//! the PQC mailboxes (which overlay that firmware's HSM↔FP IPC rings), as
+//! ML-DSA and ML-KEM are.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_pqc::SHAKE_MSG_MAX;
+use tsra_fw_uno_drivers_pqc::SHAKE_OUT_MAX;
+use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_sha::ShaRequest;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 /// Multi-step hash context for the Uno SHA hardware accelerator.
@@ -65,6 +82,8 @@ pub struct HsmHashContext<'a> {
     /// Passed to the SHA engine on every submission.  On the final block the
     /// engine uses this value (plus the current message length) to construct
     /// the 64-bit or 128-bit length field in the SHA padding.
+    ///
+    /// For SHAKE, the number of message bytes buffered in [`buf`](Self::buf).
     byte_count: u32,
 
     /// Scope-allocated state buffer with layout `[digest(state_len) |
@@ -74,7 +93,9 @@ pub struct HsmHashContext<'a> {
     /// hardware submissions and ultimately receives the final digest. The
     /// pending region accumulates a partial block between
     /// [`hash_continue`](HsmHash::hash_continue) calls.
-    buf: &'a mut DmaBuf,
+    ///
+    /// For SHAKE, the buffered message ([`SHAKE_MSG_MAX`] bytes).
+    buf: &'a mut HsmDmaBuf,
 
     /// Number of valid bytes currently stored in the pending region of
     /// [`buf`](Self::buf).
@@ -88,7 +109,7 @@ pub(crate) trait ShaDigestContext {
 
     fn set_byte_count(&mut self, byte_count: u32);
 
-    fn buf(&mut self) -> &mut DmaBuf;
+    fn buf(&mut self) -> &mut HsmDmaBuf;
 }
 
 impl ShaDigestContext for HsmHashContext<'_> {
@@ -104,7 +125,7 @@ impl ShaDigestContext for HsmHashContext<'_> {
         self.byte_count = byte_count;
     }
 
-    fn buf(&mut self) -> &mut DmaBuf {
+    fn buf(&mut self) -> &mut HsmDmaBuf {
         self.buf
     }
 }
@@ -118,13 +139,14 @@ impl<'a> HsmHashContext<'a> {
     /// - `algo` — hash algorithm (e.g. SHA-256, SHA-512).
     /// - `buf` — alloc-allocated state storage for intermediate state, final
     ///   digest, and pending block storage. Must be at least
-    ///   [`HsmHashAlgo::hash_state_len`] bytes.
+    ///   [`HsmHashAlgo::hash_state_len`] bytes; for SHAKE, the message
+    ///   buffer.
     ///
     /// # Returns
     ///
     /// A freshly initialized [`HsmHashContext`] with `byte_count` and
     /// `pending_len` both set to zero.
-    pub(crate) fn new(algo: HsmHashAlgo, buf: &'a mut DmaBuf) -> Self {
+    pub(crate) fn new(algo: HsmHashAlgo, buf: &'a mut HsmDmaBuf) -> Self {
         Self {
             algo,
             byte_count: 0,
@@ -168,13 +190,22 @@ impl<'a> HsmHashContext<'a> {
 // HsmHash trait implementation
 // ---------------------------------------------------------------------------
 
+/// Refuse SHAKE when the FP cores have no PQC engine; see the module docs.
+fn shake_available() -> HsmResult<()> {
+    if cfg!(feature = "bulk_crypto") {
+        Err(HsmError::UnsupportedDigestHashAlgorithm)
+    } else {
+        Ok(())
+    }
+}
+
 impl HsmHash for UnoHsmPal {
     type HashCtx<'a> = HsmHashContext<'a>;
 
     /// Computes a one-shot hash of the entire message.
     ///
     /// Delegates to [`sha_oneshot`](Self::sha_oneshot) with the hardware mode
-    /// derived from `algo`.
+    /// derived from `algo`, or to a PQC core for SHAKE.
     ///
     /// # Parameters
     ///
@@ -189,14 +220,16 @@ impl HsmHash for UnoHsmPal {
     ///
     /// # Returns
     ///
-    /// `Ok(())` on success, or an [`HsmError`] if the message length exceeds
-    /// `u32::MAX` or the hardware submission fails.
+    /// `Ok(())` on success, or an [`HsmError`] if `digest` is too short, the
+    /// message length exceeds `u32::MAX` (for SHAKE, [`SHAKE_MSG_MAX`]), a
+    /// SHAKE output exceeds [`SHAKE_OUT_MAX`], or the hardware submission
+    /// fails.
     async fn hash(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        data: &DmaBuf,
-        digest: &mut DmaBuf,
+        data: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()> {
         let _ = io;
@@ -204,7 +237,16 @@ impl HsmHash for UnoHsmPal {
         if digest.len() < digest_len {
             return Err(HsmError::InvalidArg);
         }
-        self.sha_oneshot(algo, data, digest).await?;
+        if algo.is_xof() {
+            shake_available()?;
+            // Reject what the PQC core cannot take before claiming one.
+            if data.len() > SHAKE_MSG_MAX || digest_len > SHAKE_OUT_MAX {
+                return Err(HsmError::InvalidArg);
+            }
+            self.pqc.shake(algo, data, digest).await?;
+        } else {
+            self.sha_oneshot(algo, data, digest).await?;
+        }
         if !big_endian {
             digest[..digest_len].reverse();
         }
@@ -225,18 +267,31 @@ impl HsmHash for UnoHsmPal {
     /// # Returns
     ///
     /// `Ok(HsmHashContext)` ready to accept data via
-    /// [`hash_continue`](HsmHash::hash_continue), or
-    /// [`HsmError::NotEnoughSpace`] if the alloc cannot satisfy the
-    /// allocation.
+    /// [`hash_continue`](HsmHash::hash_continue),
+    /// [`HsmError::UnsupportedDigestHashAlgorithm`] for an algorithm the SHA
+    /// engine cannot run (SHA-3), or SHAKE with `bulk_crypto`,
+    /// [`HsmError::InvalidArg`] for a SHAKE output
+    /// longer than [`SHAKE_OUT_MAX`], or [`HsmError::NotEnoughSpace`] if the
+    /// alloc cannot satisfy the allocation.
     fn hash_begin<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         algo: HsmHashAlgo,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HashCtx<'a>>
     where
         Self: 'a,
     {
+        if algo.is_xof() {
+            shake_available()?;
+            if algo.digest_len() > SHAKE_OUT_MAX {
+                return Err(HsmError::InvalidArg);
+            }
+            let buf = alloc.dma_alloc(SHAKE_MSG_MAX)?;
+            return Ok(HsmHashContext::new(algo, buf));
+        }
+        // Reject algorithms the SHA engine cannot run before allocating.
+        ShaMode::try_from(algo)?;
         let buf = alloc.dma_alloc(algo.hash_state_len())?;
         Ok(HsmHashContext::new(algo, buf))
     }
@@ -258,12 +313,13 @@ impl HsmHash for UnoHsmPal {
     /// # Returns
     ///
     /// `Ok(())` on success, or an [`HsmError`] if the cumulative message
-    /// length overflows `u32` or the hardware submission fails.
+    /// length overflows `u32` (for SHAKE, [`SHAKE_MSG_MAX`]) or the hardware
+    /// submission fails.
     async fn hash_continue(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         ctx: &mut Self::HashCtx<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let _ = io;
         self.hash_continue_bytes(ctx, data).await
@@ -290,9 +346,9 @@ impl HsmHash for UnoHsmPal {
     /// hardware submission fails.
     async fn hash_finish(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         mut ctx: Self::HashCtx<'_>,
-        digest: &mut DmaBuf,
+        digest: &mut HsmDmaBuf,
         big_endian: bool,
     ) -> HsmResult<()> {
         let _ = io;
@@ -302,9 +358,14 @@ impl HsmHash for UnoHsmPal {
             return Err(HsmError::InvalidArg);
         }
 
-        let len = ctx.pending_len as usize;
-        self.sha_digest_block(&mut ctx, None, len, true).await?;
-        digest[..digest_len].copy_from_slice(&ctx.buf[..digest_len]);
+        if algo.is_xof() {
+            let msg = &ctx.buf[..ctx.byte_count as usize];
+            self.pqc.shake(algo, msg, digest).await?;
+        } else {
+            let len = ctx.pending_len as usize;
+            self.sha_digest_block(&mut ctx, None, len, true).await?;
+            digest[..digest_len].copy_from_slice(&ctx.buf[..digest_len]);
+        }
         if !big_endian {
             digest[..digest_len].reverse();
         }
@@ -317,11 +378,27 @@ impl HsmHash for UnoHsmPal {
 // ---------------------------------------------------------------------------
 
 impl UnoHsmPal {
+    /// [`hash_continue`](HsmHash::hash_continue) on a plain byte slice, for
+    /// internal callers that feed data not in a DMA buffer (RSA-PSS).
+    ///
+    /// For SHAKE, appends `data` to the buffered message instead, failing
+    /// with [`HsmError::InvalidArg`] past [`SHAKE_MSG_MAX`] bytes.
     pub(crate) async fn hash_continue_bytes(
         &self,
         ctx: &mut HsmHashContext<'_>,
         data: &[u8],
     ) -> HsmResult<()> {
+        if ctx.algo.is_xof() {
+            let start = ctx.byte_count as usize;
+            let end = start
+                .checked_add(data.len())
+                .filter(|&end| end <= ctx.buf.len())
+                .ok_or(HsmError::InvalidArg)?;
+            ctx.buf[start..end].copy_from_slice(data);
+            ctx.byte_count = end as u32;
+            return Ok(());
+        }
+
         let block_len = ctx.algo.block_len();
 
         let remaining = if ctx.pending_len > 0 {
@@ -366,11 +443,12 @@ impl UnoHsmPal {
     pub(crate) async fn sha_oneshot(
         &self,
         algo: HsmHashAlgo,
-        message: &DmaBuf,
-        digest: &mut DmaBuf,
+        message: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         let byte_count = u32::try_from(message.len()).map_err(|_| HsmError::InvalidArg)?;
-        let req = ShaRequest::new(algo.into(), message, digest).with_auto_pad(byte_count);
+        let req =
+            ShaRequest::new(ShaMode::try_from(algo)?, message, digest).with_auto_pad(byte_count);
         self.sha.digest(req).await
     }
 
@@ -421,10 +499,10 @@ impl UnoHsmPal {
         blocks: &[u8],
     ) -> HsmResult<()> {
         // SAFETY: sha_submit_blocks is only called from hash_continue_bytes
-        // with data that originated from hash_continue(data: &DmaBuf) or
+        // with data that originated from hash_continue(data: &HsmDmaBuf) or
         // hmac_continue, so `blocks` is always a sub-slice of a
         // DMA-accessible caller buffer.
-        let blocks = unsafe { DmaBuf::from_raw(blocks) };
+        let blocks = unsafe { HsmDmaBuf::from_raw(blocks) };
         self.sha_digest_block(ctx, Some(blocks), blocks.len(), false)
             .await
     }
@@ -458,7 +536,7 @@ impl UnoHsmPal {
     pub(crate) async fn sha_digest_block<C>(
         &self,
         ctx: &mut C,
-        external_msg: Option<&DmaBuf>,
+        external_msg: Option<&HsmDmaBuf>,
         msg_len: usize,
         finalize: bool,
     ) -> HsmResult<()>
@@ -473,12 +551,12 @@ impl UnoHsmPal {
             .ok_or(HsmError::InvalidArg)?;
         let state_len = algo.state_len();
         let (digest, pending) = ctx.buf().split_at_mut(state_len);
-        let message: &DmaBuf = match external_msg {
+        let message: &HsmDmaBuf = match external_msg {
             Some(ext) => ext,
             None => &pending[..msg_len],
         };
 
-        let mut req = ShaRequest::new(algo.into(), message, digest);
+        let mut req = ShaRequest::new(ShaMode::try_from(algo)?, message, digest);
         if finalize {
             req = req.with_auto_pad(total);
         } else {

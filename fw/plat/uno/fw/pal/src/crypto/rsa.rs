@@ -12,12 +12,11 @@
 
 use core::cmp::Ordering;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKdf;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
@@ -25,10 +24,12 @@ use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
 use tsra_fw_hsm_pal_traits::HsmRsaPct;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_drivers_sha::ShaMode;
 use tsra_fw_uno_drivers_upka::UpkaModSize;
 use tsra_fw_uno_drivers_upka::UpkaRsaKeyType;
 
 use super::reverse_copy;
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 use crate::asn1::parse_rsa_private_key;
 
@@ -48,8 +49,23 @@ fn rsa_key_to_upka_key_type(key: HsmRsaKey) -> UpkaRsaKeyType {
     }
 }
 
-fn digest_info_prefix(algo: HsmHashAlgo) -> &'static [u8] {
-    match algo {
+/// The private-key selector of a converted RSA key with a `k`-byte modulus.
+fn rsa_priv_key(k: usize, crt: bool) -> HsmResult<HsmRsaKey> {
+    Ok(match (k, crt) {
+        (256, false) => HsmRsaKey::Rsa2048Priv,
+        (384, false) => HsmRsaKey::Rsa3072Priv,
+        (512, false) => HsmRsaKey::Rsa4096Priv,
+        (256, true) => HsmRsaKey::Rsa2048CrtPriv,
+        (384, true) => HsmRsaKey::Rsa3072CrtPriv,
+        (512, true) => HsmRsaKey::Rsa4096CrtPriv,
+        _ => return Err(HsmError::InvalidArg),
+    })
+}
+
+/// The PKCS #1 v1.5 `DigestInfo` prefix for `algo`; SHA-3 and SHAKE are not
+/// supported yet.
+fn digest_info_prefix(algo: HsmHashAlgo) -> HsmResult<&'static [u8]> {
+    Ok(match algo {
         // SHA-256: SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }, OCTET STRING(32) }
         HsmHashAlgo::Sha256 => &[
             0x30, 0x31, 0x30, 0x0D, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02,
@@ -70,7 +86,12 @@ fn digest_info_prefix(algo: HsmHashAlgo) -> &'static [u8] {
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E, 0x03, 0x02, 0x1A, 0x05, 0x00, 0x04,
             0x14,
         ],
-    }
+        HsmHashAlgo::Sha3_256
+        | HsmHashAlgo::Sha3_384
+        | HsmHashAlgo::Sha3_512
+        | HsmHashAlgo::Shake128(_)
+        | HsmHashAlgo::Shake256(_) => return Err(HsmError::UnsupportedDigestHashAlgorithm),
+    })
 }
 
 // =============================================================================
@@ -179,7 +200,7 @@ fn assemble_rsa_operand_in_place(buf: &mut [u8], layout: &RsaOperandLayout) {
 /// RSA-4096-public and `d ‖ n ‖ e` for RSA-2048-private are both 516 bytes, so
 /// length alone is ambiguous, and the PKA accepts an operand longer than the
 /// minimum it requires. The returned slice aliases the operand — no copy.
-fn rsa_modulus_le(key_size: HsmRsaKey, priv_key: &DmaBuf) -> HsmResult<&[u8]> {
+fn rsa_modulus_le(key_size: HsmRsaKey, priv_key: &HsmDmaBuf) -> HsmResult<&[u8]> {
     let k = key_size.modulus_len();
     let n_off = if key_size.is_crt() { 2 * k } else { k };
     let end = n_off + k;
@@ -239,11 +260,11 @@ fn mod_exp_input_in_range(n: &[u8], m: &[u8]) -> bool {
 impl UnoHsmPal {
     async fn pss_message_digest<'a>(
         &'a self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         algo: HsmHashAlgo,
-        message_hash: &DmaBuf,
-        salt: &DmaBuf,
-        digest: &mut DmaBuf,
+        message_hash: &HsmDmaBuf,
+        salt: &HsmDmaBuf,
+        digest: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()> {
         let mut ctx = self.hash_begin(io, algo, alloc)?;
@@ -276,13 +297,13 @@ impl UnoHsmPal {
     #[allow(clippy::too_many_arguments)]
     async fn compute_crt_params(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         modulus_len: usize,
         p_be: &[u8],
         q_be: &[u8],
         qinv_be: &[u8],
-        n1q_out: &mut DmaBuf,
-        n2p_out: &mut DmaBuf,
+        n1q_out: &mut HsmDmaBuf,
+        n2p_out: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // Full operand = the modulus size k; the `p⁻¹ mod q` inverse runs at
         // the next PKA size that covers the k/2-byte prime.
@@ -399,10 +420,10 @@ impl UnoHsmPal {
 impl HsmRsa for UnoHsmPal {
     async fn rsa_gen_keypair(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         _key_size: HsmRsaKey,
-        _priv_key: &mut DmaBuf,
-        _pub_key: &mut DmaBuf,
+        _priv_key: &mut HsmDmaBuf,
+        _pub_key: &mut HsmDmaBuf,
         _pct: HsmRsaPct,
     ) -> HsmResult<()> {
         Err(HsmError::UnsupportedCmd)
@@ -410,11 +431,11 @@ impl HsmRsa for UnoHsmPal {
 
     async fn mod_exp_priv(
         &self,
-        _io: &impl HsmIo,
+        _io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        key: &DmaBuf,
-        y: &DmaBuf,
-        x: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        y: &HsmDmaBuf,
+        x: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         // FIPS / NIST-ACVP: the input `m` must satisfy `1 < m < n - 1`. The PKA
         // engine reduces `m mod n` and returns a valid result for out-of-range
@@ -428,23 +449,55 @@ impl HsmRsa for UnoHsmPal {
         self.pka.rsa_mod_exp_priv(upka_key_type, key, y, x).await
     }
 
+    async fn mod_exp_priv_in_place(
+        &self,
+        _io: &UnoHsmIo,
+        key_type: HsmRsaKey,
+        key: &HsmDmaBuf,
+        y_x: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
+        let modulus = rsa_modulus_le(key_type, key)?;
+        if !mod_exp_input_in_range(modulus, y_x) {
+            return Err(HsmError::InvalidArg);
+        }
+        self.pka
+            .rsa_mod_exp_priv_in_place(rsa_key_to_upka_key_type(key_type), key, y_x)
+            .await
+    }
+
+    /// Public-key modular exponentiation, `y = x^e mod n`.
+    ///
+    /// `key` is the wire public key that [`rsa_priv_pub_key`](HsmRsa::rsa_priv_pub_key)
+    /// emits: `n ‖ e`, `k + 4` bytes, both little-endian. The PKA takes its
+    /// public-key operand exponent first (`e ‖ n`), so the key is reordered
+    /// into the IO's scratch before the call. That copy is public and at most
+    /// 516 bytes; it stays allocated until the caller's scratch scope closes
+    /// or the IO ends.
     async fn mod_exp_pub(
         &self,
-        _io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        key: &DmaBuf,
-        x: &DmaBuf,
-        y: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        x: &HsmDmaBuf,
+        y: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        let k = key_size.modulus_len();
+        if key.len() != k + EXP_WIRE_LEN {
+            return Err(HsmError::InvalidArg);
+        }
         let upka_key_type = rsa_key_to_upka_key_type(key_size);
-        self.pka.rsa_mod_exp_pub(upka_key_type, key, x, y).await
+        let pka_key = self.dma_alloc(io, k + EXP_WIRE_LEN)?;
+        let (e, n) = pka_key.split_at_mut(EXP_WIRE_LEN);
+        e.copy_from_slice(&key[k..]);
+        n.copy_from_slice(&key[..k]);
+        self.pka.rsa_mod_exp_pub(upka_key_type, pka_key, x, y).await
     }
 
     fn rsa_priv_pub_key(
         &self,
-        _io: &impl HsmIo,
-        priv_key: &DmaBuf,
-        pub_out: Option<&mut DmaBuf>,
+        _io: &UnoHsmIo,
+        priv_key: &HsmDmaBuf,
+        pub_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         // The wire public key is `n_le ‖ e_le` (`k + 4` bytes), extracted from
         // the Uno vault private operand. Two vault layouts carry the same
@@ -480,18 +533,22 @@ impl HsmRsa for UnoHsmPal {
         Ok(wire_len)
     }
 
+    /// Converts an imported RSA private key into the vault format, then runs
+    /// the PCT that `pct` selects on the converted key pair. A key that fails
+    /// the PCT is rejected with an error.
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
-        io: &impl HsmIo,
-        der: &'a mut DmaBuf,
+        io: &UnoHsmIo,
+        der: &'a mut HsmDmaBuf,
         crt: bool,
-    ) -> HsmResult<(&'a DmaBuf, usize)> {
+        pct: HsmRsaPct,
+    ) -> HsmResult<(&'a HsmDmaBuf, usize)> {
         // Note: `der` holds recovered plaintext DER — and, on the non-CRT path,
         // the staged `d` plus the leftover CRT components `p`/`q`/`dp`/`dq`/
         // `qinv` — on every path through this function. It is not scrubbed
         // here: the per-IO teardown scrub wipes the whole slot, so a local wipe
         // would be redundant work that has to be removed again.
-        if crt {
+        let (vault, k): (&'a HsmDmaBuf, usize) = if crt {
             // Decode the recovered CRT DER into its big-endian field magnitudes
             // (modulus `n`, exponent `e`, primes `p`/`q`, CRT exponents `dp`/`dq`,
             // coefficient `qInv = q⁻¹ mod p`). The `UintRef`s alias `der`; the
@@ -550,38 +607,45 @@ impl HsmRsa for UnoHsmPal {
                 .compute_crt_params(io, k, p, q, qinv, n1q_out, n2p_out)
                 .await;
             result?;
-            return Ok((&out[..vault_len], k));
-        }
-
-        // Non-CRT: assemble the little-endian vault operand
-        // `[d(k) ‖ n(k) ‖ e(EXP_WIRE_LEN)]` in place over the source DER. The
-        // `key` borrow of `der` (held by the decoded `UintRef`s) is released
-        // before the in-place rewrite.
-        let Some(layout) = rsa_operand_layout(&der[..]) else {
-            return Err(HsmError::InvalidArg);
+            (&out[..vault_len], k)
+        } else {
+            // Non-CRT: assemble the little-endian vault operand
+            // `[d(k) ‖ n(k) ‖ e(EXP_WIRE_LEN)]` in place over the source DER. The
+            // `key` borrow of `der` (held by the decoded `UintRef`s) is released
+            // before the in-place rewrite.
+            let Some(layout) = rsa_operand_layout(&der[..]) else {
+                return Err(HsmError::InvalidArg);
+            };
+            let k = layout.modulus_len;
+            let vault_len = 2 * k + EXP_WIRE_LEN;
+            // In-place assembly stages `d` into `der[vault_len..]`, so the recovered
+            // DER must be at least `vault_len + d_len` bytes. A full RSAPrivateKey is
+            // always larger, but reject rather than panic on a malformed / truncated
+            // DER.
+            if der.len() < vault_len + layout.d_len {
+                return Err(HsmError::InvalidArg);
+            }
+            assemble_rsa_operand_in_place(&mut der[..], &layout);
+            (&der[..vault_len], k)
         };
-        let k = layout.modulus_len;
-        let vault_len = 2 * k + EXP_WIRE_LEN;
-        // In-place assembly stages `d` into `der[vault_len..]`, so the recovered
-        // DER must be at least `vault_len + d_len` bytes. A full RSAPrivateKey is
-        // always larger, but reject rather than panic on a malformed / truncated
-        // DER.
-        if der.len() < vault_len + layout.d_len {
-            return Err(HsmError::InvalidArg);
+        if !self
+            .rsa_key_pct(io, vault, rsa_priv_key(k, crt)?, pct)
+            .await?
+        {
+            return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
         }
-        assemble_rsa_operand_in_place(&mut der[..], &layout);
-        Ok((&der[..vault_len], k))
+        Ok((vault, k))
     }
 
     // ── PKCS#1 v1.5 encryption ─────────────────────────────────────
 
     async fn rsa_pkcs1_encrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        pub_key: &DmaBuf,
-        message: &DmaBuf,
-        output: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
@@ -620,11 +684,11 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pkcs1_decrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
-        priv_key: &DmaBuf,
-        ciphertext: &DmaBuf,
-        output: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
@@ -664,24 +728,25 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pkcs1_sign<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        message_hash: &DmaBuf,
-        signature: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        signature: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
         Self: 'a,
     {
+        // Rejects SHA-3 and SHAKE before anything is sized by them.
+        let prefix = digest_info_prefix(algo)?;
         let k = key_size.modulus_len();
         let digest_len = algo.digest_len();
         if message_hash.len() != digest_len || signature.len() < k {
             return Err(HsmError::InvalidArg);
         }
 
-        let prefix = digest_info_prefix(algo);
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Err(HsmError::InvalidArg);
@@ -704,17 +769,21 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pkcs1_verify<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message_hash: &DmaBuf,
-        signature: &DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
+        signature: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
         Self: 'a,
     {
+        // Rejects SHA-3 and SHAKE before the modular exponentiation, so an
+        // unsupported hash is reported as such rather than as a bad
+        // signature, and costs no PKA operation.
+        let prefix = digest_info_prefix(algo)?;
         let k = key_size.modulus_len();
         let digest_len = algo.digest_len();
         if message_hash.len() != digest_len || signature.len() != k {
@@ -730,7 +799,6 @@ impl HsmRsa for UnoHsmPal {
             return Ok(false);
         }
 
-        let prefix = digest_info_prefix(algo);
         let t_len = prefix.len() + digest_len;
         if k < t_len + 11 {
             return Ok(false);
@@ -762,18 +830,21 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_oaep_encrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message: &DmaBuf,
-        label: &DmaBuf,
-        output: &mut DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -819,18 +890,21 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_oaep_decrypt<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        ciphertext: &DmaBuf,
-        label: &DmaBuf,
-        output: &mut DmaBuf,
+        priv_key: &HsmDmaBuf,
+        ciphertext: &HsmDmaBuf,
+        label: &HsmDmaBuf,
+        output: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<usize>
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -902,18 +976,21 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pss_sign<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        priv_key: &DmaBuf,
-        message_hash: &DmaBuf,
+        priv_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &mut DmaBuf,
+        signature: &mut HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<()>
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;
@@ -959,18 +1036,21 @@ impl HsmRsa for UnoHsmPal {
 
     async fn rsa_pss_verify<'a>(
         &self,
-        io: &impl HsmIo,
+        io: &UnoHsmIo,
         key_size: HsmRsaKey,
         algo: HsmHashAlgo,
-        pub_key: &DmaBuf,
-        message_hash: &DmaBuf,
+        pub_key: &HsmDmaBuf,
+        message_hash: &HsmDmaBuf,
         salt_len: usize,
-        signature: &DmaBuf,
+        signature: &HsmDmaBuf,
         alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<bool>
     where
         Self: 'a,
     {
+        // Reject algorithms the SHA engine cannot run (SHA-3, SHAKE) before
+        // sizing anything by their digest length.
+        ShaMode::try_from(algo)?;
         let k = key_size.modulus_len();
         let h_len = algo.digest_len();
         let db_len = k - h_len - 1;

@@ -5,7 +5,7 @@
 //!
 //! Storage is backed by owned arrays (no GSRAM) and the GDMA engine by a
 //! CPU fake, so the full allocator / layout / error logic runs on the
-//! host. The fake brands owned memory as `DmaBuf`, which requires
+//! host. The fake brands owned memory as `HsmDmaBuf`, which requires
 //! `unsafe`; that is confined to this test module.
 
 #![allow(unsafe_code)]
@@ -20,14 +20,14 @@ use core::task::RawWaker;
 use core::task::RawWakerVTable;
 use core::task::Waker;
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmIo;
+use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
-use tsra_fw_hsm_pal_traits::HsmPartId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -105,19 +105,19 @@ impl<const N: usize> TableStorage for ArrayStorage<N> {
         }
         Ok(&mut self.bitmap[table])
     }
-    fn blob(&self, table: usize) -> HsmResult<&DmaBuf> {
+    fn blob(&self, table: usize) -> HsmResult<&HsmDmaBuf> {
         if table >= N {
             return Err(HsmError::InvalidArg);
         }
         // SAFETY: test-owned memory; "DMA" is a fiction on the host.
-        Ok(unsafe { DmaBuf::from_raw(&self.blob[table]) })
+        Ok(unsafe { HsmDmaBuf::from_raw(&self.blob[table]) })
     }
-    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut DmaBuf> {
+    fn blob_mut(&mut self, table: usize) -> HsmResult<&mut HsmDmaBuf> {
         if table >= N {
             return Err(HsmError::InvalidArg);
         }
         // SAFETY: test-owned memory; "DMA" is a fiction on the host.
-        Ok(unsafe { DmaBuf::from_raw_mut(&mut self.blob[table]) })
+        Ok(unsafe { HsmDmaBuf::from_raw_mut(&mut self.blob[table]) })
     }
 }
 
@@ -130,8 +130,17 @@ struct FakeGdma {
     fail_copy: Cell<bool>,
 }
 
+impl HsmIoTypes for FakeGdma {
+    type Io = FakeIo;
+}
+
 impl HsmGdmaController for FakeGdma {
-    async fn copy_mem(&self, _io: &impl HsmIo, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn copy_mem(
+        &self,
+        _io: &Self::Io,
+        src: &HsmDmaBuf,
+        dst: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
         self.copies.set(self.copies.get() + 1);
         if self.fail_copy.get() {
             return Err(HsmError::FailedToStartDmaTransaction);
@@ -139,7 +148,7 @@ impl HsmGdmaController for FakeGdma {
         dst.copy_from_slice(src);
         Ok(())
     }
-    async fn zeroize_mem(&self, _io: &impl HsmIo, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn zero_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
         self.zeroizes.set(self.zeroizes.get() + 1);
         for b in dst.iter_mut() {
             *b = 0;
@@ -148,27 +157,27 @@ impl HsmGdmaController for FakeGdma {
     }
     async fn copy_mem_from_host(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         _src: HsmDmaAddr,
         _src2: HsmDmaAddr,
-        _dst: &mut DmaBuf,
+        _dst: &mut HsmDmaBuf,
         _prp: bool,
     ) -> HsmResult<()> {
         unimplemented!("vault does not use host copies")
     }
     async fn copy_mem_from_host_raw(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         _desc: &[u8; 16],
-        _dst: &mut DmaBuf,
+        _dst: &mut HsmDmaBuf,
         _prp: bool,
     ) -> HsmResult<()> {
         unimplemented!("vault does not use host copies")
     }
     async fn copy_mem_to_host(
         &self,
-        _io: &impl HsmIo,
-        _src: &DmaBuf,
+        _io: &Self::Io,
+        _src: &HsmDmaBuf,
         _dst: HsmDmaAddr,
         _dst2: HsmDmaAddr,
         _prp: bool,
@@ -181,23 +190,11 @@ impl HsmGdmaController for FakeGdma {
 
 #[derive(Default)]
 struct FakeIo {
-    sqe: HsmSqe,
-    cqe: HsmCqe,
+    sqe: [u32; 16],
+    cqe: [u32; 4],
 }
 
 impl HsmIo for FakeIo {
-    fn index(&self) -> u16 {
-        0
-    }
-    fn pid(&self) -> HsmPartId {
-        HsmPartId::from(0u8)
-    }
-    fn queue_id(&self) -> u16 {
-        0
-    }
-    fn queue_idx(&self) -> u16 {
-        0
-    }
     fn sqe(&self) -> &HsmSqe {
         &self.sqe
     }
@@ -234,10 +231,10 @@ fn aes_attrs() -> HsmVaultKeyAttrs {
         .with_decrypt(true)
 }
 
-/// Runs `f` with a `key` slice branded as `&DmaBuf`.
-fn with_key<R>(bytes: &[u8], f: impl FnOnce(&DmaBuf) -> R) -> R {
+/// Runs `f` with a `key` slice branded as `&HsmDmaBuf`.
+fn with_key<R>(bytes: &[u8], f: impl FnOnce(&HsmDmaBuf) -> R) -> R {
     // SAFETY: test-owned memory; "DMA" is a fiction on the host.
-    let buf = unsafe { DmaBuf::from_raw(bytes) };
+    let buf = unsafe { HsmDmaBuf::from_raw(bytes) };
     f(buf)
 }
 
@@ -510,9 +507,12 @@ fn variable_hmac_persists_actual_length() {
     assert_eq!(e, HsmError::InvalidArg);
 }
 
+// Only the 2-byte bulk handle is small enough to exhaust the slots before the
+// blob space; without `bulk_crypto` every kind exhausts blob space first.
+#[cfg(feature = "bulk_crypto")]
 #[test]
 fn slot_exhaustion_reports_not_enough_space() {
-    // Tiny keys (bulk index = 2 B) so slots run out before blob space.
+    // Tiny keys (bulk handle = 2 B) so slots run out before blob space.
     let (mut v, g, io) = vault::<1>();
     for _ in 0..ENTRIES_PER_TABLE {
         with_key(&[0u8; 2], |k| {
@@ -768,9 +768,9 @@ fn create_reports_defragmentation_needed() {
     // non-adjacent slots, leaving enough total free space but no run long
     // enough for a larger key.
     let (mut v, g, io) = vault::<1>();
-    // Ecc256Private = 32 B -> 64 B storage -> 8 blocks; 1888/8 = 236 keys
-    // fill the blob exactly.
-    let ids: Vec<_> = (0..236)
+    // Ecc256Private = 32 B -> 64 B storage -> 8 blocks.
+    let key_count = BLOB_SIZE / key_span(32);
+    let ids: Vec<_> = (0..key_count)
         .map(|i| {
             with_key(&[i as u8; 32], |k| {
                 block_on(v.create(

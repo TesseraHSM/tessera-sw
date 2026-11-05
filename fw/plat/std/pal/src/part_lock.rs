@@ -17,8 +17,8 @@ use crate::part::NUM_PARTITIONS;
 impl HsmPartitionLock for StdHsmPal {
     type PartitionGuard<'a> = MutexGuard<'a, NoopRawMutex, ()>;
 
-    async fn partition_lock(&self, io: &impl HsmIo) -> HsmResult<Self::PartitionGuard<'_>> {
-        let idx = u8::from(io.pid()) as usize;
+    async fn partition_lock(&self, io: &Self::Io) -> HsmResult<Self::PartitionGuard<'_>> {
+        let idx = usize::from(u8::from(io.pid()));
         if idx >= NUM_PARTITIONS {
             return Err(HsmError::InvalidArg);
         }

@@ -22,12 +22,11 @@
 //! [`labeled_extract`]: crate::kdf::labeled_extract
 //! [`labeled_expand`]: crate::kdf::labeled_expand
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -73,7 +72,7 @@ fn build_kem_context(
     }
 }
 
-fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut DmaBuf> {
+fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDmaBuf> {
     alloc.dma_alloc(len)
 }
 
@@ -190,11 +189,11 @@ fn kem_sizes(suite: HpkeSuite) -> HsmResult<(usize, usize, usize)> {
 ///   HKDF calls.
 pub async fn encap<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     pk_r: &[u8],
     enc: &mut [u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -209,9 +208,10 @@ where
     }
 
     // Query-alloc-use ECC keygen.  PAL writes `pk_e_le` as
-    // `X_le ‖ Y_le` (no SEC1 prefix), `npk_pal` bytes.
+    // `X_le ‖ Y_le` (no SEC1 prefix), `npk_pal` bytes.  The ephemeral key
+    // is used for ECDH, so its generation runs a key-agreement PCT.
     let (priv_size, pub_size) = pal
-        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::None)
+        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::KeyAgreement)
         .await?;
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
@@ -225,7 +225,7 @@ where
             alloc,
             curve,
             Some((&mut *sk_e, &mut *pk_e_le)),
-            HsmEccPct::None,
+            HsmEccPct::KeyAgreement,
         )
         .await?;
     if pk_len != npk_pal {
@@ -278,12 +278,12 @@ where
 /// * `Err(HsmError)` — propagated from the ECDH / HKDF calls.
 pub async fn decap<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     enc: &[u8],
     sk_r: &[u8],
     pk_r: &[u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -341,13 +341,13 @@ where
 ///   HKDF calls.
 pub async fn auth_encap<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     pk_r: &[u8],
-    sk_s: &DmaBuf,
+    sk_s: &HsmDmaBuf,
     pk_s: &[u8],
     enc: &mut [u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -363,7 +363,7 @@ where
 
     // Query-alloc-use ECC keygen — same flow as `encap`.
     let (priv_size, pub_size) = pal
-        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::None)
+        .ecc_gen_keypair(io, alloc, curve, None, HsmEccPct::KeyAgreement)
         .await?;
     if pub_size != npk_pal {
         return Err(HsmError::InvalidArg);
@@ -377,7 +377,7 @@ where
             alloc,
             curve,
             Some((&mut *sk_e, &mut *pk_e_le)),
-            HsmEccPct::None,
+            HsmEccPct::KeyAgreement,
         )
         .await?;
     if pk_len != npk_pal {
@@ -433,13 +433,13 @@ where
 /// * `Err(HsmError)` — propagated from the ECDH / HKDF calls.
 pub async fn auth_decap<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     enc: &[u8],
     sk_r: &[u8],
     pk_r: &[u8],
     pk_s: &[u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -506,11 +506,11 @@ where
 ///   calls.
 async fn extract_and_expand<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     dh: &[u8],
     kem_context: &[u8],
-    shared_secret: &mut DmaBuf,
+    shared_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where

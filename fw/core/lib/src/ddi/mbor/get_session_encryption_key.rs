@@ -32,10 +32,10 @@ use super::*;
 /// rotation is performed here.
 pub(crate) async fn get_session_encryption_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetSessionEncryptionKeyReq = decoder.decode_data()?;
 
     if !crate::part_state::part_is_credential_set(pal, io)? {

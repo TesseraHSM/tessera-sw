@@ -26,16 +26,17 @@ use tsra_fw_ddi_tbor_types::build_psk_change_aad;
 use tsra_fw_ddi_tbor_types::TborPskChangeReq;
 use tsra_fw_ddi_tbor_types::TborPskChangeResp;
 use tsra_fw_ddi_tbor_types::PSK_CHANGE_AAD_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::SessionRole;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CO;
 use tsra_fw_hsm_pal_traits::DEFAULT_PSK_CU;
 use tsra_fw_hsm_pal_traits::PSK_LEN;
+use tsra_fw_hsm_pal_traits::SESSION_PARAM_KEY_LEN;
 use tsra_fw_hsm_undo::UndoLog;
 
 /// PSK slot id written when the active session is the Crypto Officer.
@@ -46,55 +47,55 @@ const PSK_ID_CU: u8 = 1;
 /// Handle a TBOR `PskChange` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
-    req_buf: &mut DmaBuf,
+    io: &P::Io,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
-    // `decode_mut` validates the wire frame and hands back a
-    // destructured view: scalar `session_id` by value, plus
-    // `psk_envelope` as `&mut DmaBuf` so `aead_open` can decrypt the
-    // envelope in place — no scratch copy.
-    let req = TborPskChangeReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
+) -> HsmResult<usize> {
+    pal.alloc_scoped_async(io, async |alloc| {
+        // `decode_mut` validates the wire frame and hands back a
+        // destructured view: scalar `session_id` by value, plus
+        // `psk_envelope` as `&mut HsmDmaBuf` so `aead_open` can decrypt the
+        // envelope in place — no scratch copy.
+        let req = TborPskChangeReq::decode_mut(cmd_buf.request_mut())?;
+        let sess_id = HsmSessId::from(u16::from(req.session_id));
 
-    // Target slot is implicit in the session role; no cross-role
-    // rotation is permitted.
-    let target_psk_id = target_psk_for_role(sess_id.role());
+        // Target slot is implicit in the session role; no cross-role
+        // rotation is permitted.
+        let target_psk_id = target_psk_for_role(sess_id.role());
 
-    // The `psk_envelope` length is pinned by the schema
-    // (`PSK_CHANGE_ENVELOPE_LEN` = 100 B); a malformed length was
-    // already rejected at decode with `TborInvalidFixedLength`. The
-    // AEAD-open below plus the AAD/payload-length checks remain the
-    // load-bearing validation for a correctly-sized but crafted
-    // envelope.
+        // The `psk_envelope` length is pinned by the schema
+        // (`PSK_CHANGE_ENVELOPE_LEN` = 100 B); a malformed length was
+        // already rejected at decode with `TborInvalidFixedLength`. The
+        // AEAD-open below plus the AAD/payload-length checks remain the
+        // load-bearing validation for a correctly-sized but crafted
+        // envelope.
 
-    // Reserve the session's one-shot PSK-change budget **before** any
-    // crypto work, so replayed-after-success envelopes are rejected
-    // cheaply.  A successful return here means no further `PskChange`
-    // can succeed on this session; if the subsequent crypto/persist
-    // steps fail, the session is "burned" — the caller must
-    // renegotiate to retry.  Cross-session replay is already
-    // structurally impossible (HPKE-derived per-session `param_key`).
-    pal.session_try_consume_psk_change(io, sess_id)?;
+        // Reserve the session's one-shot PSK-change budget **before** any
+        // crypto work, so replayed-after-success envelopes are rejected
+        // cheaply.  A successful return here means no further `PskChange`
+        // can succeed on this session; if the subsequent crypto/persist
+        // steps fail, the session is "burned" — the caller must
+        // renegotiate to retry.  Cross-session replay is already
+        // structurally impossible (HPKE-derived per-session `param_key`).
+        pal.session_try_consume_psk_change(io, sess_id)?;
+        let auth_binding = crate::session::copy_auth_binding(pal, io, alloc, sess_id)?;
+        let param_key = alloc.dma_alloc(SESSION_PARAM_KEY_LEN)?;
+        param_key.copy_from_slice(pal.session_param_key(io, sess_id)?);
+        crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
 
-    // Record the prior PSK *before* overwriting it, so any later failure
-    // — the crypto below, the response DMA, or the CQE post — restores it
-    // via the dispatcher's undo walk.  The rotation is therefore
-    // all-or-nothing as the host observes it.  (The budget burn above is
-    // intentionally *not* reverted: one attempt per session.)
-    let prior = crate::part_state::part_psk(pal, io, target_psk_id)?;
-    let psk_prop = crate::part_state::part_psk_prop_id(target_psk_id)?;
-    undo.push_prop_restore_bytes(psk_prop, prior)?;
-
-    pal.alloc_scoped_async(io, async |_alloc| {
-        // Fetch the session's `param_key` schedule (the PAL hides the
-        // session-blob layout from us).
-        let param_key = pal.session_param_key(io, sess_id)?;
+        // Record the prior PSK *before* overwriting it, so any later failure
+        // — the crypto below, the response DMA, or the CQE post — restores it
+        // via the dispatcher's undo walk.  The rotation is therefore
+        // all-or-nothing as the host observes it.  (The budget burn above is
+        // intentionally *not* reverted: one attempt per session.)
+        let prior = crate::part_state::part_psk(pal, io, target_psk_id)?;
+        let psk_prop = crate::part_state::part_psk_prop_id(target_psk_id)?;
+        undo.push_prop_restore_bytes(psk_prop, prior)?;
 
         // AEAD-open the envelope **in place** on the inbound request
         // buffer.  The destructured `req.psk_envelope` is a
-        // `&mut DmaBuf` carved by `decode_mut` from the same parent
-        // `req_buf`; no copy into a scratch buffer is needed.
+        // `&mut HsmDmaBuf` carved by `decode_mut` from the same parent
+        // `cmd_buf.request_mut()`; no copy into a scratch buffer is needed.
         let aead_view = aead_open(pal, io, param_key, req.psk_envelope)
             .await
             .map_err(|_| HsmError::AeadEnvelopeAuthFailed)?;
@@ -134,7 +135,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // scratch buffer.
         crate::part_state::part_set_psk(pal, io, target_psk_id, aead_view.payload)?;
 
-        encode_response(pal, io)
+        encode_response(cmd_buf)
     })
     .await
 }
@@ -153,17 +154,17 @@ fn is_default_psk(candidate: &[u8]) -> bool {
 /// Maps the active session's role to the partition PSK slot it is
 /// allowed to write.  Self-rotate-only: there is no cross-role
 /// rotation path.
-fn target_psk_for_role(role: SessionRole) -> u8 {
+fn target_psk_for_role(role: HsmSessionRole) -> u8 {
     match role {
-        SessionRole::CryptoOfficer => PSK_ID_CO,
-        SessionRole::CryptoUser => PSK_ID_CU,
+        HsmSessionRole::CryptoOfficer => PSK_ID_CO,
+        HsmSessionRole::CryptoUser => PSK_ID_CU,
     }
 }
 
 /// Encode the `PskChange` empty acknowledgement into a fresh
-/// IO-scoped DmaBuf.
-fn encode_response<'p, P: HsmPal>(pal: &'p P, io: &impl HsmIo) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+/// IO-scoped HsmDmaBuf.
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborPskChangeResp::encode(buf, 0, false)?.finish();
         Ok(frame.as_bytes().len())
     })?;
@@ -179,21 +180,24 @@ mod tests {
 
     #[test]
     fn co_session_targets_co_slot() {
-        assert_eq!(target_psk_for_role(SessionRole::CryptoOfficer), PSK_ID_CO);
+        assert_eq!(
+            target_psk_for_role(HsmSessionRole::CryptoOfficer),
+            PSK_ID_CO
+        );
     }
 
     #[test]
     fn cu_session_targets_cu_slot() {
-        assert_eq!(target_psk_for_role(SessionRole::CryptoUser), PSK_ID_CU);
+        assert_eq!(target_psk_for_role(HsmSessionRole::CryptoUser), PSK_ID_CU);
     }
 
     #[test]
     fn session_id_zero_is_co_session() {
         // Sanity guard against drift in the slot-to-role mapping owned
         // by `HsmSessId::role`.
-        assert_eq!(HsmSessId::from(0u16).role(), SessionRole::CryptoOfficer);
+        assert_eq!(HsmSessId::from(0u16).role(), HsmSessionRole::CryptoOfficer);
         for slot in 1u16..=7 {
-            assert_eq!(HsmSessId::from(slot).role(), SessionRole::CryptoUser);
+            assert_eq!(HsmSessId::from(slot).role(), HsmSessionRole::CryptoUser);
         }
     }
 

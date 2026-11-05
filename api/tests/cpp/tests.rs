@@ -163,16 +163,25 @@ fn parse_gtest_list(output: &str, path: PathBuf) -> Vec<Trial> {
 fn run_gtest(test_name: &str, path: &PathBuf) -> Result<(), Failed> {
     let test_name = test_name.replace("::", ".");
 
-    let success = Command::new(path)
+    let output = Command::new(path)
         .arg(format!("--gtest_filter={}", test_name))
-        .status()
-        .expect("Failed to run test")
-        .success();
+        .output()
+        .expect("Failed to run test");
 
-    if success {
+    if output.status.success() {
         Ok(())
     } else {
-        Err(test_name.into())
+        // Surface the gtest subprocess's own stdout/stderr and exit status so
+        // that CI failures are self-diagnosing instead of showing only a bare
+        // "FAILED" with no detail (e.g. when the process crashes before
+        // printing any gtest assertion output).
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!(
+            "{test_name} exited with {status}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+            status = output.status
+        )
+        .into())
     }
 }
 

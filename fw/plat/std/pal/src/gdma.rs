@@ -12,16 +12,19 @@ use crate::StdHsmPal;
 
 impl HsmGdmaController for StdHsmPal {
     /// Copy data between HSM-local buffers.
-    async fn copy_mem(&self, _io: &impl HsmIo, src: &DmaBuf, dst: &mut DmaBuf) -> HsmResult<()> {
+    async fn copy_mem(
+        &self,
+        _io: &Self::Io,
+        src: &HsmDmaBuf,
+        dst: &mut HsmDmaBuf,
+    ) -> HsmResult<()> {
         self.gdma.copy_mem(src, dst);
         Ok(())
     }
 
-    /// Zero an HSM-local buffer (software volatile wipe on the std
-    /// platform). [`DmaBuf::zeroize`] guarantees the writes are not
-    /// optimized away so key material is actually scrubbed.
-    async fn zeroize_mem(&self, _io: &impl HsmIo, dst: &mut DmaBuf) -> HsmResult<()> {
-        dst.zeroize();
+    /// Zero an HSM-local buffer with non-elidable software writes.
+    async fn zero_mem(&self, _io: &Self::Io, dst: &mut HsmDmaBuf) -> HsmResult<()> {
+        zeroize::Zeroize::zeroize(&mut **dst);
         Ok(())
     }
 
@@ -35,10 +38,10 @@ impl HsmGdmaController for StdHsmPal {
     /// that PRP2 fixes was invisible under `--features emu`.
     async fn copy_mem_from_host(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         src: HsmDmaAddr,
         _src2: HsmDmaAddr,
-        dst: &mut DmaBuf,
+        dst: &mut HsmDmaBuf,
         _prp: bool,
     ) -> HsmResult<()> {
         // SAFETY: In the std platform, PRP addresses are raw host-process
@@ -54,9 +57,9 @@ impl HsmGdmaController for StdHsmPal {
     /// pointer, `length` field = transfer size).
     async fn copy_mem_from_host_raw(
         &self,
-        _io: &impl HsmIo,
+        _io: &Self::Io,
         desc: &[u8; 16],
-        dst: &mut DmaBuf,
+        dst: &mut HsmDmaBuf,
         prp: bool,
     ) -> HsmResult<()> {
         // Only inline SGL Data Block descriptors are supported here.
@@ -83,8 +86,8 @@ impl HsmGdmaController for StdHsmPal {
     /// `_dst2` is ignored — see [`Self::copy_mem_from_host`].
     async fn copy_mem_to_host(
         &self,
-        _io: &impl HsmIo,
-        src: &DmaBuf,
+        _io: &Self::Io,
+        src: &HsmDmaBuf,
         dst: HsmDmaAddr,
         _dst2: HsmDmaAddr,
         _prp: bool,

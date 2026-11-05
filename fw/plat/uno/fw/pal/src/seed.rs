@@ -5,9 +5,9 @@
 //!
 //! Device-global BKS seed material is read from the GSRAM BKS table via
 //! the [`BksStore`](tsra_fw_uno_drivers_bks_store::BksStore) driver.
-//! Only one owner lineage (BKS2) is supported, so
-//! [`owner_svn`](HsmSeedStore::owner_svn) is always `0` and
-//! [`owner_seed`](HsmSeedStore::owner_seed) accepts only selector `0`.
+//! Only one device-owner lineage (BKS2) is supported, so
+//! [`dev_owner_svn`](HsmSeedStore::dev_owner_svn) is always `0` and
+//! [`dev_owner_seed`](HsmSeedStore::dev_owner_seed) accepts only selector `0`.
 
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
@@ -16,8 +16,8 @@ use tsra_fw_uno_drivers_bks_store::BksStore;
 
 use crate::UnoHsmPal;
 
-/// The only supported owner-seed (BKS2) selector.
-const OWNER_SVN: u64 = 0;
+/// The only supported device-owner-seed (BKS2) selector.
+const DEV_OWNER_SVN: u64 = 0;
 
 /// Firmware-supplied secret seed (the `BK_BOOT` masking key), a
 /// device-global firmware constant used as the KBKDF key in boot-key
@@ -46,9 +46,9 @@ impl HsmSeedStore for UnoHsmPal {
         BksStore::svn()
     }
 
-    /// Owner-seed (BKS2) selector — always `0` (single lineage).
-    fn owner_svn(&self) -> u64 {
-        OWNER_SVN
+    /// Device-owner-seed (BKS2) selector — always `0` (single lineage).
+    fn dev_owner_svn(&self) -> u64 {
+        DEV_OWNER_SVN
     }
 
     /// Current manufacturer seed (BKS1) — BKS table entry 0.
@@ -56,8 +56,8 @@ impl HsmSeedStore for UnoHsmPal {
         BksStore::bks1_current()
     }
 
-    /// Current owner seed (BKS2) — the single BKS2 entry.
-    fn curr_owner_seed(&self) -> &[u8] {
+    /// Current device-owner seed (BKS2) — the single BKS2 entry.
+    fn curr_dev_owner_seed(&self) -> &[u8] {
         BksStore::bks2()
     }
 
@@ -67,10 +67,10 @@ impl HsmSeedStore for UnoHsmPal {
         BksStore::bks1(svn)
     }
 
-    /// Owner seed (BKS2) for `svn`.  Only selector `0` is provisioned;
+    /// Device-owner seed (BKS2) for `svn`. Only selector `0` is provisioned;
     /// any other value returns `Err(SeedNotFound)`.
-    fn owner_seed(&self, svn: u64) -> HsmResult<&[u8]> {
-        if svn == OWNER_SVN {
+    fn dev_owner_seed(&self, svn: u64) -> HsmResult<&[u8]> {
+        if svn == DEV_OWNER_SVN {
             Ok(BksStore::bks2())
         } else {
             Err(HsmError::SeedNotFound)

@@ -16,11 +16,10 @@
 //! public entry points stay short and the slice arithmetic does not
 //! get duplicated.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -38,13 +37,13 @@ struct ScheduleState<'a> {
     /// Cached HPKE suite identifier.
     suite_id: [u8; 10],
     /// `secret = LabeledExtract(shared_secret, "secret", psk)` (`Nh` bytes).
-    secret: &'a DmaBuf,
+    secret: &'a HsmDmaBuf,
     /// `key_schedule_context = mode || psk_id_hash || info_hash`
     /// (`1 + 2*Nh` bytes).
-    ksc: &'a DmaBuf,
+    ksc: &'a HsmDmaBuf,
 }
 
-fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut DmaBuf> {
+fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut HsmDmaBuf> {
     alloc.dma_alloc(len)
 }
 
@@ -75,10 +74,10 @@ fn alloc_bytes(len: usize, alloc: &impl HsmScopedAlloc) -> HsmResult<&mut DmaBuf
 /// * `Err(HsmError)` — propagated from the HKDF Extract calls.
 async fn derive_secret_and_ksc<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     mode: u8,
-    shared_secret: &DmaBuf,
+    shared_secret: &HsmDmaBuf,
     info: &[u8],
     psk: &[u8],
     psk_id: &[u8],
@@ -187,15 +186,15 @@ where
 ///   calls.
 pub async fn key_schedule<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     mode: u8,
-    shared_secret: &DmaBuf,
+    shared_secret: &HsmDmaBuf,
     info: &[u8],
     psk: &[u8],
     psk_id: &[u8],
-    key: &mut DmaBuf,
-    base_nonce: &mut DmaBuf,
+    key: &mut HsmDmaBuf,
+    base_nonce: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where
@@ -263,14 +262,14 @@ where
 ///   calls.
 pub async fn key_schedule_export<'a, P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     suite: HpkeSuite,
     mode: u8,
-    shared_secret: &DmaBuf,
+    shared_secret: &HsmDmaBuf,
     info: &[u8],
     psk: &[u8],
     psk_id: &[u8],
-    exporter_secret: &mut DmaBuf,
+    exporter_secret: &mut HsmDmaBuf,
     alloc: &'a impl HsmScopedAlloc,
 ) -> HsmResult<()>
 where

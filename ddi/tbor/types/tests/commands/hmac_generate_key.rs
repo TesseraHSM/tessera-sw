@@ -15,15 +15,13 @@
 //!   key.
 //! * Variable key lengths across each variant's `[min, max]` range
 //!   (SHA-256: 32–64, SHA-384: 48–128, SHA-512: 64–128), incl. the 128 B
-//!   maximum → 356 B masked blob.
+//!   maximum → 360 B masked blob.
 //! * Out-of-range `key_length` (below min / above max) → `InvalidKeyLength`.
 //! * Every masking-key scope: `Session` (masked under the per-session
 //!   key, works pre-finalize), `Ephemeral` / `Local` (provisioned by
 //!   `PartFinal`).
 //! * `SecurityDomain` scope before `CreateSD` → `UnsupportedKeyScope`.
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
-
-#![cfg(feature = "emu")]
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
@@ -38,6 +36,8 @@ use tsra_ddi_tbor_types::HASH_ALGO_SHA1;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA384;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA512;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE128;
+use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
 use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
 use crate::commands::common::CO;
@@ -52,9 +52,13 @@ use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// Masked-key envelope length for a given HMAC key length: `header(8) ‖
-/// iv(12) ‖ aad(192) ‖ pt(key) ‖ tag(16)`.
+/// iv(16) ‖ aad(192) ‖ pt(key padded to 16 B) ‖ tag(16)`.
 fn masked_len(key_len: usize) -> usize {
-    ENVELOPE_HEADER_LEN + ENVELOPE_IV_LEN + ENVELOPE_AAD_LEN + key_len + ENVELOPE_TAG_LEN
+    ENVELOPE_HEADER_LEN
+        + ENVELOPE_IV_LEN
+        + ENVELOPE_AAD_LEN
+        + key_len.next_multiple_of(16)
+        + ENVELOPE_TAG_LEN
 }
 
 /// A representative in-range key length for a wire hash discriminant (the
@@ -253,12 +257,13 @@ fn hmac_generate_key_rejects_non_session_scopes_before_finalize() {
     }
 }
 
-/// Rejects unsupported HMAC hash algorithm discriminants.
+/// Rejects unsupported HMAC hash algorithm discriminants, including the SHAKE
+/// XOFs.
 #[test]
 fn hmac_generate_key_rejects_unknown_hash() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
-    for hash_algo in [0, 4, u8::MAX] {
+    for hash_algo in [0, 4, HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
         let req = TborHmacGenerateKeyReq {
             session_id: session.session_id,
             scope: SCOPE_EPHEMERAL,
@@ -369,7 +374,7 @@ fn hmac_generate_key_rejects_closed_session() {
         key_length: default_key_len(HASH_ALGO_SHA256) as u8,
         key_label: Vec::new(),
     };
-    ctx.expect_fw_reject(&req, TborStatus::SessionNotFound);
+    ctx.expect_session_reject(&req, TborStatus::SessionNotFound);
 }
 
 /// Rejects a request whose session id does not match the active session.
@@ -408,7 +413,7 @@ fn hmac_generate_key_rejects_invalid_session_id() {
         key_label: Vec::new(),
     };
 
-    ctx.expect_fw_reject(&req, TborStatus::SessionNotFound);
+    ctx.expect_session_reject(&req, TborStatus::SessionNotFound);
 }
 
 /// Accepts the exact minimum and maximum key length for every HMAC variant.
@@ -648,7 +653,7 @@ fn hmac_generate_key_cu_rejects_unknown_hash() {
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
 
-    for hash_algo in [0u8, 4, u8::MAX] {
+    for hash_algo in [0u8, 4, HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
         let req = TborHmacGenerateKeyReq {
             session_id: session.session_id,
             scope: SCOPE_SESSION,
@@ -712,7 +717,7 @@ fn hmac_generate_key_cu_rejects_closed_session() {
         key_label: Vec::new(),
     };
 
-    ctx.expect_fw_reject(&req, TborStatus::SessionNotFound);
+    ctx.expect_session_reject(&req, TborStatus::SessionNotFound);
 }
 
 /// Rejects a 20-byte SHA-256 HMAC key below the minimum supported length.
@@ -797,7 +802,7 @@ fn hmac_generate_key_active_session_id_mismatch_rejected() {
     };
 
     // Verify that the mismatched session ID reaches session validation.
-    ctx.expect_fw_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
+    ctx.expect_session_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
 
     // Verify that the active CO session remains usable.
     roundtrip(

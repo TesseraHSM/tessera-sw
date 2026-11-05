@@ -47,8 +47,7 @@ Algorithm:
    derived from BKS3 + the partition `policy_hash`), re-mask both backups
    at the current `{svn, owner}`, vault `SDMK` (SecurityDomain scope),
    record `SD_MK_KEY_ID`, and mark the partition SD-initialized —
-   undo-guarded.  `RcvrPriv`, BKS3, SDMK, and SDBMK are zeroized before
-   returning.
+   undo-guarded. IO teardown scrubs `RcvrPriv`, BKS3, SDMK, and SDBMK scratch.
 
 The command is **stateful** (vaults `SDMK`, marks the partition
 SD-initialized) and **one-shot** per partition incarnation: a second

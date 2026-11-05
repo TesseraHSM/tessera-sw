@@ -76,6 +76,9 @@ pub enum TsraPartPropId {
     /// Raw ECC-P384 partition identity public key (`x ‖ y`, 96 bytes).
     // Corresponds to TSRA_PART_PROP_ID_PART_EX_PUB_KEY
     PartExPubKey = 14,
+
+    /// Live security-domain initialization state as tsra_bool; TSRA_BOOL_FALSE when unsupported.
+    SdInitialized = 15,
 }
 
 /// UUID structure.
@@ -210,6 +213,10 @@ fn get_partition_prop(
         TsraPartPropId::PartExPubKey => {
             let ex_pub_key = partition.ex_pub_key()?;
             copy_to_part_prop(part_prop, &ex_pub_key)
+        }
+        TsraPartPropId::SdInitialized => {
+            let initialized = TsraBool::from(partition.sd_initialized()?);
+            copy_to_part_prop(part_prop, initialized.as_bytes())
         }
         _ => Err(TsraStatus::UnsupportedProperty),
     }

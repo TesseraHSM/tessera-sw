@@ -41,10 +41,10 @@ use super::*;
 /// - any error from the session / vault PAL calls.
 pub(crate) fn resolve_masking_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
     session_scoped: bool,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     if session_scoped {
         pal.session_masking_key(io, sess_id)
     } else {
@@ -106,12 +106,12 @@ pub(crate) struct MaskSpec<'a> {
 /// DMA buffer and return the written slice.
 ///
 /// Resolves the masking key, assembles the metadata, size-queries the
-/// envelope, then fills a zeroed scratch buffer.  Handlers whose
+/// envelope, then fills a scratch buffer. Handlers whose
 /// response carries the masked key as an ordinary `&[u8]` field point
 /// that field at the returned slice.
 pub(crate) async fn mask_blob<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
     spec: MaskSpec<'_>,
     plaintext: &[u8],
@@ -125,7 +125,7 @@ pub(crate) async fn mask_blob<'p, P: HsmPal>(
         spec.key_length,
     )?;
     let masked_len = mask(pal, io, masking_key, plaintext, &metadata, None).await?;
-    let out = pal.dma_alloc_zeroed(io, masked_len)?;
+    let out = pal.dma_alloc(io, masked_len)?;
     mask(pal, io, masking_key, plaintext, &metadata, Some(out)).await?;
     Ok(&out[..masked_len])
 }

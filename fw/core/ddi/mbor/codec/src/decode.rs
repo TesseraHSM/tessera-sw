@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
 use crate::*;
 
@@ -134,7 +134,7 @@ pub struct MborDecoder<'a> {
     ///
     /// `None` only transiently during split operations; between any
     /// pair of public method calls this is always `Some`.
-    remaining: Option<&'a mut DmaBuf>,
+    remaining: Option<&'a mut HsmDmaBuf>,
     /// Total length of the original input buffer; used to compute
     /// [`position`](Self::position) without retaining the original
     /// buffer.
@@ -143,7 +143,7 @@ pub struct MborDecoder<'a> {
 
 impl<'a> MborDecoder<'a> {
     /// Create a new decoder over `buf`.
-    pub fn new(buf: &'a mut DmaBuf) -> Self {
+    pub fn new(buf: &'a mut HsmDmaBuf) -> Self {
         let initial_len = buf.len();
         Self {
             remaining: Some(buf),
@@ -174,7 +174,7 @@ impl<'a> MborDecoder<'a> {
     /// and skips padding.
     ///
     /// Returns `(padding, data_slice)`.
-    pub fn decode_byte_slice(&mut self) -> Result<(u8, &'a mut DmaBuf), MborDecodeError> {
+    pub fn decode_byte_slice(&mut self) -> Result<(u8, &'a mut HsmDmaBuf), MborDecodeError> {
         let marker = self.byte()?;
         if marker & BYTES_MARKER != BYTES_MARKER {
             return Err(MborDecodeError::ExpectedU8);
@@ -204,7 +204,7 @@ impl<'a> MborDecoder<'a> {
     pub fn decode_byte_slice_exact(
         &mut self,
         expected_len: usize,
-    ) -> Result<&'a mut DmaBuf, MborDecodeError> {
+    ) -> Result<&'a mut HsmDmaBuf, MborDecodeError> {
         let marker = self.byte()?;
         if marker & BYTES_MARKER != BYTES_MARKER {
             return Err(MborDecodeError::ExpectedU8);
@@ -234,7 +234,7 @@ impl<'a> MborDecoder<'a> {
     /// Peel `len` bytes off the front of the remaining buffer and
     /// return them as a disjoint mutable sub-slice.
     #[inline(always)]
-    pub(crate) fn bytes(&mut self, len: usize) -> Result<&'a mut DmaBuf, MborDecodeError> {
+    pub(crate) fn bytes(&mut self, len: usize) -> Result<&'a mut HsmDmaBuf, MborDecodeError> {
         let buf = self
             .remaining
             .take()
@@ -265,14 +265,14 @@ mod tests {
 
     use super::*;
 
-    /// In tests, local arrays aren't DMA memory, but we need `&DmaBuf`
+    /// In tests, local arrays aren't DMA memory, but we need `&HsmDmaBuf`
     /// to construct a decoder. This is safe in tests — no real DMA hw.
-    fn dma(buf: &mut [u8]) -> &mut DmaBuf {
+    fn dma(buf: &mut [u8]) -> &mut HsmDmaBuf {
         // SAFETY: In tests, no real DMA hardware is involved. The
-        // `DmaBuf::from_raw_mut` transmute is safe because the data
+        // `HsmDmaBuf::from_raw_mut` transmute is safe because the data
         // is only read/written by the decoder, not submitted to a
         // DMA engine.
-        unsafe { DmaBuf::from_raw_mut(buf) }
+        unsafe { HsmDmaBuf::from_raw_mut(buf) }
     }
 
     #[test]

@@ -22,6 +22,7 @@ use tsra_ddi_interface::DdiCookie;
 use tsra_ddi_interface::DdiDev;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
+use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_mbor_codec::MborDecode;
 use tsra_ddi_mbor_codec::MborDecoder;
 use tsra_ddi_mbor_codec::MborEncoder;
@@ -42,6 +43,16 @@ use tsra_ddi_mbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::BulkDir;
+use tsra_fw_hsm_bulk::BulkParams;
+use tsra_fw_hsm_bulk::BulkSqe;
+use tsra_fw_hsm_bulk::GcmParams;
+use tsra_fw_hsm_bulk::GcmTail;
+use tsra_fw_hsm_bulk::XtsDul;
+use tsra_fw_hsm_bulk::XtsParams;
+use tsra_fw_hsm_bulk::BLOCK_LEN;
+use tsra_fw_hsm_bulk::GCM_AAD_ALIGN;
 use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::SessionFlags;
@@ -79,6 +90,9 @@ const EMU_PART_RES_MASK: u128 = 1u128 << EMU_PID;
 /// (a 5060-byte masked key plus a 2592-byte public key and the
 /// which fits here with room to spare.
 const SCRATCH_LEN: usize = 8192;
+
+/// Bulk queue id fast-path IOs are submitted on.
+const EMU_BULK_QID: u16 = 1;
 
 /// Size of one NVMe SGL Data Block descriptor in the out-of-band page.
 const OOB_ENTRY_LEN: usize = 16;
@@ -149,6 +163,46 @@ impl DdiEmuDev {
         })
     }
 
+    /// Checks a fast-path session id against the handle's open session,
+    /// as the driver does. The short app id is left to the firmware.
+    fn validate_fp_session(&self, session_id: u16) -> Result<(), DdiError> {
+        match self.session.lock().session_id {
+            None => Err(DdiError::DdiStatus(DdiStatus::FileHandleNoExistingSession)),
+            Some(id) if id != session_id => Err(DdiError::DdiStatus(
+                DdiStatus::FileHandleSessionIdDoesNotMatch,
+            )),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// Submits a bulk SQE and returns its CQE.
+    ///
+    /// The buffers referenced by `sqe` must stay alive until this returns.
+    /// A failed CQE maps like the driver's ioctl output: a non-zero status
+    /// code to [`DdiError::FpError`], otherwise a non-zero error code to
+    /// [`DdiError::FpCmdSpecificError`].
+    fn bulk_submit(&self, sqe: &BulkSqe) -> Result<BulkCqe, DdiError> {
+        let raw = self
+            .handle
+            .block_on(self.hsm.bulk_io(sqe.encode(), EMU_PID, EMU_BULK_QID, 0))
+            .map_err(|_| DdiError::DeviceNotReady)?;
+        let cqe = BulkCqe::decode(&raw);
+        if !cqe.status.is_success() {
+            tracing::warn!(
+                sts = cqe.status.sts,
+                err = cqe.status.err,
+                "DdiEmu bulk IO failed"
+            );
+        }
+        if cqe.status.sts != 0 {
+            Err(DdiError::FpError(u32::from(cqe.status.sts)))?;
+        }
+        if cqe.status.err != 0 {
+            Err(DdiError::FpCmdSpecificError(u32::from(cqe.status.err)))?;
+        }
+        Ok(cqe)
+    }
+
     /// Best-effort close of the device's live session.
     fn close_live_session(&self) {
         let session_id = self.session.lock().session_id;
@@ -165,6 +219,149 @@ impl DdiEmuDev {
             ext: None,
         };
         let _ = self.exec_op_mbor(&req, &mut None);
+    }
+
+    /// TBOR exec path — mirrors [`Self::exec_op_mbor`] but uses the
+    /// TBOR codec, sets the SQE opcode to [`OP_TBOR`], and returns a
+    /// fully-decoded owned response value via [`TborResp::decode_response`].
+    ///
+    /// `oob` lists each out-of-band item as `(host address, length)`; the
+    /// caller keeps every item borrowed for the duration of the call.
+    fn exec_tbor<T: TborOpReq>(&self, req: &T, oob: &[(u64, usize)]) -> DdiResult<T::OpResp> {
+        // Match the native driver's per-file-descriptor session checks before
+        // dispatching to firmware, whose session table is global to the HSM.
+        let req_session_id = req.get_session_id();
+        let current_session_id = self.session.lock().session_id;
+        validate_tbor_session_request(req.session_ctrl(), req_session_id, current_session_id)?;
+
+        // ── 1. Encode the TBOR request into a 4-KiB scratch buffer ─
+        let mut src = AlignedBuf::new(SCRATCH_LEN);
+        let mut dst = AlignedBuf::new(SCRATCH_LEN);
+
+        let req_len = {
+            let bytes = req.encode_request(src.as_mut_slice())?;
+            bytes.len()
+        };
+        tracing::debug!(
+            opcode = T::OPCODE,
+            len = req_len,
+            "DdiEmu TBOR request (in hex): {:02x?}",
+            &src.as_slice()[..req_len]
+        );
+
+        // ── 1b. Build the out-of-band SGL Data Block descriptor page ─
+        //
+        // Each caller-supplied item becomes one 16-byte NVMe SGL Data
+        // Block descriptor `addr(8, LE) ‖ length(4, LE) ‖ rsvd(3) ‖
+        // type(1)=0` written into a page-aligned buffer the SQE points
+        // at via `oob_prp`/`oob_len`. The device indexes descriptors by
+        // position; the items are borrowed by the caller (no copy) and stay live
+        // for the duration of the blocking `io` below.
+        let mut oob_page = AlignedBuf::new(SCRATCH_LEN);
+        let oob_len = if oob.is_empty() {
+            0
+        } else {
+            let total = oob.len() * OOB_ENTRY_LEN;
+            if total > SCRATCH_LEN {
+                return Err(DdiError::InvalidParameter);
+            }
+            let page = oob_page.as_mut_slice();
+            for (i, &(addr, len)) in oob.iter().enumerate() {
+                let off = i * OOB_ENTRY_LEN;
+                let len = u32::try_from(len).map_err(|_| DdiError::InvalidParameter)?;
+                page[off..off + 8].copy_from_slice(&addr.to_le_bytes());
+                page[off + 8..off + 12].copy_from_slice(&len.to_le_bytes());
+                // bytes [off+12..off+16] stay zero: rsvd (3) +
+                // SGL descriptor-type nibble 0 (Data Block).
+            }
+            total as u32
+        };
+
+        // ── 2. Build SQE with OP_TBOR ──────────────────────────────
+        let cmd_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let session_ctrl = req.session_ctrl();
+        let oob_prp = if oob_len != 0 {
+            oob_page.as_slice().as_ptr() as u64
+        } else {
+            0
+        };
+        let sqe = SqeBuilder::new()
+            .cmd(CmdDword::new().with_op(OP_TBOR).with_id(cmd_id))
+            .buf_lens(req_len as u32, SCRATCH_LEN as u32)
+            .src_prp1(src.as_slice().as_ptr() as u64)
+            .dst_prp1(dst.as_mut_slice().as_mut_ptr() as u64)
+            .oob_prp(oob_prp)
+            .oob_len(oob_len)
+            .session_flags(
+                SessionFlags::new()
+                    .with_ctrl(u8::from(session_ctrl))
+                    .with_id_valid(req_session_id.is_some()),
+            )
+            .session_id(req_session_id.unwrap_or(0))
+            .build();
+
+        let mut raw_cqe = self
+            .handle
+            .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
+            .map_err(|_| DdiError::DeviceNotReady)?;
+        let cqe = Cqe::from(&mut raw_cqe);
+
+        // ── 3. Pre-decode CQE host status ──────────────────────────
+        if cqe.status() != 0 {
+            tracing::warn!(
+                opcode = T::OPCODE,
+                status = cqe.status(),
+                "DdiEmu TBOR CQE pre-decode error"
+            );
+            return Err(DdiError::DdiError(cqe.status() as u32));
+        }
+
+        // ── 4. Decode the typed response ───────────────────────────
+        let resp_len = cqe.dst_len() as usize;
+        if resp_len == 0 {
+            return Err(DdiError::DdiError(0));
+        }
+        let resp_buf = &dst.as_slice()[..resp_len];
+        tracing::trace!(
+            opcode = T::OPCODE,
+            len = resp_len,
+            "DdiEmu TBOR response (in hex): {:02x?}",
+            resp_buf
+        );
+
+        // `decode_response` returns `DecodeError::FwError` on a non-`Success`
+        // firmware status, so decoding first gates session tracking on
+        // success: a failed command must not change the tracked session id —
+        // a rejected `SessionClose` leaves the session live, so its id must
+        // stay tracked for the close-on-drop retry.
+        let resp = <T::OpResp>::decode_response(resp_buf).map_err(DdiError::from)?;
+
+        // Update session tracking on Open / Close success, mirroring
+        // `exec_op_mbor`.  The firmware allocates the session id and returns
+        // it in the `SessionOpenInit` response — the TBOR analog of MBOR's
+        // `hdr.sess_id`, carried here as a `SessionId` TOC entry — so record
+        // it from the Open response and clear it on Close.  In-session ops
+        // (including `SessionOpenFinish`) leave the tracked id unchanged.
+        match session_ctrl {
+            tsra_ddi_tbor_types::SessionControlKind::Open => {
+                if let Some(id) = tsra_ddi_tbor_codec::ResponseView::parse(resp_buf)
+                    .ok()
+                    .and_then(|view| {
+                        view.toc_iter().find_map(|entry| match entry {
+                            tsra_ddi_tbor_codec::TocEntry::SessionId(id) => Some(id),
+                            _ => None,
+                        })
+                    })
+                {
+                    self.session.lock().session_id = Some(id);
+                }
+            }
+            tsra_ddi_tbor_types::SessionControlKind::Close => self.session.lock().session_id = None,
+            tsra_ddi_tbor_types::SessionControlKind::InSession
+            | tsra_ddi_tbor_types::SessionControlKind::NoSession => {}
+        }
+
+        Ok(resp)
     }
 }
 
@@ -300,183 +497,205 @@ impl DdiDev for DdiEmuDev {
         oob_items: Option<&[&[u8]]>,
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
-        // Match the native driver's per-file-descriptor session checks before
-        // dispatching to firmware, whose session table is global to the HSM.
-        let req_session_id = req.get_session_id();
-        let current_session_id = self.session.lock().session_id;
-        validate_tbor_session_request(req.session_ctrl(), req_session_id, current_session_id)?;
-
-        // ── 1. Encode the TBOR request into a 4-KiB scratch buffer ─
-        let mut src = AlignedBuf::new(SCRATCH_LEN);
-        let mut dst = AlignedBuf::new(SCRATCH_LEN);
-
-        let req_len = {
-            let bytes = req.encode_request(src.as_mut_slice())?;
-            bytes.len()
-        };
-        tracing::debug!(
-            opcode = T::OPCODE,
-            len = req_len,
-            "DdiEmu TBOR request (in hex): {:02x?}",
-            &src.as_slice()[..req_len]
-        );
-
-        // ── 1b. Build the out-of-band SGL Data Block descriptor page ─
-        //
-        // Each caller-supplied item becomes one 16-byte NVMe SGL Data
-        // Block descriptor `addr(8, LE) ‖ length(4, LE) ‖ rsvd(3) ‖
-        // type(1)=0` written into a page-aligned buffer the SQE points
-        // at via `oob_prp`/`oob_len`. The device indexes descriptors by
-        // position; the item slices are borrowed (no copy) and stay live
-        // for the duration of the blocking `io` below.
-        let mut oob_page = AlignedBuf::new(SCRATCH_LEN);
-        let oob_len = match oob_items {
-            Some(items) if !items.is_empty() => {
-                let total = items.len() * OOB_ENTRY_LEN;
-                if total > SCRATCH_LEN {
-                    return Err(DdiError::InvalidParameter);
-                }
-                let page = oob_page.as_mut_slice();
-                for (i, item) in items.iter().enumerate() {
-                    let off = i * OOB_ENTRY_LEN;
-                    let addr = item.as_ptr() as u64;
-                    page[off..off + 8].copy_from_slice(&addr.to_le_bytes());
-                    page[off + 8..off + 12].copy_from_slice(&(item.len() as u32).to_le_bytes());
-                    // bytes [off+12..off+16] stay zero: rsvd (3) +
-                    // SGL descriptor-type nibble 0 (Data Block).
-                }
-                total as u32
-            }
-            _ => 0,
-        };
-
-        // ── 2. Build SQE with OP_TBOR ──────────────────────────────
-        let cmd_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let session_ctrl = req.session_ctrl();
-        let oob_prp = if oob_len != 0 {
-            oob_page.as_slice().as_ptr() as u64
-        } else {
-            0
-        };
-        let sqe = SqeBuilder::new()
-            .cmd(CmdDword::new().with_op(OP_TBOR).with_id(cmd_id))
-            .buf_lens(req_len as u32, SCRATCH_LEN as u32)
-            .src_prp1(src.as_slice().as_ptr() as u64)
-            .dst_prp1(dst.as_mut_slice().as_mut_ptr() as u64)
-            .oob_prp(oob_prp)
-            .oob_len(oob_len)
-            .session_flags(
-                SessionFlags::new()
-                    .with_ctrl(u8::from(session_ctrl))
-                    .with_id_valid(req_session_id.is_some()),
-            )
-            .session_id(req_session_id.unwrap_or(0))
-            .build();
-
-        let mut raw_cqe = self
-            .handle
-            .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
-            .map_err(|_| DdiError::DeviceNotReady)?;
-        let cqe = Cqe::from(&mut raw_cqe);
-
-        // ── 3. Pre-decode CQE host status ──────────────────────────
-        if cqe.status() != 0 {
-            tracing::warn!(
-                opcode = T::OPCODE,
-                status = cqe.status(),
-                "DdiEmu TBOR CQE pre-decode error"
-            );
-            return Err(DdiError::DdiError(cqe.status() as u32));
-        }
-
-        // ── 4. Decode the typed response ───────────────────────────
-        let resp_len = cqe.dst_len() as usize;
-        if resp_len == 0 {
-            return Err(DdiError::DdiError(0));
-        }
-        let resp_buf = &dst.as_slice()[..resp_len];
-        tracing::trace!(
-            opcode = T::OPCODE,
-            len = resp_len,
-            "DdiEmu TBOR response (in hex): {:02x?}",
-            resp_buf
-        );
-
-        // `decode_response` returns `DecodeError::FwError` on a non-`Success`
-        // firmware status, so decoding first gates session tracking on
-        // success: a failed command must not change the tracked session id —
-        // a rejected `SessionClose` leaves the session live, so its id must
-        // stay tracked for the close-on-drop retry.
-        let resp = <T::OpResp>::decode_response(resp_buf).map_err(DdiError::from)?;
-
-        // Update session tracking on Open / Close success, mirroring
-        // `exec_op_mbor`.  The firmware allocates the session id and returns
-        // it in the `SessionOpenInit` response — the TBOR analog of MBOR's
-        // `hdr.sess_id`, carried here as a `SessionId` TOC entry — so record
-        // it from the Open response and clear it on Close.  In-session ops
-        // (including `SessionOpenFinish`) leave the tracked id unchanged.
-        match session_ctrl {
-            tsra_ddi_tbor_types::SessionControlKind::Open => {
-                if let Some(id) = tsra_ddi_tbor_codec::ResponseView::parse(resp_buf)
-                    .ok()
-                    .and_then(|view| {
-                        view.toc_iter().find_map(|entry| match entry {
-                            tsra_ddi_tbor_codec::TocEntry::SessionId(id) => Some(id),
-                            _ => None,
-                        })
-                    })
-                {
-                    self.session.lock().session_id = Some(id);
-                }
-            }
-            tsra_ddi_tbor_types::SessionControlKind::Close => self.session.lock().session_id = None,
-            tsra_ddi_tbor_types::SessionControlKind::InSession
-            | tsra_ddi_tbor_types::SessionControlKind::NoSession => {}
-        }
-
-        Ok(resp)
+        // Firmware may write any item the request names as an output, so
+        // it only ever sees owned staging copies, never the borrowed inputs.
+        let mut staged: Vec<Vec<u8>> = oob_items
+            .unwrap_or(&[])
+            .iter()
+            .map(|item| item.to_vec())
+            .collect();
+        self.exec_tbor(req, &staged_oob(&mut staged))
     }
 
+    /// TBOR exec path with device-writable out-of-band items. Items are
+    /// staged in owned buffers the in-process firmware may read or write;
+    /// only [`TborOobItem::Out`] buffers receive the device's writes.
+    fn exec_op_tbor_oob<T: TborOpReq>(
+        &self,
+        req: &T,
+        oob_items: &mut [TborOobItem<'_>],
+        _cookie: &mut Option<DdiCookie>,
+    ) -> DdiResult<T::OpResp> {
+        let mut staged: Vec<Vec<u8>> = oob_items
+            .iter()
+            .map(|item| match item {
+                TborOobItem::In(buf) => buf.to_vec(),
+                TborOobItem::Out(buf) => buf.to_vec(),
+            })
+            .collect();
+        let result = self.exec_tbor(req, &staged_oob(&mut staged));
+        for (item, buf) in oob_items.iter_mut().zip(&staged) {
+            if let TborOobItem::Out(out) = item {
+                out.copy_from_slice(buf);
+            }
+        }
+        result
+    }
+
+    /// Runs an AES-GCM fast-path operation through the bulk queue.
+    ///
+    /// Lays the buffers out as the Linux driver does: the AAD zero-padded
+    /// to 32 bytes followed by the block-aligned text in one source /
+    /// destination buffer pair, and the final partial block (at most 15
+    /// bytes) in one tail buffer shared by input and output.
     fn exec_op_fp_gcm_slice(
         &self,
-        _mode: DdiAesOp,
-        _gcm_params: DdiAesGcmParams,
-        _src_buf: &[u8],
-        _dst_buf: &mut [u8],
-        _tag: &mut Option<[u8; 16]>,
-        _iv: &mut Option<[u8; 12]>,
-        _fips_approved: &mut bool,
+        mode: DdiAesOp,
+        gcm_params: DdiAesGcmParams,
+        src_buf: &[u8],
+        dst_buf: &mut [u8],
+        tag: &mut Option<[u8; 16]>,
+        iv: &mut Option<[u8; 12]>,
+        fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let dir = bulk_dir(mode);
+        if dir == BulkDir::Decrypt && gcm_params.tag.is_none() {
+            Err(DdiError::DdiStatus(DdiStatus::NoTagProvided))?;
+        }
+        if dst_buf.len() < src_buf.len() {
+            Err(DdiError::InvalidParameter)?;
+        }
+        self.validate_fp_session(gcm_params.session_id)?;
+
+        let aad = gcm_params.aad.unwrap_or_default();
+        let aligned_aad_len = aad.len().div_ceil(GCM_AAD_ALIGN as usize) * GCM_AAD_ALIGN as usize;
+        let tail_len = src_buf.len() % BLOCK_LEN as usize;
+        let body_len = src_buf.len() - tail_len;
+
+        let mut src = vec![0u8; aligned_aad_len + body_len];
+        src[..aad.len()].copy_from_slice(&aad);
+        src[aligned_aad_len..].copy_from_slice(&src_buf[..body_len]);
+        let mut dst = vec![0u8; src.len()];
+        let mut tail_buf = [0u8; BLOCK_LEN as usize];
+        tail_buf[..tail_len].copy_from_slice(&src_buf[body_len..]);
+        let tail_addr = tail_buf.as_mut_ptr() as u64;
+
+        let sgl_len = u32::try_from(src.len()).map_err(|_| DdiError::InvalidParameter)?;
+        let sqe = BulkSqe {
+            dir,
+            cid: CMD_COUNTER.fetch_add(1, Ordering::Relaxed),
+            session_id: gcm_params.session_id,
+            short_app_id: gcm_params.short_app_id,
+            src_len: sgl_len,
+            src_addr: src.as_ptr() as u64,
+            dst_len: sgl_len,
+            dst_addr: dst.as_mut_ptr() as u64,
+            params: BulkParams::Gcm(GcmParams {
+                key_id: gcm_params.key_id,
+                aad_len: aad.len() as u32,
+                aligned_aad_len: aligned_aad_len as u32,
+                tag: gcm_params.tag.unwrap_or_default(),
+                iv: gcm_params.iv,
+                tail: (tail_len > 0).then_some(GcmTail {
+                    len: tail_len as u8,
+                    src: tail_addr,
+                    dst: tail_addr,
+                }),
+            }),
+        };
+        let cqe = self.bulk_submit(&sqe)?;
+        if cqe.data_len != sgl_len || cqe.tail_len as usize != tail_len {
+            Err(DdiError::DdiStatus(DdiStatus::InternalError))?;
+        }
+
+        dst_buf[..body_len].copy_from_slice(&dst[aligned_aad_len..]);
+        dst_buf[body_len..src_buf.len()].copy_from_slice(&tail_buf[..tail_len]);
+        *tag = Some(cqe.tag);
+        *iv = Some(cqe.iv);
+        *fips_approved = cqe.fips_approved;
+        Ok(src_buf.len())
     }
 
     fn exec_op_fp_gcm(
         &self,
-        _mode: DdiAesOp,
-        _gcm_params: DdiAesGcmParams,
-        _src_buf: Vec<u8>,
+        mode: DdiAesOp,
+        gcm_params: DdiAesGcmParams,
+        src_buf: Vec<u8>,
     ) -> Result<DdiAesGcmResult, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let mut data = vec![0u8; src_buf.len()];
+        let mut tag = None;
+        let mut iv = None;
+        let mut fips_approved = false;
+        let len = self.exec_op_fp_gcm_slice(
+            mode,
+            gcm_params,
+            &src_buf,
+            &mut data,
+            &mut tag,
+            &mut iv,
+            &mut fips_approved,
+        )?;
+        data.truncate(len);
+        Ok(DdiAesGcmResult {
+            data,
+            tag,
+            iv,
+            fips_approved,
+        })
     }
 
+    /// Runs an AES-XTS fast-path operation through the bulk queue.
     fn exec_op_fp_xts_slice(
         &self,
-        _mode: DdiAesOp,
-        _xts_params: DdiAesXtsParams,
-        _src_buf: &[u8],
-        _dst_buf: &mut [u8],
-        _fips_approved: &mut bool,
+        mode: DdiAesOp,
+        xts_params: DdiAesXtsParams,
+        src_buf: &[u8],
+        dst_buf: &mut [u8],
+        fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        if src_buf.is_empty() || dst_buf.len() < src_buf.len() {
+            Err(DdiError::InvalidParameter)?;
+        }
+        let len = u32::try_from(src_buf.len()).map_err(|_| DdiError::InvalidParameter)?;
+        let dul = match xts_params.data_unit_len {
+            n if n == src_buf.len() => XtsDul::Full,
+            512 => XtsDul::B512,
+            4096 => XtsDul::B4096,
+            8192 => XtsDul::B8192,
+            _ => Err(DdiError::InvalidParameter)?,
+        };
+        self.validate_fp_session(xts_params.session_id)?;
+
+        let sqe = BulkSqe {
+            dir: bulk_dir(mode),
+            cid: CMD_COUNTER.fetch_add(1, Ordering::Relaxed),
+            session_id: xts_params.session_id,
+            short_app_id: xts_params.short_app_id,
+            src_len: len,
+            src_addr: src_buf.as_ptr() as u64,
+            dst_len: len,
+            dst_addr: dst_buf.as_mut_ptr() as u64,
+            params: BulkParams::Xts(XtsParams {
+                dul,
+                key_id1: xts_params.key_id1,
+                key_id2: xts_params.key_id2,
+                tweak: xts_params.tweak,
+            }),
+        };
+        let cqe = self.bulk_submit(&sqe)?;
+        if cqe.data_len > len {
+            Err(DdiError::DdiStatus(DdiStatus::InternalError))?;
+        }
+
+        *fips_approved = cqe.fips_approved;
+        Ok(cqe.data_len as usize)
     }
 
     fn exec_op_fp_xts(
         &self,
-        _mode: DdiAesOp,
-        _xts_params: DdiAesXtsParams,
-        _src_buf: Vec<u8>,
+        mode: DdiAesOp,
+        xts_params: DdiAesXtsParams,
+        src_buf: Vec<u8>,
     ) -> Result<DdiAesXtsResult, DdiError> {
-        Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd))
+        let mut data = vec![0u8; src_buf.len()];
+        let mut fips_approved = false;
+        let len =
+            self.exec_op_fp_xts_slice(mode, xts_params, &src_buf, &mut data, &mut fips_approved)?;
+        data.truncate(len);
+        Ok(DdiAesXtsResult {
+            data,
+            fips_approved,
+        })
     }
 
     /// Erase the device: disable and re-enable the emulator partition,
@@ -501,6 +720,22 @@ impl DdiDev for DdiEmuDev {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
+
+/// Host DMA descriptors `(address, length)` for staged OOB buffers.
+fn staged_oob(staged: &mut [Vec<u8>]) -> Vec<(u64, usize)> {
+    staged
+        .iter_mut()
+        .map(|buf| (buf.as_mut_ptr() as u64, buf.len()))
+        .collect()
+}
+
+fn bulk_dir(mode: DdiAesOp) -> BulkDir {
+    if mode == DdiAesOp::Encrypt {
+        BulkDir::Encrypt
+    } else {
+        BulkDir::Decrypt
+    }
+}
 
 /// Validate a request against the current session state.
 ///

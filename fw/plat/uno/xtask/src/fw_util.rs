@@ -14,6 +14,11 @@ use toml_edit::DocumentMut;
 
 use crate::XtaskCtx;
 
+/// Feature that builds the firmware for the bulk-crypto fastpath firmware
+/// instead of the PQC one (`tsra_fw_uno_pal/bulk_crypto`).  Given in
+/// `package/feature` form because the firmware workspace is virtual.
+pub const BULK_CRYPTO_FEATURE: &str = "tsra_fw_uno_app/bulk_crypto";
+
 /// Resolved firmware workspace paths.
 #[derive(Debug)]
 pub struct FwPaths {

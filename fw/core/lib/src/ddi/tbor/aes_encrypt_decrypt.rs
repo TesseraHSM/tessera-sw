@@ -3,17 +3,18 @@
 
 //! TBOR `AesEncryptDecrypt` command handler.
 //!
-//! Within an open session, AES-CBC encrypt or decrypt a host-supplied
-//! message using a caller-held **masked** AES key (the `masked_key` from
-//! [`AesGenerateKey`](super::aes_generate_key) or imported via
-//! [`UnwrapKey`](super::unwrap_key)).  The masked key's scope is read from
-//! its cleartext, tag-bound metadata to select the masking key; the key is
-//! unmasked **in place** in the request buffer (verifying the AEAD tag),
-//! the AES-CBC transform runs zero-copy — reading the request message and
-//! writing the transformed message plus updated chaining IV straight into
-//! the response buffer — and nothing is persisted; the recovered key is
-//! wiped.  This is the TBOR analogue of MBOR `AesEncryptDecrypt`, keyed by
-//! a masked blob rather than a vault `key_id`.
+//! Within an open session, AES encrypt or decrypt a host-supplied message
+//! in CBC, ECB, CFB-128, OFB or CTR mode using a caller-held **masked** AES
+//! key (the `masked_key` from [`AesGenerateKey`](super::aes_generate_key)
+//! or imported via [`UnwrapKey`](super::unwrap_key)).  The masked key's
+//! scope is read from its cleartext, tag-bound metadata to select the
+//! masking key; the key is unmasked **in place** in the request buffer
+//! (verifying the AEAD tag).  The request's contiguous `[iv | msg]` bytes
+//! are transformed in place by the PAL into `[msg | iv out]`, which is the
+//! response payload at the same offset — and nothing is persisted.  The
+//! recovered key is wiped.  This is the TBOR analogue of MBOR
+//! `AesEncryptDecrypt` (CBC / ECB only), keyed by a masked blob rather than
+//! a vault `key_id`.
 //!
 //! The key must be a non-bulk AES kind (`InvalidKeyType` otherwise) and
 //! must carry the permission matching the direction (`encrypt` for
@@ -22,16 +23,15 @@
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor_types::AesMode;
 use tsra_fw_ddi_tbor_types::AesOp;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptReq;
 use tsra_fw_ddi_tbor_types::TborAesEncryptDecryptResp;
-use tsra_fw_ddi_tbor_types::AES_IV_LEN;
 use tsra_fw_ddi_tbor_types::AES_MSG_MAX_LEN;
-use tsra_fw_hsm_pal_traits::AesOp as PalAesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmAesMode;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
-use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
@@ -40,21 +40,31 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use super::resolve_masking_key;
 use super::validate_active_session;
 
-/// AES-CBC block size in bytes — also the required IV length.
-const AES_BLOCK_LEN: usize = AES_IV_LEN;
-
-/// Map the wire [`AesOp`] onto the PAL [`PalAesOp`].  An unrecognized
+/// Map the wire [`AesOp`] onto the PAL [`HsmAesOp`].  An unrecognized
 /// discriminant is rejected with [`HsmError::InvalidArg`].
-fn pal_aes_op(op: AesOp) -> HsmResult<PalAesOp> {
+pub(super) fn pal_aes_op(op: AesOp) -> HsmResult<HsmAesOp> {
     match op {
-        AesOp::Encrypt => Ok(PalAesOp::Encrypt),
-        AesOp::Decrypt => Ok(PalAesOp::Decrypt),
+        AesOp::Encrypt => Ok(HsmAesOp::Encrypt),
+        AesOp::Decrypt => Ok(HsmAesOp::Decrypt),
+        _ => Err(HsmError::InvalidArg),
+    }
+}
+
+/// Map the wire [`AesMode`] onto the PAL [`HsmAesMode`].  An unrecognized
+/// discriminant is rejected with [`HsmError::InvalidArg`].
+fn pal_aes_mode(mode: AesMode) -> HsmResult<HsmAesMode> {
+    match mode {
+        AesMode::Cbc => Ok(HsmAesMode::Cbc),
+        AesMode::Ecb => Ok(HsmAesMode::Ecb),
+        AesMode::Cfb => Ok(HsmAesMode::Cfb),
+        AesMode::Ofb => Ok(HsmAesMode::Ofb),
+        AesMode::Ctr => Ok(HsmAesMode::Ctr),
         _ => Err(HsmError::InvalidArg),
     }
 }
 
 /// Require an unmasked key to be a non-bulk AES kind (128 / 192 / 256).
-/// The XTS / GCM bulk kinds are not valid for the CBC transform.
+/// The XTS / GCM bulk kinds are not valid for this transform.
 fn assert_aes_kind(kind: HsmVaultKeyKind) -> HsmResult<()> {
     match kind {
         HsmVaultKeyKind::Aes128 | HsmVaultKeyKind::Aes192 | HsmVaultKeyKind::Aes256 => Ok(()),
@@ -62,123 +72,74 @@ fn assert_aes_kind(kind: HsmVaultKeyKind) -> HsmResult<()> {
     }
 }
 
-/// Unmask the AES key **in place** and run the CBC transform, reading
-/// `input` and writing the ciphertext / chaining IV straight into the
-/// response slots `out_msg` / `out_iv`.
-///
-/// `masked_key` is a `&mut` slice of the request buffer: `unmask` decrypts
-/// it in place and the recovered `target_key` is used directly — no scratch
-/// copy of the blob or the key.  `input` (request) and `out_msg` (response
-/// slot) are distinct buffers, so the AES engine performs the read → write
-/// with no intermediate copy.  The recovered key is wiped on every path.
-#[allow(clippy::too_many_arguments)]
-async fn transform<P: HsmPal>(
-    pal: &P,
-    io: &impl HsmIo,
-    op: PalAesOp,
-    scope: HsmKeyScope,
-    sess_id: HsmSessId,
-    masked_key: &mut DmaBuf,
-    input: &DmaBuf,
-    iv: &DmaBuf,
-    out_msg: &mut DmaBuf,
-    out_iv: &mut DmaBuf,
-) -> HsmResult<()> {
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-
-    // Unmask in place; validate the key is an AES key that permits the
-    // requested direction; transform straight from the recovered key into
-    // the response.  Capture the result so the recovered key (now in the
-    // request buffer) is wiped on EVERY path — `view`'s borrow of
-    // `masked_key` ends with the inner block, releasing it for the wipe.
-    let crypt_res = async {
-        let view = unmask(pal, io, masking_key, masked_key).await?;
-        assert_aes_kind(view.key_kind)?;
-        // Encrypt is a `C_Encrypt` op, Decrypt a `C_Decrypt` op; the key
-        // must carry the matching permission.
-        let permitted = match op {
-            PalAesOp::Encrypt => view.key_attrs.encrypt(),
-            PalAesOp::Decrypt => view.key_attrs.decrypt(),
-        };
-        if !permitted {
-            return Err(HsmError::InvalidPermissions);
-        }
-        pal.aes_cbc_enc_dec(io, op, view.target_key, input, iv, out_msg, Some(out_iv))
-            .await
-    }
-    .await;
-
-    masked_key.zeroize();
-    crypt_res
-}
-
 /// Handle a TBOR `AesEncryptDecrypt` request.
 ///
 /// No partition lock or undo log is required: the command reads no mutable
 /// partition state and **persists nothing** — it unmasks the caller's key
-/// and transforms the message into the response buffer.
-///
-/// Fully zero-copy: `decode_mut` exposes the request `masked_key` as `&mut`
-/// so `unmask` decrypts it in place (no blob / key scratch copy); the
-/// response `msg` / `iv` slots are **reserved** and filled in place
-/// (`decode_mut`) by the AES engine, which reads the request message and
-/// writes the ciphertext / chaining IV straight into the response.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
-    req_buf: &mut DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    // `decode_mut` exposes `masked_key` as `&mut` (a slice of the request
-    // buffer) so `unmask` can decrypt it in place; `msg` / `iv` are disjoint
-    // shared borrows.
-    let req = TborAesEncryptDecryptReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
-    validate_active_session(pal, io, sess_id)?;
+/// and transforms the message in place, retaining its final response offset.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    async {
+        let req = TborAesEncryptDecryptReq::decode(cmd_buf.request())?;
+        let base = cmd_buf.request().as_ptr() as usize;
+        let sess_id = HsmSessId::from(u16::from(req.session_id()));
+        validate_active_session(pal, io, sess_id)?;
+        let op = pal_aes_op(req.op())?;
+        let mode = pal_aes_mode(req.mode())?;
 
-    let op = pal_aes_op(AesOp(req.op))?;
+        let iv_len = req.iv().len();
+        let msg_len = req.msg().len();
+        if iv_len != mode.iv_len()
+            || msg_len == 0
+            || msg_len > AES_MSG_MAX_LEN
+            || mode.data_len(iv_len + msg_len) != Some(msg_len)
+        {
+            return Err(HsmError::InvalidArg);
+        }
+        let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborAesEncryptDecryptReq::TOC_COUNT * 4;
+        let region_end = data_start + iv_len + msg_len;
+        // `[iv | msg]` must be contiguous at the payload start so it can be
+        // transformed in place into the response `[msg | iv]`.
+        let offset = |p: *const u8| (p as usize).checked_sub(base);
+        let key_off = offset(req.masked_key().as_ptr()).ok_or(HsmError::InvalidArg)?;
+        let key_len = req.masked_key().len();
+        if (iv_len != 0 && offset(req.iv().as_ptr()) != Some(data_start))
+            || offset(req.msg().as_ptr()) != Some(data_start + iv_len)
+            || key_off < region_end
+        {
+            return Err(HsmError::InvalidArg);
+        }
 
-    // IV must be exactly one block; the message must be non-empty, a whole
-    // number of blocks, and within the wire max (single source of truth:
-    // `AES_MSG_MAX_LEN`).
-    if req.iv.len() != AES_BLOCK_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    if req.msg.is_empty()
-        || !req.msg.len().is_multiple_of(AES_BLOCK_LEN)
-        || req.msg.len() > AES_MSG_MAX_LEN
-    {
-        return Err(HsmError::InvalidArg);
-    }
-    let msg_len = req.msg.len();
+        // In bounds: decode bounded every field within the request, and
+        // `[iv | msg]` ends at or before the masked key.
+        let (head, tail) = cmd_buf.request_mut().split_at_mut(key_off);
+        let masked_key = &mut tail[..key_len];
+        let data = &mut head[data_start..region_end];
 
-    // Peek the masked-key metadata (cleartext, tag-bound) to route to the
-    // right masking key before unmasking.
-    let scope = peek_scope(req.masked_key)?;
+        let scope = peek_scope(masked_key)?;
+        let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+        let view = unmask(pal, io, masking_key, masked_key).await?;
+        assert_aes_kind(view.key_kind)?;
+        let permitted = match op {
+            HsmAesOp::Encrypt => view.key_attrs.encrypt(),
+            HsmAesOp::Decrypt => view.key_attrs.decrypt(),
+        };
+        if !permitted {
+            return Err(HsmError::InvalidPermissions);
+        }
+        pal.aes_enc_dec_in_place(io, op, mode, view.target_key, data)
+            .await?;
 
-    // Build the response with the `msg` / `iv` slots reserved (sized but
-    // unwritten) — no data copy at encode time.
-    let resp = pal.dma_alloc_var(io, |buf| {
-        let frame = TborAesEncryptDecryptResp::encode(buf, 0, false)?
-            .msg_reserve(msg_len)?
-            .iv_reserve(AES_BLOCK_LEN)?
-            .finish();
-        Ok(frame.as_bytes().len())
-    })?;
-
-    let masked_key = req.masked_key;
-    let msg = req.msg;
-    let iv = req.iv;
-
-    // Fill the reserved slots in place: unmask the key in the request buffer
-    // and have the AES engine write straight into the response.  The view is
-    // scoped so its borrow of `resp` ends before `resp` is returned.
-    {
-        let out = TborAesEncryptDecryptResp::decode_mut(resp)?;
-        transform(
-            pal, io, op, scope, sess_id, masked_key, msg, iv, out.msg, out.iv,
+        Ok(
+            TborAesEncryptDecryptResp::encode(cmd_buf.buffer_mut(), 0, false)?
+                .msg_existing(msg_len)?
+                .iv_existing(iv_len)?
+                .finish()
+                .len(),
         )
-        .await?;
     }
-
-    Ok(resp)
+    .await
 }

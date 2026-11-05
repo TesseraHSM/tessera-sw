@@ -38,6 +38,7 @@
 //!   +0x10 u32  response_seq   FP -> HSM, written last
 //!   +0x14 u32  status
 //!   +0x18 u32  pub_key_len
+//!   +0x68 u32  msg_type       ML-DSA sign/verify: message or external mu
 //! ```
 //!
 //! # Handshake
@@ -67,8 +68,9 @@ pub const SEED_LEN: usize = 32;
 
 /// Bytes in each core's operand slot.
 ///
-/// Sized for the largest PQC working set: `MlDsaVerify` needs public key
-/// (2592) + message (586) + ctx (255) + signature (4627) = 8060 B. Three
+/// Sized for the largest PQC working set: verifying a pure message needs
+/// public key (2592) + message (586) + ctx (255) + signature (4627) =
+/// 8060 B. Three
 /// slots of this size fit either side of the only part of PSRAM still
 /// spoken for (`0x3AFC`-`0x4004`); everything else is legacy fastpath
 /// structure that nothing reads, including the 12 KB of FP debug-log rings
@@ -92,6 +94,7 @@ mod word {
     pub const RND: usize = 16;
     pub const SIG_LEN: usize = 24;
     pub const PUB_KEY_LEN: usize = 25;
+    pub const MSG_TYPE: usize = 26;
 }
 
 /// Operand slot layout, mirroring the FP side.
@@ -149,6 +152,33 @@ pub const SLOT_KEY_IN_OFFSET: usize = SLOT_SIG_OFFSET;
 /// [`SLOT_CT_OFFSET`]; decapsulation takes no public key.
 pub const SLOT_CT_IN_OFFSET: usize = SLOT_PK_OFFSET;
 
+/// Offset of the message SHAKE absorbs, mirroring `SLOT_SHAKE_IN_OFFSET` on
+/// FP. SHAKE uses no context string or signature, so its message may run on
+/// through those regions, up to [`SLOT_SHAKE_OUT_OFFSET`].
+pub const SLOT_SHAKE_IN_OFFSET: usize = SLOT_MSG_OFFSET;
+
+/// Offset of the SHAKE output, mirroring `SLOT_SHAKE_OUT_OFFSET` on FP.
+/// Borrows the public-key region, which SHAKE does not use.
+pub const SLOT_SHAKE_OUT_OFFSET: usize = SLOT_PK_OFFSET;
+
+/// ML-DSA message type: the staged message is the message itself. Mirrors
+/// `MSG_TYPE_PURE` on FP and the PAL's `HsmMlDsaMsgType::Pure`.
+pub const MSG_TYPE_PURE: u32 = 0;
+
+/// ML-DSA message type: the staged message is an external `μ` of
+/// [`MU_LEN`] bytes, with no context string. Mirrors `MSG_TYPE_EXTERNAL_MU`
+/// on FP and the PAL's `HsmMlDsaMsgType::ExternalMu`.
+pub const MSG_TYPE_EXTERNAL_MU: u32 = 3;
+
+/// Length of an external `μ`.
+pub const MU_LEN: usize = 64;
+
+const _: () = assert!(
+    tsra_fw_hsm_pal_traits::HsmMlDsaMsgType::Pure as u32 == MSG_TYPE_PURE
+        && tsra_fw_hsm_pal_traits::HsmMlDsaMsgType::ExternalMu as u32 == MSG_TYPE_EXTERNAL_MU
+        && tsra_fw_hsm_pal_traits::MLDSA_MU_LEN == MU_LEN
+);
+
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;
 
@@ -160,6 +190,8 @@ const _: () = assert!(crate::request::PqcOp::MlDsaVerify as u32 == 3);
 const _: () = assert!(crate::request::PqcOp::MlKemGenerateKey as u32 == 4);
 const _: () = assert!(crate::request::PqcOp::MlKemEncapsulate as u32 == 5);
 const _: () = assert!(crate::request::PqcOp::MlKemDecapsulate as u32 == 6);
+const _: () = assert!(crate::request::PqcOp::Shake128 as u32 == 7);
+const _: () = assert!(crate::request::PqcOp::Shake256 as u32 == 8);
 
 /// A response read back from a core.
 #[derive(Debug, Clone, Copy)]
@@ -188,10 +220,14 @@ pub struct RequestParams<'a> {
     pub msg_len: u32,
     /// Length of the context string staged in the operand slot.
     pub ctx_len: u32,
-    /// Length of the signature staged in the operand slot (verify only).
+    /// Length of the signature staged in the operand slot (verify only);
+    /// for SHAKE, the number of output bytes requested.
     pub sig_len: u32,
     /// Length of the public key staged in the operand slot (verify only).
     pub pub_key_len: u32,
+    /// How the staged message is read, ML-DSA sign and verify only:
+    /// [`MSG_TYPE_PURE`] or [`MSG_TYPE_EXTERNAL_MU`].
+    pub msg_type: u32,
 }
 
 /// Stage `data` into `engine`'s operand slot at `offset`.
@@ -238,6 +274,38 @@ pub fn write_slot(engine: EngineId, offset: usize, data: &[u8]) -> bool {
         let tail = head + words * 4;
         for (i, &byte) in data[tail..].iter().enumerate() {
             write_volatile(dst.add(tail + i), byte);
+        }
+    }
+    true
+}
+
+/// Zero `len` bytes of `engine`'s operand slot at `offset`.
+///
+/// Volatile, so the scrub cannot be elided even though nothing on this core
+/// reads the bytes back.
+pub fn clear_slot(engine: EngineId, offset: usize, len: usize) -> bool {
+    let Some(end) = offset.checked_add(len) else {
+        return false;
+    };
+    if end > SLOT_SIZE {
+        return false;
+    }
+    let base = SLOT_ADDRS[engine.raw() as usize] as *mut u8;
+
+    // SAFETY: as `write_slot`, and word-wise for the same reason.
+    unsafe {
+        let dst = base.add(offset);
+        let head = dst.align_offset(align_of::<u32>()).min(len);
+        for i in 0..head {
+            write_volatile(dst.add(i), 0);
+        }
+        let words = (len - head) / 4;
+        let dst_w = dst.add(head) as *mut u32;
+        for i in 0..words {
+            write_volatile(dst_w.add(i), 0);
+        }
+        for i in head + words * 4..len {
+            write_volatile(dst.add(i), 0);
         }
     }
     true
@@ -386,6 +454,7 @@ pub fn post_request(engine: EngineId, seq: u32, params: &RequestParams<'_>) -> u
         write_volatile(mb.add(word::CTX_LEN), params.ctx_len);
         write_volatile(mb.add(word::SIG_LEN), params.sig_len);
         write_volatile(mb.add(word::PUB_KEY_LEN), params.pub_key_len);
+        write_volatile(mb.add(word::MSG_TYPE), params.msg_type);
         for i in 0..SEED_LEN / 4 {
             let xi = u32::from_le_bytes([
                 params.xi[i * 4],
@@ -431,6 +500,32 @@ pub fn take_response(engine: EngineId, seq: u32) -> Option<Response> {
             status: read_volatile(mb.add(word::STATUS)),
             out_len: read_volatile(mb.add(word::OUT_LEN)),
         })
+    }
+}
+
+/// True if `engine`'s core has answered request `seq`.
+pub fn has_answered(engine: EngineId, seq: u32) -> bool {
+    // SAFETY: as `take_response`.
+    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) == seq }
+}
+
+/// Wipe everything a request can leave in `engine`'s shared memory: the
+/// whole operand slot and the seed words of its mailbox.
+///
+/// Only once the core has answered: it may still be reading operands, or
+/// about to write results, until then.
+pub fn scrub(engine: EngineId) {
+    // Order the wipe after the sequence-number load that showed the core
+    // has answered, as `take_response` orders its reads.
+    dmb();
+    clear_slot(engine, 0, SLOT_SIZE);
+    let mb = mailbox(engine);
+    // SAFETY: as `post_request`.
+    unsafe {
+        for i in 0..SEED_LEN / 4 {
+            write_volatile(mb.add(word::XI + i), 0);
+            write_volatile(mb.add(word::RND + i), 0);
+        }
     }
 }
 

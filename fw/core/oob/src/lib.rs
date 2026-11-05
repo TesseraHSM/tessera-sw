@@ -11,7 +11,7 @@
 //! locates the indexed descriptor and forwards it **verbatim** to the
 //! GDMA ([`HsmGdmaController::copy_mem_from_host_raw`]), which interprets
 //! the descriptor and copies the item into a caller-allocated
-//! [`DmaBuf`]. This layer does **no** SGL parsing itself — it only
+//! [`HsmDmaBuf`]. This layer does **no** SGL parsing itself — it only
 //! bounds the index and computes the descriptor's address.
 //!
 //! The Uno GDMA does not walk PRP lists; each transfer is a single SGL
@@ -20,12 +20,11 @@
 
 #![no_std]
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 
@@ -103,11 +102,36 @@ pub fn entry_addr(oob: &OobPtr, index: usize) -> HsmResult<HsmDmaAddr> {
 /// * [`HsmError`] — propagated from the GDMA / allocator.
 pub async fn copy_oob<P>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     oob: &OobPtr,
     index: usize,
-    dst: &mut DmaBuf,
+    dst: &mut HsmDmaBuf,
 ) -> HsmResult<()>
+where
+    P: HsmGdmaController + HsmAlloc,
+{
+    let raw = read_oob_desc(pal, io, oob, index).await?;
+    // Forward the raw descriptor to the GDMA, which interprets it and
+    // copies the item into `dst` (validating `length == dst.len()`).
+    pal.copy_mem_from_host_raw(io, &raw, dst, false).await
+}
+
+/// Read the raw 16-byte SGL descriptor at `index` from the OOB page.
+///
+/// For engines that consume the descriptor themselves (e.g. host-to-host
+/// AES-GCM via `HsmAesGcm::gcm_encrypt_sgl`) rather than having the GDMA
+/// copy the item into HSM memory. The descriptor is returned verbatim;
+/// interpreting it is the consumer's job.
+///
+/// # Errors
+/// * [`HsmError::InvalidArg`] — `index` out of bounds.
+/// * [`HsmError`] — propagated from the GDMA / allocator.
+pub async fn read_oob_desc<P>(
+    pal: &P,
+    io: &P::Io,
+    oob: &OobPtr,
+    index: usize,
+) -> HsmResult<[u8; SGL_ENTRY_LEN]>
 where
     P: HsmGdmaController + HsmAlloc,
 {
@@ -131,15 +155,8 @@ where
         pal.copy_mem_from_host(io, entry_addr, HsmDmaAddr::ZERO, entry, true)
             .await?;
 
-        // Borrow the descriptor bytes directly as a fixed array (no
-        // copy) — `entry` derefs to a 16-byte `[u8]`.
         let bytes: &[u8] = entry;
-        let raw: &[u8; SGL_ENTRY_LEN] = bytes.try_into().map_err(|_| HsmError::InternalError)?;
-
-        // Forward the raw descriptor to the GDMA, which interprets it and
-        // copies the item into `dst` (validating `length == dst.len()`).
-        pal.copy_mem_from_host_raw(io, raw, dst, false).await?;
-        Ok(())
+        bytes.try_into().map_err(|_| HsmError::InternalError)
     })
     .await
 }

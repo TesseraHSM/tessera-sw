@@ -35,7 +35,7 @@ pub const TBOR_OP_GET_CERT_CHAIN_INFO: u8 = 0x1E;
 pub const CERT_THUMBPRINT_LEN: usize = 32;
 
 /// `GetCertChainInfo` request schema.
-#[tbor(opcode = 0x1E)]
+#[tbor(opcode = 0x1E, pair = TborGetCertChainInfoResp)]
 pub struct TborGetCertChainInfoReq {
     /// Certificate chain slot within the caller's partition.
     #[tbor(U8)]
@@ -43,7 +43,7 @@ pub struct TborGetCertChainInfoReq {
 }
 
 /// `GetCertChainInfo` response schema.
-#[tbor(response)]
+#[tbor(response, pair = TborGetCertChainInfoReq)]
 pub struct TborGetCertChainInfoResp<'a> {
     /// Number of certificates in the chain.  Valid `GetCertificate`
     /// indices are `0..num_certs`.

@@ -52,14 +52,14 @@ data section.
 |---|---|---|---|
 | 4  | `session_id` | `session_id` (inline) | Pending session identifier the handshake reserved in Phase 1. |
 | 8  | `mac_fin` | `buffer` (ref) | References the `mac_fin` payload below.  TOC word carries `(data_offset = 16, length = 48)`. |
-| 12 | `seed_envelope` | `buffer` (ref) | References the `seed_envelope` payload below.  TOC word carries `(data_offset = 64, length = 68)`. |
+| 12 | `seed_envelope` | `buffer` (ref) | References the `seed_envelope` payload below.  TOC word carries `(data_offset = 64, length = 72)`. |
 
 ### Data section
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
 | 16 | 48 B | `mac_fin` | Phase-2 confirmation MAC, HMAC-SHA-384 keyed on the HPKE `exported` value.  See [Phase-2 confirmation MAC](#phase-2-confirmation-mac-mac_fin) below. |
-| 64 | 68 B | `seed_envelope` | AEAD-GCM envelope of a fresh 32-byte `seed` sealed under `param_key` with no AAD.  See [`seed_envelope` format](#seed_envelope-format) below. |
+| 64 | 72 B | `seed_envelope` | AEAD-GCM envelope of a fresh 32-byte `seed` sealed under `param_key` with no AAD.  See [`seed_envelope` format](#seed_envelope-format) below. |
 
 ## Response
 
@@ -76,22 +76,23 @@ data section.
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| 12 | _N_ B | `bmk_session` | Wrapped session-key blob (≤ 512 B, typically 148 B).  See [`bmk_session` envelope](#bmk_session-envelope) below. |
+| 12 | _N_ B | `bmk_session` | Wrapped session-key blob (264 B). See [`bmk_session` envelope](#bmk_session-envelope) below. |
 
 ## `seed_envelope` format
 
-`seed_envelope` is a fixed-size 68-byte [`aead_envelope`](
+`seed_envelope` is a fixed-size 72-byte [`aead_envelope`](
 ../../../fw/core/crypto/aead-envelope/src/lib.rs) blob sealed by the
 host with the AEAD-GCM `AesGcm256` algorithm under `param_key` with
 **empty AAD**:
 
 ```
 "AEAD"(4) | alg=0x03(1) | rsv=0(1) | aad_len_be=0(2)
-        | IV(12)        | seed(32)                 | TAG(16)
+        | IV(16)        | seed(32)                 | TAG(16)
 ```
 
-The HSM AEAD-opens this envelope (the AEAD tag itself authenticates
-the IV, the empty AAD, and the ciphertext); any failure destroys the
+The IV slot contains a 12-byte GCM nonce followed by `00 00 00 01`.
+Opening ignores the four-byte suffix. The HSM AEAD-opens this envelope
+(the AEAD tag authenticates the nonce and ciphertext); any failure destroys the
 Pending slot and returns `SessionAuthFailure`.  The recovered 32-byte
 `seed` is the input to `BK_SESSION` derivation for the response's
 `bmk_session` envelope below.
@@ -109,20 +110,19 @@ BK_SESSION  = SP800-108-KBKDF-HMAC-SHA-384(
     context = seed,              // 32-byte seed from seed_envelope
     L       = 32 bytes,          // AES-256 key
 )
-bmk_session = aead_envelope::seal(
-    alg = AesGcm256,
-    key = BK_SESSION,
-    iv  = random 12 B,
-    aad = svn(8 BE) | bks2_index(2 BE) | "SMK\0"(4) | key_length(2 BE) | rsv(16),
-    pt  = masking_key,           // 80 B (CO and CU, all session_types)
-)
 ```
 
-Wire layout (148 B total):
+The masking API seals the 32-byte `masking_key` with `AesGcm256` (`0x03`)
+under `BK_SESSION`. Its AAD is the 192-byte version-1 `MaskedKeyMetadata`,
+binding the `MaskingKey` kind, vault attributes, SVN, owner-seed identifier,
+and label `SESSION_BMK`. The authenticated padding count is zero for this
+block-aligned key.
+
+Wire layout (264 B total):
 
 ```
-"AEAD"(4) | alg=0x03(1) | rsv=0(1) | aad_len_be=32(2)
-        | IV(12) | AAD(32) | masking_key_ct(80) | TAG(16)
+"AEAD"(4) | alg=0x03(1) | rsv=0(1) | aad_len_be=192(2)
+        | IV(16) | metadata(192) | masking_key_ct(32) | TAG(16)
 ```
 
 Only the `masking_key` is wrapped — transport keys (`param_key`,
@@ -158,13 +158,13 @@ depends on the `session_type` chosen in
 | Key | HKDF label | Length | Derived for |
 |---|---|---|---|
 | `param_key`   | `"tsra-session-param-v1"` | 32 B  | All sessions (AES-256 for `aead_envelope`) |
-| `masking_key` | `"tsra-masking-v1"`       | 80 B  | All sessions |
+| `masking_key` | `"tsra-masking-v1"`       | 32 B  | All sessions |
 | `mac_tx_key`  | `"tsra-session-mac-tx-v1"`| 48 B  | `Authenticated` sessions only (HSM → host) |
 | `mac_rx_key`  | `"tsra-session-mac-rx-v1"`| 48 B  | `Authenticated` sessions only (host → HSM) |
 
-`param_key` is a raw 32-byte AES-256 key.  `masking_key` keeps the
-80-byte AES-CBC-256 (32 B) + HMAC-SHA-384 (48 B) layout consumed by
-the MBOR masked-key subsystem.  MAC keys are raw 48-byte
+`param_key` and `masking_key` are raw 32-byte AES-256 keys for the
+TBOR AEAD envelopes. The legacy MBOR masking schedule is separate.
+MAC keys are raw 48-byte
 HMAC-SHA-384 keys.
 
 The derived keys are committed to the slot's session vault blob in
@@ -172,8 +172,13 @@ a length-discriminated layout:
 
 | `session_type` | Blob layout | Size |
 |---|---|---|
-| `PlainText` (CU)        | `api_rev(8) ‖ param_key(32) ‖ masking_key(80)` | 120 B |
-| `Authenticated` (CO)    | `api_rev(8) ‖ param_key(32) ‖ masking_key(80) ‖ mac_tx_key(48) ‖ mac_rx_key(48)` | 216 B |
+| `PlainText` (CU)        | `api_rev(8) ‖ param_key(32) ‖ masking_key(32) ‖ auth_binding(68)` | 140 B |
+| `Authenticated` (CO)    | CU layout `‖ mac_tx_key(48) ‖ mac_rx_key(48)` | 236 B |
+
+`auth_binding` captures the handshake role (4-byte little-endian CO=0/CU=1),
+AppId (16 B), and SHA-384 PSK digest (48 B). The firmware checks that
+the credential remains current before promotion, PSK rotation and key
+attestation. Legacy MBOR sessions have no TBOR credential binding.
 
 Per-direction MAC keys (`mac_tx`/`mac_rx` rather than a single
 shared key) eliminate any risk of a reflected-message attack and
@@ -185,9 +190,9 @@ input.
 
 | Error | Cause |
 |---|---|
-| `InvalidArg` | `mac_fin` not 48 bytes, `seed_envelope` not 68 bytes, or `session_id` out of range |
+| `InvalidArg` | `mac_fin` not 48 bytes, `seed_envelope` not 72 bytes, or `session_id` out of range |
 | `SessionNotPending` | Slot is not in `Pending` state |
-| `SessionAuthFailure` | MAC verify failed, or `seed_envelope` AEAD-open failed; the Pending slot is destroyed in either case |
+| `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed |
 | `PartitionNotProvisioned` | Identity key not present |
 
 A late `SessionOpenFinish` arriving against an evicted-and-reused slot

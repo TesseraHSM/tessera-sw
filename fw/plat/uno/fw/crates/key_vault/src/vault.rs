@@ -21,10 +21,9 @@
 //! Key material larger than [`DMA_THRESHOLD`] bytes is copied/zeroed via
 //! the GDMA engine ([`HsmGdmaController`]); smaller keys use a CPU copy.
 
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
@@ -73,9 +72,9 @@ impl<S: TableStorage> KeyVault<S> {
     pub async fn create<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         app_id: u8,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session: Option<u16>,
         attrs: HsmVaultKeyAttrs,
@@ -114,7 +113,7 @@ impl<S: TableStorage> KeyVault<S> {
     pub fn create_sync(
         &mut self,
         app_id: u8,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session: Option<u16>,
         attrs: HsmVaultKeyAttrs,
@@ -208,7 +207,7 @@ impl<S: TableStorage> KeyVault<S> {
     pub async fn delete<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         key_id: HsmKeyId,
     ) -> HsmResult<()> {
         let (table, slot) = split_key_id(key_id);
@@ -277,7 +276,7 @@ impl<S: TableStorage> KeyVault<S> {
     pub async fn delete_by_session<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         session: u16,
     ) -> HsmResult<()> {
         for table in 0..self.storage.table_count() {
@@ -303,7 +302,9 @@ impl<S: TableStorage> KeyVault<S> {
     /// [`delete_by_session`](Self::delete_by_session).  It visits the same
     /// entries that walk evicts — live *and* disabled — so a soft-deleted
     /// key's external mirror is not missed.
-    pub fn for_each_session_key<F: FnMut(HsmKeyId, HsmVaultKeyKind, &DmaBuf) -> HsmResult<()>>(
+    pub fn for_each_session_key<
+        F: FnMut(HsmKeyId, HsmVaultKeyKind, &HsmDmaBuf) -> HsmResult<()>,
+    >(
         &self,
         session: u16,
         mut f: F,
@@ -325,11 +326,7 @@ impl<S: TableStorage> KeyVault<S> {
     }
 
     /// Deletes every key in every owned table, zeroing all material.
-    pub async fn clear<G: HsmGdmaController>(
-        &mut self,
-        gdma: &G,
-        io: &impl HsmIo,
-    ) -> HsmResult<()> {
+    pub async fn clear<G: HsmGdmaController>(&mut self, gdma: &G, io: &G::Io) -> HsmResult<()> {
         for table in 0..self.storage.table_count() {
             if !self.storage.is_valid_table(table) {
                 continue;
@@ -350,7 +347,7 @@ impl<S: TableStorage> KeyVault<S> {
     ///
     /// - [`HsmError::KeyNotFound`] — `key_id` does not refer to a live
     ///   key.
-    pub fn key(&self, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    pub fn key(&self, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
         let (table, slot) = split_key_id(key_id);
         let entry = self.entry(table, slot)?;
         self.blob_of(table, &entry)
@@ -358,13 +355,13 @@ impl<S: TableStorage> KeyVault<S> {
 
     /// Disabled-aware variant of [`key`](Self::key), for the teardown walks
     /// that also visit disabled entries (see [`key_entry`](Self::key_entry)).
-    fn key_present(&self, key_id: HsmKeyId) -> HsmResult<&DmaBuf> {
+    fn key_present(&self, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
         let (table, slot) = split_key_id(key_id);
         let entry = self.entry_present(table, slot)?;
         self.blob_of(table, &entry)
     }
 
-    fn blob_of(&self, table: usize, entry: &Entry) -> HsmResult<&DmaBuf> {
+    fn blob_of(&self, table: usize, entry: &Entry) -> HsmResult<&HsmDmaBuf> {
         let (_, off, len) = self.location_of(table, entry)?;
         // `location_of` bound-checked `off..off + len` against the blob, so
         // a corrupted block offset / persisted length has already surfaced
@@ -480,7 +477,7 @@ impl<S: TableStorage> KeyVault<S> {
         // Validate `off..off+len` lies within the table blob: callers
         // build a raw pointer/slice from this tuple (e.g. the Uno PAL),
         // so corrupted entry metadata must surface as `KeyNotFound`
-        // rather than an out-of-bounds read / unsound `DmaBuf`.
+        // rather than an out-of-bounds read / unsound `HsmDmaBuf`.
         let blob_len = self.storage.blob(table)?.len();
         let end = off.checked_add(len).ok_or(HsmError::KeyNotFound)?;
         if end > blob_len {
@@ -561,10 +558,10 @@ impl<S: TableStorage> KeyVault<S> {
     async fn write_key<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         table: usize,
         block: u16,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
     ) -> HsmResult<()> {
         let key_off = usize::from(block) * BLOCK_ALIGNMENT + ATTRIBUTES_BLOB_SIZE;
         let len = key.len();
@@ -582,7 +579,7 @@ impl<S: TableStorage> KeyVault<S> {
     async fn evict<G: HsmGdmaController>(
         &mut self,
         gdma: &G,
-        io: &impl HsmIo,
+        io: &G::Io,
         table: usize,
         slot: usize,
         entry: Entry,
@@ -602,9 +599,16 @@ impl<S: TableStorage> KeyVault<S> {
             }
             let region = &mut blob[attrs_off..end];
             if total > DMA_THRESHOLD {
-                gdma.zeroize_mem(io, region).await?;
+                gdma.zero_mem(io, region).await?;
             } else {
-                region.zeroize();
+                for byte in region.iter_mut() {
+                    // SAFETY: this is an exclusive byte in the retired vault entry.
+                    #[allow(unsafe_code)]
+                    unsafe {
+                        core::ptr::write_volatile(byte, 0);
+                    }
+                }
+                core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
             }
         }
 

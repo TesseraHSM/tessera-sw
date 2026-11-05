@@ -21,12 +21,11 @@
 //! The crate is generic over the PAL — it only depends on the
 //! [`HsmAes`] trait, not on any concrete PAL implementation.
 
-use tsra_fw_hsm_pal_traits::AesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 // =============================================================================
@@ -123,11 +122,11 @@ fn strip_pkcs7_padding(decrypted: &[u8]) -> HsmResult<usize> {
 /// * Any [`HsmError`] surfaced by the PAL's CBC engine.
 pub async fn aes_cbc_pkcs7_encrypt<P: HsmAes + HsmAlloc>(
     pal: &P,
-    io: &impl HsmIo,
-    key: &DmaBuf,
+    io: &P::Io,
+    key: &HsmDmaBuf,
     iv: &mut [u8],
     pt: &[u8],
-    ct: &mut DmaBuf,
+    ct: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     let padded = padded_len(pt.len());
     if ct.len() < padded {
@@ -144,7 +143,7 @@ pub async fn aes_cbc_pkcs7_encrypt<P: HsmAes + HsmAlloc>(
     let iv_in = pal.dma_alloc(io, BLOCK)?;
     iv_in.copy_from_slice(iv);
     let iv_out = pal.dma_alloc(io, BLOCK)?;
-    pal.aes_cbc_enc_dec_in_place(io, AesOp::Encrypt, key, work, iv_in, Some(iv_out))
+    pal.aes_cbc_enc_dec_in_place(io, HsmAesOp::Encrypt, key, work, iv_in, Some(iv_out))
         .await?;
     ct[..padded].copy_from_slice(work);
     iv.copy_from_slice(iv_out);
@@ -181,11 +180,11 @@ pub async fn aes_cbc_pkcs7_encrypt<P: HsmAes + HsmAlloc>(
 /// * Any [`HsmError`] surfaced by the PAL's CBC engine.
 pub async fn aes_cbc_pkcs7_decrypt<P: HsmAes + HsmAlloc>(
     pal: &P,
-    io: &impl HsmIo,
-    key: &DmaBuf,
+    io: &P::Io,
+    key: &HsmDmaBuf,
     iv: &mut [u8],
-    ct: &DmaBuf,
-    pt: &mut DmaBuf,
+    ct: &HsmDmaBuf,
+    pt: &mut HsmDmaBuf,
 ) -> HsmResult<usize> {
     let len = ct.len();
     if len == 0 || !len.is_multiple_of(BLOCK) || pt.len() < len {
@@ -199,7 +198,7 @@ pub async fn aes_cbc_pkcs7_decrypt<P: HsmAes + HsmAlloc>(
     let iv_in = pal.dma_alloc(io, BLOCK)?;
     iv_in.copy_from_slice(iv);
     let iv_out = pal.dma_alloc(io, BLOCK)?;
-    pal.aes_cbc_enc_dec(io, AesOp::Decrypt, key, ct, iv_in, pt, Some(iv_out))
+    pal.aes_cbc_enc_dec(io, HsmAesOp::Decrypt, key, ct, iv_in, pt, Some(iv_out))
         .await?;
     iv.copy_from_slice(iv_out);
     strip_pkcs7_padding(&pt[..len])

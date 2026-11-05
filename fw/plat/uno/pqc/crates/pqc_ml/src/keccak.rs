@@ -5,6 +5,8 @@
 // On ARM (thumbv7em) targets: uses pqm4 assembly from
 // https://github.com/mupq/pqm4 (common/keccakf1600.S).
 // On host targets: pure Rust fallback for testing.
+use zeroize::Zeroize;
+
 // SHAKE-128 rate = 168 bytes, SHAKE-256 rate = 136 bytes
 pub const SHAKE128_RATE: usize = 168;
 pub const SHAKE256_RATE: usize = 136;
@@ -259,6 +261,22 @@ impl ShakeCtx {
             self.pos += take;
             offset += take;
         }
+    }
+}
+
+/// Explicit, non-elidable wipe of the sponge for callers whose input is
+/// sensitive. Not run on drop: the ML-DSA/ML-KEM paths build many sponges
+/// per operation over values that are not secret on their own.
+impl Zeroize for KeccakState {
+    fn zeroize(&mut self) {
+        self.state.zeroize();
+    }
+}
+
+impl Zeroize for ShakeCtx {
+    fn zeroize(&mut self) {
+        self.st.zeroize();
+        self.pos.zeroize();
     }
 }
 

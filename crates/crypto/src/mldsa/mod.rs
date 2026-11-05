@@ -21,6 +21,8 @@
 //! - [`MlDsaPrivateKey`]: Expanded signing key
 //! - [`MlDsaPublicKey`]: Encoded verifying key
 //! - [`MlDsaAlgo`]: Signing and verification operations
+//! - [`HashAlgo::mldsa_mu`]: The external-`μ` hash of a message, as OpenSSL's
+//!   `ML-DSA-MU` digest computes it
 //!
 //! # Platform Support
 //!
@@ -37,8 +39,8 @@
 //! # Randomness
 //!
 //! Signing randomness is drawn from the platform generator by default; see
-//! [`MlDsaAlgo`] for the constructor that pins it instead, and why two callers
-//! need that.
+//! [`MlDsaAlgo::deterministic`] for FIPS 204's deterministic variant, which
+//! fixes it at zero instead.
 //!
 //! The key-generation seed is different: it cannot be drawn here, because the
 //! seed *is* the private key. It is what the HSM stores in the masked blob and
@@ -56,8 +58,8 @@
 //!
 //! # Security Considerations
 //!
-//! - Signing is *hedged*: the same message signed twice under different
-//!   randomness yields different, equally valid signatures
+//! - Signing is *hedged* by default: the same message signed twice under
+//!   different randomness yields different, equally valid signatures
 //! - The signing randomness must come from a cryptographically secure generator
 //! - Expanded signing keys must be protected as private key material
 //! - The FIPS 204 context string is bound into the signature, so verification
@@ -80,6 +82,10 @@ pub const MLDSA_RND_LEN: usize = 32;
 
 /// Maximum length of the FIPS 204 signing context string.
 pub const MLDSA_CTX_MAX_LEN: usize = 255;
+
+/// Length of the FIPS 204 message representative `μ`, which an
+/// [external-μ](MlDsaAlgo::external_mu) engine takes in place of the message.
+pub const MLDSA_MU_LEN: usize = 64;
 
 /// ML-DSA parameter sets.
 ///

@@ -272,3 +272,212 @@ impl DecryptOp for CngAesEcbAlgo {
         Self::bcrypt_decrypt(key.ecb_handle(), input, output)
     }
 }
+
+/// AES block size in bytes.
+const BLOCK_SIZE: usize = 16;
+
+/// Validates and processes whole AES blocks with the CNG ECB handle.
+fn ecb_blocks(
+    key: &AesKey,
+    encrypt: bool,
+    input: &[u8],
+    output: &mut [u8],
+) -> Result<usize, CryptoError> {
+    if !input.len().is_multiple_of(BLOCK_SIZE) {
+        return Err(CryptoError::AesInvalidInputSize);
+    }
+    if output.len() < input.len() {
+        return Err(CryptoError::AesBufferTooSmall);
+    }
+    if input.is_empty() {
+        return Ok(0);
+    }
+    let output = &mut output[..input.len()];
+    if encrypt {
+        CngAesEcbAlgo::bcrypt_encrypt(key.ecb_handle(), input, Some(output))
+    } else {
+        CngAesEcbAlgo::bcrypt_decrypt(key.ecb_handle(), input, Some(output))
+    }
+}
+
+impl<'a> EncryptStreamingOp<'a> for CngAesEcbAlgo {
+    type Key = AesKey;
+    type Context = CngAesEcbEncryptContext;
+
+    /// Initializes a streaming AES-ECB encryption context.
+    fn encrypt_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        Ok(CngAesEcbEncryptContext {
+            algo: self,
+            key,
+            block: AesBlock::default(),
+        })
+    }
+}
+
+/// Streaming context for AES-ECB encryption operations.
+///
+/// Created by [`CngAesEcbAlgo`]'s `encrypt_init`. Data is buffered into whole
+/// 16-byte blocks; [`EncryptOpContext::finish`] fails with
+/// [`CryptoError::AesInvalidInputSize`] if the total input is not block aligned.
+///
+/// # Thread Safety
+///
+/// This context is not thread-safe and should be used from a single thread.
+pub struct CngAesEcbEncryptContext {
+    algo: CngAesEcbAlgo,
+    key: AesKey,
+    block: AesBlock,
+}
+
+impl<'a> EncryptOpContext<'a> for CngAesEcbEncryptContext {
+    type Algo = CngAesEcbAlgo;
+
+    /// Processes a chunk of input, emitting all complete blocks except the last.
+    ///
+    /// Returns the number of bytes written, or the required size if `output` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// - `CryptoError::AesBufferTooSmall` - Output buffer is too small
+    /// - `CryptoError::AesEncryptError` - CNG operation fails
+    fn update(&mut self, input: &[u8], output: Option<&mut [u8]>) -> Result<usize, CryptoError> {
+        let Some(output) = output else {
+            return self.block.update_len(input);
+        };
+        if output.len() < self.block.update_len(input)? {
+            return Err(CryptoError::AesBufferTooSmall);
+        }
+        let mut offset = 0;
+        let key = &self.key;
+        self.block.update(input, |data| {
+            let count = ecb_blocks(key, true, data, &mut output[offset..])?;
+            offset += count;
+            Ok(count)
+        })
+    }
+
+    /// Processes the remaining buffered data.
+    ///
+    /// Returns the number of bytes written, or the maximum required size if
+    /// `output` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// - `CryptoError::AesInvalidInputSize` - Total input is not a multiple of 16 bytes
+    /// - `CryptoError::AesBufferTooSmall` - Output buffer is too small
+    /// - `CryptoError::AesEncryptError` - CNG operation fails
+    fn finish(&mut self, output: Option<&mut [u8]>) -> Result<usize, CryptoError> {
+        let Some(output) = output else {
+            return self.block.final_len();
+        };
+        let key = &self.key;
+        self.block
+            .r#final(|data| ecb_blocks(key, true, data, output))
+    }
+
+    /// Returns a reference to the underlying algorithm.
+    fn algo(&self) -> &Self::Algo {
+        &self.algo
+    }
+
+    /// Returns a mutable reference to the underlying algorithm.
+    fn algo_mut(&mut self) -> &mut Self::Algo {
+        &mut self.algo
+    }
+
+    /// Consumes the context and returns the underlying algorithm.
+    fn into_algo(self) -> Self::Algo {
+        self.algo
+    }
+}
+
+impl<'a> DecryptStreamingOp<'a> for CngAesEcbAlgo {
+    type Key = AesKey;
+    type Context = CngAesEcbDecryptContext;
+
+    /// Initializes a streaming AES-ECB decryption context.
+    fn decrypt_init(self, key: Self::Key) -> Result<Self::Context, CryptoError> {
+        Ok(CngAesEcbDecryptContext {
+            algo: self,
+            key,
+            block: AesBlock::default(),
+        })
+    }
+}
+
+/// Streaming context for AES-ECB decryption operations.
+///
+/// Created by [`CngAesEcbAlgo`]'s `decrypt_init`. Data is buffered into whole
+/// 16-byte blocks; [`DecryptOpContext::finish`] fails with
+/// [`CryptoError::AesInvalidInputSize`] if the total input is not block aligned.
+///
+/// # Thread Safety
+///
+/// This context is not thread-safe and should be used from a single thread.
+pub struct CngAesEcbDecryptContext {
+    algo: CngAesEcbAlgo,
+    key: AesKey,
+    block: AesBlock,
+}
+
+impl<'a> DecryptOpContext<'a> for CngAesEcbDecryptContext {
+    type Algo = CngAesEcbAlgo;
+
+    /// Processes a chunk of input, emitting all complete blocks except the last.
+    ///
+    /// Returns the number of bytes written, or the required size if `output` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// - `CryptoError::AesBufferTooSmall` - Output buffer is too small
+    /// - `CryptoError::AesDecryptError` - CNG operation fails
+    fn update(&mut self, input: &[u8], output: Option<&mut [u8]>) -> Result<usize, CryptoError> {
+        let Some(output) = output else {
+            return self.block.update_len(input);
+        };
+        if output.len() < self.block.update_len(input)? {
+            return Err(CryptoError::AesBufferTooSmall);
+        }
+        let mut offset = 0;
+        let key = &self.key;
+        self.block.update(input, |data| {
+            let count = ecb_blocks(key, false, data, &mut output[offset..])?;
+            offset += count;
+            Ok(count)
+        })
+    }
+
+    /// Processes the remaining buffered data.
+    ///
+    /// Returns the number of bytes written, or the maximum required size if
+    /// `output` is `None`.
+    ///
+    /// # Errors
+    ///
+    /// - `CryptoError::AesInvalidInputSize` - Total input is not a multiple of 16 bytes
+    /// - `CryptoError::AesBufferTooSmall` - Output buffer is too small
+    /// - `CryptoError::AesDecryptError` - CNG operation fails
+    fn finish(&mut self, output: Option<&mut [u8]>) -> Result<usize, CryptoError> {
+        let Some(output) = output else {
+            return self.block.final_len();
+        };
+        let key = &self.key;
+        self.block
+            .r#final(|data| ecb_blocks(key, false, data, output))
+    }
+
+    /// Returns a reference to the underlying algorithm.
+    fn algo(&self) -> &Self::Algo {
+        &self.algo
+    }
+
+    /// Returns a mutable reference to the underlying algorithm.
+    fn algo_mut(&mut self) -> &mut Self::Algo {
+        &mut self.algo
+    }
+
+    /// Consumes the context and returns the underlying algorithm.
+    fn into_algo(self) -> Self::Algo {
+        self.algo
+    }
+}

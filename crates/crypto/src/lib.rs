@@ -290,6 +290,10 @@ pub enum CryptoError {
     #[error("ML-DSA context too long")]
     MlDsaInvalidContext,
 
+    /// ML-DSA external `μ` not [`MLDSA_MU_LEN`] bytes long.
+    #[error("ML-DSA mu has the wrong length")]
+    MlDsaInvalidMu,
+
     /// ML-DSA key import failed.
     #[error("ML-DSA key import error")]
     MlDsaKeyImportError,

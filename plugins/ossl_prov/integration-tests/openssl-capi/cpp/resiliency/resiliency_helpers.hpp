@@ -69,8 +69,7 @@ struct hsm_str
     uint32_t len;
 };
 
-/// Matches the C layout of tsra_part_info { tsra_str path; tsra_api_rev min; tsra_api_rev
-/// max; }
+/// Matches the C layout of tsra_part_info.
 struct hsm_part_info
 {
     hsm_str path;

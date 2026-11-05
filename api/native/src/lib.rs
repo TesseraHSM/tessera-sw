@@ -57,6 +57,15 @@ use tsra_api as api;
 use utils::*;
 use zerocopy::*;
 
+/// Native C boolean represented as an 8-bit unsigned integer.
+pub type TsraBool = u8;
+
+/// Native C boolean false value.
+pub const TSRA_BOOL_FALSE: TsraBool = 0;
+
+/// Native C boolean true value.
+pub const TSRA_BOOL_TRUE: TsraBool = 1;
+
 /// Handle type for referencing HSM objects across the FFI boundary.
 ///
 /// A 32-bit unsigned integer used as an opaque handle to reference HSM objects

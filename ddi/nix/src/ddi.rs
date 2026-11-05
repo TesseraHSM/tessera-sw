@@ -62,6 +62,22 @@ ioctl_readwrite!(
     TsraCpGetDeviceInfoIoctlOutData
 );
 
+/// Device node name prefixes, in enumeration order: TSRA devices, then azihsm devices.
+const DEV_NAME_PREFIXES: [&str; 2] = ["tsra", "azihsm"];
+
+/// Paths of the device nodes in `dev_dir` whose names start with one of
+/// [`DEV_NAME_PREFIXES`], grouped by prefix in that order and sorted within
+/// each group. Entries that cannot be read are skipped.
+fn dev_paths(dev_dir: &str) -> Vec<String> {
+    let dev_dir = glob::Pattern::escape(dev_dir);
+    DEV_NAME_PREFIXES
+        .iter()
+        .filter_map(|prefix| glob(&format!("{dev_dir}/{prefix}*")).ok())
+        .flat_map(|paths| paths.flatten())
+        .filter_map(|path| path.to_str().map(String::from))
+        .collect()
+}
+
 ///
 /// query_device_info
 /// Returns a DevInfo structure that should have
@@ -126,24 +142,21 @@ impl Ddi for DdiNix {
 
     /// Returns the HSM device information list
     ///
+    /// Lists `/dev/tsra*` devices followed by `/dev/azihsm*` devices.
+    ///
     /// # Returns
     /// * `Vec<DevInfo>` - HSM device information list
     fn dev_info_list(&self) -> Vec<DevInfo> {
         let mut devs = Vec::new();
 
-        if let Ok(devices) = glob("/dev/tsra*") {
-            for device in devices.flatten() {
-                if let Some(path) = device.to_str() {
-                    let path = String::from(path);
-                    let dev_info = query_device_info(path.as_str());
-                    match dev_info {
-                        Ok(v) => devs.push(v),
-                        // If querying a specific device's info fails, show a
-                        // warning, but do not return an error. The device info
-                        // will not be added to the returned vector (`devs`)
-                        Err(e) => tracing::warn!("Device Info error: {:?}", e),
-                    }
-                }
+        for path in dev_paths("/dev") {
+            let dev_info = query_device_info(path.as_str());
+            match dev_info {
+                Ok(v) => devs.push(v),
+                // If querying a specific device's info fails, show a
+                // warning, but do not return an error. The device info
+                // will not be added to the returned vector (`devs`)
+                Err(e) => tracing::warn!("Device Info error: {:?}", e),
             }
         }
 
@@ -169,5 +182,31 @@ impl Ddi for DdiNix {
     /// * `DdiError` - Error encountered while opening the device
     fn open_dev(&self, path: &str) -> DdiResult<Self::Dev> {
         DdiNixDev::open(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn dev_paths_lists_tsra_then_azihsm_devices() {
+        let dir =
+            std::env::temp_dir().join(format!("tsra_ddi_nix_dev_paths_{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        for name in ["azihsm0", "tsra1", "tsra0", "other0"] {
+            fs::File::create(dir.join(name)).expect("create device node stand-in");
+        }
+
+        let paths = dev_paths(dir.to_str().expect("UTF-8 temp dir"));
+        fs::remove_dir_all(&dir).expect("remove temp dir");
+
+        let expected: Vec<String> = ["tsra0", "tsra1", "azihsm0"]
+            .iter()
+            .map(|name| dir.join(name).to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(paths, expected);
     }
 }

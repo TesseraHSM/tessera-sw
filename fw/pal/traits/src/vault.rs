@@ -80,6 +80,7 @@ use super::*;
 /// | 55–57 | ML-KEM seed keys | `MlKem512Seed` .. `MlKem1024Seed` |
 /// | 58–60 | ML-KEM private keys | `MlKem512Private` .. `MlKem1024Private` |
 /// | 61–63 | ML-KEM public keys | `MlKem512Public` .. `MlKem1024Public` |
+/// | 64 | AES-256-XTS key (`K1 ‖ K2`) | `AesXts512` |
 #[repr(u8)]
 #[open_enum]
 #[derive(Clone, Copy, Debug)]
@@ -148,9 +149,9 @@ pub enum HsmVaultKeyKind {
     /// In-flight TBOR session-handshake (Pending) state blob.
     ///
     /// Holds the opaque Pending blob (`exported ‖ pk_init ‖ pk_resp ‖
-    /// session_type ‖ suite_id`, up to
+    /// auth_binding ‖ session_type ‖ suite_id`, up to
     /// [`SESSION_PENDING_BLOB_MAX`](crate::SESSION_PENDING_BLOB_MAX) =
-    /// 256 B) produced by the TBOR `OpenSessionInit` phase and consumed
+    /// 320 B) produced by the TBOR `OpenSessionInit` phase and consumed
     /// by `OpenSessionFinish`.
     ///
     /// Written by
@@ -166,10 +167,10 @@ pub enum HsmVaultKeyKind {
     /// and CU).
     ///
     /// Length-discriminated by session type:
-    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)]`
-    ///   = 72 B.
+    /// * **PlainText (CU):** `[api_rev(8) ‖ param_key(32) ‖ masking_key(32)
+    ///   ‖ auth_binding(68)]` = 140 B.
     /// * **Authenticated (CO):** the above ‖ `mac_tx(48) ‖ mac_rx(48)`
-    ///   = 168 B.
+    ///   = 236 B.
     ///
     /// `masking_key` is the 32 B AES-256-GCM
     /// [`SESSION_MASKING_KEY_LEN`](crate::SESSION_MASKING_KEY_LEN) key used
@@ -227,9 +228,10 @@ pub enum HsmVaultKeyKind {
     /// **not** stored on-device: it is returned to the caller masked under
     /// the requested scope's masking key, and this kind is recorded only
     /// as the masked blob's `key_kind` metadata.  Tagged with the caller's
-    /// requested [`HsmKeyScope`] (currently `Ephemeral` or `Local`;
-    /// `SecurityDomain` is not yet supported) via its attribute `scope`
-    /// field.  Represented as the 48-byte raw private scalar, mirroring
+    /// requested [`HsmKeyScope`] (`Ephemeral`, `Local`, or
+    /// `SecurityDomain`) via its attribute `scope` field. SecurityDomain
+    /// requires an already-provisioned SD masking key. Represented as the
+    /// 48-byte raw private scalar, mirroring
     /// [`PartitionTrustAnchor`](Self::PartitionTrustAnchor).
     SdSealing = 41,
 
@@ -315,6 +317,9 @@ pub enum HsmVaultKeyKind {
     MlKem512Public = 61,
     MlKem768Public = 62,
     MlKem1024Public = 63,
+
+    // AES-256-XTS key, `K1 || K2` (TBOR; distinct from the MBOR bulk kind)
+    AesXts512 = 64,
 }
 
 /// Key scope: the lifecycle / visibility domain a vault key belongs
@@ -500,7 +505,7 @@ pub struct HsmVaultKeyAttrs {
 /// is invisible to other partitions.  Methods returning `&[u8]`
 /// borrow directly from vault storage; the borrow lives no longer
 /// than the `&self` borrow on the vault.
-pub trait HsmVault {
+pub trait HsmVault: HsmIoTypes {
     /// Stores a new key in the vault under a freshly assigned
     /// [`HsmKeyId`].
     ///
@@ -527,37 +532,17 @@ pub trait HsmVault {
     /// - `Err(HsmError::NotEnoughSpace)` — vault is full.
     /// - `Err(HsmError::InvalidArg)` — `key.len()` does not match
     ///   `kind`, or `attrs` are inconsistent.
+    /// - `Err(HsmError::InvalidKeyType)` — `kind` is a bulk kind; bulk
+    ///   keys are created through
+    ///   [`HsmBulkCrypto::bulk_key_create`](crate::HsmBulkCrypto::bulk_key_create).
     async fn vault_key_create(
         &self,
-        io: &impl HsmIo,
-        key: &DmaBuf,
+        io: &Self::Io,
+        key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         session_id: Option<HsmSessId>,
         attrs: HsmVaultKeyAttrs,
     ) -> HsmResult<HsmKeyId>;
-
-    /// The backend-assigned bulk key id for `key_id`, if it names a bulk key.
-    ///
-    /// Bulk (AES-GCM / XTS) keys are held by a platform bulk-crypto backend
-    /// rather than as material in the vault; the host addresses them by this
-    /// opaque id.  How the id is produced, and how the vault entry relates to
-    /// it, is entirely platform-defined — a platform folds any backend
-    /// registration into its [`vault_key_create`](Self::vault_key_create) /
-    /// [`vault_key_delete`](Self::vault_key_delete) overrides and exposes only
-    /// this lookup to the core.  Platforms without a bulk backend inherit the
-    /// default `Ok(None)`.
-    ///
-    /// # Parameters
-    /// - `io` — caller I/O context (partition scope).
-    /// - `key_id` — the vault handle returned by `vault_key_create`.
-    ///
-    /// # Returns
-    /// - `Ok(Some(bulk_key_id))` — `key_id` is a bulk key.
-    /// - `Ok(None)` — `key_id` is an ordinary vault key, or the platform has
-    ///   no bulk backend.
-    fn bulk_key_id(&self, _io: &impl HsmIo, _key_id: HsmKeyId) -> HsmResult<Option<u16>> {
-        Ok(None)
-    }
 
     /// Deletes a single key by ID.
     ///
@@ -584,7 +569,7 @@ pub trait HsmVault {
     ///   present (live or soft-deleted) key in the caller's partition.
     /// - `Err(HsmError::NotPermitted)` if the key's `destroyable` bit
     ///   is unset (e.g. internal device keys).
-    async fn vault_key_delete(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()>;
+    async fn vault_key_delete(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<()>;
 
     /// Marks a key as **disabled** without freeing its slot or zeroizing
     /// its material — the staging half of a reversible delete.
@@ -607,7 +592,7 @@ pub trait HsmVault {
     ///
     /// - [`HsmError::KeyNotFound`] — `key_id` does not refer to a live
     ///   (present, not-already-disabled) key in the caller's partition.
-    fn vault_key_disable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()>;
+    fn vault_key_disable(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<()>;
 
     /// Re-enables a [`vault_key_disable`](Self::vault_key_disable)d key,
     /// making it visible to lookups again.  The inverse of
@@ -617,7 +602,7 @@ pub trait HsmVault {
     ///
     /// - [`HsmError::KeyNotFound`] — `key_id` does not refer to a present
     ///   slot in the caller's partition.
-    fn vault_key_enable(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<()>;
+    fn vault_key_enable(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<()>;
 
     /// Deletes every key whose `session_id` matches `session_id`.
     ///
@@ -634,7 +619,7 @@ pub trait HsmVault {
     /// - `Ok(())` always; deleting zero keys is not an error.
     async fn vault_key_delete_by_session(
         &self,
-        io: &impl HsmIo,
+        io: &Self::Io,
         session_id: HsmSessId,
     ) -> HsmResult<()>;
 
@@ -648,7 +633,7 @@ pub trait HsmVault {
     /// # Returns
     ///
     /// - `Ok(())` always; an already-empty vault is not an error.
-    async fn vault_clear(&self, io: &impl HsmIo) -> HsmResult<()>;
+    async fn vault_clear(&self, io: &Self::Io) -> HsmResult<()>;
 
     /// Borrows the raw key material for `key_id`.
     ///
@@ -666,7 +651,7 @@ pub trait HsmVault {
     ///   [`vault_key_len`](Self::vault_key_len) for the key's `kind`.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<&DmaBuf>;
+    fn vault_key(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf>;
 
     /// Returns the canonical byte length of a key of the given kind.
     ///
@@ -686,7 +671,7 @@ pub trait HsmVault {
     ///   `kind`.
     /// - `Err(HsmError::InvalidArg)` — `kind` is `Free` or otherwise
     ///   not a real key type.
-    fn vault_key_len(&self, io: &impl HsmIo, kind: HsmVaultKeyKind) -> HsmResult<u16>;
+    fn vault_key_len(&self, io: &Self::Io, kind: HsmVaultKeyKind) -> HsmResult<u16>;
 
     /// Returns the [`HsmVaultKeyKind`] tag stored alongside the key.
     ///
@@ -700,7 +685,7 @@ pub trait HsmVault {
     /// - `Ok(kind)` — algorithm/size tag.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key_kind(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind>;
+    fn vault_key_kind(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyKind>;
 
     /// Returns the attribute bitfield stored alongside the key.
     ///
@@ -714,7 +699,7 @@ pub trait HsmVault {
     /// - `Ok(attrs)` — the [`HsmVaultKeyAttrs`] supplied at creation.
     /// - `Err(HsmError::InvalidArg)` — `key_id` does not refer to a
     ///   live key in the caller's partition.
-    fn vault_key_attrs(&self, io: &impl HsmIo, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs>;
+    fn vault_key_attrs(&self, io: &Self::Io, key_id: HsmKeyId) -> HsmResult<HsmVaultKeyAttrs>;
 }
 
 #[cfg(test)]

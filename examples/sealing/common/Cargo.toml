@@ -26,6 +26,7 @@ minicbor = { features = ["std"], workspace = true }
 
 [features]
 emu = ["tsra_sealing_api/emu"]
+sock = ["tsra_sealing_api/sock"]
 
 [lints]
 workspace = true

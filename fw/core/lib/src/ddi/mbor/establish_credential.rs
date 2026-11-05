@@ -72,10 +72,10 @@ const MK_VAULT_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 /// request).
 pub(crate) async fn establish_credential<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let mut body: DdiEstablishCredentialReq<'_> = decoder.decode_data()?;
 
     let _lock = pal.partition_lock(io).await?;
@@ -208,7 +208,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     //
     // (The MK vault entry was committed at creation; a future undo log
     // will handle rollback of a partially-applied EstablishCredential.)
-    // Compose `id ‖ pin` into a 32 B DmaBuf for the property setter.
+    // Compose `id ‖ pin` into a 32 B HsmDmaBuf for the property setter.
     // The CREDENTIAL prop setter enforces the write-once invariant and
     // the all-zero half rejection (the latter is also pre-checked
     // above to preserve the historical error ordering).
@@ -252,9 +252,9 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
 ///   `MK` mismatch.
 async fn reimport_unwrapping_key<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     mk_key_id: HsmKeyId,
-    masked: &mut DmaBuf,
+    masked: &mut HsmDmaBuf,
 ) -> HsmResult<Option<HsmKeyId>> {
     if masked.is_empty() {
         return Ok(None);
@@ -330,7 +330,7 @@ async fn reimport_unwrapping_key<P: HsmPal>(
 ///   needed for those.
 fn check_fail_fast<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     body: &DdiEstablishCredentialReq<'_>,
 ) -> HsmResult<()> {
     crate::part_state::part_verify_nonce(pal, io, body.encrypted_credential.nonce)?;
@@ -369,9 +369,9 @@ fn check_fail_fast<P: HsmPal>(
 /// and verify the supplied signature against it.
 async fn verify_pota_signature<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
-    signer_pub_key_raw: &DmaBuf,
-    signature_raw: &DmaBuf,
+    io: &P::Io,
+    signer_pub_key_raw: &HsmDmaBuf,
+    signature_raw: &HsmDmaBuf,
 ) -> HsmResult<()> {
     // `part_id_pub_key` returns the raw `x ‖ y` form (96 B) in natural
     // big-endian; prepend the SEC1 `0x04` uncompressed-point tag to build the
@@ -428,10 +428,10 @@ async fn verify_pota_signature<P: HsmPal>(
 /// `okm_out` must be exactly [`BK_LEN`] (80) bytes.
 async fn derive_credential_keys<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
-    host_eph_pub_key_raw: &DmaBuf,
-    nonce: &DmaBuf,
-    okm_out: &mut DmaBuf,
+    io: &P::Io,
+    host_eph_pub_key_raw: &HsmDmaBuf,
+    nonce: &HsmDmaBuf,
+    okm_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let est_cred_key_id = match crate::part_state::part_establish_cred_key_id(pal, io) {
         Ok(id) => id,
@@ -485,9 +485,9 @@ async fn derive_credential_keys<P: HsmPal>(
 /// `hmac_key` must be at least 48 bytes (the HMAC-SHA-384 key).
 async fn verify_credential_hmac<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     enc_cred: &DdiEncryptedEstablishCredential<'_>,
-    hmac_key: &DmaBuf,
+    hmac_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let id_len = enc_cred.encrypted_id.len();
     let pin_len = enc_cred.encrypted_pin.len();
@@ -530,9 +530,9 @@ async fn verify_credential_hmac<P: HsmPal>(
 /// request buffer — no scratch buffer for ciphertext is needed.
 async fn decrypt_credential<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     enc_cred: &mut DdiEncryptedEstablishCredential<'_>,
-    aes_key: &DmaBuf,
+    aes_key: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let iv_chain = pal.dma_alloc(io, enc_cred.iv.len())?;
 
@@ -540,7 +540,7 @@ async fn decrypt_credential<P: HsmPal>(
     // original ciphertext into `iv_chain` for use as the next IV.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_id,
         enc_cred.iv,
@@ -551,7 +551,7 @@ async fn decrypt_credential<P: HsmPal>(
     // Block 2: AES-CBC decrypt `enc_pin` in place with `iv_chain`.
     pal.aes_cbc_enc_dec_in_place(
         io,
-        AesOp::Decrypt,
+        HsmAesOp::Decrypt,
         aes_key,
         enc_cred.encrypted_pin,
         iv_chain,
@@ -568,7 +568,7 @@ async fn decrypt_credential<P: HsmPal>(
 /// AES-CBC-256 + HMAC-SHA-384 masking key).
 ///
 /// `unmask` decrypts the ciphertext slot inside the
-/// blob in place, so this helper takes the blob as `&mut DmaBuf` and
+/// blob in place, so this helper takes the blob as `&mut HsmDmaBuf` and
 /// the caller passes `body.masked_bk3` (whose decoded byte-slice
 /// field is mutable — see the MBOR mut-decoder refactor) directly.
 /// No staging allocation or input copy is needed.  After unmask, the
@@ -578,9 +578,9 @@ async fn decrypt_credential<P: HsmPal>(
 /// `bk3_out` must be exactly [`BK3_LEN`] (48) bytes.
 async fn unmask_partition_bk3<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
-    masked_bk3: &mut DmaBuf,
-    bk3_out: &mut DmaBuf,
+    io: &P::Io,
+    masked_bk3: &mut HsmDmaBuf,
+    bk3_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let bk_boot = pal.dma_alloc(io, BK_BOOT_LEN)?;
     crate::ddi::recover_bk_boot(pal, io, bk_boot).await?;
@@ -602,9 +602,9 @@ async fn unmask_partition_bk3<P: HsmPal>(
 /// `bk3_session_out` must be exactly [`BK3_LEN`] (48) bytes.
 async fn derive_bk3_session<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
-    bk3: &DmaBuf,
-    bk3_session_out: &mut DmaBuf,
+    io: &P::Io,
+    bk3: &HsmDmaBuf,
+    bk3_session_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let session_label = pal.dma_alloc(io, SESSION_BK3_LABEL.len())?;
     session_label.copy_from_slice(SESSION_BK3_LABEL);
@@ -627,19 +627,19 @@ async fn derive_bk3_session<P: HsmPal>(
 /// `context = MFGR_SEED[svn] ‖ DEV_OWNER_SEED[bks2_id]` (read from
 /// the PAL via [`derive_masking_key`]).
 ///
-/// [`derive_masking_key`] takes `label: &[u8]` (not `&DmaBuf`), so
+/// [`derive_masking_key`] takes `label: &[u8]` (not `&HsmDmaBuf`), so
 /// the label is built on the stack — no DMA alloc needed for it.
 ///
 /// `signer_pub_key` must be exactly 96 bytes (P-384 raw `x ‖ y`).
 /// `bk_out` must be exactly [`BK_LEN`] (80) bytes.
 async fn derive_partition_bk<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
-    bk3: &DmaBuf,
-    signer_pub_key: &DmaBuf,
+    io: &P::Io,
+    bk3: &HsmDmaBuf,
+    signer_pub_key: &HsmDmaBuf,
     svn: u64,
     bks2_id: u16,
-    bk_out: &mut DmaBuf,
+    bk_out: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let mut bk_label = [0u8; PARTITION_BK_LABEL.len() + 96];
     bk_label[..PARTITION_BK_LABEL.len()].copy_from_slice(PARTITION_BK_LABEL);
@@ -667,9 +667,9 @@ async fn derive_partition_bk<P: HsmPal>(
 /// immediately (rollback of a later failure is future undo-log work).
 async fn provision_mk<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
-    bmk: &mut DmaBuf,
-    bk: &DmaBuf,
+    io: &P::Io,
+    bmk: &mut HsmDmaBuf,
+    bk: &HsmDmaBuf,
 ) -> HsmResult<HsmKeyId> {
     if bmk.is_empty() {
         let mk_buf = pal.dma_alloc(io, BK_LEN)?;
@@ -709,13 +709,13 @@ async fn provision_mk<P: HsmPal>(
 /// - `key_length = BK_LEN` — plaintext length before AES-CBC pad.
 async fn encode_bmk_response<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     hdr: &DdiReqHdr,
-    bk: &DmaBuf,
+    bk: &HsmDmaBuf,
     mk_key_id: HsmKeyId,
     svn: u64,
     bks2_id: u16,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let bmk_metadata = DdiMaskedKeyMetadata {
         svn,
         key_type: DdiKeyType::AesCbc256Hmac384,
@@ -727,7 +727,7 @@ async fn encode_bmk_response<'p, P: HsmPal>(
     };
 
     // Borrow MK from the vault so `mask` reads it through a
-    // `&DmaBuf` view rather than retaining the original input buffer.
+    // `&HsmDmaBuf` view rather than retaining the original input buffer.
     let mk_dma = pal.vault_key(io, mk_key_id)?;
 
     // Size-query the BMK envelope length (no crypto performed).
@@ -742,10 +742,6 @@ async fn encode_bmk_response<'p, P: HsmPal>(
     })?;
     let frame = DdiEstablishCredentialResp::from_layout(resp, &layout);
 
-    // `mask` requires `out[..total_len]` to be zero on entry; the
-    // MBOR `reserve_offset` path advances the cursor without clearing
-    // the reserved data region, so explicitly zero it here.
-    frame.bmk.fill(0);
     mask(pal, io, bk, mk_dma, &bmk_metadata, Some(frame.bmk)).await?;
     Ok(resp)
 }

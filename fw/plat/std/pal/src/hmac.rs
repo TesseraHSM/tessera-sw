@@ -11,7 +11,7 @@
 //! caller-provided key bytes are imported into an [`HmacKey`] handle
 //! at [`hmac_begin`] time and the resulting streaming context
 //! ([`HmacAlgoSignContext`]) is held inside [`StdHmacCtx`].  Each
-//! [`hmac_continue`] call feeds its `DmaBuf` slice straight into the
+//! [`hmac_continue`] call feeds its `HsmDmaBuf` slice straight into the
 //! HMAC state machine via [`SignStreamingOpContext::update`]; the
 //! std PAL never accumulates message bytes in a heap buffer.  This
 //! preserves the "must not panic on any input" trust-boundary
@@ -20,10 +20,10 @@
 //!
 //! ## Sensitive-byte handling
 //!
-//! - The caller's [`DmaBuf`] key bytes are not copied into a PAL-
+//! - The caller's [`HsmDmaBuf`] key bytes are not copied into a PAL-
 //!   side scratch buffer.  [`HmacKey::from_bytes`] reads the slice
 //!   and copies into its own backend-owned storage; the caller's
-//!   `DmaBuf` remains under the IO scope's zero-on-free allocator
+//!   `HsmDmaBuf` remains under the IO scope's zero-on-free allocator
 //!   contract and is wiped on release.
 //! - The streaming HMAC state owned by [`HmacAlgoSignContext`] is a
 //!   thin wrapper around an OpenSSL `EVP_MD_CTX` (Linux) or a CNG
@@ -32,12 +32,11 @@
 //!   retained inside [`StdHmacCtx`] itself.
 //! - The driver-level one-shot sign / verify paths still own a
 //!   short-lived `Vec` for cross-thread submission to the worker
-//!   pool; that buffer is bounded by the single-call DmaBuf size and
+//!   pool; that buffer is bounded by the single-call HsmDmaBuf size and
 //!   freed before the next operation can be dispatched.
 
 use core::marker::PhantomData;
 
-use tsra_crypto::HashAlgo;
 use tsra_crypto::HmacAlgo;
 use tsra_crypto::HmacAlgoSignContext;
 use tsra_crypto::HmacKey;
@@ -46,19 +45,11 @@ use tsra_crypto::SignStreamingOpContext;
 use tsra_crypto::Signer;
 
 use super::*;
+use crate::hash::to_hash_algo;
 
 /// Largest HMAC tag we may need to materialise locally for verify
 /// (== SHA-512 digest length).
 const MAX_HMAC_TAG_LEN: usize = 64;
-
-fn to_hash_algo(algo: HsmHashAlgo) -> HashAlgo {
-    match algo {
-        HsmHashAlgo::Sha1 => HashAlgo::sha1(),
-        HsmHashAlgo::Sha256 => HashAlgo::sha256(),
-        HsmHashAlgo::Sha384 => HashAlgo::sha384(),
-        HsmHashAlgo::Sha512 => HashAlgo::sha512(),
-    }
-}
 
 /// Constant-time byte slice comparison.
 ///
@@ -102,52 +93,52 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_gen_key(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _algo: HsmHashAlgo,
-        key: &mut DmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.hmac.gen_key(key).await
     }
 
     async fn hmac_sign(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        self.hmac.sign(to_hash_algo(algo), key, data, tag).await
+        self.hmac.sign(to_hash_algo(algo)?, key, data, tag).await
     }
 
     async fn hmac_verify(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        data: &DmaBuf,
-        tag: &DmaBuf,
+        key: &HsmDmaBuf,
+        data: &HsmDmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool> {
-        self.hmac.verify(to_hash_algo(algo), key, data, tag).await
+        self.hmac.verify(to_hash_algo(algo)?, key, data, tag).await
     }
 
     async fn hmac_begin<'a>(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
+        key: &HsmDmaBuf,
         _alloc: &'a impl HsmScopedAlloc,
     ) -> HsmResult<Self::HmacCtx<'a>>
     where
         Self: 'a,
     {
         // `HmacKey::from_bytes` copies the bytes into its own
-        // backend-owned storage; the caller's `DmaBuf` keeps owning
+        // backend-owned storage; the caller's `HsmDmaBuf` keeps owning
         // the original buffer and is wiped on release by the IO
         // scope's zero-on-free allocator contract.
         let hmac_key = HmacKey::from_bytes(key).map_err(|_| HsmError::HmacError)?;
 
-        let hmac_algo = HmacAlgo::new(to_hash_algo(algo));
+        let hmac_algo = HmacAlgo::new(to_hash_algo(algo)?);
         let sign_ctx: HmacAlgoSignContext<'static> =
             Signer::sign_init::<'static, HmacAlgo>(hmac_algo, hmac_key)
                 .map_err(|_| HsmError::HmacError)?;
@@ -161,39 +152,39 @@ impl HsmHmac for StdHsmPal {
 
     async fn hmac_continue(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         ctx: &mut Self::HmacCtx<'_>,
-        data: &DmaBuf,
+        data: &HsmDmaBuf,
     ) -> HsmResult<()> {
         ctx.sign_ctx.update(data).map_err(|_| HsmError::HmacError)
     }
 
     async fn hmac_finish(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         mut ctx: Self::HmacCtx<'_>,
-        tag: &mut DmaBuf,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         finish_into_tag(&mut ctx, tag)
     }
 
     async fn hmac_finish_into(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         mut ctx: Self::HmacCtx<'_>,
-        dest: &mut DmaBuf,
+        dest: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         finish_into_tag(&mut ctx, dest)
     }
 
     async fn hmac_finish_verify(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         mut ctx: Self::HmacCtx<'_>,
-        tag: &DmaBuf,
+        tag: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         let mut computed = [0u8; MAX_HMAC_TAG_LEN];
-        let digest_len = to_hash_algo(ctx.algo).size();
+        let digest_len = to_hash_algo(ctx.algo)?.size();
         if digest_len > computed.len() {
             return Err(HsmError::HmacError);
         }
@@ -214,8 +205,8 @@ impl HsmHmac for StdHsmPal {
 
 /// Shared helper for the two non-verify finishers.  Writes the HMAC
 /// tag into `out[..digest_len]`.
-fn finish_into_tag(ctx: &mut StdHmacCtx<'_>, out: &mut DmaBuf) -> HsmResult<()> {
-    let digest_len = to_hash_algo(ctx.algo).size();
+fn finish_into_tag(ctx: &mut StdHmacCtx<'_>, out: &mut HsmDmaBuf) -> HsmResult<()> {
+    let digest_len = to_hash_algo(ctx.algo)?.size();
     if out.len() < digest_len {
         return Err(HsmError::HmacError);
     }

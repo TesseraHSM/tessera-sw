@@ -172,9 +172,14 @@ fn test_close_session_multiple() {
             );
             assert!(resp.is_err(), "resp {:?}", resp);
 
+            let expected = if cfg!(feature = "sock") {
+                DdiStatus::FileHandleSessionIdDoesNotMatch
+            } else {
+                DdiStatus::FileHandleNoExistingSession
+            };
             assert!(matches!(
                 resp.unwrap_err(),
-                DdiError::DdiStatus(DdiStatus::FileHandleNoExistingSession)
+                DdiError::DdiStatus(status) if status == expected
             ));
         },
     );

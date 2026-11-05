@@ -34,13 +34,13 @@ use super::*;
 /// # Usage
 ///
 /// ```text
-/// async fn handle_ddi<P: HsmPal>(pal: &P, io: &impl HsmIo) {
+/// async fn handle_ddi<P: HsmPal>(pal: &P, io: &P::Io) {
 ///     let _lock = pal.partition_lock(io).await;
 ///     // Exclusive access to this partition until _lock drops.
 ///     let _sess_id = pal.session_create(io, api_rev, mk, None)?;
 /// }
 /// ```
-pub trait HsmPartitionLock {
+pub trait HsmPartitionLock: HsmIoTypes {
     /// RAII guard returned by [`partition_lock`](Self::partition_lock).
     ///
     /// Holds the per-partition lock until dropped.  The guard does not
@@ -57,6 +57,6 @@ pub trait HsmPartitionLock {
     ///
     /// # Errors
     ///
-    /// Returns [`HsmError::InvalidArg`] if `io.pid()` is out of range.
-    async fn partition_lock(&self, io: &impl HsmIo) -> HsmResult<Self::PartitionGuard<'_>>;
+    /// Returns [`HsmError::InvalidArg`] if the IO's bound partition is out of range.
+    async fn partition_lock(&self, io: &Self::Io) -> HsmResult<Self::PartitionGuard<'_>>;
 }

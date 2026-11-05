@@ -6,6 +6,34 @@
 use super::common::*;
 
 #[test]
+fn known_toc_footprint_writes_payload_at_final_offset() -> TestResult {
+    let mut buffer = [0xA5; 23];
+    let payload = b"payload";
+    let payload_address = buffer[16..].as_ptr();
+    let bytes = RequestEncoder::new(&mut buffer, PROTOCOL_VERSION, OPCODE)
+        .with_toc_slots(2)?
+        .uint8(7)?
+        .buffer(payload)?
+        .finish()?;
+    let request = RequestView::parse(bytes)?;
+    assert_eq!(request.data_section(), payload);
+    assert_eq!(request.data_section().as_ptr(), payload_address);
+    assert_eq!(request.len(), 23);
+    Ok(())
+}
+
+#[test]
+fn known_toc_footprint_cannot_be_overwritten_by_extra_entries() -> TestResult {
+    let mut buffer = [0xA5; 32];
+    let result = RequestEncoder::new(&mut buffer, PROTOCOL_VERSION, OPCODE)
+        .with_toc_slots(1)?
+        .uint8(7)?
+        .buffer(b"payload");
+    assert!(matches!(result, Err(EncodeError::TooManyTocEntries)));
+    Ok(())
+}
+
+#[test]
 fn request_round_trip_all_entry_types() -> TestResult {
     let mut buf = [0u8; 1024];
     let payload = b"hello world";

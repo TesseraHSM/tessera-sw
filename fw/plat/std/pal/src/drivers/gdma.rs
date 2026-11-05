@@ -69,6 +69,26 @@ impl StdGdma {
         core::ptr::copy_nonoverlapping(addr_to_ptr(src), dst.as_mut_ptr(), len);
     }
 
+    /// Copy an HSM buffer to host memory described by a raw 16-byte NVMe
+    /// SGL Data Block descriptor (the write-side twin of
+    /// [`Self::copy_mem_from_host_raw`]); copies `src.len()` bytes.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the descriptor address points to a valid,
+    /// writable buffer of at least `src.len()` bytes (validate with
+    /// [`validate_raw_src`] first).
+    pub unsafe fn copy_mem_to_host_raw(&self, src: &[u8], desc: &[u8; 16]) {
+        if src.is_empty() {
+            return;
+        }
+        let dst = HsmDmaAddr {
+            lo: u32::from_le_bytes([desc[0], desc[1], desc[2], desc[3]]),
+            hi: u32::from_le_bytes([desc[4], desc[5], desc[6], desc[7]]),
+        };
+        core::ptr::copy_nonoverlapping(src.as_ptr(), addr_to_ptr(dst), src.len());
+    }
+
     /// Copy from an HSM buffer to host memory.
     ///
     /// # Safety

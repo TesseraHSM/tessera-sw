@@ -24,10 +24,10 @@ use super::*;
 /// 3. **Response** — Encodes header + frame, fills blob in-place.
 pub(crate) fn get_sealed_bk3<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetSealedBk3Req = decoder.decode_data()?;
 
     let sealed_len = match crate::part_state::part_sealed_bk3(pal, io) {

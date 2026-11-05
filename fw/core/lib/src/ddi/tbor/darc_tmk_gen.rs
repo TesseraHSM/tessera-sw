@@ -22,7 +22,7 @@
 //!    SDMK the output is masked under is provisioned by SD setup).
 //! 2. Draw a fresh 32-byte TMK from the RNG.
 //! 3. Mask the TMK (AEAD-GCM-256) under the SDMK and return the masked
-//!    envelope.  The raw TMK is zeroized on every exit path.
+//!    envelope. IO teardown scrubs the raw TMK.
 //!
 //! The command **persists nothing** (no vault write, no lifecycle
 //! advance), so it records no rollback on the undo log.  This command is
@@ -32,16 +32,16 @@ use tsra_fw_ddi_tbor_types::TborDarcTmkGenReq;
 use tsra_fw_ddi_tbor_types::TborDarcTmkGenResp;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::PartState;
 
 use super::masking_key_id_for_scope;
 use super::sd_backup;
@@ -52,23 +52,22 @@ use crate::part_state;
 ///
 /// **Stateless**: mints a fresh TMK and returns it masked under the SDMK
 /// without writing the vault or advancing any lifecycle, so it records no
-/// rollback on the undo log.  The raw TMK is scrubbed on EVERY exit path
-/// — scope rewind does not clear DMA memory.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
-    req_buf: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
+/// rollback on the undo log. IO teardown scrubs the raw TMK.
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
     // Session/state gating + masking-key routing use only the shared
     // `decode` view; the resolved id is `Copy`, so it outlives the view.
     let sdmk_id: HsmKeyId = {
-        let req = TborDarcTmkGenReq::decode(req_buf)?;
+        let req = TborDarcTmkGenReq::decode(cmd_buf.request())?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
         // The SDMK the output is masked under is provisioned by SD setup,
         // which requires a finalized partition.
-        if part_state::part_state(pal, io)? != PartState::Initialized {
+        if part_state::part_state(pal, io)? != HsmPartState::Initialized {
             return Err(HsmError::InvalidArg);
         }
         if !part_state::part_is_sd_initialized(pal, io)? {
@@ -85,11 +84,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
         let (svn, owner) = sd_backup::platform_svn_owner(pal)?;
 
-        // Mint the fresh TMK, then mask it under the SDMK.  The raw TMK is
-        // secret material; scope rewind does not clear DMA memory, so it
-        // is scrubbed on EVERY exit path below.  Any fallible step that runs
-        // after the TMK is populated is captured into `mask_res` so the
-        // `?`-propagation happens only after `tmk.zeroize()`.
+        // Mint the fresh TMK, then mask it under the SDMK.
         let tmk = alloc.dma_alloc(TMK_LEN)?;
         let mask_res = async {
             pal.rng_fill_bytes(io, tmk)?;
@@ -99,21 +94,16 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         }
         .await;
 
-        tmk.zeroize();
         mask_res
     })
     .await?;
 
-    encode_response(pal, io, masked_tmk_out)
+    encode_response(cmd_buf, masked_tmk_out)
 }
 
 /// Encode the `DarcTmkGen` response around the masked TMK.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
-    masked_tmk: &DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+fn encode_response(cmd_buf: &mut HsmCmdBuf<'_>, masked_tmk: &HsmDmaBuf) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborDarcTmkGenResp::encode(buf, 0, false)?
             .masked_tmk(masked_tmk)?
             .finish();

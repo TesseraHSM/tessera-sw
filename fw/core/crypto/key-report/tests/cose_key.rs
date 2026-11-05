@@ -6,7 +6,7 @@
 //! These build reference EC2 `COSE_Key` maps with an inline [`minicbor`]
 //! encoder (independent of the crate's own builder) and exercise the
 //! public [`parse_ec2_cose_key`] API, asserting the curve and the
-//! zero-copy `&DmaBuf` coordinate sub-views, plus its no-panic rejection
+//! zero-copy `&HsmDmaBuf` coordinate sub-views, plus its no-panic rejection
 //! of malformed input across the trust boundary.
 
 #![allow(clippy::unwrap_used)]
@@ -14,21 +14,21 @@
 
 use minicbor::Encoder;
 use tsra_fw_core_crypto_key_report::parse_ec2_cose_key;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 
 const COSE_CRV_P256: i8 = 1;
 const COSE_CRV_P384: i8 = 2;
 const COSE_CRV_P521: i8 = 3;
 
-/// Brand a byte slice as a `DmaBuf` view for the pure decode path.
+/// Brand a byte slice as a `HsmDmaBuf` view for the pure decode path.
 ///
 /// # Safety
 /// Test-only: the backing slice is ordinary in-process memory, which is
 /// valid for the pure CBOR decode path (no real DMA is performed).
-fn dma(bytes: &[u8]) -> &DmaBuf {
-    // SAFETY: in-process test heap buffer; branding as a DmaBuf is sound.
-    unsafe { DmaBuf::from_raw(bytes) }
+fn dma(bytes: &[u8]) -> &HsmDmaBuf {
+    // SAFETY: in-process test heap buffer; branding as a HsmDmaBuf is sound.
+    unsafe { HsmDmaBuf::from_raw(bytes) }
 }
 
 /// Encode a canonical EC2 `COSE_Key` map `{ 1: 2, -1: crv, -2: x, -3: y }`.

@@ -14,32 +14,22 @@
 
 use core::ops::Deref;
 
-use tsra_crypto::HashAlgo;
-
 use super::*;
-
-fn to_hash_algo(algo: HsmHashAlgo) -> HashAlgo {
-    match algo {
-        HsmHashAlgo::Sha1 => HashAlgo::sha1(),
-        HsmHashAlgo::Sha256 => HashAlgo::sha256(),
-        HsmHashAlgo::Sha384 => HashAlgo::sha384(),
-        HsmHashAlgo::Sha512 => HashAlgo::sha512(),
-    }
-}
+use crate::hash::to_hash_algo;
 
 impl HsmKdf for StdHsmPal {
     async fn hkdf_extract(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        salt: Option<&DmaBuf>,
-        ikm: &DmaBuf,
-        prk: &mut DmaBuf,
+        salt: Option<&HsmDmaBuf>,
+        ikm: &HsmDmaBuf,
+        prk: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .hkdf(
                 ikm,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::HkdfMode::Extract,
                 salt.map(|s| s.deref()),
                 None,
@@ -50,16 +40,16 @@ impl HsmKdf for StdHsmPal {
 
     async fn hkdf_expand(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        prk: &DmaBuf,
-        info: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        prk: &HsmDmaBuf,
+        info: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .hkdf(
                 prk,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::HkdfMode::Expand,
                 None,
                 info.map(|s| s.deref()),
@@ -70,17 +60,17 @@ impl HsmKdf for StdHsmPal {
 
     async fn sp800_108_kdf(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        key: &DmaBuf,
-        label: Option<&DmaBuf>,
-        context: Option<&DmaBuf>,
-        output: &mut DmaBuf,
+        key: &HsmDmaBuf,
+        label: Option<&HsmDmaBuf>,
+        context: Option<&HsmDmaBuf>,
+        output: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .kbkdf(
                 key,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 label.map(|s| s.deref()),
                 context.map(|s| s.deref()),
                 output,
@@ -90,36 +80,36 @@ impl HsmKdf for StdHsmPal {
 
     async fn mgf1(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _algo: HsmHashAlgo,
-        _seed: &DmaBuf,
-        _mask: &mut DmaBuf,
+        _seed: &HsmDmaBuf,
+        _mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         todo!()
     }
 
     async fn mgf1_xor(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _algo: HsmHashAlgo,
-        _seed: &DmaBuf,
-        _mask: &mut DmaBuf,
+        _seed: &HsmDmaBuf,
+        _mask: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         todo!()
     }
 
     async fn x963_kdf(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        shared_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        shared_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .concat_kdf(
                 z,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::ConcatKdfMode::X963,
                 Some(shared_info.deref()),
                 key,
@@ -129,16 +119,16 @@ impl HsmKdf for StdHsmPal {
 
     async fn sp800_56a_kdf(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         algo: HsmHashAlgo,
-        z: &DmaBuf,
-        other_info: &DmaBuf,
-        key: &mut DmaBuf,
+        z: &HsmDmaBuf,
+        other_info: &HsmDmaBuf,
+        key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         self.kdf
             .concat_kdf(
                 z,
-                to_hash_algo(algo),
+                to_hash_algo(algo)?,
                 tsra_crypto::ConcatKdfMode::Sp800_56a,
                 Some(other_info.deref()),
                 key,

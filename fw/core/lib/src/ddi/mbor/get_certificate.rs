@@ -19,15 +19,21 @@ use super::*;
 /// Handle DdiGetCertificateCmd.
 pub(crate) async fn get_certificate<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiGetCertificateReq = decoder.decode_data()?;
 
     // Query cert size (no copy).
     let len = pal
-        .get_cert(io, io.pid(), body.slot_id, body.cert_id, None)
+        .get_cert(
+            io,
+            HsmCertSlot(body.slot_id),
+            HsmCertBank::Ecc,
+            body.cert_id,
+            None,
+        )
         .await?;
 
     // Reserve the response inside a closure (encoder borrow ends with the
@@ -45,8 +51,8 @@ pub(crate) async fn get_certificate<'p, P: HsmPal>(
 
     pal.get_cert(
         io,
-        io.pid(),
-        body.slot_id,
+        HsmCertSlot(body.slot_id),
+        HsmCertBank::Ecc,
         body.cert_id,
         Some(frame.certificate),
     )

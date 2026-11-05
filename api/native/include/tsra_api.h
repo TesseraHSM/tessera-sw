@@ -263,6 +263,22 @@ enum tsra_algo_id
      */
     TSRA_ALGO_ID_AES_GCM = 196615,
     /*
+     AES ECB Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_ECB = 196616,
+    /*
+     AES CFB (128-bit segment) Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_CFB = 196617,
+    /*
+     AES OFB Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_OFB = 196618,
+    /*
+     AES CTR Encrypt & Decrypt.
+     */
+    TSRA_ALGO_ID_AES_CTR = 196619,
+    /*
      SHA-1 Digest.
      */
     TSRA_ALGO_ID_SHA1 = 262145,
@@ -578,6 +594,10 @@ enum tsra_part_prop_id
      Raw ECC-P384 partition identity public key (`x ‖ y`, 96 bytes).
      */
     TSRA_PART_PROP_ID_PART_EX_PUB_KEY = 14,
+    /*
+     Live security-domain initialization state as tsra_bool; TSRA_BOOL_FALSE when unsupported.
+     */
+    TSRA_PART_PROP_ID_SD_INITIALIZED = 15,
 };
 #ifndef __cplusplus
 typedef uint32_t tsra_part_prop_id;
@@ -1574,12 +1594,57 @@ struct tsra_session_prop
 };
 
 /*
+ Native C boolean represented as an 8-bit unsigned integer.
+ */
+typedef uint8_t tsra_bool;
+
+/*
  AES CBC parameters.
  */
 struct tsra_algo_aes_cbc_params
 {
     /*
      IV
+     */
+    uint8_t iv[16];
+};
+
+/*
+ AES CFB (128-bit segment) parameters.
+
+ On return, `iv` holds the last full ciphertext block (unchanged if no full
+ block was produced).
+
+ Continuing a message by passing the returned `iv` to a later single-shot
+ call is only correct when every call except the last processes a multiple of
+ 16 bytes; otherwise keystream bytes are reused. To process a message in
+ arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+ / `_update` / `_finish`) instead.
+ */
+struct tsra_algo_aes_cfb_params
+{
+    /*
+     IV
+     */
+    uint8_t iv[16];
+};
+
+/*
+ AES CTR parameters.
+
+ On return, `iv` holds the counter advanced by the number of blocks processed
+ (a trailing partial block counts as one).
+
+ Continuing a message by passing the returned `iv` to a later single-shot
+ call is only correct when every call except the last processes a multiple of
+ 16 bytes; otherwise keystream bytes are skipped. To process a message in
+ arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+ / `_update` / `_finish`) instead.
+ */
+struct tsra_algo_aes_ctr_params
+{
+    /*
+     Initial 128-bit counter block (big-endian, wraps modulo 2^128)
      */
     uint8_t iv[16];
 };
@@ -1604,6 +1669,25 @@ struct tsra_algo_aes_gcm_params
 };
 
 /*
+ AES OFB parameters.
+
+ On return, `iv` holds the last keystream block.
+
+ Continuing a message by passing the returned `iv` to a later single-shot
+ call is only correct when every call except the last processes a multiple of
+ 16 bytes; otherwise keystream bytes are skipped. To process a message in
+ arbitrary-length chunks, use a single streaming context (`tsra_crypt_*_init`
+ / `_update` / `_finish`) instead.
+ */
+struct tsra_algo_aes_ofb_params
+{
+    /*
+     IV
+     */
+    uint8_t iv[16];
+};
+
+/*
  AES-XTS algorithm parameters.
 
  This structure defines the parameters required for AES-XTS encryption/decryption,
@@ -1614,7 +1698,11 @@ struct tsra_algo_aes_xts_params
     /*
      Sector number (tweak value) in little-endian byte format.
      This is a 128-bit value that provides additional security by
-     varying the encryption for each data unit.
+     varying the encryption for each data unit. On sessions opened with
+     `tsra_sess_ex_open` the tweak is 64-bit: bytes 8..16 must be zero for
+     the initial tweak and for the tweak advanced past the last processed
+     data unit, otherwise the operation fails with
+     `TSRA_STATUS_INVALID_TWEAK`.
      */
     uint8_t sector_num[16];
     /*
@@ -1736,6 +1824,16 @@ struct tsra_algo_rsa_pkcs_pss_params
      */
     uint32_t salt_len;
 };
+
+/*
+ Native C boolean false value.
+ */
+#define TSRA_BOOL_FALSE 0
+
+/*
+ Native C boolean true value.
+ */
+#define TSRA_BOOL_TRUE 1
 
 #ifdef __cplusplus
 extern "C"
@@ -2452,7 +2550,12 @@ tsra_status tsra_key_unwrap_pair(
 
  This function unmasks a previously masked symmetric key. The masked key contains
  the key material and properties, so no external properties or unwrapping keys
- are needed. The key is imported into the HSM within the provided session.
+ are needed. On a legacy session, the device authenticates and imports the key.
+
+ On an extended session, the device authenticates the blob via TBOR VerifyKey
+ and an unpinned host handle is returned; no device-resident key is created.
+ A modified blob or a session-scoped blob from another session fails with
+ TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED.
 
  @param[in] sess_handle Handle to the HSM session
  @param[in] key_kind The kind of key to unmask (e.g., AES)
@@ -2477,7 +2580,9 @@ tsra_status tsra_key_unmask(
 
  This function unmasks a previously masked key pair. The masked key contains
  the key material and properties, so no external properties or unwrapping keys
- are needed. The key pair is imported into the HSM within the provided session.
+ are needed. On a legacy session, the device authenticates and imports the pair.
+ On an extended session, the device authenticates the blob and returns its public
+ key via TBOR GetPublicKey; no device-resident key is created.
 
  @param[in] sess_handle Handle to the HSM session
  @param[in] key_kind The kind of key pair to unmask (RSA or ECC)

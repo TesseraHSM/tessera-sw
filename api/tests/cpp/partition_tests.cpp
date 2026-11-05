@@ -562,6 +562,42 @@ TEST(tsra_part, get_prop_api_rev_range)
     });
 }
 
+TEST(tsra_part, get_prop_sd_initialized)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+        ASSERT_EQ(tsra_part_reset(part.get()), TSRA_STATUS_SUCCESS);
+
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_SD_INITIALIZED, nullptr, 0 };
+        ASSERT_EQ(tsra_part_get_prop(part.get(), &prop), TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(prop.len, sizeof(tsra_bool));
+
+        tsra_bool initialized = TSRA_BOOL_TRUE;
+        prop.val = &initialized;
+        prop.len = sizeof(initialized) - 1;
+        ASSERT_EQ(tsra_part_get_prop(part.get(), &prop), TSRA_STATUS_BUFFER_TOO_SMALL);
+        ASSERT_EQ(prop.len, sizeof(initialized));
+        ASSERT_EQ(initialized, TSRA_BOOL_TRUE);
+
+        ASSERT_EQ(tsra_part_get_prop(part.get(), &prop), TSRA_STATUS_SUCCESS);
+        ASSERT_EQ(prop.len, sizeof(initialized));
+        ASSERT_EQ(initialized, TSRA_BOOL_FALSE);
+    });
+}
+
+TEST(tsra_part, get_prop_sd_initialized_null_value)
+{
+    auto part_list = PartitionListHandle();
+
+    part_list.for_each_part([](std::vector<tsra_char> &path) {
+        auto part = PartitionHandle(path);
+        tsra_part_prop prop = { TSRA_PART_PROP_ID_SD_INITIALIZED, nullptr, sizeof(tsra_bool) };
+        ASSERT_EQ(tsra_part_get_prop(part.get(), &prop), TSRA_STATUS_INVALID_ARGUMENT);
+    });
+}
+
 TEST(tsra_part, get_prop_manufacturer_cert)
 {
     auto part_list = PartitionListHandle();

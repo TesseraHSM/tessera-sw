@@ -1,0 +1,23 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+[package]
+edition = "2021"
+name = "tsra_api_sock_get_api_rev"
+version = "0.1.0"
+
+[[bin]]
+name = "tsra_api_sock_get_api_rev"
+path = "src/main.rs"
+required-features = ["sock"]
+
+[features]
+sock = ["dep:tsra_api"]
+
+[dependencies]
+tsra_api = { features = ["sock"], optional = true, workspace = true }
+
+[dev-dependencies]
+parking_lot.workspace = true
+
+[lints]
+workspace = true

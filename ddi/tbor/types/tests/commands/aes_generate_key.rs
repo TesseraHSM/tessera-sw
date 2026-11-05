@@ -11,7 +11,7 @@
 //!
 //! Coverage:
 //! * Happy path per key size (128/192/256) — the masked key has the
-//!   expected length (244/252/260 B) and is non-zero; a second call yields
+//!   expected length (248/264/264 B) and is non-zero; a second call yields
 //!   a distinct key.
 //! * Every AES masking scope exercised after `PartFinal`: `Session`, `Ephemeral`,
 //!   and `Local`; `Session` is also available before finalization.
@@ -19,16 +19,12 @@
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
 //! * Unknown key size → `InvalidArg`.
 
-#![cfg(any(feature = "emu", feature = "mock", feature = "sock"))]
 // The shared masked-key helpers/constants below stay available under any
 // backend (so the module isn't emu-limited), but only the emu-gated tests
 // exercise them today; suppress dead-code noise in non-emu builds.
-#![cfg_attr(not(feature = "emu"), allow(dead_code))]
 
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::TestCtx;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_types::TborAesGenerateKeyReq;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
@@ -37,16 +33,15 @@ use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
 use tsra_ddi_tbor_types::KEY_USAGE_DECRYPT;
 use tsra_ddi_tbor_types::KEY_USAGE_ENCRYPT;
 
-/// `KeyScope` discriminants matching the firmware `HsmKeyScope`.
-pub(crate) const SCOPE_SESSION: u8 = 0b001;
-pub(crate) const SCOPE_EPHEMERAL: u8 = 0b010;
-pub(crate) const SCOPE_LOCAL: u8 = 0b011;
-pub(crate) const SCOPE_SECURITY_DOMAIN: u8 = 0b100;
+pub(crate) use crate::commands::common::SCOPE_EPHEMERAL;
+pub(crate) use crate::commands::common::SCOPE_LOCAL;
+pub(crate) use crate::commands::common::SCOPE_SECURITY_DOMAIN;
+pub(crate) use crate::commands::common::SCOPE_SESSION;
 
 /// Masked-key envelope length for a given AES key length: `header(8) ‖
-/// iv(12) ‖ aad(192) ‖ pt(key) ‖ tag(16)`.
+/// iv(16) ‖ aad(192) ‖ pt(key padded to 16 B) ‖ tag(16)`.
 fn masked_len(key_len: usize) -> usize {
-    8 + 12 + 192 + key_len + 16
+    8 + 16 + 192 + key_len.next_multiple_of(16) + 16
 }
 
 /// Expected AES key length (bytes) for a wire key-size discriminant.
@@ -98,10 +93,10 @@ fn generate_key_req(session_id: u16, scope: u8, key_size: u8) -> TborAesGenerate
     }
 }
 
-#[cfg(feature = "emu")]
-mod emu_tests {
+mod tests {
     use tsra_ddi_tbor_types::TborAesEncryptDecryptReq;
     use tsra_ddi_tbor_types::TborStatus;
+    use tsra_ddi_tbor_types::AES_MODE_CBC;
     use tsra_ddi_tbor_types::AES_OP_DECRYPT;
     use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 
@@ -266,7 +261,7 @@ mod emu_tests {
 
         let req = generate_key_req(mismatched_session_id, SCOPE_SESSION, AES_KEY_SIZE_256);
 
-        ctx.expect_fw_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
+        ctx.expect_session_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
     }
 
     /// Verifies repeated generations do not reuse an earlier masked-key blob.
@@ -310,7 +305,7 @@ mod emu_tests {
         let session = finalized_co_session(&ctx);
 
         let plaintext = vec![0xA5u8; 32];
-        let iv = [0x11u8; 16];
+        let iv = vec![0x11u8; 16];
 
         for scope in [SCOPE_SESSION, SCOPE_EPHEMERAL, SCOPE_LOCAL] {
             let masked_key = generate_key(&ctx, session.session_id, scope, AES_KEY_SIZE_256);
@@ -319,8 +314,9 @@ mod emu_tests {
                 session_id: session.session_id,
                 masked_key: masked_key.clone(),
                 op: AES_OP_ENCRYPT,
+                mode: AES_MODE_CBC,
+                iv: iv.clone(),
                 msg: plaintext.clone(),
-                iv,
             };
 
             let encrypted = ctx.tbor(&encrypt_req).expect("AesEncryptDecrypt encrypt");
@@ -340,8 +336,9 @@ mod emu_tests {
                 session_id: session.session_id,
                 masked_key,
                 op: AES_OP_DECRYPT,
+                mode: AES_MODE_CBC,
+                iv: iv.clone(),
                 msg: encrypted.msg,
-                iv,
             };
 
             let decrypted = ctx.tbor(&decrypt_req).expect("AesEncryptDecrypt decrypt");

@@ -13,30 +13,40 @@
 //! key.  The blob carries the 32-byte `xi` seed followed by the expanded
 //! secret key, and the fastpath core signs with the expanded half
 //! directly rather than re-deriving the key pair (`f0bf65c4`).
+//!
+//! The PAL consumes the tail-aligned expanded key before replacing the
+//! envelope prefix with the signature at its final response offset.
+//!
+//! The request carries the 64-byte message representative `μ` rather than a
+//! message, as `EccSign` carries a digest.  `μ` already binds the FIPS 204
+//! context string, so no context is passed on.  `hedge` selects hedged or
+//! deterministic signing, as PKCS#11's `CK_HEDGE_TYPE` does, and is checked
+//! before the key is unmasked.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor_types::MlDsaHedge;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignResp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
+use super::from_pal::mldsa_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
-use crate::ddi::tbor::mldsa_generate_key::mldsa_sec_key_len;
 use crate::ddi::tbor::mldsa_generate_key::MLDSA_SEED_LEN;
 
-/// Signature length per ML-DSA parameter set (FIPS 204 Table 2).
-fn mldsa_sig_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlDsa44Seed => Ok(2420),
-        HsmVaultKeyKind::MlDsa65Seed => Ok(3309),
-        HsmVaultKeyKind::MlDsa87Seed => Ok(4627),
+/// Map the wire hedge variant onto the PAL's; unknown values are invalid.
+fn mldsa_hedge(hedge: MlDsaHedge) -> HsmResult<HsmMlDsaHedge> {
+    match hedge {
+        MlDsaHedge::Preferred => Ok(HsmMlDsaHedge::Preferred),
+        MlDsaHedge::Required => Ok(HsmMlDsaHedge::Required),
+        MlDsaHedge::Deterministic => Ok(HsmMlDsaHedge::Deterministic),
         _ => Err(HsmError::InvalidArg),
     }
 }
@@ -45,74 +55,67 @@ fn mldsa_sig_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
 ///
 /// Persists nothing and takes no partition lock: it reads the caller's
 /// key, signs, and returns.
-pub(crate) async fn handle<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
-    req_buf: &mut DmaBuf,
-) -> HsmResult<&'p DmaBuf> {
-    let req = TborMlDsaSignReq::decode_mut(req_buf)?;
-    let sess_id = HsmSessId::from(u16::from(req.session_id));
-    validate_active_session(pal, io, sess_id)?;
+pub(crate) async fn handle<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    cmd_buf: &mut HsmCmdBuf<'_>,
+) -> HsmResult<usize> {
+    async {
+        let base = cmd_buf.request().as_ptr() as usize;
+        let sig_len = {
+            let req = TborMlDsaSignReq::decode_mut(cmd_buf.request_mut())?;
+            let sess_id = HsmSessId::from(u16::from(req.session_id));
+            validate_active_session(pal, io, sess_id)?;
 
-    if req.ctx.len() > 255 {
-        return Err(HsmError::InvalidArg);
+            let hedge = mldsa_hedge(MlDsaHedge(req.hedge))?;
+            let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlDsaSignReq::TOC_COUNT * 4;
+            let masked_at = req.masked_key.as_ptr() as usize;
+            if masked_at.checked_sub(base) != Some(data_start) {
+                return Err(HsmError::InvalidArg);
+            }
+
+            // Resolve the envelope's tag-bound scope before unmasking.
+            let scope = peek_scope(req.masked_key)?;
+            let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
+
+            // Unmask in place. The AAD carries the parameter set, so the kind
+            // comes from the envelope rather than being inferred from length.
+            // A key of another type is rejected before its permissions are
+            // checked, as `EccSign` does.
+            let view = unmask(pal, io, masking_key, req.masked_key).await?;
+            let param_set = mldsa_param_set(view.key_kind)?;
+            if !view.key_attrs.sign() {
+                return Err(HsmError::InvalidPermissions);
+            }
+            let sig_len = param_set.sig_len();
+            let sec_len = param_set.sec_key_len();
+            if view.target_key.len() != MLDSA_SEED_LEN + sec_len {
+                return Err(HsmError::InvalidArg);
+            }
+            let key_end = (view.target_key.as_ptr() as usize)
+                .checked_sub(masked_at)
+                .and_then(|at| at.checked_add(view.target_key.len()))
+                .ok_or(HsmError::InvalidArg)?;
+            if key_end > req.masked_key.len() || key_end < sig_len {
+                return Err(HsmError::InvalidArg);
+            }
+            pal.mldsa_sign_in_place(
+                io,
+                param_set,
+                &mut req.masked_key[..key_end],
+                HsmMlDsaMsgType::ExternalMu,
+                hedge,
+                req.mu,
+                &req.mu[..0],
+            )
+            .await?;
+            sig_len
+        };
+        let buffer = cmd_buf.buffer_mut();
+        let frame = TborMlDsaSignResp::encode(buffer, 0, false)?
+            .signature_existing(sig_len)?
+            .finish();
+        Ok(frame.as_bytes().len())
     }
-
-    // Unmask, sign and build the response inside a block that yields a
-    // `Result`, so every post-unmask path falls through to the wipe below:
-    // the recovered seed is the private key and must not survive in the
-    // request buffer, which scope exit does not zero.
-    // The scope that masked this key is recorded (cleartext, tag-bound) in
-    // the blob metadata; resolve its masking key before unmasking. The peek
-    // borrow is transient -- it ends before the in-place unmask.
-    let scope = peek_scope(req.masked_key)?;
-    let masking_key = resolve_masking_key(pal, io, scope, sess_id)?;
-
-    let outcome: HsmResult<&'p DmaBuf> = async {
-        // Unmask in place. The AAD carries the parameter set, so the kind
-        // comes from the envelope rather than being inferred from length.
-        let view = unmask(pal, io, masking_key, req.masked_key).await?;
-        let kind = view.key_kind;
-        if !view.key_attrs.sign() {
-            return Err(HsmError::InvalidPermissions);
-        }
-        let sig_len = mldsa_sig_len(kind)?;
-        let sec_len = mldsa_sec_key_len(kind)?;
-        if view.target_key.len() != MLDSA_SEED_LEN + sec_len {
-            return Err(HsmError::InvalidArg);
-        }
-        let key_blob: &DmaBuf = view.target_key;
-
-        // Reserve the signature slot and have the PAL sign straight into it.
-        let resp = pal.dma_alloc_var(io, |buf| {
-            let frame = TborMlDsaSignResp::encode(buf, 0, false)?
-                .signature_reserve(sig_len)?
-                .finish();
-            Ok(frame.as_bytes().len())
-        })?;
-
-        {
-            let out = TborMlDsaSignResp::decode_mut(resp)?;
-            let signed = pal
-                .mldsa_sign(
-                    io,
-                    kind,
-                    &key_blob[MLDSA_SEED_LEN..],
-                    req.message,
-                    req.ctx,
-                    out.signature,
-                )
-                .await;
-            signed?;
-        }
-
-        let resp: &'p DmaBuf = resp;
-        Ok(resp)
-    }
-    .await;
-
-    // The key is read in place, so the request buffer is the only copy --
-    // wiped here on every path out of the block above.
-    req.masked_key.zeroize();
-    outcome
+    .await
 }

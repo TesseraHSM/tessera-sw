@@ -67,15 +67,15 @@ use tsra_fw_ddi_tbor_types::PART_INIT_MACH_SEED_AAD_LEN;
 use tsra_fw_ddi_tbor_types::PTA_CSR_MAX_LEN;
 use tsra_fw_ddi_tbor_types::PTA_REPORT_MAX_LEN;
 use tsra_fw_ddi_tbor_types::SAPOTA_THUMBPRINT_LEN;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
+use tsra_fw_hsm_pal_traits::HsmPartPropId;
+use tsra_fw_hsm_pal_traits::HsmPartState;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_pal_traits::HsmSessionRole;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
-use tsra_fw_hsm_pal_traits::PartPropId;
-use tsra_fw_hsm_pal_traits::PartState;
-use tsra_fw_hsm_pal_traits::SessionRole;
 use tsra_fw_hsm_undo::UndoLog;
 
 use super::pta;
@@ -136,13 +136,13 @@ const PART_ROOT_VAULT_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 /// Handle a TBOR `PartInit` request.
 pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
-    req_buf: &mut DmaBuf,
+    io: &P::Io,
+    cmd_buf: &mut HsmCmdBuf<'_>,
     undo: &mut UndoLog<'p>,
-) -> HsmResult<&'p DmaBuf> {
-    let req = parse_request(req_buf)?;
-
+) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
+        let req = parse_request(cmd_buf.request_mut())?;
+
         // Read-only request fields are codec sub-views of the inbound
         // buffer, so they flow directly into PAL crypto and the
         // write-once setters without copying.  `mach_seed_envelope` is
@@ -220,7 +220,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             pta_key_id,
             undo,
         )?;
-        encode_response(pal, io, &csr_dma[..csr_len], &report_dma[..report_len])
+        encode_response(cmd_buf, &csr_dma[..csr_len], &report_dma[..report_len])
     })
     .await
 }
@@ -229,27 +229,27 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// the cryptographic pipeline.  Variable-length fields are returned
 /// as sub-views of the inbound request buffer so they can be handed
 /// straight to PAL crypto primitives without copying.
-/// `mach_seed_envelope` is held as `&mut DmaBuf` so the FW handler
+/// `mach_seed_envelope` is held as `&mut HsmDmaBuf` so the FW handler
 /// can AEAD-open it in place; the remaining fields are shared.
 struct ParsedRequest<'a> {
     sess_id: HsmSessId,
-    mach_seed_envelope: &'a mut DmaBuf,
-    policy: &'a DmaBuf,
-    pota_thumb: &'a DmaBuf,
-    sata_thumb: &'a DmaBuf,
-    sapota_thumb: Option<&'a DmaBuf>,
+    mach_seed_envelope: &'a mut HsmDmaBuf,
+    policy: &'a HsmDmaBuf,
+    pota_thumb: &'a HsmDmaBuf,
+    sata_thumb: &'a HsmDmaBuf,
+    sapota_thumb: Option<&'a HsmDmaBuf>,
 }
 
 /// Decode the wire request, enforce the CO-only role gate, and
 /// length-check the variable-length fields against the wire schema.
-fn parse_request<'a>(req_buf: &'a mut DmaBuf) -> HsmResult<ParsedRequest<'a>> {
+fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
     let req = TborPartInitReq::decode_mut(req_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id));
 
     // PartInit is CO-only.  The dispatcher's default-PSK gate uses
     // the same `psk_id_for_role` mapping but does not by itself
     // reject CU sessions on this opcode.
-    if sess_id.role() != SessionRole::CryptoOfficer {
+    if sess_id.role() != HsmSessionRole::CryptoOfficer {
         return Err(HsmError::InvalidPermissions);
     }
 
@@ -285,8 +285,8 @@ fn parse_request<'a>(req_buf: &'a mut DmaBuf) -> HsmResult<ParsedRequest<'a>> {
 /// SEC1 public key (`0x04 || X || Y`).  All buffers live in the
 /// caller's scoped allocator.
 struct PtaKeypair<'a> {
-    priv_scalar: &'a mut DmaBuf,
-    pub_sec1: &'a mut DmaBuf,
+    priv_scalar: &'a mut HsmDmaBuf,
+    pub_sec1: &'a mut HsmDmaBuf,
 }
 
 // ─── Pipeline stage helpers ──────────────────────────────────────────────────
@@ -307,10 +307,10 @@ struct PtaKeypair<'a> {
 /// which is operationally indistinguishable from a forgery attempt.
 async fn open_mach_seed_envelope<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     sess_id: HsmSessId,
-    envelope: &'a mut DmaBuf,
-) -> HsmResult<&'a DmaBuf> {
+    envelope: &'a mut HsmDmaBuf,
+) -> HsmResult<&'a HsmDmaBuf> {
     let param_key = pal.session_param_key(io, sess_id)?;
 
     let view = aead_open(pal, io, param_key, envelope)
@@ -348,14 +348,14 @@ async fn open_mach_seed_envelope<'a, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn derive_part_root<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    mach_seed: &DmaBuf,
-    policy: &DmaBuf,
-    pota_thumb: &DmaBuf,
-    sata_thumb: &DmaBuf,
-    sapota_thumb: Option<&DmaBuf>,
-) -> HsmResult<&'a mut DmaBuf> {
+    mach_seed: &HsmDmaBuf,
+    policy: &HsmDmaBuf,
+    pota_thumb: &HsmDmaBuf,
+    sata_thumb: &HsmDmaBuf,
+    sapota_thumb: Option<&HsmDmaBuf>,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let src = crate::part_state::part_uds(pal);
 
     let root = alloc.dma_alloc(kdf::PART_ROOT_LEN)?;
@@ -390,9 +390,9 @@ async fn derive_part_root<'a, P: HsmPal>(
 /// already in place), avoiding any later reshape.
 async fn derive_pta_keypair_buf<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    root: &DmaBuf,
+    root: &HsmDmaBuf,
 ) -> HsmResult<PtaKeypair<'a>> {
     let priv_scalar = alloc.dma_alloc(P384_PRIV_LEN)?;
     let pub_sec1 = alloc.dma_alloc(P384_PUB_SEC1_LEN)?;
@@ -419,11 +419,11 @@ async fn derive_pta_keypair_buf<'a, P: HsmPal>(
 /// boundary in `handle`.
 async fn build_signed_csr<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    pub_sec1: &DmaBuf,
-    pta_priv: &DmaBuf,
-) -> HsmResult<(&'a mut DmaBuf, usize)> {
+    pub_sec1: &HsmDmaBuf,
+    pta_priv: &HsmDmaBuf,
+) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
     // PTAID = SHA-384("TSRA-PTAID-v1" || sec1_pub)[..PTAID_LEN].
     let ptaid_input = alloc.dma_alloc(PTAID_LABEL.len() + P384_PUB_SEC1_LEN)?;
     ptaid_input[..PTAID_LABEL.len()].copy_from_slice(PTAID_LABEL);
@@ -456,19 +456,19 @@ async fn build_signed_csr<'a, P: HsmPal>(
 #[allow(clippy::too_many_arguments)]
 async fn build_pta_report<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
     sess_id: HsmSessId,
-    pub_sec1: &DmaBuf,
-    policy: &DmaBuf,
-    pota_thumb: &DmaBuf,
-    sata_thumb: &DmaBuf,
-    sapota_thumb: Option<&DmaBuf>,
-) -> HsmResult<(&'a mut DmaBuf, usize)> {
+    pub_sec1: &HsmDmaBuf,
+    policy: &HsmDmaBuf,
+    pota_thumb: &HsmDmaBuf,
+    sata_thumb: &HsmDmaBuf,
+    sapota_thumb: Option<&HsmDmaBuf>,
+) -> HsmResult<(&'a mut HsmDmaBuf, usize)> {
     let pid_priv = pal.vault_key(io, crate::part_state::part_id_key_id(pal, io)?)?;
 
     // Copy the session app id into DMA scratch so every report input is a
-    // `DmaBuf` (the report builder takes `&DmaBuf` throughout).
+    // `HsmDmaBuf` (the report builder takes `&HsmDmaBuf` throughout).
     let app_id = super::super::super::session::session_app_id(pal, io, sess_id)?;
     if app_id.len() != APP_UUID_LEN {
         return Err(HsmError::InternalError);
@@ -536,19 +536,19 @@ async fn build_pta_report<'a, P: HsmPal>(
 /// length-injective prefix and an absent SAPOTA contributes a
 /// zero-length field.
 ///
-/// The returned DmaBuf is zero-initialised and sized to
+/// The returned HsmDmaBuf is zero-initialised and sized to
 /// [`REPORT_DATA_LEN`]; `pal.hash` only writes the leading
 /// [`SHA384_LEN`] bytes, leaving the trailing 80 bytes as the
 /// required zero pad.
 async fn build_report_data<'a, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    policy: &DmaBuf,
-    pota_thumb: &DmaBuf,
-    sata_thumb: &DmaBuf,
-    sapota_thumb: Option<&DmaBuf>,
-) -> HsmResult<&'a mut DmaBuf> {
+    policy: &HsmDmaBuf,
+    pota_thumb: &HsmDmaBuf,
+    sata_thumb: &HsmDmaBuf,
+    sapota_thumb: Option<&HsmDmaBuf>,
+) -> HsmResult<&'a mut HsmDmaBuf> {
     let sapota_bytes: &[u8] = match sapota_thumb {
         Some(t) => t,
         None => &[],
@@ -584,11 +584,11 @@ async fn build_report_data<'a, P: HsmPal>(
 
 /// Write-once inputs committed by [`commit_partition_state`].
 struct CommitInputs<'a> {
-    pta_pub_sec1: &'a DmaBuf,
-    policy_hash: &'a DmaBuf,
-    pota_thumb: &'a DmaBuf,
-    sata_thumb: &'a DmaBuf,
-    sapota_thumb: Option<&'a DmaBuf>,
+    pta_pub_sec1: &'a HsmDmaBuf,
+    policy_hash: &'a HsmDmaBuf,
+    pota_thumb: &'a HsmDmaBuf,
+    sata_thumb: &'a HsmDmaBuf,
+    sapota_thumb: Option<&'a HsmDmaBuf>,
 }
 
 /// Create the partition's two vault keys — the PartRoot UPS secret and the
@@ -601,9 +601,9 @@ struct CommitInputs<'a> {
 /// fails-fast; its just-staged keys are reaped by the recorded inverses.
 async fn stage_part_keys<'p, P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
-    root: &DmaBuf,
-    pta_priv: &DmaBuf,
+    io: &P::Io,
+    root: &HsmDmaBuf,
+    pta_priv: &HsmDmaBuf,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<(HsmKeyId, HsmKeyId)> {
     let root_key_id = pal
@@ -648,7 +648,7 @@ async fn stage_part_keys<'p, P: HsmPal>(
 /// commit.
 fn commit_partition_state<P: HsmPal>(
     pal: &P,
-    io: &impl HsmIo,
+    io: &P::Io,
     inputs: CommitInputs<'_>,
     root_key_id: HsmKeyId,
     pta_key_id: HsmKeyId,
@@ -679,7 +679,7 @@ fn commit_partition_state<P: HsmPal>(
     if let Some(sapota) = inputs.sapota_thumb {
         crate::part_state::part_set_sapota_thumbprint(pal, io, sapota)?;
     }
-    crate::part_state::part_set_state(pal, io, PartState::Initializing)?;
+    crate::part_state::part_set_state(pal, io, HsmPartState::Initializing)?;
     Ok(())
 }
 
@@ -687,28 +687,27 @@ fn commit_partition_state<P: HsmPal>(
 /// in commit order (the dispatcher walks them LIFO).  Each write-once
 /// field restores to **absent** (it was unset before PartInit); STATE
 /// restores to its prior `Enabled`.  The two `part_set_pta_key` fields
-/// (`PTA_KEY_ID` + `PTA_PUB_KEY`) are recorded together.
+/// (`PTA_KEY_ID` + `PTA_ECC_PUB_KEY`) are recorded together.
 fn record_field_undo(undo: &mut UndoLog<'_>, has_sapota: bool) -> HsmResult<()> {
-    undo.push_prop_restore_absent(PartPropId::PTA_KEY_ID)?;
-    undo.push_prop_restore_absent(PartPropId::PTA_PUB_KEY)?;
-    undo.push_prop_restore_absent(PartPropId::UPS_KEY_ID)?;
-    undo.push_prop_restore_absent(PartPropId::POLICY_HASH)?;
-    undo.push_prop_restore_absent(PartPropId::POTA_THUMBPRINT)?;
-    undo.push_prop_restore_absent(PartPropId::SATA_THUMBPRINT)?;
+    undo.push_prop_restore_absent(HsmPartPropId::PTA_KEY_ID)?;
+    undo.push_prop_restore_absent(HsmPartPropId::PTA_ECC_PUB_KEY)?;
+    undo.push_prop_restore_absent(HsmPartPropId::UPS_KEY_ID)?;
+    undo.push_prop_restore_absent(HsmPartPropId::POLICY_HASH)?;
+    undo.push_prop_restore_absent(HsmPartPropId::POTA_THUMBPRINT)?;
+    undo.push_prop_restore_absent(HsmPartPropId::SATA_THUMBPRINT)?;
     if has_sapota {
-        undo.push_prop_restore_absent(PartPropId::SAPOTA_THUMBPRINT)?;
+        undo.push_prop_restore_absent(HsmPartPropId::SAPOTA_THUMBPRINT)?;
     }
-    undo.push_prop_restore_scalar(PartPropId::STATE, PartState::Enabled as u32)
+    undo.push_prop_restore_scalar(HsmPartPropId::PART_STATE, HsmPartState::Enabled as u32)
 }
 
-/// Encode the `TborPartInitResp` into a fresh IO-scoped DmaBuf.
-fn encode_response<'p, P: HsmPal>(
-    pal: &'p P,
-    io: &impl HsmIo,
+/// Encode the `TborPartInitResp` into a fresh IO-scoped HsmDmaBuf.
+fn encode_response(
+    cmd_buf: &mut HsmCmdBuf<'_>,
     pta_csr_bytes: &[u8],
     pta_report_bytes: &[u8],
-) -> HsmResult<&'p DmaBuf> {
-    let resp = pal.dma_alloc_var(io, |buf| {
+) -> HsmResult<usize> {
+    let resp = cmd_buf.encode_response(|buf| {
         let frame = TborPartInitResp::encode(buf, 0, false)?
             .pta_csr(pta_csr_bytes)?
             .pta_report(pta_report_bytes)?
@@ -832,12 +831,11 @@ pub(crate) mod kdf {
     //!   length-injective: two distinct input tuples can never collide
     //!   into the same context bytes.
 
-    use tsra_fw_hsm_pal_traits::DmaBuf;
+    use tsra_fw_hsm_pal_traits::HsmDmaBuf;
     use tsra_fw_hsm_pal_traits::HsmEccCurve;
     use tsra_fw_hsm_pal_traits::HsmEccPct;
     use tsra_fw_hsm_pal_traits::HsmError;
     use tsra_fw_hsm_pal_traits::HsmHashAlgo;
-    use tsra_fw_hsm_pal_traits::HsmIo;
     use tsra_fw_hsm_pal_traits::HsmPal;
     use tsra_fw_hsm_pal_traits::HsmResult;
     use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -911,17 +909,17 @@ pub(crate) mod kdf {
     /// - `Err(HsmError::NotEnoughSpace)` — scoped alloc exhausted.
     /// - `Err(HsmError)` — PAL KDF driver failure.
     #[allow(clippy::too_many_arguments)]
-    pub async fn derive_part_root(
-        pal: &impl HsmPal,
-        io: &impl HsmIo,
+    pub async fn derive_part_root<P: HsmPal>(
+        pal: &P,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
-        uds: &DmaBuf,
-        machine_seed: &DmaBuf,
-        part_policy: &DmaBuf,
-        pota_thumb: &DmaBuf,
-        sata_thumb: &DmaBuf,
-        sapota_thumb: Option<&DmaBuf>,
-        root_out: Option<&mut DmaBuf>,
+        uds: &HsmDmaBuf,
+        machine_seed: &HsmDmaBuf,
+        part_policy: &HsmDmaBuf,
+        pota_thumb: &HsmDmaBuf,
+        sata_thumb: &HsmDmaBuf,
+        sapota_thumb: Option<&HsmDmaBuf>,
+        root_out: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
         if !(MACHINE_SEED_MIN_LEN..=MACHINE_SEED_MAX_LEN).contains(&machine_seed.len()) {
             return Err(HsmError::InvalidArg);
@@ -1027,12 +1025,12 @@ pub(crate) mod kdf {
     ///   an output buffer too small.
     /// - `Err(HsmError::NotEnoughSpace)` — scoped alloc exhausted.
     /// - `Err(HsmError)` — PAL KDF / ECC driver failure.
-    pub async fn derive_pta_keypair(
-        pal: &impl HsmPal,
-        io: &impl HsmIo,
+    pub async fn derive_pta_keypair<P: HsmPal>(
+        pal: &P,
+        io: &P::Io,
         alloc: &impl HsmScopedAlloc,
-        root: &DmaBuf,
-        out: Option<(&mut DmaBuf, &mut DmaBuf)>,
+        root: &HsmDmaBuf,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let curve = HsmEccCurve::P384;
         let priv_len = curve.wire_coord_len();
@@ -1051,14 +1049,15 @@ pub(crate) mod kdf {
 
         // Hand the raw PartRoot to the PAL; each platform owns its
         // FIPS 186-5 §A.2 derivation (a domain-separated HKDF-Expand
-        // followed by its A.2.x scalar generation) from it.
+        // followed by its A.2.x scalar generation) from it.  The PTA
+        // signs, so its derivation gets a sign/verify PCT.
         pal.ecc_gen_keypair_from_root(
             io,
             alloc,
             curve,
             root,
             Some((priv_out, pub_out)),
-            HsmEccPct::None,
+            HsmEccPct::SignVerify,
         )
         .await
     }

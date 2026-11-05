@@ -7,17 +7,17 @@
 //! (`ddi/mbor/sim/src/report.rs`). Deriving [`Encode`] and [`CborLen`]
 //! lets `minicbor::len` compute every encoded length exactly, so no
 //! byte-counting constants are hand-maintained. Byte fields borrow
-//! `&[u8]` (which `DmaBuf` derefs to) — encoding writes into `DmaBuf`
+//! `&[u8]` (which `HsmDmaBuf` derefs to) — encoding writes into `HsmDmaBuf`
 //! output, and the zero-copy decoder ([`crate::decode`]) is unaffected.
 
 use minicbor::CborLen;
 use minicbor::Encode;
-use tsra_fw_hsm_pal_traits::DmaBuf;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 
-/// Reborrow a `&mut DmaBuf` as its underlying mutable byte slice, so it
+/// Reborrow a `&mut HsmDmaBuf` as its underlying mutable byte slice, so it
 /// can be handed to `minicbor::encode` (whose `Write` bound is satisfied
-/// by `&mut [u8]`, not `&mut DmaBuf`).
-pub(crate) fn as_mut_slice(buf: &mut DmaBuf) -> &mut [u8] {
+/// by `&mut [u8]`, not `&mut HsmDmaBuf`).
+pub(crate) fn as_mut_slice(buf: &mut HsmDmaBuf) -> &mut [u8] {
     buf
 }
 

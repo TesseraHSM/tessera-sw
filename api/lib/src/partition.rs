@@ -852,6 +852,15 @@ impl HsmPartition {
         ddi::get_cert_chain(self, slot)
     }
 
+    /// Queries whether the partition's security domain is initialized.
+    ///
+    /// Performs an out-of-session device query on every call. Returns
+    /// `false` when initialization-state reporting is unsupported.
+    pub fn sd_initialized(&self) -> HsmResult<bool> {
+        let inner = self.inner().read();
+        ddi::get_sd_initialized(inner.dev())
+    }
+
     /// Queries the partition's stable identity (PID) via `PartInfo`.
     ///
     /// Returns the 16-byte PID, which a caller uses to name this

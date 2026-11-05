@@ -59,3 +59,20 @@ pub fn assert_fw_rejects(err: &DdiError, expected: TborStatus) {
         other => panic!("expected DdiError::TborStatus({expected:?}), got {other:?}"),
     }
 }
+
+/// Assert a session rejection, including socket ownership checks that reject
+/// unknown or closed allocations before the command reaches firmware.
+#[track_caller]
+pub fn assert_session_rejects(err: &DdiError, expected: TborStatus) {
+    #[cfg(feature = "sock")]
+    if matches!(
+        expected,
+        TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+    ) && matches!(
+        err,
+        DdiError::DdiStatus(tsra_ddi_mbor_types::DdiStatus::FileHandleSessionIdDoesNotMatch)
+    ) {
+        return;
+    }
+    assert_fw_rejects(err, expected);
+}

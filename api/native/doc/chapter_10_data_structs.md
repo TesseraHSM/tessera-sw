@@ -55,7 +55,7 @@ typedef void tsra_void;
 Boolean type
 
 ```cpp
-typedef uint32_t tsra_bool;
+typedef uint8_t tsra_bool;
 ```
 Possible values are defined by [TSRA_BOOL_XXX](#tsra_bool_xxx)
 
@@ -232,6 +232,7 @@ Device property identifiers
 #define TSRA_PART_PROP_ID_BACKUP_MASKING_KEY 10
 #define TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY 11
 #define TSRA_PART_PROP_ID_PART_PUB_KEY 12
+#define TSRA_PART_PROP_ID_SD_INITIALIZED 15
 ```
 
 ### TSRA_PART_TYPE_XXX
@@ -331,6 +332,10 @@ Algorithm ID type values
 #define TSRA_ALGO_ID_AES_XTS 0x00030005
 #define TSRA_ALGO_ID_AES_GCM_KEY_GEN 0x00030006
 #define TSRA_ALGO_ID_AES_GCM 0x00030007
+#define TSRA_ALGO_ID_AES_ECB 0x00030008
+#define TSRA_ALGO_ID_AES_CFB 0x00030009
+#define TSRA_ALGO_ID_AES_OFB 0x0003000A
+#define TSRA_ALGO_ID_AES_CTR 0x0003000B
 #define TSRA_ALGO_ID_SHA1 0x00040001
 #define TSRA_ALGO_ID_SHA256 0x00040002
 #define TSRA_ALGO_ID_SHA384 0x00040003
@@ -449,6 +454,10 @@ in `tsra_char` elements (including the null terminator).
 On output, `path.len` is set to the number of `tsra_char` elements written
 (or the required count when `TSRA_STATUS_BUFFER_TOO_SMALL` is returned).
 `api_rev_min` and `api_rev_max` are only valid when the return status is `TSRA_STATUS_SUCCESS`.
+
+Security-domain initialization is queried live through
+[`tsra_part_get_prop`](#tsra_part_get_prop) with `TSRA_PART_PROP_ID_SD_INITIALIZED`,
+which returns a [`tsra_bool`](#tsra_bool); it is not part of this structure.
 
 ### tsra_api_rev
 
@@ -678,6 +687,48 @@ struct tsra_algo_aes_cbc_params {
 | ----- | --------------------------------- | ------------------------------------------------- |
 | iv    | [tsra_buffer *](#tsra_buffer)     | initialization vector. must be 16 bytes    &nbsp; |
 
+### tsra_algo_aes_cfb_params
+
+Parameters for AES CFB Algorithm. AES ECB takes no parameters.
+
+```cpp
+struct tsra_algo_aes_cfb_params {
+    uint8_t iv[16];
+};
+```
+
+| Field | Type        | Description                                                        |
+| ----- | ----------- | ------------------------------------------------------------------ |
+| iv    | uint8_t[16] | initialization vector. must be 16 bytes; updated on return  &nbsp; |
+
+### tsra_algo_aes_ofb_params
+
+Parameters for AES OFB Algorithm. AES ECB takes no parameters.
+
+```cpp
+struct tsra_algo_aes_ofb_params {
+    uint8_t iv[16];
+};
+```
+
+| Field | Type        | Description                                                        |
+| ----- | ----------- | ------------------------------------------------------------------ |
+| iv    | uint8_t[16] | initialization vector. must be 16 bytes; updated on return  &nbsp; |
+
+### tsra_algo_aes_ctr_params
+
+Parameters for AES CTR Algorithm. AES ECB takes no parameters.
+
+```cpp
+struct tsra_algo_aes_ctr_params {
+    uint8_t iv[16];
+};
+```
+
+| Field | Type        | Description                                                        |
+| ----- | ----------- | ------------------------------------------------------------------ |
+| iv    | uint8_t[16] | initial counter block. must be 16 bytes; updated on return  &nbsp; |
+
 ### tsra_algo_aes_gcm_params
 
 Parameters for AES GCM Algorithm
@@ -710,7 +761,7 @@ struct tsra_algo_aes_xts_params {
 
 | Field            | Type     | Description                                                           |
 | ---------------- | -------  | --------------------------------------------------------------------- |
-| sector_num       | uint8_t  | sector or data unit sequence number                            &nbsp; |
+| sector_num       | uint8_t  | sector or data unit sequence number (little-endian). 128-bit on `tsra_sess_open` sessions; 64-bit on `tsra_sess_ex_open` sessions, where bytes 8..16 must be zero for the initial tweak and the tweak advanced past the last processed data unit (else `TSRA_STATUS_INVALID_TWEAK`) &nbsp; |
 | data_unit_length | uint32_t | data unit length                                               &nbsp; |
 
 

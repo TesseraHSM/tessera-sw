@@ -19,10 +19,10 @@ use super::*;
 ///    response header.
 pub(crate) fn get_device_info<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetDeviceInfoReq = decoder.decode_data()?;
 
     let resp_data = DdiGetDeviceInfoResp {

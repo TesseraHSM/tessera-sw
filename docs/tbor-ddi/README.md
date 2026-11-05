@@ -20,15 +20,16 @@ dispatchable.
 
 ## Request header
 
-Every TBOR DDI request begins with a 4-byte header followed by the
+Every TBOR DDI request begins with an 8-byte header followed by the
 request body's TOC entries and optional variable-length data section.
 
 | Offset | Size | Field | Description |
 |---|---|---|---|
-| 0 | 1 B | `version` | Protocol version.  Current version is `0x01`. |
+| 0 | 1 B | `version` | Protocol version. Current version is `0x01`. |
 | 1 | 1 B | `reserved` | Reserved, MUST be `0x00`. |
 | 2 | 1 B | `toc_count` | Bits 4-0: number of TOC entries minus 1 (`0` = 1 entry, `0x1F` = 32 entries).  Bits 7-5 reserved, MUST be `0`. |
 | 3 | 1 B | `opcode` | Command identifier; see the [command table](#commands) below. |
+| 4 | 4 B | `reserved` | Reserved, MUST be zero. |
 
 ## Response header
 
@@ -41,9 +42,61 @@ single `none` TOC placeholder and no typed body fields.
 |---|---|---|---|
 | 0 | 1 B | `version` | Protocol version.  MUST match the request's `version`. |
 | 1 | 1 B | `flags` | Bit 0: `FIPS_APPROVED` — set if the operation used only FIPS-approved algorithms.  Bits 1-7 reserved, MUST be `0`. |
-| 2 | 1 B | `reserved` | Reserved, MUST be `0x00`. |
-| 3 | 1 B | `toc_count` | Bits 4-0: number of TOC entries minus 1.  Bits 7-5 reserved, MUST be `0`. |
+| 2 | 1 B | `toc_count` | Bits 4-0: number of TOC entries minus 1. Bits 7-5 reserved, MUST be `0`. |
+| 3 | 1 B | `reserved` | Reserved, MUST be `0x00`. |
 | 4 | 4 B | `status` | Little-endian `HsmError` value.  `0x00000000` = success. |
+
+## Paired TOC footprint
+
+Each command reserves the larger of its request and response schema TOC
+counts (at least one slot) in both the request and successful response.
+Unused trailing slots contain `None`. Both data sections start at
+`8 + 4 * toc_count`, so replacing
+request metadata with response metadata does not move the payload.
+
+Host and firmware must be updated together. Equal metadata footprints are
+the framing prerequisite for shared-buffer execution; handlers still need
+to preserve live inputs and validate output capacity before reusing data.
+Error responses retain the single `None` placeholder described above.
+
+## Firmware exchange storage
+
+The IO layer receives the request into a growable DMA allocation, then selects
+capacity after parsing the opcode. Growth preserves the address and bytes and
+must precede handler scratch allocations. The undo log is allocated separately
+and remains valid through outbound DMA, CQE completion, and rollback/commit.
+A successful transport completion carrying a TBOR error still rolls back the
+command; only command success together with successful CQE posting commits it.
+
+`HsmCmdBuf` exposes the received request, mutable backing storage, and a response
+prefix bounded by both allocation and host capacity. Handlers check bounds before
+splitting the DMA-branded storage into disjoint live-input/output views.
+Native handlers and the custom PAL hook return a response length in that
+allocation. Errors overwrite the response prefix in the same storage. Every published byte,
+including padding or gaps, must be initialized; overlapping crypto requires an
+explicitly supported in-place PAL operation.
+
+All 43 commands encode their compact responses directly into this shared
+allocation; there is no legacy dispatch bridge or separately allocated encoded
+response. Existing cryptographic working buffers remain scoped independently.
+Hash consumes the input before reclaiming it for the digest.
+AES places message/IV before the masked key in both host and firmware request
+schemas, and transforms those fields in place. ECC signing reuses consumed
+envelope metadata for the signature while the key and digest remain disjoint
+live inputs. RSA places the input integer before the masked key and uses an
+in-place PAL operation to replace that integer with its result while the key
+remains disjoint. ML-DSA uses one key/signature buffer with a tail-aligned
+expanded key and prefix output; its `μ` input remains disjoint.
+ML-KEM reuses a public-key/ciphertext buffer with a separate DMA-branded
+shared-secret output. Both consume inputs before overwriting them.
+The dispatcher validates the response prefix without modifying unpublished storage.
+IO teardown performs final scrubbing after outbound DMA, CQE completion, and the
+undo/commit walk, including IO-owned secrets outside the command buffer.
+Error-response encoding fully initializes its 12-byte prefix without clearing the
+unpublished tail. Scoped scratch is reclaimed without clearing; IO teardown also
+scrubs these reclaimed regions using peak allocation ends. Algorithms and encoders
+must initialize every byte they consume or publish rather than assume reused
+storage is zero.
 
 ## Commands
 
@@ -87,11 +140,13 @@ single `none` TOC placeholder and no typed body fields.
 | `0x24` | `DarcTmkExport` | InSession | [`commands/darc_tmk_export.md`](./commands/darc_tmk_export.md) |
 | `0x25` | `DarcKeyWrap` | InSession | [`commands/darc_key_wrap.md`](./commands/darc_key_wrap.md) |
 | `0x26` | `MlDsaGenerateKey` | NoSession | [`commands/mldsa_generate_key.md`](./commands/mldsa_generate_key.md) (**schema-only**) |
-| `0x27` | `MlDsaSign` | NoSession | [`commands/mldsa_sign.md`](./commands/mldsa_sign.md) (**schema-only**) |
-| `0x28` | `MlDsaVerify` | NoSession | [`commands/mldsa_verify.md`](./commands/mldsa_verify.md) (**schema-only**) |
+| `0x27` | `MlDsaSign` | InSession | [`commands/mldsa_sign.md`](./commands/mldsa_sign.md) |
+| `0x28` | `MlDsaVerify` | InSession | [`commands/mldsa_verify.md`](./commands/mldsa_verify.md) |
 | `0x29` | `MlKemGenerateKey` | NoSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) (**schema-only**) |
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |
+| `0x2F` | `GetPublicKey` | InSession | [`commands/get_public_key.md`](./commands/get_public_key.md) |
+| `0x32` | `VerifyKey` | InSession | [`commands/verify_key.md`](./commands/verify_key.md) |
 
 ## Default-PSK gate
 
@@ -123,6 +178,12 @@ bootstrap session.
 1. Open a session for the role under the default PSK.
 2. Issue `PskChange` as the first in-session command.
 3. (Optional) `SessionClose`; subsequent sessions are unrestricted.
+
+Disabling a partition erases its configured CO and CU PSKs. Re-enabling
+installs the public defaults again, so each role must repeat this bootstrap
+sequence before normal in-session commands are permitted. Previously
+rotated PSKs no longer authenticate. An enable retry on an already-enabled
+partition must not reset its PSKs.
 
 The gate is **safe-by-default** in code: future opcodes added to the
 dispatcher are gated unless explicitly placed on the

@@ -128,6 +128,7 @@ fn test_aes_generate_invalid_key_usage() {
 }
 
 #[test]
+#[ignore = "key_tag support has been removed"]
 fn test_aes_generate_session_only_key_with_key_tag() {
     ddi_dev_test(
         common_setup,

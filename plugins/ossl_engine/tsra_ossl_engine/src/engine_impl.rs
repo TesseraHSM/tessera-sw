@@ -6,14 +6,19 @@
 
 use std::ffi::CStr;
 use std::ffi::c_int;
+use std::ffi::c_uint;
 use std::ffi::c_ulong;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
 use parking_lot::Mutex;
+use tsra_ossl_engine_core::engine::CMD_DEFN_END;
+use tsra_ossl_engine_core::engine::CmdDefn;
+use tsra_ossl_engine_core::engine::CtrlHandler;
 use tsra_ossl_engine_core::engine::DestroyHandler;
 use tsra_ossl_engine_core::engine::Engine;
 use tsra_ossl_engine_core::engine::LoadPrivKeyHandler;
+use tsra_ossl_engine_core::engine::string_cmd;
 use tsra_ossl_engine_core::error::EngineError;
 use tsra_ossl_engine_core::error::EngineResult;
 use tsra_ossl_engine_core::error::RetCode;
@@ -65,6 +70,35 @@ impl LoadPrivKeyHandler for TsraLoadPrivKey {
     }
 }
 
+/// `GENERATE_KEY` ctrl command number (see [`crate::aes::generate_key`]).
+const CMD_GENERATE_KEY: c_uint = ffi::ENGINE_CMD_BASE;
+
+/// The engine's ctrl commands.
+pub(crate) struct TsraCtrl;
+impl CtrlHandler for TsraCtrl {
+    const COMMANDS: &'static [CmdDefn] = &[
+        string_cmd(
+            CMD_GENERATE_KEY,
+            c"GENERATE_KEY",
+            c"Generate an HSM AES key and write its masked blob: \
+              tsra://<file>;type=<aes|aes-gcm|aes-xts>[;bits=<n>]",
+        ),
+        CMD_DEFN_END,
+    ];
+
+    fn ctrl(engine: &Engine, cmd: c_uint, arg: &CStr) -> EngineResult<()> {
+        let arg = arg
+            .to_str()
+            .map_err(|_| "ctrl argument is not valid UTF-8")?;
+        match cmd {
+            CMD_GENERATE_KEY => crate::aes::generate_key(engine, arg),
+            _ => Err(EngineError::Other(format!(
+                "unsupported engine ctrl command {cmd}"
+            ))),
+        }
+    }
+}
+
 struct TsraDestroy;
 impl DestroyHandler for TsraDestroy {
     #[allow(unsafe_code)]
@@ -96,13 +130,16 @@ impl DestroyHandler for TsraDestroy {
     }
 }
 
+/// `v_check` result for an incompatible dynamic-engine version.
+const DYNAMIC_VERSION_INCOMPATIBLE: c_ulong = 0;
+
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub extern "C" fn v_check(v: c_ulong) -> c_ulong {
     if v >= ffi::OSSL_DYNAMIC_OLDEST_CONST {
         ffi::OSSL_DYNAMIC_VERSION_CONST
     } else {
-        0
+        DYNAMIC_VERSION_INCOMPATIBLE
     }
 }
 
@@ -170,6 +207,7 @@ fn bind_helper(engine: &mut Engine, id: &CStr) -> EngineResult<()> {
     engine.set_name(ENGINE_NAME)?;
     engine.set_destroy::<TsraDestroy>()?;
     engine.set_load_privkey::<TsraLoadPrivKey>()?;
+    engine.set_ctrl::<TsraCtrl>()?;
     // Advertise the engine's EC method — OpenSSL defaults with sign_sig routed
     // to the HSM — so keys the loader creates with EC_KEY_new_method adopt it
     // at creation and keep their engine reference (see crate::sign for why it

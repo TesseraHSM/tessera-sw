@@ -49,8 +49,8 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 ///
 /// The TBOR wire ships **seed-only** ML-DSA private keys (see
 /// [`MlDsaKeyKind`]), so the masked plaintext is always the 32-byte `xi`
-/// seed: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(32) ‖ tag(16)` = 260 bytes.
-/// The 228-byte constant part is the AEAD-GCM-256 masked-envelope
+/// seed: `header(8) ‖ iv(16) ‖ aad(192) ‖ pt(32) ‖ tag(16)` = 264 bytes.
+/// The 232-byte constant part is the AEAD-GCM-256 masked-envelope
 /// overhead.
 ///
 /// If an expanded (`Private`) kind is ever added to [`MlDsaKeyKind`], the
@@ -58,11 +58,11 @@ pub const TBOR_OP_MLDSA_GENERATE_KEY: u8 = 0x26;
 /// this constant — together with the `max_len` literals on
 /// [`TborMlDsaGenerateKeyResp::masked_key`] and
 /// [`TborMlDsaSignReq`](crate::mldsa_sign::TborMlDsaSignReq)`::masked_key`
-/// — must be raised to `4896 + 228 = 5124`.
+/// — must be raised to `4896 + 232 = 5124`.
 ///
-/// Pinned into the `#[tbor(buffer, max_len = 260)]` literal on
+/// Pinned into the `#[tbor(buffer, max_len = 264)]` literal on
 /// [`TborMlDsaGenerateKeyResp::masked_key`].
-pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 12 + 192 + 32 + 4896 + 16;
+pub const MASKED_MLDSA_KEY_MAX_LEN: usize = 8 + 16 + 192 + 32 + 4896 + 16;
 
 /// Maximum ML-DSA public-key length: 2592 bytes for ML-DSA-87.  Pinned
 /// into the `#[tbor(buffer, max_len = 2592)]` literal on
@@ -73,52 +73,18 @@ pub const MLDSA_PUB_KEY_MAX_LEN: usize = 2592;
 /// `MlDsaSign` / `MlDsaVerify` and pinned into their signature buffers.
 pub const MLDSA_SIGNATURE_MAX_LEN: usize = 4627;
 
-/// Maximum ML-DSA context-string length: 255 bytes.
+/// Length of the ML-DSA message representative `μ`, the input of `MlDsaSign`
+/// and `MlDsaVerify`.
 ///
-/// FIPS 204 defines `ML-DSA.Sign(sk, M, ctx)` and
-/// `ML-DSA.Verify(pk, M, sigma, ctx)` over a caller-chosen context string
-/// with `0 <= |ctx| <= 255`.  The bound is a hard specification limit, not
-/// a wire-budget choice: the signed message representative embeds `|ctx|`
-/// as a single byte of the domain separator, so a longer context string
-/// is not representable.  An empty `ctx` is the FIPS 204 default and
-/// reproduces the pre-context behaviour.
+/// `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`, with
+/// `tr = SHAKE256(pk, 64)`, is what pure ML-DSA signs for a message `M` under
+/// the FIPS 204 context string `ctx` (Algorithm 7, line 6).  The commands
+/// take `μ`, as `EccSign` takes a digest, rather than the message: the caller
+/// computes it, on the host or on the device with `Hash` (SHAKE256).
 ///
-/// Shared by `MlDsaSign` / `MlDsaVerify` and pinned into the
-/// `#[tbor(buffer, max_len = 255)]` literals on their `ctx` fields.
-pub const MLDSA_CTX_MAX_LEN: usize = 255;
-
-/// Maximum message length accepted by the TBOR ML-DSA sign and verify
-/// schemas.
-///
-/// The binding constraint is the worst-case `MlDsaVerify` request — the
-/// largest PQC frame — and the limit is the **host encoder's staging
-/// budget**, not TBOR's 8191-byte `MAX_DATA_SIZE`.  The encoder stages
-/// the data section at offset 132 (`header(4) + 32 TOC entries * 4`; see
-/// `stage_base()` in `ddi/tbor/codec/src/encode.rs`) inside an 8192-byte
-/// transport buffer (`REQ_BUF_LEN` in `ddi/nix/src/dev.rs` and
-/// `ddi/win/src/dev.rs`):
-///
-/// ```text
-///   transport buffer  =  8192
-///   stage offset      =  -132   header(4) + 32 * 4 TOC bytes
-///   pub_key           = -2592   ML-DSA-87
-///   signature         = -4627   ML-DSA-87
-///   ctx               =  -255   MLDSA_CTX_MAX_LEN
-///   message budget    =   586
-/// ```
-///
-/// `MlDsaSign` shares the same cap: sign and verify are inverse
-/// operations over pure ML-DSA, so a message that can be signed must also
-/// be verifiable.  `MlDsaSign` on its own would allow
-/// `8192 - 132 - 164 - 255 = 7641` bytes.
-///
-/// The cap is therefore dictated entirely by `MlDsaVerify`.  If
-/// `MlDsaVerify` is ever removed as a command, raising the cap is a
-/// deliberate **one-constant change**: nothing else in the schema derives
-/// from it, and the `max_len` literals on the `message` fields are
-/// mechanically pinned to this constant by `const _: () = assert!(...)`
-/// checks that fail the build if they drift.
-pub const MLDSA_MESSAGE_MAX_LEN: usize = 586;
+/// Pinned into the `#[tbor(buffer, len = 64)]` literals on their `mu`
+/// fields.
+pub const MLDSA_MU_LEN: usize = 64;
 
 /// ML-DSA key-kind selector on the TBOR wire — a wire-side mirror of the
 /// ML-DSA subset of the firmware
@@ -157,7 +123,7 @@ pub enum MlDsaKeyKind {
 }
 
 /// `MlDsaGenerateKey` request schema.
-#[tbor(opcode = 0x26)]
+#[tbor(opcode = 0x26, pair = TborMlDsaGenerateKeyResp)]
 pub struct TborMlDsaGenerateKeyReq {
     /// CO/CU session id this request is bound to.
     #[tbor(session_id)]
@@ -178,13 +144,13 @@ pub struct TborMlDsaGenerateKeyReq {
 /// `masked_key` is `#[tbor(mutable)]` so the handler can reserve the slot
 /// and mask the private key straight into it (`decode_mut`) — no scratch
 /// copy of the masked blob.
-#[tbor(response)]
+#[tbor(response, pair = TborMlDsaGenerateKeyReq)]
 pub struct TborMlDsaGenerateKeyResp<'a> {
     /// The generated ML-DSA private key, masked (AEAD-GCM-256) under the
     /// scope's masking key.  Always 164 B: the wire is seed-only, so the
     /// plaintext is the 32-byte `xi` seed.  See
     /// [`MASKED_MLDSA_KEY_MAX_LEN`].
-    #[tbor(buffer, max_len = 5156, mutable)]
+    #[tbor(buffer, max_len = 5160, mutable)]
     pub masked_key: &'a [u8],
 
     /// The ML-DSA public key.  Up to 2592 B for ML-DSA-87.
@@ -270,28 +236,10 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        const _: () = assert!(5156 == MASKED_MLDSA_KEY_MAX_LEN);
+        const _: () = assert!(5160 == MASKED_MLDSA_KEY_MAX_LEN);
         const _: () = assert!(2592 == MLDSA_PUB_KEY_MAX_LEN);
         const _: () = assert!(4627 == MLDSA_SIGNATURE_MAX_LEN);
-        const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
-        const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
-        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5156);
-    }
-
-    /// The message cap is the residue of the worst-case `MlDsaVerify`
-    /// request against the host encoder's 8192-byte staging budget.
-    #[test]
-    fn message_cap_is_the_mldsa_verify_staging_residue() {
-        const TRANSPORT_BUF_LEN: usize = 8192;
-        const STAGE_OFFSET: usize = 132;
-
-        assert_eq!(
-            TRANSPORT_BUF_LEN
-                - STAGE_OFFSET
-                - MLDSA_PUB_KEY_MAX_LEN
-                - MLDSA_SIGNATURE_MAX_LEN
-                - MLDSA_CTX_MAX_LEN,
-            MLDSA_MESSAGE_MAX_LEN,
-        );
+        const _: () = assert!(64 == MLDSA_MU_LEN);
+        assert_eq!(MASKED_MLDSA_KEY_MAX_LEN, 5160);
     }
 }

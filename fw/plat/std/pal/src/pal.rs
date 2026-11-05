@@ -62,6 +62,7 @@ use crate::io::HsmIoRequest;
 use crate::part::PartitionTable;
 use crate::part::NUM_PARTITIONS;
 use crate::worker::WorkerPool;
+use crate::StdHsmIo;
 
 /// Type alias for the per-partition async mutex.
 ///
@@ -244,16 +245,16 @@ impl Default for StdHsmPal {
 /// so that adding a protocol to the trait forces this platform to
 /// consider it.
 impl HsmCustomDispatch for StdHsmPal {
-    async fn mbor_dispatch(&self, _io: &impl HsmIo, _req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
+    async fn mbor_dispatch(&self, _io: &StdHsmIo, _req: &mut HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
         Err(HsmError::UnsupportedCmd)
     }
 
     async fn tbor_dispatch(
         &self,
-        _io: &impl HsmIo,
+        _io: &StdHsmIo,
         _opcode: u8,
-        _req: &DmaBuf,
-    ) -> HsmResult<&DmaBuf> {
+        _cmd_buf: &mut HsmCmdBuf<'_>,
+    ) -> HsmResult<usize> {
         Err(HsmError::UnsupportedCmd)
     }
 }

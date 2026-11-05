@@ -38,6 +38,9 @@ struct Stage {
     /// Run release build (firmware).
     #[clap(long)]
     build: bool,
+    /// Run unit tests (firmware, host target).
+    #[clap(long)]
+    test: bool,
 }
 
 impl Stage {
@@ -49,6 +52,7 @@ impl Stage {
             || self.copyright
             || self.audit
             || self.build
+            || self.test
     }
 
     fn all() -> Self {
@@ -60,13 +64,16 @@ impl Stage {
             copyright: true,
             audit: true,
             build: true,
+            test: true,
         }
     }
 }
 
 /// Run pre-commit checks across the uno firmware workspace.
 #[derive(Parser)]
-#[clap(about = "Run all pre-commit checks (setup, fmt, clippy, copyright, audit, build, reggen)")]
+#[clap(
+    about = "Run all pre-commit checks (setup, fmt, clippy, test, copyright, audit, build, reggen)"
+)]
 pub struct Precheck {
     #[clap(flatten)]
     stage: Stage,
@@ -149,6 +156,13 @@ impl Xtask for Precheck {
             }
         }
 
+        if stage.test {
+            log::info!("=== test (firmware, host) ===");
+            if let Err(e) = (crate::test::Test {}).run(ctx.clone()) {
+                errors.push(("test", e));
+            }
+        }
+
         if stage.copyright {
             log::info!("=== copyright ===");
             if let Err(e) = (crate::copyright::Copyright { fix: false }).run(ctx.clone()) {
@@ -164,6 +178,18 @@ impl Xtask for Precheck {
         }
 
         if stage.build {
+            // The bulk-crypto fastpath flavor first, so the default flavor is what
+            // remains in `target/` afterwards.
+            log::info!("=== build (firmware, bulk_crypto) ===");
+            if let Err(e) = (crate::build::Build {
+                features: Some(crate::fw_util::BULK_CRYPTO_FEATURE.to_string()),
+                no_default_features: false,
+            })
+            .run(ctx.clone())
+            {
+                errors.push(("build (bulk_crypto)", e));
+            }
+
             log::info!("=== build (firmware) ===");
             if let Err(e) = (crate::build::Build {
                 features: None,

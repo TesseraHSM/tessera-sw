@@ -3,7 +3,8 @@
 
 //! Supported AEAD algorithms and their fixed sizing.
 //!
-//! v1 supports only AES-256-GCM. Other discriminants are reserved
+//! Supports AES-256-GCM with a 16-byte stored IV.
+//! Other discriminants are reserved
 //! for future variants and listed in the registry below; they are
 //! not currently accepted by [`AeadAlg::from_u8`].
 //!
@@ -11,7 +12,7 @@
 //! |------------|--------------------------|---------------------------------|
 //! | `0x01`     | AES-128-GCM              | reserved (not implemented)      |
 //! | `0x02`     | AES-192-GCM              | reserved (not implemented)      |
-//! | `0x03`     | AES-256-GCM              | **v1 — the only supported alg** |
+//! | `0x03`     | AES-256-GCM, stored IV16 | implemented                     |
 //! | `0x11`–`0x13` | AES-CBC-HMAC-SHA-2 family | reserved (not implemented)   |
 
 /// AEAD algorithms supported by the envelope format.
@@ -23,13 +24,14 @@
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AeadAlg {
-    /// AES-256-GCM with a 96-bit nonce and 128-bit tag (NIST
-    /// SP 800-38D). Wire byte: `0x03`.
+    /// AES-256-GCM with a 16-byte stored IV and 128-bit tag.
+    /// Only the first 12 IV bytes are the nonce; the stored suffix is
+    /// `00 00 00 01` on seal and is ignored on open. Wire byte: `0x03`.
     AesGcm256 = 0x03,
 }
 
-/// AES-GCM IV length in bytes (NIST-recommended 96-bit nonce).
-const GCM_IV_LEN: usize = 12;
+/// Stored IV length in bytes (the nonce is the first 12 bytes).
+const GCM_IV_LEN: usize = 16;
 
 /// AES-GCM authentication tag length in bytes.
 const GCM_TAG_LEN: usize = 16;
@@ -118,7 +120,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn from_u8_accepts_only_0x03() {
+    fn from_u8_accepts_registered_algorithm() {
         assert_eq!(AeadAlg::from_u8(0x03), Some(AeadAlg::AesGcm256));
         for v in 0u8..=0xFF {
             if v == 0x03 {
@@ -132,13 +134,11 @@ mod tests {
     fn sizing_constants() {
         let a = AeadAlg::AesGcm256;
         assert_eq!(a.key_len(), 32);
-        assert_eq!(a.iv_len(), 12);
+        assert_eq!(a.iv_len(), 16);
         assert_eq!(a.tag_len(), 16);
         assert_eq!(a.aad_granularity(), 32);
-        // 4 (header) + 12 (iv) + 0 (aad) + 0 (pt) + 16 (tag) = 32
-        assert_eq!(a.envelope_len(0, 0), 36);
-        // 8 + 12 + 32 (aad) + 17 (pt) + 16 = 85
-        assert_eq!(a.envelope_len(17, 32), 85);
+        assert_eq!(a.envelope_len(0, 0), 40);
+        assert_eq!(a.envelope_len(17, 32), 89);
     }
 
     #[test]

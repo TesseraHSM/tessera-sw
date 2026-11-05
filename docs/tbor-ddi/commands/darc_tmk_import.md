@@ -37,7 +37,7 @@ Handler flow:
 4. HPKE-Auth-open `sealed_tmk` (`sk_r = RcvrPriv`, sender-auth `SndrPub`)
    → the 32-byte TMK.
 5. Re-mask the TMK (AEAD-GCM-256) under the SDMK and return the masked
-   envelope.  `RcvrPriv` and the TMK are zeroized on every exit path.
+   envelope. IO teardown scrubs `RcvrPriv` and the TMK.
 
 The command **persists nothing** (no vault write, no lifecycle advance),
 so it records no rollback on the undo log.  The masked output's metadata

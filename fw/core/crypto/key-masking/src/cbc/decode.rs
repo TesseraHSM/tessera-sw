@@ -10,13 +10,12 @@
 //! block).  The caller recovers the exact plaintext length from the
 //! metadata's higher-level format (e.g. `key_length`).
 
-use tsra_fw_hsm_pal_traits::AesOp;
-use tsra_fw_hsm_pal_traits::DmaBuf;
 use tsra_fw_hsm_pal_traits::HsmAes;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmHmac;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 use crate::cbc::format::MaskedKeyAesHeader;
@@ -64,7 +63,7 @@ pub struct UnmaskLayout {
 ///
 /// * [`HsmError::MaskedKeyDecodeFailed`] — the headers are malformed, or
 ///   `blob.len()` does not match the on-wire length they declare.
-pub fn peek_metadata(blob: &DmaBuf) -> HsmResult<&[u8]> {
+pub fn peek_metadata(blob: &HsmDmaBuf) -> HsmResult<&[u8]> {
     // Structural header parse only (no key, no tag verification); mirrors
     // the header handling at the top of `unmask`.
     MaskedKeyHeader::parse_cbc(blob)?;
@@ -113,13 +112,13 @@ pub fn peek_metadata(blob: &DmaBuf) -> HsmResult<&[u8]> {
 ///   match the on-wire length declared by its headers, its headers are
 ///   malformed, or the HMAC tag does not match.
 /// * Any [`HsmError`] surfaced by the PAL HMAC or AES drivers.  On
-///   AES-decrypt failure, the ciphertext slot is wiped before
-///   returning so partial plaintext does not leak.
+///   AES-decrypt failure, the ciphertext slot may contain partial plaintext;
+///   callers must not publish it. IO teardown scrubs the backing storage.
 pub async fn unmask<P>(
     pal: &P,
-    io: &impl HsmIo,
-    masking_key: &DmaBuf,
-    blob: &mut DmaBuf,
+    io: &P::Io,
+    masking_key: &HsmDmaBuf,
+    blob: &mut HsmDmaBuf,
 ) -> HsmResult<UnmaskLayout>
 where
     P: HsmAes + HsmHmac,
@@ -164,14 +163,10 @@ where
         let iv = &front[iv_off..iv_off + AES_CBC_IV_SIZE];
         let ct = &mut back[..ct_len];
         let aes_key = &masking_key[..AES_CBC_256_KEY_SIZE];
-        pal.aes_cbc_enc_dec_in_place(io, AesOp::Decrypt, aes_key, ct, iv, None)
+        pal.aes_cbc_enc_dec_in_place(io, HsmAesOp::Decrypt, aes_key, ct, iv, None)
             .await
     };
-    if let Err(e) = aes_result {
-        // May hold partial plaintext; wipe before surfacing the error.
-        blob[ct_off..ct_off + ct_len].fill(0);
-        return Err(e);
-    }
+    aes_result?;
 
     Ok(UnmaskLayout {
         metadata_offset: meta_off,

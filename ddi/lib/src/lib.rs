@@ -16,14 +16,11 @@ compile_error!("features `emu` and `sock` are mutually exclusive; enable at most
 #[cfg(all(feature = "mock", feature = "sock"))]
 compile_error!("features `mock` and `sock` are mutually exclusive; enable at most one");
 
-#[cfg(all(feature = "sock", not(unix)))]
-compile_error!("feature `sock` requires a Unix target (tsra_ddi_sock uses Unix-domain sockets)");
-
 cfg_if::cfg_if! {
     if #[cfg(feature = "emu")] {
         /// Tsra DDI emulator implementation (in-process firmware).
         pub type TsraDdi = tsra_ddi_emu::DdiEmu;
-    } else if #[cfg(all(feature = "sock", unix))] {
+    } else if #[cfg(feature = "sock")] {
         /// Tsra DDI socket implementation (firmware behind a socket server).
         pub type TsraDdi = tsra_ddi_sock::DdiSock;
     } else if #[cfg(feature = "mock")] {

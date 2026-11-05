@@ -9,13 +9,13 @@ use crate::*;
 #[ddi(map)]
 pub struct DdiEncryptedPin<'a> {
     #[ddi(id = 2, len = 16)]
-    pub encrypted_pin: &'a mut DmaBuf,
+    pub encrypted_pin: &'a mut HsmDmaBuf,
     #[ddi(id = 3, len = 16)]
-    pub iv: &'a mut DmaBuf,
+    pub iv: &'a mut HsmDmaBuf,
     #[ddi(id = 4, len = 32)]
-    pub nonce: &'a mut DmaBuf,
+    pub nonce: &'a mut HsmDmaBuf,
     #[ddi(id = 5, len = 48)]
-    pub tag: &'a mut DmaBuf,
+    pub tag: &'a mut HsmDmaBuf,
 }
 
 #[derive(Debug, Ddi)]

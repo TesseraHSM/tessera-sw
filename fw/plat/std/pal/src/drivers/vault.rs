@@ -31,6 +31,7 @@
 //! session key ID — called during session close.
 
 use tsra_fw_hsm_pal_traits::*;
+use zeroize::Zeroizing;
 
 use crate::session::SESSION_CU_AUTH_BLOB_SIZE;
 use crate::session::SESSION_CU_BLOB_SIZE;
@@ -87,9 +88,11 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
         HsmVaultKeyKind::Aes128 => 16,
         HsmVaultKeyKind::Aes192 => 24,
         HsmVaultKeyKind::Aes256 => 32,
+        // The std PAL runs bulk crypto itself, so bulk keys keep their
+        // AES-256 material (the reference firmware stored a 2-byte handle).
         HsmVaultKeyKind::AesXtsBulk256
         | HsmVaultKeyKind::AesGcmBulk256
-        | HsmVaultKeyKind::AesGcmBulk256Unapproved => 2,
+        | HsmVaultKeyKind::AesGcmBulk256Unapproved => 32,
         HsmVaultKeyKind::Secret256 => 32,
         HsmVaultKeyKind::Secret384 => 48,
         HsmVaultKeyKind::Secret521 => 68,
@@ -126,8 +129,9 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
         HsmVaultKeyKind::MlKem512Public => 800,
         HsmVaultKeyKind::MlKem768Public => 1184,
         HsmVaultKeyKind::MlKem1024Public => 1568,
+        HsmVaultKeyKind::AesXts512 => 64,
         // `SessionEx` is length-discriminated by session type
-        // (PlainText=72, Authenticated=168 — see [`session_ex_len_valid`]);
+        // (PlainText=140, Authenticated=236 — see [`session_ex_len_valid`]);
         // reported as variable length, same handling as VarLenHmac*.
         HsmVaultKeyKind::SessionEx => return None,
         // Variable-length HMAC — size depends on actual key.
@@ -145,10 +149,10 @@ pub fn fw_key_size(kind: HsmVaultKeyKind) -> Option<usize> {
 /// bounds come from [`crate::session`], the module that actually builds
 /// the blob, so the check cannot drift from the writer:
 ///
-/// * [`SESSION_CU_BLOB_SIZE`] — PlainText (CU): `api_rev ‖ param_key ‖ masking_key`
+/// * [`SESSION_CU_BLOB_SIZE`] — PlainText (CU): `api_rev ‖ param_key ‖ masking_key ‖ auth_binding`
 /// * [`SESSION_CU_AUTH_BLOB_SIZE`] — Authenticated (CO): the above `‖ mac_tx ‖ mac_rx`
 fn session_ex_len_valid(len: usize) -> bool {
-    (SESSION_CU_BLOB_SIZE..=SESSION_CU_AUTH_BLOB_SIZE).contains(&len)
+    matches!(len, SESSION_CU_BLOB_SIZE | SESSION_CU_AUTH_BLOB_SIZE)
 }
 
 /// Compute the firmware-equivalent storage cost for a key.
@@ -184,7 +188,7 @@ fn fw_storage_cost(kind: HsmVaultKeyKind, actual_len: usize) -> Option<usize> {
 /// A single stored key with its attributes.
 struct VaultEntry {
     /// Raw key material (may differ in size from firmware representation).
-    key: Vec<u8>,
+    key: Zeroizing<Vec<u8>>,
     /// Algorithm/size discriminant.
     kind: HsmVaultKeyKind,
     /// PKCS#11-inspired attribute bitfield.
@@ -270,7 +274,7 @@ impl KeyVault {
             };
 
             table.entries[entry_idx] = Some(VaultEntry {
-                key: key.to_vec(),
+                key: Zeroizing::new(key.to_vec()),
                 kind,
                 attrs,
                 session_key_id,
@@ -299,8 +303,6 @@ impl KeyVault {
             .ok_or(HsmError::KeyNotFound)?;
         let entry = slot.take().ok_or(HsmError::KeyNotFound)?;
         table.used_bytes -= entry.cost;
-        // Key material in entry.key is dropped (Vec deallocated).
-        // In a real zeroize implementation we'd use zeroize crate.
         Ok(())
     }
 
@@ -445,8 +447,8 @@ mod tests {
     /// actually writes, and both must round-trip through `create`.
     #[test]
     fn session_ex_len_matches_session_blob_sizes() {
-        assert_eq!(SESSION_CU_BLOB_SIZE, 72);
-        assert_eq!(SESSION_CU_AUTH_BLOB_SIZE, 168);
+        assert_eq!(SESSION_CU_BLOB_SIZE, 140);
+        assert_eq!(SESSION_CU_AUTH_BLOB_SIZE, 236);
 
         // Both real blobs are accepted.
         assert!(session_ex_len_valid(SESSION_CU_BLOB_SIZE));
@@ -764,9 +766,9 @@ mod tests {
             (HsmVaultKeyKind::Aes128, 16),
             (HsmVaultKeyKind::Aes192, 24),
             (HsmVaultKeyKind::Aes256, 32),
-            (HsmVaultKeyKind::AesXtsBulk256, 2),
-            (HsmVaultKeyKind::AesGcmBulk256, 2),
-            (HsmVaultKeyKind::AesGcmBulk256Unapproved, 2),
+            (HsmVaultKeyKind::AesXtsBulk256, 32),
+            (HsmVaultKeyKind::AesGcmBulk256, 32),
+            (HsmVaultKeyKind::AesGcmBulk256Unapproved, 32),
             (HsmVaultKeyKind::Secret256, 32),
             (HsmVaultKeyKind::Secret384, 48),
             (HsmVaultKeyKind::Secret521, 68),
@@ -802,6 +804,7 @@ mod tests {
             (HsmVaultKeyKind::MlKem512Public, 800),
             (HsmVaultKeyKind::MlKem768Public, 1184),
             (HsmVaultKeyKind::MlKem1024Public, 1568),
+            (HsmVaultKeyKind::AesXts512, 64),
         ];
         for &(kind, expected) in cases {
             assert_eq!(

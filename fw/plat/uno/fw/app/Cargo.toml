@@ -32,6 +32,9 @@ tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_pal = { workspace = true }
 tsra_fw_uno_trace = { workspace = true }
 
+[build-dependencies]
+tsra_fw_uno_reg_soc = { workspace = true }
+
 [features]
 #default = ["trace-uart"]
 default = []
@@ -85,6 +88,10 @@ profile = [
   "tsra_fw_uno_drivers_profile/backend-semihosting",
   "tsra_fw_uno_drivers_profile/trace",
 ]
+
+# Target the bulk-crypto fastpath firmware rather than the PQC one; see
+# `tsra_fw_uno_pal/bulk_crypto`.
+bulk_crypto = ["tsra_fw_uno_pal/bulk_crypto"]
 
 [lints]
 workspace = true

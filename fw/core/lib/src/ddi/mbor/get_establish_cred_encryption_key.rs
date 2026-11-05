@@ -20,10 +20,10 @@ use super::*;
 /// Handle DdiGetEstablishCredEncryptionKeyCmd.
 pub(crate) async fn get_establish_cred_encryption_key<'p, P: HsmPal>(
     pal: &'p P,
-    io: &impl HsmIo,
+    io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
-) -> HsmResult<&'p DmaBuf> {
+) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetEstablishCredEncryptionKeyReq = decoder.decode_data()?;
 
     // Key must exist (not yet consumed by EstablishCredential).
