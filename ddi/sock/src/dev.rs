@@ -393,13 +393,19 @@ pub struct DdiSockDev {
     cmd_counter: Arc<AtomicU16>,
     device_kind: DdiDeviceKind,
     // Set once a best-effort leaked-session cleanup exchange (see
-    // `close_leaked_session_locked`) times out: a late response for that
-    // exchange may still be unread on the wire, so reusing the stream for
-    // any further request risks reading that stale response instead.
-    // Every clone shares this flag (and the stream), so every clone is
-    // retired together rather than only the one that observed the
-    // timeout.
+    // `close_leaked_session_locked`) fails (timeout or any other error):
+    // a late or partially-consumed response for that exchange may still
+    // be unread on the wire, so reusing the stream for any further
+    // request risks reading that stale response instead. Every clone
+    // shares this flag (and the stream), so every clone is retired
+    // together rather than only the one that observed the failure.
     retired: Arc<AtomicBool>,
+    // The cleanup failure that caused `retired` to be set, if any,
+    // described as a string (so it's cheap to clone out of the mutex
+    // without requiring `DdiError` itself to implement `Clone`). Read by
+    // `retired_err` to report the actual cause — not always a timeout —
+    // behind every subsequent request on a retired connection.
+    retired_cause: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for DdiSockDev {
@@ -425,8 +431,10 @@ enum CloseLeakedSessionOutcome {
     /// partially-consumed response may still arrive, so the stream can
     /// no longer be trusted to pair reads with the request that caused
     /// them; the connection is conservatively retired instead of
-    /// reused.
-    Unusable,
+    /// reused. Carries a description of the actual failure, so a
+    /// subsequent request on the retired connection can report it
+    /// instead of always claiming a timeout.
+    Unusable(String),
 }
 
 impl DdiSockDev {
@@ -477,6 +485,7 @@ impl DdiSockDev {
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
             retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -486,11 +495,30 @@ impl DdiSockDev {
 
     /// Error returned for any request on a connection the best-effort
     /// leaked-session cleanup has already retired (see `retired`).
-    fn retired_err() -> DdiError {
-        DdiError::IoError(std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "connection retired after a leaked-session cleanup timeout",
-        ))
+    /// Describes the actual cleanup failure (if one was recorded via
+    /// `retired_cause`) rather than always claiming a timeout — the
+    /// cleanup can also fail with an ordinary I/O error or a malformed
+    /// response, and the earlier flat "cleanup timeout" wording would
+    /// misdirect anyone diagnosing one of those cases.
+    fn retired_err(&self) -> DdiError {
+        let cause = self.retired_cause.lock().clone();
+        let message = match cause {
+            Some(cause) => {
+                format!("connection retired after a leaked-session cleanup failure: {cause}")
+            }
+            None => "connection retired after a leaked-session cleanup".to_owned(),
+        };
+        DdiError::IoError(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message))
+    }
+
+    /// Mark the connection retired, recording `cause` so a subsequent
+    /// `retired_err()` describes the actual cleanup failure instead of a
+    /// generic message. The cause is stored before the flag is set so
+    /// any caller that observes `retired == true` (via `Acquire`) can
+    /// always read it back.
+    fn retire(&self, cause: String) {
+        *self.retired_cause.lock() = Some(cause);
+        self.retired.store(true, Ordering::Release);
     }
 
     /// Exchange one submission with the server over an already-locked
@@ -518,7 +546,7 @@ impl DdiSockDev {
     /// Maps a nonzero transport status to a [`DdiError`].
     fn exchange(&self, req: &Request) -> DdiResult<Response> {
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         let mut stream = self.stream.lock();
         // A cleanup running on another clone of this handle could have
@@ -527,7 +555,7 @@ impl DdiSockDev {
         // recheck now, before any I/O, so a request can't slip in on a
         // stream whose cleanup response hasn't been consumed yet.
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         Self::exchange_locked(&mut *stream, req)
     }
@@ -548,7 +576,7 @@ impl DdiSockDev {
         oob_items: Vec<OobItem>,
     ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         let cmd_id = self.next_cmd_id();
         let mut stream = self.stream.lock();
@@ -556,7 +584,7 @@ impl DdiSockDev {
         // may have retired the connection after the check above but
         // before this lock was acquired.
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         Self::submit_locked(
             &mut *stream,
@@ -737,7 +765,7 @@ impl DdiSockDev {
 
         match result {
             Ok(_) => CloseLeakedSessionOutcome::Done,
-            Err(_) => CloseLeakedSessionOutcome::Unusable,
+            Err(err) => CloseLeakedSessionOutcome::Unusable(err.to_string()),
         }
     }
 
@@ -880,7 +908,7 @@ impl DdiDev for DdiSockDev {
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         let (pre_encode, post_decode) = match self.device_kind {
             DdiDeviceKind::Physical => (true, true),
@@ -922,7 +950,7 @@ impl DdiDev for DdiSockDev {
         // clone may have retired the connection after the check at the
         // top of this function but before this lock was acquired.
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         let (resp_buf, _) = Self::submit_locked(
             &mut *stream,
@@ -960,16 +988,15 @@ impl DdiDev for DdiSockDev {
             Err(_) => {
                 if session_ctrl == SessionControlKind::Open {
                     if let Some(leaked_id) = hdr.sess_id {
-                        if matches!(
+                        if let CloseLeakedSessionOutcome::Unusable(cause) =
                             Self::close_leaked_session_locked(
                                 &mut stream,
                                 self.next_cmd_id(),
                                 pre_encode,
                                 leaked_id,
-                            ),
-                            CloseLeakedSessionOutcome::Unusable
-                        ) {
-                            self.retired.store(true, Ordering::Release);
+                            )
+                        {
+                            self.retire(cause);
                         }
                     }
                 }
@@ -1004,16 +1031,15 @@ impl DdiDev for DdiSockDev {
             if let Some(leaked_id) =
                 open_session_leaked_id(hdr.sess_id, typed_resp.resp_session_id())
             {
-                if matches!(
+                if let CloseLeakedSessionOutcome::Unusable(cause) =
                     Self::close_leaked_session_locked(
                         &mut stream,
                         self.next_cmd_id(),
                         pre_encode,
                         leaked_id,
-                    ),
-                    CloseLeakedSessionOutcome::Unusable
-                ) {
-                    self.retired.store(true, Ordering::Release);
+                    )
+                {
+                    self.retire(cause);
                 }
             }
             return Err(DdiError::MborError(MborError::DecodeError));
@@ -1233,14 +1259,14 @@ impl DdiDev for DdiSockDev {
 
     fn erase(&self) -> Result<(), DdiError> {
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         let mut stream = self.stream.lock();
         // See `exchange`'s matching recheck: a cleanup on another clone
         // may have retired the connection after the check above but
         // before this lock was acquired.
         if self.retired.load(Ordering::Acquire) {
-            return Err(Self::retired_err());
+            return Err(self.retired_err());
         }
         RequestFrame::Reset
             .write_to(&mut *stream)
@@ -1448,6 +1474,7 @@ mod tests {
             cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Physical,
             retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
         };
         let peer = std::thread::spawn(move || {
             let request = Request::read_from(&mut server).expect("request");
@@ -1495,8 +1522,37 @@ mod tests {
         let mut stream = SocketStream::Unix(client);
         let outcome = DdiSockDev::close_leaked_session_locked(&mut stream, 1, false, 7);
         assert!(
-            matches!(outcome, CloseLeakedSessionOutcome::Unusable),
+            matches!(outcome, CloseLeakedSessionOutcome::Unusable(_)),
             "a non-timeout cleanup error must still retire the connection"
+        );
+    }
+
+    /// `retired_err` must describe the actual cleanup failure that
+    /// caused a connection to be retired, not a flat "timeout" message
+    /// that would misdirect anyone diagnosing a non-timeout cleanup
+    /// error (see `close_leaked_session_retires_on_any_cleanup_error_not_just_timeout`).
+    #[cfg(unix)]
+    #[test]
+    fn retired_err_reports_the_recorded_cleanup_cause() {
+        let device = DdiSockDev {
+            stream: Arc::new(Mutex::new(SocketStream::Unix(
+                UnixStream::pair().expect("socket pair").0,
+            ))),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
+            device_kind: DdiDeviceKind::Physical,
+            retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
+        };
+        device.retire("disk on fire".to_owned());
+        // `DdiError::IoError`'s `Display` is the fixed string "io error"
+        // (see `ddi/interface/src/error.rs`); the actual message only
+        // shows up via `Debug` (through the wrapped `io::Error`'s own
+        // `Debug` impl), so that's what callers trying to diagnose a
+        // retired connection would actually see.
+        let err = format!("{:?}", device.retired_err());
+        assert!(
+            err.contains("disk on fire"),
+            "retired_err should surface the recorded cause, got: {err}"
         );
     }
 
