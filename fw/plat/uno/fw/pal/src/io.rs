@@ -137,7 +137,7 @@ pub struct UnoHsmIo {
 
 impl UnoHsmIo {
     /// Returns the platform-private resource slot for this IO.
-    pub(crate) fn index(&self) -> u16 {
+    pub fn index(&self) -> u16 {
         self.index
     }
 
