@@ -168,6 +168,7 @@ fn build_fixture(
             session_id: session.session_id,
             masked_key: masked_sealing_key.clone(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
+            auth_envelope: Vec::new(),
         })
         .expect("KeyReport")
         .report

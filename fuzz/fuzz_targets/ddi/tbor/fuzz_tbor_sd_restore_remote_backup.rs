@@ -230,6 +230,7 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
             session_id: source_session.session_id,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
+            auth_envelope: Vec::new(),
         })
         .expect("KeyReport should succeed")
         .report;
@@ -261,6 +262,7 @@ fn create_restore_fixture(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<
                 session_id: source_session.session_id,
                 masked_key: sealing_key.masked_key.to_vec(),
                 report_data: [0u8; KEY_REPORT_DATA_LEN],
+                auth_envelope: Vec::new(),
             })
             .expect("SecurityDomain-scope KeyReport should succeed")
             .report;
