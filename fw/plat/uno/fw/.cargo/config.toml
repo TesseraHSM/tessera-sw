@@ -15,7 +15,7 @@ rustflags = [
   "target-cpu=cortex-m7",
   # Limit code growth to fit CP1's 512 KiB ITCM without lowering crypto opt-levels.
   "-C",
-  "llvm-args=-inline-threshold=25",
+  "llvm-args=-inline-threshold=50",
 ]
 
 [unstable]
