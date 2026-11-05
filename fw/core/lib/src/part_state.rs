@@ -1055,6 +1055,9 @@ pub fn part_psk_is_default<P: HsmPartitionManager>(
     io: &P::Io,
     psk_id: u8,
 ) -> HsmResult<bool> {
+    if let Some(is_default) = pal.part_psk_default_memo(io, psk_id) {
+        return Ok(is_default);
+    }
     let stored = part_psk(pal, io, psk_id)?;
     let default = match psk_id {
         0 => DEFAULT_PSK_CO.as_slice(),
@@ -1079,6 +1082,9 @@ pub fn part_psk_is_default<P: HsmPartitionManager>(
         diff |= a ^ b;
     }
     copy.0.zeroize();
+    // Nothing above awaits, so no write to the PSK can come between the
+    // comparison and the PAL remembering its result.
+    pal.part_psk_memo_default(io, psk_id, diff == 0);
     Ok(diff == 0)
 }
 
