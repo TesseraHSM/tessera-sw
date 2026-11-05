@@ -283,26 +283,32 @@ pub fn sign_internal(
         let mut hint_count = 0u32;
         let mut reject = false;
 
+        // The hints want w0 - c*s2 + c*t0, and c*t0 inside gamma2. For
+        // ML-DSA-65 and -87 |c*t0| <= tau * 2^12 is below gamma2 anyway, so
+        // that check cannot fail and one product a row does: w0 + c*(t0 -
+        // s2). ML-DSA-44's c*t0 can exceed gamma2, so it forms r0 = w0 -
+        // c*s2 in w_i and checks c*t0 on its own.
+        let ct0_checked = params.tau as u32 * (1 << 12) >= params.gamma2;
         for i in 0..k {
-            // r0 = w0 - c*s2 replaces w0 in w_i, beside w1; the check
-            // above already found it inside its bound.
-            c_times_key(
-                &mut tmp,
-                &c_hat,
-                &sk[sk_s2_offset + i * params.eta_pack_bytes()..],
-                eta_d,
-                eta_bias,
-            );
-            poly::poly_r0_check(&mut w[i], &tmp, params.gamma2 - params.beta);
-
-            c_times_key(&mut tmp, &c_hat, &sk[sk_t0_offset + i * 416..], 13, 1 << 12);
-            if !poly::poly_reduce_chknorm(&mut tmp, params.gamma2) {
-                reject = true;
-                break;
+            let s2 = &sk[sk_s2_offset + i * params.eta_pack_bytes()..];
+            let t0 = &sk[sk_t0_offset + i * 416..];
+            if ct0_checked {
+                c_times_key(&mut tmp, &c_hat, s2, [eta_d, eta_bias as u32], None);
+                poly::poly_r0_check(&mut w[i], &tmp, params.gamma2 - params.beta);
+                c_times_key(&mut tmp, &c_hat, t0, [13, 1 << 12], None);
+                if !poly::poly_reduce_chknorm(&mut tmp, params.gamma2) {
+                    reject = true;
+                    break;
+                }
+            } else {
+                let minus = (&mut w0_i, s2, [eta_d, eta_bias as u32]);
+                c_times_key(&mut tmp, &c_hat, t0, [13, 1 << 12], Some(minus));
+                // Only to centre it: the bound is out of reach.
+                poly::poly_reduce_chknorm(&mut tmp, 1 << 22);
             }
 
-            // MakeHint and pack incrementally into hint_buf, from r0 and w1
-            // in w_i.
+            // MakeHint and pack incrementally into hint_buf, from w_i's low
+            // part -- r0, or w0 with c*s2 folded into tmp -- and w1.
             for coeff in 0..N {
                 let v = w[i][coeff];
                 let h = rounding::make_hint((v >> 6) + tmp[coeff], v & 63, params.gamma2);
@@ -344,8 +350,8 @@ pub fn sign_internal(
                 &mut w0_i,
                 &c_hat,
                 &sk[sk_s1_offset + j * params.eta_pack_bytes()..],
-                eta_d,
-                eta_bias,
+                [eta_d, eta_bias as u32],
+                None,
             );
             poly::poly_add_reduce_chknorm(&mut tmp, &w0_i, params.gamma1 - params.beta);
             packing::pack_z(zj, &tmp, params.gamma1);
@@ -357,14 +363,28 @@ pub fn sign_internal(
     false
 }
 
-/// `dst = c * p`, for `p` a polynomial of s1, s2 or t0, packed in `src` as
-/// `bias - f` in `d`-bit fields.
+/// `dst = c * p`, for `p` a polynomial of s1, s2 or t0 packed in `src` as
+/// `bias - f` in `d`-bit fields, `fmt` = [d, bias] -- less, if `minus` names
+/// one, a second such polynomial, unpacked into the scratch it carries.
 ///
 /// Each is needed once a signature, by the attempt that passes, so the
 /// transform is not kept.
 #[inline(never)]
-fn c_times_key(dst: &mut Poly, c_hat: &Poly, src: &[u8], d: u32, bias: i32) {
-    packing::unpack_centered(dst, src, d, bias);
+#[allow(clippy::type_complexity)]
+fn c_times_key(
+    dst: &mut Poly,
+    c_hat: &Poly,
+    src: &[u8],
+    fmt: [u32; 2],
+    minus: Option<(&mut Poly, &[u8], [u32; 2])>,
+) {
+    packing::unpack_centered(dst, src, fmt[0], fmt[1] as i32);
+    if let Some((scratch, src, fmt)) = minus {
+        packing::unpack_centered(scratch, src, fmt[0], fmt[1] as i32);
+        for (x, &y) in dst.iter_mut().zip(scratch.iter()) {
+            *x -= y;
+        }
+    }
     ntt::ntt(dst);
     ntt::poly_pointwise_montgomery_inplace(dst, c_hat);
     ntt::invntt(dst);
