@@ -73,6 +73,10 @@ impl HsmSession {
             pub(crate) fn with_dev<F, R>(&self, f: F) -> HsmResult<R>
             where
                 F: FnOnce(&ddi::HsmDev) -> HsmResult<R>;
+
+            pub(crate) fn with_dev_no_cookie<F, R>(&self, f: F) -> HsmResult<R>
+            where
+                F: FnOnce(&ddi::HsmDev) -> HsmResult<R>;
         }
     }
 
@@ -827,6 +831,38 @@ impl HsmSessionInner {
         let part = self.partition().inner().read();
         let dev = part.dev();
         ddi::with_session_cookie(&self.ddi_cookie, || f(dev))
+    }
+
+    /// Executes a closure with access to the underlying device handle,
+    /// without serializing on the session's cookie mutex.
+    ///
+    /// For cookie-free fast-path operations (e.g. the V1 AES-GCM/XTS
+    /// bulk calls, which go straight to the backend without ever
+    /// reading or writing `ddi_cookie`): holding the cookie mutex for
+    /// their entire device call would needlessly serialize concurrent
+    /// bulk operations sharing a session, removing concurrency the
+    /// backend's own locking already allows. Use [`Self::with_dev`]
+    /// instead for any call that may read or write the session's
+    /// continuity cookie (MBOR/TBOR exchanges).
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Closure that receives the device handle and returns a result
+    ///
+    /// # Returns
+    ///
+    /// Returns the result produced by the closure.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error produced by the closure.
+    pub(crate) fn with_dev_no_cookie<F, R>(&self, f: F) -> HsmResult<R>
+    where
+        F: FnOnce(&ddi::HsmDev) -> HsmResult<R>,
+    {
+        let part = self.partition().inner().read();
+        let dev = part.dev();
+        f(dev)
     }
 
     /// Returns the partition restore epoch at which this session was last
