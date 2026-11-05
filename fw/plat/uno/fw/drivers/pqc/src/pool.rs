@@ -10,7 +10,9 @@
 //! key, and the core that last signed with that key still holds the key's
 //! public matrix, which spares it most of the matrix expansion. A freed
 //! engine goes to the oldest waiter with its tag, if one is queued, ahead
-//! of the head of the queue, which is passed over at most
+//! of the head of the queue; failing that, to the oldest whose tag no other
+//! engine holds, so that it does not take a waiter another engine would
+//! serve with its matrix in hand. The head is passed over at most
 //! [`MAX_HEAD_SKIPS`] times before it is served regardless.
 
 use core::task::Context;
@@ -31,10 +33,10 @@ use crate::types::QUEUE_DEPTH;
 /// with a real index.
 pub(crate) const NO_SLOT: u8 = u8::MAX;
 
-/// Most times the head waiter may be passed over for a later one with the
-/// freed engine's tag before it is served regardless. Each costs it at most
-/// one request's time on one of the engines.
-pub(crate) const MAX_HEAD_SKIPS: u8 = 8;
+/// Most times the head waiter may be passed over for a later one before it
+/// is served regardless. Each costs it at most one request's time on one of
+/// the engines.
+pub(crate) const MAX_HEAD_SKIPS: u8 = 16;
 
 /// Per-engine state.
 pub(crate) struct EngineSlot {
@@ -190,6 +192,12 @@ impl PqcState {
         self.wait_head != NO_SLOT
     }
 
+    /// True if an engine other than `e` last ran a task with tag `tag`
+    /// (nonzero).
+    fn held_elsewhere(&self, e: usize, tag: u32) -> bool {
+        tag != 0 && (0..ENGINES).any(|i| i != e && self.engine_tag[i] == tag)
+    }
+
     /// Reserve a queue slot for a task with affinity `tag` about to wait.
     pub(crate) fn reserve_queue_slot(&mut self, tag: u32) -> Option<u8> {
         // Pop the free list.
@@ -235,29 +243,38 @@ impl PqcState {
     }
 
     /// Return an engine to the pool, handing it straight to a waiting task
-    /// if there is one: the longest-waiting with the engine's tag, unless
-    /// the head of the queue has been passed over [`MAX_HEAD_SKIPS`] times,
-    /// and otherwise the head.
+    /// if there is one: unless the head of the queue has been passed over
+    /// [`MAX_HEAD_SKIPS`] times, the longest-waiting with the engine's tag,
+    /// else the longest-waiting whose tag no other engine holds; otherwise
+    /// the head.
     pub(crate) fn release_engine(&mut self, id: EngineId) {
         // The head of the wait ring is by construction the waiter that
         // queued first.
         let waiter = if self.wait_head == NO_SLOT {
             None
         } else {
-            let want = self.engine_tag[id.raw() as usize];
+            let e = id.raw() as usize;
+            let want = self.engine_tag[e];
             let head = self.wait_head;
             let mut idx = head;
-            if want != 0
-                && self.queue[head as usize].tag != want
-                && self.head_skips < MAX_HEAD_SKIPS
+            if self.head_skips < MAX_HEAD_SKIPS
+                && (want == 0 || self.queue[head as usize].tag != want)
             {
-                let mut cur = self.queue[head as usize].next;
+                let mut pick = NO_SLOT;
+                let mut cur = head;
                 while cur != NO_SLOT {
-                    if self.queue[cur as usize].tag == want {
-                        idx = cur;
+                    let tag = self.queue[cur as usize].tag;
+                    if want != 0 && tag == want {
+                        pick = cur;
                         break;
                     }
+                    if pick == NO_SLOT && !self.held_elsewhere(e, tag) {
+                        pick = cur;
+                    }
                     cur = self.queue[cur as usize].next;
+                }
+                if pick != NO_SLOT {
+                    idx = pick;
                 }
             }
             self.unlink_waiter(idx);
@@ -586,6 +603,24 @@ mod tests {
         assert_eq!(state.claim_free_engine(7), Some(EngineId::new(2)));
         assert_eq!(state.claim_free_engine(9), Some(EngineId::new(0)));
         assert_eq!(state.engine_tag[0], 9);
+    }
+
+    /// With no waiter for its own tag, a freed engine passes over waiters
+    /// whose tag another engine holds for one whose tag none does.
+    #[test]
+    fn released_engine_leaves_waiters_another_engine_holds() {
+        let mut state = PqcState::new();
+        for tag in [5, 6, 7] {
+            state.claim_free_engine(tag).expect("engine free");
+        }
+        let six = state.reserve_queue_slot(6).expect("slot");
+        let nine = state.reserve_queue_slot(9).expect("slot");
+
+        state.release_engine(EngineId::new(0));
+        assert_eq!(collect(&mut state, nine), Some(EngineId::new(0)));
+        assert_eq!(state.engine_tag[0], 9);
+        state.release_engine(EngineId::new(1));
+        assert_eq!(collect(&mut state, six), Some(EngineId::new(1)));
     }
 
     /// The head is passed over at most `MAX_HEAD_SKIPS` times in a row.
