@@ -17,6 +17,12 @@
 //! error is returned to the host, so a tampered envelope cannot be
 //! probed repeatedly against the same slot.
 //!
+//! The Phase-2 core ([`run_finish`]) is shared with
+//! [`super::session_reopen_finish`], which restores the session's
+//! existing `masking_key` from the host's `bmk_session` instead of
+//! generating a fresh one.  A failed reopen (before or after promotion)
+//! reverts the slot to NeedsRenegotiation, so it never loses the session.
+//!
 //! All variable-length buffers live on the per-IO scoped allocator
 //! per the firmware async-discipline convention; no DMA-sized arrays
 //! sit on the async stack.
@@ -26,25 +32,15 @@ use tsra_fw_core_crypto_aead_envelope::AeadAlg;
 use tsra_fw_core_crypto_hpke::HpkeSuite;
 use tsra_fw_core_crypto_key_masking::aead::mask as mask_key;
 use tsra_fw_core_crypto_key_masking::aead::masked_blob_len;
+use tsra_fw_core_crypto_key_masking::aead::unmask as unmask_key;
 use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_ddi_tbor_types::*;
 use tsra_fw_hsm_pal_traits::*;
 use tsra_fw_hsm_undo::UndoLog;
 
-/// Map a [`HsmSessionSuite`] to the concrete [`HpkeSuite`] used by the
-/// session-establishment handshake.  Mirrors the function of the same
-/// name in [`super::session_open_init`]; kept duplicated to avoid
-/// pulling that module's internals into a public surface.
-const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
-    match suite {
-        HsmSessionSuite::P384HkdfSha384AesGcm256 => HpkeSuite::DHKemP384Sha384AesGcm256,
-    }
-}
-
-/// Length of the Pending blob; mirrors the layout written by
-/// [`super::session_open_init`]:
-/// `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`.
-const PENDING_BLOB_LEN: usize = super::session_open_init::PENDING_BLOB_LEN;
+use super::session_open_init::hpke_suite_for;
+use super::session_open_init::HandshakeKind;
+use super::session_open_init::PENDING_BLOB_LEN;
 
 /// Length of the API revision tag persisted alongside the session blob.
 const API_REV_LEN: usize = 8;
@@ -61,16 +57,34 @@ const AEAD_ALG: AeadAlg = AeadAlg::AesGcm256;
 /// per-session boot-masking key recovered on resume.
 const BMK_SESSION_KEY_LABEL: &[u8] = b"SESSION_BMK";
 
-/// Validated `SessionOpenFinish` request fields.
-struct ParsedRequest<'a> {
+/// Validated Phase-2 request fields shared by open and reopen finish.
+pub(super) struct FinishRequest<'a> {
     /// Session Id
-    sess_id: HsmSessId,
+    pub(super) sess_id: HsmSessId,
     /// Codec-supplied `&HsmDmaBuf` sub-view of the inbound request
     /// buffer; flows straight into the constant-time MAC compare.
-    mac_fin: &'a HsmDmaBuf,
+    pub(super) mac_fin: &'a HsmDmaBuf,
     /// Codec-supplied `&mut HsmDmaBuf` sub-view of the inbound request
     /// buffer.  Decrypted in place by [`aead_open`] — no scratch copy.
-    seed_envelope: &'a mut HsmDmaBuf,
+    pub(super) seed_envelope: &'a mut HsmDmaBuf,
+}
+
+/// Where Phase 2 obtains the session's `masking_key`.
+pub(super) enum MaskingKeySource<'a> {
+    /// `SessionOpenFinish`: generate a fresh random key.
+    Fresh,
+    /// `SessionReopenFinish`: unwrap the session's existing key from the
+    /// host-supplied `bmk_session` (decrypted in place).
+    Restore(&'a mut HsmDmaBuf),
+}
+
+impl MaskingKeySource<'_> {
+    fn kind(&self) -> HandshakeKind {
+        match self {
+            Self::Fresh => HandshakeKind::Open,
+            Self::Restore(_) => HandshakeKind::Reopen,
+        }
+    }
 }
 
 /// Per-session keys derived from the HPKE `exported` secret.
@@ -104,6 +118,14 @@ struct HandshakeState<'a> {
     /// Cryptographic suite recorded by Phase 1.  Drives every
     /// suite-derived size in this handler (Nh, Npk, AEAD parameters).
     suite: HpkeSuite,
+    /// Phase-1 opcode that created the Pending slot.
+    kind: HandshakeKind,
+}
+
+/// Map an authentication-relevant failure while restoring the
+/// `masking_key` to [`HsmError::SessionAuthFailure`].
+fn restore_failure(_: HsmError) -> HsmError {
+    HsmError::SessionAuthFailure
 }
 
 /// Handle a TBOR `SessionOpenFinish` request.
@@ -114,93 +136,195 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| {
-        let ParsedRequest {
-            sess_id,
-            mac_fin,
-            seed_envelope,
-        } = parse_request(cmd_buf.request_mut())?;
-        ensure_pending_blob_len(pal, io, sess_id)?;
-
-        // ── Load Pending handshake state ──────────────────────────
-        let HandshakeState {
-            exported,
-            pk_init,
-            pk_resp,
-            session_type,
-            auth_binding,
-            suite,
-        } = load_pending_state(pal, io, alloc, sess_id)?;
-
-        // Record the session's teardown inverse up front: any failure below
-        // (MAC/envelope auth, key derivation, promote, response, or the CQE
-        // post) reverts the session via the dispatcher's undo walk — the
-        // same "destroy on failure" the bespoke rollback did, now uniform.
-        undo.push_session_destroy(sess_id)?;
-        let pk_hsm = load_pk_hsm(pal, io, alloc)?;
-
-        // The `mac_fin` length is dictated by the suite recorded in
-        // the Pending blob, not by the wire schema (which is fixed
-        // for the only currently-implemented suite).  Validating here
-        // — after the suite is known — keeps the handler honest if a
-        // future suite ships with a different MAC length.
-        if mac_fin.len() != suite.nh() {
-            return Err(HsmError::InvalidArg);
-        }
-
-        // ── Verify Phase-2 confirm MAC ────────────────────────────
-        // On any failure here (MAC mismatch → `SessionAuthFailure`, or an
-        // internal HMAC error) eagerly destroy the still-Pending slot: IOs
-        // run in a concurrent task pool, so a delayed teardown would let a
-        // racing `SessionOpenFinish` re-probe the same slot in the window
-        // before the dispatcher's undo walk runs.  The pushed
-        // `session_destroy` undo entry stays as the backstop.
-        if let Err(e) = verify_mac(
-            pal, io, alloc, sess_id, mac_fin, exported, pk_init, pk_hsm, pk_resp,
-        )
-        .await
-        {
-            destroy_pending_on_auth_failure(pal, io, sess_id).await;
-            return Err(e);
-        }
-        crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
-
-        // ── Derive param_key once, use it to open the seed envelope
-        let param_key = hkdf_expand_labeled(
-            pal,
-            io,
-            alloc,
-            exported,
-            SESSION_PARAM_KEY_LABEL,
-            SESSION_PARAM_KEY_LEN,
-        )
-        .await?;
-
-        // Same eager-teardown rationale as the MAC check above: a tampered
-        // envelope must not be re-probable against a lingering Pending slot.
-        let seed = match open_seed_envelope(pal, io, param_key, seed_envelope).await {
-            Ok(seed) => seed,
-            Err(e) => {
-                destroy_pending_on_auth_failure(pal, io, sess_id).await;
-                return Err(e);
-            }
-        };
-
-        // ── Derive remaining per-session keys ─────────────────────
-        let derived =
-            derive_remaining_keys(pal, io, alloc, exported, session_type, param_key).await?;
-
-        // ── Build bmk_session (BK_SESSION-wrapped masking-key blob)
-        //    BEFORE promote, so no active session is ever created without a
-        //    recovery blob.  A failure at this step (or any later one) tears
-        //    the still-Pending session down via the dispatcher's undo walk.
-        let bmk_session = build_bmk_session(pal, io, alloc, seed, derived.masking_key).await?;
-
-        // ── Promote Pending → Active ──────────────────────────────
-        promote_to_active(pal, io, alloc, sess_id, derived, auth_binding).await?;
-
+        let req = parse_request(cmd_buf.request_mut())?;
+        let bmk_session = run_finish(pal, io, alloc, undo, req, MaskingKeySource::Fresh).await?;
         encode_response(cmd_buf, bmk_session)
     })
     .await
+}
+
+/// Phase-2 core shared by `SessionOpenFinish` and `SessionReopenFinish`:
+/// verify the confirm MAC, open the seed envelope, obtain the
+/// `masking_key` per `mk_source`, derive the transport keys, wrap the
+/// `masking_key` into a fresh `bmk_session`, and promote the slot
+/// Pending → Active.  Returns the new `bmk_session`.
+pub(super) async fn run_finish<'a, 'p, P: HsmPal>(
+    pal: &'p P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    undo: &mut UndoLog<'p>,
+    req: FinishRequest<'_>,
+    mk_source: MaskingKeySource<'_>,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let FinishRequest {
+        sess_id,
+        mac_fin,
+        seed_envelope,
+    } = req;
+    ensure_pending_blob_len(pal, io, sess_id)?;
+
+    // ── Load Pending handshake state ──────────────────────────
+    let HandshakeState {
+        exported,
+        pk_init,
+        pk_resp,
+        session_type,
+        auth_binding,
+        suite,
+        kind,
+    } = load_pending_state(pal, io, alloc, sess_id)?;
+
+    // Each Phase-2 opcode only completes the handshake its own Phase-1
+    // opcode started.  Rejected before the undo push: a mismatched
+    // finish must not tear down (or revert) someone else's handshake.
+    if kind != mk_source.kind() {
+        return Err(HsmError::InvalidArg);
+    }
+
+    // Record the session's teardown inverse up front: any failure below
+    // (MAC/envelope auth, key derivation, promote, response, or the CQE
+    // post) reverts the session via the dispatcher's undo walk — the
+    // same "destroy on failure" the bespoke rollback did, now uniform.
+    // A reopen instead reverts to NeedsRenegotiation, even after the
+    // promote, so the host can retry it.
+    match kind {
+        HandshakeKind::Open => undo.push_session_destroy(sess_id)?,
+        HandshakeKind::Reopen => undo.push_session_cancel_reopen(sess_id)?,
+    }
+    let pk_hsm = load_pk_hsm(pal, io, alloc)?;
+
+    // The `mac_fin` length is dictated by the suite recorded in
+    // the Pending blob, not by the wire schema (which is fixed
+    // for the only currently-implemented suite).  Validating here
+    // — after the suite is known — keeps the handler honest if a
+    // future suite ships with a different MAC length.
+    if mac_fin.len() != suite.nh() {
+        return Err(HsmError::InvalidArg);
+    }
+
+    // ── Verify Phase-2 confirm MAC ────────────────────────────
+    // On any failure here (MAC mismatch → `SessionAuthFailure`, or an
+    // internal HMAC error) eagerly destroy the still-Pending slot: IOs
+    // run in a concurrent task pool, so a delayed teardown would let a
+    // racing finish re-probe the same slot in the window before the
+    // dispatcher's undo walk runs.
+    if let Err(e) = verify_mac(
+        pal, io, alloc, sess_id, mac_fin, exported, pk_init, pk_hsm, pk_resp,
+    )
+    .await
+    {
+        destroy_pending_on_auth_failure(pal, io, undo, sess_id, kind).await;
+        return Err(e);
+    }
+    crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
+
+    // ── Derive param_key once, use it to open the seed envelope
+    let param_key = hkdf_expand_labeled(
+        pal,
+        io,
+        alloc,
+        exported,
+        SESSION_PARAM_KEY_LABEL,
+        SESSION_PARAM_KEY_LEN,
+    )
+    .await?;
+
+    // Same eager-teardown rationale as the MAC check above: a tampered
+    // envelope must not be re-probable against a lingering Pending slot.
+    let seed = match open_seed_envelope(pal, io, param_key, seed_envelope).await {
+        Ok(seed) => seed,
+        Err(e) => {
+            destroy_pending_on_auth_failure(pal, io, undo, sess_id, kind).await;
+            return Err(e);
+        }
+    };
+
+    let bk_session = derive_bk_session(pal, io, alloc, seed).await?;
+
+    // ── Obtain masking_key (fresh, or restored from bmk_session) ──
+    let masking_key = match obtain_masking_key(pal, io, alloc, bk_session, mk_source).await {
+        Ok(mk) => mk,
+        Err(e) => {
+            destroy_pending_on_auth_failure(pal, io, undo, sess_id, kind).await;
+            return Err(e);
+        }
+    };
+
+    // ── Derive remaining per-session keys ─────────────────────
+    let derived = derive_remaining_keys(
+        pal,
+        io,
+        alloc,
+        exported,
+        session_type,
+        param_key,
+        masking_key,
+    )
+    .await?;
+
+    // ── Build bmk_session (BK_SESSION-wrapped masking-key blob)
+    //    BEFORE promote, so no active session is ever created without a
+    //    recovery blob.  A failure at this step (or any later one) tears
+    //    the still-Pending session down via the dispatcher's undo walk.
+    let bmk_session = build_bmk_session(pal, io, alloc, bk_session, derived.masking_key).await?;
+
+    // ── Promote Pending → Active ──────────────────────────────
+    promote_to_active(pal, io, alloc, sess_id, derived, auth_binding).await?;
+
+    Ok(bmk_session)
+}
+
+/// Produce the session's `masking_key` in a scoped buffer.
+///
+/// The key is **random**, not derived from `exported`.
+///
+/// `exported` is an HPKE export secret: the host computes the same
+/// value during the handshake, so anything expanded from it is
+/// reproducible host-side.  That is right for the transport keys --
+/// both ends need them -- but a masking key derived that way lets the
+/// host open any blob masked at `Session` scope, recovering private key
+/// material the HSM is supposed to hold.
+///
+/// Every other masking key in the system is random and kept inside
+/// the device (`PartLocalMK` and `EphemeralMK` at `PartFinal`, `SDMK`
+/// and `BKS3` in the SD flows, `BK_BOOT` at partition allocation);
+/// this brings sessions in line.  Continuity does not depend on
+/// re-derivation: the key is carried out of the HSM only as
+/// `bmk_session`, wrapped under `BK_SESSION`
+/// (`KBKDF(BK_BOOT, "SESSION_BK", seed)`), and `BK_BOOT` never leaves
+/// the device -- it is itself only ever persisted masked under `BKx`.
+///
+/// On reopen the key is recovered from `bmk_session`; any unwrap or
+/// metadata failure surfaces as [`HsmError::SessionAuthFailure`].
+async fn obtain_masking_key<'a, P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &'a impl HsmScopedAlloc,
+    bk_session: &HsmDmaBuf,
+    mk_source: MaskingKeySource<'_>,
+) -> HsmResult<&'a mut HsmDmaBuf> {
+    let masking_key = alloc.dma_alloc(SESSION_MASKING_KEY_LEN)?;
+    match mk_source {
+        MaskingKeySource::Fresh => pal.rng_fill_bytes(io, &mut masking_key[..])?,
+        MaskingKeySource::Restore(bmk_in) => {
+            let view = unmask_key(pal, io, bk_session, bmk_in)
+                .await
+                .map_err(restore_failure)?;
+            let svn = crate::part_state::part_mfgr_svn(pal);
+            let owner_seed_id = u16::try_from(crate::part_state::part_owner_svn(pal))
+                .map_err(|_| HsmError::InvalidArg)?;
+            if view.key_kind != HsmVaultKeyKind::MaskingKey
+                || view.key_label != BMK_SESSION_KEY_LABEL
+                || view.svn > svn
+                || view.owner_seed_id != owner_seed_id
+                || view.target_key.len() != SESSION_MASKING_KEY_LEN
+            {
+                return Err(HsmError::SessionAuthFailure);
+            }
+            masking_key.copy_from_slice(view.target_key);
+        }
+    }
+    Ok(masking_key)
 }
 
 /// Eagerly tear down the still-Pending session after an authentication
@@ -212,15 +336,31 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// observable to a racing finish until that walk completes.  Destroying
 /// here shrinks that window to nothing.
 ///
-/// Best-effort: the [`UndoLog`] `session_destroy` entry pushed up front is
-/// the authoritative backstop (its walk step is best-effort), so a failure
-/// here — or the walk's later redundant destroy — is harmless.
-async fn destroy_pending_on_auth_failure<P: HsmPal>(pal: &P, io: &P::Io, id: HsmSessId) {
-    let _ = pal.session_destroy(io, id).await;
+/// A reopen-Pending slot is reverted to NeedsRenegotiation instead of
+/// destroyed, so a failed reopen never loses the session.
+///
+/// The [`UndoLog`] holds only the teardown entry pushed up front, so once
+/// the eager teardown succeeds the log is discarded: a second one would
+/// fail on (or hit a re-allocated) slot.  If the eager teardown fails the
+/// entry stays as the backstop.
+async fn destroy_pending_on_auth_failure<'p, P: HsmPal>(
+    pal: &'p P,
+    io: &P::Io,
+    undo: &mut UndoLog<'p>,
+    id: HsmSessId,
+    kind: HandshakeKind,
+) {
+    let torn_down = match kind {
+        HandshakeKind::Open => pal.session_destroy(io, id).await,
+        HandshakeKind::Reopen => pal.session_cancel_reopen(io, id).await,
+    };
+    if torn_down.is_ok() {
+        undo.discard();
+    }
 }
 
 /// Decode and validate the wire request.
-fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>> {
+fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<FinishRequest<'a>> {
     let req = TborSessionOpenFinishReq::decode_mut(req_buf)?;
     let id = HsmSessId::from(u16::from(req.session_id));
     // `mac_fin` length is checked once the negotiated suite is known
@@ -230,7 +370,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
     if seed_envelope.len() != SEED_ENVELOPE_LEN {
         return Err(HsmError::InvalidArg);
     }
-    Ok(ParsedRequest {
+    Ok(FinishRequest {
         sess_id: id,
         mac_fin,
         seed_envelope,
@@ -250,7 +390,7 @@ fn ensure_pending_blob_len<P: HsmPal>(pal: &P, io: &P::Io, id: HsmSessId) -> Hsm
 }
 
 /// Load the Pending slot's blob and split it into `(exported,
-/// pk_init, pk_resp, auth_binding, session_type, suite)` scoped buffers.
+/// pk_init, pk_resp, auth_binding, session_type, suite, kind)` scoped buffers.
 fn load_pending_state<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -266,7 +406,12 @@ fn load_pending_state<'a, P: HsmPal>(
     // Nh/Npk.  Today only `P384HkdfSha384AesGcm256` is registered, so
     // a mismatch with the wire length pre-check would already have
     // fired in [`ensure_pending_blob_len`].
-    let suite = HsmSessionSuite::from_u8(blob[blob.len() - 1])?;
+    let kind = match blob[blob.len() - 1] {
+        k if k == HandshakeKind::Open as u8 => HandshakeKind::Open,
+        k if k == HandshakeKind::Reopen as u8 => HandshakeKind::Reopen,
+        _ => return Err(HsmError::InvalidArg),
+    };
+    let suite = HsmSessionSuite::from_u8(blob[blob.len() - 2])?;
     let hpke_suite = hpke_suite_for(suite);
 
     let nh = hpke_suite.nh();
@@ -282,7 +427,7 @@ fn load_pending_state<'a, P: HsmPal>(
     auth_binding.copy_from_slice(
         &blob[auth_start..auth_start + tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN],
     );
-    let session_type = HsmSessionType::from_u8(blob[blob.len() - 2])?;
+    let session_type = HsmSessionType::from_u8(blob[blob.len() - 3])?;
 
     Ok(HandshakeState {
         exported,
@@ -291,6 +436,7 @@ fn load_pending_state<'a, P: HsmPal>(
         session_type,
         auth_binding,
         suite: hpke_suite,
+        kind,
     })
 }
 
@@ -384,9 +530,9 @@ async fn open_seed_envelope<'a, P: HsmPal>(
 
 /// Derive the remaining per-session keys from the HPKE `exported`
 /// secret.  Uses a loop over key specs to reduce async state machine
-/// variants.  `param_key` was derived earlier (needed to open the
-/// seed envelope) and is plumbed through so it can be moved straight
-/// into the [`DerivedKeys`] carrier without re-deriving.
+/// variants.  `param_key` (needed to open the seed envelope) and
+/// `masking_key` (see [`obtain_masking_key`]) were produced earlier and
+/// are moved straight into the [`DerivedKeys`] carrier.
 async fn derive_remaining_keys<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
@@ -394,27 +540,8 @@ async fn derive_remaining_keys<'a, P: HsmPal>(
     exported: &HsmDmaBuf,
     session_type: HsmSessionType,
     param_key: &'a mut HsmDmaBuf,
+    masking_key: &'a mut HsmDmaBuf,
 ) -> HsmResult<DerivedKeys<'a>> {
-    // The masking key is **random**, not derived from `exported`.
-    //
-    // `exported` is an HPKE export secret: the host computes the same
-    // value during the handshake, so anything expanded from it is
-    // reproducible host-side.  That is right for the transport keys
-    // below -- both ends need them -- but a masking key derived that way
-    // lets the host open any blob masked at `Session` scope, recovering
-    // private key material the HSM is supposed to hold.
-    //
-    // Every other masking key in the system is random and kept inside
-    // the device (`PartLocalMK` and `EphemeralMK` at `PartFinal`, `SDMK`
-    // and `BKS3` in the SD flows, `BK_BOOT` at partition allocation);
-    // this brings sessions in line.  Continuity does not depend on
-    // re-derivation: the key is carried out of the HSM only as
-    // `bmk_session`, wrapped under `BK_SESSION`
-    // (`KBKDF(BK_BOOT, "SESSION_BK", seed)`), and `BK_BOOT` never leaves
-    // the device -- it is itself only ever persisted masked under `BKx`.
-    let masking_key = alloc.dma_alloc(SESSION_MASKING_KEY_LEN)?;
-    pal.rng_fill_bytes(io, &mut masking_key[..])?;
-
     // The MAC keys stay derived: they authenticate the channel, so both
     // ends must arrive at the same value without transmitting it.
     let is_auth = session_type.is_authenticated();
@@ -469,8 +596,7 @@ async fn hkdf_expand_labeled<'a, P: HsmPal>(
     Ok(out)
 }
 
-/// Derive `BK_SESSION = SP800-108-KBKDF-SHA-384(BK_BOOT, "SESSION_BK",
-/// seed)` (32 bytes) and wrap `masking_key` under it via the
+/// Wrap `masking_key` under `BK_SESSION` (see [`derive_bk_session`]) via the
 /// [`masked_key::aead`](tsra_fw_core_crypto_key_masking::aead) module
 /// — an AEAD envelope whose 192 B AAD is a fixed
 /// [`MaskedKeyMetadata`](tsra_fw_core_crypto_key_masking::aead::MaskedKeyMetadata)
@@ -485,11 +611,9 @@ async fn build_bmk_session<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,
     alloc: &'a impl HsmScopedAlloc,
-    seed: &HsmDmaBuf,
+    bk_session: &HsmDmaBuf,
     masking_key: &HsmDmaBuf,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
-    let bk_session = derive_bk_session(pal, io, alloc, seed).await?;
-
     let svn = crate::part_state::part_mfgr_svn(pal);
     let owner_seed_id =
         u16::try_from(crate::part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
@@ -524,8 +648,8 @@ async fn build_bmk_session<'a, P: HsmPal>(
     Ok(bmk_buf)
 }
 
-/// Derive the 32-byte `BK_SESSION` wrap key into a freshly-allocated
-/// scoped buffer.
+/// Derive the 32-byte `BK_SESSION = SP800-108-KBKDF-SHA-384(BK_BOOT,
+/// "SESSION_BK", seed)` wrap key into a freshly-allocated scoped buffer.
 async fn derive_bk_session<'a, P: HsmPal>(
     pal: &P,
     io: &P::Io,

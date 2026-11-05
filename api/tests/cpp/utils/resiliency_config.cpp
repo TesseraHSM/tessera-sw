@@ -352,6 +352,26 @@ const tsra_mobk_callback_ops *get_mobk_callback_ops()
     return &mobk_ops;
 }
 
+void make_resiliency_ex_config_in(ResiliencyTestCtx &ctx, tsra_resiliency_ex_config &config_out)
+{
+    tsra_resiliency_config base{};
+    make_resiliency_config_in(ctx, base);
+
+    config_out.ctx = base.ctx;
+    config_out.storage_ops = base.storage_ops;
+    config_out.lock_ops = base.lock_ops;
+    // No PTA callback: restore replays the chain captured at PartFinal.
+    config_out.pta_callback_ops = nullptr;
+}
+
+std::unique_ptr<ResiliencyTestCtx> make_resiliency_ex_config(tsra_resiliency_ex_config &config_out)
+{
+    tsra_resiliency_config base{};
+    auto ctx = make_resiliency_config(base);
+    make_resiliency_ex_config_in(*ctx, config_out);
+    return ctx;
+}
+
 std::unique_ptr<ResiliencyTestCtx> make_resiliency_config(tsra_resiliency_config &config_out)
 {
     // Each call gets a unique directory so parallel tests never interfere.

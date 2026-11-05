@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use tokio::runtime::Handle;
 use tsra_ddi_interface::DdiAesGcmParams;
 use tsra_ddi_interface::DdiAesGcmResult;
@@ -106,6 +107,16 @@ const PAGE_4K: usize = 4096;
 /// per IO mostly for diagnostic correlation.
 static CMD_COUNTER: AtomicU16 = AtomicU16::new(1);
 
+/// Serializes firmware IO against [`DdiEmuDev::erase`].
+///
+/// Erase disables then re-enables the partition. An IO dispatched in
+/// between would see a missing partition (`PartPropNotFound`,
+/// `InternalError`) instead of the abort the real driver reports, which
+/// the host resiliency layer does not retry. Each IO holds a read guard
+/// and erase holds the write guard, so every IO runs wholly before or
+/// wholly after the reset.
+static RESET_GATE: RwLock<()> = RwLock::new(());
+
 /// Per-handle session bookkeeping (mirrors the mock backend).
 #[derive(Debug, Default)]
 struct SessionState {
@@ -182,6 +193,7 @@ impl DdiEmuDev {
     /// code to [`DdiError::FpError`], otherwise a non-zero error code to
     /// [`DdiError::FpCmdSpecificError`].
     fn bulk_submit(&self, sqe: &BulkSqe) -> Result<BulkCqe, DdiError> {
+        let _gate = RESET_GATE.read();
         let raw = self
             .handle
             .block_on(self.hsm.bulk_io(sqe.encode(), EMU_PID, EMU_BULK_QID, 0))
@@ -300,6 +312,7 @@ impl DdiEmuDev {
             .session_id(req_session_id.unwrap_or(0))
             .build();
 
+        let _gate = RESET_GATE.read();
         let mut raw_cqe = self
             .handle
             .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
@@ -433,6 +446,7 @@ impl DdiDev for DdiEmuDev {
             .session_id(req_session_id.unwrap_or(0))
             .build();
 
+        let _gate = RESET_GATE.read();
         let mut raw_cqe = self
             .handle
             .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
@@ -707,6 +721,7 @@ impl DdiDev for DdiEmuDev {
     fn erase(&self) -> Result<(), DdiError> {
         // Reset partition state: disable then re-enable. This
         // matches what real hardware does on NSSR.
+        let _gate = RESET_GATE.write();
         self.handle
             .block_on(async {
                 self.hsm.part_disable(EMU_PID).await.map_err(|_| ())?;

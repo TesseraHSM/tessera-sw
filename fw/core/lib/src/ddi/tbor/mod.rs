@@ -67,6 +67,8 @@ pub(crate) mod sd_sealing_key_gen;
 pub(crate) mod session_close;
 pub(crate) mod session_open_finish;
 pub(crate) mod session_open_init;
+pub(crate) mod session_reopen_finish;
+pub(crate) mod session_reopen_init;
 pub(crate) mod unwrap_key;
 pub(crate) mod verify_key;
 
@@ -101,12 +103,8 @@ pub(crate) mod opcode {
     pub(crate) const API_REV: u8 = 0x01;
 
     /// `SessionOpenInit` — Phase 1 of the session-establishment
-    /// handshake.  Client sends `(psk_id, pk_init, seed,
-    /// bmk_session?)`; HSM responds with `(session_id, pk_resp,
-    /// mac_resp)`.  The optional `bmk_session` selects the resume
-    /// variant (preserves `masking_key` continuity from a prior
-    /// session); fresh keys are always derived from the HPKE
-    /// handshake, so every promoted session has forward secrecy.
+    /// handshake.  Client sends `(psk_id, session_type, suite_id,
+    /// pk_init)`; HSM responds with `(session_id, pk_resp, mac_resp)`.
     pub(crate) const SESSION_OPEN_INIT: u8 = 0x03;
 
     /// `SessionOpenFinish` — Phase 2 of the session-establishment
@@ -115,6 +113,17 @@ pub(crate) mod opcode {
     /// a fresh `bmk_session` envelope the host may persist for a
     /// future resume.
     pub(crate) const SESSION_OPEN_FINISH: u8 = 0x04;
+
+    /// `SessionReopenInit` — Phase 1 of re-establishing an existing
+    /// session that needs renegotiation (after a partition disable /
+    /// NSSR).  Same handshake as `SessionOpenInit`, but against the
+    /// session id carried in the request instead of a new slot.
+    pub(crate) const SESSION_REOPEN_INIT: u8 = 0x30;
+
+    /// `SessionReopenFinish` — Phase 2 of session reopen.  Same as
+    /// `SessionOpenFinish`, plus the session's prior `bmk_session`, from
+    /// which the HSM restores the session's `masking_key`.
+    pub(crate) const SESSION_REOPEN_FINISH: u8 = 0x31;
 
     /// `SessionClose` — destroys an Active or Pending session slot.
     pub(crate) const SESSION_CLOSE: u8 = 0x05;
@@ -559,6 +568,8 @@ pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: u
         opcode::API_REV => types::TborApiRevResp::MAX_ENCODED_SIZE,
         opcode::SESSION_OPEN_INIT => types::TborSessionOpenInitResp::MAX_ENCODED_SIZE,
         opcode::SESSION_OPEN_FINISH => types::TborSessionOpenFinishResp::MAX_ENCODED_SIZE,
+        opcode::SESSION_REOPEN_INIT => types::TborSessionReopenInitResp::MAX_ENCODED_SIZE,
+        opcode::SESSION_REOPEN_FINISH => types::TborSessionReopenFinishResp::MAX_ENCODED_SIZE,
         opcode::SESSION_CLOSE => types::TborSessionCloseResp::MAX_ENCODED_SIZE,
         opcode::PSK_CHANGE => types::TborPskChangeResp::MAX_ENCODED_SIZE,
         opcode::PART_INIT => types::TborPartInitResp::MAX_ENCODED_SIZE,
@@ -675,6 +686,21 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
                 return Err(HsmError::InvalidArg);
             }
 
+            // A slot left NeedsRenegotiation by a partition disable /
+            // NSSR must be reopened (`SessionReopen*`) before use.
+            // Reported ahead of the default-PSK gate (the reset also
+            // reverted the PSK) so the host knows to reopen; `SessionClose`
+            // may still tear such a slot down.
+            if is_in_session(opcode)
+                && opcode != opcode::SESSION_CLOSE
+                && matches!(
+                    pal.session_state(io, sess_id),
+                    HsmSessionState::NeedsRenegotiation
+                )
+            {
+                return Err(HsmError::SessionNeedsRenegotiation);
+            }
+
             // Default-PSK gate: applies only to in-session commands
             // that are not on the allow-list.
             if needs_psk_gate {
@@ -697,6 +723,10 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
             session_open_init::handle(pal, io, cmd_buf, undo, &mut session_id).await
         }
         opcode::SESSION_OPEN_FINISH => session_open_finish::handle(pal, io, cmd_buf, undo).await,
+        opcode::SESSION_REOPEN_INIT => session_reopen_init::handle(pal, io, cmd_buf, undo).await,
+        opcode::SESSION_REOPEN_FINISH => {
+            session_reopen_finish::handle(pal, io, cmd_buf, undo).await
+        }
         opcode::SESSION_CLOSE => session_close::handle(pal, io, cmd_buf).await,
         opcode::PSK_CHANGE => psk_change::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_INIT => part_init::handle(pal, io, cmd_buf, undo).await,
@@ -755,6 +785,23 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::VERIFY_KEY => verify_key::handle(pal, io, cmd_buf).await,
         _ => Err(HsmError::UnsupportedCmd),
     };
+    // A partition disable / NSSR that lands while an in-session command is
+    // in flight wipes state the handler then trips over (surfacing as e.g.
+    // `PartPropNotFound`). Report such a failure as the renegotiation the
+    // reset caused so the host restores and retries.
+    let resp = match (resp, body_sess_id) {
+        (Err(_), Some(sess_id))
+            if is_in_session(opcode)
+                && opcode != opcode::SESSION_CLOSE
+                && matches!(
+                    pal.session_state(io, sess_id),
+                    HsmSessionState::NeedsRenegotiation
+                ) =>
+        {
+            Err(HsmError::SessionNeedsRenegotiation)
+        }
+        (resp, _) => resp,
+    };
     let response_len = cmd_buf.finish_response(resp)?;
     Ok(DispatchResult {
         response_len,
@@ -772,6 +819,8 @@ fn is_known_opcode(opcode: u8) -> bool {
         opcode::API_REV
             | opcode::SESSION_OPEN_INIT
             | opcode::SESSION_OPEN_FINISH
+            | opcode::SESSION_REOPEN_INIT
+            | opcode::SESSION_REOPEN_FINISH
             | opcode::SESSION_CLOSE
             | opcode::PSK_CHANGE
             | opcode::PART_INIT
@@ -825,7 +874,8 @@ fn is_known_opcode(opcode: u8) -> bool {
 /// `session_id` TOC field).
 ///
 /// Out-of-session opcodes (`ApiRev`) and session-establishment
-/// opcodes (`SessionOpenInit`, `SessionOpenFinish`) return `false` —
+/// opcodes (`SessionOpenInit`, `SessionOpenFinish`,
+/// `SessionReopenInit`, `SessionReopenFinish`) return `false` —
 /// they either need no session at all or they bring a Pending slot to
 /// life, and the default-PSK gate would have nothing meaningful to
 /// check for them.
@@ -838,6 +888,8 @@ fn is_in_session(opcode: u8) -> bool {
         opcode::API_REV
         | opcode::SESSION_OPEN_INIT
         | opcode::SESSION_OPEN_FINISH
+        | opcode::SESSION_REOPEN_INIT
+        | opcode::SESSION_REOPEN_FINISH
         | opcode::PART_INFO
         | opcode::GET_CERT_CHAIN_INFO
         | opcode::GET_CERTIFICATE => false,
@@ -890,7 +942,8 @@ fn is_in_session(opcode: u8) -> bool {
 /// Equivalent to "the opcode's [`SessionCtrl`] requires
 /// `id_valid = true`" (see
 /// [`SessionCtrl::from_tbor_opcode`](crate::op::SessionCtrl::from_tbor_opcode)):
-/// `SessionOpenFinish`, `SessionClose`, and `PskChange` all carry
+/// `SessionOpenFinish`, `SessionReopen*`, `SessionClose`, and
+/// `PskChange` all carry
 /// the targeted slot id both in the SQE header and in the body's
 /// `SessionId` TOC entry, and the two MUST agree.
 ///
@@ -911,6 +964,8 @@ fn needs_session_id_cross_check(opcode: u8) -> bool {
         | opcode::GET_CERT_CHAIN_INFO
         | opcode::GET_CERTIFICATE => false,
         opcode::SESSION_OPEN_FINISH
+        | opcode::SESSION_REOPEN_INIT
+        | opcode::SESSION_REOPEN_FINISH
         | opcode::SESSION_CLOSE
         | opcode::PSK_CHANGE
         | opcode::PART_INIT
@@ -2301,6 +2356,8 @@ mod tests {
             opcode::API_REV,
             opcode::SESSION_OPEN_INIT,
             opcode::SESSION_OPEN_FINISH,
+            opcode::SESSION_REOPEN_INIT,
+            opcode::SESSION_REOPEN_FINISH,
             opcode::SESSION_CLOSE,
             opcode::PSK_CHANGE,
             opcode::PART_INIT,
@@ -2325,6 +2382,8 @@ mod tests {
             opcode::API_REV,
             opcode::SESSION_OPEN_INIT,
             opcode::SESSION_OPEN_FINISH,
+            opcode::SESSION_REOPEN_INIT,
+            opcode::SESSION_REOPEN_FINISH,
         ] {
             assert!(!is_in_session(op), "{op:#04x} must be out-of-session");
         }

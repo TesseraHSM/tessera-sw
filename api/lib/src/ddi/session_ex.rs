@@ -112,6 +112,10 @@ pub(crate) struct OpenSessionExResult {
     /// FW-emitted wrapped masking-key blob — opaque to the host.
     /// Held in a [`Zeroizing`] buffer so it is wiped on drop.
     pub(crate) bmk_session: Zeroizing<Vec<u8>>,
+    /// Session seed sealed into `seed_envelope`. Retained because
+    /// [`reopen_session_ex`] must re-send the **original** seed so the
+    /// HSM can unwrap `bmk_session`. Wiped on drop.
+    pub(crate) seed: Zeroizing<[u8; SESSION_SEED_LEN]>,
 }
 
 /// Look up the partition identity public key (`pk_hsm`) via the
@@ -279,9 +283,44 @@ fn open_session_ex_init(
         .exec_op_tbor(&req, None, &mut cookie)
         .map_err(HsmError::from)?;
 
+    complete_phase1(
+        &eph,
+        &pk_hsm_key,
+        pk_hsm_sec1,
+        resp.session_id,
+        psk_id,
+        session_type,
+        psk,
+        resp.pk_resp,
+        &resp.mac_resp,
+    )
+}
+
+/// Shared Phase-1 tail for `SessionOpenInit` and `SessionReopenInit`.
+///
+/// Runs HPKE `auth_psk receive_export` on the FW response, verifies the
+/// Phase-1 confirm MAC (bound to `session_id`), and packages the
+/// [`PendingHandshake`] for Phase 2. Uses the caller-supplied PSK when
+/// present, else the partition default PSK for `psk_id`.
+#[allow(clippy::too_many_arguments)]
+fn complete_phase1(
+    eph: &VmEphemeralKey,
+    pk_hsm_key: &EccPublicKey,
+    pk_hsm_sec1: [u8; PK_RESP_LEN],
+    session_id: u16,
+    psk_id: u8,
+    session_type: SessionType,
+    psk: Option<&[u8; crate::PSK_LEN]>,
+    pk_resp: [u8; PK_RESP_LEN],
+    mac_resp: &[u8; MAC_RESP_LEN],
+) -> HsmResult<PendingHandshake> {
     // Derive the 48-byte HPKE `exported` secret, then verify the FW's
     // Phase-1 confirm MAC binds the negotiated role/type/suite.
-    let info = build_hpke_info(psk_id, session_type.to_u8(), suite_id);
+    let info = build_hpke_info(
+        psk_id,
+        session_type.to_u8(),
+        SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
+    );
     // Use the caller-supplied PSK when present, else the partition
     // default PSK for the role (required before the default is rotated).
     let psk: &[u8; crate::PSK_LEN] = match psk {
@@ -291,8 +330,8 @@ fn open_session_ex_init(
     let exported = Zeroizing::new(receive_exported(
         &eph.sk,
         &eph.pk,
-        &pk_hsm_key,
-        &resp.pk_resp,
+        pk_hsm_key,
+        &pk_resp,
         &info,
         psk,
         &[psk_id],
@@ -300,20 +339,20 @@ fn open_session_ex_init(
 
     verify_phase1_mac(
         &exported,
-        resp.session_id,
+        session_id,
         &eph.pk_sec1,
         &pk_hsm_sec1,
-        &resp.pk_resp,
-        &resp.mac_resp,
+        &pk_resp,
+        mac_resp,
     )?;
 
     Ok(PendingHandshake {
-        session_id: resp.session_id,
+        session_id,
         psk_id,
         session_type,
         exported,
         pk_init: eph.pk_sec1,
-        pk_resp: resp.pk_resp,
+        pk_resp,
         pk_hsm: pk_hsm_sec1,
     })
 }
@@ -341,11 +380,58 @@ fn open_session_ex_finish(
     let inner = partition.inner().read();
     let dev = inner.dev();
 
-    // Derive the per-session wrap key, generate a fresh seed, and seal
-    // it under `param_key` as the `seed_envelope` wire blob.
-    let param_key = derive_param_key(&pending.exported)?;
     let mut seed = Zeroizing::new([0u8; SESSION_SEED_LEN]);
     Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| HsmError::InternalError)?;
+    let material = phase2_material(&pending, seed)?;
+
+    let req = TborSessionOpenFinishReq {
+        session_id: pending.session_id,
+        mac_fin: material.mac_fin,
+        seed_envelope: material.seed_envelope,
+    };
+    let mut cookie = None;
+    let resp = dev
+        .exec_op_tbor(&req, None, &mut cookie)
+        .map_err(HsmError::from)?;
+
+    Ok(material.into_result(pending, resp.bmk_session))
+}
+
+/// Host-side Phase-2 material shared by `SessionOpenFinish` and
+/// `SessionReopenFinish`.
+struct Phase2Material {
+    param_key: AesKey,
+    seed: Zeroizing<[u8; SESSION_SEED_LEN]>,
+    seed_envelope: [u8; SEED_ENVELOPE_LEN],
+    mac_fin: [u8; MAC_FIN_LEN],
+}
+
+impl Phase2Material {
+    /// Folds the FW-issued `bmk_session` into an [`OpenSessionExResult`].
+    fn into_result(self, pending: PendingHandshake, bmk_session: Vec<u8>) -> OpenSessionExResult {
+        OpenSessionExResult {
+            session_id: pending.session_id,
+            psk_id: pending.psk_id,
+            session_type: pending.session_type,
+            // Hand the session its own copy of the export secret; the copy
+            // in `pending` is wiped when `pending` drops (its `exported`
+            // is a `Zeroizing` buffer).
+            exported: pending.exported.clone(),
+            param_key: self.param_key,
+            bmk_session: Zeroizing::new(bmk_session),
+            seed: self.seed,
+        }
+    }
+}
+
+/// Derives the per-session `param_key` from the HPKE export, seals
+/// `seed` under it as the `seed_envelope` wire blob, and computes the
+/// Phase-2 confirm MAC over the Phase-1 transcript.
+fn phase2_material(
+    pending: &PendingHandshake,
+    seed: Zeroizing<[u8; SESSION_SEED_LEN]>,
+) -> HsmResult<Phase2Material> {
+    let param_key = derive_param_key(&pending.exported)?;
     let envelope = seal_seed_envelope(&param_key, seed.as_slice())?;
     let seed_envelope: [u8; SEED_ENVELOPE_LEN] = envelope
         .as_slice()
@@ -362,27 +448,85 @@ fn open_session_ex_finish(
         &pending.pk_resp,
     )?;
 
-    let req = TborSessionOpenFinishReq {
-        session_id: pending.session_id,
-        mac_fin,
+    Ok(Phase2Material {
+        param_key,
+        seed,
         seed_envelope,
+        mac_fin,
+    })
+}
+
+/// Re-establishes an existing TBOR session that needs renegotiation
+/// (e.g. after a partition reset) — `SessionReopenInit` (opcode `0x30`)
+/// followed by `SessionReopenFinish` (opcode `0x31`).
+///
+/// Runs the same HPKE handshake as [`open_session_ex`] against the
+/// existing `session_id`, using the PSK currently bound to the session's
+/// role (`psk`, or the role default when `None`). Phase 2 re-sends the
+/// session's **original** `seed` and its last `bmk_session` so the HSM
+/// restores the same session masking key; session-scoped masked keys
+/// therefore stay valid. Returns fresh `param_key` / `exported` material
+/// and the refreshed `bmk_session`.
+///
+/// # Errors
+///
+/// Returns [`HsmError::UnsupportedApiRevision`] when `rev` does not
+/// support TBOR, and propagates handshake and DDI failures.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reopen_session_ex(
+    partition: &HsmPartition,
+    rev: HsmApiRev,
+    session_id: u16,
+    psk_id: u8,
+    psk: Option<&[u8; crate::PSK_LEN]>,
+    session_type: SessionType,
+    seed: &[u8; SESSION_SEED_LEN],
+    bmk_session: &[u8],
+) -> HsmResult<OpenSessionExResult> {
+    require_tbor_rev(rev)?;
+
+    let inner = partition.inner().read();
+    let dev = inner.dev();
+
+    let eph = generate_vm_ephemeral()?;
+    let (pk_hsm_key, pk_hsm_sec1) = fetch_pk_hsm(dev, rev)?;
+
+    let req = TborSessionReopenInitReq {
+        session_id,
+        session_type: session_type.to_u8(),
+        suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
+        pk_init: eph.pk_sec1,
     };
     let mut cookie = None;
     let resp = dev
         .exec_op_tbor(&req, None, &mut cookie)
         .map_err(HsmError::from)?;
 
-    Ok(OpenSessionExResult {
-        session_id: pending.session_id,
-        psk_id: pending.psk_id,
-        session_type: pending.session_type,
-        // Hand the session its own copy of the export secret; the copy
-        // in `pending` is wiped when `pending` drops (its `exported`
-        // is a `Zeroizing` buffer).
-        exported: pending.exported.clone(),
-        param_key,
-        bmk_session: Zeroizing::new(resp.bmk_session),
-    })
+    let pending = complete_phase1(
+        &eph,
+        &pk_hsm_key,
+        pk_hsm_sec1,
+        session_id,
+        psk_id,
+        session_type,
+        psk,
+        resp.pk_resp,
+        &resp.mac_resp,
+    )?;
+
+    let material = phase2_material(&pending, Zeroizing::new(*seed))?;
+    let req = TborSessionReopenFinishReq {
+        session_id,
+        mac_fin: material.mac_fin,
+        seed_envelope: material.seed_envelope,
+        bmk_session: bmk_session.to_vec(),
+    };
+    let mut cookie = None;
+    let resp = dev
+        .exec_op_tbor(&req, None, &mut cookie)
+        .map_err(HsmError::from)?;
+
+    Ok(material.into_result(pending, resp.bmk_session))
 }
 
 /// Issue `PskChange` (opcode `0x06`) on the active session.

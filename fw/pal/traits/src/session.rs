@@ -416,6 +416,60 @@ pub trait HsmSessionManager: HsmIoTypes {
         handshake_state: &HsmDmaBuf,
     ) -> HsmResult<HsmSessId>;
 
+    /// Moves a [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation)
+    /// slot to [`Pending`](HsmSessionState::Pending) under the **same**
+    /// id, storing `handshake_state` exactly like
+    /// [`session_create_pending`](Self::session_create_pending).
+    ///
+    /// Phase 1 of the TBOR session **reopen** protocol (`SessionReopenInit`).
+    /// The slot stays reserved for its owner while the handshake is in
+    /// flight ("reopen-Pending"):
+    ///
+    /// * it is never evicted by a fresh `session_create_pending`;
+    /// * a repeated call on a reopen-Pending slot replaces the stored
+    ///   handshake state (the host may restart an abandoned reopen);
+    /// * [`session_cancel_reopen`](Self::session_cancel_reopen) reverts
+    ///   it to `NeedsRenegotiation`, so a failed reopen handshake cannot
+    ///   drop the session; [`session_destroy`](Self::session_destroy)
+    ///   (host close / flush) frees it like any other slot;
+    /// * [`session_promote`](Self::session_promote) completes the reopen,
+    ///   leaving the slot [`Active`](HsmSessionState::Active);
+    /// * a partition disable returns it to `NeedsRenegotiation`.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — slot is now Pending.
+    /// - `Err(HsmError::InvalidArg)` — `handshake_state` is empty or
+    ///   larger than [`SESSION_PENDING_BLOB_MAX`], `id` is outside
+    ///   `role`'s slot range, or the slot is Active.
+    /// - `Err(HsmError::SessionNotFound)` — slot is free or holds a fresh
+    ///   (non-reopen) Pending handshake.
+    async fn session_reopen_pending(
+        &self,
+        io: &Self::Io,
+        id: HsmSessId,
+        role: HsmSessionRole,
+        handshake_state: &HsmDmaBuf,
+    ) -> HsmResult<()>;
+
+    /// Rolls back a reopen handshake, returning the slot to
+    /// [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation) under
+    /// the same id.
+    ///
+    /// Used by the undo walk of `SessionReopenInit` / `SessionReopenFinish`:
+    ///
+    /// * a reopen-Pending slot drops its handshake state;
+    /// * an [`Active`](HsmSessionState::Active) slot (a reopen already
+    ///   promoted by the failing command) has its new session vault key
+    ///   and every session-scoped key bound to it removed.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` — slot is `NeedsRenegotiation`.
+    /// - `Err(HsmError::SessionNotPending)` — slot is neither
+    ///   reopen-Pending nor Active.
+    async fn session_cancel_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
+
     /// Borrows the opaque handshake state of a
     /// [`Pending`](HsmSessionState::Pending) slot.
     ///

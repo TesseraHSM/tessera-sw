@@ -290,6 +290,22 @@ impl From<TborPartInfoResp> for HsmPartInfo {
     }
 }
 
+/// Issue `PartInfo` on the partition, returning its lifecycle state
+/// (the firmware `HsmPartState` discriminant).
+///
+/// # Errors
+///
+/// Surfaces DDI/device failures from the round-trip.
+pub(crate) fn part_state(partition: &HsmPartition) -> HsmResult<u8> {
+    let inner = partition.inner().read();
+    let mut cookie = None;
+    inner
+        .dev()
+        .exec_op_tbor(&TborPartInfoReq::new(), None, &mut cookie)
+        .map(|resp| resp.part_state)
+        .map_err(HsmError::from)
+}
+
 /// Issue `PartInfo` on the partition, returning its identity (PID) and
 /// raw identity public key.
 ///

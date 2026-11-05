@@ -62,7 +62,9 @@ include = [
   "TsraDarcTmkImportParams",
   "TsraMobkCallbackOps",
   "TsraPotaCallbackOps",
+  "TsraPtaCallbackOps",
   "TsraResiliencyConfig",
+  "TsraResiliencyExConfig",
   "TsraResiliencyLockOps",
   "TsraResiliencyStorageOps",
   "TsraSdCertChain",
@@ -144,7 +146,9 @@ item_types = [
 "TsraPotaEndorsement" = "tsra_pota_endorsement"
 "TsraPotaEndorsementData" = "tsra_pota_endorsement_data"
 "TsraPotaEndorsementSource" = "tsra_pota_endorsement_source"
+"TsraPtaCallbackOps" = "tsra_pta_callback_ops"
 "TsraResiliencyConfig" = "tsra_resiliency_config"
+"TsraResiliencyExConfig" = "tsra_resiliency_ex_config"
 "TsraResiliencyLockOps" = "tsra_resiliency_lock_ops"
 "TsraResiliencyStorageOps" = "tsra_resiliency_storage_ops"
 "TsraSdCertChain" = "tsra_sd_cert_chain"

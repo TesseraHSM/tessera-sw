@@ -316,7 +316,8 @@ impl SessionTable {
     /// `alloc_mask & !pending_mask`.
     #[inline(never)]
     pub fn mark_all_needs_renego(&mut self) {
-        let survivors = self.alloc_mask() & !self.pending_mask();
+        // Reopen-Pending slots belong to an established session: keep them.
+        let survivors = self.alloc_mask() & !self.fresh_pending_mask();
         self.region_mut()[ALLOC_MASK] = survivors;
         self.region_mut()[RENEGO_MASK] = survivors;
         self.region_mut()[PHYS_IDS..].fill(0);
@@ -328,11 +329,12 @@ impl SessionTable {
     /// the physical-id indirection, and the volatile pending / PSK-change
     /// masks.
     ///
-    /// Used on partition free, which releases the prior session context.
-    /// Disable and NSSR (`Migrate`) use
-    /// [`mark_all_needs_renego`](Self::mark_all_needs_renego) instead, retaining
-    /// established logical IDs for reopen or close. Mirrors the reference
-    /// firmware's `session_table().restore(0)` in `HsmPartState::clear_partition_info`.
+    /// Used on partition free (and on an NSSR of a partition with no
+    /// resources yet), which discards the prior session context. A disable
+    /// or full NSSR uses [`mark_all_needs_renego`](Self::mark_all_needs_renego)
+    /// instead, retaining established logical IDs so the host can reopen or
+    /// close its sessions. Mirrors the reference firmware's
+    /// `session_table().restore(0)` in `HsmPartState::clear_partition_info`.
     #[inline(never)]
     pub fn clear_all(&mut self) {
         self.region_mut().fill(0);
@@ -342,7 +344,7 @@ impl SessionTable {
 
     /// Returns the physical vault key id of every slot that still owns live
     /// vault key material — [`Active`](HsmSessionState::Active) and
-    /// [`Pending`](HsmSessionState::Pending) — so a caller tearing the
+    /// [`Pending`](HsmSessionState::Pending), including reopen-Pending — so a caller tearing the
     /// partition down can delete the backing session-blob and handshake-blob
     /// vault keys before the indirection is dropped; otherwise they would be
     /// orphaned in the vault.
@@ -361,7 +363,7 @@ impl SessionTable {
     #[inline(never)]
     pub fn occupied_physical_ids(&self) -> [Option<HsmKeyId>; MAX_SESSIONS] {
         let mut out = [None; MAX_SESSIONS];
-        let mask = self.alloc_mask() & !self.renego_mask();
+        let mask = self.alloc_mask() & !(self.renego_mask() & !self.pending_mask());
         for (slot, entry) in out.iter_mut().enumerate() {
             if (mask & (1 << slot)) != 0 {
                 *entry = Some(HsmKeyId::from(self.phys_id(slot)));
@@ -401,9 +403,11 @@ impl SessionTable {
             }
         }
 
-        // 2. Evict the lowest-index Pending slot in range.
+        // 2. Evict the lowest-index fresh Pending slot in range
+        //    (reopen-Pending slots are never evicted).
+        let fresh_pending = self.fresh_pending_mask();
         for slot in start..=end {
-            if (self.pending_mask() & (1 << slot)) != 0 {
+            if (fresh_pending & (1 << slot)) != 0 {
                 let evicted = HsmKeyId::from(self.phys_id(slot));
                 self.install_pending(slot, physical_id);
                 return Ok((HsmSessId::from(slot as u16), Some(evicted)));
@@ -412,6 +416,98 @@ impl SessionTable {
 
         // 3. All slots in range are Active or NeedsRenegotiation.
         Err(HsmError::VaultSessionLimitReached)
+    }
+
+    /// Pending slots that are not reopen handshakes.
+    #[inline]
+    fn fresh_pending_mask(&self) -> u8 {
+        self.pending_mask() & !self.renego_mask()
+    }
+
+    /// Moves a [`NeedsRenegotiation`](HsmSessionState::NeedsRenegotiation)
+    /// (or reopen-Pending) slot to Pending under the same id, mapping it to
+    /// the handshake-blob vault key `physical_id`. The renegotiation flag
+    /// stays set until [`promote`](Self::promote), marking the slot
+    /// reopen-Pending. Returns the replaced handshake key id, if any, so the
+    /// caller can delete it.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::InvalidArg`] — `id` is outside `role`'s range or Active.
+    /// - [`HsmError::SessionNotFound`] — the slot is free or fresh Pending.
+    #[inline(never)]
+    pub fn reopen_pending(
+        &mut self,
+        id: HsmSessId,
+        role: HsmSessionRole,
+        physical_id: HsmKeyId,
+    ) -> HsmResult<Option<HsmKeyId>> {
+        let (start, end) = Self::role_slot_range(role);
+        if !(start..=end).contains(&(u16::from(id) as usize)) {
+            return Err(HsmError::InvalidArg);
+        }
+        let slot = self.active_slot(id)?;
+        let bit = 1u8 << slot;
+        if (self.renego_mask() & bit) == 0 {
+            return Err(if (self.pending_mask() & bit) == 0 {
+                HsmError::InvalidArg
+            } else {
+                HsmError::SessionNotFound
+            });
+        }
+        let replaced =
+            ((self.pending_mask() & bit) != 0).then(|| HsmKeyId::from(self.phys_id(slot)));
+        self.set_pending_mask(self.pending_mask() | bit);
+        self.set_psk_change_mask(self.psk_change_mask() & !bit);
+        self.set_phys_id(slot, u16::from(physical_id));
+        Ok(replaced)
+    }
+
+    /// Whether `id` is a reopen-Pending slot.
+    #[inline(never)]
+    pub fn is_reopen_pending(&self, id: HsmSessId) -> bool {
+        let slot = u16::from(id) as usize;
+        slot < MAX_SESSIONS && (self.pending_mask() & self.renego_mask() & (1 << slot)) != 0
+    }
+
+    /// Abandons a reopen handshake: the slot reverts to NeedsRenegotiation.
+    /// Returns the handshake-blob vault key id so the caller can delete it.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::SessionNotPending`] — `id` is not reopen-Pending.
+    #[inline(never)]
+    pub fn cancel_reopen(&mut self, id: HsmSessId) -> HsmResult<HsmKeyId> {
+        if !self.is_reopen_pending(id) {
+            return Err(HsmError::SessionNotPending);
+        }
+        let slot = u16::from(id) as usize;
+        let phys = HsmKeyId::from(self.phys_id(slot));
+        self.set_pending_mask(self.pending_mask() & !(1u8 << slot));
+        self.set_phys_id(slot, 0);
+        Ok(phys)
+    }
+
+    /// Reverts a reopen promoted by [`promote`](Self::promote): an Active
+    /// slot goes back to NeedsRenegotiation. Returns the physical vault key
+    /// id it was bound to so the caller can delete it.
+    ///
+    /// # Errors
+    ///
+    /// - [`HsmError::SessionNotFound`] — `id` is not an allocated slot.
+    /// - [`HsmError::SessionNotPending`] — the slot is not Active.
+    #[inline(never)]
+    pub fn demote_reopened(&mut self, id: HsmSessId) -> HsmResult<HsmKeyId> {
+        let slot = self.active_slot(id)?;
+        let bit = 1u8 << slot;
+        if ((self.pending_mask() | self.renego_mask()) & bit) != 0 {
+            return Err(HsmError::SessionNotPending);
+        }
+        let phys = HsmKeyId::from(self.phys_id(slot));
+        self.region_mut()[RENEGO_MASK] |= bit;
+        self.set_psk_change_mask(self.psk_change_mask() & !bit);
+        self.set_phys_id(slot, 0);
+        Ok(phys)
     }
 
     /// Occupies `slot` as a fresh Pending session mapped to `physical_id`,
@@ -460,6 +556,7 @@ impl SessionTable {
         }
         let old = HsmKeyId::from(self.phys_id(slot));
         self.set_pending_mask(self.pending_mask() & !bit);
+        self.region_mut()[RENEGO_MASK] &= !bit;
         self.set_psk_change_mask(self.psk_change_mask() & !bit);
         self.set_phys_id(slot, u16::from(new_physical));
         Ok(old)

@@ -61,6 +61,10 @@ use crate::session::session_open_finish as session_open_finish_helper;
 use crate::session::session_open_finish_with_mac as session_open_finish_with_mac_helper;
 use crate::session::session_open_init as session_open_init_helper;
 use crate::session::session_open_init_with_options as session_open_init_with_options_helper;
+use crate::session::session_reopen as session_reopen_helper;
+use crate::session::session_reopen_finish as session_reopen_finish_helper;
+use crate::session::session_reopen_finish_with_mac as session_reopen_finish_with_mac_helper;
+use crate::session::session_reopen_init as session_reopen_init_helper;
 use crate::session::PendingHandshake;
 use crate::session::SessionHandshake;
 use crate::session::SessionOpenInitOptions;
@@ -324,6 +328,46 @@ impl TestCtx {
         mac_fin: [u8; 48],
     ) -> DdiResult<SessionHandshake> {
         session_open_finish_with_mac_helper(&self.dev, pending, mac_fin)
+    }
+
+    /// Phase 1 of `SessionReopen` for the NeedsRenegotiation slot
+    /// `session_id`.
+    pub fn session_reopen_init(
+        &self,
+        session_id: u16,
+        opts: SessionOpenInitOptions<'_>,
+    ) -> DdiResult<PendingHandshake> {
+        session_reopen_init_helper(&self.dev, session_id, opts)
+    }
+
+    /// Phase 2 of `SessionReopen` with the canonical confirm MAC.
+    pub fn session_reopen_finish(
+        &self,
+        pending: PendingHandshake,
+        seed: [u8; tsra_ddi_tbor_types::SESSION_SEED_LEN],
+        bmk_session: &[u8],
+    ) -> DdiResult<SessionHandshake> {
+        session_reopen_finish_helper(&self.dev, pending, seed, bmk_session)
+    }
+
+    /// Phase 2 of `SessionReopen` with a caller-supplied `mac_fin`.
+    pub fn session_reopen_finish_with_mac(
+        &self,
+        pending: PendingHandshake,
+        mac_fin: [u8; 48],
+        seed: [u8; tsra_ddi_tbor_types::SESSION_SEED_LEN],
+        bmk_session: &[u8],
+    ) -> DdiResult<SessionHandshake> {
+        session_reopen_finish_with_mac_helper(&self.dev, pending, mac_fin, seed, bmk_session)
+    }
+
+    /// Full reopen of `prev`; `psk` overrides the role's default PSK.
+    pub fn session_reopen(
+        &self,
+        prev: &SessionHandshake,
+        psk: Option<&[u8]>,
+    ) -> DdiResult<SessionHandshake> {
+        session_reopen_helper(&self.dev, prev, psk)
     }
 
     /// One-shot happy-path handshake that returns the raw

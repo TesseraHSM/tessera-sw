@@ -180,7 +180,9 @@ pub(crate) fn require_tbor_rev(rev: HsmApiRev) -> HsmResult<()> {
 /// `DdiStatus::PartitionAlreadyProvisioned`, and
 /// `DdiStatus::VaultAppLimitReached` are surfaced as distinct
 /// `HsmError` variants to enable targeted retry logic during partition
-/// initialization and key operations.
+/// initialization and key operations. The TBOR equivalents
+/// (`TborStatus::SessionNeedsRenegotiation`, `TborStatus::KeyNotFound`,
+/// `TborStatus::PartitionNotProvisioned`) map to the same variants.
 ///
 /// All remaining `DdiError` variants are logged and collapsed into
 /// `HsmError::DdiCmdFailure`.
@@ -220,6 +222,13 @@ impl From<DdiError> for HsmError {
             DdiError::DdiStatus(DdiStatus::VaultAppLimitReached) => HsmError::VaultAppLimitReached,
             DdiError::DdiStatus(DdiStatus::CannotDeleteInternalKeys) => {
                 HsmError::CannotDeleteInternalKeys
+            }
+            DdiError::TborStatus(TborStatus::SessionNeedsRenegotiation) => {
+                HsmError::SessionNeedsRenegotiation
+            }
+            DdiError::TborStatus(TborStatus::KeyNotFound) => HsmError::KeyNotFound,
+            DdiError::TborStatus(TborStatus::PartitionNotProvisioned) => {
+                HsmError::PartitionNotProvisioned
             }
             DdiError::TborStatus(TborStatus::SdAlreadyInitialized) => {
                 HsmError::SdAlreadyInitialized

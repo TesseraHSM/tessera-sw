@@ -10,7 +10,6 @@ compile_error!("features `mock` and `session-ex-tests` cannot be enabled togethe
 mod algo;
 #[cfg(not(feature = "session-ex-tests"))]
 mod partition_tests;
-#[cfg(not(feature = "session-ex-tests"))]
 mod resiliency;
 #[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 mod resiliency_tests;

@@ -265,6 +265,76 @@ impl HsmSessionManager for UnoHsmPal {
         }
     }
 
+    async fn session_reopen_pending(
+        &self,
+        io: &UnoHsmIo,
+        id: HsmSessId,
+        role: HsmSessionRole,
+        handshake_state: &HsmDmaBuf,
+    ) -> HsmResult<()> {
+        if handshake_state.is_empty() || handshake_state.len() > SESSION_PENDING_BLOB_MAX {
+            return Err(HsmError::InvalidArg);
+        }
+
+        // Validate the slot before touching the vault so a rejected reopen
+        // leaves no orphaned handshake key.
+        match SessionStore::partition(io.pid())?.state(id) {
+            HsmSessionState::NeedsRenegotiation | HsmSessionState::Pending => {}
+            HsmSessionState::Active => return Err(HsmError::InvalidArg),
+            HsmSessionState::Invalid => return Err(HsmError::SessionNotFound),
+        }
+
+        let attrs = HsmVaultKeyAttrs::new().with_internal(true);
+        let physical_id = {
+            let mut v = crate::vault::vault(io);
+            v.create(
+                self,
+                io,
+                u8::from(io.pid()),
+                handshake_state,
+                HsmVaultKeyKind::SessionExPending,
+                None,
+                attrs,
+            )
+            .await?
+        };
+
+        let mut store = SessionStore::partition(io.pid())?;
+        match store.reopen_pending(id, role, physical_id) {
+            Ok(replaced) => {
+                if let Some(old) = replaced {
+                    let _ = crate::vault::vault(io).delete(self, io, old).await;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = crate::vault::vault(io).delete(self, io, physical_id).await;
+                Err(e)
+            }
+        }
+    }
+
+    async fn session_cancel_reopen(&self, io: &UnoHsmIo, id: HsmSessId) -> HsmResult<()> {
+        let _guard = self.fp_bulk_lock.lock().await;
+
+        let mut table = SessionStore::partition(io.pid())?;
+        if table.is_reopen_pending(id) {
+            let handshake = table.cancel_reopen(id)?;
+            let _ = crate::vault::vault(io).delete(self, io, handshake).await;
+            return Ok(());
+        }
+        if !matches!(table.state(id), HsmSessionState::Active) {
+            return Err(HsmError::SessionNotPending);
+        }
+        let physical_id = table.physical_id(id)?;
+        crate::vault::delete_session_keys(self, io, id).await?;
+        crate::vault::vault(io)
+            .delete(self, io, physical_id)
+            .await?;
+        table.demote_reopened(id)?;
+        Ok(())
+    }
+
     fn session_pending_state(
         &self,
         io: &UnoHsmIo,

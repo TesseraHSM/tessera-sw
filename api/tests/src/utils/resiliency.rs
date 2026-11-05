@@ -40,7 +40,7 @@ use std::sync::atomic::Ordering;
 
 use tsra_api::*;
 use tsra_crypto::*;
-#[cfg(feature = "res-test")]
+#[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 use tsra_res_test_dev::DdiOp;
 use tsra_resiliency_test_helpers::FileLock;
 use tsra_resiliency_test_helpers::FileStorage;
@@ -55,7 +55,7 @@ use crate::utils::partition::*;
 /// re-running the BK3 flow (real-HW `init_bk3` is one-shot per power
 /// cycle). `EstablishCredential` is always invoked by both init and
 /// restore, so it is the reliable signal going forward.
-#[cfg(feature = "res-test")]
+#[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 pub(crate) fn bk3_op() -> DdiOp {
     DdiOp::EstablishCredential
 }
@@ -185,6 +185,18 @@ pub(crate) fn make_resiliency_config_in(dir: &Path) -> HsmResiliencyConfig {
         lock: Arc::new(FileLock::new(lock_path)),
         pota_callback,
         mobk_callback,
+    }
+}
+
+/// Creates a [`HsmResiliencyExConfig`] (TBOR resiliency) backed by the
+/// given directory. No PTA callback is configured, so restore replays
+/// the PTA chain captured from the original `part_final_ex`.
+#[cfg(feature = "session-ex-tests")]
+pub(crate) fn make_resiliency_ex_config_in(dir: &Path) -> HsmResiliencyExConfig {
+    HsmResiliencyExConfig {
+        storage: Box::new(FileStorage::new(dir.to_path_buf())),
+        lock: Arc::new(FileLock::new(dir.join(".lock"))),
+        pta_callback: None,
     }
 }
 

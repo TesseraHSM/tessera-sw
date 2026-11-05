@@ -6,6 +6,7 @@
 
 use tsra_api::*;
 
+#[cfg(not(feature = "session-ex-tests"))]
 use crate::utils::partition::*;
 use crate::utils::resiliency::*;
 
@@ -13,6 +14,7 @@ use crate::utils::resiliency::*;
 
 /// Open and init a partition with resiliency enabled, open a session,
 /// and return all handles plus the RAII cleanup context.
+#[cfg(not(feature = "session-ex-tests"))]
 pub(crate) fn init_with_resiliency_and_session() -> (HsmPartition, HsmSession, ResiliencyTestCtx) {
     let list = HsmPartitionManager::partition_info_list();
     assert!(!list.is_empty(), "No partitions found.");
@@ -39,8 +41,43 @@ pub(crate) fn init_with_resiliency_and_session() -> (HsmPartition, HsmSession, R
     (part, session, ctx)
 }
 
+/// Reset a TBOR partition, enable TBOR resiliency, rotate the default
+/// CO PSK and provision the partition, returning the CO session plus the
+/// RAII cleanup context.
+#[cfg(feature = "session-ex-tests")]
+pub(crate) fn init_with_resiliency_and_session() -> (HsmPartition, HsmSession, ResiliencyTestCtx) {
+    use crate::utils::sd_provision::*;
+
+    let (part, rev) = crate::utils::partition_ex_helpers::new_partition();
+    let ctx = ResiliencyTestCtx::new();
+    part.enable_resiliency_ex(make_resiliency_ex_config_in(ctx.dir()))
+        .expect("Failed to enable TBOR resiliency");
+
+    let session = part
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::new(HsmPskId::CO),
+            HsmSessionExType::Authenticated,
+        )
+        .expect("Failed to open CO session");
+    session
+        .change_psk(&ROTATED_CO_PSK)
+        .expect("Failed to rotate the default CO PSK");
+    drop(session);
+    let session = part
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
+            HsmSessionExType::Authenticated,
+        )
+        .expect("Failed to reopen CO session with the rotated PSK");
+    provision_partition(&session);
+
+    (part, session, ctx)
+}
+
 /// Open and init a partition without resiliency, open a session.
-#[cfg(feature = "res-test")]
+#[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 pub(crate) fn init_without_resiliency_and_session() -> (HsmPartition, HsmSession) {
     let list = HsmPartitionManager::partition_info_list();
     assert!(!list.is_empty(), "No partitions found.");
@@ -202,7 +239,7 @@ pub(crate) fn cbc_decrypt(key: &HsmAesKey, iv: &[u8], ciphertext: &[u8]) -> HsmR
 }
 
 /// AES-CBC streaming encrypt: sends data in multiple chunks.
-#[cfg(feature = "res-test")]
+#[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 pub(crate) fn cbc_streaming_encrypt(
     key: &HsmAesKey,
     iv: &[u8],
@@ -226,7 +263,7 @@ pub(crate) fn cbc_streaming_encrypt(
 }
 
 /// AES-CBC streaming decrypt: sends data in multiple chunks.
-#[cfg(feature = "res-test")]
+#[cfg(all(feature = "res-test", not(feature = "session-ex-tests")))]
 pub(crate) fn cbc_streaming_decrypt(
     key: &HsmAesKey,
     iv: &[u8],
