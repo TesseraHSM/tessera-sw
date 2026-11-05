@@ -58,6 +58,10 @@ pub struct OsslHashAlgo {
     md: MessageDigest,
     /// Output length of the SHAKE XOFs; `None` for fixed-length digests.
     xof_len: Option<NonZeroUsize>,
+    /// Input absorbed ahead of the message: ML-DSA `μ`'s
+    /// `tr || 0x00 || len(ctx) || ctx` (see `HashAlgo::mldsa_mu`); empty for
+    /// every other algorithm.
+    prefix: Vec<u8>,
 }
 
 impl OsslHashAlgo {
@@ -74,7 +78,17 @@ impl OsslHashAlgo {
     ///
     /// A new `OsslHash` instance ready to perform hash operations.
     pub fn new(md: MessageDigest) -> Self {
-        Self { md, xof_len: None }
+        Self {
+            md,
+            xof_len: None,
+            prefix: Vec::new(),
+        }
+    }
+
+    /// Absorbs `prefix` ahead of every message; see `HashAlgo::mldsa_mu`.
+    pub(super) fn with_prefix(mut self, prefix: Vec<u8>) -> Self {
+        self.prefix = prefix;
+        self
     }
 
     /// Creates a new SHA-1 hash instance.
@@ -168,6 +182,7 @@ impl OsslHashAlgo {
         Self {
             md: MessageDigest::shake_128(),
             xof_len: Some(len),
+            prefix: Vec::new(),
         }
     }
 
@@ -185,6 +200,7 @@ impl OsslHashAlgo {
         Self {
             md: MessageDigest::shake_256(),
             xof_len: Some(len),
+            prefix: Vec::new(),
         }
     }
 
@@ -316,6 +332,10 @@ impl HashOp for OsslHashAlgo {
             let mut ctx = MdCtx::new().map_err(|_| CryptoError::HashInitError)?;
             ctx.digest_init(&md)
                 .map_err(|_| CryptoError::HashInitError)?;
+            if !self.prefix.is_empty() {
+                ctx.digest_update(&self.prefix)
+                    .map_err(|_| CryptoError::HashUpdateError)?;
+            }
             ctx.digest_update(data)
                 .map_err(|_| CryptoError::HashUpdateError)?;
             digest_final(&mut ctx, self.is_xof(), &mut hash[..size])?;
@@ -362,6 +382,10 @@ impl HashStreamingOp for OsslHashAlgo {
         let mut ctx = MdCtx::new().map_err(|_| CryptoError::HashInitError)?;
         ctx.digest_init(&md)
             .map_err(|_| CryptoError::HashInitError)?;
+        if !self.prefix.is_empty() {
+            ctx.digest_update(&self.prefix)
+                .map_err(|_| CryptoError::HashUpdateError)?;
+        }
         Ok(OsslHashAlgoContext {
             algo: self,
             ctx,

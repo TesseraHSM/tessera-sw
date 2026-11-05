@@ -4,15 +4,14 @@
 //! Host-side wrapper for the TBOR `MlDsaVerify` command.
 //!
 //! `MlDsaVerify` is (temporarily) an **out-of-session** command that verifies an ML-DSA signature over a host-supplied
-//! message and public key.  Success is signalled by an empty response;
-//! an invalid signature arrives as the `MlDsaVerifyFailed` status.
+//! 64-byte message representative `μ` and public key.  Success is signalled
+//! by an empty response; an invalid signature arrives as the
+//! `MlDsaVerifyFailed` status.
 //!
-//! `ctx` is the caller-chosen context string of
-//! `ML-DSA.Verify(pk, M, sigma, ctx)` (FIPS 204 §5.3) and must match the
-//! `ctx` used at signing time: it is bound into the signature, so
-//! verification under a different context fails.  It is carried as a
-//! buffer of 0..=255 bytes; an empty `ctx` is the FIPS 204 default.  See
-//! [`MLDSA_CTX_MAX_LEN`](crate::MLDSA_CTX_MAX_LEN).
+//! As `MlDsaSign` signs `μ` rather than a message, verification takes `μ`
+//! too: a pure ML-DSA signature over `M` under the FIPS 204 context string
+//! `ctx` verifies over `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)`.
+//! See [`MLDSA_MU_LEN`](crate::MLDSA_MU_LEN).
 //!
 //! # TEMPORARY: out-of-session bring-up
 //!
@@ -52,18 +51,10 @@ pub struct TborMlDsaVerifyReq {
     #[tbor(max_len = 2592)]
     pub pub_key: Vec<u8>,
 
-    /// Message that was signed.  Capped at 586 B — the residue of the
-    /// 8192-byte host staging budget once the maximum public key,
-    /// signature and context string are accounted for.  See
-    /// [`MLDSA_MESSAGE_MAX_LEN`](crate::MLDSA_MESSAGE_MAX_LEN).
-    #[tbor(max_len = 586)]
-    pub message: Vec<u8>,
-
-    /// FIPS 204 context string `ctx` for `ML-DSA.Verify(pk, M, sigma,
-    /// ctx)`, 0..=255 bytes.  Must match the `ctx` used at signing time.
-    /// See [`MLDSA_CTX_MAX_LEN`](crate::MLDSA_CTX_MAX_LEN).
-    #[tbor(max_len = 255)]
-    pub ctx: Vec<u8>,
+    /// The message representative `μ` the signature covers, exactly
+    /// [`MLDSA_MU_LEN`](crate::MLDSA_MU_LEN) bytes.
+    #[tbor(min_len = 64, max_len = 64)]
+    pub mu: Vec<u8>,
 
     /// ML-DSA signature bytes.
     #[tbor(max_len = 4627)]
@@ -85,65 +76,29 @@ mod tests {
     use tsra_ddi_tbor_types::TborOpReq;
 
     use super::*;
-    use crate::mldsa_generate_key::MLDSA_CTX_MAX_LEN;
-    use crate::mldsa_generate_key::MLDSA_MESSAGE_MAX_LEN;
+    use crate::mldsa_generate_key::MLDSA_MU_LEN;
     use crate::mldsa_generate_key::MLDSA_PUB_KEY_MAX_LEN;
     use crate::mldsa_generate_key::MLDSA_SIGNATURE_MAX_LEN;
 
-    #[test]
-    fn request_encodes_signature() {
-        let req = TborMlDsaVerifyReq {
-            session_id: 7,
-            pub_key: alloc::vec![0x11u8; 64],
-            message: alloc::vec![0x22u8; 32],
-            ctx: alloc::vec![0x44u8; 8],
-            signature: alloc::vec![0x33u8; 64],
-        };
-        let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
-        assert!(
-            frame.windows(4).any(|w| w == [0x33u8; 4]),
-            "encoded frame must carry the signature bytes",
-        );
-    }
-
-    #[test]
-    fn request_encodes_ctx() {
-        let req = TborMlDsaVerifyReq {
-            session_id: 7,
-            pub_key: alloc::vec![0x11u8; 64],
-            message: alloc::vec![0x22u8; 32],
-            ctx: alloc::vec![0x44u8; MLDSA_CTX_MAX_LEN],
-            signature: alloc::vec![0x33u8; 64],
-        };
-        let mut buf = [0u8; 1024];
-        let frame = req.encode_request(&mut buf).expect("encode");
-        assert!(
-            frame.windows(4).any(|w| w == [0x44u8; 4]),
-            "encoded frame must carry the context-string bytes",
-        );
-    }
-
-    /// The worst-case verify request must fit the 8192-byte transport
-    /// buffer with the data written directly after the paired TOC.
+    /// The worst-case verify request, ML-DSA-87's public key, `μ` and
+    /// signature, written directly after the paired TOC.
     #[test]
     fn max_sized_request_fits_the_transport_buffer() {
         let req = TborMlDsaVerifyReq {
             session_id: 7,
             pub_key: alloc::vec![0x11u8; MLDSA_PUB_KEY_MAX_LEN],
-            message: alloc::vec![0x22u8; MLDSA_MESSAGE_MAX_LEN],
-            ctx: alloc::vec![0x44u8; MLDSA_CTX_MAX_LEN],
+            mu: alloc::vec![0x55u8; MLDSA_MU_LEN],
             signature: alloc::vec![0x33u8; MLDSA_SIGNATURE_MAX_LEN],
         };
         let mut buf = [0u8; 8192];
         let frame = req.encode_request(&mut buf).expect("encode");
-        // header(8) + 5 TOC entries * 4 + data(8060).
-        assert_eq!(frame.len(), 8088);
-    }
-
-    #[test]
-    fn lengths_match_pinned_values() {
-        const _: () = assert!(586 == MLDSA_MESSAGE_MAX_LEN);
-        const _: () = assert!(255 == MLDSA_CTX_MAX_LEN);
+        assert!(
+            frame
+                .windows(MLDSA_MU_LEN)
+                .any(|w| w == [0x55u8; MLDSA_MU_LEN]),
+            "encoded frame must carry mu",
+        );
+        // header(8) + 4 TOC entries * 4 + data(2592 + 64 + 4627).
+        assert_eq!(frame.len(), 7307);
     }
 }

@@ -6,6 +6,7 @@
 use core::future::poll_fn;
 
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_single_cell::SingleCell;
@@ -141,18 +142,25 @@ impl PqcDriver {
         }
     }
 
-    /// Sign a message on whichever FP core is free.
+    /// Sign a message, or an external `μ`, on whichever FP core is free.
+    /// See [`PqcEngine::mldsa_sign`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn mldsa_sign(
         &self,
         kind: HsmVaultKeyKind,
         sec_key: &[u8],
         rnd: &[u8; crate::MLDSA_SEED_LEN],
+        msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
         sig: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mldsa_sign(kind, sec_key, rnd, msg, ctx, sig).await)
-            .await
+        self.with_engine(async |engine| {
+            engine
+                .mldsa_sign(kind, sec_key, rnd, msg_type, msg, ctx, sig)
+                .await
+        })
+        .await
     }
 
     /// Generate an ML-KEM key pair on whichever FP core is free.
@@ -200,17 +208,23 @@ impl PqcDriver {
         .await
     }
 
-    /// Verify a signature on whichever FP core is free.
+    /// Verify a signature over a message, or an external `μ`, on whichever
+    /// FP core is free. See [`PqcEngine::mldsa_verify`].
     pub async fn mldsa_verify(
         &self,
         kind: HsmVaultKeyKind,
         pub_key: &[u8],
+        msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
-        self.with_engine(async |engine| engine.mldsa_verify(kind, pub_key, msg, ctx, sig).await)
-            .await
+        self.with_engine(async |engine| {
+            engine
+                .mldsa_verify(kind, pub_key, msg_type, msg, ctx, sig)
+                .await
+        })
+        .await
     }
 
     /// Hash `msg` with SHAKE on whichever FP core is free, writing the

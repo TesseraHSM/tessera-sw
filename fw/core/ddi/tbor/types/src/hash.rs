@@ -31,9 +31,9 @@ use crate::key_props::HashAlgo;
 pub const TBOR_OP_HASH: u8 = 0x1B;
 
 /// Maximum message length (bytes) accepted by `Hash`.  Pinned into
-/// the `#[tbor(buffer, max_len = 2048)]` literal on
+/// the `#[tbor(buffer, max_len = 3072)]` literal on
 /// [`TborHashReq::msg`].
-pub const HASH_MSG_MAX_LEN: usize = 2048;
+pub const HASH_MSG_MAX_LEN: usize = 3072;
 
 /// Maximum output length (bytes): the largest SHAKE `out_len`.  Fixed-length
 /// digests are at most 64 B (SHA-512).  Pinned into the
@@ -56,7 +56,7 @@ pub struct TborHashReq<'a> {
     pub out_len: Option<u16>,
 
     /// The message to hash, up to [`HASH_MSG_MAX_LEN`] bytes.
-    #[tbor(buffer, max_len = 2048)]
+    #[tbor(buffer, max_len = 3072)]
     pub msg: &'a [u8],
 }
 
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn lengths_match_pinned_values() {
-        assert_eq!(HASH_MSG_MAX_LEN, 2048);
+        assert_eq!(HASH_MSG_MAX_LEN, 3072);
         assert_eq!(HASH_DIGEST_MAX_LEN, 256);
     }
 }

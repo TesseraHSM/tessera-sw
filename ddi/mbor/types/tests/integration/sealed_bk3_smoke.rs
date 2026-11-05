@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! SetSealedBk3 / GetSealedBk3 smoke tests for the emu/mock backend.
+//! SetSealedBk3 / GetSealedBk3 smoke tests for the emu backend.
 
-#![cfg(any(feature = "emu", feature = "mock"))]
+#![cfg(feature = "emu")]
 #![cfg(test)]
 
 use test_with_tracing::test;

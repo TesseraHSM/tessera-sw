@@ -4,6 +4,11 @@ Long-running stress tool for testing TSRA SDK resiliency under continuous
 device resets. Multiple worker threads perform crypto operations while a
 dedicated thread triggers resets at configurable intervals.
 
+> **Dormant:** this tool is not a workspace member and is not built. Its
+> `mock` and `res-test` modes depended on the removed `tsra_ddi_mock` and
+> `tsra_res_test_dev` transports; the instructions below are kept for
+> reference until it is ported to the `emu` backend.
+
 ## Building
 
 ```bash

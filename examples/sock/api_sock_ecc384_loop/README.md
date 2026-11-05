@@ -75,7 +75,7 @@ already-rotated test PSK. Restarting the emulator server loses its state, so the
 next run rotates the default PSK again.
 
 The `sock` feature selects the socket backend through `tsra_api/sock`. It is
-opt-in to avoid conflicts with workspace `mock` and `emu` builds. The same TCP
+opt-in to avoid conflicts with workspace `emu` builds. The same TCP
 endpoint and public API calls are used on Windows and Linux.
 
 ## Focused Checks

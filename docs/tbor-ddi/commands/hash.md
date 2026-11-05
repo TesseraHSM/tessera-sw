@@ -40,11 +40,16 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | — | `algo` | `u8` (inline) | Digest algorithm ([`HashAlgo`]): `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512, `7` = SHAKE128, `8` = SHAKE256. |
 | — | `out_len` | `u16` (inline, optional) | SHAKE output length, 1 to 256 bytes; required for SHAKE, absent (`none`) for the fixed-length digests. |
-| — | `msg` | `buffer` (≤ 2048 B) | The message to hash. |
+| — | `msg` | `buffer` (≤ 3072 B) | The message to hash. |
 
 ### Data section
 
 Carries the message bytes.
+
+The 3072-byte cap holds an ML-DSA-87 public key (2592 B), so `tr` for an
+external ML-DSA `μ` can be computed here, and keeps the whole request
+within 4 KiB.  Worst-case frame: staged `132 + 3072 = 3204` B and encoded
+`8 + 4*4 + 3072 = 3096` B.
 
 ## Response
 
@@ -65,7 +70,7 @@ Carries the digest or SHAKE output.
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
 | `InvalidArg` | Unknown `algo`; SHAKE without `out_len` or with `out_len` 0 or above 256; `out_len` with a fixed-length digest |
 | `DefaultPskMustRotate` | The calling role's PSK is still the compiled-in default (dispatcher, pre-handler) |
-| `DdiDecodeFailed` | Malformed request body (e.g. `msg` exceeds 2048 B) |
+| `DdiDecodeFailed` | Malformed request body (e.g. `msg` exceeds 3072 B) |
 
 ## See also
 

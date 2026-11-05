@@ -86,7 +86,7 @@ envelope metadata for the signature while the key and digest remain disjoint
 live inputs. RSA places the input integer before the masked key and uses an
 in-place PAL operation to replace that integer with its result while the key
 remains disjoint. ML-DSA uses one key/signature buffer with a tail-aligned
-expanded key and prefix output; its message and context remain disjoint.
+expanded key and prefix output; its `μ` input remains disjoint.
 ML-KEM reuses a public-key/ciphertext buffer with a separate DMA-branded
 shared-secret output. Both consume inputs before overwriting them.
 The dispatcher validates the response prefix without modifying unpublished storage.
@@ -140,8 +140,8 @@ storage is zero.
 | `0x24` | `DarcTmkExport` | InSession | [`commands/darc_tmk_export.md`](./commands/darc_tmk_export.md) |
 | `0x25` | `DarcKeyWrap` | InSession | [`commands/darc_key_wrap.md`](./commands/darc_key_wrap.md) |
 | `0x26` | `MlDsaGenerateKey` | NoSession | [`commands/mldsa_generate_key.md`](./commands/mldsa_generate_key.md) (**schema-only**) |
-| `0x27` | `MlDsaSign` | NoSession | [`commands/mldsa_sign.md`](./commands/mldsa_sign.md) (**schema-only**) |
-| `0x28` | `MlDsaVerify` | NoSession | [`commands/mldsa_verify.md`](./commands/mldsa_verify.md) (**schema-only**) |
+| `0x27` | `MlDsaSign` | InSession | [`commands/mldsa_sign.md`](./commands/mldsa_sign.md) |
+| `0x28` | `MlDsaVerify` | InSession | [`commands/mldsa_verify.md`](./commands/mldsa_verify.md) |
 | `0x29` | `MlKemGenerateKey` | NoSession | [`commands/mlkem_generate_key.md`](./commands/mlkem_generate_key.md) (**schema-only**) |
 | `0x2A` | `MlKemEncapsulate` | NoSession | [`commands/mlkem_encapsulate.md`](./commands/mlkem_encapsulate.md) (**schema-only**) |
 | `0x2B` | `MlKemDecapsulate` | NoSession | [`commands/mlkem_decapsulate.md`](./commands/mlkem_decapsulate.md) (**schema-only**) |

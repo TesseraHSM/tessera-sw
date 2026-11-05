@@ -22,6 +22,8 @@ use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
+use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_VERIFY;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -35,8 +37,7 @@ fn mldsa_verify_request_wire_shape() {
     let req = TborMlDsaVerifyReq {
         session_id: 0,
         pub_key: vec![0x11; 1312],
-        message: vec![0x22; 32],
-        ctx: Vec::new(),
+        mu: vec![0x22; MLDSA_MU_LEN],
         signature: vec![0x33; 2420],
     };
 
@@ -48,7 +49,7 @@ fn mldsa_verify_request_wire_shape() {
     let bytes = req.encode_request(&mut buf).expect("encode request");
     let view = RequestView::parse(bytes).expect("parse request");
     assert_eq!(view.opcode(), TBOR_OP_MLDSA_VERIFY);
-    assert_eq!(view.toc_count(), 5);
+    assert_eq!(view.toc_count(), 4);
 }
 
 /// Happy path: generate, sign, then verify the signature the device
@@ -56,13 +57,12 @@ fn mldsa_verify_request_wire_shape() {
 /// `TborMlDsaVerifyResp` is a unit struct and failure is reported as
 /// `MlDsaVerifyFailed`.
 ///
-/// Verify is the one operation that carries message, context, signature
-/// and public key at the same time, so at ML-DSA-87 it fills the FP
-/// operand slot to within a handful of bytes.
+/// Verify carries the public key, `μ` and signature together, the largest
+/// ML-DSA request.
 fn verify_case(p: &MlDsaParams) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
-    let message = b"tsra pqc bring-up".to_vec();
+    let mu = vec![0x5A; MLDSA_MU_LEN];
 
     let key = ctx
         .tbor(&TborMlDsaGenerateKeyReq {
@@ -76,8 +76,8 @@ fn verify_case(p: &MlDsaParams) {
         .tbor(&TborMlDsaSignReq {
             session_id: session.session_id,
             masked_key: key.masked_key,
-            message: message.clone(),
-            ctx: Vec::new(),
+            mu: mu.clone(),
+            hedge: MLDSA_HEDGE_PREFERRED,
         })
         .unwrap_or_else(|e| panic!("MlDsaSign({}): {e:?}", p.name));
 
@@ -92,8 +92,7 @@ fn verify_case(p: &MlDsaParams) {
     ctx.tbor(&TborMlDsaVerifyReq {
         session_id: session.session_id,
         pub_key: key.pub_key,
-        message,
-        ctx: Vec::new(),
+        mu,
         signature: signed.signature,
     })
     .unwrap_or_else(|e| {

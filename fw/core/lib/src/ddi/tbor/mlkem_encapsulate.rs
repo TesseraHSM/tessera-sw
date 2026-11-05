@@ -23,13 +23,14 @@ use tsra_fw_ddi_tbor_types::TborMlKemEncapsulateResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
+use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
+use super::from_pal::mlkem_seed_kind;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
@@ -39,30 +40,6 @@ const SHARED_SECRET_LEN: usize = 32;
 
 /// Envelope key-label recorded in the masked blob's metadata.
 const MLKEM_SS_LABEL: &[u8] = b"MlKemSs";
-
-/// Recover the parameter set from the encapsulation key length.
-///
-/// The three lengths are distinct, so this is unambiguous — the same
-/// property `MlDsaVerify` relies on, and the reason neither command needs
-/// a key kind on the wire.
-fn kind_from_pub_key_len(len: usize) -> HsmResult<HsmVaultKeyKind> {
-    match len {
-        800 => Ok(HsmVaultKeyKind::MlKem512Seed),
-        1184 => Ok(HsmVaultKeyKind::MlKem768Seed),
-        1568 => Ok(HsmVaultKeyKind::MlKem1024Seed),
-        _ => Err(HsmError::InvalidArg),
-    }
-}
-
-/// Ciphertext length per ML-KEM parameter set (FIPS 203 Table 3).
-fn mlkem_ct_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlKem512Seed => Ok(768),
-        HsmVaultKeyKind::MlKem768Seed => Ok(1088),
-        HsmVaultKeyKind::MlKem1024Seed => Ok(1568),
-        _ => Err(HsmError::InvalidArg),
-    }
-}
 
 /// Attributes recorded in the masked blob's metadata.  The shared secret
 /// is derived material, usable for deriving further keys.
@@ -95,8 +72,13 @@ pub(crate) async fn handle<P: HsmPal>(
         // when there was no session to scope a key to; these commands are
         // in-session now, so the restriction no longer has a reason.
 
-        let kind = kind_from_pub_key_len(req.pub_key.len())?;
-        let ct_len = mlkem_ct_len(kind)?;
+        // The parameter set comes from the encapsulation key length: the three
+        // lengths are distinct, the same property `MlDsaVerify` relies on, and
+        // the reason neither command needs a key kind on the wire.
+        let param_set =
+            HsmMlKemParamSet::from_pub_key_len(req.pub_key.len()).ok_or(HsmError::InvalidArg)?;
+        let kind = mlkem_seed_kind(param_set);
+        let ct_len = param_set.ciphertext_len();
         let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlKemEncapsulateReq::TOC_COUNT * 4;
         if (req.pub_key.as_ptr() as usize).checked_sub(base) != Some(data_start) {
             return Err(HsmError::InvalidArg);
@@ -108,7 +90,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let attrs = shared_secret_attrs(HsmKeyScope(scope));
 
         let shared_secret = pal.dma_alloc(io, SHARED_SECRET_LEN)?;
-        pal.mlkem_encaps_in_place(io, kind, req.pub_key, shared_secret)
+        pal.mlkem_encaps_in_place(io, param_set, req.pub_key, shared_secret)
             .await?;
 
         async {

@@ -238,6 +238,14 @@ tsra_status tsra_part_init(
 
 When `resiliency_config` is non-NULL, the SDK enables automatic retry and recovery for transient hardware resets. The caller provides storage, lock, and (optionally) POTA re-endorsement and MOBK provider callbacks. If POTA endorsement source is `TSRA_POTA_ENDORSEMENT_SOURCE_CALLER`, `pota_callback_ops` must be non-NULL. If source is `TSRA_POTA_ENDORSEMENT_SOURCE_TPM`, `pota_callback_ops` must be NULL. Similarly, if OBK source is `TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER`, `mobk_callback_ops` must be non-NULL. If source is `TSRA_OWNER_BACKUP_KEY_SOURCE_TPM`, `mobk_callback_ops` must be NULL. Passing NULL for `resiliency_config` disables resiliency.
 
+If credentials are already established, initialization can succeed without the
+device validating the supplied MOBK. The SDK preserves any previously validated
+MOBK on that handle, but does not cache the unvalidated value. On a fresh handle,
+`TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY` remains empty until credential
+establishment or recovery succeeds. Callers must retain the MOBK from the initial
+successful credential establishment and supply it through the MOBK callback when
+recovery needs it.
+
 > **POTA callback:** The POTA `endorse` callback is
 > invoked during resiliency recovery. The SDK retrieves the device's
 > PID public key and certificate chain and passes them to the callback,
@@ -250,9 +258,10 @@ When `resiliency_config` is non-NULL, the SDK enables automatic retry and recove
 > for details.
 
 > **MOBK callback:** The MOBK `get_mobk` callback is invoked during
-> resiliency recovery to re-provision the caller's Owner Backup Key.
-> The SDK does not cache the plaintext OBK — it calls this callback
-> on demand. The callback is invoked while the partition's internal
+> resiliency recovery when the handle has no previously validated MOBK.
+> The SDK never caches the plaintext OBK. The callback must return the
+> previously derived masked key, not the plaintext OBK.
+> The callback is invoked while the partition's internal
 > lock is held; its implementation must not call TSRA APIs on the
 > same `tsra_handle` being initialized or restored, to avoid deadlock.
 > See [`tsra_mobk_callback_ops`](#tsra_mobk_callback_ops)

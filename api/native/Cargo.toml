@@ -19,7 +19,6 @@ zerocopy = { features = ["derive"], workspace = true }
 [features]
 default = []
 emu = ["tsra_api/emu"]
-mock = ["tsra_api/mock"]
 sock = ["tsra_api/sock"]
 
 [lints]

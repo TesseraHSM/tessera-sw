@@ -39,27 +39,6 @@ pub(crate) fn init_with_resiliency_and_session() -> (HsmPartition, HsmSession, R
     (part, session, ctx)
 }
 
-/// Open and init a partition without resiliency, open a session.
-#[cfg(feature = "res-test")]
-pub(crate) fn init_without_resiliency_and_session() -> (HsmPartition, HsmSession) {
-    let list = HsmPartitionManager::partition_info_list();
-    assert!(!list.is_empty(), "No partitions found.");
-    let part = HsmPartitionManager::open_partition(&list[0].path, test_api_rev())
-        .expect("Failed to open partition");
-    part.reset().expect("Partition reset failed");
-
-    let creds = HsmCredentials::new(&APP_ID, &APP_PIN);
-    let (obk_info, pota_endorsement) = make_init_params(&part);
-    init_with_mobk_fallback(&part, creds, obk_info, pota_endorsement, None);
-
-    let rev = part.api_rev();
-    let session = part
-        .open_session(rev, &creds, None)
-        .expect("Failed to open session");
-
-    (part, session)
-}
-
 // Key-generation helpers
 
 /// Generate an AES-256 session key for encryption/decryption tests.
@@ -198,53 +177,5 @@ pub(crate) fn cbc_decrypt(key: &HsmAesKey, iv: &[u8], ciphertext: &[u8]) -> HsmR
         HsmDecrypter::decrypt(&mut algo, key, ciphertext, Some(&mut out))?
     };
     out.truncate(written);
-    Ok(out)
-}
-
-/// AES-CBC streaming encrypt: sends data in multiple chunks.
-#[cfg(feature = "res-test")]
-pub(crate) fn cbc_streaming_encrypt(
-    key: &HsmAesKey,
-    iv: &[u8],
-    chunks: &[&[u8]],
-) -> HsmResult<Vec<u8>> {
-    let algo = HsmAesCbcAlgo::with_padding(iv.to_vec()).expect("Failed to create AES-CBC algo");
-    let mut ctx =
-        HsmEncrypter::encrypt_init(algo, key.clone()).expect("Failed to init streaming encrypt");
-    let mut out = Vec::new();
-    for chunk in chunks {
-        let needed = ctx.update(chunk, None)?;
-        let mut buf = vec![0u8; needed];
-        let written = ctx.update(chunk, Some(&mut buf))?;
-        out.extend_from_slice(&buf[..written]);
-    }
-    let needed = ctx.finish(None)?;
-    let mut buf = vec![0u8; needed];
-    let written = ctx.finish(Some(&mut buf))?;
-    out.extend_from_slice(&buf[..written]);
-    Ok(out)
-}
-
-/// AES-CBC streaming decrypt: sends data in multiple chunks.
-#[cfg(feature = "res-test")]
-pub(crate) fn cbc_streaming_decrypt(
-    key: &HsmAesKey,
-    iv: &[u8],
-    chunks: &[&[u8]],
-) -> HsmResult<Vec<u8>> {
-    let algo = HsmAesCbcAlgo::with_padding(iv.to_vec()).expect("Failed to create AES-CBC algo");
-    let mut ctx =
-        HsmDecrypter::decrypt_init(algo, key.clone()).expect("Failed to init streaming decrypt");
-    let mut out = Vec::new();
-    for chunk in chunks {
-        let needed = ctx.update(chunk, None)?;
-        let mut buf = vec![0u8; needed];
-        let written = ctx.update(chunk, Some(&mut buf))?;
-        out.extend_from_slice(&buf[..written]);
-    }
-    let needed = ctx.finish(None)?;
-    let mut buf = vec![0u8; needed];
-    let written = ctx.finish(Some(&mut buf))?;
-    out.extend_from_slice(&buf[..written]);
     Ok(out)
 }

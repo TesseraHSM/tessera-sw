@@ -47,7 +47,7 @@ cargo xtask build --package tsra_sealing_root_svc --features sock
 cargo xtask build --package tsra_sealing_leaf_svc --features sock
 ```
 
-Do not combine `sock` with `emu` or `mock`. `--require-emu` deliberately rejects
+Do not combine `sock` with `emu`. `--require-emu` deliberately rejects
 socket builds, even though the remote server hosts emulated firmware.
 
 ## Create and sign

@@ -29,10 +29,7 @@ inline constexpr uint32_t kPokRemoteBackupLen = 161;
 // a real C consumer performs, except the consumer brings its own PKI chain.
 //
 // The chain is built with the platform host crypto (OpenSSL on Linux,
-// BCrypt on Windows), no HSM session. Excluded from the mock backend; runs
-// on the emu and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
+// BCrypt on Windows), no HSM session.
 /// Provision a freshly-reset partition's security domain and return a live,
 /// provisioned Crypto-Officer session handle (`Initialized` state):
 /// open CO under the default PSK, rotate it, reopen, `PartInit`, build a
@@ -297,5 +294,3 @@ DarcCertChainHolder darc_make_chain(
     const std::shared_ptr<CaKey> &ca,
     const std::vector<uint8_t> &leaf_pub_raw
 );
-
-#endif // !defined(TSRA_FEATURE_MOCK)

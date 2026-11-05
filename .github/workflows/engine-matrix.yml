@@ -152,10 +152,10 @@ jobs:
       - name: Test tsra_ossl_engine_core
         run: cargo nextest run -p tsra_ossl_engine_core --features engine
 
-      # tsra_ossl_engine's mock lifecycle tests drive the HSM open path against the
-      # mock DDI.
-      - name: Test tsra_ossl_engine (mock lifecycle)
-        run: cargo nextest run -p tsra_ossl_engine --features engine,mock
+      # tsra_ossl_engine's emu lifecycle tests drive the HSM open path against the
+      # emu DDI.
+      - name: Test tsra_ossl_engine (emu lifecycle)
+        run: cargo nextest run -p tsra_ossl_engine --features engine,emu
 
       - name: Test tsra_crypto
         run: cargo nextest run -p tsra_crypto
@@ -168,10 +168,10 @@ jobs:
         run: openssl engine -t "$(pwd)/target/debug/libtsra_ossl_engine.so"
 
       # The integration suites load a key through the engine end to end; they
-      # need a mock-backed .so, so (re)build it and the masked-key generator.
-      - name: Build engine (mock) + generator for integration tests
+      # need an emu-backed .so, so (re)build it and the masked-key generator.
+      - name: Build engine (emu) + generator for integration tests
         run: |
-          cargo build -p tsra_ossl_engine --features engine,mock
+          cargo build -p tsra_ossl_engine --features engine,emu
           cargo build -p tsra-engine-masked-keygen --features integration
 
       - name: Integration tests — CLI (openssl -engine)

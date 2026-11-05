@@ -266,3 +266,91 @@ fn parameter_sets_do_not_interoperate() {
         assert!(!Verifier::verify(&mut verifier, &pk, &msg, &sig).unwrap());
     }
 }
+
+/// Signing an external `μ` computed by [`HashAlgo::mldsa_mu`] is pure signing:
+/// under the same randomness both give the same signature, and each
+/// verifies under the other interface.
+#[test]
+fn external_mu_is_pure_signing_over_the_same_message() {
+    for variant in VARIANTS {
+        let sk = MlDsaPrivateKey::from_seed(variant, &filler(31, MLDSA_SEED_LEN)).unwrap();
+        let pk = sk.public_key().unwrap();
+        let (msg, ctx) = (filler(32, 100), filler(33, 17));
+        let mu = Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, &ctx).unwrap(), &msg).unwrap();
+
+        let mut pure = MlDsaAlgo::with_randomness(&ctx, rnd(34)).unwrap();
+        let mut external = MlDsaAlgo::external_mu_with_randomness(rnd(34));
+        let pure_sig = Signer::sign_vec(&mut pure, &sk, &msg).unwrap();
+        let mu_sig = Signer::sign_vec(&mut external, &sk, &mu).unwrap();
+        assert_eq!(
+            pure_sig, mu_sig,
+            "{variant:?}: mu differs from the one pure signing computes"
+        );
+
+        let mut pure = MlDsaAlgo::new(&ctx).unwrap();
+        let mut external = MlDsaAlgo::external_mu();
+        assert!(Verifier::verify(&mut pure, &pk, &msg, &mu_sig).unwrap());
+        assert!(Verifier::verify(&mut external, &pk, &mu, &pure_sig).unwrap());
+
+        // A different context gives a different mu, and the signature no
+        // longer verifies under it.
+        let other =
+            Hasher::hash_vec(&mut HashAlgo::mldsa_mu(&pk, b"other").unwrap(), &msg).unwrap();
+        assert!(!Verifier::verify(&mut external, &pk, &other, &mu_sig).unwrap());
+    }
+}
+
+/// An external `μ` is exactly 64 bytes; anything else is malformed input to
+/// both directions, not a failed verification.
+#[test]
+fn external_mu_of_the_wrong_length_is_rejected() {
+    let (sk, pk, _) = setup(MlDsaVariant::MlDsa44, b"");
+    let mut algo = MlDsaAlgo::external_mu();
+    let sig = Signer::sign_vec(&mut algo, &sk, &[7; MLDSA_MU_LEN]).unwrap();
+    for len in [0, MLDSA_MU_LEN - 1, MLDSA_MU_LEN + 1] {
+        let mu = vec![7; len];
+        assert!(matches!(
+            Signer::sign_vec(&mut algo, &sk, &mu),
+            Err(CryptoError::MlDsaInvalidMu)
+        ));
+        assert!(matches!(
+            Verifier::verify(&mut algo, &pk, &mu, &sig),
+            Err(CryptoError::MlDsaInvalidMu)
+        ));
+    }
+}
+
+/// `μ` binds the context string, so it shares its 255-byte limit.
+#[test]
+fn mu_rejects_an_oversized_context() {
+    let (_, pk, _) = setup(MlDsaVariant::MlDsa44, b"");
+    assert!(matches!(
+        HashAlgo::mldsa_mu(&pk, &filler(35, MLDSA_CTX_MAX_LEN + 1)),
+        Err(CryptoError::MlDsaInvalidContext)
+    ));
+    assert!(HashAlgo::mldsa_mu(&pk, &filler(35, MLDSA_CTX_MAX_LEN)).is_ok());
+}
+
+/// `μ` is an ordinary hash of the message: streamed in any chunks, it
+/// matches the one-shot result, and it reports its 64-byte length.
+#[test]
+fn mu_streams_like_a_one_shot_hash() {
+    let (_, pk, _) = setup(MlDsaVariant::MlDsa65, b"");
+    let msg = filler(36, 1000);
+    let mut algo = HashAlgo::mldsa_mu(&pk, b"ctx").unwrap();
+    assert_eq!(Hasher::hash(&mut algo, &msg, None).unwrap(), MLDSA_MU_LEN);
+    let one_shot = Hasher::hash_vec(&mut algo, &msg).unwrap();
+
+    // Split across SHAKE256's 136-byte rate, with an empty chunk too.
+    let mut stream = Hasher::hash_init(algo).unwrap();
+    for chunk in [
+        &msg[..0],
+        &msg[..1],
+        &msg[1..136],
+        &msg[136..137],
+        &msg[137..],
+    ] {
+        stream.update(chunk).unwrap();
+    }
+    assert_eq!(stream.finish_vec().unwrap(), one_shot);
+}

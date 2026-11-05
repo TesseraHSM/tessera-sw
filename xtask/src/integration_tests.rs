@@ -32,9 +32,13 @@ pub enum Suite {
 /// for the test harnesses if they aren't already set.
 ///
 /// The provider stack itself is **not** built here — callers must build it
-/// into `target/debug` (`cargo build -p tsra_ossl_provider --features mock`)
+/// into `target/debug` (`cargo build -p tsra_ossl_provider --features emu`)
 /// beforehand.  Keeping the build out means a partial run (`--suite nginx`)
 /// doesn't recompile the world.
+///
+/// The nginx suite needs the fork-safe `sock` transport: build the provider
+/// with `--features sock`, start `ddi_sock_server tcp://127.0.0.1:PORT`, and
+/// set `TSRA_DDI_SOCK` to the same endpoint (see `provider-matrix.yml`).
 #[derive(Parser)]
 #[clap(about = "Run Integration Tests")]
 pub struct IntegrationTest {

@@ -81,8 +81,8 @@ both files, with the change in RPS and p50.
 | `tbor-rsa-sign-2k-crt`, `-3k-crt`, `-4k-crt` | `RsaModExp` sign, CRT key | modulus-sized message |
 | `tbor-aes-cbc-encrypt`, `-decrypt` | `AesEncryptDecrypt`, AES-256-CBC | `--cbc-len` bytes |
 | `tbor-mldsa-keygen-44`, `-65`, `-87` | `MlDsaGenerateKey` | - |
-| `tbor-mldsa-sign-44`, `-65`, `-87` | `MlDsaSign` | 64-byte message |
-| `tbor-mldsa-verify-44`, `-65`, `-87` | `MlDsaVerify` | host key and signature, 64-byte message |
+| `tbor-mldsa-sign-44`, `-65`, `-87` | `MlDsaSign` | 64-byte `μ` |
+| `tbor-mldsa-verify-44`, `-65`, `-87` | `MlDsaVerify` | host key and signature, 64-byte `μ` |
 | `tbor-mlkem-keygen-512`, `-768`, `-1024` | `MlKemGenerateKey` | - |
 | `tbor-mlkem-encap-512`, `-768`, `-1024` | `MlKemEncapsulate` | host encapsulation key |
 | `tbor-mlkem-decap-512`, `-768`, `-1024` | `MlKemDecapsulate` | host ciphertext |
@@ -123,7 +123,7 @@ the file is empty.
 | `label` | `--label` |
 | `op` | Operation name |
 | `threads` | Worker threads in the run (shared by all operations of a `perf` mix) |
-| `payload` | Request data size, e.g. `32B digest`, `1024B`, `64B msg` or `768B ct` (ML-KEM ciphertext); `-` if none |
+| `payload` | Request data size, e.g. `32B digest`, `1024B`, `64B mu` or `768B ct` (ML-KEM ciphertext); `-` if none |
 | `keys` | `--keys` |
 | `seconds` | Measured window, `--test-seconds` |
 | `ops` | Requests completed inside the measured window |

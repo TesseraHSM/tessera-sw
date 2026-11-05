@@ -5,6 +5,7 @@
 
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_trace::tracing::*;
@@ -55,10 +56,11 @@ const SUBMIT_YIELD_WINDOW: embassy_time::Duration = embassy_time::Duration::from
 /// parameter set, which is why the key kind has to travel with it.
 pub const MLDSA_SEED_LEN: usize = 32;
 
-/// Largest message the wire carries (`MLDSA_MESSAGE_MAX_LEN`).
+/// Largest message a pure sign or verify accepts: what the operand slot is
+/// sized for alongside the largest key, context string and signature.
 pub const MLDSA_MSG_MAX: usize = 586;
 
-/// Largest context string the wire carries (`MLDSA_CTX_MAX_LEN`).
+/// Largest context string, the FIPS 204 limit.
 pub const MLDSA_CTX_MAX: usize = 255;
 
 /// Length of the ML-KEM seed pair `(d ‖ z)`.
@@ -69,13 +71,30 @@ pub const MLKEM_SEED_LEN: usize = 64;
 
 /// Largest message [`PqcEngine::shake`] accepts: the TBOR `Hash` message
 /// cap, well inside the slot space before the SHAKE output.
-pub const SHAKE_MSG_MAX: usize = 2048;
+pub const SHAKE_MSG_MAX: usize = 3072;
 
 /// Largest SHAKE output: the rest of the slot after its output offset.
 pub const SHAKE_OUT_MAX: usize = mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
 
 const _: () =
     assert!(SHAKE_MSG_MAX <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET);
+
+/// The mailbox encoding of an ML-DSA message type, once its input is
+/// checked: an external `μ` is exactly 64 bytes, with no context string.
+///
+/// # Errors
+/// * [`HsmError::InvalidArg`] — the input is malformed for `msg_type`.
+/// * [`HsmError::UnsupportedCmd`] — a pre-hash type; the FP cores take the
+///   message itself or an external `μ`.
+fn mailbox_msg_type(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<u32> {
+    match msg_type {
+        HsmMlDsaMsgType::Pure | HsmMlDsaMsgType::ExternalMu => {
+            msg_type.check_input(msg, ctx)?;
+            Ok(msg_type as u32)
+        }
+        HsmMlDsaMsgType::PreHash | HsmMlDsaMsgType::PreHashMessage => Err(HsmError::UnsupportedCmd),
+    }
+}
 
 /// Encapsulation-key length per ML-KEM parameter set (FIPS 203 Table 3).
 pub fn mlkem_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
@@ -239,6 +258,7 @@ impl PqcEngine<'_> {
                 ctx_len: 0,
                 sig_len: 0,
                 pub_key_len: 0,
+                msg_type: mailbox::MSG_TYPE_PURE,
             })
             .await?;
 
@@ -266,13 +286,17 @@ impl PqcEngine<'_> {
     ///   masked key. Supplying it rather than the seed is what keeps a key
     ///   generation out of every signature.
     /// * `rnd` — per-signature randomness from the device TRNG.
+    /// * `msg_type` — how `msg` is read: the message itself, or an external
+    ///   `μ` (64 bytes, with an empty `ctx`).
     /// * `msg`, `ctx` — staged into the operand slot.
     /// * `sig` — output, exactly the parameter set's signature length.
+    #[allow(clippy::too_many_arguments)]
     pub async fn mldsa_sign(
         &mut self,
         kind: HsmVaultKeyKind,
         sec_key: &[u8],
         rnd: &[u8; MLDSA_SEED_LEN],
+        msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
         sig: &mut [u8],
@@ -280,7 +304,8 @@ impl PqcEngine<'_> {
         if sig.len() != mldsa_sig_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mldsa_sign_submit(kind, sec_key, rnd, msg, ctx).await?;
+        self.mldsa_sign_submit(kind, sec_key, rnd, msg_type, msg, ctx)
+            .await?;
         if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -293,6 +318,7 @@ impl PqcEngine<'_> {
         kind: HsmVaultKeyKind,
         key_signature: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
         rnd: &[u8; MLDSA_SEED_LEN],
+        msg_type: HsmMlDsaMsgType,
         msg: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
         ctx: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
     ) -> HsmResult<()> {
@@ -304,7 +330,7 @@ impl PqcEngine<'_> {
         if key_signature.len() < sig_len {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mldsa_sign_submit(kind, &key_signature[key_at..], rnd, msg, ctx)
+        self.mldsa_sign_submit(kind, &key_signature[key_at..], rnd, msg_type, msg, ctx)
             .await?;
         let output = &mut key_signature[..sig_len];
         if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, output) {
@@ -318,10 +344,12 @@ impl PqcEngine<'_> {
         kind: HsmVaultKeyKind,
         sec_key: &[u8],
         rnd: &[u8; MLDSA_SEED_LEN],
+        msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
     ) -> HsmResult<()> {
         let expected_sig = mldsa_sig_len(kind)?;
+        let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
         if sec_key.len() != mldsa_sec_key_len(kind)?
             || msg.len() > MLDSA_MSG_MAX
             || ctx.len() > MLDSA_CTX_MAX
@@ -349,6 +377,7 @@ impl PqcEngine<'_> {
                 ctx_len: ctx.len() as u32,
                 sig_len: 0,
                 pub_key_len: 0,
+                msg_type,
             })
             .await?;
 
@@ -398,6 +427,7 @@ impl PqcEngine<'_> {
                 ctx_len: 0,
                 sig_len: 0,
                 pub_key_len: 0,
+                msg_type: mailbox::MSG_TYPE_PURE,
             })
             .await;
 
@@ -501,6 +531,7 @@ impl PqcEngine<'_> {
                 ctx_len: 0,
                 sig_len: 0,
                 pub_key_len: pub_key.len() as u32,
+                msg_type: mailbox::MSG_TYPE_PURE,
             })
             .await?;
 
@@ -556,6 +587,7 @@ impl PqcEngine<'_> {
                 // field, as it did when the ciphertext shared that region.
                 sig_len: ciphertext.len() as u32,
                 pub_key_len: 0,
+                msg_type: mailbox::MSG_TYPE_PURE,
             })
             .await;
 
@@ -573,6 +605,9 @@ impl PqcEngine<'_> {
 
     /// Verify a signature on this engine.
     ///
+    /// `msg_type` says how `msg` is read: the message itself, or an
+    /// external `μ` (64 bytes, with an empty `ctx`).
+    ///
     /// Returns `Ok(true)` for a good signature and `Ok(false)` for a bad
     /// one; `Err` is reserved for transport and argument faults, so a
     /// caller cannot mistake a failed verification for a broken link.
@@ -580,10 +615,12 @@ impl PqcEngine<'_> {
         &mut self,
         kind: HsmVaultKeyKind,
         pub_key: &[u8],
+        msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
+        let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
         if pub_key.len() != mldsa_pub_key_len(kind)?
             || sig.len() != mldsa_sig_len(kind)?
             || msg.len() > MLDSA_MSG_MAX
@@ -613,6 +650,7 @@ impl PqcEngine<'_> {
                 ctx_len: ctx.len() as u32,
                 sig_len: sig.len() as u32,
                 pub_key_len: pub_key.len() as u32,
+                msg_type,
             })
             .await?;
 
@@ -659,6 +697,7 @@ impl PqcEngine<'_> {
                     ctx_len: 0,
                     sig_len: out_len as u32,
                     pub_key_len: 0,
+                    msg_type: mailbox::MSG_TYPE_PURE,
                 })
                 .await?;
 

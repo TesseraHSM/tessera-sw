@@ -88,11 +88,11 @@ make -j"$(nproc)" && sudo make install_sw
 # 2. Build both libraries against OpenSSL 3.0.3
 cd tessera-sw
 export LD_LIBRARY_PATH=/opt/openssl-3.0.3/lib
-OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_api_native --features mock
-OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_ossl_provider --features mock
+OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_api_native --features emu
+OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_ossl_provider --features emu
 ```
 
-On real hardware, omit `mock` from both build commands.
+On real hardware, omit `emu` from both build commands.
 
 This produces two shared libraries in `target/debug/`:
 - `tsra_provider.so` — the OpenSSL provider

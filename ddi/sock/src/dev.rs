@@ -6,6 +6,8 @@
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpStream;
+#[cfg(target_os = "linux")]
+use std::os::fd::IntoRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::AtomicU16;
@@ -150,7 +152,8 @@ impl VsockStream {
             SockFlag::SOCK_CLOEXEC,
             None,
         )
-        .map_err(std::io::Error::from)?;
+        .map_err(std::io::Error::from)?
+        .into_raw_fd();
 
         if let Err(error) = connect(fd, &VsockAddr::new(cid, port)) {
             let _ = nix::unistd::close(fd);

@@ -20,15 +20,8 @@ use crate::partition::HsmCredentials;
 use crate::shared_types::HsmOwnerBackupKeySource;
 use crate::shared_types::HsmPotaEndorsementSource;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "res-test")] {
-        /// Concrete DDI type used by the API layer with resiliency fault injection.
-        pub(crate) type HsmDdi = tsra_res_test_dev::DdiResTest<tsra_ddi::TsraDdi>;
-    } else {
-        /// Concrete DDI type used by the API layer.
-        pub(crate) type HsmDdi = tsra_ddi::TsraDdi;
-    }
-}
+/// Concrete DDI type used by the API layer.
+pub(crate) type HsmDdi = tsra_ddi::TsraDdi;
 
 /// Well-known storage key for the backup masking key.
 pub(crate) const TSRA_STORAGE_BMK: &str = "tsra_bmk";
@@ -353,13 +346,13 @@ pub const MAX_RETRIES: u32 = 5;
 /// Each iteration doubles: 400 → 800 → 1600 → 3200 → 6400 ms, plus
 /// random jitter of 0–[`BACKOFF_JITTER_MS`] to avoid thundering-herd retries.
 ///
-/// When compiled with `mock` (test builds only) the base is
-/// reduced to 8 ms so that retry tests complete quickly while
+/// When compiled with `emu` (in-process emulator, test builds only) the
+/// base is reduced to 8 ms so that retry tests complete quickly while
 /// still exercising realistic backoff behavior.
-#[cfg(not(feature = "mock"))]
+#[cfg(not(feature = "emu"))]
 pub(crate) const BACKOFF_BASE_MS: u64 = 400;
 
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 pub(crate) const BACKOFF_BASE_MS: u64 = 8;
 
 /// Maximum random jitter added to each backoff delay (in milliseconds).
@@ -368,13 +361,13 @@ pub(crate) const BACKOFF_BASE_MS: u64 = 8;
 /// the exponential delay so that concurrent callers don't all retry at
 /// exactly the same instant.
 ///
-/// When compiled with `mock` (test builds only) jitter is reduced
+/// When compiled with `emu` (test builds only) jitter is reduced
 /// to 2 ms, preserving the 4:1 base-to-jitter ratio while keeping
 /// tests fast.
-#[cfg(not(feature = "mock"))]
+#[cfg(not(feature = "emu"))]
 pub(crate) const BACKOFF_JITTER_MS: u64 = 100;
 
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 pub(crate) const BACKOFF_JITTER_MS: u64 = 2;
 
 /// Applies exponential backoff with jitter and sleeps for the computed

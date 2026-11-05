@@ -1658,8 +1658,7 @@ mod tests {
         let (pal, io, sess_id) = crypto_fixture().await;
         crate::part_state::part_set_psk(&pal, &io, 1, dma(&mut [3; 32])).unwrap();
         let mut request = [0; 8192];
-        let message = vec![0x42; types::MLDSA_MESSAGE_MAX_LEN];
-        let mut ctx = vec![0x24; types::MLDSA_CTX_MAX_LEN];
+        let mut mu = [0x42; types::MLDSA_MU_LEN];
         for kind in [
             types::MlDsaKeyKind::MlDsa44Seed,
             types::MlDsaKeyKind::MlDsa65Seed,
@@ -1687,9 +1686,9 @@ mod tests {
                 .unwrap()
                 .masked_key(&masked_key)
                 .unwrap()
-                .message(&message)
+                .mu(&mu)
                 .unwrap()
-                .ctx(&ctx)
+                .hedge(types::MlDsaHedge::Preferred)
                 .unwrap()
                 .finish();
             let mut signature = Box::pin(bounded_exchange(&pal, &io, req.as_bytes(), 8192))
@@ -1702,7 +1701,7 @@ mod tests {
             let mut noncanonical = request_with_payload_gap(
                 req.as_bytes(),
                 types::TborMlDsaSignReq::TOC_COUNT,
-                &[1, 2, 3],
+                &[1, 2],
             );
             types::TborMlDsaSignReq::decode(dma(&mut noncanonical)).unwrap();
             assert_eq!(
@@ -1715,7 +1714,7 @@ mod tests {
                 .to_vec();
             for valid in [true, false] {
                 if !valid {
-                    ctx[0] ^= 1;
+                    mu[0] ^= 1;
                 }
                 let req = types::TborMlDsaVerifyReq::encode(&mut request)
                     .unwrap()
@@ -1723,9 +1722,7 @@ mod tests {
                     .unwrap()
                     .pub_key(&public_key)
                     .unwrap()
-                    .message(&message)
-                    .unwrap()
-                    .ctx(&ctx)
+                    .mu(&mu)
                     .unwrap()
                     .signature(&signature)
                     .unwrap()
@@ -1734,11 +1731,11 @@ mod tests {
                 if valid {
                     result.unwrap();
                     if kind == types::MlDsaKeyKind::MlDsa87Seed {
-                        assert_eq!(req.len(), 8088);
+                        assert_eq!(req.len(), 7307);
                     }
                 } else {
                     assert_eq!(result, Err(HsmError::MlDsaVerifyFailed));
-                    ctx[0] ^= 1;
+                    mu[0] ^= 1;
                 }
             }
         }
@@ -1907,7 +1904,7 @@ mod tests {
         ] {
             let host_capacity = RESP_PREFIX_LEN + digest_len;
             for size in [0, 3, HASH_MSG_MAX_LEN] {
-                let mut storage = [0xA5; 2100];
+                let mut storage = [0xA5; HASH_MSG_MAX_LEN + 64];
                 let address = storage.as_ptr();
                 let request_len = TborHashReq::encode(&mut storage)
                     .unwrap()

@@ -26,11 +26,6 @@
 //!   Linux / `win` on Windows) so the hw-eligible tests run against
 //!   real silicon. Destructive emu-only tests remain gated
 //!   `#[cfg(feature = "emu")]` at the test-item level.
-//!
-//! `--features mock` is compilable but disables both this harness
-//! and the consumer's command-level integration tests — mock rejects
-//! TBOR at the transport layer, so command-level integration tests
-//! are meaningless there.
 
 pub mod api_rev;
 pub mod assertions;

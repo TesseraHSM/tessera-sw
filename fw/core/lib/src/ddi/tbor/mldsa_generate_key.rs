@@ -24,6 +24,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
+use super::from_pal::mldsa_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
@@ -62,7 +63,8 @@ pub(crate) async fn handle<P: HsmPal>(
         // Map the wire kind onto the vault kind the PAL speaks. Byte-identical
         // discriminants, and the match above already rejected anything else.
         let vault_kind = HsmVaultKeyKind(key_kind.0);
-        let pub_len = mldsa_pub_key_len(vault_kind)?;
+        let param_set = mldsa_param_set(vault_kind)?;
+        let pub_len = param_set.pub_key_len();
 
         // Platform identity bound into the masked blob (anti-rollback on
         // re-import): SVN and owner-seed id.
@@ -75,7 +77,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // key, masked as a unit. Keeping the seed means the public key can
         // still be regenerated from the blob alone; keeping the expanded key
         // means signing never has to re-derive it.
-        let sec_len = mldsa_sec_key_len(vault_kind)?;
+        let sec_len = param_set.sec_key_len();
         let plain_len = MLDSA_SEED_LEN + sec_len;
 
         // IO teardown wipes the allocation,
@@ -114,7 +116,7 @@ pub(crate) async fn handle<P: HsmPal>(
                 }
                 let payload = &mut out.masked_key[payload_at..end];
                 let (seed, sec_key) = payload.split_at_mut(MLDSA_SEED_LEN);
-                pal.mldsa_gen_key(io, vault_kind, seed, out.pub_key, sec_key)
+                pal.mldsa_gen_key(io, param_set, seed, out.pub_key, sec_key)
                     .await?;
             }
 
@@ -173,26 +175,3 @@ const MLDSA_KEY_LABEL: &[u8] = b"MlDsaKey";
 /// Length of the compact ML-DSA private seed (`xi`), identical across
 /// parameter sets.
 pub(crate) const MLDSA_SEED_LEN: usize = 32;
-
-/// Public key length per parameter set (FIPS 204 Table 2).
-/// Expanded ML-DSA secret-key length for a parameter set (FIPS 204).
-///
-/// Carried in the masked blob after the seed, so signing does not have to
-/// re-derive the key pair.
-pub(crate) fn mldsa_sec_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlDsa44Seed => Ok(2560),
-        HsmVaultKeyKind::MlDsa65Seed => Ok(4032),
-        HsmVaultKeyKind::MlDsa87Seed => Ok(4896),
-        _ => Err(HsmError::InvalidArg),
-    }
-}
-
-fn mldsa_pub_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlDsa44Seed => Ok(1312),
-        HsmVaultKeyKind::MlDsa65Seed => Ok(1952),
-        HsmVaultKeyKind::MlDsa87Seed => Ok(2592),
-        _ => Err(HsmError::InvalidArg),
-    }
-}

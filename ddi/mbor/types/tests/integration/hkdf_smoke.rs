@@ -180,7 +180,6 @@ fn test_hkdf_hmac_derive_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_hkdf_var_hmac_derive_smoke() {
     ddi_dev_test(
@@ -226,7 +225,6 @@ fn test_hkdf_var_hmac_derive_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_hkdf_var_hmac_missing_length_smoke() {
     ddi_dev_test(
@@ -244,7 +242,6 @@ fn test_hkdf_var_hmac_missing_length_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_hkdf_var_hmac_out_of_range_length_smoke() {
     ddi_dev_test(

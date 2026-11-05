@@ -9,13 +9,6 @@
 // backup, then `tsra_sd_create_peer_backup` to HPKE-Auth-seal
 // BKS3 to the destination peer (our own attested identity). A successful
 // seal is itself the correctness check.
-//
-// Like the create/reseal/restore tests this needs the two-phase TBOR HPKE
-// handshake and a fully provisioned partition, which the mock backend does
-// not implement, so it is excluded from the mock lane and runs on the emu
-// and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -247,5 +240,3 @@ TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_null_params)
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

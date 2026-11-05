@@ -55,7 +55,7 @@ struct Stage {
     /// Run nextest with cli options (features, package, profile, exclude)
     #[clap(long, conflicts_with_all = ["nextest_min", "nextest_full"])]
     nextest: bool,
-    /// Run default nextest tests with a 64-table workspace mock run (skip other table counts)
+    /// Run default nextest tests (skip the extra emu resource-count runs)
     #[clap(long, conflicts_with_all = ["nextest", "nextest_full"])]
     nextest_min: bool,
     /// Run the full nextest tests
@@ -320,20 +320,24 @@ impl Xtask for Precheck {
         }
 
         if stage.nextest_min {
-            let tests = default_tests(&self.exclude, self.profile.clone(), true);
+            let tests = default_tests(&self.exclude, self.profile.clone());
             run_tests(tests, false, self.skip_clean, ctx.clone())?;
         }
 
         if stage.nextest_full {
             // Run default tests
-            let tests = default_tests(&self.exclude, self.profile.clone(), false);
+            let tests = default_tests(&self.exclude, self.profile.clone());
             run_tests(tests, false, self.skip_clean, ctx.clone())?;
 
             #[cfg(not(target_os = "windows"))]
             {
-                // Run mock tests with all table count combinations
-                let table_count_test_runs = table_count_tests(&self.exclude, self.profile.clone());
-                run_tests(table_count_test_runs, false, self.skip_clean, ctx.clone())?;
+                // Run emu tests with the extra partition resource counts
+                for (count, test) in resource_count_tests(&self.exclude, self.profile.clone()) {
+                    std::env::set_var(EMU_RESOURCE_COUNT_ENV, count.to_string());
+                    let result = test.run(ctx.clone());
+                    std::env::remove_var(EMU_RESOURCE_COUNT_ENV);
+                    result?;
+                }
             }
         }
 
@@ -346,7 +350,7 @@ impl Xtask for Precheck {
                 && self.filter.is_empty()
             {
                 // Run default tests with coverage
-                let tests = default_tests(&self.exclude, self.profile.clone(), false);
+                let tests = default_tests(&self.exclude, self.profile.clone());
                 run_tests(tests, true, self.skip_clean, ctx.clone())?;
             } else {
                 Coverage {
@@ -391,10 +395,10 @@ impl Xtask for Precheck {
 }
 
 // Helper function to define test parameters for --nextest-min, --nextest-full and --coverage
-fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<Nextest> {
+fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
     let mut tests = Vec::new();
 
-    let mut mock_exclude = exclude.to_owned();
+    let mut emu_exclude = exclude.to_owned();
 
     for pkg in [
         "tsra_api_tests",
@@ -402,24 +406,20 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
         "provider-integration-tests-capi",
         "provider-integration-tests-nginx",
     ] {
-        if !mock_exclude.iter().any(|e| e == pkg) {
-            mock_exclude.push(pkg.to_string());
+        if !emu_exclude.iter().any(|e| e == pkg) {
+            emu_exclude.push(pkg.to_string());
         }
     }
 
-    // Run all mock tests (except tsra_api_tests)
-    // CI job: test_*_mock
+    // Run all emu tests (except tsra_api_tests)
+    // CI job: test_*_emu
     tests.push(Nextest {
-        features: Some(if min {
-            "mock,table-64".to_string()
-        } else {
-            "mock".to_string()
-        }),
+        features: Some("emu".to_string()),
         package: None,
         no_default_features: false,
         filterset: None,
-        profile: profile.clone().or(Some("ci-mock".to_string())),
-        exclude: mock_exclude,
+        profile: profile.clone().or(Some("ci-emu".to_string())),
+        exclude: emu_exclude,
         test: None,
         filter: vec![],
     });
@@ -428,7 +428,7 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
     // CI job: test_*_api
     if !exclude.iter().any(|e| e == "tsra_api_tests") {
         tests.push(Nextest {
-            features: Some("mock".to_string()),
+            features: Some("emu".to_string()),
             package: Some("tsra_api_tests".to_string()),
             no_default_features: false,
             filterset: None,
@@ -454,101 +454,37 @@ fn default_tests(exclude: &[String], profile: Option<String>, min: bool) -> Vec<
         });
     }
 
-    // SDK Run TBOR types tests against emu backend
-    // CI job: test_ubuntu_misc
-    #[cfg(not(target_os = "windows"))]
-    if !exclude.iter().any(|e| e == "tsra_ddi_tbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_tbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-tbor-emu".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
-    }
-
-    // Run resiliency fault injection tests
-    // CI job: test_*_misc
-    if !exclude.iter().any(|e| e == "tsra_api_tests") {
-        tests.push(Nextest {
-            features: Some("mock,res-test".to_string()),
-            package: Some("tsra_api_tests".to_string()),
-            no_default_features: false,
-            filterset: Some("test(resiliency::fault_injection::)".to_string()),
-            profile: profile.clone().or(Some("ci-mock-res".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
-    }
-
-    // Run emu smoke tests
-    // CI job: test_*_smoke
-    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-emu-smoke".to_string())),
-            exclude: exclude.to_owned(),
-            test: Some("tsra_ddi_tests".to_string()),
-            filter: vec!["smoke".to_string()],
-        });
-    }
-
-    // Run emu DDI tests
-    // CI job: test_*_emu_ddi
-    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-emu-ddi".to_string())),
-            exclude: exclude.to_owned(),
-            test: Some("tsra_ddi_tests".to_string()),
-            filter: vec![],
-        });
-    }
-
     tests
 }
 
-// Helper function to define test parameters for Linux-specific tsra_ddi mock tests
+/// Env var the emu transport reads for the partition resource count
+/// (mirrors `tsra_ddi_emu::EMU_RESOURCE_COUNT_ENV`).
 #[cfg(not(target_os = "windows"))]
-fn table_count_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
+const EMU_RESOURCE_COUNT_ENV: &str = "TSRA_EMU_RESOURCE_COUNT";
+
+// Helper function to define the Linux-specific tsra_ddi emu runs with extra
+// partition resource counts. Each entry is (resource count, test run).
+#[cfg(not(target_os = "windows"))]
+fn resource_count_tests(exclude: &[String], profile: Option<String>) -> Vec<(u32, Nextest)> {
     let mut tests = Vec::new();
 
     if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        // SDK Run all mock tests table-4
         // CI job: test_ubuntu_misc
-        tests.push(Nextest {
-            features: Some("mock,table-4".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-mock-table-4".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
-
-        // SDK Run all mock tests table-64
-        // CI job: test_ubuntu_misc
-        tests.push(Nextest {
-            features: Some("mock,table-64".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-mock-table-64".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
+        for count in [4u32, 64] {
+            tests.push((
+                count,
+                Nextest {
+                    features: Some("emu".to_string()),
+                    package: Some("tsra_ddi_mbor_types".to_string()),
+                    no_default_features: false,
+                    filterset: None,
+                    profile: profile.clone().or(Some(format!("ci-emu-res-{count}"))),
+                    exclude: exclude.to_owned(),
+                    test: None,
+                    filter: vec![],
+                },
+            ));
+        }
     }
 
     tests

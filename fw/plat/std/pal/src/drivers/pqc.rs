@@ -57,6 +57,15 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 
 use crate::worker::WorkerPool;
 
+/// The ML-DSA engine for a pure signature under `ctx`, or an external `μ`.
+fn mldsa_algo(external_mu: bool, ctx: &[u8]) -> HsmResult<MlDsaAlgo> {
+    if external_mu {
+        Ok(MlDsaAlgo::external_mu())
+    } else {
+        MlDsaAlgo::new(ctx).map_err(|_| HsmError::InvalidArg)
+    }
+}
+
 /// Std PQC driver — software ML-DSA / ML-KEM with async worker dispatch.
 pub struct StdPqc {
     pool: WorkerPool,
@@ -94,11 +103,15 @@ impl StdPqc {
 
     /// Sign `message` with an expanded ML-DSA secret key.
     ///
-    /// Signing is hedged; the randomness is drawn by the crypto layer.
+    /// With `external_mu`, `message` is the 64-byte `μ` and `ctx` is unused.
+    /// Signing is hedged, the crypto layer drawing the randomness, unless
+    /// `deterministic`.
     pub async fn mldsa_sign(
         &self,
         variant: MlDsaVariant,
         sec_key: &[u8],
+        external_mu: bool,
+        deterministic: bool,
         message: &[u8],
         ctx: &[u8],
     ) -> HsmResult<Vec<u8>> {
@@ -109,18 +122,22 @@ impl StdPqc {
                 if sk.variant() != variant {
                     return Err(HsmError::InvalidArg);
                 }
-                let mut algo = MlDsaAlgo::new(&ctx).map_err(|_| HsmError::InvalidArg)?;
+                let mut algo = mldsa_algo(external_mu, &ctx)?;
+                if deterministic {
+                    algo = algo.deterministic();
+                }
                 Signer::sign_vec(&mut algo, &sk, &message).map_err(|_| HsmError::InvalidArg)
             })
             .await
     }
 
     /// Verify an ML-DSA signature, returning whether it authenticates
-    /// `message`.
+    /// `message` (the 64-byte `μ` with `external_mu`, `ctx` then unused).
     pub async fn mldsa_verify(
         &self,
         variant: MlDsaVariant,
         pub_key: &[u8],
+        external_mu: bool,
         message: &[u8],
         ctx: &[u8],
         signature: &[u8],
@@ -137,7 +154,7 @@ impl StdPqc {
                 if pk.variant() != variant {
                     return Err(HsmError::InvalidArg);
                 }
-                let mut algo = MlDsaAlgo::new(&ctx).map_err(|_| HsmError::InvalidArg)?;
+                let mut algo = mldsa_algo(external_mu, &ctx)?;
                 Verifier::verify(&mut algo, &pk, &message, &signature)
                     .map_err(|_| HsmError::InvalidArg)
             })
