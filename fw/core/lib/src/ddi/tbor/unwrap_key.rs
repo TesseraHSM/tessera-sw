@@ -45,6 +45,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_undo::UndoLog;
+use zeroize::Zeroize;
 
 use super::resolve_masking_key;
 use super::validate_active_session;
@@ -260,12 +261,13 @@ pub(crate) async fn handle<'p, P: HsmPal>(
                 .await?;
                 // Decode and import into the transient vault.
                 let created = async {
-                    let decoded = decode(pal, io, &mut *material, dclass).await?;
+                    let decoded = decode(pal, io, &mut *material, dclass, attrs).await?;
                     // Transient, partition-scoped (`None` session): deleted below.
                     pal.vault_key_create(io, decoded.material, decoded.kind, None, attrs)
                         .await
                 }
                 .await;
+                material.zeroize();
                 created
             })
             .await?;

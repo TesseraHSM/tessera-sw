@@ -36,12 +36,10 @@ use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborMlDsaGenerateKeyReq;
 use tsra_ddi_tbor_types::TborMlKemGenerateKeyReq;
 use tsra_ddi_tbor_types::MASKED_MLKEM_SHARED_SECRET_MAX_LEN;
+use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use zeroize::Zeroizing;
 
 use crate::setup::SCOPE_LOCAL;
-
-/// Length of the messages ML-DSA operations sign and verify.
-pub(crate) const MLDSA_MSG_LEN: usize = 64;
 
 /// Host-DMA page size: a response reaches the host as a PRP pair of 4 KiB
 /// pages.
@@ -54,17 +52,18 @@ pub(crate) struct MlDsaKey {
     pub(crate) public: MlDsaPublicKey,
 }
 
-/// A host-generated ML-DSA key and its signature over each shared message.
+/// A host-generated ML-DSA key and its signature over each shared `μ`.
 pub(crate) struct MlDsaSigner {
     /// Encoded public key, as `MlDsaVerify` takes it.
     pub(crate) pub_key: Vec<u8>,
-    /// `sigs[m]` signs message `m` of [`MlDsaSigned::messages`].
+    /// `sigs[m]` signs `μ` `m` of [`MlDsaSigned::mus`].
     pub(crate) sigs: Vec<Vec<u8>>,
 }
 
 /// `MlDsaVerify` inputs, made once on the host and shared by all threads.
 pub(crate) struct MlDsaSigned {
-    pub(crate) messages: Vec<Vec<u8>>,
+    /// Random message representatives, which is what the commands take.
+    pub(crate) mus: Vec<Vec<u8>>,
     pub(crate) keys: Vec<MlDsaSigner>,
 }
 
@@ -149,27 +148,27 @@ pub(crate) fn device_mldsa_keys(
 }
 
 /// Generate `keys` ML-DSA keys for `p` on the host, each signing the same
-/// `messages` random messages.
+/// `mus` random message representatives.
 pub(crate) fn host_mldsa_signed(
     p: &MlDsaParams,
     keys: usize,
-    messages: usize,
+    mus: usize,
 ) -> Result<MlDsaSigned, String> {
     let variant = MlDsaVariant::from_pub_key_len(p.pub_key_len)
         .ok_or_else(|| format!("no host {}", p.name))?;
-    let messages = (0..messages)
-        .map(|_| Rng::rand_vec(MLDSA_MSG_LEN))
+    let mus = (0..mus)
+        .map(|_| Rng::rand_vec(MLDSA_MU_LEN))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("host ML-DSA messages: {e:?}"))?;
-    let keys = par_map(keys, |_| host_mldsa_signer(p, variant, &messages))?;
-    Ok(MlDsaSigned { messages, keys })
+        .map_err(|e| format!("host ML-DSA mu: {e:?}"))?;
+    let keys = par_map(keys, |_| host_mldsa_signer(p, variant, &mus))?;
+    Ok(MlDsaSigned { mus, keys })
 }
 
-/// Generate one ML-DSA key on the host and sign each of `messages`.
+/// Generate one ML-DSA key on the host and sign each of `mus`.
 fn host_mldsa_signer(
     p: &MlDsaParams,
     variant: MlDsaVariant,
-    messages: &[Vec<u8>],
+    mus: &[Vec<u8>],
 ) -> Result<MlDsaSigner, String> {
     let mut seed = Zeroizing::new([0u8; MLDSA_SEED_LEN]);
     rand::rng().fill(&mut seed[..]);
@@ -179,8 +178,8 @@ fn host_mldsa_signer(
         .public_key()
         .and_then(|k| k.to_vec())
         .map_err(|e| format!("host {} public key: {e:?}", p.name))?;
-    let mut algo = MlDsaAlgo::new(&[]).map_err(|e| format!("host {}: {e:?}", p.name))?;
-    let sigs = messages
+    let mut algo = MlDsaAlgo::external_mu();
+    let sigs = mus
         .iter()
         .map(|m| {
             let mut sig = vec![0u8; p.sig_len];
@@ -280,18 +279,17 @@ pub(crate) fn check_mlkem_key(
     MlKemPublicKey::from_bytes(pub_key).map_err(|e| format!("ML-KEM public key: {e:?}"))
 }
 
-/// Verify a device ML-DSA signature over `message` on the host (empty
-/// context, as the device signs with).
+/// Verify a device ML-DSA signature over `mu` on the host.
 pub(crate) fn check_mldsa_sig(
     p: &MlDsaParams,
     public: &MlDsaPublicKey,
-    message: &[u8],
+    mu: &[u8],
     sig: &[u8],
 ) -> Result<(), String> {
     check_len(sig, p.sig_len, "ML-DSA signature")?;
     check_page_tail(sig, "ML-DSA signature")?;
-    let mut algo = MlDsaAlgo::new(&[]).map_err(|e| format!("host ML-DSA: {e:?}"))?;
-    let ok = Verifier::verify(&mut algo, public, message, sig)
+    let mut algo = MlDsaAlgo::external_mu();
+    let ok = Verifier::verify(&mut algo, public, mu, sig)
         .map_err(|e| format!("host ML-DSA verify: {e:?}"))?;
     if ok {
         Ok(())

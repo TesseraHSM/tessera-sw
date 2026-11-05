@@ -182,7 +182,7 @@ impl MlDsaPublicKey {
     }
 
     /// Borrows the encoded key bytes.
-    pub(super) fn as_bytes(&self) -> &[u8] {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.encoded
     }
 }

@@ -41,6 +41,10 @@ const BCRYPT_CSHAKE256_ALGORITHM: windows::core::PCWSTR = windows::core::w!("CSH
 pub struct CngHashAlgo {
     bcrypt_algo: BCRYPT_ALG_HANDLE,
     size: usize,
+    /// Input absorbed ahead of the message: ML-DSA `μ`'s
+    /// `tr || 0x00 || len(ctx) || ctx` (see `HashAlgo::mldsa_mu`); empty for
+    /// every other algorithm.
+    prefix: Vec<u8>,
 }
 
 #[allow(unsafe_code)]
@@ -65,7 +69,17 @@ impl CngHashAlgo {
     ///
     /// A new `CngHash` instance ready to perform hash operations.
     fn new(bcrypt_algo: BCRYPT_ALG_HANDLE, size: usize) -> Self {
-        Self { bcrypt_algo, size }
+        Self {
+            bcrypt_algo,
+            size,
+            prefix: Vec::new(),
+        }
+    }
+
+    /// Absorbs `prefix` ahead of every message; see `HashAlgo::mldsa_mu`.
+    pub(super) fn with_prefix(mut self, prefix: Vec<u8>) -> Self {
+        self.prefix = prefix;
+        self
     }
 
     /// Creates a new SHA-1 hash instance.
@@ -313,6 +327,13 @@ impl HashOp for CngHashAlgo {
             if hash.len() < hash_len {
                 Err(CryptoError::HashBufferTooSmall)?;
             }
+            if !self.prefix.is_empty() {
+                // `BCryptHash` takes a single input; the streaming path
+                // absorbs the prefix first.
+                let mut ctx = self.clone().hash_init()?;
+                ctx.update(data)?;
+                return ctx.finish(Some(hash));
+            }
             // CNG takes the output length from the buffer: it must match a
             // fixed-length digest exactly, and sets an XOF's output length.
             //SAFETY: Calling Windows CNG API directly
@@ -342,7 +363,12 @@ impl HashStreamingOp for CngHashAlgo {
     /// * `CryptoError::HashGetPropertyError` - If hash length retrieval fails
     fn hash_init(self) -> Result<Self::Context, CryptoError> {
         let handle = CngHashHandle::new(self.bcrypt_algo)?;
-        Ok(CngHashAlgoContext { algo: self, handle })
+        let prefix = self.prefix.clone();
+        let mut ctx = CngHashAlgoContext { algo: self, handle };
+        if !prefix.is_empty() {
+            ctx.update(&prefix)?;
+        }
+        Ok(ctx)
     }
 }
 

@@ -22,52 +22,22 @@
 //!   tightest on the per-IO DMA budget; exercises the transient-vault
 //!   unwrap path that keeps it within 8 KB.
 
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
 use tsra_crypto::*;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::*;
 
+use crate::commands::common::import_ok;
+use crate::commands::common::rsa_aes_wrap;
+use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
-/// `KeyScope::Local` discriminant — masks the recovered key under the
-/// partition-local masking key.
-const SCOPE_LOCAL: u8 = 0b011;
 /// `HsmVaultKeyKind::VarLenHmacSha256` discriminant.
 const KIND_HMAC_SHA256: u8 = 32;
-
-/// RSA-AES-wrap `data` against the HSM-format unwrapping public key
-/// (`n_le ‖ e_le`): RSA-OAEP an ephemeral 32-byte KEK with `oaep_hash`, then
-/// AES-KWP the data under it, and concatenate.
-fn rsa_aes_wrap(hsm_pub: &[u8], data: &[u8], oaep_hash: HashAlgo) -> Vec<u8> {
-    // `GetUnwrappingKey` returns the modulus / exponent little-endian
-    // (`n_le(256) ‖ e_le(4)`), but `RsaPublicKey::from_hsm_bytes` parses
-    // each component big-endian — reverse them per-component.
-    assert_eq!(hsm_pub.len(), 260, "RSA-2048 HSM pubkey is 260 bytes");
-    let mut be = Vec::with_capacity(260);
-    be.extend(hsm_pub[..256].iter().rev());
-    be.extend(hsm_pub[256..260].iter().rev());
-
-    let ephemeral_kek = [0xA7u8; 32];
-    let pub_key = RsaPublicKey::from_hsm_bytes(&be).expect("from_hsm_bytes");
-    let mut enc_kek = Encrypter::encrypt_vec(
-        &mut RsaEncryptAlgo::with_oaep_padding(oaep_hash, None),
-        &pub_key,
-        &ephemeral_kek,
-    )
-    .expect("RSA-OAEP wrap KEK");
-    // The device expects the OAEP ciphertext in wire-LE (it flips it to
-    // big-endian internally for OpenSSL); OpenSSL emits big-endian, so
-    // reverse the modulus-sized RSA ciphertext.
-    enc_kek.reverse();
-
-    let kek = AesKey::from_bytes(&ephemeral_kek).expect("AES KEK");
-    let mut enc_data = Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, data)
-        .expect("AES-KWP wrap data");
-
-    let mut wrapped = Vec::with_capacity(enc_kek.len() + enc_data.len());
-    wrapped.append(&mut enc_kek);
-    wrapped.append(&mut enc_data);
-    wrapped
-}
 
 /// Canonical valid `KeyUsage` for a wrapped-key `class`, used by the test
 /// `unwrap` helper so callers need not spell out permissions.
@@ -98,21 +68,8 @@ pub(crate) fn unwrap_with_usage(
     usage: u64,
     key: &[u8],
 ) -> TborUnwrapKeyResp {
-    let hsm_pub = ctx
-        .tbor(&TborGetUnwrappingKeyReq { session_id })
-        .expect("GetUnwrappingKey")
-        .pub_key;
-    let wrapped = rsa_aes_wrap(&hsm_pub, key, HashAlgo::sha256());
-    ctx.tbor(&TborUnwrapKeyReq {
-        session_id,
-        scope: SCOPE_LOCAL,
-        key_class: class,
-        key_usage: usage,
-        oaep_hash_algo: HASH_ALGO_SHA256,
-        wrapped_blob: wrapped,
-        key_label: b"imported-key".to_vec(),
-    })
-    .expect("UnwrapKey")
+    let hsm_pub = get_unwrapping_key(ctx, session_id);
+    import_ok(ctx, session_id, &hsm_pub, class, usage, key)
 }
 
 /// Wrap `key` for `class` against the partition's unwrapping key and build
@@ -124,10 +81,8 @@ fn unwrap_req(
     usage: u64,
     key: &[u8],
 ) -> TborUnwrapKeyReq {
-    let hsm_pub = ctx
-        .tbor(&TborGetUnwrappingKeyReq { session_id })
-        .expect("GetUnwrappingKey")
-        .pub_key;
+    let hsm_pub = get_unwrapping_key(ctx, session_id);
+
     TborUnwrapKeyReq {
         session_id,
         scope: SCOPE_LOCAL,
@@ -194,17 +149,33 @@ fn unwrap_key_aes() {
     assert!(resp.pub_key.is_empty(), "a symmetric key has no public key");
 }
 
+/// Retrieves the unwrapping public key, retrying while generation is pending.
+pub(crate) fn get_unwrapping_key(ctx: &TestCtx, session_id: u16) -> Vec<u8> {
+    let timeout = Duration::from_secs(30);
+    let retry_delay = Duration::from_millis(100);
+    let start = Instant::now();
+
+    loop {
+        match ctx.tbor(&TborGetUnwrappingKeyReq { session_id }) {
+            Ok(resp) => return resp.pub_key.to_vec(),
+            Err(DdiError::TborStatus(status))
+                if status == TborStatus::PendingKeyGeneration && start.elapsed() < timeout =>
+            {
+                thread::sleep(retry_delay);
+            }
+            Err(err) => {
+                panic!("GetUnwrappingKey failed: {err:?}");
+            }
+        }
+    }
+}
+
 /// Verifies all OAEP hashes unwrap symmetric keys and preserve an ECC public key.
 #[test]
 fn unwrap_key_all_oaep_hashes() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
-    let hsm_pub = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey")
-        .pub_key;
+    let hsm_pub = get_unwrapping_key(&ctx, session.session_id);
     let ecc_key = EccPrivateKey::from_curve(EccCurve::P256).expect("generate ECC key");
     let ecc_der = ecc_key.to_vec().expect("export ECC key");
     let (x_be, y_be) = ecc_key.coord_vec().expect("export ECC public coordinates");
@@ -260,12 +231,7 @@ fn unwrap_key_all_oaep_hashes() {
 fn unwrap_key_unknown_oaep_hash_rejected() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
-    let hsm_pub = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey")
-        .pub_key;
+    let hsm_pub = get_unwrapping_key(&ctx, session.session_id);
     let wrapped_blob = rsa_aes_wrap(&hsm_pub, &[0x42u8; 32], HashAlgo::sha256());
     for oaep_hash_algo in [HASH_ALGO_SHAKE128, HASH_ALGO_SHAKE256, u8::MAX] {
         ctx.expect_fw_reject(
@@ -337,12 +303,7 @@ fn unwrap_key_rejects_invalid_usage_for_class() {
     // Request `sign`+`verify` for an AES key — AES only permits
     // `encrypt`+`decrypt`, so the device must reject the import.
     let aes_key = [0x42u8; 32];
-    let hsm_pub = ctx
-        .tbor(&TborGetUnwrappingKeyReq {
-            session_id: session.session_id,
-        })
-        .expect("GetUnwrappingKey")
-        .pub_key;
+    let hsm_pub = get_unwrapping_key(&ctx, session.session_id);
     let wrapped = rsa_aes_wrap(&hsm_pub, &aes_key, HashAlgo::sha256());
     let req = TborUnwrapKeyReq {
         session_id: session.session_id,

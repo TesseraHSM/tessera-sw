@@ -23,8 +23,6 @@
 //! * `SecurityDomain` scope before `CreateSD` → `UnsupportedKeyScope`.
 //! * `Ephemeral` scope before `PartFinal` → `InvalidArg`.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -376,7 +374,7 @@ fn hmac_generate_key_rejects_closed_session() {
         key_length: default_key_len(HASH_ALGO_SHA256) as u8,
         key_label: Vec::new(),
     };
-    ctx.expect_fw_reject(&req, TborStatus::SessionNotFound);
+    ctx.expect_session_reject(&req, TborStatus::SessionNotFound);
 }
 
 /// Rejects a request whose session id does not match the active session.
@@ -415,7 +413,7 @@ fn hmac_generate_key_rejects_invalid_session_id() {
         key_label: Vec::new(),
     };
 
-    ctx.expect_fw_reject(&req, TborStatus::SessionNotFound);
+    ctx.expect_session_reject(&req, TborStatus::SessionNotFound);
 }
 
 /// Accepts the exact minimum and maximum key length for every HMAC variant.
@@ -719,7 +717,7 @@ fn hmac_generate_key_cu_rejects_closed_session() {
         key_label: Vec::new(),
     };
 
-    ctx.expect_fw_reject(&req, TborStatus::SessionNotFound);
+    ctx.expect_session_reject(&req, TborStatus::SessionNotFound);
 }
 
 /// Rejects a 20-byte SHA-256 HMAC key below the minimum supported length.
@@ -804,7 +802,7 @@ fn hmac_generate_key_active_session_id_mismatch_rejected() {
     };
 
     // Verify that the mismatched session ID reaches session validation.
-    ctx.expect_fw_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
+    ctx.expect_session_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
 
     // Verify that the active CO session remains usable.
     roundtrip(

@@ -21,9 +21,9 @@ use tsra_fw_ddi_tbor_types::EccCurve;
 use tsra_fw_ddi_tbor_types::KeyUsage;
 use tsra_fw_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_fw_ddi_tbor_types::TborEccGenerateKeyResp;
+use tsra_fw_hsm_key_decode::ecc_pct_for;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
-use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmPal;
@@ -112,7 +112,7 @@ pub(crate) async fn handle<P: HsmPal>(
                     a,
                     curve,
                     Some((&mut *priv_key, &mut *pub_key)),
-                    HsmEccPct::SignVerify,
+                    ecc_pct_for(attrs),
                 )
                 .await
             })

@@ -45,6 +45,7 @@ use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CO;
 use tsra_ddi_tbor_types::DEFAULT_PSK_CU;
+use tsra_ddi_tbor_types::PSK_CHANGE_AAD_LEN;
 use tsra_ddi_tbor_types::PSK_LEN;
 
 /// Distinct, non-default 32-byte PSK used by the happy-path tests.
@@ -52,6 +53,13 @@ const ROTATED_PSK: [u8; PSK_LEN] = [
     0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF, 0xB0,
     0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF, 0xC0,
 ];
+
+/// Expected length of an encrypted PSK change envelope.
+const PSK_CHANGE_ENVELOPE_LEN: usize = crate::commands::common::ENVELOPE_HEADER_LEN
+    + crate::commands::common::ENVELOPE_IV_LEN
+    + tsra_ddi_tbor_types::PSK_CHANGE_AAD_LEN
+    + PSK_LEN
+    + crate::commands::common::ENVELOPE_TAG_LEN;
 
 /// Build an AEAD-GCM envelope under `param_key` with a caller-controlled
 /// AAD and plaintext. Negative-path tests use this to exercise FW
@@ -117,6 +125,7 @@ fn psk_change_happy_co() {
 // Reopen with old PSK fails after rotation
 // ===========================================================================
 
+/// Verifies the original CU PSK cannot authenticate after a successful rotation.
 #[test]
 fn psk_change_reopen_with_old_psk_fails() {
     let ctx = TestCtx::new();
@@ -142,6 +151,7 @@ fn psk_change_reopen_with_old_psk_fails() {
 // One-shot enforcement
 // ===========================================================================
 
+/// Verifies a second CU PSK change on the same session is denied.
 #[test]
 fn psk_change_second_attempt_same_session_fails() {
     let ctx = TestCtx::new();
@@ -169,6 +179,7 @@ fn psk_change_second_attempt_same_session_fails() {
 // offset 24; CT starts at offset 56.
 // ===========================================================================
 
+/// Verifies tampering with envelope ciphertext or AAD causes authentication failure.
 #[test]
 fn psk_change_envelope_tampered() {
     let ctx = TestCtx::new();
@@ -212,6 +223,7 @@ fn psk_change_envelope_tampered() {
 // Empty envelope
 // ===========================================================================
 
+/// Verifies an empty PSK envelope is rejected.
 #[test]
 fn psk_change_empty_envelope() {
     let ctx = TestCtx::new();
@@ -232,6 +244,7 @@ fn psk_change_empty_envelope() {
 // AAD-vs-request session-id mismatch
 // ===========================================================================
 
+/// Verifies AAD bound to a different session ID is rejected.
 #[test]
 fn psk_change_wrong_session_id_in_aad() {
     let ctx = TestCtx::new();
@@ -262,6 +275,7 @@ fn psk_change_wrong_session_id_in_aad() {
 // the second concurrent session to live on its own fd.
 // ===========================================================================
 
+/// Verifies an envelope encrypted with another session key is rejected.
 #[test]
 fn psk_change_envelope_from_other_session() {
     let ctx_a = TestCtx::new();
@@ -295,6 +309,7 @@ fn psk_change_envelope_from_other_session() {
 // Wrong plaintext length
 // ===========================================================================
 
+/// Verifies PSK plaintext lengths outside the required size are rejected.
 #[test]
 fn psk_change_wrong_plaintext_length() {
     let ctx = TestCtx::new();
@@ -329,6 +344,7 @@ fn psk_change_wrong_plaintext_length() {
 // wrong-length envelope the FW schema rejects at decode)
 // ===========================================================================
 
+/// Verifies an envelope containing incorrectly sized AAD is rejected.
 #[test]
 fn psk_change_wrong_aad_length() {
     let ctx = TestCtx::new();
@@ -372,22 +388,375 @@ fn run_psk_change_to_default_rejected(role: u8, sty: SessionType, new_psk: &[u8;
     assert_fw_rejects(&err, TborStatus::InvalidArg);
 }
 
+/// Verifies CU cannot rotate its PSK to the default CU PSK.
 #[test]
 fn psk_change_cu_to_default_cu_rejected() {
     run_psk_change_to_default_rejected(CU, SessionType::PlainText, &DEFAULT_PSK_CU);
 }
 
+/// Verifies CU cannot rotate its PSK to the default CO PSK.
 #[test]
 fn psk_change_cu_to_default_co_rejected() {
     run_psk_change_to_default_rejected(CU, SessionType::PlainText, &DEFAULT_PSK_CO);
 }
 
+/// Verifies CO cannot rotate its PSK to the default CO PSK.
 #[test]
 fn psk_change_co_to_default_co_rejected() {
     run_psk_change_to_default_rejected(CO, SessionType::Authenticated, &DEFAULT_PSK_CO);
 }
 
+/// Verifies CU cannot rotate its PSK to the default CO PSK.
 #[test]
 fn psk_change_co_to_default_cu_rejected() {
     run_psk_change_to_default_rejected(CO, SessionType::Authenticated, &DEFAULT_PSK_CU);
+}
+
+/// Verifies a modified AES-GCM authentication tag is rejected.
+#[test]
+fn psk_change_tampered_auth_tag_rejected() {
+    let ctx = TestCtx::new();
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    let mut envelope =
+        encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
+
+    // The authentication tag occupies the last 16 bytes.
+    let last = envelope.len() - 1;
+    envelope[last] ^= 0x01;
+
+    let req = TborPskChangeReq {
+        session_id: session.session_id(),
+        psk_envelope: envelope,
+    };
+
+    ctx.expect_fw_reject(&req, TborStatus::AeadEnvelopeAuthFailed);
+}
+
+/// Verifies a modified AES-GCM initialization vector is rejected.
+#[test]
+fn psk_change_tampered_iv_rejected() {
+    let ctx = TestCtx::new();
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    let mut envelope =
+        encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
+
+    // Envelope layout:
+    // HEADER(8) | IV(12) | AAD(32) | CT(32) | TAG(16)
+    // The IV starts immediately after the header.
+    envelope[tsra_crypto::aead_envelope::HEADER_LEN] ^= 0x01;
+
+    let req = TborPskChangeReq {
+        session_id: session.session_id(),
+        psk_envelope: envelope,
+    };
+
+    ctx.expect_fw_reject(&req, TborStatus::AeadEnvelopeAuthFailed);
+}
+
+/// Verifies truncated PSK envelopes are rejected at multiple length boundaries.
+#[test]
+fn psk_change_truncated_envelope_rejected() {
+    let ctx = TestCtx::new();
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    let valid =
+        encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
+
+    assert_eq!(valid.len(), PSK_CHANGE_ENVELOPE_LEN);
+    for len in [1usize, 4, 15, 16, 47, 48, 83, 84, 99] {
+        let req = TborPskChangeReq {
+            session_id: session.session_id(),
+            psk_envelope: valid[..len].to_vec(),
+        };
+
+        ctx.expect_fw_reject(&req, TborStatus::TborInvalidFixedLength);
+    }
+}
+
+/// Verifies PSK envelopes with extra trailing bytes are rejected.
+#[test]
+fn psk_change_oversized_envelope_rejected() {
+    let ctx = TestCtx::new();
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    let valid =
+        encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt PSK envelope");
+
+    assert_eq!(valid.len(), PSK_CHANGE_ENVELOPE_LEN);
+
+    for extra in [1usize, 2, 16, 32, 100] {
+        let mut envelope = valid.clone();
+        envelope.extend(vec![0xAA; extra]);
+
+        let req = TborPskChangeReq {
+            session_id: session.session_id(),
+            psk_envelope: envelope,
+        };
+
+        ctx.expect_fw_reject(&req, TborStatus::TborInvalidFixedLength);
+    }
+}
+
+/// Verifies a second CO PSK change on the same session is denied.
+#[test]
+fn psk_change_co_second_attempt_same_session_fails() {
+    let ctx = TestCtx::new();
+
+    let session = ctx
+        .open_session(CO, SessionType::Authenticated)
+        .expect("open CO session");
+
+    ctx.psk_change(session.handshake(), &ROTATED_PSK)
+        .expect("first CO PSK rotation");
+
+    // Even a request containing a valid new PSK must fail.
+    let second_psk = [0x5Au8; PSK_LEN];
+
+    let err = ctx
+        .psk_change(session.handshake(), &second_psk)
+        .expect_err("second CO rotation must fail");
+
+    assert_fw_rejects(&err, TborStatus::InvalidPermissions);
+}
+
+/// Verifies the rotated CU PSK authenticates across multiple fresh sessions.
+#[test]
+fn psk_change_rotated_psk_repeated_reopen() {
+    let ctx = TestCtx::new();
+
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open original CU session");
+
+    ctx.psk_change(session.handshake(), &ROTATED_PSK)
+        .expect("rotate CU PSK");
+
+    session.close().expect("close original CU session");
+
+    // Check that the rotated key is persistent across
+    // multiple independent session handshakes.
+    for _ in 0..3 {
+        let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_PSK);
+
+        let pending = ctx
+            .session_open_init_with_options(opts)
+            .expect("init using rotated PSK");
+
+        let resumed = ctx
+            .session_open_finish(pending)
+            .expect("finish using rotated PSK");
+
+        ctx.session_close(resumed.session_id)
+            .expect("failed to close reopened session");
+    }
+}
+
+/// Verifies authenticated envelopes with modified AAD content are rejected.
+#[test]
+fn psk_change_invalid_aad_content_rejected() {
+    let ctx = TestCtx::new();
+
+    for offset in [0usize, 8, 16, 31] {
+        // Use a fresh session for each malformed-AAD case.
+        let session = ctx
+            .open_session(CU, SessionType::PlainText)
+            .expect("open CU session");
+
+        let correct_aad = build_psk_change_aad(session.session_id());
+
+        assert_eq!(correct_aad.len(), PSK_CHANGE_AAD_LEN);
+
+        let mut wrong_aad = correct_aad;
+        wrong_aad[offset] ^= 0x01;
+
+        // Re-encrypt with the modified AAD so the
+        // AES-GCM authentication tag remains valid.
+        let envelope = build_envelope(&session.handshake().param_key, &wrong_aad, &ROTATED_PSK);
+
+        let req = TborPskChangeReq {
+            session_id: session.session_id(),
+            psk_envelope: envelope,
+        };
+
+        ctx.expect_fw_reject(&req, TborStatus::AeadEnvelopeAuthFailed);
+    }
+}
+
+/// Verifies the rotated CO PSK works while the original CO PSK is rejected.
+#[test]
+fn psk_change_co_reopen_with_old_psk_fails() {
+    let ctx = TestCtx::new();
+
+    let session = ctx
+        .open_session(CO, SessionType::Authenticated)
+        .expect("open CO session");
+
+    ctx.psk_change(session.handshake(), &ROTATED_PSK)
+        .expect("rotate CO PSK");
+
+    session.close().expect("close rotating CO session");
+
+    // First prove that the rotated PSK works.
+    let opts = SessionOpenInitOptions::new(CO, SessionType::Authenticated).with_psk(&ROTATED_PSK);
+
+    let pending = ctx
+        .session_open_init_with_options(opts)
+        .expect("init with rotated CO PSK");
+
+    let resumed = ctx
+        .session_open_finish(pending)
+        .expect("finish with rotated CO PSK");
+
+    ctx.session_close(resumed.session_id)
+        .expect("close reopened CO session");
+
+    // Finally verify that the original default
+    // CO PSK can no longer authenticate.
+    let result = ctx.open_session(CO, SessionType::Authenticated);
+
+    assert!(
+        result.is_err(),
+        "old default CO PSK must fail after rotation"
+    );
+}
+
+/// Verifies a CU session rejects another PSK change after an invalid envelope.
+#[test]
+fn psk_change_failed_envelope_then_valid_rotation() {
+    let ctx = TestCtx::new();
+
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    // Build a corrupted envelope.
+    let mut bad_envelope =
+        encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt envelope");
+
+    let last = bad_envelope.len() - 1;
+    bad_envelope[last] ^= 0x80;
+
+    let bad_req = TborPskChangeReq {
+        session_id: session.session_id(),
+        psk_envelope: bad_envelope,
+    };
+
+    // First request must fail authentication.
+    ctx.expect_fw_reject(&bad_req, TborStatus::AeadEnvelopeAuthFailed);
+
+    // Current observed FW behavior: a subsequent
+    // PskChange on this session is also rejected.
+    let err = ctx
+        .psk_change(session.handshake(), &ROTATED_PSK)
+        .expect_err("second rotation request after failed envelope must fail");
+
+    println!("PskChange retry after authentication failure: {err:?}");
+}
+
+/// Verifies rotating the CU PSK does not alter CO authentication.
+#[test]
+fn psk_change_cu_rotation_does_not_affect_co() {
+    let ctx = TestCtx::new();
+
+    // Rotate the CU PSK.
+    let cu = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    ctx.psk_change(cu.handshake(), &ROTATED_PSK)
+        .expect("rotate CU PSK");
+
+    cu.close().expect("close CU session");
+
+    // CO must still authenticate with its original PSK.
+    let co = ctx
+        .open_session(CO, SessionType::Authenticated)
+        .expect("CU rotation must not affect CO PSK");
+
+    co.close().expect("close CO session");
+
+    // CU must authenticate with its new PSK.
+    let opts = SessionOpenInitOptions::new(CU, SessionType::PlainText).with_psk(&ROTATED_PSK);
+
+    let pending = ctx
+        .session_open_init_with_options(opts)
+        .expect("open with rotated CU PSK");
+
+    let resumed = ctx
+        .session_open_finish(pending)
+        .expect("finish rotated CU session");
+
+    ctx.session_close(resumed.session_id)
+        .expect("close reopened CU session");
+}
+
+/// Verifies a PSK change targeting an invalid CU session ID is rejected.
+#[test]
+fn psk_change_cu_invalid_session_id_rejected() {
+    let ctx = TestCtx::new();
+
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    let envelope =
+        encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt envelope");
+
+    // Change the request session ID without changing
+    // the envelope or the active session.
+    let invalid_id = session.session_id() ^ 0x1234;
+
+    let req = TborPskChangeReq {
+        session_id: invalid_id,
+        psk_envelope: envelope,
+    };
+
+    let err = ctx
+        .tbor(&req)
+        .expect_err("invalid session ID must be rejected");
+
+    println!("Invalid session ID rejected: {err:?}");
+}
+
+/// Verifies a rejected CU PSK change leaves the original PSK usable.
+#[test]
+fn psk_change_cu_rejected_rotation_preserves_psk() {
+    let ctx = TestCtx::new();
+
+    let session = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("open CU session");
+
+    let mut envelope =
+        encrypt_psk_envelope(session.handshake(), &ROTATED_PSK).expect("encrypt envelope");
+
+    // Corrupt the authentication tag.
+    let last = envelope.len() - 1;
+    envelope[last] ^= 0x01;
+
+    let req = TborPskChangeReq {
+        session_id: session.session_id(),
+        psk_envelope: envelope,
+    };
+
+    ctx.expect_fw_reject(&req, TborStatus::AeadEnvelopeAuthFailed);
+
+    session.close().expect("close CU session");
+
+    // The failed operation must not update stored PSK.
+    let reopened = ctx
+        .open_session(CU, SessionType::PlainText)
+        .expect("old CU PSK should remain valid");
+
+    reopened.close().expect("close reopened CU session");
 }

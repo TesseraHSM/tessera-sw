@@ -16,8 +16,6 @@
 //! primitive's correctness is covered by the MBOR `EcdhKeyExchange` tests and
 //! the std-PAL ECC driver tests, which share the same `pal.ecdh_derive`.
 
-#![cfg(feature = "emu")]
-
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::ExportableKey;
@@ -40,6 +38,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::PSK_LEN;
 use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
+use crate::commands::common::derive;
 pub(crate) use crate::commands::common::CO;
 pub(crate) use crate::commands::common::CU;
 use crate::commands::common::SCOPE_EPHEMERAL;
@@ -76,26 +75,6 @@ fn generate_in_scope(ctx: &TestCtx, session_id: u16, scope: u8, curve: u8) -> (V
         })
         .expect("EccGenerateKey");
     (resp.masked_key, resp.pub_key)
-}
-
-/// Derive a shared secret from local key `masked_key` against `peer_pub`
-/// under `scope`.
-fn derive(
-    ctx: &TestCtx,
-    session_id: u16,
-    scope: u8,
-    masked_key: Vec<u8>,
-    peer_pub: Vec<u8>,
-) -> Vec<u8> {
-    ctx.tbor(&TborEcdhDeriveReq {
-        session_id,
-        scope,
-        masked_key,
-        peer_pub_key: peer_pub,
-        key_label: Vec::new(),
-    })
-    .expect("EcdhDerive")
-    .masked_secret
 }
 
 /// Derives well-formed masked shared secrets in both directions for every supported ECC curve.
@@ -421,7 +400,7 @@ fn ecdh_derive_unknown_session_rejected() {
     let (_, peer_pub) = generate_in_scope(&ctx, session.session_id, SCOPE_LOCAL, ECC_CURVE_P256);
     assert_ne!(session.session_id, u16::MAX, "test requires an unused id");
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborEcdhDeriveReq {
             session_id: u16::MAX,
             scope: SCOPE_LOCAL,

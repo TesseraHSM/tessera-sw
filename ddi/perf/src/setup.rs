@@ -287,7 +287,7 @@ impl Env {
                     say(
                         args,
                         format!(
-                            "signing {} messages with each of {} host {} keys",
+                            "signing {} random mu values with each of {} host {} keys",
                             args.messages, args.keys, p.name
                         ),
                     );

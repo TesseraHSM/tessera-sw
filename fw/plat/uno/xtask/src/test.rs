@@ -19,7 +19,14 @@ use crate::XtaskCtx;
 /// The firmware workspace builds for the thumb target, so its crates
 /// default to `test = false`; a crate listed here enables its lib tests and
 /// keeps them free of hardware access.
-const HOST_TESTED: &[&str] = &["tsra_fw_uno_drivers_pqc"];
+const HOST_TESTED: &[&str] = &[
+    "tsra_fw_uno_drivers_pqc",
+    "tsra_fw_uno_drivers_soc",
+    "tsra_fw_uno_drivers_iic",
+    "tsra_fw_uno_drivers_oic",
+    "tsra_fw_uno_drivers_session_store",
+    "tsra_fw_uno_pct",
+];
 
 #[derive(Parser)]
 #[clap(about = "Run firmware unit tests on the host")]
@@ -34,7 +41,7 @@ impl Xtask for Test {
         let host = host_triple(&sh)?;
         for krate in HOST_TESTED {
             log::info!("Running {krate} unit tests on {host}...");
-            cmd!(sh, "cargo test -p {krate} --lib --target {host}").run()?;
+            cmd!(sh, "cargo nextest run -p {krate} --target {host}").run()?;
         }
         Ok(())
     }

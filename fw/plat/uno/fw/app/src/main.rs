@@ -37,6 +37,10 @@
 
 #![no_std]
 #![no_main]
+// The `handle_io` Embassy task future is a deeply nested async state machine;
+// with `trace-uart` enabled its layout computation exceeds rustc's default
+// recursion limit of 128. Raise it to give headroom.
+#![recursion_limit = "256"]
 
 #[allow(unsafe_code)]
 mod trampoline;
@@ -92,8 +96,9 @@ static HSM: OnceLock<Hsm<UnoHsmPal>> = OnceLock::new();
 /// - Schedules per-IO tasks onto the executor when task slots are available.
 #[embassy_executor::task]
 async fn poll_io(spawner: Spawner) -> ! {
+    let hsm = HSM.get().await;
     loop {
-        let Ok(io) = HSM.get().await.pal().poll_io().await else {
+        let Ok(io) = hsm.pal().poll_io().await else {
             continue;
         };
 
@@ -108,8 +113,10 @@ async fn poll_io(spawner: Spawner) -> ! {
 /// Processes a single IO to completion.
 ///
 /// Takes ownership of the [`UnoHsmIo`], keeping the underlying
-/// IO_SQ slot reserved until the completion DMA finishes. Delegates
-/// SQE parsing, inbound/outbound DMA, DDI dispatch, and CQE
+/// IO_SQ slot reserved until the completion DMA finishes. First lets the
+/// PAL certify the partition's SP-published unwrapping key (a FIPS 140-3
+/// pairwise consistency test that runs once per published key), then
+/// delegates SQE parsing, inbound/outbound DMA, DDI dispatch, and CQE
 /// population to [`Hsm::handle_io`].
 ///
 /// # Parameters
@@ -119,11 +126,14 @@ async fn poll_io(spawner: Spawner) -> ! {
 /// Returns `()` after this IO has been fully processed and completed.
 ///
 /// # Side Effects
+/// - May run the unwrapping key's pairwise consistency test.
 /// - Advances the HSM request pipeline for one IO.
 /// - Triggers DMA activity and CQE completion for that IO.
 #[embassy_executor::task(pool_size = 32)]
 async fn handle_io(io: UnoHsmIo) {
-    HSM.get().await.handle_io(io).await;
+    let hsm = HSM.get().await;
+    hsm.pal().certify_pending_unwrapping_key(&io).await;
+    hsm.handle_io(io).await;
 }
 
 /// Dedicated core-liveliness heartbeat task.
@@ -143,6 +153,18 @@ async fn heartbeat() -> ! {
         embassy_time::Timer::after(embassy_time::Duration::from_millis(250)).await;
         hsm.pal().update_liveliness();
     }
+}
+
+/// Periodic cryptographic self-test task (CAST).
+///
+/// Started once boot completes; runs one self-test per interval for the
+/// lifetime of the firmware.
+///
+/// # Returns
+/// Never returns (`!`).
+#[embassy_executor::task]
+async fn periodic_self_tests() -> ! {
+    HSM.get().await.pal().run_periodic_self_tests().await
 }
 
 /// IPC message/event receive loop — runs forever as a single
@@ -169,6 +191,9 @@ async fn poll_ipc(spawner: Spawner) -> ! {
             booted = true;
             info!("app", "boot complete, spawning poll_io");
             if let Ok(token) = poll_io(spawner) {
+                spawner.spawn(token);
+            }
+            if let Ok(token) = periodic_self_tests() {
                 spawner.spawn(token);
             }
         }

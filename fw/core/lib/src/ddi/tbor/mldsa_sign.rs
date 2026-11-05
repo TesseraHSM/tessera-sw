@@ -16,29 +16,37 @@
 //!
 //! The PAL consumes the tail-aligned expanded key before replacing the
 //! envelope prefix with the signature at its final response offset.
+//!
+//! The request carries the 64-byte message representative `μ` rather than a
+//! message, as `EccSign` carries a digest.  `μ` already binds the FIPS 204
+//! context string, so no context is passed on.  `hedge` selects hedged or
+//! deterministic signing, as PKCS#11's `CK_HEDGE_TYPE` does, and is checked
+//! before the key is unmasked.
 
 use tsra_fw_core_crypto_key_masking::aead::peek_scope;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_ddi_tbor_types::MlDsaHedge;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaSignResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
-use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
+use super::from_pal::mldsa_param_set;
 use super::resolve_masking_key;
 use super::validate_active_session;
-use crate::ddi::tbor::mldsa_generate_key::mldsa_sec_key_len;
 use crate::ddi::tbor::mldsa_generate_key::MLDSA_SEED_LEN;
 
-/// Signature length per ML-DSA parameter set (FIPS 204 Table 2).
-fn mldsa_sig_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
-    match kind {
-        HsmVaultKeyKind::MlDsa44Seed => Ok(2420),
-        HsmVaultKeyKind::MlDsa65Seed => Ok(3309),
-        HsmVaultKeyKind::MlDsa87Seed => Ok(4627),
+/// Map the wire hedge variant onto the PAL's; unknown values are invalid.
+fn mldsa_hedge(hedge: MlDsaHedge) -> HsmResult<HsmMlDsaHedge> {
+    match hedge {
+        MlDsaHedge::Preferred => Ok(HsmMlDsaHedge::Preferred),
+        MlDsaHedge::Required => Ok(HsmMlDsaHedge::Required),
+        MlDsaHedge::Deterministic => Ok(HsmMlDsaHedge::Deterministic),
         _ => Err(HsmError::InvalidArg),
     }
 }
@@ -59,9 +67,7 @@ pub(crate) async fn handle<P: HsmPal>(
             let sess_id = HsmSessId::from(u16::from(req.session_id));
             validate_active_session(pal, io, sess_id)?;
 
-            if req.ctx.len() > 255 {
-                return Err(HsmError::InvalidArg);
-            }
+            let hedge = mldsa_hedge(MlDsaHedge(req.hedge))?;
             let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlDsaSignReq::TOC_COUNT * 4;
             let masked_at = req.masked_key.as_ptr() as usize;
             if masked_at.checked_sub(base) != Some(data_start) {
@@ -74,13 +80,15 @@ pub(crate) async fn handle<P: HsmPal>(
 
             // Unmask in place. The AAD carries the parameter set, so the kind
             // comes from the envelope rather than being inferred from length.
+            // A key of another type is rejected before its permissions are
+            // checked, as `EccSign` does.
             let view = unmask(pal, io, masking_key, req.masked_key).await?;
-            let kind = view.key_kind;
+            let param_set = mldsa_param_set(view.key_kind)?;
             if !view.key_attrs.sign() {
                 return Err(HsmError::InvalidPermissions);
             }
-            let sig_len = mldsa_sig_len(kind)?;
-            let sec_len = mldsa_sec_key_len(kind)?;
+            let sig_len = param_set.sig_len();
+            let sec_len = param_set.sec_key_len();
             if view.target_key.len() != MLDSA_SEED_LEN + sec_len {
                 return Err(HsmError::InvalidArg);
             }
@@ -93,10 +101,12 @@ pub(crate) async fn handle<P: HsmPal>(
             }
             pal.mldsa_sign_in_place(
                 io,
-                kind,
+                param_set,
                 &mut req.masked_key[..key_end],
-                req.message,
-                req.ctx,
+                HsmMlDsaMsgType::ExternalMu,
+                hedge,
+                req.mu,
+                &req.mu[..0],
             )
             .await?;
             sig_len

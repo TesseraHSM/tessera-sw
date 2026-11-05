@@ -3,21 +3,20 @@
 
 //! Host-side wrapper for the TBOR `MlDsaSign` command.
 //!
-//! `MlDsaSign` is (temporarily) an **out-of-session** command that signs a host-supplied message using a caller-held
-//! **masked** ML-DSA secret key.  The host supplies raw message bytes and
-//! the FIPS 204 context string; this crate only defines wire types and
-//! performs no cryptography.
+//! `MlDsaSign` is (temporarily) an **out-of-session** command that signs a host-supplied
+//! 64-byte message representative `μ` using a caller-held **masked** ML-DSA
+//! secret key; this crate only defines wire types and performs no
+//! cryptography.
 //!
 //! There is intentionally no `key_kind` request field: the masked blob is
 //! self-describing.  Its authenticated key kind already tells the firmware
 //! which parameter set the key belongs to.
 //!
-//! `ctx` is the caller-chosen context string of `ML-DSA.Sign(sk, M, ctx)`
-//! (FIPS 204 §5.2).  It is domain-separation input that is bound into the
-//! signature, so a signature produced under one `ctx` never verifies
-//! under another.  It is carried as a buffer of 0..=255 bytes; an empty
-//! `ctx` is the FIPS 204 default.  See
-//! [`MLDSA_CTX_MAX_LEN`](crate::MLDSA_CTX_MAX_LEN).
+//! Like `EccSign`, which signs a digest rather than a message, `MlDsaSign`
+//! signs `μ = SHAKE256(tr || 0x00 || len(ctx) || ctx || M, 64)` rather than
+//! `M`.  The caller computes it, binding its FIPS 204 context string `ctx`,
+//! and the result is a pure ML-DSA signature over `M` under `ctx`.  See
+//! [`MLDSA_MU_LEN`](crate::MLDSA_MU_LEN).
 //!
 //! # TEMPORARY: out-of-session bring-up
 //!
@@ -39,6 +38,17 @@ use crate::tbor;
 /// TBOR opcode for `MlDsaSign`.
 pub const TBOR_OP_MLDSA_SIGN: u8 = 0x27;
 
+/// `MlDsaHedge` discriminant: hedged or deterministic, as the device chooses
+/// (PKCS#11 `CKH_HEDGE_PREFERRED`).  The device signs hedged.
+pub const MLDSA_HEDGE_PREFERRED: u8 = 0;
+/// `MlDsaHedge` discriminant: hedged, or fail (PKCS#11
+/// `CKH_HEDGE_REQUIRED`).
+pub const MLDSA_HEDGE_REQUIRED: u8 = 1;
+/// `MlDsaHedge` discriminant: deterministic, or fail (PKCS#11
+/// `CKH_DETERMINISTIC_REQUIRED`).  FIPS 204's deterministic variant, so the
+/// same key and input always yield the same signature.
+pub const MLDSA_HEDGE_DETERMINISTIC: u8 = 2;
+
 /// Host-facing TBOR `MlDsaSign` request.
 #[tbor(opcode = TBOR_OP_MLDSA_SIGN, session_ctrl = in_session)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -53,16 +63,15 @@ pub struct TborMlDsaSignReq {
     #[tbor(max_len = 5160)]
     pub masked_key: Vec<u8>,
 
-    /// Message to sign.  The TBOR schema caps inline messages at 586 B; see
-    /// [`MLDSA_MESSAGE_MAX_LEN`](crate::MLDSA_MESSAGE_MAX_LEN).
-    #[tbor(max_len = 586)]
-    pub message: Vec<u8>,
+    /// The message representative `μ` to sign, exactly
+    /// [`MLDSA_MU_LEN`](crate::MLDSA_MU_LEN) bytes.
+    #[tbor(min_len = 64, max_len = 64)]
+    pub mu: Vec<u8>,
 
-    /// FIPS 204 context string `ctx` for `ML-DSA.Sign(sk, M, ctx)`,
-    /// 0..=255 bytes.  Empty is the FIPS 204 default.  See
-    /// [`MLDSA_CTX_MAX_LEN`](crate::MLDSA_CTX_MAX_LEN).
-    #[tbor(max_len = 255)]
-    pub ctx: Vec<u8>,
+    /// How the signature is randomized: `MLDSA_HEDGE_PREFERRED`,
+    /// `MLDSA_HEDGE_REQUIRED` or `MLDSA_HEDGE_DETERMINISTIC`, following
+    /// PKCS#11's `CK_HEDGE_TYPE`.
+    pub hedge: u8,
 }
 
 /// Host-facing TBOR `MlDsaSign` response.
@@ -80,50 +89,27 @@ mod tests {
 
     use super::*;
     use crate::mldsa_generate_key::MASKED_MLDSA_KEY_MAX_LEN;
-    use crate::mldsa_generate_key::MLDSA_CTX_MAX_LEN;
+    use crate::mldsa_generate_key::MLDSA_MU_LEN;
 
+    /// The worst-case sign request, ML-DSA-87's masked key and `μ`, written
+    /// directly after the paired TOC.
     #[test]
-    fn request_encodes_message() {
+    fn max_sized_request_encodes_mu_and_hedge() {
         let req = TborMlDsaSignReq {
             session_id: 7,
             masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
-            message: alloc::vec![0x22u8; 32],
-            ctx: alloc::vec![0x44u8; 8],
+            mu: alloc::vec![0x55u8; MLDSA_MU_LEN],
+            hedge: MLDSA_HEDGE_DETERMINISTIC,
         };
         let mut buf = [0u8; 8192];
         let frame = req.encode_request(&mut buf).expect("encode");
         assert!(
-            frame.windows(4).any(|w| w == [0x22u8; 4]),
-            "encoded frame must carry the message bytes",
+            frame
+                .windows(MLDSA_MU_LEN)
+                .any(|w| w == [0x55u8; MLDSA_MU_LEN]),
+            "encoded frame must carry mu",
         );
-    }
-
-    #[test]
-    fn request_encodes_ctx() {
-        let req = TborMlDsaSignReq {
-            session_id: 7,
-            masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
-            message: alloc::vec![0x22u8; 32],
-            ctx: alloc::vec![0x44u8; MLDSA_CTX_MAX_LEN],
-        };
-        let mut buf = [0u8; 8192];
-        let frame = req.encode_request(&mut buf).expect("encode");
-        assert!(
-            frame.windows(4).any(|w| w == [0x44u8; 4]),
-            "encoded frame must carry the context-string bytes",
-        );
-    }
-
-    #[test]
-    fn request_encodes_empty_ctx() {
-        let req = TborMlDsaSignReq {
-            session_id: 7,
-            masked_key: alloc::vec![0x11u8; MASKED_MLDSA_KEY_MAX_LEN],
-            message: alloc::vec![0x22u8; 32],
-            ctx: Vec::new(),
-        };
-        let mut buf = [0u8; 8192];
-        req.encode_request(&mut buf)
-            .expect("an empty ctx is the FIPS 204 default and must encode");
+        // header(8) + 4 TOC entries * 4 + data(5160 + 64).
+        assert_eq!(frame.len(), 5248);
     }
 }

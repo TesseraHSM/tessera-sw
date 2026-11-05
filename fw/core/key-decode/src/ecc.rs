@@ -16,6 +16,7 @@
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
+use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -23,19 +24,23 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use super::DecodedKey;
 
 /// Convert a DER-encoded ECC private key into the vault representation and
-/// derive its wire public key.
+/// derive its wire public key.  `pct` is passed to the PAL's conversion.
 pub(super) async fn decode<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     material: &HsmDmaBuf,
+    pct: HsmEccPct,
 ) -> HsmResult<DecodedKey<'p>> {
     // Convert the recovered PKCS#8 DER into the vault representation (the
     // PAL parses and classifies the curve).  Query the length, then
     // serialize into a freshly allocated buffer that becomes the vault
-    // material.
-    let (vault_len, curve) = pal.ecc_priv_der_to_vault(io, material, None)?;
+    // material.  The query converts nothing, so it takes no PCT.
+    let (vault_len, curve) = pal
+        .ecc_priv_der_to_vault(io, material, None, HsmEccPct::None)
+        .await?;
     let vault_buf = pal.dma_alloc(io, vault_len)?;
-    pal.ecc_priv_der_to_vault(io, material, Some(&mut *vault_buf))?;
+    pal.ecc_priv_der_to_vault(io, material, Some(&mut *vault_buf), pct)
+        .await?;
 
     let kind = vault_kind(curve);
 
