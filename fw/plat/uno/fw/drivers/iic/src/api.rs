@@ -33,6 +33,11 @@ struct ChannelState {
     /// ICQ consumer index — FW advances after reading completions.
     icq_head: u16,
 
+    /// The ICQ producer index as last read from its shadow: entries up to
+    /// it are known to be there, so the shadow, which the CPU reads
+    /// uncached, is read again only once the consumer has caught up.
+    icq_tail: u16,
+
     /// ISQ producer index — the firmware is the register's only writer, so
     /// it is tracked here rather than read back on every freed IO.
     isq_tail: u16,
@@ -189,6 +194,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             io_meta: config.io_meta_base as *mut IoMetaEntry,
             state: SingleCell::new(ChannelState {
                 icq_head: 0,
+                icq_tail: 0,
                 isq_tail: (DEPTH - 1) as u16,
                 waker: WakerRegistration::new(),
             }),
@@ -266,6 +272,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             let hw_isq_tail = regs.isq_ch[ch].tail.read(ISQ_CHANNEL_TAIL::TAIL) as u16;
             self.state.with(|s| {
                 s.icq_head = hw_head;
+                s.icq_tail = hw_head;
                 s.isq_tail = hw_isq_tail;
             });
             // The completion IRQ enable does not survive the core reset even
@@ -440,10 +447,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// (status != 0) is recycled: its buffer returns to the ISQ and its
     /// credit to the source queue.
     fn pop(&self, s: &mut ChannelState) -> IcqPop {
-        // Read tail from shadow (DTCM)
-        // SAFETY: The configured shadow word is aligned and remains mapped for the driver.
-        let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
-        if s.icq_head == tail {
+        if !self.icq_pending(s) {
             return IcqPop::Empty;
         }
 
@@ -495,11 +499,19 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
 
     /// Whether the inbound completion ring still contains an unclaimed host IO.
     pub fn has_pending_io(&self) -> bool {
-        self.state.with(|s| {
+        self.state.with(|s| self.icq_pending(s))
+    }
+
+    /// Whether the ICQ holds an entry the firmware has not consumed: known
+    /// from the last producer index read while the consumer is behind it,
+    /// read again from the shadow once it has caught up.
+    #[inline]
+    fn icq_pending(&self, s: &mut ChannelState) -> bool {
+        if s.icq_head == s.icq_tail {
             // SAFETY: The configured shadow word is aligned and remains mapped for the driver.
-            let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
-            s.icq_head != tail
-        })
+            s.icq_tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
+        }
+        s.icq_head != s.icq_tail
     }
 
     /// Wake the driver if the ICQ has pending entries.
@@ -508,9 +520,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             // Clear NVIC pending bit for this interrupt
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
 
-            // SAFETY: The configured shadow word is aligned and remains mapped for the driver.
-            let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
-            if s.icq_head != tail {
+            if self.icq_pending(s) {
                 s.waker.wake();
             }
         });
