@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use nix::sys::socket::connect;
@@ -127,6 +128,75 @@ impl SocketStream {
             Self::Vsock(stream) => stream.set_read_timeout(timeout),
         }
     }
+
+    /// Set (or, with `None`, clear) a write deadline, regardless of
+    /// transport. Paired with [`Self::set_read_timeout`] by
+    /// [`DeadlineBound`] so a blocked `write` (e.g. a full send buffer
+    /// because the peer isn't draining it) can't hold the best-effort
+    /// leaked-session cleanup past its deadline either.
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_write_timeout(timeout),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.set_write_timeout(timeout),
+            #[cfg(target_os = "linux")]
+            Self::Vsock(stream) => stream.set_write_timeout(timeout),
+        }
+    }
+}
+
+/// Wraps an already-locked [`SocketStream`] so every `Read`/`Write`
+/// call made through it is bounded by one absolute `deadline`, rather
+/// than each individual `recv`/`send` syscall getting its own
+/// independent timeout window.
+///
+/// Used by [`DdiSockDev::close_leaked_session_locked`]: the framing
+/// reader's `read_exact` can call through here several times for one
+/// logical response, and a peer trickling in a byte just before each
+/// per-call timeout could otherwise stall the whole cleanup — and
+/// therefore the shared stream mutex, since cleanup runs with it held
+/// — far longer than `CLEANUP_TIMEOUT`. Each call instead computes the
+/// time left before `deadline`, arms the stream's native timeout with
+/// just that remainder, and fails immediately once it's exhausted.
+struct DeadlineBound<'a> {
+    stream: &'a mut SocketStream,
+    deadline: Instant,
+}
+
+impl DeadlineBound<'_> {
+    /// Time remaining before `deadline`, or a `TimedOut` error once
+    /// it's passed.
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "cleanup exchange exceeded its deadline",
+                )
+            })
+    }
+}
+
+impl Read for DeadlineBound<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.remaining()?;
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for DeadlineBound<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.remaining()?;
+        self.stream.set_write_timeout(Some(remaining))?;
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
 }
 
 impl Read for SocketStream {
@@ -170,18 +240,19 @@ struct VsockStream {
 
 #[cfg(target_os = "linux")]
 impl VsockStream {
-    /// Set (or, with `None`, clear) `SO_RCVTIMEO` on the raw `AF_VSOCK`
-    /// socket. Neither `std` nor `nix` 0.26 expose a safe wrapper for
-    /// this option on a bare fd, so it's set directly via `libc`.
+    /// Set (or, with `None`, clear) a receive- or send-side timeout
+    /// (`SO_RCVTIMEO` / `SO_SNDTIMEO`) on the raw `AF_VSOCK` socket.
+    /// Neither `std` nor `nix` 0.26 expose a safe wrapper for either
+    /// option on a bare fd, so it's set directly via `libc`.
     #[allow(unsafe_code)]
-    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+    fn set_timeout(&mut self, opt: libc::c_int, timeout: Option<Duration>) -> std::io::Result<()> {
         let tv = match timeout {
             Some(d) => libc::timeval {
                 tv_sec: d.as_secs() as libc::time_t,
                 tv_usec: libc::suseconds_t::from(d.subsec_micros()),
             },
             // A zeroed timeval disables the timeout (block indefinitely),
-            // matching `SO_RCVTIMEO`'s documented default.
+            // matching `SO_RCVTIMEO`/`SO_SNDTIMEO`'s documented default.
             None => libc::timeval {
                 tv_sec: 0,
                 tv_usec: 0,
@@ -194,7 +265,7 @@ impl VsockStream {
             libc::setsockopt(
                 self.fd,
                 libc::SOL_SOCKET,
-                libc::SO_RCVTIMEO,
+                opt,
                 std::ptr::addr_of!(tv).cast(),
                 std::mem::size_of::<libc::timeval>() as libc::socklen_t,
             )
@@ -203,6 +274,14 @@ impl VsockStream {
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_timeout(libc::SO_RCVTIMEO, timeout)
+    }
+
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_timeout(libc::SO_SNDTIMEO, timeout)
     }
 
     fn connect(cid: u32, port: u32) -> std::io::Result<Self> {
@@ -322,16 +401,21 @@ impl std::fmt::Debug for DdiSockDev {
 
 /// Outcome of [`DdiSockDev::close_leaked_session_locked`].
 enum CloseLeakedSessionOutcome {
-    /// The cleanup either succeeded or failed for an ordinary reason
-    /// (bad encode, device error, etc.); the stream had no exchange left
-    /// outstanding and is safe for the next caller to reuse.
+    /// The cleanup either wasn't attempted (e.g. a local encode failure
+    /// before any I/O) or succeeded with a fully-read, well-formed
+    /// response; the stream had no exchange left outstanding and is
+    /// safe for the next caller to reuse.
     Done,
-    /// The cleanup's `CloseSession` exchange hit `CLEANUP_TIMEOUT` before
-    /// the peer replied. A late response may still arrive on the wire
-    /// for it, so the stream can no longer be trusted to pair reads with
-    /// the request that caused them; the connection must be retired
-    /// instead of reused.
-    TimedOut,
+    /// The cleanup's `CloseSession` exchange hit `CLEANUP_TIMEOUT`, or
+    /// failed with any other I/O or protocol error, before a complete
+    /// response was confirmed read (e.g. an oversized response whose
+    /// framing reader consumes only the length prefix before erroring
+    /// out, leaving the body unread on the wire). Either way a late or
+    /// partially-consumed response may still arrive, so the stream can
+    /// no longer be trusted to pair reads with the request that caused
+    /// them; the connection is conservatively retired instead of
+    /// reused.
+    Unusable,
 }
 
 impl DdiSockDev {
@@ -402,7 +486,7 @@ impl DdiSockDev {
     /// `stream`.
     ///
     /// Maps a nonzero transport status to a [`DdiError`].
-    fn exchange_locked(stream: &mut SocketStream, req: &Request) -> DdiResult<Response> {
+    fn exchange_locked<RW: Read + Write>(stream: &mut RW, req: &Request) -> DdiResult<Response> {
         let resp: Response = {
             req.write_to(&mut *stream).map_err(map_proto_err)?;
             Response::read_from(&mut *stream).map_err(map_proto_err)?
@@ -426,7 +510,15 @@ impl DdiSockDev {
             return Err(Self::retired_err());
         }
         let mut stream = self.stream.lock();
-        Self::exchange_locked(&mut stream, req)
+        // A cleanup running on another clone of this handle could have
+        // retired the connection (and poisoned `stream`'s framing) in
+        // the gap between the check above and acquiring the lock;
+        // recheck now, before any I/O, so a request can't slip in on a
+        // stream whose cleanup response hasn't been consumed yet.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
+        Self::exchange_locked(&mut *stream, req)
     }
 
     /// Build a submission entry, exchange it with the server, and return
@@ -449,8 +541,14 @@ impl DdiSockDev {
         }
         let cmd_id = self.next_cmd_id();
         let mut stream = self.stream.lock();
+        // See `exchange`'s matching recheck: a cleanup on another clone
+        // may have retired the connection after the check above but
+        // before this lock was acquired.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
         Self::submit_locked(
-            &mut stream,
+            &mut *stream,
             cmd_id,
             op,
             session_ctrl,
@@ -477,8 +575,8 @@ impl DdiSockDev {
     /// identity check, so a best-effort leaked-session close (see
     /// [`Self::close_leaked_session_locked`]) can reuse the same stream
     /// without racing a concurrent caller's request.
-    fn submit_locked(
-        stream: &mut SocketStream,
+    fn submit_locked<RW: Read + Write>(
+        stream: &mut RW,
         cmd_id: u16,
         op: u16,
         session_ctrl: u8,
@@ -568,13 +666,16 @@ impl DdiSockDev {
     /// [`DdiDev::exec_op_mbor`]), so nothing local would otherwise ever
     /// close it either.
     ///
-    /// This exchange is bounded by `CLEANUP_TIMEOUT`: a peer that never
-    /// answers `CloseSession` must not block the caller (or any clone
-    /// sharing this stream, since they share the same mutex) forever.
-    /// Errors other than that timeout are intentionally discarded by the
-    /// caller: this is a best-effort reclaim on top of an
-    /// already-failing exchange, and the original error is what should
-    /// surface to the caller either way.
+    /// This exchange is bounded by one absolute `CLEANUP_TIMEOUT`
+    /// deadline spanning the whole exchange (see [`DeadlineBound`]): a
+    /// peer that never answers `CloseSession`, or that trickles bytes
+    /// just fast enough to keep renewing a naively per-call timeout,
+    /// must not block the caller (or any clone sharing this stream,
+    /// since they share the same mutex) past it. Any error from the
+    /// exchange — timeout or otherwise — conservatively marks the
+    /// stream [`CloseLeakedSessionOutcome::Unusable`] rather than risk
+    /// reusing a connection whose framing may be desynced; the original
+    /// error is what surfaces to the caller either way.
     fn close_leaked_session_locked(
         stream: &mut SocketStream,
         cmd_id: u16,
@@ -604,14 +705,12 @@ impl DdiSockDev {
         };
         buf.truncate(req_len);
 
-        if stream.set_read_timeout(Some(CLEANUP_TIMEOUT)).is_err() {
-            // Couldn't even arm the deadline: don't risk an unbounded
-            // wait, retire the connection without attempting the
-            // exchange.
-            return CloseLeakedSessionOutcome::TimedOut;
-        }
-        let result = Self::submit_locked(
+        let mut bounded = DeadlineBound {
             stream,
+            deadline: Instant::now() + CLEANUP_TIMEOUT,
+        };
+        let result = Self::submit_locked(
+            &mut bounded,
             cmd_id,
             OP_MBOR,
             u8::from(SessionControlKind::Close),
@@ -619,20 +718,15 @@ impl DdiSockDev {
             buf,
             Vec::new(),
         );
-        // Clear the deadline so ordinary (non-cleanup) exchanges sharing
-        // this stream aren't bounded by it.
+        // Clear any deadline `DeadlineBound` left armed on the
+        // underlying stream so ordinary (non-cleanup) exchanges sharing
+        // it afterward aren't bounded by it.
         let _ = stream.set_read_timeout(None);
+        let _ = stream.set_write_timeout(None);
 
         match result {
-            Err(DdiError::IoError(ref e))
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                CloseLeakedSessionOutcome::TimedOut
-            }
-            _ => CloseLeakedSessionOutcome::Done,
+            Ok(_) => CloseLeakedSessionOutcome::Done,
+            Err(_) => CloseLeakedSessionOutcome::Unusable,
         }
     }
 
@@ -813,8 +907,14 @@ impl DdiDev for DdiSockDev {
         //    stream without an intervening request from another caller.
         let cmd_id = self.next_cmd_id();
         let mut stream = self.stream.lock();
+        // See `exchange`'s matching recheck: a cleanup on another
+        // clone may have retired the connection after the check at the
+        // top of this function but before this lock was acquired.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
         let (resp_buf, _) = Self::submit_locked(
-            &mut stream,
+            &mut *stream,
             cmd_id,
             OP_MBOR,
             u8::from(session_ctrl),
@@ -856,7 +956,7 @@ impl DdiDev for DdiSockDev {
                                 pre_encode,
                                 leaked_id,
                             ),
-                            CloseLeakedSessionOutcome::TimedOut
+                            CloseLeakedSessionOutcome::Unusable
                         ) {
                             self.retired.store(true, Ordering::Release);
                         }
@@ -900,7 +1000,7 @@ impl DdiDev for DdiSockDev {
                         pre_encode,
                         leaked_id,
                     ),
-                    CloseLeakedSessionOutcome::TimedOut
+                    CloseLeakedSessionOutcome::Unusable
                 ) {
                     self.retired.store(true, Ordering::Release);
                 }
@@ -1121,7 +1221,16 @@ impl DdiDev for DdiSockDev {
     }
 
     fn erase(&self) -> Result<(), DdiError> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
         let mut stream = self.stream.lock();
+        // See `exchange`'s matching recheck: a cleanup on another clone
+        // may have retired the connection after the check above but
+        // before this lock was acquired.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Self::retired_err());
+        }
         RequestFrame::Reset
             .write_to(&mut *stream)
             .map_err(map_proto_err)?;
@@ -1306,6 +1415,33 @@ mod tests {
             b"response"
         );
         peer.join().expect("peer");
+    }
+
+    /// A best-effort leaked-session cleanup whose exchange fails for any
+    /// reason — not only `CLEANUP_TIMEOUT` — must retire the connection
+    /// rather than report it reusable: a response that failed partway
+    /// through (e.g. one whose framing was never fully consumed) can
+    /// leave unread bytes behind that the *next* exchange would
+    /// otherwise misread as its own response. Dropping the peer makes
+    /// the cleanup's write fail immediately with a non-timeout I/O
+    /// error, exercising exactly that "ordinary error, no timeout"
+    /// path.
+    #[cfg(unix)]
+    #[test]
+    fn close_leaked_session_retires_on_any_cleanup_error_not_just_timeout() {
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("read timeout");
+        // Close the peer so the cleanup's write fails immediately
+        // rather than blocking or timing out.
+        drop(server);
+        let mut stream = SocketStream::Unix(client);
+        let outcome = DdiSockDev::close_leaked_session_locked(&mut stream, 1, false, 7);
+        assert!(
+            matches!(outcome, CloseLeakedSessionOutcome::Unusable),
+            "a non-timeout cleanup error must still retire the connection"
+        );
     }
 
     #[test]

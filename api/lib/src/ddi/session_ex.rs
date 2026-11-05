@@ -369,13 +369,22 @@ fn open_session_ex_init(
 /// confirm-MAC rejection by the FW), [`HsmError::InvalidArgument`] for
 /// malformed handshake inputs, and [`HsmError::InternalError`] for
 /// handshake-crypto failures.
-fn open_session_ex_finish(
-    partition: &HsmPartition,
-    pending: PendingHandshake,
+/// Shared core of [`open_session_ex_finish`]'s Phase-2 exchange: derive
+/// `param_key`, seal a fresh session seed, build the Phase-2 confirm
+/// MAC, exchange `OpenSessionFinish` via [`exec_handshake_tbor`], and
+/// fold the response into an [`OpenSessionExResult`] whose
+/// `ddi_cookie` is Phase 2's (possibly refreshed) token.
+///
+/// Generic over `D: DdiDev` so [`open_session_ex_finish`] drives it
+/// against the real negotiated device while the `session_ex` unit
+/// tests independently drive it against a cookie-enforcing test
+/// double and assert the refreshed token this function returns is the
+/// one actually retained in the resulting `OpenSessionExResult`, not
+/// just the raw value `exec_handshake_tbor` hands back.
+fn finish_handshake_tbor<D: DdiDev>(
+    dev: &D,
+    pending: &PendingHandshake,
 ) -> HsmResult<OpenSessionExResult> {
-    let inner = partition.inner().read();
-    let dev = inner.dev();
-
     // Derive the per-session wrap key, generate a fresh seed, and seal
     // it under `param_key` as the `seed_envelope` wire blob.
     let param_key = derive_param_key(&pending.exported)?;
@@ -406,7 +415,7 @@ fn open_session_ex_finish(
     // `InSession` exchange is recognized as the same handshake rather
     // than rejected for lacking one.
     let (resp, cookie) =
-        exec_handshake_tbor(&**dev, &req, pending.ddi_cookie).map_err(HsmError::from)?;
+        exec_handshake_tbor(dev, &req, pending.ddi_cookie).map_err(HsmError::from)?;
 
     Ok(OpenSessionExResult {
         session_id: pending.session_id,
@@ -420,6 +429,15 @@ fn open_session_ex_finish(
         bmk_session: Zeroizing::new(resp.bmk_session),
         ddi_cookie: cookie,
     })
+}
+
+fn open_session_ex_finish(
+    partition: &HsmPartition,
+    pending: PendingHandshake,
+) -> HsmResult<OpenSessionExResult> {
+    let inner = partition.inner().read();
+    let dev = inner.dev();
+    finish_handshake_tbor(&**dev, &pending)
 }
 
 /// Issue `PskChange` (opcode `0x06`) on the active session.
@@ -883,33 +901,31 @@ mod tests {
         )
         .expect("phase 1 confirm mac must verify");
 
-        let param_key = derive_param_key(&exported).expect("derive param_key");
-        let seed = [7u8; SESSION_SEED_LEN];
-        let envelope = seal_seed_envelope(&param_key, &seed).expect("seal seed envelope");
-        let seed_envelope: [u8; SEED_ENVELOPE_LEN] = envelope
-            .as_slice()
-            .try_into()
-            .expect("seed envelope length");
-        let mac_fin = build_phase2_mac(
-            &exported,
-            resp1.session_id,
-            &eph.pk_sec1,
-            &pk_hsm_sec1,
-            &resp1.pk_resp,
-        )
-        .expect("build phase2 mac");
-
-        let req2 = TborSessionOpenFinishReq {
+        let pending = PendingHandshake {
             session_id: resp1.session_id,
-            mac_fin,
-            seed_envelope,
+            psk_id,
+            session_type,
+            exported: Zeroizing::new(exported),
+            pk_init: eph.pk_sec1,
+            pk_resp: resp1.pk_resp,
+            pk_hsm: pk_hsm_sec1,
+            ddi_cookie: cookie1,
         };
-        let (_, cookie2) = exec_handshake_tbor(&fake, &req2, cookie1)
+        // Drive the real `finish_handshake_tbor` (the same function
+        // `open_session_ex_finish` calls against the negotiated device)
+        // so this verifies the refreshed token is retained in the
+        // actual `OpenSessionExResult` the production code path
+        // produces, not just the raw `exec_handshake_tbor` return
+        // value.
+        let result = finish_handshake_tbor(&fake, &pending)
             .expect("phase 2 exchange must succeed once phase 1's token is threaded in");
-        assert!(cookie2.is_some(), "phase 2 must return a (refreshed) token");
+        assert!(
+            result.ddi_cookie.is_some(),
+            "OpenSessionExResult must retain a (refreshed) phase-2 token"
+        );
         assert_ne!(
-            cookie1, cookie2,
-            "phase 2's token must be a genuine refresh, not a stale echo of phase 1's"
+            cookie1, result.ddi_cookie,
+            "OpenSessionExResult.ddi_cookie must be phase 2's genuine refresh, not a stale echo of phase 1's"
         );
     }
 }
