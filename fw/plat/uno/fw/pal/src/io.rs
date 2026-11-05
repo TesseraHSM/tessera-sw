@@ -24,6 +24,7 @@
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
 //! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
 
+use core::cell::UnsafeCell;
 use core::mem;
 use core::ops::AsyncFnOnce;
 
@@ -44,6 +45,7 @@ use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
+use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoSqEntry;
@@ -59,6 +61,57 @@ use crate::alloc::reset_io_alloc;
 /// Typed overlay of the IO GSRAM region.
 // SAFETY: IO_GSRAM_BASE is the aligned, permanently mapped IO queue region.
 const IO_Q: StaticRef<IoGsramRegs> = unsafe { StaticRef::new(IO_GSRAM_BASE as *const IoGsramRegs) };
+
+/// Each host IO slot's SQE, copied out of `IO_SQ` when its IO is accepted.
+///
+/// The SQE's fields are read many times per IO, and IO GSRAM is read
+/// uncached: a load costs the interconnect's full latency, while two
+/// eight-word bursts fetch the whole 64-byte entry for about the price of
+/// two loads. The hardware writes `IO_SQ[index]` only while the slot is
+/// free, so the copy stays valid until the IO is dropped.
+struct SqeCopies(UnsafeCell<[RawSqe; IO_SQ_COUNT as usize]>);
+
+// SAFETY: single-core firmware with cooperative scheduling; a slot's copy
+// is written only by `accept_io`, before its IO exists, and read only
+// through that IO.
+unsafe impl Sync for SqeCopies {}
+
+static SQE_COPIES: SqeCopies = SqeCopies(UnsafeCell::new([[0; 16]; IO_SQ_COUNT as usize]));
+
+/// Copies host slot `index`'s SQE out of `IO_SQ` with two eight-word bursts.
+fn copy_sqe(index: usize) {
+    let src = &IO_Q.io_sq[index] as *const IoSqEntry as *const u32;
+    // SAFETY: `index` is a host slot, so its copy exists; nothing else
+    // borrows it while the slot is free (see `SqeCopies`).
+    let dst = unsafe { (*SQE_COPIES.0.get())[index].as_mut_ptr() };
+    #[cfg(target_arch = "arm")]
+    // SAFETY: both are 64-byte, word-aligned SQEs: the IO_SQ entry and its
+    // DTCM copy.
+    unsafe {
+        core::arch::asm!(
+            "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            s = inout(reg) src => _,
+            d = inout(reg) dst => _,
+            out("r2") _,
+            out("r3") _,
+            out("r4") _,
+            out("r5") _,
+            out("r8") _,
+            out("r9") _,
+            out("r10") _,
+            out("r11") _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: as above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, 16);
+    }
+}
 
 /// An in-flight IO identified by its IO_SQ slot index.
 ///
@@ -181,14 +234,19 @@ impl UnoHsmIo {
 impl HsmIo for UnoHsmIo {
     /// Returns the SQE from `IO_SQ[index]`.
     ///
-    /// IIC DMAs the host-side 64-byte SQE directly into this slot, so it
-    /// can be read in-place without a copy.
+    /// IIC DMAs the host-side 64-byte SQE into `IO_SQ[index]`; a host IO
+    /// reads the copy [`accept_io`](UnoHsmPal::accept_io) took of it.
     fn sqe(&self) -> &HsmSqe {
         const _ASSERT_SQE_SIZE: () =
             assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<RawSqe>());
         const _ASSERT_SQE_ALIGN: () =
             assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<RawSqe>());
 
+        if (self.index as u32) < IO_SQ_COUNT {
+            // SAFETY: `accept_io` filled this host slot's copy before the IO
+            // existed, and it is not written again while the IO lives.
+            return unsafe { &(*SQE_COPIES.0.get())[self.index as usize] };
+        }
         let io_sq = &IO_Q.io_sq[self.index as usize];
         // SAFETY: The queue entry and RawSqe share the asserted layout; this IO owns the slot.
         unsafe { &*(io_sq as *const IoSqEntry as *const RawSqe) }
@@ -270,6 +328,9 @@ impl UnoHsmPal {
     pub(crate) fn accept_io(&self, index: u16) -> UnoHsmIo {
         self.io_in_flight_inc();
         reset_io_alloc(self, index);
+        if (index as u32) < IO_SQ_COUNT {
+            copy_sqe(index as usize);
+        }
         UnoHsmIo { index }
     }
 
