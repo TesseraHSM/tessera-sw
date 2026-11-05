@@ -3,22 +3,13 @@
 
 //! Resiliency integration tests.
 //!
-//! This module contains two categories of resiliency tests:
+//! **Stress tests** — in the [`stress`] sub-module. Multi-threaded
+//! tests that trigger real NSSRs via [`HsmPartition::reset`] while
+//! worker threads perform key operations concurrently.
 //!
-//! 1. **Fault-injection tests** (`res-test` feature) — in the
-//!    [`fault_injection`] sub-module. Each sub-module targets a
-//!    specific API surface and uses the resiliency DDI device
-//!    (`tsra_res_test_dev`) to inject transient faults, verifying
-//!    that the retry-with-backoff machinery recovers correctly.
-//!
-//! 2. **Stress tests** — in the [`stress`] sub-module. Multi-threaded
-//!    tests that trigger real NSSRs via [`HsmPartition::reset`] while
-//!    worker threads perform key operations concurrently. These do
-//!    **not** require the `res-test` feature.
+//! The `fault_injection` sub-directory is dormant: it relied on the
+//! removed `tsra_res_test_dev` fault-injection transport and is not built.
 
 mod helpers;
-
-#[cfg(feature = "res-test")]
-mod fault_injection;
 
 mod stress;

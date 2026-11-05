@@ -20,12 +20,11 @@ canonical error-shape assertions.
 
 ## Backend feature regimes
 
-Three build modes; see the crate-level doc in
+Build modes; see the crate-level doc in
 [`crates/tbor_test_harness/src/lib.rs`](../../../../crates/tbor_test_harness/src/lib.rs)
 for the full per-feature gating table.
 
 * `--features emu` — canonical configuration, runs the full suite.
-* `--features mock` — transport-contract probes only.
 * `--features sock` — firmware behind a running socket DDI server.
 * No backend feature — native OS backend (`nix` on Linux / `win` on
   Windows); hardware-eligible command tests run against real silicon.

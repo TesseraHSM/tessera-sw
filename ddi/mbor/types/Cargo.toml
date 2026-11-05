@@ -35,7 +35,6 @@ tsra_crypto.workspace = true
 tsra_ddi.workspace = true
 tsra_ddi_mbor_codec.workspace = true
 tsra_ddi_mbor_test_helpers.workspace = true
-tsra_ddi_mock.workspace = true
 tsra_ddi_nix.workspace = true
 tsra_ddi_win.workspace = true
 x509.workspace = true
@@ -62,12 +61,10 @@ pre_encode = [
   "tsra_ddi_mbor_codec/pre_encode",
 ]
 # Forward backend selection to the tsra_ddi facade so the integration
-# test binary picks up the right mock/table-size combination.
+# test binary picks up the right backend. On emu, set
+# `TSRA_EMU_RESOURCE_COUNT` to choose the partition resource count.
 emu = ["tsra_ddi/emu"]
-mock = ["tsra_ddi/mock"]
 sock = ["tsra_ddi/sock"]
-table-4 = ["tsra_ddi/table-4"]
-table-64 = ["tsra_ddi/table-64"]
 
 [lints]
 workspace = true

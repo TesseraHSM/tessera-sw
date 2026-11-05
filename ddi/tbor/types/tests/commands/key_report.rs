@@ -35,6 +35,7 @@ use tsra_crypto::ExportableKey;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::RsaKeyOp;
 use tsra_crypto::RsaPrivateKey;
+use tsra_ddi_mbor_test_helpers::KeyAttestationReport;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -73,11 +74,6 @@ use crate::commands::unwrap_key::unwrap;
 
 /// Verifies an imported RSA or RSA-CRT key report against the host public key.
 fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
-    use tsra_ddi_mbor_sim::attestation::KeyAttester;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccOp;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccPublicKey as SimEccPublicKey;
-    use tsra_ddi_mbor_sim::report::CoseSign1Object;
-    use tsra_ddi_mbor_sim::report::KeyAttestationReport;
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 
@@ -118,18 +114,8 @@ fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
 
     let spki = leaf.get_public_key_der().expect("extract PID public key");
 
-    let pid_pub = SimEccPublicKey::from_der(&spki, None).expect("load PID public key");
-
-    KeyAttester::parse(&report.report)
-        .expect("parse COSE_Sign1")
-        .verify(&pid_pub)
-        .expect("verify PID signature");
-
-    // Decode the signed attestation payload.
-    let cose = CoseSign1Object::decode(&report.report).expect("decode COSE_Sign1");
-
-    let decoded: KeyAttestationReport =
-        minicbor::decode(cose.payload).expect("decode key attestation report");
+    // Verify the PID signature and decode the signed attestation payload.
+    let decoded = verify_cose_sign1(&report.report, &spki);
 
     assert_eq!(decoded.version, 2);
     assert_eq!(&decoded.report_data[..], &report_data[..]);
@@ -207,6 +193,30 @@ fn masked_sealing_key(ctx: &TestCtx, session_id: u16, scope: u8) -> (Vec<u8>, Ve
     (seal.masked_key.to_vec(), seal.pub_key.to_vec())
 }
 
+/// Verifies a COSE_Sign1 report's ES384 signature under the PID public key
+/// (`pid_spki_der`) and returns the decoded attestation payload.
+pub(crate) fn verify_cose_sign1(report: &[u8], pid_spki_der: &[u8]) -> KeyAttestationReport {
+    use tsra_crypto::EccAlgo;
+    use tsra_crypto::EccPublicKey;
+    use tsra_crypto::HashAlgo;
+    use tsra_crypto::Hasher;
+    use tsra_crypto::ImportableKey;
+    use tsra_crypto::Verifier;
+    use tsra_ddi_mbor_test_helpers::encode_sig_struct;
+    use tsra_ddi_mbor_test_helpers::CoseSign1Object;
+
+    let cose = CoseSign1Object::decode(report).expect("report parses as COSE_Sign1");
+    let mut tbs = vec![0u8; 64 + cose.protected_header.len() + cose.payload.len()];
+    let tbs_len = encode_sig_struct(&cose.protected_header, cose.payload, &mut tbs)
+        .expect("encode COSE Sig_structure");
+    let digest = Hasher::hash_vec(&mut HashAlgo::sha384(), &tbs[..tbs_len]).expect("SHA-384");
+    let pid_pub = EccPublicKey::from_bytes(pid_spki_der).expect("PID pubkey loads from SPKI");
+    let ok = Verifier::verify(&mut EccAlgo::default(), &pid_pub, &digest, &cose.signature)
+        .expect("ECDSA verify");
+    assert!(ok, "COSE_Sign1 must verify under PID pubkey");
+    minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport")
+}
+
 /// Verify a `KeyReport` COSE_Sign1: (1) the envelope verifies under the
 /// PID pubkey; (2) the embedded COSE_Key re-derives `sealing_pub_le`; and
 /// (3) the report's `report_data` matches what the caller supplied.
@@ -215,12 +225,7 @@ pub(crate) fn verify_key_report(
     report: &[u8],
     sealing_pub_le: &[u8],
     expected_report_data: &[u8; KEY_REPORT_DATA_LEN],
-) -> tsra_ddi_mbor_sim::report::KeyAttestationReport {
-    use tsra_ddi_mbor_sim::attestation::KeyAttester;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccOp;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccPublicKey as SimEccPublicKey;
-    use tsra_ddi_mbor_sim::report::CoseSign1Object;
-    use tsra_ddi_mbor_sim::report::KeyAttestationReport;
+) -> KeyAttestationReport {
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 
@@ -235,20 +240,12 @@ pub(crate) fn verify_key_report(
     let leaf_bytes = leaf_resp.data.certificate.as_slice();
     let leaf = X509Certificate::from_der(leaf_bytes).expect("PID leaf parses as X.509 certificate");
     let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
-    let pid_pub =
-        SimEccPublicKey::from_der(&pid_spki, None).expect("PID pubkey loads from leaf SPKI");
 
-    // 2. COSE_Sign1 signature verify under PID pubkey.
-    let attester = KeyAttester::parse(report).expect("report parses as COSE_Sign1");
-    attester
-        .verify(&pid_pub)
-        .expect("KeyReport COSE_Sign1 must verify under PID pubkey");
+    // 2. COSE_Sign1 signature verify under PID pubkey, then decode the
+    // payload.
+    let decoded = verify_cose_sign1(report, &pid_spki);
 
-    // 3. Decode the payload and cross-bind the embedded COSE_Key to the
-    //    sealed public point.
-    let cose = CoseSign1Object::decode(report).expect("re-decode COSE_Sign1 envelope");
-    let decoded: KeyAttestationReport =
-        minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport");
+    // 3. Cross-bind the embedded COSE_Key to the sealed public point.
 
     assert_eq!(
         &decoded.report_data[..],

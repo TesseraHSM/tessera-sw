@@ -10,13 +10,6 @@
 // `tsra_sd_reseal_remote_backup`. A successful reseal is itself
 // the correctness check: the HPKE open only succeeds if the receiver key
 // and the attested sender key match those that sealed the source.
-//
-// Like the create-backup tests, this needs the two-phase TBOR HPKE
-// handshake and a fully provisioned partition, which the mock backend does
-// not implement, so it is excluded from the mock lane and runs on the emu
-// and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -308,5 +301,3 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_null_params)
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

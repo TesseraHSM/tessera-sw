@@ -1415,14 +1415,12 @@ impl DdiDev for DdiWinDev {
 
         self.map_ioctl_status(ioctl_out_buffer.extended_status)?;
 
-        if ioctl_out_buffer.result != 0 {
-            Err(DdiError::FpError(ioctl_out_buffer.result))?
-        }
-
-        if ioctl_out_buffer.extended_status != 0 {
-            Err(DdiError::FpCmdSpecificError(
-                ioctl_out_buffer.extended_status,
-            ))?
+        // The driver reports the CQE status code in `result` and its error
+        // code in `extended_status`.
+        if let Some(err) =
+            DdiError::from_fp_status(ioctl_out_buffer.result, ioctl_out_buffer.extended_status)
+        {
+            Err(err)?
         }
 
         // Copy the actual data (excluding AAD) to the destination buffer
@@ -1667,14 +1665,12 @@ impl DdiDev for DdiWinDev {
 
         self.map_ioctl_status(ioctl_out_buffer.extended_status)?;
 
-        if ioctl_out_buffer.result != 0 {
-            Err(DdiError::FpError(ioctl_out_buffer.result))?
-        }
-
-        if ioctl_out_buffer.extended_status != 0 {
-            Err(DdiError::FpCmdSpecificError(
-                ioctl_out_buffer.extended_status,
-            ))?
+        // The driver reports the CQE status code in `result` and its error
+        // code in `extended_status`.
+        if let Some(err) =
+            DdiError::from_fp_status(ioctl_out_buffer.result, ioctl_out_buffer.extended_status)
+        {
+            Err(err)?
         }
 
         let total_size = ioctl_out_buffer.byte_count as usize;

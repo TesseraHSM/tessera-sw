@@ -51,8 +51,7 @@ fn test_get_session_encryption_key_smoke() {
             "session encryption nonce must be non-empty"
         );
 
-        // The signature is only populated by real or emulated devices;
-        // the mock dispatcher returns an empty placeholder.
+        // The signature is only checked on physical devices.
         if get_device_kind(dev) != DdiDeviceKind::Virtual {
             assert!(
                 !resp.data.pub_key_signature.is_empty(),

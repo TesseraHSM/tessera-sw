@@ -6,9 +6,6 @@ edition = "2024"
 name = "tsra_api_tests"
 version = "0.0.0"
 
-[dependencies]
-tsra_res_test_dev = { optional = true, workspace = true }
-
 [build-dependencies]
 anyhow.workspace = true
 cmake.workspace = true
@@ -36,8 +33,6 @@ zerocopy.workspace = true
 [features]
 default = []
 emu = ["tsra_api/emu"]
-mock = ["tsra_api/mock"]
-res-test = ["dep:tsra_res_test_dev", "tsra_api/res-test"]
 session-ex-tests = []
 sock = ["tsra_api/sock"]
 

@@ -1407,7 +1407,7 @@ fn capi_aes_cbc(
 /// the engine attach (`TSRA_CTRL_SET_KEY_URI`, read from the public header)
 /// and round-trip a message several device requests long; a key does not
 /// attach to a cipher of another size. (Equality with the SDK's own AES is the
-/// mock round trip's check; raw keys are the engine-as-default test's.)
+/// emu round trip's check; raw keys are the engine-as-default test's.)
 #[test]
 #[serial]
 #[allow(unsafe_code)]

@@ -11,9 +11,9 @@
 //!    instance for the whole test binary, so any in-flight FW work
 //!    from another test would be corrupted by this one's `erase`.
 //! 2. Opens the device advertised by the configured backend
-//!    (`emu` or `mock`).
+//!    (`emu` or hw).
 //! 3. Factory-resets the device on every backend that owns partition
-//!    state (all but `mock`) so every test starts from byte-identical
+//!    state so every test starts from byte-identical
 //!    state — no inherited session slots, no inherited PSK rotations,
 //!    no implicit ordering dependency on other tests' cleanup
 //!    discipline.
@@ -152,7 +152,7 @@ impl Deref for TestDev {
 
 /// Acquire the test lock, open the configured backend device, and
 /// factory-reset it before use. Only reachable under `--features emu`
-/// or the no-feature (hw) build — mock/sock builds gate the whole
+/// or the no-feature (hw) build — sock builds gate the whole
 /// harness out at the crate root.
 ///
 /// Panics if the backend lists no devices or if `erase` fails — both

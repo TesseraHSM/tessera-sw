@@ -43,13 +43,13 @@ use zeroize::Zeroizing;
 use crate::SECRET_FILE_MODE;
 
 /// Test-only credentials. Match the values used throughout the API test
-/// suite (`api/tests/src/utils/partition.rs`), so the mock DDI accepts
-/// the engine out of the box. Compiled in **only** for `mock` builds: a
+/// suite (`api/tests/src/utils/partition.rs`), so the emu DDI accepts
+/// the engine out of the box. Compiled in **only** for `emu` builds: a
 /// production build has no default, so an unset `TSRA_CREDENTIALS_*` is a
 /// hard error rather than a silent authentication with a well-known PIN.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 const DEFAULT_CRED_ID: [u8; CREDENTIALS_SIZE] = [1u8; CREDENTIALS_SIZE];
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 const DEFAULT_CRED_PIN: [u8; CREDENTIALS_SIZE] = [2u8; CREDENTIALS_SIZE];
 
 /// Length of a credential id or PIN (`HsmCredentials`), and of its hex form.
@@ -548,11 +548,11 @@ fn build_obk_config(settings: &ResiliencySettings) -> EngineResult<HsmOwnerBacku
 }
 
 fn credentials_from_env() -> EngineResult<HsmCredentials> {
-    // Defaults exist only in mock builds; a production build requires the
+    // Defaults exist only in emu builds; a production build requires the
     // env vars (see DEFAULT_CRED_* above).
-    #[cfg(feature = "mock")]
+    #[cfg(feature = "emu")]
     let (def_id, def_pin) = (Some(DEFAULT_CRED_ID), Some(DEFAULT_CRED_PIN));
-    #[cfg(not(feature = "mock"))]
+    #[cfg(not(feature = "emu"))]
     let (def_id, def_pin): (
         Option<[u8; CREDENTIALS_SIZE]>,
         Option<[u8; CREDENTIALS_SIZE]>,
@@ -568,7 +568,7 @@ fn credentials_from_env() -> EngineResult<HsmCredentials> {
 }
 
 /// Read a credential from `var` (hex). Falls back to `default` when the var is
-/// unset; in non-mock builds `default` is `None`, so a missing credential is a
+/// unset; in non-emu builds `default` is `None`, so a missing credential is a
 /// hard error rather than a silent well-known PIN.
 fn cred_field(
     var: &'static str,

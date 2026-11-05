@@ -14,8 +14,8 @@ use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::TborStatus;
 
 /// Assert that `err` is a backend-side "this wire encoding is not
-/// implemented" rejection. The `mock` backend returns this for every
-/// `exec_op_tbor` call (it has not opted into TBOR).
+/// implemented" rejection, as returned by a backend that has not opted
+/// into TBOR.
 #[track_caller]
 pub fn assert_unsupported_encoding(err: &DdiError) {
     assert!(

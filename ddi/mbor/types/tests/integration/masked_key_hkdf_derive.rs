@@ -4,7 +4,6 @@
 #![cfg(test)]
 
 use test_with_tracing::test;
-#[cfg(not(feature = "mock"))]
 use tsra_crypto::Rng;
 use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
@@ -427,7 +426,6 @@ fn test_masked_key_hmac_sha512() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_masked_key_var_hmac_sha256() {
     ddi_dev_test(
@@ -481,7 +479,6 @@ fn test_masked_key_var_hmac_sha256() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_masked_key_var_hmac_sha384() {
     ddi_dev_test(
@@ -535,7 +532,6 @@ fn test_masked_key_var_hmac_sha384() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_masked_key_var_hmac_sha512() {
     ddi_dev_test(

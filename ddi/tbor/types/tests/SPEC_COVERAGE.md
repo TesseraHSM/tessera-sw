@@ -18,7 +18,6 @@ Source of truth for the `TborStatus` enum:
 
 Test counts:
 * emu: 281 tests
-* mock: 6 tests
 
 ## Legend
 
@@ -44,7 +43,6 @@ All test names below are relative to the
 | Repeated calls return stable values | ✅ | `api_rev::api_rev_repeated_stable_emu` | Smoke for transport idempotence |
 | Independent of session state (no session open, then open, then close — all succeed) | ✅ | `api_rev::api_rev_independent_of_session_state_emu` | Proves the dispatcher does not gate `ApiRev` on session presence |
 | Default-PSK gate bypass (E5) | ✅ | `default_psk_gate::default_psk_gate_api_rev_bypass_emu` | Out-of-session opcodes are never default-PSK-gated |
-| Mock backend rejects the opcode at the transport layer | ✅ (mock) | `api_rev::unsupported_on_mock` | Mock has no TBOR-capable transport |
 
 ## `SessionOpenInit` (opcode out-of-session, phase 1 of handshake)
 
@@ -521,10 +519,10 @@ Firmware integration coverage for the TBOR `KeyReport` command. Tests validate P
  | Key label over `TBOR_KEY_LABEL_MAX_LEN` → `TborInvalidFixedLength` | ✅ | `ecdh_derive::ecdh_derive_key_label_too_long_rejected` |  |
  | Distinct non-empty key labels are accepted for identical ECDH inputs | ✅ | `ecdh_derive::ecdh_derive_different_labels_succeed` |  |
  | Binary key labels are accepted | ✅ | `ecdh_derive::ecdh_derive_binary_key_label` |  |
-| Empty response surfaces FW status without attempting body decode | ✅ | `fw_error_decode::empty_response_surfaces_fw_status` | Mock + emu |
-| Non-empty error response surfaces FW status before schema decode | ✅ | `fw_error_decode::fields_response_surfaces_fw_status_before_schema_decode` | Mock + emu |
-| `status == 0` with a valid body still decodes the body | ✅ | `fw_error_decode::zero_status_with_valid_body_still_decodes` | Mock + emu |
-| TOC entry of wrong type yields `TborDecodeError::UnexpectedTocType` | ✅ | `unexpected_toc_type::wrong_toc_entry_type_yields_unexpected_toc_type` | Mock + emu |
+| Empty response surfaces FW status without attempting body decode | ✅ | `fw_error_decode::empty_response_surfaces_fw_status` | emu |
+| Non-empty error response surfaces FW status before schema decode | ✅ | `fw_error_decode::fields_response_surfaces_fw_status_before_schema_decode` | emu |
+| `status == 0` with a valid body still decodes the body | ✅ | `fw_error_decode::zero_status_with_valid_body_still_decodes` | emu |
+| TOC entry of wrong type yields `TborDecodeError::UnexpectedTocType` | ✅ | `unexpected_toc_type::wrong_toc_entry_type_yields_unexpected_toc_type` | emu |
 | `mach_seed` AAD wire-layout encoder stability | ✅ | `part_init::success_path::mach_seed_aad_layout` | Unit test; pure host-side |
 
 ## `HkdfDerive` (opcode in-session, gated)
@@ -660,19 +658,19 @@ Authenticates a masked key of any kind without using it; empty response.
 FIPS 140-3 key assurance for keys that `UnwrapKey` imports, plus key-generation
 and unwrapping-key round trips, in the `key_assurance` module. Only hardware
 firmware checks an imported ECC key's structure and runs pairwise consistency
-tests (PCTs), so the tests that need either are ignored under `emu`, `mock`,
+tests (PCTs), so the tests that need either are ignored under `emu`
 and `sock`.
 
 | Requirement | Status | Test | Notes |
 |---|---|---|---|
 | Imported ECC keys work on every curve, for signing and derivation | ✅ | `key_assurance::import_ecc_p256_sign` through `key_assurance::import_ecc_p521_derive` | Six tests; each signs or derives with the imported key |
 | Imported RSA keys work for every size, layout, and usage | ✅ | `key_assurance::import_rsa_2k_plain_sign` through `key_assurance::import_rsa_4k_crt_decrypt` | Twelve tests: 2048, 3072, and 4096 bits, plain and CRT, sign and decrypt |
-| An ECC key whose embedded public key doesn't match is rejected with `KeyStructuralValidationFailed` | ✅ | `key_assurance::reject_ecc_mismatched_q_p256_sign`, `_p384_derive`, `_p521_sign` | Hardware only (`n/a` on emu, mock, and sock) |
+| An ECC key whose embedded public key doesn't match is rejected with `KeyStructuralValidationFailed` | ✅ | `key_assurance::reject_ecc_mismatched_q_p256_sign`, `_p384_derive`, `_p521_sign` | Hardware only (`n/a` on emu and sock) |
 | An ECC key with no embedded public key is rejected with `KeyDecodeFailed` | ✅ | `key_assurance::reject_ecc_missing_q_p256_derive`, `_p384_sign`, `_p521_derive` | Hardware only |
 | An ECC key with a compressed or hybrid point is rejected with `KeyStructuralValidationFailed` | ✅ | `key_assurance::reject_ecc_compressed_q_02_p256`, `reject_ecc_compressed_q_03_p384`, `reject_ecc_hybrid_q_06_p256`, `reject_ecc_hybrid_q_07_p521` | Hardware only |
 | An ECC key with `[0]` curve parameters is rejected with `KeyDecodeFailed` | ✅ | `key_assurance::reject_ecc_params_p256_sign`, `_p384_derive`, `_p521_sign` | Hardware only |
 | An ECC key whose private value is 0 or the curve order is rejected with `InvalidArg` | ✅ | `key_assurance::reject_ecc_d_zero_p256_sign`, `_p384_derive`, `_p521_sign`, and `key_assurance::reject_ecc_d_order_p256_derive`, `_p384_sign`, `_p521_derive` | All platforms |
-| An RSA key with an inconsistent private component is rejected with `PctValidationRsaUnwrapRsaKeyFailed` | ✅ | `key_assurance::reject_rsa_2k_plain_d_sign` and eight more `reject_rsa_*` tests that change `d`, `dp`, `dq`, `p`, or `q` | Hardware only (`n/a` on emu, mock, and sock) |
+| An RSA key with an inconsistent private component is rejected with `PctValidationRsaUnwrapRsaKeyFailed` | ✅ | `key_assurance::reject_rsa_2k_plain_d_sign` and eight more `reject_rsa_*` tests that change `d`, `dp`, `dq`, `p`, or `q` | Hardware only (`n/a` on emu and sock) |
 | An RSA key whose operations return their input unchanged (`e = d = 1`) is rejected with `PctValidationRsaUnwrapRsaKeyFailed` | ✅ | `key_assurance::reject_rsa_2k_plain_identity_sign`, `key_assurance::reject_rsa_2k_crt_identity_decrypt` | Hardware only |
 | An RSA decryption key with `e = 0`, whose public operation maps the test value to 1, is rejected with `InvalidArg`, which the PCT's private operation returns | ✅ | `key_assurance::reject_rsa_2k_plain_zero_e_decrypt`, `key_assurance::reject_rsa_2k_crt_zero_e_decrypt` | Hardware only |
 | A wrong CRT coefficient is either rejected by the PCT or harmless | ✅ | `key_assurance::rsa_2k_crt_qinv_corrupted` | All platforms |

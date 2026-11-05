@@ -20,9 +20,9 @@ integration = ["dep:tsra_api", "dep:tsra_ossl_engine"]
 [dependencies]
 tsra_api = { optional = true, workspace = true }
 tsra_ossl_engine = { features = [
+  "emu",
   "engine",
   "integration",
-  "mock",
 ], optional = true, path = "../../tsra_ossl_engine" }
 
 [lints]
