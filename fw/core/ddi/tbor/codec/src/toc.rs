@@ -150,7 +150,34 @@ pub fn raw_toc_inline_u16(word: u32) -> u16 {
 #[inline(always)]
 pub fn read_toc_word(buf: &[u8], header_len: usize, toc_index: usize) -> u32 {
     let base = header_len + toc_index * 4;
-    u32::from_be_bytes([buf[base], buf[base + 1], buf[base + 2], buf[base + 3]])
+    u32::from_be_bytes(read_word_bytes(&buf[base..base + 4]))
+}
+
+/// The four bytes at the start of `bytes`, read with a single word load
+/// when they are word-aligned.
+///
+/// Messages sit in DMA memory, which may be uncached: there every load
+/// costs the interconnect's full latency whatever its width, so four byte
+/// loads cost four times one word load. DMA buffers are word-aligned, which
+/// makes every TOC word and most fixed-width fields aligned too.
+///
+/// # Panics
+///
+/// Panics if `bytes` is shorter than four bytes, as indexing would.
+#[inline(always)]
+pub fn read_word_bytes(bytes: &[u8]) -> [u8; 4] {
+    let word: &[u8; 4] = match bytes.first_chunk() {
+        Some(word) => word,
+        None => panic!("read_word_bytes needs four bytes"),
+    };
+    if word.as_ptr().align_offset(4) == 0 {
+        #[allow(unsafe_code)]
+        // SAFETY: `word` is four readable bytes at a 4-aligned address.
+        let v = unsafe { word.as_ptr().cast::<u32>().read() };
+        v.to_ne_bytes()
+    } else {
+        *word
+    }
 }
 
 /// Read inline uint8 value from TOC entry at the given index.
@@ -179,7 +206,12 @@ pub fn read_toc_buffer(
     toc_index: usize,
     data_start: usize,
 ) -> &HsmDmaBuf {
-    let word = read_toc_word(buf, header_len, toc_index);
+    toc_word_buffer(buf, read_toc_word(buf, header_len, toc_index), data_start)
+}
+
+/// The data-section slice an offset/length TOC `word` names.
+#[inline(always)]
+pub fn toc_word_buffer(buf: &HsmDmaBuf, word: u32, data_start: usize) -> &HsmDmaBuf {
     let length = raw_toc_length(word);
     let offset = raw_toc_offset(word);
     &buf[data_start + offset..data_start + offset + length]
@@ -188,28 +220,29 @@ pub fn read_toc_buffer(
 /// Read a uint32 from the data section via an offset/length TOC entry.
 #[inline(always)]
 pub fn read_toc_uint32(buf: &[u8], header_len: usize, toc_index: usize, data_start: usize) -> u32 {
-    let word = read_toc_word(buf, header_len, toc_index);
-    let offset = raw_toc_offset(word);
-    let base = data_start + offset;
-    u32::from_le_bytes([buf[base], buf[base + 1], buf[base + 2], buf[base + 3]])
+    toc_word_uint32(buf, read_toc_word(buf, header_len, toc_index), data_start)
+}
+
+/// The little-endian `u32` an offset/length TOC `word` names.
+#[inline(always)]
+pub fn toc_word_uint32(buf: &[u8], word: u32, data_start: usize) -> u32 {
+    let base = data_start + raw_toc_offset(word);
+    u32::from_le_bytes(read_word_bytes(&buf[base..base + 4]))
 }
 
 /// Read a uint64 from the data section via an offset/length TOC entry.
 #[inline(always)]
 pub fn read_toc_uint64(buf: &[u8], header_len: usize, toc_index: usize, data_start: usize) -> u64 {
-    let word = read_toc_word(buf, header_len, toc_index);
-    let offset = raw_toc_offset(word);
-    let base = data_start + offset;
-    u64::from_le_bytes([
-        buf[base],
-        buf[base + 1],
-        buf[base + 2],
-        buf[base + 3],
-        buf[base + 4],
-        buf[base + 5],
-        buf[base + 6],
-        buf[base + 7],
-    ])
+    toc_word_uint64(buf, read_toc_word(buf, header_len, toc_index), data_start)
+}
+
+/// The little-endian `u64` an offset/length TOC `word` names.
+#[inline(always)]
+pub fn toc_word_uint64(buf: &[u8], word: u32, data_start: usize) -> u64 {
+    let base = data_start + raw_toc_offset(word);
+    let lo = u32::from_le_bytes(read_word_bytes(&buf[base..base + 4]));
+    let hi = u32::from_le_bytes(read_word_bytes(&buf[base + 4..base + 8]));
+    (u64::from(hi) << 32) | u64::from(lo)
 }
 
 // ── TOC word write helpers ─────────────────────────────────────────────
@@ -265,16 +298,16 @@ pub fn decode_toc_entry<'a>(
     let entry_type = raw_toc_entry_type(word);
 
     match entry_type {
-        0 => TocEntry::SessionId(read_toc_inline_u16(buf, header_len, toc_index)),
-        1 => TocEntry::KeyId(read_toc_inline_u16(buf, header_len, toc_index)),
-        2 => TocEntry::SealedKey(read_toc_buffer(buf, header_len, toc_index, data_start)),
+        0 => TocEntry::SessionId(raw_toc_inline_u16(word)),
+        1 => TocEntry::KeyId(raw_toc_inline_u16(word)),
+        2 => TocEntry::SealedKey(toc_word_buffer(buf, word, data_start)),
         3 => TocEntry::Uint8(raw_toc_inline_u8(word)),
-        4 => TocEntry::Uint16(read_toc_inline_u16(buf, header_len, toc_index)),
-        5 => TocEntry::Uint32(read_toc_uint32(buf, header_len, toc_index, data_start)),
-        6 => TocEntry::Uint64(read_toc_uint64(buf, header_len, toc_index, data_start)),
-        7 => TocEntry::Buffer(read_toc_buffer(buf, header_len, toc_index, data_start)),
+        4 => TocEntry::Uint16(raw_toc_inline_u16(word)),
+        5 => TocEntry::Uint32(toc_word_uint32(buf, word, data_start)),
+        6 => TocEntry::Uint64(toc_word_uint64(buf, word, data_start)),
+        7 => TocEntry::Buffer(toc_word_buffer(buf, word, data_start)),
         8 => TocEntry::None,
-        9 => TocEntry::Padding(read_toc_buffer(buf, header_len, toc_index, data_start)),
+        9 => TocEntry::Padding(toc_word_buffer(buf, word, data_start)),
         _ => TocEntry::Unknown {
             entry_type,
             raw_bits: word,

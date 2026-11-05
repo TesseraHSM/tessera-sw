@@ -20,6 +20,9 @@ use crate::toc::*;
 #[derive(Debug)]
 pub struct RequestView<'a> {
     buf: &'a HsmDmaBuf,
+    /// The header's first word (version, flags, TOC count, opcode), read
+    /// once by [`parse()`](Self::parse).
+    head: [u8; 4],
 }
 
 impl<'a> RequestView<'a> {
@@ -39,12 +42,13 @@ impl<'a> RequestView<'a> {
             return Err(HsmError::TborBufferTooShort);
         }
 
-        let version = buf[0];
+        let head = read_word_bytes(buf);
+        let version = head[0];
         if version != PROTOCOL_VERSION {
             return Err(HsmError::TborUnsupportedVersion);
         }
 
-        let toc_count = (buf[2] & 0x1F) as usize + 1;
+        let toc_count = (head[2] & 0x1F) as usize + 1;
         let min_len = REQ_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
@@ -56,25 +60,25 @@ impl<'a> RequestView<'a> {
         // Validate all known offset/length TOC entries.
         validate_toc_entries(buf, REQ_HEADER_LEN, toc_count, data_size)?;
 
-        Ok(Self { buf })
+        Ok(Self { buf, head })
     }
 
     /// Protocol version.
     #[inline]
     pub fn version(&self) -> u8 {
-        self.buf[0]
+        self.head[0]
     }
 
     /// Operation code.
     #[inline]
     pub fn opcode(&self) -> u8 {
-        self.buf[3]
+        self.head[3]
     }
 
     /// Number of TOC entries (1–32).
     #[inline]
     pub fn toc_count(&self) -> usize {
-        (self.buf[2] & 0x1F) as usize + 1
+        (self.head[2] & 0x1F) as usize + 1
     }
 
     /// Byte offset where the variable-length data section starts.
@@ -141,6 +145,9 @@ impl<'a> RequestView<'a> {
 #[derive(Debug)]
 pub struct ResponseView<'a> {
     buf: &'a HsmDmaBuf,
+    /// The header's first word (version, flags, TOC count, reserved), read
+    /// once by [`parse()`](Self::parse).
+    head: [u8; 4],
 }
 
 impl<'a> ResponseView<'a> {
@@ -160,12 +167,13 @@ impl<'a> ResponseView<'a> {
             return Err(HsmError::TborBufferTooShort);
         }
 
-        let version = buf[0];
+        let head = read_word_bytes(buf);
+        let version = head[0];
         if version != PROTOCOL_VERSION {
             return Err(HsmError::TborUnsupportedVersion);
         }
 
-        let toc_count = (buf[2] & 0x1F) as usize + 1;
+        let toc_count = (head[2] & 0x1F) as usize + 1;
         let min_len = RESP_HEADER_LEN + toc_count * 4;
         if buf.len() < min_len {
             return Err(HsmError::TborMessageTruncated);
@@ -176,37 +184,37 @@ impl<'a> ResponseView<'a> {
 
         validate_toc_entries(buf, RESP_HEADER_LEN, toc_count, data_size)?;
 
-        Ok(Self { buf })
+        Ok(Self { buf, head })
     }
 
     /// Protocol version.
     #[inline]
     pub fn version(&self) -> u8 {
-        self.buf[0]
+        self.head[0]
     }
 
     /// Flags byte.
     #[inline]
     pub fn flags(&self) -> u8 {
-        self.buf[1]
+        self.head[1]
     }
 
     /// FIPS_APPROVED flag (bit 0 of flags).
     #[inline]
     pub fn fips_approved(&self) -> bool {
-        self.buf[1] & 0x01 != 0
+        self.head[1] & 0x01 != 0
     }
 
     /// Status code (4-byte LE unsigned integer).
     #[inline]
     pub fn status(&self) -> u32 {
-        u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
+        u32::from_le_bytes(read_word_bytes(&self.buf[4..]))
     }
 
     /// Number of TOC entries (1–32).
     #[inline]
     pub fn toc_count(&self) -> usize {
-        (self.buf[2] & 0x1F) as usize + 1
+        (self.head[2] & 0x1F) as usize + 1
     }
 
     /// Byte offset where the variable-length data section starts.
