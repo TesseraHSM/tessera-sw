@@ -3,17 +3,18 @@
 
 //! Shared state for the PQC engine pool.
 //!
-//! Mirrors the UPKA pool but for three engines rather than sixteen, and
-//! without specific-engine acquisition: callers never need a particular FP
-//! core, so the only entry point is "give me any free engine". A caller may
-//! name a preference, though: an ML-DSA signer tags its request with its
-//! key, and the core that last signed with that key still holds the key's
-//! public matrix, which spares it most of the matrix expansion. A freed
-//! engine goes to the oldest waiter with its tag, if one is queued, ahead
-//! of the head of the queue; failing that, to the oldest whose tag no other
-//! engine holds, so that it does not take a waiter another engine would
-//! serve with its matrix in hand. The head is passed over at most
-//! [`MAX_HEAD_SKIPS`] times before it is served regardless.
+//! Mirrors the UPKA pool but for six engines -- two lanes on each of three
+//! FP cores -- rather than sixteen, and without specific-engine
+//! acquisition: callers never need a particular lane, so the only entry
+//! point is "give me any free engine". A caller may name a preference,
+//! though: an ML-DSA signer tags its request with its key, and the core
+//! that last signed with that key still holds the key's public matrix,
+//! which spares it most of the matrix expansion. A freed engine goes to the
+//! oldest waiter with its core's tag, if one is queued, ahead of the head
+//! of the queue; failing that, to the oldest whose tag no other core holds,
+//! so that it does not take a waiter another core would serve with its
+//! matrix in hand. The head is passed over at most [`MAX_HEAD_SKIPS`] times
+//! before it is served regardless.
 
 use core::task::Context;
 use core::task::Poll;
@@ -25,6 +26,7 @@ use crate::error::PqcError;
 use crate::types::EngineId;
 use crate::types::EngineState;
 use crate::types::QueueSlotState;
+use crate::types::CORES;
 use crate::types::ENGINES;
 use crate::types::QUEUE_DEPTH;
 
@@ -70,7 +72,7 @@ pub(crate) struct QueueSlot {
     pub(crate) next: u8,
 
     /// The waiter's affinity tag, or 0 for none; see
-    /// [`PqcState::engine_tag`].
+    /// [`PqcState::core_tag`].
     pub(crate) tag: u32,
 }
 
@@ -104,10 +106,11 @@ pub(crate) struct PqcState {
     /// Per-engine state.
     pub(crate) engines: [EngineSlot; ENGINES],
 
-    /// Per engine, the last nonzero tag a task acquired it with: the key
-    /// its core last signed with, and whose public matrix it still holds.
-    /// Only a hint -- the core checks the key itself.
-    pub(crate) engine_tag: [u32; ENGINES],
+    /// Per core, the last nonzero tag a task acquired one of its lanes
+    /// with: the key it signs with next or last, and whose public matrix it
+    /// holds. Kept per core because the two lanes share one matrix. Only a
+    /// hint -- the core checks the key itself.
+    pub(crate) core_tag: [u32; CORES],
 
     /// Times the current head waiter has been passed over.
     pub(crate) head_skips: u8,
@@ -152,7 +155,7 @@ impl PqcState {
         Self {
             free_mask: (1u8 << ENGINES) - 1,
             engines: [const { EngineSlot::new() }; ENGINES],
-            engine_tag: [0; ENGINES],
+            core_tag: [0; CORES],
             head_skips: 0,
             queue,
             free_head: 0,
@@ -164,19 +167,29 @@ impl PqcState {
     }
 
     /// Claim a free engine for a task with affinity `tag`, marking it busy:
-    /// one that holds `tag` if any is free, otherwise the lowest.
+    /// preferably a lane of an idle core, so that requests run side by side
+    /// rather than queue on one core while another idles, and of those one
+    /// whose core holds `tag`; otherwise the lowest.
     pub(crate) fn claim_free_engine(&mut self, tag: u32) -> Option<EngineId> {
         if self.free_mask == 0 {
             return None;
         }
-        let mut id = self.free_mask.trailing_zeros() as u8;
-        if tag != 0 {
-            if let Some(i) =
-                (0..ENGINES).find(|&i| self.free_mask & (1 << i) != 0 && self.engine_tag[i] == tag)
-            {
+        let mut id = 0;
+        let mut best = u8::MAX;
+        for i in 0..ENGINES {
+            if self.free_mask & (1 << i) == 0 {
+                continue;
+            }
+            let busy = self.free_mask & (1 << ((i + CORES) % ENGINES)) == 0;
+            let rank =
+                (u8::from(busy) << 1) | u8::from(tag == 0 || self.core_tag[i % CORES] != tag);
+            if rank < best {
+                best = rank;
                 id = i as u8;
             }
-            self.engine_tag[id as usize] = tag;
+        }
+        if tag != 0 {
+            self.core_tag[id as usize % CORES] = tag;
         }
         self.free_mask &= !(1u8 << id);
         self.engines[id as usize].state = EngineState::Busy;
@@ -192,10 +205,9 @@ impl PqcState {
         self.wait_head != NO_SLOT
     }
 
-    /// True if an engine other than `e` last ran a task with tag `tag`
-    /// (nonzero).
-    fn held_elsewhere(&self, e: usize, tag: u32) -> bool {
-        tag != 0 && (0..ENGINES).any(|i| i != e && self.engine_tag[i] == tag)
+    /// True if a core other than `core` holds tag `tag` (nonzero).
+    fn held_elsewhere(&self, core: usize, tag: u32) -> bool {
+        tag != 0 && (0..CORES).any(|c| c != core && self.core_tag[c] == tag)
     }
 
     /// Reserve a queue slot for a task with affinity `tag` about to wait.
@@ -244,17 +256,17 @@ impl PqcState {
 
     /// Return an engine to the pool, handing it straight to a waiting task
     /// if there is one: unless the head of the queue has been passed over
-    /// [`MAX_HEAD_SKIPS`] times, the longest-waiting with the engine's tag,
-    /// else the longest-waiting whose tag no other engine holds; otherwise
+    /// [`MAX_HEAD_SKIPS`] times, the longest-waiting with its core's tag,
+    /// else the longest-waiting whose tag no other core holds; otherwise
     /// the head.
     pub(crate) fn release_engine(&mut self, id: EngineId) {
+        let core = id.core() as usize;
         // The head of the wait ring is by construction the waiter that
         // queued first.
         let waiter = if self.wait_head == NO_SLOT {
             None
         } else {
-            let e = id.raw() as usize;
-            let want = self.engine_tag[e];
+            let want = self.core_tag[core];
             let head = self.wait_head;
             let mut idx = head;
             if self.head_skips < MAX_HEAD_SKIPS
@@ -268,7 +280,7 @@ impl PqcState {
                         pick = cur;
                         break;
                     }
-                    if pick == NO_SLOT && !self.held_elsewhere(e, tag) {
+                    if pick == NO_SLOT && !self.held_elsewhere(core, tag) {
                         pick = cur;
                     }
                     cur = self.queue[cur as usize].next;
@@ -291,7 +303,7 @@ impl PqcState {
                 self.engines[id.raw() as usize].state = EngineState::Busy;
                 let tag = self.queue[idx].tag;
                 if tag != 0 {
-                    self.engine_tag[id.raw() as usize] = tag;
+                    self.core_tag[core] = tag;
                 }
                 self.queue[idx].state = QueueSlotState::Assigned(id);
                 self.queue[idx].waker.wake();
@@ -593,20 +605,53 @@ mod tests {
         // An untagged engine serves the head, which hands it its tag.
         state.release_engine(EngineId::new(1));
         assert_eq!(collect(&mut state, head), Some(EngineId::new(1)));
-        assert_eq!(state.engine_tag[1], 1);
+        assert_eq!(state.core_tag[1], 1);
         state.release_engine(EngineId::new(1));
         assert_eq!(collect(&mut state, later_five), Some(EngineId::new(1)));
 
         // Of the free engines, one holding the tag is claimed first.
         let mut state = PqcState::new();
-        state.engine_tag[2] = 7;
+        state.core_tag[2] = 7;
         assert_eq!(state.claim_free_engine(7), Some(EngineId::new(2)));
         assert_eq!(state.claim_free_engine(9), Some(EngineId::new(0)));
-        assert_eq!(state.engine_tag[0], 9);
+        assert_eq!(state.core_tag[0], 9);
+    }
+
+    /// A free lane of an idle core is claimed ahead of one whose core holds
+    /// the tag but is busy with its other lane; once every core is busy,
+    /// the tag decides.
+    #[test]
+    fn idle_cores_are_claimed_before_busy_cores_lanes() {
+        let mut state = PqcState::new();
+        assert_eq!(state.claim_free_engine(9), Some(EngineId::new(0)));
+        assert_eq!(state.claim_free_engine(9), Some(EngineId::new(1)));
+        assert_eq!(state.claim_free_engine(7), Some(EngineId::new(2)));
+        assert_eq!(state.claim_free_engine(7), Some(EngineId::new(5)));
+        assert_eq!(state.claim_free_engine(0), Some(EngineId::new(3)));
+    }
+
+    /// Both lanes of a core share its tag: a freed lane goes to a waiter
+    /// for the key its core's other lane was taken for.
+    #[test]
+    fn released_lane_prefers_its_cores_tag() {
+        let mut state = PqcState::new();
+        for _ in 0..crate::types::CORES {
+            state.claim_free_engine(0).expect("engine free");
+        }
+        let lane = state.claim_free_engine(5).expect("engine free");
+        assert_eq!(lane, EngineId::new(3));
+        state.claim_free_engine(0).expect("engine free");
+        state.claim_free_engine(0).expect("engine free");
+
+        let six = state.reserve_queue_slot(6).expect("slot");
+        let five = state.reserve_queue_slot(5).expect("slot");
+        state.release_engine(EngineId::new(0));
+        assert_eq!(collect(&mut state, five), Some(EngineId::new(0)));
+        assert!(collect(&mut state, six).is_none());
     }
 
     /// With no waiter for its own tag, a freed engine passes over waiters
-    /// whose tag another engine holds for one whose tag none does.
+    /// whose tag another core holds for one whose tag none does.
     #[test]
     fn released_engine_leaves_waiters_another_engine_holds() {
         let mut state = PqcState::new();
@@ -618,7 +663,7 @@ mod tests {
 
         state.release_engine(EngineId::new(0));
         assert_eq!(collect(&mut state, nine), Some(EngineId::new(0)));
-        assert_eq!(state.engine_tag[0], 9);
+        assert_eq!(state.core_tag[0], 9);
         state.release_engine(EngineId::new(1));
         assert_eq!(collect(&mut state, six), Some(EngineId::new(1)));
     }
