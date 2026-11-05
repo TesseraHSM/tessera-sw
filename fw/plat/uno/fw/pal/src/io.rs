@@ -304,7 +304,7 @@ impl HsmIoController for UnoHsmPal {
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
         Cqe::try_from(io.cqe())?.set_sq_id(queue_id);
-        self.oic.send(io.index)?.await
+        self.oic.send(io.index, queue_id as u8)?.await
     }
 
     /// Drops an IO without sending a completion (e.g. for disabled
@@ -438,7 +438,8 @@ impl UnoHsmPal {
     /// Posts slot `index`'s completion, or leaves it for the next pass if
     /// the OIC has no room.
     fn post_detached(&self, index: u16) {
-        if self.oic.send_detached(index).is_err() {
+        let queue_id = self.detached[index as usize].get().queue_id as u8;
+        if self.oic.send_detached(index, queue_id).is_err() {
             self.detached_post_pending
                 .set(self.detached_post_pending.get() | 1 << index);
         }

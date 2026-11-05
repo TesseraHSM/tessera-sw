@@ -427,8 +427,9 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 // SAFETY: The masked consumer index selects an available entry in the CQ ring.
                 let cq_entry = unsafe { &*self.cq_ring.add(cq_slot) };
 
-                let tag = cq_entry.status.read(GDMA_CQ_STATUS::TAG) as u16;
-                let status = if cq_entry.status.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
+                let st = cq_entry.status.extract();
+                let tag = st.read(GDMA_CQ_STATUS::TAG) as u16;
+                let status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
                     0u8
                 } else {
                     1u8

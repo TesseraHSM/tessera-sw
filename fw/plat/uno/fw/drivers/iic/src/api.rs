@@ -30,6 +30,10 @@ struct ChannelState {
     /// ICQ consumer index — FW advances after reading completions.
     icq_head: u16,
 
+    /// ISQ producer index — the firmware is the register's only writer, so
+    /// it is tracked here rather than read back on every freed IO.
+    isq_tail: u16,
+
     /// Waker for async recv — woken by IRQ or polling.
     waker: WakerRegistration,
 }
@@ -144,6 +148,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             io_meta: config.io_meta_base as *mut IoMetaEntry,
             state: SingleCell::new(ChannelState {
                 icq_head: 0,
+                isq_tail: (DEPTH - 1) as u16,
                 waker: WakerRegistration::new(),
             }),
             regs,
@@ -217,7 +222,11 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         // attach can never adopt foreign or uninitialised hardware state.
         if should_attach(fw_update, already_enabled, ours) {
             let hw_head = regs.icq_ch[ch].head.read(ICQ_CHANNEL_HEAD::HEAD) as u16;
-            self.state.with(|s| s.icq_head = hw_head);
+            let hw_isq_tail = regs.isq_ch[ch].tail.read(ISQ_CHANNEL_TAIL::TAIL) as u16;
+            self.state.with(|s| {
+                s.icq_head = hw_head;
+                s.isq_tail = hw_isq_tail;
+            });
             // The completion IRQ enable does not survive the core reset even
             // though the queue programming does; re-arm it (idempotent).
             if config.interrupt {
@@ -285,6 +294,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         isq.status.write(ISQ_CHANNEL_STATUS::EMPTY::SET);
         isq.tail
             .write(ISQ_CHANNEL_TAIL::TAIL.val((DEPTH as u32) - 1));
+        self.state.with(|s| s.isq_tail = (DEPTH - 1) as u16);
         isq.head.write(ISQ_CHANNEL_HEAD::HEAD.val(0));
         isq.ctrl.modify(
             ISQ_CHANNEL_CTRL::DEPTH.val(Self::ENCODED_DEPTH)
@@ -319,12 +329,15 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// Both DFL refill and IQ credit release happen together when an IO
     /// is fully processed.
     pub fn free_io(&self, index: u16, queue_id: u16) {
-        // Return buffer to DFL (read PI from HW each time)
+        self.state.with(|s| self.free_io_in(s, index, queue_id));
+    }
+
+    /// [`free_io`](Self::free_io) with the driver state already borrowed.
+    fn free_io_in(&self, s: &mut ChannelState, index: u16, queue_id: u16) {
+        // Return buffer to DFL
         let buf_addr = self.buf_addr(index);
-        let pi = self.regs.isq_ch[self.channel as usize]
-            .tail
-            .read(ISQ_CHANNEL_TAIL::TAIL) as u16;
-        let new_pi = (pi + 1) & Self::MASK;
+        s.isq_tail = (s.isq_tail + 1) & Self::MASK;
+        let new_pi = s.isq_tail;
         // SAFETY: The masked producer index selects a free entry in the configured ISQ ring.
         let entry = unsafe { &mut *self.isq_ring.add(new_pi as usize) };
         entry.addr_lo = buf_addr;
@@ -419,7 +432,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
                 queue_id,
                 _cause
             );
-            self.free_io(index, queue_id);
+            self.free_io_in(s, index, queue_id);
             return IcqPop::Recycled;
         }
 
@@ -451,16 +464,6 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
 
             // SAFETY: The configured shadow word is aligned and remains mapped for the driver.
             let tail = unsafe { self.icq_tail_shadow.read_volatile() } as u16;
-            let _hw_tail = self.regs.icq_ch[self.channel as usize].tail.get() as u16;
-            //             debug!(
-            //                 "iic",
-            //                 "wake ch={} head={} shadow_tail={} hw_tail={} shadow_ptr={:#x}",
-            //                 self.channel,
-            //                 s.icq_head,
-            //                 tail,
-            //                 hw_tail,
-            //                 self.icq_tail_shadow as u32
-            //             );
             if s.icq_head != tail {
                 s.waker.wake();
             }
