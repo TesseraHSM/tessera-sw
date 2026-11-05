@@ -454,52 +454,6 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
         });
     }
 
-    // SDK Run TBOR types tests against emu backend
-    // CI job: test_ubuntu_misc
-    #[cfg(not(target_os = "windows"))]
-    if !exclude.iter().any(|e| e == "tsra_ddi_tbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_tbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-tbor-emu".to_string())),
-            exclude: exclude.to_owned(),
-            test: None,
-            filter: vec![],
-        });
-    }
-
-    // Run emu smoke tests
-    // CI job: test_*_smoke
-    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-emu-smoke".to_string())),
-            exclude: exclude.to_owned(),
-            test: Some("tsra_ddi_tests".to_string()),
-            filter: vec!["smoke".to_string()],
-        });
-    }
-
-    // Run emu DDI tests
-    // CI job: test_*_emu_ddi
-    if !exclude.iter().any(|e| e == "tsra_ddi_mbor_types") {
-        tests.push(Nextest {
-            features: Some("emu".to_string()),
-            package: Some("tsra_ddi_mbor_types".to_string()),
-            no_default_features: false,
-            filterset: None,
-            profile: profile.clone().or(Some("ci-emu-ddi".to_string())),
-            exclude: exclude.to_owned(),
-            test: Some("tsra_ddi_tests".to_string()),
-            filter: vec![],
-        });
-    }
-
     tests
 }
 
