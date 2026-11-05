@@ -41,6 +41,7 @@ use crate::error::Error;
 pub use crate::error::Error as AeadError;
 use crate::format::is_valid_aad_len;
 use crate::format::read_header;
+use crate::format::Header;
 pub use crate::format::FORMAT_TAG;
 pub use crate::format::HEADER_LEN;
 pub use crate::format::MAX_AAD_LEN;
@@ -178,7 +179,7 @@ pub async fn open<'a, P: HsmCrypto>(
     key: &HsmDmaBuf,
     buf: &'a mut HsmDmaBuf,
 ) -> HsmResult<AeadEnvelope<'a>> {
-    let header = read_header(buf)?;
+    let header = read_dma_header(buf)?;
     let env = match header.alg {
         AeadAlg::AesGcm256 => open_gcm(crypto, io, key, buf, header).await?,
     };
@@ -218,7 +219,7 @@ pub async fn open<'a, P: HsmCrypto>(
 ///   [`AeadError::BufferTooSmall`] (buffer shorter than the framing
 ///   implies).
 pub fn peek(buf: &HsmDmaBuf) -> HsmResult<AeadPeek<'_>> {
-    let header = read_header(buf)?;
+    let header = read_dma_header(buf)?;
     // Validates the minimum envelope length (HEADER + iv + aad + tag)
     // and yields the region boundaries; iv_len / tag_len are derived
     // from the `alg` parsed above. The payload / tag offsets are
@@ -229,4 +230,14 @@ pub fn peek(buf: &HsmDmaBuf) -> HsmResult<AeadPeek<'_>> {
         iv: &buf[iv_off..aad_off],
         aad: &buf[aad_off..payload_off],
     })
+}
+
+/// [`read_header`] over a copy of the header taken a word at a time: the
+/// buffer may be uncached DMA memory, where reading the fields in place
+/// would cost a load per byte.
+fn read_dma_header(buf: &HsmDmaBuf) -> Result<Header, Error> {
+    match buf.read_prefix::<HEADER_LEN>() {
+        Some(head) => read_header(&head),
+        None => read_header(buf),
+    }
 }

@@ -261,7 +261,7 @@ impl MaskedKeyMetadata {
 const LABEL_OFF: usize = core::mem::offset_of!(MaskedKeyMetadata, key_label);
 
 /// Whether every byte is zero, tested a word at a time.
-fn all_zero(bytes: &[u8]) -> bool {
+pub(crate) fn all_zero(bytes: &[u8]) -> bool {
     let (words, rest) = bytes.as_chunks::<4>();
     let acc = words
         .iter()
