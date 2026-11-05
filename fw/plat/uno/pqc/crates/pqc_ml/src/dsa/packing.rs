@@ -65,14 +65,9 @@ pub fn pack_t0(buf: &mut [u8], a: &Poly) {
     }
 }
 
-pub fn unpack_t0(a: &mut Poly, buf: &[u8]) {
-    // Centered: [0, 2^d) maps to [-(2^(d-1)-1), 2^(d-1)].
-    unpack_centered(a, buf, D, 1 << (D - 1));
-}
-
 /// Unpack 256 `d`-bit fields, little-endian as FIPS 204's BitPack writes
-/// them, as `bias - field`: the form of `t0`, and of `s1`/`s2` for both
-/// values of eta.
+/// them, as `bias - field`: the form of `t0` (13 bits, bias 2^12), and of
+/// `s1`/`s2` for both values of eta (3 or 4 bits, bias eta).
 ///
 /// Signing reads these straight out of the secret key where it lies, in
 /// PSRAM, which charges about 35 cycles an access whether the access is a
@@ -80,7 +75,7 @@ pub fn unpack_t0(a: &mut Poly, buf: &[u8]) {
 /// accesses the byte-wise unpackers made, and one routine for all three
 /// shapes is smaller than any one of them was.
 #[inline(never)]
-fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
+pub(crate) fn unpack_centered(a: &mut Poly, buf: &[u8], d: u32, bias: i32) {
     let mut words = buf[..32 * d as usize].as_chunks::<4>().0.iter();
     let mask = (1u32 << d) - 1;
     let mut acc: u32 = 0;
@@ -108,16 +103,6 @@ pub fn pack_eta(buf: &mut [u8], a: &Poly, eta: u8) {
     match eta {
         2 => pack_eta2(buf, a),
         4 => pack_eta4(buf, a),
-        _ => {}
-    }
-}
-
-pub fn unpack_eta(a: &mut Poly, buf: &[u8], eta: u8) {
-    // Three bits a coefficient for eta = 2, four for eta = 4; either way
-    // the field f stands for eta - f.
-    match eta {
-        2 => unpack_centered(a, buf, 3, 2),
-        4 => unpack_centered(a, buf, 4, 4),
         _ => {}
     }
 }
