@@ -211,6 +211,17 @@ impl MaskedKeyMetadata {
         Ok(&self.key_label[..n])
     }
 
+    /// Byte range of the label within the metadata record, for borrowing it
+    /// from the record's original bytes rather than from a copy.
+    #[inline]
+    pub(crate) fn key_label_range(&self) -> HsmResult<core::ops::Range<usize>> {
+        let n = self.key_label_len as usize;
+        if n > KEY_LABEL_MAX {
+            return Err(HsmError::MaskedKeyDecodeFailed);
+        }
+        Ok(LABEL_OFF..LABEL_OFF + n)
+    }
+
     /// Validate every field of the parsed metadata against v1's
     /// invariants. Returns [`HsmError::MaskedKeyDecodeFailed`] for
     /// any violation:
@@ -232,16 +243,28 @@ impl MaskedKeyMetadata {
             || self.version.get() != META_VERSION_V1
             || self.data_pad_len > 15
             || (self.key_label_len as usize) > KEY_LABEL_MAX
-            || !self._reserved.iter().all(|&b| b == 0)
+            || !all_zero(&self._reserved)
         {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
         // Pad bytes after the label MUST be zero — prevents callers
         // from smuggling unbound-looking data through the slack.
         let n = self.key_label_len as usize;
-        if !self.key_label[n..].iter().all(|&b| b == 0) {
+        if !all_zero(&self.key_label[n..]) {
             return Err(HsmError::MaskedKeyDecodeFailed);
         }
         Ok(())
     }
+}
+
+/// Offset of `key_label` within [`MaskedKeyMetadata`].
+const LABEL_OFF: usize = core::mem::offset_of!(MaskedKeyMetadata, key_label);
+
+/// Whether every byte is zero, tested a word at a time.
+fn all_zero(bytes: &[u8]) -> bool {
+    let (words, rest) = bytes.as_chunks::<4>();
+    let acc = words
+        .iter()
+        .fold(0u32, |acc, w| acc | u32::from_ne_bytes(*w));
+    acc == 0 && rest.iter().all(|&b| b == 0)
 }
