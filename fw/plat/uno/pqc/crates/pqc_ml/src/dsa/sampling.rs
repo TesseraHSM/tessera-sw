@@ -23,21 +23,25 @@ pub fn poly_uniform(a: &mut Poly, rho: &[u8], i: u8, j: u8) {
     ctx.absorb(&[j, i]);
     ctx.finalize();
 
+    // Three little-endian words hold four 3-byte candidates, so each one
+    // is a shift, an OR and a mask rather than three byte loads.
+    let mut buf = [0u32; SHAKE128_RATE / 4];
     let mut ctr = 0;
-    let mut buf = [0u8; SHAKE128_RATE];
     while ctr < N {
-        ctx.squeeze(&mut buf);
-        let mut pos = 0;
-        while pos + 3 <= SHAKE128_RATE && ctr < N {
-            // 3-byte rejection sampling
-            let d = (buf[pos] as u32)
-                | ((buf[pos + 1] as u32) << 8)
-                | (((buf[pos + 2] & 0x7F) as u32) << 16);
-            pos += 3;
-            if d < Q {
-                a[ctr] = d as i32;
-                ctr += 1;
-            }
+        ctx.squeeze_words(&mut buf);
+        for w in buf.as_chunks::<3>().0 {
+            let (w0, w1, w2) = (u32::from_le(w[0]), u32::from_le(w[1]), u32::from_le(w[2]));
+            let mut take = |d: u32| {
+                let d = d & 0x7F_FFFF;
+                if d < Q && ctr < N {
+                    a[ctr] = d as i32;
+                    ctr += 1;
+                }
+            };
+            take(w0);
+            take((w0 >> 24) | (w1 << 8));
+            take((w1 >> 16) | (w2 << 16));
+            take(w2 >> 8);
         }
     }
 }
