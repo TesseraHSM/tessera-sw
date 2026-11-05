@@ -246,6 +246,27 @@ impl HsmDmaBuf {
         dst.copy_from_slice(src);
         true
     }
+
+    /// The first `N` bytes of this buffer, or `None` if it is shorter.
+    ///
+    /// When they are word-aligned and `N` is a whole number of words, they
+    /// are read a word at a time rather than a byte at a time (see
+    /// [`copy_to_slice`](Self::copy_to_slice)): a short header read out of
+    /// DMA memory this way costs a load per word.
+    #[inline]
+    pub fn read_prefix<const N: usize>(&self) -> Option<[u8; N]> {
+        let src: &[u8; N] = self.inner.first_chunk()?;
+        if !N.is_multiple_of(4) || src.as_ptr().align_offset(4) != 0 {
+            return Some(*src);
+        }
+        let mut out = [0u8; N];
+        for (i, word) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            // SAFETY: `src` is `N` readable bytes at a 4-aligned address and
+            // `i < N / 4`, so word `i` lies within it.
+            *word = unsafe { src.as_ptr().cast::<u32>().add(i).read() }.to_ne_bytes();
+        }
+        Some(out)
+    }
 }
 
 /// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word
