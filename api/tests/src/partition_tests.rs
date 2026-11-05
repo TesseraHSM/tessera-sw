@@ -250,6 +250,50 @@ fn test_partition_init() {
     }
 }
 
+/// A second handle initializing an already-initialized partition (as a
+/// second process does on a shared device) must still expose the MOBK.
+#[api_test]
+fn test_partition_init_already_established_exposes_mobk() {
+    if use_tpm() {
+        return;
+    }
+    let part_mgr = HsmPartitionManager::partition_info_list();
+    assert!(!part_mgr.is_empty(), "No partitions found.");
+    for part_info in part_mgr.iter() {
+        let part = HsmPartitionManager::open_partition(&part_info.path, test_api_rev())
+            .expect("Failed to open the partition");
+        part.reset().expect("Partition reset failed");
+        let (obk_info, pota_endorsement) = make_init_params(&part);
+        part.init(
+            HsmCredentials::new(&APP_ID, &APP_PIN),
+            None,
+            None,
+            obk_info,
+            pota_endorsement,
+            None,
+        )
+        .expect("Partition init failed");
+        save_mobk_after_init(&part);
+        let mobk = part.mobk_vec();
+        assert!(!mobk.is_empty(), "MOBK missing after first init");
+
+        let second = HsmPartitionManager::open_partition(&part_info.path, test_api_rev())
+            .expect("Failed to open the partition again");
+        let (obk_info, pota_endorsement) = make_init_params(&second);
+        second
+            .init(
+                HsmCredentials::new(&APP_ID, &APP_PIN),
+                None,
+                None,
+                obk_info,
+                pota_endorsement,
+                None,
+            )
+            .expect("Second init failed");
+        assert_eq!(second.mobk_vec(), mobk);
+    }
+}
+
 #[api_test]
 fn test_cert_chain() {
     let part_mgr = HsmPartitionManager::partition_info_list();

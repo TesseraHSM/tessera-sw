@@ -19,3 +19,4 @@ workspace = true
 default = []
 emu = []
 provider = []
+sock = []

@@ -11,6 +11,9 @@ fn main() {
     if env::var("CARGO_FEATURE_EMU").is_ok() {
         features.push("emu");
     }
+    if env::var("CARGO_FEATURE_SOCK").is_ok() {
+        features.push("sock");
+    }
 
     // Calculate the target directory for passing to CMake
     // OUT_DIR is in target/profile/build/crate-hash/out, so we go up 3 levels

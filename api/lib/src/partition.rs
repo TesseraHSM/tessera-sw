@@ -1347,6 +1347,11 @@ impl HsmPartitionInner {
                     .map(Self::read_bmk_from_storage)
                     .transpose()?
                     .unwrap_or_default();
+                // The MOBK resolved for this attempt is still valid for the
+                // already-initialized device; cache it so callers can read it.
+                if let Some(mobk) = cached_mobk.take() {
+                    self.set_mobk(mobk);
+                }
                 (bmk, pota_endorsement)
             }
             // Any other error is propagated to the caller.
