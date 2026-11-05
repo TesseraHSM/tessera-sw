@@ -14,6 +14,7 @@
 #   timing: benchmarks and timing ratios: meaningless or flaky on shared runners
 #   import-refused: set up a plaintext key, which C_CreateObject refuses, and
 #     pass on that refusal without reaching what they test
+#   posture: record a hardening note and pass on the path this module takes
 #   crash: known crashes (none at present)
 
 rng testcases/test_access_levels.py::TestPublicSessionVisibility::test_public_session_can_generate_random
@@ -41,8 +42,23 @@ tool testcases/test_mech_coverage.py::TestMechanismRegistryCoverage::test_advert
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_load_module_via_p11kit
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_list_modules
 environment testcases/test_interop_openssl.py::TestP11KitProxy::test_p11kit_proxy_exists
+timing testcases/security/test_cve_regression.py::TestECDSATimingBasic::test_ecdsa_timing_variance
 timing testcases/security/test_padding_oracle.py::TestTimingBasic::test_aes_cbc_pad_decrypt_timing_sanity
 timing testcases/test_benchmark.py::test_bench_aes256_cbc_encrypt
 timing testcases/test_benchmark.py::test_bench_aes_keygen
+timing testcases/test_benchmark.py::test_bench_ecdsa_p256_sign
 timing testcases/test_benchmark.py::test_bench_sha256_digest
 import-refused testcases/test_surface_audit.py::TestMechanismLimitProbing::test_hmac_short_key
+posture testcases/security/test_crypto_weakness.py::TestSmallRsaPublicKeyImport::test_small_rsa_public_key_import
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[DES3_CBC]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[DES3_ECB]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[DES_CBC]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[DES_ECB]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[MD2]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[MD5]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[MD5_RSA_PKCS]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[RC4]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[SHA1_RSA_PKCS]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[SSL3_MD5_MAC]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[SSL3_PRE_MASTER_KEY_GEN]
+posture testcases/security/test_crypto_weakness.py::TestDeprecatedMechanism::test_deprecated_mechanism_available[SSL3_SHA1_MAC]

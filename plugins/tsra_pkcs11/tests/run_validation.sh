@@ -7,8 +7,8 @@
 # pkcs11-tool, and runs the device-free unit harnesses under UBSan and ASan
 # (build_units.sh); if the mock-backed module has been built (cargo build -p
 # tsra_pkcs11 --features mock; TSRA_PKCS11_MODULE overrides its path), it also
-# runs the C_Login provisioning ceremony, a pkcs11-tool AES keygen and a
-# refused pkcs11-tool key import, the gtest functional suite
+# runs the C_Login provisioning ceremony, a pkcs11-tool AES keygen, EC key
+# pair generation and a refused pkcs11-tool key import, the gtest functional suite
 # (integration-tests/cpp) on the memory and the file object store, the
 # pkcs11test conformance gate (tests/pkcs11test) and the per-PR part of the
 # pkcs11-check gate (tests/pkcs11-check) against the simulator. The
@@ -83,6 +83,19 @@ if [ -f "$HSMMOD" ]; then
         echo "   (AES keygen failed)"; exit 1
     fi
 
+    echo; echo "== mock-backed: EC key pair via pkcs11-tool =="
+    # A private EC key signs or derives, never both: a named usage works, the
+    # tool's default (both) is refused.
+    if ! pkcs11-tool --module "$HSMMOD" --login --pin 1234 --keypairgen \
+        --key-type EC:prime256v1 --usage-sign --label validation-ec 2>&1 | sed 's/^/   /'; then
+        echo "   (EC key pair generation failed)"; exit 1
+    fi
+    pkcs11-tool --module "$HSMMOD" --login --pin 1234 --keypairgen \
+        --key-type EC:prime256v1 --label validation-ec-both > "$WORK/ec-both.log" 2>&1 || true
+    sed 's/^/   /' "$WORK/ec-both.log"
+    grep -q CKR_TEMPLATE_INCONSISTENT "$WORK/ec-both.log" \
+        || { echo "   (an EC key that signs and derives was not refused)"; exit 1; }
+
     echo; echo "== mock-backed: plaintext key import via pkcs11-tool is refused =="
     printf '0123456789abcdef' > "$WORK/import.key"
     pkcs11-tool --module "$HSMMOD" --login --pin 1234 --write-object "$WORK/import.key" \
@@ -92,22 +105,26 @@ if [ -f "$HSMMOD" ]; then
         || { echo "   (plaintext key import was not refused)"; exit 1; }
 
     echo; echo "== mock-backed: gtest functional suite (integration-tests/cpp) =="
-    # googletest is fetched by CMake. Cache only its SOURCE between runs and
-    # let every build tree compile it privately: a shared build directory
-    # breaks as soon as one of the trees using it goes away.
+    # googletest and Wycheproof are fetched by CMake. Cache only their SOURCE
+    # between runs and let every build tree compile privately: a shared build
+    # directory breaks as soon as one of the trees using it goes away.
     deps="${XDG_CACHE_HOME:-$HOME/.cache}/tsra-pkcs11-cpp-deps"
     src_arg=()
-    if [ -d "$deps/googletest-src" ]; then
-        src_arg=(-DFETCHCONTENT_SOURCE_DIR_GOOGLETEST="$deps/googletest-src")
-    fi
+    for dep in googletest wycheproof; do
+        if [ -d "$deps/$dep-src" ]; then
+            src_arg+=(-DFETCHCONTENT_SOURCE_DIR_"${dep^^}"="$deps/$dep-src")
+        fi
+    done
     cmake -S "$PLUGIN/integration-tests/cpp" -B "$WORK/cpp-tests" \
         -DCMAKE_BUILD_TYPE=Release "${src_arg[@]}" > "$WORK/cmake.log" 2>&1 \
         || { tail -n 20 "$WORK/cmake.log"; echo "   (cmake configure failed)"; exit 1; }
-    # Seed the cache from the first run's download.
-    if [ ! -d "$deps/googletest-src" ] && [ -d "$WORK/cpp-tests/_deps/googletest-src" ]; then
-        mkdir -p "$deps"
-        cp -r "$WORK/cpp-tests/_deps/googletest-src" "$deps/googletest-src" || true
-    fi
+    # Seed the cache from the first run's downloads.
+    for dep in googletest wycheproof; do
+        if [ ! -d "$deps/$dep-src" ] && [ -d "$WORK/cpp-tests/_deps/$dep-src" ]; then
+            mkdir -p "$deps"
+            cp -r "$WORK/cpp-tests/_deps/$dep-src" "$deps/$dep-src" || true
+        fi
+    done
     cmake --build "$WORK/cpp-tests" --parallel > "$WORK/cmake-build.log" 2>&1 \
         || { tail -n 30 "$WORK/cmake-build.log"; echo "   (cmake build failed)"; exit 1; }
     TSRA_PKCS11_MODULE="$HSMMOD" ctest --test-dir "$WORK/cpp-tests" --output-on-failure \

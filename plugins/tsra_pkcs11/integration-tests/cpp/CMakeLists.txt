@@ -32,6 +32,21 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+# Project Wycheproof (Apache-2.0) supplies negative known-answer vectors. It is
+# third-party data, so it is fetched at a pinned commit, never committed, and
+# converted in the build directory. FETCHCONTENT_SOURCE_DIR_WYCHEPROOF may name
+# a local copy of the commit, or of its testvectors_v1 directory alone.
+FetchContent_Declare(
+    wycheproof
+    URL https://github.com/C2SP/wycheproof/archive/7a325932231bd7a724c791c8b0d65ea4d6d2f435.tar.gz
+    URL_HASH SHA256=a96fc6b82db54a32d87c95b88421868a84e254255f247cc5af3b8935dca818d2
+)
+FetchContent_MakeAvailable(wycheproof)
+set(WYCHEPROOF_VECTORS "${wycheproof_SOURCE_DIR}/testvectors_v1")
+if(NOT EXISTS "${WYCHEPROOF_VECTORS}")
+    set(WYCHEPROOF_VECTORS "${wycheproof_SOURCE_DIR}")
+endif()
+
 enable_testing()
 
 # The module's own tree (vendored PKCS#11 headers + the platform-macro header
@@ -52,18 +67,41 @@ set(SOURCE
     aes/multipart_tests.cpp
     aes/relation_tests.cpp
     aes/survival_tests.cpp
+    ec/keygen_tests.cpp
+    ec/sign_tests.cpp
     session/login_tests.cpp
     session/op_lifecycle_tests.cpp
     session/logout_tests.cpp
     object/attr_tests.cpp
     object/persist_tests.cpp
     object/policy_tests.cpp
+    unwrap/pair_tests.cpp
+    unwrap/unwrap_tests.cpp
+    unwrap/kat_tests.cpp
 )
-add_executable(tsra_pkcs11_cpp_tests ${SOURCE})
+
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(WYCHEPROOF_OUT "${CMAKE_CURRENT_BINARY_DIR}/wycheproof")
+set(WYCHEPROOF_INC
+    ${WYCHEPROOF_OUT}/aes_kwp.inc
+    ${WYCHEPROOF_OUT}/aes_cbc_pkcs5.inc
+    ${WYCHEPROOF_OUT}/aes_gcm.inc
+)
+add_custom_command(
+    OUTPUT ${WYCHEPROOF_INC}
+    COMMAND Python3::Interpreter -I ${TSRA_PKCS11_ROOT}/tools/gen_wycheproof.py
+        ${WYCHEPROOF_VECTORS} ${WYCHEPROOF_OUT}
+    DEPENDS ${TSRA_PKCS11_ROOT}/tools/gen_wycheproof.py
+    COMMENT "Converting the Wycheproof vectors"
+    VERBATIM
+)
+
+add_executable(tsra_pkcs11_cpp_tests ${SOURCE} ${WYCHEPROOF_INC})
 target_include_directories(
     tsra_pkcs11_cpp_tests
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
         ${TSRA_PKCS11_ROOT}/include/pkcs11-v3.1
         ${TSRA_PKCS11_ROOT}/src
 )

@@ -188,6 +188,27 @@ inline bool on_hardware()
         }                                                                                          \
     } while (0)
 
+/// Read a variable-length attribute (two-call sizing) into `out`.
+inline CK_RV get_bytes(
+    CK_SESSION_HANDLE s,
+    CK_OBJECT_HANDLE obj,
+    CK_ATTRIBUTE_TYPE type,
+    std::vector<CK_BYTE> &out
+)
+{
+    CK_ATTRIBUTE a = { type, nullptr, 0 };
+    CK_RV rv = p11()->C_GetAttributeValue(s, obj, &a, 1);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    out.assign(a.ulValueLen, 0);
+    a.pValue = out.data();
+    rv = p11()->C_GetAttributeValue(s, obj, &a, 1);
+    out.resize(a.ulValueLen);
+    return rv;
+}
+
 /// C_Login as CKU_USER with the test PIN.
 inline CK_RV login_user(CK_SESSION_HANDLE s)
 {
@@ -220,14 +241,17 @@ class ModuleEnvironment : public ::testing::Environment
 };
 
 /// Terminate whatever operation `s` has active. A data call with bad
-/// arguments terminates a cipher or digest operation (spec rule, see
-/// tsra_pkcs11_crypt.c), and C_FindObjectsFinal ends a search; each call is
-/// a harmless CKR_OPERATION_NOT_INITIALIZED when nothing is active.
+/// arguments terminates a cipher, digest, sign or verify operation (spec
+/// rule, see tsra_pkcs11_crypt.c), and C_FindObjectsFinal ends a search;
+/// each call is a harmless CKR_OPERATION_NOT_INITIALIZED when nothing is
+/// active.
 inline void abandon_operations(CK_SESSION_HANDLE s)
 {
     (void)p11()->C_Encrypt(s, nullptr, 0, nullptr, nullptr);
     (void)p11()->C_Decrypt(s, nullptr, 0, nullptr, nullptr);
     (void)p11()->C_Digest(s, nullptr, 0, nullptr, nullptr);
+    (void)p11()->C_Sign(s, nullptr, 0, nullptr, nullptr);
+    (void)p11()->C_Verify(s, nullptr, 1, nullptr, 0);
     (void)p11()->C_FindObjectsFinal(s);
 }
 

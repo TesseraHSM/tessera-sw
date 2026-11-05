@@ -56,6 +56,16 @@ extern "C"
  *                                 material (tsra_pkcs11_attr_is_key_material)
  *   CKR_TEMPLATE_INCOMPLETE       a secret or private key without it, which
  *                                 PKCS#11 requires
+ *   then for a public key of type CKK_EC or CKK_RSA:
+ *   CKR_TEMPLATE_INCOMPLETE       an EC key without CKA_EC_PARAMS or
+ *                                 CKA_EC_POINT, an RSA key without CKA_MODULUS
+ *                                 or CKA_PUBLIC_EXPONENT
+ *   CKR_CURVE_NOT_SUPPORTED       a CKA_EC_PARAMS naming a curve other than
+ *                                 P-256, P-384 and P-521
+ *   CKR_ATTRIBUTE_VALUE_INVALID   a CKA_EC_PARAMS that is no single DER
+ *                                 element, or a CKA_EC_POINT that is not a
+ *                                 point of that curve as the token stores one
+ *                                 (tsra_pkcs11_ec_point_check)
  */
 CK_RV tsra_pkcs11_create_check(
     const CK_ATTRIBUTE *tmpl,

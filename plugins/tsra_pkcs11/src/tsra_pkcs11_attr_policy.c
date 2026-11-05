@@ -7,6 +7,7 @@
  */
 
 #include "tsra_pkcs11_attr_policy.h"
+#include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_template.h"
 
 #include <stddef.h>
@@ -347,6 +348,43 @@ CK_RV tsra_pkcs11_destroy_check(CK_BBOOL rw_session, tsra_pkcs11_attr_reader rea
     return object_gate(read, ctx, rw_session, CKA_DESTROYABLE);
 }
 
+/*
+ * A public key of a type this token uses needs what it cannot be used
+ * without: an EC key its curve, one the token supports, and a point encoded
+ * for that curve; an RSA key its modulus and exponent. Other key types are
+ * stored as given.
+ */
+static CK_RV public_key_check(const CK_ATTRIBUTE *tmpl, CK_ULONG count)
+{
+    CK_ULONG kt = 0;
+    const CK_ATTRIBUTE *type = tsra_pkcs11_tmpl_find(tmpl, count, CKA_KEY_TYPE);
+    if ((type == NULL) || (tsra_pkcs11_tmpl_ulong(type, &kt) != CKR_OK))
+    {
+        return CKR_OK;
+    }
+    if (kt == CKK_RSA)
+    {
+        return ((tsra_pkcs11_tmpl_find(tmpl, count, CKA_MODULUS) != NULL) &&
+                (tsra_pkcs11_tmpl_find(tmpl, count, CKA_PUBLIC_EXPONENT) != NULL))
+                   ? CKR_OK
+                   : CKR_TEMPLATE_INCOMPLETE;
+    }
+    if (kt != CKK_EC)
+    {
+        return CKR_OK;
+    }
+    const CK_ATTRIBUTE *params = tsra_pkcs11_tmpl_find(tmpl, count, CKA_EC_PARAMS);
+    const CK_ATTRIBUTE *point = tsra_pkcs11_tmpl_find(tmpl, count, CKA_EC_POINT);
+    if ((params == NULL) || (point == NULL))
+    {
+        return CKR_TEMPLATE_INCOMPLETE;
+    }
+    tsra_pkcs11_ec_curve_t curve = TSRA_PKCS11_CURVE_NONE;
+    CK_RV rv = tsra_pkcs11_ec_params_curve(params->pValue, params->ulValueLen, &curve);
+    return (rv == CKR_OK) ? tsra_pkcs11_ec_point_check(point->pValue, point->ulValueLen, curve)
+                          : rv;
+}
+
 CK_RV tsra_pkcs11_create_check(
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
@@ -419,5 +457,5 @@ CK_RV tsra_pkcs11_create_check(
     {
         return CKR_TEMPLATE_INCOMPLETE;
     }
-    return CKR_OK;
+    return (cls == CKO_PUBLIC_KEY) ? public_key_check(tmpl, count) : CKR_OK;
 }
