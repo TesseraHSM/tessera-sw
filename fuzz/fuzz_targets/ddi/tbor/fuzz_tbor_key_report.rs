@@ -18,9 +18,7 @@ use common::*;
 use libfuzzer_sys::arbitrary::*;
 use tsra_crypto::*;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_mbor_sim::attestation::*;
-use tsra_ddi_mbor_sim::crypto::ecc::*;
-use tsra_ddi_mbor_sim::report::*;
+use tsra_ddi_mbor_test_helpers::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 use tsra_session_ex_crypto::seal_key_report_auth;
@@ -477,23 +475,26 @@ fn verify_report(
         .expect("PID leaf");
     let cert =
         X509Certificate::from_der(leaf.data.certificate.as_slice()).expect("PID certificate");
-    let public = tsra_ddi_mbor_sim::crypto::ecc::EccPublicKey::from_der(
-        &cert.get_public_key_der().expect("PID SPKI"),
-        None,
-    )
-    .expect("PID public key");
-    KeyAttester::parse(&response.report)
-        .expect("COSE_Sign1")
-        .verify(&public)
-        .expect("PID signature");
+    let public = EccPublicKey::from_bytes(&cert.get_public_key_der().expect("PID SPKI"))
+        .expect("PID public key");
     let cose = CoseSign1Object::decode(&response.report).expect("COSE envelope");
+    let mut tbs = vec![0u8; 64 + cose.protected_header.len() + cose.payload.len()];
+    let tbs_len = encode_sig_struct(&cose.protected_header, cose.payload, &mut tbs)
+        .expect("encode COSE Sig_structure");
+    let digest = Hasher::hash_vec(&mut HashAlgo::sha384(), &tbs[..tbs_len]).expect("SHA-384");
+    let verified = Verifier::verify(&mut EccAlgo::default(), &public, &digest, &cose.signature)
+        .expect("PID signature");
+    assert!(
+        verified,
+        "KeyReport must be signed by the partition PID key"
+    );
     let payload: KeyAttestationReport = minicbor::decode(cose.payload).expect("report payload");
     assert_eq!(payload.version, 2);
     assert_eq!(payload.report_data, request.report_data);
     assert_eq!(payload.app_uuid.as_slice(), app_id);
     assert_eq!(payload.flags, key.flags);
 
-    // The shared simulator view predates v2's policy hash; inspect that entry separately.
+    // The shared report view predates v2's policy hash; inspect that entry separately.
     let mut decoder = minicbor::Decoder::new(cose.payload);
     let mut policy_hash = None;
     for _ in 0..decoder
