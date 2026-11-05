@@ -124,7 +124,13 @@ fuzz_target!(|input: FuzzInput| {
                 Err(err @ tsra_ddi_interface::DdiError::DriverError(_)) => {
                     panic!("Crash Detected: {err}")
                 }
-                Err(_) => {}
+                Err(
+                    tsra_ddi_interface::DdiError::TborStatus(_)
+                    | tsra_ddi_interface::DdiError::TborEncodeError,
+                ) => {}
+                Err(err) => {
+                    panic!("invalid EccGenerateKey request returned an unexpected error: {err}")
+                }
                 Ok(_) => panic!("invalid EccGenerateKey request unexpectedly succeeded"),
             }
         }

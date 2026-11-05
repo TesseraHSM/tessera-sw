@@ -9,6 +9,7 @@ mod common;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
@@ -228,7 +229,8 @@ fuzz_target!(|input: FuzzInput| {
         //   → encoder over-length reject), or a backup that overflows
         //   `LOCAL_MK_BACKUP_LEN`. Any other combination has a
         //   probabilistic outcome (arbitrary bytes could occasionally
-        //   parse) and is left unasserted.
+        //   parse), but errors must still be firmware rejections or
+        //   request-encoding failures, never response-decoding failures.
         let expect_success = chain_is_noop && input.prev_local_mk_backup.is_empty();
         let expect_failure = input.prev_local_mk_backup.len() > LOCAL_MK_BACKUP_LEN
             || chain_items.is_empty()
@@ -236,13 +238,16 @@ fuzz_target!(|input: FuzzInput| {
 
         let result = ctx.part_final(&session, &policy, &input.prev_local_mk_backup, &cert_slices);
 
-        if expect_success {
-            result.expect("PartFinal should succeed for a valid chain with an empty backup");
-        } else if expect_failure {
-            assert!(
-                result.is_err(),
-                "PartFinal should reject wire-schema-invalid input"
-            );
+        match result {
+            Ok(_) if expect_failure => {
+                panic!("PartFinal should reject wire-schema-invalid input")
+            }
+            Ok(_) => {}
+            Err(err) if expect_success => {
+                panic!("PartFinal should succeed for a valid chain with an empty backup: {err}")
+            }
+            Err(DdiError::TborStatus(_) | DdiError::TborEncodeError) => {}
+            Err(err) => panic!("PartFinal returned an unexpected error: {err}"),
         }
 
         ctx.session_close(session.session_id)

@@ -194,7 +194,11 @@ fuzz_target!(|input: FuzzInput| {
                 Ok(resp) if key_generation_should_succeed => (resp.masked_key, true),
                 Ok(_) => panic!("invalid AES key-generation request unexpectedly succeeded"),
                 Err(err @ DdiError::DriverError(_)) => panic!("Crash Detected: {err}"),
-                Err(_) if !key_generation_should_succeed => (Vec::new(), false),
+                Err(DdiError::TborStatus(_) | DdiError::TborEncodeError)
+                    if !key_generation_should_succeed =>
+                {
+                    (Vec::new(), false)
+                }
                 Err(err) => panic!("valid AES key-generation request failed: {err}"),
             }
         } else {
@@ -216,8 +220,9 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id,
             masked_key: masked_key.clone(),
             op,
+            mode: AES_MODE_CBC,
             msg: msg.clone(),
-            iv,
+            iv: iv.to_vec(),
         });
 
         match (&result, expect_success) {
@@ -236,8 +241,9 @@ fuzz_target!(|input: FuzzInput| {
                             FuzzAesMode::Encrypt => AES_OP_DECRYPT,
                             FuzzAesMode::Decrypt => AES_OP_ENCRYPT,
                         },
+                        mode: AES_MODE_CBC,
                         msg: response.msg.clone(),
-                        iv,
+                        iv: iv.to_vec(),
                     })
                     .expect("inverse AES operation should succeed");
                 assert_eq!(
@@ -251,7 +257,8 @@ fuzz_target!(|input: FuzzInput| {
             }
             (Ok(_), false) => panic!("invalid AES request unexpectedly succeeded"),
             (Err(err), true) => panic!("valid AES request failed: {err}"),
-            (Err(_), false) => {}
+            (Err(DdiError::TborStatus(_) | DdiError::TborEncodeError), false) => {}
+            (Err(err), false) => panic!("invalid AES request returned an unexpected error: {err}"),
         }
 
         ctx.session_close(session.session_id)

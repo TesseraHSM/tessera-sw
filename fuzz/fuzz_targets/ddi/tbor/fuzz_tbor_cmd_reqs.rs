@@ -148,7 +148,8 @@ fuzz_target!(|input: FuzzInput| {
                 Err(err @ tsra_ddi_interface::DdiError::DriverError(_)) => {
                     panic!("Crash Detected: {err}")
                 }
-                Err(_) => false,
+                Err(tsra_ddi_interface::DdiError::TborStatus(_)) => false,
+                Err(err) => panic!("key-generation request returned an unexpected error: {err}"),
             };
 
             if input.use_valid_header {

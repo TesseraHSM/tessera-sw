@@ -86,6 +86,10 @@ fuzz_target!(|input: FuzzInput| {
 
         // If session open succeeds, finish then close it afterwards.
         let init_result = ctx.tbor::<TborSessionOpenInitReq>(&req);
+        assert!(
+            matches!(&init_result, Ok(_) | Err(DdiError::TborStatus(_))),
+            "SessionOpenInit returned an unexpected error: {init_result:?}"
+        );
 
         // assert open init success if expected
         if input.valid_open_init || input.valid_open_finish {
@@ -128,6 +132,10 @@ fuzz_target!(|input: FuzzInput| {
             };
 
             let finish_result = ctx.tbor::<TborSessionOpenFinishReq>(&open_finish_req);
+            assert!(
+                matches!(&finish_result, Ok(_) | Err(DdiError::TborStatus(_))),
+                "SessionOpenFinish returned an unexpected error: {finish_result:?}"
+            );
 
             // assert open finish success only when we actually built a valid request
             if input.valid_open_finish {
