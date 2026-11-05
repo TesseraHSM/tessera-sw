@@ -67,16 +67,38 @@ pub fn sign_internal(
     // multiply-accumulate unpacks as it reads.
     let a_cache = a_cache.as_flattened_mut();
     let cache_slots = a_cache.len() / PACKED_WORDS;
+    // The elements after those go to the platform's near region, if it
+    // gave one, the same way -- and only the rest to the spill.
+    //
+    // SAFETY: signing is the near region's only user, and this the only
+    // borrow of it.
+    let near = unsafe { crate::spill::near() };
+    let near_a = (k * l)
+        .saturating_sub(cache_slots)
+        .min(near.len() / PACKED_WORDS);
+    let (near, near_keys) = near.split_at_mut(near_a * PACKED_WORDS);
+    let held = cache_slots + near_a;
     let mut a_cached = false;
 
     // s1, s2 and t0 are transformed once per attempt but depend only on the
-    // key, so their transforms are held alongside the spilled matrix and
-    // reused. They live in their own region above the matrix, so their
-    // indices do not depend on how much this parameter set spilled.
+    // key, so their transforms are held and reused: in whatever the matrix
+    // leaves of the near region, and past that in their own region of the
+    // spill, above the matrix, so their indices do not depend on how much
+    // this parameter set spilled.
     //
     // Both passes walk their rows from zero and can stop early, so a count
     // of how many slots have been filled is enough -- an attempt that got
     // as far as row n leaves rows 0..n valid for the next one.
+    let (keys_near, keys_ptr) = (near_keys.len() / N, near_keys.as_mut_ptr());
+    let key_slot = |j: usize| {
+        if j < keys_near {
+            // SAFETY: slot j of the near region's key part, which this
+            // signature alone uses.
+            Some(unsafe { keys_ptr.add(j * N) })
+        } else {
+            crate::spill::key_slot(j)
+        }
+    };
     let mut s1_done = 0usize;
     let mut hint_done = 0usize;
 
@@ -120,12 +142,12 @@ pub fn sign_internal(
             sampling::unpack_gamma1(y_hat, yb, params.gamma1);
             ntt::ntt(y_hat);
             for i in 0..k {
-                let spill = if t < cache_slots {
+                let spill = if t < held {
                     None
                 } else {
-                    crate::spill::matrix_slot(t - cache_slots)
+                    crate::spill::matrix_slot(t - held)
                 };
-                if !a_cached || (t >= cache_slots && spill.is_none()) {
+                if !a_cached || (t >= held && spill.is_none()) {
                     // The first attempt, or an element with nowhere to be
                     // kept: derive it.
                     sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
@@ -137,6 +159,11 @@ pub fn sign_internal(
                     if !a_cached {
                         if t < cache_slots {
                             crate::spill::pack(&mut a_cache[t * PACKED_WORDS..], &c_hat);
+                        } else if t < held {
+                            crate::spill::pack(
+                                &mut near[(t - cache_slots) * PACKED_WORDS..],
+                                &c_hat,
+                            );
                         } else if let Some(p) = spill {
                             // SAFETY: `p` is this core's own slot, sized for
                             // one packed element by `spill::init`.
@@ -152,7 +179,8 @@ pub fn sign_internal(
                             unsafe { crate::spill::load_packed_words(&mut c_hat, p) };
                             &c_hat
                         }
-                        None => &a_cache[t * PACKED_WORDS..],
+                        None if t < cache_slots => &a_cache[t * PACKED_WORDS..],
+                        None => &near[(t - cache_slots) * PACKED_WORDS..],
                     };
                     if j == 0 {
                         // SAFETY: one whole word-aligned polynomial.
@@ -205,7 +233,7 @@ pub fn sign_internal(
             );
 
             // c * s1_j — reuse w0_i/w1_i (unused in z-pass)
-            match crate::spill::key_slot(j) {
+            match key_slot(j) {
                 // SAFETY: a slot of this core's own region, and `s1_done`
                 // says whether this one has been written yet.
                 Some(p) if j < s1_done => unsafe { crate::spill::load(&mut w0_i, p) },
@@ -258,7 +286,7 @@ pub fn sign_internal(
             rounding::poly_decompose_reduced(&mut w1_i, &mut w0_i, &w[i], params.gamma2);
 
             // c * s2_i, folded in place so no fifth polynomial is needed
-            match crate::spill::key_slot(l + 2 * i) {
+            match key_slot(l + 2 * i) {
                 // SAFETY: as in the z-pass.
                 Some(p) if 2 * i < hint_done => unsafe { crate::spill::load(&mut tmp, p) },
                 slot => {
@@ -284,7 +312,7 @@ pub fn sign_internal(
             }
 
             // c * t0_i, likewise in place
-            match crate::spill::key_slot(l + 2 * i + 1) {
+            match key_slot(l + 2 * i + 1) {
                 // SAFETY: as in the z-pass.
                 Some(p) if 2 * i + 1 < hint_done => unsafe { crate::spill::load(&mut tmp, p) },
                 slot => {

@@ -964,6 +964,25 @@ fn main() -> ! {
             (FP_SPILL_BASE + id as usize * FP_SPILL_PER_CORE) as *mut i32,
             FP_SPILL_WORDS,
         );
+
+        // Ahead of GSRAM, the signer keeps matrix elements and key
+        // transforms in dTCM-speed memory this image does not otherwise
+        // map. On FP1, the top half of its 64 KB dTCM, above the stack. On
+        // the others, the 16 KB block at 0x2002_0000 -- each core's view of
+        // a different block it shares with a neighbour (FP0's with FP1,
+        // FP2's with FP0; sp/src/dc_scm/rot_memory_map.h), which no core
+        // here reaches through its other view at 0x2003_0000 -- but only
+        // the part no one else uses: below the SP's liveliness word, which
+        // the SP zeroes behind the core's back (`CORE_RUN_STATUS`), and on
+        // FP2 below the admin core's legacy AES-GCM queues and FIPS flags
+        // from 0x2002_1C60 (cp/hsm/mem-map/src/soc.rs). The SP's crash dumps
+        // in these blocks are only ever read, after a core has crashed.
+        let (near, bytes) = match id {
+            1 => (0x2000_8000usize, 0x8000usize),
+            2 => (0x2002_0000, 0x1C60),
+            _ => (0x2002_0000, CORE_RUN_STATUS as usize - 0x2002_0000),
+        };
+        pqc_ml::spill::init_near(near as *mut i32, bytes / 4);
     }
 
     mailbox::cyc_init();
