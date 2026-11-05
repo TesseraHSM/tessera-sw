@@ -152,6 +152,19 @@ pub fn mldsa_sec_key_len(kind: HsmVaultKeyKind) -> HsmResult<usize> {
     }
 }
 
+/// Affinity tag (see [`PqcDriver::acquire_for`](crate::PqcDriver::acquire_for))
+/// for signing with the expanded key that ends `key_signature`, as
+/// [`PqcEngine::mldsa_sign_in_place`] takes it: the first word of the
+/// key's public seed rho, from which the matrix the cores keep is expanded,
+/// made nonzero. 0, for no preference, if the buffer cannot hold the key.
+pub fn mldsa_key_tag(kind: HsmVaultKeyKind, key_signature: &[u8]) -> u32 {
+    mldsa_sec_key_len(kind)
+        .ok()
+        .and_then(|len| key_signature.len().checked_sub(len))
+        .and_then(|at| key_signature.get(at..at + 4))
+        .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) | 1)
+}
+
 /// ML-KEM decapsulation-key length for a parameter set (FIPS 203).
 ///
 /// Carried in the masked key beside the `(d, z)` seed pair, so

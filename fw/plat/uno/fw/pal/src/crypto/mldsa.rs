@@ -102,17 +102,14 @@ impl HsmMlDsa for UnoHsmPal {
             if hedged(hedge) {
                 self.rng_fill_bytes(io, &mut rnd)?;
             }
+            let kind = mldsa_kind(param_set);
+            // Signatures with one key go to the core that last signed with
+            // it where they can: it still holds the key's public matrix.
+            let tag = tsra_fw_uno_drivers_pqc::mldsa_key_tag(kind, key_signature);
             self.pqc
-                .with_engine(async |engine| {
+                .with_engine_for(tag, async |engine| {
                     engine
-                        .mldsa_sign_in_place(
-                            mldsa_kind(param_set),
-                            key_signature,
-                            &rnd,
-                            msg_type,
-                            message,
-                            ctx,
-                        )
+                        .mldsa_sign_in_place(kind, key_signature, &rnd, msg_type, message, ctx)
                         .await
                 })
                 .await
