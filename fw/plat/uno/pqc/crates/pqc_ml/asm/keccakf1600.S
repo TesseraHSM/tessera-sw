@@ -29,105 +29,87 @@
 .text
 
 	@ Credit: Henry S. Warren, Hacker's Delight, Addison-Wesley, 2002
-.macro	toBitInterleaving	x0,x1,s0,s1,t,over
-
-	and		\t,\x0,#0x55555555
-	orr		\t,\t,\t, LSR #1
-	and		\t,\t,#0x33333333
-	orr		\t,\t,\t, LSR #2
-	and		\t,\t,#0x0F0F0F0F
-	orr		\t,\t,\t, LSR #4
-	and		\t,\t,#0x00FF00FF
-	bfi		\t,\t,#8, #8
-	.if \over != 0
-	lsr		\s0,\t, #8
-	.else
-	eor		\s0,\s0,\t, LSR #8
-	.endif
-
-	and		\t,\x1,#0x55555555
-	orr		\t,\t,\t, LSR #1
-	and		\t,\t,#0x33333333
-	orr		\t,\t,\t, LSR #2
-	and		\t,\t,#0x0F0F0F0F
-	orr		\t,\t,\t, LSR #4
-	and		\t,\t,#0x00FF00FF
-	orr		\t,\t,\t, LSR #8
-	eor		\s0,\s0,\t, LSL #16
-
-	and		\t,\x0,#0xAAAAAAAA
-	orr		\t,\t,\t, LSL #1
-	and		\t,\t,#0xCCCCCCCC
-	orr		\t,\t,\t, LSL #2
-	and		\t,\t,#0xF0F0F0F0
-	orr		\t,\t,\t, LSL #4
-	and		\t,\t,#0xFF00FF00
-	orr		\t,\t,\t, LSL #8
-	.if \over != 0
-	lsr		\s1,\t, #16
-	.else
-	eor		\s1,\s1,\t, LSR #16
-	.endif
-
-	and		\t,\x1,#0xAAAAAAAA
-	orr		\t,\t,\t, LSL #1
-	and		\t,\t,#0xCCCCCCCC
-	orr		\t,\t,\t, LSL #2
-	and		\t,\t,#0xF0F0F0F0
-	orr		\t,\t,\t, LSL #4
-	and		\t,\t,#0xFF00FF00
-	orr		\t,\t,\t, LSL #8
-	bfc		\t, #0, #16
-	eors	\s1,\s1,\t
+	@ s0 ^= even bits and s1 ^= odd bits of the lane x0:x1 (x0, x1, t0, t1
+	@ clobbered). Each half is unshuffled by four delta swaps; the two
+	@ independent chains are interleaved two apart so the M7 can dual-issue
+	@ them without pairing two shifted operands.
+.macro	toBitInterleaving	x0, x1, s0, s1, t0, t1
+	eor		\t0, \x0, \x0, lsr #1
+	and		\t0, \t0, #0x22222222
+	eor		\x0, \x0, \t0
+	eor		\t1, \x1, \x1, lsr #1
+	eor		\x0, \x0, \t0, lsl #1
+	and		\t1, \t1, #0x22222222
+	eor		\t0, \x0, \x0, lsr #2
+	eor		\x1, \x1, \t1
+	and		\t0, \t0, #0x0C0C0C0C
+	eor		\x1, \x1, \t1, lsl #1
+	eor		\x0, \x0, \t0
+	eor		\t1, \x1, \x1, lsr #2
+	eor		\x0, \x0, \t0, lsl #2
+	and		\t1, \t1, #0x0C0C0C0C
+	eor		\t0, \x0, \x0, lsr #4
+	eor		\x1, \x1, \t1
+	and		\t0, \t0, #0x00F000F0
+	eor		\x1, \x1, \t1, lsl #2
+	eor		\x0, \x0, \t0
+	eor		\t1, \x1, \x1, lsr #4
+	eor		\x0, \x0, \t0, lsl #4
+	and		\t1, \t1, #0x00F000F0
+	eor		\t0, \x0, \x0, lsr #8
+	eor		\x1, \x1, \t1
+	and		\t0, \t0, #0x0000FF00
+	eor		\x1, \x1, \t1, lsl #4
+	eor		\x0, \x0, \t0
+	eor		\t1, \x1, \x1, lsr #8
+	eor		\x0, \x0, \t0, lsl #8
+	and		\t1, \t1, #0x0000FF00
+	eor		\x1, \x1, \t1
+	eor		\x1, \x1, \t1, lsl #8
+	pkhbt	\t0, \x0, \x1, lsl #16
+	pkhtb	\x1, \x1, \x0, asr #16
+	eor		\s0, \s0, \t0
+	eor		\s1, \s1, \x1
 	.endm
 
 	@ Credit: Henry S. Warren, Hacker's Delight, Addison-Wesley, 2002
-.macro	fromBitInterleaving		x0, x1, t
-
-	movs	\t, \x0					@ t = x0@
-	bfi		\x0, \x1, #16, #16		@ x0 = (x0 & 0x0000FFFF) | (x1 << 16)@
-	bfc		\x1, #0, #16			@	x1 = (t >> 16) | (x1 & 0xFFFF0000)@
-	orr		\x1, \x1, \t, LSR #16
-
-    eor		\t, \x0, \x0, LSR #8    @ t = (x0 ^ (x0 >>  8)) & 0x0000FF00UL@  x0 = x0 ^ t ^ (t <<  8)@
-	and		\t, #0x0000FF00
-    eors	\x0, \x0, \t
-    eor		\x0, \x0, \t, LSL #8
-
-    eor		\t, \x0, \x0, LSR #4	@ t = (x0 ^ (x0 >>  4)) & 0x00F000F0UL@  x0 = x0 ^ t ^ (t <<  4)@
-	and		\t, #0x00F000F0
-    eors	\x0, \x0, \t
-    eor		\x0, \x0, \t, LSL #4
-
-    eor		\t, \x0, \x0, LSR #2	@ t = (x0 ^ (x0 >>  2)) & 0x0C0C0C0CUL@  x0 = x0 ^ t ^ (t <<  2)@
-	and		\t, #0x0C0C0C0C
-    eors	\x0, \x0, \t
-    eor		\x0, \x0, \t, LSL #2
-
-    eor		\t, \x0, \x0, LSR #1	@ t = (x0 ^ (x0 >>  1)) & 0x22222222UL@  x0 = x0 ^ t ^ (t <<  1)@
-	and		\t, #0x22222222
-    eors	\x0, \x0, \t
-    eor		\x0, \x0, \t, LSL #1
-
-    eor		\t, \x1, \x1, LSR #8    @ t = (x1 ^ (x1 >>  8)) & 0x0000FF00UL@  x1 = x1 ^ t ^ (t <<  8)@
-	and		\t, #0x0000FF00
-    eors	\x1, \x1, \t
-    eor		\x1, \x1, \t, LSL #8
-
-    eor		\t, \x1, \x1, LSR #4	@ t = (x1 ^ (x1 >>  4)) & 0x00F000F0UL@  x1 = x1 ^ t ^ (t <<  4)@
-	and		\t, #0x00F000F0
-    eors	\x1, \x1, \t
-    eor		\x1, \x1, \t, LSL #4
-
-    eor		\t, \x1, \x1, LSR #2	@ t = (x1 ^ (x1 >>  2)) & 0x0C0C0C0CUL@  x1 = x1 ^ t ^ (t <<  2)@
-	and		\t, #0x0C0C0C0C
-    eors	\x1, \x1, \t
-    eor		\x1, \x1, \t, LSL #2
-
-    eor		\t, \x1, \x1, LSR #1	@ t = (x1 ^ (x1 >>  1)) & 0x22222222UL@  x1 = x1 ^ t ^ (t <<  1)@
-	and		\t, #0x22222222
-    eors	\x1, \x1, \t
-    eor		\x1, \x1, \t, LSL #1
+	@ x0:x1 = the lane whose even/odd bit words are x0/x1 (t0, t1 clobbered);
+	@ the inverse of toBitInterleaving, with the same chain interleaving.
+.macro	fromBitInterleaving	x0, x1, t0, t1
+	pkhbt	\t0, \x0, \x1, lsl #16
+	pkhtb	\x1, \x1, \x0, asr #16
+	eor		\x0, \t0, \t0, lsr #8
+	and		\x0, \x0, #0x0000FF00
+	eor		\t0, \t0, \x0
+	eor		\t1, \x1, \x1, lsr #8
+	eor		\t0, \t0, \x0, lsl #8
+	and		\t1, \t1, #0x0000FF00
+	eor		\x0, \t0, \t0, lsr #4
+	eor		\x1, \x1, \t1
+	and		\x0, \x0, #0x00F000F0
+	eor		\x1, \x1, \t1, lsl #8
+	eor		\t0, \t0, \x0
+	eor		\t1, \x1, \x1, lsr #4
+	eor		\t0, \t0, \x0, lsl #4
+	and		\t1, \t1, #0x00F000F0
+	eor		\x0, \t0, \t0, lsr #2
+	eor		\x1, \x1, \t1
+	and		\x0, \x0, #0x0C0C0C0C
+	eor		\x1, \x1, \t1, lsl #4
+	eor		\t0, \t0, \x0
+	eor		\t1, \x1, \x1, lsr #2
+	eor		\t0, \t0, \x0, lsl #2
+	and		\t1, \t1, #0x0C0C0C0C
+	eor		\x0, \t0, \t0, lsr #1
+	eor		\x1, \x1, \t1
+	and		\x0, \x0, #0x22222222
+	eor		\x1, \x1, \t1, lsl #2
+	eor		\t0, \t0, \x0
+	eor		\t1, \x1, \x1, lsr #1
+	eor		\x0, \t0, \x0, lsl #1
+	and		\t1, \t1, #0x22222222
+	eor		\x1, \x1, \t1
+	eor		\x1, \x1, \t1, lsl #1
 	.endm
 
 @	--- offsets in state
@@ -195,7 +177,7 @@
 @
 @ void KeccakF1600_Initialize( void )
 @
-.align 8
+.align 3
 .global   KeccakF1600_Initialize
 KeccakF1600_Initialize:
 	bx		lr
@@ -206,7 +188,7 @@ KeccakF1600_Initialize:
 @
 @ void KeccakF1600_StateXORBytes(void *state, const unsigned char *data, unsigned int offset, unsigned int length)
 @
-.align 8
+.align 3
 .global   KeccakF1600_StateXORBytes
 KeccakF1600_StateXORBytes:
 	cbz		r3, KeccakF1600_StateXORBytes_Exit1
@@ -254,15 +236,15 @@ KeccakF1600_StateXORBytes_Exit1:
 @  r0 state pointer next lane
 @  r1 data pointer next byte to input
 @
-@ Changed: r2-r7
+@ Changed: r2-r7, r12
 @
-.align 8
+.align 3
 __KeccakF1600_StateXORLanes:
 __KeccakF1600_StateXORLanes_LoopAligned:
 	ldr		r4, [r1], #4
 	ldr		r5, [r1], #4
 	ldrd    r6, r7, [r0]
-	toBitInterleaving	r4, r5, r6, r7, r3, 0
+	toBitInterleaving	r4, r5, r6, r7, r3, r12
 	strd	r6, r7, [r0], #8
 	subs	r2, r2, #1
 	bne		__KeccakF1600_StateXORLanes_LoopAligned
@@ -283,9 +265,9 @@ __KeccakF1600_StateXORLanes_LoopAligned:
 @  r0 state pointer next lane
 @  r1 data pointer next byte to input
 @
-@  Changed: r2-r7
+@  Changed: r2-r7, r12
 @
-.align 8
+.align 3
 __KeccakF1600_StateXORBytesInLane:
 	movs	r4, #0
 	movs	r5, #0
@@ -298,7 +280,7 @@ __KeccakF1600_StateXORBytesInLane_Loop:
 	bne		__KeccakF1600_StateXORBytesInLane_Loop
 	pop		{ r4 - r5 }
 	ldrd    r6, r7, [r0]
-	toBitInterleaving	r4, r5, r6, r7, r3, 0
+	toBitInterleaving	r4, r5, r6, r7, r3, r12
 	strd	r6, r7, [r0], #8
 	bx		lr
 
@@ -309,7 +291,7 @@ __KeccakF1600_StateXORBytesInLane_Loop:
 @
 @ void KeccakF1600_StateExtractBytes(void *state, const unsigned char *data, unsigned int offset, unsigned int length)
 @
-.align 8
+.align 3
 .global   KeccakF1600_StateExtractBytes
 KeccakF1600_StateExtractBytes:
 	cbz		r3, KeccakF1600_StateExtractBytes_Exit1	@ .if length != 0
@@ -357,13 +339,13 @@ KeccakF1600_StateExtractBytes_Exit1:
 @  r0 state pointer next lane
 @  r1 data pointer next byte to input
 @
-@ Changed: r2-r5
+@ Changed: r2-r6
 @
-.align 8
+.align 3
 __KeccakF1600_StateExtractLanes:
 __KeccakF1600_StateExtractLanes_LoopAligned:
 	ldrd	r4, r5, [r0], #8
-	fromBitInterleaving	r4, r5, r3
+	fromBitInterleaving	r4, r5, r3, r6
 	str		r4, [r1], #4
 	subs	r2, r2, #1
 	str		r5, [r1], #4
@@ -385,12 +367,12 @@ __KeccakF1600_StateExtractLanes_LoopAligned:
 @  r0 state pointer next lane
 @  r1 data pointer next byte to input
 @
-@  Changed: r2-r6
+@  Changed: r2-r6, r12
 @
-.align 8
+.align 3
 __KeccakF1600_StateExtractBytesInLane:
 	ldrd	r4, r5, [r0], #8
-	fromBitInterleaving	r4, r5, r6
+	fromBitInterleaving	r4, r5, r6, r12
 	push	{r4, r5}
 	add		r2, sp, r2
 __KeccakF1600_StateExtractBytesInLane_Loop:
@@ -403,7 +385,7 @@ __KeccakF1600_StateExtractBytesInLane_Loop:
 
 
 
-.align 8
+.align 3
 KeccakF1600_StatePermute_RoundConstantsWithTerminator:
 	@		0			1
 		.long 		0x00000001,	0x00000000
@@ -442,7 +424,7 @@ KeccakF1600_StatePermute_RoundConstantsWithTerminator:
 @
 @ void KeccakF1600_StatePermute( void *state )
 @
-.align 8
+.align 3
 .global   KeccakF1600_StatePermute
 .type     KeccakF1600_StatePermute, %function
 KeccakF1600_StatePermute:
