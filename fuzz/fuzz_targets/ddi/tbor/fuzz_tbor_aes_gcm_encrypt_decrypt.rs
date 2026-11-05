@@ -207,10 +207,19 @@ fn crypt(
 /// Import the all-zero AES-256 known-answer key using the existing RSA-OAEP /
 /// AES-KWP test convention, without treating an AEAD envelope as a masked key.
 fn import_zero_key(ctx: &TestCtx, sid: u16) -> Vec<u8> {
-    let wire = ctx
-        .tbor(&TborGetUnwrappingKeyReq { session_id: sid })
-        .expect("GetUnwrappingKey for known answer")
-        .pub_key;
+    let timeout = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    let wire = loop {
+        match ctx.tbor(&TborGetUnwrappingKeyReq { session_id: sid }) {
+            Ok(resp) => break resp.pub_key,
+            Err(DdiError::TborStatus(status))
+                if status == TborStatus::PendingKeyGeneration && start.elapsed() < timeout =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(err) => panic!("GetUnwrappingKey for known answer failed: {err:?}"),
+        }
+    };
     assert_eq!(wire.len(), UNWRAPPING_PUB_KEY_LEN);
     let modulus_len = wire.len() - 4;
     let be: Vec<_> = wire[..modulus_len]
