@@ -103,12 +103,10 @@ pub(crate) fn sd_create_remote_backup_ex(
     // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
-    let mut cookie = *ddi_cookie.lock();
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    let result = dev
-        .exec_op_tbor(&req, oob_items, &mut cookie)
-        .map(HsmSdRemoteBackupResult::from)
-        .map_err(HsmError::from);
-    *ddi_cookie.lock() = cookie;
-    result
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, oob_items, cookie)
+            .map(HsmSdRemoteBackupResult::from)
+            .map_err(HsmError::from)
+    })
 }

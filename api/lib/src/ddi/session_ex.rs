@@ -506,12 +506,12 @@ pub(crate) fn psk_change(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = *ddi_cookie.lock();
-    let _resp: TborPskChangeResp = dev
-        .exec_op_tbor(&req, None, &mut cookie)
-        .map_err(HsmError::from)?;
-    *ddi_cookie.lock() = cookie;
-    Ok(())
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        let _resp: TborPskChangeResp = dev
+            .exec_op_tbor(&req, None, cookie)
+            .map_err(HsmError::from)?;
+        Ok(())
+    })
 }
 
 /// Closes an active TBOR security-domain session — `CloseSession`
@@ -542,13 +542,11 @@ pub(crate) fn close_session_ex(
     let dev = inner.dev();
 
     let req = TborSessionCloseReq { session_id };
-    let mut cookie = *ddi_cookie.lock();
-    let result = dev
-        .exec_op_tbor(&req, None, &mut cookie)
-        .map_err(HsmError::from)
-        .map(|_| ());
-    *ddi_cookie.lock() = cookie;
-    result
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, None, cookie)
+            .map_err(HsmError::from)
+            .map(|_| ())
+    })
 }
 
 #[cfg(all(test, feature = "emu"))]

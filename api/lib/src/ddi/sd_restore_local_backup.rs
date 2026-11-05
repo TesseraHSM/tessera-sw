@@ -75,11 +75,9 @@ pub(crate) fn sd_restore_local_backup_ex(
     // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
     // cookie explicitly since this call also runs outside
     // `with_session_cookie`'s scope.
-    let mut cookie = *ddi_cookie.lock();
-    let result = dev
-        .exec_op_tbor(&req, None, &mut cookie)
-        .map(HsmSdRestoreResult::from)
-        .map_err(HsmError::from);
-    *ddi_cookie.lock() = cookie;
-    result
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, None, cookie)
+            .map(HsmSdRestoreResult::from)
+            .map_err(HsmError::from)
+    })
 }

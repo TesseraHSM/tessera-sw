@@ -196,13 +196,11 @@ pub(crate) fn part_init_ex(
     // this session across calls (per the `exec_op_tbor` contract in
     // `ddi/interface`) treat the request as belonging to an unknown
     // session, even immediately after a successful `OpenSession`.
-    let mut cookie = *ddi_cookie.lock();
-    let result = dev
-        .exec_op_tbor(&req, None, &mut cookie)
-        .map(HsmPartInitExResult::from)
-        .map_err(HsmError::from);
-    *ddi_cookie.lock() = cookie;
-    result
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, None, cookie)
+            .map(HsmPartInitExResult::from)
+            .map_err(HsmError::from)
+    })
 }
 
 /// Issue `PartFinal` (opcode `0x08`) on the active CO session.
@@ -266,9 +264,9 @@ pub(crate) fn part_final_ex(
     let dev = inner.dev();
     // See `part_init_ex`: thread the session's cookie explicitly since
     // this call also runs outside `with_session_cookie`'s scope.
-    let mut cookie = *ddi_cookie.lock();
-    let resp = dev.exec_op_tbor(&req, Some(&oob), &mut cookie);
-    *ddi_cookie.lock() = cookie;
+    let resp = with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, Some(&oob), cookie)
+    });
     let resp = resp.map_err(HsmError::from)?;
 
     // The firmware always returns a fixed-size `local_mk_backup`

@@ -247,10 +247,21 @@ impl VsockStream {
     #[allow(unsafe_code)]
     fn set_timeout(&mut self, opt: libc::c_int, timeout: Option<Duration>) -> std::io::Result<()> {
         let tv = match timeout {
-            Some(d) => libc::timeval {
-                tv_sec: d.as_secs() as libc::time_t,
-                tv_usec: libc::suseconds_t::from(d.subsec_micros()),
-            },
+            Some(d) => {
+                // A positive duration under one microsecond truncates to
+                // an all-zero `timeval` via `subsec_micros()`, which the
+                // kernel treats identically to `None` (disable the
+                // timeout, block indefinitely) rather than "expire
+                // immediately". Round such tiny positive remainders up
+                // to one microsecond so the timeout stays armed; `std`'s
+                // own `TcpStream`/`UnixStream` timeout setters apply the
+                // same clamp for this reason.
+                let d = d.max(Duration::from_micros(1));
+                libc::timeval {
+                    tv_sec: d.as_secs() as libc::time_t,
+                    tv_usec: libc::suseconds_t::from(d.subsec_micros()),
+                }
+            }
             // A zeroed timeval disables the timeout (block indefinitely),
             // matching `SO_RCVTIMEO`/`SO_SNDTIMEO`'s documented default.
             None => libc::timeval {
@@ -1377,6 +1388,51 @@ mod tests {
                 .expect_err("peer disconnected")
                 .kind(),
             std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(unsafe_code)]
+    fn vsock_set_timeout_clamps_sub_microsecond_duration_to_nonzero() {
+        use std::os::fd::IntoRawFd;
+
+        let (client, _peer) = UnixStream::pair().expect("socket pair");
+        let mut stream = VsockStream {
+            fd: client.into_raw_fd(),
+        };
+        stream
+            .set_timeout(libc::SO_RCVTIMEO, Some(Duration::from_nanos(1)))
+            .expect("set timeout");
+
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        let mut len = std::mem::size_of::<libc::timeval>() as libc::socklen_t;
+        // SAFETY: `stream.fd` is a valid, open socket; `tv`/`len` are a
+        // valid, correctly sized out-param pair for `getsockopt`.
+        let ret = unsafe {
+            libc::getsockopt(
+                stream.fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                std::ptr::addr_of_mut!(tv).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(
+            ret,
+            0,
+            "getsockopt failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // A 1ns request must not round down to an all-zero timeval, since
+        // the kernel treats that identically to `None` (disable the
+        // timeout, block indefinitely) rather than "expire immediately".
+        assert!(
+            tv.tv_sec != 0 || tv.tv_usec != 0,
+            "sub-microsecond timeout was clamped to the all-zero 'no timeout' value"
         );
     }
 
