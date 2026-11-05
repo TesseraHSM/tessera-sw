@@ -3,9 +3,10 @@
 
 //! TSRA fastpath (FP) firmware.
 //!
-//! Bring-up skeleton: one image is built and loaded into all three FP
-//! cores, where it starts an Embassy executor on the SysTick time base and
-//! services the SP core-liveliness heartbeat. There is no FP workload yet.
+//! One image is built and loaded into all three FP cores, where a single
+//! loop serves the HSM's ML-DSA and ML-KEM requests and keeps the SP
+//! core-liveliness heartbeat; there is no executor, as there is never more
+//! than one thing to do.
 //!
 //! # Per-core identity
 //!
@@ -32,13 +33,10 @@ mod mailbox;
 mod shared_status;
 
 use core::ptr::addr_of;
+use core::sync::atomic::AtomicU32;
 use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering;
 
-use embassy_executor::Spawner;
-use embassy_time::Duration;
-use embassy_time::Timer;
-use tsra_fw_uno_drivers_systick as systick;
 use zeroize::Zeroize;
 
 /// Number of fastpath cores.
@@ -130,66 +128,81 @@ const CORE_RUN_STATUS: *mut u32 = 0x2002_3DDC as *mut u32;
 /// Value the SP treats as "this core made forward progress".
 const CORE_ALIVE: u32 = 1;
 
-/// Heartbeat refresh period, comfortably faster than the SP's 1 s poll.
-const HEARTBEAT_PERIOD: Duration = Duration::from_millis(250);
+/// Core clock, which the DWT cycle counter and SysTick both count.
+const CORE_HZ: u32 = 750_000_000;
 
-/// How often to look for an HSM doorbell.  Fast enough not to dominate a
-/// PQC operation, slow enough to stay free.
-const DOORBELL_POLL_PERIOD: Duration = Duration::from_millis(2);
+/// SysTick rate: 64 Hz, the slowest power of two its 24-bit reload allows
+/// at this clock.
+const SYSTICK_HZ: u32 = 64;
 
-/// How long to yield-poll the doorbell after servicing a request, before
-/// dropping back to [`DOORBELL_POLL_PERIOD`].
+/// Heartbeat refresh period, comfortably faster than the SP's 1 s poll:
+/// 250 ms. The status block is refreshed on the same beat.
 ///
-/// `Timer::after` cannot sleep for less than one embassy tick and this core
-/// runs `tick-hz-32`, so the 2 ms above is really 31.25 ms. A request could
-/// therefore sit unnoticed for a full tick before the core even started
-/// work — on operations that take 3–9 ms.
-///
-/// Yielding re-checks on every executor pass, so a request arriving while
-/// this window is open is picked up almost immediately. The window is
-/// bounded rather than infinite so an idle core eventually returns to the
-/// timer instead of spinning forever: the heartbeat keeps running either
-/// way, but a permanently spinning core burns power for nothing.
-///
-/// Expressed as a deadline rather than an iteration count so it does not
-/// depend on how long one trip through the executor takes.
-const DOORBELL_YIELD_WINDOW: Duration = Duration::from_millis(50);
+/// Counted in SysTicks, not cycles: the cycle counter need not advance
+/// while the core sleeps in `wfi`, which is nearly all the time on an idle
+/// core, so a beat timed by it could fall far behind and have the SP
+/// report a healthy core as hung. SysTick keeps counting there -- it is
+/// what wakes the core.
+const HEARTBEAT_TICKS: u32 = SYSTICK_HZ / 4;
 
-/// Refreshes the SP-polled liveliness slot for the life of the firmware.
+/// How long the core keeps polling the doorbell flat out after its last
+/// request, 50 ms, before it starts sleeping between SysTicks.
 ///
-/// Runs as its own task so the heartbeat tracks executor forward progress
-/// rather than any single workload.
-#[embassy_executor::task]
-async fn heartbeat() -> ! {
-    loop {
-        // SAFETY: `CORE_RUN_STATUS` is a 32-bit slot reserved for this
-        // purpose by the SoC memory map. It lies outside every region
-        // described to the linker, so no Rust object aliases it.
-        unsafe { CORE_RUN_STATUS.write_volatile(CORE_ALIVE) };
+/// A stream of work therefore never waits on a tick, and an idle core does
+/// not spin forever: a permanently spinning core burns power for nothing.
+const IDLE_AFTER_CYCLES: u32 = CORE_HZ / 20;
 
-        Timer::after(HEARTBEAT_PERIOD).await;
-    }
+/// SysTick reload for [`SYSTICK_HZ`]. Once the core is idle, SysTick only
+/// wakes it from `wfi` to look at the doorbell and the heartbeat again.
+const SYSTICK_RELOAD: u32 = CORE_HZ / SYSTICK_HZ - 1;
+
+/// SysTicks since boot, counted by the `SysTick` handler for the
+/// heartbeat; wraps after two years.
+static TICKS: AtomicU32 = AtomicU32::new(0);
+
+/// Cycles since the counter [`mailbox::cyc_init`] started; wraps every
+/// 5.7 s, so only differences of less than that mean anything.
+fn cycles() -> u32 {
+    // SAFETY: DWT_CYCCNT, a read-only use of a core peripheral register.
+    unsafe { core::ptr::read_volatile(0xE000_1004 as *const u32) }
 }
 
-/// Service PQC requests from the HSM.
+/// Serve HSM requests for the life of the firmware, keeping the SP's
+/// liveliness slot and the HSM's status block fresh in between.
 ///
-/// The doorbell only wakes this task; the request itself is read from
-/// this core's PSRAM mailbox, and the response written back there. The
-/// doorbell is still answered so the HSM can distinguish a core that is
-/// running from one that is wedged.
+/// The doorbell only wakes the loop; the request itself is read from this
+/// core's PSRAM mailbox, and the response written back there. The doorbell
+/// is still answered so the HSM can distinguish a core that is running
+/// from one that is wedged. Polled rather than interrupt-driven; see
+/// [`ipc`].
 ///
-/// Polled rather than interrupt-driven; see [`ipc`].
-#[embassy_executor::task]
-async fn doorbell(core_id: u8) -> ! {
-    // Publish a marker immediately so a task that never starts is
-    // distinguishable from one that starts but sees nothing.
+/// The heartbeat is written between requests, so it tracks the loop's
+/// forward progress rather than any single workload; no request comes
+/// close to the SP's one-second poll.
+fn serve(core_id: u8) -> ! {
+    // Publish a marker immediately so a core that never gets here is
+    // distinguishable from one that does but sees nothing.
     shared_status::note_doorbell(core_id, 0);
 
-    // End of the current fast window, reset on every serviced request so a
-    // stream of work stays on the fast path.
-    let mut yield_until = embassy_time::Instant::now();
+    // Both due at once: the first heartbeat and status go out before any
+    // request is looked at.
+    let mut beat = TICKS.load(Ordering::Relaxed).wrapping_sub(HEARTBEAT_TICKS);
+    let mut status: u32 = 0;
+    let mut last_request = cycles();
 
     loop {
+        let now = cycles();
+        let tick = TICKS.load(Ordering::Relaxed);
+        if tick.wrapping_sub(beat) >= HEARTBEAT_TICKS {
+            beat = tick;
+            // SAFETY: `CORE_RUN_STATUS` is a 32-bit slot reserved for this
+            // purpose by the SoC memory map. It lies outside every region
+            // described to the linker, so no Rust object aliases it.
+            unsafe { CORE_RUN_STATUS.write_volatile(CORE_ALIVE) };
+            status = status.wrapping_add(1);
+            shared_status::publish(core_id, status);
+        }
+
         if let Some(ring) = ipc::take_request(core_id) {
             shared_status::note_doorbell(core_id, ring);
 
@@ -198,16 +211,22 @@ async fn doorbell(core_id: u8) -> ! {
             }
 
             ipc::ring_response(core_id, ring.wrapping_add(1));
-            yield_until = embassy_time::Instant::now() + DOORBELL_YIELD_WINDOW;
-            continue;
-        }
-
-        if embassy_time::Instant::now() < yield_until {
-            embassy_futures::yield_now().await;
-        } else {
-            Timer::after(DOORBELL_POLL_PERIOD).await;
+            last_request = cycles();
+        } else if now.wrapping_sub(last_request) >= IDLE_AFTER_CYCLES {
+            // Held at the threshold, so a long idle spell cannot wrap the
+            // counter back into the polling window.
+            last_request = now.wrapping_sub(IDLE_AFTER_CYCLES);
+            cortex_m::asm::wfi();
         }
     }
+}
+
+/// Wakes an idle core from `wfi`, and counts the ticks the heartbeat is
+/// timed by. The only writer of [`TICKS`], so a plain load and store do.
+#[cortex_m_rt::exception]
+fn SysTick() {
+    let ticks = TICKS.load(Ordering::Relaxed);
+    TICKS.store(ticks.wrapping_add(1), Ordering::Relaxed);
 }
 
 /// Produce a response for `req`.
@@ -877,8 +896,8 @@ fn mldsa_variant(key_kind: u32) -> Option<pqc_ml::MlDsaVariant> {
     }
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+#[cortex_m_rt::entry]
+fn main() -> ! {
     // Establish identity before anything else. A core that cannot -- an
     // unpatched or corrupt image -- parks instead of running, so it stops
     // heartbeating and the SP reports it. That turns the SP's existing
@@ -925,26 +944,18 @@ async fn main(spawner: Spawner) {
         );
     }
 
-    systick::init();
-
     mailbox::cyc_init();
 
-    if let Ok(token) = heartbeat() {
-        spawner.spawn(token);
-    }
-
-    if let Ok(token) = shared_status::status_task(id, HEARTBEAT_PERIOD) {
-        spawner.spawn(token);
-    }
+    // SAFETY: SysTick is used nowhere else in this image.
+    let mut syst = unsafe { cortex_m::Peripherals::steal() }.SYST;
+    syst.set_clock_source(cortex_m::peripheral::syst::SystClkSource::Core);
+    syst.set_reload(SYSTICK_RELOAD);
+    syst.clear_current();
+    syst.enable_interrupt();
+    syst.enable_counter();
 
     ipc::init(id);
-    if let Ok(token) = doorbell(id) {
-        spawner.spawn(token);
-    }
-
-    loop {
-        Timer::after(Duration::from_secs(1)).await;
-    }
+    serve(id)
 }
 
 /// Stop this core permanently, leaving the heartbeat slot untouched so the
