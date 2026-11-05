@@ -389,7 +389,7 @@ fn shadowed_fields_follow_writes() {
     let cred = [0x66u8; CREDENTIAL_LEN];
 
     Partition(pid).reset();
-    Partition(pid).set_state(PartState::Initialized);
+    Partition(pid).set_state(HsmPartState::Initialized);
     Partition(pid).set_generation(7);
     Partition(pid).set_res_mask(0x0123_4567_89ab_cdef_0011_2233_4455_6677);
     Partition(pid).set_mk_key_id(Some(HsmKeyId::from(0x0102u16)));
@@ -398,7 +398,7 @@ fn shadowed_fields_follow_writes() {
     // Twice each: once loading the shadow, once from it.
     for _ in 0..2 {
         let p = Partition(pid);
-        assert_eq!(p.state().unwrap(), PartState::Initialized);
+        assert_eq!(p.state().unwrap(), HsmPartState::Initialized);
         assert_eq!(p.generation(), 7);
         assert_eq!(p.res_mask(), 0x0123_4567_89ab_cdef_0011_2233_4455_6677);
         assert_eq!(p.mk_key_id(), Some(HsmKeyId::from(0x0102u16)));
@@ -407,8 +407,8 @@ fn shadowed_fields_follow_writes() {
         assert!(!p.credential_valid());
     }
 
-    Partition(pid).set_state(PartState::Enabled);
-    assert_eq!(Partition(pid).state().unwrap(), PartState::Enabled);
+    Partition(pid).set_state(HsmPartState::Enabled);
+    assert_eq!(Partition(pid).state().unwrap(), HsmPartState::Enabled);
     Partition(pid).bump_generation();
     assert_eq!(Partition(pid).generation(), 8);
     Partition(pid).set_res_mask(1);
