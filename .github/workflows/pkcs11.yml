@@ -69,6 +69,18 @@ jobs:
           pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 --keygen \
             --key-type aes:32 --label ci-aes --sensitive
 
+      # A private EC key signs or derives, never both, so the tool's default
+      # (both) is refused and a named usage works.
+      - name: EC key pair via pkcs11-tool
+        run: |
+          set -euo pipefail
+          pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 --keypairgen \
+            --key-type EC:prime256v1 --usage-sign --label ci-ec
+          pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 --keypairgen \
+            --key-type EC:prime256v1 --label ci-ec-both > "$RUNNER_TEMP/ec-both.log" 2>&1 || true
+          cat "$RUNNER_TEMP/ec-both.log"
+          grep -q CKR_TEMPLATE_INCONSISTENT "$RUNNER_TEMP/ec-both.log"
+
       # Keys enter the token only by generation or unwrap.
       - name: Plaintext key import via pkcs11-tool is refused
         run: |

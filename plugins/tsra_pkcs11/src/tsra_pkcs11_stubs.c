@@ -132,62 +132,6 @@ CK_RV C_DigestKey(CK_SESSION_HANDLE hSession, CK_OBJECT_HANDLE hKey)
     return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
-CK_RV C_SignInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pMechanism;
-    (void)hKey;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_Sign(
-    CK_SESSION_HANDLE hSession,
-    CK_BYTE_PTR pData,
-    CK_ULONG ulDataLen,
-    CK_BYTE_PTR pSignature,
-    CK_ULONG_PTR pulSignatureLen
-)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pData;
-    (void)ulDataLen;
-    (void)pSignature;
-    (void)pulSignatureLen;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_SignUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart, CK_ULONG ulPartLen)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pPart;
-    (void)ulPartLen;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_SignFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, CK_ULONG_PTR pulSignatureLen)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pSignature;
-    (void)pulSignatureLen;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
 CK_RV C_SignRecoverInit(
     CK_SESSION_HANDLE hSession,
     CK_MECHANISM_PTR pMechanism,
@@ -221,62 +165,6 @@ CK_RV C_SignRecover(
     (void)ulDataLen;
     (void)pSignature;
     (void)pulSignatureLen;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_VerifyInit(CK_SESSION_HANDLE hSession, CK_MECHANISM_PTR pMechanism, CK_OBJECT_HANDLE hKey)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pMechanism;
-    (void)hKey;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_Verify(
-    CK_SESSION_HANDLE hSession,
-    CK_BYTE_PTR pData,
-    CK_ULONG ulDataLen,
-    CK_BYTE_PTR pSignature,
-    CK_ULONG ulSignatureLen
-)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pData;
-    (void)ulDataLen;
-    (void)pSignature;
-    (void)ulSignatureLen;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_VerifyUpdate(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pPart, CK_ULONG ulPartLen)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pPart;
-    (void)ulPartLen;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_VerifyFinal(CK_SESSION_HANDLE hSession, CK_BYTE_PTR pSignature, CK_ULONG ulSignatureLen)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pSignature;
-    (void)ulSignatureLen;
     return CKR_FUNCTION_NOT_SUPPORTED;
 }
 
@@ -393,32 +281,6 @@ CK_RV C_DecryptVerifyUpdate(
     (void)ulEncryptedPartLen;
     (void)pPart;
     (void)pulPartLen;
-    return CKR_FUNCTION_NOT_SUPPORTED;
-}
-
-CK_RV C_GenerateKeyPair(
-    CK_SESSION_HANDLE hSession,
-    CK_MECHANISM_PTR pMechanism,
-    CK_ATTRIBUTE_PTR pPublicKeyTemplate,
-    CK_ULONG ulPublicKeyAttributeCount,
-    CK_ATTRIBUTE_PTR pPrivateKeyTemplate,
-    CK_ULONG ulPrivateKeyAttributeCount,
-    CK_OBJECT_HANDLE_PTR phPublicKey,
-    CK_OBJECT_HANDLE_PTR phPrivateKey
-)
-{
-    if (!g_tsra_pkcs11.initialized)
-    {
-        return CKR_CRYPTOKI_NOT_INITIALIZED;
-    }
-    (void)hSession;
-    (void)pMechanism;
-    (void)pPublicKeyTemplate;
-    (void)ulPublicKeyAttributeCount;
-    (void)pPrivateKeyTemplate;
-    (void)ulPrivateKeyAttributeCount;
-    (void)phPublicKey;
-    (void)phPrivateKey;
     return CKR_FUNCTION_NOT_SUPPORTED;
 }
 

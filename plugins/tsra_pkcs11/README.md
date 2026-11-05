@@ -4,7 +4,7 @@ A standalone **PKCS#11 (Cryptoki) v3.1** module for the TSRA. It links the
 native C API (`tsra.h`, generated from `api/native`) the same way
 `plugins/ossl_prov` does.
 
-## Status: digests, AES keys and ciphers, host objects
+## Status: digests, AES and EC keys, ciphers, ECDSA, host objects
 
 Unimplemented PKCS#11 entry points return `CKR_FUNCTION_NOT_SUPPORTED` (after
 `C_Initialize`; before it every entry point other than `C_Initialize` and the
@@ -16,7 +16,7 @@ the spec requires). Implemented so far:
   login state machine. The "PKCS 11" interface comes in versions 3.1 (the
   default), 3.0 and 2.40 (`C_GetInterfaceList`, `C_GetInterface`), and
   `C_GetFunctionList` returns the 2.40 table.
-  `C_GetMechanismList` reports only the ten mechanisms below, and
+  `C_GetMechanismList` reports only the sixteen mechanisms below, and
   `C_GetTokenInfo` the real session counts (at most 256 sessions).
 - **`C_Login`**: runs the TSRA provisioning ceremony and opens one device
   session for the token. Provisioning is done lazily: login opens a device
@@ -112,12 +112,33 @@ the spec requires). Implemented so far:
   - The OpenSSL provider works around the same SDK constraints
     (`plugins/ossl_prov/src/tsra_ossl_cipher.c`).
 
-  The other key-backed mechanisms (RSA/ECDSA, wrap/unwrap, derive) are not
+- **`C_GenerateKeyPair` (`CKM_EC_KEY_PAIR_GEN`)**: generates a P-256, P-384
+  or P-521 key pair on the device, named by the public template's
+  `CKA_EC_PARAMS` as a named-curve OID; any other curve returns
+  `CKR_CURVE_NOT_SUPPORTED`; `C_GetMechanismInfo` says so with `CKF_EC_F_P`,
+  `CKF_EC_OID` and `CKF_EC_UNCOMPRESS` on every EC mechanism. The private key
+  signs or derives, never both (see Deviations). `CKA_EC_POINT` is the
+  uncompressed point in a DER OCTET STRING. The private key is private,
+  sensitive, unextractable and local; the public key is not private unless
+  the template says so, and is readable while logged out. Both objects keep the pair's masked blob as their key body: the
+  SDK verifies only with a device key, and only unmasking the pair gives one.
+- **`C_Sign*` / `C_Verify*` (`CKM_ECDSA`, `CKM_ECDSA_SHA1`, `_SHA256`,
+  `_SHA384`, `_SHA512`)**: each init unmasks the pair into device keys that
+  live as long as the operation, like the cipher operations. A signature is
+  r || s, 64, 96 or 132 bytes. The hashing mechanisms work one-shot and
+  multi-part (through the SDK's stream); `CKM_ECDSA` signs a hash the caller
+  made, one-shot only (`C_SignUpdate` and `C_SignFinal` return
+  `CKR_FUNCTION_NOT_SUPPORTED`), and takes 20, 32, 48 or 64 bytes (see
+  Deviations). A signature of the wrong length returns
+  `CKR_SIGNATURE_LEN_RANGE`, a wrong one `CKR_SIGNATURE_INVALID`. A key's
+  `CKA_ALLOWED_MECHANISMS`, if it has one, is enforced.
+
+  The other key-backed mechanisms (RSA, wrap/unwrap, derive) are not
   implemented yet.
-- **Ending an operation**: `C_DigestInit`, `C_EncryptInit` and
-  `C_DecryptInit` with a NULL mechanism end the session's active operation of
-  their kind (and return `CKR_OK` when there is none), and `C_SessionCancel`
-  ends the operations its flags name.
+- **Ending an operation**: `C_DigestInit`, `C_EncryptInit`,
+  `C_DecryptInit`, `C_SignInit` and `C_VerifyInit` with a NULL mechanism end
+  the session's active operation of their kind (and return `CKR_OK` when
+  there is none), and `C_SessionCancel` ends the operations its flags name.
 
 ## Deviations from PKCS#11
 
@@ -147,6 +168,22 @@ the spec requires). Implemented so far:
   a secret or private key without it `CKR_TEMPLATE_INCOMPLETE`. Tools that
   import plaintext keys, such as OpenSC `pkcs11-tool --write-object --type
   secrkey` or `privkey`, get this error.
+- **An EC private key signs or derives, not both.** The device makes a
+  signing key or a deriving key. A private-key template with both `CKA_SIGN`
+  and `CKA_DERIVE` TRUE, or neither, returns `CKR_TEMPLATE_INCONSISTENT`, and
+  the debug trace (`TSRA_PKCS11_DEBUG=1`) names the rule. Ask for one:
+  `pkcs11-tool --keypairgen --key-type EC:prime256v1 --usage-sign` (or
+  `--usage-derive`). Tools that ask for both by default, such as
+  `pkcs11-tool` without a `--usage-*` option, get this error.
+- **Raw ECDSA takes 20, 32, 48 or 64 bytes.** The SDK infers the hash from
+  the input length, so `CKM_ECDSA` input of any other length (SHA-224's 28
+  bytes among them) returns `CKR_DATA_LEN_RANGE`. The module neither pads nor
+  truncates; the device truncates a hash longer than the curve order, as
+  PKCS#11 describes.
+- **Verification needs a login and a generated key.** The SDK verifies only
+  through a device key, so `C_VerifyInit` needs the login's device session
+  (`CKR_USER_NOT_LOGGED_IN`) even with a public key, and a public key made
+  with `C_CreateObject` cannot verify (`CKR_KEY_HANDLE_INVALID`).
 - **No attribute arrays.** `CKA_WRAP_TEMPLATE`, `CKA_UNWRAP_TEMPLATE` and
   `CKA_DERIVE_TEMPLATE` return `CKR_ATTRIBUTE_TYPE_INVALID` in every template.
 - **XTS tweaks are 64-bit.** The tweak, read as a little-endian 128-bit
@@ -209,7 +246,7 @@ What a token key survives:
 | Object store | `tsra_pkcs11_objstore.h`, `tsra_pkcs11_objstore_mem.c` | host-side objects behind a vtable seam; the in-memory backend |
 | File store | `tsra_pkcs11_objstore_file.c`, `tsra_pkcs11_store_record.c`, `tsra_pkcs11_store_io.c` | the persistent backend for token objects (session objects stay in memory): one record file per object, the record codec, and the crash-safe, owner-only filesystem primitives with a cross-process lock |
 | Object policy | `tsra_pkcs11_attr_types.c`, `tsra_pkcs11_attr_policy.c` | the attribute type table and template ceilings every template entry point uses; what `C_CreateObject` may create and which attributes `C_SetAttributeValue` may change, per class; device-free units of their own |
-| Key operations | `tsra_pkcs11_crypt.c`, `tsra_pkcs11_template.c` | key-backed entry points: operation state and the masked-blob store/unmask flow (CK_RV only); the keygen template validation, key-family choice and cipher mechanism policy are a device-free unit of their own |
+| Key operations | `tsra_pkcs11_crypt.c`, `tsra_pkcs11_sign.c`, `tsra_pkcs11_template.c`, `tsra_pkcs11_ec_template.c` | key-backed entry points: operation state and the masked-blob store/unmask flow (CK_RV only); the keygen template validation, key-family choice, cipher and sign mechanism policy, and the EC templates and encodings are device-free units of their own |
 | Configuration | `tsra_pkcs11_config.c` | the configuration file and environment, the PIN rules and the owner backup key file; a device-free unit of its own |
 | HSM binding | `tsra_pkcs11_hsm.c`, `tsra_pkcs11_key.c`, `tsra_pkcs11_status.c` | the only code that calls `tsra_*` and maps `tsra_status` to `CK_RV` |
 | Not implemented | `tsra_pkcs11_stubs.c` (generated) | everything else → `CKR_FUNCTION_NOT_SUPPORTED` |
@@ -325,19 +362,23 @@ misaligned templates and parameter blocks it feeds the decoders are real
 checks), `tests/attr_types_test.c` (the attribute type table and ceilings:
 every `CK_BBOOL` and `CK_ULONG` attribute at the lengths callers get wrong),
 `tests/attr_policy_test.c` (every `C_CreateObject` and `C_SetAttributeValue`
-verdict, per object class), `tests/mech_table_test.c` (the mechanism table
+verdict, per object class), `tests/ec_template_test.c` (the EC key-pair
+template verdicts, the curve and point encodings, the raw ECDSA lengths and
+the sign mechanism table), `tests/mech_table_test.c` (the mechanism table
 against the dispatch arms, in both directions), `tests/config_test.c` (the
 environment configuration, the PIN rules and the owner backup key, built as a
 hardware build) and `tests/config_file_test.c` (the configuration file
 parser). `integration-tests/cpp/` is the functional suite
 (GoogleTest, same shape as the OpenSSL provider's): it `dlopen`s the built
 module and drives the real Cryptoki ABI: keygen including the GCM/XTS key
-families, one-shot CBC, GCM and XTS round trips, the two-call sizing
-discipline, the operation state machine and init precedence, an init path
-for every advertised mechanism, attribute changes and object sizes, the
-object policy and attribute typing, key survival across every event that ends
-the device session, what `C_Logout` does to session objects, the
-configuration at `C_Initialize`, the interface list, and the login rules (each
+families, one-shot CBC, GCM and XTS round trips, EC key pairs on every curve
+and ECDSA with every mechanism, each signature verified by the host oracle,
+the two-call sizing discipline, the operation state machine and init
+precedence, an init path for every advertised mechanism, attribute changes
+and object sizes, the object policy and attribute typing, key survival
+across every event that ends the device session, what `C_Logout` does to
+session objects, the configuration at `C_Initialize`, the interface list,
+and the login rules (each
 login case in a process of its own, because the first login of a process
 provisions the mock partition with its PIN). So it needs the mock- or
 hardware-backed build (see the CMakeLists.txt header for

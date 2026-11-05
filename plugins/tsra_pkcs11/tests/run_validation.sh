@@ -7,8 +7,8 @@
 # pkcs11-tool, and runs the device-free unit harnesses under UBSan and ASan
 # (build_units.sh); if the mock-backed module has been built (cargo build -p
 # tsra_pkcs11 --features mock; TSRA_PKCS11_MODULE overrides its path), it also
-# runs the C_Login provisioning ceremony, a pkcs11-tool AES keygen and a
-# refused pkcs11-tool key import, the gtest functional suite
+# runs the C_Login provisioning ceremony, a pkcs11-tool AES keygen, EC key
+# pair generation and a refused pkcs11-tool key import, the gtest functional suite
 # (integration-tests/cpp) on the memory and the file object store, the
 # pkcs11test conformance gate (tests/pkcs11test) and the per-PR part of the
 # pkcs11-check gate (tests/pkcs11-check) against the simulator. The
@@ -82,6 +82,19 @@ if [ -f "$HSMMOD" ]; then
         --key-type aes:32 --label validation --sensitive 2>&1 | sed 's/^/   /'; then
         echo "   (AES keygen failed)"; exit 1
     fi
+
+    echo; echo "== mock-backed: EC key pair via pkcs11-tool =="
+    # A private EC key signs or derives, never both: a named usage works, the
+    # tool's default (both) is refused.
+    if ! pkcs11-tool --module "$HSMMOD" --login --pin 1234 --keypairgen \
+        --key-type EC:prime256v1 --usage-sign --label validation-ec 2>&1 | sed 's/^/   /'; then
+        echo "   (EC key pair generation failed)"; exit 1
+    fi
+    pkcs11-tool --module "$HSMMOD" --login --pin 1234 --keypairgen \
+        --key-type EC:prime256v1 --label validation-ec-both > "$WORK/ec-both.log" 2>&1 || true
+    sed 's/^/   /' "$WORK/ec-both.log"
+    grep -q CKR_TEMPLATE_INCONSISTENT "$WORK/ec-both.log" \
+        || { echo "   (an EC key that signs and derives was not refused)"; exit 1; }
 
     echo; echo "== mock-backed: plaintext key import via pkcs11-tool is refused =="
     printf '0123456789abcdef' > "$WORK/import.key"
