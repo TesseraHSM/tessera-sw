@@ -15,11 +15,12 @@ extern "C"
 #endif
 
 /*
- * AES key-generation template handling and the per-mechanism cipher policy:
- * the CK_ATTRIBUTE and CK_MECHANISM logic the key-backed entry points run
- * before they touch the device or the object store. It depends on neither, so
- * it is unit-tested on its own (tests/aes_template_test.c) and reused by
- * tsra_pkcs11_crypt.c. Everything here speaks CK_RV only.
+ * AES key-generation template handling and the per-mechanism cipher and sign
+ * policy: the CK_ATTRIBUTE and CK_MECHANISM logic the key-backed entry points
+ * run before they touch the device or the object store. It depends on
+ * neither, so it is unit-tested on its own (tests/aes_template_test.c, the
+ * sign table in tests/ec_template_test.c) and reused by tsra_pkcs11_crypt.c
+ * and tsra_pkcs11_sign.c. Everything here speaks CK_RV only.
  */
 
 /* Supported AES key lengths (CKA_VALUE_LEN values). An XTS key is two AES-256
@@ -82,12 +83,29 @@ const CK_ATTRIBUTE *tsra_pkcs11_tmpl_find(
  * otherwise, including for a NULL attribute, value or `out`. */
 CK_RV tsra_pkcs11_tmpl_bool(const CK_ATTRIBUTE *a, CK_BBOOL *out);
 
+/* Read a CK_ULONG-wide attribute (CKA_CLASS, CKA_KEY_TYPE, ...) into *out; the
+ * value length must be exactly sizeof(CK_ULONG). CKR_ATTRIBUTE_VALUE_INVALID
+ * otherwise, including for a NULL attribute, value or `out`. */
+CK_RV tsra_pkcs11_tmpl_ulong(const CK_ATTRIBUTE *a, CK_ULONG *out);
+
+/* Append `a` to `full` at index *n (and advance *n) unless `tmpl`, the
+ * caller's template of `count` entries, already carries its type. */
+void tsra_pkcs11_tmpl_append(
+    CK_ATTRIBUTE *full,
+    CK_ULONG *n,
+    const CK_ATTRIBUTE *tmpl,
+    CK_ULONG count,
+    CK_ATTRIBUTE a
+);
+
 /*
  * Validate an AES key-generation template for `mech` (CKM_AES_KEY_GEN or
  * CKM_AES_XTS_KEY_GEN), pick the key family it asks for (*policy), and
  * extract what the device needs: the key length in bytes (*value_len) and
  * whether the caller asked for a token object (*token). All outputs are
- * cleared first and are meaningful only on CKR_OK. Returns:
+ * cleared first and are meaningful only on CKR_OK, except that a template
+ * lacking only CKA_VALUE_LEN also gets its *policy and *token: C_UnwrapKey
+ * takes the length from the wrapped key. Returns:
  *   CKR_ARGUMENTS_BAD             NULL outputs, NULL tmpl with count > 0, or
  *                                 count > TEMPLATE_MAX_ATTRS
  *   CKR_MECHANISM_INVALID         `mech` is not an AES key-generation mechanism
@@ -138,16 +156,17 @@ typedef struct
 } tsra_pkcs11_keygen_fill;
 
 /*
- * Build the template C_GenerateKey stores: the caller's `tmpl` copied verbatim,
- * then the token-decided attributes (see KEYGEN_APPENDED_ATTRS) — class/type
- * identify the object for search and C_GetAttributeValue, the allowed
- * mechanisms record the key family `policy` chose, the sensitivity quartet
- * states the only possible key-protection reality, CKA_LOCAL and
- * CKA_KEY_GEN_MECHANISM say how the key came to be, a key is private unless
- * the caller says otherwise, and the usage defaults make an attribute-less
- * template usable. A caller's own
- * CKA_ALLOWED_MECHANISMS (already checked to lie within the family) is kept
- * as the narrower list. `full` must have room for count +
+ * Build the template C_GenerateKey (`local`) or C_UnwrapKey (not `local`)
+ * stores: the caller's `tmpl` copied verbatim, then the token-decided
+ * attributes (see KEYGEN_APPENDED_ATTRS): class/type identify the object for
+ * search and C_GetAttributeValue, the allowed mechanisms record the key family
+ * `policy` chose, the sensitivity quartet states the only possible
+ * key-protection reality, CKA_LOCAL and CKA_KEY_GEN_MECHANISM say how the key
+ * came to be (an unwrapped key is not local, and neither always sensitive nor
+ * never extractable, as PKCS#11 has it), a key is private unless the caller
+ * says otherwise, and the usage defaults make an attribute-less template
+ * usable. A caller's own CKA_ALLOWED_MECHANISMS (already checked to lie within
+ * the family) is kept as the narrower list. `full` must have room for count +
  * KEYGEN_APPENDED_ATTRS entries; *n receives the number written. `tmpl` is
  * expected to have passed tsra_pkcs11_keygen_check_template.
  * CKR_ARGUMENTS_BAD for NULL policy/fill/full/n, a NULL tmpl with count > 0,
@@ -157,6 +176,7 @@ CK_RV tsra_pkcs11_keygen_build_template(
     const tsra_pkcs11_keygen_policy *policy,
     const CK_ATTRIBUTE *tmpl,
     CK_ULONG count,
+    bool local,
     tsra_pkcs11_keygen_fill *fill,
     CK_ATTRIBUTE *full,
     CK_ULONG *n
@@ -189,6 +209,23 @@ typedef struct
 /* The table entry for `mech`, or NULL for any mechanism this token cannot run
  * through C_Encrypt/C_Decrypt. */
 const tsra_pkcs11_cipher_mech *tsra_pkcs11_cipher_mech_find(CK_MECHANISM_TYPE mech);
+
+/*
+ * The sign and verify mechanisms and what each needs from a key. A mechanism
+ * that hashes the message streams through the SDK (C_SignUpdate and
+ * C_VerifyUpdate); one over a hash the caller computed is one-shot only,
+ * because the SDK has no stream for it.
+ */
+typedef struct
+{
+    CK_MECHANISM_TYPE mech;
+    CK_KEY_TYPE key_type;
+    bool multipart;
+} tsra_pkcs11_sign_mech;
+
+/* The table entry for `mech`, or NULL for any mechanism this token cannot run
+ * through C_Sign/C_Verify. */
+const tsra_pkcs11_sign_mech *tsra_pkcs11_sign_mech_find(CK_MECHANISM_TYPE mech);
 
 /*
  * Whether a key may run `mech`, given how reading its CKA_ALLOWED_MECHANISMS

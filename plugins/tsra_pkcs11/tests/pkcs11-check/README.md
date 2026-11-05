@@ -40,8 +40,8 @@ request.
 test passes that is neither listed nor in `baseline.txt`: that test belongs on
 the list. The nightly workflow runs it.
 
-Measured on the mock build (2026-11-04, a shared 8-core host): `--pr` 282 tests
-in 112 s, the gate 885 tests in 174 s, `--full` about 4.5 minutes.
+Measured on the mock build (2026-11-04, a shared 8-core host): `--pr` 305 tests
+in 110 s, the gate 1012 tests in 186 s, `--full` about 5 minutes.
 
 ## The include-list and the baseline
 
@@ -57,6 +57,7 @@ anything about this module:
 | `environment` | Depend on host tools (p11-kit) the gate does not pin. |
 | `timing` | Benchmarks and timing ratios: no verdict, or flaky on shared runners. |
 | `import-refused` | Set up a plaintext key, which `C_CreateObject` refuses, and pass on that refusal without reaching what they test. |
+| `posture` | Record a hardening note and pass on the path this module takes, so they cannot fail here. |
 | `crash` | Known crashes. None at present. |
 
 The list only grows: `run.sh` fails when it names fewer tests than `FLOOR`.

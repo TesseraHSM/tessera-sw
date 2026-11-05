@@ -4,12 +4,16 @@
 /*
  * Unit test for the mechanism table (src/tsra_pkcs11_mech.c) against the
  * dispatch arms that run the mechanisms: the digest table
- * (src/tsra_pkcs11_digest.c), the cipher table and the key-generation
- * template check (src/tsra_pkcs11_template.c). No device, no libcrypto:
+ * (src/tsra_pkcs11_digest.c), the cipher and sign tables and the
+ * key-generation template check (src/tsra_pkcs11_template.c), the EC
+ * key-pair template check (src/tsra_pkcs11_ec_template.c), and the unwrapping
+ * key pair and unwrap checks (src/tsra_pkcs11_unwrap_params.c). No device, no
+ * libcrypto:
  *
  *   gcc -I ../include/pkcs11-v3.1 -I ../src mech_table_test.c \
  *       ../src/tsra_pkcs11_mech.c ../src/tsra_pkcs11_template.c \
  *       ../src/tsra_pkcs11_attr_types.c ../src/tsra_pkcs11_digest.c \
+ *       ../src/tsra_pkcs11_ec_template.c ../src/tsra_pkcs11_unwrap_params.c \
  *       -o mech_table_test && ./mech_table_test
  *
  * Both directions: every row advertises exactly the flags its arms implement,
@@ -18,8 +22,10 @@
  */
 
 #include "tsra_pkcs11_digest.h"
+#include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_mech.h"
 #include "tsra_pkcs11_template.h"
+#include "tsra_pkcs11_unwrap_params.h"
 
 #include <stdio.h>
 
@@ -44,7 +50,8 @@ static int g_checks = 0;
 /* Every standard CKM_* value lies below this; the sweep looks for arms there. */
 #define SWEEP_END 0x10000
 
-/* The entry-point flags the dispatch arms implement for `t`. */
+/* The flags the dispatch arms implement for `t`, with the EC capability flags
+ * for an EC arm. */
 static CK_FLAGS arm_flags(CK_MECHANISM_TYPE t)
 {
     CK_FLAGS f = 0;
@@ -56,6 +63,11 @@ static CK_FLAGS arm_flags(CK_MECHANISM_TYPE t)
     {
         f |= CKF_ENCRYPT | CKF_DECRYPT;
     }
+    const tsra_pkcs11_sign_mech *sm = tsra_pkcs11_sign_mech_find(t);
+    if (sm != NULL)
+    {
+        f |= CKF_SIGN | CKF_VERIFY;
+    }
     const tsra_pkcs11_keygen_policy *policy = NULL;
     CK_ULONG len = 0;
     CK_BBOOL token = CK_FALSE;
@@ -63,6 +75,26 @@ static CK_FLAGS arm_flags(CK_MECHANISM_TYPE t)
         CKR_MECHANISM_INVALID)
     {
         f |= CKF_GENERATE;
+    }
+    tsra_pkcs11_ec_keygen kg;
+    bool ec_keygen =
+        tsra_pkcs11_ec_keygen_check(t, NULL, 0, NULL, 0, &kg, NULL) != CKR_MECHANISM_INVALID;
+    CK_BBOOL priv_token = CK_FALSE;
+    if (ec_keygen || (tsra_pkcs11_unwrapping_pair_check(t, NULL, 0, NULL, 0, &token, &priv_token) !=
+                      CKR_MECHANISM_INVALID))
+    {
+        f |= CKF_GENERATE_KEY_PAIR;
+    }
+    /* An EC mechanism also reports what EC it handles. */
+    if (ec_keygen || ((sm != NULL) && (sm->key_type == CKK_EC)))
+    {
+        f |= EC_MECH_FLAGS;
+    }
+    CK_MECHANISM m = { t, NULL, 0 };
+    tsra_pkcs11_rsa_aes_params params;
+    if (tsra_pkcs11_unwrap_params_check(&m, &params) != CKR_MECHANISM_INVALID)
+    {
+        f |= CKF_UNWRAP;
     }
     return f;
 }
@@ -126,6 +158,14 @@ static void test_sweep(void)
         tsra_pkcs11_mech_find(CKM_GENERIC_SECRET_KEY_GEN) == NULL,
         "CKM_GENERIC_SECRET_KEY_GEN is not advertised"
     );
+    const tsra_pkcs11_mech_t *ec = tsra_pkcs11_mech_find(CKM_ECDSA_SHA256);
+    CHECK(
+        (ec != NULL) && ((ec->flags & CKF_EC_F_P) != 0) && ((ec->flags & CKF_EC_OID) != 0) &&
+            ((ec->flags & CKF_EC_UNCOMPRESS) != 0),
+        "an EC row names prime-field curves, by OID, with uncompressed points"
+    );
+    const tsra_pkcs11_mech_t *aes = tsra_pkcs11_mech_find(CKM_AES_CBC);
+    CHECK((aes != NULL) && ((aes->flags & EC_MECH_FLAGS) == 0), "an AES row has no EC flags");
 }
 
 int main(void)
