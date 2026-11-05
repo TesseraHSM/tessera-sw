@@ -128,8 +128,11 @@ pub(crate) async fn handle<P: HsmPal>(
             staged
         };
 
-        let out = TborEccSignResp::decode_mut(response)?;
-        pal.ecc_sign(io, curve, key, &operand[..sign_len], out.signature)
+        // `response` is exactly header, TOC and the one reserved field, so the
+        // signature slot is its tail; taking it there spares re-decoding the
+        // frame just encoded from DMA memory.
+        let signature = &mut response[len - curve.wire_sig_len()..len];
+        pal.ecc_sign(io, curve, key, &operand[..sign_len], signature)
             .await?;
         Ok(len)
     }
