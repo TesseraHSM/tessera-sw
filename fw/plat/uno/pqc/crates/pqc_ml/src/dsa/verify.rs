@@ -9,16 +9,15 @@ use super::params::MlDsaParams;
 /// ML-DSA Verification (FIPS 204 Algorithm 3 / Internal Algorithm 8).
 ///
 /// Stack-optimized: z_hat lives in caller-provided workspace; hints unpacked per-poly.
-use super::params::D;
-/// ML-DSA Verification (FIPS 204 Algorithm 3 / Internal Algorithm 8).
-///
-/// Stack-optimized: z_hat lives in caller-provided workspace; hints unpacked per-poly.
 use super::params::N;
 use super::poly::Poly;
 use super::poly::{self};
 use super::rounding;
 use super::sampling;
 use crate::keccak::shake256_init;
+
+/// -2^d * 2^32 mod q: c_hat's Montgomery product with it is c_hat * -2^d.
+const NEG_2D_MONT: i64 = 4165636;
 
 pub fn verify_internal(
     params: &MlDsaParams,
@@ -58,10 +57,15 @@ pub fn verify_internal(
         return false;
     }
 
-    // Reconstruct challenge
+    // Reconstruct challenge, scaled by -2^d: then each row's c * t1 * 2^d
+    // comes off as one multiply-accumulate on t1's own transform, with no
+    // shift, product or subtraction pass of its own.
     let mut c_hat: Poly = [0i32; N];
     sampling::poly_challenge(&mut c_hat, ctilde, params.tau);
     ntt::ntt(&mut c_hat);
+    for x in c_hat.iter_mut() {
+        *x = ntt::montgomery_reduce(*x as i64 * NEG_2D_MONT);
+    }
 
     // Compute w'_i = A*z_hat - c*t1*2^d for each i, apply UseHint, hash
     let mut commit_ctx = shake256_init();
@@ -74,25 +78,25 @@ pub fn verify_internal(
     let mut w1_packed_buf = [0u8; 192];
 
     for i in 0..k {
-        poly::poly_zero(&mut w_prime);
         for j in 0..l {
             sampling::poly_uniform(&mut a_ij, rho, i as u8, j as u8);
-            ntt::poly_pointwise_acc_montgomery(&mut w_prime, &a_ij, &z_hat[j]);
+            if j == 0 {
+                ntt::poly_pointwise_montgomery(&mut w_prime, &a_ij, &z_hat[0]);
+            } else {
+                ntt::poly_pointwise_acc_montgomery(&mut w_prime, &a_ij, &z_hat[j]);
+            }
         }
 
         packing::unpack_t1(&mut t1_poly, &pk[32 + i * 320..]);
-        poly::poly_shiftl(&mut t1_poly, D);
         ntt::ntt(&mut t1_poly);
-        ntt::poly_pointwise_montgomery(&mut tmp, &c_hat, &t1_poly);
-
-        poly::poly_sub_inplace(&mut w_prime, &tmp);
+        ntt::poly_pointwise_acc_montgomery(&mut w_prime, &c_hat, &t1_poly);
         ntt::invntt(&mut w_prime);
-        poly::poly_reduce_caddq(&mut w_prime);
 
-        // UseHint: apply directly from packed hints (no h_i poly needed)
-        for coeff in 0..N {
-            tmp[coeff] = rounding::highbits(w_prime[coeff], params.gamma2);
-        }
+        // HighBits straight off the transform, as signing does: w1 into
+        // tmp and w0 into t1_poly, which is done with until the next row.
+        // UseHint then needs only the parts at the hinted positions rather
+        // than a fresh decomposition of each.
+        rounding::poly_decompose_reduced(&mut tmp, &mut t1_poly, &w_prime, params.gamma2);
         let hint_start = if i == 0 {
             0
         } else {
@@ -101,7 +105,7 @@ pub fn verify_internal(
         let hint_end = hint_sig[params.omega as usize + i] as usize;
         for j in hint_start..hint_end {
             let idx = hint_sig[j] as usize;
-            tmp[idx] = rounding::use_hint(1, w_prime[idx], params.gamma2);
+            tmp[idx] = rounding::use_hint_parts(tmp[idx], t1_poly[idx], params.gamma2);
         }
 
         let w1_bytes = params.w1_pack_bytes();

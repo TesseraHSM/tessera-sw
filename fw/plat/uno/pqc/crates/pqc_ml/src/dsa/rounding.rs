@@ -93,7 +93,13 @@ pub fn use_hint(h: u8, r: i32, gamma2: u32) -> i32 {
     if h == 0 {
         return r1;
     }
+    use_hint_parts(r1, r0, gamma2)
+}
 
+/// UseHint for a set hint bit, given r already decomposed into (r1, r0):
+/// r1 moved one step towards r0's sign, wrapping.
+#[inline]
+pub fn use_hint_parts(r1: i32, r0: i32, gamma2: u32) -> i32 {
     match gamma2 {
         261888 => {
             // (q-1)/32, m = 16

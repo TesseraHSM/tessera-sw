@@ -339,17 +339,63 @@ KeccakF1600_StateExtractBytes_Exit1:
 @  r0 state pointer next lane
 @  r1 data pointer next byte to input
 @
-@ Changed: r2-r6
+@ Changed: r2-r7, r12
+@
+@ Undoes the bit interleaving a byte at a time through a table of each
+@ byte's bits spread to the even positions of a halfword: eight lookups a
+@ lane that the core can overlap, where the four delta swaps of
+@ fromBitInterleaving are a chain of dependent shifts. The table lives in
+@ .bss and is filled the first time it is wanted, which zeroed .bss makes
+@ easy to tell: spread(1) is 1.
 @
 .align 3
 __KeccakF1600_StateExtractLanes:
+	movw	r12, #:lower16:pqc_keccak_spread
+	movt	r12, #:upper16:pqc_keccak_spread
+	ldrh	r3, [r12, #2]
+	cbnz	r3, 2f
+1:
+	orr		r4, r3, r3, lsl #4
+	and		r4, r4, #0x0F0F0F0F
+	orr		r4, r4, r4, lsl #2
+	and		r4, r4, #0x33333333
+	orr		r4, r4, r4, lsl #1
+	and		r4, r4, #0x55555555
+	strh	r4, [r12, r3, lsl #1]
+	adds	r3, r3, #1
+	cmp		r3, #256
+	bne		1b
+2:
+	push	{r8-r10}
 __KeccakF1600_StateExtractLanes_LoopAligned:
-	ldrd	r4, r5, [r0], #8
-	fromBitInterleaving	r4, r5, r3, r6
-	str		r4, [r1], #4
+	ldrd	r4, r5, [r0], #8			@ the lane's even bits, odd bits
+	uxtb	r3, r4
+	uxtb	r6, r5
+	uxtb	r7, r4, ror #8
+	uxtb	r8, r5, ror #8
+	ldrh	r3, [r12, r3, lsl #1]
+	ldrh	r6, [r12, r6, lsl #1]
+	ldrh	r7, [r12, r7, lsl #1]
+	ldrh	r8, [r12, r8, lsl #1]
+	uxtb	r9, r4, ror #16
+	uxtb	r10, r5, ror #16
+	orr		r3, r3, r6, lsl #1			@ lane bits 0-15
+	lsr		r4, r4, #24
+	orr		r7, r7, r8, lsl #1			@ bits 16-31
+	lsr		r5, r5, #24
+	ldrh	r9, [r12, r9, lsl #1]
+	ldrh	r10, [r12, r10, lsl #1]
+	ldrh	r4, [r12, r4, lsl #1]
+	ldrh	r5, [r12, r5, lsl #1]
+	orr		r3, r3, r7, lsl #16
+	orr		r9, r9, r10, lsl #1			@ bits 32-47
+	orr		r4, r4, r5, lsl #1			@ bits 48-63
+	str		r3, [r1], #4
+	orr		r9, r9, r4, lsl #16
 	subs	r2, r2, #1
-	str		r5, [r1], #4
+	str		r9, [r1], #4
 	bne		__KeccakF1600_StateExtractLanes_LoopAligned
+	pop		{r8-r10}
 	bx		lr
 
 
@@ -1959,3 +2005,10 @@ KeccakF1600_StatePermute_RoundLoop:
 	pop		{ r4 - r12, pc }
 .size KeccakF1600_StatePermute, .-KeccakF1600_StatePermute
 
+
+@ Each byte's bits spread to the even positions of a halfword, for
+@ __KeccakF1600_StateExtractLanes, which fills it.
+	.section .bss.pqc_keccak_spread, "aw", %nobits
+	.align	2
+pqc_keccak_spread:
+	.space	512
