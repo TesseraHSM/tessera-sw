@@ -1175,6 +1175,18 @@ impl Partition {
         u128::from_le_bytes(self.slot().res_mask)
     }
 
+    /// Reads word `word` (bits `32 * word..32 * word + 32`) of the
+    /// resource mask; `0` past its end.
+    #[inline]
+    pub fn res_mask_word(self, word: usize) -> u32 {
+        self.slot()
+            .res_mask
+            .as_chunks::<4>()
+            .0
+            .get(word)
+            .map_or(0, |w| u32::from_le_bytes(*w))
+    }
+
     /// Sets the resource mask.
     #[inline(never)]
     pub fn set_res_mask(mut self, mask: u128) {
