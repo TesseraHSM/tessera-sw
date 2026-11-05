@@ -16,10 +16,12 @@ use tsra_fw_hsm_pal_traits::HsmKeyScope;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::MaskedKeyMeta;
 use zerocopy::FromBytes;
 
 use crate::aead::format::all_zero;
 use crate::aead::format::MaskedKeyMetadata;
+use crate::aead::format::LABEL_OFF;
 use crate::aead::format::META_LEN;
 
 /// Borrowed view over a successfully unmasked blob.
@@ -111,40 +113,67 @@ pub async fn unmask<'a, P: HsmKeyMasking>(
     let blob: &'a HsmDmaBuf = blob;
     let aad = &blob[aad_at..payload_at];
 
-    // Parse and validate a copy of the 192 B AAD region: it sits in DMA
-    // memory, which may be uncached, so one burst read fetches it far
-    // faster than validation would read it field by field in place.
-    // `ref_from_bytes` never panics; the length check above guarantees a
-    // 192 B slice.
-    let mut copy = MetaCopy([0; META_LEN]);
-    if !aad.copy_to_slice(&mut copy.0) {
-        return Err(HsmError::MaskedKeyDecodeFailed);
-    }
-    let metadata =
-        MaskedKeyMetadata::ref_from_bytes(&copy.0).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
-
-    metadata.validate_v1()?;
+    // The tag decryption has just verified covers the AAD: a blob carrying
+    // a tag whose metadata was validated before carries that metadata, byte
+    // for byte, so the platform may remember it by the tag rather than
+    // have every 192 B read again. The tag is in place, as above.
+    let (words, _) = blob[tag_at..].read_head_words();
+    let tag = [words[0], words[1], words[2], words[3]];
+    let remembered = crypto.masked_key_meta(&tag);
+    let meta = match remembered {
+        Some(meta) => meta,
+        None => validated_meta(aad)?,
+    };
     let data_end = tag_at
-        .checked_sub(metadata.data_pad_len as usize)
+        .checked_sub(meta.data_pad_len as usize)
         .filter(|&n| n >= payload_at)
         .ok_or(HsmError::MaskedKeyDecodeFailed)?;
     if !all_zero(&blob[data_end..tag_at]) {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
 
-    // The label is borrowed from the blob, not the copy. validate_v1
-    // guarantees key_label_len ≤ KEY_LABEL_MAX, so this range is in bounds.
+    // The label is borrowed from the blob. Validation guarantees
+    // key_label_len ≤ KEY_LABEL_MAX, so this range is in bounds.
     let key_label = aad
-        .get(metadata.key_label_range()?)
+        .get(LABEL_OFF..LABEL_OFF + meta.key_label_len as usize)
         .ok_or(HsmError::MaskedKeyDecodeFailed)?;
+    if remembered.is_none() {
+        crypto.remember_masked_key_meta(&tag, meta);
+    }
 
     Ok(UnmaskedView {
         key_label,
-        key_kind: metadata.key_kind(),
-        key_attrs: metadata.usage_flags(),
+        key_kind: HsmVaultKeyKind(meta.key_kind),
+        key_attrs: HsmVaultKeyAttrs::from_bits(meta.usage_flags),
+        svn: meta.svn,
+        owner_seed_id: meta.owner_seed_id,
+        target_key: &blob[payload_at..data_end],
+    })
+}
+
+/// Parse and validate the 192 B metadata record `aad`, returning the fields
+/// a caller uses.
+///
+/// Works on a copy: the record sits in DMA memory, which may be uncached,
+/// so one burst read fetches it far faster than validation would read it
+/// field by field in place.
+fn validated_meta(aad: &HsmDmaBuf) -> HsmResult<MaskedKeyMeta> {
+    let mut copy = MetaCopy([0; META_LEN]);
+    if !aad.copy_to_slice(&mut copy.0) {
+        return Err(HsmError::MaskedKeyDecodeFailed);
+    }
+    // `ref_from_bytes` never panics; the caller's length check guarantees a
+    // 192 B slice.
+    let metadata =
+        MaskedKeyMetadata::ref_from_bytes(&copy.0).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
+    metadata.validate_v1()?;
+    Ok(MaskedKeyMeta {
+        usage_flags: metadata.usage_flags.get(),
         svn: metadata.svn.get(),
         owner_seed_id: metadata.owner_seed_id.get(),
-        target_key: &blob[payload_at..data_end],
+        key_kind: metadata.key_kind().0,
+        key_label_len: metadata.key_label_len,
+        data_pad_len: metadata.data_pad_len,
     })
 }
 

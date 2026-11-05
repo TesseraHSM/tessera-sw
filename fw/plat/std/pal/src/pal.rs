@@ -149,6 +149,9 @@ pub struct StdHsmPal {
     /// with `UnsafeCell` access to partition data.
     pub(crate) part_locks: Box<[PartMutex; NUM_PARTITIONS]>,
 
+    /// Masked-key metadata already validated (see [`MaskedKeyMetaCache`]).
+    pub(crate) masked_key_meta: std::sync::Mutex<MaskedKeyMetaCache>,
+
     /// Tokio runtime owned by this instance when constructed via [`Default`].
     ///
     /// `None` when constructed via [`new`](Self::new) — the caller owns the
@@ -197,6 +200,7 @@ impl StdHsmPal {
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),
             part_locks: Box::new(core::array::from_fn(|_| PartMutex::new(()))),
+            masked_key_meta: std::sync::Mutex::new(MaskedKeyMetaCache::new()),
             _rt: None,
         }
     }
@@ -231,6 +235,7 @@ impl Default for StdHsmPal {
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),
             part_locks: Box::new(core::array::from_fn(|_| PartMutex::new(()))),
+            masked_key_meta: std::sync::Mutex::new(MaskedKeyMetaCache::new()),
             // Keep the runtime alive so `handle` remains valid.
             _rt: Some(rt),
         }

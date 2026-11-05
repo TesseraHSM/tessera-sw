@@ -48,6 +48,20 @@ impl HsmKeyMasking for StdHsmPal {
         self.gcm_decrypt_in_place(io, masking_key, &iv[..12], aad_len, tag, body)
             .await
     }
+
+    fn masked_key_meta(&self, tag: &MaskedKeyTag) -> Option<MaskedKeyMeta> {
+        self.masked_key_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tag)
+    }
+
+    fn remember_masked_key_meta(&self, tag: &MaskedKeyTag, meta: MaskedKeyMeta) {
+        self.masked_key_meta
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .put(tag, meta);
+    }
 }
 
 fn validate(key: &HsmDmaBuf, aad_len: usize, len: usize) -> HsmResult<()> {
