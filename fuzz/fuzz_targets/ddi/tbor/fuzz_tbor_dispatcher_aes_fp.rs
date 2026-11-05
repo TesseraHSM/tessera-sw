@@ -216,8 +216,9 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id,
             masked_key: masked_key.clone(),
             op,
+            mode: AES_MODE_CBC,
             msg: msg.clone(),
-            iv,
+            iv: iv.to_vec(),
         });
 
         match (&result, expect_success) {
@@ -236,8 +237,9 @@ fuzz_target!(|input: FuzzInput| {
                             FuzzAesMode::Encrypt => AES_OP_DECRYPT,
                             FuzzAesMode::Decrypt => AES_OP_ENCRYPT,
                         },
+                        mode: AES_MODE_CBC,
                         msg: response.msg.clone(),
-                        iv,
+                        iv: iv.to_vec(),
                     })
                     .expect("inverse AES operation should succeed");
                 assert_eq!(
