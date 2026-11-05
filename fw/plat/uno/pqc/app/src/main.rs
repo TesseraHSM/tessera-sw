@@ -171,8 +171,9 @@ fn cycles() -> u32 {
 /// Serve HSM requests for the life of the firmware, keeping the SP's
 /// liveliness slot and the HSM's status block fresh in between.
 ///
-/// The doorbell only wakes the loop; the request itself is read from this
-/// core's PSRAM mailbox, and the response written back there. The doorbell
+/// The doorbell only wakes the loop; the request itself is read from one
+/// of this core's two mailboxes, and the response written back there,
+/// oldest first (see [`mailbox`]). The doorbell
 /// is still answered so the HSM can distinguish a core that is running
 /// from one that is wedged. Polled rather than interrupt-driven; see
 /// [`ipc`].
@@ -190,6 +191,7 @@ fn serve(core_id: u8) -> ! {
     let mut beat = TICKS.load(Ordering::Relaxed).wrapping_sub(HEARTBEAT_TICKS);
     let mut status: u32 = 0;
     let mut last_request = cycles();
+    let mut look = false;
 
     loop {
         let now = cycles();
@@ -204,20 +206,30 @@ fn serve(core_id: u8) -> ! {
             shared_status::publish(core_id, status);
         }
 
-        if let Some(ring) = ipc::take_request(core_id) {
+        // One request a pass, so the heartbeat above keeps beating under a
+        // stream of them. The mailboxes are looked at after a doorbell, and
+        // after every request served: the other lane's may have been posted
+        // before the doorbell that brought this one was taken, leaving none
+        // pending for it.
+        let ring = ipc::take_request(core_id);
+        if let Some(ring) = ring {
             shared_status::note_doorbell(core_id, ring);
-
-            if let Some(req) = mailbox::take_request(core_id) {
-                service(core_id, &req);
+        }
+        if ring.is_some() || look {
+            look = false;
+            if let Some((lane, req)) = mailbox::take_request(core_id) {
+                service(lane, &req);
+                look = true;
             }
-
-            ipc::ring_response(core_id, ring.wrapping_add(1));
             last_request = cycles();
         } else if now.wrapping_sub(last_request) >= IDLE_AFTER_CYCLES {
             // Held at the threshold, so a long idle spell cannot wrap the
             // counter back into the polling window.
             last_request = now.wrapping_sub(IDLE_AFTER_CYCLES);
             cortex_m::asm::wfi();
+        }
+        if let Some(ring) = ring {
+            ipc::ring_response(core_id, ring.wrapping_add(1));
         }
     }
 }
@@ -235,9 +247,9 @@ fn SysTick() {
 /// Runs real ML-DSA key generation from the seed the HSM supplied, writing
 /// the public key straight into this core's operand slot.
 ///
-fn service(core_id: u8, req: &mailbox::Request) {
+fn service(lane: u8, req: &mailbox::Request) {
     if matches!(req.op, mailbox::OP_SHAKE128 | mailbox::OP_SHAKE256) {
-        service_shake(core_id, req);
+        service_shake(lane, req);
         scrub_shake_stack();
         return;
     }
@@ -250,27 +262,27 @@ fn service(core_id: u8, req: &mailbox::Request) {
             | mailbox::OP_MLKEM_DECAPSULATE
     ) {
         let Some(variant) = mlkem_variant(req.key_kind) else {
-            mailbox::respond(core_id, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
+            mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
             return;
         };
         match req.op {
-            mailbox::OP_MLKEM_GENERATE_KEY => service_mlkem_keygen(core_id, req, variant),
-            mailbox::OP_MLKEM_ENCAPSULATE => service_mlkem_encaps(core_id, req, variant),
-            _ => service_mlkem_decaps(core_id, req, variant),
+            mailbox::OP_MLKEM_GENERATE_KEY => service_mlkem_keygen(lane, req, variant),
+            mailbox::OP_MLKEM_ENCAPSULATE => service_mlkem_encaps(lane, req, variant),
+            _ => service_mlkem_decaps(lane, req, variant),
         }
         return;
     }
 
     let Some(variant) = mldsa_variant(req.key_kind) else {
-        mailbox::respond(core_id, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
         return;
     };
 
     match req.op {
-        mailbox::OP_MLDSA_GENERATE_KEY => service_keygen(core_id, req, variant),
-        mailbox::OP_MLDSA_SIGN => service_sign(core_id, req, variant),
-        mailbox::OP_MLDSA_VERIFY => service_verify(core_id, req, variant),
-        _ => mailbox::respond(core_id, req, mailbox::STATUS_UNSUPPORTED_OP, 0),
+        mailbox::OP_MLDSA_GENERATE_KEY => service_keygen(lane, req, variant),
+        mailbox::OP_MLDSA_SIGN => service_sign(lane, req, variant),
+        mailbox::OP_MLDSA_VERIFY => service_verify(lane, req, variant),
+        _ => mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_OP, 0),
     }
 }
 
@@ -281,7 +293,7 @@ fn service(core_id: u8, req: &mailbox::Request) {
 /// travels back to the HSM, which masks it alongside the seeds so
 /// decapsulation never has to re-derive it.
 #[inline(never)]
-fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
+fn service_mlkem_keygen(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
     let ek_len = variant.pk_size();
     let dk_len = variant.sk_size();
 
@@ -305,7 +317,7 @@ fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
         )
     };
     if dk_len > scratch.len() {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     }
 
@@ -321,14 +333,14 @@ fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     pqc_ml::ml_kem_keygen(variant, &req.xi, &req.rnd, ek, &mut scratch[..dk_len]);
 
     let Some((ek_out, dk_out)) = mailbox::slot_pair_mut(
-        core_id,
+        lane,
         mailbox::SLOT_PK_OFFSET,
         ek_len,
         mailbox::SLOT_KEY_OUT_OFFSET,
         dk_len,
     ) else {
         scratch[..dk_len].fill(0);
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     // Written out a word at a time: PSRAM takes single stores at a fraction
@@ -340,7 +352,7 @@ fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     // Do not leave key material in dTCM for the next request to find.
     scratch[..dk_len].fill(0);
 
-    mailbox::respond(core_id, req, mailbox::STATUS_OK, ek_len as u32);
+    mailbox::respond(lane, req, mailbox::STATUS_OK, ek_len as u32);
 }
 
 /// Encapsulate to the public key staged in the operand slot.
@@ -349,12 +361,12 @@ fn service_mlkem_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
 /// only input besides the public key is the 32 bytes of randomness the HSM
 /// supplied in the first seed field.
 #[inline(never)]
-fn service_mlkem_encaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
+fn service_mlkem_encaps(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
     let ek_len = variant.pk_size();
     let ct_len = variant.ct_size();
 
     if req.pub_key_len != ek_len {
-        mailbox::respond(core_id, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
         return;
     }
 
@@ -363,26 +375,26 @@ fn service_mlkem_encaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     // borrow of the same slot at once would not be.
     let mut ek = Align4([0u8; MAX_MLKEM_PK_LEN]);
     let ek = &mut ek.0;
-    let Some(src) = mailbox::slot_range(core_id, mailbox::SLOT_PK_OFFSET, ek_len) else {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+    let Some(src) = mailbox::slot_range(lane, mailbox::SLOT_PK_OFFSET, ek_len) else {
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     mailbox::stage(&mut ek[..ek_len], src);
 
     let mut ss = [0u8; mailbox::SHARED_SECRET_LEN];
     {
-        let Some(ct) = mailbox::slot_range_mut(core_id, mailbox::SLOT_CT_OFFSET, ct_len) else {
-            mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        let Some(ct) = mailbox::slot_range_mut(lane, mailbox::SLOT_CT_OFFSET, ct_len) else {
+            mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
             return;
         };
         pqc_ml::ml_kem_encaps(variant, &mut ss, ct, &ek[..ek_len], &req.xi);
     }
 
     let Some(out) =
-        mailbox::slot_range_mut(core_id, mailbox::SLOT_SS_OFFSET, mailbox::SHARED_SECRET_LEN)
+        mailbox::slot_range_mut(lane, mailbox::SLOT_SS_OFFSET, mailbox::SHARED_SECRET_LEN)
     else {
         ss.fill(0);
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     out.copy_from_slice(&ss);
@@ -391,7 +403,7 @@ fn service_mlkem_encaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     // the HSM reads, so do not leave a second on the stack.
     ss.fill(0);
 
-    mailbox::respond(core_id, req, mailbox::STATUS_OK, ct_len as u32);
+    mailbox::respond(lane, req, mailbox::STATUS_OK, ct_len as u32);
 }
 
 /// Decapsulate the ciphertext staged in the operand slot.
@@ -401,12 +413,12 @@ fn service_mlkem_encaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
 /// instead used to dominate this operation: a full ML-KEM key generation
 /// per decapsulation, roughly 3.6 ms of ML-KEM-1024's 5.3 ms.
 #[inline(never)]
-fn service_mlkem_decaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
+fn service_mlkem_decaps(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlKemVariant) {
     let dk_len = variant.sk_size();
     let ct_len = variant.ct_size();
 
     if req.sig_len != ct_len {
-        mailbox::respond(core_id, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
         return;
     }
 
@@ -423,16 +435,16 @@ fn service_mlkem_decaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     let scratch = &mut scratch.0;
 
     let Some(staged_len) = ct_len.checked_add(dk_len).filter(|n| *n <= scratch.len()) else {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
 
     {
         let (Some(ct_src), Some(dk_src)) = (
-            mailbox::slot_range(core_id, mailbox::SLOT_CT_IN_OFFSET, ct_len),
-            mailbox::slot_range(core_id, mailbox::SLOT_KEY_IN_OFFSET, dk_len),
+            mailbox::slot_range(lane, mailbox::SLOT_CT_IN_OFFSET, ct_len),
+            mailbox::slot_range(lane, mailbox::SLOT_KEY_IN_OFFSET, dk_len),
         ) else {
-            mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+            mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
             return;
         };
 
@@ -449,17 +461,17 @@ fn service_mlkem_decaps(core_id: u8, req: &mailbox::Request, variant: pqc_ml::Ml
     scratch[..staged_len].fill(0);
 
     let Some(out) =
-        mailbox::slot_range_mut(core_id, mailbox::SLOT_SS_OFFSET, mailbox::SHARED_SECRET_LEN)
+        mailbox::slot_range_mut(lane, mailbox::SLOT_SS_OFFSET, mailbox::SHARED_SECRET_LEN)
     else {
         ss.fill(0);
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     out.copy_from_slice(&ss);
     ss.fill(0);
 
     mailbox::respond(
-        core_id,
+        lane,
         req,
         mailbox::STATUS_OK,
         mailbox::SHARED_SECRET_LEN as u32,
@@ -488,19 +500,19 @@ const SHAKE_CHUNK: usize = 512;
 /// Both directions go through a dTCM buffer: PSRAM is far cheaper to move
 /// in bursts (see [`mailbox::stage`]) than to feed the sponge byte by byte.
 #[inline(never)]
-fn service_shake(core_id: u8, req: &mailbox::Request) {
+fn service_shake(lane: u8, req: &mailbox::Request) {
     let out_len = req.sig_len;
     // The message has to end before the output begins.
     let fits = out_len != 0
         && req.msg_len <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET
         && out_len <= mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OFFSET;
     let msg = if fits {
-        mailbox::slot_range(core_id, mailbox::SLOT_SHAKE_IN_OFFSET, req.msg_len)
+        mailbox::slot_range(lane, mailbox::SLOT_SHAKE_IN_OFFSET, req.msg_len)
     } else {
         None
     };
     let Some(msg) = msg else {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
 
@@ -517,11 +529,10 @@ fn service_shake(core_id: u8, req: &mailbox::Request) {
     }
     sponge.finalize();
 
-    let Some(out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len)
-    else {
+    let Some(out) = mailbox::slot_range_mut(lane, mailbox::SLOT_SHAKE_OUT_OFFSET, out_len) else {
         buf.0.zeroize();
         sponge.zeroize();
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     for part in out.chunks_mut(SHAKE_CHUNK) {
@@ -534,7 +545,7 @@ fn service_shake(core_id: u8, req: &mailbox::Request) {
     buf.0.zeroize();
     sponge.zeroize();
 
-    mailbox::respond(core_id, req, mailbox::STATUS_OK, out_len as u32);
+    mailbox::respond(lane, req, mailbox::STATUS_OK, out_len as u32);
 }
 
 /// Bytes of stack [`scrub_shake_stack`] clears.
@@ -624,7 +635,7 @@ fn mlkem_variant(key_kind: u32) -> Option<pqc_ml::MlKemVariant> {
 
 /// Derive a key pair from the supplied seed, publishing the public key.
 #[inline(never)]
-fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
+fn service_keygen(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
     let params = variant.params();
     let pk_len = params.pk_bytes();
     let sk_len = params.sk_bytes();
@@ -650,9 +661,8 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     //
     // The expanded secret key travels back to the HSM, which masks it
     // alongside the seed so signing never has to re-derive it.
-    let Some(sk_out) = mailbox::slot_range_mut(core_id, mailbox::SLOT_KEY_OUT_OFFSET, sk_len)
-    else {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+    let Some(sk_out) = mailbox::slot_range_mut(lane, mailbox::SLOT_KEY_OUT_OFFSET, sk_len) else {
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
 
@@ -668,13 +678,13 @@ fn service_keygen(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
 
     pqc_ml::ml_dsa_keygen(variant, &req.xi, pk_buf, sk_out, work);
 
-    let Some(pk) = mailbox::slot_range_mut(core_id, mailbox::SLOT_PK_OFFSET, pk_len) else {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+    let Some(pk) = mailbox::slot_range_mut(lane, mailbox::SLOT_PK_OFFSET, pk_len) else {
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     pk.copy_from_slice(pk_buf);
 
-    mailbox::respond(core_id, req, mailbox::STATUS_OK, pk_len as u32);
+    mailbox::respond(lane, req, mailbox::STATUS_OK, pk_len as u32);
 }
 
 /// What an ML-DSA sign or verify request covers.
@@ -719,7 +729,7 @@ fn dsa_input<'a>(
 /// mask stream between the commitment and z passes. The key is then read
 /// where it lies, and this core never takes a copy of it to wipe.
 #[inline(never)]
-fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
+fn service_sign(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
     let params = variant.params();
     let sk_len = params.sk_bytes();
     let sig_len = params.sig_bytes();
@@ -745,17 +755,17 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
 
     let ok = {
         let (Some(sk), Some(msg), Some(ctx)) = (
-            mailbox::slot_range(core_id, mailbox::SLOT_KEY_IN_OFFSET, sk_len),
-            mailbox::slot_range(core_id, mailbox::SLOT_MSG_OFFSET, req.msg_len),
-            mailbox::slot_range(core_id, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
+            mailbox::slot_range(lane, mailbox::SLOT_KEY_IN_OFFSET, sk_len),
+            mailbox::slot_range(lane, mailbox::SLOT_MSG_OFFSET, req.msg_len),
+            mailbox::slot_range(lane, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
         ) else {
-            mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+            mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
             return;
         };
         let input = match dsa_input(req, msg, ctx) {
             Ok(input) => input,
             Err(status) => {
-                mailbox::respond(core_id, req, status, 0);
+                mailbox::respond(lane, req, status, 0);
                 return;
             }
         };
@@ -770,19 +780,19 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
     };
 
     if !ok {
-        mailbox::respond(core_id, req, mailbox::STATUS_CRYPTO_FAILED, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_CRYPTO_FAILED, 0);
         return;
     }
 
     // Only now, with the key no longer being read, does the slot region it
     // shares with the signature get written.
-    let Some(sig) = mailbox::slot_range_mut(core_id, mailbox::SLOT_SIG_OFFSET, sig_len) else {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+    let Some(sig) = mailbox::slot_range_mut(lane, mailbox::SLOT_SIG_OFFSET, sig_len) else {
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     sig.copy_from_slice(&sig_buf[..sig_len]);
 
-    mailbox::respond(core_id, req, mailbox::STATUS_OK, sig_len as u32);
+    mailbox::respond(lane, req, mailbox::STATUS_OK, sig_len as u32);
 }
 
 /// Verify a signature over the message, or external `μ`, under the supplied
@@ -797,26 +807,26 @@ fn service_sign(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVaria
 /// the distinction matters because a caller who ignored the result must not
 /// be able to treat an invalid signature as valid.
 #[inline(never)]
-fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
+fn service_verify(lane: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVariant) {
     let params = variant.params();
     if req.pub_key_len != params.pk_bytes() || req.sig_len != params.sig_bytes() {
-        mailbox::respond(core_id, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_UNSUPPORTED_KIND, 0);
         return;
     }
 
     let (Some(msg), Some(ctx), Some(sig_src), Some(pk_src)) = (
-        mailbox::slot_range(core_id, mailbox::SLOT_MSG_OFFSET, req.msg_len),
-        mailbox::slot_range(core_id, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
-        mailbox::slot_range(core_id, mailbox::SLOT_SIG_OFFSET, req.sig_len),
-        mailbox::slot_range(core_id, mailbox::SLOT_PK_OFFSET, req.pub_key_len),
+        mailbox::slot_range(lane, mailbox::SLOT_MSG_OFFSET, req.msg_len),
+        mailbox::slot_range(lane, mailbox::SLOT_CTX_OFFSET, req.ctx_len),
+        mailbox::slot_range(lane, mailbox::SLOT_SIG_OFFSET, req.sig_len),
+        mailbox::slot_range(lane, mailbox::SLOT_PK_OFFSET, req.pub_key_len),
     ) else {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     };
     let input = match dsa_input(req, msg, ctx) {
         Ok(input) => input,
         Err(status) => {
-            mailbox::respond(core_id, req, status, 0);
+            mailbox::respond(lane, req, status, 0);
             return;
         }
     };
@@ -850,7 +860,7 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     };
 
     if sig_src.len() > sig_buf.len() || pk_src.len() > pk_buf.len() {
-        mailbox::respond(core_id, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_SLOT_TOO_SMALL, 0);
         return;
     }
 
@@ -877,9 +887,9 @@ fn service_verify(core_id: u8, req: &mailbox::Request, variant: pqc_ml::MlDsaVar
     };
 
     if verified {
-        mailbox::respond(core_id, req, mailbox::STATUS_OK, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_OK, 0);
     } else {
-        mailbox::respond(core_id, req, mailbox::STATUS_CRYPTO_FAILED, 0);
+        mailbox::respond(lane, req, mailbox::STATUS_CRYPTO_FAILED, 0);
     }
 }
 
@@ -957,31 +967,33 @@ fn main() -> ! {
     // that carries it (`tsra_fw_uno_reg_soc::fp_dsa_cache_t`) lives in
     // the `fw` workspace, and depending on it from `fp` drags that
     // workspace's dependency tree into a build with a different target.
-    // Three places therefore have to agree, and nothing checks them:
+    // Four places therefore have to agree, and nothing checks them:
     //
-    //   * here,
+    //   * `mailbox::FP_WINDOW_BASE` here,
+    //   * `FP_WINDOW_BASE` in the HSM's PQC driver (drivers/pqc/src/mailbox.rs),
+    //     which addresses the cores' second lanes in it,
     //   * `FP_DSA_CACHE` in fw/plat/uno/rdl/soc/gsram_map.rdl (0x1D0000),
     //   * `rsvd_fp_dsa_cache` in cp/hsm/mem-map/src/gsram.rs, which also
     //     pins it with a const_assert,
     //
-    // Moving the window means moving all three. The key vault sits directly
+    // Moving the window means moving all four. The key vault sits directly
     // below and is sized to end before it; letting the vault grow back over
     // this region is what the RDL declaration is there to prevent.
     //
     // SAFETY: called once, before any request can be serviced, with a
     // region this core alone owns.
     unsafe {
-        const FP_SPILL_BASE: usize = 0x611D_0000;
-        // What one core needs, plus 3 KB: ML-DSA-87 spills 40 of its 56
-        // matrix elements, packed three bytes to a coefficient, plus 23
-        // key-derived transforms held unpacked. No parameter set needs more.
-        // (It spilled 44 before dTCM held its share packed too.) The stride
-        // used to be 0x1B000, of which 41 KB per core was never addressable.
-        const FP_SPILL_PER_CORE: usize = 0xE000;
-        const FP_SPILL_WORDS: usize = FP_SPILL_PER_CORE / 4;
+        // ML-DSA-87 spills at most 40 of its 56 matrix elements, packed
+        // three bytes to a coefficient: 30 KB. No parameter set needs more.
+        // The 12 KB above them holds as many of the signer's key-derived
+        // transforms as fit, 12 of ML-DSA-87's 23; it transforms the others
+        // again in each attempt that needs them. The rest of each core's
+        // 56 KB is its second request lane (see `mailbox`). (The stride
+        // used to be 0x1B000, of which 41 KB per core was never
+        // addressable.)
         pqc_ml::spill::init(
-            (FP_SPILL_BASE + id as usize * FP_SPILL_PER_CORE) as *mut i32,
-            FP_SPILL_WORDS,
+            (mailbox::FP_WINDOW_BASE + id as usize * mailbox::FP_WINDOW_STRIDE) as *mut i32,
+            mailbox::LANE2_OFFSET / 4,
         );
     }
 

@@ -12,8 +12,9 @@
 //!
 //! Structurally this mirrors the UPKA driver: where UPKA manages sixteen
 //! hardware PKA engines as a shared pool, this manages **three FP cores as
-//! three PQC engines**.  Each engine executes one PQC command at a time
-//! and the driver distributes work across whichever are free.
+//! six PQC engines**, two request lanes per core.  Each engine carries one
+//! PQC command at a time, a core serves its two lanes in turn, and the
+//! driver distributes work across whichever are free.
 //!
 //! Two API patterns, matching UPKA:
 //! - **Convenience**: [`PqcDriver::mldsa_gen_key`] — acquire, run, release
@@ -26,9 +27,9 @@
 //!
 //! # Transport
 //!
-//! Each engine has its own IPC message pair.  Descriptors 2–7 carry them,
-//! two per core — FP0 on 2/3, FP1 on 4/5, FP2 on 6/7 — sitting below the
-//! Admin↔HSM channels on descriptors 28–31.
+//! Each core has its own IPC message pair, shared by its two lanes.
+//! Descriptors 2–7 carry them, two per core — FP0 on 2/3, FP1 on 4/5, FP2
+//! on 6/7 — sitting below the Admin↔HSM channels on descriptors 28–31.
 //!
 //! # Status: not yet submitting
 //!
@@ -38,7 +39,7 @@
 //! core's IO path on the very first PQC request.
 //!
 //! Everything up to that boundary is real and exercised: engine
-//! acquisition, FIFO queueing when all three are busy, request encoding,
+//! acquisition, FIFO queueing when all six are busy, request encoding,
 //! buffer validation, and release-on-drop.  What remains is the IPC
 //! send/recv itself, the FP-side responder, and the choice of shared
 //! memory window for operands — see the `request` module for why that

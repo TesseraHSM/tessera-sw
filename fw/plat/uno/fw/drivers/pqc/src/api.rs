@@ -17,7 +17,7 @@ use crate::pool::Acquire;
 use crate::pool::PqcState;
 use crate::shared_status;
 use crate::types::EngineId;
-use crate::types::ENGINES;
+use crate::types::CORES;
 
 /// How often the head waiter checks whether a draining engine's core has
 /// answered. `Timer::after` rounds up to one embassy tick (31.25 ms on
@@ -26,8 +26,9 @@ const DRAIN_POLL_INTERVAL: embassy_time::Duration = embassy_time::Duration::from
 
 /// Async driver for PQC offload to the fastpath cores.
 ///
-/// Manages the three FP cores as a pool of interchangeable engines, in
-/// the same shape as the UPKA driver manages its sixteen PKA engines.
+/// Manages the three FP cores' six request lanes as a pool of
+/// interchangeable engines, in the same shape as the UPKA driver manages
+/// its sixteen PKA engines.
 pub struct PqcDriver {
     pub(crate) state: SingleCell<PqcState>,
 }
@@ -40,7 +41,7 @@ impl PqcDriver {
         }
     }
 
-    /// Acquire any free engine, waiting if all three are busy.
+    /// Acquire any free engine, waiting if all six are busy.
     ///
     /// Waiters are served FIFO: a task that queues is handed the next
     /// engine to be released, rather than racing tasks that arrive later.
@@ -135,7 +136,7 @@ impl PqcDriver {
         });
         shared_status::write_sentinel(sentinel);
 
-        for idx in 0..ENGINES {
+        for idx in 0..CORES {
             // Underscore-prefixed: the trace macros compile to nothing
             // without a trace backend, and this is read only by them.
             let _st = shared_status::read_status(idx);

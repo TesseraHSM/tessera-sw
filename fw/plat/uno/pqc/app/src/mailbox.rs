@@ -1,14 +1,30 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Per-core PQC request mailbox in PSRAM.
+//! Per-lane PQC request mailboxes.
 //!
-//! One fixed-size mailbox per FP core, written by the HSM and answered by
-//! the core.  Depth one is sufficient by construction: the HSM-side engine
-//! pool hands out exclusive use of a core and does not take it back until
-//! the operation finishes, so a core can never have two requests in
-//! flight.  That is why this is a mailbox rather than the 16-entry rings
-//! the legacy fastpath used.
+//! Each FP core has two lanes, each a fixed-size mailbox and operand slot,
+//! written by the HSM and answered by the core.  Depth one per lane is
+//! sufficient by construction: the HSM-side engine pool hands out exclusive
+//! use of a lane and does not take it back until the operation finishes,
+//! so a lane can never have two requests in flight.  That is why these are
+//! mailboxes rather than the 16-entry rings the legacy fastpath used.
+//!
+//! The core serves its lanes in the order the HSM posted to them, so while
+//! it works on one the HSM can stage the next on the other, and the core
+//! starts it the moment it answers -- rather than idling while the HSM
+//! notices the answer, reads it back and stages another.
+//!
+//! Lane `n` of the HSM's six is lane `n / 3` of core `n % 3`. Lanes 0-2
+//! are in PSRAM, laid out below. Lanes 3-5 are in the cores' shares of the
+//! GSRAM window the SP fences to them, above the signer's spill:
+//!
+//! ```text
+//! 0x611D_0000 + 0xE000*n   core n's share
+//!   +0x0000    signer spill          0xA800
+//!   +0xA800    lane 3+n mailbox      0x100
+//!   +0xA900    lane 3+n operand slot 0x1F80
+//! ```
 //!
 //! # Placement
 //!
@@ -89,9 +105,38 @@ pub const SEED_LEN: usize = 32;
 /// (2592) + message (586) + ctx (255) + signature (4627) = 8060 B.
 pub const SLOT_SIZE: usize = 0x1F80;
 
-/// Offset of each core's operand slot within PSRAM.  FP0 sits below the
-/// block of PSRAM still in use, FP1 and FP2 above it.
-const SLOT_OFFSETS: [usize; 3] = [0x0D00, 0x4080, 0x6000];
+/// The GSRAM window the SP fences to the fastpath cores, and each core's
+/// share of it; mirrored on the HSM side.
+pub const FP_WINDOW_BASE: usize = 0x611D_0000;
+pub const FP_WINDOW_STRIDE: usize = 0xE000;
+
+/// Offset of a core's second lane within its share of the window, and so
+/// the room left below it for the signer's spill: 40 matrix elements of
+/// 768 bytes, then 12 key transforms of 1 KB.
+pub const LANE2_OFFSET: usize = 0xA800;
+
+const _: () = assert!(LANE2_OFFSET + MAILBOX_STRIDE + SLOT_SIZE <= FP_WINDOW_STRIDE);
+
+/// Every lane's mailbox, in this core's view. Lanes 0-2 are in PSRAM.
+const MAILBOX_ADDRS: [usize; 6] = [
+    PSRAM_LOCAL_BASE + MAILBOX_OFFSET,
+    PSRAM_LOCAL_BASE + MAILBOX_OFFSET + MAILBOX_STRIDE,
+    PSRAM_LOCAL_BASE + MAILBOX_OFFSET + 2 * MAILBOX_STRIDE,
+    FP_WINDOW_BASE + LANE2_OFFSET,
+    FP_WINDOW_BASE + FP_WINDOW_STRIDE + LANE2_OFFSET,
+    FP_WINDOW_BASE + 2 * FP_WINDOW_STRIDE + LANE2_OFFSET,
+];
+
+/// Every lane's operand slot, in this core's view. In PSRAM, FP0's sits
+/// below the block still in use, FP1's and FP2's above it.
+const SLOT_ADDRS: [usize; 6] = [
+    PSRAM_LOCAL_BASE + 0x0D00,
+    PSRAM_LOCAL_BASE + 0x4080,
+    PSRAM_LOCAL_BASE + 0x6000,
+    MAILBOX_ADDRS[3] + MAILBOX_STRIDE,
+    MAILBOX_ADDRS[4] + MAILBOX_STRIDE,
+    MAILBOX_ADDRS[5] + MAILBOX_STRIDE,
+];
 
 /// Word indices within a mailbox.
 mod word {
@@ -306,24 +351,24 @@ pub struct Request {
     pub msg_type: u32,
 }
 
-/// Base of this core's operand slot.
-fn slot(core_id: u8) -> *mut u8 {
-    (PSRAM_LOCAL_BASE + SLOT_OFFSETS[core_id as usize]) as *mut u8
+/// Base of `lane`'s operand slot.
+fn slot(lane: u8) -> *mut u8 {
+    SLOT_ADDRS[lane as usize] as *mut u8
 }
 
-/// A sub-range of this core's operand slot as a mutable byte slice.
+/// A sub-range of `lane`'s operand slot as a mutable byte slice.
 ///
 /// Used to hand the crypto its input and output regions in place; see the
 /// `SLOT_*_OFFSET` constants for the sign layout.
-pub fn slot_range_mut(core_id: u8, offset: usize, len: usize) -> Option<&'static mut [u8]> {
+pub fn slot_range_mut(lane: u8, offset: usize, len: usize) -> Option<&'static mut [u8]> {
     if offset.checked_add(len)? > SLOT_SIZE {
         return None;
     }
     // SAFETY: as `slot_mut`, with the range checked against SLOT_SIZE.
-    Some(unsafe { core::slice::from_raw_parts_mut(slot(core_id).add(offset), len) })
+    Some(unsafe { core::slice::from_raw_parts_mut(slot(lane).add(offset), len) })
 }
 
-/// Two **disjoint** sub-ranges of this core's operand slot, both mutable.
+/// Two **disjoint** sub-ranges of `lane`'s operand slot, both mutable.
 ///
 /// Key generation produces a public and a private key at once, into two
 /// regions of the same slot. Calling [`slot_range_mut`] twice would hand
@@ -334,7 +379,7 @@ pub fn slot_range_mut(core_id: u8, offset: usize, len: usize) -> Option<&'static
 ///
 /// Returns `None` if either range leaves the slot, or if the two overlap.
 pub fn slot_pair_mut(
-    core_id: u8,
+    lane: u8,
     a_offset: usize,
     a_len: usize,
     b_offset: usize,
@@ -352,7 +397,7 @@ pub fn slot_pair_mut(
         return None;
     }
 
-    let base = slot(core_id);
+    let base = slot(lane);
 
     // SAFETY: as `slot_range_mut`, and both ranges have just been checked
     // to lie inside the slot and not to overlap, so the slices cannot
@@ -365,16 +410,17 @@ pub fn slot_pair_mut(
     })
 }
 
-/// A sub-range of this core's operand slot as a shared byte slice.///
+/// A sub-range of `lane`'s operand slot as a shared byte slice.
+///
 /// Verify takes four inputs and produces no output, so it can borrow every
 /// operand at once without any of them aliasing.
-pub fn slot_range(core_id: u8, offset: usize, len: usize) -> Option<&'static [u8]> {
+pub fn slot_range(lane: u8, offset: usize, len: usize) -> Option<&'static [u8]> {
     if offset.checked_add(len)? > SLOT_SIZE {
         return None;
     }
     // SAFETY: as `slot_range_mut`, but shared -- several disjoint shared
     // borrows of the slot are fine, and nothing writes it during a verify.
-    unsafe { core::slice::from_raw_parts(slot(core_id), SLOT_SIZE) }.get(offset..offset + len)
+    unsafe { core::slice::from_raw_parts(slot(lane), SLOT_SIZE) }.get(offset..offset + len)
 }
 
 /// Copy `src` into `dst` eight words per transaction.
@@ -425,27 +471,48 @@ pub fn stage(dst: &mut [u8], src: &[u8]) {
     dst[done..].copy_from_slice(&src[done..]);
 }
 
-/// Base of this core's mailbox.
-fn mailbox(core_id: u8) -> *mut u32 {
-    (PSRAM_LOCAL_BASE + MAILBOX_OFFSET + core_id as usize * MAILBOX_STRIDE) as *mut u32
+/// Base of `lane`'s mailbox.
+fn mailbox(lane: u8) -> *mut u32 {
+    MAILBOX_ADDRS[lane as usize] as *mut u32
 }
 
-/// Read the pending request, if the HSM has posted a new one.
+/// Read the request posted first of those pending on core `core_id`'s two
+/// lanes, if the HSM has posted one, with the lane it is on.
 ///
-/// Returns `None` when the mailbox has already been answered, so a
-/// duplicate or spurious doorbell cannot cause the same request to run
-/// twice.
-pub fn take_request(core_id: u8) -> Option<Request> {
-    let mb = mailbox(core_id);
-
-    // SAFETY: this core's own mailbox, a fixed 256-byte slot in PSRAM that
-    // lies outside every region described to the linker. Volatile because
-    // the HSM core writes it.
+/// Returns `None` when both mailboxes have been answered, so a duplicate or
+/// spurious doorbell cannot cause the same request to run twice.
+pub fn take_request(core_id: u8) -> Option<(u8, Request)> {
+    // SAFETY: this core's own mailboxes, fixed 256-byte slots that lie
+    // outside every region described to the linker. Volatile because the
+    // HSM core writes them.
     unsafe {
-        let seq = read_volatile(mb.add(word::REQUEST_SEQ));
-        if seq == read_volatile(mb.add(word::RESPONSE_SEQ)) {
+        // Sequence numbers rise across every lane in the order the HSM
+        // posts, so the earlier of two is the one that wraps below the
+        // other.
+        let mut lane = core_id;
+        let mut seq = 0;
+        let mut found = false;
+        for l in [core_id, core_id + 3] {
+            let mb = mailbox(l);
+            let s = read_volatile(mb.add(word::REQUEST_SEQ));
+            if s != read_volatile(mb.add(word::RESPONSE_SEQ))
+                && (!found || (s.wrapping_sub(seq) as i32) < 0)
+            {
+                lane = l;
+                seq = s;
+                found = true;
+            }
+        }
+        if !found {
             return None;
         }
+        // Both lanes are Normal memory, so nothing stops the loads below,
+        // or the operand slot reads that follow, from being observed before
+        // the `request_seq` load that showed the request. A look that no
+        // doorbell prompted has passed no barrier since the HSM posted, so
+        // order them here, as the HSM does after `response_seq`.
+        cortex_m::asm::dmb();
+        let mb = mailbox(lane);
         let mut xi = [0u8; SEED_LEN];
         let mut rnd = [0u8; SEED_LEN];
         for i in 0..SEED_LEN / 4 {
@@ -455,18 +522,21 @@ pub fn take_request(core_id: u8) -> Option<Request> {
                 .copy_from_slice(&read_volatile(mb.add(word::RND + i)).to_le_bytes());
         }
 
-        Some(Request {
-            seq,
-            op: read_volatile(mb.add(word::OP)),
-            key_kind: read_volatile(mb.add(word::KEY_KIND)),
-            xi,
-            rnd,
-            msg_len: read_volatile(mb.add(word::MSG_LEN)) as usize,
-            ctx_len: read_volatile(mb.add(word::CTX_LEN)) as usize,
-            sig_len: read_volatile(mb.add(word::SIG_LEN)) as usize,
-            pub_key_len: read_volatile(mb.add(word::PUB_KEY_LEN)) as usize,
-            msg_type: read_volatile(mb.add(word::MSG_TYPE)),
-        })
+        Some((
+            lane,
+            Request {
+                seq,
+                op: read_volatile(mb.add(word::OP)),
+                key_kind: read_volatile(mb.add(word::KEY_KIND)),
+                xi,
+                rnd,
+                msg_len: read_volatile(mb.add(word::MSG_LEN)) as usize,
+                ctx_len: read_volatile(mb.add(word::CTX_LEN)) as usize,
+                sig_len: read_volatile(mb.add(word::SIG_LEN)) as usize,
+                pub_key_len: read_volatile(mb.add(word::PUB_KEY_LEN)) as usize,
+                msg_type: read_volatile(mb.add(word::MSG_TYPE)),
+            },
+        ))
     }
 }
 
@@ -475,15 +545,17 @@ pub fn take_request(core_id: u8) -> Option<Request> {
 /// `response_seq` is written last, so the HSM cannot observe a matching
 /// sequence number alongside a half-written payload.
 ///
-pub fn respond(core_id: u8, req: &Request, status: u32, out_len: u32) {
-    let mb = mailbox(core_id);
+pub fn respond(lane: u8, req: &Request, status: u32, out_len: u32) {
+    let mb = mailbox(lane);
 
     // SAFETY: as above.
     unsafe {
         write_volatile(mb.add(word::STATUS), status);
         write_volatile(mb.add(word::OUT_LEN), out_len);
         // Commit: everything above, and the operand slot, must be visible
-        // before the HSM is told the response is ready.
+        // before the HSM is told the response is ready -- asked for
+        // explicitly, as GSRAM is Normal memory.
+        cortex_m::asm::dmb();
         write_volatile(mb.add(word::RESPONSE_SEQ), req.seq);
     }
 }

@@ -3,9 +3,11 @@
 
 //! Shared state for the PQC engine pool.
 //!
-//! Mirrors the UPKA pool but for three engines rather than sixteen, and
-//! without specific-engine acquisition: callers never care *which* FP core
-//! runs their work, so the only entry point is "give me any free engine".
+//! Mirrors the UPKA pool but for six engines -- two lanes on each of three
+//! FP cores -- rather than sixteen, and without specific-engine
+//! acquisition: callers never need a particular lane, so the only entry
+//! point is "give me any free engine". A freed engine goes to the waiter
+//! that queued first; a free one is taken from an idle core first.
 
 use core::task::Context;
 use core::task::Poll;
@@ -17,6 +19,7 @@ use crate::error::PqcError;
 use crate::types::EngineId;
 use crate::types::EngineState;
 use crate::types::QueueSlotState;
+use crate::types::CORES;
 use crate::types::ENGINES;
 use crate::types::QUEUE_DEPTH;
 
@@ -135,12 +138,17 @@ impl PqcState {
         }
     }
 
-    /// Claim a free engine, marking it busy.
+    /// Claim a free engine, marking it busy: the lowest lane of an idle
+    /// core if there is one, so that requests run side by side rather than
+    /// queue on one core while another idles; otherwise the lowest.
     pub(crate) fn claim_free_engine(&mut self) -> Option<EngineId> {
         if self.free_mask == 0 {
             return None;
         }
-        let id = self.free_mask.trailing_zeros() as u8;
+        let idle = (0..ENGINES).find(|&i| {
+            self.free_mask & (1 << i) != 0 && self.free_mask & (1 << ((i + CORES) % ENGINES)) != 0
+        });
+        let id = idle.unwrap_or(self.free_mask.trailing_zeros() as usize) as u8;
         self.free_mask &= !(1u8 << id);
         self.engines[id as usize].state = EngineState::Busy;
         Some(EngineId::new(id))
@@ -494,6 +502,21 @@ mod tests {
             state.reserve_queue_slot().is_none(),
             "queue must report full once every slot is taken"
         );
+    }
+
+    /// A free lane of an idle core is claimed ahead of a lower-numbered one
+    /// whose core is busy with its other lane.
+    #[test]
+    fn idle_cores_are_claimed_before_busy_cores_lanes() {
+        let mut state = PqcState::new();
+        for want in 0..ENGINES {
+            assert_eq!(state.claim_free_engine(), Some(EngineId::new(want as u8)));
+        }
+        for id in [0, 1, 4] {
+            state.release_engine(EngineId::new(id));
+        }
+        assert_eq!(state.claim_free_engine(), Some(EngineId::new(1)));
+        assert_eq!(state.claim_free_engine(), Some(EngineId::new(0)));
     }
 
     /// Every waiter is eventually served: with more arrivals than engines,

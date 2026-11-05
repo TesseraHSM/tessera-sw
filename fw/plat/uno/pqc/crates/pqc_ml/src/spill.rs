@@ -39,26 +39,34 @@ const MATRIX_WORDS: usize = PACKED_WORDS;
 /// bounded by 2^24, so they are stored unpacked.
 const KEY_WORDS: usize = DSA_N;
 
-/// Words one core needs for both regions.
-const NEEDED_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS + KEY_SLOTS * KEY_WORDS;
+/// Words the matrix region takes. The key region follows it.
+const MATRIX_REGION_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS;
 
 static mut BASE: *mut i32 = core::ptr::null_mut();
 
+/// Key-transform slots the region has room for above the matrix region, up
+/// to [`KEY_SLOTS`].
+static mut KEY_CAP: usize = 0;
+
 /// Hand the signer a region to spill into.
 ///
-/// A region smaller than [`NEEDED_WORDS`] is refused outright rather than
+/// A region smaller than the matrix region is refused outright rather than
 /// half-used: the signer already falls back to re-deriving whatever it
-/// cannot spill, so losing the region costs speed and nothing else.
+/// cannot spill, so losing the region costs speed and nothing else. Key
+/// transforms take as many slots as fit above the matrix region, up to
+/// [`KEY_SLOTS`], and the signer transforms the rest again each attempt.
 ///
 /// # Safety
 /// `base` must be valid for `words` `i32` writes, word aligned, and
 /// reserved for this core alone for the lifetime of the program.
 pub unsafe fn init(base: *mut i32, words: usize) {
-    BASE = if words >= NEEDED_WORDS {
-        base
+    if words >= MATRIX_REGION_WORDS {
+        BASE = base;
+        KEY_CAP = ((words - MATRIX_REGION_WORDS) / KEY_WORDS).min(KEY_SLOTS);
     } else {
-        core::ptr::null_mut()
-    };
+        BASE = core::ptr::null_mut();
+        KEY_CAP = 0;
+    }
 }
 
 /// Address of matrix slot `i`, if it exists.
@@ -84,10 +92,10 @@ pub(crate) fn matrix_slot(i: usize) -> Option<*mut i32> {
 pub(crate) fn key_slot(j: usize) -> Option<*mut i32> {
     // SAFETY: as `matrix_slot`.
     unsafe {
-        if BASE.is_null() || j >= KEY_SLOTS {
+        if BASE.is_null() || j >= KEY_CAP {
             None
         } else {
-            Some(BASE.add(MATRIX_SLOTS * MATRIX_WORDS + j * KEY_WORDS))
+            Some(BASE.add(MATRIX_REGION_WORDS + j * KEY_WORDS))
         }
     }
 }
