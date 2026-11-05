@@ -6,6 +6,8 @@
 #include "tsra_pkcs11_compat.h"
 #include "tsra_pkcs11_config.h"
 
+#include <stdbool.h>
+
 #ifdef __cplusplus
 extern "C"
 {
@@ -27,6 +29,9 @@ extern "C"
  * opt-in via TSRA_PKCS11_PERSIST, which writes token objects through to disk.
  * The framework callers do not change when the backend is swapped —
  * construction picks the backend, everything else goes through `ops`/`ctx`.
+ * The file backend seals private token objects through device services the
+ * module hands it at construction (tsra_pkcs11_store_cipher), so the store
+ * itself still never calls the SDK.
  */
 
 typedef struct tsra_pkcs11_objstore_ops tsra_pkcs11_objstore_ops;
@@ -170,12 +175,48 @@ struct tsra_pkcs11_objstore_ops
 CK_RV tsra_pkcs11_objstore_mem_create(tsra_pkcs11_objstore *out);
 
 /*
+ * The device services the file backend seals private token objects with
+ * (CKA_PRIVATE TRUE): every write of such a record generates an AES-GCM key on
+ * the device for that record alone, kept in the record as its masked blob, so
+ * each key encrypts exactly once. The backend calls them under the module lock,
+ * only for a `slot` whose user is logged in; the module runs them in that
+ * slot's device session.
+ */
+typedef struct
+{
+    /* Generate a record key: *blob receives its masked blob in a malloc'd
+     * buffer the caller wipes and frees. */
+    CK_RV (*key_generate)(CK_SLOT_ID slot, CK_BYTE **blob, CK_ULONG *blob_len);
+    /*
+     * AES-GCM in place with the record key whose masked blob is `key`: `data`
+     * holds the plaintext or ciphertext and receives the result, `tag` (16
+     * bytes) is written on encrypt and checked on decrypt.
+     * CKR_KEY_HANDLE_INVALID means the device does not unmask `key` (the
+     * partition was provisioned afresh).
+     */
+    CK_RV(*gcm)
+    (CK_SLOT_ID slot,
+     bool encrypt,
+     const CK_BYTE *key,
+     CK_ULONG key_len,
+     const CK_BYTE *aad,
+     CK_ULONG aad_len,
+     CK_BYTE *data,
+     CK_ULONG data_len,
+     CK_BYTE *tag);
+} tsra_pkcs11_store_cipher;
+
+/*
  * Construct the persistent file backend into `out`, rooted at cfg->store_dir.
  * Objects are written through to disk so token objects survive a process restart
  * and are visible to other processes sharing the directory
- * (tsra_pkcs11_objstore_file.c).
+ * (tsra_pkcs11_objstore_file.c). `cipher` is borrowed and must outlive the store.
  */
-CK_RV tsra_pkcs11_objstore_file_create(tsra_pkcs11_objstore *out, const tsra_pkcs11_config *cfg);
+CK_RV tsra_pkcs11_objstore_file_create(
+    tsra_pkcs11_objstore *out,
+    const tsra_pkcs11_config *cfg,
+    const tsra_pkcs11_store_cipher *cipher
+);
 
 #ifdef __cplusplus
 }

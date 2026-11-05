@@ -3,8 +3,10 @@
 
 /*
  * Seeds a file object store for the conformance gate's second run (run.sh):
- * a public and a private token data object and a token AES key, so the tests
- * that search and list objects meet a store that is not empty.
+ * a public and a private token data object and a public token AES key, so the
+ * tests that search and list objects meet a store that is not empty. The key
+ * is public so a search finds it in every process: a private object is sealed
+ * with a key another process on the mock cannot unmask.
  *
  *   seed_store <module.so> <pin>
  *
@@ -63,6 +65,7 @@ int main(int argc, char **argv)
     CK_BBOOL no = CK_FALSE;
     CK_OBJECT_CLASS data = CKO_DATA;
     CK_BYTE value[] = "seeded public value";
+    CK_BYTE private_value[] = "seeded private value";
     char public_label[] = "seed-public-data";
     char private_label[] = "seed-private-data";
     char key_label[] = "seed-token-key";
@@ -75,17 +78,16 @@ int main(int argc, char **argv)
         { CKA_LABEL, public_label, sizeof(public_label) - 1 },
         { CKA_VALUE, value, sizeof(value) - 1 },
     };
-    /* No CKA_VALUE: the file store refuses a private token object with a
-     * plaintext value. */
     CK_ATTRIBUTE private_data[] = {
         { CKA_CLASS, &data, sizeof(data) },
         { CKA_TOKEN, &yes, sizeof(yes) },
         { CKA_PRIVATE, &yes, sizeof(yes) },
         { CKA_LABEL, private_label, sizeof(private_label) - 1 },
+        { CKA_VALUE, private_value, sizeof(private_value) - 1 },
     };
     CK_ATTRIBUTE token_key[] = {
         { CKA_TOKEN, &yes, sizeof(yes) },
-        { CKA_PRIVATE, &yes, sizeof(yes) },
+        { CKA_PRIVATE, &no, sizeof(no) },
         { CKA_VALUE_LEN, &key_len, sizeof(key_len) },
         { CKA_LABEL, key_label, sizeof(key_label) - 1 },
     };

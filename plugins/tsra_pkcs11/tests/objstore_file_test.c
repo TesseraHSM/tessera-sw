@@ -11,18 +11,24 @@
  *       ../src/tsra_pkcs11_store_io.c ../src/tsra_pkcs11_store_record.c -o objstore_file_test
  * -lpthread
  *
- * Covers: token vs session routing, the private login gate, the v1
- * private-secret refusal, sensitive-attribute hiding, two-call sizing,
- * counter-first no-reuse of handles, destroy, a lost or empty token.meta never
- * letting a create replace a surviving object, and cross-process persistence
- * (a child process opens a fresh store on the same directory and reads the
- * token object the parent created, then observes the persisted counter).
+ * Covers: token vs session routing, the private login gate, sensitive-attribute
+ * hiding, two-call sizing, counter-first no-reuse of handles, destroy, a lost
+ * or empty token.meta never letting a create replace a surviving object, and
+ * cross-process persistence (a child process opens a fresh store on the same
+ * directory and reads the token object the parent created, then observes the
+ * persisted counter). Private token objects are sealed with the fake device
+ * cipher (store_fakes.h): no plaintext on disk, a key of its own for every
+ * write, records of another provisioning invisible until their key unmasks
+ * again, and a tampered, wrongly keyed, forged clear or version-1 record
+ * refused.
  */
 
+#include "store_fakes.h"
 #include "tsra_pkcs11_objstore.h"
 #include "tsra_pkcs11_store_io.h"
 #include "tsra_pkcs11_store_record.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -159,13 +165,91 @@ static int body_equals(
     }
     tsra_pkcs11_rec_object o;
     int ok = 0;
-    if (tsra_pkcs11_record_decode(buf, len, &o) == CKR_OK)
+    if (tsra_pkcs11_record_decode(buf, len, NULL, &o) == CKR_OK)
     {
         ok = (o.body_len == exp_len) && (exp_len == 0 || memcmp(o.body, exp, exp_len) == 0);
         tsra_pkcs11_record_free(&o);
     }
     free(buf);
     return ok;
+}
+
+/* The record file of token object `h` in `slot`. */
+static void record_path(char *out, size_t n, const char *root, CK_SLOT_ID slot, CK_OBJECT_HANDLE h)
+{
+    snprintf(
+        out,
+        n,
+        "%s/slot-%lu/%lu.object",
+        root,
+        (unsigned long)slot,
+        (unsigned long)(h & ~TOKEN_FLAG)
+    );
+}
+
+/* Read a whole file into a malloc'd buffer; NULL when it cannot be read. */
+static unsigned char *slurp(const char *path, size_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL)
+    {
+        return NULL;
+    }
+    unsigned char *buf = (unsigned char *)malloc(P11_STORE_MAX_FILE_SIZE);
+    *len = (buf != NULL) ? fread(buf, 1, P11_STORE_MAX_FILE_SIZE, f) : 0;
+    fclose(f);
+    return buf;
+}
+
+static int spill(const char *path, const unsigned char *buf, size_t len)
+{
+    FILE *f = fopen(path, "wb");
+    if (f == NULL)
+    {
+        return 0;
+    }
+    int ok = (fwrite(buf, 1, len, f) == len);
+    return (fclose(f) == 0) && ok;
+}
+
+/* Whether the record of `h` is sealed (peeked from the file). */
+static int record_sealed(const char *root, CK_SLOT_ID slot, CK_OBJECT_HANDLE h)
+{
+    char path[512];
+    record_path(path, sizeof(path), root, slot, h);
+    size_t len = 0;
+    unsigned char *buf = slurp(path, &len);
+    uint16_t version = 0;
+    bool sealed = false;
+    int ok = (buf != NULL) && (tsra_pkcs11_record_peek(buf, len, &version, &sealed) == CKR_OK);
+    free(buf);
+    return ok && sealed;
+}
+
+/* Whether any file under `dir` holds `needle` verbatim. */
+static int dir_contains(const char *dir, const void *needle, size_t n)
+{
+    DIR *d = opendir(dir);
+    if (d == NULL)
+    {
+        return 0;
+    }
+    int found = 0;
+    struct dirent *e;
+    while (!found && ((e = readdir(d)) != NULL))
+    {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+        size_t len = 0;
+        unsigned char *buf = slurp(path, &len);
+        for (size_t i = 0; (buf != NULL) && (i + n <= len) && !found; i++)
+        {
+            found = (memcmp(buf + i, needle, n) == 0);
+        }
+        free(buf);
+    }
+    closedir(d);
+    return found;
 }
 
 /*
@@ -223,7 +307,14 @@ int main(void)
     cfg.store_persist = true;
 
     tsra_pkcs11_objstore s;
-    CHECK(tsra_pkcs11_objstore_file_create(&s, &cfg) == CKR_OK, "file store constructs");
+    CHECK(
+        tsra_pkcs11_objstore_file_create(&s, &cfg, NULL) == CKR_ARGUMENTS_BAD,
+        "file store needs the device cipher"
+    );
+    CHECK(
+        tsra_pkcs11_objstore_file_create(&s, &cfg, &FAKE_CIPHER) == CKR_OK,
+        "file store constructs"
+    );
 
     const CK_SLOT_ID SLOT = 0;
     char lbuf[64];
@@ -289,23 +380,7 @@ int main(void)
         "private object visible when logged in"
     );
 
-    /* --- v1 refusal: private object carrying a plaintext CKA_VALUE --- */
     unsigned char secret[] = { 1, 2, 3, 4 };
-    CHECK(
-        make_object(
-            &s,
-            SLOT,
-            CK_TRUE,
-            CK_TRUE,
-            CK_TRUE,
-            "priv-data",
-            secret,
-            sizeof(secret),
-            CK_FALSE,
-            &bad
-        ) == CKR_TEMPLATE_INCONSISTENT,
-        "private object with CKA_VALUE refused (non-device-protected secret)"
-    );
 
     /* --- sensitive hiding on a public token object with a value --- */
     CK_OBJECT_HANDLE sens = 0;
@@ -604,20 +679,31 @@ int main(void)
     s.ops->destroy(s.ctx, SLOT, CK_FALSE, sz_tok, NULL, NULL);
     s.ops->destroy(s.ctx, SLOT, CK_FALSE, sz_sess, NULL, NULL);
 
-    /* v1 refusal via set_attr: making an object that carries CKA_VALUE private. */
+    /* Making an object private (the policy layer never asks) seals it, which
+     * needs the login like a private create. */
     CK_ATTRIBUTE mkpriv[] = { { CKA_PRIVATE, &ck_true, sizeof(CK_BBOOL) } };
     CHECK(
-        s.ops->set_attr(s.ctx, SLOT, CK_TRUE, x, mkpriv, 1, NULL, NULL) ==
-            CKR_TEMPLATE_INCONSISTENT,
-        "set_attr refuses to make a value-carrying object private"
+        s.ops->set_attr(s.ctx, SLOT, CK_FALSE, x, mkpriv, 1, NULL, NULL) ==
+                CKR_USER_NOT_LOGGED_IN &&
+            read_label(&s, SLOT, CK_FALSE, x, lbuf, sizeof(lbuf), &llen) == CKR_OK,
+        "set_attr making an object private while logged out is refused, the object unchanged"
     );
     CHECK(
-        read_label(&s, SLOT, CK_FALSE, x, lbuf, sizeof(lbuf), &llen) == CKR_OK,
-        "refused set_attr left the object unchanged (still public)"
+        s.ops->set_attr(s.ctx, SLOT, CK_TRUE, x, mkpriv, 1, NULL, NULL) == CKR_OK &&
+            read_label(&s, SLOT, CK_FALSE, x, lbuf, sizeof(lbuf), &llen) ==
+                CKR_OBJECT_HANDLE_INVALID &&
+            record_sealed(root, SLOT, x),
+        "set_attr making an object private while logged in seals it"
+    );
+    vq2.ulValueLen = sizeof(lbuf);
+    CHECK(
+        s.ops->get_attr(s.ctx, SLOT, CK_TRUE, x, &vq2, 1) == CKR_OK && vq2.ulValueLen == 3 &&
+            memcmp(lbuf, xval, 3) == 0,
+        "the sealed object reads back while logged in"
     );
 
     CHECK(
-        s.ops->destroy(s.ctx, SLOT, CK_FALSE, x, NULL, NULL) == CKR_OK,
+        s.ops->destroy(s.ctx, SLOT, CK_TRUE, x, NULL, NULL) == CKR_OK,
         "cleanup: destroy the scratch object"
     );
 
@@ -625,7 +711,10 @@ int main(void)
            A second store instance on the same directory stands in for another
            process sharing the token. --- */
     tsra_pkcs11_objstore s2;
-    CHECK(tsra_pkcs11_objstore_file_create(&s2, &cfg) == CKR_OK, "second store instance");
+    CHECK(
+        tsra_pkcs11_objstore_file_create(&s2, &cfg, &FAKE_CIPHER) == CKR_OK,
+        "second store instance"
+    );
     CK_OBJECT_HANDLE lt = 0;
     make_object(&s, SLOT, CK_FALSE, CK_TRUE, CK_FALSE, "latch", NULL, 0, CK_FALSE, &lt);
     CK_ATTRIBUTE unlatch[] = { { CKA_SENSITIVE, &ck_false, sizeof(CK_BBOOL) } };
@@ -771,6 +860,156 @@ int main(void)
     );
     s.ops->destroy(s.ctx, META_SLOT, CK_FALSE, keep, NULL, NULL);
 
+    /* --- sealed private objects, in a slot of their own --- */
+    const CK_SLOT_ID SEAL_SLOT = SLOT + 5;
+    char seal_dir[512];
+    snprintf(seal_dir, sizeof(seal_dir), "%s/slot-%lu", root, (unsigned long)SEAL_SLOT);
+    static const char plabel[] = "sealed-label-1234";
+    static const unsigned char pvalue[] = "sealed-value-5678";
+    CK_OBJECT_HANDLE p1 = 0, p2 = 0, p3 = 0;
+    CHECK(
+        make_object(
+            &s,
+            SEAL_SLOT,
+            CK_TRUE,
+            CK_TRUE,
+            CK_TRUE,
+            plabel,
+            pvalue,
+            sizeof(pvalue),
+            CK_FALSE,
+            &p1
+        ) == CKR_OK &&
+            make_object(&s, SEAL_SLOT, CK_TRUE, CK_TRUE, CK_TRUE, "p2", NULL, 0, CK_FALSE, &p2) ==
+                CKR_OK,
+        "seal: private objects, one with a value, are created"
+    );
+    CK_ATTRIBUTE pv = { CKA_VALUE, lbuf, sizeof(lbuf) };
+    CHECK(
+        record_sealed(root, SEAL_SLOT, p1) &&
+            s.ops->get_attr(s.ctx, SEAL_SLOT, CK_TRUE, p1, &pv, 1) == CKR_OK &&
+            pv.ulValueLen == sizeof(pvalue) && memcmp(lbuf, pvalue, sizeof(pvalue)) == 0,
+        "seal: the private record is sealed and its value reads back logged in"
+    );
+    CHECK(
+        !dir_contains(seal_dir, plabel, sizeof(plabel) - 1) &&
+            !dir_contains(seal_dir, pvalue, sizeof(pvalue)),
+        "seal: neither the private label nor the value is on disk in clear"
+    );
+    CHECK(
+        read_label(&s, SEAL_SLOT, CK_FALSE, p1, lbuf, sizeof(lbuf), &llen) ==
+                CKR_OBJECT_HANDLE_INVALID &&
+            find_count(&s, SEAL_SLOT, CK_FALSE, NULL, 0) == 0 &&
+            find_count(&s, SEAL_SLOT, CK_TRUE, NULL, 0) == 2,
+        "seal: sealed objects are invisible logged out, found logged in"
+    );
+
+    /* Every write seals with a key of its own, a rewrite included. */
+    char path[600];
+    char path2[600];
+    size_t flen = 0;
+    size_t flen2 = 0;
+    record_path(path, sizeof(path), root, SEAL_SLOT, p2);
+    unsigned char *before = slurp(path, &flen);
+    CK_ATTRIBUTE relabel2[] = { { CKA_LABEL, (void *)"p2-renamed", 10 } };
+    CHECK(
+        s.ops->set_attr(s.ctx, SEAL_SLOT, CK_TRUE, p2, relabel2, 1, NULL, NULL) == CKR_OK,
+        "seal: a private object is rewritten"
+    );
+    unsigned char *after = slurp(path, &flen2);
+    record_path(path2, sizeof(path2), root, SEAL_SLOT, p1);
+    size_t flen1 = 0;
+    unsigned char *f1 = slurp(path2, &flen1);
+    CHECK(
+        (before != NULL) && (after != NULL) && (f1 != NULL) &&
+            (memcmp(before + REC_KEY_AT, after + REC_KEY_AT, FAKE_KEY_LEN) != 0) &&
+            (memcmp(f1 + REC_KEY_AT, after + REC_KEY_AT, FAKE_KEY_LEN) != 0),
+        "seal: no two writes share a key"
+    );
+    free(before);
+    free(f1);
+
+    /* The partition provisioned afresh: older record keys no longer unmask. */
+    fake_epoch++;
+    CHECK(
+        read_label(&s, SEAL_SLOT, CK_TRUE, p1, lbuf, sizeof(lbuf), &llen) ==
+                CKR_OBJECT_HANDLE_INVALID &&
+            find_count(&s, SEAL_SLOT, CK_TRUE, NULL, 0) == 0,
+        "seal: records whose key the device does not unmask are invisible"
+    );
+    CHECK(
+        make_object(&s, SEAL_SLOT, CK_TRUE, CK_TRUE, CK_TRUE, "p3", NULL, 0, CK_FALSE, &p3) ==
+                CKR_OK &&
+            read_label(&s, SEAL_SLOT, CK_TRUE, p3, lbuf, sizeof(lbuf), &llen) == CKR_OK,
+        "seal: new private objects work meanwhile"
+    );
+    fake_epoch--;
+    CHECK(
+        read_label(&s, SEAL_SLOT, CK_TRUE, p1, lbuf, sizeof(lbuf), &llen) == CKR_OK &&
+            read_label(&s, SEAL_SLOT, CK_TRUE, p3, lbuf, sizeof(lbuf), &llen) ==
+                CKR_OBJECT_HANDLE_INVALID,
+        "seal: once the old keys unmask again, their records open again"
+    );
+
+    /* Tampering, a wrong key, a forged clear record and an old format. */
+    f1 = slurp(path2, &flen1);
+    if (f1 != NULL)
+    {
+        f1[flen1 - 1] ^= 0x01; /* the tag */
+        spill(path2, f1, flen1);
+        free(f1);
+    }
+    CHECK(
+        read_label(&s, SEAL_SLOT, CK_TRUE, p1, lbuf, sizeof(lbuf), &llen) == CKR_FUNCTION_FAILED &&
+            find_count(&s, SEAL_SLOT, CK_TRUE, NULL, 0) == 1,
+        "seal: a tampered record is refused and left out of a search"
+    );
+    unsigned char *f2 = slurp(path, &flen);
+    f1 = slurp(path2, &flen1);
+    if ((f2 != NULL) && (f1 != NULL))
+    {
+        memcpy(f2 + REC_KEY_AT, f1 + REC_KEY_AT, FAKE_KEY_LEN);
+        spill(path, f2, flen);
+    }
+    free(f1);
+    free(f2);
+    free(after);
+    CHECK(
+        read_label(&s, SEAL_SLOT, CK_TRUE, p2, lbuf, sizeof(lbuf), &llen) == CKR_FUNCTION_FAILED,
+        "seal: a record with another record's valid key put in is refused"
+    );
+
+    CK_OBJECT_CLASS fcls = CKO_DATA;
+    tsra_pkcs11_rec_attr forged_attrs[] = {
+        { CKA_CLASS, (unsigned char *)&fcls, sizeof(fcls) },
+        { CKA_TOKEN, &ck_true, sizeof(CK_BBOOL) },
+        { CKA_PRIVATE, &ck_true, sizeof(CK_BBOOL) },
+    };
+    tsra_pkcs11_rec_object forged = { forged_attrs, 3, NULL, 0 };
+    unsigned char fbuf[256];
+    size_t fl = sizeof(fbuf);
+    snprintf(path, sizeof(path), "%s/900.object", seal_dir);
+    CHECK(
+        tsra_pkcs11_record_encode(&forged, NULL, fbuf, &fl) == CKR_OK && spill(path, fbuf, fl) &&
+            read_label(&s, SEAL_SLOT, CK_TRUE, TOKEN_FLAG | 900, lbuf, sizeof(lbuf), &llen) ==
+                CKR_FUNCTION_FAILED &&
+            find_count(&s, SEAL_SLOT, CK_TRUE, NULL, 0) == 0,
+        "seal: a clear record claiming CKA_PRIVATE is refused"
+    );
+    forged_attrs[2].value = &ck_false;
+    fl = sizeof(fbuf);
+    snprintf(path, sizeof(path), "%s/901.object", seal_dir);
+    fake_log_last[0] = '\0';
+    CK_RV frv = tsra_pkcs11_record_encode(&forged, NULL, fbuf, &fl);
+    fbuf[REC_VERSION_AT] = 1;
+    CHECK(
+        (frv == CKR_OK) && spill(path, fbuf, fl) &&
+            read_label(&s, SEAL_SLOT, CK_FALSE, TOKEN_FLAG | 901, lbuf, sizeof(lbuf), &llen) ==
+                CKR_FUNCTION_FAILED &&
+            strstr(fake_log_last, "version 1") != NULL,
+        "seal: a version-1 record is refused with a log line"
+    );
+
     CK_OBJECT_HANDLE last = b; /* highest handle so far */
     s.ops->teardown(s.ctx);
 
@@ -782,7 +1021,7 @@ int main(void)
     {
         tsra_pkcs11_objstore cs;
         int bad_child = 0;
-        if (tsra_pkcs11_objstore_file_create(&cs, &cfg) != CKR_OK)
+        if (tsra_pkcs11_objstore_file_create(&cs, &cfg, &FAKE_CIPHER) != CKR_OK)
         {
             _exit(10);
         }

@@ -23,14 +23,21 @@
  * exactly as the in-memory backend does, because the device authenticates the
  * partition, not individual objects.
  *
+ * A private token object is stored sealed: AES-GCM through the device with a
+ * key generated for that write alone and kept masked in the record
+ * (tsra_pkcs11_store_cipher). Public objects stay in clear, and a clear record
+ * that claims CKA_PRIVATE is refused, so the tag guards every private object.
+ *
  * Like the in-memory backend this file links no libcrypto (durability rests on
- * the filesystem, not host cryptography) so the no-device smoke build compiles.
+ * the filesystem, and sealing on the device) so the no-device smoke build
+ * compiles.
  * It does no internal thread locking — the framework holds the module lock
  * across every call — but takes the cross-process flock for each disk mutation
  * and read.
  */
 
 #include "tsra_pkcs11_attr_types.h"
+#include "tsra_pkcs11_internal.h"
 #include "tsra_pkcs11_objstore.h"
 #include "tsra_pkcs11_store_io.h"
 #include "tsra_pkcs11_store_record.h"
@@ -59,6 +66,7 @@ typedef struct
 {
     char store_dir[TSRA_PKCS11_PATH_LEN];
     tsra_pkcs11_objstore mem; /* embedded backend for session (CKA_TOKEN == FALSE) objects */
+    const tsra_pkcs11_store_cipher *cipher; /* borrowed; seals private token objects */
 } file_store;
 
 /* ---- template / record attribute helpers ------------------------------- */
@@ -216,12 +224,97 @@ static void object_name(CK_ULONG num, char *out, size_t outlen)
     (void)snprintf(out, outlen, "%lu.object", (unsigned long)num);
 }
 
+/* ---- sealing ------------------------------------------------------------ */
+
+/* The codec's sealing callback, bound to the caller's slot. */
+typedef struct
+{
+    const tsra_pkcs11_store_cipher *cipher;
+    CK_SLOT_ID slot;
+} seal_ctx;
+
+static CK_RV seal_gcm(
+    void *ctx,
+    bool encrypt,
+    const unsigned char *key,
+    size_t key_len,
+    const unsigned char *aad,
+    size_t aad_len,
+    unsigned char *data,
+    size_t data_len,
+    unsigned char *tag
+)
+{
+    const seal_ctx *c = (const seal_ctx *)ctx;
+    return c->cipher->gcm(c->slot, encrypt, key, key_len, aad, aad_len, data, data_len, tag);
+}
+
+/* Encode `o` (sealed when `seal` is set) into a malloc'd *out the caller wipes
+ * and frees. */
+static CK_RV encode_record(
+    const tsra_pkcs11_rec_object *o,
+    const tsra_pkcs11_record_seal *seal,
+    unsigned char **out,
+    size_t *out_len
+)
+{
+    size_t cap = 0;
+    CK_RV rv = tsra_pkcs11_record_encode(o, seal, NULL, &cap);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    unsigned char *buf = (unsigned char *)malloc(cap);
+    if (buf == NULL)
+    {
+        return CKR_HOST_MEMORY;
+    }
+    size_t len = cap;
+    rv = tsra_pkcs11_record_encode(o, seal, buf, &len);
+    if (rv != CKR_OK)
+    {
+        tsra_pkcs11_wipe(buf, cap);
+        free(buf);
+        return rv;
+    }
+    *out = buf;
+    *out_len = len;
+    return CKR_OK;
+}
+
+/* Encode a private record sealed with a key generated for it alone. */
+static CK_RV seal_record(
+    const file_store *st,
+    CK_SLOT_ID slot,
+    const tsra_pkcs11_rec_object *o,
+    unsigned char **out,
+    size_t *out_len
+)
+{
+    CK_BYTE *key = NULL;
+    CK_ULONG key_len = 0;
+    CK_RV rv = st->cipher->key_generate(slot, &key, &key_len);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    seal_ctx sc = { st->cipher, slot };
+    tsra_pkcs11_record_seal seal = { seal_gcm, &sc, key, key_len };
+    rv = encode_record(o, &seal, out, out_len);
+    tsra_pkcs11_wipe(key, key_len);
+    free(key);
+    return rv;
+}
+
 /* ---- disk-backed token object operations -------------------------------- */
 
-/* Encode `o` and atomically write it as <num>.object in `dir`, replacing an
- * existing file only when `replace` is set. The encoded buffer is wiped after
- * the write since it may hold attribute bytes. */
+/* Encode `o`, sealed when it is private, and atomically write it as
+ * <num>.object in `dir`, replacing an existing file only when `replace` is set.
+ * The encoded buffer is wiped after the write since it may hold attribute
+ * bytes. */
 static CK_RV write_token_object(
+    const file_store *st,
+    CK_SLOT_ID slot,
     const char *dir,
     CK_ULONG num,
     const tsra_pkcs11_rec_object *o,
@@ -230,19 +323,8 @@ static CK_RV write_token_object(
 {
     unsigned char *buf = NULL;
     size_t blen = 0;
-    CK_RV rv = tsra_pkcs11_record_encode(o, NULL, &blen);
-    if (rv == CKR_OK)
-    {
-        buf = (unsigned char *)malloc(blen ? blen : 1);
-        if (buf == NULL)
-        {
-            rv = CKR_HOST_MEMORY;
-        }
-    }
-    if (rv == CKR_OK)
-    {
-        rv = tsra_pkcs11_record_encode(o, buf, &blen);
-    }
+    CK_RV rv = rec_bool(o, CKA_PRIVATE, CK_FALSE) ? seal_record(st, slot, o, &buf, &blen)
+                                                  : encode_record(o, NULL, &buf, &blen);
     if (rv == CKR_OK)
     {
         char name[P11_FILE_OBJ_NAME_LEN];
@@ -267,22 +349,9 @@ static CK_RV create_token_object(
     CK_OBJECT_HANDLE *out
 )
 {
-    CK_BBOOL is_private = tmpl_bool(tmpl, count, CKA_PRIVATE, CK_FALSE);
-    if (is_private && !user_logged_in)
+    if (tmpl_bool(tmpl, count, CKA_PRIVATE, CK_FALSE) && !user_logged_in)
     {
         return CKR_USER_NOT_LOGGED_IN;
-    }
-    /*
-     * v1 refuses to persist a private object whose secret is not the
-     * device-encrypted masked blob: a private CKA_VALUE (e.g. a CKO_DATA app
-     * secret) or a plaintext CKA_PRIVATE_EXPONENT would sit in cleartext at rest
-     * (the device protects only the masked key body). At-rest encryption of such
-     * material is a later phase; until then, refuse rather than leak.
-     */
-    if (is_private && (tmpl_find(tmpl, count, CKA_VALUE) != NULL ||
-                       tmpl_find(tmpl, count, CKA_PRIVATE_EXPONENT) != NULL))
-    {
-        return CKR_TEMPLATE_INCONSISTENT;
     }
 
     char dir[P11_FILE_TOKEN_DIR_LEN];
@@ -360,7 +429,7 @@ static CK_RV create_token_object(
 
     /* Never over an existing file: a lost or reset token.meta hands out a
      * number some surviving object may still hold. */
-    rv = write_token_object(dir, n, &obj, false);
+    rv = write_token_object(st, slot, dir, n, &obj, false);
     free(ra);
     tsra_pkcs11_store_unlock(lock_fd);
     if (rv != CKR_OK)
@@ -371,9 +440,74 @@ static CK_RV create_token_object(
     return CKR_OK;
 }
 
-/* Load and decode a token object under the caller's slot; applies the private
- * login gate. *found is set false (and CKR_OBJECT_HANDLE_INVALID returned) when
- * the object is absent or not visible, without leaking its existence. */
+/*
+ * Read and decode <dir>/<name>. A sealed (private) record is invisible while
+ * logged out and opened through the device otherwise. CKR_OBJECT_HANDLE_INVALID
+ * when the object is absent or not visible, without leaking its existence.
+ */
+static CK_RV read_token_object(
+    const file_store *st,
+    CK_SLOT_ID slot,
+    CK_BBOOL user_logged_in,
+    const char *dir,
+    const char *name,
+    tsra_pkcs11_rec_object *out
+)
+{
+    unsigned char *buf = NULL;
+    size_t blen = 0;
+    CK_RV rv = tsra_pkcs11_store_read(dir, name, &buf, &blen);
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    if (buf == NULL) /* absent */
+    {
+        return CKR_OBJECT_HANDLE_INVALID;
+    }
+    uint16_t version = 0;
+    bool sealed = false;
+    rv = tsra_pkcs11_record_peek(buf, blen, &version, &sealed);
+    if ((rv == CKR_OK) && (version != P11_RECORD_VERSION))
+    {
+        TSRA_PKCS11_LOG(
+            "%s/%s: store format version %u is not supported, only %u",
+            dir,
+            name,
+            (unsigned)version,
+            (unsigned)P11_RECORD_VERSION
+        );
+        rv = CKR_FUNCTION_FAILED;
+    }
+    else if ((rv == CKR_OK) && sealed && !user_logged_in)
+    {
+        rv = CKR_OBJECT_HANDLE_INVALID; /* private + logged out: invisible */
+    }
+    else if (rv == CKR_OK)
+    {
+        seal_ctx sc = { st->cipher, slot };
+        tsra_pkcs11_record_seal open = { seal_gcm, &sc, NULL, 0 };
+        rv = tsra_pkcs11_record_decode(buf, blen, &open, out);
+        /* A record key the device does not unmask hides the object from this
+         * login, as the private gate does. */
+        if (rv == CKR_KEY_HANDLE_INVALID)
+        {
+            rv = CKR_OBJECT_HANDLE_INVALID;
+        }
+        /* A clear record that claims CKA_PRIVATE was not sealed by this module
+         * and would escape the tag, so it counts as corrupt. */
+        if ((rv == CKR_OK) && ((rec_bool(out, CKA_PRIVATE, CK_FALSE) != CK_FALSE) != sealed))
+        {
+            tsra_pkcs11_record_free(out);
+            rv = CKR_FUNCTION_FAILED;
+        }
+    }
+    tsra_pkcs11_wipe(buf, blen); /* masked key body and attribute values */
+    free(buf);
+    return rv;
+}
+
+/* Load and decode a token object under the caller's slot (read_token_object). */
 static CK_RV load_visible_token_object(
     file_store *st,
     CK_SLOT_ID slot,
@@ -390,31 +524,7 @@ static CK_RV load_visible_token_object(
     }
     char name[P11_FILE_OBJ_NAME_LEN];
     object_name(h & ~P11_FILE_TOKEN_FLAG, name, sizeof(name));
-
-    unsigned char *buf = NULL;
-    size_t blen = 0;
-    rv = tsra_pkcs11_store_read(dir, name, &buf, &blen);
-    if (rv != CKR_OK)
-    {
-        return rv;
-    }
-    if (buf == NULL) /* absent */
-    {
-        return CKR_OBJECT_HANDLE_INVALID;
-    }
-    rv = tsra_pkcs11_record_decode(buf, blen, out);
-    tsra_pkcs11_wipe(buf, blen); /* masked key body and attribute values */
-    free(buf);
-    if (rv != CKR_OK)
-    {
-        return rv;
-    }
-    if (rec_bool(out, CKA_PRIVATE, CK_FALSE) && !user_logged_in)
-    {
-        tsra_pkcs11_record_free(out);
-        return CKR_OBJECT_HANDLE_INVALID; /* private + logged out: invisible */
-    }
-    return CKR_OK;
+    return read_token_object(st, slot, user_logged_in, dir, name, out);
 }
 
 /* ---- vtable ops --------------------------------------------------------- */
@@ -630,16 +740,14 @@ static CK_RV set_attr_token(
             tmpl[i].ulValueLen
         );
     }
-    /* The same v1 refusal as create: a private object must not end up carrying a
-     * non-device-protected plaintext secret at rest. */
-    if (rv == CKR_OK && rec_bool(&o, CKA_PRIVATE, CK_FALSE) &&
-        (rec_find(&o, CKA_VALUE) != NULL || rec_find(&o, CKA_PRIVATE_EXPONENT) != NULL))
+    /* The create rule: a private object is sealed, which needs the login. */
+    if ((rv == CKR_OK) && rec_bool(&o, CKA_PRIVATE, CK_FALSE) && !user_logged_in)
     {
-        rv = CKR_TEMPLATE_INCONSISTENT;
+        rv = CKR_USER_NOT_LOGGED_IN;
     }
     if ((rv == CKR_OK) && (count > 0))
     {
-        rv = write_token_object(dir, h & ~P11_FILE_TOKEN_FLAG, &o, true);
+        rv = write_token_object(st, slot, dir, h & ~P11_FILE_TOKEN_FLAG, &o, true);
     }
     tsra_pkcs11_record_free(&o);
     tsra_pkcs11_store_unlock(lock_fd);
@@ -780,22 +888,14 @@ static CK_RV collect_token_matches(
         {
             continue;
         }
-        unsigned char *buf = NULL;
-        size_t blen = 0;
-        if (tsra_pkcs11_store_read(dir, e->d_name, &buf, &blen) != CKR_OK || buf == NULL)
-        {
-            continue; /* removed or unreadable mid-scan */
-        }
         tsra_pkcs11_rec_object o;
-        int decoded = (tsra_pkcs11_record_decode(buf, blen, &o) == CKR_OK);
-        tsra_pkcs11_wipe(buf, blen);
-        free(buf);
-        if (!decoded)
+        if (read_token_object(st, slot, user_logged_in, dir, e->d_name, &o) != CKR_OK)
         {
-            continue; /* skip a corrupt record rather than fail the whole scan */
+            /* Removed mid-scan, invisible, or corrupt: skip it rather than fail
+             * the whole scan. */
+            continue;
         }
-        CK_BBOOL is_private = rec_bool(&o, CKA_PRIVATE, CK_FALSE);
-        if ((!is_private || user_logged_in) && matches_rec(&o, tmpl, count))
+        if (matches_rec(&o, tmpl, count))
         {
             rv = cursor_append(c, P11_FILE_TOKEN_FLAG | num);
         }
@@ -961,7 +1061,7 @@ static CK_RV set_key_body_token(
     }
     o.body = nb;
     o.body_len = len;
-    rv = write_token_object(dir, h & ~P11_FILE_TOKEN_FLAG, &o, true);
+    rv = write_token_object(st, slot, dir, h & ~P11_FILE_TOKEN_FLAG, &o, true);
     tsra_pkcs11_record_free(&o);
     tsra_pkcs11_store_unlock(lock_fd);
     return rv;
@@ -1144,9 +1244,13 @@ static const tsra_pkcs11_objstore_ops FILE_OPS = {
     .persist = file_persist, /* file backend flushes; contrast MEM_OPS (.persist = NULL) */
 };
 
-CK_RV tsra_pkcs11_objstore_file_create(tsra_pkcs11_objstore *out, const tsra_pkcs11_config *cfg)
+CK_RV tsra_pkcs11_objstore_file_create(
+    tsra_pkcs11_objstore *out,
+    const tsra_pkcs11_config *cfg,
+    const tsra_pkcs11_store_cipher *cipher
+)
 {
-    if (out == NULL || cfg == NULL)
+    if ((out == NULL) || (cfg == NULL) || (cipher == NULL))
     {
         return CKR_ARGUMENTS_BAD;
     }
@@ -1155,6 +1259,7 @@ CK_RV tsra_pkcs11_objstore_file_create(tsra_pkcs11_objstore *out, const tsra_pkc
     {
         return CKR_HOST_MEMORY;
     }
+    st->cipher = cipher;
     int written = snprintf(st->store_dir, sizeof(st->store_dir), "%s", cfg->store_dir);
     if (written < 0 || (size_t)written >= sizeof(st->store_dir))
     {

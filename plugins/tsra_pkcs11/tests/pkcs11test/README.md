@@ -22,7 +22,8 @@ requests into the staging branch.
 4. fails unless **every listed test passed, ran, and actually asserted
    something**,
 5. seeds a file object store with `seed_store.c` (a public and a private
-   token data object and a token AES key, in a directory the module creates)
+   token data object and a public token AES key, in a directory the module
+   creates)
    and runs the same list again with `TSRA_PKCS11_PERSIST=1`, under the same
    conditions. Each process starts with an empty memory store, so only this
    run makes the object searches and listings meet objects the test did not
@@ -149,7 +150,9 @@ No listed test uses a key after its device session ended; key survival
 within a process is covered by the GoogleTest suite (`key_survival.*`). The
 seeded key of the second run is only found and listed, never used: on the
 mock every process provisions its partition afresh, so a key from another
-process does not unmask there (`CKR_KEY_HANDLE_INVALID`).
+process does not unmask there (`CKR_KEY_HANDLE_INVALID`). For the same reason
+the second run does not see the seeded private object on the mock: it is
+sealed with a key only the seeding process could unmask.
 
 ## Running it locally
 
