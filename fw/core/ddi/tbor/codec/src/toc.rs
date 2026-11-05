@@ -294,7 +294,13 @@ pub fn decode_toc_entry<'a>(
     toc_index: usize,
     data_start: usize,
 ) -> TocEntry<'a> {
-    let word = read_toc_word(buf, header_len, toc_index);
+    decode_toc_word(buf, read_toc_word(buf, header_len, toc_index), data_start)
+}
+
+/// Decode the TOC entry `word` of the message in `buf`, whose data section
+/// starts at `data_start`.
+#[inline(always)]
+pub fn decode_toc_word(buf: &HsmDmaBuf, word: u32, data_start: usize) -> TocEntry<'_> {
     let entry_type = raw_toc_entry_type(word);
 
     match entry_type {
