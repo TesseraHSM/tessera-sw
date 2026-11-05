@@ -34,6 +34,7 @@ fn hash(ctx: &TestCtx, session_id: u16) -> Result<Vec<u8>, tsra_ddi_interface::D
     ctx.tbor(&TborHashReq {
         session_id,
         algo: HASH_ALGO_SHA256,
+        out_len: None,
         msg: b"abc".to_vec(),
     })
     .map(|r| r.digest)

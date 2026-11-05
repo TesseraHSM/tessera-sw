@@ -63,6 +63,14 @@ pub(crate) fn init_with_resiliency_and_session() -> (HsmPartition, HsmSession, R
     session
         .change_psk(&ROTATED_CO_PSK)
         .expect("Failed to rotate the default CO PSK");
+    drop(session);
+    let session = part
+        .open_session_ex(
+            rev,
+            HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
+            HsmSessionExType::Authenticated,
+        )
+        .expect("Failed to reopen CO session with the rotated PSK");
     provision_partition(&session);
 
     (part, session, ctx)
