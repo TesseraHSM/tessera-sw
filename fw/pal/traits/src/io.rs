@@ -208,4 +208,31 @@ pub trait HsmIoController: HsmIoTypes {
     /// - `Err(HsmError)` — slot release failed (logged by core; the
     ///   IO is no longer accessible regardless).
     async fn drop_io(&self, io: Self::Io) -> HsmResult<()>;
+
+    /// Finishes `io` without the caller: copies `resp` to the host at
+    /// `dst`/`dst2` (as [`HsmGdmaController::copy_mem_to_host`] would), then
+    /// posts its completion (as [`complete_io`](Self::complete_io)) and
+    /// drops it (as [`drop_io`](Self::drop_io)).
+    ///
+    /// For an IO with nothing left to do once its completion is posted, so
+    /// that its task can move on at once. The CQE must already hold the
+    /// completion of a successful copy; if the copy fails, `copy_failed`
+    /// first rewrites it to report that.
+    ///
+    /// # Errors
+    ///
+    /// Returns `io`, having started nothing, if the platform cannot take it
+    /// over now; the caller then copies, completes and drops it itself. The
+    /// default implementation never takes it.
+    fn finish_io(
+        &self,
+        io: Self::Io,
+        resp: &HsmDmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        copy_failed: fn(&mut HsmCqe),
+    ) -> Result<(), Self::Io> {
+        let _ = (resp, dst, dst2, copy_failed);
+        Err(io)
+    }
 }

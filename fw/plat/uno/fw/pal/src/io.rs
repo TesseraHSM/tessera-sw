@@ -34,12 +34,15 @@ use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_pal_traits::HsmCqe;
+use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
+use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
@@ -309,6 +312,51 @@ impl HsmIoController for UnoHsmPal {
     /// per-IO buffer scrub lives here. See
     /// [`scrub_io_slot`](UnoHsmPal::scrub_io_slot). It also ends the IO's
     /// in-flight count, in the same step that returns the slot.
+    /// Starts the reply copy as a detached GDMA transfer, whose completion
+    /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
+    /// CQE post, and that post's completion into the scrub and free of
+    /// [`drop_io`](HsmIoController::drop_io). Declines admin and self-test
+    /// IOs, and IOs whose dirty SRAM is too large to scrub with the CPU.
+    fn finish_io(
+        &self,
+        io: Self::Io,
+        resp: &HsmDmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        copy_failed: fn(&mut HsmCqe),
+    ) -> Result<(), Self::Io> {
+        let index = io.index;
+        if index as u32 >= IO_SQ_COUNT
+            || crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX
+        {
+            return Err(io);
+        }
+        let Ok(ifc) = crate::gdma::host_interface(io.pid()) else {
+            return Err(io);
+        };
+        let len = resp.len() as u32;
+        if self
+            .gdma
+            .copy_mem_detached(
+                crate::gdma::device_dma_buf(resp.as_ptr(), len),
+                MemInterface::Device,
+                len,
+                crate::gdma::host_dma_buf(dst, dst2, true),
+                ifc,
+                len,
+                index,
+            )
+            .is_err()
+        {
+            return Err(io);
+        }
+        self.detached[index as usize].set(DetachedIo {
+            queue_id: io.queue_id(),
+            copy_failed,
+        });
+        Ok(())
+    }
+
     async fn drop_io(&self, io: Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
         // Scrub both per-IO scratch buffers *before* returning the slot to
@@ -321,7 +369,77 @@ impl HsmIoController for UnoHsmPal {
     }
 }
 
+/// What finishing a detached host IO still needs (see
+/// [`HsmIoController::finish_io`]).
+#[derive(Clone, Copy)]
+pub(crate) struct DetachedIo {
+    queue_id: u16,
+    copy_failed: fn(&mut HsmCqe),
+}
+
+impl DetachedIo {
+    pub(crate) const NONE: Self = Self {
+        queue_id: 0,
+        copy_failed: |_| {},
+    };
+}
+
+/// The CQE of host IO slot `index`, as [`HsmIo::cqe`] exposes it.
+fn slot_cqe(index: u16) -> &'static mut HsmCqe {
+    // SAFETY: as in `HsmIo::cqe`: the layouts match, and only the slot's
+    // owner -- here the platform, finishing a detached IO -- touches it.
+    unsafe {
+        let ptr = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut RawCqe;
+        &mut *ptr
+    }
+}
+
 impl UnoHsmPal {
+    /// Advances detached IOs (see [`HsmIoController::finish_io`]): posts the
+    /// completion of each finished reply copy (marked failed first if the
+    /// copy failed), retries posts the OIC had no room for, and scrubs and
+    /// frees the slot of each posted completion. Called on every run-loop
+    /// pass.
+    pub(crate) fn finish_detached(&self) {
+        while let Some((index, ok)) = self.gdma.take_detached() {
+            let d = self.detached[index as usize].get();
+            let cqe = slot_cqe(index);
+            if !ok {
+                (d.copy_failed)(cqe);
+            }
+            if let Ok(mut cqe) = Cqe::try_from(cqe) {
+                cqe.set_sq_id(d.queue_id);
+            }
+            self.post_detached(index);
+        }
+        let mut pending = self.detached_post_pending.get();
+        if pending != 0 {
+            self.detached_post_pending.set(0);
+            while pending != 0 {
+                let index = pending.trailing_zeros() as u16;
+                pending &= !(1 << index);
+                self.post_detached(index);
+            }
+        }
+        while let Some((index, _)) = self.oic.take_detached() {
+            // As `drop_io`: wipe the slot's scratch before the slot can be
+            // reused. A failed post is dropped like a failed `complete_io`.
+            self.scrub_io_slot_cpu(index);
+            self.iic
+                .free_io(index, self.detached[index as usize].get().queue_id);
+            self.io_in_flight_dec();
+        }
+    }
+
+    /// Posts slot `index`'s completion, or leaves it for the next pass if
+    /// the OIC has no room.
+    fn post_detached(&self, index: u16) {
+        if self.oic.send_detached(index).is_err() {
+            self.detached_post_pending
+                .set(self.detached_post_pending.get() | 1 << index);
+        }
+    }
+
     /// Turns IO_SQ slot `index` received from the IIC driver into an IO:
     /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io))
     /// and resets the slot's scratch allocator.

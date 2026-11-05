@@ -52,7 +52,7 @@ use crate::UnoHsmPal;
 /// - `false` → [`GdmaBuf::Sgl`] — Scatter-Gather List descriptor pair.
 ///   `sgl0` holds the address; `sgl1` is zeroed (inline data block).
 #[inline(always)]
-fn host_dma_buf(addr: HsmDmaAddr, addr2: HsmDmaAddr, prp: bool) -> GdmaBuf {
+pub(crate) fn host_dma_buf(addr: HsmDmaAddr, addr2: HsmDmaAddr, prp: bool) -> GdmaBuf {
     let gdma_addr = GdmaAddr {
         lo: addr.lo,
         hi: addr.hi,
@@ -85,7 +85,7 @@ fn host_dma_buf(addr: HsmDmaAddr, addr2: HsmDmaAddr, prp: bool) -> GdmaBuf {
 /// `sgl1.hi[31:24]` = type/subtype (0x00 = inline data block).
 /// No 4K page-crossing restriction unlike PRP.
 #[inline(always)]
-fn device_dma_buf(ptr: *const u8, len: u32) -> GdmaBuf {
+pub(crate) fn device_dma_buf(ptr: *const u8, len: u32) -> GdmaBuf {
     GdmaBuf::Sgl {
         sgl0: GdmaAddr::from_u32(ptr as usize as u32),
         sgl1: GdmaAddr { lo: len, hi: 0 },
@@ -121,7 +121,7 @@ fn sgl_desc_buf(desc: &[u8; 16]) -> GdmaBuf {
 /// widened into a port that would alias another function. A valid id never
 /// yields 0, which selects device memory.
 #[inline(always)]
-fn host_interface(part_id: HsmPartId) -> HsmResult<MemInterface> {
+pub(crate) fn host_interface(part_id: HsmPartId) -> HsmResult<MemInterface> {
     let pfn = u8::from(part_id);
     let ctrl_id = crate::pal::pfn_to_axi_id(pfn).ok_or(HsmError::InvalidArg)?;
     Ok(MemInterface::Host { ctrl_id })
@@ -362,6 +362,21 @@ impl UnoHsmPal {
     /// averaged ~933 B of the 16 KiB slot (max ~3.3 KiB). The slot is sized to
     /// `ZERO`, so even a full-capacity wipe is a single GDMA transfer.
     /// A heap that was never touched is skipped entirely.
+    /// [`scrub_io_slot`](Self::scrub_io_slot) all with the CPU, for a slot
+    /// whose dirty SRAM is at most [`CPU_SCRUB_MAX`] bytes (larger regions
+    /// are still wiped, only more slowly).
+    pub(crate) fn scrub_io_slot_cpu(&self, io_index: u16) {
+        let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, io_index);
+        // SAFETY: `(dma_ptr, dma_len)` is a prefix of the slot's SRAM buffer,
+        // valid for writes over its whole length.
+        unsafe { cpu_zeroize(dma_ptr, dma_len) };
+        let (nd_ptr, nd_len) = crate::alloc::io_slot_nondma_dirty(self, io_index);
+        // SAFETY: `(nd_ptr, nd_len)` is a prefix of the slot's DTCM buffer,
+        // valid for writes over its whole length.
+        unsafe { cpu_zeroize(nd_ptr, nd_len) };
+        crate::alloc::clear_io_peak(self, io_index);
+    }
+
     pub(crate) async fn scrub_io_slot(&self, io_index: u16) {
         let (dma_ptr, dma_len) = crate::alloc::io_slot_dma_dirty(self, io_index);
         if dma_len != 0 && dma_len <= CPU_SCRUB_MAX {
@@ -399,7 +414,7 @@ impl UnoHsmPal {
 /// SRAM are posted, so a small wipe costs less CPU than submitting a GDMA
 /// transfer, reaping its completion and polling the IO's task once more.
 /// Most IOs' dirty region is well under this; larger ones go to the GDMA.
-const CPU_SCRUB_MAX: usize = 4096;
+pub(crate) const CPU_SCRUB_MAX: usize = 4096;
 
 /// Volatile CPU zeroization of `[ptr, ptr + len)` that the optimizer cannot
 /// elide, via the vetted [`zeroize`] crate. Used for the M7 TCM (which GDMA

@@ -325,7 +325,7 @@ impl SessionCtrl {
 /// `handle_io`, which writes them directly to the CQE. Session fields
 /// are packed into `cqe_dw0` and `cqe_dw1` at construction time to
 /// minimize the async future size (2 × u32 vs 5 scattered fields).
-#[derive(Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub(crate) struct HsmOpStatus {
     /// Encoded response length in smem (written to CQE DW0 dst_len).
     pub(crate) resp_len: u16,

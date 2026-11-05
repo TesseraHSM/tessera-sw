@@ -34,12 +34,19 @@ struct TagSlot {
     waker: WakerRegistration,
     completed: bool,
     status: u8,
+    /// Posted by [`OicDriver::send_detached`]: no task awaits it, so its
+    /// completion is left for [`OicDriver::take_detached`].
+    detached: bool,
+    /// IO index of a detached post.
+    index: u16,
 }
 
 struct OicState<const DEPTH: usize> {
     ocq_head: u16,
     osq_tail: u16,
     tag_free: u32,
+    /// Completed detached posts, one bit per tag.
+    detached_done: u32,
     tags: [TagSlot; DEPTH],
 }
 
@@ -132,6 +139,8 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             waker: WakerRegistration::new(),
             completed: false,
             status: 0,
+            detached: false,
+            index: 0,
         });
 
         let tag_free = if DEPTH >= 32 {
@@ -151,6 +160,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 ocq_head: 0,
                 osq_tail: 0,
                 tag_free,
+                detached_done: 0,
                 tags,
             }),
             regs,
@@ -280,7 +290,7 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
     /// Allocate a tag, post an OSQ entry for the given IO index,
     /// and ring the doorbell.
-    fn submit(&self, index: u16) -> HsmResult<u16> {
+    fn submit(&self, index: u16, detached: bool) -> HsmResult<u16> {
         // SAFETY: The caller supplies an active IO slot whose completion remains live until send.
         let io_cq_entry = unsafe { &*self.io_cq.add(index as usize) };
         let data_addr = io_cq_entry as *const _ as u32;
@@ -294,6 +304,9 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             }
             let tag = s.tag_free.trailing_zeros() as u16;
             s.tag_free &= !(1u32 << tag);
+            let slot = &mut s.tags[tag as usize];
+            slot.detached = detached;
+            slot.index = index;
 
             let osq_head = self.regs.osq_ch[self.channel as usize]
                 .head
@@ -368,8 +381,37 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         &self,
         index: u16,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(index)?;
+        let tag = self.submit(index, false)?;
         Ok(self.wait_completion(tag))
+    }
+
+    /// Post the IO CQE for `index` with no task awaiting it: its completion
+    /// is collected by [`take_detached`](Self::take_detached).
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send) fails.
+    pub fn send_detached(&self, index: u16) -> HsmResult<()> {
+        self.submit(index, true).map(|_| ())
+    }
+
+    /// Takes one completed detached post, freeing its tag: the IO index
+    /// it was for, and whether it succeeded.
+    pub fn take_detached(&self) -> Option<(u16, bool)> {
+        self.state.with(|s| {
+            if s.detached_done == 0 {
+                return None;
+            }
+            let tag = s.detached_done.trailing_zeros();
+            s.detached_done &= !(1u32 << tag);
+            let slot = &mut s.tags[tag as usize];
+            slot.completed = false;
+            slot.detached = false;
+            // HW status: 0x80 = Success.
+            let done = (slot.index, slot.status == 0x80);
+            s.tag_free |= 1u32 << tag;
+            Some(done)
+        })
     }
 
     /// Drain all available OCQ entries and wake their awaiters.
@@ -392,7 +434,11 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                     let slot = &mut s.tags[tag as usize];
                     slot.status = status;
                     slot.completed = true;
-                    slot.waker.wake();
+                    if slot.detached {
+                        s.detached_done |= 1u32 << tag;
+                    } else {
+                        slot.waker.wake();
+                    }
                 }
             }
 
