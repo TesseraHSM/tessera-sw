@@ -17,6 +17,7 @@ use super::poly::{self};
 use super::rounding;
 use super::sampling;
 use crate::keccak::shake256_init;
+use crate::spill::PACKED_WORDS;
 use crate::DsaWorkBuf;
 
 pub fn sign_internal(
@@ -61,6 +62,11 @@ pub fn sign_internal(
     // matrix is by far the largest cost of a signature, so those spare
     // slots buy back one expansion each per retry, and they cost nothing.
     let (w, a_cache) = work.split_at_mut(k);
+    // They are kept packed, three bytes to a coefficient as the spill holds
+    // them: a third more of the matrix fits in the same dTCM, and the
+    // multiply-accumulate unpacks as it reads.
+    let a_cache = a_cache.as_flattened_mut();
+    let cache_slots = a_cache.len() / PACKED_WORDS;
     let mut a_cached = false;
 
     // s1, s2 and t0 are transformed once per attempt but depend only on the
@@ -114,33 +120,50 @@ pub fn sign_internal(
             sampling::unpack_gamma1(y_hat, yb, params.gamma1);
             ntt::ntt(y_hat);
             for i in 0..k {
-                let a = if t < a_cache.len() {
-                    if !a_cached {
-                        sampling::poly_uniform(&mut a_cache[t], rho, i as u8, j as u8);
+                let spill = if t < cache_slots {
+                    None
+                } else {
+                    crate::spill::matrix_slot(t - cache_slots)
+                };
+                if !a_cached || (t >= cache_slots && spill.is_none()) {
+                    // The first attempt, or an element with nowhere to be
+                    // kept: derive it.
+                    sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
+                    if j == 0 {
+                        ntt::poly_pointwise_montgomery(&mut w[i], &c_hat, y_hat);
+                    } else {
+                        ntt::poly_pointwise_acc_montgomery(&mut w[i], &c_hat, y_hat);
                     }
-                    &a_cache[t]
-                } else if let Some(p) = crate::spill::matrix_slot(t - a_cache.len()) {
-                    // Off-core, but a burst read still costs a fifth of
-                    // what deriving the element again would.
-                    // SAFETY: `p` is this core's own slot, sized for one
-                    // polynomial by `spill::init`.
-                    unsafe {
-                        if a_cached {
-                            crate::spill::load_packed(&mut c_hat, p);
-                        } else {
-                            sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
-                            crate::spill::store_packed(p, &c_hat);
+                    if !a_cached {
+                        if t < cache_slots {
+                            crate::spill::pack(&mut a_cache[t * PACKED_WORDS..], &c_hat);
+                        } else if let Some(p) = spill {
+                            // SAFETY: `p` is this core's own slot, sized for
+                            // one packed element by `spill::init`.
+                            unsafe { crate::spill::store_packed(p, &c_hat) };
                         }
                     }
-                    &c_hat
                 } else {
-                    sampling::poly_uniform(&mut c_hat, rho, i as u8, j as u8);
-                    &c_hat
-                };
-                if j == 0 {
-                    ntt::poly_pointwise_montgomery(&mut w[i], a, y_hat);
-                } else {
-                    ntt::poly_pointwise_acc_montgomery(&mut w[i], a, y_hat);
+                    let packed: &[i32] = match spill {
+                        // Off-core, but a burst read still costs a fifth of
+                        // what deriving the element again would.
+                        Some(p) => {
+                            // SAFETY: as above; the first attempt wrote it.
+                            unsafe { crate::spill::load_packed_words(&mut c_hat, p) };
+                            &c_hat
+                        }
+                        None => &a_cache[t * PACKED_WORDS..],
+                    };
+                    if j == 0 {
+                        // SAFETY: one whole word-aligned polynomial.
+                        unsafe {
+                            crate::fast_zero(
+                                w[i].as_mut_ptr().cast(),
+                                core::mem::size_of_val(&w[i]),
+                            )
+                        };
+                    }
+                    ntt::poly_pointwise_acc_montgomery_packed(&mut w[i], packed, y_hat);
                 }
                 t += 1;
             }
