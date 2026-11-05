@@ -26,9 +26,9 @@
 //!   returned blob.
 //! * The partition unwrapping key: availability and stability.
 //!
-//! The emulator, mock, and socket backends don't run the structure check or
+//! The emulator and socket backends don't run the structure check or
 //! pairwise consistency tests, so the tests that need one are ignored under
-//! the `emu`, `mock`, and `sock` features.
+//! the `emu` and `sock` features.
 //!
 //! The SP publishes the unwrapping key asynchronously, so tests wait up to
 //! `UNWRAP_KEY_WAIT_SECS` seconds (default 900) for `GetUnwrappingKey`.
@@ -411,7 +411,7 @@ fn order_d(key: &HostEcc) -> Vec<u8> {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_mismatched_q_p256_sign() {
@@ -420,7 +420,7 @@ fn reject_ecc_mismatched_q_p256_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_mismatched_q_p384_derive() {
@@ -429,7 +429,7 @@ fn reject_ecc_mismatched_q_p384_derive() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_mismatched_q_p521_sign() {
@@ -438,7 +438,7 @@ fn reject_ecc_mismatched_q_p521_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_missing_q_p256_derive() {
@@ -447,7 +447,7 @@ fn reject_ecc_missing_q_p256_derive() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_missing_q_p384_sign() {
@@ -456,7 +456,7 @@ fn reject_ecc_missing_q_p384_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_missing_q_p521_derive() {
@@ -465,7 +465,7 @@ fn reject_ecc_missing_q_p521_derive() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_compressed_q_02_p256() {
@@ -476,7 +476,7 @@ fn reject_ecc_compressed_q_02_p256() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_compressed_q_03_p384() {
@@ -487,7 +487,7 @@ fn reject_ecc_compressed_q_03_p384() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_hybrid_q_06_p256() {
@@ -498,7 +498,7 @@ fn reject_ecc_hybrid_q_06_p256() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_hybrid_q_07_p521() {
@@ -509,7 +509,7 @@ fn reject_ecc_hybrid_q_07_p521() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_params_p256_sign() {
@@ -518,7 +518,7 @@ fn reject_ecc_params_p256_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_params_p384_derive() {
@@ -527,7 +527,7 @@ fn reject_ecc_params_p384_derive() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_ecc_params_p521_sign() {
@@ -598,7 +598,7 @@ fn reject_rsa_with(
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_plain_d_sign() {
@@ -607,7 +607,7 @@ fn reject_rsa_2k_plain_d_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_plain_d_decrypt() {
@@ -616,7 +616,7 @@ fn reject_rsa_2k_plain_d_decrypt() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_4k_plain_d_sign() {
@@ -625,7 +625,7 @@ fn reject_rsa_4k_plain_d_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_crt_dp_sign() {
@@ -634,7 +634,7 @@ fn reject_rsa_2k_crt_dp_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_crt_dq_decrypt() {
@@ -643,7 +643,7 @@ fn reject_rsa_2k_crt_dq_decrypt() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_3k_crt_dp_decrypt() {
@@ -652,7 +652,7 @@ fn reject_rsa_3k_crt_dp_decrypt() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_4k_crt_dq_sign() {
@@ -674,7 +674,7 @@ fn swap_prime(k: usize, crt_p: bool) -> impl Fn(&mut RsaParts) {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_crt_p_sign() {
@@ -683,7 +683,7 @@ fn reject_rsa_2k_crt_p_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_crt_q_decrypt() {
@@ -700,7 +700,7 @@ fn identity_exponents(p: &mut RsaParts) {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_plain_identity_sign() {
@@ -709,7 +709,7 @@ fn reject_rsa_2k_plain_identity_sign() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_crt_identity_decrypt() {
@@ -724,7 +724,7 @@ fn zero_public_exponent(p: &mut RsaParts) {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_plain_zero_e_decrypt() {
@@ -739,7 +739,7 @@ fn reject_rsa_2k_plain_zero_e_decrypt() {
 
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_rsa_2k_crt_zero_e_decrypt() {
@@ -810,7 +810,7 @@ fn reject_rsa_4k_repeatedly(
 /// the vault would have run out of space first.
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_repeated_then_valid() {
@@ -835,7 +835,7 @@ fn reject_repeated_then_valid() {
 /// imports, whose masked blobs are a whole number of AES blocks.
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_repeated_then_ecc_valid() {
@@ -870,7 +870,7 @@ fn reject_repeated_then_ecc_valid() {
 /// Valid P-256 imports must still work afterwards.
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock", feature = "sock"),
+    any(feature = "emu", feature = "sock"),
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn reject_matrix() {

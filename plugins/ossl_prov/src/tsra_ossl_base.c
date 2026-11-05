@@ -317,7 +317,7 @@ static const OSSL_ALGORITHM *tsra_ossl_query_operation(
      * simulator backend and asks libcrypto for random bytes / EC keys) would
      * re-enter the very initialisation path that is on the stack, deadlock
      * the OpenSSL Once cell guarding DRBG init, and ultimately poison the
-     * lazy-initialised dispatcher in the mock DDI.  See the integration test
+     * lazy-initialised dispatcher in the emu DDI.  See the integration test
      * `nginx_tests` and the design note in tsra_ossl_hsm.c
      * (tsra_ensure_session) for the full backtrace.
      *

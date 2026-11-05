@@ -173,8 +173,7 @@ pub trait DdiDev {
     /// Returns the device kind.
     ///
     /// The kind is fixed at construction time per backend
-    /// (`DdiDeviceKind::Virtual` for mock; `DdiDeviceKind::Physical`
-    /// for nix/win/emu). Used by the host-side codec to select the
+    /// (`DdiDeviceKind::Physical` for nix/win/emu). Used by the host-side codec to select the
     /// matching wire-format mode.
     fn device_kind(&self) -> DdiDeviceKind;
 

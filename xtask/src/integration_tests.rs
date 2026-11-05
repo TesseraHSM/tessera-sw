@@ -32,7 +32,7 @@ pub enum Suite {
 /// for the test harnesses if they aren't already set.
 ///
 /// The provider stack itself is **not** built here — callers must build it
-/// into `target/debug` (`cargo build -p tsra_ossl_provider --features mock`)
+/// into `target/debug` (`cargo build -p tsra_ossl_provider --features emu`)
 /// beforehand.  Keeping the build out means a partial run (`--suite nginx`)
 /// doesn't recompile the world.
 #[derive(Parser)]

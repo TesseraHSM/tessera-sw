@@ -17,3 +17,4 @@ mod dev;
 pub use ddi::DdiEmu;
 pub use dev::DdiEmuDev;
 pub use dev::EMU_DEVICE_PATH;
+pub use dev::EMU_RESOURCE_COUNT_ENV;

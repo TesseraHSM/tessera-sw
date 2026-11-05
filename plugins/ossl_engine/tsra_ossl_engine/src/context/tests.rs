@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Unit tests (mock) and hardware smoke tests for the engine context, split
+//! Unit tests (emu) and hardware smoke tests for the engine context, split
 //! out of `context.rs` for readability. Shared round-trip bodies live in
-//! `round_trips`; `mock` runs them against the emulator, `hw_tests` against a
+//! `round_trips`; `emu` runs them against the emulator, `hw_tests` against a
 //! real device (`#[ignore]`d).
 
 use std::io::Write;
@@ -76,7 +76,7 @@ fn new_test_engine() -> (Engine, *mut ffi::ENGINE) {
 
 /// Sign `msg` (hashed with `md`) through `pkey` via OpenSSL's EVP interface —
 /// the same path the ABI and `openssl dgst -sign` take. Exercises the loaded
-/// key's `EC_KEY_METHOD` `sign_sig` (→ HSM). Shared by the mock and hardware
+/// key's `EC_KEY_METHOD` `sign_sig` (→ HSM). Shared by emu and hardware
 /// sign tests.
 #[allow(unsafe_code)]
 fn evp_digest_sign(pkey: *mut ffi::EVP_PKEY, msg: &[u8], md: *const ffi::EVP_MD) -> Vec<u8> {
@@ -169,7 +169,7 @@ fn evp_pkey_sign(pkey: *mut ffi::EVP_PKEY, digest: &[u8], md: *const ffi::EVP_MD
 }
 
 /// Shared round-trip test bodies, driven against an already-opened
-/// [`EngineData`] so the same flow runs on the mock (always) and on real
+/// [`EngineData`] so the same flow runs on emu (always) and on real
 /// hardware (the `hw_tests` smokes). Only the `open` differs between the two.
 mod round_trips {
     use std::ffi::CString;
@@ -195,7 +195,7 @@ mod round_trips {
     use tsra_api::HsmAesXtsKeyUnmaskAlgo;
     use tsra_api::HsmEccCurve;
     use tsra_api::HsmEccKeyGenAlgo;
-    #[cfg(feature = "mock")]
+    #[cfg(feature = "emu")]
     use tsra_api::HsmEccPrivateKey;
     use tsra_api::HsmEncrypter;
     use tsra_api::HsmError;
@@ -221,9 +221,9 @@ mod round_trips {
     use crate::uri::AesKind;
 
     /// Generate a persistent EC P-384 signing key pair on the open HSM and
-    /// return the private-key handle. Only the mock-only deletion tests take a
+    /// return the private-key handle. Only emu-only deletion tests take a
     /// live handle; the curve round trips use [`generate_masked`] instead.
-    #[cfg(feature = "mock")]
+    #[cfg(feature = "emu")]
     pub(super) fn generate_p384_key(data: &EngineData) -> EngineResult<HsmEccPrivateKey> {
         data.with_session(|session| {
             let priv_props = HsmKeyPropsBuilder::default()
@@ -329,7 +329,7 @@ mod round_trips {
 
     /// Generate a key on `curve` on `data`'s HSM, load it back through the
     /// engine, and verify the returned public key matches. Backend-agnostic:
-    /// the caller opens `data` against the mock or a real device.
+    /// the caller opens `data` against emu or a real device.
     #[allow(unsafe_code)]
     pub(super) fn run_load(data: &EngineData, curve: HsmEccCurve) -> EngineResult<()> {
         let (masked, expected_pub_der) = generate_masked(data, curve)?;
@@ -1210,9 +1210,9 @@ mod round_trips {
     /// the real `EVP_PKEY_sign` dispatch on a ctx bound to the engine — so our
     /// `EVP_PKEY_METHOD` sign override actually runs — rather than calling the
     /// handler directly; a regression that delegated software PSS would fail here.
-    /// No HSM is opened (the reject precedes any HSM work); only the mock unit
+    /// No HSM is opened (the reject precedes any HSM work); only emu unit
     /// test drives it (the hardware smokes do not need a software-key path).
-    #[cfg(feature = "mock")]
+    #[cfg(feature = "emu")]
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_pss_rejects_software_key(data: EngineData) -> EngineResult<()> {
@@ -1306,8 +1306,8 @@ mod round_trips {
     /// (`genpkey ... -pkeyopt tsra.key_usage:keyWrapping`) and prove it is a
     /// usable 2048-bit RSA public key. Also pins that a non-2048 size is
     /// rejected up front (the HSM unwrapping key is fixed at 2048 bits). Only
-    /// the mock test exercises this today; the hardware smoke follows.
-    #[cfg(feature = "mock")]
+    /// emu test exercises this today; the hardware smoke follows.
+    #[cfg(feature = "emu")]
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_export_unwrapping_key(data: EngineData) -> EngineResult<()> {
@@ -1363,8 +1363,8 @@ mod round_trips {
     /// unwrapping public key (RSA-OAEP-SHA256 + AES-256-KWP, via the same wrap
     /// an external SDK holder would use), import the blob, and prove the masked
     /// kind and reloaded public key — the wrapped-blob analogue of
-    /// [`run_rsa_import`]. Mock-only: it uses the cached unwrapping key handle.
-    #[cfg(feature = "mock")]
+    /// [`run_rsa_import`]. Emu-only: it uses the cached unwrapping key handle.
+    #[cfg(feature = "emu")]
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_import_wrapped(data: EngineData, dir: &Path) -> EngineResult<()> {
@@ -1489,8 +1489,8 @@ mod round_trips {
     /// the string form) must be recorded in the import state. Request
     /// keyWrapping with a direct-set 3072 and confirm it is rejected for not
     /// being 2048 — it would wrongly fall back to the 2048 default if the
-    /// numeric ctrl were not recorded. Mock-only.
-    #[cfg(feature = "mock")]
+    /// numeric ctrl were not recorded. Emu-only.
+    #[cfg(feature = "emu")]
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_keygen_bits_direct_ctrl(data: EngineData) -> EngineResult<()> {
@@ -2134,7 +2134,7 @@ mod round_trips {
     /// verifies in software, and reloads the written masked blob through the
     /// loader to prove the generate→persist→reload cycle closes. `curve` is
     /// the OpenSSL curve name (e.g. "P-384"). Backend-agnostic: the caller
-    /// opens `data` against the mock or a real device.
+    /// opens `data` against emu or a real device.
     #[allow(unsafe_code)]
     pub(super) fn run_keygen(data: EngineData, dir: &Path, curve: &str) -> EngineResult<()> {
         let (mut engine, engine_raw) = keygen_engine(data)?;
@@ -2278,8 +2278,8 @@ mod round_trips {
     }
 }
 
-#[cfg(all(test, feature = "mock"))]
-mod mock {
+#[cfg(all(test, feature = "emu"))]
+mod emu {
     #![allow(clippy::unwrap_used)]
 
     use std::fs;
@@ -2300,7 +2300,7 @@ mod mock {
 
     use super::*;
 
-    /// Shared per-process MOBK path. The mock device's BK3 is global to the
+    /// Shared per-process MOBK path. The emu device's BK3 is global to the
     /// process: the first test establishes it (plaintext OBK) and the engine
     /// persists the MOBK here; later tests re-init from that MOBK (re-running
     /// init_bk3 fails). Shared across tests so the second open sees the first
@@ -2356,7 +2356,7 @@ mod mock {
         }
     }
 
-    // `#[serial]`: these share the process-global mock device (BK3 state),
+    // `#[serial]`: these share the process-global emu device (BK3 state),
     // so they must not run concurrently.
     #[test]
     #[serial]
@@ -2858,10 +2858,10 @@ mod mock {
 /// Hardware smoke test. Drives the full device open (`open_hsm_from_env`:
 /// partition open → init → session) using the ambient `TSRA_*` environment,
 /// so a real HSM host can validate a configuration end to end — e.g. the TPM
-/// OBK/POTA sources, which the mock cannot exercise.
+/// OBK/POTA sources, which emu cannot exercise.
 ///
-/// Compiled only in non-mock builds and `#[ignore]`d, so it never runs in the
-/// normal (mock) CI cell — invoke it explicitly on a provisioned host:
+/// Compiled only in non-emu builds and `#[ignore]`d, so it never runs in the
+/// normal (emu) CI cell — invoke it explicitly on a provisioned host:
 ///
 /// ```text
 /// export TSRA_CREDENTIALS_ID=<32 hex>  TSRA_CREDENTIALS_PIN=<32 hex>
@@ -2874,7 +2874,7 @@ mod mock {
 /// umask 0077
 /// cargo test -p tsra_ossl_engine --features engine open_from_env_smoke -- --ignored --nocapture
 /// ```
-#[cfg(all(test, not(feature = "mock")))]
+#[cfg(all(test, not(feature = "emu")))]
 mod hw_tests {
     use openssl::hash::MessageDigest;
     use tsra_api::HsmEccCurve;
@@ -2895,7 +2895,7 @@ mod hw_tests {
 
     /// Hardware key-loading round trips against a real device, one per
     /// supported curve — the same flow
-    /// `mock::load_ec_key_round_trips_through_engine` runs on the mock (see
+    /// `emu::load_ec_key_round_trips_through_engine` runs on emu (see
     /// [`super::round_trips::run_load`]).
     ///
     /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
@@ -2916,7 +2916,7 @@ mod hw_tests {
 
     /// Hardware ECDSA signing round trips against a real device, one per
     /// supported curve — the same flow
-    /// `mock::sign_through_loaded_key_verifies` runs on the mock (see
+    /// `emu::sign_through_loaded_key_verifies` runs on emu (see
     /// [`super::round_trips::run_sign`]). Proves the device produces a valid
     /// ECDSA signature.
     ///
@@ -2938,10 +2938,10 @@ mod hw_tests {
 
     /// A digest longer than the curve order (SHA-512 over P-384, 64 > 48 bytes)
     /// on a real device — the hardware counterpart of
-    /// `mock::sign_with_digest_longer_than_curve_order_verifies`. The device
+    /// `emu::sign_with_digest_longer_than_curve_order_verifies`. The device
     /// must truncate per the ECDSA spec (its signature must verify in software
     /// with the same digest), so a firmware change breaking the truncation
-    /// convention is caught on hardware, not only on the mock.
+    /// convention is caught on hardware, not only on emu.
     ///
     /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
     ///
@@ -2960,8 +2960,8 @@ mod hw_tests {
     }
 
     /// Hardware EC keygen round trips against a real device, one per supported
-    /// curve — the same flow `mock::keygen_via_pkey_method_signs_and_reloads`
-    /// runs on the mock (see [`super::round_trips::run_keygen`]): generate
+    /// curve — the same flow `emu::keygen_via_pkey_method_signs_and_reloads`
+    /// runs on emu (see [`super::round_trips::run_keygen`]): generate
     /// through `EVP_PKEY_keygen`, sign, verify in software, and reload the
     /// written masked blob.
     ///
@@ -2981,7 +2981,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware ECDH round trips, same flow as the mock test (see
+    /// Hardware ECDH round trips, same flow as emu test (see
     /// [`super::round_trips::run_derive`]); env setup as above:
     ///
     /// ```text
@@ -2998,7 +2998,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware RSA import round trips, same flow as the mock test (see
+    /// Hardware RSA import round trips, same flow as emu test (see
     /// [`super::round_trips::run_rsa_import`]); env setup as above:
     ///
     /// ```text
@@ -3015,7 +3015,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware RSA sign round trip, same flow as the mock test (see
+    /// Hardware RSA sign round trip, same flow as emu test (see
     /// [`super::round_trips::run_rsa_sign`]): import a software RSA key, sign a
     /// digest on the device via `EVP_DigestSign`, and verify in software. Env
     /// setup as above:
@@ -3031,7 +3031,7 @@ mod hw_tests {
         round_trips::run_rsa_sign(data, &std::env::temp_dir())
     }
 
-    /// Hardware ECDH → HKDF chain, same flow as the mock test (see
+    /// Hardware ECDH → HKDF chain, same flow as emu test (see
     /// [`super::round_trips::run_hkdf`]); env setup as above:
     ///
     /// ```text
@@ -3045,7 +3045,7 @@ mod hw_tests {
         round_trips::run_hkdf(data, &std::env::temp_dir())
     }
 
-    /// Hardware session keys, same flow as the mock test (see
+    /// Hardware session keys, same flow as emu test (see
     /// [`super::round_trips::run_session_keys`]); env setup as above:
     ///
     /// ```text
@@ -3059,7 +3059,7 @@ mod hw_tests {
         round_trips::run_session_keys(data, &std::env::temp_dir())
     }
 
-    /// Hardware AES-CBC through the engine's ciphers, same flow as the mock
+    /// Hardware AES-CBC through the engine's ciphers, same flow as emu
     /// test (see [`super::round_trips::run_aes_cbc`]); env setup as above:
     ///
     /// ```text
@@ -3073,7 +3073,7 @@ mod hw_tests {
         round_trips::run_aes_cbc(data, &std::env::temp_dir())
     }
 
-    /// Hardware `GENERATE_KEY`, same flow as the mock test (see
+    /// Hardware `GENERATE_KEY`, same flow as emu test (see
     /// [`super::round_trips::run_generate_key`]); env setup as above:
     ///
     /// ```text

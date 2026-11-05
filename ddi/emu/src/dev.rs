@@ -13,6 +13,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
+use parking_lot::RwLock;
 use tokio::runtime::Handle;
 use tsra_ddi_interface::DdiAesGcmParams;
 use tsra_ddi_interface::DdiAesGcmResult;
@@ -69,12 +70,46 @@ pub const EMU_DEVICE_PATH: &str = "/dev/tsra-emu";
 
 /// Hard-coded partition index used by the emulator.
 ///
-/// All IOs submitted via [`DdiEmuDev`] target this partition. The
-/// matching resource bit is set in [`EMU_PART_RES_MASK`].
+/// All IOs submitted via [`DdiEmuDev`] target this partition. Its
+/// resource mask starts at this bit; see [`emu_part_res_mask`].
 const EMU_PID: u8 = 10;
 
+/// Environment variable selecting how many vault tables (resources) the
+/// emulator partition is allocated. Accepts `1..=EMU_MAX_RESOURCES`;
+/// defaults to 1 when unset.
+pub const EMU_RESOURCE_COUNT_ENV: &str = "TSRA_EMU_RESOURCE_COUNT";
+
+/// Number of resource bits the std platform accepts in a partition mask.
+const EMU_MAX_RESOURCES: u32 = 65;
+
 /// Resource bitmask passed to [`StdHsm::part_alloc`].
-const EMU_PART_RES_MASK: u128 = 1u128 << EMU_PID;
+///
+/// Sets `count` contiguous bits starting at [`EMU_PID`], wrapping at
+/// [`EMU_MAX_RESOURCES`], so a count of 1 yields `1 << EMU_PID`.
+fn emu_part_res_mask(count: u32) -> u128 {
+    (0..count).fold(0u128, |mask, i| {
+        mask | 1u128 << ((EMU_PID as u32 + i) % EMU_MAX_RESOURCES)
+    })
+}
+
+/// Reads [`EMU_RESOURCE_COUNT_ENV`]; unset means 1.
+fn emu_resource_count() -> DdiResult<u32> {
+    let Ok(value) = std::env::var(EMU_RESOURCE_COUNT_ENV) else {
+        return Ok(1);
+    };
+    match value.trim().parse::<u32>() {
+        Ok(count) if (1..=EMU_MAX_RESOURCES).contains(&count) => Ok(count),
+        _ => {
+            tracing::error!(
+                ?value,
+                env = EMU_RESOURCE_COUNT_ENV,
+                max = EMU_MAX_RESOURCES,
+                "DdiEmuDev: invalid resource count"
+            );
+            Err(DdiError::InvalidParameter)
+        }
+    }
+}
 
 /// Size of the scratch buffers used for DDI request/response DMA.
 ///
@@ -106,7 +141,13 @@ const PAGE_4K: usize = 4096;
 /// per IO mostly for diagnostic correlation.
 static CMD_COUNTER: AtomicU16 = AtomicU16::new(1);
 
-/// Per-handle session bookkeeping (mirrors the mock backend).
+/// Quiesces IO across [`DdiEmuDev::erase`], like the driver does across
+/// NSSR: IOs hold a read guard, erase holds the write guard. Without it an
+/// IO racing the partition disable/enable fails with `InternalError`
+/// instead of seeing either the old or the reset partition.
+static RESET_FENCE: RwLock<()> = RwLock::new(());
+
+/// Per-handle session bookkeeping.
 #[derive(Debug, Default)]
 struct SessionState {
     session_id: Option<u16>,
@@ -119,8 +160,8 @@ struct SessionState {
 /// instantiated by [`DdiEmu`](crate::DdiEmu). State that is unique to the
 /// handle (the open session id) lives in [`SessionState`].
 ///
-/// `Clone` matches the sibling backends (`DdiMockDev`, `DdiNixDev`,
-/// `DdiWinDev`); cloning produces another handle to the same `StdHsm`
+/// `Clone` matches the sibling backends (`DdiNixDev`, `DdiWinDev`);
+/// cloning produces another handle to the same `StdHsm`
 /// and shares the same session table.
 #[derive(Clone, Debug)]
 pub struct DdiEmuDev {
@@ -133,8 +174,8 @@ pub struct DdiEmuDev {
 impl DdiEmuDev {
     /// Open the emulator device.
     ///
-    /// Validates the path, then performs a best-effort
-    /// `part_alloc` + `part_enable` for the emulator partition. Both
+    /// Validates the path and [`EMU_RESOURCE_COUNT_ENV`], then performs a
+    /// best-effort `part_alloc` + `part_enable` for the emulator partition. Both
     /// operations are idempotent — on a second open they return errors
     /// (already allocated / already enabled), which we deliberately
     /// ignore. Real partition failures surface on the first IO.
@@ -147,11 +188,12 @@ impl DdiEmuDev {
             );
             return Err(DdiError::DeviceNotFound);
         }
+        let res_mask = emu_part_res_mask(emu_resource_count()?);
 
         // Drive partition lifecycle on the embedded runtime. The `let _`
         // pattern matches `fw/plat/std/lib/tests/echo_test.rs::ensure_io_part`.
         handle.block_on(async {
-            let _ = hsm.part_alloc(EMU_PID, EMU_PART_RES_MASK).await;
+            let _ = hsm.part_alloc(EMU_PID, res_mask).await;
             let _ = hsm.part_enable(EMU_PID).await;
         });
 
@@ -161,6 +203,13 @@ impl DdiEmuDev {
             session: Arc::new(Mutex::new(SessionState::default())),
             device_kind: DdiDeviceKind::Physical,
         })
+    }
+
+    /// Drives `io` to completion while holding a read guard on
+    /// [`RESET_FENCE`].
+    fn block_on_io<F: std::future::Future>(&self, io: F) -> F::Output {
+        let _fence = RESET_FENCE.read();
+        self.handle.block_on(io)
     }
 
     /// Checks a fast-path session id against the handle's open session,
@@ -178,13 +227,11 @@ impl DdiEmuDev {
     /// Submits a bulk SQE and returns its CQE.
     ///
     /// The buffers referenced by `sqe` must stay alive until this returns.
-    /// A failed CQE maps like the driver's ioctl output: a non-zero status
-    /// code to [`DdiError::FpError`], otherwise a non-zero error code to
-    /// [`DdiError::FpCmdSpecificError`].
+    /// A failed CQE maps through [`DdiError::from_fp_status`], as the
+    /// drivers' ioctl output does.
     fn bulk_submit(&self, sqe: &BulkSqe) -> Result<BulkCqe, DdiError> {
         let raw = self
-            .handle
-            .block_on(self.hsm.bulk_io(sqe.encode(), EMU_PID, EMU_BULK_QID, 0))
+            .block_on_io(self.hsm.bulk_io(sqe.encode(), EMU_PID, EMU_BULK_QID, 0))
             .map_err(|_| DdiError::DeviceNotReady)?;
         let cqe = BulkCqe::decode(&raw);
         if !cqe.status.is_success() {
@@ -194,11 +241,10 @@ impl DdiEmuDev {
                 "DdiEmu bulk IO failed"
             );
         }
-        if cqe.status.sts != 0 {
-            Err(DdiError::FpError(u32::from(cqe.status.sts)))?;
-        }
-        if cqe.status.err != 0 {
-            Err(DdiError::FpCmdSpecificError(u32::from(cqe.status.err)))?;
+        if let Some(err) =
+            DdiError::from_fp_status(u32::from(cqe.status.sts), u32::from(cqe.status.err))
+        {
+            Err(err)?
         }
         Ok(cqe)
     }
@@ -301,8 +347,7 @@ impl DdiEmuDev {
             .build();
 
         let mut raw_cqe = self
-            .handle
-            .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
+            .block_on_io(self.hsm.io(sqe, EMU_PID, 0, 0))
             .map_err(|_| DdiError::DeviceNotReady)?;
         let cqe = Cqe::from(&mut raw_cqe);
 
@@ -434,8 +479,7 @@ impl DdiDev for DdiEmuDev {
             .build();
 
         let mut raw_cqe = self
-            .handle
-            .block_on(self.hsm.io(sqe, EMU_PID, 0, 0))
+            .block_on_io(self.hsm.io(sqe, EMU_PID, 0, 0))
             .map_err(|_| DdiError::DeviceNotReady)?;
         let cqe = Cqe::from(&mut raw_cqe);
 
@@ -470,8 +514,7 @@ impl DdiDev for DdiEmuDev {
         }
 
         // ── 7. Decode the typed response (whole-buffer decode — the
-        //         response type wraps both the header and body, matching
-        //         what the mock backend does) ────────────────────────
+        //         response type wraps both the header and body) ─────────
         let mut body_dec = MborDecoder::new(resp_buf, post_decode);
         let resp = <T::OpResp>::mbor_decode(&mut body_dec)
             .map_err(|_| DdiError::MborError(MborError::DecodeError))?;
@@ -707,6 +750,7 @@ impl DdiDev for DdiEmuDev {
     fn erase(&self) -> Result<(), DdiError> {
         // Reset partition state: disable then re-enable. This
         // matches what real hardware does on NSSR.
+        let _fence = RESET_FENCE.write();
         self.handle
             .block_on(async {
                 self.hsm.part_disable(EMU_PID).await.map_err(|_| ())?;
@@ -739,9 +783,8 @@ fn bulk_dir(mode: DdiAesOp) -> BulkDir {
 
 /// Validate a request against the current session state.
 ///
-/// Mirrors `tsra_ddi_mock::dev::validate_request`. The host driver
-/// performs this check too, but doing it here means we surface mismatches
-/// as `DdiError` before constructing an SQE.
+/// Mirrors the session check the host driver performs, so mismatches
+/// surface as `DdiError` before constructing an SQE.
 fn validate_session_request(
     opcode: DdiOp,
     req_session_id: Option<u16>,
@@ -878,6 +921,47 @@ mod tests {
 
     use crate::DdiEmu;
     use crate::EMU_DEVICE_PATH;
+
+    #[test]
+    fn part_res_mask_has_count_bits_from_pid() {
+        use super::emu_part_res_mask;
+        use super::EMU_MAX_RESOURCES;
+        use super::EMU_PID;
+
+        assert_eq!(emu_part_res_mask(1), 1u128 << EMU_PID);
+        assert_eq!(emu_part_res_mask(4), 0b1111u128 << EMU_PID);
+        let all = (1u128 << EMU_MAX_RESOURCES) - 1;
+        assert_eq!(emu_part_res_mask(EMU_MAX_RESOURCES), all);
+        let m64 = emu_part_res_mask(64);
+        assert_eq!(m64.count_ones(), 64);
+        assert_eq!(m64 & !all, 0);
+        assert_eq!(m64 & (1u128 << (EMU_PID - 1)), 0);
+    }
+
+    #[test]
+    fn fp_status_maps_firmware_invalid_key_to_key_not_found() {
+        use tsra_ddi_interface::DdiError;
+        use tsra_ddi_mbor_types::DdiStatus;
+        use tsra_fw_hsm_bulk::BulkCipher;
+        use tsra_fw_hsm_bulk::BulkStatus;
+        use tsra_fw_hsm_pal_traits::HsmError;
+
+        let map = |cipher, err| {
+            let s = BulkStatus::from_error(cipher, err);
+            DdiError::from_fp_status(u32::from(s.sts), u32::from(s.err))
+        };
+        for cipher in [BulkCipher::Gcm, BulkCipher::Xts] {
+            assert!(matches!(
+                map(cipher, HsmError::KeyNotFound),
+                Some(DdiError::DdiStatus(DdiStatus::KeyNotFound))
+            ));
+            assert!(matches!(
+                map(cipher, HsmError::SessionNotFound),
+                Some(DdiError::FpError(_))
+            ));
+        }
+        assert!(DdiError::from_fp_status(0, 0).is_none());
+    }
 
     #[test]
     fn get_api_rev_round_trips_through_emulator() {

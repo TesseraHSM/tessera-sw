@@ -24,8 +24,6 @@ use tsra_api_tests_macro::*;
 ///
 /// The subscriber is configured with:
 /// - Debug level logging by default
-/// - Info level for `tsra_ddi_mock`
-/// - Disabled logging for `tsra_ddi_mbor_sim` and `tsra_ddi_mock`
 /// - Thread names and IDs in output
 /// - Indented hierarchical output format
 /// - Target information in log messages

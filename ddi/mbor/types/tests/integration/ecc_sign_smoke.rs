@@ -7,8 +7,8 @@
 //!   and verify the signature against the returned public key with
 //!   OpenSSL.
 //! - Sign with an unknown key id: rejected (the exact error code
-//!   differs across backends — emu returns `KeyNotFound`, the mock
-//!   returns `InvalidKeyNumber`).
+//!   differs across backends — emu returns `KeyNotFound`, others
+//!   may return `InvalidKeyNumber`).
 
 #![cfg(test)]
 
@@ -98,7 +98,7 @@ fn test_ecc_sign_unknown_key_smoke() {
             .expect_err("EccSign must reject an unknown key id");
 
             // The exact error code differs across backends — emu's
-            // vault returns `KeyNotFound`, the mock returns
+            // vault returns `KeyNotFound`, others may return
             // `InvalidKeyNumber`.  Both are acceptable as long as the
             // request fails.
             assert!(

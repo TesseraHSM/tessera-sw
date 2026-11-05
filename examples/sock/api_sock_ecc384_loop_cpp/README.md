@@ -54,7 +54,7 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Iapi/nativ
 The executable is placed beside `tsra_api_native.dll` so Windows can load the
 SDK without changing `PATH`. Use the x64 compiler to match the native SDK build.
 Rebuild the DLL with the socket feature if other Cargo commands have rebuilt it
-with the hardware, mock, or emulator backend.
+with the hardware or emulator backend.
 
 ## Run
 

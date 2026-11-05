@@ -40,7 +40,7 @@ mod op;
 mod traits;
 
 /// Crate-private `OSSL_LIB_CTX` (default-provider-only) for the OpenSSL
-/// backends, so the mock SDK's crypto never re-enters the tsra provider on
+/// backends, so the emu SDK's crypto never re-enters the tsra provider on
 /// OpenSSL 3.5. Linux-only (the Windows backends use CNG).
 #[cfg(all(target_os = "linux", ossl300))]
 mod libctx;

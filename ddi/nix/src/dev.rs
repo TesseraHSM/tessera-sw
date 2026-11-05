@@ -1294,12 +1294,12 @@ impl DdiDev for DdiNixDev {
             resp.map_err(DdiError::NixError)?;
         }
 
-        if cmd.out_data.device_status != 0 {
-            Err(DdiError::FpError(cmd.out_data.device_status))?
-        }
-
-        if cmd.out_data.ioctl_status != 0 {
-            Err(DdiError::FpCmdSpecificError(cmd.out_data.ioctl_status))?
+        // The driver reports the CQE status code in `device_status` and its
+        // error code in `ioctl_status`.
+        if let Some(err) =
+            DdiError::from_fp_status(cmd.out_data.device_status, cmd.out_data.ioctl_status)
+        {
+            Err(err)?
         }
 
         // Copy the actual data (excluding AAD) to the destination buffer
@@ -1476,12 +1476,12 @@ impl DdiDev for DdiNixDev {
             resp.map_err(DdiError::NixError)?;
         }
 
-        if cmd.out_data.device_status != 0 {
-            Err(DdiError::FpError(cmd.out_data.device_status))?
-        }
-
-        if cmd.out_data.ioctl_status != 0 {
-            Err(DdiError::FpCmdSpecificError(cmd.out_data.ioctl_status))?
+        // The driver reports the CQE status code in `device_status` and its
+        // error code in `ioctl_status`.
+        if let Some(err) =
+            DdiError::from_fp_status(cmd.out_data.device_status, cmd.out_data.ioctl_status)
+        {
+            Err(err)?
         }
 
         let total_size = cmd.out_data.byte_count as usize;

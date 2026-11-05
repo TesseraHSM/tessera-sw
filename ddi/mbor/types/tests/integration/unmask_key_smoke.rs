@@ -333,10 +333,7 @@ fn test_unmask_rsa_4k_crt_reunmask_roundtrip_smoke() {
             .expect("oaep decode");
             assert_eq!(orig_x[..data_len], decoded[..]);
 
-            // The firmware embeds the caller's label into the envelope; the sim
-            // (mock) backend does not model labels, so assert the exact value on
-            // every backend except the sim.
-            #[cfg(not(feature = "mock"))]
+            // The firmware embeds the caller's label into the envelope.
             assert_eq!(
                 base_meta.key_label.as_slice(),
                 label_bytes,
@@ -404,9 +401,7 @@ fn test_unmask_rsa_4k_crt_reunmask_roundtrip_smoke() {
                 );
 
                 // The firmware re-masks (fresh IV) rather than echoing, so each
-                // envelope differs byte-wise from the one it unmasked; the sim
-                // (mock) echoes the input, so this holds on every backend but it.
-                #[cfg(not(feature = "mock"))]
+                // envelope differs byte-wise from the one it unmasked.
                 assert_ne!(
                     new_env.as_slice(),
                     current_env.as_slice(),

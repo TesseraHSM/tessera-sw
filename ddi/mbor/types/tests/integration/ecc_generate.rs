@@ -293,7 +293,7 @@ fn test_ecc_generate_and_unmask() {
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            // Run this test only for Mock device
+            // Run this test only for a virtual device
             if get_device_kind(dev) != DdiDeviceKind::Virtual {
                 println!("Unmask key Not supported for Physical Device.");
                 return;

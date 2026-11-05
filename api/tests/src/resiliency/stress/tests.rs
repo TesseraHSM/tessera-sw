@@ -6,7 +6,7 @@
 //! These tests exercise the resiliency retry path (proc macros
 //! `#[resiliency_key_gen]` and `#[resiliency_key_op]`) under concurrent Reset
 //! pressure. Unlike the fault-injection tests in `resiliency/`, these
-//! tests use the mock device directly and trigger real simulated
+//! tests use the emulator directly and trigger real simulated
 //! Resets via [`HsmPartition::reset`].
 //!
 //! # Architecture
@@ -53,8 +53,8 @@ const ITERATIONS_PER_WORKER: usize = 500;
 
 /// Delay between Reset triggers (ms).
 ///
-/// Mock: the retry backoff base is 8 ms (see `BACKOFF_BASE_MS` in
-/// `resiliency.rs` under `cfg(feature = "mock")`), and
+/// Emu: the retry backoff base is 8 ms (see `BACKOFF_BASE_MS` in
+/// `resiliency.rs` under `cfg(feature = "emu")`), and
 /// `SessionNeedsRenegotiation` retries without backoff.
 /// With 4 workers all serializing through `restore_partition`,
 /// recovery completes quickly. 1 second is high enough for
@@ -64,9 +64,9 @@ const ITERATIONS_PER_WORKER: usize = 500;
 /// Real hardware: `BACKOFF_BASE_MS` is 400 ms, and Reset may take
 /// up to ~5 seconds to complete. The interval must be longer than
 /// that to avoid spurious `IOAbortInProgress` errors.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 const RESET_INTERVAL_MS: u64 = 1000;
-#[cfg(not(feature = "mock"))]
+#[cfg(not(feature = "emu"))]
 const RESET_INTERVAL_MS: u64 = 7000;
 
 /// Small inter-iteration sleep (ms) so that the worker loop
@@ -621,7 +621,7 @@ fn test_stress_rapid_reset_between_ops() {
 // =========================================================================
 
 /// Generate an AES-GCM-256 session key.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 fn generate_aes_gcm_key(session: &HsmSession) -> HsmAesGcmKey {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -637,7 +637,7 @@ fn generate_aes_gcm_key(session: &HsmSession) -> HsmAesGcmKey {
 }
 
 /// AES-GCM encrypt (returns ciphertext + tag).
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 fn gcm_encrypt(
     key: &HsmAesGcmKey,
     iv: &[u8],
@@ -660,7 +660,7 @@ fn gcm_encrypt(
 }
 
 /// AES-GCM decrypt.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 fn gcm_decrypt(
     key: &HsmAesGcmKey,
     iv: &[u8],
@@ -686,7 +686,7 @@ fn gcm_decrypt(
 
 /// Workers encrypt then decrypt with AES-GCM under continuous Reset,
 /// verifying round-trip correctness including authenticated data.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[api_test]
 fn test_stress_aes_gcm_round_trip_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -754,7 +754,7 @@ fn test_stress_aes_gcm_round_trip_under_reset() {
 // =========================================================================
 
 /// Generate an AES-XTS-512 session key.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 fn generate_aes_xts_key(session: &HsmSession) -> HsmAesXtsKey {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -770,7 +770,7 @@ fn generate_aes_xts_key(session: &HsmSession) -> HsmAesXtsKey {
 }
 
 /// AES-XTS encrypt.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 fn xts_encrypt(
     key: &HsmAesXtsKey,
     tweak: &[u8],
@@ -792,7 +792,7 @@ fn xts_encrypt(
 }
 
 /// AES-XTS decrypt.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 fn xts_decrypt(
     key: &HsmAesXtsKey,
     tweak: &[u8],
@@ -815,7 +815,7 @@ fn xts_decrypt(
 
 /// Workers encrypt then decrypt with AES-XTS under continuous Reset,
 /// verifying round-trip correctness.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[api_test]
 fn test_stress_aes_xts_round_trip_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1103,7 +1103,7 @@ fn test_stress_ecc_key_gen_under_reset() {
 // =========================================================================
 
 /// Workers repeatedly generate AES-GCM keys while Resets fire.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[api_test]
 fn test_stress_aes_gcm_key_gen_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1973,7 +1973,7 @@ fn test_stress_init_part_under_reset() {
 // =========================================================================
 
 /// Workers repeatedly generate AES-XTS keys while Resets fire.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[api_test]
 fn test_stress_aes_xts_key_gen_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2238,7 +2238,7 @@ fn test_stress_aes_unmask_under_reset() {
 // =========================================================================
 
 /// Workers repeatedly unmask an AES-XTS key from a masked blob while Resets fire.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[api_test]
 fn test_stress_xts_unmask_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2487,7 +2487,7 @@ fn test_stress_ecc_unwrap_under_reset() {
 // =========================================================================
 
 /// Workers repeatedly unwrap an AES-XTS key using RSA-AES while Resets fire.
-#[cfg(feature = "mock")]
+#[cfg(feature = "emu")]
 #[api_test]
 fn test_stress_xts_unwrap_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
