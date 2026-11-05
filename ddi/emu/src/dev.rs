@@ -197,6 +197,7 @@ impl DdiEmuDev {
 
         // Drive partition lifecycle on the embedded runtime. The `let _`
         // pattern matches `fw/plat/std/lib/tests/echo_test.rs::ensure_io_part`.
+        let _fence = RESET_FENCE.read();
         handle.block_on(async {
             let _ = hsm.part_alloc(EMU_PID, res_mask).await;
             let _ = hsm.part_enable(EMU_PID).await;
@@ -1067,6 +1068,39 @@ mod tests {
                 max_ver: 1,
             }
         );
+    }
+
+    #[test]
+    fn open_waits_for_reset() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let ddi = DdiEmu::default();
+        ddi.open_dev(EMU_DEVICE_PATH)
+            .expect("initialize emu device");
+
+        let reset_fence = super::RESET_FENCE.write();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (opened_sender, opened_receiver) = mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            started_sender.send(()).expect("signal device open");
+            opened_sender
+                .send(ddi.open_dev(EMU_DEVICE_PATH))
+                .expect("return opened device");
+        });
+        started_receiver.recv().expect("wait for device open");
+        let before_reset = opened_receiver.recv_timeout(Duration::from_millis(100));
+        drop(reset_fence);
+        opener.join().expect("join device opener");
+
+        assert!(
+            matches!(before_reset, Err(mpsc::RecvTimeoutError::Timeout)),
+            "opening the device must wait for the reset fence"
+        );
+        opened_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("device open should finish after reset")
+            .expect("open emu device");
     }
 
     /// Dropping a device with a live session from a thread-local destructor

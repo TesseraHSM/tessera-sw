@@ -181,7 +181,7 @@ mod integration {
              \n\
              Build the provider first:\n\
              \n\
-                 cargo build -p tsra_ossl_provider --features emu,provider\n",
+                 cargo build -p tsra_ossl_provider --features sock,provider\n",
             provider_so.display(),
         );
 

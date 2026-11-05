@@ -391,11 +391,12 @@ void make_part_init_config(tsra_handle part_handle, PartInitConfig &config)
     }
 }
 
-// Process-unique default MOBK cache path, removed at process exit. Each
-// nextest process owns an independent emulator with its own random BK_BOOT,
-// so a MOBK cached by one process cannot be decoded by another.
+// Emu needs a process-unique cache because each nextest process owns an
+// independent emulator with its own random BK_BOOT. Hardware/socket builds
+// keep a shared persistent cache for reuse across processes.
 static const std::string &default_mobk_path()
 {
+#ifdef TSRA_FEATURE_EMU
     struct MobkPath
     {
         std::string path;
@@ -419,6 +420,11 @@ static const std::string &default_mobk_path()
     };
     static const MobkPath mobk_path;
     return mobk_path.path;
+#else
+    static const std::string mobk_path =
+        (std::filesystem::temp_directory_path() / "mobk.bin").string();
+    return mobk_path;
+#endif
 }
 
 std::string get_mobk_path()
