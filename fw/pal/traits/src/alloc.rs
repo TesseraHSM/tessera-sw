@@ -267,6 +267,29 @@ impl HsmDmaBuf {
         }
         Some(out)
     }
+
+    /// The buffer's first words, as many as it holds whole up to eight, and
+    /// their count: read with one burst when the buffer is word-aligned (see
+    /// [`copy_to_slice`](Self::copy_to_slice)), so a message's header and
+    /// leading fields cost one load's latency out of DMA memory. The words
+    /// are native-endian loads of the bytes, in memory order; the rest of
+    /// the array is zero.
+    #[inline]
+    pub fn read_head_words(&self) -> ([u32; 8], usize) {
+        let n = (self.inner.len() / 4).min(8);
+        let mut out = [0u32; 8];
+        #[cfg(target_arch = "arm")]
+        if self.inner.as_ptr().align_offset(4) == 0 {
+            // SAFETY: the buffer is word-aligned and holds `n` whole words,
+            // and `out` is a distinct, word-aligned array of eight.
+            unsafe { burst_copy_words(out.as_mut_ptr().cast(), self.inner.as_ptr(), n) };
+            return (out, n);
+        }
+        for (word, bytes) in out.iter_mut().zip(self.inner.as_chunks::<4>().0) {
+            *word = u32::from_ne_bytes(*bytes);
+        }
+        (out, n)
+    }
 }
 
 /// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word
@@ -301,6 +324,52 @@ unsafe fn burst_copy(dst: *mut u8, src: *const u8, blocks: usize) {
                 options(nostack, preserves_flags),
             );
         }
+    }
+}
+
+/// Copies `words` words, at most eight, from `src` to `dst` with one burst
+/// load and store.
+///
+/// # Safety
+///
+/// `src` and `dst` must be word-aligned, valid for `words * 4` bytes, and
+/// must not overlap.
+#[cfg(target_arch = "arm")]
+#[inline]
+unsafe fn burst_copy_words(dst: *mut u8, src: *const u8, words: usize) {
+    macro_rules! burst {
+        ($regs:literal) => {
+            // SAFETY: per the function contract, for the listed words.
+            unsafe {
+                core::arch::asm!(
+                    concat!("ldm {s}, {{", $regs, "}}"),
+                    concat!("stm {d}, {{", $regs, "}}"),
+                    s = in(reg) src,
+                    d = in(reg) dst,
+                    out("r2") _,
+                    out("r3") _,
+                    out("r4") _,
+                    out("r5") _,
+                    out("r8") _,
+                    out("r9") _,
+                    out("r10") _,
+                    out("r11") _,
+                    options(nostack, preserves_flags),
+                )
+            }
+        };
+    }
+    match words {
+        0 => {}
+        // SAFETY: per the function contract, for one word.
+        1 => unsafe { dst.cast::<u32>().write(src.cast::<u32>().read()) },
+        2 => burst!("r2, r3"),
+        3 => burst!("r2, r3, r4"),
+        4 => burst!("r2, r3, r4, r5"),
+        5 => burst!("r2, r3, r4, r5, r8"),
+        6 => burst!("r2, r3, r4, r5, r8, r9"),
+        7 => burst!("r2, r3, r4, r5, r8, r9, r10"),
+        _ => burst!("r2, r3, r4, r5, r8, r9, r10, r11"),
     }
 }
 
