@@ -12,6 +12,7 @@ use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use parking_lot::Condvar;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use tokio::runtime::Handle;
@@ -56,6 +57,7 @@ use tsra_fw_hsm_bulk::BLOCK_LEN;
 use tsra_fw_hsm_bulk::GCM_AAD_ALIGN;
 use tsra_fw_hsm_io::CmdDword;
 use tsra_fw_hsm_io::Cqe;
+use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_io::OP_MBOR;
@@ -134,6 +136,9 @@ const OOB_ENTRY_LEN: usize = 16;
 
 /// Page size enforced by the firmware platform.
 const PAGE_4K: usize = 4096;
+
+/// Upper bound on the best-effort session close run from `Drop`.
+const CLOSE_ON_DROP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Process-wide rolling SQE command identifier.
 ///
@@ -249,10 +254,50 @@ impl DdiEmuDev {
         Ok(cqe)
     }
 
-    /// Best-effort close of the device's live session.
+    /// Encodes `req` into `src` and builds the MBOR SQE that points the
+    /// firmware at `src` (request) and `dst` (response).
+    fn mbor_sqe<T: DdiOpReq>(
+        req: &T,
+        pre_encode: bool,
+        session_ctrl: SessionControlKind,
+        src: &mut AlignedBuf,
+        dst: &mut AlignedBuf,
+    ) -> DdiResult<RawSqe> {
+        let req_len = {
+            let mut enc = MborEncoder::new(src.as_mut_slice(), pre_encode);
+            req.mbor_encode(&mut enc)
+                .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
+            enc.position()
+        };
+        let req_buf = &src.as_slice()[..req_len];
+        tracing::debug!(opcode = ?req.get_opcode(), len = req_len, "DdiEmu request (in hex): {:02x?}", req_buf);
+
+        let req_session_id = req.get_session_id();
+        let cmd_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Ok(SqeBuilder::new()
+            .cmd(CmdDword::new().with_op(OP_MBOR).with_id(cmd_id))
+            .buf_lens(req_len as u32, SCRATCH_LEN as u32)
+            .src_prp1(req_buf.as_ptr() as u64)
+            .dst_prp1(dst.as_mut_slice().as_mut_ptr() as u64)
+            .session_flags(
+                SessionFlags::new()
+                    .with_ctrl(u8::from(session_ctrl))
+                    .with_id_valid(req_session_id.is_some()),
+            )
+            .session_id(req_session_id.unwrap_or(0))
+            .build())
+    }
+
+    /// Best-effort close of the device's live session, used on drop.
+    ///
+    /// The dropping thread may be tearing down its thread-locals (e.g.
+    /// OpenSSL's `atexit` cleanup, or a Windows TLS destructor holding the
+    /// loader lock). `Handle::block_on` needs Tokio's thread-locals and a
+    /// helper thread can't start under the loader lock, so the request runs
+    /// as a task that owns its buffers while this thread waits on a `std`
+    /// condvar.
     fn close_live_session(&self) {
-        let session_id = self.session.lock().session_id;
-        let Some(sess_id) = session_id else {
+        let Some(sess_id) = self.session.lock().session_id else {
             return;
         };
         let req = DdiCloseSessionCmdReq {
@@ -264,7 +309,37 @@ impl DdiEmuDev {
             data: DdiCloseSessionReq {},
             ext: None,
         };
-        let _ = self.exec_op_mbor(&req, &mut None);
+        let pre_encode = self.device_kind == DdiDeviceKind::Physical;
+        let mut src = AlignedBuf::new(SCRATCH_LEN);
+        let mut dst = AlignedBuf::new(SCRATCH_LEN);
+        let Ok(sqe) = Self::mbor_sqe(
+            &req,
+            pre_encode,
+            SessionControlKind::Close,
+            &mut src,
+            &mut dst,
+        ) else {
+            return;
+        };
+
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let signal = Arc::clone(&done);
+        let hsm = Arc::clone(&self.hsm);
+        let _fence = RESET_FENCE.read();
+        self.handle.spawn(async move {
+            let _bufs = (src, dst);
+            let _ = hsm.io(sqe, EMU_PID, 0, 0).await;
+            let (lock, cvar) = &*signal;
+            *lock.lock() = true;
+            cvar.notify_one();
+        });
+        let (lock, cvar) = &*done;
+        let mut finished = lock.lock();
+        let wait = cvar.wait_while_for(&mut finished, |done| !*done, CLOSE_ON_DROP_TIMEOUT);
+        if wait.timed_out() {
+            tracing::warn!(sess_id, "DdiEmu: timed out closing session on drop");
+        }
+        self.session.lock().session_id = None;
     }
 
     /// TBOR exec path — mirrors [`Self::exec_op_mbor`] but uses the
@@ -412,24 +487,7 @@ impl DdiEmuDev {
 
 impl Drop for DdiEmuDev {
     fn drop(&mut self) {
-        if self.session.lock().session_id.is_none() {
-            return;
-        }
-        // Close on a helper thread: the dropping thread may be tearing down
-        // (e.g. OpenSSL's `atexit` cleanup at process exit) with Tokio's
-        // thread-locals already destroyed, where `block_on` would panic.
-        let this = &*self;
-        std::thread::scope(|s| {
-            match std::thread::Builder::new()
-                .name("tsra-emu-close".into())
-                .spawn_scoped(s, || this.close_live_session())
-            {
-                Ok(t) => {
-                    let _ = t.join();
-                }
-                Err(err) => tracing::warn!(?err, "DdiEmu: failed to close session on drop"),
-            }
-        });
+        self.close_live_session();
     }
 }
 
@@ -468,32 +526,10 @@ impl DdiDev for DdiEmuDev {
         validate_session_request(opcode, req_session_id, current_session_id)?;
 
         // ── 2. Encode DDI request via host MBOR (wire-compat with fw) ─
+        // ── 3. Build SQE and submit on the embedded tokio runtime ─────
         let mut src = AlignedBuf::new(SCRATCH_LEN);
         let mut dst = AlignedBuf::new(SCRATCH_LEN);
-
-        let req_len = {
-            let mut enc = MborEncoder::new(src.as_mut_slice(), pre_encode);
-            req.mbor_encode(&mut enc)
-                .map_err(|_| DdiError::MborError(MborError::EncodeError))?;
-            enc.position()
-        };
-        let req_buf = &src.as_slice()[..req_len];
-        tracing::debug!(opcode = ?opcode, len = req_len, "DdiEmu request (in hex): {:02x?}", req_buf);
-
-        // ── 3. Build SQE and submit on the embedded tokio runtime ─────
-        let cmd_id = CMD_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let sqe = SqeBuilder::new()
-            .cmd(CmdDword::new().with_op(OP_MBOR).with_id(cmd_id))
-            .buf_lens(req_len as u32, SCRATCH_LEN as u32)
-            .src_prp1(req_buf.as_ptr() as u64)
-            .dst_prp1(dst.as_mut_slice().as_mut_ptr() as u64)
-            .session_flags(
-                SessionFlags::new()
-                    .with_ctrl(u8::from(session_ctrl))
-                    .with_id_valid(req_session_id.is_some()),
-            )
-            .session_id(req_session_id.unwrap_or(0))
-            .build();
+        let sqe = Self::mbor_sqe(req, pre_encode, session_ctrl, &mut src, &mut dst)?;
 
         let mut raw_cqe = self
             .block_on_io(self.hsm.io(sqe, EMU_PID, 0, 0))
