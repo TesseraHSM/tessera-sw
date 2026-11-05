@@ -21,9 +21,12 @@ use tsra_fw_uno_trace::tracing::*;
 
 use crate::ChannelConfig;
 use crate::IcqEntry;
+use crate::IcqInfo;
+use crate::IcqStatus;
 use crate::IoMetaEntry;
 use crate::IoMetaQueue;
 use crate::IsqEntry;
+use crate::Received;
 
 /// Mutable driver state — ring indices and async waker.
 struct ChannelState {
@@ -44,8 +47,46 @@ enum IcqPop {
     Empty,
     /// A failed entry was consumed and its slot recycled.
     Recycled,
-    /// A successful entry was consumed; holds its IO_SQ slot index.
-    Ready(u16),
+    /// A successful entry was consumed.
+    Ready(Received),
+}
+
+/// Reads ICQ entry `p` with one four-word burst: the ring sits in memory
+/// the CPU reads uncached, where every load costs the interconnect's full
+/// latency, and a burst costs about as much as one load.
+///
+/// # Safety
+///
+/// `p` must point to a mapped, word-aligned ICQ entry.
+#[inline(always)]
+unsafe fn read_icq_entry(p: *const IcqEntry) -> IcqEntry {
+    #[cfg(target_arch = "arm")]
+    {
+        let (w0, w1, w2, w3): (u32, u32, u32, u32);
+        // SAFETY: per the function contract, four readable words at `p`.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r2, r3, r4, r5}}",
+                p = in(reg) p,
+                out("r2") w0,
+                out("r3") w1,
+                out("r4") w2,
+                out("r5") w3,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        IcqEntry {
+            addr_lo: w0,
+            addr_hi: w1,
+            info: IcqInfo::from_bits(w2),
+            status: IcqStatus::from_bits(w3),
+        }
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: per the function contract.
+    unsafe {
+        p.read_volatile()
+    }
 }
 
 /// Async IIC (Inbound IO Controller) driver.
@@ -364,10 +405,10 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     ///
     /// When done, call [`free_io`](Self::free_io) to return the slot
     /// and grant credit back.
-    pub fn recv(&self) -> impl core::future::Future<Output = u16> + '_ {
+    pub fn recv(&self) -> impl core::future::Future<Output = Received> + '_ {
         poll_fn(move |cx| {
             self.state.with(|s| match self.pop(s) {
-                IcqPop::Ready(index) => Poll::Ready(index),
+                IcqPop::Ready(rx) => Poll::Ready(rx),
                 IcqPop::Empty | IcqPop::Recycled => {
                     s.waker.register(cx.waker());
                     Poll::Pending
@@ -382,10 +423,10 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// Returns `None` once the ICQ is empty. Failed entries are recycled as
     /// in [`recv`](Self::recv). A returned slot must be released with
     /// [`free_io`](Self::free_io).
-    pub fn try_recv(&self) -> Option<u16> {
+    pub fn try_recv(&self) -> Option<Received> {
         self.state.with(|s| loop {
             match self.pop(s) {
-                IcqPop::Ready(index) => return Some(index),
+                IcqPop::Ready(rx) => return Some(rx),
                 IcqPop::Recycled => {}
                 IcqPop::Empty => return None,
             }
@@ -408,7 +449,7 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
 
         let icq_slot = (s.icq_head & Self::MASK) as usize;
         // SAFETY: The masked consumer index selects an available entry in the ICQ ring.
-        let entry = unsafe { &*self.icq_ring.add(icq_slot) };
+        let entry = unsafe { read_icq_entry(self.icq_ring.add(icq_slot)) };
 
         let success = entry.status.success();
         let index = self.buf_index(entry.buffer_addr());
@@ -439,12 +480,17 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
         // Persist metadata into IO_META sidecar
         // SAFETY: The completed buffer's index selects its exclusively owned metadata slot.
         let meta = unsafe { &mut *self.io_meta.add(index as usize) };
-        meta.controller_id = entry.info.axi_id();
+        let (axi_id, queue_id) = (entry.info.axi_id(), entry.info.queue_id());
+        meta.controller_id = axi_id;
         meta.queue = IoMetaQueue::new()
-            .with_queue_id(entry.info.queue_id() as u16)
+            .with_queue_id(queue_id as u16)
             .with_queue_index(entry.info.queue_index());
 
-        IcqPop::Ready(index)
+        IcqPop::Ready(Received {
+            index,
+            axi_id,
+            queue_id,
+        })
     }
 
     /// Whether the inbound completion ring still contains an unclaimed host IO.
