@@ -80,6 +80,7 @@ use tsra_fw_uno_reg_soc::io_gsram::ICQ_TAIL_SHADOW_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IPC_ADMIN_HSM_RX_CI_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IPC_ADMIN_HSM_RX_PI_OFFSET;
@@ -359,6 +360,12 @@ pub struct UnoHsmPal {
     /// partitions.
     io_in_flight: Cell<u32>,
 
+    /// Per host IO slot: what finishing a detached IO still needs.
+    pub(crate) detached: [Cell<crate::io::DetachedIo>; IO_SQ_COUNT as usize],
+
+    /// Host IO slots whose detached completion post found the OIC full.
+    pub(crate) detached_post_pending: Cell<u32>,
+
     /// Set while a PCIe reset (PERST / FLR) frees partitions. IO received
     /// while it is set is recycled without being dispatched, so no new host
     /// IO starts while partition keys are being deleted and no pre-reset IO
@@ -513,6 +520,8 @@ impl Default for UnoHsmPal {
             io_peak: IO_ALLOC_INIT,
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
+            detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
+            detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
         }
@@ -754,6 +763,8 @@ impl UnoHsmPal {
         // The BCP raises no HSM interrupt; reap its completions every pass.
         #[cfg(not(feature = "bulk_crypto"))]
         self.bcp.wake();
+
+        self.finish_detached();
     }
 
     /// Handle an incoming IPC message.

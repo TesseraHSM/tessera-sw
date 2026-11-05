@@ -134,6 +134,15 @@ impl<'a> HsmDmaAllocation<'a> {
         self.len == 0
     }
 
+    /// Give up the handle for a view of the whole allocation that lives as
+    /// long as the allocation itself. With the handle gone it can no longer
+    /// grow, so the view stays valid.
+    pub fn into_buffer(self) -> &'a mut HsmDmaBuf {
+        // SAFETY: as `buffer_mut`; consuming the handle ends every other way
+        // to reach or grow the range.
+        unsafe { HsmDmaBuf::from_raw_mut(core::slice::from_raw_parts_mut(self.ptr, self.len)) }
+    }
+
     /// Exclusively borrow the current allocation until the next handle access.
     pub fn buffer_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: the allocator owns the range and the exclusive handle borrow

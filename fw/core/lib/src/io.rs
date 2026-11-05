@@ -94,15 +94,19 @@ impl<P: HsmPal> Hsm<P> {
         let mut undo: Option<UndoLog<'_>> = None;
         let mut credential_guard = None;
 
+        let mut reply = None;
         let op_result = match validated {
             Err(e) => Err(e),
             Ok(()) => match op {
                 OP_MBOR => self.handle_mbor_op(&mut io).await,
                 OP_TBOR => match self.bind_undo(&io) {
-                    Ok(log) => {
-                        self.handle_tbor_op(&mut io, undo.insert(log), &mut credential_guard)
-                            .await
-                    }
+                    Ok(log) => self
+                        .handle_tbor_op(&mut io, undo.insert(log), &mut credential_guard)
+                        .await
+                        .map(|(status, r)| {
+                            reply = Some(r);
+                            status
+                        }),
                     Err(e) => Err(e),
                 },
                 OP_FLUSH => self.handle_flush_op(&mut io).await,
@@ -111,6 +115,42 @@ impl<P: HsmPal> Hsm<P> {
                     HostStatus::INVALID_COMMAND_OPCODE,
                 )),
             },
+        };
+
+        // Copy a TBOR reply to the host. With nothing to walk once the
+        // completion is posted, the platform can do that, post the CQE and
+        // drop the IO on its own, freeing this task at once.
+        let op_result = match (op_result, reply) {
+            (Ok(status), Some(reply)) => {
+                if credential_guard.is_none()
+                    && undo.as_ref().is_none_or(UndoLog::is_empty)
+                    && Self::finalize_cqe(&mut io, Ok(status)).is_ok()
+                {
+                    match self.pal().finish_io(
+                        io,
+                        reply.resp,
+                        reply.dst,
+                        reply.dst2,
+                        Self::mark_copy_failed,
+                    ) {
+                        Ok(()) => return,
+                        Err(back) => {
+                            io = back;
+                            Self::unfinalize_cqe(&mut io);
+                        }
+                    }
+                }
+                self.pal()
+                    .copy_mem_to_host(&io, reply.resp, reply.dst, reply.dst2, true)
+                    .await
+                    .op_err(
+                        "core",
+                        HsmError::FailedToStartDmaTransaction,
+                        HostStatus::DMA_TXN_ERROR,
+                    )
+                    .map(|()| status)
+            }
+            (result, _) => result,
         };
         let handler_ok = op_result.as_ref().is_ok_and(|status| !status.ddi_failed);
 
@@ -257,6 +297,25 @@ impl<P: HsmPal> Hsm<P> {
             }
         }
         Ok(())
+    }
+
+    /// Rewrites a CQE that [`finalize_cqe`](Self::finalize_cqe) completed as
+    /// a success into what it leaves when the reply copy then fails.
+    fn mark_copy_failed(cqe: &mut HsmCqe) {
+        if let Ok(mut cqe) = Cqe::try_from(cqe) {
+            cqe.set_dw0(CqeDw0::from(0));
+            cqe.set_dw1(CqeDw1::from(0));
+            cqe.set_status(HostStatus::DMA_TXN_ERROR);
+        }
+    }
+
+    /// Undoes a successful [`finalize_cqe`](Self::finalize_cqe), leaving the
+    /// CQE as [`init_cqe_from_sqe`](Self::init_cqe_from_sqe) did.
+    fn unfinalize_cqe(io: &mut P::Io) {
+        if let Ok(mut cqe) = Cqe::try_from(io.cqe()) {
+            cqe.set_dw0(CqeDw0::from(0));
+            cqe.set_dw1(CqeDw1::from(0));
+        }
     }
 
     /// Handles an [`OP_MBOR`] IO command.
@@ -407,12 +466,14 @@ impl<P: HsmPal> Hsm<P> {
     /// **Phase 2 (post-decode)** — Dispatch by opcode. Errors are
     /// encoded into the exchange as a non-zero TBOR `status`. The undo
     /// log is independent and remains live through outbound DMA and CQE.
+    ///
+    /// Returns the reply for the caller to copy to the host.
     async fn handle_tbor_op<'s>(
         &'s self,
         io: &mut P::Io,
         undo: &mut UndoLog<'s>,
         credential_guard: &mut Option<P::PartitionGuard<'s>>,
-    ) -> Result<HsmOpStatus, OpError> {
+    ) -> Result<(HsmOpStatus, TborReply<'s>), OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
         let mut allocation = self
@@ -503,33 +564,32 @@ impl<P: HsmPal> Hsm<P> {
             },
             Err(_) => (None, false),
         };
-        let resp = match dispatch_result {
+        let resp_len = match dispatch_result {
             Ok(out) => exchange
                 .response(out.response_len)
-                .op_status(HostStatus::INTERNAL_ERROR)?,
+                .op_status(HostStatus::INTERNAL_ERROR)?
+                .len(),
             Err(err) => {
                 let len = ddi::tbor::encode_exchange_err(opcode, err, &mut exchange)
                     .op_status(HostStatus::INTERNAL_ERROR)?;
                 exchange
                     .response(len)
                     .op_status(HostStatus::INTERNAL_ERROR)?
+                    .len()
             }
         };
-        let resp_len = resp.len();
-
-        // ── Outbound DMA (yield 2) ─────────────────────────────────
-        self.pal()
-            .copy_mem_to_host(io, resp, params.dst_addr, params.dst_addr2, true)
-            .await
-            .op_err(
-                "core",
-                HsmError::FailedToStartDmaTransaction,
-                HostStatus::DMA_TXN_ERROR,
-            )?;
+        let resp = &allocation.into_buffer()[..resp_len];
 
         let mut status = HsmOpStatus::new(resp_len, session_ctrl, cqe_sess_id, None, cqe_closed);
         status.ddi_failed = ddi_failed;
-        Ok(status)
+        Ok((
+            status,
+            TborReply {
+                resp,
+                dst: params.dst_addr,
+                dst2: params.dst_addr2,
+            },
+        ))
     }
 
     /// Validates the SQE for an MBOR / TBOR IO command and extracts the
@@ -705,6 +765,14 @@ fn flush_session_id(sqe: &Sqe<'_>) -> HsmResult<u16> {
         return Err(HsmError::SessionExpected);
     }
     Ok(sqe.session_id())
+}
+
+/// A TBOR response, ready to copy to the host.
+struct TborReply<'s> {
+    resp: &'s HsmDmaBuf,
+    dst: HsmDmaAddr,
+    /// Second host destination page (SQE PRP2).
+    dst2: HsmDmaAddr,
 }
 
 /// Fields extracted from a validated MBOR / TBOR IO SQE.
