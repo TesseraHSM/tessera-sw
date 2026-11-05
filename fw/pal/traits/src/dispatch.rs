@@ -120,6 +120,14 @@ use crate::HsmResult;
 /// the fall-through, and a platform may want to extend one protocol
 /// without touching the other.
 pub trait HsmCustomDispatch: HsmIoTypes {
+    /// Check for a platform-requested command failure after a mutation.
+    ///
+    /// Call only after recording the mutation's inverse in the undo log.
+    /// An error follows normal command rollback. Platforms without fault
+    /// injection return `Ok(())`; action decoding and one-shot state remain
+    /// entirely below the PAL.
+    fn check_io_failure(&self, io: &Self::Io) -> HsmResult<()>;
+
     /// Handle an MBOR opcode the core does not implement.
     ///
     /// `req` is the whole request, exactly as it arrived. The core has

@@ -501,6 +501,8 @@ impl UnoHsmPal {
         let Ok(part) = PartStore::partition(pid) else {
             return;
         };
+        #[cfg(feature = "tsra_test_hooks")]
+        self.io_failure[usize::from(u8::from(pid))].set(false);
         // Delete every enable-time and provisioning vault key before the
         // backing handles are zeroized below.
         for key_id in [

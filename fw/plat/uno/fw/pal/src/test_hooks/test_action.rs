@@ -61,6 +61,9 @@ struct DdiTestActionResp {
 #[derive(Debug, Copy, Clone)]
 #[repr(u32)]
 enum SupportedTestAction {
+    /// Fail the next command that reaches a post-mutation checkpoint.
+    #[cfg(feature = "tsra_test_hooks")]
+    TriggerIoFailure = 5,
     /// Inject a crash into the HSM/Admin/FP cores.
     #[cfg(feature = "tsra_test_hooks")]
     TriggerCrash = 8,
@@ -91,6 +94,10 @@ impl TryFrom<u32> for SupportedTestAction {
     type Error = HsmError;
 
     fn try_from(value: u32) -> Result<Self, Self::Error> {
+        #[cfg(feature = "tsra_test_hooks")]
+        if value == Self::TriggerIoFailure as u32 {
+            return Ok(Self::TriggerIoFailure);
+        }
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::TriggerCrash as u32 {
             return Ok(Self::TriggerCrash);
@@ -126,6 +133,17 @@ pub(super) async fn dispatch<'p>(
     let selector = decode_action_selector(decoder)?;
 
     match selector.action {
+        #[cfg(feature = "tsra_test_hooks")]
+        SupportedTestAction::TriggerIoFailure => {
+            expect_empty_payload(decoder, selector.request_field_count, request_len)?;
+            let pending = pal
+                .io_failure
+                .get(usize::from(u8::from(io.pid())))
+                .ok_or(HsmError::InvalidArg)?;
+            let resp = encode_success(pal, io, hdr)?;
+            pending.set(true);
+            Ok(resp)
+        }
         #[cfg(feature = "tsra_test_hooks")]
         SupportedTestAction::ClearUserCredentials => {
             clear_user_credentials::dispatch(

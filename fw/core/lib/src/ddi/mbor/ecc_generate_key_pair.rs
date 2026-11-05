@@ -96,6 +96,7 @@ pub(crate) async fn ecc_generate_key_pair<'p, P: HsmPal>(
     // The dispatcher preallocates one empty entry before invoking this
     // handler, so the inverse fits without a fallible allocation here.
     undo.push_vault_create(private_key_id)?;
+    pal.check_io_failure(io)?;
     let private_key_id: u16 = private_key_id.into();
 
     // Build the host's re-import blob.  ECC envelopes the private-key

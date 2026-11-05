@@ -388,6 +388,10 @@ pub struct UnoHsmPal {
     /// consistency test, so only one IO tests a partition's slot at a time.
     /// See [`crate::unwrapping_key`].
     pub(crate) unwrap_pct_busy: [Cell<bool>; NUM_PARTITIONS],
+
+    /// One-shot command failure, scoped to the requesting partition.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) io_failure: [Cell<bool>; NUM_PARTITIONS],
 }
 
 // SAFETY: UnoHsmPal is only accessed from a single-threaded Embassy
@@ -537,6 +541,8 @@ impl Default for UnoHsmPal {
             detached_post_pending: Cell::new(0),
             io_paused: Cell::new(false),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
+            #[cfg(feature = "tsra_test_hooks")]
+            io_failure: [const { Cell::new(false) }; NUM_PARTITIONS],
         }
     }
 }
@@ -1202,6 +1208,19 @@ impl UnoHsmPal {
 /// `crate::test_hooks`; without both, and for TBOR in all cases, uno
 /// claims nothing.
 impl HsmCustomDispatch for UnoHsmPal {
+    fn check_io_failure(&self, _io: &UnoHsmIo) -> HsmResult<()> {
+        #[cfg(feature = "tsra_test_hooks")]
+        if self
+            .io_failure
+            .get(usize::from(u8::from(_io.pid())))
+            .ok_or(HsmError::InvalidArg)?
+            .replace(false)
+        {
+            return Err(HsmError::InvalidKeyType);
+        }
+        Ok(())
+    }
+
     #[cfg(any(feature = "tsra_test_hooks", feature = "fips_validation_hooks"))]
     async fn mbor_dispatch(&self, io: &UnoHsmIo, req: &mut HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
         let future = core::pin::pin!(crate::test_hooks::mbor_dispatch(self, io, req));
