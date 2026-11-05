@@ -1083,8 +1083,8 @@ impl UnoHsmPal {
             // dispatched once the flag clears and could reach a partition
             // re-enabled after the acknowledgement. Nothing awaits between
             // finding the ICQ empty and clearing the flag.
-            while let Some(index) = self.iic.try_recv() {
-                let io = self.accept_io(index);
+            while let Some(rx) = self.iic.try_recv() {
+                let io = self.accept_io(rx);
                 self.recycle_reset_io(io).await;
             }
             // Resume normal IO dispatch.

@@ -43,6 +43,7 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_gdma::MemInterface;
+use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
@@ -157,18 +158,27 @@ impl UnoHsmIo {
             };
         }
         let meta = &IO_Q.io_meta[index as usize];
-        let axi_id = meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
+        Self::from_routing(
+            index,
+            meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8,
+            meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
+        )
+    }
+
+    /// An IO over slot `index` from source controller `axi_id`'s queue
+    /// `queue_id`.
+    fn from_routing(index: u16, axi_id: u8, queue_id: u16) -> Self {
         Self {
             index,
-            // IO_META records the routing axi_id the hardware reported;
-            // partitions are indexed by the dense PcieFunction id, so
-            // translate here. An axi_id naming no function yields an
-            // out-of-range id, which the partition lookup rejects with
-            // `InvalidArg` rather than aliasing a valid slot.
+            // The hardware reports the routing axi_id; partitions are
+            // indexed by the dense PcieFunction id, so translate here. An
+            // axi_id naming no function yields an out-of-range id, which
+            // the partition lookup rejects with `InvalidArg` rather than
+            // aliasing a valid slot.
             pid: HsmPartId::from(
                 crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
             ),
-            queue_id: meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
+            queue_id,
         }
     }
 
@@ -448,13 +458,16 @@ impl UnoHsmPal {
     /// Turns IO_SQ slot `index` received from the IIC driver into an IO:
     /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io))
     /// and resets the slot's scratch allocator.
-    pub(crate) fn accept_io(&self, index: u16) -> UnoHsmIo {
+    pub(crate) fn accept_io(&self, rx: Received) -> UnoHsmIo {
+        let index = rx.index;
         self.io_in_flight_inc();
         reset_io_alloc(self, index);
         if (index as u32) < IO_SQ_COUNT {
             copy_sqe(index as usize);
         }
-        UnoHsmIo::from_meta(index)
+        // The routing comes with the IO, as the IIC driver read it from the
+        // ICQ entry, rather than back out of IO_META.
+        UnoHsmIo::from_routing(index, rx.axi_id, u16::from(rx.queue_id))
     }
 
     /// Recycles an IO received during a PCIe reset without dispatching it:
