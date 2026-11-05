@@ -27,20 +27,12 @@ use crate::DSA_N;
 /// dTCM. No parameter set spills more.
 pub const MATRIX_SLOTS: usize = 40;
 
-/// Key-derived transforms one signature can spill: `s1` (l of them) plus
-/// `s2` and `t0` (k each). ML-DSA-87's 7 + 8 + 8 is the worst case.
-pub const KEY_SLOTS: usize = 23;
-
 /// Words in a matrix slot. Matrix elements are stored three bytes to a
 /// coefficient, so they need a quarter less room than a raw polynomial.
 const MATRIX_WORDS: usize = PACKED_WORDS;
 
-/// Words in a key-transform slot. Those are NTT outputs, whose range is not
-/// bounded by 2^24, so they are stored unpacked.
-const KEY_WORDS: usize = DSA_N;
-
-/// Words one core needs for both regions.
-const NEEDED_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS + KEY_SLOTS * KEY_WORDS;
+/// Words one core needs.
+const NEEDED_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS;
 
 static mut BASE: *mut i32 = core::ptr::null_mut();
 
@@ -106,40 +98,6 @@ pub(crate) fn matrix_slot(i: usize) -> Option<*mut i32> {
             Some(BASE.add(i * MATRIX_WORDS))
         }
     }
-}
-
-/// Address of key-transform slot `j`, if it exists.
-///
-/// The key region starts above the whole matrix region rather than after
-/// however much this parameter set happened to spill, so its base is the
-/// same for every variant and the caller does not have to track one.
-#[inline(always)]
-pub(crate) fn key_slot(j: usize) -> Option<*mut i32> {
-    // SAFETY: as `matrix_slot`.
-    unsafe {
-        if BASE.is_null() || j >= KEY_SLOTS {
-            None
-        } else {
-            Some(BASE.add(MATRIX_SLOTS * MATRIX_WORDS + j * KEY_WORDS))
-        }
-    }
-}
-
-/// Copy a polynomial out to a spill slot, or a near one.
-///
-/// # Safety
-/// `dst` must come from [`key_slot`] or be the signer's own polynomial's
-/// worth of the near region.
-pub(crate) unsafe fn store(dst: *mut i32, src: &[i32; DSA_N]) {
-    burst(dst, src.as_ptr(), DSA_N);
-}
-
-/// Read a polynomial back from a spill slot, or a near one.
-///
-/// # Safety
-/// As for [`store`].
-pub(crate) unsafe fn load(dst: &mut [i32; DSA_N], src: *const i32) {
-    burst(dst.as_mut_ptr(), src, DSA_N);
 }
 
 /// Words a matrix element occupies when packed three bytes to a

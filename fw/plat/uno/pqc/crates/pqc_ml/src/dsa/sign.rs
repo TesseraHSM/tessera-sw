@@ -77,35 +77,9 @@ pub fn sign_internal(
     let want = (k * l).saturating_sub(cache_slots);
     let near_a1 = want.min(near1.len() / PACKED_WORDS);
     let near_a2 = (want - near_a1).min(near2.len() / PACKED_WORDS);
-    let (near1, near_keys1) = near1.split_at_mut(near_a1 * PACKED_WORDS);
-    let (near2, near_keys2) = near2.split_at_mut(near_a2 * PACKED_WORDS);
     let held = cache_slots + near_a1 + near_a2;
     let mut a_cached = false;
 
-    // s1, s2 and t0 are transformed once per attempt but depend only on the
-    // key, so their transforms are held and reused: in whatever the matrix
-    // leaves of the near regions, and past that in their own region of the
-    // spill, above the matrix, so their indices do not depend on how much
-    // this parameter set spilled. s2 comes first, as the one every attempt
-    // reads, then s1, then t0.
-    //
-    // Each pass walks its rows from zero and can stop early, so a count of
-    // how many slots have been filled is enough -- an attempt that got as
-    // far as row n leaves rows 0..n valid for the next one.
-    let (keys1, keys1_ptr) = (near_keys1.len() / N, near_keys1.as_mut_ptr());
-    let (keys2, keys2_ptr) = (near_keys2.len() / N, near_keys2.as_mut_ptr());
-    let key_slot = |j: usize| {
-        // SAFETY: slot j of the near regions' key parts, which this
-        // signature alone uses.
-        if j < keys1 {
-            Some(unsafe { keys1_ptr.add(j * N) })
-        } else if j < keys1 + keys2 {
-            Some(unsafe { keys2_ptr.add((j - keys1) * N) })
-        } else {
-            crate::spill::key_slot(j)
-        }
-    };
-    let (mut s2_done, mut s1_done, mut t0_done) = (0usize, 0usize, 0usize);
     // s1 and s2 coefficients are packed eta - f in d-bit fields.
     let eta_d = if params.eta == 2 { 3 } else { 4 };
     let eta_bias = params.eta as i32;
@@ -212,7 +186,9 @@ pub fn sign_internal(
 
         for i in 0..k {
             ntt::invntt(&mut w[i]);
-            rounding::poly_decompose_reduced(&mut w1_i, &mut w0_i, &w[i], params.gamma2);
+            // w1 into w1_i for the hash; w_i keeps (w0 << 6) | w1 for the
+            // r0 check and the hints.
+            rounding::poly_decompose_reduced(&mut w1_i, &mut w[i], params.gamma2);
             let w1_bytes = params.w1_pack_bytes();
             packing::pack_w1(&mut w1_packed[..w1_bytes], &w1_i, params.gamma2);
             commit_ctx.absorb(&w1_packed[..w1_bytes]);
@@ -222,86 +198,81 @@ pub fn sign_internal(
         commit_ctx.finalize();
         commit_ctx.squeeze(&mut ctilde[..ctilde_len]);
 
-        // Challenge
+        // Challenge, and its nonzero coefficients -- each one's position,
+        // with 0x100 set where it is -1 -- for the norm checks.
         sampling::poly_challenge(&mut c_hat, &ctilde[..ctilde_len], params.tau);
+        let mut c_sparse = [0u16; 64];
+        let mut c_n = 0;
+        for (p, &v) in c_hat.iter().enumerate() {
+            if v != 0 {
+                c_sparse[c_n] = p as u16 | (u16::from(v < 0) << 8);
+                c_n += 1;
+            }
+        }
+        let c_sparse = &c_sparse[..c_n];
         ntt::ntt(&mut c_hat);
 
-        // An attempt has three checks to pass, and they are made in the
-        // order that rejects soonest. The low bits of w - c*s2 fail most
-        // often -- about two attempts in three for ML-DSA-65, against one in
-        // three for z -- and cost about as much per row as z does per
-        // column, so they go first, and an attempt they reject never pays
-        // for c*s1. c*t0 and the hints, which reject almost never, are left
-        // for an attempt that has passed both.
-
-        // ---- r0 pass: check w0 - c*s2 row by row ----
-        let mut reject = false;
+        // ---- the norm checks, exactly, without the products ----
+        // An attempt must keep every coefficient of w0 - c*s2 inside
+        // gamma2 - beta and of y + c*s1 inside gamma1 - beta, and most
+        // attempts fail one or the other. But |c*s| <= tau*eta = beta, so a
+        // coefficient of w0 or y more than 2*beta inside its bound stays
+        // inside whatever c*s is: only the few closer than that -- a
+        // fraction of one a polynomial -- need c*s, and only at that
+        // coefficient, a sum of tau coefficients of s. The checks decide
+        // each attempt as the full products would, so the attempts and the
+        // signature are the same; the products themselves, a forward and an
+        // inverse transform each, are left for the one attempt that passes.
+        // The low bits fail most often, so they go first.
+        let r0_bound = (params.gamma2 - params.beta) as i32;
+        let z_bound = (params.gamma1 - params.beta) as i32;
+        let beta = params.beta as i32;
+        let mut ok = true;
         for i in 0..k {
-            rounding::poly_decompose_reduced(&mut w1_i, &mut w0_i, &w[i], params.gamma2);
-            c_times_key(
+            // w_i holds (w0 << 6) | w1.
+            let near = r0_bound - beta;
+            ok = close_ok(
+                &w[i],
+                [64 * (near - 1), 64 * (2 * near - 1)],
+                -1,
+                c_sparse,
                 &mut tmp,
-                &c_hat,
-                key_slot(i),
-                i,
-                &mut s2_done,
                 &sk[sk_s2_offset + i * params.eta_pack_bytes()..],
-                eta_d,
-                eta_bias,
+                [eta_d, eta_bias as u32],
+                r0_bound,
             );
-            if !poly::poly_sub_reduce_chknorm(&mut w0_i, &tmp, params.gamma2 - params.beta) {
-                reject = true;
+            if !ok {
                 break;
             }
-            // r0 and w1 are all the hint pass wants of this row, and w_i is
-            // not read again this attempt, so they replace it -- w1 below
-            // six bits, which is the most it needs.
-            for (v, (&r0, &w1)) in w[i].iter_mut().zip(w0_i.iter().zip(w1_i.iter())) {
-                *v = (r0 << 6) | w1;
-            }
         }
-        if reject {
-            kappa += l as u16;
-            continue;
-        }
-
-        // ---- z pass: compute z_j, check norm, pack directly into sig ----
-        sig[..ctilde_len].copy_from_slice(&ctilde[..ctilde_len]);
-        let mut sig_z_offset = ctilde_len;
-
         for j in 0..l {
-            // y_j comes back from the packed stream this attempt already
-            // produced; compute z_j = y_j + c*s1_j
+            if !ok {
+                break;
+            }
+            // y_j comes back from the packed stream this attempt produced.
             sampling::unpack_gamma1(
                 &mut tmp,
                 &sig[ctilde_len + j * ybytes..ctilde_len + (j + 1) * ybytes],
                 params.gamma1,
             );
-            c_times_key(
+            let near = z_bound - beta;
+            ok = close_ok(
+                &tmp,
+                [near - 1, 2 * near - 1],
+                1,
+                c_sparse,
                 &mut w0_i,
-                &c_hat,
-                key_slot(k + j),
-                j,
-                &mut s1_done,
                 &sk[sk_s1_offset + j * params.eta_pack_bytes()..],
-                eta_d,
-                eta_bias,
+                [eta_d, eta_bias as u32],
+                z_bound,
             );
-            if !poly::poly_add_reduce_chknorm(&mut tmp, &w0_i, params.gamma1 - params.beta) {
-                reject = true;
-                break;
-            }
-
-            // Pack z_j directly into signature
-            packing::pack_z(&mut sig[sig_z_offset..], &tmp, params.gamma1);
-            sig_z_offset += params.z_pack_bytes();
         }
-
-        if reject {
+        if !ok {
             kappa += l as u16;
             continue;
         }
 
-        // ---- hint pass: check c*t0, build hints incrementally ----
+        // ---- hint pass: r0 and c*t0 row by row, hints incrementally ----
         let hint_offset = ctilde_len + l * params.z_pack_bytes();
         let hint_buf = &mut sig[hint_offset..hint_offset + params.omega as usize + k];
         // Zero the hint buffer
@@ -310,25 +281,28 @@ pub fn sign_internal(
         }
         let mut hint_idx = 0usize; // write position in first omega bytes
         let mut hint_count = 0u32;
+        let mut reject = false;
 
         for i in 0..k {
+            // r0 = w0 - c*s2 replaces w0 in w_i, beside w1; the check
+            // above already found it inside its bound.
             c_times_key(
                 &mut tmp,
                 &c_hat,
-                key_slot(k + l + i),
-                i,
-                &mut t0_done,
-                &sk[sk_t0_offset + i * 416..],
-                13,
-                1 << 12,
+                &sk[sk_s2_offset + i * params.eta_pack_bytes()..],
+                eta_d,
+                eta_bias,
             );
+            poly::poly_r0_check(&mut w[i], &tmp, params.gamma2 - params.beta);
+
+            c_times_key(&mut tmp, &c_hat, &sk[sk_t0_offset + i * 416..], 13, 1 << 12);
             if !poly::poly_reduce_chknorm(&mut tmp, params.gamma2) {
                 reject = true;
                 break;
             }
 
-            // MakeHint and pack incrementally into hint_buf, from the r0
-            // and w1 the r0 pass left in w_i.
+            // MakeHint and pack incrementally into hint_buf, from r0 and w1
+            // in w_i.
             for coeff in 0..N {
                 let v = w[i][coeff];
                 let h = rounding::make_hint((v >> 6) + tmp[coeff], v & 63, params.gamma2);
@@ -360,47 +334,104 @@ pub fn sign_internal(
             hint_idx += 1;
         }
 
+        // ---- z pass: z_j = y_j + c*s1_j, packed over y_j ----
+        // The check above already found every z_j inside its bound.
+        sig[..ctilde_len].copy_from_slice(&ctilde[..ctilde_len]);
+        for j in 0..l {
+            let zj = &mut sig[ctilde_len + j * ybytes..ctilde_len + (j + 1) * ybytes];
+            sampling::unpack_gamma1(&mut tmp, zj, params.gamma1);
+            c_times_key(
+                &mut w0_i,
+                &c_hat,
+                &sk[sk_s1_offset + j * params.eta_pack_bytes()..],
+                eta_d,
+                eta_bias,
+            );
+            poly::poly_add_reduce_chknorm(&mut tmp, &w0_i, params.gamma1 - params.beta);
+            packing::pack_z(zj, &tmp, params.gamma1);
+        }
+
         return true;
     }
 
     false
 }
 
-/// `dst = c * p`, for `p` the `i`th polynomial of s1, s2 or t0, packed in
-/// `src` as `bias - f` in `d`-bit fields.
+/// `dst = c * p`, for `p` a polynomial of s1, s2 or t0, packed in `src` as
+/// `bias - f` in `d`-bit fields.
 ///
-/// The key's transform is read back from `slot` if an earlier attempt left
-/// it there -- `*done` counts how many of this polynomial's family have
-/// been -- and otherwise unpacked and transformed, and kept in `slot` for
-/// the next attempt if there is one.
+/// Each is needed once a signature, by the attempt that passes, so the
+/// transform is not kept.
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn c_times_key(
-    dst: &mut Poly,
-    c_hat: &Poly,
-    slot: Option<*mut i32>,
-    i: usize,
-    done: &mut usize,
-    src: &[u8],
-    d: u32,
-    bias: i32,
-) {
-    match slot {
-        // SAFETY: a slot of this core's own region, which `done` says an
-        // earlier attempt filled.
-        Some(p) if i < *done => unsafe { crate::spill::load(dst, p) },
-        slot => {
-            packing::unpack_centered(dst, src, d, bias);
-            ntt::ntt(dst);
-            if let Some(p) = slot {
-                // SAFETY: as above.
-                unsafe { crate::spill::store(p, dst) };
-                *done = i + 1;
-            }
-        }
-    }
+fn c_times_key(dst: &mut Poly, c_hat: &Poly, src: &[u8], d: u32, bias: i32) {
+    packing::unpack_centered(dst, src, d, bias);
+    ntt::ntt(dst);
     ntt::poly_pointwise_montgomery_inplace(dst, c_hat);
     ntt::invntt(dst);
+}
+
+/// Whether every `|x + sign * (c*s)[n]|` is below `bound`, for x the
+/// coefficients of `a` (shifted down 6 where `a` holds `(w0 << 6) | w1`),
+/// `c` the challenge's nonzero coefficients and `s` the key polynomial
+/// packed in `src` as `fmt` = [d, bias].
+///
+/// `close` = [k, m] picks out the coefficients that need looking at --
+/// those with `(x + k) as u32 >= m`, the ones within 2*beta of the bound.
+/// Everywhere else `|c*s| <= beta` keeps the sum inside. `s` is unpacked
+/// into `scratch` only if some coefficient does.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn close_ok(
+    a: &Poly,
+    close: [i32; 2],
+    sign: i32,
+    c: &[u16],
+    scratch: &mut Poly,
+    src: &[u8],
+    fmt: [u32; 2],
+    bound: i32,
+) -> bool {
+    let shift = if sign < 0 { 6 } else { 0 };
+    let mut have_s = false;
+    let mut n = find_close(a, 0, close);
+    while n < N {
+        if !have_s {
+            packing::unpack_centered(scratch, src, fmt[0], fmt[1] as i32);
+            have_s = true;
+        }
+        // Coefficient n of the negacyclic product c * s.
+        let mut cs = 0i32;
+        for &e in c {
+            let p = (e & 0xff) as usize;
+            let v = if n >= p { scratch[n - p] } else { -scratch[n + N - p] };
+            cs += if e & 0x100 != 0 { -v } else { v };
+        }
+        if ((a[n] >> shift) + sign * cs).abs() >= bound {
+            return false;
+        }
+        n = find_close(a, n + 1, close);
+    }
+    true
+}
+
+/// The first index from `n` whose coefficient `x` has `(x + k) as u32 >=
+/// m`, or N.
+fn find_close(a: &Poly, n: usize, [k, m]: [i32; 2]) -> usize {
+    #[cfg(target_arch = "arm")]
+    {
+        extern "C" {
+            fn pqc_ml_dsa_find_close(a: *const i32, n: u32, k: i32, m: u32) -> u32;
+        }
+        // SAFETY: `a` is 256 word-aligned coefficients and n <= 256.
+        unsafe { pqc_ml_dsa_find_close(a.as_ptr(), n as u32, k, m as u32) as usize }
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    {
+        (n..N)
+            .find(|&i| a[i].wrapping_add(k) as u32 >= m as u32)
+            .unwrap_or(N)
+    }
 }
 
 /// Near-region matrix element `u`: the first region's elements, then the

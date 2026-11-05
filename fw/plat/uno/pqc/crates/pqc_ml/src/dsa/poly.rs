@@ -117,6 +117,34 @@ pub fn poly_reduce_chknorm(a: &mut Poly, bound: u32) -> bool {
     fused_reduce_chknorm(a, None, bound)
 }
 
+/// Signing's r0 check on a row [`super::rounding::poly_decompose_reduced`]
+/// left as `(w0 << 6) | w1`: `r0 = reduce32(w0 - cs2)` replaces w0, and the
+/// result says whether every `|r0|` stayed inside `bound`.
+///
+/// `cs2` must be below q in magnitude, as an inverse NTT leaves it.
+pub fn poly_r0_check(w: &mut Poly, cs2: &Poly, bound: u32) -> bool {
+    #[cfg(target_arch = "arm")]
+    {
+        extern "C" {
+            fn pqc_ml_dsa_r0_check(w: *mut i32, cs2: *const i32, bound: i32) -> u32;
+        }
+        // SAFETY: two distinct `[i32; N]`, word aligned.
+        unsafe { pqc_ml_dsa_r0_check(w.as_mut_ptr(), cs2.as_ptr(), bound as i32) == 0 }
+    }
+
+    #[cfg(not(target_arch = "arm"))]
+    {
+        let bound = bound as i32;
+        let mut ok = true;
+        for (v, &c) in w.iter_mut().zip(cs2.iter()) {
+            let r0 = ntt::reduce32((*v >> 6) - c);
+            ok &= r0.abs() < bound;
+            *v = (r0 << 6) | (*v & 63);
+        }
+        ok
+    }
+}
+
 fn fused_reduce_chknorm(a: &mut Poly, b: Option<(&Poly, bool)>, bound: u32) -> bool {
     // Two coefficients a pass, `reduce32` as one `mls`, and the bound as a
     // single unsigned compare: |v| < bound exactly when v + bound - 1, taken
