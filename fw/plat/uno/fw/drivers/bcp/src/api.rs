@@ -799,8 +799,46 @@ fn bring_up() -> bool {
 }
 
 /// Write a key into the vault slot of command `id`, as little-endian words.
+///
+/// A word-aligned key (vault keys are) is read in one burst: it sits in DMA
+/// memory, which the CPU reads uncached, where a burst of eight words costs
+/// about as much as a single byte load. The vault registers take one
+/// single-beat store each; they do not accept a burst.
 fn load_key(id: usize, key: &[u8]) {
+    const _: () = assert!(KEY_WORDS == 8);
     let (words, _) = key.as_chunks::<4>();
+    #[cfg(target_arch = "arm")]
+    if words.len() == KEY_WORDS && key.as_ptr().align_offset(4) == 0 {
+        let slot: *const _ = &BCP.key_vault[id * KEY_WORDS];
+        // SAFETY: `key` is eight readable, word-aligned words, and the vault
+        // slot of command `id` is eight consecutive word registers that only
+        // this command uses. Little-endian words are the CPU's native order.
+        unsafe {
+            core::arch::asm!(
+                "ldm {src}, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+                "str r2, [{dst}]",
+                "str r3, [{dst}, #4]",
+                "str r4, [{dst}, #8]",
+                "str r5, [{dst}, #12]",
+                "str r8, [{dst}, #16]",
+                "str r9, [{dst}, #20]",
+                "str r10, [{dst}, #24]",
+                "str r11, [{dst}, #28]",
+                src = in(reg) key.as_ptr(),
+                dst = in(reg) slot,
+                out("r2") _,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") _,
+                out("r9") _,
+                out("r10") _,
+                out("r11") _,
+                options(nostack, preserves_flags),
+            );
+        }
+        return;
+    }
     for (i, word) in words.iter().enumerate() {
         BCP.key_vault[id * KEY_WORDS + i].set(u32::from_le_bytes(*word));
     }
@@ -819,7 +857,24 @@ fn dfl_ptr(id: usize) -> *mut u32 {
 }
 
 /// Pack bytes into little-endian words at `dw[start..]`.
+///
+/// Word-aligned bytes are read a word at a time: they may sit in DMA memory
+/// (an IV in a masked blob), which the CPU reads uncached, a load per word
+/// rather than per byte.
 fn put_bytes(dw: &mut [u32; DFL_DWORDS], start: usize, bytes: &[u8]) {
+    if bytes.as_ptr().align_offset(4) == 0 {
+        let (words, rest) = bytes.as_chunks::<4>();
+        for (i, word) in words.iter().enumerate() {
+            // SAFETY: `word` is four readable bytes at a 4-aligned address.
+            dw[start + i] = unsafe { word.as_ptr().cast::<u32>().read() };
+        }
+        if !rest.is_empty() {
+            let mut word = [0u8; 4];
+            word[..rest.len()].copy_from_slice(rest);
+            dw[start + words.len()] = u32::from_le_bytes(word);
+        }
+        return;
+    }
     for (i, chunk) in bytes.chunks(4).enumerate() {
         let mut word = [0u8; 4];
         word[..chunk.len()].copy_from_slice(chunk);

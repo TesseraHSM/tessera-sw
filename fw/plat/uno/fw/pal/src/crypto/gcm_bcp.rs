@@ -94,6 +94,26 @@ fn len_block(aad_len: usize, text_len: usize) -> Block {
     b
 }
 
+/// Copy a block a word at a time when it is word-aligned: a tag inside a
+/// masked blob sits in DMA memory, which the CPU reads uncached, a load per
+/// word rather than per byte.
+fn read_block(b: &Block) -> Block {
+    if b.as_ptr().align_offset(4) != 0 {
+        return *b;
+    }
+    let mut out = [0u8; AES_BLOCK_SIZE];
+    for (o, w) in out
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(b.as_chunks::<4>().0)
+    {
+        // SAFETY: `w` is four readable bytes at a 4-aligned address.
+        *o = unsafe { w.as_ptr().cast::<u32>().read() }.to_ne_bytes();
+    }
+    out
+}
+
 fn xor(a: &Block, b: &Block) -> Block {
     core::array::from_fn(|i| a[i] ^ b[i])
 }
@@ -230,7 +250,7 @@ impl UnoHsmPal {
         // no hash subkey and no tag correction.
         if !fix && bufs.aligned() {
             let engine_tag = match dir {
-                Dir::Decrypt(t) => *t,
+                Dir::Decrypt(t) => read_block(t),
                 Dir::Encrypt => [0; AES_BLOCK_SIZE],
             };
             let done = self
