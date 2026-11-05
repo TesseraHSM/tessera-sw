@@ -28,7 +28,7 @@
 //! }));
 //! oic.init(); // attach on fw-update, full program otherwise (reads reset reason)
 //! oic.enable();
-//! oic.send(index)?.await?;
+//! oic.send(index, queue_id)?.await?;
 //! ```
 
 mod api;

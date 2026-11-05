@@ -16,10 +16,8 @@ use tsra_fw_uno_drivers_soc::reset_type;
 use tsra_fw_uno_drivers_soc::SocResetType;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OcqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OsqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
 use tsra_fw_uno_reg_soc::io_gsram::OCQ_TAG;
 use tsra_fw_uno_reg_soc::io_gsram::OSQ_DESC;
 use tsra_fw_uno_reg_soc::io_gsram::OSQ_TAG;
@@ -44,6 +42,9 @@ struct TagSlot {
 struct OicState<const DEPTH: usize> {
     ocq_head: u16,
     osq_tail: u16,
+    /// Cached OSQ head index. Re-read from the register only when the ring
+    /// looks full.
+    osq_head_cached: u16,
     tag_free: u32,
     /// Completed detached posts, one bit per tag.
     detached_done: u32,
@@ -77,9 +78,6 @@ pub struct OicDriver<const DEPTH: usize> {
 
     /// IO_CQ array in DTCM.
     io_cq: *const IoCqEntry,
-
-    /// IO_META sidecar array in DTCM.
-    io_meta: *const IoMetaEntry,
 
     /// Mutable state protected by single-threaded access.
     state: SingleCell<OicState<DEPTH>>,
@@ -155,10 +153,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             ocq_ring: config.ocq_base as *const OcqEntry,
             ocq_tail_shadow: config.ocq_tail_shadow as *const u32,
             io_cq: config.io_cq_base as *const IoCqEntry,
-            io_meta: config.io_meta_base as *const IoMetaEntry,
             state: SingleCell::new(OicState {
                 ocq_head: 0,
                 osq_tail: 0,
+                osq_head_cached: 0,
                 tag_free,
                 detached_done: 0,
                 tags,
@@ -226,9 +224,11 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         if should_attach(fw_update, already_enabled, ours) {
             let hw_ocq_head = regs.ocq_ch[ch].head.read(OCQ_CHANNEL_HEAD::HEAD) as u16;
             let hw_osq_tail = regs.osq_ch[ch].tail.read(OSQ_CHANNEL_TAIL::TAIL) as u16;
+            let hw_osq_head = regs.osq_ch[ch].head.read(OSQ_CHANNEL_HEAD::HEAD) as u16;
             self.state.with(|s| {
                 s.ocq_head = hw_ocq_head;
                 s.osq_tail = hw_osq_tail;
+                s.osq_head_cached = hw_osq_head;
             });
             if config.interrupt {
                 let val = regs.irq_enable.read(IRQ_ENABLE::IRQ_EN) | (1 << config.channel);
@@ -290,13 +290,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
     /// Allocate a tag, post an OSQ entry for the given IO index,
     /// and ring the doorbell.
-    fn submit(&self, index: u16, detached: bool) -> HsmResult<u16> {
+    fn submit(&self, index: u16, queue_id: u8, detached: bool) -> HsmResult<u16> {
         // SAFETY: The caller supplies an active IO slot whose completion remains live until send.
         let io_cq_entry = unsafe { &*self.io_cq.add(index as usize) };
         let data_addr = io_cq_entry as *const _ as u32;
-        // SAFETY: The active IO slot has a corresponding initialized metadata entry.
-        let meta = unsafe { &*self.io_meta.add(index as usize) };
-        let queue_id = meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u8;
 
         self.state.with(|s| {
             if s.tag_free == 0 {
@@ -308,12 +305,14 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             slot.detached = detached;
             slot.index = index;
 
-            let osq_head = self.regs.osq_ch[self.channel as usize]
-                .head
-                .read(OSQ_CHANNEL_HEAD::HEAD) as u16;
-            if (s.osq_tail + 1) & Self::MASK == osq_head {
-                s.tag_free |= 1u32 << tag;
-                return Err(OicError::OSQ_FULL);
+            if (s.osq_tail + 1) & Self::MASK == s.osq_head_cached {
+                s.osq_head_cached = self.regs.osq_ch[self.channel as usize]
+                    .head
+                    .read(OSQ_CHANNEL_HEAD::HEAD) as u16;
+                if (s.osq_tail + 1) & Self::MASK == s.osq_head_cached {
+                    s.tag_free |= 1u32 << tag;
+                    return Err(OicError::OSQ_FULL);
+                }
             }
 
             // Write OSQ entry.
@@ -380,8 +379,9 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     pub fn send(
         &self,
         index: u16,
+        queue_id: u8,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(index, false)?;
+        let tag = self.submit(index, queue_id, false)?;
         Ok(self.wait_completion(tag))
     }
 
@@ -391,8 +391,8 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     /// # Errors
     ///
     /// As [`send`](Self::send) fails.
-    pub fn send_detached(&self, index: u16) -> HsmResult<()> {
-        self.submit(index, true).map(|_| ())
+    pub fn send_detached(&self, index: u16, queue_id: u8) -> HsmResult<()> {
+        self.submit(index, queue_id, true).map(|_| ())
     }
 
     /// Takes one completed detached post, freeing its tag: the IO index
@@ -425,8 +425,9 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
                 // SAFETY: The masked consumer index selects an available entry in the OCQ ring.
                 let ocq_entry = unsafe { &*self.ocq_ring.add(ocq_slot) };
 
-                let tag = ocq_entry.tag.read(OCQ_TAG::TAG) as u16;
-                let status = ocq_entry.tag.read(OCQ_TAG::STATUS) as u8;
+                let word = ocq_entry.tag.extract();
+                let tag = word.read(OCQ_TAG::TAG) as u16;
+                let status = word.read(OCQ_TAG::STATUS) as u8;
 
                 s.ocq_head = (s.ocq_head + 1) & Self::MASK;
 
