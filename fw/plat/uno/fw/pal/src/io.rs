@@ -50,7 +50,6 @@ use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_trace::tracing::*;
@@ -120,7 +119,9 @@ fn copy_sqe(index: usize) {
 ///
 /// Holds the slot index for the lifetime of a single IO operation.
 /// Metadata (controller_id, queue_id, queue_index) is stored in
-/// `IO_META[index]`, written by the IIC driver at recv time.
+/// `IO_META[index]`, written by the IIC driver at recv time; the IO reads
+/// the partition and queue it needs from there once, when it is created,
+/// since IO GSRAM is read uncached and both are wanted many times per IO.
 #[derive(Debug)]
 pub struct UnoHsmIo {
     /// IO_SQ slot index. Host IO uses `0..ADMIN_IO_INDEX`; the reserved
@@ -128,6 +129,10 @@ pub struct UnoHsmIo {
     /// for PAL-internal provisioning crypto. So the valid range is
     /// `0..=ADMIN_IO_INDEX`, not just the host range.
     index: u16,
+    /// Partition the IO targets, from `IO_META[index]` (see [`Self::pid`]).
+    pid: HsmPartId,
+    /// Source queue, from `IO_META[index]` (see [`Self::queue_id`]).
+    queue_id: u16,
 }
 
 impl UnoHsmIo {
@@ -136,12 +141,35 @@ impl UnoHsmIo {
         self.index
     }
 
-    /// Returns the queue ID from IO_META.
+    /// Returns the queue ID read from IO_META when the IO was created.
     fn queue_id(&self) -> u16 {
-        if self.index as u32 >= IO_META_COUNT {
-            return 0;
+        self.queue_id
+    }
+
+    /// An IO over slot `index`, taking its partition and queue from the
+    /// slot's `IO_META` entry.
+    fn from_meta(index: u16) -> Self {
+        if index as u32 >= IO_META_COUNT {
+            return Self {
+                index,
+                pid: HsmPartId::from(crate::pal::NO_PARTITION),
+                queue_id: 0,
+            };
         }
-        self.io_meta().queue.read(IO_META_QUEUE::QUEUE_ID) as u16
+        let meta = &IO_Q.io_meta[index as usize];
+        let axi_id = meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
+        Self {
+            index,
+            // IO_META records the routing axi_id the hardware reported;
+            // partitions are indexed by the dense PcieFunction id, so
+            // translate here. An axi_id naming no function yields an
+            // out-of-range id, which the partition lookup rejects with
+            // `InvalidArg` rather than aliasing a valid slot.
+            pid: HsmPartId::from(
+                crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
+            ),
+            queue_id: meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
+        }
     }
 
     /// Constructs a **bare, unscrubbed** IO handle over the dedicated admin
@@ -168,17 +196,14 @@ impl UnoHsmIo {
     /// [`ADMIN_IO_INDEX`]: crate::alloc::ADMIN_IO_INDEX
     /// [`UnoScopedAlloc`]: crate::alloc::UnoScopedAlloc
     pub(crate) fn admin_no_scrub(pid: HsmPartId) -> Self {
-        let io = Self {
-            index: ADMIN_IO_INDEX,
-        };
         // CONTROLLER_ID holds the hardware axi_id (what IIC `recv` records for
         // a host IO), so an internally created admin IO stores the same
         // encoding for `pid()` to round-trip it back to `pid`.
         let axi_id = crate::pal::pfn_to_axi_id(u8::from(pid)).unwrap_or(crate::pal::NO_PARTITION);
-        io.io_meta()
+        IO_Q.io_meta[ADMIN_IO_INDEX as usize]
             .ctlr
             .write(IO_META_CTLR::CONTROLLER_ID.val(axi_id as u32));
-        io
+        Self::from_meta(ADMIN_IO_INDEX)
     }
 
     /// Constructs an IO handle over the dedicated self-test slot
@@ -199,38 +224,17 @@ impl UnoHsmIo {
     ///
     /// [`SELF_TEST_IO_INDEX`]: crate::alloc::SELF_TEST_IO_INDEX
     pub(crate) fn self_test() -> Self {
-        Self {
-            index: SELF_TEST_IO_INDEX,
-        }
+        Self::from_meta(SELF_TEST_IO_INDEX)
     }
 
-    /// Returns a reference to the IO_META entry for this slot.
-    ///
-    /// Only valid for host and admin slots — `IO_META` has
-    /// [`IO_META_COUNT`] entries (host `0..32` plus [`ADMIN_IO_INDEX`]).
-    /// The self-test slot ([`SELF_TEST_IO_INDEX`]) has no `IO_META` entry;
-    /// callers must guard against it (see [`pid`](HsmIo::pid)).
-    #[inline]
-    fn io_meta(&self) -> &IoMetaEntry {
-        &IO_Q.io_meta[self.index as usize]
-    }
-
-    /// Returns the partition ID for this IO.
-    ///
-    /// IO_META records the routing axi_id the hardware reported; partitions
-    /// are indexed by the dense PcieFunction id, so translate here. An axi_id
-    /// naming no function yields an out-of-range id, which the partition
-    /// lookup rejects with `InvalidArg` rather than aliasing a valid slot.
+    /// Returns the partition ID for this IO, resolved from the axi_id in
+    /// IO_META when the IO was created (see [`from_meta`](Self::from_meta)).
     ///
     /// The self-test slot ([`SELF_TEST_IO_INDEX`]) has no `IO_META` entry or
     /// partition context, so it returns the invalid `NO_PARTITION` sentinel
     /// rather than aliasing a real partition or indexing `IO_META`.
     pub(crate) fn pid(&self) -> HsmPartId {
-        if self.index as u32 >= IO_META_COUNT {
-            return HsmPartId::from(crate::pal::NO_PARTITION);
-        }
-        let axi_id = self.io_meta().ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
-        HsmPartId::from(crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION))
+        self.pid
     }
 }
 
@@ -449,7 +453,7 @@ impl UnoHsmPal {
         if (index as u32) < IO_SQ_COUNT {
             copy_sqe(index as usize);
         }
-        UnoHsmIo { index }
+        UnoHsmIo::from_meta(index)
     }
 
     /// Recycles an IO received during a PCIe reset without dispatching it:
