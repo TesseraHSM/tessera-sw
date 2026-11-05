@@ -30,6 +30,7 @@
 mod crash;
 mod ipc;
 mod mailbox;
+mod mem;
 mod shared_status;
 
 use core::ptr::addr_of;
