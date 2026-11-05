@@ -46,7 +46,7 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| -> HsmResult<usize> {
-        let req = TborAesXtsGenerateKeyReq::decode(cmd_buf.request())?;
+        let req = TborAesXtsGenerateKeyReq::decode_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         let scope = HsmKeyScope(req.scope().0);
         validate_active_session(pal, io, sess_id)?;

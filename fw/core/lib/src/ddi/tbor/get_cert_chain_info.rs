@@ -32,7 +32,7 @@ pub(crate) async fn handle<P: HsmPal>(
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    let req = TborGetCertChainInfoReq::decode(cmd_buf.request())?;
+    let req = TborGetCertChainInfoReq::decode_cmd(cmd_buf)?;
     let slot = HsmCertSlot(req.slot_id());
 
     let info = if slot == HsmCertSlot::PartOwner {

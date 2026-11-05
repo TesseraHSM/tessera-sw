@@ -145,7 +145,7 @@ pub(crate) async fn handle<P: HsmPal>(
     // Session/state gating + masking-key routing use only the shared
     // `decode` view.  Both ids are `Copy`, so they outlive the view.
     let (sender_mk_id, tmk_mk_id): (HsmKeyId, HsmKeyId) = {
-        let req = TborDarcTmkExportReq::decode(cmd_buf.request())?;
+        let req = TborDarcTmkExportReq::decode_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -190,7 +190,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let sender_blob = alloc.dma_alloc(MASKED_KEX_KEY_LEN)?;
         let tmk_blob = alloc.dma_alloc(MASKED_TMK_LEN)?;
         {
-            let req = TborDarcTmkExportReq::decode(cmd_buf.request())?;
+            let req = TborDarcTmkExportReq::decode_cmd(cmd_buf)?;
             sender_blob.copy_from_slice(req.masked_sender_key());
             tmk_blob.copy_from_slice(req.masked_tmk());
         }

@@ -56,7 +56,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // destructured view: scalar `session_id` by value, plus
         // `psk_envelope` as `&mut HsmDmaBuf` so `aead_open` can decrypt the
         // envelope in place — no scratch copy.
-        let req = TborPskChangeReq::decode_mut(cmd_buf.request_mut())?;
+        let req = TborPskChangeReq::decode_mut_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
 
         // Target slot is implicit in the session role; no cross-role

@@ -180,7 +180,7 @@ pub(crate) async fn handle<P: HsmPal>(
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    let req = TborDarcKexKeyGenReq::decode(cmd_buf.request())?;
+    let req = TborDarcKexKeyGenReq::decode_cmd(cmd_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
 
     // Losslessly map the wire `KeyScope` onto the PAL `HsmKeyScope`

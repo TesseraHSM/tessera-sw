@@ -215,7 +215,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     async {
-        let req = TborUnwrapKeyReq::decode(cmd_buf.request())?;
+        let req = TborUnwrapKeyReq::decode_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         let scope = HsmKeyScope(req.scope().0);
         validate_active_session(pal, io, sess_id)?;

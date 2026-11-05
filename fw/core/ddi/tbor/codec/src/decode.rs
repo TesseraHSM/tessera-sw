@@ -79,6 +79,22 @@ impl<'a> RequestView<'a> {
         self.head[0].to_ne_bytes()[i]
     }
 
+    /// The leading words [`parse()`](Self::parse) read, as
+    /// [`from_head()`](Self::from_head) takes them.
+    #[inline]
+    pub fn head_words(&self) -> [u32; 8] {
+        self.head
+    }
+
+    /// The view [`parse()`](Self::parse) returned for `buf`, rebuilt from
+    /// the words it read (see [`head_words()`](Self::head_words)) without
+    /// reading `buf` or checking it again: `head` must come from parsing
+    /// these same bytes, unchanged since.
+    #[inline]
+    pub fn from_head(buf: &'a HsmDmaBuf, head: [u32; 8]) -> Self {
+        Self { buf, head }
+    }
+
     /// Protocol version.
     #[inline]
     pub fn version(&self) -> u8 {

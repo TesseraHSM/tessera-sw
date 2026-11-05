@@ -46,7 +46,7 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     async {
-        let req = TborMlDsaVerifyReq::decode(cmd_buf.request())?;
+        let req = TborMlDsaVerifyReq::decode_cmd(cmd_buf)?;
 
         let param_set =
             HsmMlDsaParamSet::from_pub_key_len(req.pub_key().len()).ok_or(HsmError::InvalidArg)?;

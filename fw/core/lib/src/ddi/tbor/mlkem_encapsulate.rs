@@ -58,7 +58,7 @@ pub(crate) async fn handle<P: HsmPal>(
 ) -> HsmResult<usize> {
     async {
         let base = cmd_buf.request().as_ptr() as usize;
-        let req = TborMlKemEncapsulateReq::decode_mut(cmd_buf.request_mut())?;
+        let req = TborMlKemEncapsulateReq::decode_mut_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
         let scope = req.scope;

@@ -41,7 +41,7 @@ pub(crate) async fn handle<P: HsmPal>(
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    let req = TborGetUnwrappingKeyReq::decode(cmd_buf.request())?;
+    let req = TborGetUnwrappingKeyReq::decode_cmd(cmd_buf)?;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
 
     validate_active_session(pal, io, sess_id)?;

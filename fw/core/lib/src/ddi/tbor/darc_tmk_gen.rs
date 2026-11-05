@@ -61,7 +61,7 @@ pub(crate) async fn handle<P: HsmPal>(
     // Session/state gating + masking-key routing use only the shared
     // `decode` view; the resolved id is `Copy`, so it outlives the view.
     let sdmk_id: HsmKeyId = {
-        let req = TborDarcTmkGenReq::decode(cmd_buf.request())?;
+        let req = TborDarcTmkGenReq::decode_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 

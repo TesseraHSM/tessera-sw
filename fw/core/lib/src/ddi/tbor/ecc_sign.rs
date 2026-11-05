@@ -44,7 +44,7 @@ pub(crate) async fn handle<P: HsmPal>(
     async {
         let base = cmd_buf.request().as_ptr() as usize;
         let (curve, key_at, key_len, digest_at, digest_len) = {
-            let req = TborEccSignReq::decode_mut(cmd_buf.request_mut())?;
+            let req = TborEccSignReq::decode_mut_cmd(cmd_buf)?;
             let sess_id = HsmSessId::from(u16::from(req.session_id));
             validate_active_session(pal, io, sess_id)?;
             if ![

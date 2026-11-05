@@ -151,7 +151,7 @@ pub(crate) async fn handle<P: HsmPal>(
     // `decode` view.  Every value captured out is `Copy`, so it outlives
     // the borrow.
     let (tmk_mk_id, key_mk_id): (HsmKeyId, HsmKeyId) = {
-        let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
+        let req = TborDarcKeyWrapReq::decode_cmd(cmd_buf)?;
         let sess_id = tsra_fw_hsm_pal_traits::HsmSessId::from(u16::from(req.session_id()));
         validate_crypto_officer_active_session(pal, io, sess_id)?;
 
@@ -184,7 +184,7 @@ pub(crate) async fn handle<P: HsmPal>(
             // ── Recover the 32-byte TMK from its masked envelope. ──
             let masked_tmk = alloc.dma_alloc(MASKED_TMK_LEN)?;
             {
-                let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
+                let req = TborDarcKeyWrapReq::decode_cmd(cmd_buf)?;
                 masked_tmk.copy_from_slice(req.masked_tmk());
             }
             let tmk_masking_key = pal.vault_key(io, tmk_mk_id)?;
@@ -206,12 +206,12 @@ pub(crate) async fn handle<P: HsmPal>(
                 // Unmask the local EC key: recover the vault scalar (secret)
                 // plus its curve, vault attributes, and masked-key label.
                 let masked_key_len = {
-                    let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
+                    let req = TborDarcKeyWrapReq::decode_cmd(cmd_buf)?;
                     req.masked_key().len()
                 };
                 let masked_key = alloc.dma_alloc(masked_key_len)?;
                 {
-                    let req = TborDarcKeyWrapReq::decode(cmd_buf.request())?;
+                    let req = TborDarcKeyWrapReq::decode_cmd(cmd_buf)?;
                     masked_key.copy_from_slice(req.masked_key());
                 }
                 let key_masking_key = pal.vault_key(io, key_mk_id)?;

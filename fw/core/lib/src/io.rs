@@ -497,8 +497,9 @@ impl<P: HsmPal> Hsm<P> {
                 HostStatus::DMA_TXN_ERROR,
             )?;
 
-        // Parse once before growing or reborrowing the request storage.
-        let (opcode, body_sess_id) = {
+        // Parse once before growing or reborrowing the request storage; the
+        // handler's decode reuses the words the parse read.
+        let (opcode, body_sess_id, head) = {
             let req_view = TborRequestView::parse(&allocation.buffer_mut()[..params.src_len])
                 .op_err(
                     "core",
@@ -511,7 +512,7 @@ impl<P: HsmPal> Hsm<P> {
             } else {
                 None
             };
-            (op, sid)
+            (op, sid, req_view.head_words())
         };
 
         if matches!(
@@ -536,6 +537,7 @@ impl<P: HsmPal> Hsm<P> {
         }
         let mut exchange = HsmCmdBuf::new(allocation.buffer_mut(), params.src_len, params.dst_len)
             .op_status(HostStatus::INTERNAL_ERROR)?;
+        exchange.set_request_head(head);
         let session_ctrl = SessionCtrl::from_tbor_opcode(opcode);
         let dispatch_result =
             if Self::validate_tbor_session_flags(session_ctrl, params.session_flags).is_err() {

@@ -294,7 +294,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // sealing key in the IO-scoped request buffer.
         async {
             let sndr_priv = {
-                let req_mut = TborSdCreateRemoteBackupReq::decode_mut(cmd_buf.request_mut())?;
+                let req_mut = TborSdCreateRemoteBackupReq::decode_mut_cmd(cmd_buf)?;
                 let masking_key = pal.vault_key(io, mk_key_id)?;
                 let view = unmask(pal, io, masking_key, req_mut.masked_sealing_key).await?;
                 if !matches!(view.key_kind, HsmVaultKeyKind::SdSealing) {

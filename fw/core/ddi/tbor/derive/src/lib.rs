@@ -73,11 +73,36 @@ fn on_struct(
     let s0 = format_ident!("{}S0", schema.name);
 
     let validation = codegen_view::gen_validation_standalone(&schema);
+    let is_request = matches!(schema.kind, schema::MessageKind::Request { .. });
 
-    let decode_fn = quote! {
-        pub fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
-            #validation
-            Ok(#view_name::from_validated(buf))
+    // A request decodes through one body that takes the leading words a
+    // parse of the buffer already read, if the caller has them, so the
+    // IO layer's parse need not be redone: `decode` passes none, and
+    // `decode_cmd` those an `HsmCmdBuf` carries.
+    let decode_fn = if is_request {
+        quote! {
+            pub fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                Self::decode_head(buf, None)
+            }
+
+            /// As `decode`, given in `__head` the leading words a parse of
+            /// these same bytes read (`RequestView::head_words`), if any.
+            pub fn decode_head(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf, __head: Option<[u32; 8]>) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                #validation
+                Ok(#view_name::from_validated(buf))
+            }
+
+            /// `decode` of the command's request.
+            pub fn decode_cmd<'b>(cmd: &'b tsra_fw_hsm_pal_traits::HsmCmdBuf<'_>) -> Result<#view_name<'b>, tsra_fw_hsm_pal_traits::HsmError> {
+                Self::decode_head(cmd.request(), cmd.request_head())
+            }
+        }
+    } else {
+        quote! {
+            pub fn decode(buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                #validation
+                Ok(#view_name::from_validated(buf))
+            }
         }
     };
 
@@ -86,14 +111,30 @@ fn on_struct(
     // `codegen_view_mut`: a full validation pass via a shared
     // reborrow, then a pipelined `split_at_mut` that hands out
     // per-field borrows at the parent buffer's lifetime.
-    let decode_mut_fn = if let Some(body) = codegen_view_mut::gen_decode_mut_body(&schema) {
-        quote! {
+    let decode_mut_fn = match codegen_view_mut::gen_decode_mut_body(&schema) {
+        Some(body) if is_request => quote! {
+            pub fn decode_mut(buf: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_mut_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                Self::decode_mut_head(buf, None)
+            }
+
+            /// As `decode_mut`, given in `__head` the leading words a parse
+            /// of these same bytes read (`RequestView::head_words`), if any.
+            pub fn decode_mut_head(buf: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf, __head: Option<[u32; 8]>) -> Result<#view_mut_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
+                #body
+            }
+
+            /// `decode_mut` of the command's request.
+            pub fn decode_mut_cmd<'b>(cmd: &'b mut tsra_fw_hsm_pal_traits::HsmCmdBuf<'_>) -> Result<#view_mut_name<'b>, tsra_fw_hsm_pal_traits::HsmError> {
+                let head = cmd.request_head();
+                Self::decode_mut_head(cmd.request_mut(), head)
+            }
+        },
+        Some(body) => quote! {
             pub fn decode_mut(buf: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf) -> Result<#view_mut_name<'_>, tsra_fw_hsm_pal_traits::HsmError> {
                 #body
             }
-        }
-    } else {
-        quote! {}
+        },
+        None => quote! {},
     };
 
     let encode_fn = match schema.kind {

@@ -253,8 +253,15 @@ fn gen_validation(schema: &Schema) -> TokenStream {
     let layout = TocLayout::compute(&schema.fields);
 
     let (parse_call, _header_len_val, opcode_check) = match schema.kind {
+        // `__head`: the leading words a parse of `buf` already read, if the
+        // caller has them (see `RequestView::from_head`).
         MessageKind::Request { opcode } => (
-            quote! { tsra_fw_ddi_tbor::RequestView::parse(buf)? },
+            quote! {
+                match __head {
+                    Some(__h) => tsra_fw_ddi_tbor::RequestView::from_head(buf, __h),
+                    None => tsra_fw_ddi_tbor::RequestView::parse(buf)?,
+                }
+            },
             quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
             quote! {
                 if raw.opcode() != #opcode {

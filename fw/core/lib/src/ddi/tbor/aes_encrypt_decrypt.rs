@@ -83,7 +83,7 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     async {
-        let req = TborAesEncryptDecryptReq::decode(cmd_buf.request())?;
+        let req = TborAesEncryptDecryptReq::decode_cmd(cmd_buf)?;
         let base = cmd_buf.request().as_ptr() as usize;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
         validate_active_session(pal, io, sess_id)?;

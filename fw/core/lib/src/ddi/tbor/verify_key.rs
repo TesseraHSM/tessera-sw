@@ -38,7 +38,7 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     {
-        let req = TborVerifyKeyReq::decode_mut(cmd_buf.request_mut())?;
+        let req = TborVerifyKeyReq::decode_mut_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
 

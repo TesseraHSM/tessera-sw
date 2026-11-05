@@ -43,7 +43,7 @@ pub(crate) async fn handle<P: HsmPal>(
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    let req = TborSessionCloseReq::decode(cmd_buf.request())?;
+    let req = TborSessionCloseReq::decode_cmd(cmd_buf)?;
     let session_id: u16 = req.session_id().into();
     let id = HsmSessId::from(session_id);
     // SECURITY: This is a destructive operation gated only by

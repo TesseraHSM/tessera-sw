@@ -2185,7 +2185,7 @@ mod tests {
             }
             let mut cmd_buf =
                 HsmCmdBuf::new(dma(&mut storage), request_len + gap, host_capacity).unwrap();
-            let request = TborRsaModExpReq::decode(cmd_buf.request()).unwrap();
+            let request = TborRsaModExpReq::decode_cmd(&cmd_buf).unwrap();
             let y_address = request.y().as_ptr();
             assert!(request.masked_key().as_ptr() as usize >= y_address as usize + y.len());
             let outcome = rsa_mod_exp::handle(&pal, &io, &mut cmd_buf).await;

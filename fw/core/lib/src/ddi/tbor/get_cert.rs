@@ -37,7 +37,7 @@ pub(crate) async fn handle<P: HsmPal>(
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
-    let req = TborGetCertReq::decode(cmd_buf.request())?;
+    let req = TborGetCertReq::decode_cmd(cmd_buf)?;
     let slot = HsmCertSlot(req.slot_id());
     let cert_id = req.cert_id();
 

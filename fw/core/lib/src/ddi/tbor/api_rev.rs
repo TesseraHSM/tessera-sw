@@ -28,7 +28,7 @@ pub(crate) const MAX_PROTOCOL_VERSION: u8 = PROTOCOL_VERSION;
 /// `API_REV`. This handler validates the typed request and encodes the
 /// `(MIN_PROTOCOL_VERSION, MAX_PROTOCOL_VERSION)` response.
 pub(crate) fn handle(cmd_buf: &mut HsmCmdBuf<'_>) -> HsmResult<usize> {
-    TborApiRevReq::decode(cmd_buf.request())?;
+    TborApiRevReq::decode_cmd(cmd_buf)?;
     let frame = TborApiRevResp::encode(cmd_buf.buffer_mut(), 0, false)?
         .min_ver(MIN_PROTOCOL_VERSION)?
         .max_ver(MAX_PROTOCOL_VERSION)?

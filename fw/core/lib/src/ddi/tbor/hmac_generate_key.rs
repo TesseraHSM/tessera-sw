@@ -112,7 +112,7 @@ pub(crate) async fn handle<P: HsmPal>(
     cmd_buf: &mut HsmCmdBuf<'_>,
 ) -> HsmResult<usize> {
     pal.alloc_scoped_async(io, async |alloc| -> HsmResult<usize> {
-        let req = TborHmacGenerateKeyReq::decode(cmd_buf.request())?;
+        let req = TborHmacGenerateKeyReq::decode_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id()));
 
         // Losslessly map the wire `KeyScope` onto the PAL `HsmKeyScope`

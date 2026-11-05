@@ -22,6 +22,9 @@ pub struct HsmCmdBuf<'a> {
     buffer: &'a mut HsmDmaBuf,
     request_len: usize,
     response_capacity: usize,
+    /// The request's leading words as the IO layer's parse of it read
+    /// them, while nothing has had mutable access to the buffer since.
+    request_head: Option<[u32; 8]>,
 }
 
 impl<'a> HsmCmdBuf<'a> {
@@ -38,7 +41,21 @@ impl<'a> HsmCmdBuf<'a> {
             buffer,
             request_len,
             response_capacity,
+            request_head: None,
         })
+    }
+
+    /// Record the leading words a parse of the request just read, so a
+    /// handler's decode need not read them out of DMA memory again. Any
+    /// mutable access to the buffer forgets them.
+    pub fn set_request_head(&mut self, head: [u32; 8]) {
+        self.request_head = Some(head);
+    }
+
+    /// The words [`set_request_head`](Self::set_request_head) recorded, if
+    /// the buffer has not been borrowed mutably since.
+    pub fn request_head(&self) -> Option<[u32; 8]> {
+        self.request_head
     }
 
     /// The original request length, excluding allocation capacity.
@@ -48,6 +65,7 @@ impl<'a> HsmCmdBuf<'a> {
 
     /// Mutable request access for in-place envelope decoding.
     pub fn request_mut(&mut self) -> &mut HsmDmaBuf {
+        self.request_head = None;
         &mut self.buffer[..self.request_len]
     }
 
@@ -55,6 +73,7 @@ impl<'a> HsmCmdBuf<'a> {
     ///
     /// Existing input borrows must end before this exclusive borrow is available.
     pub fn buffer_mut(&mut self) -> &mut HsmDmaBuf {
+        self.request_head = None;
         self.buffer
     }
 
@@ -68,6 +87,7 @@ impl<'a> HsmCmdBuf<'a> {
         &mut self,
         encode: impl FnOnce(&mut HsmDmaBuf) -> HsmResult<usize>,
     ) -> HsmResult<usize> {
+        self.request_head = None;
         let len = encode(self.buffer)?;
         self.response(len)?;
         Ok(len)

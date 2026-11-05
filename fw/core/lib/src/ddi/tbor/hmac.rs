@@ -47,7 +47,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // `decode_mut` exposes `masked_key` as `&mut` (a slice of the request
         // buffer) so `unmask` can decrypt it in place, while `msg` is a
         // disjoint shared borrow.
-        let req = TborHmacReq::decode_mut(cmd_buf.request_mut())?;
+        let req = TborHmacReq::decode_mut_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
 

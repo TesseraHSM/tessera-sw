@@ -44,7 +44,7 @@ pub(crate) async fn handle<P: HsmPal>(
 ) -> HsmResult<usize> {
     let base = cmd_buf.request().as_ptr() as usize;
     let output_len = {
-        let req = TborRsaModExpReq::decode_mut(cmd_buf.request_mut())?;
+        let req = TborRsaModExpReq::decode_mut_cmd(cmd_buf)?;
         let sess_id = HsmSessId::from(u16::from(req.session_id));
         validate_active_session(pal, io, sess_id)?;
         let require_sign = match RsaOp(req.op_type) {
