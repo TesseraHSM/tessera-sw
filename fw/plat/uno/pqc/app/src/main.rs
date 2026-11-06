@@ -965,11 +965,11 @@ fn main() -> ! {
     // SAFETY: called once, before any request can be serviced, with a
     // region this core alone owns.
     unsafe {
-        // ML-DSA-87 keeps at most all 56 of its matrix elements here,
-        // packed three bytes to a coefficient: 42 KB. No parameter set
-        // needs more. The rest of each core's 56 KB is its second request
-        // lane (see `mailbox`). (The stride used to be 0x1B000, of which
-        // 41 KB per core was never addressable.)
+        // ML-DSA-87 spills at most 40 of its 56 matrix elements, packed
+        // three bytes to a coefficient: 30 KB. No parameter set needs more.
+        // The rest of each core's 56 KB is its second request lane (see
+        // `mailbox`). (The stride used to be 0x1B000, of which 41 KB per
+        // core was never addressable.)
         pqc_ml::spill::init(
             (mailbox::FP_WINDOW_BASE + id as usize * mailbox::FP_WINDOW_STRIDE) as *mut i32,
             mailbox::LANE2_OFFSET / 4,

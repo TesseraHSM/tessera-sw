@@ -90,10 +90,9 @@ pub fn sign_internal(
 
     // The near regions and the spill keep their elements across
     // signatures: a signature with the key (rho) and layout the last one on
-    // this core used finds them there. The work buffer goes with each
-    // request, so its elements, packed, also go to the spill after the
-    // spilled ones, and a signature that finds them copies them back. Any
-    // other signature forgets them before it overwrites them.
+    // this core used finds them there, and derives only the work buffer's,
+    // which go with each request's buffer. Any other forgets them before it
+    // overwrites them.
     let a_cache = crate::spill::ACache {
         rho: *rho,
         layout: [
@@ -158,26 +157,12 @@ pub fn sign_internal(
                 } else {
                     crate::spill::matrix_slot(t - held)
                 };
-                // A packed work-buffer element's copy, past the spilled
-                // elements.
-                let copy = if whole || t >= cache_slots {
-                    None
-                } else {
-                    crate::spill::matrix_slot(k * l - held + t)
-                };
                 // Kept whole: derived straight into its slot the first
                 // time, and used from there.
                 let kept_whole = whole && t < cache_slots;
-                // Already in its near region or spill slot, or a copy in
-                // the spill: from an earlier attempt, or from an earlier
-                // signature with this matrix.
-                let have = a_cached
-                    || (reuse
-                        && if t < cache_slots {
-                            copy.is_some()
-                        } else {
-                            t < held || spill.is_some()
-                        });
+                // Already in its near region or spill slot: from an earlier
+                // attempt, or from an earlier signature with this matrix.
+                let have = a_cached || (reuse && t >= cache_slots && (t < held || spill.is_some()));
                 if kept_whole || !have || (t >= held && spill.is_none()) {
                     // Otherwise the first attempt, or an element with
                     // nowhere to be kept: derive it.
@@ -196,13 +181,10 @@ pub fn sign_internal(
                     }
                     if !have && !kept_whole {
                         if t < cache_slots {
-                            let slot = &mut a_polys.as_flattened_mut()[t * PACKED_WORDS..];
-                            crate::spill::pack(slot, &c_hat);
-                            if let Some(p) = copy {
-                                // SAFETY: `p` is this core's own slot, sized
-                                // for one packed element by `spill::init`.
-                                unsafe { crate::spill::store_packed_words(p, slot) };
-                            }
+                            crate::spill::pack(
+                                &mut a_polys.as_flattened_mut()[t * PACKED_WORDS..],
+                                &c_hat,
+                            );
                         } else if t < held {
                             crate::spill::pack(near_elem(near1, near2, t - cache_slots), &c_hat);
                         } else if let Some(p) = spill {
@@ -220,19 +202,7 @@ pub fn sign_internal(
                             unsafe { crate::spill::load_packed_words(&mut c_hat, p) };
                             &c_hat
                         }
-                        None if t < cache_slots => {
-                            if let (false, Some(p)) = (a_cached, copy) {
-                                // SAFETY: as above; the signature that left
-                                // the matrix wrote it.
-                                unsafe {
-                                    crate::spill::load_packed_words(
-                                        &mut a_polys.as_flattened_mut()[t * PACKED_WORDS..],
-                                        p,
-                                    )
-                                };
-                            }
-                            &a_polys.as_flattened()[t * PACKED_WORDS..]
-                        }
+                        None if t < cache_slots => &a_polys.as_flattened()[t * PACKED_WORDS..],
                         None => near_elem(near1, near2, t - cache_slots),
                     };
                     if j == 0 {
