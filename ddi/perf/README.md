@@ -132,23 +132,24 @@ the file is empty.
 | `min_us`, `p50_us`, `p90_us`, `p99_us`, `max_us` | Full-window minimum and maximum; percentiles from the reservoir sample, in µs |
 | `errors` | Failed requests in any phase; a run with errors exits non-zero |
 
-## Input rotation and host verification
+## Input selection and host verification
 
-Keyed operations rotate through `--keys` keys and each thread rotates through
-`--messages` messages, so nothing can be cached or specialized across
-requests. `MlDsaVerify`, `MlKemEncapsulate` and `MlKemDecapsulate` inputs are
-made once on the host and shared by all threads, each thread starting at a
-different offset.
+Each timed request of a keyed operation draws its key at random from `--keys`
+keys and its message from its thread's `--messages` messages, as a real
+workload may send any key and any message: nothing about one request tells
+the device which key or message the next will use, so nothing can be cached
+or specialized across requests. `MlDsaVerify`, `MlKemEncapsulate` and
+`MlKemDecapsulate` inputs are made once on the host and shared by all threads.
 
-Before any timing, each selected operation runs `2 × --keys` times and every
-response is checked against a host reference (`tsra_crypto`): ECDSA and raw
-RSA signatures must verify with the public key, AES-CBC output must match the
-host's, device ML-DSA signatures must verify on the host, and `MlDsaVerify`
-must accept host signatures (and, in this check, reject a tampered one).
-Generated PQC keys must have the parameter set's lengths, and each keygen
-operation also uses the exact checked key response once. CBC runs require at
-least as many messages as keys so every key is exercised. ML-KEM shared secrets
-come back masked under a key the host cannot derive, so KEM results are checked
-for shape only. Any mismatch fails the run. `--verify-all` checks every timed
-response too; it adds host work between requests, so leave it off for the
-numbers themselves.
+Before any timing, each selected operation runs `2 × --keys` times, taking the
+keys in turn so that every key is used, and every response is checked against a
+host reference (`tsra_crypto`): ECDSA and raw RSA signatures must verify with
+the public key, AES-CBC output must match the host's, device ML-DSA signatures
+must verify on the host, and `MlDsaVerify` must accept host signatures (and, in
+this check, reject a tampered one). Generated PQC keys must have the parameter
+set's lengths, and each keygen operation also uses the exact checked key
+response once. CBC runs require at least as many messages as keys so every key
+is exercised. ML-KEM shared secrets come back masked under a key the host
+cannot derive, so KEM results are checked for shape only. Any mismatch fails
+the run. `--verify-all` checks every timed response too; it adds host work
+between requests, so leave it off for the numbers themselves.

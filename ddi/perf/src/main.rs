@@ -10,13 +10,14 @@
 //! window. Only requests that complete inside the window count, and only
 //! the device call is timed.
 //!
-//! Inputs vary per request: keyed operations rotate through `--keys`
-//! distinct keys and each thread through `--messages` distinct messages,
-//! so nothing can be cached or specialized across requests. Before any
-//! timing, every selected operation runs against each key and is checked
-//! against a host reference (OpenSSL through `tsra_crypto`); a device that
-//! returns wrong results fails the run instead of producing numbers.
-//! `--verify-all` checks every timed response as well.
+//! Inputs vary per request: each timed request of a keyed operation draws
+//! its key at random from `--keys` distinct keys and its message from its
+//! thread's `--messages` distinct messages, so nothing can be cached or
+//! specialized across requests. Before any timing, every selected operation
+//! runs against each key in turn and is checked against a host reference
+//! (OpenSSL through `tsra_crypto`); a device that returns wrong results
+//! fails the run instead of producing numbers. `--verify-all` checks every
+//! timed response as well.
 
 mod bench;
 mod ops;
@@ -72,11 +73,11 @@ pub(crate) struct RunArgs {
     #[arg(long, default_value_t = 30)]
     pub(crate) test_seconds: u64,
 
-    /// Distinct keys per key type; requests rotate through them.
+    /// Distinct keys per key type; each request draws one at random.
     #[arg(long, default_value_t = 8)]
     pub(crate) keys: usize,
 
-    /// Distinct messages per thread; requests rotate through them.
+    /// Distinct messages per thread; each request draws one at random.
     #[arg(long, default_value_t = 64)]
     pub(crate) messages: usize,
 

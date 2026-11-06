@@ -10,6 +10,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clap::ValueEnum;
+use rand::rngs::SmallRng;
 use rand::RngExt;
 use tsra_crypto::AesCbcAlgo;
 use tsra_crypto::AesKey;
@@ -393,6 +394,19 @@ impl Pools {
     }
 }
 
+/// How a [`Worker`] picks each request's key and message.
+#[derive(Clone, Copy)]
+pub(crate) enum Pick {
+    /// Every key in turn, each meeting every message: for the pre-flight,
+    /// which must check every key.
+    Sweep,
+    /// A key and a message drawn at random for every request, as a real
+    /// workload may send any key and any message: nothing about one request
+    /// tells the device which the next will use, so caching them gains
+    /// nothing.
+    Random,
+}
+
 /// One thread's device handles and inputs.
 pub(crate) struct Worker<'e> {
     env: &'e Env,
@@ -401,9 +415,11 @@ pub(crate) struct Worker<'e> {
     /// This thread's own fd for MBOR commands.
     mbor: Option<<TsraDdi as Ddi>::Dev>,
     pools: Pools,
-    tid: u16,
-    /// Requests issued; drives input rotation.
+    pick: Pick,
+    /// Requests issued; drives the [`Pick::Sweep`] order.
     seq: u64,
+    /// Draws [`Pick::Random`] inputs.
+    rng: SmallRng,
     /// The indices [`Self::rotate_shared`] returned last, so a pre-flight
     /// follow-up can reuse that request's inputs.
     last_shared: (usize, usize),
@@ -439,11 +455,12 @@ fn same_as_first(
 }
 
 impl<'e> Worker<'e> {
-    /// Open this thread's handles and build its inputs for `kinds`.
+    /// Open this thread's handles and build its inputs for `kinds`, to be
+    /// picked from as `pick` says.
     pub(crate) fn new(
         env: &'e Env,
         args: &RunArgs,
-        tid: usize,
+        pick: Pick,
         kinds: &[OpKind],
     ) -> Result<Self, String> {
         let own = if kinds.contains(&OpKind::TborGetApiRev) {
@@ -467,27 +484,34 @@ impl<'e> Worker<'e> {
             own,
             mbor,
             pools: Pools::new(env, args, kinds)?,
-            tid: tid as u16,
+            pick,
             seq: 0,
+            rng: rand::make_rng(),
             last_shared: (0, 0),
             last_mldsa_keygen: None,
             last_mlkem_keygen: None,
         })
     }
 
-    /// Next `(key, message)` indices: every key meets every message.
+    /// Next `(key, message)` indices; see [`Pick`].
     fn rotate(&mut self, keys: usize, msgs: usize) -> (usize, usize) {
-        let n = self.seq as usize;
-        self.seq += 1;
-        (n % keys, (n / keys) % msgs)
+        match self.pick {
+            Pick::Sweep => {
+                let n = self.seq as usize;
+                self.seq += 1;
+                (n % keys, (n / keys) % msgs)
+            }
+            Pick::Random => (
+                self.rng.random_range(0..keys),
+                self.rng.random_range(0..msgs),
+            ),
+        }
     }
 
-    /// [`Self::rotate`] over inputs all threads share: each thread starts at
-    /// its own key and message, so concurrent requests differ.
+    /// [`Self::rotate`] over inputs all threads share, remembered for a
+    /// pre-flight follow-up.
     fn rotate_shared(&mut self, keys: usize, msgs: usize) -> (usize, usize) {
-        let (k, m) = self.rotate(keys, msgs);
-        let t = usize::from(self.tid);
-        self.last_shared = ((k + t) % keys, (m + t) % msgs);
+        self.last_shared = self.rotate(keys, msgs);
         self.last_shared
     }
 

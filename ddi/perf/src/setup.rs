@@ -51,6 +51,7 @@ use zeroize::Zeroizing;
 use crate::ops::MlDsaCmd;
 use crate::ops::MlKemCmd;
 use crate::ops::OpKind;
+use crate::ops::Pick;
 use crate::ops::Worker;
 use crate::pqc;
 use crate::pqc::MlDsaKey;
@@ -331,7 +332,7 @@ impl Env {
     /// [`Worker::prove`]).
     fn preflight(&self, args: &RunArgs, kinds: &BTreeSet<OpKind>) -> Result<(), String> {
         let list: Vec<OpKind> = kinds.iter().copied().collect();
-        let mut worker = Worker::new(self, args, 0, &list)?;
+        let mut worker = Worker::new(self, args, Pick::Sweep, &list)?;
         for &op in kinds {
             let rounds = 2 * args.keys;
             for i in 0..rounds {
