@@ -8,9 +8,8 @@
 # `ddi_sock_server_tcp_integration` and `ddi_sock_server_unix_integration`
 # spawn the separately-built `ddi_sock_server` binary (see
 # `examples/sock/ddi_sock_server/README.md`). This profile's
-# `--workspace` invocation does not build that binary; they are only
-# exercised by the dedicated `ci-sock-ddi` profile, which builds it
-# first.
+# `--workspace` invocation does not build that binary, so these tests
+# are excluded here; they are not currently run by any CI job.
 [profile.ci-emu]
 default-filter = "not binary_id(tsra_ddi_sock::ddi_sock_server_tcp_integration) and not binary_id(tsra_ddi_sock::ddi_sock_server_unix_integration)"
 
@@ -44,22 +43,4 @@ path = "junit.xml"
 path = "junit.xml"
 
 [profile.ci-api-ex.junit]
-path = "junit.xml"
-
-# profile for running socket DDI tests against a live ddi_sock_server
-# process over TCP
-[profile.ci-sock-ddi-tcp.junit]
-path = "junit.xml"
-
-# profile for running socket DDI tests against a live ddi_sock_server
-# process over a Unix domain socket. Kept separate from
-# `ci-sock-ddi-tcp` (rather than both using one `ci-sock-ddi` profile)
-# so their JUnit output lands in distinct `target/nextest/<profile>`
-# directories and one run's report doesn't overwrite the other's.
-[profile.ci-sock-ddi-unix.junit]
-path = "junit.xml"
-
-# profile for running tsra_api_tests's ddi_sock_server session tests
-# against a live ddi_sock_server process
-[profile.ci-api-sock.junit]
 path = "junit.xml"
