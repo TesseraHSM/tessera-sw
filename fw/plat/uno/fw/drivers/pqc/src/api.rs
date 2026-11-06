@@ -57,14 +57,6 @@ impl PqcDriver {
     ///   will be released until a core answers a request it has already
     ///   missed its deadline for.
     pub async fn acquire_any(&self) -> HsmResult<PqcEngine<'_>> {
-        self.acquire_for(0).await
-    }
-
-    /// As [`acquire_any`](Self::acquire_any), for a task with affinity
-    /// `tag` (0 for none): an engine freed while it waits goes to it ahead
-    /// of the queue's head if the engine last ran a task with the same tag,
-    /// within the bounds the pool sets. See [`mldsa_key_tag`].
-    pub async fn acquire_for(&self, tag: u32) -> HsmResult<PqcEngine<'_>> {
         // Withdraws from the queue if this future is dropped while waiting,
         // so an engine handed to it is passed on rather than stranded.
         let mut wait = WaitGuard {
@@ -75,13 +67,7 @@ impl PqcDriver {
         let id = loop {
             let step = poll_fn(|cx| {
                 self.state.with(|s| {
-                    s.poll_acquire(
-                        &mut wait.idx,
-                        tag,
-                        cx,
-                        mailbox::has_answered,
-                        mailbox::scrub,
-                    )
+                    s.poll_acquire(&mut wait.idx, cx, mailbox::has_answered, mailbox::scrub)
                 })
             })
             .await;
@@ -108,16 +94,7 @@ impl PqcDriver {
     where
         F: for<'a> AsyncFnOnce(&'a mut PqcEngine<'_>) -> HsmResult<R>,
     {
-        self.with_engine_for(0, f).await
-    }
-
-    /// As [`with_engine`](Self::with_engine), acquiring with affinity `tag`;
-    /// see [`acquire_for`](Self::acquire_for).
-    pub async fn with_engine_for<F, R>(&self, tag: u32, f: F) -> HsmResult<R>
-    where
-        F: for<'a> AsyncFnOnce(&'a mut PqcEngine<'_>) -> HsmResult<R>,
-    {
-        let mut engine = self.acquire_for(tag).await?;
+        let mut engine = self.acquire_any().await?;
 
         let result = f(&mut engine).await;
 

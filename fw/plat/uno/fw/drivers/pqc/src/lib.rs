@@ -60,7 +60,6 @@ mod shared_status;
 mod types;
 
 pub use api::PqcDriver;
-pub use engine::mldsa_key_tag;
 pub use engine::mldsa_pub_key_len;
 pub use engine::mldsa_sig_len;
 pub use engine::mlkem_ct_len;
