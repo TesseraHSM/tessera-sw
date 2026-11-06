@@ -21,9 +21,9 @@ use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_mbor_test_helpers::encode_sig_struct;
 use tsra_ddi_mbor_test_helpers::CoseSign1Object;
 use tsra_ddi_mbor_test_helpers::KeyAttestationReport;
+use tsra_ddi_mbor_test_helpers::encode_sig_struct;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
@@ -306,8 +306,8 @@ fn verify_key_report(
     let leaf_bytes = leaf.data.certificate.as_slice();
     let leaf = X509Certificate::from_der(leaf_bytes).expect("PID leaf parses as X.509");
     let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
-    let pid_pub = tsra_crypto::EccPublicKey::from_bytes(&pid_spki)
-        .expect("PID pubkey loads from leaf SPKI");
+    let pid_pub =
+        tsra_crypto::EccPublicKey::from_bytes(&pid_spki).expect("PID pubkey loads from leaf SPKI");
 
     // 2. COSE_Sign1 signature verify under PID pubkey (ES384 over the COSE
     //    Sig_structure).
@@ -315,8 +315,8 @@ fn verify_key_report(
     let mut tbs = vec![0u8; 64 + cose.protected_header.len() + cose.payload.len()];
     let tbs_len = encode_sig_struct(&cose.protected_header, cose.payload, &mut tbs)
         .expect("encode COSE Sig_structure");
-    let digest = tsra_crypto::Hasher::hash_vec(&mut HashAlgo::sha384(), &tbs[..tbs_len])
-        .expect("SHA-384");
+    let digest =
+        tsra_crypto::Hasher::hash_vec(&mut HashAlgo::sha384(), &tbs[..tbs_len]).expect("SHA-384");
     let ok = tsra_crypto::Verifier::verify(
         &mut tsra_crypto::EccAlgo::default(),
         &pid_pub,
@@ -395,6 +395,7 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id,
             masked_key,
             report_data: input.fuzzed_key_data.report_data,
+            auth_envelope: Vec::new(),
         };
         let result = ctx.tbor(&req);
 

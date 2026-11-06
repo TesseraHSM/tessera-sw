@@ -18,6 +18,7 @@ tsra_ddi_mbor_test_helpers = { path = "../ddi/mbor/test_helpers" }
 tsra_ddi_tbor_codec = { path = "../ddi/tbor/codec" }
 tsra_ddi_tbor_test_harness = { path = "../crates/tbor_test_harness" }
 tsra_ddi_tbor_types = { path = "../ddi/tbor/types" }
+tsra_fw_core_crypto_key_masking = { path = "../fw/core/crypto/key-masking" }
 tsra_session_ex_crypto = { path = "../crates/session_ex_crypto" }
 x509 = { path = "../crates/x509" }
 zerocopy = { features = ["derive"], version = "0.8.17" }
@@ -40,6 +41,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_cmd_reqs"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_cmd_reqs.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_request_view"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_request_view.rs"
 test = false
@@ -56,6 +64,13 @@ bench = false
 doc = false
 name = "fuzz_tbor_response_view"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_response_view.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_dispatcher"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_dispatcher.rs"
 test = false
 
 [[bin]]
@@ -84,6 +99,13 @@ bench = false
 doc = false
 name = "fuzz_tbor_part_final"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_part_final.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_part_info"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_part_info.rs"
 test = false
 
 [[bin]]
@@ -159,6 +181,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_dispatcher_aes_fp"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_dispatcher_aes_fp.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_attest_key"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_attest_key.rs"
 test = false
@@ -166,8 +195,22 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_key_report"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_key_report.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_establish_credential"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_establish_credential.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_ecc_generate_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecc_generate_key.rs"
 test = false
 
 [[bin]]
@@ -182,6 +225,13 @@ bench = false
 doc = false
 name = "fuzz_tbor_ecdh_key_exchange"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecdh_key_exchange.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_app_ops"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_app_ops.rs"
 test = false
 
 [[bin]]
@@ -215,8 +265,22 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_unwrap_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_unwrap_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_hmac"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_hmac.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_hmac_generate_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_hmac_generate_key.rs"
 test = false
 
 [[bin]]
@@ -229,6 +293,34 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_concat_kdf_derive"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_concat_kdf_derive.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_rsa_mod_exp"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_rsa_mod_exp.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_get_unwrapping_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_unwrapping_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_get_cert"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_cert.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_get_cert_chain_info"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_cert_chain_info.rs"
 test = false
