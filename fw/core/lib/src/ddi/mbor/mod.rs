@@ -165,7 +165,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
     // CQE), so it returns a fully-formed `DispatchResult`; every other command
     // yields just a response slice that is wrapped below.
     if matches!(hdr.op, DdiOp::OpenSession) {
-        return open_session(pal, io, decoder, hdr).await;
+        return open_session(pal, io, decoder, hdr, undo).await;
     }
 
     let resp = match hdr.op {
@@ -179,8 +179,8 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         }
         DdiOp::GetSessionEncryptionKey => get_session_encryption_key(pal, io, decoder, hdr).await,
         DdiOp::GetUnwrappingKey => get_unwrapping_key(pal, io, decoder, hdr).await,
-        DdiOp::RsaUnwrap => rsa_unwrap(pal, io, decoder, hdr).await,
-        DdiOp::UnmaskKey => unmask_key(pal, io, decoder, hdr).await,
+        DdiOp::RsaUnwrap => rsa_unwrap(pal, io, decoder, hdr, undo).await,
+        DdiOp::UnmaskKey => unmask_key(pal, io, decoder, hdr, undo).await,
         DdiOp::GetSealedBk3 => get_sealed_bk3(pal, io, decoder, hdr),
         DdiOp::SetSealedBk3 => set_sealed_bk3(pal, io, decoder, hdr),
         DdiOp::InitBk3 => init_bk3(pal, io, decoder, hdr).await,
@@ -189,13 +189,15 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::CloseSession => close_session(pal, io, decoder, hdr).await,
         DdiOp::ReopenSession => reopen_session(pal, io, decoder, hdr).await,
         DdiOp::DeleteKey => delete_key(pal, io, decoder, hdr).await,
-        DdiOp::AesGenerateKey => aes_generate_key(pal, io, decoder, hdr).await,
+        DdiOp::AesGenerateKey => aes_generate_key(pal, io, decoder, hdr, undo).await,
         DdiOp::AesEncryptDecrypt => aes_encrypt_decrypt(pal, io, decoder, hdr).await,
         DdiOp::EccGenerateKeyPair => ecc_generate_key_pair(pal, io, decoder, hdr, undo).await,
         DdiOp::EccSign => ecc_sign(pal, io, decoder, hdr).await,
         DdiOp::EcdhKeyExchange => ecdh_key_exchange(pal, io, decoder, hdr, undo).await,
-        DdiOp::HkdfDerive => hkdf_derive(pal, io, decoder, hdr).await,
-        DdiOp::KbkdfCounterHmacDerive => kbkdf_counter_hmac_derive(pal, io, decoder, hdr).await,
+        DdiOp::HkdfDerive => hkdf_derive(pal, io, decoder, hdr, undo).await,
+        DdiOp::KbkdfCounterHmacDerive => {
+            kbkdf_counter_hmac_derive(pal, io, decoder, hdr, undo).await
+        }
         DdiOp::Hmac => hmac(pal, io, decoder, hdr).await,
         DdiOp::RsaModExp => rsa_mod_exp(pal, io, decoder, hdr).await,
         DdiOp::AttestKey => attest_key(pal, io, decoder, hdr).await,

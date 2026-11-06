@@ -23,6 +23,7 @@
 
 use tsra_fw_ddi_mbor_types::aes_generate_key::DdiAesGenerateKeyReq;
 use tsra_fw_ddi_mbor_types::aes_generate_key::DdiAesGenerateKeyResp;
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 
@@ -41,6 +42,7 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiAesGenerateKeyReq<'_> = decoder.decode_data()?;
 
@@ -73,6 +75,7 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
         vault_kind,
         HsmSessId::from(sess_id),
         attrs,
+        undo,
     )
     .await
     {
@@ -123,5 +126,5 @@ pub(crate) async fn aes_generate_key<'p, P: HsmPal>(
     }
     .await;
 
-    super::bulk::rollback_on_err(pal, io, key_handle, result.map(|b| &*b)).await
+    result.map(|b| &*b)
 }
