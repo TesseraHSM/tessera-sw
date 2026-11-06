@@ -233,17 +233,20 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
             return;
         }
 
-        // Full program path (POR / plain warm reset / fw-update with queues not
-        // enabled). Warn if a queue is unexpectedly already enabled, since the
-        // full reprogram below will reset a running queue.
+        // Full program path (POR / plain warm reset / fw-update that cannot
+        // attach). A channel left enabled keeps using the rings it latched,
+        // e.g. a bulk_crypto image's FP DTCM rings after an IDFU to this
+        // image, so disable it before reprogramming; Step 5 re-enables it.
         if icq_ctrl & 0x1 != 0 || isq_ctrl & 0x1 != 0 {
             warn!(
                 "iic",
-                "ch={} ALREADY ENABLED before full init! icq_ctrl={:#x} isq_ctrl={:#x}",
+                "ch={} enabled before full init, disabling: icq_ctrl={:#x} isq_ctrl={:#x}",
                 config.channel,
                 icq_ctrl,
                 isq_ctrl
             );
+            isq.ctrl.modify(ISQ_CHANNEL_CTRL::EN::CLEAR);
+            icq.ctrl.modify(ICQ_CHANNEL_CTRL::EN::CLEAR);
         }
 
         // ── Step 1: Pre-fill ISQ with buffer addresses ──────────────

@@ -232,17 +232,20 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             return;
         }
 
-        // Full program path (POR / plain warm reset / fw-update with queues not
-        // enabled). Warn if a queue is unexpectedly already enabled, since the
-        // full reprogram below will reset a running queue.
+        // Full program path (POR / plain warm reset / fw-update that cannot
+        // attach). A channel left enabled keeps using the rings it latched,
+        // e.g. a bulk_crypto image's FP DTCM rings after an IDFU to this
+        // image, so disable it before reprogramming; Step 4 re-enables it.
         if ocq_ctrl & 0x1 != 0 || osq_ctrl & 0x1 != 0 {
             warn!(
                 "oic",
-                "ch={} ALREADY ENABLED before full init! ocq_ctrl={:#x} osq_ctrl={:#x}",
+                "ch={} enabled before full init, disabling: ocq_ctrl={:#x} osq_ctrl={:#x}",
                 config.channel,
                 ocq_ctrl,
                 osq_ctrl
             );
+            osq.ctrl.modify(OSQ_CHANNEL_CTRL::EN::CLEAR);
+            ocq.ctrl.modify(OCQ_CHANNEL_CTRL::EN::CLEAR);
         }
 
         // ── Step 1: Reset TX queue shadow PI ───────────────────────
