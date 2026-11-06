@@ -32,6 +32,8 @@
 //! restore a property) must succeed → a failure **poisons** the partition;
 //! finalising *physical cleanup* (zeroise) that fails leaves only a benign
 //! orphan → **best-effort** + reclaim by the recovery sweep.
+//! ReopenSession is an explicit exception: its inverse is
+//! best-effort even if backing-key deletion fails before restoring the slot.
 
 #![no_std]
 // The narrow `UndoVerbs` adapter mirrors the PAL's own `async fn` vault
@@ -83,6 +85,7 @@ const KIND_VAULT_CREATE: u8 = 0;
 const KIND_VAULT_DISABLE: u8 = 1;
 const KIND_PROP_RESTORE: u8 = 2;
 const KIND_SESSION_DESTROY: u8 = 3;
+const KIND_SESSION_ROLLBACK_REOPEN: u8 = 4;
 
 const MODE_SHIFT: u8 = 3;
 const MODE_MASK: u8 = 0b0000_0011;
@@ -143,6 +146,16 @@ impl UndoEntry {
     fn session_destroy(id: HsmSessId) -> Self {
         Self {
             tag: KIND_SESSION_DESTROY,
+            aux: 0,
+            id: u16::from(id),
+            data: 0,
+        }
+    }
+
+    #[inline]
+    fn session_rollback_reopen(id: HsmSessId) -> Self {
+        Self {
+            tag: KIND_SESSION_ROLLBACK_REOPEN,
             aux: 0,
             id: u16::from(id),
             data: 0,
@@ -218,9 +231,10 @@ fn unpack_bytes_handle(handle: u32) -> (usize, usize) {
 /// One rule decides it: failures of operations that *restore logical
 /// consistency* (re-enable, prop restore) poison; failures of *physical
 /// cleanup* (zeroise/delete of already-removed material) are best-effort.
+/// ReopenSession cleanup is also best-effort.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FailurePolicy {
-    /// Benign orphan → log and continue; reclaimed by the recovery sweep.
+    /// Log and continue (physical cleanup or session reopen).
     BestEffort,
     /// In-memory state is now incoherent → fail closed (poison).
     Poison,
@@ -354,6 +368,14 @@ impl<'a> UndoLog<'a> {
         self.push_entry(UndoEntry::session_destroy(id))
     }
 
+    /// Record a successful recreation of an existing session.
+    ///
+    /// Undo deletes its new backing key and restores NeedsRenegotiation,
+    /// retaining the logical ID. Commit keeps the recreated session.
+    pub fn push_session_rollback_reopen(&mut self, id: HsmSessId) -> HsmResult<()> {
+        self.push_entry(UndoEntry::session_rollback_reopen(id))
+    }
+
     /// Record that a property was set while previously **absent**.
     ///
     /// undo → clear the slot; commit → keep.
@@ -472,6 +494,11 @@ impl<'a> UndoLog<'a> {
                 }
             }
             KIND_SESSION_DESTROY => verbs.session_destroy(io, HsmSessId::from(entry.id)).await,
+            KIND_SESSION_ROLLBACK_REOPEN => {
+                verbs
+                    .session_rollback_reopen(io, HsmSessId::from(entry.id))
+                    .await
+            }
             _ => Err(HsmError::InvalidArg),
         }
     }
@@ -502,6 +529,9 @@ fn undo_policy(kind: u8) -> FailurePolicy {
         // undo = destroy the freshly-created session; a failure leaks a
         // never-established session slot → benign (reclaimed on teardown).
         KIND_SESSION_DESTROY => FailurePolicy::BestEffort,
+        // ReopenSession cleanup is best-effort even when deleting
+        // the backing key fails before the logical state can be restored.
+        KIND_SESSION_ROLLBACK_REOPEN => FailurePolicy::BestEffort,
         // undo = re-enable / restore: must succeed for consistency.
         _ => FailurePolicy::Poison,
     }
@@ -536,6 +566,9 @@ pub trait UndoVerbs {
     /// Destroy a session (its slot + backing vault keys) — the coarse
     /// inverse of session create/promote.
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
+    /// Delete a recreated session's backing key and restore renegotiation
+    /// without releasing its logical ID.
+    async fn session_rollback_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()>;
 }
 
 impl<P> UndoVerbs for P
@@ -580,6 +613,10 @@ where
 
     async fn session_destroy(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
         HsmSessionManager::session_destroy(self, io, id).await
+    }
+
+    async fn session_rollback_reopen(&self, io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
+        HsmSessionManager::session_rollback_reopen(self, io, id).await
     }
 }
 
@@ -649,6 +686,7 @@ mod tests {
     const OP_SET_BOOL: u8 = 7;
     const OP_SET_BYTES: u8 = 8;
     const OP_SESSION_DESTROY: u8 = 9;
+    const OP_SESSION_ROLLBACK_REOPEN: u8 = 10;
 
     #[derive(Clone, Copy, Default)]
     struct Rec {
@@ -663,6 +701,7 @@ mod tests {
         fail_enable: Cell<bool>,
         fail_delete: Cell<bool>,
         fail_session_destroy: Cell<bool>,
+        fail_session_rollback_reopen: Cell<bool>,
         last_bytes: RefCell<[u8; 64]>,
         last_bytes_len: Cell<usize>,
     }
@@ -675,6 +714,7 @@ mod tests {
                 fail_enable: Cell::new(false),
                 fail_delete: Cell::new(false),
                 fail_session_destroy: Cell::new(false),
+                fail_session_rollback_reopen: Cell::new(false),
                 last_bytes: RefCell::new([0u8; 64]),
                 last_bytes_len: Cell::new(0),
             }
@@ -765,6 +805,14 @@ mod tests {
         async fn session_destroy(&self, _io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
             self.record(OP_SESSION_DESTROY, u16::from(id), 0);
             if self.fail_session_destroy.get() {
+                Err(HsmError::InvalidArg)
+            } else {
+                Ok(())
+            }
+        }
+        async fn session_rollback_reopen(&self, _io: &Self::Io, id: HsmSessId) -> HsmResult<()> {
+            self.record(OP_SESSION_ROLLBACK_REOPEN, u16::from(id), 0);
+            if self.fail_session_rollback_reopen.get() {
                 Err(HsmError::InvalidArg)
             } else {
                 Ok(())
@@ -918,6 +966,41 @@ mod tests {
         m.fail_session_destroy.set(true);
         let io = FakeIo::default();
         assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
+    }
+
+    #[test]
+    fn session_reopen_commit_keeps_session_and_undo_uses_dedicated_inverse() {
+        let m = MockVerbs::new();
+        let io = FakeIo::default();
+        log!(commit_log);
+        commit_log
+            .push_session_rollback_reopen(HsmSessId::from(7))
+            .unwrap();
+        assert_eq!(run_commit(commit_log, &m, &io), WalkOutcome::Ok);
+        assert_eq!(m.count(), 0);
+
+        log!(undo_log);
+        undo_log
+            .push_session_rollback_reopen(HsmSessId::from(7))
+            .unwrap();
+        assert_eq!(run_undo(undo_log, &m, &io), WalkOutcome::Ok);
+        assert_eq!(m.count(), 1);
+        m.assert_rec(0, OP_SESSION_ROLLBACK_REOPEN, 7, 0);
+    }
+
+    #[test]
+    fn failed_reopen_inverse_does_not_poison_or_stop_undo() {
+        let m = MockVerbs::new();
+        m.fail_session_rollback_reopen.set(true);
+        let io = FakeIo::default();
+        log!(log);
+        log.push_vault_create(HsmKeyId::from(2)).unwrap();
+        log.push_session_rollback_reopen(HsmSessId::from(3))
+            .unwrap();
+        assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
+        assert_eq!(m.count(), 2);
+        m.assert_rec(0, OP_SESSION_ROLLBACK_REOPEN, 3, 0);
+        m.assert_rec(1, OP_DELETE, 2, 0);
     }
 
     #[test]

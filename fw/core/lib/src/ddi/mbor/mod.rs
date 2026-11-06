@@ -187,7 +187,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::EstablishCredential => establish_credential(pal, io, decoder, hdr).await,
         DdiOp::ChangePin => change_pin(pal, io, decoder, hdr).await,
         DdiOp::CloseSession => close_session(pal, io, decoder, hdr).await,
-        DdiOp::ReopenSession => reopen_session(pal, io, decoder, hdr).await,
+        DdiOp::ReopenSession => reopen_session(pal, io, decoder, hdr, undo).await,
         DdiOp::DeleteKey => delete_key(pal, io, decoder, hdr).await,
         DdiOp::AesGenerateKey => aes_generate_key(pal, io, decoder, hdr, undo).await,
         DdiOp::AesEncryptDecrypt => aes_encrypt_decrypt(pal, io, decoder, hdr).await,
