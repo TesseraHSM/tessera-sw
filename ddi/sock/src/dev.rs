@@ -1306,18 +1306,31 @@ fn map_proto_err(e: ProtoError) -> DdiError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use tsra_ddi_mbor_codec::MborByteArray;
+    #[cfg(unix)]
     use tsra_ddi_mbor_codec::MborMap;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiDerPublicKey;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiEncryptedSessionCredential;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiKeyType;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiOpenSessionCmdReq;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiOpenSessionCmdResp;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiOpenSessionReq;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiOpenSessionResp;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiReopenSessionCmdReq;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiReopenSessionCmdResp;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiReopenSessionReq;
+    #[cfg(unix)]
     use tsra_ddi_mbor_types::DdiReopenSessionResp;
 
     use super::*;
@@ -1570,10 +1583,12 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     fn zero_byte_array<const N: usize>() -> MborByteArray<N> {
         MborByteArray::new([0u8; N], 0).expect("zero-filled byte array")
     }
 
+    #[cfg(unix)]
     fn dummy_encrypted_session_credential() -> DdiEncryptedSessionCredential {
         DdiEncryptedSessionCredential {
             encrypted_id: zero_byte_array(),
@@ -1585,6 +1600,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn dummy_der_public_key() -> DdiDerPublicKey {
         DdiDerPublicKey {
             der: zero_byte_array(),
@@ -1592,6 +1608,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn dummy_open_session_req() -> DdiOpenSessionCmdReq {
         DdiOpenSessionCmdReq {
             hdr: DdiReqHdr {
@@ -1607,6 +1624,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn dummy_reopen_session_req(session_id: u16) -> DdiReopenSessionCmdReq {
         DdiReopenSessionCmdReq {
             hdr: DdiReqHdr {
@@ -1628,6 +1646,7 @@ mod tests {
     /// require a real DER-encoded ECC key) backed by one end of a
     /// `UnixStream` pair, returning the device and the other end to
     /// drive as the fake peer.
+    #[cfg(unix)]
     fn virtual_device_with_peer() -> (DdiSockDev, UnixStream) {
         let (client, server) = UnixStream::pair().expect("socket pair");
         client
@@ -1645,6 +1664,7 @@ mod tests {
 
     /// MBOR-encodes `resp` the same way `exec_op_mbor` would decode it:
     /// a full `CmdResp` map (`hdr`/`data`/optional `ext`).
+    #[cfg(unix)]
     fn encode_cmd_resp<R: MborEncode>(resp: &R) -> Vec<u8> {
         let mut buf = vec![0u8; DST_CAP as usize];
         let len = {
@@ -1656,6 +1676,7 @@ mod tests {
         buf
     }
 
+    #[cfg(unix)]
     fn write_mbor_response(server: &mut UnixStream, payload: Vec<u8>) {
         let dst_len = payload.len() as u32;
         Response {
