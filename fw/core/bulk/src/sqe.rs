@@ -319,7 +319,15 @@ impl BulkSqe {
 
     fn parse_gcm(entry: &RawBulkSqe, src_len: u32) -> HsmResult<GcmParams> {
         let aad_len = rd_u32(entry, OFF_GCM_AAD_LEN);
-        let aligned_aad_len = rd_u32(entry, OFF_GCM_ALIGNED_AAD_LEN);
+        let mut aligned_aad_len = rd_u32(entry, OFF_GCM_ALIGNED_AAD_LEN);
+        // A zero `aligned_aad_len` means the caller didn't opt into the GCM
+        // alignment workaround (older driver versions always send 0 here
+        // regardless of `aad_len`); derive the padded AAD region length by
+        // rounding `aad_len` up to the alignment ourselves, matching real
+        // firmware's behavior for such callers.
+        if aligned_aad_len == 0 && aad_len > 0 {
+            aligned_aad_len = aad_len.next_multiple_of(GCM_AAD_ALIGN);
+        }
         if !aligned_aad_len.is_multiple_of(GCM_AAD_ALIGN)
             || aligned_aad_len > src_len
             || aad_len > aligned_aad_len

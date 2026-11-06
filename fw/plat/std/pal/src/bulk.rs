@@ -23,6 +23,26 @@ use super::*;
 /// AES-256 bulk key length in bytes.
 const BULK_KEY_LEN: usize = 32;
 
+/// Byte offset of the AAD data within its 32-byte-aligned region of the
+/// GCM source buffer.
+///
+/// The host driver's AAD layout (see `align_aad_in_place` in
+/// `ddi/nix/src/dev.rs`) does not always place the AAD at the start of
+/// its aligned region: when `aad_len % 32` falls in `1..=16`, it
+/// prepends a 16-byte zero prefix so the AAD lands in the middle of the
+/// 32-byte block (a hardware GHASH-engine requirement), then pads the
+/// tail with zeros to the next 32-byte boundary. Otherwise (a zero or
+/// `17..=31` remainder) the AAD starts at offset 0, with only trailing
+/// zero padding. This mirrors that placement so the simulated bulk GCM
+/// path reads the real AAD bytes instead of the zero prefix.
+fn aad_offset_in_aligned_region(aad_len: u32) -> usize {
+    if aad_len == 0 {
+        return 0;
+    }
+    let rem = aad_len % 32;
+    if rem != 0 && rem <= 16 { 16 } else { 0 }
+}
+
 /// True for the AES bulk (GCM / XTS) vault kinds.
 pub(crate) fn is_bulk_kind(kind: HsmVaultKeyKind) -> bool {
     matches!(
@@ -152,7 +172,9 @@ impl StdHsmPal {
         if let Some(tail) = &gcm.tail {
             input.extend_from_slice(&self.bulk_read(tail.src, usize::from(tail.len))?);
         }
-        let aad = (gcm.aad_len > 0).then(|| &src[..gcm.aad_len as usize]);
+        let aad_offset = aad_offset_in_aligned_region(gcm.aad_len);
+        let aad = (gcm.aad_len > 0)
+            .then(|| &src[aad_offset..aad_offset + gcm.aad_len as usize]);
 
         let mut output = Zeroizing::new(vec![0u8; input.len()]);
         let mut iv = gcm.iv;
