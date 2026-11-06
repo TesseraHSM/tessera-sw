@@ -691,7 +691,6 @@ fn gcm_decrypt(
 /// verifying round-trip correctness including authenticated data.
 #[cfg(feature = "sock")]
 #[api_test]
-#[ignore = "after a reset, ddi_sock_server rejects bulk ops with FileHandleSessionIdDoesNotMatch, which resiliency does not recover"]
 fn test_stress_aes_gcm_round_trip_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
     let key = generate_aes_gcm_key(&session);
@@ -821,7 +820,6 @@ fn xts_decrypt(
 /// verifying round-trip correctness.
 #[cfg(feature = "sock")]
 #[api_test]
-#[ignore = "after a reset, ddi_sock_server rejects bulk ops with FileHandleSessionIdDoesNotMatch, which resiliency does not recover"]
 fn test_stress_aes_xts_round_trip_under_reset() {
     let (part, _creds, session, _ctx) = init_partition_and_session();
     let key = generate_aes_xts_key(&session);
