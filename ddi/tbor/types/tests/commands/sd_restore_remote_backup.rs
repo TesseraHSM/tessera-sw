@@ -347,3 +347,253 @@ fn sd_restore_remote_backup_rejects_before_finalize() {
     };
     ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
 }
+
+/// Prepare a finalized destination partition with its original PartLocalMK
+/// restored, but without an initialized security domain.
+fn remote_restore_destination(backup: &RemoteBackup, seed: &[u8], pota: &CaKey) -> (TestCtx, u16) {
+    let ctx = TestCtx::new();
+    let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
+
+    let init = ctx
+        .part_init(&session, seed, &backup.policy, &pota_thumbprint())
+        .expect("destination PartInit");
+
+    let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
+
+    ctx.part_final(
+        &session,
+        &backup.policy,
+        &backup.local_mk_backup,
+        &chain.der_items(),
+    )
+    .expect("destination PartFinal");
+
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
+
+    (ctx, session.session_id)
+}
+
+/// A rejected remote restore must not initialize the security domain.
+/// This helper is intended for negative tests with a valid destination.
+fn assert_remote_restore_rejected(
+    ctx: &TestCtx,
+    req: &TborSdRestoreRemoteBackupReq,
+    backup: &RemoteBackup,
+) {
+    assert!(
+        ctx.tbor_oob(req, &backup.evidence.oob()).is_err(),
+        "malformed remote restore unexpectedly succeeded"
+    );
+
+    assert_part_state(ctx, PART_STATE_INITIALIZED, false);
+}
+
+#[test]
+fn sd_restore_remote_backup_accepts_zero_session_id() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+
+    let (ctx, _) = remote_restore_destination(&backup, &seed, &pota);
+
+    let req = restore_remote_req(0, &backup);
+
+    let resp = ctx
+        .tbor_oob(&req, &backup.evidence.oob())
+        .expect("SdRestoreRemoteBackup accepts zero session ID");
+
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
+
+    assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);
+    assert!(resp.pok_local_backup.iter().any(|&b| b != 0));
+
+    assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+    assert!(resp.sd_mk_backup.iter().any(|&b| b != 0));
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_max_session_id() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, _) = remote_restore_destination(&backup, &seed, &pota);
+
+    let req = restore_remote_req(u16::MAX, &backup);
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_zeroed_masked_sealing_key() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.masked_sealing_key.fill(0);
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_masked_sealing_key() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.masked_sealing_key[0] ^= 0x01;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_zeroed_remote_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.src_remote_backup.fill(0);
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_remote_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.src_remote_backup[0] ^= 0x01;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_remote_backup_tail() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    let last = req.src_remote_backup.len() - 1;
+    req.src_remote_backup[last] ^= 0x80;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_zeroed_prev_sd_mk_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.prev_sd_mk_backup.fill(0);
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_prev_sd_mk_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.prev_sd_mk_backup[0] ^= 0x01;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_corrupted_prev_sd_mk_backup_tail() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    let last = req.prev_sd_mk_backup.len() - 1;
+    req.prev_sd_mk_backup[last] ^= 0x80;
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_missing_sender_chain() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup(&seed, &sata, &pota);
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.sender_cert_chain.clear();
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_missing_sender_mfgr_chain_trusted() {
+    let sata = CaKey::generate();
+    let sapota = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup_trusted(&sata, &sapota, &pota);
+
+    let seed = mach_seed();
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.sender_mfgr_cert_chain.clear();
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
+
+#[test]
+fn sd_restore_remote_backup_rejects_missing_sender_part_owner_chain_trusted() {
+    let sata = CaKey::generate();
+    let sapota = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let backup = create_remote_backup_trusted(&sata, &sapota, &pota);
+
+    let seed = mach_seed();
+    let (ctx, session_id) = remote_restore_destination(&backup, &seed, &pota);
+
+    let mut req = restore_remote_req(session_id, &backup);
+    req.sender_part_owner_cert_chain.clear();
+
+    assert_remote_restore_rejected(&ctx, &req, &backup);
+}
