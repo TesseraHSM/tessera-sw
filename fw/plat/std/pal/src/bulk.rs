@@ -71,6 +71,25 @@ impl HsmBulkCrypto for StdHsmPal {
         }
         cqe.write(io.cqe())
     }
+
+    async fn bulk_crypt_unpinned(&self, io: &mut StdHsmIo, key: &HsmDmaBuf) -> HsmResult<()> {
+        let sqe = BulkSqe::parse(io.sqe())?;
+        let key_ref = sqe.masked_key.ok_or(HsmError::InvalidArg)?;
+        let mut cqe = BulkCqe::success(&sqe, io.qid);
+        match &sqe.params {
+            BulkParams::Gcm(gcm) if key.len() == BULK_KEY_LEN => {
+                self.bulk_gcm_with_key(io, &sqe, gcm, &mut cqe, key, key_ref.device_iv)
+                    .await?;
+            }
+            BulkParams::Xts(xts) if key.len() == 2 * BULK_KEY_LEN => {
+                let (key1, key2) = key.split_at(BULK_KEY_LEN);
+                self.bulk_xts_with_keys(&sqe, xts, key1, key2).await?;
+                cqe.fips_approved = true;
+            }
+            _ => return Err(HsmError::InvalidKeyLength),
+        }
+        cqe.write(io.cqe())
+    }
 }
 
 impl StdHsmPal {
@@ -145,7 +164,19 @@ impl StdHsmPal {
             )
         })?;
         let approved = kind == HsmVaultKeyKind::AesGcmBulk256;
+        self.bulk_gcm_with_key(io, sqe, gcm, cqe, &key, approved)
+            .await
+    }
 
+    async fn bulk_gcm_with_key(
+        &self,
+        io: &StdHsmIo,
+        sqe: &BulkSqe,
+        gcm: &GcmParams,
+        cqe: &mut BulkCqe,
+        key: &[u8],
+        approved: bool,
+    ) -> HsmResult<()> {
         let aligned = gcm.aligned_aad_len as usize;
         let src = self.bulk_read(sqe.src_addr, sqe.src_len as usize)?;
         let mut input = Zeroizing::new(src[aligned..].to_vec());
@@ -162,12 +193,12 @@ impl StdHsmPal {
                     self.rng_fill_bytes(io, &mut iv)?;
                 }
                 self.aes
-                    .gcm_encrypt(&key, &iv, aad, &input, &mut output, &mut cqe.tag)
+                    .gcm_encrypt(key, &iv, aad, &input, &mut output, &mut cqe.tag)
                     .await?;
             }
             BulkDir::Decrypt => {
                 self.aes
-                    .gcm_decrypt(&key, &iv, aad, &gcm.tag, &input, &mut output)
+                    .gcm_decrypt(key, &iv, aad, &gcm.tag, &input, &mut output)
                     .await?;
             }
         }
@@ -191,7 +222,17 @@ impl StdHsmPal {
         let is_xts = |k| k == HsmVaultKeyKind::AesXtsBulk256;
         let (key1, _) = self.bulk_key(io, xts.key_id1, sqe.session_id, is_xts)?;
         let (key2, _) = self.bulk_key(io, xts.key_id2, sqe.session_id, is_xts)?;
-        if ct_eq(&key1, &key2) {
+        self.bulk_xts_with_keys(sqe, xts, &key1, &key2).await
+    }
+
+    async fn bulk_xts_with_keys(
+        &self,
+        sqe: &BulkSqe,
+        xts: &XtsParams,
+        key1: &[u8],
+        key2: &[u8],
+    ) -> HsmResult<()> {
+        if ct_eq(key1, key2) {
             return Err(HsmError::KeyStructuralValidationFailed);
         }
 
@@ -199,8 +240,8 @@ impl StdHsmPal {
         let dul = xts.dul.len(sqe.src_len) as usize;
         self.aes
             .xts_crypt(
-                &key1,
-                &key2,
+                key1,
+                key2,
                 sqe.dir == BulkDir::Encrypt,
                 xts.tweak,
                 dul,
@@ -274,6 +315,7 @@ mod tests {
             cid: 7,
             session_id: 0,
             short_app_id: 0,
+            masked_key: None,
             src_len: src.len() as u32,
             src_addr: src.as_ptr() as u64,
             dst_len: dst.len() as u32,
@@ -521,6 +563,7 @@ mod tests {
             cid: 1,
             session_id: 0,
             short_app_id: 0,
+            masked_key: None,
             src_len: 16,
             src_addr: 0,
             dst_len: 16,

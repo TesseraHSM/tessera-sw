@@ -604,6 +604,8 @@ pub struct TsraFpIoctlOutData {
 // constants for fp ioctl operations
 pub const TSRA_FP_IOCTL_CODE_XTS: u32 = 0x100;
 pub const TSRA_FP_IOCTL_CODE_GCM: u32 = 0x101;
+const TSRA_FP_IOCTL_CODE_GCM_UNPINNED: u32 = 0x102;
+const TSRA_FP_IOCTL_CODE_XTS_UNPINNED: u32 = 0x103;
 pub const TSRA_FP_IOCTL_FRAME_TYPE_AES: u8 = 1;
 pub const TSRA_FP_IOCTL_AES_CYPHER_GCM: u8 = 0;
 #[allow(unused)]
@@ -1245,7 +1247,7 @@ impl DdiDev for DdiWinDev {
     fn exec_op_fp_gcm_slice(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         tag: &mut Option<[u8; 16]>,
@@ -1254,6 +1256,9 @@ impl DdiDev for DdiWinDev {
     ) -> Result<usize, DdiError> {
         // Note: src_buf_len == 0 is valid for GCM (AAD-only authentication)
         let src_buf_len = src_buf.len();
+        let request: DdiAesGcmRequest = gcm_params.into();
+        let unpinned = request.unpinned_descriptor()?;
+        let (gcm_params, _masked_key, _) = request.into_parts();
 
         // If this is a decryption operation, the tag must be provided
         if mode == DdiAesOp::Decrypt && gcm_params.tag.is_none() {
@@ -1273,6 +1278,10 @@ impl DdiDev for DdiWinDev {
 
         let mut ioctl_in_buffer = TsraFpIoctlIndata::default();
         let ioctl_out_buffer = TsraFpIoctlOutData::default();
+
+        if let Some(descriptor) = unpinned {
+            ioctl_in_buffer.rsvd2 = descriptor;
+        }
 
         ioctl_in_buffer.ioctl_hdr.ioctl_data_size = mem::size_of::<TsraFpIoctlIndata>() as u32;
         ioctl_in_buffer.ioctl_hdr.app_cmd_id = 0xCD1DDEAE;
@@ -1323,7 +1332,11 @@ impl DdiDev for DdiWinDev {
         ioctl_in_buffer.cypher = TSRA_FP_IOCTL_AES_CYPHER_GCM;
         let ioctl_code = CTL_CODE(
             0x3F,
-            TSRA_FP_IOCTL_CODE_GCM,
+            if unpinned.is_some() {
+                TSRA_FP_IOCTL_CODE_GCM_UNPINNED
+            } else {
+                TSRA_FP_IOCTL_CODE_GCM
+            },
             METHOD_BUFFERED,
             FILE_READ_ACCESS | FILE_WRITE_ACCESS,
         );
@@ -1473,7 +1486,7 @@ impl DdiDev for DdiWinDev {
     fn exec_op_fp_gcm(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesGcmResult, DdiError> {
         let src_buf_len = src_buf.len();
@@ -1528,11 +1541,14 @@ impl DdiDev for DdiWinDev {
     fn exec_op_fp_xts_slice(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
+        let request: DdiAesXtsRequest = xts_params.into();
+        let unpinned = request.unpinned_descriptor()?;
+        let (xts_params, _masked_key) = request.into_parts();
         let src_buf_len = src_buf.len();
 
         // Validate input parameters
@@ -1553,6 +1569,9 @@ impl DdiDev for DdiWinDev {
         let mut ioctl_in_buffer = TsraFpIoctlIndata::default();
         let ioctl_out_buffer = TsraFpIoctlOutData::default();
 
+        if let Some(descriptor) = unpinned {
+            ioctl_in_buffer.rsvd2 = descriptor;
+        }
         let xts_dul = xts_params.data_unit_len;
         // map the caller provided data unit length to ioctl encoding
         // If not valid size, return error
@@ -1590,7 +1609,11 @@ impl DdiDev for DdiWinDev {
         ioctl_in_buffer.cypher = TSRA_FP_IOCTL_AES_CYPHER_XTS; /* xts */
         let ioctl_code = CTL_CODE(
             0x3F,
-            TSRA_FP_IOCTL_CODE_XTS,
+            if unpinned.is_some() {
+                TSRA_FP_IOCTL_CODE_XTS_UNPINNED
+            } else {
+                TSRA_FP_IOCTL_CODE_XTS
+            },
             METHOD_BUFFERED,
             FILE_READ_ACCESS | FILE_WRITE_ACCESS,
         );
@@ -1717,7 +1740,7 @@ impl DdiDev for DdiWinDev {
     fn exec_op_fp_xts(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesXtsResult, DdiError> {
         let src_buf_len = src_buf.len();

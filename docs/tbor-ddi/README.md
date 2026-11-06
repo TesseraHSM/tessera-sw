@@ -98,6 +98,92 @@ scrubs these reclaimed regions using peak allocation ends. Algorithms and encode
 must initialize every byte they consume or publish rather than assume reused
 storage is zero.
 
+## Unpinned Bulk GCM and XTS
+
+SessionEx AES-GCM and AES-XTS data operations use the same bulk queue format
+and host `exec_op_fp_*` entry points as MBOR. The key source differs: MBOR
+uses resident bulk key IDs; SessionEx supplies its masked key for each
+operation. No bulk key is registered, no key ID is returned, and no resident
+key is created. Key generation remains TBOR `AesGenerateKey` or
+`AesXtsGenerateKey`, returning only a caller-held masked blob.
+
+The SDK no longer uses the separate TBOR `AesGcmEncryptDecrypt` and
+`AesXtsEncryptDecrypt` commands for these operations. Their wire handlers
+remain available for compatibility.
+
+### Bulk SQE Extension
+
+The submission remains 128 bytes and the completion remains 64 bytes.
+Legacy submissions and completion fields are unchanged. The following
+previously-reserved fields are defined for unpinned requests:
+
+| Field | Meaning |
+|---|---|
+| Command attributes bit 1 | Unpinned masked key is supplied. |
+| Command attributes bit 6 | Device-generated GCM encryption IV; valid only with bit 1 on GCM encrypt. |
+| Bytes 12-19 | Little-endian 64-bit DMA address of the masked blob. |
+| Bytes 20-23 | Little-endian 32-bit masked-blob length, nonzero and at most 296 bytes. |
+
+All resident key IDs must be zero when bit 1 is set. The masked blob contains
+one AES-256 key for GCM or the combined `K1 || K2` AES-256-XTS key. Firmware
+validates the active session and the role's rotated-PSK policy, copies the
+blob into operation-owned DMA memory, authenticates and unmasks it, and
+checks key kind and direction permissions before running the cipher. The
+temporary key buffer is wiped on success and failure; it is never vaulted
+or registered with the bulk-key backend.
+
+Unpinned input and output use flat SGL Data Block descriptors with lengths
+equal to the SQE's source and destination lengths. These lengths are
+block-aligned and at most 16 KiB. GCM keeps its canonical zero-padded AAD
+region, rounded to 32 bytes, followed by complete text blocks; the final
+1-15 text bytes use the existing separate tail buffers. GCM IVs and tags
+remain 12 and 16 bytes. XTS uses the existing 128-bit tweak and data-unit
+selectors.
+
+### Native Driver ABI
+
+Unpinned operations have distinct IOCTL numbers. They must not be sent as
+legacy pinned IOCTLs or retried with a fabricated key ID.
+
+| Platform | GCM | XTS |
+|---|---|---|
+| Linux | Existing HSM IOCTL magic, command `0x20` | Existing magic, command `0x21` |
+| Windows | `CTL_CODE(0x3F, 0x102, METHOD_BUFFERED, FILE_READ_ACCESS \| FILE_WRITE_ACCESS)` | Same arguments with function `0x103` |
+
+The existing input structure size is unchanged. Its `rsvd2` array carries
+this extension for the new IOCTLs only:
+
+| DWORD | Value |
+|---|---|
+| 0 | ABI version, currently 1. |
+| 1 | Flags: bit 0 requests a device-generated GCM encryption IV. Other bits are zero. |
+| 2-3 | Low/high halves of the caller's masked-key buffer address. |
+| 4 | Masked-key buffer length. |
+| 5-29 | Zero. |
+
+The driver must validate the version, flags, lengths and key mode; copy the
+masked blob into a bounded DMA mapping; populate the SQE extension with the
+mapped address; and retain all operation mappings until completion. The
+SDK keeps the caller-held masked blob alive through the synchronous IOCTL.
+Socket transport carries the blob as one input item and relocates its
+address to server-owned memory before dispatch.
+
+### Hardware Prerequisites
+
+The kernel drivers and C FP firmware are not in this checkout. Native use
+requires coordinated support for the new IOCTLs and masked-key bulk
+delivery. Older drivers are expected to reject the new IOCTLs; the SDK
+does not fall back to pinning keys.
+
+The current Uno control-queue adapter exposes 64-byte SQEs, not these
+128-byte bulk submissions. The production queue/FP delivery adapter must
+therefore be updated before native unpinned requests can reach the HSM
+bulk dispatcher. Building the PAL hook is not proof of that integration.
+The Uno unpinned GCM hook uses the existing GCM backend, stages one
+operation, and currently accepts at most the BCP backend's 8 KiB rounded
+input limit. Uno unpinned XTS remains unsupported, matching its existing
+XTS PAL implementation. The std/emulator backend supports both ciphers.
+
 ## Commands
 
 | Opcode | Command | Session | Doc |

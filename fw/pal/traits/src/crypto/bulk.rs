@@ -108,4 +108,12 @@ pub trait HsmBulkCrypto: HsmIoTypes {
     /// - `Err(HsmError)` — validation, key lookup or engine failure;
     ///   `io.cqe()` contents are unspecified.
     async fn bulk_crypt(&self, io: &mut Self::Io) -> HsmResult<()>;
+
+    /// Run one bulk IO with an already authenticated, unmasked AES key.
+    ///
+    /// The caller validates session, key kind and permissions and wipes
+    /// `key` after this call. The platform must not register or retain it.
+    async fn bulk_crypt_unpinned(&self, _io: &mut Self::Io, _key: &HsmDmaBuf) -> HsmResult<()> {
+        Err(HsmError::UnsupportedCmd)
+    }
 }

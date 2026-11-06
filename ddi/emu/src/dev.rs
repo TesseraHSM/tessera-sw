@@ -14,9 +14,9 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tokio::runtime::Handle;
-use tsra_ddi_interface::DdiAesGcmParams;
+use tsra_ddi_interface::DdiAesGcmRequest;
 use tsra_ddi_interface::DdiAesGcmResult;
-use tsra_ddi_interface::DdiAesXtsParams;
+use tsra_ddi_interface::DdiAesXtsRequest;
 use tsra_ddi_interface::DdiAesXtsResult;
 use tsra_ddi_interface::DdiCookie;
 use tsra_ddi_interface::DdiDev;
@@ -45,6 +45,7 @@ use tsra_ddi_tbor_types::TborResp;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_fw_hsm_bulk::BulkCqe;
 use tsra_fw_hsm_bulk::BulkDir;
+use tsra_fw_hsm_bulk::BulkMaskedKey;
 use tsra_fw_hsm_bulk::BulkParams;
 use tsra_fw_hsm_bulk::BulkSqe;
 use tsra_fw_hsm_bulk::GcmParams;
@@ -541,13 +542,16 @@ impl DdiDev for DdiEmuDev {
     fn exec_op_fp_gcm_slice(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         tag: &mut Option<[u8; 16]>,
         iv: &mut Option<[u8; 12]>,
         fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
+        let request: DdiAesGcmRequest = gcm_params.into();
+        request.unpinned_descriptor()?;
+        let (gcm_params, masked_blob, device_iv) = request.into_parts();
         let dir = bulk_dir(mode);
         if dir == BulkDir::Decrypt && gcm_params.tag.is_none() {
             Err(DdiError::DdiStatus(DdiStatus::NoTagProvided))?;
@@ -556,6 +560,11 @@ impl DdiDev for DdiEmuDev {
             Err(DdiError::InvalidParameter)?;
         }
         self.validate_fp_session(gcm_params.session_id)?;
+        let masked_key = masked_blob.as_ref().map(|key| BulkMaskedKey {
+            addr: key.as_ptr() as u64,
+            len: key.len() as u32,
+            device_iv,
+        });
 
         let aad = gcm_params.aad.unwrap_or_default();
         let aligned_aad_len = aad.len().div_ceil(GCM_AAD_ALIGN as usize) * GCM_AAD_ALIGN as usize;
@@ -576,6 +585,7 @@ impl DdiDev for DdiEmuDev {
             cid: CMD_COUNTER.fetch_add(1, Ordering::Relaxed),
             session_id: gcm_params.session_id,
             short_app_id: gcm_params.short_app_id,
+            masked_key,
             src_len: sgl_len,
             src_addr: src.as_ptr() as u64,
             dst_len: sgl_len,
@@ -609,7 +619,7 @@ impl DdiDev for DdiEmuDev {
     fn exec_op_fp_gcm(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesGcmResult, DdiError> {
         let mut data = vec![0u8; src_buf.len()];
@@ -638,11 +648,14 @@ impl DdiDev for DdiEmuDev {
     fn exec_op_fp_xts_slice(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
+        let request: DdiAesXtsRequest = xts_params.into();
+        request.unpinned_descriptor()?;
+        let (xts_params, masked_blob) = request.into_parts();
         if src_buf.is_empty() || dst_buf.len() < src_buf.len() {
             Err(DdiError::InvalidParameter)?;
         }
@@ -655,12 +668,18 @@ impl DdiDev for DdiEmuDev {
             _ => Err(DdiError::InvalidParameter)?,
         };
         self.validate_fp_session(xts_params.session_id)?;
+        let masked_key = masked_blob.as_ref().map(|key| BulkMaskedKey {
+            addr: key.as_ptr() as u64,
+            len: key.len() as u32,
+            device_iv: false,
+        });
 
         let sqe = BulkSqe {
             dir: bulk_dir(mode),
             cid: CMD_COUNTER.fetch_add(1, Ordering::Relaxed),
             session_id: xts_params.session_id,
             short_app_id: xts_params.short_app_id,
+            masked_key,
             src_len: len,
             src_addr: src_buf.as_ptr() as u64,
             dst_len: len,
@@ -684,7 +703,7 @@ impl DdiDev for DdiEmuDev {
     fn exec_op_fp_xts(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesXtsResult, DdiError> {
         let mut data = vec![0u8; src_buf.len()];

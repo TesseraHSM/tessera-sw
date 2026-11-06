@@ -459,10 +459,15 @@ async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> 
         BulkParams::Gcm(gcm) => gcm.tail.map_or(0, |tail| usize::from(tail.len)),
         BulkParams::Xts(_) => 0,
     };
-    if !request.oob_items.is_empty()
-        || request.payload.len() != sqe.src_len as usize
-        || request.tail.len() != tail_len
-    {
+    let mut items = request.oob_items.into_iter();
+    let masked_key = match (sqe.masked_key, items.next(), items.next()) {
+        (Some(key_ref), Some(OobItem::In(bytes)), None) if bytes.len() == key_ref.len as usize => {
+            Some(bytes)
+        }
+        (None, None, None) => None,
+        _ => return transport_error(TRANSPORT_INVALID_REQUEST),
+    };
+    if request.payload.len() != sqe.src_len as usize || request.tail.len() != tail_len {
         return transport_error(TRANSPORT_INVALID_REQUEST);
     }
 
@@ -472,6 +477,9 @@ async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> 
     tail[..tail_len].copy_from_slice(&request.tail);
     sqe.src_addr = src.as_ptr() as u64;
     sqe.dst_addr = dst.as_mut_ptr() as u64;
+    if let (Some(key_ref), Some(bytes)) = (&mut sqe.masked_key, &masked_key) {
+        key_ref.addr = bytes.as_ptr() as u64;
+    }
     if let BulkParams::Gcm(gcm) = &mut sqe.params
         && let Some(gcm_tail) = &mut gcm.tail
     {
@@ -493,6 +501,7 @@ async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> 
         }
     };
     drop(src);
+    drop(masked_key);
     Response {
         status: 0,
         cqe: cqe.to_vec(),

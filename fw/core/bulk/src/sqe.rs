@@ -35,6 +35,8 @@ const OFF_ATTR: usize = 4;
 const OFF_CID: usize = 6;
 const OFF_SESSION_ID: usize = 8;
 const OFF_APP_ID: usize = 10;
+const OFF_MASKED_KEY_ADDR: usize = 12;
+const OFF_MASKED_KEY_LEN: usize = 20;
 const OFF_SRC_LEN: usize = 24;
 const OFF_SRC_SGL: usize = 28;
 const OFF_DST_LEN: usize = 44;
@@ -60,9 +62,11 @@ const OFF_XTS_KEY_ID2: usize = 72;
 const OFF_XTS_TWEAK: usize = 76;
 
 const ATTR_DECRYPT: u16 = 1 << 0;
+const ATTR_UNPINNED: u16 = 1 << 1;
 const ATTR_SGL: u16 = 1 << 2;
 const ATTR_CMD_TYPE_SHIFT: u16 = 3;
 const ATTR_CMD_TYPE_MASK: u16 = 0x7;
+const ATTR_DEVICE_IV: u16 = 1 << 6;
 const ATTR_XTS: u16 = 1 << 8;
 const ATTR_DUL_SHIFT: u16 = 14;
 
@@ -182,6 +186,17 @@ pub struct GcmParams {
     pub tail: Option<GcmTail>,
 }
 
+/// A caller-held masked key read for one bulk operation, never registered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BulkMaskedKey {
+    /// Host DMA address of the masked envelope.
+    pub addr: u64,
+    /// Envelope length, bounded by [`MAX_MASKED_KEY_LEN`].
+    pub len: u32,
+    /// Generate a fresh GCM encryption IV on the device.
+    pub device_iv: bool,
+}
+
 impl GcmParams {
     /// Returns the SGL text length (after the AAD region) for source
     /// length `src_len`, excluding the tail.
@@ -229,6 +244,8 @@ pub struct BulkSqe {
     pub session_id: u16,
     /// Short app id.
     pub short_app_id: u8,
+    /// Masked key supplied for this operation; `None` selects legacy key IDs.
+    pub masked_key: Option<BulkMaskedKey>,
     /// Source data length.
     pub src_len: u32,
     /// Source address (from the source SGL descriptor).
@@ -253,6 +270,12 @@ impl BulkSqe {
     /// Returns the encoded command attributes.
     pub fn attr(&self) -> u16 {
         let mut attr = ATTR_SGL | (u16::from(CMD_TYPE_AES) << ATTR_CMD_TYPE_SHIFT);
+        if let Some(key) = self.masked_key {
+            attr |= ATTR_UNPINNED;
+            if key.device_iv {
+                attr |= ATTR_DEVICE_IV;
+            }
+        }
         if self.dir == BulkDir::Decrypt {
             attr |= ATTR_DECRYPT;
         }
@@ -310,11 +333,55 @@ impl BulkSqe {
             BulkCipher::Xts => BulkParams::Xts(Self::parse_xts(entry, attr, src_len)?),
         };
 
+        let masked_key = if attr & ATTR_UNPINNED != 0 {
+            let addr = rd_u64(entry, OFF_MASKED_KEY_ADDR);
+            let len = rd_u32(entry, OFF_MASKED_KEY_LEN);
+            let device_iv = attr & ATTR_DEVICE_IV != 0;
+            let has_key_id = match params {
+                BulkParams::Gcm(gcm) => {
+                    if gcm.aligned_aad_len != gcm.aad_len.next_multiple_of(GCM_AAD_ALIGN) {
+                        return Err(HsmError::InvalidArg);
+                    }
+                    gcm.key_id != 0
+                }
+                BulkParams::Xts(xts) => xts.key_id1 != 0 || xts.key_id2 != 0,
+            };
+            if addr == 0
+                || len == 0
+                || len > MAX_MASKED_KEY_LEN
+                || addr.checked_add(u64::from(len)).is_none()
+                || has_key_id
+                || (device_iv && (cipher != BulkCipher::Gcm || dir != BulkDir::Encrypt))
+            {
+                return Err(HsmError::InvalidArg);
+            }
+            for (offset, len) in [(OFF_SRC_SGL, src_len), (OFF_DST_SGL, dst_len)] {
+                let addr = rd_u64(entry, offset);
+                if rd_u8(entry, offset + SGL_TYPE_OFF) != SGL_TYPE_DATA_BLOCK << 4
+                    || rd_u32(entry, offset + SGL_LEN_OFF) != len
+                    || (len != 0 && (addr == 0 || addr.checked_add(u64::from(len)).is_none()))
+                {
+                    return Err(HsmError::InvalidArg);
+                }
+            }
+            Some(BulkMaskedKey {
+                addr,
+                len,
+                device_iv,
+            })
+        } else {
+            if attr & ATTR_DEVICE_IV != 0 {
+                return Err(HsmError::InvalidArg);
+            }
+            None
+        };
+
         Ok(Self {
             dir,
             cid: rd_u16(entry, OFF_CID),
             session_id: rd_u16(entry, OFF_SESSION_ID),
             short_app_id: rd_u8(entry, OFF_APP_ID),
+            masked_key,
             src_len,
             src_addr: rd_u64(entry, OFF_SRC_SGL),
             dst_len,
@@ -385,6 +452,10 @@ impl BulkSqe {
         wr(&mut e, OFF_CID, &self.cid.to_le_bytes());
         wr(&mut e, OFF_SESSION_ID, &self.session_id.to_le_bytes());
         wr(&mut e, OFF_APP_ID, &[self.short_app_id]);
+        if let Some(key) = self.masked_key {
+            wr(&mut e, OFF_MASKED_KEY_ADDR, &key.addr.to_le_bytes());
+            wr(&mut e, OFF_MASKED_KEY_LEN, &key.len.to_le_bytes());
+        }
         wr(&mut e, OFF_SRC_LEN, &self.src_len.to_le_bytes());
         Self::encode_sgl(&mut e, OFF_SRC_SGL, self.src_addr, self.src_len);
         wr(&mut e, OFF_DST_LEN, &self.dst_len.to_le_bytes());

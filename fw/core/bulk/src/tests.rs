@@ -9,6 +9,7 @@ fn gcm_sqe() -> BulkSqe {
         cid: 0x1234,
         session_id: 0x0102,
         short_app_id: 7,
+        masked_key: None,
         src_len: 64 + 256,
         src_addr: 0x1000_0000,
         dst_len: 64 + 256,
@@ -34,6 +35,7 @@ fn xts_sqe() -> BulkSqe {
         cid: 9,
         session_id: 3,
         short_app_id: 1,
+        masked_key: None,
         src_len: 4096,
         src_addr: 0x1000,
         dst_len: 4096,
@@ -68,6 +70,105 @@ fn sqe_round_trips() {
     for sqe in [gcm_sqe(), xts_sqe()] {
         assert_eq!(BulkSqe::parse(&sqe.encode()), Ok(sqe));
     }
+}
+
+#[test]
+fn unpinned_sqe_round_trips() {
+    for mut sqe in [gcm_sqe(), xts_sqe()] {
+        match &mut sqe.params {
+            BulkParams::Gcm(gcm) => gcm.key_id = 0,
+            BulkParams::Xts(xts) => {
+                xts.key_id1 = 0;
+                xts.key_id2 = 0;
+            }
+        }
+        sqe.masked_key = Some(BulkMaskedKey {
+            addr: 0x4000,
+            len: MAX_MASKED_KEY_LEN,
+            device_iv: false,
+        });
+        assert_eq!(BulkSqe::parse(&sqe.encode()), Ok(sqe));
+    }
+}
+
+#[test]
+fn unpinned_sqe_rejects_bad_key_references() {
+    let mut sqe = gcm_sqe();
+    gcm_of(&mut sqe).key_id = 0;
+    for (addr, len) in [
+        (0, 264),
+        (0x4000, 0),
+        (0x4000, MAX_MASKED_KEY_LEN + 1),
+        (u64::MAX, 264),
+    ] {
+        sqe.masked_key = Some(BulkMaskedKey {
+            addr,
+            len,
+            device_iv: false,
+        });
+        assert_eq!(BulkSqe::parse(&sqe.encode()), Err(HsmError::InvalidArg));
+    }
+}
+
+#[test]
+fn unpinned_sqe_rejects_resident_key_ids() {
+    for mut sqe in [gcm_sqe(), xts_sqe()] {
+        sqe.masked_key = Some(BulkMaskedKey {
+            addr: 0x4000,
+            len: MAX_MASKED_KEY_LEN,
+            device_iv: false,
+        });
+        assert_eq!(BulkSqe::parse(&sqe.encode()), Err(HsmError::InvalidArg));
+    }
+}
+
+#[test]
+fn unpinned_device_iv_is_encrypt_only() {
+    let mut sqe = gcm_sqe();
+    gcm_of(&mut sqe).key_id = 0;
+    sqe.masked_key = Some(BulkMaskedKey {
+        addr: 0x4000,
+        len: MAX_MASKED_KEY_LEN,
+        device_iv: true,
+    });
+    assert_eq!(BulkSqe::parse(&sqe.encode()), Err(HsmError::InvalidArg));
+    sqe.dir = BulkDir::Encrypt;
+    assert_eq!(BulkSqe::parse(&sqe.encode()), Ok(sqe));
+}
+
+#[test]
+fn unpinned_sqe_rejects_invalid_dma_descriptors() {
+    let mut sqe = gcm_sqe();
+    gcm_of(&mut sqe).key_id = 0;
+    sqe.masked_key = Some(BulkMaskedKey {
+        addr: 0x4000,
+        len: MAX_MASKED_KEY_LEN,
+        device_iv: false,
+    });
+    let mut raw = sqe.encode();
+    set_byte(&mut raw, 43, |_| 0x20);
+    assert_eq!(BulkSqe::parse(&raw), Err(HsmError::InvalidArg));
+    let mut raw = sqe.encode();
+    set_byte(&mut raw, 36, |value| value ^ 1);
+    assert_eq!(BulkSqe::parse(&raw), Err(HsmError::InvalidArg));
+    sqe.src_addr = 0;
+    assert_eq!(BulkSqe::parse(&sqe.encode()), Err(HsmError::InvalidArg));
+    sqe.src_addr = u64::MAX;
+    assert_eq!(BulkSqe::parse(&sqe.encode()), Err(HsmError::InvalidArg));
+}
+
+#[test]
+fn unpinned_sqe_rejects_noncanonical_aad_padding() {
+    let mut sqe = gcm_sqe();
+    let gcm = gcm_of(&mut sqe);
+    gcm.key_id = 0;
+    gcm.aad_len = GCM_AAD_ALIGN;
+    sqe.masked_key = Some(BulkMaskedKey {
+        addr: 0x4000,
+        len: MAX_MASKED_KEY_LEN,
+        device_iv: false,
+    });
+    assert_eq!(BulkSqe::parse(&sqe.encode()), Err(HsmError::InvalidArg));
 }
 
 #[test]

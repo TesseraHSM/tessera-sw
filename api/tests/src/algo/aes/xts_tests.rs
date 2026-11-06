@@ -422,28 +422,22 @@ fn aes_xts_tweak_overflow_rejected(session: HsmSession) {
     assert!(matches!(err, HsmError::InvalidTweak));
 }
 
-/// On ex sessions (64-bit tweak), a multi-call input whose tweak crosses
-/// 2^64 only in a later call must be rejected up front without writing
-/// output or advancing the tweak.
+/// Unpinned XTS uses the shared bulk format's full 128-bit tweak, including
+/// a multi-call operation that crosses the old TBOR command's 64-bit limit.
 #[cfg(feature = "session-ex-tests")]
 #[session_test]
-fn aes_xts_tweak_crossing_u64_checked_up_front(session: HsmSession) {
+fn aes_xts_unpinned_bulk_crosses_u64(session: HsmSession) {
     let key = aes_xts_generate_key(&session).unwrap();
     let dul: usize = 512;
-    // 64 units span two 16 KiB TBOR calls; the first call alone fits in 64 bits.
     let units = 64;
     let tweak = (u64::MAX as u128 - 40).to_le_bytes();
 
     let plaintext = vec![0x11u8; dul * units];
-    let mut out = vec![0u8; plaintext.len()];
-    let mut algo = HsmAesXtsAlgo::new(&tweak, dul).unwrap();
-    let err = algo
-        .encrypt(&key, &plaintext, Some(out.as_mut()))
-        .unwrap_err();
-
-    assert!(matches!(err, HsmError::InvalidTweak));
-    assert!(out.iter().all(|&b| b == 0));
-    assert_eq!(algo.tweak(), tweak.to_vec());
+    let (ciphertext, enc_tweak) = xts_encrypt(&key, &tweak, dul, &plaintext).unwrap();
+    assert_eq!(enc_tweak, tweak_after_units(&tweak, units));
+    let (decrypted, dec_tweak) = xts_decrypt(&key, &tweak, dul, &ciphertext).unwrap();
+    assert_eq!(decrypted, plaintext);
+    assert_eq!(dec_tweak, enc_tweak);
 }
 
 /// Sweep representative valid DUL values and 1–2 units each.

@@ -57,6 +57,9 @@ pub const MAX_DATA_LEN: u32 = 16 * 1024;
 /// AES block length; SGL data lengths must be a multiple of it.
 pub const BLOCK_LEN: u32 = 16;
 
+/// Largest masked AES envelope: header, IV, metadata, AES-XTS key and tag.
+pub const MAX_MASKED_KEY_LEN: u32 = 8 + 16 + 192 + 64 + 16;
+
 /// Alignment of the padded GCM AAD region at the start of the source data.
 pub const GCM_AAD_ALIGN: u32 = 32;
 

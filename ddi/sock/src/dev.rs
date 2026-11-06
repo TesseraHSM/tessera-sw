@@ -29,9 +29,9 @@ use nix::sys::socket::SockType;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::VsockAddr;
 use parking_lot::Mutex;
-use tsra_ddi_interface::DdiAesGcmParams;
+use tsra_ddi_interface::DdiAesGcmRequest;
 use tsra_ddi_interface::DdiAesGcmResult;
-use tsra_ddi_interface::DdiAesXtsParams;
+use tsra_ddi_interface::DdiAesXtsRequest;
 use tsra_ddi_interface::DdiAesXtsResult;
 use tsra_ddi_interface::DdiCookie;
 use tsra_ddi_interface::DdiDev;
@@ -63,6 +63,7 @@ use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
 use tsra_fw_hsm_bulk::BulkCqe;
 use tsra_fw_hsm_bulk::BulkDir;
+use tsra_fw_hsm_bulk::BulkMaskedKey;
 use tsra_fw_hsm_bulk::BulkParams;
 use tsra_fw_hsm_bulk::BulkSqe;
 use tsra_fw_hsm_bulk::GcmParams;
@@ -450,11 +451,12 @@ impl DdiSockDev {
         sqe: &BulkSqe,
         payload: Vec<u8>,
         tail: Vec<u8>,
+        masked_key: Option<&[u8]>,
     ) -> DdiResult<(BulkCqe, Vec<u8>, Vec<u8>)> {
         let req = Request {
             sqe: sqe.encode().to_vec(),
             payload,
-            oob_items: Vec::new(),
+            oob_items: masked_key.map_or_else(Vec::new, |key| vec![OobItem::In(key.to_vec())]),
             tail,
         };
         let resp = self.exchange(&req)?;
@@ -598,13 +600,16 @@ impl DdiDev for DdiSockDev {
     fn exec_op_fp_gcm_slice(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         tag: &mut Option<[u8; 16]>,
         iv: &mut Option<[u8; 12]>,
         fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
+        let request: DdiAesGcmRequest = gcm_params.into();
+        request.unpinned_descriptor()?;
+        let (gcm_params, masked_blob, device_iv) = request.into_parts();
         let dir = bulk_dir(mode);
         if dir == BulkDir::Decrypt && gcm_params.tag.is_none() {
             Err(DdiError::DdiStatus(DdiStatus::NoTagProvided))?;
@@ -612,6 +617,12 @@ impl DdiDev for DdiSockDev {
         if dst_buf.len() < src_buf.len() {
             Err(DdiError::InvalidParameter)?;
         }
+
+        let masked_key = masked_blob.as_ref().map(|key| BulkMaskedKey {
+            addr: key.as_ptr() as u64,
+            len: key.len() as u32,
+            device_iv,
+        });
 
         let aad = gcm_params.aad.unwrap_or_default();
         let aligned_aad_len = aad.len().div_ceil(GCM_AAD_ALIGN as usize) * GCM_AAD_ALIGN as usize;
@@ -629,6 +640,7 @@ impl DdiDev for DdiSockDev {
             cid: self.next_cmd_id(),
             session_id: gcm_params.session_id,
             short_app_id: gcm_params.short_app_id,
+            masked_key,
             src_len: sgl_len,
             src_addr: src.as_ptr() as u64,
             dst_len: sgl_len,
@@ -646,7 +658,7 @@ impl DdiDev for DdiSockDev {
                 }),
             }),
         };
-        let (cqe, dst, tail_out) = self.bulk_submit(&sqe, src, tail)?;
+        let (cqe, dst, tail_out) = self.bulk_submit(&sqe, src, tail, masked_blob.as_deref())?;
         if cqe.data_len != sgl_len
             || cqe.tail_len as usize != tail_len
             || tail_out.len() != tail_len
@@ -665,7 +677,7 @@ impl DdiDev for DdiSockDev {
     fn exec_op_fp_gcm(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesGcmResult, DdiError> {
         let mut data = vec![0u8; src_buf.len()];
@@ -694,11 +706,14 @@ impl DdiDev for DdiSockDev {
     fn exec_op_fp_xts_slice(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
+        let request: DdiAesXtsRequest = xts_params.into();
+        request.unpinned_descriptor()?;
+        let (xts_params, masked_blob) = request.into_parts();
         if src_buf.is_empty() || dst_buf.len() < src_buf.len() {
             Err(DdiError::InvalidParameter)?;
         }
@@ -711,11 +726,17 @@ impl DdiDev for DdiSockDev {
             _ => Err(DdiError::InvalidParameter)?,
         };
 
+        let masked_key = masked_blob.as_ref().map(|key| BulkMaskedKey {
+            addr: key.as_ptr() as u64,
+            len: key.len() as u32,
+            device_iv: false,
+        });
         let sqe = BulkSqe {
             dir: bulk_dir(mode),
             cid: self.next_cmd_id(),
             session_id: xts_params.session_id,
             short_app_id: xts_params.short_app_id,
+            masked_key,
             src_len: len,
             src_addr: src_buf.as_ptr() as u64,
             dst_len: len,
@@ -727,7 +748,8 @@ impl DdiDev for DdiSockDev {
                 tweak: xts_params.tweak,
             }),
         };
-        let (cqe, dst, _) = self.bulk_submit(&sqe, src_buf.to_vec(), Vec::new())?;
+        let (cqe, dst, _) =
+            self.bulk_submit(&sqe, src_buf.to_vec(), Vec::new(), masked_blob.as_deref())?;
         let data_len = cqe.data_len as usize;
         if data_len > src_buf.len() {
             Err(DdiError::DdiStatus(DdiStatus::InternalError))?;
@@ -741,7 +763,7 @@ impl DdiDev for DdiSockDev {
     fn exec_op_fp_xts(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesXtsResult, DdiError> {
         let mut data = vec![0u8; src_buf.len()];

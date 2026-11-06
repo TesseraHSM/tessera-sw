@@ -171,13 +171,13 @@ mod emu_tests {
         }
     }
 
-    /// Rejects minimum and maximum invalid AES key-size discriminants.
+    /// Rejects invalid AES sizes, including MBOR-only pinned bulk key selectors.
     #[test]
     fn aes_generate_key_rejects_unknown_sizes() {
         let ctx = TestCtx::new();
         let session = finalized_co_session(&ctx);
 
-        for key_size in [0, u8::MAX] {
+        for key_size in [0, 4, 5, 6, u8::MAX] {
             let req = generate_key_req(session.session_id, SCOPE_EPHEMERAL, key_size);
 
             ctx.expect_fw_reject(&req, TborStatus::InvalidArg);

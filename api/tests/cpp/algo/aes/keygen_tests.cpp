@@ -16,14 +16,8 @@
 #include "utils/auto_key.hpp"
 #include "utils/rsa_keygen.hpp"
 
-// GCM authentication failures surface differently per protocol: TBOR reports
-// a dedicated tag-mismatch status (mapped to MASKED_KEY_AUTHENTICATION_FAILED),
-// while MBOR returns a generic DDI command failure.
-#if SESSION_EX_TESTS
-static constexpr tsra_status kGcmAuthFailureStatus = TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED;
-#else
+// Both session types use the shared bulk GCM command-failure status.
 static constexpr tsra_status kGcmAuthFailureStatus = TSRA_STATUS_DDI_CMD_FAILURE;
-#endif
 
 class tsra_aes_keygen : public ::testing::Test
 {

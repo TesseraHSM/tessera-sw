@@ -42,15 +42,21 @@
 //! `session_id`; `CloseSession` is classified as `Close` so the CQE
 //! reflects the slot teardown.
 
+use tsra_fw_core_crypto_key_masking::aead::peek_scope;
+use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_ddi_mbor_api::DdiDecoder;
 use tsra_fw_ddi_mbor_types::DdiOp;
 use tsra_fw_ddi_mbor_types::DdiReqHdr;
 use tsra_fw_ddi_tbor::RequestView as TborRequestView;
 use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::BulkDir;
+use tsra_fw_hsm_bulk::BulkParams;
+use tsra_fw_hsm_bulk::BulkSqe;
 use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_undo::UndoLog;
 use tsra_fw_hsm_undo::WalkOutcome;
 use tsra_fw_hsm_undo::UNDO_LOG_SIZE;
+use zeroize::Zeroize;
 
 use super::*;
 
@@ -193,7 +199,7 @@ impl<P: HsmPal> Hsm<P> {
         let Some(mut io) = self.gate_partition(io).await else {
             return;
         };
-        if let Err(e) = self.pal().bulk_crypt(&mut io).await {
+        if let Err(e) = self.run_bulk_io(&mut io).await {
             debug!("core", "bulk IO failed: {:?}", e);
             let cqe = BulkCqe::error(io.sqe(), 0, e);
             if let Err(_e) = cqe.write(io.cqe()) {
@@ -212,6 +218,62 @@ impl<P: HsmPal> Hsm<P> {
         if let Err(_e) = self.pal().drop_io(io).await {
             error!("core", HsmError::DropIoFailure, "drop_io failed: {:?}", _e);
         }
+    }
+
+    async fn run_bulk_io(&self, io: &mut P::Io) -> HsmResult<()> {
+        let sqe = BulkSqe::parse(io.sqe())?;
+        let Some(key_ref) = sqe.masked_key else {
+            return self.pal().bulk_crypt(io).await;
+        };
+        let pal = self.pal();
+        let sess_id = HsmSessId::from(sqe.session_id);
+        ddi::tbor::validate_active_session(pal, io, sess_id)?;
+        let psk_id = match sess_id.role() {
+            HsmSessionRole::CryptoOfficer => 0,
+            HsmSessionRole::CryptoUser => 1,
+        };
+        if crate::part_state::part_psk_is_default(pal, io, psk_id)? {
+            return Err(HsmError::DefaultPskMustRotate);
+        }
+        let masked_key = pal.dma_alloc(io, key_ref.len as usize)?;
+        let outcome = async {
+            pal.copy_mem_from_host(
+                io,
+                HsmDmaAddr {
+                    lo: key_ref.addr as u32,
+                    hi: (key_ref.addr >> 32) as u32,
+                },
+                HsmDmaAddr::ZERO,
+                masked_key,
+                false,
+            )
+            .await?;
+            let scope = peek_scope(masked_key)?;
+            let masking_key = ddi::tbor::resolve_masking_key(pal, io, scope, sess_id)?;
+            let view = unmask(pal, io, masking_key, masked_key).await?;
+            let valid_kind = match sqe.params {
+                BulkParams::Gcm(_) => {
+                    view.key_kind == HsmVaultKeyKind::Aes256 && view.target_key.len() == 32
+                }
+                BulkParams::Xts(_) => {
+                    view.key_kind == HsmVaultKeyKind::AesXts512 && view.target_key.len() == 64
+                }
+            };
+            if !valid_kind {
+                return Err(HsmError::InvalidKeyType);
+            }
+            let permitted = match sqe.dir {
+                BulkDir::Encrypt => view.key_attrs.encrypt(),
+                BulkDir::Decrypt => view.key_attrs.decrypt(),
+            };
+            if !permitted {
+                return Err(HsmError::InvalidPermissions);
+            }
+            pal.bulk_crypt_unpinned(io, view.target_key).await
+        }
+        .await;
+        masked_key.zeroize();
+        outcome
     }
 
     /// Bind the per-command undo log for a TBOR command, carved from `io`'s

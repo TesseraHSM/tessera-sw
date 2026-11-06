@@ -26,6 +26,26 @@ fn aes_gcm_generate_key(session: &HsmSession) -> HsmAesGcmKey {
     HsmKeyManager::generate_key(session, &mut algo, props).expect("Failed to generate AES-GCM key")
 }
 
+/// Unpinned GCM uses the shared bulk queue for partial text and AAD lengths.
+#[cfg(feature = "session-ex-tests")]
+#[session_test]
+fn test_gcm_unpinned_bulk_partial_lengths(session: HsmSession) {
+    let key = aes_gcm_generate_key(&session);
+    for aad_len in [0, 1, 16, 17, 32, 33] {
+        for text_len in [0, 1, 15, 16, 17, 53, 8192] {
+            let iv = test_iv();
+            let aad = (aad_len != 0).then(|| vec![0xA5; aad_len]);
+            let plaintext = vec![0x5A; text_len];
+            let (ciphertext, tag) =
+                gcm_encrypt(&key, &iv, aad.clone(), &plaintext).expect("unpinned GCM encrypt");
+            assert_eq!(ciphertext.len(), plaintext.len());
+            let decrypted =
+                gcm_decrypt(&key, &iv, &tag, aad, &ciphertext).expect("unpinned GCM decrypt");
+            assert_eq!(decrypted, plaintext, "AAD {aad_len}, text {text_len}");
+        }
+    }
+}
+
 /// Generate a non-session AES-GCM key for streaming tests.
 fn aes_gcm_generate_streaming_key(session: &HsmSession) -> HsmAesGcmKey {
     let props = HsmKeyPropsBuilder::default()

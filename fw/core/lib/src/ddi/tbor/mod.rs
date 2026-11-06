@@ -429,7 +429,11 @@ fn validate_crypto_officer_active_session<P: HsmPal>(
 /// — unlike the security-domain administrative commands — are available
 /// to both CO and CU sessions.  The default-PSK gate (applied by the
 /// dispatcher) still requires the calling role's PSK to be rotated.
-fn validate_active_session<P: HsmPal>(pal: &P, io: &P::Io, sess_id: HsmSessId) -> HsmResult<()> {
+pub(crate) fn validate_active_session<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    sess_id: HsmSessId,
+) -> HsmResult<()> {
     if !matches!(pal.session_state(io, sess_id), HsmSessionState::Active) {
         return Err(HsmError::SessionNotFound);
     }
@@ -486,7 +490,7 @@ fn masking_key_id_for_scope<P: HsmPal>(
 /// implemented.  Callers targeting hardware should use a persisted scope
 /// (`Local` / `SecurityDomain`) provisioned by `PartFinal` / the SD
 /// lifecycle.
-fn resolve_masking_key<'p, P: HsmPal>(
+pub(crate) fn resolve_masking_key<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     scope: HsmKeyScope,

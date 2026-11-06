@@ -774,9 +774,7 @@ TEST_F(tsra_aes_xts, different_tweaks_higher_order_bytes_different_ciphertexts)
     });
 }
 
-// Verifies a realistic, non-trivial 128-bit tweak value. Sessions opened with
-// tsra_sess_open honor all 128 bits and round-trip; sessions opened with
-// tsra_sess_ex_open support a 64-bit tweak and reject non-zero upper bytes.
+// Both session types honor the shared bulk format's full 128-bit tweak.
 TEST_F(tsra_aes_xts, non_trivial_multi_byte_tweak_roundtrip)
 {
     part_list_.for_each_session([&](tsra_handle session) {
@@ -796,33 +794,6 @@ TEST_F(tsra_aes_xts, non_trivial_multi_byte_tweak_roundtrip)
         crypt_algo.params = &xts_params;
         crypt_algo.len = sizeof(xts_params);
 
-#if SESSION_EX_TESTS
-        std::vector<uint8_t> out;
-        ASSERT_EQ(
-            TSRA_STATUS_INVALID_TWEAK,
-            ::single_shot_crypt(
-                CryptOperation::Encrypt,
-                key.get(),
-                &crypt_algo,
-                plaintext.data(),
-                plaintext.size(),
-                out
-            )
-        );
-
-        std::memcpy(xts_params.sector_num, tweak, sizeof(tweak));
-        ASSERT_EQ(
-            TSRA_STATUS_INVALID_TWEAK,
-            ::single_shot_crypt(
-                CryptOperation::Decrypt,
-                key.get(),
-                &crypt_algo,
-                plaintext.data(),
-                plaintext.size(),
-                out
-            )
-        );
-#else
         std::vector<uint8_t> ciphertext;
         ASSERT_EQ(
             TSRA_STATUS_SUCCESS,
@@ -852,7 +823,6 @@ TEST_F(tsra_aes_xts, non_trivial_multi_byte_tweak_roundtrip)
 
         ASSERT_EQ(decrypted.size(), plaintext.size());
         ASSERT_EQ(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
-#endif
     });
 }
 
@@ -910,9 +880,8 @@ TEST_F(tsra_aes_xts, non_trivial_64bit_tweak_roundtrip)
 }
 
 #if SESSION_EX_TESTS
-// On ex sessions the tweak is 64-bit: the tweak advanced past the last data
-// unit must still fit in 64 bits.
-TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_rejected)
+// Unpinned bulk XTS carries the increment across the low 64-bit boundary.
+TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_roundtrip)
 {
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_xts_key(session, 512);
@@ -930,11 +899,13 @@ TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_rejected)
 
         // Start at 2^64 - 2: the tweak advances to 2^64.
         std::memset(xts_params.sector_num, 0, sizeof(xts_params.sector_num));
-        std::memset(xts_params.sector_num, 0xFF, 8);
+        std::memset(xts_params.sector_num, 0xFF, sizeof(uint64_t));
         xts_params.sector_num[0] = 0xFE;
+        std::array<uint8_t, sizeof(xts_params.sector_num)> initial_tweak{};
+        std::memcpy(initial_tweak.data(), xts_params.sector_num, initial_tweak.size());
         std::vector<uint8_t> out;
         ASSERT_EQ(
-            TSRA_STATUS_INVALID_TWEAK,
+            TSRA_STATUS_SUCCESS,
             ::single_shot_crypt(
                 CryptOperation::Encrypt,
                 key.get(),
@@ -944,10 +915,34 @@ TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_rejected)
                 out
             )
         );
+        std::array<uint8_t, sizeof(xts_params.sector_num)> crossed_tweak{};
+        crossed_tweak[sizeof(uint64_t)] = 1;
+        ASSERT_EQ(
+            std::memcmp(xts_params.sector_num, crossed_tweak.data(), crossed_tweak.size()),
+            0
+        );
+        std::memcpy(xts_params.sector_num, initial_tweak.data(), initial_tweak.size());
+        std::vector<uint8_t> decrypted;
+        ASSERT_EQ(
+            TSRA_STATUS_SUCCESS,
+            ::single_shot_crypt(
+                CryptOperation::Decrypt,
+                key.get(),
+                &crypt_algo,
+                out.data(),
+                out.size(),
+                decrypted
+            )
+        );
+        ASSERT_EQ(decrypted, plaintext);
+        ASSERT_EQ(
+            std::memcmp(xts_params.sector_num, crossed_tweak.data(), crossed_tweak.size()),
+            0
+        );
 
         // Start at 2^64 - 3: the tweak advances to 2^64 - 1.
         std::memset(xts_params.sector_num, 0, sizeof(xts_params.sector_num));
-        std::memset(xts_params.sector_num, 0xFF, 8);
+        std::memset(xts_params.sector_num, 0xFF, sizeof(uint64_t));
         xts_params.sector_num[0] = 0xFD;
         ASSERT_EQ(
             TSRA_STATUS_SUCCESS,
@@ -960,8 +955,9 @@ TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_rejected)
                 out
             )
         );
-        uint8_t expected[16] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-        ASSERT_EQ(std::memcmp(xts_params.sector_num, expected, sizeof(expected)), 0);
+        std::array<uint8_t, sizeof(xts_params.sector_num)> expected{};
+        std::memset(expected.data(), 0xFF, sizeof(uint64_t));
+        ASSERT_EQ(std::memcmp(xts_params.sector_num, expected.data(), expected.size()), 0);
     });
 }
 #endif

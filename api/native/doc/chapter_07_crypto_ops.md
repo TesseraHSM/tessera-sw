@@ -3,6 +3,20 @@
 This section discusses the various cryptographic operation that can be performed
 on an established session.
 
+## SessionEx Bulk Operations
+
+SessionEx AES-GCM and AES-XTS use the shared bulk transport with a masked
+key supplied for each operation. The SDK does not pin these keys, register
+bulk handles, or expose device key IDs. Legacy sessions retain their
+existing resident-key bulk path. The native API signatures are unchanged.
+GCM authentication failures use the shared bulk command-failure status,
+`TSRA_STATUS_DDI_CMD_FAILURE`, for both session types.
+
+XTS uses the bulk format's full 128-bit tweak. Native SessionEx bulk
+operations require the new unpinned driver/firmware ABI; an older driver
+does not trigger a pinned-key fallback. See the
+[unpinned bulk protocol and hardware prerequisites](../../../docs/tbor-ddi/README.md#unpinned-bulk-gcm-and-xts).
+
 ## Encrypt
 
 ### tsra_crypt_encrypt

@@ -14,15 +14,30 @@
 //! Deletion goes through the [`HsmVault`](tsra_fw_hsm_pal_traits::HsmVault)
 //! delete paths in [`crate::vault`], which release any engine state.
 
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::BulkDir;
+use tsra_fw_hsm_bulk::BulkParams;
+use tsra_fw_hsm_bulk::BulkSqe;
+use tsra_fw_hsm_bulk::GCM_IV_LEN;
+use tsra_fw_hsm_bulk::GCM_TAG_LEN;
+use tsra_fw_hsm_pal_traits::HsmAesGcm;
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmBulkCrypto;
+use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmGdmaController;
+use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
+use tsra_fw_hsm_pal_traits::HsmRng;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_uno_drivers_bcp::BCP_MAX_SRC_LEN;
+use zeroize::Zeroize;
 
 use crate::UnoHsmIo;
 use crate::UnoHsmPal;
@@ -94,5 +109,123 @@ impl HsmBulkCrypto for UnoHsmPal {
             let _ = io;
             Err(HsmError::UnsupportedCmd)
         }
+    }
+
+    async fn bulk_crypt_unpinned(&self, io: &mut UnoHsmIo, key: &HsmDmaBuf) -> HsmResult<()> {
+        let sqe = BulkSqe::parse(io.sqe())?;
+        let key_ref = sqe.masked_key.ok_or(HsmError::InvalidArg)?;
+        let BulkParams::Gcm(gcm) = sqe.params else {
+            return Err(HsmError::UnsupportedCmd);
+        };
+        let body_len = sqe.src_len as usize;
+        let tail_len = gcm.tail.map_or(0, |tail| usize::from(tail.len));
+        let len = body_len + tail_len;
+        let block_len = tsra_fw_hsm_bulk::BLOCK_LEN as usize;
+        let aad_align = tsra_fw_hsm_bulk::GCM_AAD_ALIGN as usize;
+        if len.next_multiple_of(block_len) > BCP_MAX_SRC_LEN {
+            return Err(HsmError::AesGcmInvalidBufferSize);
+        }
+        let aad_len = gcm.aad_len as usize;
+        let padded = gcm.aligned_aad_len as usize;
+        let aad_offset = if (1..=block_len).contains(&(aad_len % aad_align)) {
+            block_len
+        } else {
+            0
+        };
+        if aad_offset + aad_len > padded {
+            return Err(HsmError::InvalidArg);
+        }
+        let mut cqe = BulkCqe::success(&sqe, 0);
+        let io_ref = &*io;
+        self.alloc_scoped_async(io_ref, async |scope| {
+            let allocation = scope.dma_alloc(len.max(block_len))?;
+            let data = &mut allocation[..len];
+            let iv = scope.dma_alloc(GCM_IV_LEN)?;
+            let tag = scope.dma_alloc(GCM_TAG_LEN)?;
+            let outcome: HsmResult<()> = async {
+                if body_len != 0 {
+                    self.copy_mem_from_host(
+                        io_ref,
+                        host_addr(sqe.src_addr),
+                        HsmDmaAddr::ZERO,
+                        &mut data[..body_len],
+                        false,
+                    )
+                    .await?;
+                }
+                if let Some(tail) = gcm.tail {
+                    self.copy_mem_from_host(
+                        io_ref,
+                        host_addr(tail.src),
+                        HsmDmaAddr::ZERO,
+                        &mut data[body_len..],
+                        false,
+                    )
+                    .await?;
+                }
+                if aad_offset != 0 {
+                    data.copy_within(..aad_len, aad_offset);
+                    data[..aad_offset].fill(0);
+                }
+                data[aad_offset + aad_len..padded].fill(0);
+                iv.copy_from_slice(&gcm.iv);
+                tag.copy_from_slice(&gcm.tag);
+                match sqe.dir {
+                    BulkDir::Encrypt => {
+                        if key_ref.device_iv {
+                            self.rng_fill_bytes(io_ref, iv)?;
+                        }
+                        self.gcm_encrypt_in_place(io_ref, key, iv, aad_len, data, tag)
+                            .await?;
+                    }
+                    BulkDir::Decrypt => {
+                        self.gcm_decrypt_in_place(io_ref, key, iv, aad_len, tag, data)
+                            .await?
+                    }
+                }
+                if aad_offset != 0 {
+                    data.copy_within(aad_offset..aad_offset + aad_len, 0);
+                    data[aad_len..padded].fill(0);
+                }
+                if body_len != 0 {
+                    self.copy_mem_to_host(
+                        io_ref,
+                        &data[..body_len],
+                        host_addr(sqe.dst_addr),
+                        HsmDmaAddr::ZERO,
+                        false,
+                    )
+                    .await?;
+                }
+                if let Some(tail) = gcm.tail {
+                    self.copy_mem_to_host(
+                        io_ref,
+                        &data[body_len..],
+                        host_addr(tail.dst),
+                        HsmDmaAddr::ZERO,
+                        false,
+                    )
+                    .await?;
+                }
+                cqe.iv.copy_from_slice(iv);
+                cqe.tag.copy_from_slice(tag);
+                cqe.fips_approved = key_ref.device_iv;
+                Ok(())
+            }
+            .await;
+            allocation.zeroize();
+            iv.zeroize();
+            tag.zeroize();
+            outcome
+        })
+        .await?;
+        cqe.write(io.cqe())
+    }
+}
+
+fn host_addr(addr: u64) -> HsmDmaAddr {
+    HsmDmaAddr {
+        lo: addr as u32,
+        hi: (addr >> 32) as u32,
     }
 }
