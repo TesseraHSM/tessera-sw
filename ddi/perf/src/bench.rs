@@ -10,6 +10,7 @@ use std::time::Instant;
 use rand::RngExt;
 
 use crate::ops::OpKind;
+use crate::ops::Pick;
 use crate::ops::Worker;
 use crate::setup::Env;
 use crate::RunArgs;
@@ -215,7 +216,7 @@ pub(crate) fn run(
             let (start_tx, start_rx) = std::sync::mpsc::channel();
             let handle = thread::Builder::new().spawn_scoped(s, move || {
                 let worker = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    Worker::new(env, args, tid, kinds)
+                    Worker::new(env, args, Pick::Random, kinds)
                 }))
                 .unwrap_or_else(|_| Err(format!("thread {tid}: opening the device panicked")));
                 ready_tx
