@@ -326,6 +326,8 @@ mod tests {
             cbc_len: 16,
             verify_all: false,
             max_samples: 1,
+            key_cache: None,
+            no_key_cache: true,
             tsv: None,
             label: String::new(),
             quiet: true,

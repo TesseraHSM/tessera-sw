@@ -416,7 +416,7 @@ pub(crate) struct Worker<'e> {
     mbor: Option<<TsraDdi as Ddi>::Dev>,
     pools: Pools,
     pick: Pick,
-    /// Requests issued; drives the [`Pick::Sweep`] order.
+    /// The next request's place in the [`Pick::Sweep`] order.
     seq: u64,
     /// Draws [`Pick::Random`] inputs.
     rng: SmallRng,
@@ -491,6 +491,11 @@ impl<'e> Worker<'e> {
             last_mldsa_keygen: None,
             last_mlkem_keygen: None,
         })
+    }
+
+    /// Make the next request the `n`th of the [`Pick::Sweep`] order.
+    pub(crate) fn sweep_to(&mut self, n: usize) {
+        self.seq = n as u64;
     }
 
     /// Next `(key, message)` indices; see [`Pick`].
@@ -757,12 +762,13 @@ impl<'e> Worker<'e> {
         let (_, p) = op.mldsa().expect("ML-DSA operation");
         let env = self.env;
         let signed = &env.keys.mldsa_signed[&p.key_kind];
-        let (k, m) = self.rotate_shared(signed.keys.len(), signed.mus.len());
+        let (i, _) = self.rotate_shared(signed.pairs(), 1);
+        let (pub_key, mu, signature) = signed.pair(i);
         let req = TborMlDsaVerifyReq {
             session_id: env.session_id,
-            pub_key: signed.keys[k].pub_key.clone(),
-            mu: signed.mus[m].clone(),
-            signature: signed.keys[k].sigs[m].clone(),
+            pub_key: pub_key.to_vec(),
+            mu: mu.to_vec(),
+            signature: signature.to_vec(),
         };
         // The device error is kept so that a rejection is reported by name.
         let (dt, resp) = timed(|| Ok(env.session_ctx().tbor(&req)));
@@ -820,15 +826,14 @@ impl<'e> Worker<'e> {
     fn mlkem_decap(&mut self, op: OpKind, verify: bool) -> (Duration, Result<(), String>) {
         let (_, p) = op.mlkem().expect("ML-KEM operation");
         let env = self.env;
-        let keys = &env.keys.mlkem[&p.key_kind];
-        // Every key has `--messages` ciphertexts.
-        let (k, m) = self.rotate_shared(keys.len(), keys[0].cts.len());
-        let key = &keys[k];
+        let cts = &env.keys.mlkem[&p.key_kind];
+        let (i, _) = self.rotate_shared(cts.pairs(), 1);
+        let (masked_key, ciphertext) = cts.pair(i);
         let req = TborMlKemDecapsulateReq {
             session_id: env.session_id,
             scope: SCOPE_LOCAL,
-            masked_key: key.masked.clone(),
-            ciphertext: key.cts[m].clone(),
+            masked_key: masked_key.to_vec(),
+            ciphertext: ciphertext.to_vec(),
         };
         let (dt, resp) = timed(|| env.session_ctx().tbor(&req));
         let result = resp.and_then(|r| {
@@ -870,15 +875,15 @@ impl<'e> Worker<'e> {
         let (_, p) = op.mldsa().expect("ML-DSA operation");
         let env = self.env;
         let signed = &env.keys.mldsa_signed[&p.key_kind];
-        let (k, m) = self.last_shared;
-        let mut signature = signed.keys[k].sigs[m].clone();
+        let (pub_key, mu, signature) = signed.pair(self.last_shared.0);
+        let mut signature = signature.to_vec();
         // The signature starts with the challenge hash, which any change to
         // it breaks.
         signature[0] ^= 0x01;
         let resp = env.session_ctx().tbor(&TborMlDsaVerifyReq {
             session_id: env.session_id,
-            pub_key: signed.keys[k].pub_key.clone(),
-            mu: signed.mus[m].clone(),
+            pub_key: pub_key.to_vec(),
+            mu: mu.to_vec(),
             signature,
         });
         match resp {

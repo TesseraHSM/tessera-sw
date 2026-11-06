@@ -6,16 +6,16 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::OnceLock;
 
 use rand::RngExt;
 use tsra_crypto::AesKey;
 use tsra_crypto::AesKeyWrapPadAlgo;
 use tsra_crypto::Encrypter;
-use tsra_crypto::ExportableKey;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::ImportableKey;
-use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
@@ -48,6 +48,7 @@ use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::PSK_LEN;
 use zeroize::Zeroizing;
 
+use crate::keycache;
 use crate::ops::MlDsaCmd;
 use crate::ops::MlKemCmd;
 use crate::ops::OpKind;
@@ -56,7 +57,7 @@ use crate::ops::Worker;
 use crate::pqc;
 use crate::pqc::MlDsaKey;
 use crate::pqc::MlDsaSigned;
-use crate::pqc::MlKemKey;
+use crate::pqc::MlKemCts;
 use crate::RunArgs;
 
 /// `KeyScope::Local`: keys masked under the partition-local masking key,
@@ -99,7 +100,7 @@ pub(crate) struct Keys {
     pub(crate) mlkem_pub: BTreeMap<u8, Vec<Vec<u8>>>,
     /// Device-generated ML-KEM keys with host ciphertexts for
     /// `MlKemDecapsulate`, keyed by `key_kind`.
-    pub(crate) mlkem: BTreeMap<u8, Vec<MlKemKey>>,
+    pub(crate) mlkem: BTreeMap<u8, MlKemCts>,
 }
 
 /// The device under test and everything set up on it.
@@ -198,27 +199,28 @@ impl Env {
                 args,
                 format!("generating {} ECC keys (curve {curve})", args.keys),
             );
-            let pool = (0..args.keys)
-                .map(|_| {
-                    let resp = ctx
-                        .tbor(&TborEccGenerateKeyReq {
-                            session_id,
-                            scope: SCOPE_LOCAL,
-                            curve,
-                            key_usage: KEY_USAGE_SIGN,
-                            key_label: Vec::new(),
-                        })
-                        .map_err(|e| format!("EccGenerateKey: {e:?}"))?;
-                    Ok(EccKey {
-                        masked: resp.masked_key,
-                        pub_le: resp.pub_key,
+            let pool = par_map(args.keys, |_| {
+                let resp = ctx
+                    .tbor(&TborEccGenerateKeyReq {
+                        session_id,
+                        scope: SCOPE_LOCAL,
+                        curve,
+                        key_usage: KEY_USAGE_SIGN,
+                        key_label: Vec::new(),
                     })
+                    .map_err(|e| format!("EccGenerateKey: {e:?}"))?;
+                Ok(EccKey {
+                    masked: resp.masked_key,
+                    pub_le: resp.pub_key,
                 })
-                .collect::<Result<_, String>>()?;
+            })?;
             keys.ecc.insert(curve, pool);
         }
 
+        let key_cache = args.key_cache_dir();
         for (bytes, crt) in kinds.iter().filter_map(|k| k.rsa()) {
+            let ders =
+                keycache::rsa_keys(key_cache.as_deref(), bytes, args.keys, |m| say(args, m))?;
             say(
                 args,
                 format!(
@@ -233,25 +235,22 @@ impl Env {
             } else {
                 KEY_CLASS_RSA
             };
-            let pool = (0..args.keys)
-                .map(|_| {
-                    let key = RsaPrivateKey::generate(bytes)
-                        .map_err(|e| format!("host RSA keygen: {e:?}"))?;
-                    let der =
-                        Zeroizing::new(key.to_vec().map_err(|e| format!("RSA DER export: {e:?}"))?);
-                    let masked = unwrap_key(
-                        ctx,
-                        session_id,
-                        class,
-                        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
-                        &der,
-                    )?;
-                    let public = key
-                        .public_key()
-                        .map_err(|e| format!("RSA public key: {e:?}"))?;
-                    Ok(RsaKey { masked, public })
-                })
-                .collect::<Result<_, String>>()?;
+            let pool = par_map(ders.len(), |i| {
+                let der = &ders[i];
+                let key = RsaPrivateKey::from_bytes(der)
+                    .map_err(|e| format!("cached RSA key {i}: {e:?}"))?;
+                let masked = unwrap_key(
+                    ctx,
+                    session_id,
+                    class,
+                    KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+                    der,
+                )?;
+                let public = key
+                    .public_key()
+                    .map_err(|e| format!("RSA public key: {e:?}"))?;
+                Ok(RsaKey { masked, public })
+            })?;
             keys.rsa.insert((bytes, crt), pool);
         }
 
@@ -260,21 +259,18 @@ impl Env {
             .any(|k| matches!(k, OpKind::AesCbcEncrypt | OpKind::AesCbcDecrypt))
         {
             say(args, format!("importing {} AES-256 keys", args.keys));
-            let mut rng = rand::rng();
-            keys.aes = (0..args.keys)
-                .map(|_| {
-                    let mut raw = Zeroizing::new([0u8; 32]);
-                    rng.fill(&mut raw[..]);
-                    let masked = unwrap_key(
-                        ctx,
-                        session_id,
-                        KEY_CLASS_AES,
-                        KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
-                        &raw[..],
-                    )?;
-                    Ok(AesKeyEntry { masked, raw })
-                })
-                .collect::<Result<_, String>>()?;
+            keys.aes = par_map(args.keys, |_| {
+                let mut raw = Zeroizing::new([0u8; 32]);
+                rand::rng().fill(&mut raw[..]);
+                let masked = unwrap_key(
+                    ctx,
+                    session_id,
+                    KEY_CLASS_AES,
+                    KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
+                    &raw[..],
+                )?;
+                Ok(AesKeyEntry { masked, raw })
+            })?;
         }
 
         for &op in kinds {
@@ -288,8 +284,10 @@ impl Env {
                     say(
                         args,
                         format!(
-                            "signing {} random mu values with each of {} host {} keys",
-                            args.messages, args.keys, p.name
+                            "signing {} random mu values with {} host {} keys",
+                            args.keys.max(args.messages),
+                            args.keys,
+                            p.name
                         ),
                     );
                     let signed = pqc::host_mldsa_signed(p, args.keys, args.messages)?;
@@ -310,8 +308,10 @@ impl Env {
                     say(
                         args,
                         format!(
-                            "generating {} {} keys, {} host ciphertexts each",
-                            args.keys, p.name, args.messages
+                            "generating {} {} keys and {} host ciphertexts to them",
+                            args.keys,
+                            p.name,
+                            args.keys.max(args.messages)
                         ),
                     );
                     let pool =
@@ -329,18 +329,54 @@ impl Env {
     /// Run every selected operation against each key, checking each
     /// response against the host reference (and following up where a
     /// response alone cannot show the device did the work; see
-    /// [`Worker::prove`]).
+    /// [`Worker::prove`]). The requests are spread over the host's cores,
+    /// each thread taking every `step`-th of them.
     fn preflight(&self, args: &RunArgs, kinds: &BTreeSet<OpKind>) -> Result<(), String> {
         let list: Vec<OpKind> = kinds.iter().copied().collect();
-        let mut worker = Worker::new(self, args, Pick::Sweep, &list)?;
+        let rounds = 2 * args.keys;
+        let step = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(rounds);
+        // Set by the first thread to fail, so that the others stop early.
+        let failed = AtomicBool::new(false);
+        std::thread::scope(|s| {
+            let handles: Vec<_> = (0..step)
+                .map(|first| {
+                    let (list, failed) = (&list, &failed);
+                    s.spawn(move || -> Result<(), String> {
+                        let run = || {
+                            let mut worker = Worker::new(self, args, Pick::Sweep, list)?;
+                            for &op in list {
+                                for i in (first..rounds).step_by(step) {
+                                    if failed.load(Ordering::Relaxed) {
+                                        return Ok(());
+                                    }
+                                    worker.sweep_to(i);
+                                    let (_, result) = worker.exec(op, true);
+                                    result.and_then(|()| worker.prove(op)).map_err(|e| {
+                                        format!(
+                                            "pre-flight {} request {i}/{rounds} failed: {e}",
+                                            op.name()
+                                        )
+                                    })?;
+                                }
+                            }
+                            Ok(())
+                        };
+                        let result = run();
+                        if result.is_err() {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+                        result
+                    })
+                })
+                .collect();
+            handles.into_iter().try_for_each(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("pre-flight thread panicked".into()))
+            })
+        })?;
         for &op in kinds {
-            let rounds = 2 * args.keys;
-            for i in 0..rounds {
-                let (_, result) = worker.exec(op, true);
-                result.and_then(|()| worker.prove(op)).map_err(|e| {
-                    format!("pre-flight {} request {i}/{rounds} failed: {e}", op.name())
-                })?;
-            }
             say(
                 args,
                 format!("pre-flight ok: {} ({rounds} checked)", op.name()),
@@ -348,6 +384,39 @@ impl Env {
         }
         Ok(())
     }
+}
+
+/// `f(i)` for each `i` in `0..n`, in order, spread over the host's cores:
+/// at the default `--keys`, setup makes tens of thousands of keys and inputs.
+pub(crate) fn par_map<T: Send>(
+    n: usize,
+    f: impl Fn(usize) -> Result<T, String> + Sync,
+) -> Result<Vec<T>, String> {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, n.max(1));
+    let per = n.div_ceil(threads).max(1);
+    let f = &f;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..n)
+            .step_by(per)
+            .map(|start| {
+                s.spawn(move || {
+                    (start..n.min(start + per))
+                        .map(f)
+                        .collect::<Result<Vec<T>, String>>()
+                })
+            })
+            .collect();
+        let mut out = Vec::with_capacity(n);
+        for h in handles {
+            let chunk = h
+                .join()
+                .unwrap_or_else(|_| Err("setup thread panicked".into()))?;
+            out.extend(chunk);
+        }
+        Ok(out)
+    })
 }
 
 /// A version string as the driver reports it, without NUL or space padding.
