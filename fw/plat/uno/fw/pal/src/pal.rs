@@ -34,6 +34,8 @@ use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
+use embassy_time::Duration;
+use embassy_time::Instant;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
@@ -553,6 +555,13 @@ fn is_pcie_reset_event(value: u32) -> bool {
     value == PCIE_RESET_FLR || value == PCIE_RESET_PERST
 }
 
+/// Longest the IDFU shutdown handler waits for the PKA engines to return to
+/// the pool before failing closed. A wipe takes microseconds and a periodic
+/// self-test holds an engine for a few milliseconds, so this expires only for
+/// a stuck engine (e.g. a wipe that keeps failing), and it leaves the reply
+/// well inside Admin's smallest IDFU drain budget (500 ms).
+const SHUTDOWN_PKA_DRAIN_MS: u64 = 100;
+
 impl UnoHsmPal {
     /// Returns the current boot phase.
     ///
@@ -863,7 +872,7 @@ impl UnoHsmPal {
                 if self.try_handle_pfn_enable(channel, buf).await {
                     return;
                 }
-                if self.try_handle_shutdown(channel, buf) {
+                if self.try_handle_shutdown(channel, buf).await {
                     return;
                 }
                 buf[0] |= 0x80;
@@ -992,20 +1001,26 @@ impl UnoHsmPal {
     ///
     /// Admin owns the IO drain: it sends this only after every host SQ
     /// credit has been restored, and inbound is HW-paused so no new IO can
-    /// arrive. The HSM therefore just confirms it holds no in-flight IO and
+    /// arrive. The HSM therefore just confirms it holds no resident work and
     /// replies — mirroring the reference firmware's fail-closed
     /// `scheduler.occupancy_list() != 0` guard:
     ///
-    /// - non-zero in-flight -> reply `OperationFailed`, so Admin aborts
+    /// - non-zero in-flight IO -> reply `OperationFailed`, so Admin aborts
     ///   (rolls back) the IDFU instead of resetting with resident work;
-    /// - zero in-flight -> reply `Success`. Partition state is already
+    /// - PKA engines still out of the pool after [`SHUTDOWN_PKA_DRAIN_MS`]
+    ///   -> reply `OperationFailed` likewise. A request can finish while the
+    ///   wipe that follows its PKA command (or the retry of a failed wipe)
+    ///   still runs, and a reset then would lose the wipe while the rebuilt
+    ///   driver marks the engine free, so the handler first waits for the
+    ///   engines to return;
+    /// - otherwise -> reply `Success`. Partition state is already
     ///   GSRAM write-through (see [`part`](crate::part)), so there is no
     ///   separate flush to perform before the SP resets the core.
     ///
     /// Returns `true` when the message was a `Shutdown` (and thus fully
     /// handled here), `false` otherwise so the caller falls back to the
     /// default echo path.
-    fn try_handle_shutdown(&self, channel: IpcChannel, buf: &[u32; 16]) -> bool {
+    async fn try_handle_shutdown(&self, channel: IpcChannel, buf: &[u32; 16]) -> bool {
         // Only claim messages that carry the `Shutdown` opcode; anything else
         // is left for the caller's default echo path.
         let is_shutdown = IpcMessageDecoder::decode_header(&IpcMessage { data: *buf })
@@ -1031,7 +1046,8 @@ impl UnoHsmPal {
         }
 
         // Admin owns the drain (see the docstring): fail closed while any host
-        // IO is still in flight, otherwise acknowledge readiness. This relies
+        // IO is still in flight, otherwise acknowledge readiness once the PKA
+        // has finished the cleanup host IO leaves behind. This relies
         // on every received IO eventually reaching `drop_io` (each
         // `handle_io` task runs to completion, or the core faults into a
         // reset); a task that hung on an `.await` would keep the count
@@ -1045,6 +1061,13 @@ impl UnoHsmPal {
                 in_flight
             );
             IpcMessageStatusCode::OperationFailed
+        } else if !self.drain_pka().await {
+            error!(
+                "idfu",
+                HsmError::IoDrainInProgress,
+                "shutdown requested with PKA cleanup pending; failing closed"
+            );
+            IpcMessageStatusCode::OperationFailed
         } else {
             IpcMessageStatusCode::Success
         };
@@ -1052,6 +1075,25 @@ impl UnoHsmPal {
         let reply = encode_shutdown_ack(buf, status);
         self.ipc.reply(channel as u8, &reply);
         true
+    }
+
+    /// Wait up to [`SHUTDOWN_PKA_DRAIN_MS`] for every PKA engine to return to
+    /// the pool, handling finished commands and wipes as it goes.
+    ///
+    /// Returns whether the PKA is idle.
+    async fn drain_pka(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(SHUTDOWN_PKA_DRAIN_MS);
+        loop {
+            self.service_pka();
+            if !self.pka.any_engine_busy() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            // Let a task holding an engine (a periodic self-test) run.
+            embassy_futures::yield_now().await;
+        }
     }
 
     /// Handle one IPC event notification.

@@ -147,7 +147,8 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
     }
 
     /// Whether any engine is in use: running a command, wiping, or held.
-    /// Only then can an engine's completion be pending.
+    /// Only then can an engine's completion be pending. A wipe can outlive
+    /// the request that started it, so IDFU shutdown waits for this to clear.
     #[inline]
     pub fn any_engine_busy(&self) -> bool {
         self.state

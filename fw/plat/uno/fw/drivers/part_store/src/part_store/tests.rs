@@ -385,7 +385,7 @@ fn clear_state_preserves_unwrapping_key_slot() {
 /// setter's write shows up in the next read.
 #[test]
 fn shadowed_fields_follow_writes() {
-    let pid = 13usize;
+    let pid = 15usize;
     let cred = [0x66u8; CREDENTIAL_LEN];
 
     Partition(pid).reset();
