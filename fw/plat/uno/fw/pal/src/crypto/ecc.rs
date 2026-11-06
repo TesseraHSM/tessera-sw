@@ -600,9 +600,14 @@ impl HsmEcc for UnoHsmPal {
     ) -> HsmResult<()> {
         let pka_curve = map_ecc_curve(curve)?;
         self.service_pka();
-        self.pka
+        let signed = self
+            .pka
             .ecc_sign(pka_curve, priv_key, hash, signature)
-            .await
+            .await;
+        // Other engines may have finished while this one signed; see to
+        // them before the reply goes out.
+        self.service_pka();
+        signed
     }
 
     /// Raw EC verify of a signature over a pre-computed hash digest.
