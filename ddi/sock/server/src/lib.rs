@@ -40,6 +40,7 @@ use tsra_ddi_sock_proto::Request;
 use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::Response;
 use tsra_ddi_sock_proto::ResponseFrame;
+use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TBOR_OP_SESSION_OPEN_FINISH;
@@ -287,15 +288,23 @@ impl Connection {
                 // firmware, so ownership alone is insufficient here.
                 let session_id = BulkSqe::parse(&submission.sqe).map(|sqe| sqe.session_id);
                 let sessions = server.sessions.read().await;
-                if session_id.is_ok_and(|id| {
-                    !state.owns_session(id, &sessions)
-                        || !sessions
-                            .get(&id)
-                            .is_some_and(|owner| owner.state == SessionState::Active)
-                }) {
-                    return Ok(ResponseFrame::Submit(transport_error(
-                        TRANSPORT_SESSION_NOT_OWNED,
-                    )));
+                if let Ok(id) = session_id {
+                    let session_state = state
+                        .owns_session(id, &sessions)
+                        .then(|| sessions.get(&id).map(|owner| owner.state))
+                        .flatten();
+                    let rejection = match session_state {
+                        Some(SessionState::Active) => None,
+                        // Report a reset-invalidated session like firmware
+                        // would, so clients renegotiate and retry.
+                        Some(SessionState::NeedsRenegotiation) => {
+                            Some(TRANSPORT_SESSION_NEEDS_RENEGOTIATION)
+                        }
+                        _ => Some(TRANSPORT_SESSION_NOT_OWNED),
+                    };
+                    if let Some(status) = rejection {
+                        return Ok(ResponseFrame::Submit(transport_error(status)));
+                    }
                 }
                 let response = execute_frame(Arc::clone(&server), request).await;
                 drop(sessions);

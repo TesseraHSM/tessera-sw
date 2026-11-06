@@ -348,7 +348,7 @@ mod tests {
             owner.erase().expect("reset");
             assert!(matches!(
                 bulk_error(&owner, session.session_id),
-                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+                DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation)
             ));
             drop(owner);
             wait_for_cleanup(lease);
