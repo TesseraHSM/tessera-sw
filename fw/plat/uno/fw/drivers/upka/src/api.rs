@@ -146,6 +146,14 @@ impl<const DEPTH: usize, const ENGINES: usize> UpkaDriver<DEPTH, ENGINES> {
         self.scheduler().wake_engine(id);
     }
 
+    /// Whether any engine is in use: running a command, wiping, or held.
+    /// Only then can an engine's completion be pending.
+    #[inline]
+    pub fn any_engine_busy(&self) -> bool {
+        self.state
+            .with(|s| s.free_mask != ((1u32 << ENGINES) - 1) as u16)
+    }
+
     pub(crate) fn release_engine(&self, id: u8) {
         self.scheduler().release_engine(id);
     }
