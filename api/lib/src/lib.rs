@@ -11,6 +11,7 @@ mod session;
 mod shared_types;
 pub mod traits;
 
+// Starts an in-process DDI sock server for the unit tests.
 pub use algo::*;
 pub use ddi::DARC_UNWRAP_MASKED_KEY_MAX_LEN;
 pub use ddi::DARC_UNWRAP_PUB_KEY_MAX_LEN;
@@ -39,6 +40,8 @@ pub use ddi::PolicyPubKey;
 pub use ddi::PolicyVer;
 pub use ddi::SD_MK_BACKUP_LEN;
 pub use ddi::SEALED_TMK_LEN;
+#[cfg(all(test, feature = "sock"))]
+use ddi_sock_server as _;
 pub use error::*;
 pub use op::*;
 pub use partition::*;

@@ -391,12 +391,12 @@ void make_part_init_config(tsra_handle part_handle, PartInitConfig &config)
     }
 }
 
-// Emu needs a process-unique cache because each nextest process owns an
-// independent emulator with its own random BK_BOOT. Hardware/socket builds
-// keep a shared persistent cache for reuse across processes.
+// Emu and auto-started socket servers need a process-unique cache because each
+// nextest process owns an independent emulator with its own random BK_BOOT.
+// Hardware builds keep a shared persistent cache for reuse across processes.
 static const std::string &default_mobk_path()
 {
-#ifdef TSRA_FEATURE_EMU
+#ifdef TSRA_PROCESS_LOCAL_HSM
     struct MobkPath
     {
         std::string path;

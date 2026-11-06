@@ -24,7 +24,7 @@
 //! * Crypto-User session → `InvalidPermissions`.
 //! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
 
 use tsra_crypto::EccAlgo;
 use tsra_crypto::EccPublicKey;

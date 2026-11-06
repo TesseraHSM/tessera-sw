@@ -7,7 +7,7 @@
 //! `ddi/sock/tests/ddi_sock_server_*_integration.rs` already cover the
 //! raw DDI wire protocol (`GetApiRev` round trips, reconnect-after-
 //! disconnect) directly against `tsra_ddi_sock`, and `ddi_sock_server`'s
-//! own crate tests (`examples/sock/ddi_sock_server/src/tcp.rs`) cover
+//! own crate tests (`ddi/sock/server/src/tcp.rs`) cover
 //! session ownership, reset, and cleanup at the DDI/connection level in
 //! depth. What neither covers is the high-level `tsra_api` layer
 //! (`HsmPartitionManager`, `HsmPartition`, `HsmSession`) actually
@@ -16,7 +16,7 @@
 //! `ddi_sock_server` initializes its partition once at server startup
 //! and keeps it enabled for the life of the process, shared across
 //! arbitrarily many concurrent connections (see
-//! `examples/sock/ddi_sock_server/README.md`) rather than resetting
+//! `ddi/sock/server/README.md`) rather than resetting
 //! (and requiring re-`init`) on every disconnect. So this test `init`s
 //! the partition once, then drives many real session open/close cycles
 //! (including concurrently) against the one initialized partition.

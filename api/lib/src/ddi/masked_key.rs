@@ -42,9 +42,7 @@ const fn uno_rsa_crt_payload_len(key_bytes: usize) -> usize {
 fn rsa_crt_payload_len_valid(key_bytes: usize, payload_len: usize) -> bool {
     let std = payload_len == std_rsa_crt_payload_len(key_bytes);
     let uno = payload_len == uno_rsa_crt_payload_len(key_bytes);
-    if cfg!(feature = "emu") {
-        std
-    } else if cfg!(feature = "sock") {
+    if cfg!(feature = "sock") {
         std || uno
     } else {
         uno
@@ -921,14 +919,7 @@ mod tests {
                 (KEY_KIND_RSA3K_PRIVATE_CRT, 384),
                 (KEY_KIND_RSA4K_PRIVATE_CRT, 512),
             ]
-            .map(|(kind, key_bytes)| {
-                let len = if cfg!(feature = "emu") {
-                    std_rsa_crt_payload_len(key_bytes)
-                } else {
-                    uno_rsa_crt_payload_len(key_bytes)
-                };
-                (kind, len)
-            }),
+            .map(|(kind, key_bytes)| (kind, uno_rsa_crt_payload_len(key_bytes))),
         ) {
             let blob = unchecked_padded_blob(kind, raw_len);
             assert!(HsmMaskedKey::to_key_props(&blob).is_ok());
@@ -940,12 +931,9 @@ mod tests {
         for (key_bytes, std, uno) in [(256, 1156, 1284), (384, 1732, 1924), (512, 2308, 2564)] {
             assert_eq!(
                 rsa_crt_payload_len_valid(key_bytes, std),
-                cfg!(any(feature = "emu", feature = "sock"))
+                cfg!(feature = "sock")
             );
-            assert_eq!(
-                rsa_crt_payload_len_valid(key_bytes, uno),
-                !cfg!(feature = "emu")
-            );
+            assert!(rsa_crt_payload_len_valid(key_bytes, uno));
         }
     }
 }

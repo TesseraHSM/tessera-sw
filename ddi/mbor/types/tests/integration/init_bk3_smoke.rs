@@ -21,7 +21,7 @@
 //!   called again — the new `BK_BOOT` produces a different
 //!   `masked_bk3`.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
 #![cfg(test)]
 
 use test_with_tracing::test;

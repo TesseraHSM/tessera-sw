@@ -8,8 +8,8 @@
 //! Implements the [`Ddi`](tsra_ddi_interface::Ddi) trait stack by
 //! tunnelling DDI requests over TCP, a Unix domain socket, or Linux VSOCK to an emulator-side
 //! server (e.g. the Uno SoC emulator's DDI server), which bridges them to
-//! the real firmware. It mirrors [`tsra_ddi_emu`] but, instead of
-//! running the firmware in-process, encodes each request to MBOR/TBOR
+//! the real firmware, or to `ddi_sock_server`, which runs the std firmware.
+//! It encodes each request to MBOR/TBOR
 //! bytes and exchanges them with the server using
 //! [`tsra_ddi_sock_proto`].
 //!

@@ -170,7 +170,7 @@ fn sd_create_peer_backup_roundtrip() {
     );
 }
 
-#[cfg(feature = "emu")]
+#[cfg(feature = "sock")]
 #[test]
 fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
     use tsra_crypto::EccCurve;

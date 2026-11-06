@@ -33,10 +33,12 @@ zeroize.workspace = true
 
 [features]
 default = []
-emu = ["tsra_ddi/emu"]
-sock = ["tsra_ddi/sock"]
-# Forward the per-IO `iic recv` / `oic send` debug traces (emu backend only).
-trace-io = ["tsra_ddi/trace-io"]
+# Shorten resiliency retry backoff for simulated devices (test builds only).
+fast-backoff = []
+sock = ["ddi_sock_server/autostart", "tsra_ddi/sock"]
+
+[dev-dependencies]
+ddi_sock_server.workspace = true
 
 [lints]
 workspace = true

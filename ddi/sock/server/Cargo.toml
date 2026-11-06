@@ -6,6 +6,15 @@ edition = "2024"
 name = "ddi_sock_server"
 version = "0.1.0"
 
+[lib]
+doctest = false
+
+[features]
+# Start an in-process server before `main` in binaries that link this crate.
+autostart = []
+# Forward the per-IO `iic recv` / `oic send` debug traces of the served firmware.
+trace-io = ["tsra_fw_hsm_std/trace-io"]
+
 [dependencies]
 tokio = { features = [
   "io-util",

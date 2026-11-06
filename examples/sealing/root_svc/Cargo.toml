@@ -28,11 +28,12 @@ zerocopy.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Serves the in-process HSM for unit and integration tests only.
+ddi_sock_server.workspace = true
 ureq = { default-features = false, version = "3" }
 
 [features]
-emu = ["tsra_sealing_common/emu"]
-sock = ["tsra_sealing_common/sock"]
+sock = ["ddi_sock_server/autostart", "tsra_sealing_common/sock"]
 
 [lints]
 workspace = true

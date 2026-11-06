@@ -9,8 +9,11 @@ version = "0.1.0"
 
 [features]
 integration = []
+# Start an in-process DDI sock server for a sock-transport build under test.
+sock = ["ddi_sock_server/autostart"]
 
 [dev-dependencies]
+ddi_sock_server.workspace = true
 lit = { workspace = true }
 serial_test = { workspace = true }
 

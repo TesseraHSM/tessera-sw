@@ -46,9 +46,6 @@ use crate::store::FileStore;
     about = "Named leaf security domains using a loopback root issuer"
 )]
 struct Cli {
-    /// Refuse device access unless built with the emulator backend.
-    #[arg(long, global = true)]
-    require_emu: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -111,10 +108,6 @@ struct JoinArgs {
 
 pub(crate) fn run() -> Result<()> {
     let args = Cli::parse();
-    anyhow::ensure!(
-        !args.require_emu || cfg!(feature = "emu"),
-        "this operation requires an emulator build"
-    );
     match args.command {
         Command::Create(args) => create(&args),
         Command::Join(args) => join(&args),

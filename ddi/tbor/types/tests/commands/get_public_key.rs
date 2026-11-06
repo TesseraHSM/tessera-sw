@@ -8,7 +8,7 @@
 //! public key returned when the key was created (`EccGenerateKey` /
 //! `UnwrapKey`), so both commands are pinned to the same wire format.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
 
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;

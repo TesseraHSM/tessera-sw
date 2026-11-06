@@ -134,7 +134,7 @@ fn run_import_matrix(
 /// imported ECC key's structure.
 #[test]
 #[cfg_attr(
-    feature = "emu",
+    feature = "sock",
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn rsa_unwrap_ecc_structure_matrix() {
@@ -202,7 +202,7 @@ fn rsa_unwrap_ecc_structure_matrix() {
 /// with 36 malformed variants.
 #[test]
 #[cfg_attr(
-    feature = "emu",
+    feature = "sock",
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn rsa_unwrap_rsa_pct_matrix() {
@@ -254,7 +254,7 @@ fn rsa_unwrap_rsa_pct_matrix() {
 /// vault would have run out of space first.
 #[test]
 #[cfg_attr(
-    feature = "emu",
+    feature = "sock",
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn rsa_unwrap_rejected_imports_store_nothing() {

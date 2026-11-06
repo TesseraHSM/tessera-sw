@@ -21,7 +21,6 @@ members = [
   "crates/test_with_tracing/test_with_tracing_macro",
   "crates/tpm",
   "crates/x509",
-  "ddi/emu",
   "ddi/interface",
   "ddi/lib",
   "ddi/mbor/codec",
@@ -32,6 +31,7 @@ members = [
   "ddi/perf",
   "ddi/sock",
   "ddi/sock/proto",
+  "ddi/sock/server",
   "ddi/tbor/codec",
   "ddi/tbor/derive",
   "ddi/tbor/types",
@@ -45,7 +45,6 @@ members = [
   "examples/sock/api_sock_get_api_rev",
   "examples/sock/ddi_sock_ecc384_loop",
   "examples/sock/ddi_sock_get_api_rev",
-  "examples/sock/ddi_sock_server",
   "fw/core/bulk",
   "fw/core/crypto/aead-envelope",
   "fw/core/crypto/aes-cbc-pad",
@@ -108,6 +107,7 @@ exclude = ["fuzz", "fw/plat/uno"]
 
 [workspace.dependencies]
 # Internal crates
+ddi_sock_server = { path = "ddi/sock/server" }
 resiliency_macro = { path = "crates/resiliency_macro" }
 test_with_tracing = { path = "crates/test_with_tracing" }
 test_with_tracing_macro = { path = "crates/test_with_tracing/test_with_tracing_macro" }
@@ -118,7 +118,6 @@ tsra_api_tests_macro = { path = "api/tests/macro" }
 tsra_cred_encrypt = { path = "crates/cred_encrypt" }
 tsra_crypto = { path = "crates/crypto" }
 tsra_ddi = { path = "ddi/lib" }
-tsra_ddi_emu = { path = "ddi/emu" }
 tsra_ddi_interface = { path = "ddi/interface" }
 tsra_ddi_mbor_codec = { path = "ddi/mbor/codec" }
 tsra_ddi_mbor_derive = { path = "ddi/mbor/derive" }

@@ -12,11 +12,15 @@ crate-type = ["cdylib", "lib"]
 
 [features]
 default = []
-emu = ["tsra_api/emu"]
 engine = ["dep:foreign-types", "dep:openssl", "tsra_ossl_engine_core/engine"]
 # Exposes the test-only masked-key generator (generate_masked_ec_p384_from_env)
 # for the integration harness; not built into the production engine cdylib.
 integration = ["engine"]
+# Test transport: the unit tests start an in-process DDI sock server.
+sock = ["ddi_sock_server/autostart", "tsra_api/sock"]
+# Compiles in well-known default credentials for the simulated HSM. Test
+# builds only; never enable for a production engine.
+test-credentials = []
 
 [dependencies]
 parking_lot.workspace = true
@@ -40,7 +44,10 @@ libc.workspace = true
 foreign-types = { optional = true, workspace = true }
 openssl = { optional = true, workspace = true }
 
-# serial_test is only used by the Linux-only emu tests; keep it gated so the
+[dev-dependencies]
+ddi_sock_server.workspace = true
+
+# serial_test is only used by the Linux-only sock tests; keep it gated so the
 # Windows `--all-targets` build stays clean.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 serial_test.workspace = true
