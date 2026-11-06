@@ -185,6 +185,17 @@ fn wake_pka(pal: &UnoHsmPal, irq: u16) {
     pal.pka.wake_engine((irq & 0x0F) as u8);
 }
 
+/// First PKA done and error IRQs. Each block of sixteen sits inside one
+/// pending register, at the engine's index (see [`wake_pka`]).
+const PKA_DONE_IRQ: usize = Interrupt::UPKA_0_DONE as usize;
+const PKA_ERROR_IRQ: usize = Interrupt::UPKA_0_ERROR as usize;
+const _: () = assert!(
+    PKA_DONE_IRQ % 32 + 16 <= 32
+        && PKA_ERROR_IRQ % 32 + 16 <= 32
+        && Interrupt::UPKA_15_DONE as usize == PKA_DONE_IRQ + 15
+        && Interrupt::UPKA_15_ERROR as usize == PKA_ERROR_IRQ + 15
+);
+
 /// `(IRQ number, wake function)` pairs registered for NVIC dispatch.
 ///
 /// Adding a new peripheral interrupt requires one entry here. The
@@ -723,6 +734,38 @@ impl UnoHsmPal {
         tsra_fw_uno_drivers_semihosting::sys_ready();
 
         info!("boot", "phase -> Running, status=Run");
+    }
+
+    /// Handle every PKA engine that has finished a command or a wipe, as
+    /// [`poll_once`](Self::poll_once) does for their IRQs.
+    ///
+    /// Called also where a request awaits the BCP or the PKA -- steps of
+    /// keyed requests only, so that requests that never use them pay
+    /// nothing -- since the run loop's next pass waits behind every task
+    /// ready ahead of it, and an engine whose command has finished sits
+    /// idle until it comes: twice per command, once for the command and
+    /// once for the wipe that follows. Under a stream of ECDSA P-256
+    /// signatures, which keeps all sixteen engines busy, that wait was
+    /// about a fortieth of each engine's time. With no engine in use this
+    /// is a load and a compare, inlined; the rest is out of line, to keep
+    /// the request path's code as it was.
+    #[inline(always)]
+    pub fn service_pka(&self) {
+        if self.pka.any_engine_busy() {
+            self.service_busy_pka();
+        }
+    }
+
+    #[inline(never)]
+    fn service_busy_pka(&self) {
+        let mut done = ((Nvic::pending_bits(PKA_DONE_IRQ / 32) >> (PKA_DONE_IRQ % 32))
+            | (Nvic::pending_bits(PKA_ERROR_IRQ / 32) >> (PKA_ERROR_IRQ % 32)))
+            & 0xFFFF;
+        while done != 0 {
+            let id = done.trailing_zeros() as u8;
+            done &= done - 1;
+            self.pka.wake_engine(id);
+        }
     }
 
     /// Poll the NVIC once and wake any PAL driver with a pending IRQ.
