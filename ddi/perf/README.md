@@ -59,6 +59,9 @@ tsra_ddi_perf suite --threads 32 --test-seconds 30 \
 
 # compare: two result files written with --tsv
 tsra_ddi_perf compare before.tsv after.tsv --markdown compare.md
+
+# keygen: fill the host RSA key cache ahead of runs; needs no device
+tsra_ddi_perf keygen --keys 10000 --bits 2048,3072,4096
 ```
 
 `suite --op` takes a comma-separated list (or a repeated `--op`). Without it,
@@ -88,10 +91,11 @@ both files, with the change in RPS and p50.
 | `tbor-mlkem-decap-512`, `-768`, `-1024` | `MlKemDecapsulate` | host ciphertext |
 
 ECC keys and the ML-DSA sign and ML-KEM decapsulate keys are generated on the
-device. RSA and AES keys are generated on the host and imported with
-`UnwrapKey`, so the host can check results. All keys are masked under the
-partition-local scope. Keygen operations generate one key per request, and
-ML-DSA operations use an empty context.
+device. RSA and AES keys are generated on the host (RSA keys through the key
+cache; see [Setup time and the key cache](#setup-time-and-the-key-cache)) and
+imported with `UnwrapKey`, so the host can check results. All keys are masked
+under the partition-local scope. Keygen operations generate one key per
+request, and ML-DSA operations use an empty context.
 
 ## Options and defaults
 
@@ -101,8 +105,10 @@ ML-DSA operations use an empty context.
 | `--op` | `perf`: required, `suite`: baseline set | Operations to run |
 | `--stabilize-seconds` | 5 | Warm-up and cool-down length, each |
 | `--test-seconds` | 30 | Measured window length |
-| `--keys` | 8 | Distinct keys per key type |
-| `--messages` | 64 | Distinct messages per thread |
+| `--keys` | 10000 | Distinct keys per key type |
+| `--messages` | 10000 | Distinct messages per thread |
+| `--key-cache` | `tsra_ddi_perf` under `$XDG_CACHE_HOME` or `~/.cache` | Directory keeping host RSA keys between runs |
+| `--no-key-cache` | off | Generate every host RSA key afresh |
 | `--cbc-len` | 1024 | AES-CBC message length in bytes, a multiple of 16 and at most 1024 |
 | `--verify-all` | off | Check every timed response on the host |
 | `--max-samples` | 1000000 | Reservoir-sampled latencies kept per thread and operation, at least 1 |
@@ -139,17 +145,35 @@ keys and its message from its thread's `--messages` messages, as a real
 workload may send any key and any message: nothing about one request tells
 the device which key or message the next will use, so nothing can be cached
 or specialized across requests. `MlDsaVerify`, `MlKemEncapsulate` and
-`MlKemDecapsulate` inputs are made once on the host and shared by all threads.
+`MlKemDecapsulate` inputs are made once on the host and shared by all threads;
+`MlDsaVerify` and `MlKemDecapsulate` draw from `max(--keys, --messages)` host
+signatures or ciphertexts, the `i`th under key `i mod --keys`, so that their
+setup grows only linearly.
 
-Before any timing, each selected operation runs `2 × --keys` times, taking the
-keys in turn so that every key is used, and every response is checked against a
-host reference (`tsra_crypto`): ECDSA and raw RSA signatures must verify with
-the public key, AES-CBC output must match the host's, device ML-DSA signatures
-must verify on the host, and `MlDsaVerify` must accept host signatures (and, in
-this check, reject a tampered one). Generated PQC keys must have the parameter
-set's lengths, and each keygen operation also uses the exact checked key
-response once. CBC runs require at least as many messages as keys so every key
-is exercised. ML-KEM shared secrets come back masked under a key the host
-cannot derive, so KEM results are checked for shape only. Any mismatch fails
-the run. `--verify-all` checks every timed response too; it adds host work
-between requests, so leave it off for the numbers themselves.
+Before any timing, each selected operation runs `2 × --keys` times, spread over
+the host's cores and taking the keys in turn so that every key is used, and
+every response is checked against a host reference (`tsra_crypto`): ECDSA and
+raw RSA signatures must verify with the public key, AES-CBC output must match
+the host's, device ML-DSA signatures must verify on the host, and `MlDsaVerify`
+must accept host signatures (and, in this check, reject a tampered one).
+Generated PQC keys must have the parameter set's lengths, and each keygen
+operation also uses the exact checked key response once. CBC runs require at
+least as many messages as keys so every key is exercised. ML-KEM shared secrets
+come back masked under a key the host cannot derive, so KEM results are checked
+for shape only. Any mismatch fails the run. `--verify-all` checks every timed
+response too; it adds host work between requests, so leave it off for the
+numbers themselves.
+
+## Setup time and the key cache
+
+At the default 10,000 keys and messages, setup makes tens of thousands of keys
+and inputs, so it runs across the host's cores. Generating RSA keys on the host
+is still the slow part, minutes for RSA-2K and hours for RSA-4K on one core, so
+generated RSA keys are kept in a cache directory (`--key-cache`; by default
+`tsra_ddi_perf` under `$XDG_CACHE_HOME` or `~/.cache`, or `%LOCALAPPDATA%` on
+Windows). A run takes the first `--keys` keys of each size from the cache and
+generates, and adds, only the keys it lacks; `keygen` fills the cache ahead of
+time. Reusing keys across runs gives the device nothing to exploit: every keyed
+run factory-resets it, and the keys within a run stay distinct. The cache files
+hold private keys and are readable by their owner only. `--no-key-cache`
+generates every key afresh.

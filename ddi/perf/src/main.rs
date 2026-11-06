@@ -20,6 +20,7 @@
 //! timed response as well.
 
 mod bench;
+mod keycache;
 mod ops;
 mod pqc;
 mod report;
@@ -54,6 +55,8 @@ enum Command {
     Suite(SuiteArgs),
     /// Compare two result files written with `--tsv`.
     Compare(CompareArgs),
+    /// Fill the host RSA key cache ahead of runs; needs no device.
+    Keygen(KeygenArgs),
     /// List the operations.
     List,
 }
@@ -74,12 +77,22 @@ pub(crate) struct RunArgs {
     pub(crate) test_seconds: u64,
 
     /// Distinct keys per key type; each request draws one at random.
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, default_value_t = 10_000)]
     pub(crate) keys: usize,
 
     /// Distinct messages per thread; each request draws one at random.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = 10_000)]
     pub(crate) messages: usize,
+
+    /// Directory keeping host-generated RSA keys between runs [default:
+    /// tsra_ddi_perf under $XDG_CACHE_HOME or ~/.cache].
+    #[arg(long)]
+    pub(crate) key_cache: Option<PathBuf>,
+
+    /// Generate every host RSA key afresh, neither reading nor adding to
+    /// the key cache.
+    #[arg(long, conflicts_with = "key_cache")]
+    pub(crate) no_key_cache: bool,
 
     /// `AesEncryptDecrypt` (AES-256-CBC) message length in bytes.
     #[arg(long, default_value_t = 1024)]
@@ -104,6 +117,17 @@ pub(crate) struct RunArgs {
     /// Suppress progress output.
     #[arg(long)]
     pub(crate) quiet: bool,
+}
+
+impl RunArgs {
+    /// The RSA key cache directory, if one is used.
+    pub(crate) fn key_cache_dir(&self) -> Option<PathBuf> {
+        if self.no_key_cache {
+            None
+        } else {
+            self.key_cache.clone().or_else(keycache::default_dir)
+        }
+    }
 }
 
 #[derive(Args)]
@@ -151,6 +175,21 @@ struct CompareArgs {
     markdown: Option<PathBuf>,
 }
 
+#[derive(Args)]
+struct KeygenArgs {
+    /// Keys of each size the cache is to hold.
+    #[arg(long, default_value_t = 10_000)]
+    keys: usize,
+
+    /// RSA modulus sizes in bits.
+    #[arg(long, value_delimiter = ',', default_value = "2048,3072,4096")]
+    bits: Vec<usize>,
+
+    /// Cache directory [default: as for `perf` and `suite`].
+    #[arg(long)]
+    key_cache: Option<PathBuf>,
+}
+
 /// Operations `suite` runs by default.
 const BASELINE_OPS: &[OpKind] = &[
     OpKind::TborGetApiRev,
@@ -170,6 +209,7 @@ fn main() -> ExitCode {
         Command::Compare(args) => {
             report::compare(&args.baseline, &args.candidate, args.markdown.as_deref())
         }
+        Command::Keygen(args) => keygen(args),
         Command::List => {
             for op in OpKind::value_variants() {
                 println!("{}", op.name());
@@ -224,6 +264,27 @@ fn check_unique_ops(ops: &[OpKind]) -> Result<(), String> {
         if !seen.insert(op) {
             return Err(format!("operation {} appears more than once", op.name()));
         }
+    }
+    Ok(())
+}
+
+fn keygen(args: KeygenArgs) -> Result<(), String> {
+    let dir = args
+        .key_cache
+        .or_else(keycache::default_dir)
+        .ok_or("no cache directory: pass --key-cache")?;
+    for bits in args.bits {
+        if !bits.is_multiple_of(8) {
+            return Err(format!("{bits}-bit RSA keys are not supported"));
+        }
+        let start = std::time::Instant::now();
+        keycache::rsa_keys(Some(&dir), bits / 8, args.keys, |m| println!("{m}"))?;
+        println!(
+            "RSA-{bits}: {} keys in {} ({:.0} s)",
+            args.keys,
+            dir.display(),
+            start.elapsed().as_secs_f64()
+        );
     }
     Ok(())
 }
@@ -308,6 +369,8 @@ mod tests {
             cbc_len: 1024,
             verify_all: false,
             max_samples: 1,
+            key_cache: None,
+            no_key_cache: true,
             tsv: None,
             label: String::new(),
             quiet: true,
