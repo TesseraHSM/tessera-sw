@@ -1306,6 +1306,20 @@ fn map_proto_err(e: ProtoError) -> DdiError {
 
 #[cfg(test)]
 mod tests {
+    use tsra_ddi_mbor_codec::MborByteArray;
+    use tsra_ddi_mbor_codec::MborMap;
+    use tsra_ddi_mbor_types::DdiDerPublicKey;
+    use tsra_ddi_mbor_types::DdiEncryptedSessionCredential;
+    use tsra_ddi_mbor_types::DdiKeyType;
+    use tsra_ddi_mbor_types::DdiOpenSessionCmdReq;
+    use tsra_ddi_mbor_types::DdiOpenSessionCmdResp;
+    use tsra_ddi_mbor_types::DdiOpenSessionReq;
+    use tsra_ddi_mbor_types::DdiOpenSessionResp;
+    use tsra_ddi_mbor_types::DdiReopenSessionCmdReq;
+    use tsra_ddi_mbor_types::DdiReopenSessionCmdResp;
+    use tsra_ddi_mbor_types::DdiReopenSessionReq;
+    use tsra_ddi_mbor_types::DdiReopenSessionResp;
+
     use super::*;
 
     /// A `ReopenSession` response is only trusted when both the shared
@@ -1554,6 +1568,254 @@ mod tests {
             err.contains("disk on fire"),
             "retired_err should surface the recorded cause, got: {err}"
         );
+    }
+
+    fn zero_byte_array<const N: usize>() -> MborByteArray<N> {
+        MborByteArray::new([0u8; N], 0).expect("zero-filled byte array")
+    }
+
+    fn dummy_encrypted_session_credential() -> DdiEncryptedSessionCredential {
+        DdiEncryptedSessionCredential {
+            encrypted_id: zero_byte_array(),
+            encrypted_pin: zero_byte_array(),
+            encrypted_seed: zero_byte_array(),
+            iv: zero_byte_array(),
+            nonce: [0u8; 32],
+            tag: [0u8; 48],
+        }
+    }
+
+    fn dummy_der_public_key() -> DdiDerPublicKey {
+        DdiDerPublicKey {
+            der: zero_byte_array(),
+            key_kind: DdiKeyType::Ecc384Public,
+        }
+    }
+
+    fn dummy_open_session_req() -> DdiOpenSessionCmdReq {
+        DdiOpenSessionCmdReq {
+            hdr: DdiReqHdr {
+                rev: None,
+                op: DdiOp::OpenSession,
+                sess_id: None,
+            },
+            data: DdiOpenSessionReq {
+                encrypted_credential: dummy_encrypted_session_credential(),
+                pub_key: dummy_der_public_key(),
+            },
+            ext: None,
+        }
+    }
+
+    fn dummy_reopen_session_req(session_id: u16) -> DdiReopenSessionCmdReq {
+        DdiReopenSessionCmdReq {
+            hdr: DdiReqHdr {
+                rev: None,
+                op: DdiOp::ReopenSession,
+                sess_id: Some(session_id),
+            },
+            data: DdiReopenSessionReq {
+                encrypted_credential: dummy_encrypted_session_credential(),
+                pub_key: dummy_der_public_key(),
+                bmk_session: zero_byte_array(),
+            },
+            ext: None,
+        }
+    }
+
+    /// Builds a `Virtual` device (so `exec_op_mbor` skips the
+    /// `Physical`-only pre-encode/post-decode hooks that would otherwise
+    /// require a real DER-encoded ECC key) backed by one end of a
+    /// `UnixStream` pair, returning the device and the other end to
+    /// drive as the fake peer.
+    fn virtual_device_with_peer() -> (DdiSockDev, UnixStream) {
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let device = DdiSockDev {
+            stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
+            device_kind: DdiDeviceKind::Virtual,
+            retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
+        };
+        (device, server)
+    }
+
+    /// MBOR-encodes `resp` the same way `exec_op_mbor` would decode it:
+    /// a full `CmdResp` map (`hdr`/`data`/optional `ext`).
+    fn encode_cmd_resp<R: MborEncode>(resp: &R) -> Vec<u8> {
+        let mut buf = vec![0u8; DST_CAP as usize];
+        let len = {
+            let mut enc = MborEncoder::new(buf.as_mut_slice(), false);
+            resp.mbor_encode(&mut enc).expect("encode response");
+            enc.position()
+        };
+        buf.truncate(len);
+        buf
+    }
+
+    fn write_mbor_response(server: &mut UnixStream, payload: Vec<u8>) {
+        let dst_len = payload.len() as u32;
+        Response {
+            status: 0,
+            cqe: vec![dst_len, 0, 0, 0],
+            payload,
+            oob_items: Vec::new(),
+            tail: Vec::new(),
+        }
+        .write_to(server)
+        .expect("write response");
+    }
+
+    /// An `OpenSession` response whose header omits the new session's
+    /// id (while the body independently reports one) is treated the
+    /// same as any other header/body identity mismatch: the response is
+    /// rejected, and the id the body alone reported is best-effort
+    /// closed as a leaked session (see `open_session_leaked_id`). When
+    /// that cleanup succeeds, the connection stays usable.
+    #[cfg(unix)]
+    #[test]
+    fn exec_op_mbor_rejects_open_session_missing_header_id_and_cleans_up_leaked_session() {
+        let (device, mut server) = virtual_device_with_peer();
+        let peer = std::thread::spawn(move || {
+            let _request = Request::read_from(&mut server).expect("open session request");
+            let resp = DdiOpenSessionCmdResp {
+                hdr: DdiRespHdr {
+                    rev: None,
+                    op: DdiOp::OpenSession,
+                    sess_id: None,
+                    status: DdiStatus::Success,
+                    fips_approved: false,
+                },
+                data: DdiOpenSessionResp {
+                    sess_id: 7,
+                    short_app_id: 0,
+                    bmk_session: zero_byte_array(),
+                },
+                ext: None,
+            };
+            write_mbor_response(&mut server, encode_cmd_resp(&resp));
+
+            // Expect the best-effort cleanup to close the id the body
+            // alone reported, and answer it successfully.
+            let cleanup = Request::read_from(&mut server).expect("cleanup close request");
+            assert_eq!(
+                cleanup.sqe[12] & 0xffff,
+                7,
+                "cleanup must target the body's leaked id"
+            );
+            write_mbor_response(&mut server, Vec::new());
+        });
+
+        let req = dummy_open_session_req();
+        let result = device.exec_op_mbor(&req, &mut None);
+        assert!(
+            matches!(result, Err(DdiError::MborError(MborError::DecodeError))),
+            "expected a decode error for a missing open-session header id, got {result:?}"
+        );
+        assert!(
+            !device.retired.load(Ordering::Acquire),
+            "a successful cleanup must not retire the connection"
+        );
+        peer.join().expect("peer");
+    }
+
+    /// A `ReopenSession` response whose header and body both report an
+    /// id other than the one requested must be rejected as
+    /// `SessionNotFound` — unlike `OpenSession`, there's no best-effort
+    /// cleanup here, since the requested session (not whatever the peer
+    /// echoed back) is the only id this call has any business touching.
+    #[cfg(unix)]
+    #[test]
+    fn exec_op_mbor_rejects_reopen_session_with_mismatched_ids() {
+        let (device, mut server) = virtual_device_with_peer();
+        let peer = std::thread::spawn(move || {
+            let _request = Request::read_from(&mut server).expect("reopen session request");
+            let resp = DdiReopenSessionCmdResp {
+                hdr: DdiRespHdr {
+                    rev: None,
+                    op: DdiOp::ReopenSession,
+                    sess_id: Some(9),
+                    status: DdiStatus::Success,
+                    fips_approved: false,
+                },
+                data: DdiReopenSessionResp {
+                    sess_id: 1,
+                    short_app_id: 0,
+                    bmk_session: zero_byte_array(),
+                },
+                ext: None,
+            };
+            write_mbor_response(&mut server, encode_cmd_resp(&resp));
+        });
+
+        let req = dummy_reopen_session_req(9);
+        let result = device.exec_op_mbor(&req, &mut None);
+        assert!(
+            matches!(result, Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))),
+            "expected SessionNotFound for mismatched reopen-session ids, got {result:?}"
+        );
+        assert!(!device.retired.load(Ordering::Acquire));
+        peer.join().expect("peer");
+    }
+
+    /// A response whose header decodes successfully (reporting a new
+    /// session as opened) but whose body is undecodable must still be
+    /// rejected as a decode error, and the leaked session it reported
+    /// best-effort closed. When that cleanup itself fails, the
+    /// connection must be retired rather than left reusable (see
+    /// `close_leaked_session_locked`).
+    #[cfg(unix)]
+    #[test]
+    fn exec_op_mbor_retires_connection_when_undecodable_open_session_body_cleanup_fails() {
+        let (device, mut server) = virtual_device_with_peer();
+        let peer = std::thread::spawn(move || {
+            let _request = Request::read_from(&mut server).expect("open session request");
+
+            // Hand-encode a response whose header is valid but whose
+            // body entry is a bare bool rather than the nested
+            // `DdiOpenSessionResp` map the full `CmdResp` decode
+            // expects -- a type mismatch that `decode_hdr` never
+            // notices (it only reads the header), but the full body
+            // decode rejects.
+            let mut buf = vec![0u8; DST_CAP as usize];
+            let len = {
+                let mut enc = MborEncoder::new(buf.as_mut_slice(), false);
+                MborMap(2).mbor_encode(&mut enc).expect("map marker");
+                0u8.mbor_encode(&mut enc).expect("hdr key");
+                DdiRespHdr {
+                    rev: None,
+                    op: DdiOp::OpenSession,
+                    sess_id: Some(9),
+                    status: DdiStatus::Success,
+                    fips_approved: false,
+                }
+                .mbor_encode(&mut enc)
+                .expect("hdr value");
+                1u8.mbor_encode(&mut enc).expect("data key");
+                true.mbor_encode(&mut enc).expect("bogus data value");
+                enc.position()
+            };
+            buf.truncate(len);
+            write_mbor_response(&mut server, buf);
+            // Drop the peer instead of answering the best-effort
+            // cleanup this triggers, so the cleanup fails and the
+            // connection is retired.
+        });
+
+        let req = dummy_open_session_req();
+        let result = device.exec_op_mbor(&req, &mut None);
+        assert!(
+            matches!(result, Err(DdiError::MborError(MborError::DecodeError))),
+            "expected a decode error for an undecodable open-session body, got {result:?}"
+        );
+        assert!(
+            device.retired.load(Ordering::Acquire),
+            "a failed cleanup must retire the connection"
+        );
+        peer.join().expect("peer");
     }
 
     #[test]
