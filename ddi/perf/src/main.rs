@@ -18,6 +18,11 @@
 //! returns wrong results fails the run instead of producing numbers.
 //! `--verify-all` checks every timed response as well.
 
+// Starts an in-process DDI sock server before `main` unless `TSRA_DDI_SOCK`
+// names an external one.
+#[cfg(feature = "sock")]
+use ddi_sock_server as _;
+
 mod bench;
 mod ops;
 mod pqc;

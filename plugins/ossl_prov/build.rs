@@ -8,9 +8,6 @@ fn main() {
 
     let mut features = Vec::new();
 
-    if env::var("CARGO_FEATURE_EMU").is_ok() {
-        features.push("emu");
-    }
     if env::var("CARGO_FEATURE_SOCK").is_ok() {
         features.push("sock");
     }

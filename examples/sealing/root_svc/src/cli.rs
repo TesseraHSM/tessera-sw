@@ -13,9 +13,6 @@ use clap::Subcommand;
 #[derive(Parser, Debug)]
 #[command(name = "root_svc", version, about)]
 pub(crate) struct Cli {
-    /// Refuse device access unless built with the emulator backend.
-    #[arg(long, global = true)]
-    pub require_emu: bool,
     #[command(subcommand)]
     pub command: Command,
 }

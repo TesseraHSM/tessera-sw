@@ -4,6 +4,10 @@
 #![allow(clippy::unwrap_used)]
 #![cfg(test)]
 
+// Links the in-process socket server started before `main`.
+#[cfg(feature = "sock")]
+use ddi_sock_server as _;
+
 mod algo;
 #[cfg(feature = "sock")]
 mod ddi_sock_server_tests;

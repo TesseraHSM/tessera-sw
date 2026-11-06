@@ -7,7 +7,7 @@
 //! `ddi_sock_server`'s `unix://PATH` mode binds and accepts directly (no
 //! `CONNECT`/`OK` dial-out handshake): `DdiSockDev` connects to it with
 //! no bridge at all. `unix://` depends on
-//! `std::os::unix::net::UnixListener` (see `examples/sock/ddi_sock_server/
+//! `std::os::unix::net::UnixListener` (see `ddi/sock/server/
 //! src/unix.rs`), so this file is Linux-only.
 
 #![cfg(target_os = "linux")]

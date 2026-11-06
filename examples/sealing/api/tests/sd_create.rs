@@ -1,12 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
 
+// Starts an in-process DDI sock server before `main`.
 use std::cell::Cell;
 use std::cell::RefCell;
 
 use anyhow::Result;
+use ddi_sock_server as _;
 use tsra_api::HsmEccCurve;
 use tsra_api::HsmEccKeyGenAlgo;
 use tsra_api::HsmEccSignAlgo;

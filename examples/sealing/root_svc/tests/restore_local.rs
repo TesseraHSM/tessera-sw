@@ -1,18 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
+
+mod common;
 
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::process::Output;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use anyhow::Result;
+use common::SimCommand;
 use jzon::JsonValue;
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccPrivateKey;
@@ -57,7 +59,7 @@ impl Drop for StateDir {
 fn run(dir: &Path, operation: &str, reset: bool) -> Result<Output> {
     let remote_create = operation == "create-remote";
     let operation = if remote_create { "create" } else { operation };
-    let mut command = Command::new(env!("CARGO_BIN_EXE_root_svc"));
+    let mut command = SimCommand::new(env!("CARGO_BIN_EXE_root_svc"));
     command
         .args([operation, "--state-dir"])
         .arg(dir.join("state"));

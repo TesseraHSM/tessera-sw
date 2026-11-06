@@ -2,6 +2,11 @@
 // Licensed under the MIT License.
 
 #![allow(clippy::unwrap_used)]
+
+// Links the in-process socket server started before `main`.
+#[cfg(feature = "sock")]
+use ddi_sock_server as _;
+
 #[cfg(test)]
 mod integration {
     pub mod aes_cbc;

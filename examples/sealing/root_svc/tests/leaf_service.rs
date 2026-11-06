@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
+
+mod common;
 
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Child;
-use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -17,6 +17,8 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
+use common::SimChild;
+use common::SimCommand;
 use jzon::JsonValue;
 use tsra_api::PartPolicy;
 use tsra_sealing_common::http::Client;
@@ -44,7 +46,7 @@ impl Drop for TestDir {
 }
 
 struct Server {
-    child: Child,
+    child: SimChild,
     url: String,
 }
 impl Drop for Server {
@@ -58,17 +60,16 @@ impl Drop for Server {
     }
 }
 
-fn root() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_root_svc"))
+fn root() -> SimCommand {
+    SimCommand::new(env!("CARGO_BIN_EXE_root_svc"))
 }
-fn leaf() -> Command {
-    // Cross-application suite: build both apps before running this target.
-    let binary = Path::new(env!("CARGO_BIN_EXE_root_svc"))
-        .with_file_name(format!("leaf_svc{}", std::env::consts::EXE_SUFFIX));
-    Command::new(binary)
+fn leaf() -> SimCommand {
+    // Cross-application suite: build leaf_svc and ddi_sock_server before
+    // running this target.
+    SimCommand::new(common::sibling_binary("leaf_svc"))
 }
 
-fn success(command: &mut Command) -> Result<String> {
+fn success(command: &mut SimCommand) -> Result<String> {
     let output = command.output()?;
     anyhow::ensure!(
         output.status.success(),
@@ -142,13 +143,13 @@ fn start_with_log(state: &Path, previous_url: Option<&str>, log: Option<&Path>) 
     Ok(server)
 }
 
-fn start_worker(command: &mut Command) -> Result<Server> {
+fn start_worker(command: &mut SimCommand) -> Result<Server> {
     let reservation = TcpListener::bind("127.0.0.1:0")?;
     let address = reservation.local_addr()?.to_string();
     drop(reservation);
     let mut server = Server {
         child: command
-            .args(["--listen", &address, "--require-emu"])
+            .args(["--listen", &address])
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()?,

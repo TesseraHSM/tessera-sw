@@ -1223,7 +1223,7 @@ fn test_secret_hkdf_aes_xts_secret521() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
+#[cfg(not(feature = "sock"))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_secret_hkdf_name() {

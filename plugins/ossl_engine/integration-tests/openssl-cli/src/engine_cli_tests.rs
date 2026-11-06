@@ -18,8 +18,12 @@
 
 #![cfg(feature = "integration")]
 
+// Starts an in-process DDI sock server before `main`; the children this
+// harness spawns inherit its `TSRA_DDI_SOCK` endpoint.
 use std::path::PathBuf;
 
+#[cfg(feature = "sock")]
+use ddi_sock_server as _;
 use serial_test::serial;
 
 /// Absolute path to a `testfiles` subdir, anchored at the crate manifest dir so

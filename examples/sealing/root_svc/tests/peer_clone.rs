@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
+
+mod common;
 
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Child;
-use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -17,6 +17,8 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
+use common::SimChild;
+use common::SimCommand;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -40,7 +42,7 @@ impl Drop for TestDir {
     }
 }
 
-struct Server(Child);
+struct Server(SimChild);
 impl Drop for Server {
     fn drop(&mut self) {
         if let Err(error) = self.0.kill() {
@@ -52,11 +54,11 @@ impl Drop for Server {
     }
 }
 
-fn command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_root_svc"))
+fn command() -> SimCommand {
+    SimCommand::new(env!("CARGO_BIN_EXE_root_svc"))
 }
 
-fn success(command: &mut Command) -> Result<String> {
+fn success(command: &mut SimCommand) -> Result<String> {
     let output = command.output()?;
     anyhow::ensure!(
         output.status.success(),

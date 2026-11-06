@@ -24,12 +24,13 @@ Build modes; see the crate-level doc in
 [`crates/tbor_test_harness/src/lib.rs`](../../../../crates/tbor_test_harness/src/lib.rs)
 for the full per-feature gating table.
 
-* `--features emu` — canonical configuration, runs the full suite.
-* `--features sock` — firmware behind a running socket DDI server.
+* `--features sock` — canonical configuration, runs the full suite
+  against an in-process `ddi_sock_server` (or the server named by
+  `TSRA_DDI_SOCK`).
 * No backend feature — native OS backend (`nix` on Linux / `win` on
   Windows); hardware-eligible command tests run against real silicon.
 
-For `PartFinal`, emulator tests transport the real PTA certificate chain
+For `PartFinal`, simulator tests transport the real PTA certificate chain
 through OOB descriptors and exercise full chain validation. Native M1.0
 tests send one schema-required placeholder descriptor with no OOB payload
 because the current hardware firmware intentionally ignores certificate
@@ -38,10 +39,11 @@ descriptors; native certificate-chain validation remains M1.5 work.
 The canonical command is:
 
 ```bash
-cargo test -p tsra_ddi_tbor_types --tests --features emu
+cargo nextest run -p tsra_ddi_tbor_types --features sock
 ```
 
-For socket runs, start `ddi_sock_server` separately and run tests serially:
+To use an external server instead, start `ddi_sock_server` separately and
+run tests serially:
 
 ```sh
 TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
@@ -51,7 +53,7 @@ TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
 
 Tests reset the endpoint's shared partition. Use a dedicated server without
 other clients. Socket connections permit multiple sessions; per-file-handle
-limit tests apply only to the emulator/native drivers. Invalid or closed socket
+limit tests apply only to the native drivers. Invalid or closed socket
 session IDs can be rejected by the ownership gate before reaching firmware.
 
 ## Spec coverage matrix

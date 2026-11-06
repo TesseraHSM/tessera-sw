@@ -152,10 +152,10 @@ jobs:
       - name: Test tsra_ossl_engine_core
         run: cargo nextest run -p tsra_ossl_engine_core --features engine
 
-      # tsra_ossl_engine's emu lifecycle tests drive the HSM open path against the
-      # emu DDI.
-      - name: Test tsra_ossl_engine (emu lifecycle)
-        run: cargo nextest run -p tsra_ossl_engine --features engine,emu
+      # tsra_ossl_engine's sock lifecycle tests drive the HSM open path against
+      # an in-process simulated HSM over the sock DDI.
+      - name: Test tsra_ossl_engine (sock lifecycle)
+        run: cargo nextest run -p tsra_ossl_engine --features engine,sock
 
       - name: Test tsra_crypto
         run: cargo nextest run -p tsra_crypto
@@ -168,10 +168,12 @@ jobs:
         run: openssl engine -t "$(pwd)/target/debug/libtsra_ossl_engine.so"
 
       # The integration suites load a key through the engine end to end; they
-      # need an emu-backed .so, so (re)build it and the masked-key generator.
-      - name: Build engine (emu) + generator for integration tests
+      # need a sock-backed .so with the test credentials, so (re)build it and
+      # the masked-key generator. Each test harness process starts its own
+      # simulated HSM, which the openssl and generator children share.
+      - name: Build engine (sock) + generator for integration tests
         run: |
-          cargo build -p tsra_ossl_engine --features engine,emu
+          cargo build -p tsra_ossl_engine --features engine,sock,test-credentials
           cargo build -p tsra-engine-masked-keygen --features integration
 
       - name: Integration tests — CLI (openssl -engine)
@@ -181,7 +183,7 @@ jobs:
           export MASKED_KEYGEN="$(pwd)/target/debug/masked-keygen"
           export TSRA_ENGINE_TEST_KEYDIR="$(pwd)/target/test-keymat/engine-cli"
           rm -rf "$TSRA_ENGINE_TEST_KEYDIR"
-          cargo nextest run -p engine-integration-tests-cli --features integration --no-fail-fast
+          cargo nextest run -p engine-integration-tests-cli --features integration,sock --no-fail-fast
 
       # !cancelled(): run even if the CLI step failed, so the two are independent checks.
       - name: Integration tests — ABI (ENGINE C API)
@@ -189,4 +191,4 @@ jobs:
         run: |
           export ENGINE_SO="$(pwd)/target/debug/libtsra_ossl_engine.so"
           export MASKED_KEYGEN="$(pwd)/target/debug/masked-keygen"
-          cargo nextest run -p engine-integration-tests-capi --features integration --no-fail-fast
+          cargo nextest run -p engine-integration-tests-capi --features integration,sock --no-fail-fast

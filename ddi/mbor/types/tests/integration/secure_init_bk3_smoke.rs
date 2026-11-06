@@ -19,7 +19,6 @@
 //!   without completing Phase 4, which on real HW persists until reboot (NSSR
 //!   won't clear it) and would block the other PIN-setting tests.
 
-#![cfg(not(feature = "emu"))]
 #![cfg(test)]
 
 use test_with_tracing::test;
@@ -108,7 +107,7 @@ fn test_secure_init_bk3_requires_pin() {
 /// Emu-only: it sets the one-shot Phase-2 PIN without completing Phase 4, which
 /// on real HW persists until reboot (NSSR won't clear it) and would block the
 /// other PIN-setting tests. Each emu test process starts with a fresh device.
-#[cfg(feature = "emu")]
+#[cfg(feature = "sock")]
 #[test]
 fn test_secure_init_bk3_transport_tag_mismatch() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
@@ -142,7 +141,7 @@ fn test_secure_init_bk3_transport_tag_mismatch() {
 ///
 /// Emu-only: same one-shot Phase-2 PIN reason as
 /// `test_secure_init_bk3_transport_tag_mismatch`.
-#[cfg(feature = "emu")]
+#[cfg(feature = "sock")]
 #[test]
 fn test_secure_init_bk3_pin_tag_mismatch() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
@@ -175,7 +174,7 @@ fn test_secure_init_bk3_pin_tag_mismatch() {
 ///
 /// Emu-only: the first `set_init_bk3_pin` leaves a one-shot Phase-2 PIN that on
 /// real HW persists until reboot (NSSR won't clear it).
-#[cfg(feature = "emu")]
+#[cfg(feature = "sock")]
 #[test]
 fn test_secure_init_bk3_pin_already_set() {
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {

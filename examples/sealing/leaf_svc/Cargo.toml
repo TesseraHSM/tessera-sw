@@ -26,7 +26,6 @@ tsra_sealing_report.workspace = true
 zerocopy.workspace = true
 
 [features]
-emu = ["tsra_sealing_common/emu"]
 sock = ["tsra_sealing_common/sock"]
 
 [lints]

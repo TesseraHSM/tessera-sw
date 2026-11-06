@@ -346,13 +346,13 @@ pub const MAX_RETRIES: u32 = 5;
 /// Each iteration doubles: 400 → 800 → 1600 → 3200 → 6400 ms, plus
 /// random jitter of 0–[`BACKOFF_JITTER_MS`] to avoid thundering-herd retries.
 ///
-/// When compiled with `emu` (in-process emulator, test builds only) the
+/// In unit tests or with `fast-backoff` (simulated device, test builds only) the
 /// base is reduced to 8 ms so that retry tests complete quickly while
 /// still exercising realistic backoff behavior.
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(test, feature = "fast-backoff")))]
 pub(crate) const BACKOFF_BASE_MS: u64 = 400;
 
-#[cfg(feature = "emu")]
+#[cfg(any(test, feature = "fast-backoff"))]
 pub(crate) const BACKOFF_BASE_MS: u64 = 8;
 
 /// Maximum random jitter added to each backoff delay (in milliseconds).
@@ -361,13 +361,13 @@ pub(crate) const BACKOFF_BASE_MS: u64 = 8;
 /// the exponential delay so that concurrent callers don't all retry at
 /// exactly the same instant.
 ///
-/// When compiled with `emu` (test builds only) jitter is reduced
+/// In unit tests or with `fast-backoff` (test builds only) jitter is reduced
 /// to 2 ms, preserving the 4:1 base-to-jitter ratio while keeping
 /// tests fast.
-#[cfg(not(feature = "emu"))]
+#[cfg(not(any(test, feature = "fast-backoff")))]
 pub(crate) const BACKOFF_JITTER_MS: u64 = 100;
 
-#[cfg(feature = "emu")]
+#[cfg(any(test, feature = "fast-backoff"))]
 pub(crate) const BACKOFF_JITTER_MS: u64 = 2;
 
 /// Applies exponential backoff with jitter and sleeps for the computed
@@ -919,7 +919,7 @@ mod tests {
         assert_eq!(state.restore_epoch, 0);
     }
 
-    #[cfg(any(feature = "emu", feature = "sock"))]
+    #[cfg(feature = "sock")]
     #[test]
     fn aes_gcm_restore_preserves_ex_key_properties() {
         use crate::*;

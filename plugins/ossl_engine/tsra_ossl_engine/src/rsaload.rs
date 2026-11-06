@@ -7,8 +7,9 @@
 //!
 //! Mirrors [`crate::keyload`] for EC: the returned `RSA` is bound to the engine
 //! (`RSA_new_method`), so the engine — hence [`EngineData`] and this `.so` —
-//! outlives any `EVP_PKEY` built from it, and the stashed HSM-key pointer
-//! (owned by `EngineData`, in `RSA` ex_data) never dangles. PKCS#1 v1.5 signing
+//! outlives any `EVP_PKEY` built from it. The stashed HSM-key pointer (owned by
+//! `EngineData`, in `RSA` ex_data) stays valid until the `RSA` is freed, when
+//! the engine method's `finish` deletes the HSM key ([`release_on_free`]). PKCS#1 v1.5 signing
 //! on HSM-backed keys lands on the engine's RSA `RSA_METHOD` sign slot (see
 //! [`crate::rsasign`]); any future private-key decrypt support remains separate.
 //! This module wires load + retention + the ex_data marker the sign path and the
@@ -255,7 +256,9 @@ fn build_rsa_pkey(
 }
 
 /// Free a bound `RSA` from [`build_bound_rsa_key`] that could not be handed
-/// out, rolling back the HSM-key retain.
+/// out, rolling back the HSM-key retain. The ex_data pointer is detached first,
+/// so the method's `finish` (see [`release_on_free`]) does not release it a
+/// second time.
 ///
 /// # Safety
 /// `rsa` must be the caller's own never-handed-out `RSA` from
@@ -264,10 +267,39 @@ fn build_rsa_pkey(
 pub(crate) unsafe fn free_bound_rsa_key(data: &EngineData, rsa: *mut ffi::RSA) {
     let key_ptr = rsa_hsm_key(rsa);
     if !key_ptr.is_null() {
-        data.release_loaded_rsa_key(key_ptr);
+        if let Ok(idx) = rsa_ex_index() {
+            // SAFETY: rsa is valid per this function's contract; idx is our slot.
+            // If clearing fails, leave the release to finish instead.
+            let rc = unsafe { ffi::RSA_set_ex_data(rsa, idx, null_mut()) };
+            if rc == 1 {
+                data.release_loaded_rsa_key(key_ptr);
+            }
+        }
     }
     // SAFETY: rsa is valid and owned by the caller per this function's contract.
     unsafe { ffi::RSA_free(rsa) };
+}
+
+/// The engine's `RSA_METHOD` `finish` hook (see [`crate::rsasign`]): an `RSA`
+/// is being freed, so drop its reference on the attached HSM key, deleting it
+/// from the HSM once unused. Without this, keys would only be deleted at
+/// engine teardown — which a loaded key can itself postpone forever (its
+/// software public half holds a default-engine reference), leaking HSM key
+/// slots across processes. Keys with no HSM key attached (software keys that
+/// adopted the engine method) are ignored.
+#[allow(unsafe_code)]
+pub(crate) fn release_on_free(rsa: *mut ffi::RSA) {
+    let key_ptr = rsa_hsm_key(rsa);
+    if key_ptr.is_null() {
+        return;
+    }
+    // SAFETY: rsa is the RSA being freed; get0 borrows its bound engine.
+    let engine = unsafe { ffi::RSA_get0_engine(rsa) };
+    if crate::engine_impl::with_engine_data(engine, |data| data.release_loaded_rsa_key(key_ptr))
+        .is_none()
+    {
+        tracing::warn!(target: "tsra", "freed RSA key has no engine data; HSM key kept until teardown");
+    }
 }
 
 #[allow(unsafe_code)]
@@ -286,13 +318,13 @@ fn attach_rsa(data: &EngineData, rsa: *mut ffi::RSA, key: HsmRsaPrivateKey) -> E
         }
     };
 
-    // Hand the key to EngineData (owns it, deletes it at engine teardown) and
-    // stash the non-owning pointer for later sign/decrypt retrieval. The
-    // ex_data slot has no free callback (see rsa_ex_index).
+    // Hand the key to EngineData (owns it; deleted when this RSA is freed, see
+    // release_on_free) and stash the non-owning pointer for later sign/decrypt
+    // retrieval. The ex_data slot has no free callback (see rsa_ex_index).
     let key_ptr = data.retain_loaded_rsa_key(key);
     // SAFETY: rsa is valid (checked), idx is a registered RSA ex_data slot, and
-    // key_ptr is a non-owning pointer into a key EngineData keeps alive for the
-    // engine's lifetime; the slot has no free callback, so no ownership moves.
+    // key_ptr is a non-owning pointer into a key EngineData keeps alive until
+    // this RSA is freed; the slot has no free callback, so no ownership moves.
     let rc = unsafe { ffi::RSA_set_ex_data(rsa, idx, key_ptr.cast_mut().cast::<c_void>()) };
     if let Err(e) = ossl_check(rc, "RSA_set_ex_data failed") {
         data.release_loaded_rsa_key(key_ptr);
@@ -302,8 +334,8 @@ fn attach_rsa(data: &EngineData, rsa: *mut ffi::RSA, key: HsmRsaPrivateKey) -> E
 }
 
 /// Recover the `HsmRsaPrivateKey` [`attach_rsa`] stashed in `rsa`'s ex_data, or
-/// null if none is set. The pointer is owned by `EngineData` and valid for the
-/// engine's lifetime.
+/// null if none is set. The pointer is owned by `EngineData` and valid while
+/// `rsa` is alive.
 #[allow(unsafe_code)]
 pub(crate) fn rsa_hsm_key(rsa: *mut ffi::RSA) -> *const HsmRsaPrivateKey {
     let Ok(idx) = rsa_ex_index() else {

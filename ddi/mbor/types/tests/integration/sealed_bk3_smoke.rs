@@ -3,7 +3,7 @@
 
 //! SetSealedBk3 / GetSealedBk3 smoke tests for the emu backend.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
 #![cfg(test)]
 
 use test_with_tracing::test;

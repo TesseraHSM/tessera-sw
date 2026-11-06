@@ -17,6 +17,5 @@ workspace = true
 
 [features]
 default = []
-emu = []
 provider = []
 sock = []

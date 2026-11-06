@@ -9,7 +9,8 @@
 //! their respective modules. Demo signers are stored on disk; production
 //! services should use HSM-backed or external authority signers.
 //!
-//! Peer-cloning demo (build with `--features emu` for separate emulators):
+//! Peer-cloning demo (build with `--features sock` and point each process's
+//! `TSRA_DDI_SOCK` at its own `ddi_sock_server`):
 //! ```text
 //! root_svc create --name primary --state-dir primary-state --listen 127.0.0.1:8080
 //! root_svc clone --name secondary --state-dir secondary-state --primary http://127.0.0.1:8080
@@ -116,10 +117,11 @@
 //! JSON, filesystem, PKI and display helpers live in `tsra_sealing_common`,
 //! not in the transport-independent `tsra_sealing_api`.
 //!
-//! Build both apps before the cross-application process tests:
+//! Build both apps and `ddi_sock_server` before the cross-application
+//! process tests, which give every service process its own server:
 //! ```text
-//! cargo build --features emu -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc
-//! cargo nextest run --features emu -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc -p tsra_sealing_common
+//! cargo build --features sock -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc -p ddi_sock_server
+//! cargo nextest run --features sock -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc -p tsra_sealing_common
 //! ```
 
 use anyhow::Result;
@@ -135,16 +137,16 @@ mod env;
 mod leaf;
 mod peer;
 mod remote;
-#[cfg(all(test, feature = "emu"))]
+#[cfg(all(test, feature = "sock"))]
 mod state_tests;
+
+// Starts an in-process DDI sock server for the unit tests.
+#[cfg(all(test, feature = "sock"))]
+use ddi_sock_server as _;
 
 /// Run the root-service command line.
 pub fn run_root() -> Result<()> {
     let args = cli::Cli::parse();
-    anyhow::ensure!(
-        !args.require_emu || cfg!(feature = "emu"),
-        "this operation requires an emulator build"
-    );
     match args.command {
         cli::Command::Create(args) => commands::create(&args),
         cli::Command::RestoreLocal(args) => commands::restore_local(&args),

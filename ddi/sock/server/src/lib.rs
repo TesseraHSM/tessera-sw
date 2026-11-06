@@ -64,9 +64,17 @@ use tsra_fw_hsm_io::SessionFlags;
 use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_std::StdHsm;
 
+// This crate's own unit tests build their own `StdHsm`, so they never
+// autostart one.
+#[cfg(all(feature = "autostart", not(test)))]
+mod autostart;
+#[cfg(all(feature = "autostart", not(test)))]
+pub use autostart::autostarted;
 mod tcp;
 #[cfg(unix)]
 mod unix;
+
+pub use tcp::spawn_loopback;
 
 const HSM_PARTITION_ID: u8 = 10;
 const HSM_BULK_QID: u16 = 1;
@@ -722,10 +730,37 @@ async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> Respons
     }
 }
 
+/// Environment variable selecting how many vault tables (resources) the
+/// served partition is allocated. Accepts `1..=MAX_RESOURCES`; defaults to 1.
+pub const RESOURCE_COUNT_ENV: &str = "TSRA_SOCK_SERVER_RESOURCE_COUNT";
+
+/// Number of resource bits the std platform accepts in a partition mask.
+const MAX_RESOURCES: u32 = 65;
+
+/// Sets `count` contiguous resource bits starting at [`HSM_PARTITION_ID`],
+/// wrapping at [`MAX_RESOURCES`], so a count of 1 yields `1 << 10`.
+fn part_res_mask(count: u32) -> u128 {
+    (0..count).fold(0u128, |mask, i| {
+        mask | 1u128 << ((HSM_PARTITION_ID as u32 + i) % MAX_RESOURCES)
+    })
+}
+
+fn resource_count() -> Result<u32, String> {
+    let Ok(value) = std::env::var(RESOURCE_COUNT_ENV) else {
+        return Ok(1);
+    };
+    match value.trim().parse::<u32>() {
+        Ok(count) if (1..=MAX_RESOURCES).contains(&count) => Ok(count),
+        _ => Err(format!(
+            "{RESOURCE_COUNT_ENV}={value:?} must be 1..={MAX_RESOURCES}"
+        )),
+    }
+}
+
 async fn init_partition(server: &SocketHsm) -> Result<(), String> {
     server
         .hsm
-        .part_alloc(HSM_PARTITION_ID, 1u128 << HSM_PARTITION_ID)
+        .part_alloc(HSM_PARTITION_ID, part_res_mask(resource_count()?))
         .await
         .map_err(|error| format!("failed to allocate HSM partition: {error:?}"))?;
     server
@@ -1279,7 +1314,8 @@ mod linux {
     }
 }
 
-fn run() -> Result<(), String> {
+/// Run the server using the endpoint from the command line.
+pub fn run() -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let endpoint = args.next().unwrap_or_else(|| {
         if cfg!(target_os = "linux") {
@@ -1322,18 +1358,20 @@ fn run() -> Result<(), String> {
     }
 }
 
-fn main() {
-    if let Err(error) = run() {
-        eprintln!("TSRA DDI socket server failed: {error}");
-        std::process::exit(1);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncWriteExt;
 
     use super::*;
+
+    #[test]
+    fn part_res_mask_starts_at_partition_and_wraps() {
+        assert_eq!(part_res_mask(1), 1u128 << HSM_PARTITION_ID);
+        assert_eq!(part_res_mask(4), 0b1111u128 << HSM_PARTITION_ID);
+        let all = part_res_mask(MAX_RESOURCES);
+        assert_eq!(all.count_ones(), MAX_RESOURCES);
+        assert_eq!(all >> MAX_RESOURCES, 0);
+    }
 
     #[test]
     fn shared_test_hsm_initializes_partition_once() {

@@ -28,14 +28,14 @@ encoding, the device round trip and response decoding; not the host checks).
 # Against the device driver
 cargo build --release -p tsra_ddi_perf
 
-# Against the in-process emulator
-cargo build --release -p tsra_ddi_perf --features emu
+# Against the in-process emulator (or the server named by TSRA_DDI_SOCK)
+cargo build --release -p tsra_ddi_perf --features sock
 ```
 
 The binary is `target/release/tsra_ddi_perf`. With `cargo run`, pass the
 tool's arguments after `--`, e.g.
-`cargo run --release -p tsra_ddi_perf --features emu -- list`. Both builds
-write the same binary, so rebuild without `--features emu` before measuring
+`cargo run --release -p tsra_ddi_perf --features sock -- list`. Both builds
+write the same binary, so rebuild without `--features sock` before measuring
 a device.
 
 Every run first prints the device it uses, even with `--quiet`, e.g.

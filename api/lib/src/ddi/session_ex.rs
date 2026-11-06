@@ -549,7 +549,7 @@ pub(crate) fn close_session_ex(
     })
 }
 
-#[cfg(all(test, feature = "emu"))]
+#[cfg(all(test, feature = "sock"))]
 mod tests {
     use parking_lot::Mutex;
 
@@ -561,35 +561,35 @@ mod tests {
     /// PSK id for the Crypto User role.
     const CU: u8 = 1;
 
-    /// Serialises tests against the process-global FW emulator
+    /// Serialises tests against the shared simulated HSM
     /// singleton. `cargo-nextest` already runs each test in its own
     /// process, but this keeps a plain `cargo test` (single process,
     /// multi-threaded) correct too. `parking_lot::Mutex` per the
     /// workspace convention (std's variant is disallowed by
     /// `clippy.toml`) and never poisons, so a panicking test cannot
     /// wedge the others.
-    static EMU_LOCK: Mutex<()> = Mutex::new(());
+    static HSM_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Open the emu-backed partition at its maximum supported revision
+    /// Open the simulated partition at its maximum supported revision
     /// and factory-reset it, so every test starts from byte-identical
     /// state (no inherited session slots or PSK rotations).
-    fn fresh_emu_partition() -> HsmPartition {
+    fn fresh_partition() -> HsmPartition {
         let info = HsmPartitionManager::partition_info_list()
             .into_iter()
             .next()
-            .expect("emu backend should advertise a partition");
+            .expect("simulator should advertise a partition");
         let max_rev = info
             .api_rev_range
-            .expect("emu partition should report an api-rev range")
+            .expect("simulated partition should report an api-rev range")
             .max();
-        let part =
-            HsmPartitionManager::open_partition(&info.path, max_rev).expect("open emu partition");
-        part.reset().expect("factory-reset emu partition");
+        let part = HsmPartitionManager::open_partition(&info.path, max_rev)
+            .expect("open simulated partition");
+        part.reset().expect("factory-reset simulated partition");
         part
     }
 
-    /// Drive a full Phase-1 + Phase-2 handshake against the FW
-    /// emulator and return the finished session material.
+    /// Drive a full Phase-1 + Phase-2 handshake against the
+    /// simulated firmware and return the finished session material.
     ///
     /// This exercises [`open_session_ex_init`] / [`open_session_ex_finish`]
     /// directly rather than the [`open_session_ex`] dispatcher, so the
@@ -597,12 +597,12 @@ mod tests {
     /// (the echoed `psk_id` / `session_type` and the HPKE export
     /// length) between the two phases.
     fn run_handshake(psk_id: u8, session_type: SessionType) -> OpenSessionExResult {
-        let _guard = EMU_LOCK.lock();
-        let part = fresh_emu_partition();
+        let _guard = HSM_LOCK.lock();
+        let part = fresh_partition();
         let rev = part.inner().read().api_rev();
 
         let pending = open_session_ex_init(&part, rev, psk_id, None, session_type)
-            .expect("phase 1 (open_session_ex_init) should succeed against emu");
+            .expect("phase 1 (open_session_ex_init) should succeed against the simulator");
         assert_eq!(
             pending.psk_id, psk_id,
             "pending must echo the requested psk_id"
@@ -618,7 +618,7 @@ mod tests {
         );
 
         open_session_ex_finish(&part, pending)
-            .expect("phase 2 (open_session_ex_finish) should succeed against emu")
+            .expect("phase 2 (open_session_ex_finish) should succeed against the simulator")
     }
 
     /// Happy path: CO must pair with an Authenticated session.
@@ -649,8 +649,8 @@ mod tests {
     /// All `session_ex` entry points require a TBOR-capable API revision.
     #[test]
     fn session_ex_entry_points_reject_revision_without_tbor() {
-        let _guard = EMU_LOCK.lock();
-        let part = fresh_emu_partition();
+        let _guard = HSM_LOCK.lock();
+        let part = fresh_partition();
         let rev = HsmApiRev { major: 1, minor: 0 };
 
         let result = open_session_ex(&part, rev, CO, None, HsmSessionExType::Authenticated);
@@ -664,8 +664,8 @@ mod tests {
     /// yield a pending handshake — the FW rejects it during Phase 1.
     #[test]
     fn open_session_ex_init_rejects_unknown_psk_id() {
-        let _guard = EMU_LOCK.lock();
-        let part = fresh_emu_partition();
+        let _guard = HSM_LOCK.lock();
+        let part = fresh_partition();
         let rev = part.inner().read().api_rev();
 
         let result = open_session_ex_init(&part, rev, 2, None, SessionType::Authenticated);
@@ -676,12 +676,12 @@ mod tests {
     }
 
     /// The partition cert path is api_rev-gated: 1.0 uses MBOR, 1.1 uses
-    /// TBOR. Both must yield the identical PID public key against the emu
+    /// TBOR. Both must yield the identical PID public key against the simulator
     /// (which speaks both transports at every advertised revision).
     #[test]
     fn cert_transport_gated_by_api_rev() {
-        let _guard = EMU_LOCK.lock();
-        let part = fresh_emu_partition();
+        let _guard = HSM_LOCK.lock();
+        let part = fresh_partition();
         let inner = part.inner().read();
         let dev = inner.dev();
 

@@ -700,7 +700,7 @@ fn test_ecdh_256_key_exchange() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
+#[cfg(not(feature = "sock"))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_ecdh_256_key_exchange_key_tag() {

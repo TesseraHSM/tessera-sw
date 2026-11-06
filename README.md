@@ -63,19 +63,21 @@ Use cargo-nextest (recommended):
 
 ```bash
 # Run tests in specific packages you are modifying against simulator
-cargo xtask nextest --features emu --package <package-name>
+cargo xtask nextest --features sock --package <package-name>
 ```
 
-The emulator exposes one partition resource by default. Set
-`TSRA_EMU_RESOURCE_COUNT` (for example `4` or `64`) to test with more.
+With `sock`, each test binary starts an in-process `ddi_sock_server`
+before `main` unless `TSRA_DDI_SOCK` names an external server. The
+simulated HSM exposes one partition resource by default. Set
+`TSRA_SOCK_SERVER_RESOURCE_COUNT` (for example `4` or `64`) to test with more.
 
 ### C++ Session Modes
 
 The C++ algorithm fixtures select the session API at compile time. Use
-`session-ex-tests` for EX/TBOR sessions on the emulator:
+`session-ex-tests` for EX/TBOR sessions on the simulator:
 
 ```bash
-cargo nextest run --package tsra_api_tests --features emu,session-ex-tests --test cpp
+cargo nextest run --package tsra_api_tests --features sock,session-ex-tests --test cpp
 ```
 
 Omit `session-ex-tests` for legacy/MBOR sessions. Run builds for different
