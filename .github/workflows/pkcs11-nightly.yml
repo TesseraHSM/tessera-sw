@@ -1,0 +1,134 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# PKCS#11 module nightly checks: the slower and broader runs that do not fit
+# the per-PR budget of pkcs11.yml. GitHub runs a schedule only from the default
+# branch, so the schedule starts once the module is on main; until then the
+# workflow runs on manual dispatch. Build output goes to $RUNNER_TEMP.
+name: pkcs11-nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # Daily at 3 AM UTC
+  workflow_dispatch:
+
+env:
+  CACHE_KEY_ID: dd2c2bcffcf0cd62b538fdeaa31c7b89c4d42815
+
+jobs:
+  # The GoogleTest suite on both object stores against a module built with
+  # AddressSanitizer and UndefinedBehaviorSanitizer (pkcs11.yml runs ASan only,
+  # on the memory store).
+  functional-asan-ubsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/ubuntu-setup
+
+      - name: Install CMake and OpenSSL headers
+        run: sudo apt-get install -y cmake libssl-dev
+
+      - name: Build PKCS#11 module against the emulator (emu), with ASan and UBSan
+        env:
+          CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address,undefined
+        run: |
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      - name: Build the functional tests with ASan and UBSan
+        run: |
+          set -euo pipefail
+          flags="-fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
+          cmake -S plugins/tsra_pkcs11/integration-tests/cpp \
+            -B "$RUNNER_TEMP/pkcs11-cpp-tests" -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="$flags" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build "$RUNNER_TEMP/pkcs11-cpp-tests" --parallel
+
+      - name: Functional tests, memory object store
+        run: |
+          ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
+
+      - name: Functional tests, file object store (TSRA_PKCS11_PERSIST=1)
+        if: ${{ !cancelled() }}
+        run: |
+          TSRA_PKCS11_PERSIST=1 TSRA_PKCS11_STORE_DIR="$RUNNER_TEMP/pkcs11-store" \
+            ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
+
+  # The external tools on one emulator build; each check is its own step so a red
+  # one does not hide the others.
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/ubuntu-setup
+
+      - name: Install CMake, OpenSSL headers, and OpenSC pkcs11-tool
+        run: sudo apt-get install -y cmake libssl-dev opensc
+
+      - name: Build PKCS#11 module against the emulator (emu)
+        run: |
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The whole fast profile: every listed test must pass, nothing may crash
+      # beyond the known crashes, and every other pass must be in baseline.txt.
+      - name: pkcs11-check, full run against the baseline
+        run: |
+          plugins/tsra_pkcs11/tests/pkcs11-check/run.sh --full "$TSRA_PKCS11_MODULE" \
+            "$RUNNER_TEMP/pkcs11-check"
+
+      # Every pkcs11test case, unfiltered: offlist.sh fails on an off-list pass,
+      # and a changed offlist.md means a test changed its bucket.
+      - name: pkcs11test, unfiltered run against offlist.md
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          plugins/tsra_pkcs11/tests/pkcs11test/offlist.sh "$TSRA_PKCS11_MODULE" \
+            "$RUNNER_TEMP/pkcs11test"
+          git diff --exit-code -- plugins/tsra_pkcs11/tests/pkcs11test/offlist.md
+
+      - name: 'pkcs11-tool: concurrent threads'
+        if: ${{ !cancelled() }}
+        run: plugins/tsra_pkcs11/tests/nightly/pkcs11_tool.sh threads "$TSRA_PKCS11_MODULE"
+
+      - name: 'pkcs11-tool: plaintext key import refused'
+        if: ${{ !cancelled() }}
+        run: plugins/tsra_pkcs11/tests/nightly/pkcs11_tool.sh import "$TSRA_PKCS11_MODULE"
+
+  # OpenSSL 3.5 with the distribution's pkcs11-provider in front of the module,
+  # on the Ubuntu 26.04 image of the provider matrix.
+  pkcs11-provider:
+    runs-on: ubuntu-24.04
+    container: ubuntu:26.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Bootstrap
+        run: |
+          echo 'Acquire::Retries "3";' > /etc/apt/apt.conf.d/80-retries
+          apt-get update --error-on=any
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git nodejs \
+            build-essential cmake pkg-config perl \
+            openssl libssl-dev libbsd-dev pkcs11-provider
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The container ships no rustup; rust-toolchain.toml picks the toolchain.
+      - name: Install rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build PKCS#11 module against the emulator (emu)
+        run: |
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      - name: Token digests through pkcs11-provider
+        run: plugins/tsra_pkcs11/tests/nightly/pkcs11_provider.sh "$TSRA_PKCS11_MODULE"
