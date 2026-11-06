@@ -651,34 +651,42 @@ impl HsmAesGcm for UnoHsmPal {
             .await
     }
 
-    /// Not yet supported on Uno.
+    /// AES-GCM encrypt host-to-host over raw SGLs.
+    ///
+    /// Delegates to [`UnoHsmPal::gcm_encrypt_sgl_impl`] in the
+    /// [`super::gcm_sgl`] module (CP AES core, both build configs).
     async fn gcm_encrypt_sgl(
         &self,
-        _io: &UnoHsmIo,
-        _key: &HsmDmaBuf,
-        _iv: &HsmDmaBuf,
-        _aad_len: usize,
-        _len: usize,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
-        _tag: &mut HsmDmaBuf,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        src: &[u8; 16],
+        dst: &[u8; 16],
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        self.gcm_encrypt_sgl_impl(io, key, iv, aad_len, len, src, dst, tag)
+            .await
     }
 
-    /// Not yet supported on Uno.
+    /// AES-GCM decrypt host-to-host over raw SGLs.
+    ///
+    /// Delegates to [`UnoHsmPal::gcm_decrypt_sgl_impl`] in the
+    /// [`super::gcm_sgl`] module (CP AES core, both build configs).
     async fn gcm_decrypt_sgl(
         &self,
-        _io: &UnoHsmIo,
-        _key: &HsmDmaBuf,
-        _iv: &HsmDmaBuf,
-        _aad_len: usize,
-        _len: usize,
-        _tag: &HsmDmaBuf,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        tag: &HsmDmaBuf,
+        src: &[u8; 16],
+        dst: &[u8; 16],
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        self.gcm_decrypt_sgl_impl(io, key, iv, aad_len, len, tag, src, dst)
+            .await
     }
 }
 
@@ -853,23 +861,24 @@ impl HsmAesKw for UnoHsmPal {
     }
 }
 
-// AES-XTS is not yet supported on Uno.
+// AES-XTS runs on the CP AES core in both build configs; see [`super::xts`].
 impl HsmAesXts for UnoHsmPal {
-    async fn aes_xts_gen_key(&self, _io: &UnoHsmIo, _key: &mut [u8]) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+    async fn aes_xts_gen_key(&self, io: &UnoHsmIo, key: &mut [u8]) -> HsmResult<()> {
+        self.xts_gen_key_impl(io, key)
     }
 
     async fn aes_xts_enc_dec_sgl(
         &self,
-        _io: &UnoHsmIo,
-        _op: HsmAesOp,
-        _key: &HsmDmaBuf,
-        _tweak: &HsmDmaBuf,
-        _len: usize,
-        _dul: usize,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        tweak: &HsmDmaBuf,
+        len: usize,
+        dul: usize,
+        src: &[u8; 16],
+        dst: &[u8; 16],
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        self.xts_enc_dec_sgl_impl(io, aes_op(op), key, tweak, len, dul, src, dst)
+            .await
     }
 }
