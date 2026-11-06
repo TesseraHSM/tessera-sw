@@ -8,18 +8,10 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyMasking;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
-use tsra_fw_hsm_pal_traits::MaskedKeyMeta;
-use tsra_fw_hsm_pal_traits::MaskedKeyMetaCache;
-use tsra_fw_hsm_pal_traits::MaskedKeyTag;
-use tsra_fw_single_cell::SingleCell;
 
 use super::gcm::GCM_IV_LEN;
 use super::gcm::GCM_TAG_LEN;
 use crate::UnoHsmPal;
-
-/// Masked-key metadata already validated (see [`MaskedKeyMetaCache`]),
-/// kept in DTCM. Reached only from synchronous code on the executor.
-static MASKED_KEY_META: SingleCell<MaskedKeyMetaCache> = SingleCell::new(MaskedKeyMetaCache::new());
 
 impl HsmKeyMasking for UnoHsmPal {
     fn key_mask_len(&self, aad_len: usize, payload_len: usize) -> HsmResult<(usize, u8)> {
@@ -65,14 +57,6 @@ impl HsmKeyMasking for UnoHsmPal {
         let (iv, body) = body.split_at_mut(16);
         self.gcm_decrypt_in_place_impl(io, masking_key, &iv[..GCM_IV_LEN], aad_len, tag, body)
             .await
-    }
-
-    fn masked_key_meta(&self, tag: &MaskedKeyTag) -> Option<MaskedKeyMeta> {
-        MASKED_KEY_META.with(|cache| cache.get(tag))
-    }
-
-    fn remember_masked_key_meta(&self, tag: &MaskedKeyTag, meta: MaskedKeyMeta) {
-        MASKED_KEY_META.with(|cache| cache.put(tag, meta));
     }
 }
 
