@@ -39,6 +39,7 @@ use tsra_ddi_tbor_types::MASKED_MLKEM_SHARED_SECRET_MAX_LEN;
 use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use zeroize::Zeroizing;
 
+use crate::setup::par_map;
 use crate::setup::SCOPE_LOCAL;
 
 /// Host-DMA page size: a response reaches the host as a PRP pair of 4 KiB
@@ -52,60 +53,69 @@ pub(crate) struct MlDsaKey {
     pub(crate) public: MlDsaPublicKey,
 }
 
-/// A host-generated ML-DSA key and its signature over each shared `μ`.
+/// A host-generated ML-DSA key and its signatures in [`MlDsaSigned`].
 pub(crate) struct MlDsaSigner {
     /// Encoded public key, as `MlDsaVerify` takes it.
     pub(crate) pub_key: Vec<u8>,
-    /// `sigs[m]` signs `μ` `m` of [`MlDsaSigned::mus`].
-    pub(crate) sigs: Vec<Vec<u8>>,
+    /// Its signatures, in pair order: key `k` of `n` signs pairs `k`,
+    /// `k + n`, `k + 2n`, ...
+    sigs: Vec<Vec<u8>>,
 }
 
-/// `MlDsaVerify` inputs, made once on the host and shared by all threads.
+/// `MlDsaVerify` inputs, made once on the host and shared by all threads:
+/// [`Self::pairs`] signatures, pair `i` signing `μ` `i % mus` with key
+/// `i % keys`. So every key and every `μ` is used, at a cost linear in
+/// their number.
 pub(crate) struct MlDsaSigned {
     /// Random message representatives, which is what the commands take.
-    pub(crate) mus: Vec<Vec<u8>>,
-    pub(crate) keys: Vec<MlDsaSigner>,
+    mus: Vec<Vec<u8>>,
+    keys: Vec<MlDsaSigner>,
 }
 
-/// A device-generated ML-KEM key with host ciphertexts for it, shared by
-/// all threads.
+impl MlDsaSigned {
+    /// The number of signed pairs: `max(keys, mus)`.
+    pub(crate) fn pairs(&self) -> usize {
+        self.keys.len().max(self.mus.len())
+    }
+
+    /// Pair `i`: `(public key, μ, signature)`.
+    pub(crate) fn pair(&self, i: usize) -> (&[u8], &[u8], &[u8]) {
+        let n = self.keys.len();
+        let key = &self.keys[i % n];
+        (
+            &key.pub_key,
+            &self.mus[i % self.mus.len()],
+            &key.sigs[i / n],
+        )
+    }
+}
+
+/// A device-generated ML-KEM key and its ciphertexts in [`MlKemCts`].
 pub(crate) struct MlKemKey {
-    pub(crate) masked: Vec<u8>,
-    /// Host encapsulations to the key's public key.
-    pub(crate) cts: Vec<Vec<u8>>,
+    masked: Vec<u8>,
+    /// Host encapsulations to the key's public key, in pair order as for
+    /// [`MlDsaSigner::sigs`].
+    cts: Vec<Vec<u8>>,
 }
 
-/// `f(i)` for each `i` in `0..n`, in order, spread over the host's cores:
-/// the host PQC work behind the shared input pools is the bulk of setup.
-fn par_map<T: Send>(
-    n: usize,
-    f: impl Fn(usize) -> Result<T, String> + Sync,
-) -> Result<Vec<T>, String> {
-    let threads = std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .clamp(1, n.max(1));
-    let per = n.div_ceil(threads).max(1);
-    let f = &f;
-    std::thread::scope(|s| {
-        let handles: Vec<_> = (0..n)
-            .step_by(per)
-            .map(|start| {
-                s.spawn(move || {
-                    (start..n.min(start + per))
-                        .map(f)
-                        .collect::<Result<Vec<T>, String>>()
-                })
-            })
-            .collect();
-        let mut out = Vec::with_capacity(n);
-        for h in handles {
-            let chunk = h
-                .join()
-                .unwrap_or_else(|_| Err("host PQC thread panicked".into()))?;
-            out.extend(chunk);
-        }
-        Ok(out)
-    })
+/// `MlKemDecapsulate` inputs, shared by all threads: [`Self::pairs`] host
+/// ciphertexts, ciphertext `i` to key `i % keys`.
+pub(crate) struct MlKemCts {
+    keys: Vec<MlKemKey>,
+    pairs: usize,
+}
+
+impl MlKemCts {
+    pub(crate) fn pairs(&self) -> usize {
+        self.pairs
+    }
+
+    /// Pair `i`: `(masked key, ciphertext)`.
+    pub(crate) fn pair(&self, i: usize) -> (&[u8], &[u8]) {
+        let n = self.keys.len();
+        let key = &self.keys[i % n];
+        (&key.masked, &key.cts[i / n])
+    }
 }
 
 /// `MlDsaGenerateKey` for `p`, masked under the local scope.
@@ -133,22 +143,20 @@ pub(crate) fn device_mldsa_keys(
     p: &MlDsaParams,
     n: usize,
 ) -> Result<Vec<MlDsaKey>, String> {
-    (0..n)
-        .map(|_| {
-            let resp = ctx
-                .tbor(&mldsa_keygen_req(session_id, p))
-                .map_err(|e| format!("MlDsaGenerateKey({}): {e:?}", p.name))?;
-            let public = check_mldsa_key(p, &resp.pub_key, &resp.masked_key)?;
-            Ok(MlDsaKey {
-                masked: resp.masked_key,
-                public,
-            })
+    par_map(n, |_| {
+        let resp = ctx
+            .tbor(&mldsa_keygen_req(session_id, p))
+            .map_err(|e| format!("MlDsaGenerateKey({}): {e:?}", p.name))?;
+        let public = check_mldsa_key(p, &resp.pub_key, &resp.masked_key)?;
+        Ok(MlDsaKey {
+            masked: resp.masked_key,
+            public,
         })
-        .collect()
+    })
 }
 
-/// Generate `keys` ML-DSA keys for `p` on the host, each signing the same
-/// `mus` random message representatives.
+/// Generate `keys` ML-DSA keys for `p` on the host and sign `mus` random
+/// message representatives with them, as [`MlDsaSigned`] pairs them.
 pub(crate) fn host_mldsa_signed(
     p: &MlDsaParams,
     keys: usize,
@@ -156,19 +164,23 @@ pub(crate) fn host_mldsa_signed(
 ) -> Result<MlDsaSigned, String> {
     let variant = MlDsaVariant::from_pub_key_len(p.pub_key_len)
         .ok_or_else(|| format!("no host {}", p.name))?;
+    let pairs = keys.max(mus);
     let mus = (0..mus)
         .map(|_| Rng::rand_vec(MLDSA_MU_LEN))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("host ML-DSA mu: {e:?}"))?;
-    let keys = par_map(keys, |_| host_mldsa_signer(p, variant, &mus))?;
+    let keys = par_map(keys, |k| {
+        let mine = (k..pairs).step_by(keys).map(|i| &mus[i % mus.len()]);
+        host_mldsa_signer(p, variant, mine)
+    })?;
     Ok(MlDsaSigned { mus, keys })
 }
 
 /// Generate one ML-DSA key on the host and sign each of `mus`.
-fn host_mldsa_signer(
+fn host_mldsa_signer<'m>(
     p: &MlDsaParams,
     variant: MlDsaVariant,
-    mus: &[Vec<u8>],
+    mus: impl Iterator<Item = &'m Vec<u8>>,
 ) -> Result<MlDsaSigner, String> {
     let mut seed = Zeroizing::new([0u8; MLDSA_SEED_LEN]);
     rand::rng().fill(&mut seed[..]);
@@ -180,7 +192,6 @@ fn host_mldsa_signer(
         .map_err(|e| format!("host {} public key: {e:?}", p.name))?;
     let mut algo = MlDsaAlgo::external_mu();
     let sigs = mus
-        .iter()
         .map(|m| {
             let mut sig = vec![0u8; p.sig_len];
             let len = Signer::sign(&mut algo, &key, m, Some(&mut sig))
@@ -197,46 +208,41 @@ fn host_mldsa_signer(
 pub(crate) fn host_mlkem_pub_keys(p: &MlKemParams, n: usize) -> Result<Vec<Vec<u8>>, String> {
     let variant = MlKemVariant::from_pub_key_len(p.pub_key_len)
         .ok_or_else(|| format!("no host {}", p.name))?;
-    (0..n)
-        .map(|_| {
-            let mut seed = Zeroizing::new([0u8; MLKEM_SEED_LEN]);
-            rand::rng().fill(&mut seed[..]);
-            MlKemPrivateKey::from_seed(variant, &seed[..])
-                .and_then(|k| k.public_key())
-                .and_then(|k| k.to_vec())
-                .map_err(|e| format!("host {} keygen: {e:?}", p.name))
-        })
-        .collect()
+    par_map(n, |_| {
+        let mut seed = Zeroizing::new([0u8; MLKEM_SEED_LEN]);
+        rand::rng().fill(&mut seed[..]);
+        MlKemPrivateKey::from_seed(variant, &seed[..])
+            .and_then(|k| k.public_key())
+            .and_then(|k| k.to_vec())
+            .map_err(|e| format!("host {} keygen: {e:?}", p.name))
+    })
 }
 
-/// Generate `keys` ML-KEM keys for `p` on the device, and encapsulate to
-/// each `messages` times on the host.
+/// Generate `keys` ML-KEM keys for `p` on the device, and on the host
+/// `max(keys, messages)` ciphertexts to them, as [`MlKemCts`] pairs them.
 pub(crate) fn device_mlkem_keys(
     ctx: &TestCtx,
     session_id: u16,
     p: &MlKemParams,
     keys: usize,
     messages: usize,
-) -> Result<Vec<MlKemKey>, String> {
-    let generated = (0..keys)
-        .map(|_| {
-            let resp = ctx
-                .tbor(&mlkem_keygen_req(session_id, p))
-                .map_err(|e| format!("MlKemGenerateKey({}): {e:?}", p.name))?;
-            let public = check_mlkem_key(p, &resp.pub_key, &resp.masked_key)?;
-            Ok((resp.masked_key, public))
+) -> Result<MlKemCts, String> {
+    let pairs = keys.max(messages);
+    let keys = par_map(keys, |k| {
+        let resp = ctx
+            .tbor(&mlkem_keygen_req(session_id, p))
+            .map_err(|e| format!("MlKemGenerateKey({}): {e:?}", p.name))?;
+        let public = check_mlkem_key(p, &resp.pub_key, &resp.masked_key)?;
+        let cts = (k..pairs)
+            .step_by(keys)
+            .map(|_| host_encapsulate(p, &public))
+            .collect::<Result<_, String>>()?;
+        Ok(MlKemKey {
+            masked: resp.masked_key,
+            cts,
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    let cts = par_map(generated.len(), |k| {
-        (0..messages)
-            .map(|_| host_encapsulate(p, &generated[k].1))
-            .collect::<Result<Vec<_>, String>>()
     })?;
-    Ok(generated
-        .into_iter()
-        .zip(cts)
-        .map(|((masked, _), cts)| MlKemKey { masked, cts })
-        .collect())
+    Ok(MlKemCts { keys, pairs })
 }
 
 /// Encapsulate to `public` on the host; returns the ciphertext. The shared
