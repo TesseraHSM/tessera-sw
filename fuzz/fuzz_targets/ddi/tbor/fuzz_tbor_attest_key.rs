@@ -21,11 +21,9 @@ use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_mbor_sim::attestation::KeyAttester;
-use tsra_ddi_mbor_sim::crypto::ecc::EccOp;
-use tsra_ddi_mbor_sim::crypto::ecc::EccPublicKey as SimEccPublicKey;
-use tsra_ddi_mbor_sim::report::CoseSign1Object;
-use tsra_ddi_mbor_sim::report::KeyAttestationReport;
+use tsra_ddi_mbor_test_helpers::CoseSign1Object;
+use tsra_ddi_mbor_test_helpers::KeyAttestationReport;
+use tsra_ddi_mbor_test_helpers::encode_sig_struct;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
@@ -309,17 +307,27 @@ fn verify_key_report(
     let leaf = X509Certificate::from_der(leaf_bytes).expect("PID leaf parses as X.509");
     let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
     let pid_pub =
-        SimEccPublicKey::from_der(&pid_spki, None).expect("PID pubkey loads from leaf SPKI");
+        tsra_crypto::EccPublicKey::from_bytes(&pid_spki).expect("PID pubkey loads from leaf SPKI");
 
-    // 2. COSE_Sign1 signature verify under PID pubkey.
-    let attester = KeyAttester::parse(report).expect("report parses as COSE_Sign1");
-    attester
-        .verify(&pid_pub)
-        .expect("KeyReport must be signed by the partition PID key");
+    // 2. COSE_Sign1 signature verify under PID pubkey (ES384 over the COSE
+    //    Sig_structure).
+    let cose = CoseSign1Object::decode(report).expect("report parses as COSE_Sign1");
+    let mut tbs = vec![0u8; 64 + cose.protected_header.len() + cose.payload.len()];
+    let tbs_len = encode_sig_struct(&cose.protected_header, cose.payload, &mut tbs)
+        .expect("encode COSE Sig_structure");
+    let digest =
+        tsra_crypto::Hasher::hash_vec(&mut HashAlgo::sha384(), &tbs[..tbs_len]).expect("SHA-384");
+    let ok = tsra_crypto::Verifier::verify(
+        &mut tsra_crypto::EccAlgo::default(),
+        &pid_pub,
+        &digest,
+        &cose.signature,
+    )
+    .expect("ECDSA verify");
+    assert!(ok, "KeyReport must be signed by the partition PID key");
 
     // 3. Decode the payload and cross-bind the exact `report_data` and the
     //    embedded COSE_Key to the sealed/generated public point.
-    let cose = CoseSign1Object::decode(report).expect("re-decode COSE_Sign1 envelope");
     let decoded: KeyAttestationReport =
         minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport");
 
@@ -387,6 +395,7 @@ fuzz_target!(|input: FuzzInput| {
             session_id: session.session_id,
             masked_key,
             report_data: input.fuzzed_key_data.report_data,
+            auth_envelope: Vec::new(),
         };
         let result = ctx.tbor(&req);
 

@@ -48,6 +48,7 @@ pub(crate) fn sd_reseal_remote_backup_ex(
     dest_evidence: &HsmSdEvidence<'_>,
     policy: &[u8],
     src_remote_backup: &[u8],
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<Vec<u8>> {
     let masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN] = masked_sealing_key
         .try_into()
@@ -80,9 +81,13 @@ pub(crate) fn sd_reseal_remote_backup_ex(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = None;
+    // See `part_init_ex` (`ddi/partition_ex.rs`): thread the session's
+    // cookie explicitly since this call also runs outside
+    // `with_session_cookie`'s scope.
     let oob_items = (!oob.is_empty()).then_some(oob.as_slice());
-    dev.exec_op_tbor(&req, oob_items, &mut cookie)
-        .map(|resp| resp.dst_remote_backup.to_vec())
-        .map_err(HsmError::from)
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, oob_items, cookie)
+            .map(|resp| resp.dst_remote_backup.to_vec())
+            .map_err(HsmError::from)
+    })
 }

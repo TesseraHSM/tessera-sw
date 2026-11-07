@@ -36,6 +36,14 @@ impl MobkProviderCallback for DummyMobkCallback {
     }
 }
 
+struct CachedMobkCallback(Vec<u8>);
+
+impl MobkProviderCallback for CachedMobkCallback {
+    fn get_mobk(&self) -> HsmResult<Vec<u8>> {
+        Ok(self.0.clone())
+    }
+}
+
 /// Builds a valid caller-source OBK config. Uses a previously-cached
 /// MOBK for this partition path (from any prior init in this process)
 /// when available, since the device's `init_bk3` is one-shot per
@@ -248,6 +256,101 @@ fn test_partition_init() {
             .expect("Partition init failed");
         save_mobk_after_init(&part);
     }
+}
+
+/// An already-established init must not cache an unvalidated MOBK or
+/// replace a MOBK that was validated by a successful credential establishment.
+#[api_test]
+fn test_partition_init_already_established() {
+    if use_tpm() {
+        return;
+    }
+    let part_mgr = HsmPartitionManager::partition_info_list();
+    assert!(!part_mgr.is_empty(), "No partitions found.");
+    for part_info in part_mgr.iter() {
+        let part = HsmPartitionManager::open_partition(&part_info.path, test_api_rev())
+            .expect("Failed to open the partition");
+        part.reset().expect("Partition reset failed");
+        let (obk_info, pota_endorsement) = make_init_params(&part);
+        part.init(
+            HsmCredentials::new(&APP_ID, &APP_PIN),
+            None,
+            None,
+            obk_info,
+            pota_endorsement,
+            None,
+        )
+        .expect("Partition init failed");
+        save_mobk_after_init(&part);
+        let mobk = part.mobk_vec();
+        assert!(!mobk.is_empty(), "MOBK missing after first init");
+
+        let second = HsmPartitionManager::open_partition(&part_info.path, test_api_rev())
+            .expect("Failed to open the partition again");
+        let (obk_info, pota_endorsement) = make_init_params(&second);
+        second
+            .init(
+                HsmCredentials::new(&APP_ID, &APP_PIN),
+                None,
+                None,
+                obk_info,
+                pota_endorsement,
+                None,
+            )
+            .expect("Second init failed");
+        assert!(second.mobk_vec().is_empty());
+
+        let (_, pota_endorsement) = make_init_params(&part);
+        part.init(
+            HsmCredentials::new(&APP_ID, &APP_PIN),
+            None,
+            None,
+            HsmOwnerBackupKeyConfig::new(
+                HsmOwnerBackupKeySource::Caller,
+                HsmOwnerBackupKey::from_masked_key(&vec![0; mobk.len()]),
+            ),
+            pota_endorsement,
+            None,
+        )
+        .expect("Repeated init failed");
+        assert_eq!(part.mobk_vec(), mobk);
+    }
+}
+
+/// A fresh handle must recover through its MOBK callback after an
+/// already-established init supplied a blob the device did not validate.
+#[partition_test]
+fn test_partition_init_mobk_callback(part: HsmPartition, creds: HsmCredentials) {
+    if use_tpm() {
+        return;
+    }
+    let mobk = part.mobk_vec();
+    assert!(!mobk.is_empty(), "MOBK missing after first init");
+    let second = HsmPartitionManager::open_partition(&part.path(), test_api_rev())
+        .expect("Failed to open the partition again");
+    let (_, pota_endorsement) = make_init_params(&second);
+    let (mut config, _ctx) = make_resiliency_config();
+    config.mobk_callback = Some(Box::new(CachedMobkCallback(mobk.clone())));
+    second
+        .init(
+            creds,
+            None,
+            None,
+            HsmOwnerBackupKeyConfig::new(
+                HsmOwnerBackupKeySource::Caller,
+                HsmOwnerBackupKey::from_masked_key(&vec![0; mobk.len()]),
+            ),
+            pota_endorsement,
+            Some(config),
+        )
+        .expect("Second init failed");
+    assert!(second.mobk_vec().is_empty());
+
+    part.reset().expect("Partition reset failed");
+    let _session = second
+        .open_session(test_api_rev(), &creds, None)
+        .expect("Partition recovery through the MOBK callback failed");
+    assert_eq!(second.mobk_vec(), mobk);
 }
 
 #[api_test]

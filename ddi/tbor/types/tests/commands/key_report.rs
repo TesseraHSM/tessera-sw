@@ -29,18 +29,13 @@
 //! * IV/ciphertext tampering fails authentication; the original key still works.
 //! * Default-PSK gate → `DefaultPskMustRotate` (dispatcher, pre-handler).
 
-#[cfg(feature = "emu")]
 use tsra_crypto::EccKeyOp;
-#[cfg(feature = "emu")]
 use tsra_crypto::EccPrivateKey;
-#[cfg(feature = "emu")]
 use tsra_crypto::ExportableKey;
-#[cfg(feature = "emu")]
 use tsra_crypto::KeyGenerationOp;
-#[cfg(feature = "emu")]
 use tsra_crypto::RsaKeyOp;
-#[cfg(feature = "emu")]
 use tsra_crypto::RsaPrivateKey;
+use tsra_ddi_mbor_test_helpers::KeyAttestationReport;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -56,19 +51,12 @@ use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::ECC_CURVE_P256;
 use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_AES;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_ECC;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_HMAC_SHA256;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_HMAC_SHA384;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_HMAC_SHA512;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_RSA;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_CLASS_RSA_CRT;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::KEY_REPORT_MASKED_KEY_MAX_LEN;
@@ -82,17 +70,10 @@ use crate::commands::common::SCOPE_EPHEMERAL;
 use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::common::SCOPE_SESSION;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
-#[cfg(feature = "emu")]
 use crate::commands::unwrap_key::unwrap;
 
 /// Verifies an imported RSA or RSA-CRT key report against the host public key.
-#[cfg(feature = "emu")]
 fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
-    use tsra_ddi_mbor_sim::attestation::KeyAttester;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccOp;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccPublicKey as SimEccPublicKey;
-    use tsra_ddi_mbor_sim::report::CoseSign1Object;
-    use tsra_ddi_mbor_sim::report::KeyAttestationReport;
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 
@@ -133,18 +114,8 @@ fn imported_rsa_report_roundtrip(class: u8, modulus_bytes: usize) {
 
     let spki = leaf.get_public_key_der().expect("extract PID public key");
 
-    let pid_pub = SimEccPublicKey::from_der(&spki, None).expect("load PID public key");
-
-    KeyAttester::parse(&report.report)
-        .expect("parse COSE_Sign1")
-        .verify(&pid_pub)
-        .expect("verify PID signature");
-
-    // Decode the signed attestation payload.
-    let cose = CoseSign1Object::decode(&report.report).expect("decode COSE_Sign1");
-
-    let decoded: KeyAttestationReport =
-        minicbor::decode(cose.payload).expect("decode key attestation report");
+    // Verify the PID signature and decode the signed attestation payload.
+    let decoded = verify_cose_sign1(&report.report, &spki);
 
     assert_eq!(decoded.version, 2);
     assert_eq!(&decoded.report_data[..], &report_data[..]);
@@ -222,6 +193,30 @@ fn masked_sealing_key(ctx: &TestCtx, session_id: u16, scope: u8) -> (Vec<u8>, Ve
     (seal.masked_key.to_vec(), seal.pub_key.to_vec())
 }
 
+/// Verifies a COSE_Sign1 report's ES384 signature under the PID public key
+/// (`pid_spki_der`) and returns the decoded attestation payload.
+pub(crate) fn verify_cose_sign1(report: &[u8], pid_spki_der: &[u8]) -> KeyAttestationReport {
+    use tsra_crypto::EccAlgo;
+    use tsra_crypto::EccPublicKey;
+    use tsra_crypto::HashAlgo;
+    use tsra_crypto::Hasher;
+    use tsra_crypto::ImportableKey;
+    use tsra_crypto::Verifier;
+    use tsra_ddi_mbor_test_helpers::encode_sig_struct;
+    use tsra_ddi_mbor_test_helpers::CoseSign1Object;
+
+    let cose = CoseSign1Object::decode(report).expect("report parses as COSE_Sign1");
+    let mut tbs = vec![0u8; 64 + cose.protected_header.len() + cose.payload.len()];
+    let tbs_len = encode_sig_struct(&cose.protected_header, cose.payload, &mut tbs)
+        .expect("encode COSE Sig_structure");
+    let digest = Hasher::hash_vec(&mut HashAlgo::sha384(), &tbs[..tbs_len]).expect("SHA-384");
+    let pid_pub = EccPublicKey::from_bytes(pid_spki_der).expect("PID pubkey loads from SPKI");
+    let ok = Verifier::verify(&mut EccAlgo::default(), &pid_pub, &digest, &cose.signature)
+        .expect("ECDSA verify");
+    assert!(ok, "COSE_Sign1 must verify under PID pubkey");
+    minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport")
+}
+
 /// Verify a `KeyReport` COSE_Sign1: (1) the envelope verifies under the
 /// PID pubkey; (2) the embedded COSE_Key re-derives `sealing_pub_le`; and
 /// (3) the report's `report_data` matches what the caller supplied.
@@ -230,12 +225,7 @@ pub(crate) fn verify_key_report(
     report: &[u8],
     sealing_pub_le: &[u8],
     expected_report_data: &[u8; KEY_REPORT_DATA_LEN],
-) -> tsra_ddi_mbor_sim::report::KeyAttestationReport {
-    use tsra_ddi_mbor_sim::attestation::KeyAttester;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccOp;
-    use tsra_ddi_mbor_sim::crypto::ecc::EccPublicKey as SimEccPublicKey;
-    use tsra_ddi_mbor_sim::report::CoseSign1Object;
-    use tsra_ddi_mbor_sim::report::KeyAttestationReport;
+) -> KeyAttestationReport {
     use x509::X509Certificate;
     use x509::X509CertificateOp;
 
@@ -250,20 +240,12 @@ pub(crate) fn verify_key_report(
     let leaf_bytes = leaf_resp.data.certificate.as_slice();
     let leaf = X509Certificate::from_der(leaf_bytes).expect("PID leaf parses as X.509 certificate");
     let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
-    let pid_pub =
-        SimEccPublicKey::from_der(&pid_spki, None).expect("PID pubkey loads from leaf SPKI");
 
-    // 2. COSE_Sign1 signature verify under PID pubkey.
-    let attester = KeyAttester::parse(report).expect("report parses as COSE_Sign1");
-    attester
-        .verify(&pid_pub)
-        .expect("KeyReport COSE_Sign1 must verify under PID pubkey");
+    // 2. COSE_Sign1 signature verify under PID pubkey, then decode the
+    // payload.
+    let decoded = verify_cose_sign1(report, &pid_spki);
 
-    // 3. Decode the payload and cross-bind the embedded COSE_Key to the
-    //    sealed public point.
-    let cose = CoseSign1Object::decode(report).expect("re-decode COSE_Sign1 envelope");
-    let decoded: KeyAttestationReport =
-        minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport");
+    // 3. Cross-bind the embedded COSE_Key to the sealed public point.
 
     assert_eq!(
         &decoded.report_data[..],
@@ -536,7 +518,6 @@ fn key_report_generated_ecc_all_curves() {
 
 /// Rejects every supported symmetric key class because KeyReport only
 /// attests asymmetric keys that have a public component.
-#[cfg(feature = "emu")]
 #[test]
 fn key_report_rejects_all_symmetric_key_classes() {
     let ctx = TestCtx::new();
@@ -675,7 +656,6 @@ fn key_report_rejects_tampered_iv_and_ciphertext() {
 
 /// Attests imported ECC keys across P-256, P-384, and P-521 using platform-appropriate key sizes.
 /// Verifies imported ECC key reports against independently generated host public keys.
-#[cfg(feature = "emu")]
 #[test]
 fn key_report_imported_ecc_all_curves() {
     let ctx = TestCtx::new();
@@ -1190,49 +1170,42 @@ fn key_report_p521_with_max_label() {
 
 /// Verifies a signed report for an imported RSA-2048 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA, 256);
 }
 
 /// Verifies a signed report for an imported RSA-CRT-2048 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA_CRT, 256);
 }
 
 /// Verifies a signed report for an imported RSA-3072 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_3072_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA, 384);
 }
 
 /// Verifies a signed report for an imported RSA-4096 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_4096_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA, 512);
 }
 
 /// Verifies a signed report for an imported RSA-CRT-3072 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_3072_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA_CRT, 384);
 }
 
 /// Verifies a signed report for an imported RSA-CRT-4096 private key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_4096_roundtrip() {
     imported_rsa_report_roundtrip(KEY_CLASS_RSA_CRT, 512);
 }
 
 /// Verifies that tampering with an imported RSA/RSA-CRT masked key
 /// is rejected without invalidating the original key.
-#[cfg(feature = "emu")]
 fn imported_rsa_tampering_rejected(class: u8) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
@@ -1285,20 +1258,17 @@ fn imported_rsa_tampering_rejected(class: u8) {
 
 /// Rejects tampered imported RSA masked keys.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_tampering_rejected() {
     imported_rsa_tampering_rejected(KEY_CLASS_RSA);
 }
 
 /// Rejects tampered imported RSA-CRT masked keys.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_tampering_rejected() {
     imported_rsa_tampering_rejected(KEY_CLASS_RSA_CRT);
 }
 
 /// Verifies RSA/RSA-CRT authenticated metadata tampering fails GCM verification.
-#[cfg(feature = "emu")]
 fn imported_rsa_metadata_tampering_rejected(class: u8) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
@@ -1346,20 +1316,17 @@ fn imported_rsa_metadata_tampering_rejected(class: u8) {
 
 /// Rejects authenticated metadata tampering on an imported RSA key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_metadata_tampering_rejected() {
     imported_rsa_metadata_tampering_rejected(KEY_CLASS_RSA);
 }
 
 /// Rejects authenticated metadata tampering on an imported RSA-CRT key.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_metadata_tampering_rejected() {
     imported_rsa_metadata_tampering_rejected(KEY_CLASS_RSA_CRT);
 }
 
 /// Rejects an RSA/RSA-CRT KeyReport request with an invalid session ID.
-#[cfg(feature = "emu")]
 fn imported_rsa_invalid_session_rejected(class: u8) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
@@ -1373,7 +1340,7 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
     let masked_key = imported.masked_key;
     let report_data = sample_report_data();
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborKeyReportReq {
             auth_envelope: Vec::new(),
             session_id: u16::MAX,
@@ -1398,14 +1365,12 @@ fn imported_rsa_invalid_session_rejected(class: u8) {
 
 /// Rejects an imported RSA KeyReport request with an invalid session.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_invalid_session_rejected() {
     imported_rsa_invalid_session_rejected(KEY_CLASS_RSA);
 }
 
 /// Rejects an imported RSA-CRT KeyReport request with an invalid session.
 #[test]
-#[cfg(feature = "emu")]
 fn key_report_imported_rsa_crt_invalid_session_rejected() {
     imported_rsa_invalid_session_rejected(KEY_CLASS_RSA_CRT);
 }

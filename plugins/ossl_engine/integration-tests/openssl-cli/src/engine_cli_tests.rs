@@ -37,7 +37,7 @@ fn search_path(relative: &str) -> String {
 /// runs every test in its own process, so suites sharing one keydir race
 /// env.sh's keymat creation (torn OBK/POTA files, seen as ASN1 parse errors).
 /// Per-test dirs remove the shared state entirely — each openssl process
-/// re-initializes the mock from its own dir's persisted MOBK.
+/// re-initializes emu from its own dir's persisted MOBK.
 ///
 /// The directory reaches the scripts as their first positional argument (the
 /// `@keydir` constant in the RUN lines, preferred by env.sh over the plain

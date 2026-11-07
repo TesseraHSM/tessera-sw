@@ -22,6 +22,8 @@ use crate::XtaskCtx;
 const HOST_TESTED: &[&str] = &[
     "tsra_fw_uno_drivers_pqc",
     "tsra_fw_uno_drivers_soc",
+    "tsra_fw_uno_drivers_iic",
+    "tsra_fw_uno_drivers_oic",
     "tsra_fw_uno_drivers_session_store",
     "tsra_fw_uno_pct",
 ];

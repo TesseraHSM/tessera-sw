@@ -47,7 +47,7 @@
 /* ------------------------------------------------------------------ */
 
 // Aligned with the Rust resiliency stress tests and the OSSL CAPI tests.
-// Mock backoff base is 8 ms, so 1 s between resets gives plenty of time
+// Emu backoff base is 8 ms, so 1 s between resets gives plenty of time
 // for recovery while still exercising the retry path.
 static constexpr auto RESET_INTERVAL = std::chrono::milliseconds(1000);
 static constexpr auto WORKER_SLEEP = std::chrono::milliseconds(10);

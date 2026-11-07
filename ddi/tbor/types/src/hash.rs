@@ -21,7 +21,7 @@ use crate::tbor;
 pub const TBOR_OP_HASH: u8 = 0x1B;
 
 /// Maximum message length (bytes) accepted by `Hash`.
-pub const HASH_MSG_MAX_LEN: usize = 2048;
+pub const HASH_MSG_MAX_LEN: usize = 3072;
 /// Maximum output length (bytes): the largest SHAKE `out_len`.  Fixed-length
 /// digests are at most 64 B (SHA-512).
 pub const HASH_DIGEST_MAX_LEN: usize = 256;
@@ -55,7 +55,7 @@ pub struct TborHashReq {
     pub out_len: Option<u16>,
 
     /// The message to hash, up to `HASH_MSG_MAX_LEN` bytes.
-    #[tbor(max_len = 2048)]
+    #[tbor(max_len = 3072)]
     pub msg: Vec<u8>,
 }
 
@@ -90,5 +90,20 @@ mod tests {
             frame.contains(&HASH_ALGO_SHA384),
             "encoded frame must carry the sha-mode discriminant",
         );
+    }
+
+    /// The worst-case request, staging included, stays within 4 KiB.
+    #[test]
+    fn max_sized_request_fits_in_4_kib() {
+        let req = TborHashReq {
+            session_id: 7,
+            algo: HASH_ALGO_SHAKE256,
+            out_len: Some(HASH_DIGEST_MAX_LEN as u16),
+            msg: alloc::vec![0x61u8; HASH_MSG_MAX_LEN],
+        };
+        let mut buf = [0u8; 4096];
+        let frame = req.encode_request(&mut buf).expect("encode");
+        // header(8) + 4 TOC entries * 4 + data(3072).
+        assert_eq!(frame.len(), 3096);
     }
 }

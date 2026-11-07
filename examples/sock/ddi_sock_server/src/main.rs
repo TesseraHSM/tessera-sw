@@ -1,12 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! TCP and Linux VSOCK server backed by an in-process HSM emulator.
+//! TCP, Unix domain socket, and Linux VSOCK server backed by an in-process
+//! HSM emulator.
 //!
 //! Run `cargo run -p ddi_sock_server -- tcp://127.0.0.1:1234` on Windows or Linux.
 //! Without arguments, Windows uses TCP loopback and Linux uses VSOCK port 1234.
 //! All connections share partition 10. Linux VSOCK clients connect to
 //! `vsock://CID:1234`, where CID is the server guest's VSOCK context ID.
+//! On Unix-like platforms, `unix://PATH` listens on an AF_UNIX stream socket
+//! at `PATH` (the file is removed and recreated if it already exists).
 //! This unauthenticated test transport is for trusted, isolated environments;
 //! it is not a production service. Emulator state is lost when the server exits.
 //! OOB bytes are re-homed into server-owned SGL descriptors, and bulk
@@ -18,7 +21,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
 use tsra_ddi_mbor_types::DdiDecoder;
 use tsra_ddi_mbor_types::DdiOp;
 use tsra_ddi_mbor_types::DdiReopenSessionResp;
@@ -26,6 +32,7 @@ use tsra_ddi_mbor_types::DdiReqHdr;
 use tsra_ddi_mbor_types::DdiRespHdr;
 use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
+use tsra_ddi_sock_proto::MAX_FRAME;
 use tsra_ddi_sock_proto::MAX_OOB_ITEM;
 use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
 use tsra_ddi_sock_proto::OobItem;
@@ -58,6 +65,8 @@ use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_std::StdHsm;
 
 mod tcp;
+#[cfg(unix)]
+mod unix;
 
 const HSM_PARTITION_ID: u8 = 10;
 const HSM_BULK_QID: u16 = 1;
@@ -65,6 +74,73 @@ const DMA_PAGE_SIZE: usize = 4096;
 const DMA_BUF_SIZE: usize = MAX_DMA_BUFFER as usize;
 const TRANSPORT_INVALID_REQUEST: u32 = 1;
 const TRANSPORT_HSM_ERROR: u32 = 2;
+
+/// Upper bound on how long a connection may sit idle before the *next*
+/// request frame's length prefix starts arriving. A healthy client
+/// reasonably leaves a connection idle between commands, so this is
+/// intentionally far more generous than [`CONNECTION_READ_TIMEOUT`] -
+/// every backend here serves connections concurrently, so this timeout
+/// exists only to reclaim resources (the spawned task, and any
+/// sessions this connection owns) from a client that vanished without
+/// closing its socket (e.g. a network partition), not to protect other
+/// clients' fairness.
+const IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Upper bound on how long it may take to complete an already-started
+/// frame: reading the rest of its body, executing it, and writing the
+/// response. Kept far tighter than [`IDLE_WAIT_TIMEOUT`] so a peer that
+/// starts a frame and then stalls or slow-drips it cannot hold the
+/// connection (and any sessions it owns) open indefinitely.
+const CONNECTION_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reads one [`RequestFrame`] from `stream`, honoring the idle/active
+/// timeout split: only the wait for the length prefix's *first* byte
+/// uses [`IDLE_WAIT_TIMEOUT`] — once that byte has arrived the peer is
+/// mid-request, not idle, so every remaining read (the rest of the
+/// prefix, then the body) uses the tighter [`CONNECTION_READ_TIMEOUT`].
+/// Applying the idle timeout to the whole 4-byte prefix would let a
+/// client that sends one byte and then stalls hold the connection (and
+/// any sessions it owns) open for the full idle window instead of the
+/// advertised active timeout. Returns `Ok(None)` for every condition
+/// that should be treated as a clean disconnect: an idle-wait timeout,
+/// clean EOF, or a stall once a frame has started arriving.
+async fn read_request_with_timeout<S>(stream: &mut S) -> Result<Option<RequestFrame>, String>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut length_buf = [0u8; 4];
+    match tokio::time::timeout(IDLE_WAIT_TIMEOUT, stream.read_exact(&mut length_buf[..1])).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Ok(Err(error)) => return Err(format!("failed to read DDI request length: {error}")),
+        Err(_elapsed) => return Ok(None),
+    }
+    match tokio::time::timeout(
+        CONNECTION_READ_TIMEOUT,
+        stream.read_exact(&mut length_buf[1..]),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Ok(Err(error)) => return Err(format!("failed to read DDI request length: {error}")),
+        Err(_elapsed) => return Ok(None),
+    }
+    let length = u32::from_le_bytes(length_buf);
+    if length > MAX_FRAME {
+        return Err(format!("request frame too large: {length}"));
+    }
+    let mut body = vec![0; length as usize];
+    match tokio::time::timeout(CONNECTION_READ_TIMEOUT, stream.read_exact(&mut body)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Ok(Err(error)) => return Err(format!("failed to read DDI request body: {error}")),
+        Err(_elapsed) => return Ok(None),
+    }
+    RequestFrame::decode(&body)
+        .map(Some)
+        .map_err(|error| format!("failed to decode DDI request: {error}"))
+}
 
 #[repr(align(4096))]
 struct DmaBuf<const N: usize>([u8; N]);
@@ -905,16 +981,53 @@ mod linux {
         Ok(())
     }
 
-    async fn read_request(stream: &AsyncFd<Socket>) -> Result<RequestFrame, ProtoError> {
+    async fn read_request(stream: &AsyncFd<Socket>) -> Result<Option<RequestFrame>, String> {
+        // Only the wait for the first prefix byte uses the generous idle
+        // timeout; once it arrives the peer is mid-request, not idle, so
+        // the rest of the prefix (and the body) uses the tighter active
+        // timeout. See `read_request_with_timeout` for why.
         let mut length = [0; 4];
-        read_exact(stream, &mut length).await?;
+        match tokio::time::timeout(
+            super::IDLE_WAIT_TIMEOUT,
+            read_exact(stream, &mut length[..1]),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Ok(Err(error)) => return Err(format!("failed to read DDI request length: {error}")),
+            Err(_elapsed) => return Ok(None),
+        }
+        match tokio::time::timeout(
+            super::CONNECTION_READ_TIMEOUT,
+            read_exact(stream, &mut length[1..]),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Ok(Err(error)) => return Err(format!("failed to read DDI request length: {error}")),
+            Err(_elapsed) => return Ok(None),
+        }
         let length = u32::from_le_bytes(length);
         if length > MAX_FRAME {
-            return Err(ProtoError::TooLarge(length));
+            return Err(format!("request frame too large: {length}"));
         }
         let mut body = vec![0; length as usize];
-        read_exact(stream, &mut body).await?;
+        match tokio::time::timeout(
+            super::CONNECTION_READ_TIMEOUT,
+            read_exact(stream, &mut body),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+            Ok(Err(error)) => return Err(format!("failed to read DDI request body: {error}")),
+            Err(_elapsed) => return Ok(None),
+        }
         RequestFrame::decode(&body)
+            .map(Some)
+            .map_err(|error| format!("failed to decode DDI request: {error}"))
     }
 
     async fn write_response(
@@ -930,17 +1043,28 @@ mod linux {
     async fn serve_connection(stream: AsyncFd<Socket>, hsm: Arc<SocketHsm>) -> Result<(), String> {
         let connection = Connection::new(hsm);
         loop {
-            let request = match read_request(&stream).await {
-                Ok(request) => request,
-                Err(ProtoError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                    return Ok(());
-                }
-                Err(error) => return Err(format!("failed to read DDI request: {error}")),
+            let Some(request) = read_request(&stream).await? else {
+                return Ok(());
             };
-            let response = connection.execute(request).await?;
-            write_response(&stream, &response)
-                .await
-                .map_err(|error| format!("failed to write DDI response: {error}"))?;
+            let response = match tokio::time::timeout(
+                super::CONNECTION_READ_TIMEOUT,
+                connection.execute(request),
+            )
+            .await
+            {
+                Ok(result) => result?,
+                Err(_elapsed) => return Ok(()),
+            };
+            match tokio::time::timeout(
+                super::CONNECTION_READ_TIMEOUT,
+                write_response(&stream, &response),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(format!("failed to write DDI response: {error}")),
+                Err(_elapsed) => return Ok(()),
+            }
         }
     }
 
@@ -1165,10 +1289,22 @@ fn run() -> Result<(), String> {
         }
     });
     if args.next().is_some() {
-        return Err("usage: ddi_sock_server [tcp://HOST:PORT | vsock://*:1234]".into());
+        return Err(
+            "usage: ddi_sock_server [tcp://HOST:PORT | unix://PATH | vsock://*:1234]".into(),
+        );
     }
     if let Some(address) = endpoint.strip_prefix("tcp://") {
         tcp::run(address)
+    } else if let Some(path) = endpoint.strip_prefix("unix://") {
+        #[cfg(unix)]
+        {
+            unix::run(path)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            Err("unix:// requires a Unix-like platform; use tcp://127.0.0.1:1234".into())
+        }
     } else if endpoint == "vsock://*:1234" {
         #[cfg(target_os = "linux")]
         {
@@ -1179,7 +1315,10 @@ fn run() -> Result<(), String> {
             Err("VSOCK requires Linux; use tcp://127.0.0.1:1234 on Windows".into())
         }
     } else {
-        Err("unsupported listener endpoint; use tcp://HOST:PORT or vsock://*:1234".into())
+        Err(
+            "unsupported listener endpoint; use tcp://HOST:PORT, unix://PATH, or vsock://*:1234"
+                .into(),
+        )
     }
 }
 
@@ -1192,6 +1331,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncWriteExt;
+
     use super::*;
 
     #[test]
@@ -1201,5 +1342,55 @@ mod tests {
         let worker = std::thread::spawn(test_hsm);
         let other = worker.join().expect("fixture worker");
         assert!(Arc::ptr_eq(&hsm, &other));
+    }
+
+    /// Builds a paused-time, single-threaded runtime: pausing `Instant::now`
+    /// requires `current_thread`, and letting a `sleep` auto-advance through
+    /// the idle/active deadlines (rather than real wall-clock time) is what
+    /// makes it practical to actually let those deadlines expire in a test.
+    fn paused_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused runtime")
+    }
+
+    #[test]
+    fn read_request_with_timeout_disconnects_an_idle_connection() {
+        paused_runtime().block_on(async {
+            let (mut server, _client) = tokio::io::duplex(64);
+            let read = tokio::spawn(async move { read_request_with_timeout(&mut server).await });
+            // Nothing is ever written: the idle-wait deadline must elapse and
+            // be treated as a clean disconnect, not an error.
+            tokio::time::sleep(IDLE_WAIT_TIMEOUT).await;
+            let frame = read.await.expect("read task").expect("no I/O error");
+            assert!(
+                frame.is_none(),
+                "an idle connection must be treated as a clean disconnect"
+            );
+        });
+    }
+
+    #[test]
+    fn read_request_with_timeout_disconnects_a_stalled_mid_frame_connection() {
+        paused_runtime().block_on(async {
+            let (mut server, mut client) = tokio::io::duplex(64);
+            let read = tokio::spawn(async move { read_request_with_timeout(&mut server).await });
+            // Send only the frame length prefix's first byte: once it
+            // arrives the peer is mid-request (no longer idle), so the rest
+            // of the read must be bound by the tighter active timeout, not
+            // the far more generous idle one.
+            client
+                .write_all(&[0])
+                .await
+                .expect("write first length byte");
+            tokio::time::sleep(CONNECTION_READ_TIMEOUT).await;
+            let frame = read.await.expect("read task").expect("no I/O error");
+            assert!(
+                frame.is_none(),
+                "a stalled mid-frame peer must be disconnected once the active timeout elapses"
+            );
+        });
     }
 }

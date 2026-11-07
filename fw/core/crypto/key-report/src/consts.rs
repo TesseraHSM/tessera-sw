@@ -4,8 +4,8 @@
 //! Wire-format constants and the `KeyFlags` bitfield for COSE_Sign1
 //! key-attestation reports.
 //!
-//! The wire format matches the TSRA simulator
-//! (`ddi/mbor/sim/src/report.rs`). Encoded lengths are computed at
+//! The wire format matches the host report codec
+//! (`ddi/mbor/test_helpers/src/report.rs`). Encoded lengths are computed at
 //! runtime by `minicbor::len` on the [`codec`](crate::codec) structs, so
 //! this module holds only the fixed wire facts — not any derived
 //! byte-counting arithmetic.
@@ -81,7 +81,7 @@ const _: () = assert!(
 /// encode at its maximum width, and leaves headroom for the optional
 /// 48-byte v2 [`policy_hash`](crate::KeyReportView::policy_hash) map entry.
 /// The `report_fits_max_len` test pins the **v1** bound against the
-/// byte-identical simulator encoder (which has no `policy_hash`); the
+/// byte-identical host encoder (which has no `policy_hash`); the
 /// `parse_decodes_v2_policy_hash` wire test checks that a worst-case **v2**
 /// report still fits. Consumers (e.g. the PartInit handler) `const`-assert
 /// their response caps against it.
@@ -105,7 +105,7 @@ pub const POLICY_HASH_LEN: usize = SHA384_LEN;
 // ─── KeyFlags ───────────────────────────────────────────────────────────────
 
 /// Capability / attribute flags packed into the report's `flags: u32`
-/// field. Wire layout matches the TSRA simulator.
+/// field. Wire layout matches the host report codec.
 #[bitfield(u32)]
 pub struct KeyFlags {
     /// Whether the key was imported (vs generated on-device).

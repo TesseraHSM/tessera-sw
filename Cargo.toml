@@ -26,13 +26,10 @@ members = [
   "ddi/lib",
   "ddi/mbor/codec",
   "ddi/mbor/derive",
-  "ddi/mbor/sim",
   "ddi/mbor/test_helpers",
   "ddi/mbor/types",
-  "ddi/mock",
   "ddi/nix",
   "ddi/perf",
-  "ddi/res_test_dev",
   "ddi/sock",
   "ddi/sock/proto",
   "ddi/tbor/codec",
@@ -91,7 +88,6 @@ members = [
   "plugins/ossl_prov/integration-tests/nginx",
   "plugins/ossl_prov/integration-tests/openssl-capi",
   "plugins/ossl_prov/integration-tests/openssl-cli",
-  "tools/resiliency_stress",
   "xtask",
 
 ]
@@ -125,7 +121,6 @@ tsra_ddi_emu = { path = "ddi/emu" }
 tsra_ddi_interface = { path = "ddi/interface" }
 tsra_ddi_mbor_codec = { path = "ddi/mbor/codec" }
 tsra_ddi_mbor_derive = { path = "ddi/mbor/derive" }
-tsra_ddi_mbor_sim = { path = "ddi/mbor/sim" }
 tsra_ddi_mbor_test_helpers = { path = "ddi/mbor/test_helpers" }
 tsra_ddi_mbor_test_hooks = { path = "api/ddi/mbor/test_hooks" }
 tsra_ddi_mbor_types = { features = [
@@ -133,7 +128,6 @@ tsra_ddi_mbor_types = { features = [
   "post_decode",
   "pre_encode",
 ], path = "ddi/mbor/types" }
-tsra_ddi_mock = { path = "ddi/mock" }
 tsra_ddi_nix = { path = "ddi/nix" }
 tsra_ddi_sock = { path = "ddi/sock" }
 tsra_ddi_sock_proto = { path = "ddi/sock/proto" }
@@ -145,7 +139,6 @@ tsra_ddi_win = { path = "ddi/win" }
 tsra_ossl_engine_core = { path = "plugins/ossl_engine/tsra_ossl_engine_core" }
 tsra_ossl_engine_resiliency = { path = "plugins/ossl_engine/tsra_ossl_engine_resiliency" }
 tsra_ossl_engine_sys = { path = "plugins/ossl_engine/tsra_ossl_engine_sys" }
-tsra_res_test_dev = { path = "ddi/res_test_dev" }
 tsra_resiliency_test_helpers = { path = "crates/resiliency_test_helpers" }
 tsra_sealing_api = { path = "examples/sealing/api" }
 tsra_sealing_common = { path = "examples/sealing/common" }
@@ -234,7 +227,7 @@ memmap2 = "0.9.11"
 minicbor = "0.19.1"
 ml-dsa = "0.1.1"
 ml-kem = "0.3.2"
-nix = "0.26"
+nix = { default-features = false, version = "0.29" }
 num-bigint = "0.4"
 open-enum = "0.3.0"
 openssl = "= 0.10.79"

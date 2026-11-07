@@ -33,7 +33,6 @@ tsra_crypto.workspace = true
 tsra_ddi_mbor_codec.workspace = true
 tsra_ddi_mbor_test_helpers.workspace = true
 tsra_ddi_mbor_types.workspace = true
-tsra_ddi_mock.workspace = true
 tsra_ddi_nix.workspace = true
 x509.workspace = true
 
@@ -61,9 +60,6 @@ pre_encode = [
 # test binary picks up the right backend. Default (no feature) resolves
 # to the nix backend.
 emu = ["tsra_ddi/emu"]
-mock = ["tsra_ddi/mock"]
-table-4 = ["tsra_ddi/table-4"]
-table-64 = ["tsra_ddi/table-64"]
 
 [lints]
 workspace = true

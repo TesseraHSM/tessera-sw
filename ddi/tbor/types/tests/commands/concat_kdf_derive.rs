@@ -19,8 +19,6 @@
 //! KDFs' byte-level correctness is covered by the `tsra_crypto`
 //! known-answer tests, which share the same primitive.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborConcatKdfDeriveReq;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
@@ -783,7 +781,7 @@ fn concat_kdf_session_id_mismatch_rejected() {
     let session = finalized_co_session(&ctx);
     let ikm = fresh_masked_secret(&ctx, session.session_id);
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborConcatKdfDeriveReq {
             session_id: u16::MAX,
             scope: SCOPE_LOCAL,

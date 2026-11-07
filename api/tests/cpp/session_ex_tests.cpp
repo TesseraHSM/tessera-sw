@@ -80,10 +80,7 @@ class tsra_sess_ex : public ::testing::Test
 };
 
 // Happy-path session open requires the two-phase TBOR HPKE handshake, which is
-// implemented by a real backend (emu or hardware), not mock; the mock backend
-// returns `UnsupportedEncoding` for TBOR ops. Exclude these tests from the mock
-// lane (see `TSRA_FEATURE_MOCK` in CMakeLists).
-#if !defined(TSRA_FEATURE_MOCK)
+// implemented by a real backend (emu or hardware).
 TEST_F(tsra_sess_ex, open_and_close)
 {
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
@@ -108,7 +105,6 @@ TEST_F(tsra_sess_ex, open_and_close)
         });
     });
 }
-#endif // !defined(TSRA_FEATURE_MOCK)
 
 TEST_F(tsra_sess_ex, open_null_sess_handle)
 {
@@ -232,7 +228,6 @@ TEST_F(tsra_sess_ex, psk_change_invalid_session_handle)
 // the emu (in-process firmware) backend. They exercise the ABI-boundary
 // validation and buffer-probe contract that runs *before* the partition is
 // provisioned, so they do not require valid provisioning inputs.
-#if !defined(TSRA_FEATURE_MOCK)
 namespace
 {
 // Well-formed (non-empty, non-null) provisioning inputs. The byte contents and
@@ -784,10 +779,9 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         );
     });
 }
-#endif // !defined(TSRA_FEATURE_MOCK)
 
 // The typed partition-policy builder FFI is pure host-side serialization and
-// needs no device, so these run in every lane (including the mock lane).
+// needs no device, so these run in every lane.
 
 // NULL builder handles are rejected by every entry point.
 TEST(tsra_part_policy_builder, null_handle_rejected)

@@ -11,7 +11,7 @@
 //! ```text
 //!  main ──► init PAL ──► spawn poll_io ──► run (NVIC polling loop)
 //!                            │
-//!                        poll_io ──► iic.recv() ──► spawn handle_io
+//!                        poll_io ──► iic.recv() ──► signal io_worker[slot]
 //!                                                       │
 //!                                                   HSM core pipeline:
 //!                                                   SQE parse → in-DMA
@@ -22,10 +22,13 @@
 //!
 //! - **`main`**: Initialises the PAL (timer, IIC/OIC/GDMA channels),
 //!   spawns the IO receive loop, then enters the NVIC polling loop.
-//! - **`poll_io`** (single instance): Awaits IOs from the IIC driver
-//!   and spawns a `handle_io` task for each one.
-//! - **`handle_io`** (pool of 32): Owns one IO for its lifetime,
-//!   delegating to the HSM core for SQE parsing, DMA, and CQE delivery.
+//! - **`poll_io`** (single instance): Awaits IOs from the IIC drivers
+//!   and hands each one to the worker of its IO slot.
+//! - **`io_worker`** (one per host IO slot, 32): Owns its slot's IO for
+//!   the IO's lifetime, delegating to the HSM core for SQE parsing, DMA,
+//!   and CQE delivery, then waits for the slot's next IO.
+//! - **`bulk_io_worker`** (one per bulk IO slot, 32; not with
+//!   `bulk_crypto`): The same for the bulk AES-GCM/XTS slots.
 //!
 //! # Interrupt handling
 //!
@@ -46,7 +49,9 @@
 mod trampoline;
 
 use embassy_executor::Spawner;
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::once_lock::OnceLock;
+use embassy_sync::signal::Signal;
 use tsra_fw_hsm_core::Hsm;
 use tsra_fw_hsm_core_tracing::info;
 use tsra_fw_hsm_pal_traits::*;
@@ -78,26 +83,46 @@ static mut DEFAULT_DATA: [u8; 16] = [0x1; 16];
 /// accesses via `HSM.get().await` are zero-cost after the first init.
 static HSM: OnceLock<Hsm<UnoHsmPal>> = OnceLock::new();
 
+/// Host IO slots, each served by its own [`io_worker`] task.
+const IO_WORKERS: usize = 32;
+
+/// Bulk IO slots, shared by the FP1 and FP2 bulk channels, each served by
+/// its own [`bulk_io_worker`] task.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_IO_WORKERS: usize = 32;
+
+/// Hands each received IO to the worker that owns its slot.
+struct IoHandoff<const N: usize>([Signal<NoopRawMutex, UnoHsmIo>; N]);
+
+// SAFETY: single-core Cortex-M7 with Embassy cooperative scheduling; only
+// tasks, never an ISR, touch these signals.
+#[allow(unsafe_code)]
+unsafe impl<const N: usize> Sync for IoHandoff<N> {}
+
+static IO_HANDOFF: IoHandoff<IO_WORKERS> = IoHandoff([const { Signal::new() }; IO_WORKERS]);
+
+#[cfg(not(feature = "bulk_crypto"))]
+static BULK_IO_HANDOFF: IoHandoff<BULK_IO_WORKERS> =
+    IoHandoff([const { Signal::new() }; BULK_IO_WORKERS]);
+
 /// IO receive loop — runs forever as a single Embassy task.
 ///
 /// Awaits [`HsmIoController::poll_io`] for the next inbound IO from
-/// the IIC drivers, then spawns a [`handle_io`] (command) or
-/// [`handle_bulk_io`] (bulk) task. Each pool is sized to its IO slot count
-/// (the bulk pool to the bulk slots both bulk channels share) and a task
-/// frees its slot in `drop_io` as its last step, so a pool slot is always
-/// available for a received IO.
-///
-/// # Parameters
-/// - `spawner`: Embassy task spawner used to enqueue [`handle_io`] jobs.
+/// the IIC drivers and hands it to the worker that owns its slot: an
+/// [`io_worker`] for a command IO, a [`bulk_io_worker`] for a bulk IO
+/// (command and bulk IOs index separate slot arrays). A slot is not handed
+/// out again until its IO is dropped, by which time the slot's worker is
+/// waiting for the next one. An IO from a slot with no worker is dropped
+/// and the loop retries on the next iteration.
 ///
 /// # Returns
 /// Never returns (`!`). This is a permanent receive-and-dispatch loop.
 ///
 /// # Side Effects
 /// - Continuously drains inbound IO work from PAL.
-/// - Schedules per-IO tasks onto the executor when task slots are available.
+/// - Wakes the worker of each received IO's slot.
 #[embassy_executor::task]
-async fn poll_io(spawner: Spawner) -> ! {
+async fn poll_io() -> ! {
     let hsm = HSM.get().await;
     loop {
         let Ok(io) = hsm.pal().poll_io().await else {
@@ -105,58 +130,70 @@ async fn poll_io(spawner: Spawner) -> ! {
         };
 
         #[cfg(not(feature = "bulk_crypto"))]
-        if io.kind() == HsmIoKind::Bulk {
-            if let Ok(token) = handle_bulk_io(io) {
-                spawner.spawn(token);
-            }
-            continue;
-        }
-
-        let Ok(token) = handle_io(io) else {
-            continue;
+        let handoff: &[_] = if io.kind() == HsmIoKind::Bulk {
+            &BULK_IO_HANDOFF.0
+        } else {
+            &IO_HANDOFF.0
         };
-        spawner.spawn(token);
+        #[cfg(feature = "bulk_crypto")]
+        let handoff: &[_] = &IO_HANDOFF.0;
+        if let Some(slot) = handoff.get(usize::from(io.index())) {
+            slot.signal(io);
+        }
     }
 }
 
-/// Processes a single IO to completion.
+/// Processes the IOs of one slot, one at a time, each to completion.
 ///
-/// Takes ownership of the [`UnoHsmIo`], keeping the underlying
-/// IO_SQ slot reserved until the completion DMA finishes. First lets the
-/// PAL certify the partition's SP-published unwrapping key (a FIPS 140-3
-/// pairwise consistency test that runs once per published key), then
-/// delegates SQE parsing, inbound/outbound DMA, DDI dispatch, and CQE
-/// population to [`Hsm::handle_io`].
+/// Waits for [`poll_io`] to hand over the slot's next [`UnoHsmIo`], keeping
+/// the underlying IO_SQ slot reserved until the completion DMA finishes.
+/// First lets the PAL certify the partition's SP-published unwrapping key
+/// (a FIPS 140-3 pairwise consistency test that runs once per published
+/// key), then delegates SQE parsing, inbound/outbound DMA, DDI dispatch,
+/// and CQE population to [`Hsm::handle_io`]. A long-lived worker per slot
+/// spares each IO a task spawn, which searches the pool for a free task
+/// and sets the task up.
 ///
 /// # Parameters
-/// - `io`: Owned IO token for one request/response transaction.
+/// - `slot`: The hand-off of the slot this worker serves.
 ///
 /// # Returns
-/// Returns `()` after this IO has been fully processed and completed.
+/// Never returns (`!`).
 ///
 /// # Side Effects
 /// - May run the unwrapping key's pairwise consistency test.
-/// - Advances the HSM request pipeline for one IO.
-/// - Triggers DMA activity and CQE completion for that IO.
-#[embassy_executor::task(pool_size = 32)]
-async fn handle_io(io: UnoHsmIo) {
+/// - Advances the HSM request pipeline for each IO of its slot.
+/// - Triggers DMA activity and CQE completion for those IOs.
+#[embassy_executor::task(pool_size = IO_WORKERS)]
+async fn io_worker(slot: &'static Signal<NoopRawMutex, UnoHsmIo>) -> ! {
     let hsm = HSM.get().await;
-    hsm.pal().certify_pending_unwrapping_key(&io).await;
-    hsm.handle_io(io).await;
+    loop {
+        let io = slot.wait().await;
+        hsm.pal().certify_pending_unwrapping_key(&io).await;
+        hsm.handle_io(io).await;
+    }
 }
 
-/// Processes a single bulk (fast-path) IO to completion.
+/// Processes the bulk (fast-path) IOs of one bulk slot, one at a time,
+/// each to completion.
 ///
-/// Runs on its own pool, sized to the 32 bulk slots shared by the FP1 and
-/// FP2 channels, so bulk IOs cannot exhaust the command pool and the task
-/// future carries only the bulk path.
+/// The bulk workers are separate from the [`io_worker`]s, so bulk IOs
+/// cannot hold up command IOs, and their task future carries only the bulk
+/// path.
 ///
 /// # Parameters
-/// - `io`: Owned bulk IO token.
+/// - `slot`: The hand-off of the bulk slot this worker serves.
+///
+/// # Returns
+/// Never returns (`!`).
 #[cfg(not(feature = "bulk_crypto"))]
-#[embassy_executor::task(pool_size = 32)]
-async fn handle_bulk_io(io: UnoHsmIo) {
-    HSM.get().await.handle_bulk_io(io).await;
+#[embassy_executor::task(pool_size = BULK_IO_WORKERS)]
+async fn bulk_io_worker(slot: &'static Signal<NoopRawMutex, UnoHsmIo>) -> ! {
+    let hsm = HSM.get().await;
+    loop {
+        let io = slot.wait().await;
+        hsm.handle_bulk_io(io).await;
+    }
 }
 
 /// Dedicated core-liveliness heartbeat task.
@@ -192,10 +229,10 @@ async fn periodic_self_tests() -> ! {
 
 /// IPC message/event receive loop — runs forever as a single
 /// Embassy task. PAL handles boot handshake internally;
-/// app spawns [`poll_io`] once boot completes.
+/// app spawns the [`io_worker`]s and [`poll_io`] once boot completes.
 ///
 /// # Parameters
-/// - `spawner`: Embassy task spawner used to start [`poll_io`] after boot.
+/// - `spawner`: Embassy task spawner used to start the IO tasks after boot.
 ///
 /// # Returns
 /// Never returns (`!`). This is a permanent IPC servicing loop.
@@ -213,7 +250,18 @@ async fn poll_ipc(spawner: Spawner) -> ! {
         if !booted && hsm.pal().boot_phase() == BootPhase::Running {
             booted = true;
             info!("app", "boot complete, spawning poll_io");
-            if let Ok(token) = poll_io(spawner) {
+            for slot in &IO_HANDOFF.0 {
+                if let Ok(token) = io_worker(slot) {
+                    spawner.spawn(token);
+                }
+            }
+            #[cfg(not(feature = "bulk_crypto"))]
+            for slot in &BULK_IO_HANDOFF.0 {
+                if let Ok(token) = bulk_io_worker(slot) {
+                    spawner.spawn(token);
+                }
+            }
+            if let Ok(token) = poll_io() {
                 spawner.spawn(token);
             }
             if let Ok(token) = periodic_self_tests() {

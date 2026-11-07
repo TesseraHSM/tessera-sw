@@ -27,6 +27,7 @@ use tsra_ddi_tbor_types::HASH_ALGO_SHA512;
 use tsra_ddi_tbor_types::HASH_ALGO_SHAKE128;
 use tsra_ddi_tbor_types::HASH_ALGO_SHAKE256;
 use tsra_ddi_tbor_types::HASH_DIGEST_MAX_LEN;
+use tsra_ddi_tbor_types::HASH_MSG_MAX_LEN;
 
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
@@ -670,7 +671,7 @@ fn hash_max_message_length_matches_host() {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
 
-    let msg: Vec<u8> = (0..2048usize).map(|i| (i % 251) as u8).collect();
+    let msg: Vec<u8> = (0..HASH_MSG_MAX_LEN).map(|i| (i % 251) as u8).collect();
 
     for algo in HASH_ALGOS {
         let dev = device_digest(&ctx, session.session_id, algo, msg.clone());
@@ -698,11 +699,11 @@ fn hash_over_max_message_length_rejected() {
             session_id: session.session_id,
             algo,
             out_len: None,
-            msg: vec![0x5a; 2049],
+            msg: vec![0x5a; HASH_MSG_MAX_LEN + 1],
         });
         assert!(
             result.is_err(),
-            "2049-byte Hash message must be rejected for algo {algo}",
+            "over-long Hash message must be rejected for algo {algo}",
         );
     }
 }
@@ -742,7 +743,7 @@ fn hash_shake_matches_host() {
     let session = finalized_co_session(&ctx);
 
     let long: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
-    let max: Vec<u8> = (0..2048usize).map(|i| (i % 251) as u8).collect();
+    let max: Vec<u8> = (0..HASH_MSG_MAX_LEN).map(|i| (i % 251) as u8).collect();
 
     for msg in [Vec::new(), b"abc".to_vec(), long, max] {
         for algo in SHAKE_ALGOS {

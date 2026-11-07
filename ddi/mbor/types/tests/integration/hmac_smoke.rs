@@ -10,7 +10,7 @@
 //!   HMAC kind): same, deriving `VarHmac256` / `384` / `512`.
 //! - **Unknown key** (both backends): a MAC against a non-existent
 //!   `key_id` is rejected with `KeyNotFound`.
-//! - **Sign permission** (emu + real HW, not mock): a `derive`-only
+//! - **Sign permission** (emu + real HW): a `derive`-only
 //!   HMAC key cannot generate a MAC (MAC generation is a PKCS#11
 //!   `C_Sign` operation requiring `CKA_SIGN`). Where this is rejected
 //!   depends on the firmware's reported API revision (queried via
@@ -65,7 +65,6 @@ fn test_hmac_fixed_key_sign_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_hmac_var_hmac_key_sign_smoke() {
     ddi_dev_test(
@@ -106,7 +105,6 @@ fn test_hmac_unknown_key_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_hmac_requires_sign_permission_smoke() {
     ddi_dev_test(

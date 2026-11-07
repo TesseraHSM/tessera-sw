@@ -11,9 +11,7 @@
 //! firmware rejects the out-of-range private values with `InvalidArg`. Only
 //! hardware firmware runs the structure check that rejects the other ECC keys
 //! and the pairwise consistency test that rejects the RSA keys, so every test
-//! here is ignored under `emu`. The `mock` feature tests the MBOR simulator
-//! instead of the firmware, and the simulator runs neither check, so every
-//! test here is ignored under `mock` too.
+//! here is ignored under `emu`.
 
 #![cfg(test)]
 
@@ -136,7 +134,7 @@ fn run_import_matrix(
 /// imported ECC key's structure.
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock"),
+    feature = "emu",
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn rsa_unwrap_ecc_structure_matrix() {
@@ -204,7 +202,7 @@ fn rsa_unwrap_ecc_structure_matrix() {
 /// with 36 malformed variants.
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock"),
+    feature = "emu",
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn rsa_unwrap_rsa_pct_matrix() {
@@ -256,7 +254,7 @@ fn rsa_unwrap_rsa_pct_matrix() {
 /// vault would have run out of space first.
 #[test]
 #[cfg_attr(
-    any(feature = "emu", feature = "mock"),
+    feature = "emu",
     ignore = "only hardware firmware performs FIPS key assurance"
 )]
 fn rsa_unwrap_rejected_imports_store_nothing() {

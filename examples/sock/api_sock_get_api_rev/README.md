@@ -173,7 +173,7 @@ Neither transport is required for the TCP setup on Windows or Linux.
 - All clients share partition state. For workflows beyond this metadata example,
   coordinate provisioning and reset operations, and open a separate authenticated
   session per worker as appropriate.
-- `sock`, `mock`, and `emu` select mutually exclusive DDI backends. Do not combine
+- `sock` and `emu` select mutually exclusive DDI backends. Do not combine
   their feature flags in the same build.
 - The socket transport carries ordinary MBOR/TBOR commands, with an 8192-byte
   main request/response capacity. TBOR supports up to 64 OOB buffers of up to

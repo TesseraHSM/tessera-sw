@@ -8,8 +8,11 @@ fn main() {
 
     let mut features = Vec::new();
 
-    if env::var("CARGO_FEATURE_MOCK").is_ok() {
-        features.push("mock");
+    if env::var("CARGO_FEATURE_EMU").is_ok() {
+        features.push("emu");
+    }
+    if env::var("CARGO_FEATURE_SOCK").is_ok() {
+        features.push("sock");
     }
 
     // Calculate the target directory for passing to CMake

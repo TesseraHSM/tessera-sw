@@ -17,13 +17,10 @@ use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::coord_sizes;
 use tsra_ddi_tbor_test_harness::TestCtx;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborEcdhDeriveReq;
@@ -31,7 +28,6 @@ use tsra_ddi_tbor_types::TborRsaModExpReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyResp;
 use tsra_ddi_tbor_types::HASH_ALGO_SHA256;
-#[cfg(feature = "emu")]
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
@@ -45,15 +41,12 @@ pub(crate) const SCOPE_EPHEMERAL: u8 = 0b010;
 /// `KeyScope::Local` discriminant.
 pub(crate) const SCOPE_LOCAL: u8 = 0b011;
 
-#[cfg(feature = "emu")]
 /// `KeyScope::SecurityDomain` discriminant.
 pub(crate) const SCOPE_SECURITY_DOMAIN: u8 = 0b100;
 
-#[cfg(feature = "emu")]
 /// `SessionType` role identifier for Crypto-Officer sessions.
 pub(crate) const CO: u8 = 0;
 
-#[cfg(feature = "emu")]
 /// `SessionType` role identifier for Crypto-User sessions.
 pub(crate) const CU: u8 = 1;
 
@@ -67,10 +60,8 @@ pub(crate) const ENVELOPE_IV_LEN: usize = 16;
 pub(crate) const ENVELOPE_AAD_LEN: usize = 192;
 
 /// Length in bytes of the masked-key envelope authentication tag.
-#[cfg(feature = "emu")]
 pub(crate) const ENVELOPE_TAG_LEN: usize = 16;
 
-#[cfg(feature = "emu")]
 /// Creates a Crypto-Officer session, generates a session-scoped ECC signing key,
 /// and keeps the session alive while `test` runs.
 pub(crate) fn with_generated_ecc_key(

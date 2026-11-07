@@ -6,9 +6,6 @@
 #[path = "../../common.rs"]
 mod common;
 
-use tsra_ddi_tbor_codec::DecodeError;
-use tsra_ddi_tbor_codec::ResponseEncoder;
-use tsra_ddi_tbor_codec::ResponseView;
 use common::EncoderTOCBuilders;
 use common::FUZZ_RESP_BUF_SIZE;
 use common::run_encoder;
@@ -16,6 +13,9 @@ use common::validate_toc_entry;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_tbor_codec::DecodeError;
+use tsra_ddi_tbor_codec::ResponseEncoder;
+use tsra_ddi_tbor_codec::ResponseView;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {

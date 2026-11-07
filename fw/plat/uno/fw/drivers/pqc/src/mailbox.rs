@@ -38,6 +38,7 @@
 //!   +0x10 u32  response_seq   FP -> HSM, written last
 //!   +0x14 u32  status
 //!   +0x18 u32  pub_key_len
+//!   +0x68 u32  msg_type       ML-DSA sign/verify: message or external mu
 //! ```
 //!
 //! # Handshake
@@ -67,8 +68,9 @@ pub const SEED_LEN: usize = 32;
 
 /// Bytes in each core's operand slot.
 ///
-/// Sized for the largest PQC working set: `MlDsaVerify` needs public key
-/// (2592) + message (586) + ctx (255) + signature (4627) = 8060 B. Three
+/// Sized for the largest PQC working set: verifying a pure message needs
+/// public key (2592) + message (586) + ctx (255) + signature (4627) =
+/// 8060 B. Three
 /// slots of this size fit either side of the only part of PSRAM still
 /// spoken for (`0x3AFC`-`0x4004`); everything else is legacy fastpath
 /// structure that nothing reads, including the 12 KB of FP debug-log rings
@@ -92,6 +94,7 @@ mod word {
     pub const RND: usize = 16;
     pub const SIG_LEN: usize = 24;
     pub const PUB_KEY_LEN: usize = 25;
+    pub const MSG_TYPE: usize = 26;
 }
 
 /// Operand slot layout, mirroring the FP side.
@@ -158,6 +161,24 @@ pub const SLOT_SHAKE_IN_OFFSET: usize = SLOT_MSG_OFFSET;
 /// Borrows the public-key region, which SHAKE does not use.
 pub const SLOT_SHAKE_OUT_OFFSET: usize = SLOT_PK_OFFSET;
 
+/// ML-DSA message type: the staged message is the message itself. Mirrors
+/// `MSG_TYPE_PURE` on FP and the PAL's `HsmMlDsaMsgType::Pure`.
+pub const MSG_TYPE_PURE: u32 = 0;
+
+/// ML-DSA message type: the staged message is an external `μ` of
+/// [`MU_LEN`] bytes, with no context string. Mirrors `MSG_TYPE_EXTERNAL_MU`
+/// on FP and the PAL's `HsmMlDsaMsgType::ExternalMu`.
+pub const MSG_TYPE_EXTERNAL_MU: u32 = 3;
+
+/// Length of an external `μ`.
+pub const MU_LEN: usize = 64;
+
+const _: () = assert!(
+    tsra_fw_hsm_pal_traits::HsmMlDsaMsgType::Pure as u32 == MSG_TYPE_PURE
+        && tsra_fw_hsm_pal_traits::HsmMlDsaMsgType::ExternalMu as u32 == MSG_TYPE_EXTERNAL_MU
+        && tsra_fw_hsm_pal_traits::MLDSA_MU_LEN == MU_LEN
+);
+
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;
 
@@ -204,6 +225,9 @@ pub struct RequestParams<'a> {
     pub sig_len: u32,
     /// Length of the public key staged in the operand slot (verify only).
     pub pub_key_len: u32,
+    /// How the staged message is read, ML-DSA sign and verify only:
+    /// [`MSG_TYPE_PURE`] or [`MSG_TYPE_EXTERNAL_MU`].
+    pub msg_type: u32,
 }
 
 /// Stage `data` into `engine`'s operand slot at `offset`.
@@ -430,6 +454,7 @@ pub fn post_request(engine: EngineId, seq: u32, params: &RequestParams<'_>) -> u
         write_volatile(mb.add(word::CTX_LEN), params.ctx_len);
         write_volatile(mb.add(word::SIG_LEN), params.sig_len);
         write_volatile(mb.add(word::PUB_KEY_LEN), params.pub_key_len);
+        write_volatile(mb.add(word::MSG_TYPE), params.msg_type);
         for i in 0..SEED_LEN / 4 {
             let xi = u32::from_le_bytes([
                 params.xi[i * 4],

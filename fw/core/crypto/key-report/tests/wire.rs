@@ -10,7 +10,7 @@
 //!
 //! Encoder byte-identity is covered end-to-end by the `part_init`
 //! emulator tests (which build a report here and verify it through the
-//! TSRA simulator's fixed-525 `KeyAttester`).
+//! host report codec's fixed-525 `public_key`).
 
 #![allow(clippy::unwrap_used)]
 #![allow(unsafe_code)]

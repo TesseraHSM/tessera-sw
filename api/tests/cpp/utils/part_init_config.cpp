@@ -391,6 +391,42 @@ void make_part_init_config(tsra_handle part_handle, PartInitConfig &config)
     }
 }
 
+// Emu needs a process-unique cache because each nextest process owns an
+// independent emulator with its own random BK_BOOT. Hardware/socket builds
+// keep a shared persistent cache for reuse across processes.
+static const std::string &default_mobk_path()
+{
+#ifdef TSRA_FEATURE_EMU
+    struct MobkPath
+    {
+        std::string path;
+        MobkPath()
+        {
+            auto nanos = std::chrono::system_clock::now().time_since_epoch().count();
+#ifdef _WIN32
+            auto pid = static_cast<unsigned long long>(GetCurrentProcessId());
+#else
+            auto pid = static_cast<unsigned long long>(getpid());
+#endif
+            path = (std::filesystem::temp_directory_path() /
+                    ("tsra-mobk-" + std::to_string(pid) + "-" + std::to_string(nanos) + ".bin"))
+                       .string();
+        }
+        ~MobkPath()
+        {
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+        }
+    };
+    static const MobkPath mobk_path;
+    return mobk_path.path;
+#else
+    static const std::string mobk_path =
+        (std::filesystem::temp_directory_path() / "mobk.bin").string();
+    return mobk_path;
+#endif
+}
+
 std::string get_mobk_path()
 {
 #ifdef _WIN32
@@ -404,14 +440,14 @@ std::string get_mobk_path()
         return result;
     }
     free(val);
-    return (std::filesystem::temp_directory_path() / "mobk.bin").string();
+    return default_mobk_path();
 #else
     const char *val = std::getenv("TSRA_MOBK_PATH");
     if (val != nullptr)
     {
         return std::string(val);
     }
-    return (std::filesystem::temp_directory_path() / "mobk.bin").string();
+    return default_mobk_path();
 #endif
 }
 
@@ -430,10 +466,9 @@ std::vector<uint8_t> load_mobk_file(const std::string &path)
 
 void save_mobk_file(const std::string &path, const std::vector<uint8_t> &mobk)
 {
-    // Multiple nextest processes share this path, and the std PAL derives a
-    // deterministic masking key so the MOBK content is identical across
-    // them. Stage to a per-process temp file then atomically rename into
-    // place, so a concurrent reader in another process never observes a
+    // `TSRA_MOBK_PATH` may be shared by several processes. Stage to a
+    // per-process temp file then atomically rename into place, so a
+    // concurrent reader in another process never observes a
     // half-truncated file mid-write.
     auto nanos = std::chrono::steady_clock::now().time_since_epoch().count();
 #ifdef _WIN32
@@ -505,9 +540,9 @@ tsra_status part_init_with_mobk_fallback(
         resiliency_config
     );
 
-    // Stale/incompatible cached MOBK: the shared cache file may have been
-    // written by a different backend (emu vs mock) or an older masked-key
-    // format, yielding a MOBK this device cannot decode. Drop the cache and
+    // Stale/incompatible cached MOBK: a shared `TSRA_MOBK_PATH` file may have
+    // been written by another device or an older masked-key format, yielding
+    // a MOBK this device cannot decode. Drop the cache and
     // re-init from the raw OBK.
     if (err == TSRA_STATUS_MASKED_KEY_DECODE_FAILED &&
         init_config.backup_config.source == TSRA_OWNER_BACKUP_KEY_SOURCE_CALLER &&

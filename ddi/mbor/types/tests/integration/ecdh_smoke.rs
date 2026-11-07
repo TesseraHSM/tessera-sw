@@ -8,8 +8,8 @@
 //!   ECDH calls succeed (so the derived `Secret256` vault entry is
 //!   created).
 //! - Reject ECDH against an unknown private key id: the backend
-//!   returns `KeyNotFound` (emu) or `InvalidKeyNumber` (mock); both
-//!   are acceptable.
+//!   returns `KeyNotFound` (emu) or `InvalidKeyNumber`; both are
+//!   acceptable.
 //! - Reject ECDH where the requested target `key_type` does not
 //!   match the private key's curve.
 
@@ -129,7 +129,7 @@ fn test_ecdh_key_exchange_unknown_key_smoke() {
             .expect_err("EcdhKeyExchange must reject an unknown priv_key_id");
 
             // The exact error code differs across backends — emu's
-            // vault returns `KeyNotFound`, the mock returns
+            // vault returns `KeyNotFound`, others may return
             // `InvalidKeyNumber`.
             assert!(
                 matches!(

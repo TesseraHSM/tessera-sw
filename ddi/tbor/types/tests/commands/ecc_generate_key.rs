@@ -13,8 +13,6 @@
 //! [`ecc_sign`](super::ecc_sign) and [`ecdh_derive`](super::ecdh_derive)
 //! tests, which build on this command.
 
-#![cfg(feature = "emu")]
-
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -272,7 +270,7 @@ fn ecc_generate_key_mismatched_session_id_rejected() {
     );
 
     for curve in SUPPORTED_CURVES {
-        ctx.expect_fw_reject(
+        ctx.expect_session_reject(
             &TborEccGenerateKeyReq {
                 session_id: u16::MAX,
                 scope: SCOPE_LOCAL,
@@ -486,7 +484,7 @@ fn ecc_generate_key_closed_session_rejected() {
         .expect("close CO session");
 
     for curve in SUPPORTED_CURVES {
-        ctx.expect_fw_reject(
+        ctx.expect_session_reject(
             &TborEccGenerateKeyReq {
                 session_id: closed_session_id,
                 scope: SCOPE_SESSION,

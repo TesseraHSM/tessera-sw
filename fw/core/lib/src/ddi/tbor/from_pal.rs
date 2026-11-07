@@ -11,6 +11,8 @@
 
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
@@ -87,5 +89,41 @@ pub(crate) fn rsa_key(kind: HsmVaultKeyKind) -> HsmResult<HsmRsaKey> {
         HsmVaultKeyKind::Rsa3kPrivateCrt => Ok(HsmRsaKey::Rsa3072CrtPriv),
         HsmVaultKeyKind::Rsa4kPrivateCrt => Ok(HsmRsaKey::Rsa4096CrtPriv),
         _ => Err(HsmError::InvalidKeyType),
+    }
+}
+
+/// Map an ML-DSA seed vault key kind to its PAL parameter set, strictly.
+///
+/// Only the three ML-DSA seed kinds are accepted; any other kind maps to
+/// [`HsmError::InvalidKeyType`], so a masked blob of the wrong class is
+/// rejected before use, as [`rsa_key`] and [`ecc_private_curve`] do.
+pub(crate) fn mldsa_param_set(kind: HsmVaultKeyKind) -> HsmResult<HsmMlDsaParamSet> {
+    match kind {
+        HsmVaultKeyKind::MlDsa44Seed => Ok(HsmMlDsaParamSet::MlDsa44),
+        HsmVaultKeyKind::MlDsa65Seed => Ok(HsmMlDsaParamSet::MlDsa65),
+        HsmVaultKeyKind::MlDsa87Seed => Ok(HsmMlDsaParamSet::MlDsa87),
+        _ => Err(HsmError::InvalidKeyType),
+    }
+}
+
+/// Map an ML-KEM seed vault key kind to its PAL parameter set, strictly:
+/// as with [`mldsa_param_set`], any other kind is
+/// [`HsmError::InvalidKeyType`].
+pub(crate) fn mlkem_param_set(kind: HsmVaultKeyKind) -> HsmResult<HsmMlKemParamSet> {
+    match kind {
+        HsmVaultKeyKind::MlKem512Seed => Ok(HsmMlKemParamSet::MlKem512),
+        HsmVaultKeyKind::MlKem768Seed => Ok(HsmMlKemParamSet::MlKem768),
+        HsmVaultKeyKind::MlKem1024Seed => Ok(HsmMlKemParamSet::MlKem1024),
+        _ => Err(HsmError::InvalidKeyType),
+    }
+}
+
+/// Map an ML-KEM parameter set onto its seed vault key kind (recorded in
+/// masked blob metadata).
+pub(crate) fn mlkem_seed_kind(param_set: HsmMlKemParamSet) -> HsmVaultKeyKind {
+    match param_set {
+        HsmMlKemParamSet::MlKem512 => HsmVaultKeyKind::MlKem512Seed,
+        HsmMlKemParamSet::MlKem768 => HsmVaultKeyKind::MlKem768Seed,
+        HsmMlKemParamSet::MlKem1024 => HsmVaultKeyKind::MlKem1024Seed,
     }
 }

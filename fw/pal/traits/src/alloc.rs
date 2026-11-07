@@ -134,6 +134,15 @@ impl<'a> HsmDmaAllocation<'a> {
         self.len == 0
     }
 
+    /// Give up the handle for a view of the whole allocation that lives as
+    /// long as the allocation itself. With the handle gone it can no longer
+    /// grow, so the view stays valid.
+    pub fn into_buffer(self) -> &'a mut HsmDmaBuf {
+        // SAFETY: as `buffer_mut`; consuming the handle ends every other way
+        // to reach or grow the range.
+        unsafe { HsmDmaBuf::from_raw_mut(core::slice::from_raw_parts_mut(self.ptr, self.len)) }
+    }
+
     /// Exclusively borrow the current allocation until the next handle access.
     pub fn buffer_mut(&mut self) -> &mut HsmDmaBuf {
         // SAFETY: the allocator owns the range and the exclusive handle borrow
@@ -206,6 +215,161 @@ impl HsmDmaBuf {
         let (a, b) = self.inner.split_at_mut(mid);
         // SAFETY: The disjoint subslices retain DMA accessibility and exclusive borrows.
         unsafe { (HsmDmaBuf::from_raw_mut(a), HsmDmaBuf::from_raw_mut(b)) }
+    }
+
+    /// Copies the first `dst.len()` bytes of this buffer into `dst`, which
+    /// must not be longer than it.
+    ///
+    /// DMA memory can be uncached (it is on Uno): every CPU load waits out
+    /// the interconnect's latency whatever its width, while an eight-word
+    /// burst costs little more than one load. When both buffers are
+    /// word-aligned this moves whole 32-byte blocks with burst loads on Arm,
+    /// so a structure read once out of DMA memory and worked on as a copy
+    /// beats reading it field by field in place.
+    ///
+    /// Returns `false`, copying nothing, if `dst` is longer than this buffer.
+    #[inline]
+    pub fn copy_to_slice(&self, dst: &mut [u8]) -> bool {
+        let Some(src) = self.inner.get(..dst.len()) else {
+            return false;
+        };
+        #[cfg(target_arch = "arm")]
+        if (src.as_ptr() as usize | dst.as_ptr() as usize) % 4 == 0 {
+            let blocks = src.len() / 32;
+            // SAFETY: both buffers are word-aligned and hold at least
+            // `blocks * 32` bytes, and `dst` is exclusively borrowed.
+            unsafe { burst_copy(dst.as_mut_ptr(), src.as_ptr(), blocks) };
+            let done = blocks * 32;
+            dst[done..].copy_from_slice(&src[done..]);
+            return true;
+        }
+        dst.copy_from_slice(src);
+        true
+    }
+
+    /// The first `N` bytes of this buffer, or `None` if it is shorter.
+    ///
+    /// When they are word-aligned and `N` is a whole number of words, they
+    /// are read a word at a time rather than a byte at a time (see
+    /// [`copy_to_slice`](Self::copy_to_slice)): a short header read out of
+    /// DMA memory this way costs a load per word.
+    #[inline]
+    pub fn read_prefix<const N: usize>(&self) -> Option<[u8; N]> {
+        let src: &[u8; N] = self.inner.first_chunk()?;
+        if !N.is_multiple_of(4) || src.as_ptr().align_offset(4) != 0 {
+            return Some(*src);
+        }
+        let mut out = [0u8; N];
+        for (i, word) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            // SAFETY: `src` is `N` readable bytes at a 4-aligned address and
+            // `i < N / 4`, so word `i` lies within it.
+            *word = unsafe { src.as_ptr().cast::<u32>().add(i).read() }.to_ne_bytes();
+        }
+        Some(out)
+    }
+
+    /// The buffer's first words, as many as it holds whole up to eight, and
+    /// their count: read with one burst when the buffer is word-aligned (see
+    /// [`copy_to_slice`](Self::copy_to_slice)), so a message's header and
+    /// leading fields cost one load's latency out of DMA memory. The words
+    /// are native-endian loads of the bytes, in memory order; the rest of
+    /// the array is zero.
+    #[inline]
+    pub fn read_head_words(&self) -> ([u32; 8], usize) {
+        let n = (self.inner.len() / 4).min(8);
+        let mut out = [0u32; 8];
+        #[cfg(target_arch = "arm")]
+        if self.inner.as_ptr().align_offset(4) == 0 {
+            // SAFETY: the buffer is word-aligned and holds `n` whole words,
+            // and `out` is a distinct, word-aligned array of eight.
+            unsafe { burst_copy_words(out.as_mut_ptr().cast(), self.inner.as_ptr(), n) };
+            return (out, n);
+        }
+        for (word, bytes) in out.iter_mut().zip(self.inner.as_chunks::<4>().0) {
+            *word = u32::from_ne_bytes(*bytes);
+        }
+        (out, n)
+    }
+}
+
+/// Copies `blocks` 32-byte blocks from `src` to `dst` with eight-word
+/// LDM/STM bursts.
+///
+/// # Safety
+///
+/// `src` and `dst` must be word-aligned, valid for `blocks * 32` bytes, and
+/// must not overlap.
+#[cfg(target_arch = "arm")]
+#[inline(always)]
+unsafe fn burst_copy(dst: *mut u8, src: *const u8, blocks: usize) {
+    let mut s = src;
+    let mut d = dst;
+    for _ in 0..blocks {
+        // SAFETY: the caller guarantees both 32-byte blocks are in bounds,
+        // word-aligned and disjoint.
+        unsafe {
+            core::arch::asm!(
+                "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+                "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+                s = inout(reg) s,
+                d = inout(reg) d,
+                out("r2") _,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") _,
+                out("r9") _,
+                out("r10") _,
+                out("r11") _,
+                options(nostack, preserves_flags),
+            );
+        }
+    }
+}
+
+/// Copies `words` words, at most eight, from `src` to `dst` with one burst
+/// load and store.
+///
+/// # Safety
+///
+/// `src` and `dst` must be word-aligned, valid for `words * 4` bytes, and
+/// must not overlap.
+#[cfg(target_arch = "arm")]
+#[inline]
+unsafe fn burst_copy_words(dst: *mut u8, src: *const u8, words: usize) {
+    macro_rules! burst {
+        ($regs:literal) => {
+            // SAFETY: per the function contract, for the listed words.
+            unsafe {
+                core::arch::asm!(
+                    concat!("ldm {s}, {{", $regs, "}}"),
+                    concat!("stm {d}, {{", $regs, "}}"),
+                    s = in(reg) src,
+                    d = in(reg) dst,
+                    out("r2") _,
+                    out("r3") _,
+                    out("r4") _,
+                    out("r5") _,
+                    out("r8") _,
+                    out("r9") _,
+                    out("r10") _,
+                    out("r11") _,
+                    options(nostack, preserves_flags),
+                )
+            }
+        };
+    }
+    match words {
+        0 => {}
+        // SAFETY: per the function contract, for one word.
+        1 => unsafe { dst.cast::<u32>().write(src.cast::<u32>().read()) },
+        2 => burst!("r2, r3"),
+        3 => burst!("r2, r3, r4"),
+        4 => burst!("r2, r3, r4, r5"),
+        5 => burst!("r2, r3, r4, r5, r8"),
+        6 => burst!("r2, r3, r4, r5, r8, r9"),
+        7 => burst!("r2, r3, r4, r5, r8, r9, r10"),
+        _ => burst!("r2, r3, r4, r5, r8, r9, r10, r11"),
     }
 }
 

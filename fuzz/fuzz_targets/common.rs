@@ -7,13 +7,19 @@
 
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
+use tsra_crypto::AesKey;
 use tsra_crypto::aead_envelope::AeadAlg;
-use tsra_crypto::*;
-use tsra_ddi::*;
+use tsra_crypto::aead_envelope::{self};
+use tsra_ddi::TsraDdi;
 use tsra_ddi_interface::Ddi;
 use tsra_ddi_tbor_codec::Encoder;
-use tsra_ddi_tbor_codec::header::Header;
-use tsra_ddi_tbor_codec::*;
+use tsra_ddi_tbor_codec::Header;
+use tsra_ddi_tbor_codec::MAX_DATA_SIZE;
+use tsra_ddi_tbor_codec::MAX_TOC_ENTRIES;
+use tsra_ddi_tbor_codec::REQ_HEADER_LEN;
+use tsra_ddi_tbor_codec::RESP_HEADER_LEN;
+use tsra_ddi_tbor_codec::TOC_ENTRY_LEN;
+use tsra_ddi_tbor_codec::TocEntry;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
@@ -164,6 +170,11 @@ impl EccCurve {
     /// ECDH shared secret (the X coordinate).
     pub fn coord_len(self) -> usize {
         coord_sizes(self.wire_pub_key_len()).1
+    }
+
+    /// Wire coordinate length in bytes, including padding (P-521: 66 -> 68 bytes).
+    pub fn wire_coord_len(self) -> usize {
+        coord_sizes(self.wire_pub_key_len()).0
     }
 
     /// Largest digest the firmware zero-extends into the ECDSA field.
@@ -496,6 +507,20 @@ pub fn add_evidence_item(oob_items: &mut Vec<Vec<u8>>, der: &[u8]) -> CertDescri
 
 /// Initialize a partition and security domain so security-domain masking is available.
 pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
+    let _ = create_test_security_domain_with_policy(ctx, session);
+}
+
+/// Retained trust anchor and policy for commands that authenticate DARC imports.
+pub struct SecurityDomainFixture {
+    pub pota: CaKey,
+    pub policy: PartPolicy,
+}
+
+/// Initialize the security domain and retain its exact policy and POTA signer.
+pub fn create_test_security_domain_with_policy(
+    ctx: &TestCtx,
+    session: &SessionHandshake,
+) -> SecurityDomainFixture {
     use zerocopy::IntoBytes;
 
     let info = ctx
@@ -555,6 +580,7 @@ pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
             session_id: session.session_id,
             masked_key: sealing_key.masked_key.to_vec(),
             report_data: [0u8; KEY_REPORT_DATA_LEN],
+            auth_envelope: Vec::new(),
         })
         .expect("sealing-key report generation should succeed");
 
@@ -607,10 +633,11 @@ pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
             index: report_descriptor.index,
             length: report_descriptor.length,
         },
-        policy,
+        policy: policy.clone(),
     };
     ctx.tbor_oob(&req, &oob)
         .expect("test security-domain creation should succeed");
+    SecurityDomainFixture { pota, policy }
 }
 
 /// Exercise key scopes that cannot be used by the backup fixtures' custom partition.

@@ -463,6 +463,25 @@ impl<S: TableStorage> KeyVault<S> {
         self.location_of(table, &entry)
     }
 
+    /// The table that holds key `key_id`.
+    pub fn key_table(key_id: HsmKeyId) -> usize {
+        split_key_id(key_id).0
+    }
+
+    /// [`key_location`](Self::key_location) and
+    /// [`key_session`](Self::key_session) from one read of the key's
+    /// entry.
+    #[allow(clippy::type_complexity)]
+    pub fn key_location_and_session(
+        &self,
+        key_id: HsmKeyId,
+    ) -> HsmResult<((usize, usize, usize), Option<u16>)> {
+        let (table, slot) = split_key_id(key_id);
+        let entry = self.entry(table, slot)?;
+        let session = entry.session().then(|| entry.session_or_tag());
+        Ok((self.location_of(table, &entry)?, session))
+    }
+
     /// Disabled-aware variant of [`key_location`](Self::key_location), for
     /// the delete path (see [`key_entry`](Self::key_entry)).
     pub fn key_location_present(&self, key_id: HsmKeyId) -> HsmResult<(usize, usize, usize)> {
