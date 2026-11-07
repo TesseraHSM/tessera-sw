@@ -11,11 +11,11 @@ path = "src/main.rs"
 required-features = ["sock"]
 
 [features]
-sock = ["dep:openssl", "dep:tsra_api"]
+sock = ["dep:tsra_api", "dep:tsra_crypto"]
 
 [dependencies]
-openssl = { optional = true, workspace = true }
 tsra_api = { features = ["sock"], optional = true, workspace = true }
+tsra_crypto = { optional = true, workspace = true }
 
 [lints]
 workspace = true

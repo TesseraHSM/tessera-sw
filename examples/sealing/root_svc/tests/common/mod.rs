@@ -34,6 +34,14 @@ pub fn sibling_binary(name: &str) -> PathBuf {
         .with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX))
 }
 
+/// The standalone `ddi_sock_server` binary: `DDI_SOCK_SERVER_BIN` when set,
+/// otherwise the one built next to `root_svc`.
+fn ddi_sock_server_binary() -> PathBuf {
+    std::env::var_os("DDI_SOCK_SERVER_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| sibling_binary("ddi_sock_server"))
+}
+
 /// A running `ddi_sock_server` process, killed on drop.
 pub struct Hsm {
     child: Child,
@@ -44,7 +52,7 @@ impl Hsm {
     pub fn start() -> io::Result<Self> {
         let address = TcpListener::bind("127.0.0.1:0")?.local_addr()?;
         let endpoint = format!("tcp://{address}");
-        let child = Command::new(sibling_binary("ddi_sock_server"))
+        let child = Command::new(ddi_sock_server_binary())
             .arg(&endpoint)
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())

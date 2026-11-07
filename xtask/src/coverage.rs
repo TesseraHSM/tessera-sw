@@ -122,6 +122,12 @@ impl Xtask for Coverage {
             log::info!("Skipping llvm-cov cleanup");
         }
 
+        crate::common::prepare_ddi_sock_server(
+            &sh,
+            &None,
+            features_vec.first().map(String::as_str),
+        )?;
+
         // Run tests with coverage
         log::info!("Building all tests and running them with coverage");
         cmd!(
