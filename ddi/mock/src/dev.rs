@@ -271,13 +271,17 @@ impl DdiDev for DdiMockDev {
     fn exec_op_fp_gcm_slice(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         tag: &mut Option<[u8; 16]>,
         iv: &mut Option<[u8; 12]>,
         fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
+        let gcm_params = match gcm_params.into() {
+            DdiAesGcmRequest::Pinned(params) => params,
+            DdiAesGcmRequest::Unpinned { .. } => return Err(DdiError::UnsupportedEncoding),
+        };
         let encrypt_decrypt_mode: AesMode =
             mode.try_into().map_err(|_| DdiError::InvalidParameter)?;
 
@@ -407,7 +411,7 @@ impl DdiDev for DdiMockDev {
     fn exec_op_fp_gcm(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesGcmResult, DdiError> {
         let mut dst_buf = vec![0u8; src_buf.len()];
@@ -457,11 +461,15 @@ impl DdiDev for DdiMockDev {
     fn exec_op_fp_xts_slice(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         fips_approved: &mut bool,
     ) -> Result<usize, DdiError> {
+        let xts_params = match xts_params.into() {
+            DdiAesXtsRequest::Pinned(params) => params,
+            DdiAesXtsRequest::Unpinned { .. } => return Err(DdiError::UnsupportedEncoding),
+        };
         let encrypt_decrypt_mode: AesMode =
             mode.try_into().map_err(|_| DdiError::InvalidParameter)?;
         if src_buf.is_empty() {
@@ -609,7 +617,7 @@ impl DdiDev for DdiMockDev {
     fn exec_op_fp_xts(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesXtsResult, DdiError> {
         let mut dst_buf = vec![0u8; src_buf.len()];

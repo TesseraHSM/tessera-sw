@@ -59,7 +59,7 @@ impl<D: DdiDev> DdiDev for DdiResTestDev<D> {
     fn exec_op_fp_gcm_slice(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         tag: &mut Option<[u8; 16]>,
@@ -73,7 +73,7 @@ impl<D: DdiDev> DdiDev for DdiResTestDev<D> {
     fn exec_op_fp_gcm(
         &self,
         mode: DdiAesOp,
-        gcm_params: DdiAesGcmParams,
+        gcm_params: impl Into<DdiAesGcmRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesGcmResult, DdiError> {
         self.inner.exec_op_fp_gcm(mode, gcm_params, src_buf)
@@ -82,7 +82,7 @@ impl<D: DdiDev> DdiDev for DdiResTestDev<D> {
     fn exec_op_fp_xts(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: Vec<u8>,
     ) -> Result<DdiAesXtsResult, DdiError> {
         self.inner.exec_op_fp_xts(mode, xts_params, src_buf)
@@ -91,7 +91,7 @@ impl<D: DdiDev> DdiDev for DdiResTestDev<D> {
     fn exec_op_fp_xts_slice(
         &self,
         mode: DdiAesOp,
-        xts_params: DdiAesXtsParams,
+        xts_params: impl Into<DdiAesXtsRequest>,
         src_buf: &[u8],
         dst_buf: &mut [u8],
         fips_approved: &mut bool,
