@@ -265,37 +265,46 @@ fn build_rsa_pkey(
 /// [`build_bound_rsa_key`].
 #[allow(unsafe_code)]
 pub(crate) unsafe fn free_bound_rsa_key(data: &EngineData, rsa: *mut ffi::RSA) {
-    let key_ptr = rsa_hsm_key(rsa);
-    if !key_ptr.is_null() {
-        if let Ok(idx) = rsa_ex_index() {
-            // SAFETY: rsa is valid per this function's contract; idx is our slot.
-            // If clearing fails, leave the release to finish instead.
-            let rc = unsafe { ffi::RSA_set_ex_data(rsa, idx, null_mut()) };
-            if rc == 1 {
-                data.release_loaded_rsa_key(key_ptr);
-            }
-        }
+    // If clearing fails, leave the release to finish instead.
+    if detach_rsa(rsa) {
+        data.release_loaded_rsa_key(rsa);
     }
     // SAFETY: rsa is valid and owned by the caller per this function's contract.
     unsafe { ffi::RSA_free(rsa) };
 }
 
+/// Clear `rsa`'s HSM-key ex_data slot; false if that fails.
+#[allow(unsafe_code)]
+fn detach_rsa(rsa: *mut ffi::RSA) -> bool {
+    let Ok(idx) = rsa_ex_index() else {
+        return false;
+    };
+    // SAFETY: rsa is a valid RSA; idx is our registered slot.
+    unsafe { ffi::RSA_set_ex_data(rsa, idx, null_mut()) == 1 }
+}
+
 /// The engine's `RSA_METHOD` `finish` hook (see [`crate::rsasign`]): an `RSA`
-/// is being freed, so drop its reference on the attached HSM key, deleting it
-/// from the HSM once unused. Without this, keys would only be deleted at
-/// engine teardown — which a loaded key can itself postpone forever (its
-/// software public half holds a default-engine reference), leaking HSM key
-/// slots across processes. Keys with no HSM key attached (software keys that
-/// adopted the engine method) are ignored.
+/// is being freed, or is switching to another method via `RSA_set_method`, so
+/// detach and drop its reference on the attached HSM key, deleting it from the
+/// HSM once unused. Detaching first keeps a still-live key from handing a
+/// freed pointer to the EVP RSA-PSS path or releasing it again in a later
+/// `finish`. Without this hook, keys would only be deleted at engine teardown
+/// — which a loaded key can itself postpone forever (its software public half
+/// holds a default-engine reference), leaking HSM key slots across processes.
+/// Keys with no HSM key attached (software keys that adopted the engine
+/// method) are ignored.
 #[allow(unsafe_code)]
 pub(crate) fn release_on_free(rsa: *mut ffi::RSA) {
-    let key_ptr = rsa_hsm_key(rsa);
-    if key_ptr.is_null() {
+    if rsa_hsm_key(rsa).is_null() {
         return;
     }
-    // SAFETY: rsa is the RSA being freed; get0 borrows its bound engine.
+    if !detach_rsa(rsa) {
+        tracing::warn!(target: "tsra", "cannot detach finished RSA key; HSM key kept until teardown");
+        return;
+    }
+    // SAFETY: rsa is the RSA being finished; get0 borrows its bound engine.
     let engine = unsafe { ffi::RSA_get0_engine(rsa) };
-    if crate::engine_impl::with_engine_data(engine, |data| data.release_loaded_rsa_key(key_ptr))
+    if crate::engine_impl::with_engine_data(engine, |data| data.release_loaded_rsa_key(rsa))
         .is_none()
     {
         tracing::warn!(target: "tsra", "freed RSA key has no engine data; HSM key kept until teardown");
@@ -321,13 +330,13 @@ fn attach_rsa(data: &EngineData, rsa: *mut ffi::RSA, key: HsmRsaPrivateKey) -> E
     // Hand the key to EngineData (owns it; deleted when this RSA is freed, see
     // release_on_free) and stash the non-owning pointer for later sign/decrypt
     // retrieval. The ex_data slot has no free callback (see rsa_ex_index).
-    let key_ptr = data.retain_loaded_rsa_key(key);
+    let key_ptr = data.retain_loaded_rsa_key(key, rsa);
     // SAFETY: rsa is valid (checked), idx is a registered RSA ex_data slot, and
     // key_ptr is a non-owning pointer into a key EngineData keeps alive until
     // this RSA is freed; the slot has no free callback, so no ownership moves.
     let rc = unsafe { ffi::RSA_set_ex_data(rsa, idx, key_ptr.cast_mut().cast::<c_void>()) };
     if let Err(e) = ossl_check(rc, "RSA_set_ex_data failed") {
-        data.release_loaded_rsa_key(key_ptr);
+        data.release_loaded_rsa_key(rsa);
         return Err(e);
     }
     Ok(())

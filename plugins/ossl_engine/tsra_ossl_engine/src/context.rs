@@ -34,6 +34,7 @@ use tsra_api::MobkProviderCallback;
 use tsra_api::PotaEndorsementCallback;
 use tsra_ossl_engine_core::error::EngineError;
 use tsra_ossl_engine_core::error::EngineResult;
+use tsra_ossl_engine_core::ffi;
 use tsra_ossl_engine_resiliency::FileMobkCallback;
 use tsra_ossl_engine_resiliency::FilePotaCallback;
 use tsra_ossl_engine_resiliency::ResiliencySettings;
@@ -165,46 +166,69 @@ impl EngineData {
         f(&ctx.session)
     }
 
-    /// Take ownership of a loaded HSM private key, holding one reference for the
-    /// `EC_KEY` it is about to be attached to, and return a stable non-owning
+    /// Take ownership of a loaded HSM private key on behalf of the `EC_KEY`
+    /// `owner` it is about to be attached to, and return a stable non-owning
     /// pointer to it for stashing in that `EC_KEY`'s ex_data. The pointer stays
-    /// valid until the last reference is dropped via
+    /// valid until its last owner is dropped via
     /// [`release_loaded_key`](Self::release_loaded_key) (which deletes the key
     /// from the HSM — HSM keys are not deleted by their own drop), or until
     /// this `EngineData` is dropped.
     ///
+    /// Ownership is tracked by owner address rather than read back from
+    /// ex_data, because `EC_KEY_copy` overwrites a destination's ex_data
+    /// without telling us what it held.
+    ///
     /// Crate-internal: an implementation detail of the key loader.
-    pub(crate) fn retain_loaded_key(&self, key: HsmEccPrivateKey) -> *const HsmEccPrivateKey {
-        self.loaded_keys.retain(key)
+    pub(crate) fn retain_loaded_key(
+        &self,
+        key: HsmEccPrivateKey,
+        owner: *const ffi::EC_KEY,
+    ) -> *const HsmEccPrivateKey {
+        self.loaded_keys.retain(key, owner.addr())
     }
 
-    /// Take another reference on a retained EC key, for an `EC_KEY` copy that
-    /// now shares its pointer. Returns false if `ptr` isn't currently retained.
-    pub(crate) fn add_loaded_key_ref(&self, ptr: *const HsmEccPrivateKey) -> bool {
-        self.loaded_keys.add_ref(ptr)
+    /// Make the `EC_KEY` `owner` (an `EC_KEY_copy` destination) own exactly
+    /// `ptr`, or nothing if `ptr` is null: whatever it owned before is
+    /// released first, deleting that key from the HSM if no other `EC_KEY`
+    /// uses it. Returns false if `ptr` is non-null but isn't retained.
+    pub(crate) fn rebind_loaded_key(
+        &self,
+        owner: *const ffi::EC_KEY,
+        ptr: *const HsmEccPrivateKey,
+    ) -> bool {
+        let (shared, displaced) = self.loaded_keys.rebind(owner.addr(), ptr);
+        if let Some(key) = displaced {
+            delete_hsm_key(key, "replaced EC private key");
+        }
+        shared
     }
 
-    /// Drop one reference on a key from [`retain_loaded_key`](Self::retain_loaded_key),
-    /// identified by the pointer it returned, deleting it from the HSM when the
-    /// last reference goes. Called when an `EC_KEY` using the key is freed, and
-    /// to roll back a partial load. A no-op if the pointer isn't currently
-    /// retained.
-    pub(crate) fn release_loaded_key(&self, ptr: *const HsmEccPrivateKey) {
-        if let Some(key) = self.loaded_keys.release(ptr) {
+    /// Drop `owner`'s reference on the key it was given by
+    /// [`retain_loaded_key`](Self::retain_loaded_key) or
+    /// [`rebind_loaded_key`](Self::rebind_loaded_key), deleting the key from
+    /// the HSM when its last owner goes. Called when an `EC_KEY` using the key
+    /// is finished, and to roll back a partial load. A no-op if `owner` holds
+    /// no key.
+    pub(crate) fn release_loaded_key(&self, owner: *const ffi::EC_KEY) {
+        if let Some(key) = self.loaded_keys.release(owner.addr()) {
             delete_hsm_key(key, "released EC private key");
         }
     }
 
     /// RSA counterpart of [`retain_loaded_key`](Self::retain_loaded_key): take
-    /// ownership of a loaded HSM RSA private key and return a stable non-owning
-    /// pointer for stashing in `RSA` ex_data.
-    pub(crate) fn retain_loaded_rsa_key(&self, key: HsmRsaPrivateKey) -> *const HsmRsaPrivateKey {
-        self.loaded_rsa_keys.retain(key)
+    /// ownership of a loaded HSM RSA private key on behalf of `owner` and
+    /// return a stable non-owning pointer for stashing in `RSA` ex_data.
+    pub(crate) fn retain_loaded_rsa_key(
+        &self,
+        key: HsmRsaPrivateKey,
+        owner: *const ffi::RSA,
+    ) -> *const HsmRsaPrivateKey {
+        self.loaded_rsa_keys.retain(key, owner.addr())
     }
 
     /// RSA counterpart of [`release_loaded_key`](Self::release_loaded_key).
-    pub(crate) fn release_loaded_rsa_key(&self, ptr: *const HsmRsaPrivateKey) {
-        if let Some(key) = self.loaded_rsa_keys.release(ptr) {
+    pub(crate) fn release_loaded_rsa_key(&self, owner: *const ffi::RSA) {
+        if let Some(key) = self.loaded_rsa_keys.release(owner.addr()) {
             delete_hsm_key(key, "released RSA private key");
         }
     }
@@ -245,12 +269,12 @@ impl Drop for EngineData {
     }
 }
 
-/// HSM keys backing engine-bound OpenSSL key objects, each with a count of the
-/// objects whose ex_data points at it.
+/// HSM keys backing engine-bound OpenSSL key objects, each with the addresses
+/// of the objects that own it. An object owns at most one key.
 struct RetainedKeys<K> {
     // `Box` gives each key a stable heap address: the loaders stash a raw
     // pointer to it in ex_data, which must stay valid across `Vec` growth.
-    keys: Mutex<Vec<(Box<K>, usize)>>,
+    keys: Mutex<Vec<(Box<K>, Vec<usize>)>>,
 }
 
 impl<K> RetainedKeys<K> {
@@ -260,42 +284,52 @@ impl<K> RetainedKeys<K> {
         }
     }
 
-    /// Store `key` with one reference and return its stable address.
-    fn retain(&self, key: K) -> *const K {
+    /// Store `key` owned by `owner` and return its stable address.
+    fn retain(&self, key: K, owner: usize) -> *const K {
         let boxed = Box::new(key);
         let ptr: *const K = boxed.as_ref();
-        self.keys.lock().push((boxed, 1));
+        self.keys.lock().push((boxed, vec![owner]));
         ptr
     }
 
-    /// Take another reference on `ptr`; false if it isn't retained.
-    fn add_ref(&self, ptr: *const K) -> bool {
+    /// Move `owner` from whatever key it owns to `ptr` (or to nothing if
+    /// `ptr` is null). Returns whether `owner` now owns `ptr`, and the key it
+    /// previously owned if that lost its last owner (for the caller to delete
+    /// outside the lock).
+    fn rebind(&self, owner: usize, ptr: *const K) -> (bool, Option<K>) {
         let mut keys = self.keys.lock();
+        let displaced = Self::take_owner(&mut keys, owner);
+        if ptr.is_null() {
+            return (true, displaced);
+        }
         match keys.iter_mut().find(|(k, _)| std::ptr::eq(k.as_ref(), ptr)) {
-            Some((_, refs)) => {
-                *refs = refs.saturating_add(1);
-                true
+            Some((_, owners)) => {
+                owners.push(owner);
+                (true, displaced)
             }
-            None => false,
+            None => (false, displaced),
         }
     }
 
-    /// Drop one reference on `ptr`, returning the key once the last goes (for
-    /// the caller to delete outside the lock). `None` if not retained.
-    fn release(&self, ptr: *const K) -> Option<K> {
-        let mut keys = self.keys.lock();
+    /// Drop `owner`'s reference, returning its key once the last owner goes
+    /// (for the caller to delete outside the lock).
+    fn release(&self, owner: usize) -> Option<K> {
+        Self::take_owner(&mut self.keys.lock(), owner)
+    }
+
+    fn take_owner(keys: &mut Vec<(Box<K>, Vec<usize>)>, owner: usize) -> Option<K> {
         let pos = keys
             .iter()
-            .position(|(k, _)| std::ptr::eq(k.as_ref(), ptr))?;
-        let refs = &mut keys[pos].1;
-        *refs = refs.saturating_sub(1);
-        if *refs > 0 {
+            .position(|(_, owners)| owners.contains(&owner))?;
+        let owners = &mut keys[pos].1;
+        owners.retain(|o| *o != owner);
+        if !owners.is_empty() {
             return None;
         }
         Some(*keys.remove(pos).0)
     }
 
-    /// Remove every key regardless of references (engine teardown).
+    /// Remove every key regardless of owners (engine teardown).
     fn drain(&mut self) -> impl Iterator<Item = K> + '_ {
         self.keys.get_mut().drain(..).map(|(k, _)| *k)
     }

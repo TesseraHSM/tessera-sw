@@ -142,13 +142,6 @@ endif()
 # compile definitions.
 # `CARGO_FEATURE_*` env vars only exist during the Rust build script, not during
 # C++ compilation. Suite selection uses `SESSION_EX_TESTS`.
-# `TSRA_PROCESS_LOCAL_HSM` marks backends where each test process owns an
-# independent simulated HSM (sock, with the server auto-started in the test
-# runner process).
-if(TEST_FEATURES MATCHES "(^| )sock($| )")
-    target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_PROCESS_LOCAL_HSM)
-endif()
-
 target_compile_definitions(
     tsra_api_cpp_tests
     PRIVATE SESSION_EX_TESTS=$<BOOL:${SESSION_EX_TESTS}>

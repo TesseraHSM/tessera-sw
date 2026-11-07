@@ -2627,8 +2627,9 @@ mod sim {
             "key must be usable before release"
         );
 
-        let ptr = data.retain_loaded_key(key);
-        data.release_loaded_key(ptr);
+        let owner = std::ptr::dangling::<ffi::EC_KEY>();
+        let _ = data.retain_loaded_key(key, owner);
+        data.release_loaded_key(owner);
         assert!(
             !hsm_sign_works(&observer),
             "release_loaded_key must delete the key from the HSM"
@@ -2656,7 +2657,7 @@ mod sim {
             "key must be usable before teardown"
         );
 
-        let _ = data.retain_loaded_key(key);
+        let _ = data.retain_loaded_key(key, std::ptr::dangling::<ffi::EC_KEY>());
         drop(data);
         assert!(
             !hsm_sign_works(&observer),
@@ -2704,6 +2705,121 @@ mod sim {
             );
             ffi::ENGINE_free(engine_raw);
         }
+    }
+
+    // EC_KEY_copy into an EC_KEY already bound to another HSM key overwrites
+    // its ex_data without a finish: the displaced key must still be deleted,
+    // and the shared one only once both EC_KEYs are gone.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn copy_into_bound_ec_key_deletes_displaced_key() {
+        let scratch = Scratch::new("copy-over");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let src_key = round_trips::generate_p384_key(&data).unwrap();
+        let src_observer = src_key.clone();
+        let src_der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&src_key).unwrap();
+        let mut dest_keys = Vec::new();
+        for _ in 0..3 {
+            let key = round_trips::generate_p384_key(&data).unwrap();
+            let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+            dest_keys.push((key, der));
+        }
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let src = crate::keyload::build_bound_ec_key(&engine, data, &src_der, src_key).unwrap();
+
+        // SAFETY: src/dest are our engine-bound EC_KEYs; the copies and frees
+        // are standard OpenSSL calls on keys we own. engine_raw is the
+        // ENGINE_new ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            for (key, der) in dest_keys {
+                let observer = key.clone();
+                let dest = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+                assert!(!ffi::EC_KEY_copy(dest, src).is_null(), "EC_KEY_copy");
+                assert!(
+                    !hsm_sign_works(&observer),
+                    "the key displaced by EC_KEY_copy must be deleted"
+                );
+                ffi::EC_KEY_free(dest);
+                assert!(
+                    hsm_sign_works(&src_observer),
+                    "freeing a copy must keep the source's HSM key"
+                );
+            }
+            ffi::EC_KEY_free(src);
+            assert!(
+                !hsm_sign_works(&src_observer),
+                "freeing the last EC_KEY must delete its HSM key"
+            );
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // EC_KEY_set_method runs finish on a still-live key: its HSM key must be
+    // released and detached, so the later free neither touches nor releases
+    // the freed pointer again.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn set_method_detaches_and_releases_ec_key() {
+        let scratch = Scratch::new("set-method");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let key = round_trips::generate_p384_key(&data).unwrap();
+        let observer = key.clone();
+        let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let ec = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+
+        // SAFETY: ec is our engine-bound EC_KEY; set_method and free are
+        // standard OpenSSL calls on a key we own. engine_raw is the ENGINE_new
+        // ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            assert_eq!(ffi::EC_KEY_set_method(ec, ffi::EC_KEY_OpenSSL()), 1);
+            assert!(
+                crate::keyload::ec_key_hsm_key(ec).is_null(),
+                "finish must detach the HSM key from a live EC_KEY"
+            );
+            assert!(
+                !hsm_sign_works(&observer),
+                "finish must release the HSM key"
+            );
+            ffi::EC_KEY_free(ec);
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // Ownership is tracked per owner: rebinding moves an owner off its old
+    // key (returning it once unowned) and shared keys live until their last
+    // owner goes.
+    #[test]
+    fn retained_keys_track_owners() {
+        let keys = RetainedKeys::<u32>::new();
+        let a = keys.retain(1, 10);
+        let b = keys.retain(2, 20);
+        assert_eq!(keys.rebind(30, a), (true, None));
+        assert_eq!(keys.rebind(20, a), (true, Some(2)));
+        assert_eq!(keys.rebind(20, a), (true, None));
+        assert_eq!(keys.rebind(40, b), (false, None));
+        assert_eq!(keys.release(10), None);
+        assert_eq!(keys.release(30), None);
+        assert_eq!(keys.rebind(20, std::ptr::null()), (true, Some(1)));
+        assert_eq!(keys.release(20), None);
     }
 
     // A signature produced through a loaded key (HSM sign via our EC_KEY_METHOD,

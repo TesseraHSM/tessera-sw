@@ -153,9 +153,16 @@ impl Xtask for IntegrationTest {
                 );
             }
 
+            // cli/capi auto-start an in-process sock server; nginx uses the
+            // external server described above.
             let run_pkg = |pkg: &str, skip_clean: bool, ctx: XtaskCtx| -> anyhow::Result<()> {
+                let features = if pkg.ends_with("-nginx") {
+                    "integration"
+                } else {
+                    "integration,sock"
+                };
                 let test = crate::nextest::Nextest {
-                    features: Some("integration".to_string()),
+                    features: Some(features.to_string()),
                     package: Some(pkg.to_string()),
                     no_default_features: false,
                     filterset: None,
