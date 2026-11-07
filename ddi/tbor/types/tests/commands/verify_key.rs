@@ -7,7 +7,7 @@
 //! using it: an intact blob is acknowledged, while a tampered or
 //! wrong-session blob fails AEAD authentication.
 
-#![cfg(feature = "emu")]
+#![cfg(feature = "sock")]
 
 use tsra_crypto::*;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;

@@ -329,7 +329,7 @@ The barrier prevents this by ensuring Thread A's operation either:
 
 ## Backoff Configuration
 
-| Parameter        | Production    | Emu (test)   |
+| Parameter        | Production    | Test (`fast-backoff`) |
 |------------------|---------------|--------------|
 | `MAX_RETRIES`    | 5 (6 total)   | 5 (6 total)  |
 | `BACKOFF_BASE_MS`| 400ms         | 8ms          |

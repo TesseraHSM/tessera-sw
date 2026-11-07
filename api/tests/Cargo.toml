@@ -16,6 +16,7 @@ log.workspace = true
 xshell.workspace = true
 
 [dev-dependencies]
+ddi_sock_server.workspace = true
 hex.workspace = true
 libtest-mimic.workspace = true
 parking_lot.workspace = true
@@ -32,9 +33,8 @@ zerocopy.workspace = true
 
 [features]
 default = []
-emu = ["tsra_api/emu"]
 session-ex-tests = []
-sock = ["tsra_api/sock"]
+sock = ["ddi_sock_server/autostart", "tsra_api/fast-backoff", "tsra_api/sock"]
 
 [lints]
 workspace = true

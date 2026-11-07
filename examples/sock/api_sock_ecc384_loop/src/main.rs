@@ -8,6 +8,8 @@
 //! to a fixed, publicly known test value and reuses that value on later runs.
 
 use tsra_api::*;
+use tsra_crypto::HashAlgo;
+use tsra_crypto::Hasher;
 
 const DEFAULT_ENDPOINT: &str = "tcp://127.0.0.1:1234";
 const TOOL_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
@@ -130,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("ECC P-384 key generation failed at iteration {index}: {error}")
         })?;
         let message = format!("TSRA TCP ECC P-384 loop iteration {index}");
-        let digest = openssl::sha::sha384(message.as_bytes());
+        let digest = Hasher::hash_vec(&mut HashAlgo::sha384(), message.as_bytes())?;
         let signature = HsmSigner::sign_vec(&mut HsmEccSignAlgo::default(), &private_key, &digest)
             .map_err(|error| format!("ECC P-384 signing failed at iteration {index}: {error}"))?;
         let verified = HsmVerifier::verify(

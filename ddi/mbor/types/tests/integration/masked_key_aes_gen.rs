@@ -248,7 +248,6 @@ fn test_unmask_session_key() {
 
 // Create named key, delete the key
 // Unmask the key, should still be named key
-#[cfg(not(feature = "emu"))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_unmask_named_key() {

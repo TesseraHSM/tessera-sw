@@ -53,6 +53,23 @@ pub(crate) fn engine_data_slot() -> EngineResult<EngineExData<EngineData>> {
     Ok(slot)
 }
 
+/// Run `f` with the [`EngineData`] parked on `engine`, or `None` if `engine` is
+/// NULL or carries none. For callbacks on engine-bound key objects
+/// (`RSA`/`EC_KEY` `finish`/`copy`), which hold a functional reference on
+/// `engine`, so it and its data are live for the call.
+pub(crate) fn with_engine_data<R>(
+    engine: *mut ffi::ENGINE,
+    f: impl FnOnce(&EngineData) -> R,
+) -> Option<R> {
+    let engine = NonNull::new(engine)?;
+    let slot = ENGINE_DATA_SLOT.get()?;
+    // SAFETY: per this fn's contract the ENGINE is live for the call; the
+    // wrapper is non-owning and dropped before returning.
+    #[allow(unsafe_code)]
+    let engine = unsafe { Engine::from_ptr(engine) };
+    slot.get(&engine).map(f)
+}
+
 struct TsraLoadPrivKey;
 impl LoadPrivKeyHandler for TsraLoadPrivKey {
     fn load(engine: &Engine, key_id: &CStr) -> EngineResult<*mut ffi::EVP_PKEY> {

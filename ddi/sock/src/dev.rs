@@ -70,6 +70,7 @@ use tsra_ddi_sock_proto::ResponseFrame;
 use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
 use tsra_ddi_sock_proto::MAX_OOB_ITEM;
 use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
+use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
@@ -537,6 +538,9 @@ impl DdiSockDev {
             TRANSPORT_SESSION_NOT_OWNED => Err(DdiError::DdiStatus(
                 DdiStatus::FileHandleSessionIdDoesNotMatch,
             )),
+            TRANSPORT_SESSION_NEEDS_RENEGOTIATION => {
+                Err(DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation))
+            }
             status => Err(DdiError::DdiError(status)),
         }
     }

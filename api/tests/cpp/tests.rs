@@ -20,6 +20,10 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+// Links the in-process socket server started before `main`; spawned gtest
+// processes inherit its `TSRA_DDI_SOCK` endpoint.
+#[cfg(feature = "sock")]
+use ddi_sock_server as _;
 use libtest_mimic::*;
 
 /// Entry point for the C++ test runner.

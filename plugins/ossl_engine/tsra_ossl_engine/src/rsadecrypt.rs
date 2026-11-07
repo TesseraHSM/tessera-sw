@@ -50,8 +50,8 @@ impl RsaDecryptHandler for TsraRsaDecrypt {
                 "no HSM key attached to RSA for decryption".into(),
             ));
         }
-        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData for
-        // the engine's lifetime; this callback runs while the key is live.
+        // SAFETY: key_ptr points to an HsmRsaPrivateKey owned by EngineData until
+        // the key using it is freed; this callback runs while that key is live.
         let key = unsafe { &*key_ptr };
 
         // The HSM performs the raw private-key operation; the SDK removes the

@@ -49,3 +49,37 @@ pub fn target_dir() -> anyhow::Result<PathBuf> {
     target_dir.push("xtask");
     Ok(target_dir)
 }
+
+/// Build the `ddi_sock_server` binary and point `DDI_SOCK_SERVER_BIN` at it
+/// for tests that spawn a standalone simulated HSM. Skipped unless the `sock`
+/// feature is requested or when `DDI_SOCK_SERVER_BIN` is already set.
+pub fn prepare_ddi_sock_server(
+    sh: &Shell,
+    toolchain: &Option<String>,
+    features: Option<&str>,
+) -> anyhow::Result<()> {
+    let wants_sock = features.is_some_and(|f| f.split([',', ' ']).any(|f| f == "sock"));
+    if !wants_sock || sh.var("DDI_SOCK_SERVER_BIN").is_ok() {
+        return Ok(());
+    }
+    cmd!(
+        sh,
+        "cargo {toolchain...} build -p ddi_sock_server --bin ddi_sock_server"
+    )
+    .quiet()
+    .run()?;
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("xtask has no parent directory"))?;
+    let target = sh
+        .var("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("target"));
+    let bin = workspace_root
+        .join(target)
+        .join("debug")
+        .join(format!("ddi_sock_server{}", std::env::consts::EXE_SUFFIX));
+    sh.set_var("DDI_SOCK_SERVER_BIN", bin);
+    Ok(())
+}

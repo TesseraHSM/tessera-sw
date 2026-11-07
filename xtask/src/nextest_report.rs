@@ -21,17 +21,17 @@ pub struct NextestReport {
 fn profile_to_command(profile_name: &str) -> String {
     // Map known profile names to their corresponding commands
     match profile_name {
-        "ci-emu" => "cargo nextest run --no-fail-fast -F emu --profile ci-emu".to_string(),
-        "ci-emu-res-4" => {
-            "TSRA_EMU_RESOURCE_COUNT=4 cargo nextest run --no-fail-fast -p tsra_ddi_mbor_types -F emu --profile ci-emu-res-4"
+        "ci-sock" => "cargo nextest run --no-fail-fast -F sock --profile ci-sock".to_string(),
+        "ci-sock-res-4" => {
+            "TSRA_SOCK_SERVER_RESOURCE_COUNT=4 cargo nextest run --no-fail-fast -p tsra_ddi_mbor_types -F sock --profile ci-sock-res-4"
                 .to_string()
         }
-        "ci-emu-res-64" => {
-            "TSRA_EMU_RESOURCE_COUNT=64 cargo nextest run --no-fail-fast -p tsra_ddi_mbor_types -F emu --profile ci-emu-res-64"
+        "ci-sock-res-64" => {
+            "TSRA_SOCK_SERVER_RESOURCE_COUNT=64 cargo nextest run --no-fail-fast -p tsra_ddi_mbor_types -F sock --profile ci-sock-res-64"
                 .to_string()
         }
-        "ci-api" => "cargo nextest run --no-fail-fast -p tsra_api_tests -F emu --profile ci-api".to_string(),
-        "ci-api-ex" => "cargo nextest run --no-fail-fast -p tsra_api_tests -F emu,session-ex-tests --profile ci-api-ex".to_string(),
+        "ci-api" => "cargo nextest run --no-fail-fast -p tsra_api_tests -F sock --profile ci-api".to_string(),
+        "ci-api-ex" => "cargo nextest run --no-fail-fast -p tsra_api_tests -F sock,session-ex-tests --profile ci-api-ex".to_string(),
         // For unknown profiles, construct a generic command showing the profile
         _ => format!("cargo nextest run --profile {}", profile_name),
     }

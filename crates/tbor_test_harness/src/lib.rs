@@ -16,16 +16,16 @@
 //!
 //! # Backend feature regimes
 //!
-//! Consuming test binaries support three active build modes:
+//! Consuming test binaries support two active build modes:
 //!
-//! * `--features emu` — the canonical configuration; runs the full
-//!   suite against the in-process std-PAL firmware.
-//! * `--features sock` — drives the same TBOR round-trips against
-//!   firmware behind a socket server.
+//! * `--features sock` — the canonical configuration; drives the full
+//!   suite over the socket transport against std-PAL firmware served by
+//!   an in-process `ddi_sock_server` (or the server named by
+//!   `TSRA_DDI_SOCK`).
 //! * **No backend feature** — targets the native OS backend (`nix` on
 //!   Linux / `win` on Windows) so the hw-eligible tests run against
-//!   real silicon. Destructive emu-only tests remain gated
-//!   `#[cfg(feature = "emu")]` at the test-item level.
+//!   real silicon. Destructive simulator-only tests remain gated
+//!   `#[cfg(feature = "sock")]` at the test-item level.
 
 pub mod api_rev;
 pub mod assertions;

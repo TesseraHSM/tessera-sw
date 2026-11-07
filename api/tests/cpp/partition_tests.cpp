@@ -149,7 +149,7 @@ TEST(tsra_part, mobk_cache_path)
         cache_path.parent_path(),
         std::filesystem::temp_directory_path()
     ));
-#ifdef TSRA_FEATURE_EMU
+#ifdef TSRA_PROCESS_LOCAL_HSM
     EXPECT_EQ(cache_path.filename().string().find("tsra-mobk-"), 0u);
     EXPECT_EQ(cache_path.extension(), ".bin");
 #else

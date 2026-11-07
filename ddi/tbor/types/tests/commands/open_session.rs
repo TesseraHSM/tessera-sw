@@ -610,7 +610,6 @@ fn pk_init_single_byte_tampered_rejected() {
 }
 
 /// Verifies concurrent native-backend CU opens all succeed with unique IDs.
-#[cfg(not(feature = "emu"))]
 #[test]
 fn open_session_multi_threaded_all_should_open() {
     let ctx = TestCtx::new();

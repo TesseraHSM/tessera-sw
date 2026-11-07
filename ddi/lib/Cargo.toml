@@ -12,7 +12,6 @@ test = false
 
 [dependencies]
 cfg-if.workspace = true
-tsra_ddi_emu = { optional = true, workspace = true }
 tsra_ddi_interface.workspace = true
 tsra_ddi_sock = { optional = true, workspace = true }
 
@@ -24,10 +23,7 @@ tsra_ddi_win.workspace = true
 
 [features]
 default = []
-emu = ["tsra_ddi_emu"]
 sock = ["tsra_ddi_sock"]
-# Forward the per-IO `iic recv` / `oic send` debug traces (emu backend only).
-trace-io = ["tsra_ddi_emu?/trace-io"]
 
 [lints]
 workspace = true

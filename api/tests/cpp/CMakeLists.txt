@@ -141,10 +141,12 @@ endif()
 # Expose the selected DDI backend and session-test mode to the C++ sources as
 # compile definitions.
 # `CARGO_FEATURE_*` env vars only exist during the Rust build script, not during
-# C++ compilation. Backend-specific setup uses `TSRA_FEATURE_EMU`; suite
-# selection uses `SESSION_EX_TESTS`.
-if(TEST_FEATURES MATCHES "(^| )emu($| )")
-    target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_FEATURE_EMU)
+# C++ compilation. Suite selection uses `SESSION_EX_TESTS`.
+# `TSRA_PROCESS_LOCAL_HSM` marks backends where each test process owns an
+# independent simulated HSM (sock, with the server auto-started in the test
+# runner process).
+if(TEST_FEATURES MATCHES "(^| )sock($| )")
+    target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_PROCESS_LOCAL_HSM)
 endif()
 
 target_compile_definitions(

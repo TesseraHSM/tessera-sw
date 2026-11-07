@@ -85,6 +85,10 @@ pub const VERSION: u8 = 1;
 /// Transport rejection when a session allocation is not owned by the connection.
 pub const TRANSPORT_SESSION_NOT_OWNED: u32 = 3;
 
+/// Transport rejection of a bulk request on an owned session that a reset
+/// invalidated and that has not been renegotiated yet.
+pub const TRANSPORT_SESSION_NEEDS_RENEGOTIATION: u32 = 4;
+
 /// Maximum main request/response buffer, matching the firmware's two-page limit.
 pub const MAX_DMA_BUFFER: u32 = 8192;
 

@@ -115,6 +115,12 @@ impl Xtask for Nextest {
             command_args.extend(self.filter.iter().map(|s| s.as_str()));
         }
 
+        crate::common::prepare_ddi_sock_server(
+            &sh,
+            &rust_toolchain,
+            features_vec.first().map(String::as_str),
+        )?;
+
         cmd!(
             sh,
             "cargo {rust_toolchain...} nextest run --no-fail-fast {command_args...}"
