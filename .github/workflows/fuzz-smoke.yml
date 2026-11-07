@@ -16,9 +16,8 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-
+    - uses: ./.github/actions/ubuntu-setup
     - run: rustup toolchain install nightly
-
     - run: cargo +nightly fmt -- --check
     - run: cargo clippy -- -D warnings
 
