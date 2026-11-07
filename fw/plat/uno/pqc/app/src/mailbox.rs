@@ -52,6 +52,11 @@
 //! Writing the sequence number last on each side means a reader that sees
 //! a matching sequence is guaranteed to see the payload that goes with it.
 //!
+//! A core reads its mailboxes only once rung, never on its own at boot.
+//! The HSM relies on that: whatever they hold when a reset restarts both
+//! sides is from before it, and on its first request the HSM withdraws it
+//! and scrubs the slots, which is only safe while no core is serving it.
+//!
 //! # Operand slots
 //!
 //! Bulk operands do not fit in a mailbox, so each core also owns a

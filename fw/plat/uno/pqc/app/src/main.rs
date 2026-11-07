@@ -191,6 +191,9 @@ fn serve(core_id: u8) -> ! {
     let mut beat = TICKS.load(Ordering::Relaxed).wrapping_sub(HEARTBEAT_TICKS);
     let mut status: u32 = 0;
     let mut last_request = cycles();
+    // Not until rung: what the mailboxes hold at boot is from before the
+    // reset, and the HSM withdraws it on its first request (see
+    // `mailbox`), which must not find this core serving it.
     let mut look = false;
 
     loop {

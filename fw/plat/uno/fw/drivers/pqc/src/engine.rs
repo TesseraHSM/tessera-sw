@@ -656,7 +656,9 @@ impl PqcEngine<'_> {
             .await?;
 
         match resp.status {
-            0 => Ok(true),
+            // Verify reads nothing back, so this is its one check that the
+            // answer is a verify answer: those carry no output.
+            0 if resp.out_len == 0 => Ok(true),
             s if s == STATUS_CRYPTO_FAILED => Ok(false),
             _ => Err(PqcError::FP_ERROR),
         }
@@ -755,7 +757,7 @@ impl PqcEngine<'_> {
         // Operations that stage operands settle before staging; this covers
         // the ones that use only the mailbox.
         self.settle()?;
-        let seq = self.driver.next_request_seq();
+        let seq = self.driver.next_request_seq(self.id);
         mailbox::post_request(self.id, seq, params);
         // Cleared when the answer is collected. If this future is dropped
         // or gives up first, releasing the engine quarantines it instead.

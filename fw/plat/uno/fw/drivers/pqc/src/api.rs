@@ -18,6 +18,7 @@ use crate::pool::PqcState;
 use crate::shared_status;
 use crate::types::EngineId;
 use crate::types::CORES;
+use crate::types::ENGINES;
 
 /// How often the head waiter checks whether a draining engine's core has
 /// answered. `Timer::after` rounds up to one embassy tick (31.25 ms on
@@ -51,12 +52,24 @@ impl PqcDriver {
     /// the head waiter checks every [`DRAIN_POLL_INTERVAL`] while any engine
     /// drains; the other waiters sleep.
     ///
+    /// The first call after boot first resets every lane, which can still
+    /// hold what an earlier boot left; see `mailbox::reset_lane`.
+    ///
     /// # Errors
     /// * [`PqcError::QUEUE_FULL`](crate::PqcError::QUEUE_FULL) — every waiter slot is taken.
     /// * [`PqcError::FP_NOT_READY`](crate::PqcError::FP_NOT_READY) — every engine is draining, so none
     ///   will be released until a core answers a request it has already
     ///   missed its deadline for.
     pub async fn acquire_any(&self) -> HsmResult<PqcEngine<'_>> {
+        self.state.with(|s| {
+            if !s.lanes_reset {
+                s.lanes_reset = true;
+                for i in 0..ENGINES as u8 {
+                    mailbox::reset_lane(EngineId::new(i));
+                }
+            }
+        });
+
         // Withdraws from the queue if this future is dropped while waiting,
         // so an engine handed to it is passed on rather than stranded.
         let mut wait = WaitGuard {
@@ -236,15 +249,12 @@ impl PqcDriver {
             .await
     }
 
-    /// Next request sequence number.
-    ///
-    /// Monotonic across all engines, so a response can never be mistaken
-    /// for one to an earlier request on the same core.
-    pub(crate) fn next_request_seq(&self) -> u32 {
-        self.state.with(|s| {
-            s.request_seq = s.request_seq.wrapping_add(1);
-            s.request_seq
-        })
+    /// Next request sequence number for engine `id`, which must be held with
+    /// no request outstanding, so its core's last answer stands still; see
+    /// [`PqcState::next_request_seq`].
+    pub(crate) fn next_request_seq(&self, id: EngineId) -> u32 {
+        let answered = mailbox::response_seq(id);
+        self.state.with(|s| s.next_request_seq(answered))
     }
 
     /// Return an engine to the pool.

@@ -69,6 +69,12 @@
 //! The HSM then polls `response_seq` rather than an interrupt pending bit:
 //! block 1's pending bits belong to the IPC driver, whose `wake()` clears
 //! every bit it processes and would race a reply away.
+//!
+//! The lanes outlive a warm reset that keeps PSRAM and GSRAM, but this
+//! side's count restarts with every boot. So the first acquire withdraws
+//! whatever each lane holds ([`reset_lane`]), and no request is numbered
+//! as its lane's last answer: the core would take it as answered already,
+//! and this side would take that old answer as the new request's.
 
 use core::ptr::read_volatile;
 use core::ptr::write_volatile;
@@ -557,8 +563,31 @@ pub fn take_response(engine: EngineId, seq: u32) -> Option<Response> {
 
 /// True if `engine`'s core has answered request `seq`.
 pub fn has_answered(engine: EngineId, seq: u32) -> bool {
+    response_seq(engine) == seq
+}
+
+/// Sequence number of the request `engine`'s core answered last.
+pub fn response_seq(engine: EngineId) -> u32 {
     // SAFETY: as `take_response`.
-    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) == seq }
+    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) }
+}
+
+/// Withdraw whatever request `engine`'s lane holds, by numbering it as
+/// answered, and [`scrub`] the lane.
+///
+/// For the first acquire after boot, before any lane is handed out. Nothing
+/// can be serving one then: every reset restarts the fastpath cores along
+/// with this one -- the SP pulses all their resets together and reloads
+/// every image (`reset_cpu_cores`) -- and a core reads its lanes only when
+/// rung, which only this driver does, and only for a lane it holds. Were
+/// this core ever restarted alone, a request from before could still be
+/// running, and its lane would have to be held back until answered
+/// instead.
+pub fn reset_lane(engine: EngineId) {
+    let answered = response_seq(engine);
+    // SAFETY: as `post_request`.
+    unsafe { write_volatile(mailbox(engine).add(word::REQUEST_SEQ), answered) };
+    scrub(engine);
 }
 
 /// Wipe everything a request can leave in `engine`'s shared memory: the

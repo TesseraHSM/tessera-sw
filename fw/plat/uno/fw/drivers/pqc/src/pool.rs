@@ -110,6 +110,10 @@ pub(crate) struct PqcState {
     /// Sequence number for PQC requests, so a response is unambiguously
     /// matched to the request that produced it.
     pub(crate) request_seq: u32,
+
+    /// Whether the lanes have been reset since boot; see
+    /// [`PqcDriver::acquire_any`](crate::PqcDriver::acquire_any).
+    pub(crate) lanes_reset: bool,
 }
 
 impl PqcState {
@@ -135,7 +139,26 @@ impl PqcState {
             wait_tail: NO_SLOT,
             probe_seq: 0,
             request_seq: 0,
+            lanes_reset: false,
         }
+    }
+
+    /// Next request sequence number for a lane whose core last answered
+    /// request `answered`.
+    ///
+    /// Numbers rise across every lane, which is how a core tells which of
+    /// its two lanes was posted first. But the count restarts on every boot
+    /// while a lane keeps its last answer, and it wraps, so `answered` is
+    /// skipped: a request numbered as its lane's last answer would look
+    /// answered already. The core would never run it, and the old answer,
+    /// with whatever the slot holds, would be taken as the new request's.
+    pub(crate) fn next_request_seq(&mut self, answered: u32) -> u32 {
+        let mut seq = self.request_seq.wrapping_add(1);
+        if seq == answered {
+            seq = seq.wrapping_add(1);
+        }
+        self.request_seq = seq;
+        seq
     }
 
     /// Claim a free engine, marking it busy: the lowest lane of an idle
@@ -684,5 +707,17 @@ mod tests {
         assert!(
             matches!(refused, Poll::Ready(Acquire::Done(Err(e))) if e == PqcError::FP_NOT_READY)
         );
+    }
+
+    /// A request is never numbered as its lane's last answer, which the
+    /// count can reach after a reset that kept the lane, or by wrapping.
+    #[test]
+    fn request_seq_skips_the_lanes_last_answer() {
+        let mut state = PqcState::new();
+        assert_eq!(state.next_request_seq(1), 2);
+        assert_eq!(state.next_request_seq(1), 3);
+        state.request_seq = u32::MAX - 1;
+        assert_eq!(state.next_request_seq(u32::MAX), 0);
+        assert_eq!(state.next_request_seq(1), 2);
     }
 }
