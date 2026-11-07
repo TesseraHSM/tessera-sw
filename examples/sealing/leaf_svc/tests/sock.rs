@@ -81,7 +81,12 @@ fn socket_server(dir: &Path, name: &str) -> Result<(Process, String)> {
     let address = address()?;
     let endpoint = format!("tcp://{address}");
     let mut process = Process::spawn(
-        Command::new(binary("ddi_sock_server")).arg(&endpoint),
+        Command::new(
+            std::env::var_os("DDI_SOCK_SERVER_BIN")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| binary("ddi_sock_server")),
+        )
+        .arg(&endpoint),
         &dir.join(format!("{name}-ddi.log")),
     )
     .context("build ddi_sock_server before running the socket integration test")?;
