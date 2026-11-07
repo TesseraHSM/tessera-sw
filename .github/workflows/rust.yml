@@ -46,7 +46,9 @@ jobs:
     - name: Check committed C header is up to date
       run: cargo xtask precheck --cbindgen
 
-  test_ubuntu_sock:
+  # Job id kept as `*_emu` to match the required status checks in the
+  # branch ruleset; it runs the sock-backed tests.
+  test_ubuntu_emu:
 
     runs-on: ubuntu-24.04
 
@@ -157,7 +159,9 @@ jobs:
     - name: Cargo Clippy
       run: cargo xtask precheck --clippy
 
-  test_windows_sock:
+  # Job id kept as `*_emu` to match the required status checks in the
+  # branch ruleset; it runs the sock-backed tests.
+  test_windows_emu:
 
     runs-on: windows-2025-vs2026
 

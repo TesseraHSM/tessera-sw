@@ -412,7 +412,7 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
     }
 
     // Run all sock tests (except tsra_api_tests)
-    // CI job: test_*_sock
+    // CI job: test_*_emu
     tests.push(Nextest {
         features: Some("sock".to_string()),
         package: None,
