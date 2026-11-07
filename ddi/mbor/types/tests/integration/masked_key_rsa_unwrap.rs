@@ -362,18 +362,12 @@ fn test_masked_key_rsa_unwrap_aes_key() {
 // Bulk keys are validated through a fast-path AES-GCM round trip rather than a
 // key-tag lookup: data encrypted with the original unwrapped key must decrypt
 // (and authenticate) with the key restored from its masked blob.
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 fn test_masked_key_rsa_unwrap_aes_bulk_key() {
     ddi_dev_test(
         common_setup,
         common_cleanup,
         |dev, _ddi, _path, session_id| {
-            if get_device_kind(dev) != DdiDeviceKind::Physical {
-                println!("Physical device NOT found. Test only supported on physical device.");
-                return;
-            }
-
             let (session_id, short_app_id) = reopen_session_with_short_app_id(dev, session_id);
 
             let (unwrap_key_id, unwrap_pub_key_der, _) = get_unwrapping_key(dev, session_id);
