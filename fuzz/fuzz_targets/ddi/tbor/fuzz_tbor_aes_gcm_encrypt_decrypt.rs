@@ -648,7 +648,7 @@ fuzz_target!(|input: FuzzInput| {
     common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
 });
 
-#[cfg(all(test, feature = "emu"))]
+#[cfg(all(test, feature = "sock"))]
 mod tests {
     use super::*;
 

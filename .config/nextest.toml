@@ -38,8 +38,16 @@ test-threads = 1
 [profile.ci-provider-integration.junit]
 path = "junit.xml"
 
+# `ddi_sock_server_tests` spawn the separately-built `ddi_sock_server` binary,
+# which these `-p tsra_api_tests` runs do not build.
+[profile.ci-api]
+default-filter = "not test(/^ddi_sock_server_tests::/)"
+
 [profile.ci-api.junit]
 path = "junit.xml"
+
+[profile.ci-api-ex]
+default-filter = "not test(/^ddi_sock_server_tests::/)"
 
 [profile.ci-api-ex.junit]
 path = "junit.xml"

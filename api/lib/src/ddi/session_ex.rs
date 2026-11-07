@@ -830,15 +830,15 @@ mod tests {
     /// must thread Phase 1's issued cookie into Phase 2 unmodified,
     /// and must retain a refreshed Phase-2 token rather than
     /// discarding it. Drives the real HPKE handshake crypto (so Phase
-    /// 2 genuinely succeeds against emu) through [`CookieEnforcingDev`]
-    /// -- a backend that actually enforces continuity, unlike emu
+    /// 2 genuinely succeeds against the simulator) through [`CookieEnforcingDev`]
+    /// -- a backend that actually enforces continuity, unlike the simulator
     /// itself -- so a regression in the cookie threading between
     /// [`open_session_ex_init`] and [`open_session_ex_finish`] fails
-    /// this test even though it would silently pass against emu alone.
+    /// this test even though it would silently pass against the simulator alone.
     #[test]
     fn handshake_cookie_is_threaded_and_refreshed() {
-        let _guard = EMU_LOCK.lock();
-        let part = fresh_emu_partition();
+        let _guard = HSM_LOCK.lock();
+        let part = fresh_partition();
         let rev = part.inner().read().api_rev();
         let inner = part.inner().read();
         let dev = inner.dev();
