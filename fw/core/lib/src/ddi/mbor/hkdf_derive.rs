@@ -107,7 +107,23 @@ pub(crate) async fn hkdf_derive<'p, P: HsmPal>(
             HsmSessId::from(sess_id),
             super::masking::MaskSpec {
                 attrs,
-                key_type: super::from_pal::vault_kind_ddi(target.kind)?,
+                // Stamp the *requested* DDI key type, not one re-derived
+                // from the internal vault kind: fixed-length HMAC
+                // (`HmacSha256/384/512`) and variable-length HMAC
+                // (`VarHmac256/384/512`) share a single vault
+                // representation (`VarLenHmacShaNNN`), so
+                // `vault_kind_ddi` can only ever report the `VarHmac*`
+                // variant. The host decodes the masked-key metadata
+                // expecting whichever type it asked for; reporting the
+                // wrong one made every fixed-length HMAC derive
+                // undecodable client-side.
+                //
+                // This specifically broke older client versions, whose
+                // masked-key decoders have no match arm for the
+                // `VarHmac*` variants; current clients tolerate both, so
+                // the mismatch was invisible to in-tree testing and only
+                // surfaced against those older clients.
+                key_type: body.key_type,
                 key_label: body.key_properties.key_label,
                 key_length: out.len() as u16,
             },
