@@ -40,6 +40,7 @@ use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmIoKind;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_static_init::static_init;
@@ -74,12 +75,49 @@ use tsra_fw_uno_drivers_systick as systick_driver;
 use tsra_fw_uno_drivers_tcon::Tcon;
 use tsra_fw_uno_drivers_upka::UpkaDriver;
 use tsra_fw_uno_pac::Interrupt;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_ICQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_ICQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_ISQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_OCQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_OCQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_FP2_OSQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_ICQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_ICQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_CQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_CQ_STRIDE;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_META_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_SQ_COUNT;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_SQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_SQ_STRIDE;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_ISQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_OCQ_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_OCQ_TAIL_SHADOW_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_OSQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_CQ_TAIL_SHADOW_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::GDMA_SQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::ICQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::ICQ_TAIL_SHADOW_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_STRIDE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT;
@@ -122,6 +160,10 @@ use crate::ipc::*;
 
 type Iic = IicDriver<IO_QUEUE_DEPTH>;
 type Oic = OicDriver<IO_QUEUE_DEPTH>;
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) type BulkIic = IicDriver<BULK_QUEUE_DEPTH>;
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) type BulkOic = OicDriver<BULK_QUEUE_DEPTH>;
 type Gdma = GdmaDriver<IO_QUEUE_DEPTH>;
 type Ipc = IpcDriver<IPC_PAIRS>;
 type Aes = AesDriver<IO_QUEUE_DEPTH>;
@@ -141,6 +183,29 @@ pub enum BootPhase {
 
 /// Queue depth for all IO queues (ISQ, ICQ, OSQ, OCQ, GDMA SQ/CQ).
 const IO_QUEUE_DEPTH: usize = 32;
+
+/// Queue depth for the bulk (fast-path) IIC/OIC queues.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_QUEUE_DEPTH: usize = 32;
+
+/// Bulk slots (of `BULK_IO_SQ`) the FP2 channel posts. Admin binds only the
+/// 65th function resource's two device SQs to FP2, every other bulk SQ to
+/// FP1, so FP2 gets a small share. The channels share the bulk slot
+/// arrays; FP1 posts the slots below [`BULK_FP1_SLOTS`], FP2 the rest.
+#[cfg(not(feature = "bulk_crypto"))]
+const BULK_FP2_SLOTS: u16 = 8;
+
+/// Bulk slots the FP1 channel posts, from slot 0.
+#[cfg(not(feature = "bulk_crypto"))]
+pub(crate) const BULK_FP1_SLOTS: u16 = BULK_IO_SQ_COUNT as u16 - BULK_FP2_SLOTS;
+
+#[cfg(not(feature = "bulk_crypto"))]
+const _: () = assert!(
+    BULK_FP2_SLOTS > 0
+        && BULK_FP1_SLOTS > 0
+        && BULK_FP1_SLOTS as usize <= BULK_QUEUE_DEPTH
+        && BULK_FP2_SLOTS as usize <= BULK_QUEUE_DEPTH
+);
 
 /// Number of IPC pairs configured for the firmware.
 const IPC_PAIRS: usize = 4;
@@ -212,6 +277,22 @@ const WAKE_ENTRIES: &[(u16, WakeFn)] = &[
     // command completion.
     (Interrupt::IIC_ICQ as u16, |pal, irq| pal.iic.wake(irq)),
     (Interrupt::OIC_OCQ as u16, |pal, irq| pal.oic.wake(irq)),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::IIC_ICQ_FP1 as u16, |pal, irq| {
+        pal.bulk_iic.wake(irq)
+    }),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::OIC_OCQ_FP1 as u16, |pal, irq| {
+        pal.bulk_oic.wake(irq)
+    }),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::IIC_ICQ_FP2 as u16, |pal, irq| {
+        pal.bulk_fp2_iic.wake(irq)
+    }),
+    #[cfg(not(feature = "bulk_crypto"))]
+    (Interrupt::OIC_OCQ_FP2 as u16, |pal, irq| {
+        pal.bulk_fp2_oic.wake(irq)
+    }),
     (Interrupt::AES_DONE as u16, |pal, _| pal.aes.wake()),
     (Interrupt::SHA_DONE as u16, |pal, _| pal.sha.wake()),
     (Interrupt::AES_ERROR as u16, |pal, _| pal.aes.wake()),
@@ -310,6 +391,25 @@ pub struct UnoHsmPal {
     /// Outbound IO Controller — sends CQEs back to the host.
     pub oic: &'static Oic,
 
+    /// Bulk Inbound IO Controller — receives bulk SQEs from the host on
+    /// the fast-path controller's FP1 channel. Absent with `bulk_crypto`,
+    /// where the FP firmware owns that controller.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_iic: &'static BulkIic,
+
+    /// Bulk Outbound IO Controller — sends FP1 bulk CQEs back to the host.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_oic: &'static BulkOic,
+
+    /// Bulk Inbound IO Controller for the fast-path controller's FP2
+    /// channel, which carries the 65th function resource's bulk SQs.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_fp2_iic: &'static BulkIic,
+
+    /// Bulk Outbound IO Controller — sends FP2 bulk CQEs back to the host.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub bulk_fp2_oic: &'static BulkOic,
+
     /// General DMA Controller — copies data between host and device.
     pub gdma: &'static Gdma,
 
@@ -339,6 +439,19 @@ pub struct UnoHsmPal {
 
     /// Boot handshake phase (PAL lifecycle state).
     boot_phase: Cell<BootPhase>,
+
+    /// Which inbound queue [`poll_io`](tsra_fw_hsm_pal_traits::HsmIoController::poll_io)
+    /// polls first next: 0 = command, 1 = bulk FP1, 2 = bulk FP2.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) poll_turn: Cell<u8>,
+
+    /// Bulk slots held by an in-flight IO (bit `i` is `BULK_IO_SQ[i]`).
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) bulk_busy: Cell<u32>,
+
+    /// Bulk slots released since the current SQ drain began.
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) bulk_freed: Cell<u32>,
 
     /// Per-IO bump allocator state (watermarks for Local + Global heaps).
     pub(crate) io_alloc: IoAllocTable,
@@ -400,6 +513,7 @@ unsafe impl Sync for UnoHsmPal {}
 impl Default for UnoHsmPal {
     fn default() -> Self {
         let iic_config = IicChannelConfig {
+            controller: 0,
             channel: 3,
             isq_base: IO_GSRAM_BASE + ISQ_OFFSET,
             // IIC DMAs into IO_SQ so the firmware reads the SQE in-place.
@@ -408,17 +522,85 @@ impl Default for UnoHsmPal {
             icq_base: IO_GSRAM_BASE + ICQ_OFFSET,
             icq_tail_shadow: IO_GSRAM_BASE + ICQ_TAIL_SHADOW_OFFSET,
             io_meta_base: IO_GSRAM_BASE + IO_META_OFFSET,
+            io_first: 0,
+            io_count: IO_QUEUE_DEPTH as u16,
             interrupt: true,
+            grant_credit: true,
         };
 
         let oic_config = OicChannelConfig {
+            controller: 0,
             channel: 3,
             osq_base: IO_GSRAM_BASE + OSQ_OFFSET,
             ocq_base: IO_GSRAM_BASE + OCQ_OFFSET,
             ocq_tail_shadow: IO_GSRAM_BASE + OCQ_TAIL_SHADOW_OFFSET,
             io_cq_base: IO_GSRAM_BASE + IO_CQ_OFFSET,
+            io_cq_size: IO_CQ_STRIDE,
             io_meta_base: IO_GSRAM_BASE + IO_META_OFFSET,
             interrupt: true,
+            return_credit: false,
+        };
+
+        // Bulk queues: fast-path controller, FP1 and FP2 channels. The HSM
+        // owns the channels as it does the command channel on controller 0;
+        // Admin owns the controller-common and IRQ routing setup. Both
+        // channels receive into the one set of bulk slots, each posting its
+        // own range, so a bulk IO's slot index is the same whichever channel
+        // it arrived on.
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_iic_config = IicChannelConfig {
+            controller: 1,
+            channel: 0,
+            isq_base: IO_GSRAM_BASE + BULK_ISQ_OFFSET,
+            io_pool_base: IO_GSRAM_BASE + BULK_IO_SQ_OFFSET,
+            io_size: BULK_IO_SQ_STRIDE,
+            io_first: 0,
+            io_count: BULK_FP1_SLOTS,
+            icq_base: IO_GSRAM_BASE + BULK_ICQ_OFFSET,
+            icq_tail_shadow: IO_GSRAM_BASE + BULK_ICQ_TAIL_SHADOW_OFFSET,
+            io_meta_base: IO_GSRAM_BASE + BULK_IO_META_OFFSET,
+            interrupt: true,
+            // Credits return with completions (`return_credit` below), as
+            // the FP firmware returned them; see `ChannelConfig::grant_credit`.
+            grant_credit: false,
+        };
+
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_oic_config = OicChannelConfig {
+            controller: 1,
+            channel: 0,
+            osq_base: IO_GSRAM_BASE + BULK_OSQ_OFFSET,
+            ocq_base: IO_GSRAM_BASE + BULK_OCQ_OFFSET,
+            ocq_tail_shadow: IO_GSRAM_BASE + BULK_OCQ_TAIL_SHADOW_OFFSET,
+            io_cq_base: IO_GSRAM_BASE + BULK_IO_CQ_OFFSET,
+            io_cq_size: BULK_IO_CQ_STRIDE,
+            io_meta_base: IO_GSRAM_BASE + BULK_IO_META_OFFSET,
+            interrupt: true,
+            // A bulk SQ has several credits, so a firmware read-modify-write
+            // of its credit register can race the hardware's decrement on
+            // fetch and leave the count off for good, which hangs Admin's
+            // SQ drain. Return each IO's credit with its completion instead.
+            return_credit: true,
+        };
+
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_fp2_iic_config = IicChannelConfig {
+            channel: 1,
+            isq_base: IO_GSRAM_BASE + BULK_FP2_ISQ_OFFSET,
+            io_first: BULK_FP1_SLOTS,
+            io_count: BULK_FP2_SLOTS,
+            icq_base: IO_GSRAM_BASE + BULK_FP2_ICQ_OFFSET,
+            icq_tail_shadow: IO_GSRAM_BASE + BULK_FP2_ICQ_TAIL_SHADOW_OFFSET,
+            ..bulk_iic_config
+        };
+
+        #[cfg(not(feature = "bulk_crypto"))]
+        let bulk_fp2_oic_config = OicChannelConfig {
+            channel: 1,
+            osq_base: IO_GSRAM_BASE + BULK_FP2_OSQ_OFFSET,
+            ocq_base: IO_GSRAM_BASE + BULK_FP2_OCQ_OFFSET,
+            ocq_tail_shadow: IO_GSRAM_BASE + BULK_FP2_OCQ_TAIL_SHADOW_OFFSET,
+            ..bulk_oic_config
         };
 
         let gdma_config = GdmaChannelConfig {
@@ -515,10 +697,26 @@ impl Default for UnoHsmPal {
         };
         // SAFETY: As above.
         #[cfg(not(feature = "bulk_crypto"))]
-        let bcp = unsafe { static_init!(BcpDriver, BcpDriver::new()) };
+        let (bulk_iic, bulk_oic, bulk_fp2_iic, bulk_fp2_oic, bcp) = unsafe {
+            (
+                static_init!(BulkIic, BulkIic::new(bulk_iic_config)),
+                static_init!(BulkOic, BulkOic::new(bulk_oic_config)),
+                static_init!(BulkIic, BulkIic::new(bulk_fp2_iic_config)),
+                static_init!(BulkOic, BulkOic::new(bulk_fp2_oic_config)),
+                static_init!(BcpDriver, BcpDriver::new()),
+            )
+        };
         Self {
             iic,
             oic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_iic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_oic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_fp2_iic,
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_fp2_oic,
             gdma,
             aes,
             sha,
@@ -529,6 +727,12 @@ impl Default for UnoHsmPal {
             #[cfg(not(feature = "bulk_crypto"))]
             bcp,
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
+            #[cfg(not(feature = "bulk_crypto"))]
+            poll_turn: Cell::new(0),
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_busy: Cell::new(0),
+            #[cfg(not(feature = "bulk_crypto"))]
+            bulk_freed: Cell::new(0),
             io_alloc: IO_ALLOC_INIT,
             io_peak: IO_ALLOC_INIT,
             fp_bulk_lock: Mutex::new(()),
@@ -727,6 +931,13 @@ impl UnoHsmPal {
         // unconditional `GdmaController::new_with_enable`.
         self.iic.init();
         self.oic.init();
+        #[cfg(not(feature = "bulk_crypto"))]
+        {
+            self.bulk_iic.init();
+            self.bulk_oic.init();
+            self.bulk_fp2_iic.init();
+            self.bulk_fp2_oic.init();
+        }
         self.gdma.init();
         self.boot_phase.set(BootPhase::Running);
         boot_status::set(BootStatus::Run);
@@ -875,6 +1086,18 @@ impl UnoHsmPal {
                 if self.try_handle_shutdown(channel, buf).await {
                     return;
                 }
+                #[cfg(not(feature = "bulk_crypto"))]
+                {
+                    let wait = self.begin_create_delete_sq(buf);
+                    core::future::poll_fn(|cx| {
+                        if self.bulk_freed.get() & wait == wait {
+                            return core::task::Poll::Ready(());
+                        }
+                        cx.waker().wake_by_ref();
+                        core::task::Poll::Pending
+                    })
+                    .await;
+                }
                 buf[0] |= 0x80;
                 self.ipc.reply(channel as u8, buf);
             }
@@ -933,6 +1156,36 @@ impl UnoHsmPal {
         let reply = encode_pfn_enable_disable_ack(buf, status);
         self.ipc.reply(channel as u8, &reply);
         true
+    }
+
+    /// Handle a `CreateDeleteSq` IPC in the running state.
+    ///
+    /// Admin binds and unbinds the queue in the UCD itself, so a create
+    /// needs only an ACK. A delete must first see every bulk IO already
+    /// taken from that device SQ finish, so the BCP and GDMA never touch
+    /// the function's memory after Admin tears the queue down. Command
+    /// queues hold no long-running engine work and are not drained.
+    ///
+    /// Writes the reply status into `buf`'s header (the caller's echo path
+    /// sends it) and returns the bulk slot mask to wait on before replying;
+    /// `0` for a create, a rejected message, or any other opcode. Kept out
+    /// of line so the IPC task's state machine stays small.
+    #[cfg(not(feature = "bulk_crypto"))]
+    #[inline(never)]
+    fn begin_create_delete_sq(&self, buf: &mut [u32; 16]) -> u32 {
+        let Some(info) = decode_create_delete_sq(buf) else {
+            return 0;
+        };
+        match (pfn_to_axi_id(info.pfn), info.action) {
+            (Some(axi_id), SqAction::Delete) => self.begin_bulk_sq_drain(axi_id, info.device_sq_id),
+            (Some(_), SqAction::Create) => 0,
+            _ => {
+                buf[0] = IpcMessageHeader::from_bits(buf[0])
+                    .with_status(IpcMessageStatusCode::InvalidField as u32)
+                    .into_bits();
+                0
+            }
+        }
     }
 
     /// Handle a `SetResource` IPC in the running state.
@@ -1169,8 +1422,15 @@ impl UnoHsmPal {
             // re-enabled after the acknowledgement. Nothing awaits between
             // finding the ICQ empty and clearing the flag.
             while let Some(rx) = self.iic.try_recv() {
-                let io = self.accept_io(rx);
+                let io = self.accept_io(rx, HsmIoKind::Cmd);
                 self.recycle_reset_io(io).await;
+            }
+            #[cfg(not(feature = "bulk_crypto"))]
+            for bulk_iic in [self.bulk_iic, self.bulk_fp2_iic] {
+                while let Some(rx) = bulk_iic.try_recv() {
+                    let io = self.accept_io(rx, HsmIoKind::Bulk);
+                    self.recycle_reset_io(io).await;
+                }
             }
             // Resume normal IO dispatch.
             self.io_paused.set(false);

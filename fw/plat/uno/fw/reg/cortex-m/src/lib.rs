@@ -4,6 +4,8 @@
 
 #![no_std]
 #![allow(clippy::modulo_one)]
+// Large `register_structs!` blocks exceed the default const-eval query depth.
+#![recursion_limit = "256"]
 
 /// Register access type aliases.
 ///

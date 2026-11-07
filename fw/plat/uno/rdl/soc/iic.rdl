@@ -150,7 +150,7 @@ reg isq_ctrl_t {
     RSVD_1->sw = r;
 
     field {} BUF_LEN[27:16] = 0x0;
-    BUF_LEN->desc = "Buffer length per entry (encoded): 1h=16B .. 4h=64B.";
+    BUF_LEN->desc = "Buffer length per entry in 16-byte units (e.g. 4h=64B, 8h=128B). Must match the host SQ entry size.";
 
     field {} RSVD_0[31:28] = 0x0;
     RSVD_0->sw = r;

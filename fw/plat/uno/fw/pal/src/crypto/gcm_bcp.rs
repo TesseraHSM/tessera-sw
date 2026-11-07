@@ -87,7 +87,7 @@ fn padded_aad_len(aad_len: usize) -> usize {
 }
 
 /// GCM length block `[8·aad_len]₆₄ ‖ [8·text_len]₆₄`.
-fn len_block(aad_len: usize, text_len: usize) -> Block {
+pub(super) fn len_block(aad_len: usize, text_len: usize) -> Block {
     let mut b = [0u8; AES_BLOCK_SIZE];
     b[..8].copy_from_slice(&(aad_len as u64 * 8).to_be_bytes());
     b[8..].copy_from_slice(&(text_len as u64 * 8).to_be_bytes());
@@ -114,12 +114,12 @@ fn read_block(b: &Block) -> Block {
     out
 }
 
-fn xor(a: &Block, b: &Block) -> Block {
+pub(super) fn xor(a: &Block, b: &Block) -> Block {
     core::array::from_fn(|i| a[i] ^ b[i])
 }
 
 /// Constant-time comparison of two blocks.
-fn constant_time_eq(a: &Block, b: &Block) -> bool {
+pub(super) fn constant_time_eq(a: &Block, b: &Block) -> bool {
     let mut diff = 0u8;
     for (&x, &y) in a.iter().zip(b) {
         diff |= x ^ y;

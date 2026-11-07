@@ -721,6 +721,56 @@ pub fn encode_pfn_enable_disable_ack(
 }
 
 // ---------------------------------------------------------------------------
+// IpcMessageCreateDeleteSq (opcode 0x3)
+// ---------------------------------------------------------------------------
+
+/// Submission queue create / delete action.
+#[repr(u8)]
+#[open_enum]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, IntoBytes, Immutable, FromBytes)]
+pub enum SqAction {
+    /// Delete the submission queue.
+    Delete = 0,
+
+    /// Create the submission queue.
+    Create = 1,
+}
+
+/// `CreateDeleteSq` payload (opcode `CreateDeleteSq`, 0x3); the first
+/// payload word of the message.
+///
+/// Mirrors the reference firmware's `SqCreateDeleteInfo`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, IntoBytes, Immutable, FromBytes)]
+pub struct SqCreateDeleteInfo {
+    /// Owning PCIe function; 1-byte `PcieFunction` on the wire.
+    pub pfn: u8,
+
+    /// Device submission queue id (the IQ id hardware stamps into IO_META).
+    pub device_sq_id: u8,
+
+    /// Device completion queue id paired with the submission queue.
+    pub device_cq_id: u8,
+
+    /// Create or delete.
+    pub action: SqAction,
+}
+
+const _: () = assert!(core::mem::size_of::<SqCreateDeleteInfo>() == 4);
+
+/// Decode a raw IPC buffer as a `CreateDeleteSq` request.
+///
+/// Returns `None` for any other opcode or for a response. Field checks are
+/// left to the caller so it can reply with a status.
+pub fn decode_create_delete_sq(buf: &[u32; IPC_MESSAGE_LENGTH]) -> Option<SqCreateDeleteInfo> {
+    let header = IpcMessageHeader::from_bits(buf[0]);
+    if header.msg_op() != IpcMessageOpCode::CreateDeleteSq as u32 || header.response() {
+        return None;
+    }
+    SqCreateDeleteInfo::read_from_bytes(buf[1].as_bytes()).ok()
+}
+
+// ---------------------------------------------------------------------------
 // IpcMessageKeyUpdate (opcode 0x7) — HSM → FP bulk AES key push
 // ---------------------------------------------------------------------------
 
