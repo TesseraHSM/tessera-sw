@@ -840,10 +840,13 @@ mod linux {
             Ok(socket)
         }
 
-        #[allow(unsafe_code)]
         fn into_async_fd(self) -> io::Result<AsyncFd<Self>> {
-            // SAFETY: Socket owns its descriptor, never replaces it, and closes it only on drop.
-            unsafe { AsyncFd::register(self) }.map_err(Into::into)
+            // `Socket` implements `AsRawFd` and closes its descriptor only
+            // on `Drop`, so the safe `AsyncFd::new` constructor can derive
+            // and register the descriptor itself; the lower-level `unsafe
+            // AsyncFd::register` (which exists for types that can't make
+            // those ownership guarantees) isn't needed here.
+            AsyncFd::new(self)
         }
 
         fn accept(&self) -> io::Result<Self> {
