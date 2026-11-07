@@ -525,6 +525,7 @@ impl Default for UnoHsmPal {
             io_first: 0,
             io_count: IO_QUEUE_DEPTH as u16,
             interrupt: true,
+            grant_credit: true,
         };
 
         let oic_config = OicChannelConfig {
@@ -559,6 +560,9 @@ impl Default for UnoHsmPal {
             icq_tail_shadow: IO_GSRAM_BASE + BULK_ICQ_TAIL_SHADOW_OFFSET,
             io_meta_base: IO_GSRAM_BASE + BULK_IO_META_OFFSET,
             interrupt: true,
+            // Credits return with completions (`return_credit` below), as
+            // the FP firmware returned them; see `ChannelConfig::grant_credit`.
+            grant_credit: false,
         };
 
         #[cfg(not(feature = "bulk_crypto"))]

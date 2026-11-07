@@ -385,7 +385,9 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     }
 
     /// Free an IO slot: return the buffer to the ISQ for hardware reuse
-    /// and grant a credit back to the source queue.
+    /// and, unless the channel's completions return it (see
+    /// [`ChannelConfig::grant_credit`]), grant a credit back to the source
+    /// queue.
     ///
     /// Both DFL refill and IQ credit release happen together when an IO
     /// is fully processed.
@@ -396,18 +398,12 @@ impl<const DEPTH: usize> IicDriver<DEPTH> {
     /// [`free_io`](Self::free_io) with the driver state already borrowed.
     fn free_io_in(&self, s: &mut ChannelState, index: u16, queue_id: u16) {
         self.release_buffer_in(s, index);
-        self.grant_credit(queue_id);
+        if self.config.grant_credit {
+            self.grant_credit(queue_id);
+        }
     }
 
-    /// Return slot `index`'s buffer to the ISQ for hardware reuse, without
-    /// granting a credit: for an IO whose completion already returned it
-    /// (the OIC `return_credit` option).
-    pub fn release_buffer(&self, index: u16) {
-        self.state.with(|s| self.release_buffer_in(s, index));
-    }
-
-    /// [`release_buffer`](Self::release_buffer) with the driver state
-    /// already borrowed.
+    /// Return slot `index`'s buffer to the ISQ for hardware reuse.
     fn release_buffer_in(&self, s: &mut ChannelState, index: u16) {
         // Return buffer to DFL
         let buf_addr = self.buf_addr(index);

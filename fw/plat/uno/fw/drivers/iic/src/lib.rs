@@ -37,6 +37,7 @@
 //!     icq_tail_shadow: 0x6109_0300,
 //!     io_meta_base: 0x6109_0C00,
 //!     interrupt: true,
+//!     grant_credit: true,
 //! });
 //! iic.init(); // attach on fw-update, full program otherwise (reads reset reason)
 //! iic.enable();

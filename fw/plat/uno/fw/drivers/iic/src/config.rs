@@ -44,4 +44,13 @@ pub struct ChannelConfig {
 
     /// Enable interrupt for this channel during init.
     pub interrupt: bool,
+
+    /// Whether the driver returns an IO's inbound-queue credit when it
+    /// frees the IO or recycles a failed entry. The credit register is
+    /// updated by a read-modify-write, which can lose a concurrent hardware
+    /// decrement on fetch, so a channel whose completions return the credit
+    /// (OIC `return_credit`) sets this to `false` and never writes it: an
+    /// IO freed without a completion, or a failed entry, returns only its
+    /// buffer, and its credit stays out until the SQ is recreated.
+    pub grant_credit: bool,
 }

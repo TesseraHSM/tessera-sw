@@ -155,11 +155,6 @@ pub struct UnoHsmIo {
 
     /// Queue kind the IO arrived on.
     kind: HsmIoKind,
-
-    /// The IO's completion was posted with its inbound-queue credit
-    /// (bulk OIC `return_credit`), so `drop_io` returns only the buffer.
-    #[cfg_attr(feature = "bulk_crypto", allow(dead_code))]
-    credit_returned: bool,
     /// Partition the IO targets, from its routing (see [`Self::pid`]).
     pid: HsmPartId,
     /// Source queue, from its routing (see [`Self::queue_id`]).
@@ -203,7 +198,6 @@ impl UnoHsmIo {
             return Self {
                 index,
                 kind: HsmIoKind::Cmd,
-                credit_returned: false,
                 pid: HsmPartId::from(crate::pal::NO_PARTITION),
                 queue_id: 0,
             };
@@ -223,7 +217,6 @@ impl UnoHsmIo {
         Self {
             index,
             kind,
-            credit_returned: false,
             // The hardware reports the routing axi_id; partitions are
             // indexed by the dense PcieFunction id, so translate here. An
             // axi_id naming no function yields an out-of-range id, which
@@ -429,11 +422,11 @@ impl HsmIoController for UnoHsmPal {
                     .try_into()
                     .map_err(|_| tsra_fw_hsm_pal_traits::HsmError::InternalError)?;
                 BulkCqe::set_sq_id(cqe, queue_id);
-                let sent = self.bulk_oic_for(io.index).send(io.index, queue_id as u8)?;
-                // The OSQ entry is posted with the IO's credit, which the
-                // hardware returns even if the wait below fails.
-                io.credit_returned = true;
-                sent.await
+                // The OSQ entry carries the IO's inbound-queue credit
+                // (`return_credit`).
+                self.bulk_oic_for(io.index)
+                    .send(io.index, queue_id as u8)?
+                    .await
             }
             #[cfg(feature = "bulk_crypto")]
             HsmIoKind::Bulk => Err(tsra_fw_hsm_pal_traits::HsmError::InternalError),
@@ -506,12 +499,10 @@ impl HsmIoController for UnoHsmPal {
                 // SAFETY: the IO's own scratch region, writable over its
                 // whole length, and no longer in use.
                 unsafe { crate::gdma::cpu_zeroize(ptr, len) };
-                let iic = self.bulk_iic_for(io.index);
-                if io.credit_returned {
-                    iic.release_buffer(io.index);
-                } else {
-                    iic.free_io(io.index, queue_id);
-                }
+                // Returns only the buffer: a bulk IO's credit comes back
+                // with its completion, or, for an IO dropped without one,
+                // when the SQ is recreated (see `grant_credit`).
+                self.bulk_iic_for(io.index).free_io(io.index, queue_id);
                 let bit = bulk_bit(io.index);
                 self.bulk_busy.set(self.bulk_busy.get() & !bit);
                 self.bulk_freed.set(self.bulk_freed.get() | bit);

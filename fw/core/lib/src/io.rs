@@ -226,11 +226,17 @@ impl<P: HsmPal> Hsm<P> {
     /// The PAL writes the success CQE into the IO's CQE; on error the
     /// core writes the failure CQE from the IO's SQE. The SQ id is stamped
     /// by [`complete_io`](HsmIoController::complete_io).
-    pub async fn handle_bulk_io(&self, io: P::Io) {
-        let Some(mut io) = self.gate_partition(io).await else {
-            return;
+    pub async fn handle_bulk_io(&self, mut io: P::Io) {
+        // A bulk IO for a disabled partition is completed with an error
+        // rather than dropped: a platform may return the IO's inbound-queue
+        // credit only with its completion.
+        let result = if self.partition_enabled(&io) {
+            self.pal().bulk_crypt(&mut io).await
+        } else {
+            debug!("core", "failing bulk IO for disabled partition");
+            Err(HsmError::PartitionNotEnabled)
         };
-        if let Err(e) = self.pal().bulk_crypt(&mut io).await {
+        if let Err(e) = result {
             debug!("core", "bulk IO failed: {:?}", e);
             let cqe = BulkCqe::error(io.sqe(), 0, e);
             if let Err(_e) = cqe.write(io.cqe()) {
