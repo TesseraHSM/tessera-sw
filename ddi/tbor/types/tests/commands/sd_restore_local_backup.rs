@@ -257,3 +257,359 @@ fn sd_restore_local_backup_rejects_tampered_pok() {
     .expect("valid restore must remain possible after a rejected backup");
     assert_part_state(&ctx, PART_STATE_INITIALIZED, true);
 }
+
+/// Verify that restoring an already-restored security domain is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_second_restore() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    let req = TborSdRestoreLocalBackupReq {
+        session_id: session.session_id,
+        pok_local_backup: created.pok_local_backup.clone(),
+        sd_mk_backup: created.sd_mk_backup.clone(),
+    };
+
+    ctx.tbor(&req).expect("First restore must succeed");
+
+    ctx.expect_fw_reject(&req, TborStatus::SdAlreadyInitialized);
+}
+
+/// Verify that corruption at the beginning of the POK backup is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_tampered_pok_first_byte() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    let mut tampered = created.pok_local_backup.clone();
+    tampered[0] ^= 0x01;
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: tampered,
+            sd_mk_backup: created.sd_mk_backup.clone(),
+        },
+        TborStatus::InvalidArg,
+    );
+}
+
+/// Verify that corruption in the middle of the POK backup is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_tampered_pok_middle() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    let mut tampered = created.pok_local_backup.clone();
+    let middle = tampered.len() / 2;
+    tampered[middle] ^= 0x01;
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: tampered,
+            sd_mk_backup: created.sd_mk_backup.clone(),
+        },
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
+}
+
+/// Verify that a failed restore does not prevent a later valid restore.
+#[test]
+fn sd_restore_local_backup_succeeds_after_failed_restore() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    let mut tampered = created.pok_local_backup.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: tampered,
+            sd_mk_backup: created.sd_mk_backup.clone(),
+        },
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
+
+    let resp = ctx
+        .tbor(&TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: created.pok_local_backup.clone(),
+            sd_mk_backup: created.sd_mk_backup.clone(),
+        })
+        .expect("Valid restore must succeed after failed attempt");
+
+    assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);
+    assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+}
+
+/// Verify that corruption of the SD masking-key backup is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_tampered_sd_mk() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    let mut tampered = created.sd_mk_backup.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0xFF;
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: created.pok_local_backup.clone(),
+            sd_mk_backup: tampered,
+        },
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
+}
+
+/// Verify that a zero session ID is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_zero_session_id() {
+    let ctx = TestCtx::new();
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: 0u16,
+            pok_local_backup: vec![0u8; MASKED_SD_LEN],
+            sd_mk_backup: vec![0u8; SD_MK_BACKUP_LEN],
+        },
+        TborStatus::SessionNotFound,
+    );
+}
+
+/// Verify that an all-zero POK backup is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_zeroed_pok_backup() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: vec![0u8; MASKED_SD_LEN],
+            sd_mk_backup: created.sd_mk_backup.clone(),
+        },
+        TborStatus::InvalidArg,
+    );
+}
+
+/// Verify that an all-zero SD masking-key backup is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_zeroed_sd_mk_backup() {
+    println!("START test");
+
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    println!("Creating SD on first device");
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    println!("First device completed");
+
+    let ctx = TestCtx::new();
+
+    println!("Restoring PartLocalMK");
+
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    println!("PartLocalMK restored");
+
+    println!("Sending zeroed SDMK backup");
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: created.pok_local_backup.clone(),
+            sd_mk_backup: vec![0u8; SD_MK_BACKUP_LEN],
+        },
+        TborStatus::InvalidArg,
+    );
+
+    println!("TEST COMPLETE");
+}
+
+/// Verify that refreshed local backups can restore another fresh device.
+#[test]
+fn sd_restore_local_backup_refreshed_backups_roundtrip() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    // Device 1: create the security domain and capture its local backups.
+    let mut created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    assert_eq!(created.pok_local_backup.len(), MASKED_SD_LEN);
+    assert_eq!(created.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+
+    // Device 2: restore the original local backups.
+    // Use a separate scope to ensure the emulator context and session
+    // are dropped before initializing Device 3.
+    let (refreshed_pok, refreshed_sd_mk) = {
+        let ctx = TestCtx::new();
+
+        let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+        let resp = ctx
+            .tbor(&TborSdRestoreLocalBackupReq {
+                session_id: session.session_id,
+                pok_local_backup: created.pok_local_backup.clone(),
+                sd_mk_backup: created.sd_mk_backup.clone(),
+            })
+            .expect("Device 2 SD restore must succeed");
+
+        assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);
+        assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+
+        assert!(
+            resp.pok_local_backup.iter().any(|&b| b != 0),
+            "Refreshed POK backup must not be all-zero",
+        );
+
+        assert!(
+            resp.sd_mk_backup.iter().any(|&b| b != 0),
+            "Refreshed SDMK backup must not be all-zero",
+        );
+
+        // Copy refreshed backups so they remain available after
+        // the Device 2 context is dropped.
+        (resp.pok_local_backup.clone(), resp.sd_mk_backup.clone())
+    };
+
+    // Replace the original backups with the refreshed backups.
+    created.pok_local_backup = refreshed_pok;
+    created.sd_mk_backup = refreshed_sd_mk;
+
+    // Device 3: simulate another reboot with the same machine seed
+    // and partition policy.
+    let ctx = TestCtx::new();
+
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    // Attempt to restore the security domain using the refreshed backups.
+    let resp = ctx
+        .tbor(&TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: created.pok_local_backup.clone(),
+            sd_mk_backup: created.sd_mk_backup.clone(),
+        })
+        .expect("Device 3 restore using refreshed backups must succeed");
+
+    // Verify that the second restoration returns correctly sized backups.
+    assert_eq!(resp.pok_local_backup.len(), MASKED_SD_LEN);
+    assert_eq!(resp.sd_mk_backup.len(), SD_MK_BACKUP_LEN);
+
+    // Verify that the returned backups contain non-zero data.
+    assert!(
+        resp.pok_local_backup.iter().any(|&b| b != 0),
+        "Device 3 POK backup must not be all-zero",
+    );
+
+    assert!(
+        resp.sd_mk_backup.iter().any(|&b| b != 0),
+        "Device 3 SDMK backup must not be all-zero",
+    );
+}
+
+/// Verify that the maximum session ID is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_max_session_id() {
+    let ctx = TestCtx::new();
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: u16::MAX,
+            pok_local_backup: vec![0u8; MASKED_SD_LEN],
+            sd_mk_backup: vec![0u8; SD_MK_BACKUP_LEN],
+        },
+        TborStatus::SessionNotFound,
+    );
+}
+
+/// Verify that corruption in the SDMK backup ciphertext is rejected.
+#[test]
+fn sd_restore_local_backup_rejects_tampered_sd_mk_middle() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    let mut tampered = created.sd_mk_backup.clone();
+    let middle = tampered.len() / 2;
+    tampered[middle] ^= 0x01;
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: created.pok_local_backup.clone(),
+            sd_mk_backup: tampered,
+        },
+        TborStatus::MaskedKeyDecodeFailed,
+    );
+}
+
+/// Verify that two all-zero local backups cannot restore an SD.
+#[test]
+fn sd_restore_local_backup_rejects_both_backups_zeroed() {
+    let seed = mach_seed();
+    let sata = CaKey::generate();
+    let pota = CaKey::generate();
+
+    let created = create_sd_on_first_device(&seed, &sata, &pota);
+
+    let ctx = TestCtx::new();
+    let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
+
+    ctx.expect_fw_reject(
+        &TborSdRestoreLocalBackupReq {
+            session_id: session.session_id,
+            pok_local_backup: vec![0u8; MASKED_SD_LEN],
+            sd_mk_backup: vec![0u8; SD_MK_BACKUP_LEN],
+        },
+        TborStatus::InvalidArg,
+    );
+}
