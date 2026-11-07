@@ -7,6 +7,21 @@ on:
     branches: [ "main" ]
 
 jobs:
+  fuzz_checks:
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: fuzz
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - run: rustup toolchain install nightly
+
+    - run: cargo +nightly fmt -- --check
+    - run: cargo clippy -- -D warnings
+
   fuzz:
     runs-on: ubuntu-24.04
 
@@ -77,7 +92,7 @@ jobs:
     - run: cargo install --root "${{ runner.tool_cache }}/cargo-fuzz" --version ${{ env.CARGO_FUZZ_VERSION }} cargo-fuzz --locked
 
     # Build and then run the fuzz target.
-    - run: cargo +nightly fuzz build ${{ matrix.fuzz_target }}
+    - run: cargo +nightly fuzz build ${{ matrix.fuzz_target }} --features emu
     - run: cargo +nightly fuzz run ${{ matrix.fuzz_target }} --features emu -- -max_total_time=${{ env.FUZZ_TIME }}
 
     # Upload fuzzing artifacts on failure for post-mortem debugging.
