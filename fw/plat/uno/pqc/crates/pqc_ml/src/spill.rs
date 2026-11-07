@@ -4,9 +4,10 @@
 //! dTCM.
 //!
 //! Signing expands `A` once per attempt. A core's 32 KB dTCM holds the
-//! accumulators plus whatever is left over, which for ML-DSA-44 is the
-//! whole 16-element matrix but for ML-DSA-87 is 12 of 56 -- so the other 44
-//! are derived again on every retry, at about 43 K cycles each.
+//! accumulators plus whatever is left over, packed three bytes to a
+//! coefficient: for ML-DSA-44 that is the whole 16-element matrix, but for
+//! ML-DSA-87 it is 16 of 56 -- so the other 40 would be derived again on
+//! every retry, at about 43 K cycles each.
 //!
 //! GSRAM is slower than dTCM but far cheaper than re-deriving: a burst read
 //! of one polynomial costs about 9 K cycles against 43 K for the five
@@ -22,9 +23,9 @@ use crate::DSA_N;
 
 /// Matrix elements one signature can spill.
 ///
-/// ML-DSA-87 is the worst case: a 56-element matrix with 12 of them held in
+/// ML-DSA-87 is the worst case: a 56-element matrix with 16 of them held in
 /// dTCM. No parameter set spills more.
-pub const MATRIX_SLOTS: usize = 44;
+pub const MATRIX_SLOTS: usize = 40;
 
 /// Key-derived transforms one signature can spill: `s1` (l of them) plus
 /// `s2` and `t0` (k each). ML-DSA-87's 7 + 8 + 8 is the worst case.
@@ -38,26 +39,34 @@ const MATRIX_WORDS: usize = PACKED_WORDS;
 /// bounded by 2^24, so they are stored unpacked.
 const KEY_WORDS: usize = DSA_N;
 
-/// Words one core needs for both regions.
-const NEEDED_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS + KEY_SLOTS * KEY_WORDS;
+/// Words the matrix region takes. The key region follows it.
+const MATRIX_REGION_WORDS: usize = MATRIX_SLOTS * MATRIX_WORDS;
 
 static mut BASE: *mut i32 = core::ptr::null_mut();
 
+/// Key-transform slots the region has room for above the matrix region, up
+/// to [`KEY_SLOTS`].
+static mut KEY_CAP: usize = 0;
+
 /// Hand the signer a region to spill into.
 ///
-/// A region smaller than [`NEEDED_WORDS`] is refused outright rather than
+/// A region smaller than the matrix region is refused outright rather than
 /// half-used: the signer already falls back to re-deriving whatever it
-/// cannot spill, so losing the region costs speed and nothing else.
+/// cannot spill, so losing the region costs speed and nothing else. Key
+/// transforms take as many slots as fit above the matrix region, up to
+/// [`KEY_SLOTS`], and the signer transforms the rest again each attempt.
 ///
 /// # Safety
 /// `base` must be valid for `words` `i32` writes, word aligned, and
 /// reserved for this core alone for the lifetime of the program.
 pub unsafe fn init(base: *mut i32, words: usize) {
-    BASE = if words >= NEEDED_WORDS {
-        base
+    if words >= MATRIX_REGION_WORDS {
+        BASE = base;
+        KEY_CAP = ((words - MATRIX_REGION_WORDS) / KEY_WORDS).min(KEY_SLOTS);
     } else {
-        core::ptr::null_mut()
-    };
+        BASE = core::ptr::null_mut();
+        KEY_CAP = 0;
+    }
 }
 
 /// Address of matrix slot `i`, if it exists.
@@ -83,10 +92,10 @@ pub(crate) fn matrix_slot(i: usize) -> Option<*mut i32> {
 pub(crate) fn key_slot(j: usize) -> Option<*mut i32> {
     // SAFETY: as `matrix_slot`.
     unsafe {
-        if BASE.is_null() || j >= KEY_SLOTS {
+        if BASE.is_null() || j >= KEY_CAP {
             None
         } else {
-            Some(BASE.add(MATRIX_SLOTS * MATRIX_WORDS + j * KEY_WORDS))
+            Some(BASE.add(MATRIX_REGION_WORDS + j * KEY_WORDS))
         }
     }
 }
@@ -109,11 +118,7 @@ pub(crate) unsafe fn load(dst: &mut [i32; DSA_N], src: *const i32) {
 
 /// Words a matrix element occupies when packed three bytes to a
 /// coefficient.
-const PACKED_WORDS: usize = DSA_N * 3 / 4;
-
-/// Where the packed words are staged inside the caller's polynomial while
-/// they are expanded in place.
-const PACKED_OFF: usize = DSA_N - PACKED_WORDS;
+pub(crate) const PACKED_WORDS: usize = DSA_N * 3 / 4;
 
 /// Copy a matrix element out to a spill slot, three bytes to a coefficient.
 ///
@@ -139,40 +144,50 @@ pub(crate) unsafe fn store_packed(dst: *mut i32, src: &[i32; DSA_N]) {
     for c in 0..DSA_N / COEFFS {
         for g in 0..COEFFS / 4 {
             let i = c * COEFFS + 4 * g;
-            let a = src[i] as u32;
-            let b = src[i + 1] as u32;
-            let e = src[i + 2] as u32;
-            let d = src[i + 3] as u32;
-            chunk[3 * g] = (a | (b << 24)) as i32;
-            chunk[3 * g + 1] = ((b >> 8) | (e << 16)) as i32;
-            chunk[3 * g + 2] = ((e >> 16) | (d << 8)) as i32;
+            chunk[3 * g..3 * g + 3].copy_from_slice(&pack4(&src[i..i + 4]));
         }
         burst(dst.add(c * WORDS), chunk.as_ptr(), WORDS);
     }
 }
 
-/// Read a packed matrix element back, expanding it in place.
+/// Four 24-bit coefficients as three little-endian words: the layout of
+/// a spilled matrix element, and of one kept in dTCM.
+#[inline(always)]
+fn pack4(v: &[i32]) -> [i32; 3] {
+    let (a, b, e, d) = (v[0] as u32, v[1] as u32, v[2] as u32, v[3] as u32);
+    [
+        (a | (b << 24)) as i32,
+        ((b >> 8) | (e << 16)) as i32,
+        ((e >> 16) | (d << 8)) as i32,
+    ]
+}
+
+/// Pack a matrix element into dTCM, in the spill's three-bytes-a-
+/// coefficient layout, for [`crate::dsa::ntt::poly_pointwise_acc_montgomery_packed`].
 ///
-/// The packed words are read into the tail of `dst` and expanded forwards,
-/// which needs no second buffer: the write cursor is `4g` while the read
-/// cursor is `PACKED_OFF + 3g`, so it only catches up at the last group,
-/// where the three words are already in registers before the four are
-/// written.
+/// Every element of `src` must be in `[0, 2^24)`.
+///
+/// # Panics
+/// If `dst` holds fewer than [`PACKED_WORDS`] words.
+pub(crate) fn pack(dst: &mut [i32], src: &[i32; DSA_N]) {
+    for (w, v) in dst[..PACKED_WORDS]
+        .as_chunks_mut::<3>()
+        .0
+        .iter_mut()
+        .zip(src.as_chunks::<4>().0)
+    {
+        *w = pack4(v);
+    }
+}
+
+/// Read a packed matrix element back without expanding it, for
+/// [`crate::dsa::ntt::poly_pointwise_acc_montgomery_packed`].
 ///
 /// # Safety
 /// `src` must come from [`slot`] and must have been written by
-/// [`store_packed`].
-pub(crate) unsafe fn load_packed(dst: &mut [i32; DSA_N], src: *const i32) {
-    burst(dst.as_mut_ptr().add(PACKED_OFF), src, PACKED_WORDS);
-    for g in 0..DSA_N / 4 {
-        let w0 = dst[PACKED_OFF + 3 * g] as u32;
-        let w1 = dst[PACKED_OFF + 3 * g + 1] as u32;
-        let w2 = dst[PACKED_OFF + 3 * g + 2] as u32;
-        dst[4 * g] = (w0 & 0x00FF_FFFF) as i32;
-        dst[4 * g + 1] = (((w0 >> 24) | (w1 << 8)) & 0x00FF_FFFF) as i32;
-        dst[4 * g + 2] = (((w1 >> 16) | (w2 << 16)) & 0x00FF_FFFF) as i32;
-        dst[4 * g + 3] = (w2 >> 8) as i32;
-    }
+/// [`store_packed`]; `dst` must hold at least [`PACKED_WORDS`] words.
+pub(crate) unsafe fn load_packed_words(dst: &mut [i32], src: *const i32) {
+    burst(dst[..PACKED_WORDS].as_mut_ptr(), src, PACKED_WORDS);
 }
 
 /// Move `words` words, eight at a time.
@@ -181,7 +196,7 @@ pub(crate) unsafe fn load_packed(dst: &mut [i32; DSA_N], src: *const i32) {
 /// Both pointers must be valid for `words` words and word aligned, and
 /// `words` must be a multiple of eight.
 #[inline(always)]
-unsafe fn burst(dst: *mut i32, src: *const i32, words: usize) {
+pub(crate) unsafe fn burst(dst: *mut i32, src: *const i32, words: usize) {
     // Eight words per transaction rather than four. GSRAM costs 121.6
     // cycles for a single-word load and 35.4 per word in a four-word
     // burst, so most of it is per-transaction overhead -- which a wider

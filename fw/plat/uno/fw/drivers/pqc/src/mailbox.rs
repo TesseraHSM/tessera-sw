@@ -6,12 +6,33 @@
 //! Mirrors `mailbox.rs` in the FP firmware (`fw/plat/uno/pqc/app/src/`);
 //! the two layouts must be kept in step.
 //!
-//! One mailbox per FP core, depth one.  That is sufficient by
-//! construction: [`PqcDriver::acquire_any`](crate::PqcDriver::acquire_any)
-//! hands out exclusive use of a core and does not take it back until the
-//! operation finishes, so a core can never have two requests outstanding.
-//! Hence a mailbox rather than the 16-entry rings the legacy fastpath used
-//! — which also matters because PSRAM is scarce.
+//! One mailbox per engine, depth one, and two engines -- lanes -- per FP
+//! core. That is sufficient by construction:
+//! [`PqcDriver::acquire_any`](crate::PqcDriver::acquire_any) hands out
+//! exclusive use of a lane and does not take it back until the operation
+//! finishes, so a lane never has two requests outstanding. Hence mailboxes
+//! rather than the 16-entry rings the legacy fastpath used -- which also
+//! matters because PSRAM is scarce.
+//!
+//! A core serves its two lanes in the order they were posted, so it can
+//! start the next request the moment it answers one, with no round trip
+//! through the HSM in between.
+//!
+//! Lanes 0-2 are in PSRAM, laid out below. PSRAM has no room for three
+//! more, so lanes 3-5 sit in the GSRAM window the SP fences to the
+//! fastpath cores, at the top of each core's 56 KB share: above the
+//! 0xA800 bytes its signer spills ML-DSA matrix elements and key
+//! transforms into, a mailbox and then a full-size operand slot.
+//!
+//! ```text
+//! 0x611D_0000 + 0xE000*n   core n's share
+//!   +0x0000    signer spill   0xA800
+//!   +0xA800    lane 3+n mailbox  0x100
+//!   +0xA900    lane 3+n operand slot 0x1F80
+//! ```
+//!
+//! Both hold operands in transit exactly as PSRAM does, private keys
+//! included, and are scrubbed the same way.
 //!
 //! # Placement
 //!
@@ -48,6 +69,12 @@
 //! The HSM then polls `response_seq` rather than an interrupt pending bit:
 //! block 1's pending bits belong to the IPC driver, whose `wake()` clears
 //! every bit it processes and would race a reply away.
+//!
+//! The lanes outlive a warm reset that keeps PSRAM and GSRAM, but this
+//! side's count restarts with every boot. So the first acquire withdraws
+//! whatever each lane holds ([`reset_lane`]), and no request is numbered
+//! as its lane's last answer: the core would take it as answered already,
+//! and this side would take that old answer as the new request's.
 
 use core::ptr::read_volatile;
 use core::ptr::write_volatile;
@@ -55,6 +82,7 @@ use core::ptr::write_volatile;
 use tsra_fw_bulk_copy::copy_slice;
 
 use crate::types::EngineId;
+use crate::types::ENGINES;
 
 /// Base of the mailbox array in the global SoC map.  An FP core addresses
 /// the same memory core-locally at `0x0001_0980`.
@@ -77,8 +105,38 @@ pub const SEED_LEN: usize = 32;
 /// whose macros the SP defines but never consumes.
 pub const SLOT_SIZE: usize = 0x1F80;
 
-/// Global address of each core's operand slot.
-const SLOT_ADDRS: [usize; 3] = [0xA3E0_0D00, 0xA3E0_4080, 0xA3E0_6000];
+/// Base of the GSRAM window the SP fences to the fastpath cores
+/// (`FP_DSA_CACHE` in the GSRAM map), and each core's share of it. Mirrors
+/// the FP side.
+const FP_WINDOW_BASE: usize = 0x611D_0000;
+const FP_WINDOW_STRIDE: usize = 0xE000;
+
+/// Offset of a core's second lane within its share of the window: past
+/// the 0xA800 bytes its signer spills ML-DSA matrix elements and key
+/// transforms into.
+const LANE2_OFFSET: usize = 0xA800;
+
+const _: () = assert!(LANE2_OFFSET + MAILBOX_STRIDE + SLOT_SIZE <= FP_WINDOW_STRIDE);
+
+/// Global address of each engine's mailbox.
+const MAILBOX_ADDRS: [usize; ENGINES] = [
+    MAILBOX_BASE,
+    MAILBOX_BASE + MAILBOX_STRIDE,
+    MAILBOX_BASE + 2 * MAILBOX_STRIDE,
+    FP_WINDOW_BASE + LANE2_OFFSET,
+    FP_WINDOW_BASE + FP_WINDOW_STRIDE + LANE2_OFFSET,
+    FP_WINDOW_BASE + 2 * FP_WINDOW_STRIDE + LANE2_OFFSET,
+];
+
+/// Global address of each engine's operand slot.
+const SLOT_ADDRS: [usize; ENGINES] = [
+    0xA3E0_0D00,
+    0xA3E0_4080,
+    0xA3E0_6000,
+    MAILBOX_ADDRS[3] + MAILBOX_STRIDE,
+    MAILBOX_ADDRS[4] + MAILBOX_STRIDE,
+    MAILBOX_ADDRS[5] + MAILBOX_STRIDE,
+];
 
 /// Word indices within a mailbox.
 mod word {
@@ -241,8 +299,8 @@ pub fn write_slot(engine: EngineId, offset: usize, data: &[u8]) -> bool {
     let base = SLOT_ADDRS[engine.raw() as usize] as *mut u8;
 
     // SAFETY: the range is checked against SLOT_SIZE above, the slot belongs
-    // to this core alone, and it lies outside every region described to the
-    // linker. Volatile because an FP core reads these bytes.
+    // to this engine alone, and it lies outside every region described to
+    // the linker. Volatile because an FP core reads these bytes.
     //
     // Copied a word at a time where alignment allows. PSRAM is uncached and
     // off-core, so each access is expensive and a byte-at-a-time loop costs
@@ -351,9 +409,9 @@ pub fn read_slot_at(engine: EngineId, offset: usize, out: &mut [u8]) -> bool {
     true
 }
 
-/// Base of one core's mailbox.
+/// Base of one engine's mailbox.
 fn mailbox(engine: EngineId) -> *mut u32 {
-    (MAILBOX_BASE + engine.raw() as usize * MAILBOX_STRIDE) as *mut u32
+    MAILBOX_ADDRS[engine.raw() as usize] as *mut u32
 }
 
 /// Data memory barrier.
@@ -381,7 +439,7 @@ fn isb() {
     unsafe { core::arch::asm!("isb sy", options(nostack, preserves_flags)) };
 }
 
-/// Base and size of the window covering the mailboxes and all three slots.
+/// Base and size of the window covering the PSRAM mailboxes and slots.
 const WINDOW_BASE: usize = 0xA3E0_0000;
 const WINDOW_SIZE: usize = 32 * 1024;
 
@@ -444,7 +502,7 @@ pub unsafe fn map_normal() {
 pub fn post_request(engine: EngineId, seq: u32, params: &RequestParams<'_>) -> u32 {
     let mb = mailbox(engine);
 
-    // SAFETY: a fixed 256-byte slot in PSRAM reserved for this core, outside
+    // SAFETY: a fixed 256-byte mailbox reserved for this engine, outside
     // every region described to the linker. Volatile because the FP core
     // reads it.
     unsafe {
@@ -505,8 +563,31 @@ pub fn take_response(engine: EngineId, seq: u32) -> Option<Response> {
 
 /// True if `engine`'s core has answered request `seq`.
 pub fn has_answered(engine: EngineId, seq: u32) -> bool {
+    response_seq(engine) == seq
+}
+
+/// Sequence number of the request `engine`'s core answered last.
+pub fn response_seq(engine: EngineId) -> u32 {
     // SAFETY: as `take_response`.
-    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) == seq }
+    unsafe { read_volatile(mailbox(engine).add(word::RESPONSE_SEQ)) }
+}
+
+/// Withdraw whatever request `engine`'s lane holds, by numbering it as
+/// answered, and [`scrub`] the lane.
+///
+/// For the first acquire after boot, before any lane is handed out. Nothing
+/// can be serving one then: every reset restarts the fastpath cores along
+/// with this one -- the SP pulses all their resets together and reloads
+/// every image (`reset_cpu_cores`) -- and a core reads its lanes only when
+/// rung, which only this driver does, and only for a lane it holds. Were
+/// this core ever restarted alone, a request from before could still be
+/// running, and its lane would have to be held back until answered
+/// instead.
+pub fn reset_lane(engine: EngineId) {
+    let answered = response_seq(engine);
+    // SAFETY: as `post_request`.
+    unsafe { write_volatile(mailbox(engine).add(word::REQUEST_SEQ), answered) };
+    scrub(engine);
 }
 
 /// Wipe everything a request can leave in `engine`'s shared memory: the
@@ -562,12 +643,14 @@ pub struct CrashRecord {
     pub stack_free: u32,
 }
 
-/// Read the crash record a core left behind, if it left one.
+/// Read the crash record `engine`'s core left behind, if it left one.
 ///
 /// Returns `None` when the magic is absent, which is the normal case: a
 /// core that is merely slow has not written anything here.
 pub fn crash_record(engine: EngineId) -> Option<CrashRecord> {
-    let mb = mailbox(engine);
+    // A core records a crash in its PSRAM mailbox, whichever lane it was
+    // serving.
+    let mb = MAILBOX_ADDRS[engine.core() as usize] as *mut u32;
 
     // SAFETY: words 48..57 of this core's 256-byte mailbox, written only by
     // that core and only on its way down. Volatile because the FP core

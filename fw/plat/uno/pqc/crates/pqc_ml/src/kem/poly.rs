@@ -71,171 +71,56 @@ fn unsigned(x: i16) -> u16 {
     (t + ((t >> 31) & Q as i32)) as u16
 }
 
+/// Compress every coefficient to `d` bits and pack them little-endian
+/// (ByteEncode_d of FIPS 203), `d` in 1..=11.
+///
+/// One loop serves every `d`, a word at a time. Specialised byte shuffles
+/// for each `d` were a little quicker per coefficient but took 0.9 KB of a
+/// 32 KB iTCM for what is a few percent of a ciphertext operation.
 pub fn poly_compress(r: &mut [u8], a: &Poly, d: u8) {
-    match d {
-        4 => {
-            // Exact output length, so the byte writes need no check.
-            let r = &mut r[..128];
-            for i in 0..N / 2 {
-                let t0 = compress(unsigned(a[2 * i]), 4);
-                let t1 = compress(unsigned(a[2 * i + 1]), 4);
-                r[i] = (t0 | (t1 << 4)) as u8;
+    let out = &mut r[..32 * d as usize];
+    let d = d as u32;
+    let mut words = out.as_chunks_mut::<4>().0.iter_mut();
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for &c in a.iter() {
+        let t = compress(unsigned(c), d as u8) as u32;
+        acc |= t << bits;
+        bits += d;
+        if bits >= 32 {
+            if let Some(w) = words.next() {
+                *w = acc.to_le_bytes();
             }
+            // `bits - d` of `t` went into the word just written; the rest
+            // starts the next one. 32 - (bits - d) is at most 11.
+            acc = t >> (32 - (bits - d));
+            bits -= 32;
         }
-        5 => {
-            // Exact output length, so the byte writes need no check.
-            let r = &mut r[..160];
-            for i in 0..N / 8 {
-                let mut t = [0u16; 8];
-                for j in 0..8 {
-                    t[j] = compress(unsigned(a[8 * i + j]), 5);
-                }
-                r[5 * i] = (t[0] | (t[1] << 5)) as u8;
-                r[5 * i + 1] = ((t[1] >> 3) | (t[2] << 2) | (t[3] << 7)) as u8;
-                r[5 * i + 2] = ((t[3] >> 1) | (t[4] << 4)) as u8;
-                r[5 * i + 3] = ((t[4] >> 4) | (t[5] << 1) | (t[6] << 6)) as u8;
-                r[5 * i + 4] = ((t[6] >> 2) | (t[7] << 3)) as u8;
-            }
-        }
-        10 => {
-            // Exact output length, so the byte writes need no check.
-            let r = &mut r[..320];
-            for i in 0..N / 4 {
-                let mut t = [0u16; 4];
-                for j in 0..4 {
-                    t[j] = compress(unsigned(a[4 * i + j]), 10);
-                }
-                r[5 * i] = t[0] as u8;
-                r[5 * i + 1] = ((t[0] >> 8) | (t[1] << 2)) as u8;
-                r[5 * i + 2] = ((t[1] >> 6) | (t[2] << 4)) as u8;
-                r[5 * i + 3] = ((t[2] >> 4) | (t[3] << 6)) as u8;
-                r[5 * i + 4] = (t[3] >> 2) as u8;
-            }
-        }
-        11 => {
-            // Exact output length, so the byte writes need no check.
-            let r = &mut r[..352];
-            for i in 0..N / 8 {
-                let mut t = [0u16; 8];
-                for j in 0..8 {
-                    t[j] = compress(unsigned(a[8 * i + j]), 11);
-                }
-                r[11 * i] = t[0] as u8;
-                r[11 * i + 1] = ((t[0] >> 8) | (t[1] << 3)) as u8;
-                r[11 * i + 2] = ((t[1] >> 5) | (t[2] << 6)) as u8;
-                r[11 * i + 3] = (t[2] >> 2) as u8;
-                r[11 * i + 4] = ((t[2] >> 10) | (t[3] << 1)) as u8;
-                r[11 * i + 5] = ((t[3] >> 7) | (t[4] << 4)) as u8;
-                r[11 * i + 6] = ((t[4] >> 4) | (t[5] << 7)) as u8;
-                r[11 * i + 7] = (t[5] >> 1) as u8;
-                r[11 * i + 8] = ((t[5] >> 9) | (t[6] << 2)) as u8;
-                r[11 * i + 9] = ((t[6] >> 6) | (t[7] << 5)) as u8;
-                r[11 * i + 10] = (t[7] >> 3) as u8;
-            }
-        }
-        _ => {}
     }
 }
 
+/// Unpack `d`-bit little-endian values (ByteDecode_d) and decompress them,
+/// `d` in 1..=11; the inverse of [`poly_compress`].
 pub fn poly_decompress(r: &mut Poly, buf: &[u8], d: u8) {
-    match d {
-        4 => {
-            // Exact input length, so the byte reads need no check.
-            let buf = &buf[..128];
-            for i in 0..N / 2 {
-                r[2 * i] = decompress(buf[i] as u16 & 0xF, 4) as i16;
-                r[2 * i + 1] = decompress(buf[i] as u16 >> 4, 4) as i16;
-            }
-        }
-        5 => {
-            // Exact input length, so the byte reads need no check.
-            let buf = &buf[..160];
-            for i in 0..N / 8 {
-                let o = 5 * i;
-                r[8 * i] = decompress((buf[o] as u16) & 0x1F, 5) as i16;
-                r[8 * i + 1] =
-                    decompress(((buf[o] as u16) >> 5 | (buf[o + 1] as u16) << 3) & 0x1F, 5) as i16;
-                r[8 * i + 2] = decompress(((buf[o + 1] as u16) >> 2) & 0x1F, 5) as i16;
-                r[8 * i + 3] = decompress(
-                    ((buf[o + 1] as u16) >> 7 | (buf[o + 2] as u16) << 1) & 0x1F,
-                    5,
-                ) as i16;
-                r[8 * i + 4] = decompress(
-                    ((buf[o + 2] as u16) >> 4 | (buf[o + 3] as u16) << 4) & 0x1F,
-                    5,
-                ) as i16;
-                r[8 * i + 5] = decompress(((buf[o + 3] as u16) >> 1) & 0x1F, 5) as i16;
-                r[8 * i + 6] = decompress(
-                    ((buf[o + 3] as u16) >> 6 | (buf[o + 4] as u16) << 2) & 0x1F,
-                    5,
-                ) as i16;
-                r[8 * i + 7] = decompress(((buf[o + 4] as u16) >> 3) & 0x1F, 5) as i16;
-            }
-        }
-        10 => {
-            // Exact input length, so the byte reads need no check.
-            let buf = &buf[..320];
-            for i in 0..N / 4 {
-                let o = 5 * i;
-                r[4 * i] =
-                    decompress((buf[o] as u16 | ((buf[o + 1] as u16) << 8)) & 0x3FF, 10) as i16;
-                r[4 * i + 1] = decompress(
-                    (((buf[o + 1] as u16) >> 2) | ((buf[o + 2] as u16) << 6)) & 0x3FF,
-                    10,
-                ) as i16;
-                r[4 * i + 2] = decompress(
-                    (((buf[o + 2] as u16) >> 4) | ((buf[o + 3] as u16) << 4)) & 0x3FF,
-                    10,
-                ) as i16;
-                r[4 * i + 3] = decompress(
-                    (((buf[o + 3] as u16) >> 6) | ((buf[o + 4] as u16) << 2)) & 0x3FF,
-                    10,
-                ) as i16;
-            }
-        }
-        11 => {
-            // Exact input length, so the byte reads need no check.
-            let buf = &buf[..352];
-            for i in 0..N / 8 {
-                let o = 11 * i;
-                r[8 * i] =
-                    decompress((buf[o] as u16 | ((buf[o + 1] as u16) << 8)) & 0x7FF, 11) as i16;
-                r[8 * i + 1] = decompress(
-                    (((buf[o + 1] as u16) >> 3) | ((buf[o + 2] as u16) << 5)) & 0x7FF,
-                    11,
-                ) as i16;
-                r[8 * i + 2] = decompress(
-                    (((buf[o + 2] as u16) >> 6)
-                        | ((buf[o + 3] as u16) << 2)
-                        | ((buf[o + 4] as u16) << 10))
-                        & 0x7FF,
-                    11,
-                ) as i16;
-                r[8 * i + 3] = decompress(
-                    (((buf[o + 4] as u16) >> 1) | ((buf[o + 5] as u16) << 7)) & 0x7FF,
-                    11,
-                ) as i16;
-                r[8 * i + 4] = decompress(
-                    (((buf[o + 5] as u16) >> 4) | ((buf[o + 6] as u16) << 4)) & 0x7FF,
-                    11,
-                ) as i16;
-                r[8 * i + 5] = decompress(
-                    (((buf[o + 6] as u16) >> 7)
-                        | ((buf[o + 7] as u16) << 1)
-                        | ((buf[o + 8] as u16) << 9))
-                        & 0x7FF,
-                    11,
-                ) as i16;
-                r[8 * i + 6] = decompress(
-                    (((buf[o + 8] as u16) >> 2) | ((buf[o + 9] as u16) << 6)) & 0x7FF,
-                    11,
-                ) as i16;
-                r[8 * i + 7] = decompress(
-                    (((buf[o + 9] as u16) >> 5) | ((buf[o + 10] as u16) << 3)) & 0x7FF,
-                    11,
-                ) as i16;
-            }
-        }
-        _ => {}
+    let src = &buf[..32 * d as usize];
+    let d = d as u32;
+    let mask = (1u32 << d) - 1;
+    let mut words = src.as_chunks::<4>().0.iter();
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    for c in r.iter_mut() {
+        let t = if bits >= d {
+            let t = acc & mask;
+            acc >>= d;
+            bits -= d;
+            t
+        } else {
+            let w = words.next().map_or(0, |w| u32::from_le_bytes(*w));
+            let t = (acc | (w << bits)) & mask;
+            acc = w >> (d - bits);
+            bits += 32 - d;
+            t
+        };
+        *c = decompress(t as u16, d as u8) as i16;
     }
 }

@@ -10,4 +10,6 @@ pub mod sampling;
 pub mod sign;
 pub mod verify;
 
+// The reference transforms' twiddles; the ARM ones carry their own.
+#[cfg(not(target_arch = "arm"))]
 mod zetas;
