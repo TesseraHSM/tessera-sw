@@ -402,9 +402,9 @@ fuzz_target!(|input: FuzzInput| {
             Fault::MissingOob => Some(TborStatus::InvalidArg),
             Fault::PolicyMismatch => Some(TborStatus::InvalidArg),
             Fault::CloningDisabled => Some(TborStatus::SdPeerCloningNotAllowed),
-            Fault::EmptyMfgrChain | Fault::EmptyOwnerChain | Fault::EmptyPartOwnerChain => {
-                Some(TborStatus::InvalidArg)
-            }
+            // The device-owner chain is optional; the other two chains are required.
+            Fault::EmptyOwnerChain => None,
+            Fault::EmptyMfgrChain | Fault::EmptyPartOwnerChain => Some(TborStatus::InvalidArg),
             Fault::WrongSataAnchor | Fault::MismatchedEvidenceLeaf => Some(TborStatus::InvalidArg),
             Fault::InvalidReportSignature if !mutation_is_noop => Some(TborStatus::InvalidArg),
             Fault::InvalidSenderTag if !mutation_is_noop => {
