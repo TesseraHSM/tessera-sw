@@ -16,6 +16,7 @@ Copyright (c) OASIS Open 2023. All Rights Reserved.
 PKCS 11 TC IPR statement: https://www.oasis-open.org/committees/pkcs11/ipr.php
 
 The files keep their upstream copyright header, so the copyright check
-(cargo xtask precheck --copyright) skips this directory (THIRD_PARTY_DIRS in
-xtask/src/copyright.rs). Do not edit them. To update, replace them from the
-upstream location and update the hashes above.
+(cargo xtask precheck --copyright) skips these three files by name
+(THIRD_PARTY_FILES in xtask/src/copyright.rs); any other file here is checked
+as usual. Do not edit them. To update, replace them from the upstream location
+and update the hashes above.

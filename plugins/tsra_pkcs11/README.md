@@ -235,7 +235,7 @@ generates `tsra.h` with cbindgen.
 
 `include/pkcs11-v3.1/` holds the OASIS PKCS #11 v3.1 headers, vendored
 unmodified under their own copyright; see the `NOTICE` file there. The
-copyright check skips that directory.
+copyright check skips those three files by name.
 
 ## Configuration
 

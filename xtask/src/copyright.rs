@@ -53,16 +53,19 @@ impl Copyright {
     const COPYRIGHT_LINE1: &str = "Copyright (c) Microsoft Corporation.";
     const COPYRIGHT_LINE2: &str = "Licensed under the MIT License.";
 
-    /// Directories vendored from third parties. Their files keep the
-    /// upstream copyright header; stamping the Microsoft header over it
-    /// (what --fix does) would misattribute the original authors, so both
-    /// the check and the fix skip them.
-    const THIRD_PARTY_DIRS: &[&str] = &["plugins/tsra_pkcs11/include/pkcs11-v3.1"];
+    /// Files vendored from third parties, named one by one so that nothing
+    /// added next to them escapes the check. They keep the upstream copyright
+    /// header; stamping the Microsoft header over it (what --fix does) would
+    /// misattribute the original authors, so both the check and the fix skip
+    /// them.
+    const THIRD_PARTY_FILES: &[&str] = &[
+        "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11.h",
+        "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11f.h",
+        "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11t.h",
+    ];
 
     fn is_third_party(path: &Path) -> bool {
-        Self::THIRD_PARTY_DIRS
-            .iter()
-            .any(|dir| path.starts_with(dir))
+        Self::THIRD_PARTY_FILES.iter().any(|f| path == Path::new(f))
     }
 
     fn check_copyright(path: &Path, fix: bool) -> anyhow::Result<()> {
@@ -230,16 +233,15 @@ mod tests {
     }
 
     #[test]
-    fn third_party_dirs_are_exempt() {
+    fn only_the_listed_third_party_files_are_exempt() {
         use std::path::Path;
 
         assert!(Copyright::is_third_party(Path::new(
             "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11.h"
         )));
-        // Component-wise match: a sibling dir sharing the prefix string is
-        // not exempt.
+        // A new file next to them is checked as usual.
         assert!(!Copyright::is_third_party(Path::new(
-            "plugins/tsra_pkcs11/include/pkcs11-v3.1-extras/pkcs11.h"
+            "plugins/tsra_pkcs11/include/pkcs11-v3.1/pkcs11_extra.h"
         )));
         assert!(!Copyright::is_third_party(Path::new(
             "plugins/tsra_pkcs11/src/tsra_pkcs11_module.c"
