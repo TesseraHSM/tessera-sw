@@ -9,8 +9,9 @@ own exit status says nothing useful, it is non-zero whenever any test fails.
 
 A test's outcome is its call-phase record in report.jsonl: passed, failed, or
 xfailed (an xfail is a skipped record with wasxfail). A test without a call
-record was skipped or broke in set-up. Crashes come from results.json, where
-the isolated runner records the tests a crashing child process took down.
+record was skipped or broke in set-up, and a test whose teardown fails after
+it passed is an error too. Crashes come from results.json, where the isolated
+runner records the tests a crashing child process took down.
 
 gate: every listed test passed, and nothing crashed except the baseline's
 known crashes (the gate runs whole files, so it meets them too).
@@ -51,6 +52,9 @@ def outcomes(out_dir):
                 result[n] = "xfailed" if xfail else r["outcome"]
             elif (r["when"] == "setup") and (r["outcome"] != "passed"):
                 result.setdefault(n, "skipped" if r["outcome"] == "skipped" else "error")
+            elif r["when"] == "teardown":
+                if (r["outcome"] == "failed") and (result.get(n) == "passed"):
+                    result[n] = "error"
     with open(os.path.join(out_dir, "results.json")) as f:
         units = json.load(f)["units"]
     for u in units:
