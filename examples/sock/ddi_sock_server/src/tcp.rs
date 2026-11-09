@@ -1,29 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
-use std::io;
 use std::sync::Arc;
 
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tsra_ddi_sock_proto::MAX_FRAME;
 use tsra_ddi_sock_proto::ProtoError;
-use tsra_ddi_sock_proto::RequestFrame;
 use tsra_ddi_sock_proto::ResponseFrame;
 
 use super::Connection;
 use super::SocketHsm;
-
-async fn read_request(stream: &mut TcpStream) -> Result<RequestFrame, ProtoError> {
-    let length = stream.read_u32_le().await?;
-    if length > MAX_FRAME {
-        return Err(ProtoError::TooLarge(length));
-    }
-    let mut body = vec![0; length as usize];
-    stream.read_exact(&mut body).await?;
-    RequestFrame::decode(&body)
-}
 
 async fn write_response(
     stream: &mut TcpStream,
@@ -38,17 +24,23 @@ async fn write_response(
 async fn serve_connection(mut stream: TcpStream, hsm: Arc<SocketHsm>) -> Result<(), String> {
     let connection = Connection::new(hsm);
     loop {
-        let request = match read_request(&mut stream).await {
-            Ok(request) => request,
-            Err(ProtoError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Ok(());
-            }
-            Err(error) => return Err(format!("failed to read DDI request: {error}")),
+        let Some(request) = super::read_request_with_timeout(&mut stream).await? else {
+            return Ok(());
         };
-        let response = connection.execute(request).await?;
-        write_response(&mut stream, &response)
-            .await
-            .map_err(|error| format!("failed to write DDI response: {error}"))?;
+        let response =
+            match tokio::time::timeout(super::CONNECTION_READ_TIMEOUT, connection.execute(request))
+                .await
+            {
+                Ok(result) => result?,
+                Err(_elapsed) => return Ok(()),
+            };
+        tokio::time::timeout(
+            super::CONNECTION_READ_TIMEOUT,
+            write_response(&mut stream, &response),
+        )
+        .await
+        .map_err(|_elapsed| "failed to write DDI response: timed out".to_string())?
+        .map_err(|error| format!("failed to write DDI response: {error}"))?;
     }
 }
 
@@ -108,6 +100,7 @@ mod tests {
     use tsra_ddi_sock::DdiSockDev;
     use tsra_ddi_sock_proto::OobItem;
     use tsra_ddi_sock_proto::Request;
+    use tsra_ddi_sock_proto::RequestFrame;
     use tsra_ddi_tbor_types::SESSION_SEED_LEN;
     use tsra_ddi_tbor_types::TborGetCertChainInfoReq;
     use tsra_ddi_tbor_types::TborGetCertReq;
@@ -892,6 +885,123 @@ mod tests {
                 super::super::execute_frame(Arc::clone(&hsm), RequestFrame::Reset).await,
                 ResponseFrame::Reset { status: 0 }
             ));
+        });
+    }
+
+    #[test]
+    fn idle_timeout_disconnects_one_client_but_preserves_an_active_peer() {
+        let _guard = crate::test_partition_lock();
+        let hsm = crate::test_hsm();
+        // Pausing `Instant::now` requires `current_thread`; letting `sleep`
+        // auto-advance through the idle deadline is what makes it practical
+        // to actually let that deadline expire (rather than waiting out the
+        // real 5-minute window) in a test.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .expect("paused runtime");
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+            let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+            let serving = tokio::spawn(run_server(listener, Arc::clone(&hsm)));
+
+            let idle_endpoint = endpoint.clone();
+            let (idle_device, idle_session_id) = tokio::task::spawn_blocking(move || {
+                let device = DdiSock::default()
+                    .open_dev(&idle_endpoint)
+                    .expect("idle device");
+                device.erase().expect("initial reset");
+                let session = open_init(&device, 0);
+                tbor(&device, &session);
+                (device, session.session_id)
+            })
+            .await
+            .expect("idle session opened");
+
+            let active_endpoint = endpoint.clone();
+            let (mut active_device, active_session_id) = tokio::task::spawn_blocking(move || {
+                let device = DdiSock::default()
+                    .open_dev(&active_endpoint)
+                    .expect("active device");
+                // A distinct PSK ID (CryptoUser, slots 1..=7) so this session
+                // doesn't contend with the idle connection's CO slot (0).
+                let session = open_init(&device, 1);
+                tbor(&device, &session);
+                (device, session.session_id)
+            })
+            .await
+            .expect("active session opened");
+
+            assert!(hsm.sessions.read().await.contains_key(&idle_session_id));
+            assert!(hsm.sessions.read().await.contains_key(&active_session_id));
+            // `generation()` uses `blocking_read()`, which panics if called
+            // directly on this (non-blocking-pool) async task, so read the
+            // lock the ordinary async way instead.
+            let idle_generation = Arc::downgrade(
+                &hsm.sessions
+                    .read()
+                    .await
+                    .get(&idle_session_id)
+                    .expect("idle session owner")
+                    .generation,
+            );
+
+            // Run most, but not all, of the idle window: neither connection
+            // has gone idle long enough to be reclaimed yet.
+            tokio::time::sleep(super::super::IDLE_WAIT_TIMEOUT - Duration::from_secs(1)).await;
+            assert!(hsm.sessions.read().await.contains_key(&idle_session_id));
+            assert!(hsm.sessions.read().await.contains_key(&active_session_id));
+
+            // The "active" connection keeps talking, resetting its own
+            // idle-wait deadline; the "idle" connection sends nothing further
+            // from here on.
+            active_device = tokio::task::spawn_blocking(move || {
+                tbor(&active_device, &TborGetCertChainInfoReq::new(0));
+                active_device
+            })
+            .await
+            .expect("active connection stays busy");
+
+            // Elapse most (but comfortably less than all) of a second idle
+            // window. The idle connection's original deadline (never reset)
+            // is now long past, while the active connection's deadline
+            // (reset a moment ago) still has a healthy margin left, so only
+            // the idle one must be reclaimed.
+            tokio::time::sleep(super::super::IDLE_WAIT_TIMEOUT / 2).await;
+
+            // Disconnect cleanup runs on a task spawned from `Connection`'s
+            // `Drop`, so it may not have completed the instant the idle
+            // deadline elapses. `wait_for_cleanup` polls with real
+            // `std::time::Instant`/`std::thread::sleep`, not tokio's paused
+            // clock, so run it inside `spawn_blocking`: that both lets it
+            // observe genuine real-world progress and inhibits the paused
+            // clock's auto-advance while it does. A busy-poll driven by
+            // `tokio::task::yield_now` instead would race the auto-advance
+            // heuristic and can overshoot straight past the active
+            // connection's own (later) deadline.
+            tokio::task::spawn_blocking(move || wait_for_cleanup(idle_generation))
+                .await
+                .expect("idle connection's session is cleaned up");
+            assert!(
+                !hsm.sessions.read().await.contains_key(&idle_session_id),
+                "an idle connection's session must be cleaned up once its deadline elapses"
+            );
+            assert!(
+                hsm.sessions.read().await.contains_key(&active_session_id),
+                "a separate, actively used connection's session must not be affected"
+            );
+
+            // The surviving session must still be fully usable, not merely
+            // present in the ownership map.
+            tokio::task::spawn_blocking(move || {
+                tbor(&active_device, &TborGetCertChainInfoReq::new(0));
+            })
+            .await
+            .expect("active session still usable after the peer's idle disconnect");
+
+            drop(idle_device);
+            serving.abort();
         });
     }
 }

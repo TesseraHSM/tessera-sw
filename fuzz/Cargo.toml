@@ -160,6 +160,27 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_aes_gcm_encrypt_decrypt"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_aes_gcm_encrypt_decrypt.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_aes_xts_encrypt_decrypt"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_aes_xts_encrypt_decrypt.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_aes_xts_generate_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_aes_xts_generate_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_dispatcher_aes_fp"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_dispatcher_aes_fp.rs"
 test = false
@@ -218,6 +239,20 @@ bench = false
 doc = false
 name = "fuzz_tbor_sd_sealing_key_gen"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_sd_sealing_key_gen.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_darc_kex_key_gen"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_darc_kex_key_gen.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_darc_key_unwrap"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_darc_key_unwrap.rs"
 test = false
 
 [[bin]]

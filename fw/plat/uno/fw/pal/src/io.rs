@@ -24,6 +24,7 @@
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
 //! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
 
+use core::cell::UnsafeCell;
 use core::mem;
 use core::ops::AsyncFnOnce;
 
@@ -33,19 +34,23 @@ use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
 use tsra_fw_hsm_pal_traits::HsmCqe;
+use tsra_fw_hsm_pal_traits::HsmDmaAddr;
+use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 use tsra_fw_static_ref::StaticRef;
+use tsra_fw_uno_drivers_gdma::MemInterface;
+use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
+use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IoSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::regs::IoGsramRegs;
 use tsra_fw_uno_trace::tracing::*;
@@ -60,11 +65,64 @@ use crate::alloc::reset_io_alloc;
 // SAFETY: IO_GSRAM_BASE is the aligned, permanently mapped IO queue region.
 const IO_Q: StaticRef<IoGsramRegs> = unsafe { StaticRef::new(IO_GSRAM_BASE as *const IoGsramRegs) };
 
+/// Each host IO slot's SQE, copied out of `IO_SQ` when its IO is accepted.
+///
+/// The SQE's fields are read many times per IO, and IO GSRAM is read
+/// uncached: a load costs the interconnect's full latency, while two
+/// eight-word bursts fetch the whole 64-byte entry for about the price of
+/// two loads. The hardware writes `IO_SQ[index]` only while the slot is
+/// free, so the copy stays valid until the IO is dropped.
+struct SqeCopies(UnsafeCell<[RawSqe; IO_SQ_COUNT as usize]>);
+
+// SAFETY: single-core firmware with cooperative scheduling; a slot's copy
+// is written only by `accept_io`, before its IO exists, and read only
+// through that IO.
+unsafe impl Sync for SqeCopies {}
+
+static SQE_COPIES: SqeCopies = SqeCopies(UnsafeCell::new([[0; 16]; IO_SQ_COUNT as usize]));
+
+/// Copies host slot `index`'s SQE out of `IO_SQ` with two eight-word bursts.
+fn copy_sqe(index: usize) {
+    let src = &IO_Q.io_sq[index] as *const IoSqEntry as *const u32;
+    // SAFETY: `index` is a host slot, so its copy exists; nothing else
+    // borrows it while the slot is free (see `SqeCopies`).
+    let dst = unsafe { (*SQE_COPIES.0.get())[index].as_mut_ptr() };
+    #[cfg(target_arch = "arm")]
+    // SAFETY: both are 64-byte, word-aligned SQEs: the IO_SQ entry and its
+    // DTCM copy.
+    unsafe {
+        core::arch::asm!(
+            "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            "ldm {s}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            "stm {d}!, {{r2, r3, r4, r5, r8, r9, r10, r11}}",
+            s = inout(reg) src => _,
+            d = inout(reg) dst => _,
+            out("r2") _,
+            out("r3") _,
+            out("r4") _,
+            out("r5") _,
+            out("r8") _,
+            out("r9") _,
+            out("r10") _,
+            out("r11") _,
+            options(nostack, preserves_flags),
+        );
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: as above.
+    unsafe {
+        core::ptr::copy_nonoverlapping(src, dst, 16);
+    }
+}
+
 /// An in-flight IO identified by its IO_SQ slot index.
 ///
 /// Holds the slot index for the lifetime of a single IO operation.
 /// Metadata (controller_id, queue_id, queue_index) is stored in
-/// `IO_META[index]`, written by the IIC driver at recv time.
+/// `IO_META[index]`, written by the IIC driver at recv time; the IO reads
+/// the partition and queue it needs from there once, when it is created,
+/// since IO GSRAM is read uncached and both are wanted many times per IO.
 #[derive(Debug)]
 pub struct UnoHsmIo {
     /// IO_SQ slot index. Host IO uses `0..ADMIN_IO_INDEX`; the reserved
@@ -72,20 +130,56 @@ pub struct UnoHsmIo {
     /// for PAL-internal provisioning crypto. So the valid range is
     /// `0..=ADMIN_IO_INDEX`, not just the host range.
     index: u16,
+    /// Partition the IO targets, from `IO_META[index]` (see [`Self::pid`]).
+    pid: HsmPartId,
+    /// Source queue, from `IO_META[index]` (see [`Self::queue_id`]).
+    queue_id: u16,
 }
 
 impl UnoHsmIo {
     /// Returns the platform-private resource slot for this IO.
-    pub(crate) fn index(&self) -> u16 {
+    pub fn index(&self) -> u16 {
         self.index
     }
 
-    /// Returns the queue ID from IO_META.
+    /// Returns the queue ID read from IO_META when the IO was created.
     fn queue_id(&self) -> u16 {
-        if self.index as u32 >= IO_META_COUNT {
-            return 0;
+        self.queue_id
+    }
+
+    /// An IO over slot `index`, taking its partition and queue from the
+    /// slot's `IO_META` entry.
+    fn from_meta(index: u16) -> Self {
+        if index as u32 >= IO_META_COUNT {
+            return Self {
+                index,
+                pid: HsmPartId::from(crate::pal::NO_PARTITION),
+                queue_id: 0,
+            };
         }
-        self.io_meta().queue.read(IO_META_QUEUE::QUEUE_ID) as u16
+        let meta = &IO_Q.io_meta[index as usize];
+        Self::from_routing(
+            index,
+            meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8,
+            meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
+        )
+    }
+
+    /// An IO over slot `index` from source controller `axi_id`'s queue
+    /// `queue_id`.
+    fn from_routing(index: u16, axi_id: u8, queue_id: u16) -> Self {
+        Self {
+            index,
+            // The hardware reports the routing axi_id; partitions are
+            // indexed by the dense PcieFunction id, so translate here. An
+            // axi_id naming no function yields an out-of-range id, which
+            // the partition lookup rejects with `InvalidArg` rather than
+            // aliasing a valid slot.
+            pid: HsmPartId::from(
+                crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION),
+            ),
+            queue_id,
+        }
     }
 
     /// Constructs a **bare, unscrubbed** IO handle over the dedicated admin
@@ -112,17 +206,14 @@ impl UnoHsmIo {
     /// [`ADMIN_IO_INDEX`]: crate::alloc::ADMIN_IO_INDEX
     /// [`UnoScopedAlloc`]: crate::alloc::UnoScopedAlloc
     pub(crate) fn admin_no_scrub(pid: HsmPartId) -> Self {
-        let io = Self {
-            index: ADMIN_IO_INDEX,
-        };
         // CONTROLLER_ID holds the hardware axi_id (what IIC `recv` records for
         // a host IO), so an internally created admin IO stores the same
         // encoding for `pid()` to round-trip it back to `pid`.
         let axi_id = crate::pal::pfn_to_axi_id(u8::from(pid)).unwrap_or(crate::pal::NO_PARTITION);
-        io.io_meta()
+        IO_Q.io_meta[ADMIN_IO_INDEX as usize]
             .ctlr
             .write(IO_META_CTLR::CONTROLLER_ID.val(axi_id as u32));
-        io
+        Self::from_meta(ADMIN_IO_INDEX)
     }
 
     /// Constructs an IO handle over the dedicated self-test slot
@@ -143,52 +234,36 @@ impl UnoHsmIo {
     ///
     /// [`SELF_TEST_IO_INDEX`]: crate::alloc::SELF_TEST_IO_INDEX
     pub(crate) fn self_test() -> Self {
-        Self {
-            index: SELF_TEST_IO_INDEX,
-        }
+        Self::from_meta(SELF_TEST_IO_INDEX)
     }
 
-    /// Returns a reference to the IO_META entry for this slot.
-    ///
-    /// Only valid for host and admin slots — `IO_META` has
-    /// [`IO_META_COUNT`] entries (host `0..32` plus [`ADMIN_IO_INDEX`]).
-    /// The self-test slot ([`SELF_TEST_IO_INDEX`]) has no `IO_META` entry;
-    /// callers must guard against it (see [`pid`](HsmIo::pid)).
-    #[inline]
-    fn io_meta(&self) -> &IoMetaEntry {
-        &IO_Q.io_meta[self.index as usize]
-    }
-
-    /// Returns the partition ID for this IO.
-    ///
-    /// IO_META records the routing axi_id the hardware reported; partitions
-    /// are indexed by the dense PcieFunction id, so translate here. An axi_id
-    /// naming no function yields an out-of-range id, which the partition
-    /// lookup rejects with `InvalidArg` rather than aliasing a valid slot.
+    /// Returns the partition ID for this IO, resolved from the axi_id in
+    /// IO_META when the IO was created (see [`from_meta`](Self::from_meta)).
     ///
     /// The self-test slot ([`SELF_TEST_IO_INDEX`]) has no `IO_META` entry or
     /// partition context, so it returns the invalid `NO_PARTITION` sentinel
     /// rather than aliasing a real partition or indexing `IO_META`.
     pub(crate) fn pid(&self) -> HsmPartId {
-        if self.index as u32 >= IO_META_COUNT {
-            return HsmPartId::from(crate::pal::NO_PARTITION);
-        }
-        let axi_id = self.io_meta().ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8;
-        HsmPartId::from(crate::pal::axi_id_to_pfn(axi_id).unwrap_or(crate::pal::NO_PARTITION))
+        self.pid
     }
 }
 
 impl HsmIo for UnoHsmIo {
     /// Returns the SQE from `IO_SQ[index]`.
     ///
-    /// IIC DMAs the host-side 64-byte SQE directly into this slot, so it
-    /// can be read in-place without a copy.
+    /// IIC DMAs the host-side 64-byte SQE into `IO_SQ[index]`; a host IO
+    /// reads the copy [`accept_io`](UnoHsmPal::accept_io) took of it.
     fn sqe(&self) -> &HsmSqe {
         const _ASSERT_SQE_SIZE: () =
             assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<RawSqe>());
         const _ASSERT_SQE_ALIGN: () =
             assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<RawSqe>());
 
+        if (self.index as u32) < IO_SQ_COUNT {
+            // SAFETY: `accept_io` filled this host slot's copy before the IO
+            // existed, and it is not written again while the IO lives.
+            return unsafe { &(*SQE_COPIES.0.get())[self.index as usize] };
+        }
         let io_sq = &IO_Q.io_sq[self.index as usize];
         // SAFETY: The queue entry and RawSqe share the asserted layout; this IO owns the slot.
         unsafe { &*(io_sq as *const IoSqEntry as *const RawSqe) }
@@ -239,7 +314,7 @@ impl HsmIoController for UnoHsmPal {
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
         Cqe::try_from(io.cqe())?.set_sq_id(queue_id);
-        self.oic.send(io.index)?.await
+        self.oic.send(io.index, queue_id as u8)?.await
     }
 
     /// Drops an IO without sending a completion (e.g. for disabled
@@ -251,6 +326,51 @@ impl HsmIoController for UnoHsmPal {
     /// per-IO buffer scrub lives here. See
     /// [`scrub_io_slot`](UnoHsmPal::scrub_io_slot). It also ends the IO's
     /// in-flight count, in the same step that returns the slot.
+    /// Starts the reply copy as a detached GDMA transfer, whose completion
+    /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
+    /// CQE post, and that post's completion into the scrub and free of
+    /// [`drop_io`](HsmIoController::drop_io). Declines admin and self-test
+    /// IOs, and IOs whose dirty SRAM is too large to scrub with the CPU.
+    fn finish_io(
+        &self,
+        io: Self::Io,
+        resp: &HsmDmaBuf,
+        dst: HsmDmaAddr,
+        dst2: HsmDmaAddr,
+        copy_failed: fn(&mut HsmCqe),
+    ) -> Result<(), Self::Io> {
+        let index = io.index;
+        if index as u32 >= IO_SQ_COUNT
+            || crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX
+        {
+            return Err(io);
+        }
+        let Ok(ifc) = crate::gdma::host_interface(io.pid()) else {
+            return Err(io);
+        };
+        let len = resp.len() as u32;
+        if self
+            .gdma
+            .copy_mem_detached(
+                crate::gdma::device_dma_buf(resp.as_ptr(), len),
+                MemInterface::Device,
+                len,
+                crate::gdma::host_dma_buf(dst, dst2, true),
+                ifc,
+                len,
+                index,
+            )
+            .is_err()
+        {
+            return Err(io);
+        }
+        self.detached[index as usize].set(DetachedIo {
+            queue_id: io.queue_id(),
+            copy_failed,
+        });
+        Ok(())
+    }
+
     async fn drop_io(&self, io: Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
         // Scrub both per-IO scratch buffers *before* returning the slot to
@@ -263,14 +383,91 @@ impl HsmIoController for UnoHsmPal {
     }
 }
 
+/// What finishing a detached host IO still needs (see
+/// [`HsmIoController::finish_io`]).
+#[derive(Clone, Copy)]
+pub(crate) struct DetachedIo {
+    queue_id: u16,
+    copy_failed: fn(&mut HsmCqe),
+}
+
+impl DetachedIo {
+    pub(crate) const NONE: Self = Self {
+        queue_id: 0,
+        copy_failed: |_| {},
+    };
+}
+
+/// The CQE of host IO slot `index`, as [`HsmIo::cqe`] exposes it.
+fn slot_cqe(index: u16) -> &'static mut HsmCqe {
+    // SAFETY: as in `HsmIo::cqe`: the layouts match, and only the slot's
+    // owner -- here the platform, finishing a detached IO -- touches it.
+    unsafe {
+        let ptr = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut RawCqe;
+        &mut *ptr
+    }
+}
+
 impl UnoHsmPal {
+    /// Advances detached IOs (see [`HsmIoController::finish_io`]): posts the
+    /// completion of each finished reply copy (marked failed first if the
+    /// copy failed), retries posts the OIC had no room for, and scrubs and
+    /// frees the slot of each posted completion. Called on every run-loop
+    /// pass.
+    pub(crate) fn finish_detached(&self) {
+        while let Some((index, ok)) = self.gdma.take_detached() {
+            let d = self.detached[index as usize].get();
+            let cqe = slot_cqe(index);
+            if !ok {
+                (d.copy_failed)(cqe);
+            }
+            if let Ok(mut cqe) = Cqe::try_from(cqe) {
+                cqe.set_sq_id(d.queue_id);
+            }
+            self.post_detached(index);
+        }
+        let mut pending = self.detached_post_pending.get();
+        if pending != 0 {
+            self.detached_post_pending.set(0);
+            while pending != 0 {
+                let index = pending.trailing_zeros() as u16;
+                pending &= !(1 << index);
+                self.post_detached(index);
+            }
+        }
+        while let Some((index, _)) = self.oic.take_detached() {
+            // As `drop_io`: wipe the slot's scratch before the slot can be
+            // reused. A failed post is dropped like a failed `complete_io`.
+            self.scrub_io_slot_cpu(index);
+            self.iic
+                .free_io(index, self.detached[index as usize].get().queue_id);
+            self.io_in_flight_dec();
+        }
+    }
+
+    /// Posts slot `index`'s completion, or leaves it for the next pass if
+    /// the OIC has no room.
+    fn post_detached(&self, index: u16) {
+        let queue_id = self.detached[index as usize].get().queue_id as u8;
+        if self.oic.send_detached(index, queue_id).is_err() {
+            self.detached_post_pending
+                .set(self.detached_post_pending.get() | 1 << index);
+        }
+    }
+
     /// Turns IO_SQ slot `index` received from the IIC driver into an IO:
     /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io))
     /// and resets the slot's scratch allocator.
-    pub(crate) fn accept_io(&self, index: u16) -> UnoHsmIo {
+    pub(crate) fn accept_io(&self, rx: Received) -> UnoHsmIo {
+        let index = rx.index;
         self.io_in_flight_inc();
         reset_io_alloc(self, index);
-        UnoHsmIo { index }
+        if (index as u32) < IO_SQ_COUNT {
+            copy_sqe(index as usize);
+        }
+        // The routing comes with the IO, as the IIC driver read it from the
+        // ICQ entry, rather than back out of IO_META.
+        UnoHsmIo::from_routing(index, rx.axi_id, u16::from(rx.queue_id))
     }
 
     /// Recycles an IO received during a PCIe reset without dispatching it:

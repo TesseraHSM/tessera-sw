@@ -377,6 +377,19 @@ pub trait HsmPartitionManager: HsmIoTypes {
         id: HsmPartPropId,
     ) -> HsmResult<&'a HsmDmaBuf>;
 
+    /// Whether the PSK selected by `psk_id` (`0` = crypto officer, `1` =
+    /// crypto user) still holds its well-known default, if the PAL
+    /// remembers it (see
+    /// [`part_psk_memo_default`](Self::part_psk_memo_default)).
+    fn part_psk_default_memo(&self, _io: &Self::Io, _psk_id: u8) -> Option<bool> {
+        None
+    }
+
+    /// Remember whether the PSK selected by `psk_id` holds its well-known
+    /// default, as comparing it just found. A PAL that remembers it must
+    /// forget it whenever that PSK may change.
+    fn part_psk_memo_default(&self, _io: &Self::Io, _psk_id: u8, _is_default: bool) {}
+
     /// Write a [`HsmPartPropKind::FixedBytes`] or
     /// [`HsmPartPropKind::VarBytes`] slot.
     ///

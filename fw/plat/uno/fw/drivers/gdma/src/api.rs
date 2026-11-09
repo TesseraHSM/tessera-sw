@@ -36,6 +36,11 @@ struct TagSlot {
     waker: WakerRegistration,
     completed: bool,
     status: u8,
+    /// Submitted by [`GdmaDriver::copy_mem_detached`]: no task awaits it, so
+    /// its completion is left for [`GdmaDriver::take_detached`].
+    detached: bool,
+    /// The submitter's cookie for a detached transfer.
+    cookie: u16,
 }
 
 struct GdmaState<const DEPTH: usize> {
@@ -44,6 +49,8 @@ struct GdmaState<const DEPTH: usize> {
     /// Cached SQ head index. Updated lazily when the queue looks full.
     sq_head_cached: u16,
     tag_free: u32,
+    /// Completed detached transfers, one bit per tag.
+    detached_done: u32,
     tags: [TagSlot; DEPTH],
 }
 
@@ -150,6 +157,8 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             waker: WakerRegistration::new(),
             completed: false,
             status: 0,
+            detached: false,
+            cookie: 0,
         });
 
         let tag_free = if DEPTH >= 32 {
@@ -171,6 +180,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 sq_tail: 0,
                 sq_head_cached: 0,
                 tag_free,
+                detached_done: 0,
                 tags,
             }),
         }
@@ -212,7 +222,10 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         }
     }
 
-    /// Allocate a tag, write an SQ entry, and ring the doorbell.
+    /// Allocate a tag, write an SQ entry, and ring the doorbell. A
+    /// `detached` transfer carries the given cookie and completes into
+    /// [`take_detached`](Self::take_detached) rather than a waker.
+    #[allow(clippy::too_many_arguments)]
     fn submit(
         &self,
         src_addr: GdmaBuf,
@@ -221,6 +234,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_addr: GdmaBuf,
         dst_ifc: MemInterface,
         dst_len: u32,
+        detached: Option<u16>,
     ) -> HsmResult<u16> {
         if src_len == 0 || dst_len == 0 {
             return Err(GdmaError::ZERO_LENGTH);
@@ -235,6 +249,9 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             }
             let tag = s.tag_free.trailing_zeros() as u16;
             s.tag_free &= !(1u32 << tag);
+            let slot = &mut s.tags[tag as usize];
+            slot.detached = detached.is_some();
+            slot.cookie = detached.unwrap_or(0);
 
             let next_tail = (s.sq_tail + 1) & Self::MASK;
             if next_tail == s.sq_head_cached {
@@ -326,7 +343,7 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_ifc: MemInterface,
         dst_len: u32,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len)?;
+        let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, None)?;
         Ok(poll_fn(move |cx| {
             self.state.with(|s| {
                 let slot = &mut s.tags[tag as usize];
@@ -346,6 +363,75 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         }))
     }
 
+    /// Submit a DMA copy that no task awaits: its completion is collected,
+    /// with `cookie`, by [`take_detached`](Self::take_detached).
+    ///
+    /// # Errors
+    ///
+    /// As [`copy_mem`](Self::copy_mem) fails immediately.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_mem_detached(
+        &self,
+        src_addr: GdmaBuf,
+        src_ifc: MemInterface,
+        src_len: u32,
+        dst_addr: GdmaBuf,
+        dst_ifc: MemInterface,
+        dst_len: u32,
+        cookie: u16,
+    ) -> HsmResult<()> {
+        self.submit(
+            src_addr,
+            src_ifc,
+            src_len,
+            dst_addr,
+            dst_ifc,
+            dst_len,
+            Some(cookie),
+        )
+        .map(|_| ())
+    }
+
+    /// Takes one completed detached copy, freeing its tag: its cookie, and
+    /// whether it succeeded.
+    pub fn take_detached(&self) -> Option<(u16, bool)> {
+        self.state.with(|s| {
+            if s.detached_done == 0 {
+                return None;
+            }
+            let tag = s.detached_done.trailing_zeros();
+            s.detached_done &= !(1u32 << tag);
+            let slot = &mut s.tags[tag as usize];
+            slot.completed = false;
+            slot.detached = false;
+            let done = (slot.cookie, slot.status == 0);
+            s.tag_free |= 1u32 << tag;
+            Some(done)
+        })
+    }
+
+    /// Record the completion whose CQ status word is `st` for its tag, and
+    /// wake its awaiter (or mark a detached copy done).
+    #[inline(always)]
+    fn complete(s: &mut GdmaState<DEPTH>, st: u32) {
+        let st = tock_registers::LocalRegisterCopy::<u32, GDMA_CQ_STATUS::Register>::new(st);
+        let tag = st.read(GDMA_CQ_STATUS::TAG) as usize;
+        if tag < DEPTH {
+            let slot = &mut s.tags[tag];
+            slot.status = if st.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
+                0
+            } else {
+                1
+            };
+            slot.completed = true;
+            if slot.detached {
+                s.detached_done |= 1u32 << tag;
+            } else {
+                slot.waker.wake();
+            }
+        }
+    }
+
     /// Drain all available CQ entries and wake their awaiters.
     ///
     /// Processes every pending completion in one call, amortizing the
@@ -361,22 +447,22 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
             while s.cq_head != tail {
                 let cq_slot = (s.cq_head & Self::MASK) as usize;
                 // SAFETY: The masked consumer index selects an available entry in the CQ ring.
-                let cq_entry = unsafe { &*self.cq_ring.add(cq_slot) };
-
-                let tag = cq_entry.status.read(GDMA_CQ_STATUS::TAG) as u16;
-                let status = if cq_entry.status.read(GDMA_CQ_STATUS::SUCCESS) != 0 {
-                    0u8
+                let status_word =
+                    unsafe { &(*self.cq_ring.add(cq_slot)).status } as *const _ as *const u32;
+                let next = (s.cq_head + 1) & Self::MASK;
+                // Two completions in one burst when both are there and
+                // adjacent in the ring.
+                if next != tail && cq_slot + 1 < DEPTH {
+                    // SAFETY: entries `cq_slot` and `cq_slot + 1` are both
+                    // available, so their 32 bytes from `status_word` are.
+                    let (st0, st1) = unsafe { read_pair(status_word) };
+                    Self::complete(s, st0);
+                    Self::complete(s, st1);
+                    s.cq_head = (next + 1) & Self::MASK;
                 } else {
-                    1u8
-                };
-
-                s.cq_head = (s.cq_head + 1) & Self::MASK;
-
-                if (tag as usize) < DEPTH {
-                    let slot = &mut s.tags[tag as usize];
-                    slot.status = status;
-                    slot.completed = true;
-                    slot.waker.wake();
+                    // SAFETY: as above, for entry `cq_slot` alone.
+                    Self::complete(s, unsafe { status_word.read_volatile() });
+                    s.cq_head = next;
                 }
             }
 
@@ -385,5 +471,39 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
                 .write(CQ_CHANNEL_HEAD::HEAD.val(s.cq_head.into()));
             tsra_fw_uno_drivers_nvic::Nvic::unpend_raw(irq);
         });
+    }
+}
+
+/// Words 0 and 4 from `p`, read with one five-word burst: the status
+/// words of two consecutive 16-byte ring entries, which sit in memory the
+/// CPU reads uncached, where a burst costs about as much as one load.
+///
+/// # Safety
+///
+/// `p` must be word-aligned and five words from it readable.
+#[inline(always)]
+unsafe fn read_pair(p: *const u32) -> (u32, u32) {
+    #[cfg(target_arch = "arm")]
+    {
+        let (w0, w4): (u32, u32);
+        // SAFETY: per the function contract.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r2, r3, r4, r5, r8}}",
+                p = in(reg) p,
+                out("r2") w0,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") w4,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (w0, w4)
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: per the function contract.
+    unsafe {
+        (p.read_volatile(), p.add(4).read_volatile())
     }
 }

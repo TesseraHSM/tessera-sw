@@ -551,6 +551,27 @@ pub(crate) struct DispatchResult {
     pub(crate) session_id: Option<u16>,
 }
 
+/// Whether `opcode`'s handler can record undo entries: every command
+/// [`dispatch`] hands the undo log to, and no other. The IO layer binds the
+/// log's storage for these only; any other command gets an empty log over
+/// no storage, so teardown has none of it to scrub, and on which any push
+/// fails -- so a command missing here fails rather than runs unrecorded.
+pub(crate) fn records_undo(opcode: u8) -> bool {
+    matches!(
+        opcode,
+        opcode::SESSION_OPEN_INIT
+            | opcode::SESSION_OPEN_FINISH
+            | opcode::PSK_CHANGE
+            | opcode::PART_INIT
+            | opcode::PART_FINAL
+            | opcode::SD_CREATE_REMOTE_BACKUP
+            | opcode::SD_RESTORE_REMOTE_BACKUP
+            | opcode::SD_RESTORE_LOCAL_BACKUP
+            | opcode::SD_RESTORE_PEER_BACKUP
+            | opcode::UNWRAP_KEY
+    )
+}
+
 /// Capacity selected after header parsing, before any handler scratch allocation.
 pub(crate) fn exchange_capacity(opcode: u8, request_len: usize, host_capacity: usize) -> usize {
     use tsra_fw_ddi_tbor_types as types;

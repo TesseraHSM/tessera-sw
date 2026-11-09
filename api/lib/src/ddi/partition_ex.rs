@@ -162,6 +162,7 @@ pub(crate) fn part_init_ex(
     pota_thumbprint: &[u8],
     sata_thumbprint: &[u8],
     sapota_thumbprint: Option<&[u8]>,
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmPartInitExResult> {
     if pota_thumbprint.len() != POTA_THUMBPRINT_LEN || sata_thumbprint.len() != SATA_THUMBPRINT_LEN
     {
@@ -187,10 +188,19 @@ pub(crate) fn part_init_ex(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = None;
-    dev.exec_op_tbor(&req, None, &mut cookie)
-        .map(HsmPartInitExResult::from)
-        .map_err(HsmError::from)
+    // Thread the session's DDI-backend cookie through explicitly (as
+    // `psk_change` does), rather than passing `&mut None`: this call
+    // runs outside `HsmSession::with_dev`'s `with_session_cookie` scope
+    // (it only has a `&HsmPartition`, not the session), so dropping the
+    // cookie here would make any DDI backend that uses it to recognize
+    // this session across calls (per the `exec_op_tbor` contract in
+    // `ddi/interface`) treat the request as belonging to an unknown
+    // session, even immediately after a successful `OpenSession`.
+    with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, None, cookie)
+            .map(HsmPartInitExResult::from)
+            .map_err(HsmError::from)
+    })
 }
 
 /// Issue `PartFinal` (opcode `0x08`) on the active CO session.
@@ -227,6 +237,7 @@ pub(crate) fn part_final_ex(
     part_policy: &PartPolicy,
     pta_cert_chain: &[HsmCert<'_>],
     prev_local_mk_backup: Option<&[u8]>,
+    ddi_cookie: &parking_lot::Mutex<Option<u64>>,
 ) -> HsmResult<HsmPartFinalExResult> {
     // The firmware treats a non-empty `prev_local_mk_backup` as a
     // fixed-size envelope of exactly `LOCAL_MK_BACKUP_LEN` bytes, so
@@ -251,10 +262,12 @@ pub(crate) fn part_final_ex(
 
     let inner = partition.inner().read();
     let dev = inner.dev();
-    let mut cookie = None;
-    let resp = dev
-        .exec_op_tbor(&req, Some(&oob), &mut cookie)
-        .map_err(HsmError::from)?;
+    // See `part_init_ex`: thread the session's cookie explicitly since
+    // this call also runs outside `with_session_cookie`'s scope.
+    let resp = with_explicit_cookie(ddi_cookie, |cookie| {
+        dev.exec_op_tbor(&req, Some(&oob), cookie)
+    });
+    let resp = resp.map_err(HsmError::from)?;
 
     // The firmware always returns a fixed-size `local_mk_backup`
     // envelope; reject a malformed (wrong-length) device response rather

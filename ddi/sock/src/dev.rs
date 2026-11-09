@@ -10,9 +10,12 @@ use std::net::TcpStream;
 use std::os::fd::IntoRawFd;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU16;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use nix::sys::socket::connect;
@@ -42,12 +45,19 @@ use tsra_ddi_interface::DdiResult;
 use tsra_ddi_interface::TborOobItem;
 use tsra_ddi_mbor_codec::MborDecode;
 use tsra_ddi_mbor_codec::MborDecoder;
+use tsra_ddi_mbor_codec::MborEncode;
 use tsra_ddi_mbor_codec::MborEncoder;
 use tsra_ddi_mbor_types::DdiAesOp;
+use tsra_ddi_mbor_types::DdiApiRev;
+use tsra_ddi_mbor_types::DdiCloseSessionCmdReq;
+use tsra_ddi_mbor_types::DdiCloseSessionReq;
 use tsra_ddi_mbor_types::DdiDecoder;
 use tsra_ddi_mbor_types::DdiDeviceKind;
+use tsra_ddi_mbor_types::DdiOp;
 use tsra_ddi_mbor_types::DdiOpReq;
+use tsra_ddi_mbor_types::DdiReqHdr;
 use tsra_ddi_mbor_types::DdiRespHdr;
+use tsra_ddi_mbor_types::DdiRespSessionId;
 use tsra_ddi_mbor_types::DdiStatus;
 use tsra_ddi_mbor_types::MborError;
 use tsra_ddi_mbor_types::SessionControlKind;
@@ -104,6 +114,91 @@ enum SocketStream {
     Vsock(VsockStream),
 }
 
+impl SocketStream {
+    /// Set (or, with `None`, clear) a read deadline, regardless of
+    /// transport. Used to bound the best-effort leaked-session cleanup
+    /// ([`DdiSockDev::close_leaked_session_locked`]) so an unresponsive
+    /// peer can't hold the stream mutex forever.
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_read_timeout(timeout),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.set_read_timeout(timeout),
+            #[cfg(target_os = "linux")]
+            Self::Vsock(stream) => stream.set_read_timeout(timeout),
+        }
+    }
+
+    /// Set (or, with `None`, clear) a write deadline, regardless of
+    /// transport. Paired with [`Self::set_read_timeout`] by
+    /// [`DeadlineBound`] so a blocked `write` (e.g. a full send buffer
+    /// because the peer isn't draining it) can't hold the best-effort
+    /// leaked-session cleanup past its deadline either.
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Tcp(stream) => stream.set_write_timeout(timeout),
+            #[cfg(unix)]
+            Self::Unix(stream) => stream.set_write_timeout(timeout),
+            #[cfg(target_os = "linux")]
+            Self::Vsock(stream) => stream.set_write_timeout(timeout),
+        }
+    }
+}
+
+/// Wraps an already-locked [`SocketStream`] so every `Read`/`Write`
+/// call made through it is bounded by one absolute `deadline`, rather
+/// than each individual `recv`/`send` syscall getting its own
+/// independent timeout window.
+///
+/// Used by [`DdiSockDev::close_leaked_session_locked`]: the framing
+/// reader's `read_exact` can call through here several times for one
+/// logical response, and a peer trickling in a byte just before each
+/// per-call timeout could otherwise stall the whole cleanup — and
+/// therefore the shared stream mutex, since cleanup runs with it held
+/// — far longer than `CLEANUP_TIMEOUT`. Each call instead computes the
+/// time left before `deadline`, arms the stream's native timeout with
+/// just that remainder, and fails immediately once it's exhausted.
+struct DeadlineBound<'a> {
+    stream: &'a mut SocketStream,
+    deadline: Instant,
+}
+
+impl DeadlineBound<'_> {
+    /// Time remaining before `deadline`, or a `TimedOut` error once
+    /// it's passed.
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "cleanup exchange exceeded its deadline",
+                )
+            })
+    }
+}
+
+impl Read for DeadlineBound<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.remaining()?;
+        self.stream.set_read_timeout(Some(remaining))?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for DeadlineBound<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.remaining()?;
+        self.stream.set_write_timeout(Some(remaining))?;
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
 impl Read for SocketStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
@@ -145,6 +240,61 @@ struct VsockStream {
 
 #[cfg(target_os = "linux")]
 impl VsockStream {
+    /// Set (or, with `None`, clear) a receive- or send-side timeout
+    /// (`SO_RCVTIMEO` / `SO_SNDTIMEO`) on the raw `AF_VSOCK` socket.
+    /// Neither `std` nor `nix` 0.26 expose a safe wrapper for either
+    /// option on a bare fd, so it's set directly via `libc`.
+    #[allow(unsafe_code)]
+    fn set_timeout(&mut self, opt: libc::c_int, timeout: Option<Duration>) -> std::io::Result<()> {
+        let tv = match timeout {
+            Some(d) => {
+                // A positive duration under one microsecond truncates to
+                // an all-zero `timeval` via `subsec_micros()`, which the
+                // kernel treats identically to `None` (disable the
+                // timeout, block indefinitely) rather than "expire
+                // immediately". Round such tiny positive remainders up
+                // to one microsecond so the timeout stays armed; `std`'s
+                // own `TcpStream`/`UnixStream` timeout setters apply the
+                // same clamp for this reason.
+                let d = d.max(Duration::from_micros(1));
+                libc::timeval {
+                    tv_sec: d.as_secs() as libc::time_t,
+                    tv_usec: libc::suseconds_t::from(d.subsec_micros()),
+                }
+            }
+            // A zeroed timeval disables the timeout (block indefinitely),
+            // matching `SO_RCVTIMEO`/`SO_SNDTIMEO`'s documented default.
+            None => libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+        };
+        // SAFETY: `self.fd` is a valid, open socket for the lifetime of
+        // `self` (closed only by `Drop`); `tv` is a valid, correctly
+        // sized `timeval` for the duration of this call.
+        let ret = unsafe {
+            libc::setsockopt(
+                self.fd,
+                libc::SOL_SOCKET,
+                opt,
+                std::ptr::addr_of!(tv).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_timeout(libc::SO_RCVTIMEO, timeout)
+    }
+
+    fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.set_timeout(libc::SO_SNDTIMEO, timeout)
+    }
+
     fn connect(cid: u32, port: u32) -> std::io::Result<Self> {
         let fd = socket(
             AddressFamily::Vsock,
@@ -224,6 +374,12 @@ pub(crate) fn socket_path() -> String {
     std::env::var(SOCK_PATH_ENV).unwrap_or_else(|_| DEFAULT_SOCK_PATH.to_owned())
 }
 
+/// Deadline for the best-effort leaked-session `CloseSession` cleanup
+/// (see [`DdiSockDev::close_leaked_session_locked`]). Bounds how long an
+/// unresponsive peer can hold the stream mutex; on expiry the connection
+/// is retired rather than reused.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A connected socket DDI device.
 ///
 /// Wraps a single TCP, Unix-domain, or Linux VSOCK connection to the server. Requests
@@ -236,6 +392,20 @@ pub struct DdiSockDev {
     stream: Arc<Mutex<SocketStream>>,
     cmd_counter: Arc<AtomicU16>,
     device_kind: DdiDeviceKind,
+    // Set once a best-effort leaked-session cleanup exchange (see
+    // `close_leaked_session_locked`) fails (timeout or any other error):
+    // a late or partially-consumed response for that exchange may still
+    // be unread on the wire, so reusing the stream for any further
+    // request risks reading that stale response instead. Every clone
+    // shares this flag (and the stream), so every clone is retired
+    // together rather than only the one that observed the failure.
+    retired: Arc<AtomicBool>,
+    // The cleanup failure that caused `retired` to be set, if any,
+    // described as a string (so it's cheap to clone out of the mutex
+    // without requiring `DdiError` itself to implement `Clone`). Read by
+    // `retired_err` to report the actual cause — not always a timeout —
+    // behind every subsequent request on a retired connection.
+    retired_cause: Arc<Mutex<Option<String>>>,
 }
 
 impl std::fmt::Debug for DdiSockDev {
@@ -246,8 +416,30 @@ impl std::fmt::Debug for DdiSockDev {
     }
 }
 
+/// Outcome of [`DdiSockDev::close_leaked_session_locked`].
+enum CloseLeakedSessionOutcome {
+    /// The cleanup either wasn't attempted (e.g. a local encode failure
+    /// before any I/O) or succeeded with a fully-read, well-formed
+    /// response; the stream had no exchange left outstanding and is
+    /// safe for the next caller to reuse.
+    Done,
+    /// The cleanup's `CloseSession` exchange hit `CLEANUP_TIMEOUT`, or
+    /// failed with any other I/O or protocol error, before a complete
+    /// response was confirmed read (e.g. an oversized response whose
+    /// framing reader consumes only the length prefix before erroring
+    /// out, leaving the body unread on the wire). Either way a late or
+    /// partially-consumed response may still arrive, so the stream can
+    /// no longer be trusted to pair reads with the request that caused
+    /// them; the connection is conservatively retired instead of
+    /// reused. Carries a description of the actual failure, so a
+    /// subsequent request on the retired connection can report it
+    /// instead of always claiming a timeout.
+    Unusable(String),
+}
+
 impl DdiSockDev {
-    /// Connect to the server at `path`.
+    /// Connect to the server at `path` (a Unix socket path, `tcp://HOST:PORT`,
+    /// or `vsock://CID:PORT` endpoint).
     pub(crate) fn connect(path: &str) -> DdiResult<Self> {
         let stream = if let Some(address) = path.strip_prefix("tcp://") {
             let stream = TcpStream::connect(address).map_err(DdiError::IoError)?;
@@ -292,6 +484,8 @@ impl DdiSockDev {
             // The firmware reports a physical device, so the host codec
             // runs its physical-mode encode/decode hooks (matching emu).
             device_kind: DdiDeviceKind::Physical,
+            retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -299,12 +493,40 @@ impl DdiSockDev {
         self.cmd_counter.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Exchange one submission with the server.
+    /// Error returned for any request on a connection the best-effort
+    /// leaked-session cleanup has already retired (see `retired`).
+    /// Describes the actual cleanup failure (if one was recorded via
+    /// `retired_cause`) rather than always claiming a timeout — the
+    /// cleanup can also fail with an ordinary I/O error or a malformed
+    /// response, and the earlier flat "cleanup timeout" wording would
+    /// misdirect anyone diagnosing one of those cases.
+    fn retired_err(&self) -> DdiError {
+        let cause = self.retired_cause.lock().clone();
+        let message = match cause {
+            Some(cause) => {
+                format!("connection retired after a leaked-session cleanup failure: {cause}")
+            }
+            None => "connection retired after a leaked-session cleanup".to_owned(),
+        };
+        DdiError::IoError(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message))
+    }
+
+    /// Mark the connection retired, recording `cause` so a subsequent
+    /// `retired_err()` describes the actual cleanup failure instead of a
+    /// generic message. The cause is stored before the flag is set so
+    /// any caller that observes `retired == true` (via `Acquire`) can
+    /// always read it back.
+    fn retire(&self, cause: String) {
+        *self.retired_cause.lock() = Some(cause);
+        self.retired.store(true, Ordering::Release);
+    }
+
+    /// Exchange one submission with the server over an already-locked
+    /// `stream`.
     ///
     /// Maps a nonzero transport status to a [`DdiError`].
-    fn exchange(&self, req: &Request) -> DdiResult<Response> {
+    fn exchange_locked<RW: Read + Write>(stream: &mut RW, req: &Request) -> DdiResult<Response> {
         let resp: Response = {
-            let mut stream = self.stream.lock();
             req.write_to(&mut *stream).map_err(map_proto_err)?;
             Response::read_from(&mut *stream).map_err(map_proto_err)?
         };
@@ -319,8 +541,64 @@ impl DdiSockDev {
         }
     }
 
+    /// Exchange one submission with the server.
+    ///
+    /// Maps a nonzero transport status to a [`DdiError`].
+    fn exchange(&self, req: &Request) -> DdiResult<Response> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        let mut stream = self.stream.lock();
+        // A cleanup running on another clone of this handle could have
+        // retired the connection (and poisoned `stream`'s framing) in
+        // the gap between the check above and acquiring the lock;
+        // recheck now, before any I/O, so a request can't slip in on a
+        // stream whose cleanup response hasn't been consumed yet.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        Self::exchange_locked(&mut *stream, req)
+    }
+
     /// Build a submission entry, exchange it with the server, and return
     /// the response body bytes plus the bytes of each [`OobItem::Out`].
+    ///
+    /// Locks `self.stream` for the duration of the exchange and delegates
+    /// to [`Self::submit_locked`]. Used by paths (e.g. `exec_op_tbor`)
+    /// that don't need to hold the lock across any additional
+    /// post-processing.
+    fn submit(
+        &self,
+        op: u16,
+        session_ctrl: u8,
+        session_id: Option<u16>,
+        payload: Vec<u8>,
+        oob_items: Vec<OobItem>,
+    ) -> DdiResult<(Vec<u8>, Vec<Vec<u8>>)> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        let cmd_id = self.next_cmd_id();
+        let mut stream = self.stream.lock();
+        // See `exchange`'s matching recheck: a cleanup on another clone
+        // may have retired the connection after the check above but
+        // before this lock was acquired.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        Self::submit_locked(
+            &mut *stream,
+            cmd_id,
+            op,
+            session_ctrl,
+            session_id,
+            payload,
+            oob_items,
+        )
+    }
+
+    /// The I/O-only half of a submit: write the request and read the
+    /// response over an already-locked `stream`.
     ///
     /// Mirrors the in-process emulator: the client constructs the SQE
     /// (opcode, command id, lengths, session flags) and reads the returned
@@ -329,8 +607,16 @@ impl DdiSockDev {
     ///
     /// Maps a nonzero transport status (header) or device status (CQE) to
     /// [`DdiError::DdiError`].
-    fn submit(
-        &self,
+    ///
+    /// Takes an already-locked `stream` (rather than locking
+    /// `self.stream` itself) so [`DdiDev::exec_op_mbor`] can hold that
+    /// lock across the exchange *and* its `OpenSession`/`ReopenSession`
+    /// identity check, so a best-effort leaked-session close (see
+    /// [`Self::close_leaked_session_locked`]) can reuse the same stream
+    /// without racing a concurrent caller's request.
+    fn submit_locked<RW: Read + Write>(
+        stream: &mut RW,
+        cmd_id: u16,
         op: u16,
         session_ctrl: u8,
         session_id: Option<u16>,
@@ -344,7 +630,6 @@ impl DdiSockDev {
         {
             return Err(DdiError::InvalidParameter);
         }
-        let cmd_id = self.next_cmd_id();
         let sqe = SqeBuilder::new()
             .cmd(CmdDword::new().with_op(op).with_id(cmd_id))
             .buf_lens(payload.len() as u32, DST_CAP)
@@ -363,7 +648,7 @@ impl DdiSockDev {
             oob_items,
             tail: Vec::new(),
         };
-        let resp = self.exchange(&req)?;
+        let resp = Self::exchange_locked(stream, &req)?;
 
         // Device-level status lives in the completion entry.
         let mut cqe_raw: RawCqe = resp
@@ -409,6 +694,79 @@ impl DdiSockDev {
         }
         payload.truncate(dst_len);
         Ok((payload, resp.oob_items))
+    }
+
+    /// Best-effort cleanup for a session the server reports opening
+    /// (header `status == Success`, carrying the new id) whose response
+    /// body then fails to decode, or whose header/body session ids
+    /// disagree. Issues a raw `CloseSession` for `leaked_id` over the
+    /// already-locked `stream`, so the firmware-side slot isn't left live
+    /// — nothing local ever recorded it (see the call site in
+    /// [`DdiDev::exec_op_mbor`]), so nothing local would otherwise ever
+    /// close it either.
+    ///
+    /// This exchange is bounded by one absolute `CLEANUP_TIMEOUT`
+    /// deadline spanning the whole exchange (see [`DeadlineBound`]): a
+    /// peer that never answers `CloseSession`, or that trickles bytes
+    /// just fast enough to keep renewing a naively per-call timeout,
+    /// must not block the caller (or any clone sharing this stream,
+    /// since they share the same mutex) past it. Any error from the
+    /// exchange — timeout or otherwise — conservatively marks the
+    /// stream [`CloseLeakedSessionOutcome::Unusable`] rather than risk
+    /// reusing a connection whose framing may be desynced; the original
+    /// error is what surfaces to the caller either way.
+    fn close_leaked_session_locked(
+        stream: &mut SocketStream,
+        cmd_id: u16,
+        pre_encode: bool,
+        leaked_id: u16,
+    ) -> CloseLeakedSessionOutcome {
+        let req = DdiCloseSessionCmdReq {
+            hdr: DdiReqHdr {
+                op: DdiOp::CloseSession,
+                sess_id: Some(leaked_id),
+                // A `None` rev here makes the firmware reject this
+                // best-effort cleanup outright, permanently leaking the
+                // session slot.
+                rev: Some(DdiApiRev { major: 1, minor: 0 }),
+            },
+            data: DdiCloseSessionReq {},
+            ext: None,
+        };
+
+        let mut buf = vec![0u8; DST_CAP as usize];
+        let req_len = {
+            let mut enc = MborEncoder::new(buf.as_mut_slice(), pre_encode);
+            if req.mbor_encode(&mut enc).is_err() {
+                return CloseLeakedSessionOutcome::Done;
+            }
+            enc.position()
+        };
+        buf.truncate(req_len);
+
+        let mut bounded = DeadlineBound {
+            stream,
+            deadline: Instant::now() + CLEANUP_TIMEOUT,
+        };
+        let result = Self::submit_locked(
+            &mut bounded,
+            cmd_id,
+            OP_MBOR,
+            u8::from(SessionControlKind::Close),
+            Some(leaked_id),
+            buf,
+            Vec::new(),
+        );
+        // Clear any deadline `DeadlineBound` left armed on the
+        // underlying stream so ordinary (non-cleanup) exchanges sharing
+        // it afterward aren't bounded by it.
+        let _ = stream.set_read_timeout(None);
+        let _ = stream.set_write_timeout(None);
+
+        match result {
+            Ok(_) => CloseLeakedSessionOutcome::Done,
+            Err(err) => CloseLeakedSessionOutcome::Unusable(err.to_string()),
+        }
     }
 
     /// Encode a TBOR request, submit it with `oob_items`, and decode the
@@ -487,6 +845,58 @@ impl DdiSockDev {
     }
 }
 
+/// Whether a `ReopenSession` response's header and body both agree with
+/// the `requested` session id.
+///
+/// Both must be present and equal to `requested` — a peer that omits
+/// either id, or reports a different one in either place, must not be
+/// trusted enough to be returned to the caller (see the call site in
+/// [`DdiDev::exec_op_mbor`]). A missing `requested` id (no specific
+/// session named) trivially confirms, since there is nothing to check
+/// against.
+fn reopen_identity_confirmed(
+    requested: Option<u16>,
+    header_sess_id: Option<u16>,
+    body_sess_id: Option<u16>,
+) -> bool {
+    match requested {
+        Some(requested) => header_sess_id == Some(requested) && body_sess_id == Some(requested),
+        None => true,
+    }
+}
+
+/// Whether an `OpenSession` response's header and body agree on the
+/// newly assigned session id.
+///
+/// Unlike `ReopenSession` (where the *requested* id is already known
+/// ahead of time, see [`reopen_identity_confirmed`]), `OpenSession` has
+/// no id to check against — the server assigns one, and the header and
+/// body are the only two independent reports of what it is. Both must be
+/// present and equal: a peer that omits either id, or reports a
+/// different one in either place, hasn't actually confirmed the new
+/// session's id (see the call site in [`DdiDev::exec_op_mbor`]).
+fn open_identity_confirmed(header_sess_id: Option<u16>, body_sess_id: Option<u16>) -> bool {
+    header_sess_id.is_some() && header_sess_id == body_sess_id
+}
+
+/// Picks the id (if any) to best-effort close after an unconfirmed
+/// `OpenSession` response (see the call site in [`DdiDev::exec_op_mbor`]).
+///
+/// Only returns an id when exactly one of the header/body reported one:
+/// that lone id is the only candidate for what was actually opened. When
+/// both are present they necessarily disagree (a caller only reaches this
+/// after [`open_identity_confirmed`] returned `false`), and there's no way
+/// to tell whether either one is the slot this call leaked, or an
+/// unrelated session this connection already owns — closing the wrong one
+/// would destroy a live session instead of cleaning up a leaked one, so
+/// this returns `None` rather than guessing.
+fn open_session_leaked_id(header_sess_id: Option<u16>, body_sess_id: Option<u16>) -> Option<u16> {
+    match (header_sess_id, body_sess_id) {
+        (Some(id), None) | (None, Some(id)) => Some(id),
+        _ => None,
+    }
+}
+
 impl DdiDev for DdiSockDev {
     fn device_kind(&self) -> DdiDeviceKind {
         self.device_kind
@@ -497,6 +907,9 @@ impl DdiDev for DdiSockDev {
         req: &T,
         _cookie: &mut Option<DdiCookie>,
     ) -> DdiResult<T::OpResp> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
         let (pre_encode, post_decode) = match self.device_kind {
             DdiDeviceKind::Physical => (true, true),
             _ => (false, false),
@@ -527,9 +940,27 @@ impl DdiDev for DdiSockDev {
         };
         buf.truncate(req_len);
 
-        // ── 2. Build the SQE and exchange it over the socket.
-        let (resp_buf, _) =
-            self.submit(OP_MBOR, u8::from(session_ctrl), session_id, buf, Vec::new())?;
+        // ── 2. Exchange the SQE/CQE and decode the full typed response,
+        //    all while holding `self.stream`'s lock, so a best-effort
+        //    leaked-session close (step 4/5 below) can reuse the same
+        //    stream without an intervening request from another caller.
+        let cmd_id = self.next_cmd_id();
+        let mut stream = self.stream.lock();
+        // See `exchange`'s matching recheck: a cleanup on another
+        // clone may have retired the connection after the check at the
+        // top of this function but before this lock was acquired.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
+        let (resp_buf, _) = Self::submit_locked(
+            &mut *stream,
+            cmd_id,
+            OP_MBOR,
+            u8::from(session_ctrl),
+            session_id,
+            buf,
+            Vec::new(),
+        )?;
         if resp_buf.is_empty() {
             return Err(DdiError::DdiError(0));
         }
@@ -543,10 +974,78 @@ impl DdiDev for DdiSockDev {
             return Err(DdiError::DdiStatus(hdr.status));
         }
 
-        // ── 4. Decode the typed response (header + body).
+        // ── 4. Decode the typed response (header + body). A server
+        //    that already told us (via the header) that it opened a
+        //    session, but whose body then fails to decode, has left a
+        //    live session this call is about to error out of — with
+        //    nothing local ever having recorded it, nothing local would
+        //    otherwise ever close it either. Best-effort close it now,
+        //    still under this same stream lock, before surfacing the
+        //    decode error.
         let mut body_dec = MborDecoder::new(&resp_buf, post_decode);
-        <T::OpResp>::mbor_decode(&mut body_dec)
-            .map_err(|_| DdiError::MborError(MborError::DecodeError))
+        let typed_resp = match <T::OpResp>::mbor_decode(&mut body_dec) {
+            Ok(resp) => resp,
+            Err(_) => {
+                if session_ctrl == SessionControlKind::Open {
+                    if let Some(leaked_id) = hdr.sess_id {
+                        if let CloseLeakedSessionOutcome::Unusable(cause) =
+                            Self::close_leaked_session_locked(
+                                &mut stream,
+                                self.next_cmd_id(),
+                                pre_encode,
+                                leaked_id,
+                            )
+                        {
+                            self.retire(cause);
+                        }
+                    }
+                }
+                return Err(DdiError::MborError(MborError::DecodeError));
+            }
+        };
+
+        // ── 5. For `ReopenSession`, the request already names the id
+        //    being reopened (`session_id`). A conforming peer's header
+        //    *and* body (`DdiRespSessionId::resp_session_id`) both echo
+        //    that same id back; reject before returning the response in
+        //    every other case — a peer that omits either id, or reports
+        //    a different one in either place, hasn't actually confirmed
+        //    this is the session the caller asked to reopen.
+        if opcode == DdiOp::ReopenSession
+            && !reopen_identity_confirmed(session_id, hdr.sess_id, typed_resp.resp_session_id())
+        {
+            return Err(DdiError::DdiStatus(DdiStatus::SessionNotFound));
+        }
+
+        // ── 6. For `OpenSession`, the header carries the server-assigned
+        //    id and the body independently echoes the same id back. A
+        //    peer that omits either id, or reports a different one in
+        //    either place, hasn't actually confirmed the new session's
+        //    id: treat it the same as a body decode failure — best-effort
+        //    close whatever the header told us was opened, and surface a
+        //    decode error rather than returning an untrustworthy id to
+        //    the caller.
+        if session_ctrl == SessionControlKind::Open
+            && !open_identity_confirmed(hdr.sess_id, typed_resp.resp_session_id())
+        {
+            if let Some(leaked_id) =
+                open_session_leaked_id(hdr.sess_id, typed_resp.resp_session_id())
+            {
+                if let CloseLeakedSessionOutcome::Unusable(cause) =
+                    Self::close_leaked_session_locked(
+                        &mut stream,
+                        self.next_cmd_id(),
+                        pre_encode,
+                        leaked_id,
+                    )
+                {
+                    self.retire(cause);
+                }
+            }
+            return Err(DdiError::MborError(MborError::DecodeError));
+        }
+
+        Ok(typed_resp)
     }
 
     fn exec_op_tbor<T: TborOpReq>(
@@ -759,7 +1258,16 @@ impl DdiDev for DdiSockDev {
     }
 
     fn erase(&self) -> Result<(), DdiError> {
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
         let mut stream = self.stream.lock();
+        // See `exchange`'s matching recheck: a cleanup on another clone
+        // may have retired the connection after the check above but
+        // before this lock was acquired.
+        if self.retired.load(Ordering::Acquire) {
+            return Err(self.retired_err());
+        }
         RequestFrame::Reset
             .write_to(&mut *stream)
             .map_err(map_proto_err)?;
@@ -798,7 +1306,96 @@ fn map_proto_err(e: ProtoError) -> DdiError {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use tsra_ddi_mbor_codec::MborByteArray;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_codec::MborMap;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiDerPublicKey;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiEncryptedSessionCredential;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiKeyType;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiOpenSessionCmdReq;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiOpenSessionCmdResp;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiOpenSessionReq;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiOpenSessionResp;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiReopenSessionCmdReq;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiReopenSessionCmdResp;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiReopenSessionReq;
+    #[cfg(unix)]
+    use tsra_ddi_mbor_types::DdiReopenSessionResp;
+
     use super::*;
+
+    /// A `ReopenSession` response is only trusted when both the shared
+    /// header and the op-specific body independently confirm the exact
+    /// id that was requested; a mismatch or a missing id in either place
+    /// must not be mistaken for confirmation (see `exec_op_mbor`'s use
+    /// of this to gate returning the response to the caller).
+    #[test]
+    fn reopen_identity_confirmed_requires_both_ids_to_match_requested() {
+        // Both ids match: confirmed.
+        assert!(reopen_identity_confirmed(Some(9), Some(9), Some(9)));
+        // Header mismatches the requested id: not confirmed, even though
+        // the body matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(1), Some(9)));
+        // Body mismatches the requested id: not confirmed, even though
+        // the header matches.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), Some(1)));
+        // Header id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), None, Some(9)));
+        // Body id entirely missing: not confirmed.
+        assert!(!reopen_identity_confirmed(Some(9), Some(9), None));
+        // No id was requested at all: trivially confirmed (nothing to
+        // check against).
+        assert!(reopen_identity_confirmed(None, Some(9), Some(9)));
+    }
+
+    /// An `OpenSession` response is only trusted when the shared header
+    /// and the op-specific body independently report the *same*
+    /// server-assigned id; unlike `ReopenSession` there's no requested id
+    /// to check against (see `exec_op_mbor`'s use of this to gate
+    /// returning the new session to the caller).
+    #[test]
+    fn open_identity_confirmed_requires_matching_non_empty_ids() {
+        // Both ids agree: confirmed.
+        assert!(open_identity_confirmed(Some(9), Some(9)));
+        // Header and body disagree: not confirmed.
+        assert!(!open_identity_confirmed(Some(9), Some(1)));
+        // Header id missing entirely: not confirmed, even if the body
+        // reports one.
+        assert!(!open_identity_confirmed(None, Some(9)));
+        // Body id missing entirely: not confirmed, even if the header
+        // reports one.
+        assert!(!open_identity_confirmed(Some(9), None));
+        // Neither id present: not confirmed.
+        assert!(!open_identity_confirmed(None, None));
+    }
+
+    /// Best-effort cleanup after an unconfirmed `OpenSession` response
+    /// must only target an id when exactly one source reported it; a
+    /// header/body disagreement is ambiguous and must not be guessed at,
+    /// since the header's id could be an existing session this connection
+    /// already owns rather than the one actually leaked.
+    #[test]
+    fn open_session_leaked_id_only_trusts_a_lone_report() {
+        // Header omitted, body reported: close the body's id.
+        assert_eq!(open_session_leaked_id(None, Some(9)), Some(9));
+        // Body omitted, header reported: close the header's id.
+        assert_eq!(open_session_leaked_id(Some(5), None), Some(5));
+        // Both present but disagreeing: ambiguous, don't guess.
+        assert_eq!(open_session_leaked_id(Some(5), Some(9)), None);
+        // Neither present: nothing to clean up.
+        assert_eq!(open_session_leaked_id(None, None), None);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -847,6 +1444,51 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(unsafe_code)]
+    fn vsock_set_timeout_clamps_sub_microsecond_duration_to_nonzero() {
+        use std::os::fd::IntoRawFd;
+
+        let (client, _peer) = UnixStream::pair().expect("socket pair");
+        let mut stream = VsockStream {
+            fd: client.into_raw_fd(),
+        };
+        stream
+            .set_timeout(libc::SO_RCVTIMEO, Some(Duration::from_nanos(1)))
+            .expect("set timeout");
+
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        let mut len = std::mem::size_of::<libc::timeval>() as libc::socklen_t;
+        // SAFETY: `stream.fd` is a valid, open socket; `tv`/`len` are a
+        // valid, correctly sized out-param pair for `getsockopt`.
+        let ret = unsafe {
+            libc::getsockopt(
+                stream.fd,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                std::ptr::addr_of_mut!(tv).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(
+            ret,
+            0,
+            "getsockopt failed: {}",
+            std::io::Error::last_os_error()
+        );
+        // A 1ns request must not round down to an all-zero timeval, since
+        // the kernel treats that identically to `None` (disable the
+        // timeout, block indefinitely) rather than "expire immediately".
+        assert!(
+            tv.tv_sec != 0 || tv.tv_usec != 0,
+            "sub-microsecond timeout was clamped to the all-zero 'no timeout' value"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn unix_stream_preserves_request_response_framing() {
@@ -858,6 +1500,8 @@ mod tests {
             stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
             cmd_counter: Arc::new(AtomicU16::new(1)),
             device_kind: DdiDeviceKind::Physical,
+            retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
         };
         let peer = std::thread::spawn(move || {
             let request = Request::read_from(&mut server).expect("request");
@@ -879,6 +1523,318 @@ mod tests {
                 .expect("submit")
                 .0,
             b"response"
+        );
+        peer.join().expect("peer");
+    }
+
+    /// A best-effort leaked-session cleanup whose exchange fails for any
+    /// reason — not only `CLEANUP_TIMEOUT` — must retire the connection
+    /// rather than report it reusable: a response that failed partway
+    /// through (e.g. one whose framing was never fully consumed) can
+    /// leave unread bytes behind that the *next* exchange would
+    /// otherwise misread as its own response. Dropping the peer makes
+    /// the cleanup's write fail immediately with a non-timeout I/O
+    /// error, exercising exactly that "ordinary error, no timeout"
+    /// path.
+    #[cfg(unix)]
+    #[test]
+    fn close_leaked_session_retires_on_any_cleanup_error_not_just_timeout() {
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .expect("read timeout");
+        // Close the peer so the cleanup's write fails immediately
+        // rather than blocking or timing out.
+        drop(server);
+        let mut stream = SocketStream::Unix(client);
+        let outcome = DdiSockDev::close_leaked_session_locked(&mut stream, 1, false, 7);
+        assert!(
+            matches!(outcome, CloseLeakedSessionOutcome::Unusable(_)),
+            "a non-timeout cleanup error must still retire the connection"
+        );
+    }
+
+    /// `retired_err` must describe the actual cleanup failure that
+    /// caused a connection to be retired, not a flat "timeout" message
+    /// that would misdirect anyone diagnosing a non-timeout cleanup
+    /// error (see `close_leaked_session_retires_on_any_cleanup_error_not_just_timeout`).
+    #[cfg(unix)]
+    #[test]
+    fn retired_err_reports_the_recorded_cleanup_cause() {
+        let device = DdiSockDev {
+            stream: Arc::new(Mutex::new(SocketStream::Unix(
+                UnixStream::pair().expect("socket pair").0,
+            ))),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
+            device_kind: DdiDeviceKind::Physical,
+            retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
+        };
+        device.retire("disk on fire".to_owned());
+        // `DdiError::IoError`'s `Display` is the fixed string "io error"
+        // (see `ddi/interface/src/error.rs`); the actual message only
+        // shows up via `Debug` (through the wrapped `io::Error`'s own
+        // `Debug` impl), so that's what callers trying to diagnose a
+        // retired connection would actually see.
+        let err = format!("{:?}", device.retired_err());
+        assert!(
+            err.contains("disk on fire"),
+            "retired_err should surface the recorded cause, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn zero_byte_array<const N: usize>() -> MborByteArray<N> {
+        MborByteArray::new([0u8; N], 0).expect("zero-filled byte array")
+    }
+
+    #[cfg(unix)]
+    fn dummy_encrypted_session_credential() -> DdiEncryptedSessionCredential {
+        DdiEncryptedSessionCredential {
+            encrypted_id: zero_byte_array(),
+            encrypted_pin: zero_byte_array(),
+            encrypted_seed: zero_byte_array(),
+            iv: zero_byte_array(),
+            nonce: [0u8; 32],
+            tag: [0u8; 48],
+        }
+    }
+
+    #[cfg(unix)]
+    fn dummy_der_public_key() -> DdiDerPublicKey {
+        DdiDerPublicKey {
+            der: zero_byte_array(),
+            key_kind: DdiKeyType::Ecc384Public,
+        }
+    }
+
+    #[cfg(unix)]
+    fn dummy_open_session_req() -> DdiOpenSessionCmdReq {
+        DdiOpenSessionCmdReq {
+            hdr: DdiReqHdr {
+                rev: None,
+                op: DdiOp::OpenSession,
+                sess_id: None,
+            },
+            data: DdiOpenSessionReq {
+                encrypted_credential: dummy_encrypted_session_credential(),
+                pub_key: dummy_der_public_key(),
+            },
+            ext: None,
+        }
+    }
+
+    #[cfg(unix)]
+    fn dummy_reopen_session_req(session_id: u16) -> DdiReopenSessionCmdReq {
+        DdiReopenSessionCmdReq {
+            hdr: DdiReqHdr {
+                rev: None,
+                op: DdiOp::ReopenSession,
+                sess_id: Some(session_id),
+            },
+            data: DdiReopenSessionReq {
+                encrypted_credential: dummy_encrypted_session_credential(),
+                pub_key: dummy_der_public_key(),
+                bmk_session: zero_byte_array(),
+            },
+            ext: None,
+        }
+    }
+
+    /// Builds a `Virtual` device (so `exec_op_mbor` skips the
+    /// `Physical`-only pre-encode/post-decode hooks that would otherwise
+    /// require a real DER-encoded ECC key) backed by one end of a
+    /// `UnixStream` pair, returning the device and the other end to
+    /// drive as the fake peer.
+    #[cfg(unix)]
+    fn virtual_device_with_peer() -> (DdiSockDev, UnixStream) {
+        let (client, server) = UnixStream::pair().expect("socket pair");
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("read timeout");
+        let device = DdiSockDev {
+            stream: Arc::new(Mutex::new(SocketStream::Unix(client))),
+            cmd_counter: Arc::new(AtomicU16::new(1)),
+            device_kind: DdiDeviceKind::Virtual,
+            retired: Arc::new(AtomicBool::new(false)),
+            retired_cause: Arc::new(Mutex::new(None)),
+        };
+        (device, server)
+    }
+
+    /// MBOR-encodes `resp` the same way `exec_op_mbor` would decode it:
+    /// a full `CmdResp` map (`hdr`/`data`/optional `ext`).
+    #[cfg(unix)]
+    fn encode_cmd_resp<R: MborEncode>(resp: &R) -> Vec<u8> {
+        let mut buf = vec![0u8; DST_CAP as usize];
+        let len = {
+            let mut enc = MborEncoder::new(buf.as_mut_slice(), false);
+            resp.mbor_encode(&mut enc).expect("encode response");
+            enc.position()
+        };
+        buf.truncate(len);
+        buf
+    }
+
+    #[cfg(unix)]
+    fn write_mbor_response(server: &mut UnixStream, payload: Vec<u8>) {
+        let dst_len = payload.len() as u32;
+        Response {
+            status: 0,
+            cqe: vec![dst_len, 0, 0, 0],
+            payload,
+            oob_items: Vec::new(),
+            tail: Vec::new(),
+        }
+        .write_to(server)
+        .expect("write response");
+    }
+
+    /// An `OpenSession` response whose header omits the new session's
+    /// id (while the body independently reports one) is treated the
+    /// same as any other header/body identity mismatch: the response is
+    /// rejected, and the id the body alone reported is best-effort
+    /// closed as a leaked session (see `open_session_leaked_id`). When
+    /// that cleanup succeeds, the connection stays usable.
+    #[cfg(unix)]
+    #[test]
+    fn exec_op_mbor_rejects_open_session_missing_header_id_and_cleans_up_leaked_session() {
+        let (device, mut server) = virtual_device_with_peer();
+        let peer = std::thread::spawn(move || {
+            let _request = Request::read_from(&mut server).expect("open session request");
+            let resp = DdiOpenSessionCmdResp {
+                hdr: DdiRespHdr {
+                    rev: None,
+                    op: DdiOp::OpenSession,
+                    sess_id: None,
+                    status: DdiStatus::Success,
+                    fips_approved: false,
+                },
+                data: DdiOpenSessionResp {
+                    sess_id: 7,
+                    short_app_id: 0,
+                    bmk_session: zero_byte_array(),
+                },
+                ext: None,
+            };
+            write_mbor_response(&mut server, encode_cmd_resp(&resp));
+
+            // Expect the best-effort cleanup to close the id the body
+            // alone reported, and answer it successfully.
+            let cleanup = Request::read_from(&mut server).expect("cleanup close request");
+            assert_eq!(
+                cleanup.sqe[12] & 0xffff,
+                7,
+                "cleanup must target the body's leaked id"
+            );
+            write_mbor_response(&mut server, Vec::new());
+        });
+
+        let req = dummy_open_session_req();
+        let result = device.exec_op_mbor(&req, &mut None);
+        assert!(
+            matches!(result, Err(DdiError::MborError(MborError::DecodeError))),
+            "expected a decode error for a missing open-session header id, got {result:?}"
+        );
+        assert!(
+            !device.retired.load(Ordering::Acquire),
+            "a successful cleanup must not retire the connection"
+        );
+        peer.join().expect("peer");
+    }
+
+    /// A `ReopenSession` response whose header and body both report an
+    /// id other than the one requested must be rejected as
+    /// `SessionNotFound` — unlike `OpenSession`, there's no best-effort
+    /// cleanup here, since the requested session (not whatever the peer
+    /// echoed back) is the only id this call has any business touching.
+    #[cfg(unix)]
+    #[test]
+    fn exec_op_mbor_rejects_reopen_session_with_mismatched_ids() {
+        let (device, mut server) = virtual_device_with_peer();
+        let peer = std::thread::spawn(move || {
+            let _request = Request::read_from(&mut server).expect("reopen session request");
+            let resp = DdiReopenSessionCmdResp {
+                hdr: DdiRespHdr {
+                    rev: None,
+                    op: DdiOp::ReopenSession,
+                    sess_id: Some(9),
+                    status: DdiStatus::Success,
+                    fips_approved: false,
+                },
+                data: DdiReopenSessionResp {
+                    sess_id: 1,
+                    short_app_id: 0,
+                    bmk_session: zero_byte_array(),
+                },
+                ext: None,
+            };
+            write_mbor_response(&mut server, encode_cmd_resp(&resp));
+        });
+
+        let req = dummy_reopen_session_req(9);
+        let result = device.exec_op_mbor(&req, &mut None);
+        assert!(
+            matches!(result, Err(DdiError::DdiStatus(DdiStatus::SessionNotFound))),
+            "expected SessionNotFound for mismatched reopen-session ids, got {result:?}"
+        );
+        assert!(!device.retired.load(Ordering::Acquire));
+        peer.join().expect("peer");
+    }
+
+    /// A response whose header decodes successfully (reporting a new
+    /// session as opened) but whose body is undecodable must still be
+    /// rejected as a decode error, and the leaked session it reported
+    /// best-effort closed. When that cleanup itself fails, the
+    /// connection must be retired rather than left reusable (see
+    /// `close_leaked_session_locked`).
+    #[cfg(unix)]
+    #[test]
+    fn exec_op_mbor_retires_connection_when_undecodable_open_session_body_cleanup_fails() {
+        let (device, mut server) = virtual_device_with_peer();
+        let peer = std::thread::spawn(move || {
+            let _request = Request::read_from(&mut server).expect("open session request");
+
+            // Hand-encode a response whose header is valid but whose
+            // body entry is a bare bool rather than the nested
+            // `DdiOpenSessionResp` map the full `CmdResp` decode
+            // expects -- a type mismatch that `decode_hdr` never
+            // notices (it only reads the header), but the full body
+            // decode rejects.
+            let mut buf = vec![0u8; DST_CAP as usize];
+            let len = {
+                let mut enc = MborEncoder::new(buf.as_mut_slice(), false);
+                MborMap(2).mbor_encode(&mut enc).expect("map marker");
+                0u8.mbor_encode(&mut enc).expect("hdr key");
+                DdiRespHdr {
+                    rev: None,
+                    op: DdiOp::OpenSession,
+                    sess_id: Some(9),
+                    status: DdiStatus::Success,
+                    fips_approved: false,
+                }
+                .mbor_encode(&mut enc)
+                .expect("hdr value");
+                1u8.mbor_encode(&mut enc).expect("data key");
+                true.mbor_encode(&mut enc).expect("bogus data value");
+                enc.position()
+            };
+            buf.truncate(len);
+            write_mbor_response(&mut server, buf);
+            // Drop the peer instead of answering the best-effort
+            // cleanup this triggers, so the cleanup fails and the
+            // connection is retired.
+        });
+
+        let req = dummy_open_session_req();
+        let result = device.exec_op_mbor(&req, &mut None);
+        assert!(
+            matches!(result, Err(DdiError::MborError(MborError::DecodeError))),
+            "expected a decode error for an undecodable open-session body, got {result:?}"
+        );
+        assert!(
+            device.retired.load(Ordering::Acquire),
+            "a failed cleanup must retire the connection"
         );
         peer.join().expect("peer");
     }

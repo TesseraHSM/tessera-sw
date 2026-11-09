@@ -18,6 +18,7 @@ use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use zerocopy::FromBytes;
 
+use crate::aead::format::all_zero;
 use crate::aead::format::MaskedKeyMetadata;
 use crate::aead::format::META_LEN;
 
@@ -60,6 +61,10 @@ pub struct UnmaskedView<'a> {
     pub target_key: &'a HsmDmaBuf,
 }
 
+/// A word-aligned buffer for a metadata copy (burst copies need alignment).
+#[repr(C, align(4))]
+struct MetaCopy([u8; META_LEN]);
+
 /// In-place unmask: parse, authenticate, decrypt, and validate a
 /// masked-key blob.
 ///
@@ -95,30 +100,43 @@ pub async fn unmask<'a, P: HsmKeyMasking>(
     {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
-    let payload_at = HEADER_LEN + env.alg.iv_len() + META_LEN;
+    let aad_at = HEADER_LEN + env.alg.iv_len();
+    let payload_at = aad_at + META_LEN;
     let tag_at = blob.len() - env.alg.tag_len();
     crypto
         .key_unmask_in_place(io, key, META_LEN, &mut blob[HEADER_LEN..])
         .await?;
-    let env = aead_peek(blob)?;
+    // Decryption leaves the header and the AAD as they were, so the AAD is
+    // where the peek above found it; no need to parse the header again.
+    let blob: &'a HsmDmaBuf = blob;
+    let aad = &blob[aad_at..payload_at];
 
-    // Parse the 192 B AAD region as MaskedKeyMetadata. `ref_from_bytes`
-    // never panics; the length check above guarantees a 192 B slice.
+    // Parse and validate a copy of the 192 B AAD region: it sits in DMA
+    // memory, which may be uncached, so one burst read fetches it far
+    // faster than validation would read it field by field in place.
+    // `ref_from_bytes` never panics; the length check above guarantees a
+    // 192 B slice.
+    let mut copy = MetaCopy([0; META_LEN]);
+    if !aad.copy_to_slice(&mut copy.0) {
+        return Err(HsmError::MaskedKeyDecodeFailed);
+    }
     let metadata =
-        MaskedKeyMetadata::ref_from_bytes(env.aad).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
+        MaskedKeyMetadata::ref_from_bytes(&copy.0).map_err(|_| HsmError::MaskedKeyDecodeFailed)?;
 
     metadata.validate_v1()?;
     let data_end = tag_at
         .checked_sub(metadata.data_pad_len as usize)
         .filter(|&n| n >= payload_at)
         .ok_or(HsmError::MaskedKeyDecodeFailed)?;
-    if !blob[data_end..tag_at].iter().all(|&b| b == 0) {
+    if !all_zero(&blob[data_end..tag_at]) {
         return Err(HsmError::MaskedKeyDecodeFailed);
     }
 
-    // validate_v1 guarantees key_label_len ≤ KEY_LABEL_MAX, so this
-    // accessor cannot return an error here.
-    let key_label = metadata.key_label()?;
+    // The label is borrowed from the blob, not the copy. validate_v1
+    // guarantees key_label_len ≤ KEY_LABEL_MAX, so this range is in bounds.
+    let key_label = aad
+        .get(metadata.key_label_range()?)
+        .ok_or(HsmError::MaskedKeyDecodeFailed)?;
 
     Ok(UnmaskedView {
         key_label,

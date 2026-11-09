@@ -913,6 +913,28 @@ impl HsmPartitionManager for UnoHsmPal {
         }
     }
 
+    /// Remembered by the partition store until the partition's slot is next
+    /// written; see `Partition::psk_default_memo`.
+    fn part_psk_default_memo(&self, io: &UnoHsmIo, psk_id: u8) -> Option<bool> {
+        let co = match psk_id {
+            0 => true,
+            1 => false,
+            _ => return None,
+        };
+        PartStore::partition(io.pid()).ok()?.psk_default_memo(co)
+    }
+
+    fn part_psk_memo_default(&self, io: &UnoHsmIo, psk_id: u8, is_default: bool) {
+        let co = match psk_id {
+            0 => true,
+            1 => false,
+            _ => return,
+        };
+        if let Ok(part) = PartStore::partition(io.pid()) {
+            part.memo_psk_default(co, is_default);
+        }
+    }
+
     fn part_prop_get_bytes<'a>(
         &'a self,
         io: &UnoHsmIo,

@@ -5,6 +5,14 @@
 # file (saved to target/nextest/<profile>/<path>) during CI runs.
 
 # profile for running all workspace tests against the emu backend
+# `ddi_sock_server_tcp_integration` and `ddi_sock_server_unix_integration`
+# spawn the separately-built `ddi_sock_server` binary (see
+# `examples/sock/ddi_sock_server/README.md`). This profile's
+# `--workspace` invocation does not build that binary, so these tests
+# are excluded here; they are not currently run by any CI job.
+[profile.ci-emu]
+default-filter = "not binary_id(tsra_ddi_sock::ddi_sock_server_tcp_integration) and not binary_id(tsra_ddi_sock::ddi_sock_server_unix_integration)"
+
 # Resiliency stress tests are timing-sensitive; reserve the whole runner so
 # they do not run in parallel with any other test or each other.
 [[profile.ci-emu.overrides]]

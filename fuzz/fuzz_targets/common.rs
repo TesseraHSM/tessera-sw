@@ -507,6 +507,20 @@ pub fn add_evidence_item(oob_items: &mut Vec<Vec<u8>>, der: &[u8]) -> CertDescri
 
 /// Initialize a partition and security domain so security-domain masking is available.
 pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
+    let _ = create_test_security_domain_with_policy(ctx, session);
+}
+
+/// Retained trust anchor and policy for commands that authenticate DARC imports.
+pub struct SecurityDomainFixture {
+    pub pota: CaKey,
+    pub policy: PartPolicy,
+}
+
+/// Initialize the security domain and retain its exact policy and POTA signer.
+pub fn create_test_security_domain_with_policy(
+    ctx: &TestCtx,
+    session: &SessionHandshake,
+) -> SecurityDomainFixture {
     use zerocopy::IntoBytes;
 
     let info = ctx
@@ -619,10 +633,11 @@ pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
             index: report_descriptor.index,
             length: report_descriptor.length,
         },
-        policy,
+        policy: policy.clone(),
     };
     ctx.tbor_oob(&req, &oob)
         .expect("test security-domain creation should succeed");
+    SecurityDomainFixture { pota, policy }
 }
 
 /// Exercise key scopes that cannot be used by the backup fixtures' custom partition.

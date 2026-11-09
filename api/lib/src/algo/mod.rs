@@ -339,6 +339,30 @@ macro_rules! define_hsm_key {
                 {
                     self.with_session(|s| s.with_dev(f))
                 }
+
+                /// Executes a closure with access to the HSM device,
+                /// without serializing on the session's cookie mutex.
+                ///
+                /// Use for cookie-free fast-path device calls (e.g. the
+                /// V1 AES-GCM/XTS bulk operations) that never read or
+                /// write the session's continuity cookie; see
+                /// `HsmSessionInner::with_dev_no_cookie` for the full
+                /// rationale. Use [`Self::with_dev`] instead for any
+                /// call that may read or write the cookie.
+                ///
+                /// # Arguments
+                ///
+                /// * `f` - The closure to execute with the device.
+                ///
+                /// # Returns
+                ///
+                /// The result of the closure execution.
+                pub(crate) fn with_dev_no_cookie<F, R>(&self, f: F) -> HsmResult<R>
+                where
+                    F: FnOnce(&crate::ddi::HsmDev) -> HsmResult<R>,
+                {
+                    self.with_session(|s| s.with_dev_no_cookie(f))
+                }
             }
 
             impl HsmKey for $name {}

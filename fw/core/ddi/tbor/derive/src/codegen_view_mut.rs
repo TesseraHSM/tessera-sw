@@ -92,11 +92,6 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
     }
 
     let view_mut_name = format_ident!("{}ViewMut", schema.name);
-    let header_len = match schema.kind {
-        MessageKind::Request { .. } => quote! { tsra_fw_ddi_tbor::REQ_HEADER_LEN },
-        MessageKind::Response => quote! { tsra_fw_ddi_tbor::RESP_HEADER_LEN },
-        MessageKind::Fields => unreachable!(),
-    };
 
     let layout = TocLayout::compute(&schema.fields);
 
@@ -129,19 +124,19 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
             let var = format_ident!("__scalar_{}", field.name);
             let body = match field.wire_type {
                 WireType::Uint8 => Some(quote! {
-                    tsra_fw_ddi_tbor::toc::read_toc_inline_u8(&*buf, #header_len, #toc_idx)
+                    tsra_fw_ddi_tbor::toc::raw_toc_inline_u8(raw.toc_word(#toc_idx))
                 }),
                 WireType::Uint16 => Some(quote! {
-                    tsra_fw_ddi_tbor::toc::read_toc_inline_u16(&*buf, #header_len, #toc_idx)
+                    tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(raw.toc_word(#toc_idx))
                 }),
                 WireType::SessionId => Some(quote! {
                     tsra_fw_ddi_tbor_api::SessionId(
-                        tsra_fw_ddi_tbor::toc::read_toc_inline_u16(&*buf, #header_len, #toc_idx)
+                        tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(raw.toc_word(#toc_idx))
                     )
                 }),
                 WireType::KeyId => Some(quote! {
                     tsra_fw_ddi_tbor_api::KeyId(
-                        tsra_fw_ddi_tbor::toc::read_toc_inline_u16(&*buf, #header_len, #toc_idx)
+                        tsra_fw_ddi_tbor::toc::raw_toc_inline_u16(raw.toc_word(#toc_idx))
                     )
                 }),
                 _ => None,
@@ -158,9 +153,7 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
             let len_var = format_ident!("__len_{}", field.name);
             quote! {
                 let (#off_var, #len_var): (usize, usize) = {
-                    let __word = tsra_fw_ddi_tbor::toc::read_toc_word(
-                        &*buf, #header_len, #toc_idx
-                    );
+                    let __word = raw.toc_word(#toc_idx);
                     (
                         tsra_fw_ddi_tbor::toc::raw_toc_offset(__word),
                         tsra_fw_ddi_tbor::toc::raw_toc_length(__word),
@@ -275,28 +268,41 @@ pub fn gen_decode_mut_body(schema: &Schema) -> Option<TokenStream> {
 
     let validation = crate::codegen_view::gen_validation_standalone(schema);
 
-    let data_start_expr = quote! {
-        {
-            let toc_count = ((&*buf)[2] & 0x1F) as usize + 1;
-            #header_len + toc_count * 4
-        }
-    };
+    // Every value Phase 1 captures, in one tuple out of its block.
+    let captured: Vec<syn::Ident> = schema
+        .fields
+        .iter()
+        .filter(|field| field.include_group.is_none())
+        .filter(|field| {
+            matches!(
+                field.wire_type,
+                WireType::Uint8 | WireType::Uint16 | WireType::SessionId | WireType::KeyId
+            )
+        })
+        .map(|field| format_ident!("__scalar_{}", field.name))
+        .chain(data_fields.iter().flat_map(|(_, field)| {
+            [
+                format_ident!("__off_{}", field.name),
+                format_ident!("__len_{}", field.name),
+            ]
+        }))
+        .collect();
 
     Some(quote! {
-        // ── Phase 1a: validation pass (shared reborrow).
-        {
+        // ── Phase 1: validation, then scalar reads and offset captures,
+        // all from the parsed view (shared reborrow), which holds the
+        // header and leading TOC words: the message sits in DMA memory,
+        // which may be uncached. The view's borrow ends with the block,
+        // so the outer `&mut` borrow remains usable for Phase 2 below.
+        let (#(#captured,)* __data_start,) = {
             let buf: &tsra_fw_hsm_pal_traits::HsmDmaBuf = &*buf;
             #validation
-        }
-
-        // ── Phase 1b: scalar reads, offset captures, monotonic check.
-        // Each helper uses a transient shared reborrow of `&*buf`;
-        // none outlive their statement, so the outer `&mut` borrow
-        // remains usable for Phase 2 below.
-        #(#scalar_captures)*
-        #(#offset_captures)*
+            #(#scalar_captures)*
+            #(#offset_captures)*
+            (#(#captured,)* raw.data_start(),)
+        };
+        let __data_start: usize = __data_start;
         #(#monotonic_checks)*
-        let __data_start: usize = #data_start_expr;
 
         // ── Phase 2: pipelined split_at_mut over the parent buffer.
         let (__prefix, __rest) = buf.split_at_mut(__data_start);
