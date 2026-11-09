@@ -151,6 +151,11 @@ impl Ghash {
         self.y[8..].copy_from_slice(&zl.to_be_bytes());
     }
 
+    /// Return the running GHASH state without consuming the accumulator.
+    pub(super) fn state(&self) -> [u8; 16] {
+        self.y
+    }
+
     /// Return the final GHASH value as a byte array.
     pub(super) fn finish(self) -> [u8; 16] {
         self.y

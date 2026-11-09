@@ -655,34 +655,48 @@ impl HsmAesGcm for UnoHsmPal {
             .await
     }
 
-    /// Not yet supported on Uno.
+    /// AES-GCM encrypt host-to-host over out-of-band items.
+    ///
+    /// Resolves the `src`/`dst` OOB item indices to their SGL descriptors
+    /// and delegates to [`UnoHsmPal::gcm_encrypt_sgl_impl`] in the
+    /// [`super::gcm_sgl`] module (CP AES core, both build configs).
     async fn gcm_encrypt_oob(
         &self,
-        _io: &UnoHsmIo,
-        _key: &HsmDmaBuf,
-        _iv: &HsmDmaBuf,
-        _aad_len: usize,
-        _len: usize,
-        _src: usize,
-        _dst: usize,
-        _tag: &mut HsmDmaBuf,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        src: usize,
+        dst: usize,
+        tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        let src = self.oob_desc(io, src).await?;
+        let dst = self.oob_desc(io, dst).await?;
+        self.gcm_encrypt_sgl_impl(io, key, iv, aad_len, len, &src, &dst, tag)
+            .await
     }
 
-    /// Not yet supported on Uno.
+    /// AES-GCM decrypt host-to-host over out-of-band items.
+    ///
+    /// Resolves the `src`/`dst` OOB item indices to their SGL descriptors
+    /// and delegates to [`UnoHsmPal::gcm_decrypt_sgl_impl`] in the
+    /// [`super::gcm_sgl`] module (CP AES core, both build configs).
     async fn gcm_decrypt_oob(
         &self,
-        _io: &UnoHsmIo,
-        _key: &HsmDmaBuf,
-        _iv: &HsmDmaBuf,
-        _aad_len: usize,
-        _len: usize,
-        _tag: &HsmDmaBuf,
-        _src: usize,
-        _dst: usize,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        tag: &HsmDmaBuf,
+        src: usize,
+        dst: usize,
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        let src = self.oob_desc(io, src).await?;
+        let dst = self.oob_desc(io, dst).await?;
+        self.gcm_decrypt_sgl_impl(io, key, iv, aad_len, len, tag, &src, &dst)
+            .await
     }
 }
 
@@ -857,23 +871,26 @@ impl HsmAesKw for UnoHsmPal {
     }
 }
 
-// AES-XTS is not yet supported on Uno.
+// AES-XTS runs on the CP AES core in both build configs; see [`super::xts`].
 impl HsmAesXts for UnoHsmPal {
-    async fn aes_xts_gen_key(&self, _io: &UnoHsmIo, _key: &mut [u8]) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+    async fn aes_xts_gen_key(&self, io: &UnoHsmIo, key: &mut [u8]) -> HsmResult<()> {
+        self.xts_gen_key_impl(io, key)
     }
 
     async fn aes_xts_enc_dec_oob(
         &self,
-        _io: &UnoHsmIo,
-        _op: HsmAesOp,
-        _key: &HsmDmaBuf,
-        _tweak: &HsmDmaBuf,
-        _len: usize,
-        _dul: usize,
-        _src: usize,
-        _dst: usize,
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        tweak: &HsmDmaBuf,
+        len: usize,
+        dul: usize,
+        src: usize,
+        dst: usize,
     ) -> HsmResult<()> {
-        Err(HsmError::UnsupportedCmd)
+        let src = self.oob_desc(io, src).await?;
+        let dst = self.oob_desc(io, dst).await?;
+        self.xts_enc_dec_sgl_impl(io, aes_op(op), key, tweak, len, dul, &src, &dst)
+            .await
     }
 }
