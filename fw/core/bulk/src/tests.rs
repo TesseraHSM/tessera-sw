@@ -3,6 +3,146 @@
 
 use super::*;
 
+fn data_block(addr: u64, len: u32) -> [u8; 16] {
+    let mut desc = [0; 16];
+    desc[..8].copy_from_slice(&addr.to_le_bytes());
+    desc[8..12].copy_from_slice(&len.to_le_bytes());
+    desc
+}
+
+#[test]
+fn sgl_prefix_and_tail() {
+    let desc = data_block(0x1000, 61);
+    assert_eq!(sgl_prefix(&desc, 61, 48), Ok(data_block(0x1000, 48)));
+    assert_eq!(
+        sgl_data_block_range(&desc, 48, 13),
+        Ok(data_block(0x1030, 13))
+    );
+    assert_eq!(
+        sgl_prefix(
+            &data_block(0x1000, MAX_DATA_LEN),
+            MAX_DATA_LEN,
+            MAX_DATA_LEN
+        ),
+        Ok(data_block(0x1000, MAX_DATA_LEN))
+    );
+    assert_eq!(sgl_prefix(&data_block(0, 0), 0, 0), Ok(data_block(0, 0)));
+}
+
+#[test]
+fn sgl_rejects_bad_ranges() {
+    let desc = data_block(0x1000, 61);
+    for (len, prefix) in [(60, 48), (61, 64), (61, 47), (MAX_DATA_LEN + 1, 0)] {
+        assert_eq!(sgl_prefix(&desc, len, prefix), Err(HsmError::InvalidArg));
+    }
+    for (offset, len) in [(61, 1), (48, 14), (u32::MAX, 1)] {
+        assert_eq!(
+            sgl_data_block_range(&desc, offset, len),
+            Err(HsmError::InvalidArg)
+        );
+    }
+    for invalid in [data_block(0, 16), data_block(u64::MAX - 7, 16)] {
+        assert_eq!(sgl_prefix(&invalid, 16, 16), Err(HsmError::InvalidArg));
+    }
+}
+
+#[test]
+fn sgl_segment_prefix_preserves_list() {
+    for kind in [SGL_SEGMENT, SGL_LAST_SEGMENT] {
+        let mut desc = data_block(0x2000, 2 * SGL_DESC_LEN);
+        desc[15] = kind << 4;
+        assert_eq!(sgl_prefix(&desc, MAX_DATA_LEN, 48), Ok(desc));
+        assert_eq!(sgl_data_block_range(&desc, 0, 1), Err(HsmError::InvalidArg));
+        for len in [0, 1, SGL_MAX_SEGMENT_LEN + SGL_DESC_LEN] {
+            desc[8..12].copy_from_slice(&len.to_le_bytes());
+            assert_eq!(sgl_prefix(&desc, 61, 48), Err(HsmError::InvalidArg));
+        }
+    }
+}
+
+#[test]
+fn sgl_tail_crosses_data_blocks() {
+    let mut root = data_block(0x2000, 2 * SGL_DESC_LEN);
+    root[15] = SGL_LAST_SEGMENT << 4;
+    let mut cursor = SglRangeCursor::new(root, 48, 13).expect("range");
+    assert_eq!(cursor.step(None), Ok(SglRangeStep::Descriptor(0x2000)));
+    assert_eq!(
+        cursor.step(Some(data_block(0x3000, 52))),
+        Ok(SglRangeStep::Data(data_block(0x3030, 4)))
+    );
+    assert_eq!(cursor.step(None), Ok(SglRangeStep::Descriptor(0x2010)));
+    assert_eq!(
+        cursor.step(Some(data_block(0x4000, 9))),
+        Ok(SglRangeStep::Data(data_block(0x4000, 9)))
+    );
+    assert_eq!(cursor.step(None), Ok(SglRangeStep::Done));
+}
+
+#[test]
+fn sgl_tail_follows_segment_chain() {
+    let mut root = data_block(0x2000, 2 * SGL_DESC_LEN);
+    root[15] = SGL_SEGMENT << 4;
+    let mut last = data_block(0x5000, SGL_DESC_LEN);
+    last[15] = SGL_LAST_SEGMENT << 4;
+    let mut cursor = SglRangeCursor::new(root, 32, 13).expect("range");
+    assert_eq!(cursor.step(None), Ok(SglRangeStep::Descriptor(0x2000)));
+    assert_eq!(
+        cursor.step(Some(data_block(0x3000, 32))),
+        Ok(SglRangeStep::Descriptor(0x2010))
+    );
+    assert_eq!(
+        cursor.step(Some(last)),
+        Ok(SglRangeStep::Descriptor(0x5000))
+    );
+    assert_eq!(
+        cursor.step(Some(data_block(0x6000, 13))),
+        Ok(SglRangeStep::Data(data_block(0x6000, 13)))
+    );
+    assert_eq!(cursor.step(None), Ok(SglRangeStep::Done));
+}
+
+#[test]
+fn sgl_tail_rejects_bad_lists() {
+    let mut root = data_block(0x2000, SGL_DESC_LEN);
+    root[15] = SGL_LAST_SEGMENT << 4;
+    let mut cursor = SglRangeCursor::new(root, 0, 13).expect("range");
+    assert_eq!(cursor.step(None), Ok(SglRangeStep::Descriptor(0x2000)));
+    assert_eq!(
+        cursor.step(Some(data_block(0x3000, 12))),
+        Ok(SglRangeStep::Data(data_block(0x3000, 12)))
+    );
+    assert_eq!(cursor.step(None), Err(HsmError::InvalidArg));
+    let mut cursor = SglRangeCursor::new(root, 0, 1).expect("range");
+    assert_eq!(cursor.step(None), Ok(SglRangeStep::Descriptor(0x2000)));
+    assert_eq!(cursor.step(Some(root)), Err(HsmError::InvalidArg));
+}
+
+#[test]
+fn sgl_tail_bounds_cyclic_chains() {
+    let mut root = data_block(0x2000, 2 * SGL_DESC_LEN);
+    root[15] = SGL_SEGMENT << 4;
+    let mut cursor = SglRangeCursor::new(root, MAX_DATA_LEN - 1, 1).expect("range");
+    let mut fetched = None;
+    let mut rejected = false;
+    for _ in 0..=SGL_MAX_SEGMENT_LEN / SGL_DESC_LEN {
+        match cursor.step(fetched) {
+            Ok(SglRangeStep::Descriptor(addr)) => {
+                fetched = Some(if addr == 0x2000 {
+                    data_block(0x3000, 1)
+                } else {
+                    root
+                });
+            }
+            Err(HsmError::InvalidArg) => {
+                rejected = true;
+                break;
+            }
+            _ => panic!("cyclic chain must not complete"),
+        }
+    }
+    assert!(rejected, "descriptor traversal must have a fixed bound");
+}
+
 fn gcm_sqe() -> BulkSqe {
     BulkSqe {
         dir: BulkDir::Decrypt,

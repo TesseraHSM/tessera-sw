@@ -40,22 +40,33 @@ use tsra_fw_hsm_bulk::BulkCqe;
 use tsra_fw_hsm_bulk::BulkDir;
 use tsra_fw_hsm_bulk::BulkParams;
 use tsra_fw_hsm_bulk::BulkSqe;
+use tsra_fw_hsm_bulk::GCM_AAD_ALIGN;
 use tsra_fw_hsm_bulk::GcmParams;
+use tsra_fw_hsm_bulk::GcmTail;
+use tsra_fw_hsm_bulk::SGL_DESC_LEN;
+use tsra_fw_hsm_bulk::SglRangeCursor;
+use tsra_fw_hsm_bulk::SglRangeStep;
 use tsra_fw_hsm_bulk::XtsDul;
 use tsra_fw_hsm_bulk::XtsParams;
+use tsra_fw_hsm_bulk::sgl_prefix;
+use tsra_fw_hsm_pal_traits::HsmAesOp;
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmGdmaController;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
+use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
+use tsra_fw_uno_drivers_bcp::BCP_KEY_LEN;
 use tsra_fw_uno_drivers_bcp::BcpError;
 use tsra_fw_uno_drivers_bcp::BcpOp;
 use tsra_fw_uno_drivers_bcp::HostCipher;
 use tsra_fw_uno_drivers_bcp::HostRequest;
+use zeroize::Zeroize;
 
 use super::aes::AES_BLOCK_SIZE;
 use super::gcm_bcp::constant_time_eq;
@@ -268,7 +279,6 @@ fn constant_time_eq_slice(a: &[u8], b: &[u8]) -> bool {
 /// The SQE fields every bulk path needs.
 struct HostIo {
     op: BcpOp,
-    session_id: u16,
     len: usize,
     src: [u8; 16],
     dst: [u8; 16],
@@ -289,8 +299,19 @@ impl HostIo {
 }
 
 /// A GCM IO's state around its engine command.
-struct GcmIo<'p> {
-    gcm: &'p GcmParams,
+enum TailIo {
+    Bulk(GcmTail),
+    Sgl {
+        src: [u8; 16],
+        dst: [u8; 16],
+        offset: u32,
+    },
+}
+
+struct GcmIo {
+    aad_len: usize,
+    expected_tag: Block,
+    tail: Option<TailIo>,
     iv: [u8; 12],
     approved: bool,
     /// Whether the engine's tag needs correcting (see the module docs).
@@ -299,6 +320,148 @@ struct GcmIo<'p> {
 }
 
 impl UnoHsmPal {
+    /// Host GCM for a command IO with a caller-owned, already unmasked key.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn gcm_host_sgl(
+        &self,
+        io: &UnoHsmIo,
+        op: HsmAesOp,
+        key: &HsmDmaBuf,
+        iv: &HsmDmaBuf,
+        aad_len: usize,
+        len: usize,
+        src: &[u8; 16],
+        dst: &[u8; 16],
+        tag: &HsmDmaBuf,
+    ) -> HsmResult<Block> {
+        if key.len() != BCP_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let iv_bytes: &[u8] = iv;
+        let iv: [u8; 12] = iv_bytes.try_into().map_err(|_| HsmError::InvalidArg)?;
+        let tag_bytes: &[u8] = tag;
+        let expected_tag: Block = tag_bytes.try_into().map_err(|_| HsmError::InvalidArg)?;
+        let pad = aad_len
+            .checked_next_multiple_of(GCM_AAD_ALIGN as usize)
+            .ok_or(HsmError::InvalidArg)?;
+        let text_len = len.checked_sub(pad).ok_or(HsmError::InvalidArg)?;
+        let tail_len = text_len % AES_BLOCK_SIZE;
+        let body_len = len - tail_len;
+        let total = u32::try_from(len).map_err(|_| HsmError::InvalidArg)?;
+        let prefix = u32::try_from(body_len).map_err(|_| HsmError::InvalidArg)?;
+        let host = HostIo {
+            op: match op {
+                HsmAesOp::Encrypt => BcpOp::Encrypt,
+                HsmAesOp::Decrypt => BcpOp::Decrypt,
+            },
+            len: body_len,
+            src: sgl_prefix(src, total, prefix)?,
+            dst: sgl_prefix(dst, total, prefix)?,
+            if_sel: crate::pal::pfn_to_axi_id(u8::from(io.pid())).ok_or(HsmError::InvalidArg)?,
+        };
+        let g = GcmIo {
+            aad_len,
+            expected_tag,
+            tail: (tail_len != 0).then_some(TailIo::Sgl {
+                src: *src,
+                dst: *dst,
+                offset: prefix,
+            }),
+            iv,
+            approved: false,
+            fix: body_len == 0 || pad != aad_len || tail_len != 0,
+            f: Fix {
+                encrypt: op == HsmAesOp::Encrypt,
+                pad,
+                text: text_len - tail_len,
+                tail_len,
+                l: len_block(aad_len, text_len),
+            },
+        };
+        self.alloc_scoped_async(io, async |scope| {
+            let mut scratch = Scratch {
+                ecb_in: scope.dma_alloc(3 * AES_BLOCK_SIZE)?,
+                ecb_out: scope.dma_alloc(3 * AES_BLOCK_SIZE)?,
+            };
+            let result = async {
+                self.host_gcm_prepare(io, key, &g, &mut scratch).await?;
+                let computed = self.host_gcm_tag(&host, &g, key, &scratch).await?;
+                self.host_gcm_finish(io, &host, &g, &computed, &scratch)
+                    .await?;
+                Ok(computed)
+            }
+            .await;
+            if result.is_err() && op == HsmAesOp::Decrypt && len != 0 {
+                let _ = self.zero_host_sgl(io, dst, len).await;
+            }
+            scratch.ecb_in.zeroize();
+            scratch.ecb_out.zeroize();
+            result
+        })
+        .await
+    }
+
+    /// Copy only a tail range, walking a bounded number of host descriptors.
+    async fn gcm_sgl_tail(
+        &self,
+        io: &UnoHsmIo,
+        root: &[u8; 16],
+        offset: u32,
+        buf: &mut HsmDmaBuf,
+        write: bool,
+    ) -> HsmResult<()> {
+        self.alloc_scoped_async(io, async |scope| {
+            let entry = scope.dma_alloc(SGL_DESC_LEN as usize)?;
+            let mut cursor = SglRangeCursor::new(
+                *root,
+                offset,
+                u32::try_from(buf.len()).map_err(|_| HsmError::InvalidArg)?,
+            )?;
+            let mut fetched = None;
+            let mut copied: usize = 0;
+            loop {
+                match cursor.step(fetched.take())? {
+                    SglRangeStep::Descriptor(addr) => {
+                        self.copy_mem_from_host_raw(
+                            io,
+                            &tail_desc(addr, SGL_DESC_LEN as usize),
+                            entry,
+                            false,
+                        )
+                        .await?;
+                        let mut desc = [0; 16];
+                        desc.copy_from_slice(entry);
+                        fetched = Some(desc);
+                    }
+                    SglRangeStep::Data(desc) => {
+                        let count =
+                            u32::from_le_bytes([desc[8], desc[9], desc[10], desc[11]]) as usize;
+                        let end = copied
+                            .checked_add(count)
+                            .filter(|end| *end <= buf.len())
+                            .ok_or(HsmError::InvalidArg)?;
+                        let target = &mut buf[copied..end];
+                        if write {
+                            self.copy_to_host_sgl(io, target, &desc).await?;
+                        } else {
+                            self.copy_mem_from_host_raw(io, &desc, target, false)
+                                .await?;
+                        }
+                        copied = end;
+                    }
+                    SglRangeStep::Done => {
+                        return if copied == buf.len() {
+                            Ok(())
+                        } else {
+                            Err(HsmError::InvalidArg)
+                        };
+                    }
+                }
+            }
+        })
+        .await
+    }
+
     /// Services a host bulk IO on the BCP and writes its CQE.
     pub(crate) async fn bulk_bcp_crypt(&self, io: &mut UnoHsmIo) -> HsmResult<()> {
         let sqe = BulkSqe::parse(io.sqe())?;
@@ -307,7 +470,6 @@ impl UnoHsmPal {
                 BulkDir::Encrypt => BcpOp::Encrypt,
                 BulkDir::Decrypt => BcpOp::Decrypt,
             },
-            session_id: sqe.session_id,
             len: sqe.src_len as usize,
             src: sgl_desc(io.sqe(), SRC_SGL_DW)?,
             dst: sgl_desc(io.sqe(), DST_SGL_DW)?,
@@ -320,7 +482,11 @@ impl UnoHsmPal {
         // The PAL stamps the SQ id when it completes the IO.
         let mut cqe = BulkCqe::success(&sqe, 0);
         let gcm = match &sqe.params {
-            BulkParams::Xts(xts) => return self.bulk_xts(io, &host, xts, &mut cqe).await,
+            BulkParams::Xts(xts) => {
+                return self
+                    .bulk_xts(io, &host, xts, sqe.session_id, &mut cqe)
+                    .await;
+            }
             BulkParams::Gcm(gcm) => gcm,
         };
 
@@ -328,34 +494,13 @@ impl UnoHsmPal {
             HsmVaultKeyKind::AesGcmBulk256,
             HsmVaultKeyKind::AesGcmBulk256Unapproved,
         ];
-        let (key, kind) = bulk_vault_key(io, gcm.key_id, host.session_id, GCM)?;
+        let (key, kind) = bulk_vault_key(io, gcm.key_id, sqe.session_id, GCM)?;
         let (mut s, key_slot) = Scratch::gcm(io)?;
         let key = snapshot(key_slot, key)?;
         let g = self
             .bulk_gcm_prepare(io, &host, gcm, key, kind, &mut s)
             .await?;
-        if host.len == 0 {
-            let tag = s.gmac(&g.f)?;
-            return self.bulk_finish(io, &host, &g, tag, &s, &mut cqe).await;
-        }
-        let cipher = HostCipher::Gcm {
-            key,
-            iv: &g.iv,
-            aad_len: g.f.pad,
-            unpadded_aad_len: gcm.aad_len as usize,
-            // Every decrypt is checked here, not by the engine.
-            tag: &[0; AES_BLOCK_SIZE],
-        };
-        let tag = self.bcp.host(host.request(cipher)).await.and_then(|done| {
-            if !(done.ok() || (!g.f.encrypt && done.tag_mismatch_only())) {
-                return Err(BcpError::CMD_ERROR);
-            }
-            if g.fix {
-                s.fix_tag(&done.tag, &g.f)
-            } else {
-                Ok(done.tag)
-            }
-        });
+        let tag = self.host_gcm_tag(&host, &g, key, &s).await;
         match tag {
             Ok(tag) => self.bulk_finish(io, &host, &g, tag, &s, &mut cqe).await,
             Err(e) => {
@@ -365,17 +510,49 @@ impl UnoHsmPal {
         }
     }
 
+    /// Run the host engine and correct its tag, or compute a tail-only tag.
+    async fn host_gcm_tag(
+        &self,
+        host: &HostIo,
+        g: &GcmIo,
+        key: &HsmDmaBuf,
+        s: &Scratch<'_>,
+    ) -> HsmResult<Block> {
+        if host.len == 0 {
+            return s.gmac(&g.f);
+        }
+        let cipher = HostCipher::Gcm {
+            key,
+            iv: &g.iv,
+            aad_len: g.f.pad,
+            unpadded_aad_len: g.aad_len,
+            // Every decrypt is checked here, not by the engine.
+            tag: &[0; AES_BLOCK_SIZE],
+        };
+        self.bcp.host(host.request(cipher)).await.and_then(|done| {
+            if !(done.ok() || (!g.f.encrypt && done.tag_mismatch_only())) {
+                return Err(BcpError::CMD_ERROR);
+            }
+            if g.fix {
+                s.fix_tag(&done.tag, &g.f)
+            } else {
+                Ok(done.tag)
+            }
+        })
+    }
+
     /// Services a host bulk XTS IO and writes its CQE.
     async fn bulk_xts(
         &self,
         io: &mut UnoHsmIo,
         host: &HostIo,
         xts: &XtsParams,
+        session_id: u16,
         cqe: &mut BulkCqe,
     ) -> HsmResult<()> {
         const XTS: &[HsmVaultKeyKind] = &[HsmVaultKeyKind::AesXtsBulk256];
-        let (key1, _) = bulk_vault_key(io, xts.key_id1, host.session_id, XTS)?;
-        let (key2, _) = bulk_vault_key(io, xts.key_id2, host.session_id, XTS)?;
+        let (key1, _) = bulk_vault_key(io, xts.key_id1, session_id, XTS)?;
+        let (key2, _) = bulk_vault_key(io, xts.key_id2, session_id, XTS)?;
         let [slot1, slot2] = scratch_views(io, [(KEY, 2), (0, 2)])?;
         let key1 = snapshot(slot1, key1)?;
         let key2 = snapshot(slot2, key2)?;
@@ -404,15 +581,15 @@ impl UnoHsmPal {
 
     /// A GCM IO's work before its engine command: the IV, and when the
     /// tag needs correcting, `H`, `E_K(J₀)` and the tail.
-    async fn bulk_gcm_prepare<'p>(
+    async fn bulk_gcm_prepare(
         &self,
         io: &UnoHsmIo,
         host: &HostIo,
-        gcm: &'p GcmParams,
+        gcm: &GcmParams,
         key: &HsmDmaBuf,
         kind: HsmVaultKeyKind,
         s: &mut Scratch<'_>,
-    ) -> HsmResult<GcmIo<'p>> {
+    ) -> HsmResult<GcmIo> {
         let approved = kind == HsmVaultKeyKind::AesGcmBulk256;
         let encrypt = host.op == BcpOp::Encrypt;
         let mut iv = gcm.iv;
@@ -433,25 +610,47 @@ impl UnoHsmPal {
         // With the AAD already block-aligned and no tail, the engine's tag
         // is GCM's; with no SGL data there is no engine tag.
         let fix = host.len == 0 || pad != aad_len || tail_len != 0;
-        if fix {
-            s.prepare(&iv, text);
-            self.aes_run(AesMode::Ecb, AesOp::Encrypt, key, None, s.ecb_in, s.ecb_out)
-                .await?;
-        }
-        if let Some(t) = &gcm.tail {
-            // The ECB step has run, so its input holds the tail now.
-            let buf = &mut s.ecb_in[TAIL_IN * AES_BLOCK_SIZE..TAIL_IN * AES_BLOCK_SIZE + tail_len];
-            self.copy_mem_from_host_raw(io, &tail_desc(t.src, tail_len), buf, false)
-                .await?;
-            s.crypt_tail(tail_len);
-        }
-        Ok(GcmIo {
-            gcm,
+        let g = GcmIo {
+            aad_len,
+            expected_tag: gcm.tag,
+            tail: gcm.tail.map(TailIo::Bulk),
             iv,
             approved,
             fix,
             f,
-        })
+        };
+        self.host_gcm_prepare(io, key, &g, s).await?;
+        Ok(g)
+    }
+
+    async fn host_gcm_prepare(
+        &self,
+        io: &UnoHsmIo,
+        key: &HsmDmaBuf,
+        g: &GcmIo,
+        s: &mut Scratch<'_>,
+    ) -> HsmResult<()> {
+        if g.fix {
+            s.prepare(&g.iv, g.f.text);
+            self.aes_run(AesMode::Ecb, AesOp::Encrypt, key, None, s.ecb_in, s.ecb_out)
+                .await?;
+        }
+        if let Some(t) = &g.tail {
+            // The ECB step has run, so its input holds the tail now.
+            let buf =
+                &mut s.ecb_in[TAIL_IN * AES_BLOCK_SIZE..TAIL_IN * AES_BLOCK_SIZE + g.f.tail_len];
+            match t {
+                TailIo::Bulk(tail) => {
+                    self.copy_mem_from_host_raw(io, &tail_desc(tail.src, g.f.tail_len), buf, false)
+                        .await?
+                }
+                TailIo::Sgl { src, offset, .. } => {
+                    self.gcm_sgl_tail(io, src, *offset, buf, false).await?
+                }
+            }
+            s.crypt_tail(g.f.tail_len);
+        }
+        Ok(())
     }
 
     /// A GCM IO's last step: the decrypt check, the tail and the tag; then
@@ -460,21 +659,12 @@ impl UnoHsmPal {
         &self,
         io: &mut UnoHsmIo,
         host: &HostIo,
-        g: &GcmIo<'_>,
+        g: &GcmIo,
         tag: Block,
         s: &Scratch<'_>,
         cqe: &mut BulkCqe,
     ) -> HsmResult<()> {
-        if !g.f.encrypt && !constant_time_eq(&tag, &g.gcm.tag) {
-            self.wipe_failed_decrypt(io, host, g).await;
-            return Err(HsmError::AesGcmDecryptTagDoesNotMatch);
-        }
-        if let Some(t) = &g.gcm.tail {
-            let buf =
-                &s.ecb_in[TAIL_OUT * AES_BLOCK_SIZE..TAIL_OUT * AES_BLOCK_SIZE + g.f.tail_len];
-            self.copy_to_host_sgl(io, buf, &tail_desc(t.dst, g.f.tail_len))
-                .await?;
-        }
+        self.host_gcm_finish(io, host, g, &tag, s).await?;
         if g.f.encrypt {
             cqe.tag = tag;
         }
@@ -483,9 +673,44 @@ impl UnoHsmPal {
         cqe.write(io.cqe())
     }
 
+    async fn host_gcm_finish(
+        &self,
+        io: &UnoHsmIo,
+        host: &HostIo,
+        g: &GcmIo,
+        tag: &Block,
+        s: &Scratch<'_>,
+    ) -> HsmResult<()> {
+        if !g.f.encrypt && !constant_time_eq(tag, &g.expected_tag) {
+            self.wipe_failed_decrypt(io, host, g).await;
+            return Err(HsmError::AesGcmDecryptTagDoesNotMatch);
+        }
+        if let Some(t) = &g.tail {
+            let buf =
+                &s.ecb_in[TAIL_OUT * AES_BLOCK_SIZE..TAIL_OUT * AES_BLOCK_SIZE + g.f.tail_len];
+            match t {
+                TailIo::Bulk(tail) => {
+                    self.copy_to_host_sgl(io, buf, &tail_desc(tail.dst, g.f.tail_len))
+                        .await?
+                }
+                TailIo::Sgl { dst, offset, .. } => {
+                    self.alloc_scoped_async(io, async |scope| {
+                        let copy = scope.dma_alloc(buf.len())?;
+                        copy.copy_from_slice(buf);
+                        let result = self.gcm_sgl_tail(io, dst, *offset, copy, true).await;
+                        copy.zeroize();
+                        result
+                    })
+                    .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Best effort: wipes the plaintext the engine may have written for a
     /// GCM decrypt that then failed, whether on the tag or on an error.
-    async fn wipe_failed_decrypt(&self, io: &UnoHsmIo, host: &HostIo, g: &GcmIo<'_>) {
+    async fn wipe_failed_decrypt(&self, io: &UnoHsmIo, host: &HostIo, g: &GcmIo) {
         if !g.f.encrypt && g.f.text != 0 {
             let _ = self.zero_host_sgl(io, &host.dst, host.len).await;
         }

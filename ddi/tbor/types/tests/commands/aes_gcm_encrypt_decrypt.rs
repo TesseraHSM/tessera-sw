@@ -26,6 +26,7 @@ use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
 use tsra_ddi_tbor_types::TborStatus;
+use tsra_ddi_tbor_types::AES_IV_LEN;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
 use tsra_ddi_tbor_types::AES_OP_DECRYPT;
 use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
@@ -262,20 +263,49 @@ fn aes_gcm_roundtrip_aad_and_text_lengths() {
     }
 }
 
-/// `data_len` at [`GCM_DATA_MAX_LEN`] round trips (text only and with
-/// AAD).
+/// Every partial tail round-trips both alone and after one complete block.
+#[test]
+fn aes_gcm_roundtrip_all_tails() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+    for aad_len in [0, 1, 16, 17, 31, 32, 33] {
+        let aad = random(aad_len);
+        for tail_len in 1..AES_IV_LEN {
+            for prefix in [0, AES_IV_LEN] {
+                let iv = random(GCM_IV_LEN);
+                let pt = random(prefix + tail_len);
+                let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+                assert_eq!(
+                    decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct),
+                    pt,
+                    "AAD {aad_len}, prefix {prefix}, tail {tail_len}"
+                );
+            }
+        }
+    }
+}
+
+/// Transfers at and near the maximum exercise aligned and partial text,
+/// including AAD padding and multi-page host buffers.
 #[test]
 fn aes_gcm_roundtrip_max_data_len() {
     let ctx = TestCtx::new();
     let sid = finalized_co_session(&ctx).session_id;
     let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
 
-    for aad_len in [0, 32] {
-        let iv = random(GCM_IV_LEN);
-        let aad = random(aad_len);
-        let pt = random(GCM_DATA_MAX_LEN - padded_aad_len(aad_len));
-        let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
-        assert_eq!(decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct), pt);
+    for aad_len in [0, 13, 32] {
+        for len in [
+            GCM_DATA_MAX_LEN,
+            GCM_DATA_MAX_LEN - 1,
+            GCM_DATA_MAX_LEN - (AES_IV_LEN - 1),
+        ] {
+            let iv = random(GCM_IV_LEN);
+            let aad = random(aad_len);
+            let pt = random(len - padded_aad_len(aad_len));
+            let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+            assert_eq!(decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct), pt);
+        }
     }
 }
 
@@ -443,6 +473,19 @@ fn aes_gcm_rejects_invalid_lengths_and_missing_oob() {
 
     let buf = vec![0u8; GCM_DATA_MAX_LEN + 32];
     let mut out = vec![0u8; buf.len()];
+    for op in [AES_OP_ENCRYPT, AES_OP_DECRYPT] {
+        let request = TborAesGcmEncryptDecryptReq { op, ..base.clone() };
+        for (in_len, out_len) in [(31, 32), (33, 32), (32, 31), (32, 33)] {
+            ctx.expect_fw_reject_oob_io(
+                &request,
+                &mut [
+                    TborOobItem::In(&buf[..in_len]),
+                    TborOobItem::Out(&mut out[..out_len]),
+                ],
+                TborStatus::InvalidArg,
+            );
+        }
+    }
     let cases = [
         // Oversize data.
         TborAesGcmEncryptDecryptReq {

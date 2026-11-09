@@ -3,6 +3,22 @@
 This section discusses the various cryptographic operation that can be performed
 on an established session.
 
+## Uno TBOR AES-GCM
+
+The existing TBOR AES-GCM command uses caller-held masked AES-256 keys and
+OOB input/output SGLs. Default Uno firmware runs these requests on the
+HSM-owned BCP engine. Keys are unmasked for the operation only; they are
+not pinned or registered, and no new native API or driver IOCTL is needed.
+
+The maximum transfer is 16 KiB including the AAD region padded to 32 bytes.
+Both flat and segmented host descriptors are supported. Complete blocks
+remain in host memory; bounded DMA scratch holds the partial tail and tag
+correction state. Tag verification is constant-time, and failed decrypts
+trigger best-effort host-output wiping.
+
+Firmware built with `bulk_crypto` reserves BCP for the FP firmware and
+continues to return `UnsupportedCmd` for these TBOR SGL operations.
+
 ## Encrypt
 
 ### tsra_crypt_encrypt

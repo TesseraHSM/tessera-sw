@@ -651,7 +651,7 @@ impl HsmAesGcm for UnoHsmPal {
             .await
     }
 
-    /// Not yet supported on Uno.
+    /// Run host-to-host TBOR GCM through the HSM-owned BCP backend.
     async fn gcm_encrypt_sgl(
         &self,
         _io: &UnoHsmIo,
@@ -663,10 +663,29 @@ impl HsmAesGcm for UnoHsmPal {
         _dst: &[u8; 16],
         _tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
+        #[cfg(not(feature = "bulk_crypto"))]
+        {
+            let tag = self
+                .gcm_host_sgl(
+                    _io,
+                    HsmAesOp::Encrypt,
+                    _key,
+                    _iv,
+                    _aad_len,
+                    _len,
+                    _src,
+                    _dst,
+                    _tag,
+                )
+                .await?;
+            _tag.copy_from_slice(&tag);
+            Ok(())
+        }
+        #[cfg(feature = "bulk_crypto")]
         Err(HsmError::UnsupportedCmd)
     }
 
-    /// Not yet supported on Uno.
+    /// Verify the GCM tag and wipe host output on a failed decrypt.
     async fn gcm_decrypt_sgl(
         &self,
         _io: &UnoHsmIo,
@@ -678,6 +697,23 @@ impl HsmAesGcm for UnoHsmPal {
         _src: &[u8; 16],
         _dst: &[u8; 16],
     ) -> HsmResult<()> {
+        #[cfg(not(feature = "bulk_crypto"))]
+        {
+            self.gcm_host_sgl(
+                _io,
+                HsmAesOp::Decrypt,
+                _key,
+                _iv,
+                _aad_len,
+                _len,
+                _src,
+                _dst,
+                _tag,
+            )
+            .await?;
+            Ok(())
+        }
+        #[cfg(feature = "bulk_crypto")]
         Err(HsmError::UnsupportedCmd)
     }
 }
