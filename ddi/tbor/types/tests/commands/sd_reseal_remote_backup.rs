@@ -704,12 +704,7 @@ fn sd_reseal_remote_backup_dest_cert_length_mismatch_rejected() {
 fn sd_reseal_remote_backup_zeroed_masked_key_rejected() {
     let (ctx, mut req, evidence) = valid_reseal_fixture();
 
-    let zeroed = vec![0u8; req.masked_sealing_key.len()];
-
-    req.masked_sealing_key = zeroed
-        .as_slice()
-        .try_into()
-        .expect("masked key length must match");
+    req.masked_sealing_key.fill(0);
 
     ctx.tbor_oob(&req, &evidence.oob())
         .expect_err("zeroed masked sealing key must fail");

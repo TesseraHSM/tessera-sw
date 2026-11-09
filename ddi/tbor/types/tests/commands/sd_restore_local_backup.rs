@@ -435,27 +435,15 @@ fn sd_restore_local_backup_rejects_zeroed_pok_backup() {
 /// Verify that an all-zero SD masking-key backup is rejected.
 #[test]
 fn sd_restore_local_backup_rejects_zeroed_sd_mk_backup() {
-    println!("START test");
-
     let seed = mach_seed();
     let sata = CaKey::generate();
     let pota = CaKey::generate();
 
-    println!("Creating SD on first device");
-
     let created = create_sd_on_first_device(&seed, &sata, &pota);
-
-    println!("First device completed");
 
     let ctx = TestCtx::new();
 
-    println!("Restoring PartLocalMK");
-
     let session = reboot_and_restore_part_local_mk(&ctx, &seed, &pota, &created);
-
-    println!("PartLocalMK restored");
-
-    println!("Sending zeroed SDMK backup");
 
     ctx.expect_fw_reject(
         &TborSdRestoreLocalBackupReq {
@@ -465,8 +453,6 @@ fn sd_restore_local_backup_rejects_zeroed_sd_mk_backup() {
         },
         TborStatus::InvalidArg,
     );
-
-    println!("TEST COMPLETE");
 }
 
 /// Verify that refreshed local backups can restore another fresh device.
