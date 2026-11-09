@@ -37,10 +37,15 @@ jobs:
         include:
           # TODO: List your fuzz targets here.
           - fuzz_target: fuzz_tbor_aes_encrypt_decrypt
+          - fuzz_target: fuzz_tbor_aes_gcm_encrypt_decrypt
+          - fuzz_target: fuzz_tbor_aes_xts_encrypt_decrypt
+          - fuzz_target: fuzz_tbor_aes_xts_generate_key
           - fuzz_target: fuzz_tbor_app_ops
           - fuzz_target: fuzz_tbor_attest_key
           - fuzz_target: fuzz_tbor_cmd_reqs
           - fuzz_target: fuzz_tbor_concat_kdf_derive
+          - fuzz_target: fuzz_tbor_darc_kex_key_gen
+          - fuzz_target: fuzz_tbor_darc_key_unwrap
           - fuzz_target: fuzz_tbor_dispatcher
           - fuzz_target: fuzz_tbor_dispatcher_aes_fp
           - fuzz_target: fuzz_tbor_ecc_generate_key
