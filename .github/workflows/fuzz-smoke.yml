@@ -25,7 +25,14 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: ./.github/actions/ubuntu-setup
+      id: ubuntu-setup
     - run: rustup toolchain install nightly
+    - name: Install nightly rustfmt
+      if: steps.ubuntu-setup.outputs.cache-hit == 'true'
+      run: rustup component add --toolchain nightly rustfmt
+    - name: Install clippy
+      if: steps.ubuntu-setup.outputs.cache-hit == 'true'
+      run: rustup component add --toolchain nightly clippy
     - run: cargo +nightly fmt -- --check
     - run: cargo clippy -- -D warnings
 
