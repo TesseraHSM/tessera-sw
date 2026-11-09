@@ -476,6 +476,10 @@ fn aes_gcm_rejects_invalid_lengths_and_missing_oob() {
     for op in [AES_OP_ENCRYPT, AES_OP_DECRYPT] {
         let request = TborAesGcmEncryptDecryptReq { op, ..base.clone() };
         for (in_len, out_len) in [(31, 32), (33, 32), (32, 31), (32, 33)] {
+            eprintln!(
+                "GCM length rejection: op={op}, data_len={}, in_len={in_len}, out_len={out_len}",
+                request.data_len,
+            );
             ctx.expect_fw_reject_oob_io(
                 &request,
                 &mut [

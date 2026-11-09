@@ -163,6 +163,7 @@ pub struct SglRangeCursor {
     chained: bool,
     awaiting: bool,
     budget: u32,
+    require_exact: bool,
 }
 
 impl SglRangeCursor {
@@ -180,7 +181,16 @@ impl SglRangeCursor {
             chained: false,
             awaiting: false,
             budget: SGL_MAX_SEGMENT_LEN / SGL_DESC_LEN,
+            require_exact: false,
         })
+    }
+
+    /// Validate every descriptor and require the complete payload to equal `len`.
+    /// `Data` actions describe validated blocks; callers need not read their data.
+    pub fn new_exact(root: [u8; 16], len: u32) -> HsmResult<Self> {
+        let mut cursor = Self::new(root, 0, len)?;
+        cursor.require_exact = true;
+        Ok(cursor)
     }
 
     /// Advance, supplying descriptor bytes only after a `Descriptor` action.
@@ -196,7 +206,7 @@ impl SglRangeCursor {
         } else if fetched.is_some() {
             return Err(HsmError::InvalidArg);
         }
-        if self.remaining == 0 {
+        if self.remaining == 0 && !self.require_exact {
             return Ok(SglRangeStep::Done);
         }
         if let Some(desc) = self.current.take() {
@@ -206,7 +216,17 @@ impl SglRangeCursor {
                 SGL_DATA_BLOCK => {
                     sgl_data_block_range(&desc, 0, 0)?;
                     if available == 0 {
+                        if self.require_exact && self.remaining == 0 && self.next == 0 {
+                            return Ok(SglRangeStep::Done);
+                        }
                         return Err(HsmError::InvalidArg);
+                    }
+                    if self.require_exact {
+                        self.remaining = self
+                            .remaining
+                            .checked_sub(available)
+                            .ok_or(HsmError::InvalidArg)?;
+                        return Ok(SglRangeStep::Data(desc));
                     }
                     if self.offset >= available {
                         self.offset -= available;
@@ -232,6 +252,9 @@ impl SglRangeCursor {
                 }
                 _ => return Err(HsmError::InvalidArg),
             }
+        }
+        if self.next == self.end && self.require_exact && self.remaining == 0 && !self.chained {
+            return Ok(SglRangeStep::Done);
         }
         if self.next >= self.end || self.budget == 0 {
             return Err(HsmError::InvalidArg);

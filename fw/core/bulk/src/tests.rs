@@ -10,6 +10,126 @@ fn data_block(addr: u64, len: u32) -> [u8; 16] {
     desc
 }
 
+fn validate_sgl_length(root: [u8; 16], len: u32, entries: &[(u64, [u8; 16])]) -> HsmResult<()> {
+    let mut cursor = SglRangeCursor::new_exact(root, len)?;
+    let mut fetched = None;
+    loop {
+        match cursor.step(fetched.take())? {
+            SglRangeStep::Descriptor(addr) => {
+                fetched = Some(
+                    entries
+                        .iter()
+                        .find(|(entry_addr, _)| *entry_addr == addr)
+                        .ok_or(HsmError::InvalidArg)?
+                        .1,
+                );
+            }
+            SglRangeStep::Data(_) => {}
+            SglRangeStep::Done => return Ok(()),
+        }
+    }
+}
+
+#[test]
+fn sgl_exact_length_accepts_matching_payloads() {
+    assert_eq!(validate_sgl_length(data_block(0, 0), 0, &[]), Ok(()));
+    assert_eq!(
+        validate_sgl_length(data_block(0x1000, MAX_DATA_LEN), MAX_DATA_LEN, &[]),
+        Ok(())
+    );
+    let mut root = data_block(0x2000, 2 * SGL_DESC_LEN);
+    root[15] = SGL_LAST_SEGMENT << 4;
+    let entries = [
+        (0x2000, data_block(0x3000, 32)),
+        (0x2010, data_block(0x4000, 29)),
+    ];
+    assert_eq!(validate_sgl_length(root, 61, &entries), Ok(()));
+}
+
+#[test]
+fn sgl_exact_length_rejects_mismatches() {
+    let expected = 2 * BLOCK_LEN;
+    let mut root = data_block(0x2000, SGL_DESC_LEN);
+    root[15] = SGL_LAST_SEGMENT << 4;
+    for len in [expected - 1, expected + 1] {
+        assert_eq!(
+            validate_sgl_length(data_block(0x3000, len), expected, &[]),
+            Err(HsmError::InvalidArg)
+        );
+        assert_eq!(
+            validate_sgl_length(root, expected, &[(0x2000, data_block(0x3000, len))]),
+            Err(HsmError::InvalidArg)
+        );
+    }
+    assert_eq!(
+        validate_sgl_length(root, expected, &[(0x2000, data_block(0x3000, expected))]),
+        Ok(())
+    );
+}
+
+#[test]
+fn sgl_exact_length_rejects_trailing_payload() {
+    let mut root = data_block(0x2000, 2 * SGL_DESC_LEN);
+    root[15] = SGL_LAST_SEGMENT << 4;
+    let entries = [
+        (0x2000, data_block(0x3000, BLOCK_LEN)),
+        (0x2010, data_block(0x4000, 1)),
+    ];
+    assert_eq!(
+        validate_sgl_length(root, BLOCK_LEN, &entries),
+        Err(HsmError::InvalidArg)
+    );
+}
+
+#[test]
+fn sgl_exact_length_validates_chained_payloads() {
+    let mut root = data_block(0x2000, 2 * SGL_DESC_LEN);
+    root[15] = SGL_SEGMENT << 4;
+    let mut last = data_block(0x5000, SGL_DESC_LEN);
+    last[15] = SGL_LAST_SEGMENT << 4;
+    let entries = [
+        (0x2000, data_block(0x3000, BLOCK_LEN)),
+        (0x2010, last),
+        (0x5000, data_block(0x6000, BLOCK_LEN)),
+    ];
+    assert_eq!(validate_sgl_length(root, 2 * BLOCK_LEN, &entries), Ok(()));
+    assert_eq!(
+        validate_sgl_length(root, 2 * BLOCK_LEN - 1, &entries),
+        Err(HsmError::InvalidArg)
+    );
+    assert_eq!(
+        validate_sgl_length(root, 2 * BLOCK_LEN + 1, &entries),
+        Err(HsmError::InvalidArg)
+    );
+}
+
+#[test]
+fn sgl_exact_length_rejects_malformed_and_cyclic_lists() {
+    let mut root = data_block(0x2000, SGL_DESC_LEN);
+    root[15] = SGL_LAST_SEGMENT << 4;
+    let mut invalid = data_block(0x3000, BLOCK_LEN);
+    invalid[15] = 1;
+    for desc in [
+        invalid,
+        data_block(0, BLOCK_LEN),
+        data_block(u64::MAX - 7, BLOCK_LEN),
+        data_block(0, 0),
+        root,
+    ] {
+        assert_eq!(
+            validate_sgl_length(root, BLOCK_LEN, &[(0x2000, desc)]),
+            Err(HsmError::InvalidArg)
+        );
+    }
+    root[15] = SGL_SEGMENT << 4;
+    root[8..12].copy_from_slice(&(2 * SGL_DESC_LEN).to_le_bytes());
+    let entries = [(0x2000, data_block(0x3000, 1)), (0x2010, root)];
+    assert_eq!(
+        validate_sgl_length(root, MAX_DATA_LEN, &entries),
+        Err(HsmError::InvalidArg)
+    );
+}
+
 #[test]
 fn sgl_prefix_and_tail() {
     let desc = data_block(0x1000, 61);

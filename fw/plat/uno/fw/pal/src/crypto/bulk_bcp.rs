@@ -359,6 +359,8 @@ impl UnoHsmPal {
             dst: sgl_prefix(dst, total, prefix)?,
             if_sel: crate::pal::pfn_to_axi_id(u8::from(io.pid())).ok_or(HsmError::InvalidArg)?,
         };
+        self.validate_gcm_sgl(io, src, total).await?;
+        self.validate_gcm_sgl(io, dst, total).await?;
         let g = GcmIo {
             aad_len,
             expected_tag,
@@ -397,6 +399,34 @@ impl UnoHsmPal {
             scratch.ecb_in.zeroize();
             scratch.ecb_out.zeroize();
             result
+        })
+        .await
+    }
+
+    /// Validate the complete payload length before handing an SGL to BCP.
+    async fn validate_gcm_sgl(&self, io: &UnoHsmIo, root: &[u8; 16], len: u32) -> HsmResult<()> {
+        self.alloc_scoped_async(io, async |scope| {
+            let entry = scope.dma_alloc(SGL_DESC_LEN as usize)?;
+            let mut cursor = SglRangeCursor::new_exact(*root, len)?;
+            let mut fetched = None;
+            loop {
+                match cursor.step(fetched.take())? {
+                    SglRangeStep::Descriptor(addr) => {
+                        self.copy_mem_from_host_raw(
+                            io,
+                            &tail_desc(addr, SGL_DESC_LEN as usize),
+                            entry,
+                            false,
+                        )
+                        .await?;
+                        let mut desc = [0; 16];
+                        desc.copy_from_slice(entry);
+                        fetched = Some(desc);
+                    }
+                    SglRangeStep::Data(_) => {}
+                    SglRangeStep::Done => return Ok(()),
+                }
+            }
         })
         .await
     }
