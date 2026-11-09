@@ -68,6 +68,8 @@ done
 # --- emulator-backed C_Login ceremony (needs the integrated build + emu) ------
 HSMMOD="${TSRA_PKCS11_MODULE:-$REPO/target/debug/tsra_pkcs11.so}"
 if [ -f "$HSMMOD" ]; then
+    # ctest and the gates load it from other directories.
+    HSMMOD="$(realpath "$HSMMOD")"
     echo; echo "== emulator-backed: C_Login provisioning ceremony =="
     echo "   (build it with: cargo build -p tsra_pkcs11 --features emu)"
     TSRA_PKCS11_DEBUG=1 pkcs11-tool --module "$HSMMOD" --login --pin 1234 \
