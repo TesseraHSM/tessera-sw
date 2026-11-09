@@ -67,13 +67,13 @@ impl AesKeyLoader for TsraAes {
     fn load_cbc_key(engine: &Engine, uri: &str, key_bits: u32) -> EngineResult<Arc<dyn AesCbcKey>> {
         let algo = HsmAesKeyUnmaskAlgo::default();
         let key = unmask_cipher_key(engine, uri, AesKind::Cbc, key_bits, algo)?;
-        Ok(Arc::new(CbcKey::new(key)))
+        Ok(Arc::new(CipherKey::new(key)))
     }
 
     fn load_gcm_key(engine: &Engine, uri: &str, key_bits: u32) -> EngineResult<Arc<dyn AesGcmKey>> {
         let algo = HsmAesGcmKeyUnmaskAlgo::default();
         let key = unmask_cipher_key(engine, uri, AesKind::Gcm, key_bits, algo)?;
-        Ok(Arc::new(GcmKey::new(key)))
+        Ok(Arc::new(CipherKey::new(key)))
     }
 }
 
@@ -203,15 +203,13 @@ pub(crate) struct CipherKey<K: HsmKeyDeleteOp>(
     Option<K>,
 );
 
-pub(crate) type CbcKey = CipherKey<HsmAesKey>;
-
-pub(crate) type GcmKey = CipherKey<HsmAesGcmKey>;
-
 impl<K: HsmKeyDeleteOp> CipherKey<K> {
+    /// Takes ownership of `key`; dropping the result deletes it from the HSM.
     pub(crate) fn new(key: K) -> Self {
         Self(Some(key))
     }
 
+    /// The SDK key, for the HSM calls.
     fn key(&self) -> EngineResult<&K> {
         self.0.as_ref().ok_or(EngineError::NullParam("AES key"))
     }
@@ -225,7 +223,7 @@ impl<K: HsmKeyDeleteOp> Drop for CipherKey<K> {
     }
 }
 
-impl AesCbcKey for CbcKey {
+impl AesCbcKey for CipherKey<HsmAesKey> {
     fn cbc(
         &self,
         encrypt: bool,
@@ -256,7 +254,7 @@ impl AesCbcKey for CbcKey {
     }
 }
 
-impl AesGcmKey for GcmKey {
+impl AesGcmKey for CipherKey<HsmAesGcmKey> {
     fn encrypt(
         &self,
         iv: &[u8; GCM_IV_LEN],
@@ -295,6 +293,7 @@ fn gcm_aad(aad: &[u8]) -> Option<Vec<u8>> {
     (!aad.is_empty()).then(|| aad.to_vec())
 }
 
+/// Fails unless the SDK wrote all `expected` bytes.
 fn check_gcm_len(written: usize, expected: usize) -> EngineResult<()> {
     if written != expected {
         return Err(EngineError::Other(format!(

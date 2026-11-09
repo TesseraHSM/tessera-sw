@@ -12,9 +12,9 @@
 //! Each cipher is a copy of the built-in one with
 //! `init`/`do_cipher`/`ctrl`/`cleanup` overridden. An attached key runs on the
 //! HSM: raw CBC while the EVP layer still buffers and pads, or GCM as one shot
-//! (see [`gcm`]). A raw key runs the built-in unchanged, so the engine stays
-//! usable as the process default. The key lives in a side table keyed by the
-//! context address. The framework never frees engine ciphers:
+//! (see the `gcm` module). A raw key runs the built-in unchanged, so the
+//! engine stays usable as the process default. The key lives in a side table
+//! keyed by the context address. The framework never frees engine ciphers:
 //! [`release_aes_ciphers`] does, from the destroy hook.
 
 use std::collections::HashMap;
@@ -204,7 +204,7 @@ unsafe fn init_inner(
     }
     // SAFETY: builtin_for returns a valid built-in cipher.
     let init = unsafe { ffi::EVP_CIPHER_meth_get_init(builtin_for(ctx)?) }
-        .ok_or(EngineError::Other("built-in AES-CBC init missing".into()))?;
+        .ok_or(EngineError::Other("built-in AES init missing".into()))?;
     // SAFETY: delegating the arguments OpenSSL passed us to the built-in, whose
     // cipher data layout our copy shares.
     let rc = unsafe { init(ctx, key, iv, enc) };
@@ -328,7 +328,8 @@ unsafe fn hsm_cbc(
 
 /// `ctrl` override: [`TSRA_CTRL_SET_KEY_URI`] attaches an HSM key, an HSM
 /// GCM key takes its own controls (see [`gcm::hsm_ctrl`]), the copy control
-/// duplicates a context's key, anything else goes to the built-in.
+/// duplicates a context's key, anything else but a NULL tag goes to the
+/// built-in.
 ///
 /// # Safety
 /// Called only by `EVP_CIPHER_CTX_ctrl`/`EVP_CIPHER_CTX_copy`; arguments per
@@ -369,6 +370,14 @@ unsafe fn ctrl_inner<L: AesKeyLoader>(
     // SAFETY: as this function's contract.
     if let Some(rc) = unsafe { gcm::hsm_ctrl(ctx, typ, arg, ptr) }? {
         return Ok(rc);
+    }
+    // The built-in GCM copies a tag through ptr without a NULL check.
+    let tag_ctrl = matches!(
+        u32::try_from(typ),
+        Ok(ffi::EVP_CTRL_AEAD_SET_TAG | ffi::EVP_CTRL_AEAD_GET_TAG)
+    );
+    if tag_ctrl && ptr.is_null() {
+        return Err(EngineError::NullParam("AES-GCM tag"));
     }
     let copy = typ == ffi::EVP_CTRL_COPY as c_int;
     // SAFETY: builtin_for returns a valid built-in cipher.

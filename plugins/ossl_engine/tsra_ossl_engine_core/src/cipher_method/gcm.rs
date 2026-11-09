@@ -5,9 +5,9 @@
 //!
 //! The HSM runs GCM in one shot: AAD updates (`out` NULL) are buffered, the
 //! single data update writes all output (callers size the final's buffer for
-//! one block), and the final writes nothing. Decryption needs the whole tag
-//! before the data and writes nothing if it fails. Each message needs a new
-//! IV.
+//! one block), and the final writes nothing. Decryption needs the whole tag,
+//! set after the IV and before the data, and writes nothing if it fails. Each
+//! message needs a new IV.
 
 use std::ffi::c_int;
 use std::ffi::c_uchar;
@@ -83,7 +83,7 @@ pub(super) struct GcmState {
     aad: Zeroizing<Vec<u8>>,
     /// The data went through the HSM.
     done: bool,
-    /// To verify (decryption), or the last one produced (encryption).
+    /// This message's: to verify (decryption), or produced (encryption).
     tag: Option<[u8; GCM_TAG_LEN]>,
 }
 
@@ -97,6 +97,7 @@ struct Message {
 }
 
 impl GcmState {
+    /// The state of a context `key` was just attached to: no message yet.
     pub(super) fn new(key: Arc<dyn AesGcmKey>) -> Self {
         Self {
             key,
@@ -107,10 +108,12 @@ impl GcmState {
         }
     }
 
+    /// Starts a message with `iv`; a decryption must set its own tag.
     fn start(&mut self, iv: [u8; GCM_IV_LEN]) {
         self.iv = Some(iv);
         self.aad = Zeroizing::default();
         self.done = false;
+        self.tag = None;
     }
 
     /// The next message needs a new IV.
@@ -132,6 +135,7 @@ impl GcmState {
         })
     }
 
+    /// Buffers `aad` for the message's one HSM call.
     fn add_aad(&mut self, aad: &[u8]) -> EngineResult<()> {
         self.open_iv()?;
         let total = self.aad.len().saturating_add(aad.len());
@@ -142,6 +146,7 @@ impl GcmState {
         Ok(())
     }
 
+    /// Fails unless `len` bytes of data fit beside the AAD.
     fn check_data_len(&self, len: usize) -> EngineResult<()> {
         if within_limit(self.aad.len(), len) {
             Ok(())
@@ -158,7 +163,8 @@ impl GcmState {
             (false, Some(tag)) => Some(tag),
             (false, None) => {
                 return Err("AES-GCM decryption with an HSM key needs the tag \
-                            (EVP_CTRL_AEAD_SET_TAG) before the ciphertext"
+                            (EVP_CTRL_AEAD_SET_TAG) after the IV, before the \
+                            ciphertext"
                     .into());
             }
         };
@@ -204,6 +210,7 @@ fn with_state<T>(ctx: *mut ffi::EVP_CIPHER_CTX, f: impl FnOnce(&mut GcmState) ->
     }
 }
 
+/// The error for a message over [`GCM_MAX_INPUT`].
 fn over_limit(aad_len: usize, data_len: usize) -> EngineError {
     EngineError::Other(format!(
         "AES-GCM message of {aad_len} bytes of AAD and {data_len} of data exceeds the \
@@ -211,6 +218,7 @@ fn over_limit(aad_len: usize, data_len: usize) -> EngineError {
     ))
 }
 
+/// The error for a context with no key.
 fn no_key() -> EngineError {
     EngineError::Other(
         "no key set on this AES-GCM context (attach an HSM key with \
@@ -219,6 +227,7 @@ fn no_key() -> EngineError {
     )
 }
 
+/// Whether `ctx` was initialized for encryption.
 #[allow(unsafe_code)]
 fn encrypting(ctx: *mut ffi::EVP_CIPHER_CTX) -> bool {
     // SAFETY: ctx is a live context OpenSSL passed a callback; the getter only
@@ -269,6 +278,9 @@ pub(super) unsafe extern "C" fn c_init(
     )
 }
 
+/// A raw key goes to the shared init, an IV for an attached key starts a
+/// message, and anything else goes to the built-in.
+///
 /// # Safety
 /// As [`c_init`].
 #[allow(unsafe_code)]
@@ -325,6 +337,8 @@ pub(super) unsafe extern "C" fn c_do_cipher(
     )
 }
 
+/// The built-in for a raw key, the HSM otherwise.
+///
 /// # Safety
 /// As [`c_do_cipher`].
 #[allow(unsafe_code)]
@@ -371,6 +385,9 @@ unsafe fn hsm_gcm(
     result
 }
 
+/// Buffers AAD, runs the HSM call on the data, or ends the message at the
+/// final (running the call there for an empty message).
+///
 /// # Safety
 /// As [`c_do_cipher`].
 #[allow(unsafe_code)]
@@ -553,6 +570,7 @@ mod tests {
         ctx
     }
 
+    /// One AAD update; whether it succeeded.
     #[allow(unsafe_code)]
     fn add_aad(ctx: *mut ffi::EVP_CIPHER_CTX, aad: &[u8]) -> bool {
         let mut n: c_int = 0;
@@ -593,6 +611,7 @@ mod tests {
         Some(out)
     }
 
+    /// The final: the bytes it wrote, or `None` if it failed.
     #[allow(unsafe_code)]
     fn finish(ctx: *mut ffi::EVP_CIPHER_CTX) -> Option<usize> {
         let mut out = [0u8; GCM_TAG_LEN];
@@ -602,6 +621,7 @@ mod tests {
         (rc == OK).then(|| usize::try_from(n).unwrap())
     }
 
+    /// One control; whether it succeeded.
     #[allow(unsafe_code)]
     fn ctrl(ctx: *mut ffi::EVP_CIPHER_CTX, typ: u32, arg: usize, ptr: *mut c_void) -> bool {
         let (typ, arg) = (c_int::try_from(typ).unwrap(), c_int::try_from(arg).unwrap());
@@ -609,12 +629,14 @@ mod tests {
         unsafe { ffi::EVP_CIPHER_CTX_ctrl(ctx, typ, arg, ptr) == OK }
     }
 
+    /// Sets the tag to verify; whether it was taken.
     fn set_tag(ctx: *mut ffi::EVP_CIPHER_CTX, tag: &[u8]) -> bool {
         let mut tag = tag.to_vec();
         let ptr = tag.as_mut_ptr().cast::<c_void>();
         ctrl(ctx, ffi::EVP_CTRL_AEAD_SET_TAG, tag.len(), ptr)
     }
 
+    /// The first `len` bytes of the produced tag.
     fn get_tag(ctx: *mut ffi::EVP_CIPHER_CTX, len: usize) -> Option<Vec<u8>> {
         let mut tag = vec![0u8; len];
         let ptr = tag.as_mut_ptr().cast::<c_void>();
@@ -668,6 +690,37 @@ mod tests {
         let verified = pt.is_some() && set_tag(ctx, tag) && finish(ctx).is_some();
         free(ctx);
         pt.filter(|_| verified)
+    }
+
+    /// Encrypts `msg` as a new message on `ctx`: ciphertext and tag.
+    fn hsm_seal(
+        ctx: *mut ffi::EVP_CIPHER_CTX,
+        iv: &[u8; GCM_IV_LEN],
+        aad: &[u8],
+        msg: &[u8],
+    ) -> Option<(Vec<u8>, Vec<u8>)> {
+        assert!(init(ctx, null(), null_mut(), None, Some(iv), true));
+        let ct = updates(ctx, aad, msg, msg.len().max(1))?;
+        if finish(ctx) != Some(0) {
+            return None;
+        }
+        Some((ct, get_tag(ctx, GCM_TAG_LEN)?))
+    }
+
+    /// Decrypts `ct` as a new message on `ctx`, setting `tag` first if given.
+    fn hsm_open(
+        ctx: *mut ffi::EVP_CIPHER_CTX,
+        iv: &[u8; GCM_IV_LEN],
+        aad: &[u8],
+        ct: &[u8],
+        tag: Option<&[u8; GCM_TAG_LEN]>,
+    ) -> Option<Vec<u8>> {
+        assert!(init(ctx, null(), null_mut(), None, Some(iv), false));
+        if tag.is_some_and(|tag| !set_tag(ctx, tag)) {
+            return None;
+        }
+        let pt = updates(ctx, aad, ct, ct.len().max(1))?;
+        (finish(ctx) == Some(0)).then_some(pt)
     }
 
     #[test]
@@ -926,6 +979,132 @@ mod tests {
             Some(toy_seal(&iv, &aad, &msg).0)
         );
         assert_eq!(finish(ctx), Some(0));
+        free(ctx);
+        assert_eq!(RELEASED.with(Cell::get), 2);
+        teardown(&engine, raw);
+    }
+
+    /// One context runs message after message, in either direction, each with
+    /// its own IV and tag; a new message drops the last one's tag.
+    #[test]
+    fn context_reuse() {
+        let (engine, raw) = engine_with_ciphers();
+        let ivs = [[11u8; GCM_IV_LEN], [12u8; GCM_IV_LEN], [13u8; GCM_IV_LEN]];
+        let (aad, msg) = (pattern(8), pattern(30));
+        let ctx = hsm_ctx(raw, false, &ivs[0]);
+        for iv in &ivs[..2] {
+            let (ct, tag) = toy_seal(iv, &aad, &msg);
+            assert_eq!(hsm_open(ctx, iv, &aad, &ct, Some(&tag)), Some(msg.clone()));
+        }
+        let (ct, _) = toy_seal(&ivs[1], &aad, &msg);
+        assert_eq!(
+            hsm_open(ctx, &ivs[1], &aad, &ct, None),
+            None,
+            "the last message's tag"
+        );
+
+        let (ct, tag) = toy_seal(&ivs[2], &aad, &msg);
+        assert_eq!(
+            hsm_seal(ctx, &ivs[2], &aad, &msg),
+            Some((ct.clone(), tag.to_vec()))
+        );
+        assert_eq!(
+            hsm_open(ctx, &ivs[2], &aad, &ct, None),
+            None,
+            "the encryption's tag"
+        );
+        assert_eq!(hsm_open(ctx, &ivs[2], &aad, &ct, Some(&tag)), Some(msg));
+        free(ctx);
+        teardown(&engine, raw);
+    }
+
+    /// A NULL tag pointer fails for an HSM key, a raw key and no key, and
+    /// leaves the context usable.
+    #[test]
+    fn null_tag_fails_closed() {
+        let (engine, raw) = engine_with_ciphers();
+        let ours = our_cipher(raw, GCM_NID);
+        let iv = [14u8; GCM_IV_LEN];
+        let (aad, msg) = (pattern(6), pattern(20));
+        let (ct, tag) = toy_seal(&iv, &aad, &msg);
+        let (set, get) = (ffi::EVP_CTRL_AEAD_SET_TAG, ffi::EVP_CTRL_AEAD_GET_TAG);
+
+        let ctx = hsm_ctx(raw, false, &iv);
+        assert!(!ctrl(ctx, set, GCM_TAG_LEN, null_mut()), "HSM key, set");
+        assert!(set_tag(ctx, &tag));
+        assert_eq!(updates(ctx, &aad, &ct, ct.len()), Some(msg.clone()));
+        free(ctx);
+        let ctx = hsm_ctx(raw, true, &iv);
+        assert_eq!(updates(ctx, &aad, &msg, msg.len()), Some(ct));
+        assert_eq!(finish(ctx), Some(0));
+        assert!(!ctrl(ctx, get, GCM_TAG_LEN, null_mut()), "HSM key, get");
+        assert_eq!(get_tag(ctx, GCM_TAG_LEN), Some(tag.to_vec()));
+        free(ctx);
+
+        let key = raw_key(GCM_NID);
+        let ctx = new_ctx();
+        assert!(init(ctx, ours, raw, Some(&key), Some(&iv), false));
+        assert!(!ctrl(ctx, set, GCM_TAG_LEN, null_mut()), "raw key, set");
+        free(ctx);
+        let ctx = new_ctx();
+        assert!(init(ctx, ours, raw, Some(&key), Some(&iv), true));
+        assert!(updates(ctx, &aad, &msg, msg.len()).is_some());
+        assert_eq!(finish(ctx), Some(0));
+        assert!(!ctrl(ctx, get, GCM_TAG_LEN, null_mut()), "raw key, get");
+        assert!(get_tag(ctx, GCM_TAG_LEN).is_some());
+        free(ctx);
+
+        let ctx = new_ctx();
+        assert!(init(ctx, ours, raw, None, Some(&iv), false));
+        assert!(!ctrl(ctx, set, GCM_TAG_LEN, null_mut()), "no key, set");
+        free(ctx);
+        teardown(&engine, raw);
+    }
+
+    /// Without a key, the AAD, the data, the final and the tag all fail.
+    #[test]
+    fn no_key_fails_closed() {
+        let (engine, raw) = engine_with_ciphers();
+        let iv = [15u8; GCM_IV_LEN];
+        let (aad, msg) = (pattern(6), pattern(20));
+        GCM_CALLS.with(|c| c.set(0));
+        let ctx = new_ctx();
+        assert!(init(
+            ctx,
+            our_cipher(raw, GCM_NID),
+            raw,
+            None,
+            Some(&iv),
+            true
+        ));
+        assert!(!add_aad(ctx, &aad), "AAD");
+        assert_eq!(updates(ctx, &[], &msg, msg.len()), None, "data");
+        assert_eq!(finish(ctx), None, "final");
+        assert_eq!(get_tag(ctx, GCM_TAG_LEN), None, "tag");
+        free(ctx);
+        assert_eq!(GCM_CALLS.with(Cell::get), 0);
+        teardown(&engine, raw);
+    }
+
+    /// Attaching a key over an attached one releases the old key and drops
+    /// the open message: the next one needs a new IV.
+    #[test]
+    fn attach_replaces_an_attached_key() {
+        let (engine, raw) = engine_with_ciphers();
+        let iv = [16u8; GCM_IV_LEN];
+        let (aad, msg) = (pattern(7), pattern(25));
+        RELEASED.with(|c| c.set(0));
+        let ctx = hsm_ctx(raw, true, &iv);
+        assert!(add_aad(ctx, &aad));
+        assert!(attach(ctx, Some(TOY_URI), 0));
+        assert_eq!(
+            RELEASED.with(Cell::get),
+            1,
+            "the replaced key must be released"
+        );
+        assert_eq!(updates(ctx, &[], &msg, msg.len()), None, "no IV");
+        let (ct, tag) = toy_seal(&iv, &aad, &msg);
+        assert_eq!(hsm_seal(ctx, &iv, &aad, &msg), Some((ct, tag.to_vec())));
         free(ctx);
         assert_eq!(RELEASED.with(Cell::get), 2);
         teardown(&engine, raw);

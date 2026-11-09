@@ -43,6 +43,9 @@ const FILE_OUTPUT_SIZE_HINT: usize = 1;
 /// The AES-GCM tag size (core `cipher_method::GCM_TAG_LEN`).
 const GCM_TAG_LEN: usize = 16;
 
+/// OpenSSL's success return.
+const OSSL_OK: std::ffi::c_int = 1;
+
 /// Write owner-only (0600) key material.
 fn write_secret(path: &std::path::Path, data: &[u8]) {
     use std::io::Write;
@@ -1325,6 +1328,7 @@ fn capi_derive_aes_blob(e: *mut ffi::ENGINE, dir: &std::path::Path, bits: u32) -
     out
 }
 
+/// The bytes of the hex string `s`.
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
@@ -1648,6 +1652,7 @@ fn aes_cbc_engine_as_default_capi() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A fresh random IV, so no two runs share one.
 fn random_gcm_iv() -> Vec<u8> {
     let mut iv = vec![0u8; Cipher::aes_256_gcm().iv_len().unwrap()];
     openssl::rand::rand_bytes(&mut iv).unwrap();
@@ -1673,11 +1678,11 @@ fn capi_gcm_ctx(
         let cipher = ffi::ENGINE_get_cipher(e, nid);
         assert!(!cipher.is_null(), "ENGINE_get_cipher(AES-256-GCM)");
         let ctx = ffi::EVP_CIPHER_CTX_new();
-        let ready = ffi::EVP_CipherInit_ex(ctx, cipher, e, null, null, enc) == 1
+        let ready = ffi::EVP_CipherInit_ex(ctx, cipher, e, null, null, enc) == OSSL_OK
             && ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl_set_key_uri(), 0, uri.as_ptr().cast_mut().cast())
-                == 1
+                == OSSL_OK
             && ffi::EVP_CipherInit_ex(ctx, std::ptr::null(), no_engine, null, iv.as_ptr(), enc)
-                == 1;
+                == OSSL_OK;
         if ready {
             Some(ctx)
         } else {
@@ -1709,23 +1714,23 @@ fn capi_gcm_run(
         let tag_ptr = tag_buf.as_mut_ptr().cast();
         let ok = (tag.is_none()
             || ffi::EVP_CIPHER_CTX_ctrl(ctx, ctrl(ffi::EVP_CTRL_AEAD_SET_TAG), tag_len, tag_ptr)
-                == 1)
+                == OSSL_OK)
             && ffi::EVP_CipherUpdate(ctx, std::ptr::null_mut(), &mut n, aad.as_ptr(), len(aad))
-                == 1
+                == OSSL_OK
             && ffi::EVP_CipherUpdate(ctx, out.as_mut_ptr(), &mut n, input.as_ptr(), len(input))
-                == 1
+                == OSSL_OK
             && ffi::EVP_CipherFinal_ex(
                 ctx,
                 out[usize::try_from(n).unwrap()..].as_mut_ptr(),
                 &mut fin,
-            ) == 1
+            ) == OSSL_OK
             && (tag.is_some()
                 || ffi::EVP_CIPHER_CTX_ctrl(
                     ctx,
                     ctrl(ffi::EVP_CTRL_AEAD_GET_TAG),
                     tag_len,
                     tag_ptr,
-                ) == 1);
+                ) == OSSL_OK);
         if !ok {
             ffi::ERR_clear_error();
             return None;

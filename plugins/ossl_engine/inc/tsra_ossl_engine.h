@@ -31,9 +31,9 @@
  *
  * AES-GCM with an HSM key runs in one shot: a 12-byte IV, AAD updates first,
  * the data in one update that writes all output, and for decryption the whole
- * 16-byte tag before the data. Each message needs a new IV and holds at most
- * 16 KiB: the AAD padded to 32 bytes, plus the data. The TLS and
- * IV-generation controls are not supported.
+ * 16-byte tag, set after the IV and before the data. Each message needs a new
+ * IV and holds at most 16 KiB: the AAD padded to 32 bytes, plus the data. The
+ * TLS and IV-generation controls are not supported.
  *
  *   EVP_DecryptInit_ex(ctx, ENGINE_get_cipher(e, NID_aes_256_gcm), e, NULL, NULL);
  *   EVP_CIPHER_CTX_ctrl(ctx, TSRA_CTRL_SET_KEY_URI, 0,

@@ -896,7 +896,7 @@ mod round_trips {
                 sdk_cbc_encrypt(&observer, &iv, b"x").is_ok(),
                 "{bits}-bit key usable"
             );
-            drop(crate::aes::CbcKey::new(key));
+            drop(crate::aes::CipherKey::new(key));
             assert!(
                 sdk_cbc_encrypt(&observer, &iv, b"x").is_err(),
                 "a released {bits}-bit key must be deleted from the HSM"
@@ -1154,11 +1154,13 @@ mod round_trips {
         done.then_some((out, tag_out))
     }
 
+    /// `EVP_CTRL_AEAD_SET_TAG` as the `ctrl` type argument.
     #[allow(clippy::unwrap_used)]
     fn set_tag_ctrl() -> c_int {
         c_int::try_from(ffi::EVP_CTRL_AEAD_SET_TAG).unwrap()
     }
 
+    /// `EVP_CTRL_AEAD_GET_TAG` as the `ctrl` type argument.
     #[allow(clippy::unwrap_used)]
     fn get_tag_ctrl() -> c_int {
         c_int::try_from(ffi::EVP_CTRL_AEAD_GET_TAG).unwrap()
@@ -1182,6 +1184,7 @@ mod round_trips {
         Ok((ct, tag))
     }
 
+    /// A fresh random IV, so no two runs share one.
     #[allow(clippy::unwrap_used)]
     fn random_gcm_iv() -> [u8; GCM_IV_LEN] {
         let mut iv = [0u8; GCM_IV_LEN];
@@ -1280,7 +1283,7 @@ mod round_trips {
             sdk_gcm_encrypt(&observer, &iv, &[], b"x").is_ok(),
             "key usable"
         );
-        drop(crate::aes::GcmKey::new(key));
+        drop(crate::aes::CipherKey::new(key));
         assert!(
             sdk_gcm_encrypt(&observer, &iv, &[], b"x").is_err(),
             "a released key must be deleted from the HSM"
