@@ -46,8 +46,9 @@ const SUBMIT_POLL_INTERVAL: embassy_time::Duration = embassy_time::Duration::fro
 /// depend on how long one trip through the executor happens to take. The
 /// window must cover the slowest operation — ML-DSA-87 signing runs to
 /// ~175 ms because FIPS 204 rejection sampling retries until a candidate
-/// passes the norm checks — or the tail of that distribution falls off a
-/// cliff onto the 31.25 ms timer.
+/// passes the norm checks — queued behind another on the core's other
+/// lane, or the tail of that distribution falls off a cliff onto the
+/// 31.25 ms timer.
 ///
 /// The timer fallback remains beyond this, bounding the total wait.
 const SUBMIT_YIELD_WINDOW: embassy_time::Duration = embassy_time::Duration::from_millis(400);
@@ -655,7 +656,9 @@ impl PqcEngine<'_> {
             .await?;
 
         match resp.status {
-            0 => Ok(true),
+            // Verify reads nothing back, so this is its one check that the
+            // answer is a verify answer: those carry no output.
+            0 if resp.out_len == 0 => Ok(true),
             s if s == STATUS_CRYPTO_FAILED => Ok(false),
             _ => Err(PqcError::FP_ERROR),
         }
@@ -754,7 +757,7 @@ impl PqcEngine<'_> {
         // Operations that stage operands settle before staging; this covers
         // the ones that use only the mailbox.
         self.settle()?;
-        let seq = self.driver.next_request_seq();
+        let seq = self.driver.next_request_seq(self.id);
         mailbox::post_request(self.id, seq, params);
         // Cleared when the answer is collected. If this future is dropped
         // or gives up first, releasing the engine quarantines it instead.
@@ -787,7 +790,7 @@ impl PqcEngine<'_> {
             PqcError::FP_NOT_READY,
             "engine {} (FP{}) did not answer seq={} within the deadline",
             self.id.raw(),
-            self.id.raw(),
+            self.id.core(),
             seq
         );
         // A core that faulted or panicked leaves a record on its way down.
@@ -802,7 +805,7 @@ impl PqcEngine<'_> {
                 "pqc",
                 PqcError::FP_NOT_READY,
                 "FP{} crashed: kind={} pc={:#010x} lr={:#010x} sp={:#010x} cfsr={:#010x} hfsr={:#010x} mmfar={:#010x} bfar={:#010x} stack_free={}",
-                self.id.raw(),
+                self.id.core(),
                 _c.kind,
                 _c.pc,
                 _c.lr,
@@ -862,7 +865,7 @@ impl Drop for PqcEngine<'_> {
     /// Safety net for an engine dropped without [`release`](Self::release)
     /// — an early `?` on an error path, or a future cancelled mid-request.
     /// Without this the engine would be leaked from the pool and, after
-    /// three such leaks, PQC would wedge permanently.
+    /// six such leaks, PQC would wedge permanently.
     fn drop(&mut self) {
         self.give_back();
     }
