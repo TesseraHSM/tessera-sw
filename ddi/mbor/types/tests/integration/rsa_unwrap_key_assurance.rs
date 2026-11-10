@@ -76,7 +76,6 @@ fn check_import(
         class,
         DdiRsaCryptoPadding::Oaep,
         DdiHashAlgorithm::Sha256,
-        None,
         helper_key_properties(usage, DdiKeyAvailability::App),
     );
     let mut delete = |key_id: u16| {

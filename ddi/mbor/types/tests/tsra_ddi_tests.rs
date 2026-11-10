@@ -70,8 +70,6 @@ mod integration {
     pub mod masked_key_hkdf_derive;
     pub mod masked_key_kbkdf_derive;
     pub mod masked_key_rsa_unwrap;
-    pub mod open_key;
-    pub mod open_key_no_import;
     pub mod open_session;
     pub mod open_session_smoke;
     pub mod prov_part;

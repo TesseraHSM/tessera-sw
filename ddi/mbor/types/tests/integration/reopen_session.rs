@@ -257,7 +257,6 @@ fn test_reopen_session_restores_socket_bulk_access() {
             let key = generate_aes_bulk_256_key(
                 dev,
                 &setup.session_id,
-                None,
                 DdiAesKeySize::AesGcmBulk256Unapproved,
             )
             .expect("generate bulk key");

@@ -34,7 +34,6 @@ fn test_aes_cbc_encrypt_decrypt_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             )
             .unwrap()

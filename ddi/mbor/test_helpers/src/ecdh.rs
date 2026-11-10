@@ -9,7 +9,6 @@ pub fn helper_ecdh_key_exchange(
     rev: Option<DdiApiRev>,
     priv_key_id: u16,
     pub_key_der: MborByteArray<192>,
-    key_tag: Option<u16>,
     key_type: DdiKeyType,
     key_properties: DdiKeyProperties,
 ) -> Result<DdiEcdhKeyExchangeCmdResp, DdiError> {
@@ -23,7 +22,7 @@ pub fn helper_ecdh_key_exchange(
         data: DdiEcdhKeyExchangeReq {
             priv_key_id,
             pub_key_der,
-            key_tag,
+            key_tag: None,
             key_type,
             key_properties: key_properties
                 .try_into()

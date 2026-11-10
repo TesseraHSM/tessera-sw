@@ -10,13 +10,11 @@ use zeroize::Zeroize;
 use crate::common::*;
 
 /// Import raw key material into validation firmware.
-#[allow(clippy::too_many_arguments)]
 pub fn helper_raw_key_import(
     dev: &mut <tsra_ddi::TsraDdi as tsra_ddi::Ddi>::Dev,
     session_id: Option<u16>,
     raw_key: &[u8],
     key_kind: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
 ) -> tsra_ddi::DdiResult<DdiRawKeyImportCmdResp> {
     use tsra_ddi::DdiDev;
@@ -28,7 +26,7 @@ pub fn helper_raw_key_import(
     let mut action_req = DdiRawKeyImportReq {
         raw: MborByteArray::from_slice(raw_key).map_err(|_| DdiError::InvalidParameter)?,
         key_kind,
-        key_tag,
+        key_tag: None,
         key_properties,
     };
     let data = DdiTestActionReq::encode(DdiTestAction::RawKeyImport, &action_req);

@@ -203,7 +203,6 @@ fn test_live_migration_sim_basic() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes256,
-                Some(0x1234),
                 key_props,
             );
             assert!(resp.is_ok(), "Failed to generate AES key: {:?}", resp);
@@ -222,7 +221,6 @@ fn test_live_migration_sim_basic() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                Some(0x5678),
                 key_props,
             );
             assert!(resp.is_err(), "Should fail after migration");
@@ -278,7 +276,6 @@ fn test_live_migration_sim_basic() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes192,
-                Some(0x9ABC),
                 key_props,
             );
             assert!(resp.is_ok(), "Should work after session reopen: {:?}", resp);
@@ -761,7 +758,6 @@ fn test_live_migration_repeated_cycles() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiAesKeySize::Aes256,
-                    Some(0x1000 + i as u16), // Use different key IDs for each cycle
                     key_props,
                 );
                 assert!(
@@ -915,7 +911,6 @@ fn test_live_migration_concurrent_shared_session() {
                         Some(session_id),
                         Some(DdiApiRev { major: 1, minor: 0 }),
                         DdiAesKeySize::Aes256,
-                        Some(0x4000 + (thread_id * 1000) + i as u16), // Unique key IDs per thread
                         key_props,
                     )
                 };
@@ -1046,13 +1041,11 @@ fn test_live_migration_concurrent_separate_sessions() {
         barrier.wait(); // Wait for all threads to be ready
         info!("Thread {}: Passed barrier, starting main loop", thread_id);
 
-        let mut key_counter = 0u16;
         let mut loop_count = 0;
         const MAX_LOOPS: usize = 20; // Prevent infinite loops
 
         while loop_count < MAX_LOOPS {
             loop_count += 1;
-            key_counter += 1;
 
             info!(
                 "Thread {}: Attempting to add session key (attempt {})",
@@ -1069,7 +1062,6 @@ fn test_live_migration_concurrent_separate_sessions() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiAesKeySize::Aes256,
-                    Some(0x3000 + (thread_id as u16 * 1000) + key_counter), // Unique key IDs per thread
                     key_props,
                 )
             };

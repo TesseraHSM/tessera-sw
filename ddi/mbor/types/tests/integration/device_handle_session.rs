@@ -137,7 +137,6 @@ fn test_socket_sessions_are_owned_by_connection() {
                 Some(session),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 props,
             )
             .expect_err("another connection cannot use this session");
@@ -150,7 +149,6 @@ fn test_socket_sessions_are_owned_by_connection() {
                 Some(session),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 props,
             )
             .expect("the owner's clone can use this session");
