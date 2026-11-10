@@ -43,7 +43,7 @@ pub enum AesKind {
     Cbc,
     /// `type=aes-gcm`: used by AES-256-GCM.
     Gcm,
-    /// `type=aes-xts`: an AES-XTS key pair.
+    /// `type=aes-xts`: used by AES-256-XTS.
     Xts,
 }
 
