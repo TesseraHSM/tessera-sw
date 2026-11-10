@@ -16,7 +16,7 @@ use libfuzzer_sys::arbitrary::*;
 use libfuzzer_sys::*;
 use tsra_crypto::*;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_tbor_test_harness::{assertions::*, x509_fixture::*, *};
+use tsra_ddi_tbor_test_harness::{assertions::*, *};
 use tsra_ddi_tbor_types::*;
 
 /// Six independent success lanes keep deep coverage frequent.
@@ -223,53 +223,6 @@ fn tmk_bytes(input: &FuzzInput<'_>) -> [u8; TMK_LEN] {
         input.scalar.rotate_left(i as u32) as u8
             ^ input.extra.get(i).copied().unwrap_or(i as u8)
     })
-}
-
-/// Recover a host-known TMK through the real POTA-authenticated import flow.
-fn import_tmk(
-    ctx: &TestCtx,
-    session_id: u16,
-    fixture: common::SecurityDomainFixture,
-    tmk: &[u8; TMK_LEN],
-) -> [u8; MASKED_TMK_LEN] {
-    let kex = ctx.tbor(&TborDarcKexKeyGenReq {
-        session_id,
-        scope: common::KEY_SCOPE_LOCAL,
-    }).expect("DarcKexKeyGen");
-    let mut recipient_be = kex.pub_key;
-    recipient_be[..common::COORD_LEN].reverse();
-    recipient_be[common::COORD_LEN..].reverse();
-    let recipient = EccPublicKey::from_hsm_bytes(&recipient_be).expect("recipient public key");
-    let sender = EccPrivateKey::from_curve(tsra_crypto::EccCurve::P384).expect("sender key");
-    let (x, y) = sender.coord_vec().expect("sender public coordinates");
-    let mut sender_pub = [0; RAW_PUB_LEN];
-    sender_pub[..common::COORD_LEN].copy_from_slice(&x);
-    sender_pub[common::COORD_LEN..].copy_from_slice(&y);
-    let chain = make_chain(&fixture.pota, &sender_pub);
-    let sealed = seal_vec(
-        &HpkeSealConfig::auth(
-            HpkeSuite::DHKemP384Sha384AesGcm256, &recipient, &[], &[], &sender,
-        ),
-        tmk,
-    ).expect("seal known TMK");
-    let (ex, ey) = sealed.enc.coord_vec().expect("encapsulated public coordinates");
-    let mut sealed_tmk = [0; SEALED_TMK_LEN];
-    sealed_tmk[0] = 4;
-    sealed_tmk[1..1 + common::COORD_LEN].copy_from_slice(&ex);
-    sealed_tmk[1 + common::COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
-    sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
-    let mut evidence = Vec::new();
-    let remote_cert_chain = chain.der_items().iter()
-        .map(|der| common::add_evidence_item(&mut evidence, der)).collect();
-    let oob = evidence.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    ctx.tbor_oob(&TborDarcTmkImportReq {
-        session_id,
-        masked_kex_key: kex.masked_key,
-        policy: fixture.policy,
-        sealed_tmk,
-        remote_cert_chain,
-    }, &oob).expect("import known TMK").masked_tmk
-        .try_into().expect("TMK envelope length")
 }
 
 /// Choose granted operations and requested permissions independently of FW.
@@ -550,7 +503,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
         let fixture = common::create_test_security_domain_with_policy(
             ctx, session.as_ref().expect("session").handshake());
         let tmk = tmk_bytes(input);
-        req.masked_tmk = import_tmk(ctx, active_id, fixture, &tmk);
+        req.masked_tmk = common::import_darc_tmk(ctx, active_id, &fixture, &tmk);
         let mutation = if matches!(input.scenario, Scenario::Cose) {
             CoseMutation::from_byte(input.controls)
         } else { CoseMutation::None };
