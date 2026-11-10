@@ -89,11 +89,12 @@ const _: () =
 ///   message itself or an external `μ`.
 fn mailbox_msg_type(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<u32> {
     match msg_type {
-        HsmMlDsaMsgType::Pure | HsmMlDsaMsgType::ExternalMu => {
-            msg_type.check_input(msg, ctx)?;
-            Ok(msg_type as u32)
+        HsmMlDsaMsgType::Pure => Ok(mailbox::MSG_TYPE_PURE),
+        HsmMlDsaMsgType::ExternalMu if msg.len() == mailbox::MU_LEN && ctx.is_empty() => {
+            Ok(mailbox::MSG_TYPE_EXTERNAL_MU)
         }
-        HsmMlDsaMsgType::PreHash | HsmMlDsaMsgType::PreHashMessage => Err(HsmError::UnsupportedCmd),
+        HsmMlDsaMsgType::ExternalMu => Err(HsmError::InvalidArg),
+        HsmMlDsaMsgType::PreHash(_) | HsmMlDsaMsgType::HashMsg(_) => Err(HsmError::UnsupportedCmd),
     }
 }
 
