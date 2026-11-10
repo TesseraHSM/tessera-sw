@@ -180,7 +180,7 @@ mod integration {
              \n\
              Build the provider first:\n\
              \n\
-                 cargo build -p tsra_ossl_provider --features provider,test-args\n",
+                 cargo build -p tsra_ossl_provider --features provider\n",
             provider_so.display(),
         );
 

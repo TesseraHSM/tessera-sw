@@ -3,10 +3,11 @@
 # Licensed under the MIT License.
 #
 # Builds and starts the simulator (ddi_sock_server) for the CI jobs that load
-# the sock-built module, which never links a simulator of its own. The server
+# the product module, which never links a simulator of its own. The server
 # runs in the background for the rest of the job, on an ephemeral loopback
-# port. TSRA_TEST_ARGS goes to $GITHUB_ENV: transport=sock, sock=<its endpoint>
-# and server_bin=<the binary> (for the functional suite's fresh-HSM cases).
+# port. TSRA_DDI_ARGS selects the SDK connection; TSRA_TEST_ARGS names the
+# server binary for fresh-HSM tests. Both go to $GITHUB_ENV, along with
+# explicit provisioning inputs generated for this private simulator.
 #
 # Usage: start_sock_server.sh <cargo target dir>
 set -euo pipefail
@@ -28,4 +29,9 @@ done
 [ -n "$endpoint" ] || { cat "$log"; echo "ddi_sock_server did not start" >&2; exit 1; }
 
 echo "ddi_sock_server listening on $endpoint"
+echo "TSRA_DDI_ARGS=transport=sock;sock=$endpoint" >> "$GITHUB_ENV"
 echo "TSRA_TEST_ARGS=transport=sock;sock=$endpoint;server_bin=$server" >> "$GITHUB_ENV"
+obk="$(realpath "$TARGET_DIR")/owner-backup-key.bin"
+(umask 077; head -c 48 /dev/urandom > "$obk")
+echo "TSRA_PKCS11_ID=01010101010101010101010101010101" >> "$GITHUB_ENV"
+echo "TSRA_PKCS11_OBK_PATH=$obk" >> "$GITHUB_ENV"

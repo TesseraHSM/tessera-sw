@@ -10,8 +10,6 @@ project(tsra_ossl_provider
 # Generate compile_commands.json for LSP
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(TSRA_CARGO_FEATURES "" CACHE STRING "Cargo Features to enable")
-
 include(GNUInstallDirs)
 include(FetchContent)
 
@@ -29,7 +27,6 @@ corrosion_import_crate(
     MANIFEST_PATH ../../api/native/Cargo.toml
     CRATE_TYPES cdylib
     CRATES tsra_api_native
-    FEATURES ${TSRA_CARGO_FEATURES}
     )
 
 corrosion_experimental_cbindgen(

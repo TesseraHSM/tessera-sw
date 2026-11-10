@@ -39,9 +39,9 @@ jobs:
       # --target-dir, not CARGO_TARGET_DIR: the cargo run that CMake starts
       # inside the build would inherit the variable and wait forever on the
       # outer build's lock. The GoogleTest suite reads TSRA_PKCS11_MODULE too.
-      - name: Build PKCS#11 module for the simulator (test-args)
+      - name: Build PKCS#11 module for hardware and the simulator
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       # The module reaches the simulator over the DDI socket transport; it never
@@ -198,12 +198,12 @@ jobs:
       - name: Install CMake and OpenSSL headers
         run: sudo apt-get install -y cmake libssl-dev
 
-      - name: Build PKCS#11 module for the simulator (test-args), with ASan
+      - name: Build PKCS#11 module for hardware and the simulator, with ASan
         env:
           CFLAGS: -fsanitize=address -fno-omit-frame-pointer
           LDFLAGS: -fsanitize=address
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       # The module reaches the simulator over the DDI socket transport; it never

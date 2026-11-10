@@ -78,7 +78,7 @@ class config : public ::testing::Test
   private:
     static constexpr const char *kVars[] = {
         TSRA_PKCS11_ENV_STORE_DIR, TSRA_PKCS11_ENV_PERSIST,  TSRA_PKCS11_ENV_CONF,
-        TSRA_PKCS11_ENV_DEBUG,     TSRA_PKCS11_ENV_OBK_PATH,
+        TSRA_PKCS11_ENV_DEBUG,     TSRA_PKCS11_ENV_OBK_PATH, TSRA_PKCS11_ENV_ID,
     };
 
     static std::optional<std::string> saved(const char *name)
@@ -187,4 +187,19 @@ TEST_F(config, owner_backup_key_is_read_at_login_not_at_initialize)
     ASSERT_CKR_OK(p11()->C_OpenSession(kSlot, CKF_SERIAL_SESSION, nullptr, nullptr, &s));
     EXPECT_CKR(CKR_FUNCTION_FAILED, login_user(s)) << "C_Login reads the file";
     EXPECT_CKR_OK(p11()->C_CloseSession(s));
+}
+
+TEST_F(config, explicit_provisioning_configuration_is_required)
+{
+    unsetenv(TSRA_PKCS11_ENV_CONF);
+    const char *names[] = { TSRA_PKCS11_ENV_ID, TSRA_PKCS11_ENV_OBK_PATH };
+    for (const char *name : names)
+    {
+        SCOPED_TRACE(name);
+        setenv(TSRA_PKCS11_ENV_ID, "01010101010101010101010101010101", 1);
+        setenv(TSRA_PKCS11_ENV_OBK_PATH, "/nonexistent/config-test-obk.bin", 1);
+        unsetenv(name);
+        EXPECT_CKR(CKR_GENERAL_ERROR, p11()->C_Initialize(nullptr));
+        EXPECT_CKR(CKR_CRYPTOKI_NOT_INITIALIZED, p11()->C_Finalize(nullptr));
+    }
 }

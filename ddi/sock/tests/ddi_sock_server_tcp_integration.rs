@@ -62,7 +62,7 @@ fn reserve_ephemeral_port() -> io::Result<u16> {
 /// set `server_bin` in `TSRA_TEST_ARGS` to override the path directly (e.g. for
 /// local runs with a non-default target directory).
 fn locate_ddi_sock_server_bin() -> std::path::PathBuf {
-    if let Some(path) = tsra_ddi::TestArgs::from_env().server_bin {
+    if let Some(path) = ddi_sock_server::TestArgs::from_env().server_bin {
         return std::path::PathBuf::from(path);
     }
 

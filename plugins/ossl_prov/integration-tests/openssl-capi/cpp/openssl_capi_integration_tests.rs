@@ -13,7 +13,7 @@
 //! enabling testing of session-based keys that cannot be tested via the CLI.
 
 // Starts an in-process DDI sock server before `main`; the children this
-// harness spawns inherit its endpoint via `TSRA_TEST_ARGS`.
+// harness spawns inherit its endpoint via `TSRA_DDI_ARGS`.
 use ddi_sock_server as _;
 
 /// Entry point for the C++ test runner.
@@ -287,7 +287,7 @@ mod integration {
              \n\
              Build the provider first:\n\
              \n\
-                 cargo build -p tsra_ossl_provider --features provider,test-args\n",
+                 cargo build -p tsra_ossl_provider --features provider\n",
             provider_so.display(),
         );
 

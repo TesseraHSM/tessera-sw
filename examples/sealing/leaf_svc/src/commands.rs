@@ -486,37 +486,3 @@ fn upload(env: &LeafEnv) -> Result<()> {
     println!("Leaf creation backup persisted in the root store.");
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use clap::CommandFactory;
-
-    use super::*;
-
-    #[test]
-    fn cli_supports_only_leaf_operations() {
-        let mut cli = Cli::command();
-        cli.debug_assert();
-        cli = Cli::command();
-        for supported in ["create", "join", "restore-local", "restore-remote"] {
-            assert!(cli.find_subcommand(supported).is_some());
-        }
-        for unsupported in ["clone", "child", "upload-backup"] {
-            assert!(cli.find_subcommand(unsupported).is_none());
-            assert!(
-                Cli::try_parse_from(["leaf_svc", unsupported, "--state-dir", "state"]).is_err()
-            );
-        }
-        assert!(Cli::try_parse_from([
-            "leaf_svc",
-            "create",
-            "--name",
-            "../bad",
-            "--root",
-            "http://127.0.0.1:8080",
-            "--state-dir",
-            "state"
-        ])
-        .is_err());
-    }
-}

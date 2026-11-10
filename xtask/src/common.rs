@@ -51,7 +51,7 @@ pub fn target_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Env var holding the `;`-separated `key=value` test configuration
-/// (mirrors `tsra_ddi::TEST_ARGS_ENV`).
+/// (mirrors `ddi_sock_server::TEST_ARGS_ENV`).
 pub const TEST_ARGS_ENV: &str = "TSRA_TEST_ARGS";
 
 /// Returns the value of `key` in the `TSRA_TEST_ARGS` string `args`.
@@ -96,7 +96,7 @@ pub const API_REVS: [&str; 2] = ["1_0", "1_1"];
 
 /// Add the requested transport/API revision selection to `TSRA_TEST_ARGS` for the
 /// test processes and, when the effective transport is `sock` (the
-/// simulator), enable the reduced test backoff and build the standalone sock
+/// simulator), build the standalone sock
 /// server (see [`prepare_ddi_sock_server`]).
 pub fn prepare_test_env(
     sh: &Shell,
@@ -113,7 +113,6 @@ pub fn prepare_test_env(
     // Match `tsra_ddi::DdiTransport::parse`: trimmed, case-insensitive.
     let args = sh.var(TEST_ARGS_ENV).unwrap_or_default();
     if test_arg(&args, "transport").is_some_and(|t| t.eq_ignore_ascii_case("sock")) {
-        set_test_arg(sh, "fast_backoff", "1", false);
         prepare_ddi_sock_server(sh, toolchain)?;
     }
     Ok(())

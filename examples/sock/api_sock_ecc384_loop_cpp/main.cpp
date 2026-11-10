@@ -136,7 +136,7 @@ Partition open_partition(const std::string &endpoint)
 {
     const auto expected_path = to_utf16(endpoint);
     const auto test_args = to_utf16("transport=sock;sock=" + endpoint);
-    if (!SetEnvironmentVariableW(L"TSRA_TEST_ARGS", test_args.c_str()))
+    if (!SetEnvironmentVariableW(L"TSRA_DDI_ARGS", test_args.c_str()))
     {
         throw std::runtime_error("failed to configure the socket endpoint");
     }
@@ -178,7 +178,7 @@ Partition open_partition(const std::string &endpoint)
         return partition;
     }
     throw std::runtime_error(
-        "TCP partition not found; check the SDK was built with the test-args feature"
+        "TCP partition not found; check the endpoint and socket server"
     );
 }
 

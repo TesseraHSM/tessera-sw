@@ -1,8 +1,8 @@
 # Hardware checklist
 
-Every module test runs against the simulator (`test-args`): the device
+Every CI module test runs against the simulator using the same product build: the device
 firmware, run in a `ddi_sock_server` process that the module reaches over the
-DDI socket transport (`TSRA_TEST_ARGS="transport=sock;sock=<endpoint>"`). The
+DDI socket transport (`TSRA_DDI_ARGS="transport=sock;sock=<endpoint>"`). The
 simulator does not survive a restart, and cases that need an unprovisioned
 device start a private one. Some behaviour can only be
 shown on a device that outlives a process or on real hardware: provisioning

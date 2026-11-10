@@ -5,7 +5,7 @@
 
 /// PrivateSimulator: a ddi_sock_server of its own, for a case that needs a
 /// freshly powered-on HSM (e.g. the first login chooses the credential) while
-/// the rest of the suite shares the one named by TSRA_TEST_ARGS (sock=).
+/// the rest of the suite shares the one named by TSRA_DDI_ARGS (sock=).
 ///
 /// The server binary is named by server_bin= in TSRA_TEST_ARGS. It is started
 /// on an ephemeral loopback port and stopped when the object goes out of
@@ -90,7 +90,7 @@ class PrivateSimulator
     /// The environment entries that point a child process at this server.
     std::vector<std::string> env() const
     {
-        return { std::string(kArgsVar) + "=transport=sock;sock=" + endpoint_ };
+        return { "TSRA_DDI_ARGS=transport=sock;sock=" + endpoint_ };
     }
 
     /// The server_bin= value of TSRA_TEST_ARGS, or "" if unset.

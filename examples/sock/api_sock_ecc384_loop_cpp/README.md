@@ -37,13 +37,13 @@ Use an **x64 Native Tools Command Prompt** or **Developer PowerShell for Visual
 Studio**, with the MSVC C++ compiler and Windows SDK installed. Run all commands
 from the repository root. No Linux, WSL, or VSOCK driver is required.
 
-Restore the repository's development tools and build the native SDK with the
-`test-args` feature (the example selects the socket backend at runtime via
-`TSRA_TEST_ARGS=transport=sock;sock=ENDPOINT`):
+Restore the repository's development tools and build the native SDK
+(the example selects the socket backend at runtime via
+`TSRA_DDI_ARGS=transport=sock;sock=ENDPOINT`):
 
 ```powershell
 cargo xtask precheck --setup
-cargo build -p tsra_api_native --features test-args
+cargo build -p tsra_api_native
 ```
 
 Compile the standalone C++17 example:
@@ -54,8 +54,7 @@ cl /nologo /std:c++17 /EHsc /W4 /WX /DNOMINMAX /DWIN32_LEAN_AND_MEAN /Iapi/nativ
 
 The executable is placed beside `tsra_api_native.dll` so Windows can load the
 SDK without changing `PATH`. Use the x64 compiler to match the native SDK build.
-Rebuild the DLL with the `test-args` feature if other Cargo commands have
-rebuilt it without.
+The same SDK binary supports both socket servers and native hardware.
 
 ## Run
 
@@ -77,7 +76,7 @@ If the port is occupied, choose the same alternative port for server and client.
 
 ## Public API Flow
 
-1. Configure `TSRA_TEST_ARGS` before making SDK calls.
+1. Configure `TSRA_DDI_ARGS` before making SDK calls.
 2. Discover partitions with `tsra_part_get_list`, `tsra_part_get_count`, and
    `tsra_part_get_info`; preserve the returned UTF-16 path and select its maximum
    supported API revision.

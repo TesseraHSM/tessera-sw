@@ -8,7 +8,8 @@
 //! (`transport=sock`) and names no `sock` endpoint, starts the server on an
 //! ephemeral loopback port and adds `sock=tcp://ADDR` to `TSRA_TEST_ARGS`.
 //! Every test process therefore gets its own emulated HSM, and the unchanged
-//! socket transport connects to it. Child processes inherit the endpoint.
+//! socket transport connects to it. The runner publishes the connection through
+//! `TSRA_DDI_ARGS`, which child SDK processes inherit without test features.
 //!
 //! With `autostart-isolated`, the server is started even if `TSRA_TEST_ARGS`
 //! names a `sock` endpoint, and the endpoint is only set for this process
@@ -26,8 +27,11 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use tsra_ddi::TEST_ARGS_ENV;
-use tsra_ddi::TestArgs;
+use tsra_ddi::DDI_ARGS_ENV;
+use tsra_ddi::DdiConfig;
+
+use crate::TEST_ARGS_ENV;
+use crate::TestArgs;
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -40,19 +44,31 @@ pub fn autostarted() -> bool {
 fn start() {
     let isolated = cfg!(feature = "autostart-isolated");
     let mut args = TestArgs::from_env();
-    if !tsra_ddi::sock_selected() || (!isolated && args.sock.is_some()) {
+    let mut config = args.connection_config().unwrap_or_else(|error| {
+        eprintln!("Invalid test connection configuration: {error}");
+        std::process::exit(1);
+    });
+    let publish = |args: TestArgs, config: DdiConfig| {
+        if isolated {
+            TestArgs::set_process(args).expect("test configuration already set");
+            DdiConfig::set_process(config).expect("connection configuration already set");
+        } else {
+            // SAFETY: this executable constructor runs before main and before
+            // the server thread starts. Loaded product libraries never do this.
+            unsafe {
+                std::env::set_var(TEST_ARGS_ENV, args.to_string());
+                std::env::set_var(DDI_ARGS_ENV, config.to_string());
+            }
+        }
+    };
+    if !config.transport.is_sock() || (!isolated && config.sock.is_some()) {
+        publish(args, config);
         return;
     }
     let result = crate::tcp::spawn_loopback_with(|address| {
         args.sock = Some(format!("tcp://{address}"));
-        if isolated {
-            let _ = TestArgs::set_process(args);
-        } else {
-            // SAFETY: runs in an executable's constructor before `main`, and
-            // before the server thread is spawned, so no other thread can
-            // access the environment concurrently.
-            unsafe { std::env::set_var(TEST_ARGS_ENV, args.to_string()) };
-        }
+        config.sock = args.sock.clone();
+        publish(args, config);
     });
     match result {
         Ok(_) => STARTED.store(true, Ordering::Release),

@@ -36,9 +36,8 @@ jobs:
     container: ${{ matrix.image }}
     env:
       # Run every test against the simulated HSM over the sock transport.
-      # Simulator resets are fast; use the reduced test backoff. Read only by
-      # builds with the `test-args` feature.
-      TSRA_TEST_ARGS: transport=sock;fast_backoff=1
+      # Test runners pass connection settings to the ordinary SDK build.
+      TSRA_TEST_ARGS: transport=sock
     strategy:
       fail-fast: false
       matrix:
@@ -173,14 +172,14 @@ jobs:
         run: openssl engine -t "$(pwd)/target/debug/libtsra_ossl_engine.so"
 
       # The integration suites load a key through the engine end to end; they
-      # need a .so with the test credentials and TSRA_TEST_ARGS support, so
+      # need a .so with the test credentials and runtime transport support, so
       # (re)build it and
       # the masked-key generator. Each test harness process starts its own
       # simulated HSM, which the openssl and generator children share.
       - name: Build engine + generator for integration tests
         run: |
-          cargo build -p tsra_ossl_engine --features engine,test-credentials,test-args
-          cargo build -p tsra-engine-masked-keygen --features integration,tsra_api/test-args
+          cargo build -p tsra_ossl_engine --features engine,test-credentials
+          cargo build -p tsra-engine-masked-keygen --features integration
 
       - name: Integration tests — CLI (openssl -engine)
         run: |

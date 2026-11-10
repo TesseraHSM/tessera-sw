@@ -59,9 +59,8 @@ jobs:
       PROVIDER_PATH: ${{ github.workspace }}/target/debug
       PROPQUERY: '?provider=tsra'
       # Run every suite against the simulated HSM over the sock transport.
-      # Simulator resets are fast; use the reduced test backoff. Read only by
-      # builds with the `test-args` feature.
-      TSRA_TEST_ARGS: transport=sock;fast_backoff=1
+      # Test runners pass connection settings to the ordinary SDK build.
+      TSRA_TEST_ARGS: transport=sock
     strategy:
       fail-fast: false
       matrix:
@@ -212,16 +211,16 @@ jobs:
       - name: Build provider
         if: ${{ !matrix.cov }}
         run: |
-          cargo build -p tsra_api_native --features test-args
-          cargo build -p tsra_ossl_provider --features test-args
+          cargo build -p tsra_api_native
+          cargo build -p tsra_ossl_provider
 
       - name: Build provider with coverage
         if: ${{ matrix.cov }}
         env:
           RUSTFLAGS: -C instrument-coverage
         run: |
-          cargo build -p tsra_api_native --features test-args
-          cargo build -p tsra_ossl_provider --features test-args
+          cargo build -p tsra_api_native
+          cargo build -p tsra_ossl_provider
 
       # nginx opens the HSM in its master process and then forks workers, so
       # its suite runs a standalone ddi_sock_server that outlives them.
@@ -278,7 +277,7 @@ jobs:
       - name: Run nginx suite
         if: ${{ !cancelled() && matrix.nginx && !matrix.cov }}
         env:
-          TSRA_TEST_ARGS: transport=sock;fast_backoff=1;sock=tcp://127.0.0.1:23456
+          TSRA_TEST_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
         run: |
           target/sock-server/debug/ddi_sock_server tcp://127.0.0.1:23456 &
           trap 'kill $!' EXIT
@@ -304,7 +303,7 @@ jobs:
       - name: Run nginx suite with coverage
         if: ${{ !cancelled() && matrix.nginx && matrix.cov }}
         env:
-          TSRA_TEST_ARGS: transport=sock;fast_backoff=1;sock=tcp://127.0.0.1:23456
+          TSRA_TEST_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
         run: |
           target/sock-server/debug/ddi_sock_server tcp://127.0.0.1:23456 &
           trap 'kill $!' EXIT

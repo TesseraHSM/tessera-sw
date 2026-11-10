@@ -60,15 +60,14 @@ typedef struct
  * Populate `cfg`: the defaults, then the file TSRA_PKCS11_CONF names (when
  * set), then the environment variable of every file key, which wins over the
  * file. Credentials come from the environment only: TSRA_PKCS11_ID and
- * TSRA_PKCS11_PIN, 32 hex characters each. The emulator build (TSRA_FEATURE_EMULATOR)
- * has a built-in partition ID, a hardware build (TSRA_WITH_HSM without
- * TSRA_FEATURE_EMULATOR) none and requires TSRA_PKCS11_ID and an obk_path; the key
+ * TSRA_PKCS11_PIN, 32 hex characters each. Every HSM-backed build
+ * (TSRA_WITH_HSM) requires TSRA_PKCS11_ID and an obk_path; the key
  * file itself is not read here (tsra_pkcs11_config_obk). A malformed setting
  * fails closed instead of falling back to a default: CKR_GENERAL_ERROR with
  * the reason in cfg->error for a missing, empty or unreadable file, a line that
  * is not a known "key = value", a credential that is not 32 hex characters, a
  * boolean other than 1, 0, true or false, a path that is not absolute,
- * contains "..", or does not fit, or a hardware build missing the partition ID
+ * contains "..", or does not fit, or an HSM-backed build missing the partition ID
  * or the obk_path. cfg->debug is set even then, so the reason can be traced.
  * The caller clears `cfg` on either outcome.
  */

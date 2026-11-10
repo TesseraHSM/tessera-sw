@@ -20,8 +20,6 @@ integration = ["engine"]
 # Compiles in well-known default credentials for the simulated HSM. Test
 # builds only; never enable for a production engine.
 test-credentials = []
-# Read test configuration from TSRA_TEST_ARGS. Test builds only.
-test-args = ["tsra_api/test-args"]
 
 [dependencies]
 parking_lot.workspace = true

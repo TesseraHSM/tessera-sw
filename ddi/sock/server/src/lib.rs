@@ -17,12 +17,18 @@
 //! disables and re-enables this endpoint's partition, coordinated across all
 //! connections. Independent root/leaf instances need separate server processes.
 
+#[cfg(feature = "test-args")]
+mod test_args;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+#[cfg(feature = "test-args")]
+pub use test_args::TEST_ARGS_ENV;
+#[cfg(feature = "test-args")]
+pub use test_args::TestArgs;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tsra_ddi_mbor_types::DdiDecoder;
@@ -755,7 +761,7 @@ fn part_res_mask(count: u32) -> u128 {
 /// the `test-args` feature, otherwise 1.
 fn resource_count() -> Result<u32, String> {
     #[cfg(feature = "test-args")]
-    if let Some(count) = tsra_ddi::TestArgs::from_env().resource_count {
+    if let Some(count) = TestArgs::from_env().resource_count {
         return if (1..=MAX_RESOURCES).contains(&count) {
             Ok(count)
         } else {

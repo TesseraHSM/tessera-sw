@@ -66,10 +66,16 @@ Use cargo-nextest (recommended):
 cargo xtask nextest --transport sock --package <package-name>
 ```
 
-Test configuration comes from `TSRA_TEST_ARGS`, `;`-separated `key=value`
-pairs (for example `TSRA_TEST_ARGS="transport=sock;api_rev=1_1"`). The SDK
-reads it only when built with the `test-args` feature, which test builds
-enable through their dev-dependencies; unknown keys are an error. Keys:
+The same SDK build supports native hardware and socket connections. Set
+`TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234"` to connect to a
+running socket server, or leave it unset for the platform device driver.
+Socket servers can front hardware or a simulator; transport selection never
+changes credentials, provisioning requirements, or retry policy.
+
+Test runners read `TSRA_TEST_ARGS`, `;`-separated `key=value` pairs (for
+example `TSRA_TEST_ARGS="transport=sock;api_rev=1_1"`), and pass connection
+settings to the unchanged SDK. The SDK itself never reads this variable.
+Unknown keys are an error. Test keys:
 
 - `transport`: `sock`, or the native `nix`/`win`; unset means native.
   `--transport` sets it. With `sock`, each test binary starts an in-process
@@ -78,8 +84,6 @@ enable through their dev-dependencies; unknown keys are an error. Keys:
 - `resource_count`: partition resources of the simulated HSM (default 1; for
   example `4` or `64`). A standalone server reads it only when built with
   `--features test-args`, as xtask does.
-- `fast_backoff=1`: shortens resiliency retry backoff for simulator runs;
-  xtask sets it with `sock`.
 - `api_rev`: see below.
 - `server_bin`: path to a standalone `ddi_sock_server` binary for tests
   that spawn one; xtask sets it.

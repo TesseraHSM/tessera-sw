@@ -4,13 +4,12 @@
 //! Test configuration from the [`TEST_ARGS_ENV`] environment variable.
 //!
 //! The variable holds `;`-separated `key=value` pairs, for example
-//! `TSRA_TEST_ARGS="transport=sock;api_rev=1_1;fast_backoff=1"`:
+//! `TSRA_TEST_ARGS="transport=sock;api_rev=1_1"`:
 //!
 //! | Key              | Value                                                  |
 //! |------------------|--------------------------------------------------------|
 //! | `transport`      | DDI transport: `sock`, `native`, `nix` or `win`         |
 //! | `api_rev`        | API revision used by `tsra_api_tests`: `1_0` or `1_1`   |
-//! | `fast_backoff`   | `1` for the reduced resiliency retry backoff, or `0`    |
 //! | `sock`           | Socket server endpoint for the sock transport           |
 //! | `resource_count` | Partition resources of the sock server, `1..=65`        |
 //! | `server_bin`     | Path to a standalone `ddi_sock_server` binary           |
@@ -18,7 +17,8 @@
 //! The variable is only read when the `test-args` feature is enabled (test
 //! builds); otherwise [`TestArgs::from_env`] returns the defaults, which
 //! select the native transport. [`TestArgs::set_process`] overrides it for
-//! the current process only.
+//! the current process only. The SDK never reads these settings: test runners
+//! translate connection settings into [`tsra_ddi::DdiConfig`] before invoking it.
 
 use std::fmt;
 use std::sync::OnceLock;
@@ -29,15 +29,13 @@ pub const TEST_ARGS_ENV: &str = "TSRA_TEST_ARGS";
 /// Process-local configuration set by [`TestArgs::set_process`].
 static PROCESS_ARGS: OnceLock<TestArgs> = OnceLock::new();
 
-/// Parsed [`TEST_ARGS_ENV`] configuration. `None`/`false` means unset.
+/// Parsed [`TEST_ARGS_ENV`] configuration. `None` means unset.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TestArgs {
-    /// DDI transport name (see [`crate::DdiTransport::parse`]).
+    /// DDI transport name (see [`tsra_ddi::DdiTransport::parse`]).
     pub transport: Option<String>,
     /// API revision used by `tsra_api_tests`: `1_0` or `1_1`.
     pub api_rev: Option<String>,
-    /// Whether to use the reduced resiliency retry backoff.
-    pub fast_backoff: bool,
     /// Socket server endpoint for the sock transport.
     pub sock: Option<String>,
     /// Number of partition resources allocated by the sock server.
@@ -47,6 +45,20 @@ pub struct TestArgs {
 }
 
 impl TestArgs {
+    /// Connection settings for a test runner to pass to the unchanged SDK.
+    /// Test controls are not included in the resulting runtime configuration.
+    pub fn connection_config(&self) -> Result<tsra_ddi::DdiConfig, String> {
+        let mut config = tsra_ddi::DdiConfig::from_env()?;
+        if let Some(transport) = &self.transport {
+            config.transport = tsra_ddi::DdiTransport::parse(transport)
+                .ok_or_else(|| format!("{TEST_ARGS_ENV}: unsupported transport {transport:?}"))?;
+        }
+        if let Some(sock) = &self.sock {
+            config.sock = Some(sock.clone());
+        }
+        Ok(config)
+    }
+
     /// Parses `;`-separated `key=value` pairs. Whitespace around pairs, keys
     /// and values is ignored, as are empty pairs. Unknown keys, repeated
     /// keys, empty values and invalid values are errors.
@@ -70,11 +82,6 @@ impl TestArgs {
                 "transport" => args.transport = Some(val.to_owned()),
                 "api_rev" => match val {
                     "1_0" | "1_1" => args.api_rev = Some(val.to_owned()),
-                    _ => return Err(invalid()),
-                },
-                "fast_backoff" => match val {
-                    "1" => args.fast_backoff = true,
-                    "0" => args.fast_backoff = false,
                     _ => return Err(invalid()),
                 },
                 "sock" => args.sock = Some(val.to_owned()),
@@ -127,7 +134,6 @@ impl fmt::Display for TestArgs {
         let pairs = [
             ("transport", self.transport.clone()),
             ("api_rev", self.api_rev.clone()),
-            ("fast_backoff", self.fast_backoff.then(|| "1".to_owned())),
             ("sock", self.sock.clone()),
             ("resource_count", self.resource_count.map(|c| c.to_string())),
             ("server_bin", self.server_bin.clone()),
@@ -150,13 +156,12 @@ mod tests {
     #[test]
     fn parse_all_keys_and_round_trip() {
         let args = TestArgs::parse(
-            " transport = sock ;api_rev=1_1;fast_backoff=1;sock=tcp://127.0.0.1:1;\
+            " transport = sock ;api_rev=1_1;sock=tcp://127.0.0.1:1;\
              resource_count=4;server_bin=/x/ddi_sock_server; ",
         )
         .expect("valid test args");
         assert_eq!(args.transport.as_deref(), Some("sock"));
         assert_eq!(args.api_rev.as_deref(), Some("1_1"));
-        assert!(args.fast_backoff);
         assert_eq!(args.sock.as_deref(), Some("tcp://127.0.0.1:1"));
         assert_eq!(args.resource_count, Some(4));
         assert_eq!(args.server_bin.as_deref(), Some("/x/ddi_sock_server"));
@@ -172,7 +177,7 @@ mod tests {
             "transport=",
             "bogus=1",
             "api_rev=session_ex",
-            "fast_backoff=yes",
+            "fast_backoff=1",
             "resource_count=four",
             "transport=sock;transport=nix",
         ] {

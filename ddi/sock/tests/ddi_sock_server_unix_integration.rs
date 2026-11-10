@@ -66,7 +66,7 @@ fn unique_socket_path(tag: &str) -> PathBuf {
 /// the identical helper in `ddi_sock_server_tcp_integration.rs` for why
 /// this can't just be a normal dev-dependency.
 fn locate_ddi_sock_server_bin() -> PathBuf {
-    if let Some(path) = tsra_ddi::TestArgs::from_env().server_bin {
+    if let Some(path) = ddi_sock_server::TestArgs::from_env().server_bin {
         return PathBuf::from(path);
     }
 

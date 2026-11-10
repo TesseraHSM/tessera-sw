@@ -95,10 +95,13 @@ pinned wheels into a directory and point `PIP_FIND_LINKS` at it with
 ## Running it locally
 
 ```sh
-cargo build -p tsra_pkcs11 --features test-args
+cargo build -p tsra_pkcs11
 cargo build -p ddi_sock_server
 target/debug/ddi_sock_server tcp://127.0.0.1:23456 &
-export TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:23456"
+export TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:23456"
+export TSRA_PKCS11_ID=01010101010101010101010101010101
+export TSRA_PKCS11_OBK_PATH="$(mktemp)"
+head -c 48 /dev/urandom > "$TSRA_PKCS11_OBK_PATH"
 plugins/tsra_pkcs11/tests/pkcs11-check/run.sh --pr target/debug/tsra_pkcs11.so
 ```
 

@@ -28,12 +28,6 @@ x509.workspace = true
 zerocopy.workspace = true
 zeroize.workspace = true
 
-[dev-dependencies]
-# Serves the in-process HSM for unit and integration tests only.
-ddi_sock_server = { features = ["autostart"], workspace = true }
-tsra_ddi = { features = ["test-args"], workspace = true }
-ureq = { default-features = false, version = "3" }
-
 [features]
 
 [lints]

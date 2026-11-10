@@ -223,11 +223,15 @@ serve the same callers.
 
 ```sh
 # Against the simulator over the DDI socket transport (no physical device):
-cargo build -p tsra_pkcs11 --features test-args
+cargo build -p tsra_pkcs11
 # -> target/debug/tsra_pkcs11.so
 # Start the simulator and point the module at it before loading it:
 cargo run -p ddi_sock_server -- tcp://127.0.0.1:1234 &
-export TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1234"
+export TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234"
+# Explicit provisioning inputs for this local simulator:
+export TSRA_PKCS11_ID=01010101010101010101010101010101
+export TSRA_PKCS11_OBK_PATH="$(mktemp)"
+head -c 48 /dev/urandom > "$TSRA_PKCS11_OBK_PATH"
 
 # Standalone (no device linked) framework smoke build:
 gcc -shared -fPIC -Iinclude/pkcs11-v3.1 src/*.c -o tsra_pkcs11.so -lpthread
@@ -235,6 +239,9 @@ gcc -shared -fPIC -Iinclude/pkcs11-v3.1 src/*.c -o tsra_pkcs11.so -lpthread
 
 `build.rs` drives CMake, which imports `tsra_api_native` via Corrosion and
 generates `tsra.h` with cbindgen.
+
+The same module and SDK build supports hardware and the simulator. Neither
+transport supplies built-in provisioning inputs.
 
 `include/pkcs11-v3.1/` holds the OASIS PKCS #11 v3.1 headers, vendored
 unmodified under their own copyright; see the `NOTICE` file there. The
@@ -263,14 +270,13 @@ hex characters (16 bytes) each:
   PIN zero-padded). With it the token reports
   `CKF_PROTECTED_AUTHENTICATION_PATH`, and a `C_Login` without a PIN uses it.
 
-The emulator build has a built-in partition ID and owner backup key. A hardware
-build has neither and needs both in every process: without `TSRA_PKCS11_ID`
+No build has a built-in partition ID or owner backup key. Hardware and simulator
+connections both need explicit configuration in every process: without `TSRA_PKCS11_ID`
 or `obk_path`, `C_Initialize` returns `CKR_GENERAL_ERROR` with a debug line.
 `C_Initialize` only takes the key file's name; the key is in memory only
 during a `C_Login`. Every `C_Login` reads the file before it opens the device session,
 also on a provisioned partition, and returns `CKR_FUNCTION_FAILED` with a
-debug line when it is missing, a symbolic link or not exactly 48 bytes. The
-emulator build reads a configured `obk_path` the same way.
+debug line when it is missing, a symbolic link or not exactly 48 bytes.
 
 A bad setting fails closed instead of falling back to a default: an unknown
 key (a credential included), a line without `=`, a boolean other than `1`,

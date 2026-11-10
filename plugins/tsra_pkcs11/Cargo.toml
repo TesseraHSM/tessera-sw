@@ -21,12 +21,3 @@ tsra_api_native.workspace = true
 
 [lints]
 workspace = true
-
-[features]
-default = []
-# Test builds only. Forwarded to tsra_api_native: the module reads
-# TSRA_TEST_ARGS, so it can talk to a simulator over the DDI socket transport
-# and no physical HSM is needed. Run `ddi_sock_server` and set
-# TSRA_TEST_ARGS="transport=sock;sock=<endpoint>". The simulator is never
-# linked into the module.
-test-args = []

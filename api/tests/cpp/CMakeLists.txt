@@ -47,7 +47,6 @@ corrosion_import_crate(
     MANIFEST_PATH ../../native/Cargo.toml
     CRATE_TYPES cdylib
     CRATES tsra_api_native
-    FEATURES test-args
     )
 
 corrosion_experimental_cbindgen(

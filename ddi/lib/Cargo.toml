@@ -9,11 +9,8 @@ version = "0.1.0"
 [lib]
 doctest = false
 
-[features]
-# Read test configuration from TSRA_TEST_ARGS. Test builds only.
-test-args = []
-
 [dependencies]
+tracing.workspace = true
 tsra_ddi_interface.workspace = true
 tsra_ddi_mbor_types.workspace = true
 tsra_ddi_sock.workspace = true

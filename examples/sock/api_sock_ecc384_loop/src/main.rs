@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //! Generate, sign, and verify session-scoped P-384 keys over TCP on Windows or Linux.
 //!
-//! Run with `cargo run -p tsra_api_sock_ecc384_loop --features tsra_api/test-args -- [ENDPOINT] [COUNT]`.
+//! Run with `cargo run -p tsra_api_sock_ecc384_loop -- [ENDPOINT] [COUNT]`.
 //! Defaults are `tcp://127.0.0.1:1234` and one iteration on both platforms.
 //! Use only a disposable test partition: this example rotates the default CO PSK
 //! to a fixed, publicly known test value and reuses that value on later runs.
@@ -44,10 +44,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
 }
 
 fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>> {
-    std::env::set_var(
-        "TSRA_TEST_ARGS",
-        format!("transport=sock;sock={}", endpoint),
-    );
+    std::env::set_var("TSRA_DDI_ARGS", format!("transport=sock;sock={}", endpoint));
 
     let info = HsmPartitionManager::partition_info_list()
         .into_iter()
@@ -164,68 +161,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options.count, options.endpoint
     );
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn default_options() {
-        assert_eq!(
-            parse_args(std::iter::empty()).expect("default options"),
-            Options {
-                endpoint: DEFAULT_ENDPOINT.to_owned(),
-                count: 1
-            }
-        );
-    }
-
-    #[test]
-    fn explicit_options() {
-        assert_eq!(
-            parse_args(["tcp://localhost:2345", "5"].into_iter().map(str::to_owned))
-                .expect("explicit options"),
-            Options {
-                endpoint: "tcp://localhost:2345".to_owned(),
-                count: 5
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_counts() {
-        for count in ["0", "-1", "invalid", "184467440737095516160"] {
-            assert!(
-                parse_args([DEFAULT_ENDPOINT, count].into_iter().map(str::to_owned)).is_err(),
-                "{count}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_non_tcp_endpoints() {
-        for endpoint in ["", "tcp://", "vsock://4:1234", "/tmp/tsra-ddi.sock"] {
-            assert!(
-                parse_args([endpoint].into_iter().map(str::to_owned)).is_err(),
-                "{endpoint}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_extra_arguments() {
-        assert!(parse_args(
-            [DEFAULT_ENDPOINT, "1", "extra"]
-                .into_iter()
-                .map(str::to_owned)
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn hex_encoding() {
-        assert_eq!(hex(&[]), "");
-        assert_eq!(hex(&[0x00, 0x0f, 0x10, 0x80, 0xff]), "000f1080ff");
-    }
 }

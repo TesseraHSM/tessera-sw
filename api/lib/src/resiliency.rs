@@ -354,15 +354,10 @@ pub(crate) const BACKOFF_BASE_MS: u64 = 400;
 /// exactly the same instant.
 pub(crate) const BACKOFF_JITTER_MS: u64 = 100;
 
-/// Whether to use the reduced backoff: in unit tests, and when
-/// `TSRA_TEST_ARGS` has `fast_backoff=1` (test builds only, see
-/// [`tsra_ddi::TestArgs`]). Meant for simulated devices, whose resets
-/// complete quickly; the transport alone is not enough, since a socket
-/// endpoint may front real hardware. The reduced values keep the 4:1
-/// base-to-jitter ratio, so retry tests stay fast while still exercising
-/// realistic backoff behavior.
+/// Unit tests use reduced backoff; the SDK uses the same retry policy
+/// for hardware and simulators, regardless of environment test controls.
 fn fast_backoff() -> bool {
-    cfg!(test) || tsra_ddi::TestArgs::from_env().fast_backoff
+    cfg!(test)
 }
 
 /// Base delay in milliseconds for exponential backoff: [`BACKOFF_BASE_MS`],

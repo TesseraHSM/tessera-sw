@@ -31,11 +31,6 @@ x509.workspace = true
 zerocopy = { features = ["derive"], workspace = true }
 zeroize.workspace = true
 
-[features]
-default = []
-# Read test configuration from TSRA_TEST_ARGS. Test builds only.
-test-args = ["tsra_ddi/test-args"]
-
 [dev-dependencies]
 ddi_sock_server = { features = ["autostart"], workspace = true }
 

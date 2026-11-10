@@ -329,7 +329,7 @@ The barrier prevents this by ensuring Thread A's operation either:
 
 ## Backoff Configuration
 
-| Parameter        | Default       | `fast_backoff=1` (tests) |
+| Parameter        | SDK           | Unit tests   |
 |------------------|---------------|--------------|
 | `MAX_RETRIES`    | 5 (6 total)   | 5 (6 total)  |
 | `BACKOFF_BASE_MS`| 400ms         | 8ms          |
@@ -337,10 +337,10 @@ The barrier prevents this by ensuring Thread A's operation either:
 
 Backoff schedule (production): 400, 800, 1600, 3200, 6400ms + jitter.
 
-The reduced backoff is test-only and must be requested explicitly with
-`fast_backoff=1` in `TSRA_TEST_ARGS` (read only with the `test-args`
-feature); the transport alone does not select it, since a socket endpoint may
-front real hardware. `cargo xtask` sets it for `--transport sock`.
+Only Rust unit tests compiled with `cfg(test)` use reduced backoff.
+The same SDK build and retry policy are used for hardware and simulator
+integration tests. Neither `TSRA_TEST_ARGS` nor transport selection changes
+the SDK retry policy; a socket endpoint may front real hardware.
 
 ## Error Classification
 

@@ -89,14 +89,14 @@ fn reserve_ephemeral_port() -> io::Result<u16> {
 /// `unsafe_code`.
 fn reexec_with_ddi_sock_env(test_name: &str) {
     let port = reserve_ephemeral_port().expect("failed to reserve a TCP port");
-    let mut args = tsra_ddi::TestArgs::from_env();
+    let mut args = ddi_sock_server::TestArgs::from_env();
     args.sock = Some(format!("tcp://127.0.0.1:{port}"));
 
     let exe = std::env::current_exe().expect("failed to resolve current test executable");
     let status = Command::new(exe)
         .arg(test_name)
         .arg("--nocapture")
-        .env(tsra_ddi::TEST_ARGS_ENV, args.to_string())
+        .env(ddi_sock_server::TEST_ARGS_ENV, args.to_string())
         .env(REEXEC_CHILD_MARKER, "1")
         .status()
         .expect("failed to spawn re-executed test process");
@@ -110,7 +110,7 @@ fn reexec_with_ddi_sock_env(test_name: &str) {
 /// the identical helper in `ddi/sock/tests/ddi_sock_server_tcp_integration
 /// .rs` for why this can't just be a normal dev-dependency.
 fn locate_ddi_sock_server_bin() -> std::path::PathBuf {
-    if let Some(path) = tsra_ddi::TestArgs::from_env().server_bin {
+    if let Some(path) = ddi_sock_server::TestArgs::from_env().server_bin {
         return std::path::PathBuf::from(path);
     }
 
@@ -185,7 +185,7 @@ fn many_sequential_sessions_do_not_exhaust_partition() {
         return reexec_with_ddi_sock_env("many_sequential_sessions_do_not_exhaust_partition");
     }
 
-    let endpoint = tsra_ddi::TestArgs::from_env()
+    let endpoint = ddi_sock_server::TestArgs::from_env()
         .sock
         .expect("sock must be set by re-exec");
     let _server = spawn_ddi_sock_server(&endpoint).expect("failed to start ddi_sock_server");
@@ -231,7 +231,7 @@ fn many_concurrent_sessions_are_all_usable() {
 
     const CONCURRENT_SESSIONS: usize = 4;
 
-    let endpoint = tsra_ddi::TestArgs::from_env()
+    let endpoint = ddi_sock_server::TestArgs::from_env()
         .sock
         .expect("sock must be set by re-exec");
     let _server = spawn_ddi_sock_server(&endpoint).expect("failed to start ddi_sock_server");

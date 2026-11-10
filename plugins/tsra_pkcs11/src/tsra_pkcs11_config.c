@@ -317,11 +317,6 @@ CK_RV tsra_pkcs11_config_load(tsra_pkcs11_config *cfg)
         return CKR_ARGUMENTS_BAD;
     }
     memset(cfg, 0, sizeof(*cfg));
-#ifdef TSRA_FEATURE_EMULATOR
-    /* The emulator accepts any non-zero partition ID. */
-    memset(cfg->id, 0x01, sizeof(cfg->id));
-    cfg->id_set = true;
-#endif
     memcpy(cfg->store_dir, TSRA_PKCS11_DEFAULT_STORE_DIR, sizeof(TSRA_PKCS11_DEFAULT_STORE_DIR));
     /* Taken once ahead of the file as well, so a refused file can be traced. */
     const char *debug = getenv(TSRA_PKCS11_ENV_DEBUG);
@@ -355,13 +350,13 @@ CK_RV tsra_pkcs11_config_load(tsra_pkcs11_config *cfg)
             &cfg->default_pin_set
         );
     }
-#if defined(TSRA_WITH_HSM) && !defined(TSRA_FEATURE_EMULATOR)
+#if defined(TSRA_WITH_HSM)
     if ((rv == CKR_OK) && !cfg->id_set)
     {
         snprintf(
             cfg->error,
             sizeof(cfg->error),
-            "%s: a hardware build needs it",
+            "%s: required for HSM access",
             TSRA_PKCS11_ENV_ID
         );
         rv = CKR_GENERAL_ERROR;
@@ -373,7 +368,7 @@ CK_RV tsra_pkcs11_config_load(tsra_pkcs11_config *cfg)
         snprintf(
             cfg->error,
             sizeof(cfg->error),
-            "%s or obk_path: a hardware build needs it",
+            "%s or obk_path: required for HSM access",
             TSRA_PKCS11_ENV_OBK_PATH
         );
         rv = CKR_GENERAL_ERROR;
@@ -413,12 +408,7 @@ CK_RV tsra_pkcs11_config_obk(const tsra_pkcs11_config *cfg, CK_BYTE obk[P11_OBK_
     }
     if (cfg->obk_path[0] == '\0')
     {
-#ifdef TSRA_FEATURE_EMULATOR
-        memset(obk, 0xA5, P11_OBK_LEN); /* the emulator takes any 48 bytes */
-        return CKR_OK;
-#else
         return CKR_FUNCTION_FAILED;
-#endif
     }
     unsigned char *buf = NULL;
     size_t len = 0;

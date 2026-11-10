@@ -92,9 +92,9 @@ OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_api_native
 OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_ossl_provider
 ```
 
-To use the simulator, build with `--features test-args`, run
-`ddi_sock_server <addr>` and set `TSRA_TEST_ARGS="transport=sock;sock=<addr>"`
-for OpenSSL. On real hardware, build without `test-args`.
+The same build supports hardware and the simulator. Run
+`ddi_sock_server <addr>` and set `TSRA_DDI_ARGS="transport=sock;sock=<addr>"`
+for OpenSSL to use the socket server. Leave it unset for native hardware.
 
 This produces two shared libraries in `target/debug/`:
 - `tsra_provider.so` — the OpenSSL provider

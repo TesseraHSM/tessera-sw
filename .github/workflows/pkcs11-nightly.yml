@@ -29,12 +29,12 @@ jobs:
       - name: Install CMake and OpenSSL headers
         run: sudo apt-get install -y cmake libssl-dev
 
-      - name: Build PKCS#11 module for the simulator (test-args), with ASan and UBSan
+      - name: Build PKCS#11 module for hardware and the simulator, with ASan and UBSan
         env:
           CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
           LDFLAGS: -fsanitize=address,undefined
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       # The module reaches the simulator over the DDI socket transport; it never
@@ -74,9 +74,9 @@ jobs:
       - name: Install CMake, OpenSSL headers, and OpenSC pkcs11-tool
         run: sudo apt-get install -y cmake libssl-dev opensc
 
-      - name: Build PKCS#11 module for the simulator (test-args)
+      - name: Build PKCS#11 module for hardware and the simulator
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       # The module reaches the simulator over the DDI socket transport; it never
@@ -137,9 +137,9 @@ jobs:
             | sh -s -- -y --default-toolchain none --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Build PKCS#11 module for the simulator (test-args)
+      - name: Build PKCS#11 module for hardware and the simulator
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       # The module reaches the simulator over the DDI socket transport; it never

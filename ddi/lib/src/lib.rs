@@ -6,11 +6,11 @@
 //! Device Driver Interface (DDI) library
 //!
 //! [`TsraDdi`] selects its transport at runtime from the `transport` key of
-//! [`TEST_ARGS_ENV`] (read only with the `test-args` feature): `sock` uses
+//! [`DDI_ARGS_ENV`]: `sock` uses
 //! the socket transport, and an unset key (or `native`, `nix` on Linux,
 //! `win` on Windows) uses the platform device driver.
 
-mod test_args;
+mod config;
 
 use std::fmt;
 
@@ -20,10 +20,10 @@ use tsra_ddi_mbor_types::DdiDeviceKind;
 use tsra_ddi_mbor_types::DdiOpReq;
 use tsra_ddi_tbor_types::TborOpReq;
 
-pub use crate::test_args::TestArgs;
-pub use crate::test_args::TEST_ARGS_ENV;
+pub use crate::config::DdiConfig;
+pub use crate::config::DDI_ARGS_ENV;
 
-/// Whether [`TEST_ARGS_ENV`] selects the socket transport.
+/// Whether [`DDI_ARGS_ENV`] selects the socket transport.
 pub fn sock_selected() -> bool {
     DdiTransport::from_env().is_some_and(DdiTransport::is_sock)
 }
@@ -71,12 +71,16 @@ impl DdiTransport {
         }
     }
 
-    /// The transport selected by [`TEST_ARGS_ENV`], or `None` if the value
+    /// The transport selected by [`DDI_ARGS_ENV`], or `None` if the value
     /// is not a supported transport. Defaults to [`Self::NATIVE`] when unset.
     pub fn from_env() -> Option<Self> {
-        TestArgs::from_env()
-            .transport
-            .map_or(Some(Self::NATIVE), |t| Self::parse(&t))
+        match DdiConfig::from_env() {
+            Ok(config) => Some(config.transport),
+            Err(error) => {
+                tracing::error!(%error, "Invalid DDI connection configuration");
+                None
+            }
+        }
     }
 }
 
@@ -102,7 +106,7 @@ pub enum TsraDdi {
     /// Windows device driver.
     #[cfg(target_os = "windows")]
     Win(tsra_ddi_win::DdiWin),
-    /// [`TEST_ARGS_ENV`] named an unsupported transport; no devices are
+    /// [`DDI_ARGS_ENV`] contained invalid configuration; no devices are
     /// reported and opening fails.
     Unsupported,
 }
@@ -110,9 +114,23 @@ pub enum TsraDdi {
 impl TsraDdi {
     /// Creates a DDI over `transport`.
     pub fn new(transport: DdiTransport) -> Self {
-        match transport {
+        match DdiConfig::from_env() {
+            Ok(config) => Self::with_config(DdiConfig {
+                transport,
+                ..config
+            }),
+            Err(error) => {
+                tracing::error!(%error, "Invalid DDI connection configuration");
+                Self::Unsupported
+            }
+        }
+    }
+
+    /// Creates a DDI with explicit settings, without reading the environment.
+    pub fn with_config(config: DdiConfig) -> Self {
+        match config.transport {
             DdiTransport::Sock => Self::Sock(tsra_ddi_sock::DdiSock::new(
-                TestArgs::from_env()
+                config
                     .sock
                     .unwrap_or_else(|| tsra_ddi_sock::DEFAULT_SOCK_PATH.to_owned()),
             )),
@@ -137,9 +155,15 @@ impl TsraDdi {
 }
 
 impl Default for TsraDdi {
-    /// Selects the transport from [`TEST_ARGS_ENV`].
+    /// Selects the connection from [`DDI_ARGS_ENV`].
     fn default() -> Self {
-        DdiTransport::from_env().map_or(Self::Unsupported, Self::new)
+        match DdiConfig::from_env() {
+            Ok(config) => Self::with_config(config),
+            Err(error) => {
+                tracing::error!(%error, "Invalid DDI connection configuration");
+                Self::Unsupported
+            }
+        }
     }
 }
 

@@ -11,7 +11,7 @@ doctest = false
 
 [features]
 # Read `TSRA_TEST_ARGS` (`resource_count`) in test builds of the server.
-test-args = ["dep:tsra_ddi", "tsra_ddi/test-args"]
+test-args = ["dep:tsra_ddi"]
 # Start an in-process server before `main` in executables that link this
 # crate. Never enable it for a library loaded by another program.
 autostart = ["test-args"]

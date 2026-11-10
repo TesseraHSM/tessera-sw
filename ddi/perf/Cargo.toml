@@ -28,7 +28,7 @@ zeroize.workspace = true
 default = []
 # Read `TSRA_TEST_ARGS` and, with `transport=sock`, run against the in-process
 # simulated HSM (or an external server named by `sock=`) instead of the device
-# driver. Opt-in so workspace builds never enable `tsra_ddi/test-args`.
+# driver. Opt-in so normal workspace builds do not start a simulator.
 test-args = ["dep:ddi_sock_server"]
 
 [lints]

@@ -5,9 +5,9 @@
 # Runs the checks of the CI workflow's build-and-drive and unit-tests jobs in
 # one go. Builds the standalone no-device module and drives it with OpenSC
 # pkcs11-tool, and runs the device-free unit harnesses under UBSan and ASan
-# (build_units.sh); if the emulator module has been built (cargo build -p
-# tsra_pkcs11 --features test-args; TSRA_PKCS11_MODULE overrides its path), it also
-# starts a simulator (ddi_sock_server, unless TSRA_TEST_ARGS names one) and
+# (build_units.sh); if the product module has been built (cargo build -p
+# tsra_pkcs11; TSRA_PKCS11_MODULE overrides its path), it also
+# starts a simulator (ddi_sock_server, unless TSRA_DDI_ARGS names one) and
 # runs the C_Login provisioning ceremony, a pkcs11-tool AES keygen and a
 # refused pkcs11-tool key import, the gtest functional suite
 # (integration-tests/cpp) on the memory and the file object store, the
@@ -66,18 +66,18 @@ for pair in SHA-1:sha1sum SHA256:sha256sum SHA384:sha384sum SHA512:sha512sum; do
     [ "$got" = "$exp" ] && echo "  *** $mech OK ***" || { echo "  MISMATCH"; exit 1; }
 done
 
-# --- emulator-backed C_Login ceremony (needs the integrated build + test-args)
+# --- emulator-backed C_Login ceremony (uses the ordinary integrated build)
 HSMMOD="${TSRA_PKCS11_MODULE:-$REPO/target/debug/tsra_pkcs11.so}"
 if [ -f "$HSMMOD" ]; then
     # ctest and the gates load it from other directories.
     HSMMOD="$(realpath "$HSMMOD")"
 
     # The module reaches the simulator over the DDI socket transport; it never
-    # links one. Start a ddi_sock_server unless TSRA_TEST_ARGS names one
+    # links one. Start a ddi_sock_server unless TSRA_DDI_ARGS names one
     # (sock=<endpoint>) already. The functional suite's fresh-HSM cases start
     # their own from server_bin.
     echo; echo "== emulator-backed: simulator (ddi_sock_server) =="
-    if ! [[ "${TSRA_TEST_ARGS:-}" =~ (^|;)[[:space:]]*sock[[:space:]]*= ]]; then
+    if ! [[ "${TSRA_DDI_ARGS:-}" =~ (^|;)[[:space:]]*sock[[:space:]]*= ]]; then
         cargo build -q --manifest-path "$REPO/Cargo.toml" -p ddi_sock_server
         server="$REPO/target/debug/ddi_sock_server"
         "$server" tcp://127.0.0.1:0 > "$WORK/ddi_sock_server.log" 2>&1 &
@@ -92,11 +92,17 @@ if [ -f "$HSMMOD" ]; then
         [ -n "$endpoint" ] \
             || { cat "$WORK/ddi_sock_server.log"; echo "   (simulator did not start)"; exit 1; }
         export TSRA_TEST_ARGS="transport=sock;sock=$endpoint;server_bin=$server"
+        export TSRA_DDI_ARGS="transport=sock;sock=$endpoint"
+        export TSRA_PKCS11_ID="${TSRA_PKCS11_ID:-01010101010101010101010101010101}"
+        if [ -z "${TSRA_PKCS11_OBK_PATH:-}" ]; then
+            (umask 077; head -c 48 /dev/urandom > "$WORK/owner-backup-key.bin")
+            export TSRA_PKCS11_OBK_PATH="$WORK/owner-backup-key.bin"
+        fi
     fi
-    echo "   TSRA_TEST_ARGS=$TSRA_TEST_ARGS"
+    echo "   TSRA_DDI_ARGS=$TSRA_DDI_ARGS"
 
     echo; echo "== emulator-backed: C_Login provisioning ceremony =="
-    echo "   (build it with: cargo build -p tsra_pkcs11 --features test-args)"
+    echo "   (build it with: cargo build -p tsra_pkcs11)"
     TSRA_PKCS11_DEBUG=1 pkcs11-tool --module "$HSMMOD" --login --pin 1234 \
         --list-objects 2>&1 | sed 's/^/   /' || echo "   (login harness failed)"
 

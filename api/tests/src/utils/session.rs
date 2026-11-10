@@ -23,7 +23,7 @@ const ROTATED_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
 ///
 /// Panics if `TSRA_TEST_ARGS` is invalid.
 pub(crate) fn api_rev_1_1() -> bool {
-    tsra_ddi::TestArgs::from_env().api_rev.as_deref() == Some("1_1")
+    ddi_sock_server::TestArgs::from_env().api_rev.as_deref() == Some("1_1")
 }
 
 /// Returns `true` when the `api_rev` key of `TSRA_TEST_ARGS` is unset or

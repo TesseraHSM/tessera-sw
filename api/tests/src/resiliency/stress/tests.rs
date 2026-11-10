@@ -53,25 +53,12 @@ const ITERATIONS_PER_WORKER: usize = 500;
 
 /// Delay between Reset triggers (ms).
 ///
-/// Sock: the retry backoff base is 8 ms (see `backoff_base_ms` in
-/// `resiliency.rs`), and `SessionNeedsRenegotiation` retries without
-/// backoff. With 4 workers all serializing through `restore_partition`,
-/// recovery completes quickly. 1 second is high enough for
-/// recovery to finish, but low enough that workers encounter
-/// multiple Resets during their run.
-///
-/// Real hardware: `BACKOFF_BASE_MS` is 400 ms, and Reset may take
+/// The SDK uses the same retry policy on hardware and simulators.
+/// `BACKOFF_BASE_MS` is 400 ms, and Reset may take
 /// up to ~5 seconds to complete. The interval must be longer than
-/// that to avoid spurious `IOAbortInProgress` errors. The short interval
-/// needs both the simulator and the reduced backoff (`fast_backoff=1` in
-/// `TSRA_TEST_ARGS`).
+/// that to avoid spurious `IOAbortInProgress` errors.
 fn reset_interval() -> Duration {
-    let fast_backoff = tsra_ddi::TestArgs::from_env().fast_backoff;
-    Duration::from_millis(if tsra_ddi::sock_selected() && fast_backoff {
-        1000
-    } else {
-        7000
-    })
+    Duration::from_millis(7000)
 }
 
 /// Small inter-iteration sleep (ms) so that the worker loop

@@ -24,6 +24,7 @@
 #include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/provider.h>
+#include <openssl/x509.h>
 
 /* tsra_status values referenced by the lazy-provision decision. Spelled out
  * here (rather than via the enum) to keep the mapping table in tsra_pkcs11_status.c the

@@ -3,7 +3,7 @@
 `ddi_sock_server` exposes one in-process `StdHsm` emulator over TCP, Unix
 domain sockets, or Linux VSOCK, speaking the framed SQE/CQE protocol from
 `tsra_ddi_sock_proto`. It is the reference server for `tsra_ddi_sock`
-(selected with `TSRA_TEST_ARGS=transport=sock`) and is used by the socket example programs
+(selected with `TSRA_DDI_ARGS=transport=sock`) and is used by the socket example programs
 (e.g. [`tsra_api_sock_get_api_rev`](../../../examples/sock/api_sock_get_api_rev/README.md)) and by
 DDI/API integration test suites run with `TSRA_TEST_ARGS=transport=sock`.
 

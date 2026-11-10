@@ -26,9 +26,6 @@ tsra_sealing_common.workspace = true
 tsra_sealing_report.workspace = true
 zerocopy.workspace = true
 
-[dev-dependencies]
-tsra_ddi = { features = ["test-args"], workspace = true }
-
 [features]
 
 [lints]

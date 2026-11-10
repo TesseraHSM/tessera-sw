@@ -10,7 +10,7 @@
  *       ../src/tsra_pkcs11_config.c ../src/tsra_pkcs11_store_io.c \
  *       -o config_test && ./config_test
  *
- * Built like a hardware build, TSRA_WITH_HSM without TSRA_FEATURE_EMULATOR: no
+ * Built with TSRA_WITH_HSM, like every HSM-backed product module: no
  * built-in partition ID and no built-in owner backup key, and a load without
  * either fails. Covers the store directory failing closed (empty, relative,
  * "..", overlong) while an unset variable takes the default, the "file:"
@@ -29,8 +29,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#if !defined(TSRA_WITH_HSM) || defined(TSRA_FEATURE_EMULATOR)
-#error "config_test pins the hardware build: TSRA_WITH_HSM without TSRA_FEATURE_EMULATOR"
+#if !defined(TSRA_WITH_HSM)
+#error "config_test requires the HSM-backed product configuration"
 #endif
 
 /* What every load of a hardware build needs; main sets both. The key file is
