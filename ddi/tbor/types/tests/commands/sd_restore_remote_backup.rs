@@ -401,7 +401,7 @@ fn assert_remote_restore_rejected(
 ) {
     assert!(
         ctx.tbor_oob(req, &backup.evidence.oob()).is_err(),
-        "remote restore unexpectedly succeeded"
+        "malformed remote restore unexpectedly succeeded"
     );
 
     assert_part_state(ctx, PART_STATE_INITIALIZED, false);
