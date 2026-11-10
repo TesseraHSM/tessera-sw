@@ -312,3 +312,212 @@ fn aes_xts_unwrapped_key_matches_host() {
     let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, dul, &ct);
     assert_eq!(back, pt);
 }
+
+/// Verify the smallest supported XTS data unit and several
+/// small multi-unit submissions.
+#[test]
+fn aes_xts_minimum_data_unit_roundtrip() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    for units in [1, 2, 3, 7, 16, 32] {
+        let pt = random(16 * units);
+        let tweak = 0x1234_u64;
+
+        let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, 16, &pt);
+        assert_ne!(ct, pt, "units={units}");
+
+        let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, 16, &ct);
+        assert_eq!(back, pt, "units={units}");
+    }
+}
+
+/// Verify that changing one plaintext data unit does not
+/// change ciphertext belonging to other data units.
+#[test]
+fn aes_xts_data_units_are_independent() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    let dul = 512;
+    let tweak = 100_u64;
+    let pt = random(dul * 4);
+
+    let original = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, dul, &pt);
+
+    let mut modified = pt.clone();
+    modified[dul + 17] ^= 0x80;
+
+    let changed = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, dul, &modified);
+
+    assert_eq!(&original[..dul], &changed[..dul]);
+    assert_ne!(&original[dul..2 * dul], &changed[dul..2 * dul]);
+    assert_eq!(&original[2 * dul..], &changed[2 * dul..]);
+
+    let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, dul, &changed);
+    assert_eq!(back, modified);
+}
+
+/// Identical plaintext data units at different tweak positions
+/// should produce different ciphertext.
+#[test]
+fn aes_xts_identical_units_use_distinct_tweaks() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    let unit = random(512);
+    let pt = unit.repeat(4);
+
+    let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, 500, 512, &pt);
+
+    let chunks: Vec<&[u8]> = ct.chunks(512).collect();
+
+    for i in 0..chunks.len() {
+        for j in (i + 1)..chunks.len() {
+            assert_ne!(chunks[i], chunks[j], "units {i} and {j}");
+        }
+    }
+
+    let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, 500, 512, &ct);
+    assert_eq!(back, pt);
+}
+
+/// Decrypting with another valid XTS key must not recover
+/// the original plaintext.
+#[test]
+fn aes_xts_wrong_key_does_not_recover_plaintext() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+
+    let key1 = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+    let key2 = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    let pt = random(512);
+    let tweak = 77;
+
+    let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key1, tweak, 512, &pt);
+
+    let wrong = crypt(&ctx, sid, AES_OP_DECRYPT, &key2, tweak, 512, &ct);
+    assert_ne!(wrong, pt);
+
+    let correct = crypt(&ctx, sid, AES_OP_DECRYPT, &key1, tweak, 512, &ct);
+    assert_eq!(correct, pt);
+}
+
+/// Test structured plaintext patterns, including zero and
+/// repeated-byte inputs.
+#[test]
+fn aes_xts_roundtrip_plaintext_patterns() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    let patterns = [
+        vec![0u8; 512],
+        vec![0xffu8; 512],
+        vec![0xaau8; 512],
+        vec![0x55u8; 512],
+        (0..512).map(|i| i as u8).collect::<Vec<u8>>(),
+    ];
+
+    for (index, pt) in patterns.iter().enumerate() {
+        let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, 42, 512, pt);
+
+        assert_ne!(&ct, pt, "pattern={index}");
+
+        let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, 42, 512, &ct);
+        assert_eq!(&back, pt, "pattern={index}");
+    }
+}
+
+/// The same ciphertext must be produced by repeated
+/// encryption with the same key, tweak and plaintext.
+#[test]
+fn aes_xts_repeated_encryption_is_deterministic() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    let pt = random(1024);
+    let tweak = 0x1234_5678_u64;
+
+    let first = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, 512, &pt);
+
+    for _ in 0..5 {
+        let next = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, 512, &pt);
+        assert_eq!(next, first);
+    }
+
+    let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, 512, &first);
+    assert_eq!(back, pt);
+}
+
+/// A one-bit change in the tweak should change the
+/// resulting ciphertext while preserving roundtrip correctness.
+#[test]
+fn aes_xts_tweak_bit_changes_ciphertext() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    let pt = random(512);
+    let base_tweak = 0x1234_5678_9abc_def0_u64;
+
+    let baseline = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, base_tweak, 512, &pt);
+
+    for bit in [0, 1, 7, 8, 15, 16, 31, 32, 47, 63] {
+        let tweak = base_tweak ^ (1u64 << bit);
+
+        let ct = crypt(&ctx, sid, AES_OP_ENCRYPT, &key, tweak, 512, &pt);
+        assert_ne!(ct, baseline, "tweak bit={bit}");
+
+        let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, 512, &ct);
+        assert_eq!(back, pt, "tweak bit={bit}");
+    }
+}
+
+/// A valid masked XTS key with an altered authentication
+/// tag must be rejected for decryption as well as encryption.
+#[test]
+fn aes_xts_decrypt_rejects_tampered_key() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+
+    let mut key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+    *key.last_mut().expect("non-empty masked key") ^= 1;
+
+    let r = req(sid, AES_OP_DECRYPT, &key, 0, 512, 512);
+
+    expect_reject(&ctx, &r, 512, TborStatus::AesGcmDecryptTagDoesNotMatch);
+}
+
+/// Reject a non-XTS key for decryption.
+#[test]
+fn aes_xts_decrypt_rejects_wrong_key_class() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+
+    let key = unwrap(&ctx, sid, KEY_CLASS_HMAC_SHA512, &[0x5a; 64]).masked_key;
+
+    let r = req(sid, AES_OP_DECRYPT, &key, 0, 512, 512);
+
+    expect_reject(&ctx, &r, 512, TborStatus::InvalidKeyType);
+}
+
+/// Invalid data-unit lengths must also be rejected for
+/// decrypt requests.
+#[test]
+fn aes_xts_decrypt_rejects_invalid_unit_lengths() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+
+    for (data_len, dul) in [(32, 0), (32, 8), (48, 24), (48, 32), (512, 1024)] {
+        let r = req(sid, AES_OP_DECRYPT, &key, 0, data_len, dul);
+
+        expect_reject(&ctx, &r, data_len, TborStatus::AesXtsInvalidBufferSize);
+    }
+}

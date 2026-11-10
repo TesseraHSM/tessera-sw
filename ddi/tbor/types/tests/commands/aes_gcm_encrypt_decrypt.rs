@@ -490,3 +490,322 @@ fn aes_gcm_rejects_invalid_session() {
         .expect_err("session command must be rejected");
     assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 }
+
+/// AAD-only messages must produce a valid authentication tag even when
+/// the plaintext and ciphertext are empty.
+#[test]
+fn aes_gcm_aad_only_roundtrip() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    for aad_len in [1, 15, 16, 17, 31, 32, 33, 48, 64, 100] {
+        let iv = random(GCM_IV_LEN);
+        let aad = random(aad_len);
+
+        let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &[]);
+        assert!(ct.is_empty(), "aad_len={aad_len}");
+        assert_eq!(tag.len(), GCM_TAG_LEN);
+
+        let pt = decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct);
+        assert!(pt.is_empty(), "aad_len={aad_len}");
+
+        let mut bad_aad = aad.clone();
+        bad_aad[0] ^= 1;
+        expect_tag_mismatch(&ctx, sid, &key, &iv, &tag, &bad_aad, &ct);
+    }
+}
+
+/// Exercise AAD padding transitions with both empty and nonempty text.
+#[test]
+fn aes_gcm_aad_padding_boundaries() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    for aad_len in [
+        1, 15, 16, 17, 30, 31, 32, 33, 47, 48, 49, 63, 64, 65, 95, 96, 97,
+    ] {
+        for text_len in [0, 1, 15, 16, 17, 31, 32, 33] {
+            let iv = random(GCM_IV_LEN);
+            let aad = random(aad_len);
+            let pt = random(text_len);
+
+            let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+            assert_eq!(ct.len(), pt.len());
+            assert_eq!(
+                decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct),
+                pt,
+                "aad_len={aad_len}, text_len={text_len}"
+            );
+        }
+    }
+}
+
+/// Changing any selected ciphertext byte must invalidate the tag.
+#[test]
+fn aes_gcm_rejects_ciphertext_bit_flips() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+    let iv = random(GCM_IV_LEN);
+    let aad = random(33);
+    let pt = random(128);
+
+    let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+    for index in [0, 1, 15, 16, 63, 64, 126, 127] {
+        let mut bad_ct = ct.clone();
+        bad_ct[index] ^= 0x01;
+
+        expect_tag_mismatch(&ctx, sid, &key, &iv, &tag, &aad, &bad_ct);
+    }
+}
+
+/// Changing selected authentication-tag bytes must be rejected.
+#[test]
+fn aes_gcm_rejects_tag_bit_flips() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+    let iv = random(GCM_IV_LEN);
+    let aad = random(20);
+    let pt = random(64);
+
+    let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+    for index in [0, 1, 7, 8, 14, 15] {
+        let mut bad_tag = tag.clone();
+        bad_tag[index] ^= 0x80;
+
+        expect_tag_mismatch(&ctx, sid, &key, &iv, &bad_tag, &aad, &ct);
+    }
+}
+
+/// A ciphertext authenticated with one AES-256 key must not decrypt
+/// successfully with another valid AES-256 key.
+#[test]
+fn aes_gcm_rejects_wrong_valid_aes_key() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+
+    let key1 = import_aes256(&ctx, sid, &[0x11; 32]);
+    let key2 = import_aes256(&ctx, sid, &[0x22; 32]);
+
+    let iv = random(GCM_IV_LEN);
+    let aad = b"authenticated metadata";
+    let pt = b"confidential message";
+
+    let (ct, tag) = encrypt(&ctx, sid, &key1, &iv, aad, pt);
+
+    assert_eq!(decrypt(&ctx, sid, &key1, &iv, &tag, aad, &ct), pt);
+
+    expect_tag_mismatch(&ctx, sid, &key2, &iv, &tag, aad, &ct);
+}
+
+/// Reinterpreting the same AAD bytes with a different AAD length
+/// must invalidate the authentication tag.
+#[test]
+fn aes_gcm_rejects_changed_aad_length() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    let iv = random(GCM_IV_LEN);
+    let aad = random(20);
+    let pt = random(32);
+
+    let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+    // Both lengths occupy a 32-byte padded AAD region.
+    // The underlying ciphertext layout remains compatible.
+    for shorter_len in [1, 15, 16, 17, 19] {
+        expect_tag_mismatch(&ctx, sid, &key, &iv, &tag, &aad[..shorter_len], &ct);
+    }
+}
+
+/// AES-GCM is deterministic for identical key, IV, AAD and plaintext.
+/// This verifies command behavior, not safe IV-reuse practice.
+#[test]
+fn aes_gcm_same_inputs_produce_same_output() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    let iv = random(GCM_IV_LEN);
+    let aad = random(33);
+    let pt = random(100);
+
+    let (ct1, tag1) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+    let (ct2, tag2) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+    assert_eq!(ct1, ct2);
+    assert_eq!(tag1, tag2);
+}
+
+/// Verify the maximum OOB data length with AAD padding boundaries.
+#[test]
+fn aes_gcm_max_data_len_with_aad_boundaries() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    for aad_len in [1, 16, 17, 31, 32, 33, 63, 64] {
+        let padded = padded_aad_len(aad_len);
+        assert!(padded <= GCM_DATA_MAX_LEN);
+
+        let text_len = GCM_DATA_MAX_LEN - padded;
+        let iv = random(GCM_IV_LEN);
+        let aad = random(aad_len);
+        let pt = random(text_len);
+
+        let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+        assert_eq!(ct.len(), text_len);
+        assert_eq!(
+            decrypt(&ctx, sid, &key, &iv, &tag, &aad, &ct),
+            pt,
+            "aad_len={aad_len}, text_len={text_len}"
+        );
+    }
+}
+
+#[test]
+fn aes_gcm_rejects_ciphertext_truncation() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    let iv = random(GCM_IV_LEN);
+    let aad = random(20);
+    let pt = random(64);
+
+    let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+    for removed in [1, 2, 8, 16, 32, 63, 64] {
+        let truncated = &ct[..ct.len() - removed];
+
+        expect_tag_mismatch(&ctx, sid, &key, &iv, &tag, &aad, truncated);
+    }
+}
+
+#[test]
+fn aes_gcm_rejects_ciphertext_extension() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    let iv = random(GCM_IV_LEN);
+    let aad = random(20);
+    let pt = random(64);
+
+    let (ct, tag) = encrypt(&ctx, sid, &key, &iv, &aad, &pt);
+
+    for extra in [1, 2, 16, 32] {
+        let mut extended = ct.clone();
+        extended.extend(vec![0xAA; extra]);
+
+        expect_tag_mismatch(&ctx, sid, &key, &iv, &tag, &aad, &extended);
+    }
+}
+
+#[test]
+fn aes_gcm_different_aad_changes_tag() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    let iv = random(GCM_IV_LEN);
+    let pt = random(64);
+
+    let aad1 = vec![0x11; 32];
+    let aad2 = vec![0x22; 32];
+
+    let (ct1, tag1) = encrypt(&ctx, sid, &key, &iv, &aad1, &pt);
+
+    let (ct2, tag2) = encrypt(&ctx, sid, &key, &iv, &aad2, &pt);
+
+    assert_eq!(ct1, ct2);
+    assert_ne!(tag1, tag2);
+}
+
+#[test]
+fn aes_gcm_different_plaintext_changes_ciphertext() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    let iv = random(GCM_IV_LEN);
+    let aad = random(20);
+
+    let pt1 = vec![0x11; 64];
+    let pt2 = vec![0x22; 64];
+
+    let (ct1, tag1) = encrypt(&ctx, sid, &key, &iv, &aad, &pt1);
+
+    let (ct2, tag2) = encrypt(&ctx, sid, &key, &iv, &aad, &pt2);
+
+    assert_ne!(ct1, ct2);
+    assert_ne!(tag1, tag2);
+}
+
+#[test]
+fn aes_gcm_rejects_empty_masked_key() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+
+    let pt = [0x55u8; 16];
+
+    let r = req(
+        sid,
+        AES_OP_ENCRYPT,
+        &[],
+        &[0; GCM_IV_LEN],
+        &[0; GCM_TAG_LEN],
+        0,
+        pt.len(),
+    );
+
+    let mut out = [0u8; 16];
+
+    let result = ctx.tbor_oob_io(&r, &mut [TborOobItem::In(&pt), TborOobItem::Out(&mut out)]);
+
+    assert!(result.is_err(), "empty masked key must be rejected");
+}
+
+#[test]
+fn aes_gcm_rejects_truncated_masked_key() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+
+    let pt = [0x55u8; 16];
+
+    for removed in [1, 2, 4, 8] {
+        if key.len() <= removed {
+            continue;
+        }
+
+        let truncated = &key[..key.len() - removed];
+
+        let r = req(
+            sid,
+            AES_OP_ENCRYPT,
+            truncated,
+            &[0; GCM_IV_LEN],
+            &[0; GCM_TAG_LEN],
+            0,
+            pt.len(),
+        );
+
+        let mut out = [0u8; 16];
+
+        let result = ctx.tbor_oob_io(&r, &mut [TborOobItem::In(&pt), TborOobItem::Out(&mut out)]);
+
+        assert!(
+            result.is_err(),
+            "truncated key must be rejected: removed={removed}"
+        );
+    }
+}
