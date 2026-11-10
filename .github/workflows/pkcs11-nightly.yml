@@ -29,13 +29,19 @@ jobs:
       - name: Install CMake and OpenSSL headers
         run: sudo apt-get install -y cmake libssl-dev
 
-      - name: Build PKCS#11 module against the emulator (emu), with ASan and UBSan
+      - name: Build PKCS#11 module for the simulator (test-args), with ASan and UBSan
         env:
           CFLAGS: -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
           LDFLAGS: -fsanitize=address,undefined
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step: the script sets
+      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       - name: Build the functional tests with ASan and UBSan
         run: |
@@ -68,10 +74,16 @@ jobs:
       - name: Install CMake, OpenSSL headers, and OpenSC pkcs11-tool
         run: sudo apt-get install -y cmake libssl-dev opensc
 
-      - name: Build PKCS#11 module against the emulator (emu)
+      - name: Build PKCS#11 module for the simulator (test-args)
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step: the script sets
+      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       # The whole fast profile: every listed test must pass, nothing may crash
       # beyond the known crashes, and every other pass must be in baseline.txt.
@@ -125,10 +137,16 @@ jobs:
             | sh -s -- -y --default-toolchain none --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Build PKCS#11 module against the emulator (emu)
+      - name: Build PKCS#11 module for the simulator (test-args)
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step: the script sets
+      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       - name: Token digests through pkcs11-provider
         run: plugins/tsra_pkcs11/tests/nightly/pkcs11_provider.sh "$TSRA_PKCS11_MODULE"

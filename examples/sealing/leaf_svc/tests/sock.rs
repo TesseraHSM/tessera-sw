@@ -1,8 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "sock")]
-
 use std::fs;
 use std::net::SocketAddr;
 use std::net::TcpListener;
@@ -18,6 +16,8 @@ use std::time::Instant;
 use anyhow::Context;
 use anyhow::Result;
 use jzon::JsonValue;
+use tsra_ddi::TestArgs;
+use tsra_ddi::TEST_ARGS_ENV;
 use tsra_sealing_common::http::Client;
 
 struct TestDir(PathBuf);
@@ -81,7 +81,13 @@ fn socket_server(dir: &Path, name: &str) -> Result<(Process, String)> {
     let address = address()?;
     let endpoint = format!("tcp://{address}");
     let mut process = Process::spawn(
-        Command::new(binary("ddi_sock_server")).arg(&endpoint),
+        Command::new(
+            TestArgs::from_env()
+                .server_bin
+                .map(PathBuf::from)
+                .unwrap_or_else(|| binary("ddi_sock_server")),
+        )
+        .arg(&endpoint),
         &dir.join(format!("{name}-ddi.log")),
     )
     .context("build ddi_sock_server before running the socket integration test")?;
@@ -98,7 +104,9 @@ fn socket_server(dir: &Path, name: &str) -> Result<(Process, String)> {
 
 fn app(name: &str, endpoint: &str) -> Command {
     let mut command = Command::new(binary(name));
-    command.env("TSRA_DDI_SOCK", endpoint);
+    let mut args = TestArgs::from_env();
+    args.sock = Some(endpoint.to_owned());
+    command.env(TEST_ARGS_ENV, args.to_string());
     command
 }
 
@@ -147,6 +155,9 @@ fn sign(client: &Client, identity: &JsonValue) -> Result<()> {
 
 #[test]
 fn socket_leaf_create_restore_and_authorized_join() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = TestDir::new()?;
     let root_state = dir.0.join("root");
     let leaf_state = dir.0.join("primary");

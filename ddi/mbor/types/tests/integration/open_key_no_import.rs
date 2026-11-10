@@ -5,7 +5,6 @@
 
 use test_with_tracing::test;
 use tsra_ddi::*;
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 use tsra_ddi_mbor_codec::MborByteArray;
 use tsra_ddi_mbor_types::*;
 
@@ -15,11 +14,9 @@ use super::common::*;
 const KEY_TAG: u16 = 0x5453;
 
 // Test Digest
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 const DIGEST: [u8; 96] = [100u8; 96];
 
 // Test Digest length
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 const DIGEST_LEN: usize = 20;
 
 #[test]
@@ -64,10 +61,12 @@ fn test_open_key_incorrect_session_id() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_incorrect_key_tag() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -89,10 +88,12 @@ fn test_open_key_incorrect_key_tag() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_no_key_tag() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -137,10 +138,12 @@ fn test_open_key_no_key_tag() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_aes128() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -173,10 +176,12 @@ fn test_open_key_aes128() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_aes192() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -209,10 +214,12 @@ fn test_open_key_aes192() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_aes256() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -245,10 +252,12 @@ fn test_open_key_aes256() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_ecc256() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -310,10 +319,12 @@ fn test_open_key_ecc256() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_ecc384() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -377,10 +388,12 @@ fn test_open_key_ecc384() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_key_ecc521() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -442,10 +455,12 @@ fn test_open_key_ecc521() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_open_deleted_key() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,

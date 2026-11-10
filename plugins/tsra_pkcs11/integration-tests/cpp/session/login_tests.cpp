@@ -23,6 +23,7 @@
 #include "tsra_pkcs11_config.h"
 #include "utils/aes_helpers.hpp"
 #include "utils/module.hpp"
+#include "utils/sock_server.hpp"
 #include "utils/subprocess.hpp"
 
 namespace
@@ -35,6 +36,20 @@ void run_child(const std::string &name, const std::vector<std::string> &env = {}
     EXPECT_EQ("1", child.values["ran"]) << "login_child." << name << " did not run";
     EXPECT_EQ(0, child.exit_code) << "login_child." << name << " failed, its output is above";
 }
+
+/// Run login_child.<name> in a fresh process against a freshly powered-on
+/// simulator of its own; skipped when TSRA_TEST_ARGS names no server_bin.
+#define RUN_CHILD_ON_FRESH_SIMULATOR(name)                                                         \
+    do                                                                                             \
+    {                                                                                              \
+        if (PrivateSimulator::server_bin().empty())                                                \
+        {                                                                                          \
+            GTEST_SKIP() << "needs a fresh simulator: set server_bin in TSRA_TEST_ARGS";           \
+        }                                                                                          \
+        PrivateSimulator sim;                                                                      \
+        ASSERT_TRUE(sim.ok()) << "could not start " << PrivateSimulator::server_bin();             \
+        run_child(name, sim.env());                                                                \
+    } while (0)
 
 /// C_Login as CKU_USER with exactly the bytes of `pin`.
 CK_RV login_with(CK_SESSION_HANDLE s, const std::string &pin)
@@ -276,7 +291,7 @@ TEST_F(login_child, default_pin_logs_in_without_a_pin)
 TEST_F(login, sixteen_byte_pin_logs_in)
 {
     EMU_ONLY("the first login after power-on chooses the credential");
-    run_child("sixteen_byte_pin_logs_in");
+    RUN_CHILD_ON_FRESH_SIMULATOR("sixteen_byte_pin_logs_in");
 }
 
 TEST_F(login_child, sixteen_byte_pin_logs_in)
@@ -293,7 +308,7 @@ TEST_F(login_child, sixteen_byte_pin_logs_in)
 TEST_F(login, every_login_reads_the_owner_backup_key)
 {
     EMU_ONLY("the first login provisions the partition with a test owner backup key");
-    run_child("every_login_reads_the_owner_backup_key");
+    RUN_CHILD_ON_FRESH_SIMULATOR("every_login_reads_the_owner_backup_key");
 }
 
 TEST_F(login_child, every_login_reads_the_owner_backup_key)

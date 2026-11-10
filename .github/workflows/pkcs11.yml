@@ -39,10 +39,16 @@ jobs:
       # --target-dir, not CARGO_TARGET_DIR: the cargo run that CMake starts
       # inside the build would inherit the variable and wait forever on the
       # outer build's lock. The GoogleTest suite reads TSRA_PKCS11_MODULE too.
-      - name: Build PKCS#11 module against the emulator (emu)
+      - name: Build PKCS#11 module for the simulator (test-args)
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step: the script sets
+      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       - name: Drive with pkcs11-tool (show-info, slots, login, digests)
         run: |
@@ -192,13 +198,19 @@ jobs:
       - name: Install CMake and OpenSSL headers
         run: sudo apt-get install -y cmake libssl-dev
 
-      - name: Build PKCS#11 module against the emulator (emu), with ASan
+      - name: Build PKCS#11 module for the simulator (test-args), with ASan
         env:
           CFLAGS: -fsanitize=address -fno-omit-frame-pointer
           LDFLAGS: -fsanitize=address
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features test-args
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step: the script sets
+      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       - name: Functional tests under ASan
         run: |

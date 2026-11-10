@@ -46,14 +46,14 @@ TCP endpoints and does not switch transports automatically.
 Wait for its listening message and leave it running. In a second terminal:
 
 ```sh
-cargo run -p tsra_api_sock_ecc384_loop --features sock -- tcp://127.0.0.1:1234 5
+cargo run -p tsra_api_sock_ecc384_loop --features tsra_api/test-args -- tcp://127.0.0.1:1234 5
 ```
 
 The arguments are `[ENDPOINT] [COUNT]`. The defaults are TCP loopback port 1234
 and one iteration, so this also works with the server running:
 
 ```sh
-cargo run -p tsra_api_sock_ecc384_loop --features sock
+cargo run -p tsra_api_sock_ecc384_loop --features tsra_api/test-args
 ```
 
 The endpoint must be a `tcp://HOST:PORT` endpoint; the count must be positive.
@@ -74,15 +74,16 @@ Running the client again against the same server exercises reconnection with the
 already-rotated test PSK. Restarting the emulator server loses its state, so the
 next run rotates the default PSK again.
 
-The `sock` feature selects the socket backend through `tsra_api/sock`. It is
-opt-in to avoid conflicts with workspace `emu` builds. The same TCP
-endpoint and public API calls are used on Windows and Linux.
+The client selects the socket backend at runtime by setting
+`TSRA_TEST_ARGS=transport=sock` (honored only when built with
+`--features tsra_api/test-args`). The same TCP endpoint and public API calls are used
+on Windows and Linux.
 
 ## Focused Checks
 
 ```sh
-cargo xtask nextest --package tsra_api_sock_ecc384_loop --features sock
-cargo clippy --package tsra_api_sock_ecc384_loop --all-targets --features sock -- -D warnings
+cargo xtask nextest --package tsra_api_sock_ecc384_loop
+cargo clippy --package tsra_api_sock_ecc384_loop --all-targets -- -D warnings
 ```
 
 The unit tests cover argument validation and public-signature formatting. The

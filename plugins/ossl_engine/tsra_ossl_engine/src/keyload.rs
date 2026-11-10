@@ -6,12 +6,16 @@
 //!
 //! The returned key carries the real public key (rebuilt from the SDK's DER via
 //! the safe `openssl` crate). The live HSM private-key wrapper is owned by
-//! [`EngineData`], which deletes it from the HSM when the engine is destroyed;
-//! a non-owning pointer to it is stashed in the underlying `EC_KEY` ex_data for
-//! later sign/derive callbacks. Deletion runs from the engine's destroy handler
-//! (while this `.so` is loaded), never from a libcrypto ex_data free callback —
-//! such a callback holds a function pointer into this `.so` and can be invoked
-//! after the `.so` is unloaded (see [`tsra_ossl_engine_core::exdata`]).
+//! [`EngineData`]; a non-owning pointer to it is stashed in the underlying
+//! `EC_KEY` ex_data for later sign/derive callbacks. The HSM key is deleted
+//! when the last `EC_KEY` using it is freed, from the engine `EC_KEY_METHOD`'s
+//! `finish` hook ([`release_on_free`]; `EC_KEY` copies take a reference via
+//! [`share_on_copy`]), or at the latest by the engine's destroy handler —
+//! never from a libcrypto ex_data free callback, which holds a function
+//! pointer into this `.so` and can be invoked after the `.so` is unloaded (see
+//! [`tsra_ossl_engine_core::exdata`]). The method hooks are safe because every
+//! `EC_KEY` using the method holds an engine reference, keeping the `.so`
+//! loaded.
 //!
 //! The returned `EC_KEY` is bound to the engine (`EC_KEY_new_method`), which
 //! takes a functional reference OpenSSL releases on `EC_KEY_free`. So the engine
@@ -249,19 +253,81 @@ fn bound_public_ec_key(engine: &Engine, der: &[u8]) -> EngineResult<*mut ffi::EC
 
 /// Free a bound `EC_KEY` from [`build_bound_ec_key`] that could not be handed
 /// out, rolling back the HSM-key retain so the failed call does not leave the
-/// key parked in the HSM until engine teardown.
+/// key parked in the HSM. The ex_data pointer is detached first, so the
+/// method's `finish` (see [`release_on_free`]) does not release it a second
+/// time.
 ///
 /// # Safety
 /// `ec` must be the caller's own never-handed-out `EC_KEY` from
 /// [`build_bound_ec_key`].
 #[allow(unsafe_code)]
 pub(crate) unsafe fn free_bound_ec_key(data: &EngineData, ec: *mut ffi::EC_KEY) {
-    let key_ptr = ec_key_hsm_key(ec);
-    if !key_ptr.is_null() {
-        data.release_loaded_key(key_ptr);
+    if detach_ec(ec) {
+        data.release_loaded_key(ec);
     }
     // SAFETY: ec is valid and owned by the caller per this function's contract.
     unsafe { ffi::EC_KEY_free(ec) };
+}
+
+/// Clear `ec`'s HSM-key ex_data slot; false if that fails.
+#[allow(unsafe_code)]
+fn detach_ec(ec: *mut ffi::EC_KEY) -> bool {
+    let Ok(idx) = ec_key_ex_index() else {
+        return false;
+    };
+    // SAFETY: ec is a valid EC_KEY; idx is our registered slot.
+    unsafe { ffi::EC_KEY_set_ex_data(ec, idx, std::ptr::null_mut()) == 1 }
+}
+
+/// The engine's `EC_KEY_METHOD` `finish` hook (see [`crate::sign`]): an
+/// `EC_KEY` is being freed, or is switching to another method via
+/// `EC_KEY_set_method`, so detach and drop its reference on the attached HSM
+/// key, deleting it from the HSM once no `EC_KEY` uses it. Detaching first
+/// keeps a still-live key from handing a freed pointer to the EVP derive path
+/// or releasing it again in a later `finish`. Without this hook, keys would
+/// only be deleted at engine teardown — which a loaded key can itself postpone
+/// forever (software keys it owns hold default-engine references), leaking HSM
+/// key slots across processes. Keys with no HSM key attached (software keys
+/// that adopted the engine method) are ignored.
+#[allow(unsafe_code)]
+pub(crate) fn release_on_free(ec: *mut ffi::EC_KEY) {
+    if ec_key_hsm_key(ec).is_null() {
+        return;
+    }
+    if !detach_ec(ec) {
+        tracing::warn!(target: "tsra", "cannot detach finished EC key; HSM key kept until teardown");
+        return;
+    }
+    // SAFETY: ec is the EC_KEY being finished; get0 borrows its bound engine.
+    let engine = unsafe { ffi::EC_KEY_get0_engine(ec) };
+    if crate::engine_impl::with_engine_data(engine, |data| data.release_loaded_key(ec)).is_none() {
+        tracing::warn!(target: "tsra", "freed EC key has no engine data; HSM key kept until teardown");
+    }
+}
+
+/// The engine's `EC_KEY_METHOD` `copy` hook (see [`crate::sign`]):
+/// `EC_KEY_copy` has copied `src`'s HSM-key pointer (or null) over `dest`'s
+/// ex_data, so make `dest` own exactly that key. Whatever `dest` owned before
+/// is released — the overwrite gives no `finish`, so without this it would
+/// leak — and a shared key gains a reference, so freeing either key does not
+/// delete the HSM key under the other. If no reference can be taken, `dest` is
+/// detached from the HSM key and the copy fails.
+#[allow(unsafe_code)]
+pub(crate) fn share_on_copy(dest: *mut ffi::EC_KEY, _src: *mut ffi::EC_KEY) -> EngineResult<()> {
+    let key_ptr = ec_key_hsm_key(dest);
+    // SAFETY: dest is the live destination EC_KEY; `EC_KEY_copy` has bound it
+    // to `src`'s engine before calling this hook.
+    let engine = unsafe { ffi::EC_KEY_get0_engine(dest) };
+    let shared =
+        crate::engine_impl::with_engine_data(engine, |data| data.rebind_loaded_key(dest, key_ptr))
+            .unwrap_or(key_ptr.is_null());
+    if shared {
+        return Ok(());
+    }
+    detach_ec(dest);
+    Err(EngineError::Other(
+        "cannot share the HSM key with an EC_KEY copy".into(),
+    ))
 }
 
 /// Build the returned `EVP_PKEY` around an engine-bound `EC_KEY` from
@@ -308,20 +374,20 @@ fn attach_ec(data: &EngineData, ec: *mut ffi::EC_KEY, key: HsmEccPrivateKey) -> 
     let idx = ec_key_ex_index()?;
 
     // Hand the key to EngineData, which owns it and deletes it from the HSM when
-    // the engine is destroyed (while this `.so` is loaded). Stash the non-owning
-    // pointer it returns for later sign/derive retrieval. The ex_data slot has
-    // no free callback (see ec_key_ex_index), so libcrypto never calls back into
-    // this `.so` for cleanup.
-    let key_ptr = data.retain_loaded_key(key);
+    // this EC_KEY is freed (see release_on_free). Stash the non-owning pointer
+    // it returns for later sign/derive retrieval. The ex_data slot has no free
+    // callback (see ec_key_ex_index), so libcrypto never calls back into this
+    // `.so` for cleanup.
+    let key_ptr = data.retain_loaded_key(key, ec);
     // SAFETY: ec is valid (checked), idx is a registered EC_KEY ex_data slot,
-    // and key_ptr is a non-owning pointer into a key EngineData keeps alive for
-    // the engine's lifetime; the slot has no free callback, so no ownership is
-    // transferred.
+    // and key_ptr is a non-owning pointer into a key EngineData keeps alive
+    // while this EC_KEY lives; the slot has no free callback, so no ownership
+    // is transferred.
     let rc = unsafe { ffi::EC_KEY_set_ex_data(ec, idx, key_ptr.cast_mut().cast::<c_void>()) };
     if let Err(e) = ossl_check(rc, "EC_KEY_set_ex_data failed") {
         // Roll back the retain so the failed load doesn't leave the key in the
-        // HSM until engine teardown.
-        data.release_loaded_key(key_ptr);
+        // HSM.
+        data.release_loaded_key(ec);
         return Err(e);
     }
 
@@ -333,8 +399,8 @@ fn attach_ec(data: &EngineData, ec: *mut ffi::EC_KEY, key: HsmEccPrivateKey) -> 
 }
 
 /// Recover the `HsmEccPrivateKey` [`attach_ec`] stashed in `ec_key`'s ex_data,
-/// or null if none is set. The pointer is owned by `EngineData` and valid for
-/// the engine's lifetime; the sign path dereferences it while the key is live.
+/// or null if none is set. The pointer is owned by `EngineData` and valid while
+/// `ec_key` lives; the sign path dereferences it while the key is live.
 #[allow(unsafe_code)]
 pub(crate) fn ec_key_hsm_key(ec_key: *mut ffi::EC_KEY) -> *const HsmEccPrivateKey {
     let Ok(idx) = ec_key_ex_index() else {

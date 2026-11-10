@@ -17,6 +17,6 @@ workspace = true
 
 [features]
 default = []
-emu = []
 provider = []
-sock = []
+# Read test configuration from TSRA_TEST_ARGS. Test builds only.
+test-args = ["tsra_api_native/test-args"]

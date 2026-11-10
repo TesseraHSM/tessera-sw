@@ -4,10 +4,15 @@
 # Functional tests for the TSRA PKCS#11 module, driven through the real
 # Cryptoki ABI: the test binary dlopens the built module (path from the
 # TSRA_PKCS11_MODULE environment variable, defaulting to the cargo build
-# output) and talks to the device behind it, so it needs the emulator or
-# hardware-backed build:
+# output) and talks to the device behind it, so it needs the simulator or
+# hardware-backed build. The test-args build reaches a running ddi_sock_server
+# named by TSRA_TEST_ARGS (sock=); cases that need an unprovisioned device
+# start their own from server_bin= (and skip without it):
 #
-#   cargo build -p tsra_pkcs11 --features emu
+#   cargo build -p tsra_pkcs11 --features test-args
+#   cargo build -p ddi_sock_server
+#   target/debug/ddi_sock_server tcp://127.0.0.1:23456 &
+#   export TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:23456;server_bin=$PWD/target/debug/ddi_sock_server"
 #   cmake -S plugins/tsra_pkcs11/integration-tests/cpp -B target/pkcs11-cpp-tests
 #   cmake --build target/pkcs11-cpp-tests
 #   ctest --test-dir target/pkcs11-cpp-tests --output-on-failure --no-tests=error

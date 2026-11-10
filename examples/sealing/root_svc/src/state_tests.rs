@@ -45,6 +45,9 @@ impl Drop for TestDir {
 
 #[test]
 fn reopened_sata_signer_uses_the_exact_saved_root_certificate() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = TestDir::new()?;
     crate::commands::create(&crate::cli::CreateArgs {
         device: None,
@@ -69,6 +72,9 @@ fn reopened_sata_signer_uses_the_exact_saved_root_certificate() -> Result<()> {
 
 #[test]
 fn remote_create_and_restore_persistence_failures_retain_retryable_material() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = TestDir::new()?;
     let session = SealingSession::open_reset()?;
     let seed = [0x42; MACH_SEED_LEN];

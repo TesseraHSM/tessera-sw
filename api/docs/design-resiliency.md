@@ -329,13 +329,18 @@ The barrier prevents this by ensuring Thread A's operation either:
 
 ## Backoff Configuration
 
-| Parameter        | Production    | Emu (test)   |
+| Parameter        | Default       | `fast_backoff=1` (tests) |
 |------------------|---------------|--------------|
 | `MAX_RETRIES`    | 5 (6 total)   | 5 (6 total)  |
 | `BACKOFF_BASE_MS`| 400ms         | 8ms          |
 | `BACKOFF_JITTER_MS` | 100ms      | 2ms          |
 
 Backoff schedule (production): 400, 800, 1600, 3200, 6400ms + jitter.
+
+The reduced backoff is test-only and must be requested explicitly with
+`fast_backoff=1` in `TSRA_TEST_ARGS` (read only with the `test-args`
+feature); the transport alone does not select it, since a socket endpoint may
+front real hardware. `cargo xtask` sets it for `--transport sock`.
 
 ## Error Classification
 

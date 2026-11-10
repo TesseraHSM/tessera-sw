@@ -24,6 +24,9 @@ workspace = true
 
 [features]
 default = []
-# Forwarded to tsra_api_native: the device firmware run in-process, so the
-# module can be built and tested with no physical HSM present.
-emu = []
+# Test builds only. Forwarded to tsra_api_native: the module reads
+# TSRA_TEST_ARGS, so it can talk to a simulator over the DDI socket transport
+# and no physical HSM is needed. Run `ddi_sock_server` and set
+# TSRA_TEST_ARGS="transport=sock;sock=<endpoint>". The simulator is never
+# linked into the module.
+test-args = []

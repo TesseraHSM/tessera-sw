@@ -78,14 +78,30 @@ pub fn partition_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Session Selection
 ///
-/// The session kind is selected once at compile time for the whole test binary.
+/// The session kind is selected at runtime for the whole test run.
 ///
-/// The test crate uses `open_session` by default. Enabling its
-/// `session-ex-tests` feature selects `open_session_ex` instead.
+/// The test crate uses `open_session` by default. Setting
+/// `api_rev=1_1` in `TSRA_TEST_ARGS` selects `open_session_ex` instead.
+///
+/// `#[session_test(api_rev_1_1)]` runs the test only when one of the listed
+/// revisions is selected (e.g. `#[session_test(api_rev_1_0, api_rev_1_1)]`);
+/// otherwise it returns before any partition setup. Each `api_rev_X_Y` names
+/// the selector function of the same name in `crate::utils::session`.
 #[proc_macro_attribute]
-pub fn session_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn session_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
-    make_session_test(item)
+    let revs = parse_macro_input!(
+        attr with punctuated::Punctuated::<syn::Ident, Token![,]>::parse_terminated
+    );
+    if let Some(bad) = revs
+        .iter()
+        .find(|rev| !rev.to_string().starts_with("api_rev_"))
+    {
+        return Error::new(bad.span(), "expected `api_rev_X_Y`")
+            .to_compile_error()
+            .into();
+    }
+    make_session_test(item, revs.into_iter().collect())
         .unwrap_or_else(|err| err.to_compile_error())
         .into()
 }
@@ -196,7 +212,7 @@ fn make_partition_test(item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 ///
 /// Returns a token stream representing the transformed test function,
 /// or an error if the function signature is invalid.
-fn make_session_test(item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn make_session_test(item: ItemFn, revs: Vec<syn::Ident>) -> syn::Result<proc_macro2::TokenStream> {
     if item.sig.asyncness.is_some() {
         return Err(Error::new(
             item.sig.fn_token.span(),
@@ -207,12 +223,20 @@ fn make_session_test(item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let name = &item.sig.ident;
     let return_type = &item.sig.output;
     let attrs = &item.attrs;
+    let skip = (!revs.is_empty()).then(|| {
+        quote! {
+            if !(#(crate::utils::session::#revs())||*) {
+                return;
+            }
+        }
+    });
 
     Ok(quote! {
         #[::core::prelude::v1::test]
         #(#attrs)*
         fn #name() #return_type {
             #item
+            #skip
             crate::utils::api::init();
             let span = tracing::span!(tracing::Level::INFO, stringify!(#name), );
             let _span_guard = span.enter();

@@ -16,10 +16,13 @@
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used)]
 
+// Starts an in-process DDI sock server before `main`; the children this
+// harness spawns inherit its endpoint via `TSRA_TEST_ARGS`.
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::process::Command;
 
+use ddi_sock_server as _;
 use openssl::ec::EcGroup;
 use openssl::ec::EcKey;
 use openssl::encrypt::Encrypter;

@@ -43,12 +43,9 @@ then run from the repository root:
 
 ```sh
 cargo xtask build --package ddi_sock_server
-cargo xtask build --package tsra_sealing_root_svc --features sock
-cargo xtask build --package tsra_sealing_leaf_svc --features sock
+cargo xtask build --package tsra_sealing_root_svc
+cargo xtask build --package tsra_sealing_leaf_svc
 ```
-
-Do not combine `sock` with `emu`. `--require-emu` deliberately rejects
-socket builds, even though the remote server hosts emulated firmware.
 
 ## Create and sign
 
@@ -65,11 +62,12 @@ cargo run -p ddi_sock_server -- tcp://127.0.0.1:1234
 cargo run -p ddi_sock_server -- tcp://127.0.0.1:1235
 ```
 
-Wait for each server's listening message. Start the root:
+Wait for each server's listening message. `TSRA_TEST_ARGS` is honored only
+when built with `--features tsra_ddi/test-args`. Start the root:
 
 ```sh
-TSRA_DDI_SOCK=tcp://127.0.0.1:1234 \
-cargo run -p tsra_sealing_root_svc --features sock -- \
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" \
+cargo run -p tsra_sealing_root_svc --features tsra_ddi/test-args -- \
   create --name root --state-dir /tmp/sealing-sock-root \
   --listen 127.0.0.1:8080
 ```
@@ -78,8 +76,8 @@ Wait until `curl --fail http://127.0.0.1:8080/v1/health` reports
 `"backend":"sock"`, then create the leaf:
 
 ```sh
-TSRA_DDI_SOCK=tcp://127.0.0.1:1235 \
-cargo run -p tsra_sealing_leaf_svc --features sock -- \
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1235" \
+cargo run -p tsra_sealing_leaf_svc --features tsra_ddi/test-args -- \
   create --name orders --root http://127.0.0.1:8080 \
   --state-dir /tmp/sealing-sock-orders \
   --listen 127.0.0.1:8081 --events
@@ -100,7 +98,8 @@ The health response identifies `sock` and the public domain-key identity.
 Signing returns `"verified":true`.
 
 TCP also works on native Windows. In PowerShell, set
-`$env:TSRA_DDI_SOCK = "tcp://127.0.0.1:1235"` in the leaf terminal (use port 1234
+`$env:TSRA_TEST_ARGS = "transport=sock;sock=tcp://127.0.0.1:1235"` in the leaf
+terminal (use port 1234
 in the root terminal), then run the corresponding `cargo run` command without
 the shell environment prefix. Use Windows state-directory paths.
 
@@ -110,8 +109,8 @@ Stop the leaf application only, retaining root and both DDI servers. The remote
 partition remains initialized, so use explicit `--reset`:
 
 ```sh
-TSRA_DDI_SOCK=tcp://127.0.0.1:1235 \
-cargo run -p tsra_sealing_leaf_svc --features sock -- \
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1235" \
+cargo run -p tsra_sealing_leaf_svc --features tsra_ddi/test-args -- \
   restore-local --reset --state-dir /tmp/sealing-sock-orders \
   --listen 127.0.0.1:8081
 ```
@@ -122,8 +121,8 @@ must be rejected. Repeat health/signing and compare the original identity.
 Stop that leaf application and run remote recovery:
 
 ```sh
-TSRA_DDI_SOCK=tcp://127.0.0.1:1235 \
-cargo run -p tsra_sealing_leaf_svc --features sock -- \
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1235" \
+cargo run -p tsra_sealing_leaf_svc --features tsra_ddi/test-args -- \
   restore-remote --reset --state-dir /tmp/sealing-sock-orders \
   --listen 127.0.0.1:8081 --events
 ```
@@ -137,8 +136,8 @@ Failed reseals retain recovery records and prepared receiver material for retry.
 To restart root while retaining its DDI server, use:
 
 ```sh
-TSRA_DDI_SOCK=tcp://127.0.0.1:1234 \
-cargo run -p tsra_sealing_root_svc --features sock -- \
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" \
+cargo run -p tsra_sealing_root_svc --features tsra_ddi/test-args -- \
   restore-local --reset --state-dir /tmp/sealing-sock-root \
   --listen 127.0.0.1:8080
 ```
@@ -153,8 +152,8 @@ curl --fail -H 'Content-Type: application/json' \
   -d '{"instance":"secondary"}' \
   http://127.0.0.1:8080/v1/leaves/orders/instances
 
-TSRA_DDI_SOCK=tcp://127.0.0.1:1236 \
-cargo run -p tsra_sealing_leaf_svc --features sock -- \
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1236" \
+cargo run -p tsra_sealing_leaf_svc --features tsra_ddi/test-args -- \
   join --name orders --instance secondary --root http://127.0.0.1:8080 \
   --state-dir /tmp/sealing-sock-orders-secondary \
   --listen 127.0.0.1:8082 --events
@@ -171,7 +170,7 @@ Use the same target directory as `xtask build`:
 
 ```sh
 CARGO_TARGET_DIR=target/xtask cargo xtask nextest \
-  --package tsra_sealing_leaf_svc --features sock
+  --package tsra_sealing_leaf_svc --transport sock
 ```
 
 If the build target directory is overridden, use that directory instead.

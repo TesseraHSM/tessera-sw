@@ -40,9 +40,11 @@ fn test_device_handle_session_no_session() {
     );
 }
 
-#[cfg(not(feature = "sock"))]
 #[test]
 fn test_device_handle_session_open_session_twice() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         setup,
         common_cleanup,
@@ -97,9 +99,11 @@ fn test_device_handle_session_open_session_twice() {
     );
 }
 
-#[cfg(feature = "sock")]
 #[test]
 fn test_socket_sessions_are_owned_by_connection() {
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(setup, common_cleanup, |dev, ddi, path, _| {
         helper_common_establish_credential(dev, TEST_CRED_ID, TEST_CRED_PIN);
         let mut sessions = Vec::new();

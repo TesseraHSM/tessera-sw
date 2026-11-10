@@ -27,30 +27,6 @@ const TBOR_KEY_SCOPE_MASK: u64 = 0b111;
 /// `KeyScope::Session` value in the packed scope field.
 const TBOR_KEY_SCOPE_SESSION: u64 = 0b001;
 
-/// std/OpenSSL stores `n | e | d | p | q | dp | dq | qInv`.
-const fn std_rsa_crt_payload_len(key_bytes: usize) -> usize {
-    key_bytes * 9 / 2 + 4
-}
-
-/// Uno stores the PKA operand `p | q | dp | dq | n | n1q | n2p | e`.
-const fn uno_rsa_crt_payload_len(key_bytes: usize) -> usize {
-    key_bytes * 5 + 4
-}
-
-/// Checks an RSA-CRT payload length against the backend's firmware layout.
-/// A socket server may run either the std firmware or bridge to Uno.
-fn rsa_crt_payload_len_valid(key_bytes: usize, payload_len: usize) -> bool {
-    let std = payload_len == std_rsa_crt_payload_len(key_bytes);
-    let uno = payload_len == uno_rsa_crt_payload_len(key_bytes);
-    if cfg!(feature = "emu") {
-        std
-    } else if cfg!(feature = "sock") {
-        std || uno
-    } else {
-        uno
-    }
-}
-
 /// Key-kind discriminant recorded in the TBOR masked-key metadata
 /// `key_kind` field. Values mirror the firmware `HsmVaultKeyKind`
 /// (`fw/pal/traits/src/vault.rs`).
@@ -140,8 +116,11 @@ impl TborMaskedKeyKind {
         let key_bytes = usize::from(bits).div_ceil(8);
         let expected_len = match self {
             Self::Rsa2kPrivate | Self::Rsa3kPrivate | Self::Rsa4kPrivate => key_bytes * 2 + 4,
+            // The RSA-CRT layout differs by firmware: std stores
+            // `n|e|d|p|q|dp|dq|qInv`, Uno the PKA operand
+            // `p|q|dp|dq|n|n1q|n2p|e`. Either may sit behind any transport.
             Self::Rsa2kPrivateCrt | Self::Rsa3kPrivateCrt | Self::Rsa4kPrivateCrt => {
-                return rsa_crt_payload_len_valid(key_bytes, payload_len);
+                return payload_len == key_bytes * 9 / 2 + 4 || payload_len == key_bytes * 5 + 4;
             }
             Self::EccP256 | Self::EccP384 | Self::EccP521 => key_bytes.next_multiple_of(4),
             _ => key_bytes,
@@ -921,13 +900,10 @@ mod tests {
                 (KEY_KIND_RSA3K_PRIVATE_CRT, 384),
                 (KEY_KIND_RSA4K_PRIVATE_CRT, 512),
             ]
-            .map(|(kind, key_bytes)| {
-                let len = if cfg!(feature = "emu") {
-                    std_rsa_crt_payload_len(key_bytes)
-                } else {
-                    uno_rsa_crt_payload_len(key_bytes)
-                };
-                (kind, len)
+            .into_iter()
+            // std (`n|e|d|p|q|dp|dq|qInv`) and Uno (PKA operand) layouts.
+            .flat_map(|(kind, key_bytes)| {
+                [(kind, key_bytes * 9 / 2 + 4), (kind, key_bytes * 5 + 4)]
             }),
         ) {
             let blob = unchecked_padded_blob(kind, raw_len);
@@ -936,16 +912,11 @@ mod tests {
     }
 
     #[test]
-    fn rsa_crt_payload_len_matches_backend() {
-        for (key_bytes, std, uno) in [(256, 1156, 1284), (384, 1732, 1924), (512, 2308, 2564)] {
-            assert_eq!(
-                rsa_crt_payload_len_valid(key_bytes, std),
-                cfg!(any(feature = "emu", feature = "sock"))
-            );
-            assert_eq!(
-                rsa_crt_payload_len_valid(key_bytes, uno),
-                !cfg!(feature = "emu")
-            );
+    fn rsa_crt_rejects_unknown_payload_lengths() {
+        // 2k std is 1156 and Uno 1284; reject a short and two off-by-one lengths.
+        for raw_len in [20, 1157, 1283] {
+            let blob = unchecked_padded_blob(KEY_KIND_RSA2K_PRIVATE_CRT, raw_len);
+            assert!(HsmMaskedKey::to_key_props(&blob).is_err(), "len {raw_len}");
         }
     }
 }

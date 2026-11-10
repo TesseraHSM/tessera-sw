@@ -133,11 +133,10 @@ fn run_import_matrix(
 /// ECC keys with 54 malformed variants. Only hardware firmware checks an
 /// imported ECC key's structure.
 #[test]
-#[cfg_attr(
-    feature = "emu",
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn rsa_unwrap_ecc_structure_matrix() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -201,11 +200,10 @@ fn rsa_unwrap_ecc_structure_matrix() {
 /// RSA pairwise consistency tests through MBOR `RsaUnwrap`: 12 valid RSA keys
 /// with 36 malformed variants.
 #[test]
-#[cfg_attr(
-    feature = "emu",
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn rsa_unwrap_rsa_pct_matrix() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -253,11 +251,10 @@ fn rsa_unwrap_rsa_pct_matrix() {
 /// then imports a valid one: if each rejection had leaked a stored key, the
 /// vault would have run out of space first.
 #[test]
-#[cfg_attr(
-    feature = "emu",
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn rsa_unwrap_rejected_imports_store_nothing() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,

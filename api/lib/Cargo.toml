@@ -33,10 +33,11 @@ zeroize.workspace = true
 
 [features]
 default = []
-emu = ["tsra_ddi/emu"]
-sock = ["tsra_ddi/sock"]
-# Forward the per-IO `iic recv` / `oic send` debug traces (emu backend only).
-trace-io = ["tsra_ddi/trace-io"]
+# Read test configuration from TSRA_TEST_ARGS. Test builds only.
+test-args = ["tsra_ddi/test-args"]
+
+[dev-dependencies]
+ddi_sock_server = { features = ["autostart"], workspace = true }
 
 [lints]
 workspace = true

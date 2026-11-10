@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "emu")]
-
+// Starts an in-process DDI sock server before `main`.
 use std::cell::Cell;
 use std::cell::RefCell;
 
 use anyhow::Result;
+use ddi_sock_server as _;
 use tsra_api::HsmEccCurve;
 use tsra_api::HsmEccKeyGenAlgo;
 use tsra_api::HsmEccSignAlgo;
@@ -275,6 +275,9 @@ fn assert_sender_attestation(
 
 #[test]
 fn evidence_adapter_preserves_all_attestation_material() {
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     for evidence in [
         Evidence {
             mfgr_cert_chain: Vec::new(),
@@ -312,6 +315,9 @@ fn evidence_adapter_preserves_all_attestation_material() {
 
 #[test]
 fn pota_signer_private_der_roundtrip() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let original = CaKey::generate();
     let reopened = CaKey::from_der(&original.private_key_der()?)?;
     assert_eq!(original.raw_pub(), reopened.raw_pub());
@@ -322,6 +328,9 @@ fn pota_signer_private_der_roundtrip() -> Result<()> {
 
 #[test]
 fn create_uses_external_receiver_credentials_and_restores_local_state() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let mut tee_seed = [0u8; MACH_SEED_LEN];
     HashAlgo::sha256().hash(b"external-receiver-test", Some(&mut tee_seed))?;
     let pota = CaKey::generate();

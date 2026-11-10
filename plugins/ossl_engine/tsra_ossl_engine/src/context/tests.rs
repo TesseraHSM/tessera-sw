@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Unit tests (emu) and hardware smoke tests for the engine context, split
+//! Unit tests (simulator) and hardware smoke tests for the engine context, split
 //! out of `context.rs` for readability. Shared round-trip bodies live in
-//! `round_trips`; `emu` runs them against the emulator, `hw_tests` against a
+//! `round_trips`; `sim` runs them against the simulator, `hw_tests` against a
 //! real device (`#[ignore]`d).
 
 use std::io::Write;
@@ -76,7 +76,7 @@ fn new_test_engine() -> (Engine, *mut ffi::ENGINE) {
 
 /// Sign `msg` (hashed with `md`) through `pkey` via OpenSSL's EVP interface —
 /// the same path the ABI and `openssl dgst -sign` take. Exercises the loaded
-/// key's `EC_KEY_METHOD` `sign_sig` (→ HSM). Shared by emu and hardware
+/// key's `EC_KEY_METHOD` `sign_sig` (→ HSM). Shared by simulator and hardware
 /// sign tests.
 #[allow(unsafe_code)]
 fn evp_digest_sign(pkey: *mut ffi::EVP_PKEY, msg: &[u8], md: *const ffi::EVP_MD) -> Vec<u8> {
@@ -169,7 +169,7 @@ fn evp_pkey_sign(pkey: *mut ffi::EVP_PKEY, digest: &[u8], md: *const ffi::EVP_MD
 }
 
 /// Shared round-trip test bodies, driven against an already-opened
-/// [`EngineData`] so the same flow runs on emu (always) and on real
+/// [`EngineData`] so the same flow runs on the simulator (always) and on real
 /// hardware (the `hw_tests` smokes). Only the `open` differs between the two.
 mod round_trips {
     use std::ffi::CString;
@@ -197,7 +197,6 @@ mod round_trips {
     use tsra_api::HsmAesXtsKeyUnmaskAlgo;
     use tsra_api::HsmEccCurve;
     use tsra_api::HsmEccKeyGenAlgo;
-    #[cfg(feature = "emu")]
     use tsra_api::HsmEccPrivateKey;
     use tsra_api::HsmEncrypter;
     use tsra_api::HsmError;
@@ -225,9 +224,8 @@ mod round_trips {
     use crate::uri::AesKind;
 
     /// Generate a persistent EC P-384 signing key pair on the open HSM and
-    /// return the private-key handle. Only emu-only deletion tests take a
+    /// return the private-key handle. Only simulator-only deletion tests take a
     /// live handle; the curve round trips use [`generate_masked`] instead.
-    #[cfg(feature = "emu")]
     pub(super) fn generate_p384_key(data: &EngineData) -> EngineResult<HsmEccPrivateKey> {
         data.with_session(|session| {
             let priv_props = HsmKeyPropsBuilder::default()
@@ -333,7 +331,7 @@ mod round_trips {
 
     /// Generate a key on `curve` on `data`'s HSM, load it back through the
     /// engine, and verify the returned public key matches. Backend-agnostic:
-    /// the caller opens `data` against emu or a real device.
+    /// the caller opens `data` against the simulator or a real device.
     #[allow(unsafe_code)]
     pub(super) fn run_load(data: &EngineData, curve: HsmEccCurve) -> EngineResult<()> {
         let (masked, expected_pub_der) = generate_masked(data, curve)?;
@@ -1411,9 +1409,8 @@ mod round_trips {
     /// the real `EVP_PKEY_sign` dispatch on a ctx bound to the engine — so our
     /// `EVP_PKEY_METHOD` sign override actually runs — rather than calling the
     /// handler directly; a regression that delegated software PSS would fail here.
-    /// No HSM is opened (the reject precedes any HSM work); only emu unit
+    /// No HSM is opened (the reject precedes any HSM work); only simulator unit
     /// test drives it (the hardware smokes do not need a software-key path).
-    #[cfg(feature = "emu")]
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_pss_rejects_software_key(data: EngineData) -> EngineResult<()> {
@@ -1507,8 +1504,7 @@ mod round_trips {
     /// (`genpkey ... -pkeyopt tsra.key_usage:keyWrapping`) and prove it is a
     /// usable 2048-bit RSA public key. Also pins that a non-2048 size is
     /// rejected up front (the HSM unwrapping key is fixed at 2048 bits). Only
-    /// emu test exercises this today; the hardware smoke follows.
-    #[cfg(feature = "emu")]
+    /// simulator test exercises this today; the hardware smoke follows.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_export_unwrapping_key(data: EngineData) -> EngineResult<()> {
@@ -1564,8 +1560,7 @@ mod round_trips {
     /// unwrapping public key (RSA-OAEP-SHA256 + AES-256-KWP, via the same wrap
     /// an external SDK holder would use), import the blob, and prove the masked
     /// kind and reloaded public key — the wrapped-blob analogue of
-    /// [`run_rsa_import`]. Emu-only: it uses the cached unwrapping key handle.
-    #[cfg(feature = "emu")]
+    /// [`run_rsa_import`]. Simulator-only: it uses the cached unwrapping key handle.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_import_wrapped(data: EngineData, dir: &Path) -> EngineResult<()> {
@@ -1690,8 +1685,7 @@ mod round_trips {
     /// the string form) must be recorded in the import state. Request
     /// keyWrapping with a direct-set 3072 and confirm it is rejected for not
     /// being 2048 — it would wrongly fall back to the 2048 default if the
-    /// numeric ctrl were not recorded. Emu-only.
-    #[cfg(feature = "emu")]
+    /// numeric ctrl were not recorded. Simulator-only.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_keygen_bits_direct_ctrl(data: EngineData) -> EngineResult<()> {
@@ -2335,7 +2329,7 @@ mod round_trips {
     /// verifies in software, and reloads the written masked blob through the
     /// loader to prove the generate→persist→reload cycle closes. `curve` is
     /// the OpenSSL curve name (e.g. "P-384"). Backend-agnostic: the caller
-    /// opens `data` against emu or a real device.
+    /// opens `data` against the simulator or a real device.
     #[allow(unsafe_code)]
     pub(super) fn run_keygen(data: EngineData, dir: &Path, curve: &str) -> EngineResult<()> {
         let (mut engine, engine_raw) = keygen_engine(data)?;
@@ -2479,8 +2473,8 @@ mod round_trips {
     }
 }
 
-#[cfg(all(test, feature = "emu"))]
-mod emu {
+#[cfg(test)]
+mod sim {
     #![allow(clippy::unwrap_used)]
 
     use std::fs;
@@ -2501,7 +2495,7 @@ mod emu {
 
     use super::*;
 
-    /// Shared per-process MOBK path. The emu device's BK3 is global to the
+    /// Shared per-process MOBK path. The simulated device's BK3 is global to the
     /// process: the first test establishes it (plaintext OBK) and the engine
     /// persists the MOBK here; later tests re-init from that MOBK (re-running
     /// init_bk3 fails). Shared across tests so the second open sees the first
@@ -2557,11 +2551,14 @@ mod emu {
         }
     }
 
-    // `#[serial]`: these share the process-global emu device (BK3 state),
+    // `#[serial]`: these share the process-global simulated device (BK3 state),
     // so they must not run concurrently.
     #[test]
     #[serial]
     fn open_hsm_with_resiliency_succeeds() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("open");
         // The storage dir is created by the open path (setup_storage_dir) with
         // mode 0700; pre-creating it here would inherit the umask and could be
@@ -2583,6 +2580,9 @@ mod emu {
     #[test]
     #[serial]
     fn load_ec_key_round_trips_through_engine() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("load");
         // Leave the `res` storage dir to the open path (setup_storage_dir),
         // which creates it mode 0700; pre-creating it here would inherit the
@@ -2612,6 +2612,9 @@ mod emu {
     #[test]
     #[serial]
     fn release_loaded_key_deletes_key_from_hsm() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("release-del");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2627,8 +2630,9 @@ mod emu {
             "key must be usable before release"
         );
 
-        let ptr = data.retain_loaded_key(key);
-        data.release_loaded_key(ptr);
+        let owner = std::ptr::dangling::<ffi::EC_KEY>();
+        let _ = data.retain_loaded_key(key, owner);
+        data.release_loaded_key(owner);
         assert!(
             !hsm_sign_works(&observer),
             "release_loaded_key must delete the key from the HSM"
@@ -2641,6 +2645,9 @@ mod emu {
     #[test]
     #[serial]
     fn engine_teardown_deletes_retained_keys() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("teardown-del");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2656,12 +2663,181 @@ mod emu {
             "key must be usable before teardown"
         );
 
-        let _ = data.retain_loaded_key(key);
+        let _ = data.retain_loaded_key(key, std::ptr::dangling::<ffi::EC_KEY>());
         drop(data);
         assert!(
             !hsm_sign_works(&observer),
             "EngineData teardown must delete retained keys from the HSM"
         );
+    }
+
+    // Freeing an engine-bound EC_KEY must delete its HSM key once no copy uses
+    // it (the EC_KEY_METHOD finish/copy hooks), not defer it to teardown.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn freeing_bound_ec_key_deletes_key_from_hsm() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
+        let scratch = Scratch::new("free-del");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let key = round_trips::generate_p384_key(&data).unwrap();
+        let observer = key.clone();
+        let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let ec = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+
+        // SAFETY: ec is our engine-bound EC_KEY; the dup and both frees are
+        // standard OpenSSL calls on keys we own. engine_raw is the ENGINE_new
+        // ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            let dup = ffi::EC_KEY_dup(ec);
+            assert!(!dup.is_null(), "EC_KEY_dup of a bound key");
+            ffi::EC_KEY_free(ec);
+            assert!(
+                hsm_sign_works(&observer),
+                "a live EC_KEY copy must keep the HSM key"
+            );
+            ffi::EC_KEY_free(dup);
+            assert!(
+                !hsm_sign_works(&observer),
+                "freeing the last EC_KEY must delete its HSM key"
+            );
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // EC_KEY_copy into an EC_KEY already bound to another HSM key overwrites
+    // its ex_data without a finish: the displaced key must still be deleted,
+    // and the shared one only once both EC_KEYs are gone.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn copy_into_bound_ec_key_deletes_displaced_key() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
+        let scratch = Scratch::new("copy-over");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let src_key = round_trips::generate_p384_key(&data).unwrap();
+        let src_observer = src_key.clone();
+        let src_der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&src_key).unwrap();
+        let mut dest_keys = Vec::new();
+        for _ in 0..3 {
+            let key = round_trips::generate_p384_key(&data).unwrap();
+            let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+            dest_keys.push((key, der));
+        }
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let src = crate::keyload::build_bound_ec_key(&engine, data, &src_der, src_key).unwrap();
+
+        // SAFETY: src/dest are our engine-bound EC_KEYs; the copies and frees
+        // are standard OpenSSL calls on keys we own. engine_raw is the
+        // ENGINE_new ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            for (key, der) in dest_keys {
+                let observer = key.clone();
+                let dest = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+                assert!(!ffi::EC_KEY_copy(dest, src).is_null(), "EC_KEY_copy");
+                assert!(
+                    !hsm_sign_works(&observer),
+                    "the key displaced by EC_KEY_copy must be deleted"
+                );
+                ffi::EC_KEY_free(dest);
+                assert!(
+                    hsm_sign_works(&src_observer),
+                    "freeing a copy must keep the source's HSM key"
+                );
+            }
+            ffi::EC_KEY_free(src);
+            assert!(
+                !hsm_sign_works(&src_observer),
+                "freeing the last EC_KEY must delete its HSM key"
+            );
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // EC_KEY_set_method runs finish on a still-live key: its HSM key must be
+    // released and detached, so the later free neither touches nor releases
+    // the freed pointer again.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn set_method_detaches_and_releases_ec_key() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
+        let scratch = Scratch::new("set-method");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let key = round_trips::generate_p384_key(&data).unwrap();
+        let observer = key.clone();
+        let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let ec = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+
+        // SAFETY: ec is our engine-bound EC_KEY; set_method and free are
+        // standard OpenSSL calls on a key we own. engine_raw is the ENGINE_new
+        // ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            assert_eq!(ffi::EC_KEY_set_method(ec, ffi::EC_KEY_OpenSSL()), 1);
+            assert!(
+                crate::keyload::ec_key_hsm_key(ec).is_null(),
+                "finish must detach the HSM key from a live EC_KEY"
+            );
+            assert!(
+                !hsm_sign_works(&observer),
+                "finish must release the HSM key"
+            );
+            ffi::EC_KEY_free(ec);
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // Ownership is tracked per owner: rebinding moves an owner off its old
+    // key (returning it once unowned) and shared keys live until their last
+    // owner goes.
+    #[test]
+    fn retained_keys_track_owners() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
+        let keys = RetainedKeys::<u32>::new();
+        let a = keys.retain(1, 10);
+        let b = keys.retain(2, 20);
+        assert_eq!(keys.rebind(30, a), (true, None));
+        assert_eq!(keys.rebind(20, a), (true, Some(2)));
+        assert_eq!(keys.rebind(20, a), (true, None));
+        assert_eq!(keys.rebind(40, b), (false, None));
+        assert_eq!(keys.release(10), None);
+        assert_eq!(keys.release(30), None);
+        assert_eq!(keys.rebind(20, std::ptr::null()), (true, Some(1)));
+        assert_eq!(keys.release(20), None);
     }
 
     // A signature produced through a loaded key (HSM sign via our EC_KEY_METHOD,
@@ -2670,6 +2846,9 @@ mod emu {
     #[test]
     #[serial]
     fn sign_through_loaded_key_verifies() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("sign");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2691,6 +2870,9 @@ mod emu {
     #[serial]
     #[allow(unsafe_code)]
     fn sign_with_digest_longer_than_curve_order_verifies() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("digestlen");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2711,6 +2893,9 @@ mod emu {
     #[test]
     #[serial]
     fn keygen_via_pkey_method_signs_and_reloads() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         for curve in ["P-256", "P-384", "P-521"] {
             let scratch = Scratch::new("keygen");
             let data = EngineData::new();
@@ -2732,6 +2917,9 @@ mod emu {
     #[test]
     #[serial]
     fn rsa_import_via_pkey_method_reloads() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         for crt in [true, false] {
             let scratch = Scratch::new("rsa-import");
             let data = EngineData::new();
@@ -2749,6 +2937,9 @@ mod emu {
     #[test]
     #[serial]
     fn aes_cbc_via_engine_ciphers() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("aes-cbc");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2777,6 +2968,9 @@ mod emu {
     #[test]
     #[serial]
     fn generate_key_via_engine_ctrl() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("generate-key");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2794,6 +2988,9 @@ mod emu {
     #[test]
     #[serial]
     fn rsa_sign_through_loaded_key_verifies() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("rsa-sign");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2811,6 +3008,9 @@ mod emu {
     #[test]
     #[serial]
     fn rsa_pss_software_key_rejected() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         round_trips::run_rsa_pss_rejects_software_key(EngineData::new()).unwrap();
     }
 
@@ -2821,6 +3021,9 @@ mod emu {
     #[test]
     #[serial]
     fn rsa_import_wrapped_via_pkey_method_reloads() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("rsa-wrapped");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2838,6 +3041,9 @@ mod emu {
     #[test]
     #[serial]
     fn rsa_export_unwrapping_key_via_pkey_method() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("rsa-export");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2855,6 +3061,9 @@ mod emu {
     #[test]
     #[serial]
     fn rsa_keygen_bits_direct_ctrl_is_recorded() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("rsa-bits");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2871,6 +3080,9 @@ mod emu {
     #[test]
     #[serial]
     fn derive_via_pkey_method_produces_masked_secret() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         for curve in ["P-256", "P-384", "P-521"] {
             let scratch = Scratch::new("derive");
             let data = EngineData::new();
@@ -2889,6 +3101,9 @@ mod emu {
     #[test]
     #[serial]
     fn hkdf_via_pkey_method_derives_masked_keys() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("hkdf");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2904,6 +3119,9 @@ mod emu {
     #[test]
     #[serial]
     fn software_hkdf_delegates_unchanged() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("hkdf-sw");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2942,6 +3160,9 @@ mod emu {
     #[serial]
     #[allow(unsafe_code)]
     fn software_ec_keys_serialize_unchanged_under_registered_asn1_method() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let (engine, engine_raw) = new_test_engine();
         tsra_ossl_engine_core::asn1_method::register_ec_asn1_method::<crate::asn1::TsraEcAsn1>(
             &engine,
@@ -2971,6 +3192,9 @@ mod emu {
     #[test]
     #[serial]
     fn session_keys_via_pkey_methods() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("session-keys");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2987,6 +3211,9 @@ mod emu {
     #[serial]
     #[allow(unsafe_code)]
     fn keygen_rejects_unsupported_curve() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("keygen-bad");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3015,6 +3242,9 @@ mod emu {
     #[test]
     #[serial]
     fn open_hsm_is_idempotent() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let scratch = Scratch::new("idem");
         // See open_hsm_with_resiliency_succeeds: let the open path create the
         // storage dir at 0700 rather than depending on the umask here.
@@ -3034,11 +3264,17 @@ mod emu {
 
     #[test]
     fn hex_decode_rejects_wrong_length() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         assert!(decode_credential_hex("abcd", "X").is_err());
     }
 
     #[test]
     fn hex_decode_rejects_non_hex() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let s = "g".repeat(CREDENTIALS_HEX_SIZE);
         let err = decode_credential_hex(&s, "X").unwrap_err();
         assert!(err.to_string().contains("non-hex"), "{err}");
@@ -3046,6 +3282,9 @@ mod emu {
 
     #[test]
     fn hex_decode_round_trip() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let s = "000102030405060708090a0b0c0d0e0f";
         assert_eq!(
             decode_credential_hex(s, "X").unwrap(),
@@ -3057,12 +3296,18 @@ mod emu {
     // fallback. (In production builds cred_field is called with None.)
     #[test]
     fn cred_field_missing_without_default_errors() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let r = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", None);
         assert!(matches!(r, Err(EngineError::Other(_))));
     }
 
     #[test]
     fn cred_field_missing_with_default_uses_default() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         let def = [7u8; 16];
         let got = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", Some(def)).unwrap();
         assert_eq!(got, def);
@@ -3072,10 +3317,10 @@ mod emu {
 /// Hardware smoke test. Drives the full device open (`open_hsm_from_env`:
 /// partition open → init → session) using the ambient `TSRA_*` environment,
 /// so a real HSM host can validate a configuration end to end — e.g. the TPM
-/// OBK/POTA sources, which emu cannot exercise.
+/// OBK/POTA sources, which the simulator cannot exercise.
 ///
-/// Compiled only in non-emu builds and `#[ignore]`d, so it never runs in the
-/// normal (emu) CI cell — invoke it explicitly on a provisioned host:
+/// Compiled only in non-sock builds and `#[ignore]`d, so it never runs in the
+/// normal (sock) CI cell — invoke it explicitly on a provisioned host:
 ///
 /// ```text
 /// export TSRA_CREDENTIALS_ID=<32 hex>  TSRA_CREDENTIALS_PIN=<32 hex>
@@ -3088,7 +3333,7 @@ mod emu {
 /// umask 0077
 /// cargo test -p tsra_ossl_engine --features engine open_from_env_smoke -- --ignored --nocapture
 /// ```
-#[cfg(all(test, not(feature = "emu")))]
+#[cfg(test)]
 mod hw_tests {
     use openssl::hash::MessageDigest;
     use tsra_api::HsmEccCurve;
@@ -3098,6 +3343,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn open_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         assert!(
@@ -3109,7 +3357,7 @@ mod hw_tests {
 
     /// Hardware key-loading round trips against a real device, one per
     /// supported curve — the same flow
-    /// `emu::load_ec_key_round_trips_through_engine` runs on emu (see
+    /// `sim::load_ec_key_round_trips_through_engine` runs on the simulator (see
     /// [`super::round_trips::run_load`]).
     ///
     /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
@@ -3120,6 +3368,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn load_ec_key_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         for curve in round_trips::CURVES {
@@ -3130,7 +3381,7 @@ mod hw_tests {
 
     /// Hardware ECDSA signing round trips against a real device, one per
     /// supported curve — the same flow
-    /// `emu::sign_through_loaded_key_verifies` runs on emu (see
+    /// `sim::sign_through_loaded_key_verifies` runs on the simulator (see
     /// [`super::round_trips::run_sign`]). Proves the device produces a valid
     /// ECDSA signature.
     ///
@@ -3142,6 +3393,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn sign_ec_key_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         for curve in round_trips::CURVES {
@@ -3152,10 +3406,10 @@ mod hw_tests {
 
     /// A digest longer than the curve order (SHA-512 over P-384, 64 > 48 bytes)
     /// on a real device — the hardware counterpart of
-    /// `emu::sign_with_digest_longer_than_curve_order_verifies`. The device
+    /// `sim::sign_with_digest_longer_than_curve_order_verifies`. The device
     /// must truncate per the ECDSA spec (its signature must verify in software
     /// with the same digest), so a firmware change breaking the truncation
-    /// convention is caught on hardware, not only on emu.
+    /// convention is caught on hardware, not only on the simulator.
     ///
     /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
     ///
@@ -3166,6 +3420,9 @@ mod hw_tests {
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     #[allow(unsafe_code)]
     fn sign_long_digest_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         // SAFETY: EVP_sha512 returns a process-lifetime constant.
@@ -3174,8 +3431,8 @@ mod hw_tests {
     }
 
     /// Hardware EC keygen round trips against a real device, one per supported
-    /// curve — the same flow `emu::keygen_via_pkey_method_signs_and_reloads`
-    /// runs on emu (see [`super::round_trips::run_keygen`]): generate
+    /// curve — the same flow `sim::keygen_via_pkey_method_signs_and_reloads`
+    /// runs on the simulator (see [`super::round_trips::run_keygen`]): generate
     /// through `EVP_PKEY_keygen`, sign, verify in software, and reload the
     /// written masked blob.
     ///
@@ -3187,6 +3444,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn keygen_ec_key_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         for curve in ["P-256", "P-384", "P-521"] {
             let data = EngineData::new();
             data.open_hsm_from_env()?;
@@ -3195,7 +3455,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware ECDH round trips, same flow as emu test (see
+    /// Hardware ECDH round trips, same flow as the simulator test (see
     /// [`super::round_trips::run_derive`]); env setup as above:
     ///
     /// ```text
@@ -3204,6 +3464,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn derive_ec_key_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         for curve in ["P-256", "P-384", "P-521"] {
             let data = EngineData::new();
             data.open_hsm_from_env()?;
@@ -3212,7 +3475,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware RSA import round trips, same flow as emu test (see
+    /// Hardware RSA import round trips, same flow as the simulator test (see
     /// [`super::round_trips::run_rsa_import`]); env setup as above:
     ///
     /// ```text
@@ -3221,6 +3484,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn rsa_import_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         for crt in [true, false] {
             let data = EngineData::new();
             data.open_hsm_from_env()?;
@@ -3229,7 +3495,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware RSA sign round trip, same flow as emu test (see
+    /// Hardware RSA sign round trip, same flow as the simulator test (see
     /// [`super::round_trips::run_rsa_sign`]): import a software RSA key, sign a
     /// digest on the device via `EVP_DigestSign`, and verify in software. Env
     /// setup as above:
@@ -3240,12 +3506,15 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn rsa_sign_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_rsa_sign(data, &std::env::temp_dir())
     }
 
-    /// Hardware ECDH → HKDF chain, same flow as emu test (see
+    /// Hardware ECDH → HKDF chain, same flow as the simulator test (see
     /// [`super::round_trips::run_hkdf`]); env setup as above:
     ///
     /// ```text
@@ -3254,12 +3523,15 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn hkdf_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_hkdf(data, &std::env::temp_dir())
     }
 
-    /// Hardware session keys, same flow as emu test (see
+    /// Hardware session keys, same flow as the simulator test (see
     /// [`super::round_trips::run_session_keys`]); env setup as above:
     ///
     /// ```text
@@ -3268,12 +3540,15 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn session_keys_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_session_keys(data, &std::env::temp_dir())
     }
 
-    /// Hardware AES-CBC through the engine's ciphers, same flow as emu
+    /// Hardware AES-CBC through the engine's ciphers, same flow as the simulator
     /// test (see [`super::round_trips::run_aes_cbc`]); env setup as above:
     ///
     /// ```text
@@ -3282,6 +3557,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn aes_cbc_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_aes_cbc(data, &std::env::temp_dir())
@@ -3300,7 +3578,7 @@ mod hw_tests {
         round_trips::run_aes_gcm(data, &std::env::temp_dir())
     }
 
-    /// Hardware `GENERATE_KEY`, same flow as emu test (see
+    /// Hardware `GENERATE_KEY`, same flow as the simulator test (see
     /// [`super::round_trips::run_generate_key`]); env setup as above:
     ///
     /// ```text
@@ -3309,6 +3587,9 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn generate_key_from_env_smoke() -> EngineResult<()> {
+        if tsra_ddi::sock_selected() {
+            return Ok(());
+        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_generate_key(data, &std::env::temp_dir())

@@ -6,13 +6,10 @@ fn main() {
     use std::env;
     use std::path::PathBuf;
 
+    // Corrosion builds tsra_api_native itself, so forward the features.
     let mut features = Vec::new();
-
-    if env::var("CARGO_FEATURE_EMU").is_ok() {
-        features.push("emu");
-    }
-    if env::var("CARGO_FEATURE_SOCK").is_ok() {
-        features.push("sock");
+    if env::var("CARGO_FEATURE_TEST_ARGS").is_ok() {
+        features.push("test-args");
     }
 
     // Calculate the target directory for passing to CMake

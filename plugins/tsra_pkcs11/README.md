@@ -222,9 +222,12 @@ serve the same callers.
 ## Build
 
 ```sh
-# Against the emulator, the device firmware run in-process (no physical device):
-cargo build -p tsra_pkcs11 --features emu
+# Against the simulator over the DDI socket transport (no physical device):
+cargo build -p tsra_pkcs11 --features test-args
 # -> target/debug/tsra_pkcs11.so
+# Start the simulator and point the module at it before loading it:
+cargo run -p ddi_sock_server -- tcp://127.0.0.1:1234 &
+export TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1234"
 
 # Standalone (no device linked) framework smoke build:
 gcc -shared -fPIC -Iinclude/pkcs11-v3.1 src/*.c -o tsra_pkcs11.so -lpthread

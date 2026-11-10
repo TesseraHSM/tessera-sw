@@ -19,6 +19,7 @@ jzon.workspace = true
 tiny_http = "0.12"
 tsra_api.workspace = true
 tsra_crypto.workspace = true
+tsra_ddi.workspace = true
 tsra_ddi_tbor_types.workspace = true
 tsra_sealing_api.workspace = true
 tsra_sealing_common.workspace = true
@@ -28,11 +29,12 @@ zerocopy.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Serves the in-process HSM for unit and integration tests only.
+ddi_sock_server = { features = ["autostart"], workspace = true }
+tsra_ddi = { features = ["test-args"], workspace = true }
 ureq = { default-features = false, version = "3" }
 
 [features]
-emu = ["tsra_sealing_common/emu"]
-sock = ["tsra_sealing_common/sock"]
 
 [lints]
 workspace = true

@@ -1,18 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "emu")]
+mod common;
 
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
 use std::process::Output;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use anyhow::Context;
 use anyhow::Result;
+use common::SimCommand;
 use jzon::JsonValue;
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccPrivateKey;
@@ -57,7 +57,7 @@ impl Drop for StateDir {
 fn run(dir: &Path, operation: &str, reset: bool) -> Result<Output> {
     let remote_create = operation == "create-remote";
     let operation = if remote_create { "create" } else { operation };
-    let mut command = Command::new(env!("CARGO_BIN_EXE_root_svc"));
+    let mut command = SimCommand::new(env!("CARGO_BIN_EXE_root_svc"));
     command
         .args([operation, "--state-dir"])
         .arg(dir.join("state"));
@@ -74,6 +74,9 @@ fn run(dir: &Path, operation: &str, reset: bool) -> Result<Output> {
 
 #[test]
 fn remote_restore_without_local_sd_backups_and_then_local_restore() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     let output = success(run(&dir.0, "create-remote", false)?)?;
     assert!(output.contains("creation receiver:    external software sealing authority"));
@@ -150,6 +153,9 @@ fn remote_restore_without_local_sd_backups_and_then_local_restore() -> Result<()
 
 #[test]
 fn missing_or_unprepared_remote_backup_fails_before_reset() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let output = run(&dir.0, "restore-remote", true)?;
@@ -161,6 +167,9 @@ fn missing_or_unprepared_remote_backup_fails_before_reset() -> Result<()> {
 
 #[test]
 fn invalid_remote_metadata_and_evidence_fail_before_reset() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create-remote", false)?)?;
     let path = dir.file("remote-backup.json");
@@ -225,6 +234,9 @@ fn invalid_remote_metadata_and_evidence_fail_before_reset() -> Result<()> {
 
 #[test]
 fn tampered_remote_ciphertexts_fail_without_publishing_recovery() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create-remote", false)?)?;
     let path = dir.file("remote-backup.json");
@@ -309,6 +321,9 @@ fn legacy_record(dir: &StateDir) -> Result<JsonValue> {
 
 #[test]
 fn create_and_restore_local_in_separate_processes() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     let output = success(run(&dir.0, "create", false)?)?;
     assert!(output.contains("Security domain created."));
@@ -406,6 +421,9 @@ fn create_and_restore_local_in_separate_processes() -> Result<()> {
 
 #[test]
 fn invalid_recovery_is_rejected_before_open_or_reset() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let original = record(&dir.record())?;
@@ -453,6 +471,9 @@ fn invalid_recovery_is_rejected_before_open_or_reset() -> Result<()> {
 
 #[test]
 fn missing_recovery_is_an_error_without_reset() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     let output = run(&dir.0, "restore-local", true)?;
     assert!(!output.status.success());
@@ -464,6 +485,9 @@ fn missing_recovery_is_an_error_without_reset() -> Result<()> {
 
 #[test]
 fn invalid_or_missing_sidecars_fail_before_reset() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let recovery = fs::read(dir.record())?;
@@ -507,6 +531,9 @@ fn invalid_or_missing_sidecars_fail_before_reset() -> Result<()> {
 
 #[test]
 fn combined_authority_and_keys_migrate_without_regeneration() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let saved = legacy_record(&dir)?;
@@ -534,6 +561,9 @@ fn combined_authority_and_keys_migrate_without_regeneration() -> Result<()> {
 
 #[test]
 fn valid_signer_file_encodings_are_preserved_byte_for_byte() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let mut snapshots = Vec::new();
@@ -560,6 +590,9 @@ fn valid_signer_file_encodings_are_preserved_byte_for_byte() -> Result<()> {
 
 #[test]
 fn orphaned_sidecar_blocks_create_before_reset() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     for name in ["pota.json", "sata.json", "keys.json", "remote-backup.json"] {
         let dir = StateDir::new()?;
         fs::create_dir(dir.0.join("state"))?;
@@ -576,6 +609,9 @@ fn orphaned_sidecar_blocks_create_before_reset() -> Result<()> {
 
 #[test]
 fn older_recovery_without_ecc_keys_explicitly_skips_checks() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let mut saved = legacy_record(&dir)?;
@@ -590,6 +626,9 @@ fn older_recovery_without_ecc_keys_explicitly_skips_checks() -> Result<()> {
 
 #[test]
 fn older_three_scope_recovery_explicitly_skips_session_check() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let mut saved = legacy_record(&dir)?;
@@ -609,6 +648,9 @@ fn older_three_scope_recovery_explicitly_skips_session_check() -> Result<()> {
 
 #[test]
 fn malformed_or_mislabelled_ecc_keys_fail_before_reset() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let original = record(&dir.file("keys.json"))?;
@@ -645,6 +687,9 @@ fn malformed_or_mislabelled_ecc_keys_fail_before_reset() -> Result<()> {
 
 #[test]
 fn tampered_durable_keys_are_not_expected_ephemeral_failures() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let original = record(&dir.file("keys.json"))?;
@@ -674,6 +719,9 @@ fn tampered_durable_keys_are_not_expected_ephemeral_failures() -> Result<()> {
 
 #[test]
 fn signatures_must_match_original_public_keys() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = StateDir::new()?;
     success(run(&dir.0, "create", false)?)?;
     let mut saved = record(&dir.file("keys.json"))?;

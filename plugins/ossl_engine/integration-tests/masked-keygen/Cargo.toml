@@ -13,16 +13,16 @@ path = "src/main.rs"
 
 # Gated so a plain `cargo build --workspace` (e.g. a build against
 # OpenSSL 3.x) doesn't pull the OpenSSL 1.1.x engine; the integration harness builds
-# this with `--features integration`.
+# this with `--features integration,tsra_api/test-args`.
 [features]
 integration = ["dep:tsra_api", "dep:tsra_ossl_engine"]
 
 [dependencies]
 tsra_api = { optional = true, workspace = true }
 tsra_ossl_engine = { features = [
-  "emu",
   "engine",
   "integration",
+  "test-credentials",
 ], optional = true, path = "../../tsra_ossl_engine" }
 
 [lints]

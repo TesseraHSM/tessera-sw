@@ -7,9 +7,6 @@
 //! own AES-ECB (single block encryption) to build reference CFB, OFB and CTR
 //! output from the SP 800-38A definitions.
 
-// Most helpers are only used by the extended-session tests.
-#![cfg_attr(not(feature = "session-ex-tests"), allow(dead_code))]
-
 use tsra_api::HsmAesEcbAlgo;
 use tsra_api::HsmAesKey;
 use tsra_api::HsmAesKeyGenAlgo;

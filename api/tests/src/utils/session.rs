@@ -14,13 +14,52 @@ use tsra_api_tests_macro::*;
 use crate::utils::partition::*;
 
 const SESSION_EX_MIN_TEST_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
-#[cfg(feature = "session-ex-tests")]
 const ROTATED_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
 
-/// Executes a test function with the compile-time-selected HSM session API.
+/// Returns `true` when `api_rev=1_1` in `TSRA_TEST_ARGS` selects the
+/// `open_session_ex` tests; tests for the other session API return early.
+///
+/// # Panics
+///
+/// Panics if `TSRA_TEST_ARGS` is invalid.
+pub(crate) fn api_rev_1_1() -> bool {
+    tsra_ddi::TestArgs::from_env().api_rev.as_deref() == Some("1_1")
+}
+
+/// Returns `true` when the `api_rev` key of `TSRA_TEST_ARGS` is unset or
+/// `1_0`, selecting the `open_session` tests.
+///
+/// # Panics
+///
+/// Panics if `TSRA_TEST_ARGS` is invalid.
+pub(crate) fn api_rev_1_0() -> bool {
+    !api_rev_1_1()
+}
+
+/// Runs `test`, which must panic with `expected` under `1_1` and must
+/// succeed under `1_0`.
+pub(crate) fn panics_with_api_rev_1_1(expected: &str, test: impl FnOnce()) {
+    if api_rev_1_0() {
+        test();
+        return;
+    }
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test))
+        .expect_err("test should panic under session_ex");
+    let msg = err
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(
+        msg.contains(expected),
+        "panic message {msg:?} does not contain {expected:?}"
+    );
+}
+
+/// Executes a test function with the runtime-selected HSM session API.
 ///
 /// This fixture calls `open_session` by default and `open_session_ex` when
-/// `session-ex-tests` is enabled.
+/// `TSRA_TEST_ARGS` has `api_rev=1_1`.
 ///
 /// # Partition State
 ///
@@ -66,18 +105,14 @@ where
             .api_rev_range
             .expect("Partition did not advertise an API revision range");
 
-        #[cfg(not(feature = "session-ex-tests"))]
-        let (session_api, rev, session) = {
-            let rev = session_revision(range);
-            let session = open_session_test_session(&part_info.path);
-            ("session", rev, session)
-        };
-
-        #[cfg(feature = "session-ex-tests")]
-        let (session_api, rev, session) = {
+        let (session_api, rev, session) = if api_rev_1_1() {
             let rev = session_ex_revision(range);
             let session = open_session_ex_test_session(&part_info.path, rev);
             ("session_ex", rev, session)
+        } else {
+            let rev = session_revision(range);
+            let session = open_session_test_session(&part_info.path);
+            ("session", rev, session)
         };
 
         let span = info_span!(
@@ -106,7 +141,6 @@ pub(crate) fn open_session_test_session(path: &str) -> HsmSession {
 }
 
 #[allow(clippy::expect_used)]
-#[cfg(feature = "session-ex-tests")]
 fn open_session_ex_test_session(path: &str, rev: HsmApiRev) -> HsmSession {
     let part = HsmPartitionManager::open_partition(path, rev)
         .expect("Failed to open the partition for an open_session_ex test");
@@ -173,7 +207,7 @@ fn test_session_revisions_follow_capabilities() {
 }
 
 #[test]
-fn test_with_session_uses_compiled_revision() {
+fn test_with_session_uses_selected_revision() {
     let expected = HsmPartitionManager::partition_info_list()
         .into_iter()
         .map(|part_info| {
@@ -181,11 +215,11 @@ fn test_with_session_uses_compiled_revision() {
                 .api_rev_range
                 .expect("Partition did not advertise an API revision range");
 
-            #[cfg(not(feature = "session-ex-tests"))]
-            return session_revision(range);
-
-            #[cfg(feature = "session-ex-tests")]
-            return session_ex_revision(range);
+            if api_rev_1_1() {
+                session_ex_revision(range)
+            } else {
+                session_revision(range)
+            }
         })
         .collect::<Vec<_>>();
     let mut observed = Vec::new();

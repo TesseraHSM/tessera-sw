@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
@@ -44,25 +45,34 @@ async fn serve_connection(mut stream: TcpStream, hsm: Arc<SocketHsm>) -> Result<
     }
 }
 
+fn spawn_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    hsm: &Arc<SocketHsm>,
+) -> Result<(), String> {
+    stream
+        .set_nodelay(true)
+        .map_err(|error| format!("failed to configure TCP connection: {error}"))?;
+    let hsm = Arc::clone(hsm);
+    tokio::spawn(async move {
+        if let Err(error) = serve_connection(stream, hsm).await {
+            eprintln!("TCP client {peer} failed: {error}");
+        }
+    });
+    Ok(())
+}
+
 async fn run_server(listener: TcpListener, hsm: Arc<SocketHsm>) -> Result<(), String> {
     loop {
         let (stream, peer) = listener
             .accept()
             .await
             .map_err(|error| format!("failed to accept TCP connection: {error}"))?;
-        stream
-            .set_nodelay(true)
-            .map_err(|error| format!("failed to configure TCP connection: {error}"))?;
-        let hsm = Arc::clone(&hsm);
-        tokio::spawn(async move {
-            if let Err(error) = serve_connection(stream, hsm).await {
-                eprintln!("TCP client {peer} failed: {error}");
-            }
-        });
+        spawn_connection(stream, peer, &hsm)?;
     }
 }
 
-pub(super) fn run(address: &str) -> Result<(), String> {
+fn bind(address: &str) -> Result<(std::net::TcpListener, SocketAddr), String> {
     let listener = std::net::TcpListener::bind(address)
         .map_err(|error| format!("failed to bind TCP listener at {address}: {error}"))?;
     listener
@@ -71,16 +81,87 @@ pub(super) fn run(address: &str) -> Result<(), String> {
     let bound_address = listener
         .local_addr()
         .map_err(|error| format!("failed to query TCP listener address: {error}"))?;
-    if !bound_address.ip().is_loopback() {
-        eprintln!("Warning: this unauthenticated test server is listening outside loopback");
-    }
+    Ok((listener, bound_address))
+}
+
+fn serve(
+    listener: std::net::TcpListener,
+    announce: Option<SocketAddr>,
+    first: Option<(std::net::TcpStream, SocketAddr)>,
+) -> Result<(), String> {
     super::run_with_hsm(|hsm| async move {
         let listener = TcpListener::from_std(listener)
             .map_err(|error| format!("failed to register TCP listener: {error}"))?;
         super::init_partition(&hsm).await?;
-        println!("TSRA DDI server listening on tcp://{bound_address}; partition 10");
+        if let Some(bound_address) = announce {
+            println!("TSRA DDI server listening on tcp://{bound_address}; partition 10");
+        }
+        if let Some((stream, peer)) = first {
+            let stream = TcpStream::from_std(stream)
+                .map_err(|error| format!("failed to register TCP connection: {error}"))?;
+            spawn_connection(stream, peer, &hsm)?;
+        }
         run_server(listener, hsm).await
     })
+}
+
+/// Blocks until the first client connects, so the HSM is only booted for
+/// processes that use it. Background HSM crypto racing the process's exit
+/// (OpenSSL's library destructors) would otherwise crash short-lived
+/// processes that never talk to the HSM.
+fn accept_first(
+    listener: &std::net::TcpListener,
+) -> Result<(std::net::TcpStream, SocketAddr), String> {
+    listener
+        .set_nonblocking(false)
+        .map_err(|error| format!("failed to configure TCP listener: {error}"))?;
+    let (stream, peer) = listener
+        .accept()
+        .map_err(|error| format!("failed to accept TCP connection: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure TCP listener: {error}"))?;
+    stream
+        .set_nonblocking(true)
+        .map_err(|error| format!("failed to configure TCP connection: {error}"))?;
+    Ok((stream, peer))
+}
+
+pub(super) fn run(address: &str) -> Result<(), String> {
+    let (listener, bound_address) = bind(address)?;
+    if !bound_address.ip().is_loopback() {
+        eprintln!("Warning: this unauthenticated test server is listening outside loopback");
+    }
+    serve(listener, Some(bound_address), None)
+}
+
+/// Start the server in this process on an ephemeral loopback TCP port.
+///
+/// The listener is bound before returning, so clients may connect
+/// immediately. The HSM is booted and its partition set up when the first
+/// client connects; clients are served once that completes. The server
+/// runs on a background thread for the rest of the process lifetime. Call at
+/// most once per process: the emulated HSM is process-global.
+pub fn spawn_loopback() -> Result<SocketAddr, String> {
+    spawn_loopback_with(|_| {})
+}
+
+/// [`spawn_loopback`], calling `on_bound` with the bound address before the
+/// server thread is spawned.
+pub(crate) fn spawn_loopback_with(on_bound: impl FnOnce(SocketAddr)) -> Result<SocketAddr, String> {
+    let (listener, bound_address) = bind("127.0.0.1:0")?;
+    on_bound(bound_address);
+    std::thread::Builder::new()
+        .name("tsra-ddi-sock-server".into())
+        .spawn(move || {
+            let result =
+                accept_first(&listener).and_then(|first| serve(listener, None, Some(first)));
+            if let Err(error) = result {
+                eprintln!("TSRA DDI socket server failed: {error}");
+            }
+        })
+        .map_err(|error| format!("failed to start server thread: {error}"))?;
+    Ok(bound_address)
 }
 
 #[cfg(test)]
@@ -317,7 +398,7 @@ mod tests {
             owner.erase().expect("reset");
             assert!(matches!(
                 bulk_error(&owner, session.session_id),
-                DdiError::DdiStatus(DdiStatus::FileHandleSessionIdDoesNotMatch)
+                DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation)
             ));
             drop(owner);
             wait_for_cleanup(lease);

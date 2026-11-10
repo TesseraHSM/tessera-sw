@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Builds and starts the simulator (ddi_sock_server) for the CI jobs that load
+# the sock-built module, which never links a simulator of its own. The server
+# runs in the background for the rest of the job, on an ephemeral loopback
+# port. TSRA_TEST_ARGS goes to $GITHUB_ENV: transport=sock, sock=<its endpoint>
+# and server_bin=<the binary> (for the functional suite's fresh-HSM cases).
+#
+# Usage: start_sock_server.sh <cargo target dir>
+set -euo pipefail
+
+TARGET_DIR="${1:?usage: start_sock_server.sh <cargo target dir>}"
+: "${GITHUB_ENV:?GITHUB_ENV is not set: run this from a GitHub Actions step}"
+
+cargo build --target-dir "$TARGET_DIR" -p ddi_sock_server
+server="$TARGET_DIR/debug/ddi_sock_server"
+log="$TARGET_DIR/ddi_sock_server.log"
+nohup "$server" tcp://127.0.0.1:0 > "$log" 2>&1 &
+
+endpoint=""
+for _ in $(seq 600); do
+    endpoint="$(sed -n 's/.*listening on \(tcp:\/\/[^;]*\);.*/\1/p' "$log")"
+    [ -n "$endpoint" ] && break
+    sleep 0.1
+done
+[ -n "$endpoint" ] || { cat "$log"; echo "ddi_sock_server did not start" >&2; exit 1; }
+
+echo "ddi_sock_server listening on $endpoint"
+echo "TSRA_TEST_ARGS=transport=sock;sock=$endpoint;server_bin=$server" >> "$GITHUB_ENV"

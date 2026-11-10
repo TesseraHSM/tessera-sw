@@ -1,7 +1,10 @@
 # Hardware checklist
 
-Every module test runs against the emulator (`emu`): the device firmware, run
-in-process, with a fresh device for every process. Some behaviour can only be
+Every module test runs against the simulator (`test-args`): the device
+firmware, run in a `ddi_sock_server` process that the module reaches over the
+DDI socket transport (`TSRA_TEST_ARGS="transport=sock;sock=<endpoint>"`). The
+simulator does not survive a restart, and cases that need an unprovisioned
+device start a private one. Some behaviour can only be
 shown on a device that outlives a process or on real hardware: provisioning
 races, power-cycle survival, capacities, and wherever the hardware firmware
 behaves differently from the emulated one. This file lists those items with
@@ -91,8 +94,8 @@ and the result of the last hardware run.
 - Expect: the same PIN logs in; another PIN fails with `CKR_FUNCTION_FAILED`
   (not `CKR_PIN_INCORRECT` until the SDK names the status); an empty PIN
   fails with `CKR_PIN_LEN_RANGE` unless `TSRA_PKCS11_PIN` sets a default; the
-  token key works in the second process. The emulator cannot show the last part:
-  it provisions every process afresh.
+  token key works in the second process. The simulator cannot show this across a
+  power cycle: it keeps no state over a restart.
 - Cases: `persist.a_second_process_sees_the_token_object` (the object, not
   the key), `login.*`.
 - Result: not run yet.

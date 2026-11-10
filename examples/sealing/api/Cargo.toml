@@ -23,11 +23,11 @@ x509.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
+ddi_sock_server = { features = ["autostart"], workspace = true }
 minicbor = { features = ["std"], workspace = true }
+tsra_ddi = { features = ["test-args"], workspace = true }
 
 [features]
-emu = ["tsra_api/emu"]
-sock = ["tsra_api/sock"]
 
 [lints]
 workspace = true

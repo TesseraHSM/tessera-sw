@@ -2,12 +2,14 @@
 // Licensed under the MIT License.
 //! Generate, sign, and verify session-scoped P-384 keys over TCP on Windows or Linux.
 //!
-//! Run with `cargo run -p tsra_api_sock_ecc384_loop --features sock -- [ENDPOINT] [COUNT]`.
+//! Run with `cargo run -p tsra_api_sock_ecc384_loop --features tsra_api/test-args -- [ENDPOINT] [COUNT]`.
 //! Defaults are `tcp://127.0.0.1:1234` and one iteration on both platforms.
 //! Use only a disposable test partition: this example rotates the default CO PSK
 //! to a fixed, publicly known test value and reuses that value on later runs.
 
 use tsra_api::*;
+use tsra_crypto::HashAlgo;
+use tsra_crypto::Hasher;
 
 const DEFAULT_ENDPOINT: &str = "tcp://127.0.0.1:1234";
 const TOOL_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
@@ -42,7 +44,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
 }
 
 fn open_session(endpoint: &str) -> Result<HsmSession, Box<dyn std::error::Error>> {
-    std::env::set_var("TSRA_DDI_SOCK", endpoint);
+    std::env::set_var(
+        "TSRA_TEST_ARGS",
+        format!("transport=sock;sock={}", endpoint),
+    );
 
     let info = HsmPartitionManager::partition_info_list()
         .into_iter()
@@ -130,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("ECC P-384 key generation failed at iteration {index}: {error}")
         })?;
         let message = format!("TSRA TCP ECC P-384 loop iteration {index}");
-        let digest = openssl::sha::sha384(message.as_bytes());
+        let digest = Hasher::hash_vec(&mut HashAlgo::sha384(), message.as_bytes())?;
         let signature = HsmSigner::sign_vec(&mut HsmEccSignAlgo::default(), &private_key, &digest)
             .map_err(|error| format!("ECC P-384 signing failed at iteration {index}: {error}"))?;
         let verified = HsmVerifier::verify(

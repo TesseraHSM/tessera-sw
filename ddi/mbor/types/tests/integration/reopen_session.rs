@@ -169,9 +169,11 @@ fn test_reopen_session() {
     );
 }
 
-#[cfg(feature = "sock")]
 #[test]
 fn test_reopen_session_restores_socket_bulk_access() {
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         |_, _, _| 0,
         common_cleanup,
@@ -196,9 +198,7 @@ fn test_reopen_session_restores_socket_bulk_access() {
             };
             assert!(matches!(
                 dev.exec_op_fp_gcm(DdiAesOp::Encrypt, params.clone(), vec![0; 32]),
-                Err(DdiError::DdiStatus(
-                    DdiStatus::FileHandleSessionIdDoesNotMatch
-                ))
+                Err(DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation))
             ));
 
             let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
@@ -221,9 +221,7 @@ fn test_reopen_session_restores_socket_bulk_access() {
             );
             assert!(matches!(
                 dev.exec_op_fp_gcm(DdiAesOp::Encrypt, params.clone(), vec![0; 32]),
-                Err(DdiError::DdiStatus(
-                    DdiStatus::FileHandleSessionIdDoesNotMatch
-                ))
+                Err(DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation))
             ));
 
             let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(

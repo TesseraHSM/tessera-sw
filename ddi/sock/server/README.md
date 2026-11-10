@@ -3,9 +3,9 @@
 `ddi_sock_server` exposes one in-process `StdHsm` emulator over TCP, Unix
 domain sockets, or Linux VSOCK, speaking the framed SQE/CQE protocol from
 `tsra_ddi_sock_proto`. It is the reference server for `tsra_ddi_sock`
-(`tsra_ddi/sock`, `tsra_api/sock`) and is used by the socket example programs
-(e.g. [`tsra_api_sock_get_api_rev`](../api_sock_get_api_rev/README.md)) and by
-`-F sock` DDI/API integration test suites.
+(selected with `TSRA_TEST_ARGS=transport=sock`) and is used by the socket example programs
+(e.g. [`tsra_api_sock_get_api_rev`](../../../examples/sock/api_sock_get_api_rev/README.md)) and by
+DDI/API integration test suites run with `TSRA_TEST_ARGS=transport=sock`.
 
 The server allocates and enables partition **10** once at startup. All
 connections, across all transports, share that one partition and its
@@ -102,16 +102,16 @@ is shared by every connection and is lost when the process exits.
 Connections are handled concurrently and a disconnect only cleans up that
 connection's own sessions, but `tsra_ddi_sock`'s client issues a
 partition-wide `Reset` before each test, which affects every connection
-sharing the server. Test suites built against `tsra_ddi_sock`/`-F sock`
+sharing the server. Test suites run with `TSRA_TEST_ARGS=transport=sock`
 against a shared server must therefore serialize with `--test-threads 1` to
 avoid one test's reset racing another test's in-flight operations. The
 `cargo xtask nextest` wrapper doesn't define or forward that option, so
-invoke `cargo nextest run` directly. Point `TSRA_DDI_SOCK` at the server's
-endpoint:
+invoke `cargo nextest run` directly. Point `sock=` in `TSRA_TEST_ARGS` at the
+server's endpoint:
 
 ```bash
-TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run --test-threads 1 --features sock --package tsra_api_tests
-TSRA_DDI_SOCK=/tmp/ddi_sock_server.sock cargo nextest run --test-threads 1 --features sock --package tsra_ddi_mbor_types --test tsra_ddi_tests
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" cargo nextest run --test-threads 1 --package tsra_api_tests
+TSRA_TEST_ARGS="transport=sock;sock=/tmp/ddi_sock_server.sock" cargo nextest run --test-threads 1 --package tsra_ddi_mbor_types --test tsra_ddi_tests
 ```
 
 Note the bare path (no `unix://` prefix) for the Unix client: only the
@@ -120,7 +120,7 @@ VSOCK prefixes but passes anything else straight to `UnixStream::connect`,
 so a `unix://` prefix would be treated as a literal (and nonexistent)
 filesystem path.
 
-See the [`api_sock_get_api_rev` README](../api_sock_get_api_rev/README.md) for
+See the [`api_sock_get_api_rev` README](../../../examples/sock/api_sock_get_api_rev/README.md) for
 a fuller walkthrough (two-terminal setup, alternative ports, VSOCK client
 usage, and troubleshooting) that applies equally to `unix://` endpoints.
 
@@ -129,8 +129,6 @@ usage, and troubleshooting) that applies equally to `unix://` endpoints.
 - Not a production HSM service: traffic is unauthenticated and unencrypted.
   Keep listeners on loopback/local-only paths; do not expose them to
   untrusted clients or networks.
-- `sock`, `mock`, and `emu` select mutually exclusive DDI backends; do not
-  combine their feature flags in the same build.
 - The socket transport carries ordinary MBOR/TBOR commands with an
   8192-byte main request/response capacity. TBOR supports up to 64 OOB
   buffers of up to 64 KiB each, reconstructed as server-owned SGL
@@ -138,7 +136,8 @@ usage, and troubleshooting) that applies equally to `unix://` endpoints.
   up to 16 KiB of data inline; the server copies it into its own buffers.
   Bulk requests require an owned `Active` session — a pending TBOR handshake
   cannot submit bulk I/O, and a session marked `NeedsRenegotiation` after a
-  reset blocks bulk I/O until it is reopened or authenticated again.
+  reset blocks bulk I/O (reported as `SessionNeedsRenegotiation`) until it
+  is reopened or authenticated again.
 - Client and server must be updated together; the protocol does not provide
   backward compatibility.
 - Calls on a given connection are synchronous: each connection allows one

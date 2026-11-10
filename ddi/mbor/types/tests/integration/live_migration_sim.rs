@@ -286,9 +286,11 @@ fn test_live_migration_sim_basic() {
     );
 }
 // Test: get sealed BK3, simulate live migration, set sealed BK3
-#[cfg(feature = "emu")]
 #[test]
 fn test_live_migration_sealed_bk3() {
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -1235,9 +1237,11 @@ fn test_live_migration_concurrent_separate_sessions() {
 // Check the cert chain hash before and after live migration. emu
 // regenerates its identity on erase; on hardware, certificate(s) only
 // change across an impactless update or similar.
-#[cfg(feature = "emu")]
 #[test]
 fn test_get_cert_chain_info_during_live_migration() {
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,

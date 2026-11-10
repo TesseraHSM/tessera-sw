@@ -63,29 +63,43 @@ Use cargo-nextest (recommended):
 
 ```bash
 # Run tests in specific packages you are modifying against simulator
-cargo xtask nextest --features emu --package <package-name>
+cargo xtask nextest --transport sock --package <package-name>
 ```
 
-The emulator exposes one partition resource by default. Set
-`TSRA_EMU_RESOURCE_COUNT` (for example `4` or `64`) to test with more.
+Test configuration comes from `TSRA_TEST_ARGS`, `;`-separated `key=value`
+pairs (for example `TSRA_TEST_ARGS="transport=sock;api_rev=1_1"`). The SDK
+reads it only when built with the `test-args` feature, which test builds
+enable through their dev-dependencies; unknown keys are an error. Keys:
 
-### C++ Session Modes
+- `transport`: `sock`, or the native `nix`/`win`; unset means native.
+  `--transport` sets it. With `sock`, each test binary starts an in-process
+  `ddi_sock_server` before `main` unless `sock` names an external server.
+- `sock`: endpoint of an external `ddi_sock_server`.
+- `resource_count`: partition resources of the simulated HSM (default 1; for
+  example `4` or `64`). A standalone server reads it only when built with
+  `--features test-args`, as xtask does.
+- `fast_backoff=1`: shortens resiliency retry backoff for simulator runs;
+  xtask sets it with `sock`.
+- `api_rev`: see below.
+- `server_bin`: path to a standalone `ddi_sock_server` binary for tests
+  that spawn one; xtask sets it.
 
-The C++ algorithm fixtures select the session API at compile time. Use
-`session-ex-tests` for EX/TBOR sessions on the emulator:
+### API Revision Modes
+
+`tsra_api_tests` (Rust and C++) selects the session API at runtime from
+the `api_rev` key of `TSRA_TEST_ARGS`: `1_0` (default) for legacy/MBOR
+`open_session`, or `1_1` for EX/TBOR `open_session_ex`. Tests for the other
+mode return early. `--api-rev` sets it:
 
 ```bash
-cargo nextest run --package tsra_api_tests --features emu,session-ex-tests --test cpp
+cargo xtask nextest --transport sock --api-rev 1_1 --package tsra_api_tests
 ```
-
-Omit `session-ex-tests` for legacy/MBOR sessions. Run builds for different
-backends or session modes sequentially because they share native build outputs.
 
 EX coverage includes SHA, ECC, RSA, HMAC, HKDF, AES-CBC, and plain-AES key management.
 Standalone unmask cases assert that EX returns an unsupported-operation error;
 their successful unmask workflows remain legacy-only. AES-GCM/XTS, KBKDF,
 generic-secret unmask, and legacy partition/session, cross-partition wrapping-key,
-persistence, and resiliency workflows remain in the legacy build.
+persistence, and resiliency workflows remain legacy-only.
 
 **EX algorithm fixtures reset and finalize every discovered partition, including
 hardware partitions. Use only dedicated test partitions.**

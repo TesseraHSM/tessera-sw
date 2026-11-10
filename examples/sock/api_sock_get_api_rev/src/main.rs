@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 //! Open the same socket-backed HSM partition from multiple threads on Windows or Linux.
 //!
-//! Run with `cargo run -p tsra_api_sock_get_api_rev --features sock -- [ENDPOINT] [THREADS]`.
+//! Run with `cargo run -p tsra_api_sock_get_api_rev --features tsra_api/test-args -- [ENDPOINT] [THREADS]`.
 //! Defaults are `tcp://127.0.0.1:1234` and four threads on both platforms.
 //! Unix socket paths and Linux `vsock://CID:PORT` endpoints are also supported.
 //! Each worker opens its own API partition handle and socket connection. The
@@ -76,7 +76,10 @@ mod example {
         use tsra_api::HsmPartitionManager;
 
         let options = parse_args(std::env::args().skip(1))?;
-        std::env::set_var("TSRA_DDI_SOCK", &options.endpoint);
+        std::env::set_var(
+            "TSRA_TEST_ARGS",
+            format!("transport=sock;sock={}", options.endpoint),
+        );
 
         let info = HsmPartitionManager::partition_info_list()
             .into_iter()

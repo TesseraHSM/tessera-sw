@@ -601,10 +601,12 @@ fn test_rsa_unwrap_rsa_crt_key() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_rsa_unwrap_rsa_with_key_tag() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -658,10 +660,12 @@ fn test_rsa_unwrap_rsa_with_key_tag() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_rsa_unwrap_rsa_crt_with_key_tag() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -715,10 +719,12 @@ fn test_rsa_unwrap_rsa_crt_with_key_tag() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_rsa_unwrap_ecc_keys_with_key_tag() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -869,10 +875,12 @@ fn test_rsa_unwrap_aes_key() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_rsa_unwrap_aes_with_key_tag() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,

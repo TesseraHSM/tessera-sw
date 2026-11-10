@@ -18,8 +18,10 @@ zerocopy = { features = ["derive"], workspace = true }
 
 [features]
 default = []
-emu = ["tsra_api/emu"]
-sock = ["tsra_api/sock"]
+# Read test configuration from TSRA_TEST_ARGS. Test builds only. Select the
+# socket transport with transport=sock and name a running ddi_sock_server with
+# sock=<endpoint>; the simulator is never linked into this library.
+test-args = ["tsra_api/test-args"]
 
 [lints]
 workspace = true

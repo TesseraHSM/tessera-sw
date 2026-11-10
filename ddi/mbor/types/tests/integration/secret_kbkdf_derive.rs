@@ -784,10 +784,12 @@ fn test_secret_kbkdf_aes192() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 #[ignore = "key_tag support has been removed"]
 fn test_secret_kbkdf_name() {
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,

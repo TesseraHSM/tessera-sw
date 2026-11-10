@@ -345,30 +345,37 @@ pub const MAX_RETRIES: u32 = 5;
 /// Default base delay in milliseconds for exponential backoff.
 /// Each iteration doubles: 400 → 800 → 1600 → 3200 → 6400 ms, plus
 /// random jitter of 0–[`BACKOFF_JITTER_MS`] to avoid thundering-herd retries.
-///
-/// When compiled with `emu` (in-process emulator, test builds only) the
-/// base is reduced to 8 ms so that retry tests complete quickly while
-/// still exercising realistic backoff behavior.
-#[cfg(not(feature = "emu"))]
 pub(crate) const BACKOFF_BASE_MS: u64 = 400;
-
-#[cfg(feature = "emu")]
-pub(crate) const BACKOFF_BASE_MS: u64 = 8;
 
 /// Maximum random jitter added to each backoff delay (in milliseconds).
 ///
 /// A uniform random value in `0..=BACKOFF_JITTER_MS` is added on top of
 /// the exponential delay so that concurrent callers don't all retry at
 /// exactly the same instant.
-///
-/// When compiled with `emu` (test builds only) jitter is reduced
-/// to 2 ms, preserving the 4:1 base-to-jitter ratio while keeping
-/// tests fast.
-#[cfg(not(feature = "emu"))]
 pub(crate) const BACKOFF_JITTER_MS: u64 = 100;
 
-#[cfg(feature = "emu")]
-pub(crate) const BACKOFF_JITTER_MS: u64 = 2;
+/// Whether to use the reduced backoff: in unit tests, and when
+/// `TSRA_TEST_ARGS` has `fast_backoff=1` (test builds only, see
+/// [`tsra_ddi::TestArgs`]). Meant for simulated devices, whose resets
+/// complete quickly; the transport alone is not enough, since a socket
+/// endpoint may front real hardware. The reduced values keep the 4:1
+/// base-to-jitter ratio, so retry tests stay fast while still exercising
+/// realistic backoff behavior.
+fn fast_backoff() -> bool {
+    cfg!(test) || tsra_ddi::TestArgs::from_env().fast_backoff
+}
+
+/// Base delay in milliseconds for exponential backoff: [`BACKOFF_BASE_MS`],
+/// or 8 ms with the reduced test backoff.
+pub(crate) fn backoff_base_ms() -> u64 {
+    if fast_backoff() { 8 } else { BACKOFF_BASE_MS }
+}
+
+/// Maximum backoff jitter in milliseconds: [`BACKOFF_JITTER_MS`], or 2 ms
+/// with the reduced test backoff.
+pub(crate) fn backoff_jitter_ms() -> u64 {
+    if fast_backoff() { 2 } else { BACKOFF_JITTER_MS }
+}
 
 /// Applies exponential backoff with jitter and sleeps for the computed
 /// duration.
@@ -579,7 +586,7 @@ pub(crate) fn execute_open_session_with_retry<T>(
     let mut attempt = 0u32;
 
     while is_open_session_retryable_error(&result) && attempt < max_retries {
-        apply_backoff(attempt, backoff_base_ms, BACKOFF_JITTER_MS);
+        apply_backoff(attempt, backoff_base_ms, backoff_jitter_ms());
         if partition.restore_partition().is_err() {
             attempt += 1;
             continue;
@@ -628,7 +635,7 @@ pub(crate) fn execute_key_gen_with_retry<T>(
     let mut attempt = 0u32;
 
     while result.as_ref().is_err_and(is_key_op_retryable_error) && attempt < max_retries {
-        apply_backoff(attempt, backoff_base_ms, BACKOFF_JITTER_MS);
+        apply_backoff(attempt, backoff_base_ms, backoff_jitter_ms());
 
         // Acquire write lock for the entire recovery + retry sequence
         // to prevent ABA handle collisions with concurrent
@@ -706,7 +713,7 @@ pub(crate) fn execute_key_op_with_retry<T>(
                 break Ok(value);
             }
             Some(Err(err)) if is_key_op_retryable_error(&err) && attempt < max_retries => {
-                apply_backoff(attempt, backoff_base_ms, BACKOFF_JITTER_MS);
+                apply_backoff(attempt, backoff_base_ms, backoff_jitter_ms());
                 attempt += 1;
             }
             Some(Err(err)) => {
@@ -919,9 +926,11 @@ mod tests {
         assert_eq!(state.restore_epoch, 0);
     }
 
-    #[cfg(any(feature = "emu", feature = "sock"))]
     #[test]
     fn aes_gcm_restore_preserves_ex_key_properties() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         use crate::*;
 
         let info = HsmPartitionManager::partition_info_list()

@@ -648,7 +648,7 @@ fuzz_target!(|input: FuzzInput| {
     common::common_fuzz_test(&|ctx, _path| exercise(ctx, &input));
 });
 
-#[cfg(all(test, feature = "emu"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -656,6 +656,9 @@ mod tests {
     /// fixture's device-display state is not safe for parallel entry.
     #[test]
     fn structured_scenarios() {
+        if !tsra_ddi::sock_selected() {
+            return;
+        }
         for scenario in 0..SCENARIOS {
             let seed = [scenario];
             let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("short seed");

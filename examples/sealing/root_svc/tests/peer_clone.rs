@@ -1,14 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(feature = "emu")]
+mod common;
 
 use std::fs;
 use std::net::TcpListener;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Child;
-use std::process::Command;
 use std::process::Stdio;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -17,6 +15,8 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
+use common::SimChild;
+use common::SimCommand;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -40,7 +40,7 @@ impl Drop for TestDir {
     }
 }
 
-struct Server(Child);
+struct Server(SimChild);
 impl Drop for Server {
     fn drop(&mut self) {
         if let Err(error) = self.0.kill() {
@@ -52,11 +52,11 @@ impl Drop for Server {
     }
 }
 
-fn command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_root_svc"))
+fn command() -> SimCommand {
+    SimCommand::new(env!("CARGO_BIN_EXE_root_svc"))
 }
 
-fn success(command: &mut Command) -> Result<String> {
+fn success(command: &mut SimCommand) -> Result<String> {
     let output = command.output()?;
     anyhow::ensure!(
         output.status.success(),
@@ -356,21 +356,33 @@ fn run_clone(source: &str) -> Result<()> {
 
 #[test]
 fn clone_from_created_primary() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     run_clone("create")
 }
 
 #[test]
 fn clone_from_locally_restored_primary() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     run_clone("restore-local")
 }
 
 #[test]
 fn clone_from_remotely_restored_primary() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     run_clone("restore-remote")
 }
 
 #[test]
 fn non_loopback_listen_is_rejected_before_device_access() -> Result<()> {
+    if !tsra_ddi::sock_selected() {
+        return Ok(());
+    }
     let dir = TestDir::new()?;
     let output = command()
         .args([

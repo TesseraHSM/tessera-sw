@@ -11,6 +11,10 @@ use clap::Parser;
 use crate::audit::Audit;
 use crate::cbindgen::Cbindgen;
 use crate::clippy::Clippy;
+#[cfg(not(target_os = "windows"))]
+use crate::common::with_test_arg;
+#[cfg(not(target_os = "windows"))]
+use crate::common::TEST_ARGS_ENV;
 use crate::copyright::Copyright;
 use crate::coverage::Coverage;
 use crate::coverage_report::CoverageReport;
@@ -55,7 +59,7 @@ struct Stage {
     /// Run nextest with cli options (features, package, profile, exclude)
     #[clap(long, conflicts_with_all = ["nextest_min", "nextest_full"])]
     nextest: bool,
-    /// Run default nextest tests (skip the extra emu resource-count runs)
+    /// Run default nextest tests (skip the extra sock resource-count runs)
     #[clap(long, conflicts_with_all = ["nextest", "nextest_full"])]
     nextest_min: bool,
     /// Run the full nextest tests
@@ -222,6 +226,12 @@ pub struct Precheck {
     /// Test name filters (used with --nextest/--coverage)
     #[clap(long)]
     filter: Vec<String>,
+    /// DDI transport to test against, set as `transport` in `TSRA_TEST_ARGS` (used with --nextest/--coverage)
+    #[clap(long, value_parser = crate::common::TRANSPORTS)]
+    transport: Option<String>,
+    /// API revision for tsra_api_tests, set as `api_rev` in `TSRA_TEST_ARGS` (used with --nextest/--coverage)
+    #[clap(long, value_parser = crate::common::API_REVS)]
+    api_rev: Option<String>,
 }
 
 impl Xtask for Precheck {
@@ -315,6 +325,8 @@ impl Xtask for Precheck {
                 exclude: self.exclude.clone(),
                 test: self.test.clone(),
                 filter: self.filter.clone(),
+                transport: self.transport.clone(),
+                api_rev: self.api_rev.clone(),
             }
             .run(ctx.clone())?;
         }
@@ -331,11 +343,23 @@ impl Xtask for Precheck {
 
             #[cfg(not(target_os = "windows"))]
             {
-                // Run emu tests with the extra partition resource counts
+                // Run sock tests with the extra partition resource counts
                 for (count, test) in resource_count_tests(&self.exclude, self.profile.clone()) {
-                    std::env::set_var(EMU_RESOURCE_COUNT_ENV, count.to_string());
+                    let prev = std::env::var(TEST_ARGS_ENV).ok();
+                    std::env::set_var(
+                        TEST_ARGS_ENV,
+                        with_test_arg(
+                            prev.as_deref().unwrap_or_default(),
+                            "resource_count",
+                            &count.to_string(),
+                            true,
+                        ),
+                    );
                     let result = test.run(ctx.clone());
-                    std::env::remove_var(EMU_RESOURCE_COUNT_ENV);
+                    match prev {
+                        Some(prev) => std::env::set_var(TEST_ARGS_ENV, prev),
+                        None => std::env::remove_var(TEST_ARGS_ENV),
+                    }
                     result?;
                 }
             }
@@ -345,6 +369,8 @@ impl Xtask for Precheck {
         if stage.coverage {
             if self.package.is_none()
                 && self.features.is_none()
+                && self.transport.is_none()
+                && self.api_rev.is_none()
                 && self.filterset.is_none()
                 && self.test.is_none()
                 && self.filter.is_empty()
@@ -363,6 +389,8 @@ impl Xtask for Precheck {
                     test: self.test.clone(),
                     filter: self.filter.clone(),
                     skip_clean: self.skip_clean,
+                    transport: self.transport.clone(),
+                    api_rev: self.api_rev.clone(),
                 }
                 .run(ctx.clone())?;
             }
@@ -398,7 +426,7 @@ impl Xtask for Precheck {
 fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
     let mut tests = Vec::new();
 
-    let mut emu_exclude = exclude.to_owned();
+    let mut sock_exclude = exclude.to_owned();
 
     for pkg in [
         "tsra_api_tests",
@@ -406,29 +434,31 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
         "provider-integration-tests-capi",
         "provider-integration-tests-nginx",
     ] {
-        if !emu_exclude.iter().any(|e| e == pkg) {
-            emu_exclude.push(pkg.to_string());
+        if !sock_exclude.iter().any(|e| e == pkg) {
+            sock_exclude.push(pkg.to_string());
         }
     }
 
-    // Run all emu tests (except tsra_api_tests)
+    // Run all tests against the sock transport (except tsra_api_tests)
     // CI job: test_*_emu
     tests.push(Nextest {
-        features: Some("emu".to_string()),
+        features: None,
         package: None,
         no_default_features: false,
         filterset: None,
-        profile: profile.clone().or(Some("ci-emu".to_string())),
-        exclude: emu_exclude,
+        profile: profile.clone().or(Some("ci-sock".to_string())),
+        exclude: sock_exclude,
         test: None,
         filter: vec![],
+        transport: Some("sock".to_string()),
+        api_rev: None,
     });
 
     // Run tsra_api_tests
     // CI job: test_*_api
     if !exclude.iter().any(|e| e == "tsra_api_tests") {
         tests.push(Nextest {
-            features: Some("emu".to_string()),
+            features: None,
             package: Some("tsra_api_tests".to_string()),
             no_default_features: false,
             filterset: None,
@@ -436,14 +466,16 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
             exclude: exclude.to_owned(),
             test: None,
             filter: vec![],
+            transport: Some("sock".to_string()),
+            api_rev: Some("1_0".to_string()),
         });
     }
 
-    // Run tsra_api_tests with EX sessions against emu
+    // Run tsra_api_tests with EX sessions against sock
     // CI job: test_*_api
     if !exclude.iter().any(|e| e == "tsra_api_tests") {
         tests.push(Nextest {
-            features: Some("emu,session-ex-tests".to_string()),
+            features: None,
             package: Some("tsra_api_tests".to_string()),
             no_default_features: false,
             filterset: None,
@@ -451,18 +483,15 @@ fn default_tests(exclude: &[String], profile: Option<String>) -> Vec<Nextest> {
             exclude: exclude.to_owned(),
             test: None,
             filter: vec![],
+            transport: Some("sock".to_string()),
+            api_rev: Some("1_1".to_string()),
         });
     }
 
     tests
 }
 
-/// Env var the emu transport reads for the partition resource count
-/// (mirrors `tsra_ddi_emu::EMU_RESOURCE_COUNT_ENV`).
-#[cfg(not(target_os = "windows"))]
-const EMU_RESOURCE_COUNT_ENV: &str = "TSRA_EMU_RESOURCE_COUNT";
-
-// Helper function to define the Linux-specific tsra_ddi emu runs with extra
+// Helper function to define the Linux-specific tsra_ddi sock runs with extra
 // partition resource counts. Each entry is (resource count, test run).
 #[cfg(not(target_os = "windows"))]
 fn resource_count_tests(exclude: &[String], profile: Option<String>) -> Vec<(u32, Nextest)> {
@@ -474,14 +503,16 @@ fn resource_count_tests(exclude: &[String], profile: Option<String>) -> Vec<(u32
             tests.push((
                 count,
                 Nextest {
-                    features: Some("emu".to_string()),
+                    features: None,
                     package: Some("tsra_ddi_mbor_types".to_string()),
                     no_default_features: false,
                     filterset: None,
-                    profile: profile.clone().or(Some(format!("ci-emu-res-{count}"))),
+                    profile: profile.clone().or(Some(format!("ci-sock-res-{count}"))),
                     exclude: exclude.to_owned(),
                     test: None,
                     filter: vec![],
+                    transport: Some("sock".to_string()),
+                    api_rev: None,
                 },
             ));
         }
