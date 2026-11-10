@@ -22,6 +22,8 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_uno_aes_sgl::xts::XTS_CHUNK;
+use tsra_fw_uno_aes_sgl::xts::xor_tweaks;
 use tsra_fw_uno_drivers_aes::AesMode;
 use tsra_fw_uno_drivers_aes::AesOp;
 
@@ -30,30 +32,8 @@ use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 use crate::gdma::HostSgl;
 
-/// Bytes moved per GDMA/ECB round trip. Two buffers of this size live
-/// in the per-IO DMA slot at once.
-const XTS_CHUNK: usize = 2048;
-
 /// Half of an XTS key: one AES-256 key.
 const XTS_HALF_KEY_LEN: usize = HSM_AES_XTS_KEY_LEN / 2;
-
-/// Multiply a tweak by α in GF(2¹²⁸) (IEEE 1619 little-endian convention).
-#[inline]
-fn mul_alpha(t: u128) -> u128 {
-    (t << 1) ^ ((t >> 127) * 0x87)
-}
-
-/// XOR the tweak sequence starting at `t` into `buf` (whole blocks) and
-/// return the tweak that follows the last block.
-fn xor_tweaks(buf: &mut [u8], mut t: u128) -> u128 {
-    for block in buf.as_chunks_mut::<AES_BLOCK_SIZE>().0 {
-        for (b, m) in block.iter_mut().zip(t.to_le_bytes()) {
-            *b ^= m;
-        }
-        t = mul_alpha(t);
-    }
-    t
-}
 
 impl UnoHsmPal {
     /// Fill `key` with a random AES-256-XTS key whose halves differ.

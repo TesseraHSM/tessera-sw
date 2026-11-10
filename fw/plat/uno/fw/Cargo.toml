@@ -4,6 +4,7 @@
 [workspace]
 members = [
   "app",
+  "crates/aes_sgl",
   "crates/bulk_copy",
   "crates/cert_blob",
   "crates/crashdump",
@@ -50,6 +51,7 @@ tsra_fw_bulk_copy = { path = "crates/bulk_copy" }
 tsra_fw_single_cell = { path = "crates/single_cell" }
 tsra_fw_static_init = { path = "crates/static_init" }
 tsra_fw_static_ref = { path = "crates/static_ref" }
+tsra_fw_uno_aes_sgl = { path = "crates/aes_sgl" }
 tsra_fw_uno_cert_blob = { path = "crates/cert_blob" }
 tsra_fw_uno_crashdump = { path = "crates/crashdump" }
 tsra_fw_uno_reg_cortex_m = { path = "reg/cortex-m" }

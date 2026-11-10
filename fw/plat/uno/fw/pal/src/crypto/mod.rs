@@ -54,7 +54,7 @@ mod gcm_bcp;
 #[cfg(not(feature = "bulk_crypto"))]
 use gcm_bcp as gcm;
 mod gcm_sgl;
-mod ghash;
+use tsra_fw_uno_aes_sgl::ghash;
 #[allow(unsafe_code)]
 mod hash;
 mod hmac;
