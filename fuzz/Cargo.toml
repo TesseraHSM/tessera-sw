@@ -216,6 +216,13 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_mldsa_generate_key"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_mldsa_generate_key.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_ecc_sign"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecc_sign.rs"
 test = false
@@ -223,8 +230,29 @@ test = false
 [[bin]]
 bench = false
 doc = false
+name = "fuzz_tbor_mldsa_sign"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_mldsa_sign.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
 name = "fuzz_tbor_ecdh_key_exchange"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_ecdh_key_exchange.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_mlkem_encapsulate"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_mlkem_encapsulate.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_mlkem_decapsulate"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_mlkem_decapsulate.rs"
 test = false
 
 [[bin]]
@@ -323,4 +351,11 @@ bench = false
 doc = false
 name = "fuzz_tbor_get_cert_chain_info"
 path = "fuzz_targets/ddi/tbor/fuzz_tbor_get_cert_chain_info.rs"
+test = false
+
+[[bin]]
+bench = false
+doc = false
+name = "fuzz_tbor_mldsa_verify"
+path = "fuzz_targets/ddi/tbor/fuzz_tbor_mldsa_verify.rs"
 test = false
