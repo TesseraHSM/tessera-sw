@@ -677,23 +677,31 @@ fn sd_reseal_remote_backup_invalid_dest_part_owner_cert_index_rejected() {
         .expect_err("invalid destination partition-owner cert index must fail");
 }
 
-/// Reject a source certificate descriptor with an invalid length.
+/// Reject a source certificate descriptor with a positive mismatched length.
 #[test]
 fn sd_reseal_remote_backup_src_cert_length_mismatch_rejected() {
     let (ctx, mut req, evidence) = valid_reseal_fixture();
 
-    req.src_mfgr_cert_chain[0].length = U16::new(0);
+    let index = req.src_mfgr_cert_chain[0].index as usize;
+    let actual_len = evidence.oob_items[index].len();
+
+    assert!(actual_len > 1);
+    req.src_mfgr_cert_chain[0].length = U16::new((actual_len - 1) as u16);
 
     ctx.tbor_oob(&req, &evidence.oob())
         .expect_err("source certificate length mismatch must fail");
 }
 
-/// Reject a destination certificate descriptor with an invalid length.
+/// Reject a destination certificate descriptor with a positive mismatched length.
 #[test]
 fn sd_reseal_remote_backup_dest_cert_length_mismatch_rejected() {
     let (ctx, mut req, evidence) = valid_reseal_fixture();
 
-    req.dest_mfgr_cert_chain[0].length = U16::new(0);
+    let index = req.dest_mfgr_cert_chain[0].index as usize;
+    let actual_len = evidence.oob_items[index].len();
+
+    assert!(actual_len > 1);
+    req.dest_mfgr_cert_chain[0].length = U16::new((actual_len - 1) as u16);
 
     ctx.tbor_oob(&req, &evidence.oob())
         .expect_err("destination certificate length mismatch must fail");
