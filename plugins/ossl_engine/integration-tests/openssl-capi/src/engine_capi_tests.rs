@@ -102,6 +102,9 @@ fn setup_keymat() -> PathBuf {
         // SAFETY: single-threaded test setup before any HSM/engine call.
         unsafe { std::env::set_var(k, v) };
     };
+    // Credentials the simulated HSM is provisioned with by the test suite.
+    set("TSRA_CREDENTIALS_ID", "01".repeat(16));
+    set("TSRA_CREDENTIALS_PIN", "02".repeat(16));
     set("TSRA_RESILIENCY_ENABLED", "1".into());
     set("TSRA_RESILIENCY_STORAGE_DIR", res.display().to_string());
     set("TSRA_OBK_SOURCE", "caller".into());

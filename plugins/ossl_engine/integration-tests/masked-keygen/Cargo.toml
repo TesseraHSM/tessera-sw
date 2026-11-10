@@ -22,7 +22,6 @@ tsra_api = { optional = true, workspace = true }
 tsra_ossl_engine = { features = [
   "engine",
   "integration",
-  "test-credentials",
 ], optional = true, path = "../../tsra_ossl_engine" }
 
 [lints]

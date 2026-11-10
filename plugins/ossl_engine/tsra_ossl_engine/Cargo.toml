@@ -16,10 +16,6 @@ engine = ["dep:foreign-types", "dep:openssl", "tsra_ossl_engine_core/engine"]
 # Exposes the test-only masked-key generator (generate_masked_ec_p384_from_env)
 # for the integration harness; not built into the production engine cdylib.
 integration = ["engine"]
-# Test transport: the unit tests start an in-process DDI sock server.
-# Compiles in well-known default credentials for the simulated HSM. Test
-# builds only; never enable for a production engine.
-test-credentials = []
 
 [dependencies]
 parking_lot.workspace = true

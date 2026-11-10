@@ -16,6 +16,11 @@ use tsra_ossl_engine_core::rsa_pkey_method::ANY_KEYTYPE;
 
 use super::*;
 
+/// Credentials the simulated HSM is provisioned with by the API test suite
+/// (`api/tests/src/utils/partition.rs`).
+const DEFAULT_CRED_ID: [u8; CREDENTIALS_SIZE] = [1u8; CREDENTIALS_SIZE];
+const DEFAULT_CRED_PIN: [u8; CREDENTIALS_SIZE] = [2u8; CREDENTIALS_SIZE];
+
 /// Test helper: write key-material bytes to `path` with owner-only permissions
 /// and the same open hardening the engine uses for secret files — create a new
 /// file (`O_EXCL`, no clobber) mode 0600 and refuse a symlink at the path
@@ -3292,25 +3297,14 @@ mod sim {
         );
     }
 
-    // An unset credential with no default must be a hard error, not a silent
-    // fallback. (In production builds cred_field is called with None.)
+    // An unset credential must be a hard error, not a silent fallback.
     #[test]
-    fn cred_field_missing_without_default_errors() {
+    fn cred_field_missing_errors() {
         if !tsra_ddi::sock_selected() {
             return;
         }
-        let r = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", None);
+        let r = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ");
         assert!(matches!(r, Err(EngineError::Other(_))));
-    }
-
-    #[test]
-    fn cred_field_missing_with_default_uses_default() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
-        let def = [7u8; 16];
-        let got = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", Some(def)).unwrap();
-        assert_eq!(got, def);
     }
 }
 

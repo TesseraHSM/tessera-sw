@@ -43,17 +43,6 @@ use zeroize::Zeroizing;
 
 use crate::SECRET_FILE_MODE;
 
-/// Test-only credentials. Match the values used throughout the API test
-/// suite (`api/tests/src/utils/partition.rs`), so the simulated HSM accepts
-/// the engine out of the box. Compiled in **only** for unit tests and
-/// `test-credentials` builds: a production build has no default, so an unset
-/// `TSRA_CREDENTIALS_*` is a hard error rather than a silent authentication
-/// with a well-known PIN.
-#[cfg(any(test, feature = "test-credentials"))]
-const DEFAULT_CRED_ID: [u8; CREDENTIALS_SIZE] = [1u8; CREDENTIALS_SIZE];
-#[cfg(any(test, feature = "test-credentials"))]
-const DEFAULT_CRED_PIN: [u8; CREDENTIALS_SIZE] = [2u8; CREDENTIALS_SIZE];
-
 /// Length of a credential id or PIN (`HsmCredentials`), and of its hex form.
 const CREDENTIALS_SIZE: usize = 16;
 const CREDENTIALS_HEX_SIZE: usize = CREDENTIALS_SIZE * 2;
@@ -619,18 +608,8 @@ fn build_obk_config(settings: &ResiliencySettings) -> EngineResult<HsmOwnerBacku
 }
 
 fn credentials_from_env() -> EngineResult<HsmCredentials> {
-    // Defaults exist only in test builds; a production build requires the
-    // env vars (see DEFAULT_CRED_* above).
-    #[cfg(any(test, feature = "test-credentials"))]
-    let (def_id, def_pin) = (Some(DEFAULT_CRED_ID), Some(DEFAULT_CRED_PIN));
-    #[cfg(not(any(test, feature = "test-credentials")))]
-    let (def_id, def_pin): (
-        Option<[u8; CREDENTIALS_SIZE]>,
-        Option<[u8; CREDENTIALS_SIZE]>,
-    ) = (None, None);
-
-    let mut id = cred_field(ENV_CREDENTIALS_ID, def_id)?;
-    let mut pin = cred_field(ENV_CREDENTIALS_PIN, def_pin)?;
+    let mut id = cred_field(ENV_CREDENTIALS_ID)?;
+    let mut pin = cred_field(ENV_CREDENTIALS_PIN)?;
     let creds = HsmCredentials::new(&id, &pin);
     // Scrub our decoded copies; HsmCredentials holds its own.
     id.zeroize();
@@ -638,26 +617,18 @@ fn credentials_from_env() -> EngineResult<HsmCredentials> {
     Ok(creds)
 }
 
-/// Read a credential from `var` (hex). Falls back to `default` when the var is
-/// unset; in production builds `default` is `None`, so a missing credential is a
-/// hard error rather than a silent well-known PIN.
-fn cred_field(
-    var: &'static str,
-    default: Option<[u8; CREDENTIALS_SIZE]>,
-) -> EngineResult<[u8; CREDENTIALS_SIZE]> {
+/// Read a credential from `var` (hex). There is no default: a missing
+/// credential is a hard error.
+fn cred_field(var: &'static str) -> EngineResult<[u8; CREDENTIALS_SIZE]> {
     match std::env::var(var) {
         Ok(s) => {
             // The source hex string holds the secret; scrub it on drop.
             let s = Zeroizing::new(s);
             decode_credential_hex(&s, var)
         }
-        // Only a truly-unset var falls back to the default; a present but
-        // non-UTF-8 value is an error, not "unset".
-        Err(std::env::VarError::NotPresent) => default.ok_or_else(|| {
-            EngineError::Other(format!(
-                "{var} must be set ({CREDENTIALS_HEX_SIZE} hex chars)"
-            ))
-        }),
+        Err(std::env::VarError::NotPresent) => Err(EngineError::Other(format!(
+            "{var} must be set ({CREDENTIALS_HEX_SIZE} hex chars)"
+        ))),
         Err(std::env::VarError::NotUnicode(_)) => {
             Err(EngineError::Other(format!("{var} is not valid UTF-8")))
         }

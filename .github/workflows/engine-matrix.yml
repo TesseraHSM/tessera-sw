@@ -171,14 +171,13 @@ jobs:
       - name: Load engine
         run: openssl engine -t "$(pwd)/target/debug/libtsra_ossl_engine.so"
 
-      # The integration suites load a key through the engine end to end; they
-      # need a .so with the test credentials and runtime transport support, so
-      # (re)build it and
-      # the masked-key generator. Each test harness process starts its own
-      # simulated HSM, which the openssl and generator children share.
+      # The integration suites load a key through the engine end to end, so
+      # build the engine .so and the masked-key generator. The harnesses supply
+      # credentials and the connection through the environment; each starts its
+      # own simulated HSM, which the openssl and generator children share.
       - name: Build engine + generator for integration tests
         run: |
-          cargo build -p tsra_ossl_engine --features engine,test-credentials
+          cargo build -p tsra_ossl_engine --features engine
           cargo build -p tsra-engine-masked-keygen --features integration
 
       - name: Integration tests — CLI (openssl -engine)
