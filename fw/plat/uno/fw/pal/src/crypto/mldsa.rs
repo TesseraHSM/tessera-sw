@@ -104,8 +104,8 @@ impl HsmMlDsa for UnoHsmPal {
         let outcome: HsmResult<(usize, usize)> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            let priv_len = param.sk_len();
-            let pub_len = param.pk_len();
+            let sk_len = param.sk_len();
+            let pk_len = param.pk_len();
             // Validated in both modes, so the error does not depend on `out`.
             if seed.len() != MLDSA_SEED_LEN {
                 error!(
@@ -117,20 +117,20 @@ impl HsmMlDsa for UnoHsmPal {
                 );
                 return Err(HsmError::InvalidArg);
             }
-            let Some((priv_out, pub_out)) = out else {
-                return Ok((priv_len, pub_len));
+            let Some((sk, pk)) = out else {
+                return Ok((sk_len, pk_len));
             };
             // Validate before handing anything to the driver, so buffer-size
             // bugs surface here rather than as a malformed FP request.
-            if priv_out.len() < priv_len || pub_out.len() < pub_len {
+            if sk.len() < sk_len || pk.len() < pk_len {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mldsa_gen_keypair short buffers priv_len={} (want {}) pub_len={} (want {})",
-                    priv_out.len(),
-                    priv_len,
-                    pub_out.len(),
-                    pub_len
+                    "pal: mldsa_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
+                    sk.len(),
+                    sk_len,
+                    pk.len(),
+                    pk_len
                 );
                 return Err(HsmError::InvalidArg);
             }
@@ -150,52 +150,15 @@ impl HsmMlDsa for UnoHsmPal {
                 .mldsa_gen_key(
                     mldsa_kind(param),
                     seed,
-                    &mut pub_out[..pub_len],
-                    &mut priv_out[..priv_len],
+                    &mut pk[..pk_len],
+                    &mut sk[..sk_len],
                 )
                 .await?;
-            Ok((priv_len, pub_len))
+            Ok((sk_len, pk_len))
         }
         .await;
 
         outcome
-    }
-
-    async fn mldsa_sign_in_place(
-        &self,
-        io: &UnoHsmIo,
-        param: HsmMlDsaParam,
-        sk_sig: &mut HsmDmaBuf,
-        hedge: HsmMlDsaHedge,
-        msg: HsmMlDsaMsg<'_>,
-    ) -> HsmResult<usize> {
-        let mut rnd = [0u8; MLDSA_SEED_LEN];
-        let result = async {
-            #[cfg(feature = "bulk_crypto")]
-            return Err(HsmError::UnsupportedCmd);
-            check_msg_type(&msg)?;
-            if hedged(hedge) {
-                self.rng_fill_bytes(io, &mut rnd)?;
-            }
-            self.pqc
-                .with_engine(async |engine| {
-                    engine
-                        .mldsa_sign_in_place(
-                            mldsa_kind(param),
-                            sk_sig,
-                            &rnd,
-                            msg.msg_type(),
-                            msg.message(),
-                            msg.ctx(),
-                        )
-                        .await
-                })
-                .await?;
-            Ok(param.sig_len())
-        }
-        .await;
-        rnd.fill(0);
-        result
     }
 
     async fn mldsa_sign(
@@ -256,6 +219,43 @@ impl HsmMlDsa for UnoHsmPal {
         outcome
     }
 
+    async fn mldsa_sign_in_place(
+        &self,
+        io: &UnoHsmIo,
+        param: HsmMlDsaParam,
+        sk_sig: &mut HsmDmaBuf,
+        hedge: HsmMlDsaHedge,
+        msg: HsmMlDsaMsg<'_>,
+    ) -> HsmResult<usize> {
+        let mut rnd = [0u8; MLDSA_SEED_LEN];
+        let result = async {
+            #[cfg(feature = "bulk_crypto")]
+            return Err(HsmError::UnsupportedCmd);
+            check_msg_type(&msg)?;
+            if hedged(hedge) {
+                self.rng_fill_bytes(io, &mut rnd)?;
+            }
+            self.pqc
+                .with_engine(async |engine| {
+                    engine
+                        .mldsa_sign_in_place(
+                            mldsa_kind(param),
+                            sk_sig,
+                            &rnd,
+                            msg.msg_type(),
+                            msg.message(),
+                            msg.ctx(),
+                        )
+                        .await
+                })
+                .await?;
+            Ok(param.sig_len())
+        }
+        .await;
+        rnd.fill(0);
+        result
+    }
+
     async fn mldsa_verify(
         &self,
         _io: &UnoHsmIo,
@@ -304,8 +304,8 @@ impl HsmMlKem for UnoHsmPal {
         let outcome: HsmResult<(usize, usize)> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            let priv_len = param.sk_len();
-            let pub_len = param.pk_len();
+            let sk_len = param.sk_len();
+            let pk_len = param.pk_len();
             // Validated in both modes, so the error does not depend on `out`.
             if seed.len() != MLKEM_SEED_LEN {
                 error!(
@@ -317,18 +317,18 @@ impl HsmMlKem for UnoHsmPal {
                 );
                 return Err(HsmError::InvalidArg);
             }
-            let Some((priv_out, pub_out)) = out else {
-                return Ok((priv_len, pub_len));
+            let Some((sk, pk)) = out else {
+                return Ok((sk_len, pk_len));
             };
-            if priv_out.len() < priv_len || pub_out.len() < pub_len {
+            if sk.len() < sk_len || pk.len() < pk_len {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mlkem_gen_keypair short buffers priv_len={} (want {}) pub_len={} (want {})",
-                    priv_out.len(),
-                    priv_len,
-                    pub_out.len(),
-                    pub_len
+                    "pal: mlkem_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
+                    sk.len(),
+                    sk_len,
+                    pk.len(),
+                    pk_len
                 );
                 return Err(HsmError::InvalidArg);
             }
@@ -343,11 +343,11 @@ impl HsmMlKem for UnoHsmPal {
                 .mlkem_gen_key(
                     mlkem_kind(param),
                     seed,
-                    &mut pub_out[..pub_len],
-                    &mut priv_out[..priv_len],
+                    &mut pk[..pk_len],
+                    &mut sk[..sk_len],
                 )
                 .await?;
-            Ok((priv_len, pub_len))
+            Ok((sk_len, pk_len))
         }
         .await;
 

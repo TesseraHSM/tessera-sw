@@ -119,16 +119,16 @@ impl HsmMlDsa for StdHsmPal {
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let variant = mldsa_variant(param);
-        let priv_len = variant.sec_key_len();
-        let pub_len = variant.pub_key_len();
+        let sk_len = variant.sec_key_len();
+        let pk_len = variant.pub_key_len();
         // Validated in both modes, so the error does not depend on `out`.
         if seed.len() != MLDSA_SEED_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let Some((priv_out, pub_out)) = out else {
-            return Ok((priv_len, pub_len));
+        let Some((sk, pk)) = out else {
+            return Ok((sk_len, pk_len));
         };
-        if priv_out.len() < priv_len || pub_out.len() < pub_len {
+        if sk.len() < sk_len || pk.len() < pk_len {
             return Err(HsmError::InvalidArg);
         }
         // A fresh seed *is* the private key, so it comes from the HSM's
@@ -137,43 +137,10 @@ impl HsmMlDsa for StdHsmPal {
             self.rng_fill_bytes(io, seed)?;
         }
 
-        let (pk, sk) = self.pqc.mldsa_keygen(variant, seed).await?;
-        write_exact(&mut pub_out[..pub_len], &pk)?;
-        write_exact(&mut priv_out[..priv_len], &sk)?;
-        Ok((priv_len, pub_len))
-    }
-
-    async fn mldsa_sign_in_place(
-        &self,
-        _io: &StdHsmIo,
-        param: HsmMlDsaParam,
-        sk_sig: &mut HsmDmaBuf,
-        hedge: HsmMlDsaHedge,
-        msg: HsmMlDsaMsg<'_>,
-    ) -> HsmResult<usize> {
-        let variant = mldsa_variant(param);
-        let external_mu = external_mu(&msg)?;
-        let sig_len = variant.sig_len();
-        let key_at = sk_sig
-            .len()
-            .checked_sub(variant.sec_key_len())
-            .ok_or(HsmError::InvalidArg)?;
-        if sk_sig.len() < sig_len {
-            return Err(HsmError::InvalidArg);
-        }
-        let result = self
-            .pqc
-            .mldsa_sign(
-                variant,
-                &sk_sig[key_at..],
-                external_mu,
-                deterministic(hedge),
-                msg.message(),
-                msg.ctx(),
-            )
-            .await?;
-        write_exact(&mut sk_sig[..sig_len], &result)?;
-        Ok(sig_len)
+        let (pk_bytes, sk_bytes) = self.pqc.mldsa_keygen(variant, seed).await?;
+        write_exact(&mut pk[..pk_len], &pk_bytes)?;
+        write_exact(&mut sk[..sk_len], &sk_bytes)?;
+        Ok((sk_len, pk_len))
     }
 
     async fn mldsa_sign(
@@ -216,6 +183,39 @@ impl HsmMlDsa for StdHsmPal {
         Ok(sig_len)
     }
 
+    async fn mldsa_sign_in_place(
+        &self,
+        _io: &StdHsmIo,
+        param: HsmMlDsaParam,
+        sk_sig: &mut HsmDmaBuf,
+        hedge: HsmMlDsaHedge,
+        msg: HsmMlDsaMsg<'_>,
+    ) -> HsmResult<usize> {
+        let variant = mldsa_variant(param);
+        let external_mu = external_mu(&msg)?;
+        let sig_len = variant.sig_len();
+        let key_at = sk_sig
+            .len()
+            .checked_sub(variant.sec_key_len())
+            .ok_or(HsmError::InvalidArg)?;
+        if sk_sig.len() < sig_len {
+            return Err(HsmError::InvalidArg);
+        }
+        let result = self
+            .pqc
+            .mldsa_sign(
+                variant,
+                &sk_sig[key_at..],
+                external_mu,
+                deterministic(hedge),
+                msg.message(),
+                msg.ctx(),
+            )
+            .await?;
+        write_exact(&mut sk_sig[..sig_len], &result)?;
+        Ok(sig_len)
+    }
+
     async fn mldsa_verify(
         &self,
         _io: &StdHsmIo,
@@ -244,27 +244,27 @@ impl HsmMlKem for StdHsmPal {
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
         let variant = mlkem_variant(param);
-        let priv_len = variant.sec_key_len();
-        let pub_len = variant.pub_key_len();
+        let sk_len = variant.sec_key_len();
+        let pk_len = variant.pub_key_len();
         // Validated in both modes, so the error does not depend on `out`.
         if seed.len() != MLKEM_SEED_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let Some((priv_out, pub_out)) = out else {
-            return Ok((priv_len, pub_len));
+        let Some((sk, pk)) = out else {
+            return Ok((sk_len, pk_len));
         };
-        if priv_out.len() < priv_len || pub_out.len() < pub_len {
+        if sk.len() < sk_len || pk.len() < pk_len {
             return Err(HsmError::InvalidArg);
         }
         if seed_src == HsmMlSeedSrc::Random {
             self.rng_fill_bytes(io, seed)?;
         }
 
-        let (pk, sk) = self.pqc.mlkem_keygen(variant, seed).await?;
-        let sk = Zeroizing::new(sk);
-        write_exact(&mut pub_out[..pub_len], &pk)?;
-        write_exact(&mut priv_out[..priv_len], &sk)?;
-        Ok((priv_len, pub_len))
+        let (pk_bytes, sk_bytes) = self.pqc.mlkem_keygen(variant, seed).await?;
+        let sk_bytes = Zeroizing::new(sk_bytes);
+        write_exact(&mut pk[..pk_len], &pk_bytes)?;
+        write_exact(&mut sk[..sk_len], &sk_bytes)?;
+        Ok((sk_len, pk_len))
     }
 
     async fn mlkem_encaps(
@@ -276,22 +276,22 @@ impl HsmMlKem for StdHsmPal {
     ) -> HsmResult<(usize, usize)> {
         let variant = mlkem_variant(param);
         let ct_len = variant.ciphertext_len();
-        let Some((ct_out, ss_out)) = out else {
+        let Some((ct, ss)) = out else {
             return Ok((ct_len, MLKEM_SHARED_SECRET_LEN));
         };
         if pk.len() != variant.pub_key_len()
-            || ct_out.len() < ct_len
-            || ss_out.len() < MLKEM_SHARED_SECRET_LEN
+            || ct.len() < ct_len
+            || ss.len() < MLKEM_SHARED_SECRET_LEN
         {
             return Err(HsmError::InvalidArg);
         }
 
         // As with signing, the encapsulation message never leaves the crypto
         // layer, so that layer draws it.
-        let (ct, ss) = self.pqc.mlkem_encapsulate(variant, pk).await?;
-        let ss = Zeroizing::new(ss);
-        write_exact(&mut ct_out[..ct_len], &ct)?;
-        write_exact(&mut ss_out[..MLKEM_SHARED_SECRET_LEN], &ss)?;
+        let (ct_bytes, ss_bytes) = self.pqc.mlkem_encapsulate(variant, pk).await?;
+        let ss_bytes = Zeroizing::new(ss_bytes);
+        write_exact(&mut ct[..ct_len], &ct_bytes)?;
+        write_exact(&mut ss[..MLKEM_SHARED_SECRET_LEN], &ss_bytes)?;
         Ok((ct_len, MLKEM_SHARED_SECRET_LEN))
     }
 
@@ -300,21 +300,21 @@ impl HsmMlKem for StdHsmPal {
         _io: &StdHsmIo,
         param: HsmMlKemParam,
         pk_ct: &mut HsmDmaBuf,
-        ss_out: &mut HsmDmaBuf,
+        ss: &mut HsmDmaBuf,
     ) -> HsmResult<(usize, usize)> {
         let variant = mlkem_variant(param);
         let pk_len = variant.pub_key_len();
         let ct_len = variant.ciphertext_len();
-        if pk_ct.len() < pk_len || ss_out.len() < MLKEM_SHARED_SECRET_LEN {
+        if pk_ct.len() < pk_len || ss.len() < MLKEM_SHARED_SECRET_LEN {
             return Err(HsmError::InvalidArg);
         }
-        let (ct, ss) = self
+        let (ct, ss_bytes) = self
             .pqc
             .mlkem_encapsulate(variant, &pk_ct[..pk_len])
             .await?;
-        let ss = Zeroizing::new(ss);
+        let ss_bytes = Zeroizing::new(ss_bytes);
         write_exact(&mut pk_ct[..ct_len], &ct)?;
-        write_exact(&mut ss_out[..MLKEM_SHARED_SECRET_LEN], &ss)?;
+        write_exact(&mut ss[..MLKEM_SHARED_SECRET_LEN], &ss_bytes)?;
         Ok((ct_len, MLKEM_SHARED_SECRET_LEN))
     }
 
@@ -324,20 +324,20 @@ impl HsmMlKem for StdHsmPal {
         param: HsmMlKemParam,
         sk: &HsmDmaBuf,
         ct: &HsmDmaBuf,
-        ss_out: Option<&mut HsmDmaBuf>,
+        ss: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
-        let Some(ss_out) = ss_out else {
+        let Some(ss) = ss else {
             return Ok(MLKEM_SHARED_SECRET_LEN);
         };
         let variant = mlkem_variant(param);
         if sk.len() != variant.sec_key_len()
             || ct.len() != variant.ciphertext_len()
-            || ss_out.len() < MLKEM_SHARED_SECRET_LEN
+            || ss.len() < MLKEM_SHARED_SECRET_LEN
         {
             return Err(HsmError::InvalidArg);
         }
-        let ss = Zeroizing::new(self.pqc.mlkem_decapsulate(variant, sk, ct).await?);
-        write_exact(&mut ss_out[..MLKEM_SHARED_SECRET_LEN], &ss)?;
+        let ss_bytes = Zeroizing::new(self.pqc.mlkem_decapsulate(variant, sk, ct).await?);
+        write_exact(&mut ss[..MLKEM_SHARED_SECRET_LEN], &ss_bytes)?;
         Ok(MLKEM_SHARED_SECRET_LEN)
     }
 }
@@ -359,14 +359,14 @@ mod tests {
     use crate::StdHsmIo;
     use crate::StdHsmPal;
 
-    /// ML-DSA `(param_set, pub_key, sec_key, signature)` lengths, FIPS 204.
+    /// ML-DSA `(param_set, pk, sk, sig)` lengths, FIPS 204.
     const MLDSA_SETS: [(HsmMlDsaParam, usize, usize, usize); 3] = [
         (HsmMlDsaParam::MlDsa44, 1312, 2560, 2420),
         (HsmMlDsaParam::MlDsa65, 1952, 4032, 3309),
         (HsmMlDsaParam::MlDsa87, 2592, 4896, 4627),
     ];
 
-    /// ML-KEM `(param_set, pub_key, sec_key, ciphertext)` lengths, FIPS 203.
+    /// ML-KEM `(param_set, pk, sk, ct)` lengths, FIPS 203.
     const MLKEM_SETS: [(HsmMlKemParam, usize, usize, usize); 3] = [
         (HsmMlKemParam::MlKem512, 800, 1632, 768),
         (HsmMlKemParam::MlKem768, 1184, 2400, 1088),

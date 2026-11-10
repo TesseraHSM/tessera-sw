@@ -10,11 +10,11 @@
 //!
 //! | Method | Operation | Input | Output |
 //! |--------|-----------|-------|--------|
-//! | [`mldsa_keygen`](StdPqc::mldsa_keygen) | ML-DSA key generation | `MlDsaVariant`, seed | `(pub_key, sec_key)` |
+//! | [`mldsa_keygen`](StdPqc::mldsa_keygen) | ML-DSA key generation | `MlDsaVariant`, seed | `(pk, sk)` |
 //! | [`mldsa_sign`](StdPqc::mldsa_sign) | ML-DSA sign | expanded key, message, ctx, randomness | signature |
 //! | [`mldsa_verify`](StdPqc::mldsa_verify) | ML-DSA verify | public key, message, ctx, signature | `bool` |
-//! | [`mlkem_keygen`](StdPqc::mlkem_keygen) | ML-KEM key generation | `MlKemVariant`, seed | `(pub_key, sec_key)` |
-//! | [`mlkem_encapsulate`](StdPqc::mlkem_encapsulate) | ML-KEM encapsulate | public key, `m` | `(ciphertext, shared_secret)` |
+//! | [`mlkem_keygen`](StdPqc::mlkem_keygen) | ML-KEM key generation | `MlKemVariant`, seed | `(pk, sk)` |
+//! | [`mlkem_encapsulate`](StdPqc::mlkem_encapsulate) | ML-KEM encapsulate | public key, `m` | `(ct, ss)` |
 //! | [`mlkem_decapsulate`](StdPqc::mlkem_decapsulate) | ML-KEM decapsulate | expanded key, ciphertext | shared secret |
 //!
 //! ## Thread model
@@ -79,7 +79,7 @@ impl StdPqc {
 
     /// Generate an ML-DSA key pair from `seed`.
     ///
-    /// Returns `(pub_key, sec_key)`, the second being the expanded
+    /// Returns `(pk, sk)`, the second being the expanded
     /// secret key the masked blob stores.
     pub async fn mldsa_keygen(
         &self,
@@ -91,12 +91,12 @@ impl StdPqc {
             .submit_with_result(async move {
                 let sk =
                     MlDsaPrivateKey::from_seed(variant, &seed).map_err(|_| HsmError::InvalidArg)?;
-                let pub_key = sk
+                let pk = sk
                     .public_key()
                     .and_then(|pk| pk.to_vec())
                     .map_err(|_| HsmError::InvalidArg)?;
-                let sec_key = sk.to_vec().map_err(|_| HsmError::InvalidArg)?;
-                Ok((pub_key, sec_key))
+                let sk = sk.to_vec().map_err(|_| HsmError::InvalidArg)?;
+                Ok((pk, sk))
             })
             .await
     }
@@ -109,16 +109,16 @@ impl StdPqc {
     pub async fn mldsa_sign(
         &self,
         variant: MlDsaVariant,
-        sec_key: &[u8],
+        sk: &[u8],
         external_mu: bool,
         deterministic: bool,
         message: &[u8],
         ctx: &[u8],
     ) -> HsmResult<Vec<u8>> {
-        let (sec_key, message, ctx) = (sec_key.to_vec(), message.to_vec(), ctx.to_vec());
+        let (sk, message, ctx) = (sk.to_vec(), message.to_vec(), ctx.to_vec());
         self.pool
             .submit_with_result(async move {
-                let sk = MlDsaPrivateKey::from_bytes(&sec_key).map_err(|_| HsmError::InvalidArg)?;
+                let sk = MlDsaPrivateKey::from_bytes(&sk).map_err(|_| HsmError::InvalidArg)?;
                 if sk.variant() != variant {
                     return Err(HsmError::InvalidArg);
                 }
@@ -136,21 +136,21 @@ impl StdPqc {
     pub async fn mldsa_verify(
         &self,
         variant: MlDsaVariant,
-        pub_key: &[u8],
+        pk: &[u8],
         external_mu: bool,
         message: &[u8],
         ctx: &[u8],
         signature: &[u8],
     ) -> HsmResult<bool> {
-        let (pub_key, message, ctx, signature) = (
-            pub_key.to_vec(),
+        let (pk, message, ctx, signature) = (
+            pk.to_vec(),
             message.to_vec(),
             ctx.to_vec(),
             signature.to_vec(),
         );
         self.pool
             .submit_with_result(async move {
-                let pk = MlDsaPublicKey::from_bytes(&pub_key).map_err(|_| HsmError::InvalidArg)?;
+                let pk = MlDsaPublicKey::from_bytes(&pk).map_err(|_| HsmError::InvalidArg)?;
                 if pk.variant() != variant {
                     return Err(HsmError::InvalidArg);
                 }
@@ -163,7 +163,7 @@ impl StdPqc {
 
     /// Generate an ML-KEM key pair from `seed`.
     ///
-    /// Returns `(pub_key, sec_key)`, the second being the expanded
+    /// Returns `(pk, sk)`, the second being the expanded
     /// decapsulation key.
     pub async fn mlkem_keygen(
         &self,
@@ -173,14 +173,14 @@ impl StdPqc {
         let seed = seed.to_vec();
         self.pool
             .submit_with_result(async move {
-                let dk =
+                let sk =
                     MlKemPrivateKey::from_seed(variant, &seed).map_err(|_| HsmError::InvalidArg)?;
-                let pub_key = dk
+                let pk = sk
                     .public_key()
-                    .and_then(|ek| ek.to_vec())
+                    .and_then(|pk| pk.to_vec())
                     .map_err(|_| HsmError::InvalidArg)?;
-                let sec_key = dk.to_vec().map_err(|_| HsmError::InvalidArg)?;
-                Ok((pub_key, sec_key))
+                let sk = sk.to_vec().map_err(|_| HsmError::InvalidArg)?;
+                Ok((pk, sk))
             })
             .await
     }
@@ -188,51 +188,51 @@ impl StdPqc {
     /// Encapsulate to an ML-KEM public key.
     ///
     /// The encapsulation message is drawn by the crypto layer.
-    /// Returns `(ciphertext, shared_secret)`.
+    /// Returns `(ct, ss)`.
     pub async fn mlkem_encapsulate(
         &self,
         variant: MlKemVariant,
-        pub_key: &[u8],
+        pk: &[u8],
     ) -> HsmResult<(Vec<u8>, Vec<u8>)> {
-        let pub_key = pub_key.to_vec();
+        let pk = pk.to_vec();
         self.pool
             .submit_with_result(async move {
-                let ek = MlKemPublicKey::from_bytes(&pub_key).map_err(|_| HsmError::InvalidArg)?;
-                if ek.variant() != variant {
+                let pk = MlKemPublicKey::from_bytes(&pk).map_err(|_| HsmError::InvalidArg)?;
+                if pk.variant() != variant {
                     return Err(HsmError::InvalidArg);
                 }
-                let mut ciphertext = vec![0u8; variant.ciphertext_len()];
-                let mut shared_secret = vec![0u8; MLKEM_SHARED_SECRET_LEN];
+                let mut ct = vec![0u8; variant.ciphertext_len()];
+                let mut ss = vec![0u8; MLKEM_SHARED_SECRET_LEN];
                 let mut algo = MlKemAlgo::new();
-                algo.encapsulate(&ek, Some(&mut ciphertext), Some(&mut shared_secret))
+                algo.encapsulate(&pk, Some(&mut ct), Some(&mut ss))
                     .map_err(|_| HsmError::InvalidArg)?;
-                Ok((ciphertext, shared_secret))
+                Ok((ct, ss))
             })
             .await
     }
 
-    /// Decapsulate `ciphertext` with an expanded ML-KEM secret key.
+    /// Decapsulate `ct` with an expanded ML-KEM secret key.
     ///
     /// A ciphertext that does not decrypt yields the implicit-rejection
     /// secret rather than an error.
     pub async fn mlkem_decapsulate(
         &self,
         variant: MlKemVariant,
-        sec_key: &[u8],
-        ciphertext: &[u8],
+        sk: &[u8],
+        ct: &[u8],
     ) -> HsmResult<Vec<u8>> {
-        let (sec_key, ciphertext) = (sec_key.to_vec(), ciphertext.to_vec());
+        let (sk, ct) = (sk.to_vec(), ct.to_vec());
         self.pool
             .submit_with_result(async move {
-                let dk = MlKemPrivateKey::from_bytes(&sec_key).map_err(|_| HsmError::InvalidArg)?;
-                if dk.variant() != variant {
+                let sk = MlKemPrivateKey::from_bytes(&sk).map_err(|_| HsmError::InvalidArg)?;
+                if sk.variant() != variant {
                     return Err(HsmError::InvalidArg);
                 }
-                let mut shared_secret = vec![0u8; MLKEM_SHARED_SECRET_LEN];
+                let mut ss = vec![0u8; MLKEM_SHARED_SECRET_LEN];
                 let mut algo = MlKemAlgo::new();
-                algo.decapsulate(&dk, &ciphertext, Some(&mut shared_secret))
+                algo.decapsulate(&sk, &ct, Some(&mut ss))
                     .map_err(|_| HsmError::InvalidArg)?;
-                Ok(shared_secret)
+                Ok(ss)
             })
             .await
     }
