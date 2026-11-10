@@ -31,7 +31,7 @@ minicbor = "0.19.1"
 default = []
 # Fuzz against an in-process simulated HSM reached over the sock transport.
 sock = [
-  "ddi_sock_server/autostart",
+  "ddi_sock_server/autostart-isolated",
   "dep:ddi_sock_server",
   "tsra_ddi/sock",
   "tsra_ddi_tbor_test_harness/sock",

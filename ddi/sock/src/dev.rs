@@ -370,8 +370,23 @@ fn parse_vsock_endpoint(path: &str) -> std::io::Result<Option<(u32, u32)>> {
     Ok(Some((cid, port)))
 }
 
-/// Resolve the configured socket path from the environment or default.
+static PROCESS_ENDPOINT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Point this process's default device at `endpoint`, taking precedence over
+/// [`SOCK_PATH_ENV`].
+///
+/// Lets an in-process server publish its endpoint without mutating the
+/// environment. Set at most once; returns the rejected endpoint otherwise.
+pub fn set_process_endpoint(endpoint: String) -> Result<(), String> {
+    PROCESS_ENDPOINT.set(endpoint)
+}
+
+/// Resolve the configured socket path: the process endpoint, then the
+/// environment, then the default.
 pub(crate) fn socket_path() -> String {
+    if let Some(endpoint) = PROCESS_ENDPOINT.get() {
+        return endpoint.clone();
+    }
     std::env::var(SOCK_PATH_ENV).unwrap_or_else(|_| DEFAULT_SOCK_PATH.to_owned())
 }
 

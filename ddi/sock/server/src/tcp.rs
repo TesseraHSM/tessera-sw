@@ -143,7 +143,14 @@ pub(super) fn run(address: &str) -> Result<(), String> {
 /// runs on a background thread for the rest of the process lifetime. Call at
 /// most once per process: the emulated HSM is process-global.
 pub fn spawn_loopback() -> Result<SocketAddr, String> {
+    spawn_loopback_with(|_| {})
+}
+
+/// [`spawn_loopback`], calling `on_bound` with the bound address before the
+/// server thread is spawned.
+pub(crate) fn spawn_loopback_with(on_bound: impl FnOnce(SocketAddr)) -> Result<SocketAddr, String> {
     let (listener, bound_address) = bind("127.0.0.1:0")?;
+    on_bound(bound_address);
     std::thread::Builder::new()
         .name("tsra-ddi-sock-server".into())
         .spawn(move || {

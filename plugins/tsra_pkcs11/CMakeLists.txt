@@ -87,7 +87,7 @@ target_compile_definitions(tsra_pkcs11 PRIVATE TSRA_WITH_HSM=1)
 # Only the simulator (sock) build has built-in provisioning inputs (partition
 # ID, owner backup key); a hardware build without configured ones refuses to
 # log in.
-if(TSRA_CARGO_FEATURES MATCHES "(^| )sock-autostart($| )")
+if(TSRA_CARGO_FEATURES MATCHES "(^| )sock($| )")
     target_compile_definitions(tsra_pkcs11 PRIVATE TSRA_FEATURE_EMULATOR)
 endif()
 

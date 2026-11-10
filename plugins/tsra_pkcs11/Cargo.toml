@@ -24,8 +24,7 @@ workspace = true
 
 [features]
 default = []
-# Forwarded to tsra_api_native as sock-autostart: the module links an
-# in-process simulator (ddi_sock_server) that starts when it is loaded, so each
-# process gets a fresh emulated HSM and no physical HSM is needed. Set
-# TSRA_DDI_SOCK to use an external server instead.
+# Forwarded to tsra_api_native: the module talks to a simulator over the DDI
+# socket transport, so no physical HSM is needed. Run `ddi_sock_server` and
+# point TSRA_DDI_SOCK at it. The simulator is never linked into the module.
 sock = []

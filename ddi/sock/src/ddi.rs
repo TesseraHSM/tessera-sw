@@ -21,7 +21,8 @@ impl Ddi for DdiSock {
     type Dev = DdiSockDev;
 
     /// Returns a single device entry whose path is the configured socket
-    /// (`TSRA_DDI_SOCK` or [`DEFAULT_SOCK_PATH`](crate::DEFAULT_SOCK_PATH)).
+    /// ([`set_process_endpoint`](crate::set_process_endpoint), `TSRA_DDI_SOCK`
+    /// or [`DEFAULT_SOCK_PATH`](crate::DEFAULT_SOCK_PATH)).
     fn dev_info_list(&self) -> Vec<DevInfo> {
         vec![DevInfo {
             path: socket_path(),

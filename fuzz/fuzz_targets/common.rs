@@ -5,7 +5,8 @@
 
 #![allow(dead_code)]
 
-// Starts an in-process DDI sock server before the fuzzer's `main`.
+// Starts a private in-process DDI sock server before the fuzzer's `main`;
+// libFuzzer `-jobs`/`-fork` workers each get their own.
 #[cfg(feature = "sock")]
 use ddi_sock_server as _;
 

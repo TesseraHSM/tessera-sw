@@ -96,6 +96,9 @@ pinned wheels into a directory and point `PIP_FIND_LINKS` at it with
 
 ```sh
 cargo build -p tsra_pkcs11 --features sock
+cargo build -p ddi_sock_server
+target/debug/ddi_sock_server tcp://127.0.0.1:23456 &
+export TSRA_DDI_SOCK=tcp://127.0.0.1:23456
 plugins/tsra_pkcs11/tests/pkcs11-check/run.sh --pr target/debug/tsra_pkcs11.so
 ```
 

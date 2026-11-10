@@ -13,7 +13,7 @@ fn main() {
 
     let mut features = Vec::new();
     if env::var("CARGO_FEATURE_SOCK").is_ok() {
-        features.push("sock-autostart");
+        features.push("sock");
     }
 
     // OUT_DIR is target/<profile>/build/<crate-hash>/out; go up 3 to <profile>.

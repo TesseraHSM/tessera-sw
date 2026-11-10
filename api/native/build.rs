@@ -5,6 +5,13 @@
 fn main() {
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
+    // Never unload the library: its statics (the handle table, the device
+    // connection) own heap memory and may be referenced by Rust std's
+    // thread-local and atexit machinery, so `dlclose` must be a no-op. This
+    // also keeps LeakSanitizer from reporting their backing storage when a
+    // host (e.g. the PKCS#11 module's tests) unloads it.
+    println!("cargo:rustc-cdylib-link-arg=-Wl,-z,nodelete");
+
     // Get the output directory and pass it to CMake
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let out_path = std::path::PathBuf::from(&out_dir);

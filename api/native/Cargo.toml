@@ -10,9 +10,6 @@ version = "0.0.0"
 crate-type = ["cdylib"]
 
 [dependencies]
-ddi_sock_server = { features = [
-  "autostart",
-], optional = true, workspace = true }
 open-enum.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
@@ -22,10 +19,6 @@ zerocopy = { features = ["derive"], workspace = true }
 [features]
 default = []
 sock = ["tsra_api/sock"]
-# Test builds only: also link an in-process simulator that autostarts when the
-# library loads (unless TSRA_DDI_SOCK is set), so every process that loads the
-# library gets its own fresh emulated HSM.
-sock-autostart = ["dep:ddi_sock_server", "sock"]
 
 [lints]
 workspace = true

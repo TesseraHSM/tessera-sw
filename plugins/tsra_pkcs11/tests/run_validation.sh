@@ -7,6 +7,7 @@
 # pkcs11-tool, and runs the device-free unit harnesses under UBSan and ASan
 # (build_units.sh); if the emulator module has been built (cargo build -p
 # tsra_pkcs11 --features sock; TSRA_PKCS11_MODULE overrides its path), it also
+# starts a simulator (ddi_sock_server, unless TSRA_DDI_SOCK names one) and
 # runs the C_Login provisioning ceremony, a pkcs11-tool AES keygen and a
 # refused pkcs11-tool key import, the gtest functional suite
 # (integration-tests/cpp) on the memory and the file object store, the
@@ -70,6 +71,29 @@ HSMMOD="${TSRA_PKCS11_MODULE:-$REPO/target/debug/tsra_pkcs11.so}"
 if [ -f "$HSMMOD" ]; then
     # ctest and the gates load it from other directories.
     HSMMOD="$(realpath "$HSMMOD")"
+
+    # The module reaches the simulator over the DDI socket transport; it never
+    # links one. Start a ddi_sock_server unless TSRA_DDI_SOCK names one already.
+    # The functional suite's fresh-HSM cases start their own from
+    # TSRA_DDI_SOCK_SERVER.
+    echo; echo "== emulator-backed: simulator (ddi_sock_server) =="
+    cargo build -q --manifest-path "$REPO/Cargo.toml" -p ddi_sock_server
+    export TSRA_DDI_SOCK_SERVER="${TSRA_DDI_SOCK_SERVER:-$REPO/target/debug/ddi_sock_server}"
+    if [ -z "${TSRA_DDI_SOCK:-}" ]; then
+        "$TSRA_DDI_SOCK_SERVER" tcp://127.0.0.1:0 > "$WORK/ddi_sock_server.log" 2>&1 &
+        server_pid=$!
+        trap 'kill "$server_pid" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+        for _ in $(seq 300); do
+            TSRA_DDI_SOCK="$(sed -n 's/.*listening on \(tcp:\/\/[^;]*\);.*/\1/p' "$WORK/ddi_sock_server.log")"
+            [ -n "$TSRA_DDI_SOCK" ] && break
+            sleep 0.1
+        done
+        [ -n "$TSRA_DDI_SOCK" ] \
+            || { cat "$WORK/ddi_sock_server.log"; echo "   (simulator did not start)"; exit 1; }
+        export TSRA_DDI_SOCK
+    fi
+    echo "   TSRA_DDI_SOCK=$TSRA_DDI_SOCK"
+
     echo; echo "== emulator-backed: C_Login provisioning ceremony =="
     echo "   (build it with: cargo build -p tsra_pkcs11 --features sock)"
     TSRA_PKCS11_DEBUG=1 pkcs11-tool --module "$HSMMOD" --login --pin 1234 \

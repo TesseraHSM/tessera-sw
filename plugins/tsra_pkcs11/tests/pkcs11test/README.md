@@ -147,14 +147,17 @@ stays off the list until the SDK names that status.
 
 No listed test uses a key after its device session ended; key survival
 within a process is covered by the GoogleTest suite (`key_survival.*`). The
-seeded key of the second run is only found and listed, never used: on the
-emulator every process provisions its partition afresh, so a key from another
-process does not unmask there (`CKR_KEY_HANDLE_INVALID`).
+seeded key of the second run is only found and listed, never used: whether a key
+from another process unmasks depends on the device's history, so no listed
+test relies on it.
 
 ## Running it locally
 
 ```sh
 cargo build -p tsra_pkcs11 --features sock
+cargo build -p ddi_sock_server
+target/debug/ddi_sock_server tcp://127.0.0.1:23456 &
+export TSRA_DDI_SOCK=tcp://127.0.0.1:23456
 plugins/tsra_pkcs11/tests/pkcs11test/run.sh target/debug/tsra_pkcs11.so
 ```
 

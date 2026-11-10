@@ -27,13 +27,14 @@
 //! [`Ddi::open_dev`](tsra_ddi_interface::Ddi::open_dev): the path is the
 //! socket path, `tcp://HOST:PORT`, or `vsock://CID:PORT` endpoint to connect to.
 //! [`Ddi::dev_info_list`] reports a single device
-//! whose path comes from the `TSRA_DDI_SOCK` environment variable,
-//! falling back to [`DEFAULT_SOCK_PATH`].
+//! whose path comes from [`set_process_endpoint`], then the
+//! `TSRA_DDI_SOCK` environment variable, falling back to [`DEFAULT_SOCK_PATH`].
 
 mod ddi;
 mod dev;
 
 pub use ddi::DdiSock;
+pub use dev::set_process_endpoint;
 pub use dev::DdiSockDev;
 pub use dev::DEFAULT_SOCK_PATH;
 pub use dev::SOCK_PATH_ENV;

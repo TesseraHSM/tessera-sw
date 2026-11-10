@@ -39,10 +39,15 @@ jobs:
       # --target-dir, not CARGO_TARGET_DIR: the cargo run that CMake starts
       # inside the build would inherit the variable and wait forever on the
       # outer build's lock. The GoogleTest suite reads TSRA_PKCS11_MODULE too.
-      - name: Build PKCS#11 module against the emulator (sock)
+      - name: Build PKCS#11 module for the simulator (sock)
         run: |
           cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features sock
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step.
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       - name: Drive with pkcs11-tool (show-info, slots, login, digests)
         run: |
@@ -192,13 +197,18 @@ jobs:
       - name: Install CMake and OpenSSL headers
         run: sudo apt-get install -y cmake libssl-dev
 
-      - name: Build PKCS#11 module against the emulator (sock), with ASan
+      - name: Build PKCS#11 module for the simulator (sock), with ASan
         env:
           CFLAGS: -fsanitize=address -fno-omit-frame-pointer
           LDFLAGS: -fsanitize=address
         run: |
           cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features sock
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step.
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
 
       - name: Functional tests under ASan
         run: |

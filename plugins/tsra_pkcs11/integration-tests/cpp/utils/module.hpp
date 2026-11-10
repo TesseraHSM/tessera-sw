@@ -177,8 +177,8 @@ inline bool on_hardware()
         }                                                                                          \
     } while (0)
 
-/// The first statement of a case that pins an emulator-only model (capacities, one
-/// fresh partition per process); skipped when TSRA_PKCS11_HW=1.
+/// The first statement of a case that pins an emulator-only model (capacities, a
+/// private unprovisioned simulator); skipped when TSRA_PKCS11_HW=1.
 #define EMU_ONLY(why)                                                                              \
     do                                                                                             \
     {                                                                                              \

@@ -12,7 +12,11 @@ use tsra_ddi_mbor_types::*;
 
 use super::common::*;
 
-pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, _ddi: &DdiTest, _path: &str) -> u16 {
+/// Reset the partition so each case starts with fresh one-shot BK3 state,
+/// even on a server shared with earlier cases (an external `TSRA_DDI_SOCK`).
+pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
+    let resp = ddi.open_dev(path).unwrap().erase();
+    assert!(resp.is_ok(), "resp {:?}", resp);
     0
 }
 

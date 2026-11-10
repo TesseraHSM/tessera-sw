@@ -41,7 +41,6 @@ mod shared_types;
 mod str;
 mod utils;
 
-// Linked only for its load-time constructor (see the `sock-autostart` feature).
 use std::ffi::c_void;
 use std::ops::AddAssign;
 use std::ops::Deref;
@@ -50,8 +49,6 @@ use std::panic::*;
 use std::sync::*;
 
 use algo::*;
-#[cfg(feature = "sock-autostart")]
-use ddi_sock_server as _;
 use handle_table::*;
 use key_props::*;
 use resiliency::*;
