@@ -36,9 +36,6 @@ fn ensure_bk3_provisioned(dev: &<DdiTest as Ddi>::Dev) {
 
 #[test]
 fn test_set_then_get_sealed_bk3() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         ensure_bk3_provisioned(dev);
         let blob: Vec<u8> = (10..73u8).collect();
@@ -55,9 +52,6 @@ fn test_set_then_get_sealed_bk3() {
 
 #[test]
 fn test_set_sealed_bk3_twice_fails() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         ensure_bk3_provisioned(dev);
         let blob: Vec<u8> = (10..73u8).collect();
@@ -76,9 +70,6 @@ fn test_set_sealed_bk3_twice_fails() {
 
 #[test]
 fn test_get_sealed_bk3_before_set_fails() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         ensure_bk3_provisioned(dev);
         let err = helper_get_sealed_bk3(dev).unwrap_err();

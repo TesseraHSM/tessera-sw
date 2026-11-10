@@ -246,9 +246,6 @@ fn api_rev_fresh_request_each_call() {
 /// still verified for `sock`.
 #[test]
 fn api_rev_repeated_stable_sock() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
 
     let baseline = ctx

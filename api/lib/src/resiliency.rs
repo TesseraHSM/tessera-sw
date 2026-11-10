@@ -923,9 +923,6 @@ mod tests {
 
     #[test]
     fn aes_gcm_restore_preserves_ex_key_properties() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         use crate::*;
 
         let info = HsmPartitionManager::partition_info_list()

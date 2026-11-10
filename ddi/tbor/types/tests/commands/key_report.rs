@@ -784,9 +784,6 @@ fn key_report_cu_session_scope_roundtrip() {
 
 #[test]
 fn key_report_cu_authentication_binds_key_data_and_session() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
     use tsra_session_ex_crypto::seal_key_report_auth;
 
@@ -848,9 +845,6 @@ fn key_report_cu_authentication_binds_key_data_and_session() {
 
 #[test]
 fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     use tsra_session_ex_crypto::seal_key_report_auth;
 
     let ctx = TestCtx::new();
@@ -896,9 +890,6 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
 
 #[test]
 fn key_report_concurrent_cu_rotations_have_one_winner() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     use std::sync::Barrier;
 
     use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;

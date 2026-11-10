@@ -33,9 +33,6 @@ fn verify_key(ctx: &TestCtx, session_id: u16, masked_key: Vec<u8>) {
 /// Accepts intact masked keys of every class: symmetric and asymmetric.
 #[test]
 fn verify_key_accepts_intact_keys() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let rsa = RsaPrivateKey::generate(256).expect("generate RSA key");
@@ -55,9 +52,6 @@ fn verify_key_accepts_intact_keys() {
 /// Expanded PQC envelopes larger than the RSA unwrap limit remain verifiable.
 #[test]
 fn verify_key_accepts_large_generated_pqc_keys() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     for key_kind in [MLDSA_KEY_KIND_65_SEED, MLDSA_KEY_KIND_87_SEED] {
@@ -85,9 +79,6 @@ fn verify_key_accepts_large_generated_pqc_keys() {
 /// Crypto-User sessions may verify keys.
 #[test]
 fn verify_key_allowed_on_crypto_user_session() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     let (masked_key, _) = generate_ecc(&ctx, session.session_id, ECC_CURVE_P384);
@@ -98,9 +89,6 @@ fn verify_key_allowed_on_crypto_user_session() {
 /// encrypted key material fails authentication.
 #[test]
 fn verify_key_tampered_masked_key_rejected() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let imported = unwrap(&ctx, session.session_id, KEY_CLASS_AES, &[0x42u8; 32]);
@@ -122,9 +110,6 @@ fn verify_key_tampered_masked_key_rejected() {
 /// A session-scoped key fails authentication in a different session.
 #[test]
 fn verify_key_session_scoped_key_rejected_in_different_session() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session_a = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let (masked_key, _) = generate_ecc(&ctx, session_a.session_id, ECC_CURVE_P256);
@@ -150,9 +135,6 @@ fn verify_key_session_scoped_key_rejected_in_different_session() {
 /// Rejected while the CO PSK is still the default.
 #[test]
 fn verify_key_rejects_default_co_psk() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = ctx
         .open_session(CO, SessionType::Authenticated)

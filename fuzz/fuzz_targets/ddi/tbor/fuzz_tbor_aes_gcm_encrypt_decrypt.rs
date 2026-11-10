@@ -656,9 +656,6 @@ mod tests {
     /// fixture's device-display state is not safe for parallel entry.
     #[test]
     fn structured_scenarios() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         for scenario in 0..SCENARIOS {
             let seed = [scenario];
             let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("short seed");

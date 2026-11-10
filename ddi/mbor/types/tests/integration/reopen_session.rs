@@ -171,9 +171,6 @@ fn test_reopen_session() {
 
 #[test]
 fn test_reopen_session_restores_socket_bulk_access() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(
         |_, _, _| 0,
         common_cleanup,

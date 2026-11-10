@@ -49,9 +49,6 @@ fn get_public_key(ctx: &TestCtx, session_id: u16, masked_key: Vec<u8>) -> Vec<u8
 /// Returns the same public key as `EccGenerateKey` on every curve.
 #[test]
 fn get_public_key_matches_ecc_generate_key_all_curves() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     for curve in ECC_CURVES {
         let ctx = TestCtx::new();
         let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
@@ -67,9 +64,6 @@ fn get_public_key_matches_ecc_generate_key_all_curves() {
 /// Returns the same public key as `UnwrapKey` for imported ECC keys.
 #[test]
 fn get_public_key_matches_unwrapped_ecc_key() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     for curve in [EccCurve::P256, EccCurve::P384, EccCurve::P521] {
         let ctx = TestCtx::new();
         let session = finalized_co_session(&ctx);
@@ -87,9 +81,6 @@ fn get_public_key_matches_unwrapped_ecc_key() {
 /// across every supported modulus size.
 #[test]
 fn get_public_key_matches_unwrapped_rsa_key() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     for modulus_bytes in [256, 384, 512] {
         let key = RsaPrivateKey::generate(modulus_bytes).expect("generate RSA key");
         let der = key.to_vec().expect("RSA private DER export");
@@ -107,9 +98,6 @@ fn get_public_key_matches_unwrapped_rsa_key() {
 /// Crypto-User sessions may query public keys.
 #[test]
 fn get_public_key_allowed_on_crypto_user_session() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_cu(&ctx, &ROTATED_CU_PSK);
     let (masked_key, pub_key) = generate_ecc(&ctx, session.session_id, ECC_CURVE_P256);
@@ -122,9 +110,6 @@ fn get_public_key_allowed_on_crypto_user_session() {
 /// Symmetric keys have no public component.
 #[test]
 fn get_public_key_symmetric_key_rejected() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let imported = unwrap(&ctx, session.session_id, KEY_CLASS_AES, &[0x42u8; 32]);
@@ -140,9 +125,6 @@ fn get_public_key_symmetric_key_rejected() {
 /// A tampered masked key fails AEAD authentication.
 #[test]
 fn get_public_key_tampered_masked_key_rejected() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let (mut masked_key, _) = generate_ecc(&ctx, session.session_id, ECC_CURVE_P384);
@@ -160,9 +142,6 @@ fn get_public_key_tampered_masked_key_rejected() {
 /// A session-scoped key cannot be unmasked from a different session.
 #[test]
 fn get_public_key_session_scoped_key_rejected_in_different_session() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session_a = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let (masked_key, _) = generate_ecc(&ctx, session_a.session_id, ECC_CURVE_P256);
@@ -188,9 +167,6 @@ fn get_public_key_session_scoped_key_rejected_in_different_session() {
 /// Rejected while the CO PSK is still the default.
 #[test]
 fn get_public_key_rejects_default_co_psk() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let ctx = TestCtx::new();
     let session = ctx
         .open_session(CO, SessionType::Authenticated)

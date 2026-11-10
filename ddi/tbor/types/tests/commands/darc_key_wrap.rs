@@ -215,33 +215,21 @@ fn assert_roundtrip_on(curve: u8) {
 
 #[test]
 fn darc_key_wrap_roundtrip_p256() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     assert_roundtrip_on(ECC_CURVE_P256);
 }
 
 #[test]
 fn darc_key_wrap_roundtrip_p384() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     assert_roundtrip_on(ECC_CURVE_P384);
 }
 
 #[test]
 fn darc_key_wrap_roundtrip_p521() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     assert_roundtrip_on(ECC_CURVE_P521);
 }
 
 #[test]
 fn darc_key_wrap_e2e_create_export_import_sign() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     // The full DARC hand-off on a single device: create a TMK, wrap a
     // local EC key under it, ship the TMK to a "target" via
     // export → import, then unwrap the key under the round-tripped TMK and
@@ -333,9 +321,6 @@ fn darc_key_wrap_e2e_create_export_import_sign() {
 
 #[test]
 fn darc_key_wrap_rejects_wrong_masked_tmk_kind() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     // Feed a masked EC key where the masked TMK is expected: it unmasks
     // fine but its kind is not `DarcTmk`.
     let ready = sd_initialized_session();
@@ -366,9 +351,6 @@ fn darc_key_wrap_rejects_wrong_masked_tmk_kind() {
 
 #[test]
 fn darc_key_wrap_rejects_wrong_masked_key_kind() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     // Feed a masked TMK where the masked EC key is expected: it unmasks
     // fine but its kind is `DarcTmk`, not an EC private key.
     let ready = sd_initialized_session();
@@ -404,9 +386,6 @@ fn dummy_req(session_id: u16) -> TborDarcKeyWrapReq {
 
 #[test]
 fn darc_key_wrap_rejects_before_sd_init() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     // Finalized but no security domain: the SDMK the TMK is masked under
     // does not exist → rejected before any crypto work.
     let ctx = TestCtx::new();
@@ -416,9 +395,6 @@ fn darc_key_wrap_rejects_before_sd_init() {
 
 #[test]
 fn darc_key_wrap_rejects_before_finalize() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     // A rotated CO session but no PartInit/PartFinal → the partition is
     // not Initialized, so the command is rejected at the lifecycle gate.
     let ctx = TestCtx::new();
@@ -428,9 +404,6 @@ fn darc_key_wrap_rejects_before_finalize() {
 
 #[test]
 fn darc_key_wrap_rejected_on_cu_session() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     // DarcKeyWrap is Crypto-Officer-only: a CU session is rejected at the
     // role gate before any crypto work.
     let ctx = TestCtx::new();
@@ -443,9 +416,6 @@ fn darc_key_wrap_rejected_on_cu_session() {
 
 #[test]
 fn darc_key_wrap_rejected_on_default_psk() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     // A CO session on the still-default PSK is rejected by the dispatcher's
     // default-PSK gate before the handler runs.
     let ctx = TestCtx::new();

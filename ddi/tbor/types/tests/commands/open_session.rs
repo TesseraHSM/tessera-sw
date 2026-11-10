@@ -249,6 +249,8 @@ fn open_session_multiple_concurrent() {
 /// Enforces the per-file-descriptor limit of one active session.
 #[test]
 fn open_session_second_on_same_fd_rejected() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -771,6 +773,8 @@ fn rejected_pk_init_does_not_consume_session_slot() {
 /// Verifies a pending Phase-1 session blocks another open on the same handle.
 #[test]
 fn pending_session_blocks_second_open_on_same_fd() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -942,6 +946,8 @@ fn authenticated_session_mac_key_derivation_is_stable() {
 /// Verifies failed Phase-2 authentication leaves the original handle session-bound.
 #[test]
 fn failed_finish_mac_keeps_original_fd_session_bound() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -970,6 +976,8 @@ fn failed_finish_mac_keeps_original_fd_session_bound() {
 /// Socket connections support multiple Pending and Active sessions.
 #[test]
 fn socket_connection_supports_multiple_sessions() {
+    // Only applicable to the socket transport: hardware limits each device
+    // handle to one session.
     if !tsra_ddi::sock_selected() {
         return;
     }
@@ -996,6 +1004,8 @@ fn socket_connection_supports_multiple_sessions() {
 /// Failed authentication does not prevent a fresh open on a socket connection.
 #[test]
 fn socket_connection_can_open_after_failed_finish() {
+    // Only applicable to the socket transport: hardware limits each device
+    // handle to one session.
     if !tsra_ddi::sock_selected() {
         return;
     }

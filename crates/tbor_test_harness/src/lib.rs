@@ -23,9 +23,9 @@
 //!   by an in-process `ddi_sock_server` (or the server named by
 //!   `sock=` in `TSRA_TEST_ARGS`).
 //! * **Unset** — targets the native OS backend (`nix` on Linux / `win` on
-//!   Windows) so the hw-eligible tests run against real silicon.
-//!   Simulator-only tests return early on hardware, and hardware-only tests
-//!   return early on the simulator (see `tsra_ddi::sock_selected`).
+//!   Windows) so the suite runs against real silicon. Tests that don't apply
+//!   to the socket transport return early when it is selected (see
+//!   `tsra_ddi::sock_selected`).
 
 pub mod api_rev;
 pub mod assertions;

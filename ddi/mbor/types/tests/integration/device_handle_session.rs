@@ -42,6 +42,8 @@ fn test_device_handle_session_no_session() {
 
 #[test]
 fn test_device_handle_session_open_session_twice() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -101,6 +103,8 @@ fn test_device_handle_session_open_session_twice() {
 
 #[test]
 fn test_socket_sessions_are_owned_by_connection() {
+    // Only applicable to the socket transport: hardware limits each device
+    // handle to one session.
     if !tsra_ddi::sock_selected() {
         return;
     }

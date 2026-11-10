@@ -285,9 +285,6 @@ fn test_live_migration_sim_basic() {
 // Test: get sealed BK3, simulate live migration, set sealed BK3
 #[test]
 fn test_live_migration_sealed_bk3() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
@@ -1231,9 +1228,6 @@ fn test_live_migration_concurrent_separate_sessions() {
 // change across an impactless update or similar.
 #[test]
 fn test_get_cert_chain_info_during_live_migration() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(
         common_setup,
         common_cleanup,

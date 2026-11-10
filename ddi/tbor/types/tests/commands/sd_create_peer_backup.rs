@@ -172,9 +172,6 @@ fn sd_create_peer_backup_roundtrip() {
 
 #[test]
 fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     use tsra_crypto::EccCurve;
     use tsra_crypto::EccPrivateKey;
     use tsra_crypto::ExportableKey;

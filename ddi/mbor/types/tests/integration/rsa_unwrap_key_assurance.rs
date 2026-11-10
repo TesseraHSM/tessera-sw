@@ -133,6 +133,7 @@ fn run_import_matrix(
 /// imported ECC key's structure.
 #[test]
 fn rsa_unwrap_ecc_structure_matrix() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -200,6 +201,7 @@ fn rsa_unwrap_ecc_structure_matrix() {
 /// with 36 malformed variants.
 #[test]
 fn rsa_unwrap_rsa_pct_matrix() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -251,6 +253,7 @@ fn rsa_unwrap_rsa_pct_matrix() {
 /// vault would have run out of space first.
 #[test]
 fn rsa_unwrap_rejected_imports_store_nothing() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }

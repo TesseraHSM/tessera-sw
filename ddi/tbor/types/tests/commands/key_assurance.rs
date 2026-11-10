@@ -26,9 +26,9 @@
 //!   returned blob.
 //! * The partition unwrapping key: availability and stability.
 //!
-//! The emulator and socket backends don't run the structure check or
-//! pairwise consistency tests, so the tests that need one are ignored under
-//! the `emu` and `sock` features.
+//! The std platform behind the socket transport doesn't run the structure
+//! check or pairwise consistency tests yet (#120), so the tests that need
+//! one return early when the socket transport is selected.
 //!
 //! The SP publishes the unwrapping key asynchronously, so tests wait up to
 //! `UNWRAP_KEY_WAIT_SECS` seconds (default 900) for `GetUnwrappingKey`.
@@ -411,6 +411,7 @@ fn order_d(key: &HostEcc) -> Vec<u8> {
 
 #[test]
 fn reject_ecc_mismatched_q_p256_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -419,6 +420,7 @@ fn reject_ecc_mismatched_q_p256_sign() {
 
 #[test]
 fn reject_ecc_mismatched_q_p384_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -427,6 +429,7 @@ fn reject_ecc_mismatched_q_p384_derive() {
 
 #[test]
 fn reject_ecc_mismatched_q_p521_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -435,6 +438,7 @@ fn reject_ecc_mismatched_q_p521_sign() {
 
 #[test]
 fn reject_ecc_missing_q_p256_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -443,6 +447,7 @@ fn reject_ecc_missing_q_p256_derive() {
 
 #[test]
 fn reject_ecc_missing_q_p384_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -451,6 +456,7 @@ fn reject_ecc_missing_q_p384_sign() {
 
 #[test]
 fn reject_ecc_missing_q_p521_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -459,6 +465,7 @@ fn reject_ecc_missing_q_p521_derive() {
 
 #[test]
 fn reject_ecc_compressed_q_02_p256() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -469,6 +476,7 @@ fn reject_ecc_compressed_q_02_p256() {
 
 #[test]
 fn reject_ecc_compressed_q_03_p384() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -479,6 +487,7 @@ fn reject_ecc_compressed_q_03_p384() {
 
 #[test]
 fn reject_ecc_hybrid_q_06_p256() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -489,6 +498,7 @@ fn reject_ecc_hybrid_q_06_p256() {
 
 #[test]
 fn reject_ecc_hybrid_q_07_p521() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -499,6 +509,7 @@ fn reject_ecc_hybrid_q_07_p521() {
 
 #[test]
 fn reject_ecc_params_p256_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -507,6 +518,7 @@ fn reject_ecc_params_p256_sign() {
 
 #[test]
 fn reject_ecc_params_p384_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -515,6 +527,7 @@ fn reject_ecc_params_p384_derive() {
 
 #[test]
 fn reject_ecc_params_p521_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -585,6 +598,7 @@ fn reject_rsa_with(
 
 #[test]
 fn reject_rsa_2k_plain_d_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -593,6 +607,7 @@ fn reject_rsa_2k_plain_d_sign() {
 
 #[test]
 fn reject_rsa_2k_plain_d_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -601,6 +616,7 @@ fn reject_rsa_2k_plain_d_decrypt() {
 
 #[test]
 fn reject_rsa_4k_plain_d_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -609,6 +625,7 @@ fn reject_rsa_4k_plain_d_sign() {
 
 #[test]
 fn reject_rsa_2k_crt_dp_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -617,6 +634,7 @@ fn reject_rsa_2k_crt_dp_sign() {
 
 #[test]
 fn reject_rsa_2k_crt_dq_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -625,6 +643,7 @@ fn reject_rsa_2k_crt_dq_decrypt() {
 
 #[test]
 fn reject_rsa_3k_crt_dp_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -633,6 +652,7 @@ fn reject_rsa_3k_crt_dp_decrypt() {
 
 #[test]
 fn reject_rsa_4k_crt_dq_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -654,6 +674,7 @@ fn swap_prime(k: usize, crt_p: bool) -> impl Fn(&mut RsaParts) {
 
 #[test]
 fn reject_rsa_2k_crt_p_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -662,6 +683,7 @@ fn reject_rsa_2k_crt_p_sign() {
 
 #[test]
 fn reject_rsa_2k_crt_q_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -678,6 +700,7 @@ fn identity_exponents(p: &mut RsaParts) {
 
 #[test]
 fn reject_rsa_2k_plain_identity_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -686,6 +709,7 @@ fn reject_rsa_2k_plain_identity_sign() {
 
 #[test]
 fn reject_rsa_2k_crt_identity_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -700,6 +724,7 @@ fn zero_public_exponent(p: &mut RsaParts) {
 
 #[test]
 fn reject_rsa_2k_plain_zero_e_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -714,6 +739,7 @@ fn reject_rsa_2k_plain_zero_e_decrypt() {
 
 #[test]
 fn reject_rsa_2k_crt_zero_e_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -784,6 +810,7 @@ fn reject_rsa_4k_repeatedly(
 /// the vault would have run out of space first.
 #[test]
 fn reject_repeated_then_valid() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -808,6 +835,7 @@ fn reject_repeated_then_valid() {
 /// imports, whose masked blobs are a whole number of AES blocks.
 #[test]
 fn reject_repeated_then_ecc_valid() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }
@@ -842,6 +870,7 @@ fn reject_repeated_then_ecc_valid() {
 /// Valid P-256 imports must still work afterwards.
 #[test]
 fn reject_matrix() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
     if tsra_ddi::sock_selected() {
         return;
     }

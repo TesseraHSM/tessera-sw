@@ -47,9 +47,6 @@ pub fn cleanup(
 
 #[test]
 fn test_init_bk3_smoke() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0xABu8; 48];
 
@@ -72,9 +69,6 @@ fn test_init_bk3_smoke() {
 
 #[test]
 fn test_init_bk3_twice_fails() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0x11u8; 48];
 
@@ -92,9 +86,6 @@ fn test_init_bk3_twice_fails() {
 
 #[test]
 fn test_init_bk3_does_not_persist_sealed_bk3() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0x22u8; 48];
 
@@ -114,9 +105,6 @@ fn test_init_bk3_does_not_persist_sealed_bk3() {
 
 #[test]
 fn test_init_bk3_then_set_get_sealed_bk3() {
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let init = helper_init_bk3(dev, HARD_CODED_BK3.to_vec()).unwrap();
         let masked_bk3 = init.data.masked_bk3.as_slice().to_vec();

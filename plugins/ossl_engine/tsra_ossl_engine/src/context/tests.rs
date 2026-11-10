@@ -229,7 +229,7 @@ mod round_trips {
     use crate::uri::AesKind;
 
     /// Generate a persistent EC P-384 signing key pair on the open HSM and
-    /// return the private-key handle. Only simulator-only deletion tests take a
+    /// return the private-key handle. Only the deletion tests take a
     /// live handle; the curve round trips use [`generate_masked`] instead.
     pub(super) fn generate_p384_key(data: &EngineData) -> EngineResult<HsmEccPrivateKey> {
         data.with_session(|session| {
@@ -1565,7 +1565,7 @@ mod round_trips {
     /// unwrapping public key (RSA-OAEP-SHA256 + AES-256-KWP, via the same wrap
     /// an external SDK holder would use), import the blob, and prove the masked
     /// kind and reloaded public key — the wrapped-blob analogue of
-    /// [`run_rsa_import`]. Simulator-only: it uses the cached unwrapping key handle.
+    /// [`run_rsa_import`]. It uses the cached unwrapping key handle.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_import_wrapped(data: EngineData, dir: &Path) -> EngineResult<()> {
@@ -1690,7 +1690,7 @@ mod round_trips {
     /// the string form) must be recorded in the import state. Request
     /// keyWrapping with a direct-set 3072 and confirm it is rejected for not
     /// being 2048 — it would wrongly fall back to the 2048 default if the
-    /// numeric ctrl were not recorded. Simulator-only.
+    /// numeric ctrl were not recorded.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_keygen_bits_direct_ctrl(data: EngineData) -> EngineResult<()> {
@@ -2561,9 +2561,6 @@ mod sim {
     #[test]
     #[serial]
     fn open_hsm_with_resiliency_succeeds() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("open");
         // The storage dir is created by the open path (setup_storage_dir) with
         // mode 0700; pre-creating it here would inherit the umask and could be
@@ -2585,9 +2582,6 @@ mod sim {
     #[test]
     #[serial]
     fn load_ec_key_round_trips_through_engine() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("load");
         // Leave the `res` storage dir to the open path (setup_storage_dir),
         // which creates it mode 0700; pre-creating it here would inherit the
@@ -2617,9 +2611,6 @@ mod sim {
     #[test]
     #[serial]
     fn release_loaded_key_deletes_key_from_hsm() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("release-del");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2650,9 +2641,6 @@ mod sim {
     #[test]
     #[serial]
     fn engine_teardown_deletes_retained_keys() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("teardown-del");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2682,9 +2670,6 @@ mod sim {
     #[serial]
     #[allow(unsafe_code)]
     fn freeing_bound_ec_key_deletes_key_from_hsm() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("free-del");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2728,9 +2713,6 @@ mod sim {
     #[serial]
     #[allow(unsafe_code)]
     fn copy_into_bound_ec_key_deletes_displaced_key() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("copy-over");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2787,9 +2769,6 @@ mod sim {
     #[serial]
     #[allow(unsafe_code)]
     fn set_method_detaches_and_releases_ec_key() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("set-method");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2829,9 +2808,6 @@ mod sim {
     // owner goes.
     #[test]
     fn retained_keys_track_owners() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let keys = RetainedKeys::<u32>::new();
         let a = keys.retain(1, 10);
         let b = keys.retain(2, 20);
@@ -2851,9 +2827,6 @@ mod sim {
     #[test]
     #[serial]
     fn sign_through_loaded_key_verifies() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("sign");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2875,9 +2848,6 @@ mod sim {
     #[serial]
     #[allow(unsafe_code)]
     fn sign_with_digest_longer_than_curve_order_verifies() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("digestlen");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2898,9 +2868,6 @@ mod sim {
     #[test]
     #[serial]
     fn keygen_via_pkey_method_signs_and_reloads() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         for curve in ["P-256", "P-384", "P-521"] {
             let scratch = Scratch::new("keygen");
             let data = EngineData::new();
@@ -2922,9 +2889,6 @@ mod sim {
     #[test]
     #[serial]
     fn rsa_import_via_pkey_method_reloads() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         for crt in [true, false] {
             let scratch = Scratch::new("rsa-import");
             let data = EngineData::new();
@@ -2942,9 +2906,6 @@ mod sim {
     #[test]
     #[serial]
     fn aes_cbc_via_engine_ciphers() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("aes-cbc");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2973,9 +2934,6 @@ mod sim {
     #[test]
     #[serial]
     fn generate_key_via_engine_ctrl() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("generate-key");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -2993,9 +2951,6 @@ mod sim {
     #[test]
     #[serial]
     fn rsa_sign_through_loaded_key_verifies() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("rsa-sign");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3013,9 +2968,6 @@ mod sim {
     #[test]
     #[serial]
     fn rsa_pss_software_key_rejected() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         round_trips::run_rsa_pss_rejects_software_key(EngineData::new()).unwrap();
     }
 
@@ -3026,9 +2978,6 @@ mod sim {
     #[test]
     #[serial]
     fn rsa_import_wrapped_via_pkey_method_reloads() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("rsa-wrapped");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3046,9 +2995,6 @@ mod sim {
     #[test]
     #[serial]
     fn rsa_export_unwrapping_key_via_pkey_method() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("rsa-export");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3066,9 +3012,6 @@ mod sim {
     #[test]
     #[serial]
     fn rsa_keygen_bits_direct_ctrl_is_recorded() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("rsa-bits");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3085,9 +3028,6 @@ mod sim {
     #[test]
     #[serial]
     fn derive_via_pkey_method_produces_masked_secret() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         for curve in ["P-256", "P-384", "P-521"] {
             let scratch = Scratch::new("derive");
             let data = EngineData::new();
@@ -3106,9 +3046,6 @@ mod sim {
     #[test]
     #[serial]
     fn hkdf_via_pkey_method_derives_masked_keys() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("hkdf");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3124,9 +3061,6 @@ mod sim {
     #[test]
     #[serial]
     fn software_hkdf_delegates_unchanged() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("hkdf-sw");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3165,9 +3099,6 @@ mod sim {
     #[serial]
     #[allow(unsafe_code)]
     fn software_ec_keys_serialize_unchanged_under_registered_asn1_method() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let (engine, engine_raw) = new_test_engine();
         tsra_ossl_engine_core::asn1_method::register_ec_asn1_method::<crate::asn1::TsraEcAsn1>(
             &engine,
@@ -3197,9 +3128,6 @@ mod sim {
     #[test]
     #[serial]
     fn session_keys_via_pkey_methods() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("session-keys");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3216,9 +3144,6 @@ mod sim {
     #[serial]
     #[allow(unsafe_code)]
     fn keygen_rejects_unsupported_curve() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("keygen-bad");
         let data = EngineData::new();
         data.open_hsm_with(
@@ -3247,9 +3172,6 @@ mod sim {
     #[test]
     #[serial]
     fn open_hsm_is_idempotent() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let scratch = Scratch::new("idem");
         // See open_hsm_with_resiliency_succeeds: let the open path create the
         // storage dir at 0700 rather than depending on the umask here.
@@ -3269,17 +3191,11 @@ mod sim {
 
     #[test]
     fn hex_decode_rejects_wrong_length() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         assert!(decode_credential_hex("abcd", "X").is_err());
     }
 
     #[test]
     fn hex_decode_rejects_non_hex() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let s = "g".repeat(CREDENTIALS_HEX_SIZE);
         let err = decode_credential_hex(&s, "X").unwrap_err();
         assert!(err.to_string().contains("non-hex"), "{err}");
@@ -3287,9 +3203,6 @@ mod sim {
 
     #[test]
     fn hex_decode_round_trip() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let s = "000102030405060708090a0b0c0d0e0f";
         assert_eq!(
             decode_credential_hex(s, "X").unwrap(),
@@ -3300,9 +3213,6 @@ mod sim {
     // An unset credential must be a hard error, not a silent fallback.
     #[test]
     fn cred_field_missing_errors() {
-        if !tsra_ddi::sock_selected() {
-            return;
-        }
         let r = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ");
         assert!(matches!(r, Err(EngineError::Other(_))));
     }
@@ -3337,9 +3247,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn open_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         assert!(
@@ -3362,9 +3269,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn load_ec_key_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         for curve in round_trips::CURVES {
@@ -3387,9 +3291,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn sign_ec_key_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         for curve in round_trips::CURVES {
@@ -3414,9 +3315,6 @@ mod hw_tests {
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     #[allow(unsafe_code)]
     fn sign_long_digest_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         // SAFETY: EVP_sha512 returns a process-lifetime constant.
@@ -3438,9 +3336,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn keygen_ec_key_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         for curve in ["P-256", "P-384", "P-521"] {
             let data = EngineData::new();
             data.open_hsm_from_env()?;
@@ -3458,9 +3353,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn derive_ec_key_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         for curve in ["P-256", "P-384", "P-521"] {
             let data = EngineData::new();
             data.open_hsm_from_env()?;
@@ -3478,9 +3370,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn rsa_import_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         for crt in [true, false] {
             let data = EngineData::new();
             data.open_hsm_from_env()?;
@@ -3500,9 +3389,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn rsa_sign_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_rsa_sign(data, &std::env::temp_dir())
@@ -3517,9 +3403,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn hkdf_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_hkdf(data, &std::env::temp_dir())
@@ -3534,9 +3417,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn session_keys_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_session_keys(data, &std::env::temp_dir())
@@ -3551,9 +3431,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn aes_cbc_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_aes_cbc(data, &std::env::temp_dir())
@@ -3581,9 +3458,6 @@ mod hw_tests {
     #[test]
     #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
     fn generate_key_from_env_smoke() -> EngineResult<()> {
-        if tsra_ddi::sock_selected() {
-            return Ok(());
-        }
         let data = EngineData::new();
         data.open_hsm_from_env()?;
         round_trips::run_generate_key(data, &std::env::temp_dir())

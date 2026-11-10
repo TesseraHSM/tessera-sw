@@ -701,9 +701,6 @@ fn test_stress_aes_gcm_round_trip_under_reset() {
     if crate::utils::session::api_rev_1_1() {
         return;
     }
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let (part, _creds, session, _ctx) = init_partition_and_session();
     let key = generate_aes_gcm_key(&session);
     let iv = [0u8; 12]; // GCM uses 12-byte IV
@@ -830,9 +827,6 @@ fn xts_decrypt(
 #[api_test]
 fn test_stress_aes_xts_round_trip_under_reset() {
     if crate::utils::session::api_rev_1_1() {
-        return;
-    }
-    if !tsra_ddi::sock_selected() {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1132,9 +1126,6 @@ fn test_stress_ecc_key_gen_under_reset() {
 #[api_test]
 fn test_stress_aes_gcm_key_gen_under_reset() {
     if crate::utils::session::api_rev_1_1() {
-        return;
-    }
-    if !tsra_ddi::sock_selected() {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2039,9 +2030,6 @@ fn test_stress_aes_xts_key_gen_under_reset() {
     if crate::utils::session::api_rev_1_1() {
         return;
     }
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let (part, _creds, session, _ctx) = init_partition_and_session();
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -2318,9 +2306,6 @@ fn test_stress_xts_unmask_under_reset() {
     if crate::utils::session::api_rev_1_1() {
         return;
     }
-    if !tsra_ddi::sock_selected() {
-        return;
-    }
     let (part, _creds, session, _ctx) = init_partition_and_session();
 
     let key = generate_aes_xts_key(&session);
@@ -2576,9 +2561,6 @@ fn test_stress_ecc_unwrap_under_reset() {
 #[api_test]
 fn test_stress_xts_unwrap_under_reset() {
     if crate::utils::session::api_rev_1_1() {
-        return;
-    }
-    if !tsra_ddi::sock_selected() {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
