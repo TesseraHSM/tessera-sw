@@ -80,22 +80,36 @@ pub const SHAKE_OUT_MAX: usize = mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OF
 const _: () =
     assert!(SHAKE_MSG_MAX <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET);
 
-/// The mailbox encoding of an ML-DSA message type, once its input is
-/// checked: an external `μ` is exactly 64 bytes, with no context string.
+/// Validate the ML-DSA message type and operand lengths without an engine.
 ///
 /// # Errors
 /// * [`HsmError::InvalidArg`] — the input is malformed for `msg_type`.
+/// * [`PqcError::INVALID_BUFFER_SIZE`] — the message or context is too long.
 /// * [`HsmError::UnsupportedCmd`] — a pre-hash type; the FP cores take the
 ///   message itself or an external `μ`.
-fn mailbox_msg_type(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<u32> {
+pub fn mldsa_check_msg(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<()> {
     match msg_type {
-        HsmMlDsaMsgType::Pure => Ok(mailbox::MSG_TYPE_PURE),
-        HsmMlDsaMsgType::ExternalMu if msg.len() == mailbox::MU_LEN && ctx.is_empty() => {
-            Ok(mailbox::MSG_TYPE_EXTERNAL_MU)
+        HsmMlDsaMsgType::Pure => {}
+        HsmMlDsaMsgType::ExternalMu if msg.len() == mailbox::MU_LEN && ctx.is_empty() => {}
+        HsmMlDsaMsgType::ExternalMu => return Err(HsmError::InvalidArg),
+        HsmMlDsaMsgType::PreHash(_) | HsmMlDsaMsgType::HashMsg(_) => {
+            return Err(HsmError::UnsupportedCmd)
         }
-        HsmMlDsaMsgType::ExternalMu => Err(HsmError::InvalidArg),
-        HsmMlDsaMsgType::PreHash(_) | HsmMlDsaMsgType::HashMsg(_) => Err(HsmError::UnsupportedCmd),
     }
+    if msg.len() > MLDSA_MSG_MAX || ctx.len() > MLDSA_CTX_MAX {
+        return Err(PqcError::INVALID_BUFFER_SIZE);
+    }
+    Ok(())
+}
+
+/// The mailbox encoding of a validated ML-DSA message.
+fn mailbox_msg_type(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<u32> {
+    mldsa_check_msg(msg_type, msg, ctx)?;
+    Ok(if matches!(msg_type, HsmMlDsaMsgType::ExternalMu) {
+        mailbox::MSG_TYPE_EXTERNAL_MU
+    } else {
+        mailbox::MSG_TYPE_PURE
+    })
 }
 
 /// Encapsulation-key length per ML-KEM parameter set (FIPS 203 Table 3).
@@ -349,10 +363,7 @@ impl PqcEngine<'_> {
     ) -> HsmResult<()> {
         let expected_sig = mldsa_sig_len(kind)?;
         let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
-        if sk.len() != mldsa_sec_key_len(kind)?
-            || msg.len() > MLDSA_MSG_MAX
-            || ctx.len() > MLDSA_CTX_MAX
-        {
+        if sk.len() != mldsa_sec_key_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -614,11 +625,7 @@ impl PqcEngine<'_> {
         sig: &[u8],
     ) -> HsmResult<bool> {
         let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
-        if pk.len() != mldsa_pub_key_len(kind)?
-            || sig.len() != mldsa_sig_len(kind)?
-            || msg.len() > MLDSA_MSG_MAX
-            || ctx.len() > MLDSA_CTX_MAX
-        {
+        if pk.len() != mldsa_pub_key_len(kind)? || sig.len() != mldsa_sig_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -860,5 +867,56 @@ impl Drop for PqcEngine<'_> {
     /// six such leaks, PQC would wedge permanently.
     fn drop(&mut self) {
         self.give_back();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mldsa_checks_message_limits_without_an_engine() {
+        let msg = [0u8; MLDSA_MSG_MAX + 1];
+        let ctx = [0u8; MLDSA_CTX_MAX + 1];
+        assert_eq!(
+            mldsa_check_msg(
+                HsmMlDsaMsgType::Pure,
+                &msg[..MLDSA_MSG_MAX],
+                &ctx[..MLDSA_CTX_MAX]
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            mldsa_check_msg(HsmMlDsaMsgType::Pure, &msg, &[]),
+            Err(PqcError::INVALID_BUFFER_SIZE)
+        );
+        assert_eq!(
+            mldsa_check_msg(HsmMlDsaMsgType::Pure, &[], &ctx),
+            Err(PqcError::INVALID_BUFFER_SIZE)
+        );
+    }
+
+    #[test]
+    fn mldsa_checks_message_type_before_mailbox_encoding() {
+        let mu = [0u8; mailbox::MU_LEN];
+        assert_eq!(
+            mailbox_msg_type(HsmMlDsaMsgType::ExternalMu, &mu, &[]),
+            Ok(mailbox::MSG_TYPE_EXTERNAL_MU)
+        );
+        for (msg, ctx) in [(&mu[..mailbox::MU_LEN - 1], &[][..]), (&mu[..], &b"x"[..])] {
+            assert_eq!(
+                mldsa_check_msg(HsmMlDsaMsgType::ExternalMu, msg, ctx),
+                Err(HsmError::InvalidArg)
+            );
+        }
+        for msg_type in [
+            HsmMlDsaMsgType::PreHash(HsmHashAlgo::Sha256),
+            HsmMlDsaMsgType::HashMsg(HsmHashAlgo::Sha256),
+        ] {
+            assert_eq!(
+                mldsa_check_msg(msg_type, &[], &[]),
+                Err(HsmError::UnsupportedCmd)
+            );
+        }
     }
 }

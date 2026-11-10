@@ -108,7 +108,8 @@ fn deterministic(hedge: HsmMlDsaHedge) -> bool {
 }
 
 impl HsmMlDsa for StdHsmPal {
-    /// The std PAL runs no PCT, as for ECC: `pct` is accepted and ignored.
+    /// PCTs are deferred: `pct` is accepted but not run; see
+    /// <https://github.com/TesseraHSM/tessera-sw/issues/117>.
     async fn mldsa_gen_keypair(
         &self,
         io: &StdHsmIo,
@@ -233,7 +234,8 @@ impl HsmMlDsa for StdHsmPal {
 }
 
 impl HsmMlKem for StdHsmPal {
-    /// The std PAL runs no PCT, as for ECC: `pct` is accepted and ignored.
+    /// PCTs are deferred: `pct` is accepted but not run; see
+    /// <https://github.com/TesseraHSM/tessera-sw/issues/117>.
     async fn mlkem_gen_keypair(
         &self,
         io: &StdHsmIo,

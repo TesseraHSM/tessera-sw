@@ -26,7 +26,6 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
 use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
-use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmMlDsaParam;
 use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
@@ -38,6 +37,7 @@ use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 use tsra_fw_hsm_pal_traits::MLKEM_SEED_LEN;
 use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
+use tsra_fw_uno_drivers_pqc::mldsa_check_msg;
 use tsra_fw_uno_trace::tracing::*;
 
 use crate::UnoHsmIo;
@@ -63,13 +63,9 @@ fn mlkem_kind(param: HsmMlKemParam) -> HsmVaultKeyKind {
     }
 }
 
-/// Check an ML-DSA message type for what Uno supports: the message itself
-/// or an external `μ`; the pre-hash types are not supported on Uno.
-fn check_msg_type(msg: &HsmMlDsaMsg<'_>) -> HsmResult<()> {
-    match msg.msg_type() {
-        HsmMlDsaMsgType::Pure | HsmMlDsaMsgType::ExternalMu => Ok(()),
-        HsmMlDsaMsgType::PreHash(_) | HsmMlDsaMsgType::HashMsg(_) => Err(HsmError::UnsupportedCmd),
-    }
+/// Check the message type and lengths before query returns or RNG draws.
+fn check_msg(msg: &HsmMlDsaMsg<'_>) -> HsmResult<()> {
+    mldsa_check_msg(msg.msg_type(), msg.message(), msg.ctx())
 }
 
 /// Whether to sign hedged: Uno always has the TRNG, so it hedges unless the
@@ -89,7 +85,8 @@ const MLDSA_SEED_LEN: usize = 32;
 // the module docs.
 #[cfg_attr(feature = "bulk_crypto", allow(unreachable_code, unused_assignments))]
 impl HsmMlDsa for UnoHsmPal {
-    /// The PCT is not run on Uno yet: `pct` is accepted and ignored.
+    /// PCTs are deferred: `pct` is accepted but not run; see
+    /// <https://github.com/TesseraHSM/tessera-sw/issues/118>.
     async fn mldsa_gen_keypair(
         &self,
         _io: &UnoHsmIo,
@@ -174,7 +171,7 @@ impl HsmMlDsa for UnoHsmPal {
         let outcome: HsmResult<usize> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            check_msg_type(&msg)?;
+            check_msg(&msg)?;
             let sig_len = param.sig_len();
             if sk.len() != param.sk_len() {
                 return Err(HsmError::InvalidArg);
@@ -231,7 +228,7 @@ impl HsmMlDsa for UnoHsmPal {
         let result = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            check_msg_type(&msg)?;
+            check_msg(&msg)?;
             if hedged(hedge) {
                 self.rng_fill_bytes(io, &mut rnd)?;
             }
@@ -269,7 +266,7 @@ impl HsmMlDsa for UnoHsmPal {
         let outcome: HsmResult<bool> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            check_msg_type(&msg)?;
+            check_msg(&msg)?;
             self.pqc
                 .mldsa_verify(
                     mldsa_kind(param),
@@ -289,7 +286,8 @@ impl HsmMlDsa for UnoHsmPal {
 
 #[cfg_attr(feature = "bulk_crypto", allow(unreachable_code, unused_assignments))]
 impl HsmMlKem for UnoHsmPal {
-    /// The PCT is not run on Uno yet: `pct` is accepted and ignored.
+    /// PCTs are deferred: `pct` is accepted but not run; see
+    /// <https://github.com/TesseraHSM/tessera-sw/issues/118>.
     async fn mlkem_gen_keypair(
         &self,
         _io: &UnoHsmIo,
