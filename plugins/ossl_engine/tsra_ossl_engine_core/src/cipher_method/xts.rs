@@ -99,8 +99,9 @@ pub(super) unsafe extern "C" fn c_init(
     )
 }
 
-/// A raw key goes to the shared init, an IV for an attached key sets the
-/// tweak, and anything else goes to the built-in.
+/// A raw key goes to the shared init (keeping an attached key's tweak if it
+/// comes without an IV), an IV for an attached key sets the tweak, and
+/// anything else goes to the built-in.
 ///
 /// # Safety
 /// As [`c_init`].
@@ -112,7 +113,14 @@ unsafe fn init_inner(
     enc: c_int,
 ) -> EngineResult<()> {
     if !key.is_null() {
-        // SAFETY: as this function's contract.
+        // A key-only init keeps the IV, as with the built-in: attaching wiped
+        // the built-in's copy, so pass the attached key's tweak on.
+        let tweak = match ctx_keys().lock().get(&(ctx as usize)) {
+            Some(CtxKey::HsmXts(state)) if iv.is_null() => state.tweak,
+            _ => None,
+        };
+        let iv = tweak.as_ref().map_or(iv, |t| t.as_ptr());
+        // SAFETY: as this function's contract; a tweak holds the IV length.
         return unsafe { super::init_inner(ctx, key, iv, enc) };
     }
     if let Some(CtxKey::HsmXts(state)) = ctx_keys().lock().get_mut(&(ctx as usize)) {
@@ -813,8 +821,20 @@ mod tests {
         );
         assert!(init(ctx, null(), null_mut(), None, Some(&tweak2), true));
         assert_eq!(update(ctx, &msg), Some(toy_encrypt(&tweak2, &msg)));
-        free(ctx);
+
+        // A raw key alone keeps the attached key's tweak.
+        assert!(init(ctx, null(), null_mut(), Some(&key), None, true));
         assert_eq!(RELEASED.with(Cell::get), 3);
+        assert_eq!(
+            update(ctx, &msg),
+            raw_crypt(builtin, null_mut(), &key, &tweak2, true, &msg)
+        );
+        // There is none to keep before the first IV.
+        assert!(attach(ctx, Some(TOY_URI), 0));
+        assert!(init(ctx, null(), null_mut(), Some(&key), None, true));
+        assert!(update(ctx, &msg).is_none(), "no IV was set");
+        free(ctx);
+        assert_eq!(RELEASED.with(Cell::get), 4);
         teardown(&engine, raw);
     }
 }
