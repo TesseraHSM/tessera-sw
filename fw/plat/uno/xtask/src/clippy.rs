@@ -12,7 +12,9 @@ use xshell::Shell;
 
 use crate::fw_util::FwPaths;
 use crate::fw_util::BULK_CRYPTO_FEATURE;
+use crate::fw_util::EMULATOR_FEATURE;
 use crate::fw_util::NIGHTLY_TOOLCHAIN;
+use crate::fw_util::TRACE_UART_FEATURE;
 use crate::Xtask;
 use crate::XtaskCtx;
 
@@ -34,16 +36,19 @@ impl Xtask for Clippy {
             cmd!(sh, "cargo {toolchain} clippy -- -D warnings").run()?;
         }
 
-        // The bulk-crypto fastpath flavor compiles different PAL paths; lint it
-        // too so it cannot rot unnoticed.
+        // Other firmware flavors compile different paths: the bulk-crypto
+        // fastpath flavor (PAL), the emulator flavor (semihosting), and a trace
+        // flavor (text output). Lint them too so they cannot rot unnoticed.
         {
             let _dir = sh.push_dir(&fw.fw_dir);
-            log::info!("Running clippy on firmware workspace ({BULK_CRYPTO_FEATURE})...");
-            cmd!(
-                sh,
-                "cargo {toolchain} clippy --features {BULK_CRYPTO_FEATURE} -- -D warnings"
-            )
-            .run()?;
+            for features in [BULK_CRYPTO_FEATURE, EMULATOR_FEATURE, TRACE_UART_FEATURE] {
+                log::info!("Running clippy on firmware workspace ({features})...");
+                cmd!(
+                    sh,
+                    "cargo {toolchain} clippy --features {features} -- -D warnings"
+                )
+                .run()?;
+            }
         }
 
         // Top platform workspace (xtask + reggen + systemrdl, host target).

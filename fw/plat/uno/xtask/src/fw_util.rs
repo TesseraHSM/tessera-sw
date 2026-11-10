@@ -20,6 +20,15 @@ use crate::XtaskCtx;
 /// `package/feature` form because the firmware workspace is virtual.
 pub const BULK_CRYPTO_FEATURE: &str = "tsra_fw_uno_app/bulk_crypto";
 
+/// Feature that builds the firmware for the emulator: the PAL signals
+/// `SYS_READY` and the fault handlers call `SYS_EXIT` through ARM
+/// semihosting (`tsra_fw_uno_pal/semihosting`, `tsra_fw_uno_fault/semihosting`).
+pub const EMULATOR_FEATURE: &str = "tsra_fw_uno_app/semihosting";
+
+/// Feature that compiles the trace emitter at INFO level with the UART
+/// backend (`tsra_fw_uno_trace/backend-uart`).
+pub const TRACE_UART_FEATURE: &str = "tsra_fw_uno_app/trace-uart";
+
 /// Resolved firmware workspace paths.
 #[derive(Debug)]
 pub struct FwPaths {
