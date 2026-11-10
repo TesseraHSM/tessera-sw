@@ -277,7 +277,7 @@ jobs:
       - name: Run nginx suite
         if: ${{ !cancelled() && matrix.nginx && !matrix.cov }}
         env:
-          TSRA_TEST_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
+          TSRA_DDI_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
         run: |
           target/sock-server/debug/ddi_sock_server tcp://127.0.0.1:23456 &
           trap 'kill $!' EXIT
@@ -303,7 +303,7 @@ jobs:
       - name: Run nginx suite with coverage
         if: ${{ !cancelled() && matrix.nginx && matrix.cov }}
         env:
-          TSRA_TEST_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
+          TSRA_DDI_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
         run: |
           target/sock-server/debug/ddi_sock_server tcp://127.0.0.1:23456 &
           trap 'kill $!' EXIT

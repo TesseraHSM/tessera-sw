@@ -36,12 +36,12 @@ pub enum Suite {
 /// beforehand.  Keeping the build out means a partial run (`--suite nginx`)
 /// doesn't recompile the world.
 ///
-/// Every suite runs with `transport=sock` in `TSRA_TEST_ARGS`; its runner
-/// passes normal runtime connection settings to the unchanged provider.
-/// The nginx suite needs
+/// CLI and CAPI runners translate `transport=sock` in `TSRA_TEST_ARGS`
+/// into normal runtime connection settings for the unchanged provider.
+/// The nginx suite uses `TSRA_DDI_ARGS` directly and needs
 /// a sock server that survives `fork()`: start `ddi_sock_server
 /// tcp://127.0.0.1:PORT` and add `sock=` with the same endpoint to
-/// `TSRA_TEST_ARGS` (see `provider-matrix.yml`).
+/// `TSRA_DDI_ARGS` (see `provider-matrix.yml`).
 #[derive(Parser)]
 #[clap(about = "Run Integration Tests")]
 pub struct IntegrationTest {
@@ -157,7 +157,7 @@ impl Xtask for IntegrationTest {
             }
 
             // All suites run against the sock transport: cli/capi auto-start
-            // an in-process sock server; nginx sets `sock=` in `TSRA_TEST_ARGS` to the
+            // an in-process sock server; nginx sets `sock=` in `TSRA_DDI_ARGS` to the
             // external server described above.
             let run_pkg = |pkg: &str, skip_clean: bool, ctx: XtaskCtx| -> anyhow::Result<()> {
                 let test = crate::nextest::Nextest {

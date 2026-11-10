@@ -21,7 +21,7 @@
 //! NGINX opens the HSM in its master process and then forks workers, so the
 //! provider must use the fork-safe `sock` transport against an external
 //! server.  Run `ddi_sock_server tcp://127.0.0.1:PORT`, and set
-//! `TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:PORT"`.
+//! `TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:PORT"`.
 
 /// Entry point for the NGINX test runner.
 ///
