@@ -84,9 +84,10 @@ add_library(tsra_pkcs11 SHARED ${TSRA_PKCS11_SOURCES})
 # The module talks to the TSRA SDK through tsra.h; enable the backend seam.
 target_compile_definitions(tsra_pkcs11 PRIVATE TSRA_WITH_HSM=1)
 
-# Only the emulator build has built-in provisioning inputs (partition ID, owner
-# backup key); a hardware build without configured ones refuses to log in.
-if(TSRA_CARGO_FEATURES MATCHES "(^| )emu($| )")
+# Only the simulator (sock) build has built-in provisioning inputs (partition
+# ID, owner backup key); a hardware build without configured ones refuses to
+# log in.
+if(TSRA_CARGO_FEATURES MATCHES "(^| )sock-autostart($| )")
     target_compile_definitions(tsra_pkcs11 PRIVATE TSRA_FEATURE_EMULATOR)
 endif()
 

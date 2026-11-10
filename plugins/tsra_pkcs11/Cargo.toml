@@ -24,6 +24,8 @@ workspace = true
 
 [features]
 default = []
-# Forwarded to tsra_api_native: the device firmware run in-process, so the
-# module can be built and tested with no physical HSM present.
-emu = []
+# Forwarded to tsra_api_native as sock-autostart: the module links an
+# in-process simulator (ddi_sock_server) that starts when it is loaded, so each
+# process gets a fresh emulated HSM and no physical HSM is needed. Set
+# TSRA_DDI_SOCK to use an external server instead.
+sock = []

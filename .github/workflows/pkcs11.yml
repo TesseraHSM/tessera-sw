@@ -39,9 +39,9 @@ jobs:
       # --target-dir, not CARGO_TARGET_DIR: the cargo run that CMake starts
       # inside the build would inherit the variable and wait forever on the
       # outer build's lock. The GoogleTest suite reads TSRA_PKCS11_MODULE too.
-      - name: Build PKCS#11 module against the emulator (emu)
+      - name: Build PKCS#11 module against the emulator (sock)
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features sock
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       - name: Drive with pkcs11-tool (show-info, slots, login, digests)
@@ -192,12 +192,12 @@ jobs:
       - name: Install CMake and OpenSSL headers
         run: sudo apt-get install -y cmake libssl-dev
 
-      - name: Build PKCS#11 module against the emulator (emu), with ASan
+      - name: Build PKCS#11 module against the emulator (sock), with ASan
         env:
           CFLAGS: -fsanitize=address -fno-omit-frame-pointer
           LDFLAGS: -fsanitize=address
         run: |
-          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features emu
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11 --features sock
           echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
 
       - name: Functional tests under ASan

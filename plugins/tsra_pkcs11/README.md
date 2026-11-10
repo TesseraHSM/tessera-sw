@@ -222,8 +222,9 @@ serve the same callers.
 ## Build
 
 ```sh
-# Against the emulator, the device firmware run in-process (no physical device):
-cargo build -p tsra_pkcs11 --features emu
+# Against the emulator: a simulator linked into the module, started in-process
+# when it loads (no physical device):
+cargo build -p tsra_pkcs11 --features sock
 # -> target/debug/tsra_pkcs11.so
 
 # Standalone (no device linked) framework smoke build:

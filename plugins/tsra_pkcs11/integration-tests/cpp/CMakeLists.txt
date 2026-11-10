@@ -7,7 +7,7 @@
 # output) and talks to the device behind it, so it needs the emulator or
 # hardware-backed build:
 #
-#   cargo build -p tsra_pkcs11 --features emu
+#   cargo build -p tsra_pkcs11 --features sock
 #   cmake -S plugins/tsra_pkcs11/integration-tests/cpp -B target/pkcs11-cpp-tests
 #   cmake --build target/pkcs11-cpp-tests
 #   ctest --test-dir target/pkcs11-cpp-tests --output-on-failure --no-tests=error

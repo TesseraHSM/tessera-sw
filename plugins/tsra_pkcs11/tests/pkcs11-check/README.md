@@ -95,7 +95,7 @@ pinned wheels into a directory and point `PIP_FIND_LINKS` at it with
 ## Running it locally
 
 ```sh
-cargo build -p tsra_pkcs11 --features emu
+cargo build -p tsra_pkcs11 --features sock
 plugins/tsra_pkcs11/tests/pkcs11-check/run.sh --pr target/debug/tsra_pkcs11.so
 ```
 

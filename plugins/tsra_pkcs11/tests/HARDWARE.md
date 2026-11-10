@@ -1,6 +1,6 @@
 # Hardware checklist
 
-Every module test runs against the emulator (`emu`): the device firmware, run
+Every module test runs against the emulator (`sock`): the device firmware, run
 in-process, with a fresh device for every process. Some behaviour can only be
 shown on a device that outlives a process or on real hardware: provisioning
 races, power-cycle survival, capacities, and wherever the hardware firmware

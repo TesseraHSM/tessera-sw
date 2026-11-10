@@ -56,7 +56,7 @@ Flags: `-X` disables the Security Officer tests (this token has no SO
 credential — the TSRA DDI has none); `-I` (token initialisation) is not
 needed because `C_Login` provisions the partition lazily.
 
-The gate drives the **emulator** module (`cargo build --features emu`), not
+The gate drives the **emulator** module (`cargo build --features sock`), not
 the standalone no-device build: every interesting conformance behaviour is
 key-backed and needs a device behind the login.
 
@@ -154,7 +154,7 @@ process does not unmask there (`CKR_KEY_HANDLE_INVALID`).
 ## Running it locally
 
 ```sh
-cargo build -p tsra_pkcs11 --features emu
+cargo build -p tsra_pkcs11 --features sock
 plugins/tsra_pkcs11/tests/pkcs11test/run.sh target/debug/tsra_pkcs11.so
 ```
 

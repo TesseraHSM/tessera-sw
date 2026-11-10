@@ -12,8 +12,8 @@ fn main() {
     use std::path::PathBuf;
 
     let mut features = Vec::new();
-    if env::var("CARGO_FEATURE_EMU").is_ok() {
-        features.push("emu");
+    if env::var("CARGO_FEATURE_SOCK").is_ok() {
+        features.push("sock-autostart");
     }
 
     // OUT_DIR is target/<profile>/build/<crate-hash>/out; go up 3 to <profile>.

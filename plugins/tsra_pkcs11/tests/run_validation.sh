@@ -6,7 +6,7 @@
 # one go. Builds the standalone no-device module and drives it with OpenSC
 # pkcs11-tool, and runs the device-free unit harnesses under UBSan and ASan
 # (build_units.sh); if the emulator module has been built (cargo build -p
-# tsra_pkcs11 --features emu; TSRA_PKCS11_MODULE overrides its path), it also
+# tsra_pkcs11 --features sock; TSRA_PKCS11_MODULE overrides its path), it also
 # runs the C_Login provisioning ceremony, a pkcs11-tool AES keygen and a
 # refused pkcs11-tool key import, the gtest functional suite
 # (integration-tests/cpp) on the memory and the file object store, the
@@ -65,13 +65,13 @@ for pair in SHA-1:sha1sum SHA256:sha256sum SHA384:sha384sum SHA512:sha512sum; do
     [ "$got" = "$exp" ] && echo "  *** $mech OK ***" || { echo "  MISMATCH"; exit 1; }
 done
 
-# --- emulator-backed C_Login ceremony (needs the integrated build + emu) ------
+# --- emulator-backed C_Login ceremony (needs the integrated build + sock) -----
 HSMMOD="${TSRA_PKCS11_MODULE:-$REPO/target/debug/tsra_pkcs11.so}"
 if [ -f "$HSMMOD" ]; then
     # ctest and the gates load it from other directories.
     HSMMOD="$(realpath "$HSMMOD")"
     echo; echo "== emulator-backed: C_Login provisioning ceremony =="
-    echo "   (build it with: cargo build -p tsra_pkcs11 --features emu)"
+    echo "   (build it with: cargo build -p tsra_pkcs11 --features sock)"
     TSRA_PKCS11_DEBUG=1 pkcs11-tool --module "$HSMMOD" --login --pin 1234 \
         --list-objects 2>&1 | sed 's/^/   /' || echo "   (login harness failed)"
 
