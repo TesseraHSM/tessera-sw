@@ -153,9 +153,9 @@ fuzz_target!(|input: FuzzInput| {
         };
 
         let digest = wire_digest(&input.cmdreq_data);
-        // TBOR accepts every supported SHA-2 length on every curve;
-        // ECDSA truncates longer digests to the most significant curve bits.
-        let expect_success = generate_valid_key && matches!(digest.len(), 32 | 48 | 64);
+        let expect_success = generate_valid_key
+            && matches!(digest.len(), 32 | 48 | 64)
+            && digest.len() <= input.curve.max_digest_len();
 
         let req = TborEccSignReq {
             session_id: session.session_id,

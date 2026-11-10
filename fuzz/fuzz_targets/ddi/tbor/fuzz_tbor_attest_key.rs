@@ -18,7 +18,6 @@ use tsra_crypto::HashAlgo;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::KeyGenerationOp;
 use tsra_crypto::RsaEncryptAlgo;
-use tsra_crypto::RsaKeyOp;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_ddi_interface::DdiError;
@@ -114,8 +113,6 @@ enum Expected {
     /// Attestable ECC private key; carries the wire-LE `x ‖ y` public key
     /// and the curve's raw coordinate length.
     Report { pub_key: Vec<u8>, coord_len: usize },
-    /// Attestable RSA private key; carries the host's big-endian public components.
-    RsaReport { n: Vec<u8>, e: Vec<u8> },
     /// Valid masked key of a non-attestable kind.
     UnsupportedKeyType,
     /// Not a valid masked blob (raw fuzz bytes or a public key).
@@ -149,7 +146,10 @@ fn generate_masked_key(ctx: &TestCtx, session_id: u16, input: &FuzzInput) -> (Ve
                 .to_vec();
             (pub_key, Expected::Rejected)
         }
-        KeySource::ImportedRsaKey => import_rsa_key(ctx, session_id, scope),
+        KeySource::ImportedRsaKey => (
+            import_rsa_key(ctx, session_id, scope),
+            Expected::UnsupportedKeyType,
+        ),
         KeySource::GeneratedAesKey(key_size) => {
             let masked_key = ctx
                 .tbor(&TborAesGenerateKeyReq {
@@ -204,12 +204,8 @@ fn generate_masked_key(ctx: &TestCtx, session_id: u16, input: &FuzzInput) -> (Ve
     }
 }
 
-fn import_rsa_key(ctx: &TestCtx, session_id: u16, scope: u8) -> (Vec<u8>, Expected) {
+fn import_rsa_key(ctx: &TestCtx, session_id: u16, scope: u8) -> Vec<u8> {
     let key = RsaPrivateKey::generate(256).expect("generate host RSA-2048 key");
-    let expected = Expected::RsaReport {
-        n: key.n_vec().expect("host RSA modulus"),
-        e: key.e_vec().expect("host RSA exponent"),
-    };
     let private_der = key.to_vec().expect("export host RSA private key");
     let unwrapping_key = ctx
         .tbor(&TborGetUnwrappingKeyReq { session_id })
@@ -239,19 +235,17 @@ fn import_rsa_key(ctx: &TestCtx, session_id: u16, scope: u8) -> (Vec<u8>, Expect
     let mut wrapped_blob = encrypted_kek;
     wrapped_blob.extend(encrypted_private_key);
 
-    let masked_key = ctx
-        .tbor(&TborUnwrapKeyReq {
-            session_id,
-            scope,
-            key_class: KEY_CLASS_RSA,
-            key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
-            oaep_hash_algo: RSA_OAEP_SHA256,
-            wrapped_blob,
-            key_label: Vec::new(),
-        })
-        .expect("import host RSA key through UnwrapKey")
-        .masked_key;
-    (masked_key, expected)
+    ctx.tbor(&TborUnwrapKeyReq {
+        session_id,
+        scope,
+        key_class: KEY_CLASS_RSA,
+        key_usage: KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        oaep_hash_algo: RSA_OAEP_SHA256,
+        wrapped_blob,
+        key_label: Vec::new(),
+    })
+    .expect("import host RSA key through UnwrapKey")
+    .masked_key
 }
 
 /// Walk a COSE_Key CBOR map and return its `(x, y)` byte strings
@@ -289,12 +283,19 @@ fn cose_key_xy(cose_key: &[u8]) -> (Vec<u8>, Vec<u8>) {
     )
 }
 
-/// Verify the PID signature and report data before checking the attested key.
-fn verify_signed_report(
+/// Verify a `KeyReport` COSE_Sign1 under the partition's PID public key
+/// (slot-0 cert-chain leaf), then decode the payload and check that it
+/// binds the exact `report_data` and the attested ECC key's public
+/// point. Mirrors `verify_key_report` in
+/// `ddi/tbor/types/tests/commands/key_report.rs`, which this fuzz target
+/// exercises the same handler as (`KeyReport`).
+fn verify_key_report(
     ctx: &TestCtx,
     report: &[u8],
     expected_report_data: &[u8; KEY_REPORT_DATA_LEN],
-) -> KeyAttestationReport {
+    pub_key_le: &[u8],
+    coord_len: usize,
+) {
     // 1. PID pubkey from the slot-0 chain leaf.
     let info = ctx.cert_chain_info().expect("GetCertChainInfo");
     let num_certs = info.data.num_certs;
@@ -325,6 +326,8 @@ fn verify_signed_report(
     .expect("ECDSA verify");
     assert!(ok, "KeyReport must be signed by the partition PID key");
 
+    // 3. Decode the payload and cross-bind the exact `report_data` and the
+    //    embedded COSE_Key to the sealed/generated public point.
     let decoded: KeyAttestationReport =
         minicbor::decode(cose.payload).expect("report payload decodes as KeyAttestationReport");
 
@@ -334,18 +337,6 @@ fn verify_signed_report(
         "report_data must round-trip into the report payload",
     );
 
-    decoded
-}
-
-/// Bind the signed COSE_Key to the generated ECC public point.
-fn verify_key_report(
-    ctx: &TestCtx,
-    report: &[u8],
-    expected_report_data: &[u8; KEY_REPORT_DATA_LEN],
-    pub_key_le: &[u8],
-    coord_len: usize,
-) {
-    let decoded = verify_signed_report(ctx, report, expected_report_data);
     let cose_key = &decoded.public_key[..decoded.public_key_size as usize];
     let (x_be, y_be) = cose_key_xy(cose_key);
 
@@ -390,45 +381,6 @@ fn verify_key_report(
     );
 }
 
-/// Bind the signed RSA COSE_Key to the independently generated host key.
-fn verify_rsa_key_report(
-    ctx: &TestCtx,
-    report: &[u8],
-    expected_report_data: &[u8; KEY_REPORT_DATA_LEN],
-    expected_n: &[u8],
-    expected_e: &[u8],
-) {
-    let decoded = verify_signed_report(ctx, report, expected_report_data);
-    let cose_key = &decoded.public_key[..decoded.public_key_size as usize];
-    let mut decoder = minicbor::Decoder::new(cose_key);
-    let entries = decoder
-        .map()
-        .expect("COSE_Key is a CBOR map")
-        .expect("COSE_Key map length is known");
-    let (mut kty, mut n, mut e) = (None, None, None);
-    for _ in 0..entries {
-        match decoder.i64().expect("COSE_Key label decodes as int") {
-            1 => kty = Some(decoder.u8().expect("COSE key type")),
-            -1 => n = Some(decoder.bytes().expect("RSA modulus")),
-            -2 => e = Some(decoder.bytes().expect("RSA exponent")),
-            _ => decoder.skip().expect("skip unknown COSE field"),
-        }
-    }
-    assert_eq!(kty, Some(3), "COSE key type must be RSA");
-    assert_eq!(
-        n.expect("COSE_Key carries RSA modulus"),
-        expected_n,
-        "attested RSA modulus must match the host key",
-    );
-    let e = e.expect("COSE_Key carries RSA exponent");
-    // The firmware's four-byte exponent may have leading zero padding.
-    let e = &e[e.iter().position(|&b| b != 0).unwrap_or(e.len())..];
-    assert_eq!(
-        e, expected_e,
-        "attested RSA exponent must match the host key"
-    );
-}
-
 fuzz_target!(|input: FuzzInput| {
     common::common_fuzz_test(&|ctx: &TestCtx, _path: &str| {
         let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
@@ -461,18 +413,12 @@ fuzz_target!(|input: FuzzInput| {
             (Ok(resp), Expected::Report { pub_key, coord_len }) => {
                 verify_key_report(ctx, &resp.report, &req.report_data, &pub_key, coord_len)
             }
-            (Ok(resp), Expected::RsaReport { n, e }) => {
-                verify_rsa_key_report(ctx, &resp.report, &req.report_data, &n, &e)
-            }
             (Err(err), Expected::Report { .. }) => {
                 panic!("KeyReport of a generated ECC key must succeed, got {err}")
             }
-            (Err(err), Expected::RsaReport { .. }) => {
-                panic!("KeyReport of an imported RSA key must succeed, got {err}")
-            }
             (Err(err), Expected::UnsupportedKeyType) => assert!(
                 matches!(err, DdiError::TborStatus(TborStatus::UnsupportedKeyType)),
-                "non-attestable masked key must be rejected with UnsupportedKeyType, got {err}"
+                "non-ECC masked key must be rejected with UnsupportedKeyType, got {err}"
             ),
             (Err(err), Expected::Rejected) => assert!(
                 matches!(err, DdiError::TborStatus(_)),

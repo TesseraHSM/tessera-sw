@@ -552,11 +552,7 @@ fn expected(case: &Case, input: &Input<'_>, active: u16) -> Expected {
     } else {
         match req.scope {
             common::KEY_SCOPE_SESSION => None,
-            common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL
-                if !input.byte(5).is_multiple_of(3) =>
-            {
-                None
-            }
+            common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL if input.byte(5) % 3 != 0 => None,
             common::KEY_SCOPE_SECURITY_DOMAIN if input.byte(5) % 3 == 2 => None,
             _ => Some(TborStatus::UnsupportedKeyScope),
         }

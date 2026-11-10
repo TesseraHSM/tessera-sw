@@ -9,8 +9,6 @@ mod common;
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use tsra_crypto::aead_envelope::AeadAlg;
-use tsra_crypto::aead_envelope::HEADER_LEN;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -67,15 +65,9 @@ fuzz_target!(|input: FuzzInput| {
         // a fuzzed mutation to cover AEAD-reject / length-reject paths.
         let mut mach_seed_envelope = encrypt_mach_seed_envelope(&session, &input.mach_seed)
             .expect("sealing mach_seed under session param_key should succeed");
-        // Opening ignores the stored IV suffix: only its first 12 bytes
-        // form the GCM nonce. Flips in that suffix still authenticate.
-        let envelope_is_valid = input.envelope_mutation.is_noop(&mach_seed_envelope)
-            || match &input.envelope_mutation {
-                common::EnvelopeMutation::FlipByte { offset, .. } => (HEADER_LEN + 12
-                    ..HEADER_LEN + AeadAlg::AesGcm256.iv_len())
-                    .contains(&(usize::from(*offset) % mach_seed_envelope.len())),
-                _ => false,
-            };
+        // Snapshot noop-ness against the pre-mutation envelope; `apply`
+        // mutates it in place immediately after.
+        let envelope_is_noop = input.envelope_mutation.is_noop(&mach_seed_envelope);
         input.envelope_mutation.apply(&mut mach_seed_envelope);
 
         let part_init_req = TborPartInitReq {
@@ -91,23 +83,25 @@ fuzz_target!(|input: FuzzInput| {
         // catch bugs where a valid input is rejected or an invalid input
         // is accepted (silent regressions the `let _` discard would hide).
         //
-        // * expect_success: envelope is unchanged except possibly in
-        //   the ignored IV suffix AND the rest of the request is
-        //   wire/handler-valid
+        // * expect_success: envelope is byte-identical to the freshly
+        //   sealed one AND the rest of the request is wire/handler-valid
         //   by construction (known-good policy, fixed-length thumbprints,
         //   SAPOTA is 0 or exactly SAPOTA_THUMBPRINT_LEN). The AEAD open
         //   authenticates and the handler runs the provisioning
         //   pipeline through Commit.
-        // * expect_failure: any other non-noop envelope mutation changes
-        //   the required length, invalidates the header, or tampers with
-        //   the nonce/AAD/ciphertext/tag. Encoding, firmware decoding,
-        //   or AEAD authentication rejects it with `TborEncodeError`
-        //   or a firmware `TborStatus`, never a response-decoding failure.
+        // * expect_failure: a non-noop envelope mutation guarantees
+        //   either (a) the encoded envelope overflows
+        //   MACH_SEED_ENVELOPE_MAX_LEN and the wire encoder rejects, or
+        //   (b) AES-GCM detects the ciphertext/tag/AAD tamper (or the
+        //   post-decrypt length mismatch after truncation) and
+        //   `AeadEnvelopeAuthFailed` fires. These surface as
+        //   `TborEncodeError` or a firmware `TborStatus`, never a
+        //   response-decoding failure.
         let result = ctx.tbor(&part_init_req);
 
-        if envelope_is_valid {
+        if envelope_is_noop {
             result.expect(
-                "PartInit should succeed with an authentic envelope and a wire-valid request",
+                "PartInit should succeed with an unmutated envelope and a wire-valid request",
             );
         } else {
             assert!(
@@ -115,7 +109,7 @@ fuzz_target!(|input: FuzzInput| {
                     &result,
                     Err(DdiError::TborStatus(_) | DdiError::TborEncodeError)
                 ),
-                "PartInit should reject an invalid envelope with a firmware status or \
+                "PartInit should reject a mutated envelope with a firmware status or \
                  request-encoding error, got {result:?}"
             );
         }

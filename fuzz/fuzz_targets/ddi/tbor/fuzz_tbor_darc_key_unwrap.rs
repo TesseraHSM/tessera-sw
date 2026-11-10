@@ -15,9 +15,8 @@ mod common;
 use libfuzzer_sys::arbitrary::*;
 use libfuzzer_sys::*;
 use tsra_crypto::*;
-use tsra_ddi_tbor_test_harness::assertions::*;
-use tsra_ddi_tbor_test_harness::x509_fixture::*;
-use tsra_ddi_tbor_test_harness::*;
+use tsra_ddi_interface::DdiError;
+use tsra_ddi_tbor_test_harness::{assertions::*, x509_fixture::*, *};
 use tsra_ddi_tbor_types::*;
 
 /// Six independent success lanes keep deep coverage frequent.
@@ -173,6 +172,7 @@ impl CoseMutation {
 enum Expected {
     Success,
     Reject(TborStatus),
+    EncodeError,
 }
 
 /// Big-endian field elements and independently computed wire public key.
@@ -204,13 +204,7 @@ impl HostKey {
             le.resize(curve.wire_pub_key_len() / 2, 0);
             wire_pub.extend_from_slice(&le);
         }
-        Self {
-            curve,
-            d,
-            x,
-            y,
-            wire_pub,
-        }
+        Self { curve, d, x, y, wire_pub }
     }
 
     /// Return the exact private-key kind expected for the selected curve.
@@ -226,7 +220,8 @@ impl HostKey {
 /// Derive varied test-only key bytes without an external random dependency.
 fn tmk_bytes(input: &FuzzInput<'_>) -> [u8; TMK_LEN] {
     core::array::from_fn(|i| {
-        input.scalar.rotate_left(i as u32) as u8 ^ input.extra.get(i).copied().unwrap_or(i as u8)
+        input.scalar.rotate_left(i as u32) as u8
+            ^ input.extra.get(i).copied().unwrap_or(i as u8)
     })
 }
 
@@ -237,12 +232,10 @@ fn import_tmk(
     fixture: common::SecurityDomainFixture,
     tmk: &[u8; TMK_LEN],
 ) -> [u8; MASKED_TMK_LEN] {
-    let kex = ctx
-        .tbor(&TborDarcKexKeyGenReq {
-            session_id,
-            scope: common::KEY_SCOPE_LOCAL,
-        })
-        .expect("DarcKexKeyGen");
+    let kex = ctx.tbor(&TborDarcKexKeyGenReq {
+        session_id,
+        scope: common::KEY_SCOPE_LOCAL,
+    }).expect("DarcKexKeyGen");
     let mut recipient_be = kex.pub_key;
     recipient_be[..common::COORD_LEN].reverse();
     recipient_be[common::COORD_LEN..].reverse();
@@ -255,45 +248,28 @@ fn import_tmk(
     let chain = make_chain(&fixture.pota, &sender_pub);
     let sealed = seal_vec(
         &HpkeSealConfig::auth(
-            HpkeSuite::DHKemP384Sha384AesGcm256,
-            &recipient,
-            &[],
-            &[],
-            &sender,
+            HpkeSuite::DHKemP384Sha384AesGcm256, &recipient, &[], &[], &sender,
         ),
         tmk,
-    )
-    .expect("seal known TMK");
-    let (ex, ey) = sealed
-        .enc
-        .coord_vec()
-        .expect("encapsulated public coordinates");
+    ).expect("seal known TMK");
+    let (ex, ey) = sealed.enc.coord_vec().expect("encapsulated public coordinates");
     let mut sealed_tmk = [0; SEALED_TMK_LEN];
     sealed_tmk[0] = 4;
     sealed_tmk[1..1 + common::COORD_LEN].copy_from_slice(&ex);
     sealed_tmk[1 + common::COORD_LEN..SEC1_PUB_LEN].copy_from_slice(&ey);
     sealed_tmk[SEC1_PUB_LEN..].copy_from_slice(&sealed.ct);
     let mut evidence = Vec::new();
-    let remote_cert_chain = chain
-        .der_items()
-        .iter()
-        .map(|der| common::add_evidence_item(&mut evidence, der))
-        .collect();
+    let remote_cert_chain = chain.der_items().iter()
+        .map(|der| common::add_evidence_item(&mut evidence, der)).collect();
     let oob = evidence.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    ctx.tbor_oob(
-        &TborDarcTmkImportReq {
-            session_id,
-            masked_kex_key: kex.masked_key,
-            policy: fixture.policy,
-            sealed_tmk,
-            remote_cert_chain,
-        },
-        &oob,
-    )
-    .expect("import known TMK")
-    .masked_tmk
-    .try_into()
-    .expect("TMK envelope length")
+    ctx.tbor_oob(&TborDarcTmkImportReq {
+        session_id,
+        masked_kex_key: kex.masked_key,
+        policy: fixture.policy,
+        sealed_tmk,
+        remote_cert_chain,
+    }, &oob).expect("import known TMK").masked_tmk
+        .try_into().expect("TMK envelope length")
 }
 
 /// Choose granted operations and requested permissions independently of FW.
@@ -344,8 +320,8 @@ fn valid_permissions(ops: &[u8], requested: u64) -> bool {
         allowed |= KEY_USAGE_DERIVE;
     }
     let effective = requested & allowed;
-    let signing =
-        effective & (KEY_USAGE_SIGN | KEY_USAGE_VERIFY) == KEY_USAGE_SIGN | KEY_USAGE_VERIFY;
+    let signing = effective & (KEY_USAGE_SIGN | KEY_USAGE_VERIFY)
+        == KEY_USAGE_SIGN | KEY_USAGE_VERIFY;
     signing ^ (effective & KEY_USAGE_DERIVE != 0)
 }
 
@@ -364,30 +340,15 @@ fn encode_cose(
             continue;
         }
         let mut enc = minicbor::Encoder::new(Vec::new());
-        enc.i32(
-            if matches!(mutation, CoseMutation::Unknown) && index == selected {
-                99
-            } else {
-                label
-            },
-        )
-        .expect("COSE label");
+        enc.i32(if matches!(mutation, CoseMutation::Unknown) && index == selected {
+            99
+        } else { label }).expect("COSE label");
         if matches!(mutation, CoseMutation::WrongType) && index == selected {
             enc.bool(false).expect("wrong field type");
         } else {
             match label {
-                1 => {
-                    enc.u8(if matches!(mutation, CoseMutation::WrongKty) {
-                        1
-                    } else {
-                        2
-                    })
-                    .expect("kty");
-                }
-                2 => {
-                    enc.bytes(&input.extra[..input.extra.len().min(64)])
-                        .expect("kid");
-                }
+                1 => { enc.u8(if matches!(mutation, CoseMutation::WrongKty) { 1 } else { 2 }).expect("kty"); }
+                2 => { enc.bytes(&input.extra[..input.extra.len().min(64)]).expect("kid"); }
                 3 => {
                     let alg = if matches!(mutation, CoseMutation::DeprecatedAlgorithm) {
                         [-7, -35, -36][input.mask as usize % 3]
@@ -407,11 +368,7 @@ fn encode_cose(
                     match mutation {
                         CoseMutation::EmptyOps => values.clear(),
                         CoseMutation::DuplicateOp => values.push(ops[0]),
-                        CoseMutation::InvalidOp => values.push(if input.mask & 1 == 0 {
-                            0
-                        } else {
-                            11 + input.mask % 245
-                        }),
+                        CoseMutation::InvalidOp => values.push(if input.mask & 1 == 0 { 0 } else { 11 + input.mask % 245 }),
                         _ => {}
                     }
                     if matches!(mutation, CoseMutation::IndefiniteOps) {
@@ -419,17 +376,13 @@ fn encode_cose(
                     } else {
                         enc.array(values.len() as u64).expect("operations");
                     }
-                    for op in values {
-                        enc.u8(op).expect("operation");
-                    }
+                    for op in values { enc.u8(op).expect("operation"); }
                     if matches!(mutation, CoseMutation::IndefiniteOps) {
                         enc.end().expect("operations end");
                     }
                 }
                 -1 => {
-                    let crv = if matches!(mutation, CoseMutation::WrongCurve) {
-                        4
-                    } else {
+                    let crv = if matches!(mutation, CoseMutation::WrongCurve) { 4 } else {
                         match key.curve {
                             common::EccCurve::P256 => 1,
                             common::EccCurve::P384 => 2,
@@ -439,26 +392,14 @@ fn encode_cose(
                     enc.i32(crv).expect("curve");
                 }
                 _ => {
-                    let mut value = match label {
-                        -2 => key.x.clone(),
-                        -3 => key.y.clone(),
-                        _ => key.d.clone(),
-                    };
-                    if matches!(
-                        (mutation, label),
-                        (CoseMutation::MismatchX, -2)
-                            | (CoseMutation::MismatchY, -3)
-                            | (CoseMutation::MismatchScalar, -4)
-                    ) {
+                    let mut value = match label { -2 => key.x.clone(), -3 => key.y.clone(), _ => key.d.clone() };
+                    if matches!((mutation, label),
+                        (CoseMutation::MismatchX, -2) | (CoseMutation::MismatchY, -3) | (CoseMutation::MismatchScalar, -4)) {
                         let last = value.len() - 1;
                         value[last] ^= 0x80;
                     }
                     if matches!(mutation, CoseMutation::WrongWidth) && index == 5 + selected % 3 {
-                        if input.mask & 1 == 0 {
-                            value.pop();
-                        } else {
-                            value.push(0);
-                        }
+                        if input.mask & 1 == 0 { value.pop(); } else { value.push(0); }
                     }
                     enc.bytes(&value).expect("field element");
                 }
@@ -472,9 +413,7 @@ fn encode_cose(
     }
     let count = fields.len();
     fields.rotate_left(input.controls as usize % count);
-    if input.controls & 0x80 != 0 {
-        fields.reverse();
-    }
+    if input.controls & 0x80 != 0 { fields.reverse(); }
     let mut enc = minicbor::Encoder::new(Vec::new());
     if matches!(mutation, CoseMutation::IndefiniteMap) {
         enc.begin_map().expect("indefinite map");
@@ -482,15 +421,11 @@ fn encode_cose(
         enc.map(count as u64).expect("COSE map");
     }
     let mut bytes = enc.into_writer();
-    for field in fields {
-        bytes.extend_from_slice(&field);
-    }
+    for field in fields { bytes.extend_from_slice(&field); }
     match mutation {
         CoseMutation::IndefiniteMap => bytes.push(0xff),
         CoseMutation::Trailing => bytes.push(input.mask),
-        CoseMutation::Truncate => {
-            bytes.pop();
-        }
+        CoseMutation::Truncate => { bytes.pop(); }
         _ => {}
     }
     bytes
@@ -499,7 +434,8 @@ fn encode_cose(
 /// AES-KWP-wrap bounded plaintext under the exact TMK imported by the fixture.
 fn wrap(tmk: &[u8; TMK_LEN], plaintext: &[u8]) -> Vec<u8> {
     let key = AesKey::from_bytes(tmk).expect("TMK AES key");
-    Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &key, plaintext).expect("wrap COSE")
+    Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &key, plaintext)
+        .expect("wrap COSE")
 }
 
 /// Predict a single-byte envelope mutation, including ignored IV suffix bytes.
@@ -515,29 +451,19 @@ fn masked_tmk_outcome(original: &[u8], changed: &[u8]) -> Expected {
         return Expected::Reject(TborStatus::MaskedKeyDecodeFailed);
     }
     let label_len = aad[7] as usize;
-    if &aad[..4] != b"MKEY"
-        || aad[4..6] != [1, 0]
-        || label_len > 128
-        || aad[154] > 15
-        || aad[155..].iter().any(|b| *b != 0)
-        || aad[26 + label_len..154].iter().any(|b| *b != 0)
-    {
+    if &aad[..4] != b"MKEY" || aad[4..6] != [1, 0] || label_len > 128
+        || aad[154] > 15 || aad[155..].iter().any(|b| *b != 0)
+        || aad[26 + label_len..154].iter().any(|b| *b != 0) {
         return Expected::Reject(TborStatus::MaskedKeyDecodeFailed);
     }
     let attrs = u64::from_le_bytes(aad[8..16].try_into().expect("usage flags"));
     let scope = ((attrs >> 17) & 7) as u8;
-    if !matches!(
-        scope,
-        common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL | common::KEY_SCOPE_SECURITY_DOMAIN
-    ) {
+    if !matches!(scope, common::KEY_SCOPE_EPHEMERAL | common::KEY_SCOPE_LOCAL | common::KEY_SCOPE_SECURITY_DOMAIN) {
         return Expected::Reject(TborStatus::UnsupportedKeyScope);
     }
     let baseline = aead_envelope::inspect(original).expect("real TMK envelope");
-    if env.iv[..12] == baseline.iv[..12]
-        && aad == baseline.aad
-        && env.payload == baseline.payload
-        && env.tag == baseline.tag
-    {
+    if env.iv[..12] == baseline.iv[..12] && aad == baseline.aad
+        && env.payload == baseline.payload && env.tag == baseline.tag {
         Expected::Success
     } else {
         Expected::Reject(TborStatus::AesGcmDecryptTagDoesNotMatch)
@@ -549,23 +475,17 @@ fn masked_tmk_outcome(original: &[u8], changed: &[u8]) -> Expected {
 fn assert_success(resp: &TborDarcKeyUnwrapResp, key: &HostKey, scope: u8) {
     assert_eq!(resp.key_kind, key.kind(), "recovered key kind");
     assert_eq!(resp.pub_key.len(), key.curve.wire_pub_key_len());
-    assert!(
-        resp.pub_key == key.wire_pub,
-        "recovered public key mismatch"
-    );
+    assert!(resp.pub_key == key.wire_pub, "recovered public key mismatch");
     assert!(!resp.masked_key.is_empty());
     assert!(resp.masked_key.len() <= DARC_UNWRAP_MASKED_KEY_MAX_LEN);
     let env = aead_envelope::inspect(&resp.masked_key).expect("output envelope framing");
     assert_eq!(env.aad.len(), 192);
-    assert_eq!(env.payload.len(), key.curve.coord_len().div_ceil(16) * 16);
+    assert_eq!(env.payload.len(), (key.curve.coord_len() + 15) / 16 * 16);
     assert_eq!(env.aad[6], key.kind());
     let attrs = u64::from_le_bytes(env.aad[8..16].try_into().expect("output usage flags"));
     assert_eq!(((attrs >> 17) & 7) as u8, scope);
     let label_len = env.aad[7] as usize;
-    assert_eq!(
-        env.aad.get(26..26 + label_len),
-        Some(b"DarcKeyUnwrap".as_slice())
-    );
+    assert_eq!(env.aad.get(26..26 + label_len), Some(b"DarcKeyUnwrap".as_slice()));
 }
 
 /// Compare the observed result with the prediction made before submission.
@@ -578,6 +498,10 @@ fn check(ctx: &TestCtx, req: &TborDarcKeyUnwrapReq, expected: Expected, key: &Ho
         Expected::Reject(status) => {
             let err = ctx.tbor(req).expect_err("invalid DarcKeyUnwrap must fail");
             assert_session_rejects(&err, status);
+        }
+        Expected::EncodeError => {
+            assert!(matches!(ctx.tbor(req), Err(DdiError::TborEncodeError)),
+                "oversized request must fail host encoding");
         }
     }
 }
@@ -592,19 +516,12 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
     };
     let active_id = session.session_id;
     let mut session = Some(SessionGuard::new(ctx, session));
-    let scope = if input.scope & 1 == 0 {
-        common::KEY_SCOPE_LOCAL
-    } else {
-        common::KEY_SCOPE_EPHEMERAL
-    };
+    let scope = if input.scope & 1 == 0 { common::KEY_SCOPE_LOCAL } else { common::KEY_SCOPE_EPHEMERAL };
     let key = HostKey::new(input.curve, input.scalar);
     let (ops, usage) = permissions(input);
     let mut req = TborDarcKeyUnwrapReq {
-        session_id: active_id,
-        scope,
-        key_usage: usage,
-        masked_tmk: [0; MASKED_TMK_LEN],
-        wrapped_key: vec![0; 24],
+        session_id: active_id, scope, key_usage: usage,
+        masked_tmk: [0; MASKED_TMK_LEN], wrapped_key: vec![0; 24],
     };
     let early = match input.scenario {
         Scenario::CryptoUser => Some(TborStatus::InvalidPermissions),
@@ -614,11 +531,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
             Some(TborStatus::InvalidArg)
         }
         Scenario::ClosedSession => {
-            session
-                .take()
-                .expect("session")
-                .close()
-                .expect("close before request");
+            session.take().expect("session").close().expect("close before request");
             Some(TborStatus::SessionNotFound)
         }
         Scenario::MismatchedSession => {
@@ -635,74 +548,45 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
         check(ctx, &req, Expected::Reject(status), &key);
     } else {
         let fixture = common::create_test_security_domain_with_policy(
-            ctx,
-            session.as_ref().expect("session").handshake(),
-        );
+            ctx, session.as_ref().expect("session").handshake());
         let tmk = tmk_bytes(input);
         req.masked_tmk = import_tmk(ctx, active_id, fixture, &tmk);
         let mutation = if matches!(input.scenario, Scenario::Cose) {
             CoseMutation::from_byte(input.controls)
-        } else {
-            CoseMutation::None
-        };
+        } else { CoseMutation::None };
         let cose = encode_cose(&key, input, &ops, mutation);
         req.wrapped_key = wrap(&tmk, &cose);
         let mut expected = if !matches!(mutation, CoseMutation::None)
-            || matches!(input.scenario, Scenario::ArbitraryAlgorithm)
-                && matches!(input.alg, -7 | -35 | -36)
-        {
+            || matches!(input.scenario, Scenario::ArbitraryAlgorithm) && matches!(input.alg, -7 | -35 | -36) {
             Expected::Reject(TborStatus::InvalidArg)
-        } else if valid_permissions(&ops, usage) {
-            Expected::Success
-        } else {
-            Expected::Reject(TborStatus::InvalidPermissions)
-        };
+        } else if valid_permissions(&ops, usage) { Expected::Success }
+        else { Expected::Reject(TborStatus::InvalidPermissions) };
 
         match input.scenario {
             Scenario::ArbitraryScope => {
                 req.scope = input.scope;
-                if !matches!(
-                    req.scope,
-                    common::KEY_SCOPE_LOCAL | common::KEY_SCOPE_EPHEMERAL
-                ) {
+                if !matches!(req.scope, common::KEY_SCOPE_LOCAL | common::KEY_SCOPE_EPHEMERAL) {
                     expected = Expected::Reject(TborStatus::UnsupportedKeyScope);
                 }
             }
             Scenario::MaskedTmkFlip => {
                 let original = req.masked_tmk;
                 let mut changed = original.to_vec();
-                common::EnvelopeMutation::FlipByte {
-                    offset: input.offset,
-                    mask: input.mask,
-                }
-                .apply(&mut changed);
+                common::EnvelopeMutation::FlipByte { offset: input.offset, mask: input.mask }.apply(&mut changed);
                 expected = masked_tmk_outcome(&original, &changed);
                 req.masked_tmk.copy_from_slice(&changed);
             }
             Scenario::RawMaskedTmk => {
-                req.masked_tmk = core::array::from_fn(|i| {
-                    input.extra.get(i).copied().unwrap_or(tmk[i % TMK_LEN])
-                });
+                req.masked_tmk = core::array::from_fn(|i| input.extra.get(i).copied().unwrap_or(tmk[i % TMK_LEN]));
                 req.masked_tmk[0] = 0; // Guarantee bad magic independently of arbitrary contents.
                 expected = Expected::Reject(TborStatus::InvalidArg);
             }
             Scenario::WrappedFlip => {
-                common::EnvelopeMutation::FlipByte {
-                    offset: input.offset,
-                    mask: input.mask,
-                }
-                .apply(&mut req.wrapped_key);
+                common::EnvelopeMutation::FlipByte { offset: input.offset, mask: input.mask }.apply(&mut req.wrapped_key);
                 if input.mask != 0 {
                     let aes = AesKey::from_bytes(&tmk).expect("TMK");
-                    assert!(
-                        Decrypter::decrypt_vec(
-                            &mut AesKeyWrapPadAlgo::default(),
-                            &aes,
-                            &req.wrapped_key
-                        )
-                        .is_err(),
-                        "ciphertext mutation must violate KWP integrity"
-                    );
+                    assert!(Decrypter::decrypt_vec(&mut AesKeyWrapPadAlgo::default(), &aes, &req.wrapped_key).is_err(),
+                        "ciphertext mutation must violate KWP integrity");
                     expected = Expected::Reject(TborStatus::AesUnwrapFailed);
                 }
             }
@@ -712,48 +596,31 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
                 req.wrapped_key = if len >= 16 && len % 8 == 0 {
                     // A valid KWP layer whose plaintext is not a CBOR map.
                     wrap(&tmk, &vec![0; len - 8])
-                } else {
-                    vec![input.mask; len]
-                };
+                } else { vec![input.mask; len] };
                 assert_eq!(req.wrapped_key.len(), len);
                 expected = if len > DARC_UNWRAP_WRAPPED_KEY_MAX_LEN {
                     Expected::Reject(TborStatus::TborInvalidFixedLength)
-                } else {
-                    Expected::Reject(TborStatus::InvalidArg)
-                };
+                } else { Expected::Reject(TborStatus::InvalidArg) };
             }
             Scenario::RawWrapped => {
-                req.wrapped_key =
-                    input.extra[..input.extra.len().min(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN)].to_vec();
-                if req.wrapped_key.len().is_multiple_of(8) {
-                    req.wrapped_key.push(input.mask);
-                }
+                req.wrapped_key = input.extra[..input.extra.len().min(DARC_UNWRAP_WRAPPED_KEY_MAX_LEN)].to_vec();
+                if req.wrapped_key.len().is_multiple_of(8) { req.wrapped_key.push(input.mask); }
                 expected = if req.wrapped_key.len() > DARC_UNWRAP_WRAPPED_KEY_MAX_LEN {
                     Expected::Reject(TborStatus::TborInvalidFixedLength)
-                } else {
-                    Expected::Reject(TborStatus::InvalidArg)
-                };
+                } else { Expected::Reject(TborStatus::InvalidArg) };
             }
             Scenario::WrappedTruncate => {
                 let original_len = req.wrapped_key.len();
                 let mut len = input.offset as usize % (original_len + 1);
-                if len != original_len && len.is_multiple_of(8) {
-                    len += 1;
-                }
+                if len != original_len && len.is_multiple_of(8) { len += 1; }
                 req.wrapped_key.truncate(len);
-                if len != original_len {
-                    expected = Expected::Reject(TborStatus::InvalidArg);
-                }
+                if len != original_len { expected = Expected::Reject(TborStatus::InvalidArg); }
             }
             Scenario::WrappedAppend => {
                 let mut len = input.extra.len().min(32);
-                if len > 0 && len.is_multiple_of(8) {
-                    len -= 1;
-                }
+                if len > 0 && len.is_multiple_of(8) { len -= 1; }
                 req.wrapped_key.extend_from_slice(&input.extra[..len]);
-                if len > 0 {
-                    expected = Expected::Reject(TborStatus::InvalidArg);
-                }
+                if len > 0 { expected = Expected::Reject(TborStatus::InvalidArg); }
             }
             Scenario::WrongKind => {
                 let donor = HostKey::new(common::EccCurve::P256, input.scalar);
@@ -763,19 +630,14 @@ fn run(ctx: &TestCtx, input: &FuzzInput<'_>) {
                 };
                 let resp = ctx.tbor(&donor_req).expect("authentic wrong-kind donor");
                 assert_success(&resp, &donor, scope);
-                req.masked_tmk = resp
-                    .masked_key
-                    .try_into()
-                    .expect("P-256 envelope fits TMK field");
+                req.masked_tmk = resp.masked_key.try_into().expect("P-256 envelope fits TMK field");
                 expected = Expected::Reject(TborStatus::UnsupportedKeyType);
             }
             _ => {}
         }
         check(ctx, &req, expected, &key);
     }
-    if let Some(session) = session {
-        session.close().expect("close session");
-    }
+    if let Some(session) = session { session.close().expect("close session"); }
 }
 
 fuzz_target!(|input: FuzzInput<'_>| {
