@@ -38,7 +38,7 @@ struct Stage {
     /// Run release build (firmware).
     #[clap(long)]
     build: bool,
-    /// Run unit tests (firmware, host target).
+    /// Run unit tests (firmware and platform workspace, host target).
     #[clap(long)]
     test: bool,
 }
@@ -157,7 +157,7 @@ impl Xtask for Precheck {
         }
 
         if stage.test {
-            log::info!("=== test (firmware, host) ===");
+            log::info!("=== test (firmware and platform workspace, host) ===");
             if let Err(e) = (crate::test::Test {}).run(ctx.clone()) {
                 errors.push(("test", e));
             }
@@ -178,8 +178,8 @@ impl Xtask for Precheck {
         }
 
         if stage.build {
-            // The bulk-crypto fastpath flavor first, so the default flavor is what
-            // remains in `target/` afterwards.
+            // The bulk-crypto fastpath and emulator flavors first, so the default
+            // flavor is what remains in `target/` afterwards.
             log::info!("=== build (firmware, bulk_crypto) ===");
             if let Err(e) = (crate::build::Build {
                 features: Some(crate::fw_util::BULK_CRYPTO_FEATURE.to_string()),
@@ -188,6 +188,16 @@ impl Xtask for Precheck {
             .run(ctx.clone())
             {
                 errors.push(("build (bulk_crypto)", e));
+            }
+
+            log::info!("=== build (firmware, emulator) ===");
+            if let Err(e) = (crate::build::Build {
+                features: Some(crate::fw_util::EMULATOR_FEATURE.to_string()),
+                no_default_features: false,
+            })
+            .run(ctx.clone())
+            {
+                errors.push(("build (emulator)", e));
             }
 
             log::info!("=== build (firmware) ===");
