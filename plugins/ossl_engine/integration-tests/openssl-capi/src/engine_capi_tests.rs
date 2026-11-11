@@ -12,6 +12,11 @@
 //! Requires `ENGINE_SO` (the engine `.so`) and `MASKED_KEYGEN` (the helper that
 //! stages the blob), set by `xtask integration-tests` / the engine matrix. The
 //! blob is staged out-of-process, sharing the keymat set up here so it unmasks.
+//!
+//! Run with `cargo nextest`, as the engine matrix does: a dynamic engine binds
+//! at most once per process, so each test needs its own process, which also
+//! gives it its own auto-started simulator and keymat. A plain `cargo test`
+//! fails every test after the first at `LOAD`.
 
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used)]
