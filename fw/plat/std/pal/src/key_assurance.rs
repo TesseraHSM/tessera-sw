@@ -363,7 +363,8 @@ pub(crate) fn parse_rsa_private_key(der: &[u8]) -> Option<DecodedRsaKey<'_>> {
 /// components of an imported RSA key.
 ///
 /// The modulus must be 256, 384 or 512 bytes, `e` at most 4 bytes and each
-/// prime-sized field at most half the modulus, like Uno.
+/// prime-sized field at most half the modulus, like Uno. A non-CRT key's `d`
+/// must also fit the modulus width, like Uno's non-CRT operand layout.
 ///
 /// # Errors
 /// * [`HsmError::InvalidArg`] — a component has an unsupported size, or `e`
@@ -371,10 +372,15 @@ pub(crate) fn parse_rsa_private_key(der: &[u8]) -> Option<DecodedRsaKey<'_>> {
 /// * [`HsmError::PctValidationRsaUnwrapRsaKeyFailed`] — the components are
 ///   inconsistent, or `e` is one (the public operation is the identity, so
 ///   the PCT can't pass).
-pub(crate) fn check_rsa_components(key: &DecodedRsaKey<'_>, pct: &HsmRsaPct) -> HsmResult<()> {
+pub(crate) fn check_rsa_components(
+    key: &DecodedRsaKey<'_>,
+    crt: bool,
+    pct: &HsmRsaPct,
+) -> HsmResult<()> {
     let half = key.n.len() / 2;
     if !matches!(key.n.len(), 256 | 384 | 512)
         || key.e.len() > 4
+        || (!crt && key.d.len() > key.n.len())
         || [key.p, key.q, key.dp, key.dq, key.qinv]
             .iter()
             .any(|c| c.len() > half)

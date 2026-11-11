@@ -572,6 +572,18 @@ fn reject_rsa_4k_plain_d_sign() {
     reject_rsa(512, false, SIGN_VERIFY, |p| p.d = plus_two(&p.d));
 }
 
+/// Sets `d = 2^(8k)`, one byte wider than the modulus.
+fn oversized_d(p: &mut RsaParts) {
+    let mut d = vec![0; p.n.len() + 1];
+    d[0] = 1;
+    p.d = d;
+}
+
+#[test]
+fn reject_rsa_2k_plain_oversized_d_sign() {
+    reject_rsa_with(256, false, SIGN_VERIFY, oversized_d, TborStatus::InvalidArg);
+}
+
 #[test]
 fn reject_rsa_2k_crt_dp_sign() {
     reject_rsa(256, true, SIGN_VERIFY, |p| p.dp = plus_two(&p.dp));

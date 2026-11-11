@@ -126,7 +126,7 @@ impl HsmRsa for StdHsmPal {
         // the DER before the backend import, which may reject, drop or
         // recompute some of them.
         let key = crate::key_assurance::parse_rsa_private_key(der).ok_or(HsmError::InvalidArg)?;
-        crate::key_assurance::check_rsa_components(&key, &pct)?;
+        crate::key_assurance::check_rsa_components(&key, crt, &pct)?;
         let pk = RsaPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
         self.check_rsa_pct(&pk, pct).await?;
         let modulus_len = pk.size();
