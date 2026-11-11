@@ -314,13 +314,19 @@ impl HsmEcc for StdHsmPal {
         _io: &StdHsmIo,
         der: &HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
-        _pct: HsmEccPct,
+        pct: HsmEccPct,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         // std PAL vault format is raw HSM-format scalar bytes; parse the
         // recovered PKCS#8 DER and re-export in the vault representation.
-        // Like key generation here, it runs no PCT.
+        // Like Uno, the key must carry a well-formed public key in both
+        // modes; use mode also checks it against the scalar and runs `pct`.
+        let key = crate::key_assurance::parse_ec_private_key(der).ok_or(HsmError::InvalidArg)?;
+        let embedded = crate::key_assurance::embedded_public_key(&key)?;
         let pk = EccPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
         let curve = from_ecc_curve(pk.curve());
+        if curve != key.curve {
+            return Err(HsmError::InvalidArg);
+        }
         let priv_len = curve.wire_coord_len();
         if let Some(out) = out {
             if out.len() < priv_len {
@@ -328,6 +334,12 @@ impl HsmEcc for StdHsmPal {
             }
             pk.to_hsm_bytes(&mut out[..priv_len])
                 .map_err(|_| HsmError::InvalidArg)?;
+            // Rebuild the key from the vault scalar: OpenSSL keeps the DER's
+            // embedded public point, so `pk` can't check it.
+            let vault_pk = EccPrivateKey::from_hsm_bytes(&out[..priv_len])
+                .map_err(|_| HsmError::InvalidArg)?;
+            self.check_ecc_import(curve, pct, &vault_pk, embedded)
+                .await?;
         }
         Ok((priv_len, curve))
     }
