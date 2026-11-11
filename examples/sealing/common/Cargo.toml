@@ -21,7 +21,5 @@ ureq = { default-features = false, version = "3" }
 x509.workspace = true
 zerocopy.workspace = true
 
-[features]
-
 [lints]
 workspace = true

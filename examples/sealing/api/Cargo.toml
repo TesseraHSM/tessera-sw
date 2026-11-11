@@ -22,7 +22,5 @@ tsra_ddi_tbor_types.workspace = true
 x509.workspace = true
 zerocopy.workspace = true
 
-[features]
-
 [lints]
 workspace = true

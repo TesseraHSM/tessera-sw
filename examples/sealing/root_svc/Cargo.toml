@@ -28,7 +28,5 @@ x509.workspace = true
 zerocopy.workspace = true
 zeroize.workspace = true
 
-[features]
-
 [lints]
 workspace = true

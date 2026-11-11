@@ -23,7 +23,5 @@ x509.workspace = true
 zerocopy = { features = ["derive"], workspace = true }
 zeroize.workspace = true
 
-[features]
-
 [lints]
 workspace = true
