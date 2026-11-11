@@ -175,7 +175,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::GetCertificate => get_certificate(pal, io, decoder, hdr).await,
         DdiOp::ShaDigest => sha_digest(pal, io, decoder, hdr).await,
         DdiOp::GetEstablishCredEncryptionKey => {
-            get_establish_cred_encryption_key(pal, io, decoder, hdr).await
+            get_establish_cred_encryption_key(pal, io, decoder, hdr, undo).await
         }
         DdiOp::GetSessionEncryptionKey => get_session_encryption_key(pal, io, decoder, hdr).await,
         DdiOp::GetUnwrappingKey => get_unwrapping_key(pal, io, decoder, hdr).await,
@@ -184,7 +184,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         DdiOp::GetSealedBk3 => get_sealed_bk3(pal, io, decoder, hdr),
         DdiOp::SetSealedBk3 => set_sealed_bk3(pal, io, decoder, hdr),
         DdiOp::InitBk3 => init_bk3(pal, io, decoder, hdr).await,
-        DdiOp::EstablishCredential => establish_credential(pal, io, decoder, hdr).await,
+        DdiOp::EstablishCredential => establish_credential(pal, io, decoder, hdr, undo).await,
         DdiOp::ChangePin => change_pin(pal, io, decoder, hdr).await,
         DdiOp::CloseSession => close_session(pal, io, decoder, hdr).await,
         DdiOp::ReopenSession => reopen_session(pal, io, decoder, hdr, undo).await,

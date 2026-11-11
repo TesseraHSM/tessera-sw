@@ -23,13 +23,24 @@ pub(crate) async fn get_establish_cred_encryption_key<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetEstablishCredEncryptionKeyReq = decoder.decode_data()?;
+    let _lock = pal.partition_lock(io).await?;
 
-    // Key must exist (not yet consumed by EstablishCredential).
     match crate::part_state::part_establish_cred_key_id(pal, io) {
         Ok(_) => {}
-        Err(HsmError::PartPropNotFound) => return Err(HsmError::KeyNotFound),
+        Err(HsmError::PartPropNotFound) => {
+            if crate::part_state::part_is_credential_set(pal, io)? {
+                return Err(HsmError::KeyNotFound);
+            }
+            undo.push_prop_restore_absent_best_effort(HsmPartPropId::ESTABLISH_CRED_KEY_ID)?;
+            let key = pal.part_generate_establish_cred_key(io).await?;
+            if let Err(e) = undo.push_vault_create(key) {
+                let _ = pal.vault_key_delete(io, key).await;
+                return Err(e);
+            }
+        }
         Err(e) => return Err(e),
     }
 

@@ -65,16 +65,15 @@ const MK_VAULT_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 ///
 /// Implements protocol steps 1-13.
 ///
-/// All partition state mutations are batched into the final
-/// atomic-commit block; any failure in steps 8-13 leaves partition
-/// state untouched apart from the nonce refresh in step 6 (which is
-/// required even on failure to prevent replay of the authenticated
-/// request).
+/// The authenticated nonce and transport key remain consumed on failure.
+/// Attempt-owned keys and credential/provisioning writes are undone until
+/// the outer IO owner successfully delivers the completion.
 pub(crate) async fn establish_credential<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let mut body: DdiEstablishCredentialReq<'_> = decoder.decode_data()?;
 
@@ -136,14 +135,11 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
         return Err(HsmError::InvalidAppCredentials);
     }
 
-    // Credential commit (CREDENTIAL prop write / `part_clear_establish_cred_key`)
-    // and BK3 session commit (`part_set_bk3_session`) are intentionally
-    // deferred to the final atomic-commit block at the end of this
-    // handler.  Deferring lets a failure in steps 8-13 (e.g. tampered
-    // `masked_bk3`) leave the partition in its pre-call state — apart
-    // from the refreshed nonce — so the host can retry without re-
-    // running `InitBk3` or losing access to the establish-cred
-    // encryption key.
+    // Authenticated, valid credentials consume this transport key even if
+    // provisioning fails. A subsequent Get generates a fresh key pair.
+    let transport_key = crate::part_state::part_establish_cred_key_id(pal, io)?;
+    crate::part_state::part_clear_establish_cred_key(pal, io)?;
+    let _ = pal.vault_key_delete(io, transport_key).await;
 
     // ── Step 8: Unmask BK3 ───────────────────────────────────────────
     let bk3 = pal.dma_alloc(io, BK3_LEN)?;
@@ -172,6 +168,10 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // `bk` derived from the current selectors in step 10.  Emu has a
     // single lineage so this is a no-op today.
     let mk_key_id = provision_mk(pal, io, body.bmk, bk).await?;
+    if let Err(e) = undo.push_vault_create(mk_key_id) {
+        let _ = pal.vault_key_delete(io, mk_key_id).await;
+        return Err(e);
+    }
 
     // ── Step 12: Optional unwrapping-key re-import ───────────────────
     //
@@ -180,34 +180,41 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // provisioned above so GetUnwrappingKey returns the same key rather
     // than lazily generating a fresh one.  `None` on the fresh-
     // provisioning path (no unwrapping key supplied).
+    let prior_unwrapping_key = if body.masked_unwrapping_key.is_empty() {
+        None
+    } else {
+        pal.part_existing_unwrapping_key_id(io)?
+    };
     let unwrapping_key_id =
         reimport_unwrapping_key(pal, io, mk_key_id, body.masked_unwrapping_key).await?;
+    if let Some(key) = unwrapping_key_id {
+        if let Err(e) = undo.push_vault_create(key) {
+            let _ = pal.vault_key_delete(io, key).await;
+            return Err(e);
+        }
+    }
 
     // ── Step 13: Envelope MK into BMK and emit the response ──────────
     let resp = encode_bmk_response(pal, io, hdr, bk, mk_key_id, svn, bks2_id).await?;
 
     // ── Commit partition state ───────────────────────────────────────
     //
-    // All partition-state mutations are batched here so that any
-    // failure in steps 8-13 (e.g. tampered `masked_bk3`, derivation
-    // failure, response encode failure) leaves the partition in its
-    // pre-call state — apart from the nonce refresh in step 6, which
-    // is required even on failure to prevent replay of the original
-    // request.
-    //
-    // Under the partition lock, every call below is effectively
-    // infallible:
-    // - CREDENTIAL prop write validates length, write-once, and
-    //   non-zero id/pin; both halves are pre-checked above so this
-    //   cannot fail here.
-    // - `part_set_bk3_session` validates length (48 B); `bk3_session`
-    //   is allocated with `BK3_LEN = 48`.
-    // - `part_clear_establish_cred_key` and `part_set_mk_key_id` only
-    //   fail if the partition is disabled, which is prevented by the
-    //   partition-enabled check at the start of `handle_io`.
-    //
-    // (The MK vault entry was committed at creation; a future undo log
-    // will handle rollback of a partially-applied EstablishCredential.)
+    // Record logical cleanup after the owned-key entries so rollback clears
+    // published handles before deleting their backing keys. Existing
+    // unwrapping keys and SP backups are not owned by this attempt.
+    undo.push_prop_restore_absent_best_effort(HsmPartPropId::CREDENTIAL)?;
+    undo.push_prop_restore_absent_best_effort(HsmPartPropId::MK_KEY_ID)?;
+    if unwrapping_key_id.is_some() {
+        match prior_unwrapping_key {
+            Some(key) => undo.push_prop_restore_scalar_best_effort(
+                HsmPartPropId::RSA_UNWRAPPING_KEY_ID,
+                u32::from(u16::from(key)),
+            )?,
+            None => {
+                undo.push_prop_restore_absent_best_effort(HsmPartPropId::RSA_UNWRAPPING_KEY_ID)?
+            }
+        }
+    }
     // Compose `id ‖ pin` into a 32 B HsmDmaBuf for the property setter.
     // The CREDENTIAL prop setter enforces the write-once invariant and
     // the all-zero half rejection (the latter is also pre-checked
@@ -217,11 +224,11 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     cred[CRED_FIELD_LEN..].copy_from_slice(pin);
     crate::part_state::part_set_credential(pal, io, cred)?;
     crate::part_state::part_set_bk3_session(pal, io, bk3_session)?;
-    crate::part_state::part_clear_establish_cred_key(pal, io)?;
     crate::part_state::part_set_mk_key_id(pal, io, mk_key_id)?;
     if let Some(uk_id) = unwrapping_key_id {
         crate::part_state::part_set_unwrapping_key_id(pal, io, uk_id)?;
     }
+    pal.check_io_failure(io)?;
 
     Ok(resp)
 }

@@ -21,6 +21,8 @@ use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
 #[cfg(feature = "tsra_test_hooks")]
+use super::clear_provisioning_state;
+#[cfg(feature = "tsra_test_hooks")]
 use super::clear_user_credentials;
 use super::common::ReqHdr;
 #[cfg(feature = "tsra_test_hooks")]
@@ -70,6 +72,9 @@ enum SupportedTestAction {
     /// Clear the partition's stored user credential.
     #[cfg(feature = "tsra_test_hooks")]
     ClearUserCredentials = 18,
+    /// Clear the partition's provisioning marker without deleting keys.
+    #[cfg(feature = "tsra_test_hooks")]
+    ClearProvisioningState = 19,
     /// Read back private key material.
     #[cfg(feature = "fips_validation_hooks")]
     GetPrivKey = 25,
@@ -105,6 +110,10 @@ impl TryFrom<u32> for SupportedTestAction {
         #[cfg(feature = "tsra_test_hooks")]
         if value == Self::ClearUserCredentials as u32 {
             return Ok(Self::ClearUserCredentials);
+        }
+        #[cfg(feature = "tsra_test_hooks")]
+        if value == Self::ClearProvisioningState as u32 {
+            return Ok(Self::ClearProvisioningState);
         }
         #[cfg(feature = "fips_validation_hooks")]
         if value == Self::GetPrivKey as u32 {
@@ -147,6 +156,18 @@ pub(super) async fn dispatch<'p>(
         #[cfg(feature = "tsra_test_hooks")]
         SupportedTestAction::ClearUserCredentials => {
             clear_user_credentials::dispatch(
+                pal,
+                io,
+                hdr,
+                decoder,
+                selector.request_field_count,
+                request_len,
+            )
+            .await
+        }
+        #[cfg(feature = "tsra_test_hooks")]
+        SupportedTestAction::ClearProvisioningState => {
+            clear_provisioning_state::dispatch(
                 pal,
                 io,
                 hdr,

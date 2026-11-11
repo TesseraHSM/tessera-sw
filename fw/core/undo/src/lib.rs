@@ -32,8 +32,8 @@
 //! restore a property) must succeed → a failure **poisons** the partition;
 //! finalising *physical cleanup* (zeroise) that fails leaves only a benign
 //! orphan → **best-effort** + reclaim by the recovery sweep.
-//! ReopenSession is an explicit exception: its inverse is
-//! best-effort even if backing-key deletion fails before restoring the slot.
+//! Session reopen and credential-provisioning cleanup are explicit
+//! best-effort exceptions.
 
 #![no_std]
 // The narrow `UndoVerbs` adapter mirrors the PAL's own `async fn` vault
@@ -86,6 +86,7 @@ const KIND_VAULT_DISABLE: u8 = 1;
 const KIND_PROP_RESTORE: u8 = 2;
 const KIND_SESSION_DESTROY: u8 = 3;
 const KIND_SESSION_ROLLBACK_REOPEN: u8 = 4;
+const KIND_PROP_RESTORE_BEST_EFFORT: u8 = 5;
 
 const MODE_SHIFT: u8 = 3;
 const MODE_MASK: u8 = 0b0000_0011;
@@ -231,10 +232,10 @@ fn unpack_bytes_handle(handle: u32) -> (usize, usize) {
 /// One rule decides it: failures of operations that *restore logical
 /// consistency* (re-enable, prop restore) poison; failures of *physical
 /// cleanup* (zeroise/delete of already-removed material) are best-effort.
-/// ReopenSession cleanup is also best-effort.
+/// Session reopen and credential-provisioning cleanup are also best-effort.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FailurePolicy {
-    /// Log and continue (physical cleanup or session reopen).
+    /// Log and continue.
     BestEffort,
     /// In-memory state is now incoherent → fail closed (poison).
     Poison,
@@ -391,6 +392,24 @@ impl<'a> UndoLog<'a> {
         self.push_entry(UndoEntry::prop_restore_scalar(id, prior))
     }
 
+    /// Restore an absent provisioning property without poisoning on cleanup failure.
+    pub fn push_prop_restore_absent_best_effort(&mut self, id: HsmPartPropId) -> HsmResult<()> {
+        let mut entry = UndoEntry::prop_restore_absent(id);
+        entry.tag = (entry.tag & !KIND_MASK) | KIND_PROP_RESTORE_BEST_EFFORT;
+        self.push_entry(entry)
+    }
+
+    /// Restore a prior provisioning scalar without poisoning on cleanup failure.
+    pub fn push_prop_restore_scalar_best_effort(
+        &mut self,
+        id: HsmPartPropId,
+        prior: u32,
+    ) -> HsmResult<()> {
+        let mut entry = UndoEntry::prop_restore_scalar(id, prior);
+        entry.tag = (entry.tag & !KIND_MASK) | KIND_PROP_RESTORE_BEST_EFFORT;
+        self.push_entry(entry)
+    }
+
     /// Record a byte property's **prior bytes** (copied into the arena).
     ///
     /// undo → write the bytes back; commit → keep.  Fails with
@@ -472,7 +491,7 @@ impl<'a> UndoLog<'a> {
         match entry.kind() {
             KIND_VAULT_CREATE => verbs.vault_delete(io, HsmKeyId::from(entry.id)).await,
             KIND_VAULT_DISABLE => verbs.vault_enable(io, HsmKeyId::from(entry.id)),
-            KIND_PROP_RESTORE => {
+            KIND_PROP_RESTORE | KIND_PROP_RESTORE_BEST_EFFORT => {
                 let id = HsmPartPropId::from_raw(entry.id);
                 match entry.mode() {
                     MODE_ABSENT => verbs.prop_clear(io, id),
@@ -532,6 +551,7 @@ fn undo_policy(kind: u8) -> FailurePolicy {
         // ReopenSession cleanup is best-effort even when deleting
         // the backing key fails before the logical state can be restored.
         KIND_SESSION_ROLLBACK_REOPEN => FailurePolicy::BestEffort,
+        KIND_PROP_RESTORE_BEST_EFFORT => FailurePolicy::BestEffort,
         // undo = re-enable / restore: must succeed for consistency.
         _ => FailurePolicy::Poison,
     }
@@ -700,6 +720,7 @@ mod tests {
         n: Cell<usize>,
         fail_enable: Cell<bool>,
         fail_delete: Cell<bool>,
+        fail_prop_restore: Cell<bool>,
         fail_session_destroy: Cell<bool>,
         fail_session_rollback_reopen: Cell<bool>,
         last_bytes: RefCell<[u8; 64]>,
@@ -713,6 +734,7 @@ mod tests {
                 n: Cell::new(0),
                 fail_enable: Cell::new(false),
                 fail_delete: Cell::new(false),
+                fail_prop_restore: Cell::new(false),
                 fail_session_destroy: Cell::new(false),
                 fail_session_rollback_reopen: Cell::new(false),
                 last_bytes: RefCell::new([0u8; 64]),
@@ -773,7 +795,11 @@ mod tests {
         }
         fn prop_clear(&self, _io: &Self::Io, id: HsmPartPropId) -> HsmResult<()> {
             self.record(OP_CLEAR, id.raw(), 0);
-            Ok(())
+            if self.fail_prop_restore.get() {
+                Err(HsmError::InvalidArg)
+            } else {
+                Ok(())
+            }
         }
         fn prop_set_u8(&self, _io: &Self::Io, id: HsmPartPropId, value: u8) -> HsmResult<()> {
             self.record(OP_SET_U8, id.raw(), u32::from(value));
@@ -781,7 +807,11 @@ mod tests {
         }
         fn prop_set_u16(&self, _io: &Self::Io, id: HsmPartPropId, value: u16) -> HsmResult<()> {
             self.record(OP_SET_U16, id.raw(), u32::from(value));
-            Ok(())
+            if self.fail_prop_restore.get() {
+                Err(HsmError::InvalidArg)
+            } else {
+                Ok(())
+            }
         }
         fn prop_set_u32(&self, _io: &Self::Io, id: HsmPartPropId, value: u32) -> HsmResult<()> {
             self.record(OP_SET_U32, id.raw(), value);
@@ -937,6 +967,54 @@ mod tests {
         let io = FakeIo::default();
         // Delete fails, but a never-observable new key is a benign orphan.
         assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
+    }
+
+    #[test]
+    fn provisioning_property_undo_restores_values_and_commit_keeps_them() {
+        let m = MockVerbs::new();
+        let io = FakeIo::default();
+        log!(commit_log);
+        commit_log
+            .push_prop_restore_absent_best_effort(HsmPartPropId::CREDENTIAL)
+            .unwrap();
+        commit_log
+            .push_prop_restore_scalar_best_effort(HsmPartPropId::RSA_UNWRAPPING_KEY_ID, 7)
+            .unwrap();
+        assert_eq!(run_commit(commit_log, &m, &io), WalkOutcome::Ok);
+        assert_eq!(m.count(), 0);
+
+        log!(undo_log);
+        undo_log
+            .push_prop_restore_absent_best_effort(HsmPartPropId::CREDENTIAL)
+            .unwrap();
+        undo_log
+            .push_prop_restore_scalar_best_effort(HsmPartPropId::RSA_UNWRAPPING_KEY_ID, 7)
+            .unwrap();
+        assert_eq!(run_undo(undo_log, &m, &io), WalkOutcome::Ok);
+        m.assert_rec(0, OP_SET_U16, HsmPartPropId::RSA_UNWRAPPING_KEY_ID.raw(), 7);
+        m.assert_rec(1, OP_CLEAR, HsmPartPropId::CREDENTIAL.raw(), 0);
+    }
+
+    #[test]
+    fn failed_provisioning_property_cleanup_continues_without_poisoning() {
+        let m = MockVerbs::new();
+        m.fail_prop_restore.set(true);
+        let io = FakeIo::default();
+        log!(log);
+        log.push_vault_create(key(5)).unwrap();
+        log.push_prop_restore_absent_best_effort(HsmPartPropId::CREDENTIAL)
+            .unwrap();
+        log.push_prop_restore_scalar_best_effort(HsmPartPropId::RSA_UNWRAPPING_KEY_ID, 7)
+            .unwrap();
+        assert_eq!(run_undo(log, &m, &io), WalkOutcome::Ok);
+        assert_eq!(m.count(), 3);
+        m.assert_rec(2, OP_DELETE, 5, 0);
+
+        log!(strict_log);
+        strict_log
+            .push_prop_restore_absent(HsmPartPropId::CREDENTIAL)
+            .unwrap();
+        assert_eq!(run_undo(strict_log, &m, &io), WalkOutcome::Poisoned);
     }
 
     #[test]

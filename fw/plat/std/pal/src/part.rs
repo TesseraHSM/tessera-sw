@@ -482,6 +482,35 @@ pub enum PartCommand {
 // ---------------------------------------------------------------------------
 
 impl HsmPartitionManager for StdHsmPal {
+    async fn part_generate_establish_cred_key(&self, io: &StdHsmIo) -> HsmResult<HsmKeyId> {
+        let mut public = [0u8; P384_PUB_KEY_LEN];
+        let key = self
+            .create_internal_ecc384_key(
+                io.pid().into(),
+                HsmVaultKeyKind::EstablishCred,
+                HsmVaultKeyAttrs::new()
+                    .with_internal(true)
+                    .with_local(true)
+                    .with_derive(true),
+                HsmEccPct::KeyAgreement,
+                false,
+                &mut public,
+            )
+            .await?;
+        let entry = &mut self.table_mut().entries[u8::from(io.pid()) as usize];
+        entry.establish_cred_key_id = Some(key);
+        entry.establish_cred_pub_key = public;
+        Ok(key)
+    }
+
+    fn part_existing_unwrapping_key_id(&self, io: &StdHsmIo) -> HsmResult<Option<HsmKeyId>> {
+        match self.prop_get_u16(io, HsmPartPropId::RSA_UNWRAPPING_KEY_ID) {
+            Ok(id) => Ok(Some(HsmKeyId::from(id))),
+            Err(HsmError::PartPropNotFound) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     // ─── Property API ──────────────────────────────────────────────────
     //
     // Forwarding shims to the inherent `prop_*` implementations on
