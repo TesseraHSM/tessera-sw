@@ -434,7 +434,7 @@ struct tsra_algo algo = {
 ## RSA AES Key Wrap & Unwrap
 
 The RSA AES key wrap is an algorithm based on the RSA public-key cryptos system and the AES key wrap algorithm. 
-The algorithm can wrap and unwrap a target asymmetric key of any length and type using an RSA key.
+The algorithm can wrap and unwrap raw symmetric key material or DER-encoded asymmetric private keys using an RSA key.
 
 - A temporary AES key is used for wrapping the target key using TSRA_ALGO_ID_AES_KEY_WRAP_KWP mechanism.
 - The temporary AES key is wrapped with the wrapping RSA key using TSRA_ALGO_ID_RSA_PKCS_OAEP mechanism.
@@ -443,6 +443,12 @@ EX sessions support SHA-1, SHA-256, SHA-384, and SHA-512 for the OAEP and
 MGF1 hashes, which must match. SHA-1 requires firmware with TBOR OAEP-SHA1
 support and is intended for legacy compatibility; prefer SHA-2 for new
 applications. This does not change legacy-session behavior.
+
+HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512 key unwrapping requires an EX
+session. The raw HMAC key must contain 32, 48, or 64 bytes, respectively,
+and both SIGN and VERIFY properties must be enabled. See
+[HMAC wrapped key format](#hmac-wrapped-key-format) for the required properties
+and legacy-session behavior.
 
 |                            |                                                                             |
 | -------------------------- | --------------------------------------------------------------------------- |

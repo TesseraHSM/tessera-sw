@@ -135,6 +135,30 @@ session type:
 - Sessions opened with `tsra_sess_ex_open`: a single RSA-AES wrap of the
   64-byte key `K1 || K2` (PKCS#11 `CKK_AES_XTS`). `K1` and `K2` must differ.
 
+### HMAC Wrapped Key Format
+
+HMAC key unwrapping is supported for sessions opened with `tsra_sess_ex_open`.
+Set CLASS to `TSRA_KEY_CLASS_SECRET` and select the matching KIND and BIT_LEN:
+
+| KIND | BIT_LEN | Raw Key Length |
+| ---- | ------- | -------------- |
+| `TSRA_KEY_KIND_HMAC_SHA256` | 256 | 32 bytes |
+| `TSRA_KEY_KIND_HMAC_SHA384` | 384 | 48 bytes |
+| `TSRA_KEY_KIND_HMAC_SHA512` | 512 | 64 bytes |
+
+Both SIGN and VERIFY must be true. ENCRYPT, DECRYPT, DERIVE, WRAP, and UNWRAP
+must be false, and ECC_CURVE must be absent. Unsupported sizes or usage
+properties return `TSRA_STATUS_INVALID_KEY_PROPS`.
+
+The wrapped plaintext is the raw HMAC key, not an ASN.1 structure. Use
+`TSRA_ALGO_ID_RSA_AES_KEY_WRAP` to unwrap the RSA-OAEP-wrapped AES key followed
+by the AES-KWP-wrapped HMAC key material. The resulting handle supports
+`tsra_crypt_sign` and `tsra_crypt_verify`; its MASKED_KEY property can be
+restored using `tsra_key_unmask` with the same HMAC key kind.
+
+Legacy sessions opened with `tsra_sess_open` do not support HMAC unwrapping
+and return `TSRA_STATUS_UNSUPPORTED_KEY_KIND` for otherwise valid properties.
+
 **Returns**
 
 `TSRA_STATUS_SUCCESS` on success, error code otherwise
