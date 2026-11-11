@@ -380,6 +380,13 @@ fn mismatched_q(key: &HostEcc) -> Vec<u8> {
     ecc_pkcs8(key.curve.oid, &key.d, false, Some(&other.point(0x04)))
 }
 
+/// A correctly sized uncompressed point that is not on the curve.
+fn off_curve_q(key: &HostEcc) -> Vec<u8> {
+    let mut point = vec![0; 1 + 2 * key.curve.raw];
+    point[0] = 0x04;
+    ecc_pkcs8(key.curve.oid, &key.d, false, Some(&point))
+}
+
 fn missing_q(key: &HostEcc) -> Vec<u8> {
     ecc_pkcs8(key.curve.oid, &key.d, false, None)
 }
@@ -403,6 +410,16 @@ fn order_d(key: &HostEcc) -> Vec<u8> {
         false,
         Some(&key.point(0x04)),
     )
+}
+
+#[test]
+fn reject_ecc_off_curve_q_p256_sign() {
+    reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, off_curve_q);
+}
+
+#[test]
+fn reject_ecc_off_curve_q_p521_derive() {
+    reject_ecc(P521, KEY_USAGE_DERIVE, BAD_STRUCTURE, off_curve_q);
 }
 
 #[test]

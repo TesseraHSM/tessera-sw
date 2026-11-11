@@ -121,10 +121,14 @@ impl HsmRsa for StdHsmPal {
         // HSM byte format: the CRT layout (`n|e|d|p|q|dp|dq|qinv`) when `crt`,
         // else non-CRT (`n|e|p|q`). Both HSM layouts are no larger than the
         // source DER, so `der` doubles as the vault buffer (no second buffer).
-        // Unless `pct` is `None`, the key's components must be consistent and
-        // it must pass the PCT, like Uno.
+        // Like Uno, the components must have supported sizes and, unless
+        // `pct` is `None`, be consistent and pass the PCT. They are checked on
+        // the DER before the backend import, which may reject, drop or
+        // recompute some of them.
+        let key = crate::key_assurance::parse_rsa_private_key(der).ok_or(HsmError::InvalidArg)?;
+        crate::key_assurance::check_rsa_components(&key, &pct)?;
         let pk = RsaPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
-        self.check_rsa_import(&pk, pct).await?;
+        self.check_rsa_pct(&pk, pct).await?;
         let modulus_len = pk.size();
         let hsm_len = if crt {
             pk.to_hsm_crt_bytes(der)

@@ -12,24 +12,26 @@
 //!   scalar, and the key pair must pass the PCT that the caller selects.
 //! * **RSA** — the key components must be consistent (`n = p·q`,
 //!   `d·e ≡ 1` mod `p-1` and `q-1`, and the CRT values `dp`, `dq` and `qInv`)
-//!   and the key pair must pass the PCT that the caller selects. The
-//!   consistency check covers what the backend's private operation hides: it
-//!   verifies its CRT result and falls back to `d`, and the non-CRT vault
-//!   recomputes `d`.
+//!   and the key pair must pass the PCT that the caller selects.
+//!
+//! Every check runs on the decoded DER components, before the key reaches
+//! the crypto backend: OpenSSL and CNG validate, drop or recompute some
+//! components on import, which would otherwise change the status or hide a
+//! corrupted value. Arithmetic on secret components uses zeroizing storage.
 
 use der::asn1::AnyRef;
 use der::asn1::BitStringRef;
 use der::asn1::ContextSpecific;
+use der::asn1::Null;
 use der::asn1::ObjectIdentifier;
 use der::asn1::OctetStringRef;
+use der::asn1::UintRef;
 use der::Decode;
 use der::Reader;
 use der::SliceReader;
 use der::TagNumber;
-use num_bigint::BigUint;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
-use tsra_crypto::ExportableHsmRsaKey;
 use tsra_crypto::Key;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaPrivateKey;
@@ -37,6 +39,8 @@ use zeroize::Zeroizing;
 
 use super::*;
 
+/// rsaEncryption (1.2.840.113549.1.1.1).
+const RSA_ENCRYPTION: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
 /// id-ecPublicKey (1.2.840.10045.2.1).
 const EC_PUBLIC_KEY: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
 /// Named-curve OIDs (RFC 5480 §2.1.1.1).
@@ -47,9 +51,29 @@ const P521_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.35");
 /// SEC1 marker byte for an uncompressed point.
 const UNCOMPRESSED_POINT: u8 = 0x04;
 
+/// Big-endian curve orders `n`, for the `1 <= d < n` scalar check.
+const ORDER_P256: [u8; 32] = [
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x51,
+];
+const ORDER_P384: [u8; 48] = [
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xc7, 0x63, 0x4d, 0x81, 0xf4, 0x37, 0x2d, 0xdf,
+    0x58, 0x1a, 0x0d, 0xb2, 0x48, 0xb0, 0xa7, 0x7a, 0xec, 0xec, 0x19, 0x6a, 0xcc, 0xc5, 0x29, 0x73,
+];
+const ORDER_P521: [u8; 66] = [
+    0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xfa, 0x51, 0x86, 0x87, 0x83, 0xbf, 0x2f, 0x96, 0x6b, 0x7f, 0xcc, 0x01, 0x48, 0xf7, 0x09,
+    0xa5, 0xd0, 0x3b, 0xb5, 0xc9, 0xb8, 0x89, 0x9c, 0x47, 0xae, 0xbb, 0x6f, 0xb7, 0x1e, 0x91, 0x38,
+    0x64, 0x09,
+];
+
 /// The SEC1 fields of a PKCS#8 EC private key that the import checks use.
 pub(crate) struct DecodedEcKey<'a> {
     pub(crate) curve: HsmEccCurve,
+    /// The raw big-endian private scalar `d`.
+    pub(crate) scalar: &'a [u8],
     has_parameters: bool,
     public_key: Option<BitStringRef<'a>>,
 }
@@ -88,14 +112,14 @@ pub(crate) fn parse_ec_private_key(der: &[u8]) -> Option<DecodedEcKey<'_>> {
     let (curve, sec1) = (curve_from_oid(named_curve)?, key.as_bytes());
 
     let mut inner = SliceReader::new(sec1).ok()?;
-    let (version, parameters, public_key) = inner
+    let (version, scalar, parameters, public_key) = inner
         .sequence(|r| {
             let version = u8::decode(r)?;
-            OctetStringRef::decode(r)?;
+            let scalar = OctetStringRef::decode(r)?;
             let parameters = ContextSpecific::<AnyRef<'_>>::decode_explicit(r, TagNumber::N0)?;
             let public_key =
                 ContextSpecific::<BitStringRef<'_>>::decode_explicit(r, TagNumber::N1)?;
-            Ok((version, parameters, public_key))
+            Ok((version, scalar, parameters, public_key))
         })
         .ok()?;
     inner.finish(()).ok()?;
@@ -104,6 +128,7 @@ pub(crate) fn parse_ec_private_key(der: &[u8]) -> Option<DecodedEcKey<'_>> {
     }
     Some(DecodedEcKey {
         curve,
+        scalar: scalar.as_bytes(),
         has_parameters: parameters.is_some(),
         public_key: public_key.map(|cs| cs.value),
     })
@@ -129,6 +154,33 @@ pub(crate) fn embedded_public_key<'a>(key: &DecodedEcKey<'a>) -> HsmResult<&'a [
         Some((&UNCOMPRESSED_POINT, xy)) if xy.len() == 2 * key.curve.priv_key_len() => Ok(xy),
         _ => Err(HsmError::KeyStructuralValidationFailed),
     }
+}
+
+/// Checks the private scalar like Uno: exactly the curve's raw width and in
+/// `[1, n-1]`, compared in constant time.
+///
+/// # Errors
+/// * [`HsmError::InvalidArg`] — the scalar has the wrong length or is out of
+///   range.
+pub(crate) fn check_ecc_scalar(curve: HsmEccCurve, scalar: &[u8]) -> HsmResult<()> {
+    let order: &[u8] = match curve {
+        HsmEccCurve::P256 => &ORDER_P256,
+        HsmEccCurve::P384 => &ORDER_P384,
+        HsmEccCurve::P521 => &ORDER_P521,
+    };
+    if scalar.len() != order.len() {
+        return Err(HsmError::InvalidArg);
+    }
+    let nonzero = scalar.iter().fold(0u8, |acc, &b| acc | b) != 0;
+    // `scalar - order` borrows out of the top byte iff `scalar < order`.
+    let mut borrow = 0i32;
+    for (&v, &n) in scalar.iter().zip(order).rev() {
+        borrow = ((i32::from(v) - i32::from(n) - borrow) >> 8) & 1;
+    }
+    if !(nonzero & (borrow == 1)) {
+        return Err(HsmError::InvalidArg);
+    }
+    Ok(())
 }
 
 /// Constant-time byte-slice equality.
@@ -209,29 +261,12 @@ impl StdHsmPal {
         Ok(())
     }
 
-    /// Checks an imported RSA key pair: its components must be consistent
-    /// and the pair must pass `pct`. Does nothing when `pct` is `None`.
+    /// Runs the RSA PCT selected by `pct` on an imported key pair.
     ///
     /// # Errors
-    /// * [`HsmError::InvalidArg`] — the public exponent is zero.
-    /// * [`HsmError::PctValidationRsaUnwrapRsaKeyFailed`] — the components
-    ///   are inconsistent or the PCT failed.
-    pub(crate) async fn check_rsa_import(
-        &self,
-        pk: &RsaPrivateKey,
-        pct: HsmRsaPct,
-    ) -> HsmResult<()> {
-        if matches!(pct, HsmRsaPct::None) {
-            return Ok(());
-        }
-        let k = pk.size();
-        let mut comps = Zeroizing::new(vec![0u8; pk.hsm_crt_bytes_len()]);
-        pk.to_hsm_crt_bytes(&mut comps)
-            .map_err(|_| HsmError::InvalidArg)?;
-        if !rsa_components_consistent(&comps, k)? {
-            return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
-        }
-        if !self.rsa_pct(pk, pct, k).await? {
+    /// * [`HsmError::PctValidationRsaUnwrapRsaKeyFailed`] — the PCT failed.
+    pub(crate) async fn check_rsa_pct(&self, pk: &RsaPrivateKey, pct: HsmRsaPct) -> HsmResult<()> {
+        if !self.rsa_pct(pk, pct, pk.size()).await? {
             return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
         }
         Ok(())
@@ -263,42 +298,264 @@ impl StdHsmPal {
     }
 }
 
-/// Checks the components of an RSA key exported in the CRT HSM layout
-/// `n(k) ‖ e(4) ‖ d(k) ‖ p ‖ q ‖ dp ‖ dq ‖ qInv` (each `k/2`, big-endian).
+/// The big-endian magnitudes of a PKCS#1 two-prime `RSAPrivateKey`.
+pub(crate) struct DecodedRsaKey<'a> {
+    pub(crate) n: &'a [u8],
+    e: &'a [u8],
+    d: &'a [u8],
+    p: &'a [u8],
+    q: &'a [u8],
+    dp: &'a [u8],
+    dq: &'a [u8],
+    qinv: &'a [u8],
+}
+
+/// Decodes a PKCS#8 `PrivateKeyInfo` that wraps a PKCS#1 `RSAPrivateKey`,
+/// like Uno's `parse_rsa_private_key`: PKCS#8 version 0, `rsaEncryption`
+/// with `NULL` parameters, and a two-prime (version 0) key.
+pub(crate) fn parse_rsa_private_key(der: &[u8]) -> Option<DecodedRsaKey<'_>> {
+    let mut outer = SliceReader::new(der).ok()?;
+    let (version, alg, key) = outer
+        .sequence(|r| {
+            let version = u8::decode(r)?;
+            let alg = r.sequence(|a| {
+                let oid = ObjectIdentifier::decode(a)?;
+                Null::decode(a)?;
+                Ok(oid)
+            })?;
+            Ok((version, alg, OctetStringRef::decode(r)?))
+        })
+        .ok()?;
+    outer.finish(()).ok()?;
+    if version != 0 || alg != RSA_ENCRYPTION {
+        return None;
+    }
+
+    let mut inner = SliceReader::new(key.as_bytes()).ok()?;
+    let (version, f) = inner
+        .sequence(|r| {
+            let version = u8::decode(r)?;
+            let mut f = [&[][..]; 8];
+            for field in f.iter_mut() {
+                *field = UintRef::decode(r)?.as_bytes();
+            }
+            Ok((version, f))
+        })
+        .ok()?;
+    inner.finish(()).ok()?;
+    if version != 0 {
+        return None;
+    }
+    let [n, e, d, p, q, dp, dq, qinv] = f;
+    Some(DecodedRsaKey {
+        n,
+        e,
+        d,
+        p,
+        q,
+        dp,
+        dq,
+        qinv,
+    })
+}
+
+/// Checks the sizes and, unless `pct` is `None`, the consistency of the
+/// components of an imported RSA key.
 ///
-/// Returns `Ok(false)` if `n ≠ p·q`, `d·e ≢ 1` mod `p-1` or `q-1`,
-/// `dp·e ≢ 1` mod `p-1`, `dq·e ≢ 1` mod `q-1`, or `qInv·q ≢ 1` mod `p`.
+/// The modulus must be 256, 384 or 512 bytes, `e` at most 4 bytes and each
+/// prime-sized field at most half the modulus, like Uno.
 ///
 /// # Errors
-/// * [`HsmError::InvalidArg`] — the layout is malformed or `e` is zero.
-fn rsa_components_consistent(comps: &[u8], k: usize) -> HsmResult<bool> {
-    let half = k / 2;
-    if k == 0 || comps.len() < 2 * k + 4 + 5 * half {
+/// * [`HsmError::InvalidArg`] — a component has an unsupported size, or `e`
+///   is zero.
+/// * [`HsmError::PctValidationRsaUnwrapRsaKeyFailed`] — the components are
+///   inconsistent, or `e` is one (the public operation is the identity, so
+///   the PCT can't pass).
+pub(crate) fn check_rsa_components(key: &DecodedRsaKey<'_>, pct: &HsmRsaPct) -> HsmResult<()> {
+    let half = key.n.len() / 2;
+    if !matches!(key.n.len(), 256 | 384 | 512)
+        || key.e.len() > 4
+        || [key.p, key.q, key.dp, key.dq, key.qinv]
+            .iter()
+            .any(|c| c.len() > half)
+    {
         return Err(HsmError::InvalidArg);
     }
-    let (n, rest) = comps.split_at(k);
-    let (e, rest) = rest.split_at(4);
-    let (d, rest) = rest.split_at(k);
-    let mut it = rest.chunks_exact(half).map(BigUint::from_bytes_be);
-    let mut next = || it.next().ok_or(HsmError::InvalidArg);
-    let (p, q, dp, dq, qinv) = (next()?, next()?, next()?, next()?, next()?);
-    let (n, e, d) = (
-        BigUint::from_bytes_be(n),
-        BigUint::from_bytes_be(e),
-        BigUint::from_bytes_be(d),
-    );
-    let one = BigUint::from(1u8);
-    if e.bits() == 0 {
+    if matches!(pct, HsmRsaPct::None) {
+        return Ok(());
+    }
+    let e = limbs(key.e);
+    if !gt(&e, &[0]) {
         return Err(HsmError::InvalidArg);
     }
-    if p <= one || q <= one {
-        return Ok(false);
+    if !gt(&e, &[1]) || !rsa_components_consistent(key, &e) {
+        return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
     }
-    let (p1, q1) = (&p - &one, &q - &one);
-    Ok(n == &p * &q
-        && (&d * &e) % &p1 == one
-        && (&d * &e) % &q1 == one
-        && (&dp * &e) % &p1 == one
-        && (&dq * &e) % &q1 == one
-        && (&qinv * &q) % &p == one)
+    Ok(())
+}
+
+/// Returns whether `n = p·q`, `d·e ≡ 1` mod `p-1` and `q-1`,
+/// `dp·e ≡ 1` mod `p-1`, `dq·e ≡ 1` mod `q-1` and `qInv·q ≡ 1` mod `p`.
+fn rsa_components_consistent(key: &DecodedRsaKey<'_>, e: &[u64]) -> bool {
+    let (p, q) = (limbs(key.p), limbs(key.q));
+    if !gt(&p, &[1]) || !gt(&q, &[1]) {
+        return false;
+    }
+    let (p1, q1) = (minus_one(&p), minus_one(&q));
+    let d = limbs(key.d);
+    let de = mul(&d, e);
+    eq(&mul(&p, &q), &limbs(key.n))
+        && eq(&rem(&de, &p1), &[1])
+        && eq(&rem(&de, &q1), &[1])
+        && eq(&rem(&mul(&limbs(key.dp), e), &p1), &[1])
+        && eq(&rem(&mul(&limbs(key.dq), e), &q1), &[1])
+        && eq(&rem(&mul(&limbs(key.qinv), &q), &p), &[1])
+}
+
+// Minimal unsigned arithmetic on little-endian `u64` limbs. Every value,
+// including intermediates, lives in zeroizing storage and is never
+// reallocated, so no copy of the key material outlives the check.
+type Limbs = Zeroizing<Vec<u64>>;
+
+/// Converts a big-endian magnitude to limbs.
+fn limbs(be: &[u8]) -> Limbs {
+    let mut out = Zeroizing::new(vec![0u64; be.len().div_ceil(8).max(1)]);
+    for (i, &b) in be.iter().rev().enumerate() {
+        out[i / 8] |= u64::from(b) << (8 * (i % 8));
+    }
+    out
+}
+
+/// Limb `i` of `a`, zero past its end.
+fn limb(a: &[u64], i: usize) -> u64 {
+    a.get(i).copied().unwrap_or(0)
+}
+
+/// `a == b`, regardless of leading zero limbs.
+fn eq(a: &[u64], b: &[u64]) -> bool {
+    (0..a.len().max(b.len())).fold(0, |acc, i| acc | (limb(a, i) ^ limb(b, i))) == 0
+}
+
+/// `a > b`.
+fn gt(a: &[u64], b: &[u64]) -> bool {
+    for i in (0..a.len().max(b.len())).rev() {
+        if limb(a, i) != limb(b, i) {
+            return limb(a, i) > limb(b, i);
+        }
+    }
+    false
+}
+
+/// `a - 1`, for `a > 0`.
+fn minus_one(a: &[u64]) -> Limbs {
+    let mut out = Zeroizing::new(a.to_vec());
+    for l in out.iter_mut() {
+        let (v, borrow) = l.overflowing_sub(1);
+        *l = v;
+        if !borrow {
+            break;
+        }
+    }
+    out
+}
+
+/// `a · b`.
+fn mul(a: &[u64], b: &[u64]) -> Limbs {
+    let mut out = Zeroizing::new(vec![0u64; a.len() + b.len()]);
+    for (i, &x) in a.iter().enumerate() {
+        let mut carry = 0u128;
+        for (j, &y) in b.iter().enumerate() {
+            let t = u128::from(x) * u128::from(y) + u128::from(out[i + j]) + carry;
+            out[i + j] = t as u64;
+            carry = t >> 64;
+        }
+        out[i + b.len()] = carry as u64;
+    }
+    out
+}
+
+/// `a mod m`, for `m > 0`, by binary long division with a branch-free
+/// conditional subtraction.
+fn rem(a: &[u64], m: &[u64]) -> Limbs {
+    let w = m.len() + 1;
+    let mut r = Zeroizing::new(vec![0u64; w]);
+    let mut t = Zeroizing::new(vec![0u64; w]);
+    for bit in (0..a.len() * 64).rev() {
+        // r = 2r + bit; r < m beforehand, so r < 2m fits in `w` limbs.
+        let mut carry = (a[bit / 64] >> (bit % 64)) & 1;
+        for l in r.iter_mut() {
+            let top = *l >> 63;
+            *l = (*l << 1) | carry;
+            carry = top;
+        }
+        // t = r - m; keep it unless the subtraction borrowed.
+        let mut borrow = 0u64;
+        for (i, (ti, &ri)) in t.iter_mut().zip(r.iter()).enumerate() {
+            let (v1, b1) = ri.overflowing_sub(limb(m, i));
+            let (v2, b2) = v1.overflowing_sub(borrow);
+            *ti = v2;
+            borrow = u64::from(b1 | b2);
+        }
+        let keep = borrow.wrapping_sub(1);
+        for (ri, &ti) in r.iter_mut().zip(t.iter()) {
+            *ri = (ti & keep) | (*ri & !keep);
+        }
+    }
+    r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn be(v: u128) -> Vec<u8> {
+        v.to_be_bytes().to_vec()
+    }
+
+    #[test]
+    fn limb_arithmetic_matches_u128() {
+        let cases = [
+            (0u128, 7u128),
+            (1, 1),
+            (u64::MAX as u128, 3),
+            (
+                0x1234_5678_9abc_def0_1122_3344_5566_7788,
+                0xffff_ffff_0000_0001,
+            ),
+            (u128::MAX, u64::MAX as u128 + 2),
+        ];
+        for (a, m) in cases {
+            assert!(eq(&rem(&limbs(&be(a)), &limbs(&be(m))), &limbs(&be(a % m))));
+        }
+        let (x, y) = (0xdead_beef_cafe_f00du128, 0x1_0000_0001u128);
+        assert!(eq(&mul(&limbs(&be(x)), &limbs(&be(y))), &limbs(&be(x * y))));
+        assert!(eq(
+            &minus_one(&limbs(&be(1u128 << 64))),
+            &limbs(&be(u64::MAX as u128))
+        ));
+        assert!(gt(&limbs(&be(1u128 << 64)), &[u64::MAX]));
+        assert!(!gt(&[5, 0, 0], &[5]));
+    }
+
+    #[test]
+    fn ecc_scalar_range() {
+        let mut d = ORDER_P256;
+        assert_eq!(
+            check_ecc_scalar(HsmEccCurve::P256, &d),
+            Err(HsmError::InvalidArg)
+        );
+        d[31] -= 1;
+        assert_eq!(check_ecc_scalar(HsmEccCurve::P256, &d), Ok(()));
+        assert_eq!(
+            check_ecc_scalar(HsmEccCurve::P256, &[0; 32]),
+            Err(HsmError::InvalidArg)
+        );
+        let mut one = [0u8; 32];
+        one[31] = 1;
+        assert_eq!(check_ecc_scalar(HsmEccCurve::P256, &one), Ok(()));
+        assert_eq!(
+            check_ecc_scalar(HsmEccCurve::P256, &one[1..]),
+            Err(HsmError::InvalidArg)
+        );
+    }
 }
