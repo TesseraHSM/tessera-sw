@@ -29,6 +29,14 @@ pub const EMULATOR_FEATURE: &str = "tsra_fw_uno_app/semihosting";
 /// backend (`tsra_fw_uno_trace/backend-uart`).
 pub const TRACE_UART_FEATURE: &str = "tsra_fw_uno_app/trace-uart";
 
+/// Feature that compiles the PAL's test-only DDI commands, `TriggerCrash`
+/// among them. Never in a production build.
+pub const TEST_HOOKS_FEATURE: &str = "tsra_fw_uno_pal/tsra_test_hooks";
+
+/// Feature that compiles the PAL's test-only DDI commands for FIPS
+/// validation. Never in a production build.
+pub const FIPS_VALIDATION_HOOKS_FEATURE: &str = "tsra_fw_uno_pal/fips_validation_hooks";
+
 /// Resolved firmware workspace paths.
 #[derive(Debug)]
 pub struct FwPaths {

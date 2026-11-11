@@ -193,11 +193,13 @@ impl Xtask for Precheck {
         }
 
         if stage.build {
-            // The bulk-crypto fastpath and emulator flavors first, so the default
-            // flavor is what remains in `target/` afterwards. Each build is
-            // locked: a debug-log message without a map row fails it.
+            // Every image that `cargo xtask log-map` reads, the test-hook
+            // images included, so the decoder header check sees the same
+            // messages. The default image builds last, so it is what remains
+            // in `target/` afterwards. Each build is locked: a debug-log
+            // message without a map row fails it.
             let mut images = Vec::new();
-            for (label, features) in crate::log_map::SUPPORTED_IMAGES {
+            for (label, features) in crate::log_map::MAP_IMAGES {
                 log::info!("=== build (firmware, {label}) ===");
                 let build = crate::build::Build {
                     features: features.map(str::to_string),
@@ -215,7 +217,7 @@ impl Xtask for Precheck {
                 errors.push(("build (fastpath PQC)", e));
             }
 
-            if images.len() == crate::log_map::SUPPORTED_IMAGES.len() {
+            if images.len() == crate::log_map::MAP_IMAGES.len() {
                 log::info!("=== message sources and decoder header ===");
                 if let Err(e) = crate::log_map::finish(&ctx, &images, crate::log_map::Mode::Locked)
                 {

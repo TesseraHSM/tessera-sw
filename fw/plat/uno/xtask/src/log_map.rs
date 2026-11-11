@@ -46,11 +46,20 @@ pub const MAP: &str = "fw/pal/log_map.tsv";
 /// The decoder header, relative to the platform workspace.
 pub const HEADER: &str = "fw/pal/log_messages.h";
 
-/// The images whose messages count as in use for the decoder header: each
-/// one's name and features, in the order `cargo xtask precheck` builds them.
-pub const SUPPORTED_IMAGES: [(&str, Option<&str>); 3] = [
+/// The images that `cargo xtask log-map` and `cargo xtask precheck --build`
+/// build and read, each one's name and features, in build order. A message
+/// counts as in use for the decoder header if any of them logs it, so the
+/// list holds the PAL's test-hook images as well as the supported images
+/// (default, `bulk_crypto`, and emulator). The default image builds last, so
+/// it is what remains in `target/` afterwards.
+pub const MAP_IMAGES: [(&str, Option<&str>); 5] = [
     ("bulk_crypto", Some(fw_util::BULK_CRYPTO_FEATURE)),
     ("emulator", Some(fw_util::EMULATOR_FEATURE)),
+    ("tsra_test_hooks", Some(fw_util::TEST_HOOKS_FEATURE)),
+    (
+        "fips_validation_hooks",
+        Some(fw_util::FIPS_VALIDATION_HOOKS_FEATURE),
+    ),
     ("default", None),
 ];
 
@@ -641,16 +650,22 @@ pub fn check_sites(images: &[&ImageLog]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that each message has one source line across `images`, and writes
-/// (fix mode) or checks (locked mode) the decoder header, which marks the
-/// messages that none of `images` uses as deprecated.
-pub fn finish(ctx: &XtaskCtx, images: &[ImageLog], mode: Mode) -> anyhow::Result<()> {
+/// Checks that each message has one source line across `images`, and returns
+/// the decoder header for `map`, which marks the messages that none of
+/// `images` uses as deprecated.
+pub fn decoder_header(map: &Map, images: &[ImageLog]) -> anyhow::Result<String> {
     check_sites(&images.iter().collect::<Vec<_>>())?;
     let used: BTreeSet<String> = images
         .iter()
         .flat_map(|image| image.tokens.keys().cloned())
         .collect();
-    let header = read_map(ctx)?.decoder_header(&used)?;
+    Ok(map.decoder_header(&used)?)
+}
+
+/// Writes (fix mode) or checks (locked mode) the decoder header for the
+/// message map and `images`; see [`decoder_header`].
+pub fn finish(ctx: &XtaskCtx, images: &[ImageLog], mode: Mode) -> anyhow::Result<()> {
+    let header = decoder_header(&read_map(ctx)?, images)?;
     let path = ctx.root.join(HEADER);
     let current = fs::read_to_string(&path)
         .map(|text| text.replace("\r\n", "\n"))
@@ -743,7 +758,7 @@ pub fn check_against_base(ctx: &XtaskCtx, base: &str) -> anyhow::Result<()> {
 /// Add message-map rows for debug-log output, and update the decoder header.
 #[derive(Parser)]
 #[clap(
-    about = "Build each supported image, adding message-map rows for new debug-log messages, and update the decoder header"
+    about = "Build the supported and test-hook images, adding message-map rows for new debug-log messages, and update the decoder header"
 )]
 pub struct LogMap {
     /// Change nothing: fail on a message without a row, or on an out-of-date
@@ -756,7 +771,7 @@ impl Xtask for LogMap {
     fn run(self, ctx: XtaskCtx) -> anyhow::Result<()> {
         let mode = if self.check { Mode::Locked } else { Mode::Fix };
         let mut images = Vec::new();
-        for (label, features) in SUPPORTED_IMAGES {
+        for (label, features) in MAP_IMAGES {
             log::info!("=== {label} image ===");
             let build = Build {
                 features: features.map(str::to_string),
@@ -928,5 +943,62 @@ mod tests {
         );
 
         assert!(!boundary_problems(&symbols(&good[..5]), bss, uninit).is_empty());
+    }
+
+    #[test]
+    fn a_message_that_only_a_test_hook_image_logs_is_not_deprecated() {
+        // Every image logs "ready"; each test-hook image also logs a message
+        // that no other image logs.
+        let map = Map::parse(concat!(
+            "0\tuno\tI\ttsra_fw_uno_pal\tboot\tready\n",
+            "1\tuno\tI\ttsra_fw_uno_pal\ttest\tcrash hook ran\n",
+            "2\tuno\tI\ttsra_fw_uno_pal\ttest\tfips hook ran\n",
+        ))
+        .expect("a map");
+        let rows: Vec<_> = map.rows().collect();
+        let hook_rows = [
+            (fw_util::TEST_HOOKS_FEATURE, rows[1]),
+            (fw_util::FIPS_VALIDATION_HOOKS_FEATURE, rows[2]),
+        ];
+        let is_hook = |features: Option<&str>| hook_rows.iter().any(|(f, _)| features == Some(*f));
+        let image = |label: &str, features: Option<&str>| {
+            let mut tokens = BTreeMap::from([(rows[0].key.symbol(), rows[0].descriptor())]);
+            for (feature, row) in hook_rows {
+                if features == Some(feature) {
+                    tokens.insert(row.key.symbol(), row.descriptor());
+                }
+            }
+            ImageLog {
+                label: label.to_string(),
+                tokens,
+                sites: BTreeMap::new(),
+                drops: BTreeSet::new(),
+                boundary: BTreeMap::new(),
+            }
+        };
+
+        let all: Vec<ImageLog> = MAP_IMAGES
+            .iter()
+            .map(|(label, features)| image(label, *features))
+            .collect();
+        let header = decoder_header(&map, &all).expect("a header");
+        assert!(!header.contains("Deprecated"), "{header}");
+
+        // Without the test-hook images, both of their messages are marked.
+        let supported: Vec<ImageLog> = MAP_IMAGES
+            .iter()
+            .filter(|(_, features)| !is_hook(*features))
+            .map(|(label, features)| image(label, *features))
+            .collect();
+        let header = decoder_header(&map, &supported).expect("a header");
+        assert_eq!(
+            header.matches("// Deprecated message").count(),
+            2,
+            "{header}"
+        );
+        assert!(
+            header.contains("    [0x01] = \"[test] crash hook ran\", // Deprecated message\n"),
+            "{header}"
+        );
     }
 }

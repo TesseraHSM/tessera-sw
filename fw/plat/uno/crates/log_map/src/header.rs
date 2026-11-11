@@ -113,8 +113,8 @@ const PREAMBLE: &str = "/*
  * values. The descriptor holds the severity, the component, and the message
  * number, one byte each from the lowest up, then a zero byte. Each message
  * below is a printf format for the record's two values, in order. A
- * deprecated message is one that no supported image logs anymore; its
- * number keeps its meaning.
+ * deprecated message is one that no image built by `cargo xtask log-map`
+ * logs anymore, test-hook images included; its number keeps its meaning.
  */
 
 #ifndef TSRA_LOG_MESSAGES_H
@@ -124,7 +124,7 @@ const PREAMBLE: &str = "/*
 ";
 
 /// Writes the decoder header for a map. `used` holds the token symbols that
-/// the supported images refer to.
+/// any of the map tool's images refers to.
 pub(crate) fn write(map: &Map, used: &BTreeSet<String>) -> Result<String, Error> {
     let mut slots: BTreeMap<(Component, u8), (String, bool)> = BTreeMap::new();
     for row in map.rows() {

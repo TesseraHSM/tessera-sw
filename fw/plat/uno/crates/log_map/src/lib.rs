@@ -510,9 +510,9 @@ impl Map {
         script
     }
 
-    /// The decoder header. `used` holds the token symbols that the supported
-    /// images with debug-log output refer to; a slot that none of them uses
-    /// is marked as deprecated.
+    /// The decoder header. `used` holds the token symbols that the map tool's
+    /// images refer to, test-hook images included; a slot that none of them
+    /// uses is marked as deprecated.
     pub fn decoder_header(&self, used: &BTreeSet<String>) -> Result<String, Error> {
         header::write(self, used)
     }
