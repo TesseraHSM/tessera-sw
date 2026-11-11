@@ -26,9 +26,9 @@
 //!   returned blob.
 //! * The partition unwrapping key: availability and stability.
 //!
-//! The emulator and socket backends don't run the structure check or
-//! pairwise consistency tests, so the tests that need one are ignored under
-//! the `emu` and `sock` features.
+//! The std platform behind the socket transport doesn't run the structure
+//! check or pairwise consistency tests yet (#120), so the tests that need
+//! one return early when the socket transport is selected.
 //!
 //! The SP publishes the unwrapping key asynchronously, so tests wait up to
 //! `UNWRAP_KEY_WAIT_SECS` seconds (default 900) for `GetUnwrappingKey`.
@@ -410,127 +410,127 @@ fn order_d(key: &HostEcc) -> Vec<u8> {
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_mismatched_q_p256_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, mismatched_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_mismatched_q_p384_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P384, KEY_USAGE_DERIVE, BAD_STRUCTURE, mismatched_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_mismatched_q_p521_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P521, SIGN_VERIFY, BAD_STRUCTURE, mismatched_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_missing_q_p256_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P256, KEY_USAGE_DERIVE, BAD_DECODE, missing_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_missing_q_p384_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P384, SIGN_VERIFY, BAD_DECODE, missing_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_missing_q_p521_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P521, KEY_USAGE_DERIVE, BAD_DECODE, missing_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_compressed_q_02_p256() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.compressed(0x02)))
     });
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_compressed_q_03_p384() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P384, SIGN_VERIFY, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.compressed(0x03)))
     });
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_hybrid_q_06_p256() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P256, SIGN_VERIFY, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.point(0x06)))
     });
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_hybrid_q_07_p521() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P521, KEY_USAGE_DERIVE, BAD_STRUCTURE, |k| {
         ecc_pkcs8(k.curve.oid, &k.d, false, Some(&k.point(0x07)))
     });
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_params_p256_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P256, SIGN_VERIFY, BAD_DECODE, params_then_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_params_p384_derive() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P384, KEY_USAGE_DERIVE, BAD_DECODE, params_then_q);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_ecc_params_p521_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_ecc(P521, SIGN_VERIFY, BAD_DECODE, params_then_q);
 }
 
@@ -597,65 +597,65 @@ fn reject_rsa_with(
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_plain_d_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, false, SIGN_VERIFY, |p| p.d = plus_two(&p.d));
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_plain_d_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, false, RSA_DECRYPT, |p| p.d = plus_two(&p.d));
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_4k_plain_d_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(512, false, SIGN_VERIFY, |p| p.d = plus_two(&p.d));
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_crt_dp_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, true, SIGN_VERIFY, |p| p.dp = plus_two(&p.dp));
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_crt_dq_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, true, RSA_DECRYPT, |p| p.dq = plus_two(&p.dq));
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_3k_crt_dp_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(384, true, RSA_DECRYPT, |p| p.dp = plus_two(&p.dp));
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_4k_crt_dq_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(512, true, SIGN_VERIFY, |p| p.dq = plus_two(&p.dq));
 }
 
@@ -673,20 +673,20 @@ fn swap_prime(k: usize, crt_p: bool) -> impl Fn(&mut RsaParts) {
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_crt_p_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, true, SIGN_VERIFY, swap_prime(256, true));
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_crt_q_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, true, RSA_DECRYPT, swap_prime(256, false));
 }
 
@@ -699,20 +699,20 @@ fn identity_exponents(p: &mut RsaParts) {
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_plain_identity_sign() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, false, SIGN_VERIFY, identity_exponents);
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_crt_identity_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa(256, true, RSA_DECRYPT, identity_exponents);
 }
 
@@ -723,11 +723,11 @@ fn zero_public_exponent(p: &mut RsaParts) {
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_plain_zero_e_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa_with(
         256,
         false,
@@ -738,11 +738,11 @@ fn reject_rsa_2k_plain_zero_e_decrypt() {
 }
 
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_rsa_2k_crt_zero_e_decrypt() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     reject_rsa_with(
         256,
         true,
@@ -809,11 +809,11 @@ fn reject_rsa_4k_repeatedly(
 /// a row, then imports the valid key: if each rejection had stored its key,
 /// the vault would have run out of space first.
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_repeated_then_valid() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = unwrapping_pub(&ctx, session.session_id);
@@ -834,11 +834,11 @@ fn reject_repeated_then_valid() {
 /// Like [`reject_repeated_then_valid`], but proves recovery with P-256
 /// imports, whose masked blobs are a whole number of AES blocks.
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_repeated_then_ecc_valid() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = unwrapping_pub(&ctx, session.session_id);
@@ -869,11 +869,11 @@ fn reject_repeated_then_ecc_valid() {
 /// component errors. Each must be rejected with its check's exact status.
 /// Valid P-256 imports must still work afterwards.
 #[test]
-#[cfg_attr(
-    any(feature = "emu", feature = "sock"),
-    ignore = "only hardware firmware performs FIPS key assurance"
-)]
 fn reject_matrix() {
+    // The std platform doesn't implement FIPS key assurance yet (#120).
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let sid = session.session_id;

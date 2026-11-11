@@ -23,9 +23,5 @@ x509.workspace = true
 zerocopy = { features = ["derive"], workspace = true }
 zeroize.workspace = true
 
-[features]
-emu = ["tsra_ddi/emu"]
-sock = ["tsra_ddi/sock"]
-
 [lints]
 workspace = true

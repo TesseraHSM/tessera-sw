@@ -29,7 +29,43 @@ use libtest_mimic::*;
 /// exits with an appropriate status code based on test results.
 fn main() {
     let args = Arguments::from_args();
-    libtest_mimic::run(&args, get_tests()).exit();
+    let mobk_cache = own_mobk_cache();
+    let conclusion = libtest_mimic::run(&args, get_tests());
+    if let Some(path) = mobk_cache {
+        let _ = std::fs::remove_file(path);
+    }
+    conclusion.exit();
+}
+
+/// Points gtest processes at a cache matching this runner's own HSM.
+///
+/// An auto-started socket server lives only as long as this runner, so the
+/// shared persistent cache would hold a MOBK from another server instance.
+/// Returns the cache path to remove on exit, or `None` when the HSM is
+/// external or `TSRA_MOBK_PATH` is already set.
+#[allow(unsafe_code)]
+fn own_mobk_cache() -> Option<PathBuf> {
+    if !owns_hsm() || env::var_os("TSRA_MOBK_PATH").is_some() {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let path = env::temp_dir().join(format!("tsra-mobk-{}-{nanos}.bin", std::process::id()));
+    // SAFETY: Called from `main` before any test threads are spawned.
+    unsafe {
+        env::set_var("TSRA_MOBK_PATH", &path);
+    }
+    Some(path)
+}
+
+/// Whether this runner started the HSM that its gtest processes use.
+///
+/// With `TSRA_TEST_ARGS=transport=sock` the linked socket server starts before
+/// `main`, and spawned gtest processes inherit its endpoint via `TSRA_TEST_ARGS`.
+fn owns_hsm() -> bool {
+    ddi_sock_server::autostarted()
 }
 
 /// Retrieves the list of all available C++ tests.
@@ -161,8 +197,13 @@ fn parse_gtest_list(output: &str, path: PathBuf) -> Vec<Trial> {
 ///
 /// Panics if the test binary cannot be executed.
 fn run_gtest(test_name: &str, path: &PathBuf) -> Result<(), Failed> {
+    /// Serializes gtest processes that share this runner's HSM, since each
+    /// test re-initializes the partition.
+    static OWNED_HSM: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     let test_name = test_name.replace("::", ".");
 
+    let _guard = owns_hsm().then(|| OWNED_HSM.lock());
     let output = Command::new(path)
         .arg(format!("--gtest_filter={}", test_name))
         .output()

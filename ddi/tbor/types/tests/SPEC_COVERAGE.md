@@ -585,6 +585,7 @@ Imports an RSA-AES-wrapped 64-byte AES-256-XTS key (`K1 ‖ K2`) as one
 | A 64-byte `K1 ‖ K2` imports as one `AesXts512` key | ✅ | `unwrap_key::unwrap_key_aes_xts` | No public key |
 | Wrong length, equal halves, or a 64-byte key under the AES class is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_invalid_material` | 32, 48 and 72 bytes; `InvalidArg` |
 | Usage other than exactly encrypt + decrypt is rejected | ✅ 🔁 | `unwrap_key::unwrap_key_aes_xts_rejects_non_cipher_usage` | `InvalidPermissions` |
+| A maximum-size blob (6 KiB AES-KWP plaintext) reaches AES-KWP | ✅ | `unwrap_key::unwrap_key_max_size_blob_reaches_kwp` | Intact: `InvalidArg` from key decode; tampered: `RsaUnwrapAesUnwrapFailed` |
 | An imported key encrypts like the host AES-XTS reference | ✅ | `aes_xts_encrypt_decrypt::aes_xts_unwrapped_key_matches_host` | DUL 512, 4 units; decrypt round trip |
 
 ## `AesXtsEncryptDecrypt` (opcode in-session, gated, OOB in / out)

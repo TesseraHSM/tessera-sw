@@ -1,0 +1,20 @@
+Policy: this token has no random-number generator (module README). From
+pkcs11-check 0.2.3 (https://github.com/mingulov/pkcs11-check), MIT OR
+Apache-2.0, applied to the installed package. Tests that only need random
+data (IVs, nonces, payloads) take it through this one helper; when the token
+answers CKR_RANDOM_NO_RNG the helper returns host random bytes instead of
+failing. Tests of the generator itself either call C_GenerateRandom directly
+(unaffected) or go through this helper and then pass on host bytes; those are
+kept off the include-list (baseline.txt, tag rng).
+
+--- a/pkcs11_check/raw/recipes.py
++++ b/pkcs11_check/raw/recipes.py
+@@ -1521,6 +1521,8 @@
+     """Generate random bytes using C_GenerateRandom."""
+     buf = (ctypes.c_ubyte * length)()
+     rv = raw.C_GenerateRandom(session, buf, length)
++    if rv == 0x121:  # CKR_RANDOM_NO_RNG: the token has no generator, take host bytes
++        return os.urandom(length)
+     expect_rv(rv, CKR_OK)
+     return bytes(buf)
+ 

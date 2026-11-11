@@ -14,9 +14,11 @@
 
 #![allow(dead_code)]
 
+// Links the in-process socket server started before `main`.
 use std::fs;
 use std::panic::AssertUnwindSafe;
 
+use ddi_sock_server as _;
 use fs2::FileExt;
 use tsra_cred_encrypt::DeviceCredKey;
 use tsra_crypto::*;

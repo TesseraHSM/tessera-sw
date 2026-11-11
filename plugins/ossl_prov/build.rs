@@ -6,15 +6,6 @@ fn main() {
     use std::env;
     use std::path::PathBuf;
 
-    let mut features = Vec::new();
-
-    if env::var("CARGO_FEATURE_EMU").is_ok() {
-        features.push("emu");
-    }
-    if env::var("CARGO_FEATURE_SOCK").is_ok() {
-        features.push("sock");
-    }
-
     // Calculate the target directory for passing to CMake
     // OUT_DIR is in target/profile/build/crate-hash/out, so we go up 3 levels
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
@@ -25,9 +16,7 @@ fn main() {
         .expect("Could not determine target directory");
 
     let mut cmake_cfg = cmake::Config::new(".");
-    cmake_cfg
-        .define("TSRA_CARGO_FEATURES", features.join(" "))
-        .define("TSRA_TARGET_DIR", target_dir.to_string_lossy().to_string());
+    cmake_cfg.define("TSRA_TARGET_DIR", target_dir.to_string_lossy().to_string());
 
     // Forward OPENSSL_DIR to CMake so find_package(OpenSSL) discovers the
     // same OpenSSL that the Rust openssl-sys crate links against.

@@ -17,10 +17,10 @@
 //! failing for a reason that had nothing to do with the chain.
 //!
 //! Certificates travel **out of band**, and both transports now
-//! implement that: `ddi/emu` writes the metadata page directly, and
-//! `ddi/nix` hands the items to the driver's data-transfer ioctl, which
-//! DMA-maps them and builds the page in the kernel. So these run on
-//! `emu` **and hardware**.
+//! implement that: the sock server builds the metadata page from the
+//! items it receives, and `ddi/nix` hands them to the driver's
+//! data-transfer ioctl, which DMA-maps them and builds the page in the
+//! kernel. So these run on `sock` **and hardware**.
 //!
 //! Everything else about `PartFinal` — the happy path, backup restore,
 //! lifecycle and role gates — lives in [`super`], which also carries a

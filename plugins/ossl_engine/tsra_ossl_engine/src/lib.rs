@@ -10,6 +10,9 @@
 
 //! Tessera Integrated HSM -- OpenSSL 1.1.x Engine. Linux only.
 
+// Starts an in-process DDI sock server for the unit tests.
+#[cfg(test)]
+use ddi_sock_server as _;
 /// File mode for secret material the engine writes (the cached MOBK and the
 /// log file): owner read/write only, as for the resiliency files.
 #[cfg(all(target_os = "linux", feature = "engine"))]

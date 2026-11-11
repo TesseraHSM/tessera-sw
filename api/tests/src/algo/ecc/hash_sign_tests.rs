@@ -416,10 +416,11 @@ fn run_hash_curve_mismatch_test(session: &HsmSession, curve: HsmEccCurve, algo: 
     let mut verify_algo = HsmHashSignAlgo::new(algo);
     let result = HsmVerifier::verify(&mut verify_algo, &pub_key, data, &sig);
 
-    #[cfg(feature = "session-ex-tests")]
-    let expected_result = matches!(result, Ok(true));
-    #[cfg(not(feature = "session-ex-tests"))]
-    let expected_result = result.is_ok();
+    let expected_result = if crate::utils::session::api_rev_at_least(1, 1) {
+        matches!(result, Ok(true))
+    } else {
+        result.is_ok()
+    };
 
     assert!(
         expected_result,

@@ -18,18 +18,20 @@ fixture, [`SessionGuard`](../../../../crates/tbor_test_harness/src/session_guard
 RAII close, session-establishment + per-command crypto helpers,
 canonical error-shape assertions.
 
-## Backend feature regimes
+## Transport selection
 
-Build modes; see the crate-level doc in
+The transport is chosen at runtime by the `transport` key of
+`TSRA_TEST_ARGS`; see the
+crate-level doc in
 [`crates/tbor_test_harness/src/lib.rs`](../../../../crates/tbor_test_harness/src/lib.rs)
-for the full per-feature gating table.
+for the full gating table.
 
-* `--features emu` — canonical configuration, runs the full suite.
-* `--features sock` — firmware behind a running socket DDI server.
-* No backend feature — native OS backend (`nix` on Linux / `win` on
-  Windows); hardware-eligible command tests run against real silicon.
+* `TSRA_TEST_ARGS=transport=sock` — canonical configuration, runs the full suite
+  against an in-process `ddi_sock_server` (or the server named by
+  `sock=` in `TSRA_TEST_ARGS`).
+* Unset (or `transport=ioctl`) — platform device driver; hardware-eligible command tests run against real silicon.
 
-For `PartFinal`, emulator tests transport the real PTA certificate chain
+For `PartFinal`, simulator tests transport the real PTA certificate chain
 through OOB descriptors and exercise full chain validation. Native M1.0
 tests send one schema-required placeholder descriptor with no OOB payload
 because the current hardware firmware intentionally ignores certificate
@@ -38,20 +40,21 @@ descriptors; native certificate-chain validation remains M1.5 work.
 The canonical command is:
 
 ```bash
-cargo test -p tsra_ddi_tbor_types --tests --features emu
+TSRA_TEST_ARGS=transport=sock cargo nextest run -p tsra_ddi_tbor_types
 ```
 
-For socket runs, start `ddi_sock_server` separately and run tests serially:
+To use an external server instead, start `ddi_sock_server` separately and
+run tests serially:
 
 ```sh
-TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
-  -p tsra_ddi_tbor_types --features sock --test tsra_ddi_tbor_tests \
+TSRA_TEST_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" cargo nextest run \
+  -p tsra_ddi_tbor_types --test tsra_ddi_tbor_tests \
   --test-threads 1 --no-fail-fast
 ```
 
 Tests reset the endpoint's shared partition. Use a dedicated server without
 other clients. Socket connections permit multiple sessions; per-file-handle
-limit tests apply only to the emulator/native drivers. Invalid or closed socket
+limit tests apply only to the native drivers. Invalid or closed socket
 session IDs can be rejected by the ownership gate before reaching firmware.
 
 ## Spec coverage matrix

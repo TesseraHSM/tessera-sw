@@ -17,6 +17,9 @@ use crate::utils::partition_ex_helpers::*;
 /// live `HsmSession` over the public API.
 #[test]
 fn open_session_ex_co_authenticated() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
 
@@ -40,6 +43,9 @@ fn open_session_ex_co_authenticated() {
 /// Happy path: CU pairs with a PlainText session.
 #[test]
 fn open_session_ex_cu_plaintext() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
 
@@ -64,6 +70,9 @@ fn open_session_ex_cu_plaintext() {
 /// full `change_psk` + optional-PSK-`open_session_ex` flow end to end.
 #[test]
 fn change_psk_rotates_co_psk() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let (part, rev) = new_partition();
 

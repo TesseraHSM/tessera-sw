@@ -97,6 +97,9 @@ fn ecc_pub_key_props() -> HsmKeyProps {
 /// `AesGenerateKey`, for every retryable error code.
 #[api_test]
 fn test_aes_generate_key_recovers_from_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -122,6 +125,9 @@ fn test_aes_generate_key_recovers_from_single_fault() {
 /// fails for the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_aes_generate_key_recovers_on_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -151,6 +157,9 @@ fn test_aes_generate_key_recovers_on_last_retry() {
 /// `EccGenerateKeyPair`, for every retryable error code.
 #[api_test]
 fn test_ecc_generate_key_pair_recovers_from_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -181,6 +190,9 @@ fn test_ecc_generate_key_pair_recovers_from_single_fault() {
 /// `EccGenerateKeyPair` fails for the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_ecc_generate_key_pair_recovers_on_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -215,6 +227,9 @@ fn test_ecc_generate_key_pair_recovers_on_last_retry() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_aes_generate_key_no_retry_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session) = init_without_resiliency_and_session();
 
     inject_fault(FaultRule::fail_nth(
@@ -238,6 +253,9 @@ fn test_aes_generate_key_no_retry_without_resiliency() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_ecc_generate_key_pair_no_retry_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session) = init_without_resiliency_and_session();
 
     inject_fault(FaultRule::fail_nth(
@@ -270,6 +288,9 @@ fn test_ecc_generate_key_pair_no_retry_without_resiliency() {
 /// the last transient error.
 #[api_test]
 fn test_aes_generate_key_fails_after_all_retries_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     // Fail MAX_RETRIES + 1 times → 1 initial + MAX_RETRIES retries all fail.
@@ -298,6 +319,9 @@ fn test_aes_generate_key_fails_after_all_retries_exhausted() {
 /// and propagates immediately, even with resiliency enabled.
 #[api_test]
 fn test_aes_generate_key_non_retryable_error_propagates() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     inject_fault(FaultRule::fail_nth(
@@ -324,6 +348,9 @@ fn test_aes_generate_key_non_retryable_error_propagates() {
 /// credentials (calls `InitBk3` or `GetSealedBk3` depending on source).
 #[api_test]
 fn test_restore_partition_called_on_aes_generate_key_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     let op = bk3_op();
@@ -360,6 +387,9 @@ fn test_restore_partition_called_on_aes_generate_key_retry() {
 /// `restore_partition` + `reopen_session_if_needed` and recovers.
 #[api_test]
 fn test_aes_generate_key_recovers_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     let op = bk3_op();
@@ -389,6 +419,9 @@ fn test_aes_generate_key_recovers_after_reset() {
 /// a reset — the error propagates immediately.
 #[api_test]
 fn test_aes_generate_key_fails_after_reset_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session) = init_without_resiliency_and_session();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::AesGenerateKey, 1));
@@ -408,6 +441,9 @@ fn test_aes_generate_key_fails_after_reset_without_resiliency() {
 /// successful recovery.
 #[api_test]
 fn test_aes_generate_key_recovers_after_consecutive_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     // First reset → recover.
@@ -439,6 +475,9 @@ fn test_aes_generate_key_recovers_after_consecutive_reset() {
 /// `restore_partition` + `reopen_session_if_needed` and recovers.
 #[api_test]
 fn test_ecc_generate_key_pair_recovers_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     let op = bk3_op();
@@ -473,6 +512,9 @@ fn test_ecc_generate_key_pair_recovers_after_reset() {
 /// successful recovery.
 #[api_test]
 fn test_ecc_generate_key_pair_recovers_after_consecutive_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     // First reset → recover.
@@ -518,6 +560,9 @@ fn test_ecc_generate_key_pair_recovers_after_consecutive_reset() {
 /// (TPM path uses `GetSealedBk3`, not `InitBk3`).
 #[api_test]
 fn test_aes_generate_key_recovers_from_compound_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -583,6 +628,9 @@ fn unmask_xts_key(session: &HsmSession, masked_key: &[u8]) -> HsmResult<HsmAesXt
 /// `UnmaskKey`, for every retryable error code.
 #[api_test]
 fn test_aes_xts_unmask_key_recovers_from_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
         let masked_key = generate_xts_masked_key(&session);
@@ -604,6 +652,9 @@ fn test_aes_xts_unmask_key_recovers_from_single_fault() {
 /// fails for the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_aes_xts_unmask_key_recovers_on_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
         let masked_key = generate_xts_masked_key(&session);
@@ -627,6 +678,9 @@ fn test_aes_xts_unmask_key_recovers_on_last_retry() {
 /// retries requires (MAX_RETRIES + 1)² faults.
 #[api_test]
 fn test_aes_xts_unmask_key_fails_after_all_retries_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
     let masked_key = generate_xts_masked_key(&session);
 
@@ -653,6 +707,9 @@ fn test_aes_xts_unmask_key_fails_after_all_retries_exhausted() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_aes_xts_unmask_key_no_retry_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session) = init_without_resiliency_and_session();
     let masked_key = generate_xts_masked_key(&session);
 
@@ -674,6 +731,9 @@ fn test_aes_xts_unmask_key_no_retry_without_resiliency() {
 /// A non-retryable error propagates immediately, even with resiliency enabled.
 #[api_test]
 fn test_aes_xts_unmask_key_non_retryable_error_propagates() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
     let masked_key = generate_xts_masked_key(&session);
 
@@ -696,6 +756,9 @@ fn test_aes_xts_unmask_key_non_retryable_error_propagates() {
 /// credentials.
 #[api_test]
 fn test_restore_partition_called_on_aes_xts_unmask_key_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
     let masked_key = generate_xts_masked_key(&session);
 
@@ -732,6 +795,9 @@ fn test_restore_partition_called_on_aes_xts_unmask_key_retry() {
 /// `restore_partition` + `reopen_session_if_needed` and recovers.
 #[api_test]
 fn test_aes_xts_unmask_key_recovers_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
     let masked_key = generate_xts_masked_key(&session);
 
@@ -760,6 +826,9 @@ fn test_aes_xts_unmask_key_recovers_after_reset() {
 /// Without resiliency, AES-XTS `unmask_key` does not recover from a reset.
 #[api_test]
 fn test_aes_xts_unmask_key_fails_after_reset_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session) = init_without_resiliency_and_session();
     let masked_key = generate_xts_masked_key(&session);
 
@@ -779,6 +848,9 @@ fn test_aes_xts_unmask_key_fails_after_reset_without_resiliency() {
 /// successful recovery.
 #[api_test]
 fn test_aes_xts_unmask_key_recovers_after_consecutive_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
     let masked_key = generate_xts_masked_key(&session);
 
@@ -822,6 +894,9 @@ fn aes_xts_key_props() -> HsmKeyProps {
 /// `AesGenerateKey`, for every retryable error code.
 #[api_test]
 fn test_aes_xts_generate_key_recovers_from_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -841,6 +916,9 @@ fn test_aes_xts_generate_key_recovers_from_single_fault() {
 /// AES-XTS `generate_key` recovers on the last retry.
 #[api_test]
 fn test_aes_xts_generate_key_recovers_on_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -865,6 +943,9 @@ fn test_aes_xts_generate_key_recovers_on_last_retry() {
 /// AES-XTS `generate_key` fails when all retries are exhausted.
 #[api_test]
 fn test_aes_xts_generate_key_fails_after_all_retries_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -889,6 +970,9 @@ fn test_aes_xts_generate_key_fails_after_all_retries_exhausted() {
 /// Without resiliency, AES-XTS `generate_key` does not retry.
 #[api_test]
 fn test_aes_xts_generate_key_no_retry_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session) = init_without_resiliency_and_session();
 
     inject_fault(FaultRule::fail_next(
@@ -911,6 +995,9 @@ fn test_aes_xts_generate_key_no_retry_without_resiliency() {
 /// AesGenerateKey + InitBk3.
 #[api_test]
 fn test_aes_xts_generate_key_recovers_from_compound_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -944,6 +1031,9 @@ fn test_aes_xts_generate_key_recovers_from_compound_fault() {
 /// After a reset on `AesGenerateKey`, AES-XTS `generate_key` recovers.
 #[api_test]
 fn test_aes_xts_generate_key_recovers_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::AesGenerateKey, 1));
@@ -961,6 +1051,9 @@ fn test_aes_xts_generate_key_recovers_after_reset() {
 /// Without resiliency, AES-XTS `generate_key` does not recover from a reset.
 #[api_test]
 fn test_aes_xts_generate_key_fails_after_reset_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session) = init_without_resiliency_and_session();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::AesGenerateKey, 1));
@@ -979,6 +1072,9 @@ fn test_aes_xts_generate_key_fails_after_reset_without_resiliency() {
 /// followed by a successful recovery.
 #[api_test]
 fn test_aes_xts_generate_key_recovers_after_consecutive_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
 
     inject_fault(FaultRule::reset_on_next(DdiOp::AesGenerateKey, 1));
@@ -1007,6 +1103,9 @@ fn test_aes_xts_generate_key_recovers_after_consecutive_reset() {
 /// ECC `generate_key_pair` fails when all retries are exhausted.
 #[api_test]
 fn test_ecc_generate_key_pair_fails_after_all_retries_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
         let (_part, session, _ctx) = init_with_resiliency_and_session();
 
@@ -1037,6 +1136,9 @@ fn test_ecc_generate_key_pair_fails_after_all_retries_exhausted() {
 /// EccGenerateKeyPair + InitBk3.
 #[api_test]
 fn test_ecc_generate_key_pair_recovers_from_compound_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }

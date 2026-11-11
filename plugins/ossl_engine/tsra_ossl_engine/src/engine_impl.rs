@@ -53,6 +53,23 @@ pub(crate) fn engine_data_slot() -> EngineResult<EngineExData<EngineData>> {
     Ok(slot)
 }
 
+/// Run `f` with the [`EngineData`] parked on `engine`, or `None` if `engine` is
+/// NULL or carries none. For callbacks on engine-bound key objects
+/// (`RSA`/`EC_KEY` `finish`/`copy`), which hold a functional reference on
+/// `engine`, so it and its data are live for the call.
+pub(crate) fn with_engine_data<R>(
+    engine: *mut ffi::ENGINE,
+    f: impl FnOnce(&EngineData) -> R,
+) -> Option<R> {
+    let engine = NonNull::new(engine)?;
+    let slot = ENGINE_DATA_SLOT.get()?;
+    // SAFETY: per this fn's contract the ENGINE is live for the call; the
+    // wrapper is non-owning and dropped before returning.
+    #[allow(unsafe_code)]
+    let engine = unsafe { Engine::from_ptr(engine) };
+    slot.get(&engine).map(f)
+}
+
 struct TsraLoadPrivKey;
 impl LoadPrivKeyHandler for TsraLoadPrivKey {
     fn load(engine: &Engine, key_id: &CStr) -> EngineResult<*mut ffi::EVP_PKEY> {
@@ -125,7 +142,7 @@ impl DestroyHandler for TsraDestroy {
         // The framework never frees engine ciphers: free this ENGINE's copies.
         // SAFETY: the destroy hook runs once the last functional reference on
         // the ENGINE is gone, and every context using its ciphers holds one.
-        unsafe { tsra_ossl_engine_core::cipher_method::release_aes_cbc_ciphers(engine) };
+        unsafe { tsra_ossl_engine_core::cipher_method::release_aes_ciphers(engine) };
         taken
     }
 }
@@ -253,12 +270,10 @@ fn bind_helper(engine: &mut Engine, id: &CStr) -> EngineResult<()> {
     // The global registration holds an engine reference until ENGINE_cleanup,
     // so a dynamic engine loads at most once per process.
     tsra_ossl_engine_core::asn1_method::register_ec_asn1_method::<crate::asn1::TsraEcAsn1>(engine)?;
-    // AES-CBC with HSM keys attached via TSRA_CTRL_SET_KEY_URI; contexts with
-    // a raw key run the built-in software AES (see
-    // tsra_ossl_engine_core::cipher_method).
-    tsra_ossl_engine_core::cipher_method::register_aes_cbc_ciphers::<crate::aes::TsraAesCbc>(
-        engine,
-    )?;
+    // AES-CBC and AES-256-GCM with HSM keys attached via
+    // TSRA_CTRL_SET_KEY_URI; contexts with a raw key run the built-in software
+    // AES (see tsra_ossl_engine_core::cipher_method).
+    tsra_ossl_engine_core::cipher_method::register_aes_ciphers::<crate::aes::TsraAes>(engine)?;
 
     // Park an empty EngineData. Its HSM session is opened on demand via
     // EngineData::open_hsm_from_env; TsraDestroy::destroy takes() and

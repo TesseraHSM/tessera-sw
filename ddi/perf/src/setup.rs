@@ -129,7 +129,7 @@ impl Env {
         // and firmware they came from.
         println!(
             "device: {path}{} (firmware {}, driver {})",
-            if cfg!(feature = "emu") {
+            if in_process_emulator() {
                 ", in-process emulator"
             } else {
                 ""
@@ -517,6 +517,14 @@ fn rsa_aes_wrap(hsm_pub: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
 
     enc_kek.extend(enc_data);
     Ok(enc_kek)
+}
+
+/// Whether this process serves its own in-process simulated HSM.
+fn in_process_emulator() -> bool {
+    #[cfg(feature = "test-args")]
+    return ddi_sock_server::autostarted();
+    #[cfg(not(feature = "test-args"))]
+    false
 }
 
 #[cfg(test)]
