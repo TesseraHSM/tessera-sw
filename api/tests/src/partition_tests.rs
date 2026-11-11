@@ -71,18 +71,12 @@ fn make_valid_pota_parts(part: &HsmPartition) -> (Vec<u8>, Vec<u8>) {
 
 #[api_test]
 fn test_partition_info_list() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
 }
 
 #[api_test]
 fn test_partition_sd_initialized() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in &part_mgr {
@@ -105,9 +99,6 @@ fn test_partition_sd_initialized() {
 
 #[api_test]
 fn test_open_partition() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -119,9 +110,6 @@ fn test_open_partition() {
 
 #[api_test]
 fn test_open_partition_with_min_api_rev() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -138,9 +126,6 @@ fn test_open_partition_with_min_api_rev() {
 
 #[api_test]
 fn test_open_partition_with_max_api_rev() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -157,9 +142,6 @@ fn test_open_partition_with_max_api_rev() {
 
 #[api_test]
 fn test_open_partition_with_unsupported_api_rev_above_max_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -178,9 +160,6 @@ fn test_open_partition_with_unsupported_api_rev_above_max_fails() {
 
 #[api_test]
 fn test_open_partition_with_unsupported_api_rev_below_min_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -201,9 +180,6 @@ fn test_open_partition_with_unsupported_api_rev_below_min_fails() {
 
 #[api_test]
 fn test_partition_info_list_has_valid_api_rev_range() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -223,9 +199,6 @@ fn test_partition_info_list_has_valid_api_rev_range() {
 
 #[api_test]
 fn test_partition_properties() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
 
@@ -270,9 +243,6 @@ fn test_partition_properties() {
 
 #[api_test]
 fn test_partition_init() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -292,9 +262,6 @@ fn test_partition_init() {
 /// replace a MOBK that was validated by a successful credential establishment.
 #[api_test]
 fn test_partition_init_already_established() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     if use_tpm() {
         return;
     }
@@ -393,9 +360,6 @@ fn test_partition_init_mobk_callback() {
 
 #[api_test]
 fn test_cert_chain() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -433,9 +397,6 @@ fn test_cert_chain() {
 /// Validates that the certificate chain returned by `cert_chain` is in leaf-to-root order
 #[api_test]
 fn test_cert_chain_leaf_to_root_order() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -476,9 +437,6 @@ fn test_cert_chain_leaf_to_root_order() {
 
 #[api_test]
 fn test_init_caller_source_with_null_obk_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -508,9 +466,6 @@ fn test_init_caller_source_with_null_obk_fails() {
 
 #[api_test]
 fn test_init_caller_source_with_empty_obk_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -540,9 +495,6 @@ fn test_init_caller_source_with_empty_obk_fails() {
 
 #[api_test]
 fn test_init_tpm_obk_source_with_obk_provided_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -575,9 +527,6 @@ fn test_init_tpm_obk_source_with_obk_provided_fails() {
 
 #[api_test]
 fn test_init_tpm_pota_source_with_endorsement_provided_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -608,9 +557,6 @@ fn test_init_tpm_pota_source_with_endorsement_provided_fails() {
 
 #[api_test]
 fn test_init_invalid_obk_source_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -640,9 +586,6 @@ fn test_init_invalid_obk_source_fails() {
 
 #[api_test]
 fn test_init_caller_source_with_empty_endorsement_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -672,9 +615,6 @@ fn test_init_caller_source_with_empty_endorsement_fails() {
 
 #[api_test]
 fn test_init_caller_source_with_null_endorsement_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -703,9 +643,6 @@ fn test_init_caller_source_with_null_endorsement_fails() {
 
 #[api_test]
 fn test_init_invalid_pota_source_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -735,9 +672,6 @@ fn test_init_invalid_pota_source_fails() {
 
 #[api_test]
 fn test_init_with_resiliency_config() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -764,9 +698,6 @@ fn test_init_with_resiliency_config() {
 
 #[api_test]
 fn test_init_with_resiliency_caller_pota_null_callback_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -802,9 +733,6 @@ fn test_init_with_resiliency_caller_pota_null_callback_fails() {
 
 #[api_test]
 fn test_double_init_with_resiliency() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -903,9 +831,6 @@ fn test_double_init_with_resiliency() {
 
 #[api_test]
 fn test_init_with_resiliency_invalid_pota_source_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -931,9 +856,6 @@ fn test_init_with_resiliency_invalid_pota_source_fails() {
 
 #[api_test]
 fn test_init_with_resiliency_tpm_pota_with_callback_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -974,9 +896,6 @@ fn test_init_with_resiliency_tpm_pota_with_callback_fails() {
 
 #[api_test]
 fn test_init_with_resiliency_tpm_obk_with_callback_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let part_mgr = HsmPartitionManager::partition_info_list();
     assert!(!part_mgr.is_empty(), "No partitions found.");
     for part_info in part_mgr.iter() {
@@ -1019,9 +938,6 @@ fn test_init_with_resiliency_tpm_obk_with_callback_fails() {
 
 #[api_test]
 fn test_init_with_resiliency_caller_obk_without_callback_fails() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     // Caller-source only: when running with `TSRA_USE_TPM` (TPM init path),
     // Caller OBK is not applicable and `mobk_callback = None` is valid.
     if use_tpm() {
@@ -1072,9 +988,6 @@ fn test_init_with_resiliency_caller_obk_without_callback_fails() {
 
 #[test]
 fn test_obk_config_key_returns_none_for_tpm() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let config =
         HsmOwnerBackupKeyConfig::new(HsmOwnerBackupKeySource::Tpm, HsmOwnerBackupKey::default());
     assert!(config.key().is_none());
@@ -1083,9 +996,6 @@ fn test_obk_config_key_returns_none_for_tpm() {
 
 #[test]
 fn test_obk_config_key_returns_data_for_caller() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let data = [0xABu8; 48];
     let config = HsmOwnerBackupKeyConfig::new(
         HsmOwnerBackupKeySource::Caller,
@@ -1097,9 +1007,6 @@ fn test_obk_config_key_returns_data_for_caller() {
 
 #[test]
 fn test_obk_config_clone_is_independent() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let original = HsmOwnerBackupKeyConfig::new(
         HsmOwnerBackupKeySource::Caller,
         HsmOwnerBackupKey::from_obk(&[1u8; 32]),
@@ -1117,9 +1024,6 @@ fn test_obk_config_clone_is_independent() {
 
 #[test]
 fn test_pota_endorsement_data_clone_is_independent() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let sig = [0x10u8; 96];
     let pk = [0x20u8; 120];
     let original = HsmPotaEndorsementData::new(&sig, &pk);
@@ -1136,9 +1040,6 @@ fn test_pota_endorsement_data_clone_is_independent() {
 
 #[test]
 fn test_pota_endorsement_clone_is_independent() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let sig = [0x10u8; 96];
     let pk = [0x20u8; 120];
     let original = HsmPotaEndorsement::new(
@@ -1162,9 +1063,6 @@ fn test_pota_endorsement_clone_is_independent() {
 
 #[test]
 fn test_not_found_error_variant() {
-    if crate::utils::session::api_rev_at_least(1, 1) {
-        return;
-    }
     let err = HsmError::NotFound;
     assert_eq!(err as i32, -20);
 }
