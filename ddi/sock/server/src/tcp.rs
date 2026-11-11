@@ -56,7 +56,7 @@ fn spawn_connection(
     let hsm = Arc::clone(hsm);
     tokio::spawn(async move {
         if let Err(error) = serve_connection(stream, hsm).await {
-            eprintln!("TCP client {peer} failed: {error}");
+            tracing::warn!(%peer, %error, "TCP client failed");
         }
     });
     Ok(())
@@ -86,16 +86,15 @@ fn bind(address: &str) -> Result<(std::net::TcpListener, SocketAddr), String> {
 
 fn serve(
     listener: std::net::TcpListener,
-    announce: Option<SocketAddr>,
+    bound_address: SocketAddr,
+    on_listening: impl FnOnce(&super::Listening),
     first: Option<(std::net::TcpStream, SocketAddr)>,
 ) -> Result<(), String> {
     super::run_with_hsm(|hsm| async move {
         let listener = TcpListener::from_std(listener)
             .map_err(|error| format!("failed to register TCP listener: {error}"))?;
         super::init_partition(&hsm).await?;
-        if let Some(bound_address) = announce {
-            println!("TSRA DDI server listening on tcp://{bound_address}; partition 10");
-        }
+        on_listening(&super::Listening::new(format!("tcp://{bound_address}")));
         if let Some((stream, peer)) = first {
             let stream = TcpStream::from_std(stream)
                 .map_err(|error| format!("failed to register TCP connection: {error}"))?;
@@ -127,12 +126,18 @@ fn accept_first(
     Ok((stream, peer))
 }
 
-pub(super) fn run(address: &str) -> Result<(), String> {
+pub(super) fn run(
+    address: &str,
+    on_listening: impl FnOnce(&super::Listening),
+) -> Result<(), String> {
     let (listener, bound_address) = bind(address)?;
     if !bound_address.ip().is_loopback() {
-        eprintln!("Warning: this unauthenticated test server is listening outside loopback");
+        tracing::warn!(
+            %bound_address,
+            "This unauthenticated test server is listening outside loopback"
+        );
     }
-    serve(listener, Some(bound_address), None)
+    serve(listener, bound_address, on_listening, None)
 }
 
 /// Start the server in this process on an ephemeral loopback TCP port.
@@ -154,10 +159,10 @@ pub(crate) fn spawn_loopback_with(on_bound: impl FnOnce(SocketAddr)) -> Result<S
     std::thread::Builder::new()
         .name("tsra-ddi-sock-server".into())
         .spawn(move || {
-            let result =
-                accept_first(&listener).and_then(|first| serve(listener, None, Some(first)));
+            let result = accept_first(&listener)
+                .and_then(|first| serve(listener, bound_address, |_| {}, Some(first)));
             if let Err(error) = result {
-                eprintln!("TSRA DDI socket server failed: {error}");
+                tracing::error!(%error, "TSRA DDI socket server failed");
             }
         })
         .map_err(|error| format!("failed to start server thread: {error}"))?;

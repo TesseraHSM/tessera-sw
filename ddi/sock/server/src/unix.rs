@@ -56,7 +56,7 @@ async fn run_server(listener: UnixListener, hsm: Arc<SocketHsm>) -> Result<(), S
         let hsm = Arc::clone(&hsm);
         tokio::spawn(async move {
             if let Err(error) = serve_connection(stream, hsm).await {
-                eprintln!("Unix socket client failed: {error}");
+                tracing::warn!(%error, "Unix socket client failed");
             }
         });
     }
@@ -137,7 +137,7 @@ async fn remove_stale_socket(path: &str) -> Result<(), String> {
     }
 }
 
-pub(super) fn run(path: &str) -> Result<(), String> {
+pub(super) fn run(path: &str, on_listening: impl FnOnce(&super::Listening)) -> Result<(), String> {
     let path = path.to_owned();
     super::run_with_hsm(|hsm| async move {
         // `File::lock` is a blocking syscall; run it on a blocking-pool
@@ -156,7 +156,7 @@ pub(super) fn run(path: &str) -> Result<(), String> {
         // bound listener as live and fail fast.
         drop(_lock);
         super::init_partition(&hsm).await?;
-        println!("TSRA DDI server listening on unix://{path}; partition 10");
+        on_listening(&super::Listening::new(format!("unix://{path}")));
         run_server(listener, hsm).await
     })
 }

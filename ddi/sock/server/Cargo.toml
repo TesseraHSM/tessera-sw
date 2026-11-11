@@ -30,6 +30,8 @@ tokio = { features = [
   "sync",
   "time",
 ], workspace = true }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 tsra_ddi = { optional = true, workspace = true }
 tsra_ddi_mbor_types.workspace = true
 tsra_ddi_sock_proto.workspace = true

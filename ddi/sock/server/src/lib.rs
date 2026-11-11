@@ -466,7 +466,7 @@ impl Drop for Connection {
                         sessions.remove(&session.id);
                     }
                     Err(error) => {
-                        eprintln!("disconnected client session cleanup failed: {error}");
+                        tracing::error!(%error, "Disconnected client session cleanup failed");
                     }
                 }
             }
@@ -587,7 +587,7 @@ async fn execute_bulk(server: &SocketHsm, raw: RawBulkSqe, request: Request) -> 
     {
         Ok(cqe) => cqe,
         Err(error) => {
-            eprintln!("StdHsm bulk request failed: {error:?}");
+            tracing::error!(?error, "StdHsm bulk request failed");
             return transport_error(TRANSPORT_HSM_ERROR);
         }
     };
@@ -667,7 +667,7 @@ async fn execute_normal(server: &SocketHsm, request: Request) -> Response {
     let cqe = match server.hsm.io(sqe, HSM_PARTITION_ID, 0, 0).await {
         Ok(cqe) => cqe,
         Err(error) => {
-            eprintln!("StdHsm request failed: {error:?}");
+            tracing::error!(?error, "StdHsm request failed");
             return transport_error(TRANSPORT_HSM_ERROR);
         }
     };
@@ -721,7 +721,7 @@ async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> Respons
                 let status = match result {
                     Ok(()) => 0,
                     Err(error) => {
-                        eprintln!("StdHsm reset failed: {error:?}");
+                        tracing::error!(?error, "StdHsm reset failed");
                         TRANSPORT_HSM_ERROR
                     }
                 };
@@ -733,7 +733,7 @@ async fn execute_frame(server: Arc<SocketHsm>, request: RequestFrame) -> Respons
     {
         Ok(response) => response,
         Err(error) => {
-            eprintln!("StdHsm execution task failed: {error}");
+            tracing::error!(%error, "StdHsm execution task failed");
             if reset {
                 ResponseFrame::Reset {
                     status: TRANSPORT_HSM_ERROR,
@@ -1144,13 +1144,17 @@ mod linux {
         Ok(listener)
     }
 
-    async fn run_server(hsm: Arc<SocketHsm>, listener: Socket) -> Result<(), String> {
+    async fn run_server(
+        hsm: Arc<SocketHsm>,
+        listener: Socket,
+        on_listening: impl FnOnce(&super::Listening),
+    ) -> Result<(), String> {
         let listener = listener
             .into_async_fd()
             .map_err(|error| format!("failed to register vsock listener: {error}"))?;
         super::init_partition(&hsm).await?;
 
-        println!("TSRA DDI server listening on vsock port {VSOCK_PORT}");
+        on_listening(&super::Listening::new(format!("vsock://*:{VSOCK_PORT}")));
         loop {
             let stream = loop {
                 let mut ready = listener
@@ -1166,24 +1170,24 @@ mod linux {
             let stream = stream
                 .into_async_fd()
                 .map_err(|error| format!("failed to register vsock connection: {error}"))?;
-            println!("DDI client connected");
             let hsm = Arc::clone(&hsm);
             tokio::spawn(async move {
                 if let Err(error) = serve_connection(stream, hsm).await {
-                    eprintln!("DDI client connection failed: {error}");
-                } else {
-                    println!("DDI client disconnected");
+                    tracing::warn!(%error, "VSOCK client connection failed");
                 }
             });
         }
     }
 
-    pub(super) fn run() -> Result<(), String> {
-        run_with_listener(bind_listener()?)
+    pub(super) fn run(on_listening: impl FnOnce(&super::Listening)) -> Result<(), String> {
+        run_with_listener(bind_listener()?, on_listening)
     }
 
-    fn run_with_listener(listener: Socket) -> Result<(), String> {
-        super::run_with_hsm(|hsm| run_server(hsm, listener))
+    fn run_with_listener(
+        listener: Socket,
+        on_listening: impl FnOnce(&super::Listening),
+    ) -> Result<(), String> {
+        super::run_with_hsm(|hsm| run_server(hsm, listener, on_listening))
     }
 
     #[cfg(test)]
@@ -1231,7 +1235,7 @@ mod linux {
             // A readable socket that is not a listener forces accept to fail
             // after partition setup, without requiring VSOCK support.
             let listener = Socket::new_nonblocking(socket.into_raw_fd()).expect("test socket");
-            let error = run_with_listener(listener).expect_err("accept must fail");
+            let error = run_with_listener(listener, |_| {}).expect_err("accept must fail");
             assert!(error.starts_with("failed to accept connection:"), "{error}");
         }
 
@@ -1330,8 +1334,33 @@ mod linux {
     }
 }
 
-/// Run the server using the endpoint from the command line.
-pub fn run() -> Result<(), String> {
+/// A server that is ready for clients, reported to the callback of [`run`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listening {
+    /// Endpoint clients connect to, e.g. `tcp://127.0.0.1:1234`.
+    pub endpoint: String,
+    /// HSM partition served to every connection.
+    pub partition: u8,
+}
+
+impl Listening {
+    fn new(endpoint: String) -> Self {
+        Self {
+            endpoint,
+            partition: HSM_PARTITION_ID,
+        }
+    }
+}
+
+impl std::fmt::Display for Listening {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}; partition {}", self.endpoint, self.partition)
+    }
+}
+
+/// Run the server using the endpoint from the command line, calling
+/// `on_listening` once it accepts clients.
+pub fn run(on_listening: impl FnOnce(&Listening)) -> Result<(), String> {
     let mut args = std::env::args().skip(1);
     let endpoint = args.next().unwrap_or_else(|| {
         if cfg!(target_os = "linux") {
@@ -1346,11 +1375,11 @@ pub fn run() -> Result<(), String> {
         );
     }
     if let Some(address) = endpoint.strip_prefix("tcp://") {
-        tcp::run(address)
+        tcp::run(address, on_listening)
     } else if let Some(path) = endpoint.strip_prefix("unix://") {
         #[cfg(unix)]
         {
-            unix::run(path)
+            unix::run(path, on_listening)
         }
         #[cfg(not(unix))]
         {
@@ -1360,7 +1389,7 @@ pub fn run() -> Result<(), String> {
     } else if endpoint == "vsock://*:1234" {
         #[cfg(target_os = "linux")]
         {
-            linux::run()
+            linux::run(on_listening)
         }
         #[cfg(not(target_os = "linux"))]
         {
