@@ -63,7 +63,7 @@ jobs:
         seed=1
         for target in $TARGETS; do
           echo "[$seed] Fuzzing $target for ${{ env.FUZZ_TIME }} seconds..."
-          cargo fuzz run "$target" -- -max_total_time=${{ env.FUZZ_TIME }} -seed=$seed -print_final_stats=1
+          cargo +nightly fuzz run "$target" --features emu -- -max_total_time=${{ env.FUZZ_TIME }} -seed=$seed -print_final_stats=1
           seed=$((seed + 1))
           echo ""
         done

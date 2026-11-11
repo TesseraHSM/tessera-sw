@@ -30,6 +30,7 @@ minicbor = "0.19.1"
 [features]
 default = []
 emu = ["tsra_ddi/emu", "tsra_ddi_tbor_test_harness/emu"]
+sock = ["tsra_ddi/sock", "tsra_ddi_tbor_test_harness/sock"]
 
 [[bin]]
 bench = false
