@@ -100,6 +100,9 @@ pub struct StdHsmPal {
     /// ECC driver — key generation, signing, verification, ECDH.
     pub(crate) ecc: StdEcc,
 
+    #[cfg(test)]
+    pub(crate) ecc_pct_fail: core::cell::Cell<bool>,
+
     /// AES driver — key generation, CBC, ECB encryption/decryption.
     pub(crate) aes: StdAes,
 
@@ -188,6 +191,8 @@ impl StdHsmPal {
             gdma: StdGdma::new(),
             hash: StdHash::new(WorkerPool::new(tokio_handle.clone())),
             ecc: StdEcc::new(WorkerPool::new(tokio_handle.clone())),
+            #[cfg(test)]
+            ecc_pct_fail: core::cell::Cell::new(false),
             aes: StdAes::new(WorkerPool::new(tokio_handle.clone())),
             pqc: StdPqc::new(WorkerPool::new(tokio_handle.clone())),
             hmac: StdHmac::new(WorkerPool::new(tokio_handle.clone())),
@@ -222,6 +227,8 @@ impl Default for StdHsmPal {
             gdma: StdGdma::new(),
             hash: StdHash::new(WorkerPool::new(handle.clone())),
             ecc: StdEcc::new(WorkerPool::new(handle.clone())),
+            #[cfg(test)]
+            ecc_pct_fail: core::cell::Cell::new(false),
             aes: StdAes::new(WorkerPool::new(handle.clone())),
             pqc: StdPqc::new(WorkerPool::new(handle.clone())),
             hmac: StdHmac::new(WorkerPool::new(handle.clone())),

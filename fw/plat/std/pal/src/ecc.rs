@@ -38,9 +38,12 @@
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
+use tsra_crypto::EccPublicKey;
 use tsra_crypto::ExportableHsmKey;
+use tsra_crypto::HashAlgo;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::PrivateKey;
+use zeroize::Zeroizing;
 
 use super::*;
 
@@ -75,6 +78,92 @@ fn from_ecc_curve(curve: EccCurve) -> HsmEccCurve {
     }
 }
 
+impl StdHsmPal {
+    pub(crate) fn ecc_public_from_wire(
+        curve: EccCurve,
+        wire: &[u8],
+        big_endian: bool,
+    ) -> HsmResult<EccPublicKey> {
+        let coord_len = curve.point_size();
+        let wire_len = from_ecc_curve(curve).wire_coord_len();
+        if wire.len() != 2 * wire_len {
+            return Err(HsmError::InvalidArg);
+        }
+        let mut x = [0u8; 66];
+        let mut y = [0u8; 66];
+        for (src, dst) in [(wire, &mut x[..]), (&wire[wire_len..], &mut y[..])] {
+            if src[coord_len..wire_len].iter().any(|&byte| byte != 0) {
+                return Err(HsmError::InvalidArg);
+            }
+            if big_endian {
+                dst[..coord_len].copy_from_slice(&src[..coord_len]);
+            } else {
+                for (d, s) in dst[..coord_len]
+                    .iter_mut()
+                    .zip(src[..coord_len].iter().rev())
+                {
+                    *d = *s;
+                }
+            }
+        }
+        EccPublicKey::from_coordinates(curve, &x[..coord_len], &y[..coord_len])
+            .map_err(|_| HsmError::EccPublicKeyValidationFailed)
+    }
+
+    pub(crate) async fn ecc_pair_pct(
+        &self,
+        private: &EccPrivateKey,
+        public: &EccPublicKey,
+        pct: HsmEccPct,
+    ) -> HsmResult<bool> {
+        let curve = private.curve();
+        let result = match pct {
+            HsmEccPct::None => Ok(true),
+            HsmEccPct::SignVerify => {
+                let mut digest = [0u8; 64];
+                let (algo, digest_len) = match curve {
+                    EccCurve::P256 => (HashAlgo::sha256(), 32),
+                    EccCurve::P384 => (HashAlgo::sha384(), 48),
+                    EccCurve::P521 => (HashAlgo::sha512(), 64),
+                };
+                self.hash
+                    .hash(algo, &[100u8; 68], &mut digest[..digest_len])
+                    .await?;
+                let signature = self.ecc.ecc_sign(private, &digest[..digest_len]).await?;
+                self.ecc
+                    .ecc_verify(public, &digest[..digest_len], &signature)
+                    .await
+            }
+            HsmEccPct::KeyAgreement => {
+                let mut scalar = [0x11u8; 66];
+                let len = curve.point_size();
+                scalar[0] = 0;
+                let peer = EccPrivateKey::from_scalar(curve, &scalar[..len])
+                    .map_err(|_| HsmError::EccGenerateError)?;
+                let peer_public = peer.public_key().map_err(|_| HsmError::EccGenerateError)?;
+                let mut first = Zeroizing::new([0u8; 66]);
+                let mut second = Zeroizing::new([0u8; 66]);
+                self.ecc
+                    .ecdh_derive(private, &peer_public, &mut first[..len])
+                    .await?;
+                self.ecc
+                    .ecdh_derive(&peer, public, &mut second[..len])
+                    .await?;
+                let diff = first[..len]
+                    .iter()
+                    .zip(&second[..len])
+                    .fold(0u8, |diff, (a, b)| diff | (a ^ b));
+                Ok(core::hint::black_box(diff) == 0)
+            }
+        };
+        #[cfg(test)]
+        if self.ecc_pct_fail.get() {
+            return Ok(false);
+        }
+        result
+    }
+}
+
 impl HsmEcc for StdHsmPal {
     /// Generate an ECC key pair on the specified curve, query-alloc-use
     /// style.
@@ -96,7 +185,7 @@ impl HsmEcc for StdHsmPal {
         alloc: &impl HsmScopedAlloc,
         curve: HsmEccCurve,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
-        _pct: HsmEccPct,
+        pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
         let priv_len = curve.wire_coord_len();
         let wire_pub_len = curve.wire_pub_key_len();
@@ -120,6 +209,15 @@ impl HsmEcc for StdHsmPal {
         self.ecc.pub_coords(&pub_key, false, scratch_pub).await?;
         if pk.to_hsm_bytes(&mut scratch_priv[..priv_len]).is_err() {
             return Err(HsmError::EccExportError);
+        }
+        if !matches!(pct, HsmEccPct::None) {
+            let vault_key = EccPrivateKey::from_hsm_bytes(&scratch_priv[..priv_len])
+                .map_err(|_| HsmError::PctValidationEccGenKeyFailed)?;
+            let output_public = Self::ecc_public_from_wire(to_ecc_curve(curve), scratch_pub, false)
+                .map_err(|_| HsmError::PctValidationEccGenKeyFailed)?;
+            if !self.ecc_pair_pct(&vault_key, &output_public, pct).await? {
+                return Err(HsmError::PctValidationEccGenKeyFailed);
+            }
         }
 
         priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
@@ -146,7 +244,7 @@ impl HsmEcc for StdHsmPal {
         curve: HsmEccCurve,
         root: &HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
-        _pct: HsmEccPct,
+        pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
         let priv_len = curve.wire_coord_len();
         let wire_pub_len = curve.wire_pub_key_len();
@@ -190,6 +288,15 @@ impl HsmEcc for StdHsmPal {
             .public_key()
             .map_err(|_| HsmError::EccGetCoordinatesError)?;
         self.ecc.pub_coords(&pub_key, false, scratch_pub).await?;
+        if !matches!(pct, HsmEccPct::None) {
+            let vault_key = EccPrivateKey::from_hsm_bytes(&scratch_priv[..priv_len])
+                .map_err(|_| HsmError::PctValidationEccGenKeyFailed)?;
+            let output_public = Self::ecc_public_from_wire(to_ecc_curve(curve), scratch_pub, false)
+                .map_err(|_| HsmError::PctValidationEccGenKeyFailed)?;
+            if !self.ecc_pair_pct(&vault_key, &output_public, pct).await? {
+                return Err(HsmError::PctValidationEccGenKeyFailed);
+            }
+        }
         priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
         pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
 
@@ -540,5 +647,69 @@ mod tests {
 
         assert_ne!(priv_a, priv_b);
         assert_ne!(pub_a, pub_b);
+    }
+
+    #[tokio::test]
+    async fn pairwise_tests_reject_mismatched_keys() {
+        let (pal, _) = pal_and_io();
+        for curve in [EccCurve::P256, EccCurve::P384, EccCurve::P521] {
+            let (private, public) = pal.ecc.gen_keypair(curve).await.unwrap();
+            let (_, other_public) = pal.ecc.gen_keypair(curve).await.unwrap();
+            for pct in [HsmEccPct::SignVerify, HsmEccPct::KeyAgreement] {
+                let good_pct = match pct {
+                    HsmEccPct::SignVerify => HsmEccPct::SignVerify,
+                    HsmEccPct::KeyAgreement => HsmEccPct::KeyAgreement,
+                    HsmEccPct::None => unreachable!(),
+                };
+                assert!(pal.ecc_pair_pct(&private, &public, good_pct).await.unwrap());
+                assert!(!pal
+                    .ecc_pair_pct(&private, &other_public, pct)
+                    .await
+                    .unwrap());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_key_pct_failure_is_reported_before_output() {
+        let (pal, io) = pal_and_io();
+        pal.ecc_pct_fail.set(true);
+        pal.alloc_scoped_async(&io, async |alloc| {
+            let curve = HsmEccCurve::P384;
+            let private = alloc.dma_alloc(curve.wire_coord_len()).unwrap();
+            let public = alloc.dma_alloc(curve.wire_pub_key_len()).unwrap();
+            private.fill(0xa5);
+            public.fill(0xa5);
+            let err = pal
+                .ecc_gen_keypair(
+                    &io,
+                    alloc,
+                    curve,
+                    Some((private, public)),
+                    HsmEccPct::SignVerify,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err, HsmError::PctValidationEccGenKeyFailed);
+            assert!(private.iter().all(|&b| b == 0xa5));
+            assert!(public.iter().all(|&b| b == 0xa5));
+            let root = alloc.dma_alloc(ROOT_LEN).unwrap();
+            root.fill(0x5a);
+            let err = pal
+                .ecc_gen_keypair_from_root(
+                    &io,
+                    alloc,
+                    curve,
+                    root,
+                    Some((private, public)),
+                    HsmEccPct::KeyAgreement,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err, HsmError::PctValidationEccGenKeyFailed);
+            assert!(private.iter().all(|&b| b == 0xa5));
+            assert!(public.iter().all(|&b| b == 0xa5));
+        })
+        .await;
     }
 }

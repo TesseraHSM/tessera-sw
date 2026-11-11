@@ -1052,7 +1052,7 @@ impl StdHsmPal {
         pid: u8,
         kind: HsmVaultKeyKind,
         attrs: HsmVaultKeyAttrs,
-        _pct: HsmEccPct,
+        pct: HsmEccPct,
         big_endian: bool,
         pub_key_out: &mut [u8; P384_PUB_KEY_LEN],
     ) -> HsmResult<HsmKeyId> {
@@ -1070,6 +1070,19 @@ impl StdHsmPal {
         let mut priv_buf = Zeroizing::new(vec![0u8; priv_len]);
         pk.to_hsm_bytes(&mut priv_buf[..priv_len])
             .map_err(|_| HsmError::EccExportError)?;
+        if !matches!(pct, HsmEccPct::None) {
+            let error = match kind {
+                HsmVaultKeyKind::EstablishCred => HsmError::PctValidationEstablishCredEncKeyFailed,
+                HsmVaultKeyKind::SessionEncryption => HsmError::PctValidationSessionEncKeyFailed,
+                _ => HsmError::PartitionIdKeyGenerationPctFailed,
+            };
+            let vault_key = EccPrivateKey::from_hsm_bytes(&priv_buf).map_err(|_| error)?;
+            let output_public = Self::ecc_public_from_wire(EccCurve::P384, pub_key_out, big_endian)
+                .map_err(|_| error)?;
+            if !self.ecc_pair_pct(&vault_key, &output_public, pct).await? {
+                return Err(error);
+            }
+        }
 
         // The establish-credential and session-encryption keys are stored as
         // `pub(P384_PUB_KEY_LEN) ‖ priv(priv_len)` (144 B) — matching the Uno
@@ -1832,6 +1845,47 @@ impl StdHsmPal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn internal_key_pct_failure_reports_key_kind() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        pal.ecc_pct_fail.set(true);
+        for (kind, error) in [
+            (
+                HsmVaultKeyKind::Ecc384Private,
+                HsmError::PartitionIdKeyGenerationPctFailed,
+            ),
+            (
+                HsmVaultKeyKind::EstablishCred,
+                HsmError::PctValidationEstablishCredEncKeyFailed,
+            ),
+            (
+                HsmVaultKeyKind::SessionEncryption,
+                HsmError::PctValidationSessionEncKeyFailed,
+            ),
+        ] {
+            let mut public = [0u8; P384_PUB_KEY_LEN];
+            let pct = if kind == HsmVaultKeyKind::Ecc384Private {
+                HsmEccPct::SignVerify
+            } else {
+                HsmEccPct::KeyAgreement
+            };
+            assert_eq!(
+                pal.create_internal_ecc384_key(
+                    0,
+                    kind,
+                    HsmVaultKeyAttrs::new(),
+                    pct,
+                    false,
+                    &mut public,
+                )
+                .await
+                .unwrap_err(),
+                error
+            );
+        }
+    }
 
     #[test]
     fn partition_table_initialization_fits_small_stack() {
