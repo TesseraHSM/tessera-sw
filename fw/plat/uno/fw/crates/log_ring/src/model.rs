@@ -5,8 +5,8 @@
 //!
 //! The model runs this crate's write and boot-reset steps against a model of
 //! the shared memory and of the SP, and searches every schedule with up to
-//! two preemptions: switches away from a side that could go on. An ignored
-//! test repeats the searches with three. Each scheduled step is one memory
+//! two preemptions: switches away from a side that could go on. Ignored
+//! tests repeat the searches with three. Each scheduled step is one memory
 //! access:
 //!
 //! - CP1 runs the crate's steps. Its writes enter a store buffer and become
@@ -20,6 +20,9 @@
 //!   (three descriptor bytes, then the two values), and then moves `head`.
 //!   A drain ends at an empty or invalid ring, with one read of
 //!   `overflows`.
+//! - The HSP firmware's drain uses plain loads, which a compiler may merge.
+//!   Unmerged, it loads `head` again to read the record, and `head` and
+//!   `buffer_size` again to move `head`. The model checks both forms.
 //! - Each side keeps using the values it loaded while the other side moves
 //!   on.
 //!
@@ -54,7 +57,7 @@ const N: u32 = 3;
 
 /// Upper limit on schedules per search, as a guard against a search that
 /// doesn't end.
-const MAX_SCHEDULES: u64 = 20_000_000;
+const MAX_SCHEDULES: u64 = 50_000_000;
 
 // Positions of the descriptor words in the model's memory. Records follow,
 // three words each.
@@ -239,6 +242,9 @@ enum Consumer {
     RecordBeforeTail,
     /// Moves `head` before it reads the record.
     HeadFirst,
+    /// Loads `head` again before it reads the record, and `head` and
+    /// `buffer_size` again before it moves `head`: no load is merged.
+    FreshLoads,
     /// Mutant: doesn't check that `buffer_size` is the ring's size.
     NoSizeCheck,
 }
@@ -300,6 +306,22 @@ impl Consumer {
                 Read(2),
                 Read(3),
                 Read(4),
+                Deliver,
+            ],
+            Consumer::FreshLoads => &[
+                LoadHead,
+                LoadTail,
+                LoadSize,
+                Check,
+                LoadHead,
+                Read(0),
+                Read(1),
+                Read(2),
+                Read(3),
+                Read(4),
+                LoadHead,
+                LoadSize,
+                StoreHead,
                 Deliver,
             ],
         }
@@ -1195,6 +1217,25 @@ fn every_access_stays_in_the_ring_after_an_uncleared_boot() {
     holds(&uncleared(), &Config::IN_BOUNDS);
 }
 
+/// An SP that loads `head` again to read the record, and `head` and
+/// `buffer_size` again to move `head`. CP1 writes `head` only in the boot
+/// reset, and the SP writes only in-range values, so every load that passed
+/// the checks is followed by in-range loads.
+#[test]
+fn reloading_head_keeps_every_access_in_the_ring() {
+    let cfg = Config {
+        consumer: Consumer::FreshLoads,
+        ..Config::IN_BOUNDS
+    };
+    holds(&spill(), &cfg);
+    holds(&uncleared(), &cfg);
+}
+
+#[test]
+fn reloading_head_is_safe_after_a_warm_boot() {
+    holds(&warm_boot(), &with_consumer(Consumer::FreshLoads));
+}
+
 /// The margin of the stale-record spill: if every boot-reset write becomes
 /// visible within two SP accesses, no drain spills; with three, one can.
 #[test]
@@ -1247,7 +1288,7 @@ fn moving_head_before_the_read_is_safe() {
 
 /// The searches that must hold, with three preemptions instead of two.
 #[test]
-#[ignore = "takes about two minutes"]
+#[ignore = "takes about three minutes"]
 fn every_property_holds_with_three_preemptions() {
     let deeper = |cfg: Config| Config {
         preemptions: 3,
@@ -1266,6 +1307,7 @@ fn every_property_holds_with_three_preemptions() {
     let head_first = deeper(with_consumer(Consumer::HeadFirst));
     holds(&room(), &head_first);
     holds(&full(), &head_first);
+    holds(&warm_boot(), &deeper(with_consumer(Consumer::FreshLoads)));
 }
 
 /// The in-bounds searches, with three preemptions instead of two.
@@ -1273,6 +1315,20 @@ fn every_property_holds_with_three_preemptions() {
 #[ignore = "takes about two and a half minutes"]
 fn every_access_stays_in_the_ring_with_three_preemptions() {
     let cfg = Config {
+        preemptions: 3,
+        ..Config::IN_BOUNDS
+    };
+    holds(&spill(), &cfg);
+    holds(&uncleared(), &cfg);
+}
+
+/// The in-bounds searches of the SP that loads `head` again, with three
+/// preemptions instead of two.
+#[test]
+#[ignore = "takes about four and a half minutes"]
+fn reloading_head_keeps_every_access_in_the_ring_with_three_preemptions() {
+    let cfg = Config {
+        consumer: Consumer::FreshLoads,
         preemptions: 3,
         ..Config::IN_BOUNDS
     };
