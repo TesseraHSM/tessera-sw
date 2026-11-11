@@ -83,6 +83,7 @@ tsra_fw_uno_drivers_vault = { path = "drivers/vault" }
 tsra_fw_uno_error = { path = "crates/error" }
 tsra_fw_uno_fault = { path = "crates/fault" }
 tsra_fw_uno_key_vault = { path = "crates/key_vault" }
+tsra_fw_uno_log_ring = { path = "crates/log_ring" }
 tsra_fw_uno_pac = { path = "drivers/pac" }
 tsra_fw_uno_pal = { path = "pal" }
 tsra_fw_uno_pct = { path = "crates/pct" }
