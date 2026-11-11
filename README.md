@@ -93,7 +93,7 @@ Unknown keys are an error. Test keys:
 
 `tsra_api_tests` (Rust and C++) selects the session API at runtime from
 the `api_rev` key of `TSRA_TEST_ARGS`, written as `MAJOR_MINOR`: `1_0`
-(default) for legacy/MBOR `open_session`, or `1_1` and later for EX/TBOR
+for legacy/MBOR `open_session`, or `1_1` (default) and later for EX/TBOR
 `open_session_ex`. Tests gate on the minimum revision they need with
 `api_rev_at_least(major, minor)` and return early otherwise. `--api-rev` sets
 it:

@@ -74,7 +74,7 @@ inline std::string test_arg(const std::string &key)
 }
 
 /// Returns `true` when the `api_rev` selected in `TSRA_TEST_ARGS` is at
-/// least `major.minor`. An unset `api_rev` selects revision 1.0; revisions
+/// least `major.minor`. An unset `api_rev` selects revision 1.1; revisions
 /// from 1.1 run the `open_session_ex` tests. `api_rev` is written as
 /// `MAJOR_MINOR` (e.g. `1_1`); other values throw, matching the Rust parser.
 inline bool api_rev_at_least(uint32_t major, uint32_t minor)
@@ -82,7 +82,7 @@ inline bool api_rev_at_least(uint32_t major, uint32_t minor)
     const auto value = test_arg("api_rev");
     if (value.empty())
     {
-        return std::make_pair(uint32_t{ 1 }, uint32_t{ 0 }) >= std::make_pair(major, minor);
+        return std::make_pair(uint32_t{ 1 }, uint32_t{ 1 }) >= std::make_pair(major, minor);
     }
     const auto invalid = [&value]() {
         return std::invalid_argument("TSRA_TEST_ARGS api_rev must be `MAJOR_MINOR`, got " + value);

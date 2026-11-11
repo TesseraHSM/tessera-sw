@@ -17,7 +17,7 @@ const SESSION_EX_MIN_TEST_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
 const ROTATED_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
 
 /// Returns `true` when the `api_rev` selected in `TSRA_TEST_ARGS` is at
-/// least `major.minor`. An unset `api_rev` selects revision 1.0.
+/// least `major.minor`. An unset `api_rev` selects revision 1.1.
 ///
 /// Revisions from 1.1 run the `open_session_ex` tests.
 ///
@@ -27,7 +27,7 @@ const ROTATED_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
 pub(crate) fn api_rev_at_least(major: u32, minor: u32) -> bool {
     let (sel_major, sel_minor) = ddi_sock_server::TestArgs::from_env()
         .api_rev_parts()
-        .unwrap_or((1, 0));
+        .unwrap_or((1, 1));
     HsmApiRev {
         major: sel_major,
         minor: sel_minor,
