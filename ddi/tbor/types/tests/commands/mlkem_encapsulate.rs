@@ -21,9 +21,11 @@ use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborMlKemEncapsulateReq;
 use tsra_ddi_tbor_types::TborMlKemGenerateKeyReq;
 use tsra_ddi_tbor_types::TborOpReq;
+use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_MLKEM_SHARED_SECRET_MAX_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLKEM_ENCAPSULATE;
 
+use crate::commands::common::PayloadGapReq;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `KeyScope::Local` discriminant.
@@ -109,4 +111,26 @@ fn mlkem_encapsulate_smoke_768() {
 #[test]
 fn mlkem_encapsulate_smoke_1024() {
     encapsulate_case(&ML_KEM_1024);
+}
+
+/// Rejects an otherwise valid request whose payload data starts after a
+/// non-canonical 4-byte gap.
+#[test]
+fn mlkem_encapsulate_rejects_payload_gap() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = ctx
+        .tbor(&TborMlKemGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_KEM_512.key_kind,
+        })
+        .expect("MlKemGenerateKey");
+    let req = TborMlKemEncapsulateReq {
+        session_id: session.session_id,
+        scope: SCOPE_LOCAL,
+        pub_key: key.pub_key,
+    };
+
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::InvalidArg);
 }

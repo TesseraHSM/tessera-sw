@@ -17,13 +17,20 @@ use tsra_crypto::RsaEncryptAlgo;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
+use tsra_ddi_tbor_codec::EncodeError;
+use tsra_ddi_tbor_codec::RequestView;
+use tsra_ddi_tbor_codec::TocType;
+use tsra_ddi_tbor_codec::REQ_HEADER_LEN;
+use tsra_ddi_tbor_codec::TOC_ENTRY_LEN;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::coord_sizes;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
+use tsra_ddi_tbor_types::SessionControlKind;
 use tsra_ddi_tbor_types::TborEccGenerateKeyReq;
 use tsra_ddi_tbor_types::TborEccSignReq;
 use tsra_ddi_tbor_types::TborEcdhDeriveReq;
+use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyReq;
 use tsra_ddi_tbor_types::TborUnwrapKeyResp;
@@ -324,4 +331,67 @@ pub(crate) fn derive(
     })
     .expect("EcdhDerive")
     .masked_secret
+}
+
+/// Wraps a request so its encoding carries a 4-byte zero gap at the start of
+/// the payload data area, with every offset/length TOC entry rebased past it.
+///
+/// The result still parses as a structurally valid TBOR request, but its
+/// payload layout is non-canonical, which firmware must reject.
+pub(crate) struct PayloadGapReq<R>(pub(crate) R);
+
+/// Size of the zero gap [`PayloadGapReq`] inserts.
+const PAYLOAD_GAP: usize = 4;
+
+impl<R: TborOpReq> TborOpReq for PayloadGapReq<R> {
+    const OPCODE: u8 = R::OPCODE;
+    type OpResp = R::OpResp;
+
+    fn get_session_id(&self) -> Option<u16> {
+        self.0.get_session_id()
+    }
+
+    fn session_ctrl(&self) -> SessionControlKind {
+        self.0.session_ctrl()
+    }
+
+    fn encode_request<'b>(&self, buf: &'b mut [u8]) -> Result<&'b [u8], EncodeError> {
+        let len = self.0.encode_request(buf)?.len();
+        let toc_count = RequestView::parse(&buf[..len])
+            .expect("parse canonical request")
+            .toc_count();
+        let data_start = REQ_HEADER_LEN + toc_count * TOC_ENTRY_LEN;
+        if buf.len() < len + PAYLOAD_GAP {
+            return Err(EncodeError::BufferTooSmall);
+        }
+        buf.copy_within(data_start..len, data_start + PAYLOAD_GAP);
+        buf[data_start..data_start + PAYLOAD_GAP].fill(0);
+        for index in 0..toc_count {
+            let at = REQ_HEADER_LEN + index * TOC_ENTRY_LEN;
+            let word = u32::from_be_bytes(
+                buf[at..at + TOC_ENTRY_LEN]
+                    .try_into()
+                    .expect("TOC entry is 4 bytes"),
+            );
+            let entry_type = TocType::from_raw((word >> 26) as u8);
+            if matches!(
+                entry_type,
+                Some(
+                    TocType::SealedKey
+                        | TocType::Uint32
+                        | TocType::Uint64
+                        | TocType::Buffer
+                        | TocType::Padding
+                )
+            ) {
+                // The offset occupies the low 13 bits of the TOC word.
+                assert!((word & 0x1FFF) as usize + PAYLOAD_GAP <= 0x1FFF);
+                let word = word + PAYLOAD_GAP as u32;
+                buf[at..at + TOC_ENTRY_LEN].copy_from_slice(&word.to_be_bytes());
+            }
+        }
+        let shifted = &buf[..len + PAYLOAD_GAP];
+        RequestView::parse(shifted).expect("gapped request stays structurally valid");
+        Ok(shifted)
+    }
 }

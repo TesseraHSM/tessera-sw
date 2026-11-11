@@ -60,7 +60,6 @@ use tsra_fw_ddi_tbor_types::TborSdCreatePeerBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -101,13 +100,11 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
 ) -> HsmResult<usize> {
     let mk_key_id = gate_request(pal, io, cmd_buf.request_mut())?;
 
     // The destination attestation evidence is mandatory side-band data
     // carried in the out-of-band SGL page.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the fixed-size peer-backup response in the IO scope so it
     // survives the crypto scratch allocator's reset.
@@ -151,7 +148,6 @@ pub(crate) async fn handle<P: HsmPal>(
                 verify_evidence(
                     pal,
                     io,
-                    &oob,
                     &EvidenceRefs {
                         mfgr_chain: ev.mfgr_cert_chain(),
                         owner_chain: ev.owner_cert_chain(),

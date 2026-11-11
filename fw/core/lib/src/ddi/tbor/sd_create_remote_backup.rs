@@ -70,7 +70,6 @@ use tsra_fw_ddi_tbor_types::TborSdCreateRemoteBackupResp;
 use tsra_fw_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -176,7 +175,6 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     req_buf: &HsmDmaBuf,
-    oob: &OobPtr,
     pk_r: &mut HsmDmaBuf,
 ) -> HsmResult<()> {
     let req = TborSdCreateRemoteBackupReq::decode(req_buf)?;
@@ -203,7 +201,6 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
     verify_receiver_cert_chain(
         pal,
         io,
-        oob,
         req.receiver_cert_chain(),
         &sata.data[..POLICY_MAX_KEY_LEN],
         pk_r,
@@ -226,7 +223,6 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
         verify_evidence(
             pal,
             io,
-            oob,
             &EvidenceRefs {
                 mfgr_chain: evidence.mfgr_cert_chain(),
                 owner_chain: evidence.owner_cert_chain(),
@@ -263,13 +259,11 @@ pub(crate) async fn handle<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
     undo: &mut UndoLog<'p>,
 ) -> HsmResult<usize> {
     let mk_key_id = gate_request(pal, io, cmd_buf.request_mut())?;
 
     // Receiver certificates and any required attestation travel out of band.
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
 
     // Allocate the three fixed-size response backups in the IO scope so
     // they survive the crypto scratch allocator's reset.
@@ -286,8 +280,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let pk_r = alloc.dma_alloc(1 + 2 * coord)?;
 
         // Phase 1: verify policy binding and receiver attestation evidence.
-        verify_policy_and_receiver_evidence(pal, io, alloc, cmd_buf.request_mut(), &oob, pk_r)
-            .await?;
+        verify_policy_and_receiver_evidence(pal, io, alloc, cmd_buf.request_mut(), pk_r).await?;
 
         // ── Phase 2: unmask SndrPriv in place, derive SndrPub, and
         // HPKE-Auth seal a fresh BKS3 to RcvrPub.  `unmask` decrypts the

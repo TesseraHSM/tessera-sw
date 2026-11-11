@@ -7,8 +7,8 @@
 //! data units (`dul` bytes each, tweak incrementing per unit) of host data under a caller-held **masked** XTS key (from
 //! [`AesXtsGenerateKey`](super::aes_xts_generate_key)).  The key is
 //! unmasked **in place** in the request buffer (verifying the AEAD tag).
-//! The data travels out of band: the OOB descriptor page holds an **in**
-//! and an **out** SGL Data Block (`data_len` bytes each), which the AES
+//! The data travels out of band: the request names an **in** and an
+//! **out** OOB item (`data_len` bytes each), which the AES
 //! engine reads / writes host to host.  Nothing is persisted.
 //!
 //! The key must be [`HsmVaultKeyKind::AesXts512`] (`InvalidKeyType`
@@ -20,8 +20,6 @@ use tsra_fw_core_crypto_key_masking::aead::unmask;
 use tsra_fw_ddi_tbor_types::TborAesXtsEncryptDecryptReq;
 use tsra_fw_ddi_tbor_types::TborAesXtsEncryptDecryptResp;
 use tsra_fw_ddi_tbor_types::XTS_DATA_MAX_LEN;
-use tsra_fw_hsm_oob::read_oob_desc;
-use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::HsmAesOp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -42,9 +40,7 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
 ) -> HsmResult<usize> {
-    let oob = oob.ok_or(HsmError::InvalidArg)?;
     let req = TborAesXtsEncryptDecryptReq::decode(cmd_buf.request())?;
     let base = cmd_buf.request().as_ptr() as usize;
     let sess_id = HsmSessId::from(u16::from(req.session_id()));
@@ -68,9 +64,6 @@ pub(crate) async fn handle<P: HsmPal>(
         return Err(HsmError::InvalidArg);
     }
 
-    let src = read_oob_desc(pal, io, &oob, in_index).await?;
-    let dst = read_oob_desc(pal, io, &oob, out_index).await?;
-
     cmd_buf.response(TborAesXtsEncryptDecryptResp::MAX_ENCODED_SIZE)?;
 
     // In bounds: decode bounded every field within the request, and the
@@ -93,8 +86,17 @@ pub(crate) async fn handle<P: HsmPal>(
         return Err(HsmError::InvalidPermissions);
     }
 
-    pal.aes_xts_enc_dec_sgl(io, op, view.target_key, tweak, data_len, dul, &src, &dst)
-        .await?;
+    pal.aes_xts_enc_dec_oob(
+        io,
+        op,
+        view.target_key,
+        tweak,
+        data_len,
+        dul,
+        in_index,
+        out_index,
+    )
+    .await?;
 
     Ok(
         TborAesXtsEncryptDecryptResp::encode(cmd_buf.buffer_mut(), 0, false)?

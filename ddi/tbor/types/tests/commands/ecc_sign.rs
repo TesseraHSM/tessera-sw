@@ -36,6 +36,7 @@ use tsra_ddi_tbor_types::ECC_CURVE_P384;
 use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::KEY_CLASS_AES;
 use tsra_ddi_tbor_types::KEY_CLASS_ECC;
+use tsra_ddi_tbor_types::KEY_USAGE_DERIVE;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 
 use crate::commands::common::assert_ecc_signs;
@@ -563,5 +564,33 @@ fn ecc_sign_masked_key_can_be_reused() {
                 );
             }
         });
+    }
+}
+
+/// Rejects signing with a derive-only ECC key on every curve.
+#[test]
+fn ecc_sign_key_without_sign_usage_rejected() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+
+    for curve in ECC_CURVES {
+        let key = ctx
+            .tbor(&TborEccGenerateKeyReq {
+                session_id: session.session_id,
+                scope: SCOPE_LOCAL,
+                curve,
+                key_usage: KEY_USAGE_DERIVE,
+                key_label: Vec::new(),
+            })
+            .expect("EccGenerateKey (derive)");
+
+        ctx.expect_fw_reject(
+            &TborEccSignReq {
+                session_id: session.session_id,
+                masked_key: key.masked_key,
+                digest: vec![0x42; 32],
+            },
+            TborStatus::InvalidPermissions,
+        );
     }
 }

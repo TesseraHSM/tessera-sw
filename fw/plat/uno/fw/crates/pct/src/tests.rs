@@ -18,6 +18,7 @@ use core::task::Poll;
 use core::task::Waker;
 
 use tsra_fw_hsm_pal_traits::HsmCqe;
+use tsra_fw_hsm_pal_traits::HsmCqeSession;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -32,6 +33,7 @@ use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
 use tsra_fw_hsm_pal_traits::HsmRsaPct;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmSessCtrl;
 use tsra_fw_hsm_pal_traits::HsmSqe;
 
 use super::ct_eq;
@@ -534,16 +536,39 @@ impl HsmScopedAlloc for FakeAlloc {
 
 #[derive(Default)]
 struct FakeIo {
-    sqe: [u32; 16],
-    cqe: [u32; 4],
+    entry: FakeEntry,
+}
+
+#[derive(Default)]
+struct FakeEntry;
+
+impl HsmSqe for FakeEntry {
+    fn opcode(&self) -> u16 {
+        0
+    }
+    fn session_id(&self) -> Option<u16> {
+        None
+    }
+    fn session_ctrl(&self) -> HsmSessCtrl {
+        HsmSessCtrl::NoSession
+    }
+}
+
+impl HsmCqe for FakeEntry {
+    fn set_ok(&mut self, _dst_len: u32) {}
+    fn set_ok_ex(&mut self, _dst_len: u32, _sess: HsmCqeSession) {}
+    fn set_err(&mut self, _err: HsmError) {}
 }
 
 impl HsmIo for FakeIo {
-    fn sqe(&self) -> &HsmSqe {
-        &self.sqe
+    type Sqe = FakeEntry;
+    type Cqe = FakeEntry;
+
+    fn sqe(&self) -> &FakeEntry {
+        &self.entry
     }
-    fn cqe(&mut self) -> &mut HsmCqe {
-        &mut self.cqe
+    fn cqe(&mut self) -> &mut FakeEntry {
+        &mut self.entry
     }
 }
 

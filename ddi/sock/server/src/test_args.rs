@@ -9,7 +9,7 @@
 //! | Key              | Value                                                  |
 //! |------------------|--------------------------------------------------------|
 //! | `transport`      | DDI transport: `sock` or `ioctl`                        |
-//! | `api_rev`        | API revision used by `tsra_api_tests`, as `MAJOR_MINOR` |
+//! | `api_rev`        | API revision used by `tsra_api_tests` and to select the sock server's device, as `MAJOR_MINOR` |
 //! | `sock`           | Socket server endpoint for the sock transport           |
 //! | `resource_count` | Partition resources of the sock server, `1..=65`        |
 //! | `server_bin`     | Path to a standalone `ddi_sock_server` binary           |

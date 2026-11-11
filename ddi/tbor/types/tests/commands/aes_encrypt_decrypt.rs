@@ -24,6 +24,7 @@
 //! * NIST SP 800-38A known answers (data and IV out) for every mode.
 //! * Partial-length CFB / OFB / CTR round-trips and chaining.
 //! * Invalid modes and mode / IV length mismatches are rejected.
+//! * A non-canonical payload layout (gap before the data) is rejected.
 
 use rand::RngExt;
 use tsra_ddi_tbor_test_harness::TestCtx;
@@ -44,6 +45,7 @@ use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_CLASS_AES;
 
 use crate::commands::aes_generate_key::generate_key;
+use crate::commands::common::PayloadGapReq;
 use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
@@ -1058,4 +1060,23 @@ fn aes_encrypt_decrypt_rejects_bad_mode_and_iv() {
 
         ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
     }
+}
+
+/// Rejects an otherwise valid request whose payload data starts after a
+/// non-canonical 4-byte gap.
+#[test]
+fn aes_encrypt_decrypt_rejects_payload_gap() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = generate_key(&ctx, session.session_id, SCOPE_LOCAL, AES_KEY_SIZE_256);
+    let req = TborAesEncryptDecryptReq {
+        session_id: session.session_id,
+        masked_key: key,
+        op: AES_OP_ENCRYPT,
+        mode: AES_MODE_CBC,
+        iv: random_iv(),
+        msg: vec![0x5A; 2 * IV_LEN],
+    };
+
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::InvalidArg);
 }

@@ -7,8 +7,8 @@
 //! a caller-held **masked** AES-256 key (from
 //! [`AesGenerateKey`](super::aes_generate_key)).  The key is unmasked
 //! **in place** in the request buffer (verifying the AEAD tag).  The data
-//! travels out of band: the OOB descriptor page holds an **in** and an
-//! **out** SGL Data Block (`[padded AAD | text]`, `data_len` bytes each),
+//! travels out of band: the request names an **in** and an
+//! **out** OOB item (`[padded AAD | text]`, `data_len` bytes each),
 //! which the AES engine reads / writes host to host.  An empty message
 //! (`data_len == 0`) needs no OOB page; only the tag is computed.  The request's
 //! contiguous `[iv | tag]` bytes become the response at the same offset.
@@ -27,8 +27,6 @@ use tsra_fw_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
 use tsra_fw_ddi_tbor_types::GCM_DATA_MAX_LEN;
 use tsra_fw_ddi_tbor_types::GCM_IV_LEN;
 use tsra_fw_ddi_tbor_types::GCM_TAG_LEN;
-use tsra_fw_hsm_oob::read_oob_desc;
-use tsra_fw_hsm_oob::OobPtr;
 use tsra_fw_hsm_pal_traits::HsmAesOp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -59,7 +57,6 @@ pub(crate) async fn handle<P: HsmPal>(
     pal: &P,
     io: &P::Io,
     cmd_buf: &mut HsmCmdBuf<'_>,
-    oob: Option<OobPtr>,
 ) -> HsmResult<usize> {
     let req = TborAesGcmEncryptDecryptReq::decode(cmd_buf.request())?;
     let base = cmd_buf.request().as_ptr() as usize;
@@ -97,15 +94,7 @@ pub(crate) async fn handle<P: HsmPal>(
 
     // An empty message (no AAD, no text) carries no OOB data; only the
     // tag is computed.
-    let descs = if data_len == 0 {
-        None
-    } else {
-        let oob = oob.ok_or(HsmError::InvalidArg)?;
-        Some((
-            read_oob_desc(pal, io, &oob, in_index).await?,
-            read_oob_desc(pal, io, &oob, out_index).await?,
-        ))
-    };
+    let descs = (data_len != 0).then_some((in_index, out_index));
 
     cmd_buf.response(TborAesGcmEncryptDecryptResp::MAX_ENCODED_SIZE)?;
 
@@ -137,11 +126,11 @@ pub(crate) async fn handle<P: HsmPal>(
     let key = view.target_key;
     match (op, descs) {
         (HsmAesOp::Encrypt, Some((src, dst))) => {
-            pal.gcm_encrypt_sgl(io, key, iv, aad_len, data_len, &src, &dst, tag)
+            pal.gcm_encrypt_oob(io, key, iv, aad_len, data_len, src, dst, tag)
                 .await?
         }
         (HsmAesOp::Decrypt, Some((src, dst))) => {
-            pal.gcm_decrypt_sgl(io, key, iv, aad_len, data_len, tag, &src, &dst)
+            pal.gcm_decrypt_oob(io, key, iv, aad_len, data_len, tag, src, dst)
                 .await?
         }
         (HsmAesOp::Encrypt, None) => pal.gcm_encrypt_in_place(io, key, iv, 0, empty, tag).await?,

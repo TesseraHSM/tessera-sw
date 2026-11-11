@@ -464,6 +464,10 @@ pub enum HsmError {
     /// Admin could not quiesce host IO for the periodic RNG test after all retries.
     RngSelfTestRetriesExhausted = 0x08700112,
 
+    /// A protected IO transport failed: the request failed authentication,
+    /// or its session has no transport keys.
+    SessionTransportError = 0x08700113,
+
     // Firmware-internal diagnostic codes logged by the CPU fault and panic
     // exception handlers (`tsra_fw_uno_fault`). These are not DDI protocol
     // statuses: they use the PAL diagnostic facility (`0x08F`) to stay clear of

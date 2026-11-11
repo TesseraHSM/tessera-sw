@@ -245,7 +245,9 @@ fn sealing_key_unmask_roundtrip_attests_reconstructed_key() {
 
 #[test]
 fn sealing_key_unmask_rejects_legacy_session() {
-    if !crate::utils::session::api_rev_at_least(1, 1) {
+    if !crate::utils::session::api_rev_at_least(1, 1)
+        || !crate::utils::session::api_rev_at_most(1, 1)
+    {
         return;
     }
     let _guard = PARTITION_LOCK.lock();

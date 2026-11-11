@@ -652,22 +652,22 @@ impl HsmAesGcm for UnoHsmPal {
     }
 
     /// Not yet supported on Uno.
-    async fn gcm_encrypt_sgl(
+    async fn gcm_encrypt_oob(
         &self,
         _io: &UnoHsmIo,
         _key: &HsmDmaBuf,
         _iv: &HsmDmaBuf,
         _aad_len: usize,
         _len: usize,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
+        _src: usize,
+        _dst: usize,
         _tag: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
         Err(HsmError::UnsupportedCmd)
     }
 
     /// Not yet supported on Uno.
-    async fn gcm_decrypt_sgl(
+    async fn gcm_decrypt_oob(
         &self,
         _io: &UnoHsmIo,
         _key: &HsmDmaBuf,
@@ -675,8 +675,8 @@ impl HsmAesGcm for UnoHsmPal {
         _aad_len: usize,
         _len: usize,
         _tag: &HsmDmaBuf,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
+        _src: usize,
+        _dst: usize,
     ) -> HsmResult<()> {
         Err(HsmError::UnsupportedCmd)
     }
@@ -859,7 +859,7 @@ impl HsmAesXts for UnoHsmPal {
         Err(HsmError::UnsupportedCmd)
     }
 
-    async fn aes_xts_enc_dec_sgl(
+    async fn aes_xts_enc_dec_oob(
         &self,
         _io: &UnoHsmIo,
         _op: HsmAesOp,
@@ -867,8 +867,8 @@ impl HsmAesXts for UnoHsmPal {
         _tweak: &HsmDmaBuf,
         _len: usize,
         _dul: usize,
-        _src: &[u8; 16],
-        _dst: &[u8; 16],
+        _src: usize,
+        _dst: usize,
     ) -> HsmResult<()> {
         Err(HsmError::UnsupportedCmd)
     }

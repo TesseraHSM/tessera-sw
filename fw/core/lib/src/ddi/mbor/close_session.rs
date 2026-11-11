@@ -14,8 +14,8 @@ use super::*;
 
 /// Handle `DdiCloseSessionCmd`.
 ///
-/// `hdr.sess_id` MUST be `Some` — the `SessionCtrl::Close` classification
-/// in [`super::super::op::SessionCtrl`] guarantees this; the dispatcher
+/// `hdr.sess_id` MUST be `Some` — the `HsmSessCtrl::Close` classification
+/// in [`super::super::op::sess_ctrl_from_mbor_op`] guarantees this; the dispatcher
 /// validates it before calling the handler.  We re-check defensively so
 /// the partition state never sees `session_destroy` with a `None` id.
 ///

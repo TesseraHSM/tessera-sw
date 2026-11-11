@@ -82,8 +82,10 @@ pub(crate) const TEST_POTA_PUBLIC_KEY_DER: [u8; 120] = [
 /// Change this single function to switch all tests between min, max,
 /// or any other supported revision.
 pub(crate) fn test_api_rev() -> HsmApiRev {
-    // Function is defined in case we want to easily switch between different revisions for testing.
-    // or to read from an environment variable in the future.
+    // Revision 2.0 devices (Duo) accept only 2.0.
+    if crate::utils::session::api_rev_at_least(2, 0) {
+        return HsmApiRev { major: 2, minor: 0 };
+    }
     SESSION_TEST_API_REV
 }
 

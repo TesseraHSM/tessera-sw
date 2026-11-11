@@ -14,13 +14,17 @@
 use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
+use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevReq;
 use tsra_ddi_tbor_types::TborStatus;
 
+/// Uno reports SDK API revisions 1.0 through 1.1.
 const EXPECTED: tsra_ddi_tbor_types::TborApiRevResp = tsra_ddi_tbor_types::TborApiRevResp {
-    min_ver: 1,
-    max_ver: 1,
+    min_major: U16::new(1),
+    min_minor: U16::new(0),
+    max_major: U16::new(1),
+    max_minor: U16::new(1),
 };
 
 #[test]
@@ -31,7 +35,7 @@ fn round_trip() {
         .expect("TBOR ApiRev round-trip");
     assert_eq!(
         resp, EXPECTED,
-        "firmware should report min=max=1 for the current TBOR protocol version",
+        "firmware should report SDK API revisions 1.0..=1.1",
     );
 }
 
@@ -92,24 +96,17 @@ fn api_rev_independent_of_session_state() {
     assert_eq!(post, EXPECTED);
 }
 
-/// Asserts the `ApiRev` protocol-range invariants.
+/// Asserts the `ApiRev` revision-range invariants.
 ///
-/// The firmware must advertise a valid version range that includes the
-/// bootstrap TBOR protocol version.
+/// The firmware must advertise a non-empty `major.minor` range.
 fn assert_expected_api_rev(resp: &tsra_ddi_tbor_types::TborApiRevResp, context: &str) {
+    let min = (resp.min_major.get(), resp.min_minor.get());
+    let max = (resp.max_major.get(), resp.max_minor.get());
     assert!(
-        resp.min_ver <= resp.max_ver,
-        "{context}: minimum supported version {} must not exceed maximum supported version {}",
-        resp.min_ver,
-        resp.max_ver,
+        min <= max,
+        "{context}: minimum revision {min:?} must not exceed maximum revision {max:?}",
     );
-
-    assert!(
-        (resp.min_ver..=resp.max_ver).contains(&tsra_ddi_tbor_codec::PROTOCOL_VERSION),
-        "{context}: the current TBOR version must be inside the advertised range {}..={}",
-        resp.min_ver,
-        resp.max_ver,
-    );
+    assert_eq!(*resp, EXPECTED, "{context}: unexpected revision range");
 }
 
 /// A3: Independent device contexts must advertise the same protocol

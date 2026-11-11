@@ -29,6 +29,7 @@ use tsra_ddi_tbor_types::MLDSA_HEDGE_PREFERRED;
 use tsra_ddi_tbor_types::MLDSA_MU_LEN;
 use tsra_ddi_tbor_types::TBOR_OP_MLDSA_SIGN;
 
+use crate::commands::common::PayloadGapReq;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 
 /// `KeyScope::Local` discriminant.
@@ -198,4 +199,27 @@ fn mldsa_sign_wrong_key_class_rejected() {
         },
         TborStatus::InvalidKeyType,
     );
+}
+
+/// Rejects an otherwise valid request whose payload data starts after a
+/// non-canonical 4-byte gap.
+#[test]
+fn mldsa_sign_rejects_payload_gap() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = ctx
+        .tbor(&TborMlDsaGenerateKeyReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            key_kind: ML_DSA_44.key_kind,
+        })
+        .expect("MlDsaGenerateKey");
+    let req = TborMlDsaSignReq {
+        session_id: session.session_id,
+        masked_key: key.masked_key,
+        mu: vec![0x5A; MLDSA_MU_LEN],
+        hedge: MLDSA_HEDGE_PREFERRED,
+    };
+
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::InvalidArg);
 }

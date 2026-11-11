@@ -407,7 +407,7 @@ mod tests {
         assert!(len.check(72).is_err());
         let pending = key_len(HsmVaultKeyKind::SessionExPending).unwrap();
         assert_eq!(pending.check(312), Ok(312));
-        assert_eq!(pending.check(SESSION_PENDING_BLOB_MAX), Ok(320));
+        assert_eq!(pending.check(SESSION_PENDING_BLOB_MAX), Ok(384));
         assert!(pending.check(SESSION_PENDING_BLOB_MAX + 1).is_err());
     }
 

@@ -270,7 +270,7 @@ fn open_session_second_on_same_fd_rejected() {
 // are identical on emu (fw/plat/std) and hw (fw/plat/uno) — see
 // `MAX_SESSIONS = 8` in
 // `fw/plat/uno/fw/drivers/session_store/src/session_store.rs` and
-// `fw/plat/std/pal/src/drivers/session.rs`.
+// `fw/plat/std/common/src/drivers/session.rs`.
 
 const CU_SESSION_LIMIT: usize = 7;
 

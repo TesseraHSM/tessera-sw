@@ -266,3 +266,67 @@ acknowledges and zeroizes the slot), and the HSM unilaterally
 zeroizes any session whose slot it needs to reclaim (`bmk_session`
 may still be re-presented later via the resume path on a fresh
 `SessionOpenInit`).
+
+## Duo session transport (API revision 2.0)
+
+Duo devices support API revision 2.0 only and carry TBOR only (no MBOR,
+no bulk queue). Every Duo submission is a 128-byte SQE answered by a
+64-byte CQE; the SQE opcode (DW0 bits 7-0) selects one of three channels:
+
+| SQE opcode | Name | Carries |
+|---|---|---|
+| `0` | `Tbor` | Plaintext TBOR: `NoSession` commands and `SessionOpenInit`. |
+| `1` | `TborSecure` | TBOR encrypted under the session transport keys: `SessionOpenFinish`, every `InSession` command, and `SessionClose`. |
+| `2` | `FlushSession` | No payload. Tears down the session named by the SQE `session_id` (including a Pending one). |
+
+A command sent on the wrong channel is rejected without being executed.
+On `TborSecure`, the TBOR body's `session_id` must equal the SQE
+`session_id` (DW1).
+
+### Transport keys
+
+`SessionOpenInit` derives two AES-256-GCM keys from the HPKE `exported`
+secret and stores them with the Pending session, so `SessionOpenFinish`
+already travels encrypted:
+
+```text
+key_h2m = HKDF-Expand-SHA-384(exported, "tsra-session-xport-h2m-v1" ‖ be16(32), 32)
+key_m2h = HKDF-Expand-SHA-384(exported, "tsra-session-xport-m2h-v1" ‖ be16(32), 32)
+```
+
+`key_h2m` protects requests (host → HSM) and `key_m2h` protects responses
+(HSM → host); separate keys stop reflection of one direction into the
+other. Both CO and CU sessions use them, and at revision 2.0 they replace
+the CO outer HMAC envelope. The keys never leave the session's key-vault
+entry; the host zeroizes its copies on close or flush.
+
+### Encrypted exchange
+
+1. The host encrypts the entire TBOR request (header, TOC and data)
+   in place with `key_h2m` under a fresh random 96-bit IV, and places the
+   IV (DW23–25) and 16-byte tag (DW19–22) in the SQE. `aad_len` (DW26)
+   must be `0`; there is no AAD.
+2. The HSM decrypts the request and checks the tag before parsing. A tag
+   failure, or a session without transport keys, completes with CQE
+   status `SESSION_TRANSPORT_ERR` (`0xCC`); session state is unchanged.
+3. The TBOR response, success or error, is encrypted with `key_m2h`
+   under a fresh IV; the IV (CQE DW5–7) and tag (CQE DW1–4) are returned
+   in the CQE.
+
+Because the SQE `session_id` selects the key, tampering with it fails the
+tag check. `SessionClose` defers destroying the session until the CQE has
+posted, so its response is still encrypted.
+
+### Out-of-band data
+
+Out-of-band (OOB) items are not encrypted by the transport. On
+`TborSecure` they are passed through as on `Tbor`: the SQE OOB fields
+(DW2–4) describe the SGL descriptor array, and `oob_len` must equal the
+number of items × 16 bytes. Parameters that need confidentiality are
+protected at the command level (for example, AEAD-sealed key material).
+
+### Limitations
+
+Replay of a captured request or response is not detected: the firmware
+processes requests concurrently on several cores and keeps no
+per-session sequence state.

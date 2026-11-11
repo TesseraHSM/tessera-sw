@@ -43,15 +43,26 @@ const fn hpke_suite_for(suite: HsmSessionSuite) -> HpkeSuite {
 
 /// Length of the Pending blob; mirrors the layout written by
 /// [`super::session_open_init`]:
-/// `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`.
-const PENDING_BLOB_LEN: usize = super::session_open_init::PENDING_BLOB_LEN;
+/// `exported ‖ pk_init ‖ pk_resp ‖ auth_binding ‖ session_type ‖ suite_id`
+/// (‖ `h2m ‖ m2h` with secure sessions).
+use super::session_open_init::pending_blob_len;
+
+/// Length of the Pending blob up to and including `suite_id`.
+const PENDING_BASE_LEN: usize = super::session_open_init::PENDING_BASE_LEN;
 
 /// Length of the API revision tag persisted alongside the session blob.
 const API_REV_LEN: usize = 8;
 
 /// API-revision tag persisted into the session vault blob's first 8
-/// bytes by [`HsmSessionManager::session_promote`].
-const SESSION_API_REV: [u8; API_REV_LEN] = [1, 0, 0, 0, 0, 0, 0, 0];
+/// bytes by [`HsmSessionManager::session_promote`]. Secure-session (Duo)
+/// blobs carry transport keys and are tagged 2.0.
+const fn session_api_rev<P: HsmPalFeatures>() -> [u8; API_REV_LEN] {
+    if P::IO_PROTOCOL.secure_session() {
+        [2, 0, 0, 0, 0, 0, 0, 0]
+    } else {
+        [1, 0, 0, 0, 0, 0, 0, 0]
+    }
+}
 
 /// AEAD algorithm shared by `bmk_session` and the seed envelope.
 const AEAD_ALG: AeadAlg = AeadAlg::AesGcm256;
@@ -84,6 +95,10 @@ struct ParsedRequest<'a> {
 ///   message MACs.  `Some` iff `session_type` is `Authenticated`.
 /// * `mac_rx_key` — 48 B HMAC-SHA-384 key for inbound (host → HSM)
 ///   message MACs.  `Some` iff `session_type` is `Authenticated`.
+///
+/// With secure sessions, `mac_tx_key` / `mac_rx_key` instead hold the
+/// 32 B VM→HSM / HSM→VM AES-256-GCM transport keys, taken from the Pending
+/// blob, and are always `Some`.
 struct DerivedKeys<'a> {
     param_key: &'a mut HsmDmaBuf,
     masking_key: &'a mut HsmDmaBuf,
@@ -104,6 +119,9 @@ struct HandshakeState<'a> {
     /// Cryptographic suite recorded by Phase 1.  Drives every
     /// suite-derived size in this handler (Nh, Npk, AEAD parameters).
     suite: HpkeSuite,
+    /// VM→HSM and HSM→VM transport keys derived at `SessionOpenInit`
+    /// (secure sessions only).
+    transport: Option<(&'a mut HsmDmaBuf, &'a mut HsmDmaBuf)>,
 }
 
 /// Handle a TBOR `SessionOpenFinish` request.
@@ -129,6 +147,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
             session_type,
             auth_binding,
             suite,
+            transport,
         } = load_pending_state(pal, io, alloc, sess_id)?;
 
         // Record the session's teardown inverse up front: any failure below
@@ -188,6 +207,15 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // ── Derive remaining per-session keys ─────────────────────
         let derived =
             derive_remaining_keys(pal, io, alloc, exported, session_type, param_key).await?;
+        let derived = if let Some((h2m, m2h)) = transport {
+            DerivedKeys {
+                mac_tx_key: Some(h2m),
+                mac_rx_key: Some(m2h),
+                ..derived
+            }
+        } else {
+            derived
+        };
 
         // ── Build bmk_session (BK_SESSION-wrapped masking-key blob)
         //    BEFORE promote, so no active session is ever created without a
@@ -243,7 +271,7 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
 /// scratch.
 fn ensure_pending_blob_len<P: HsmPal>(pal: &P, io: &P::Io, id: HsmSessId) -> HsmResult<()> {
     let pending_len = pal.session_pending_state(io, id, None)?;
-    if pending_len != PENDING_BLOB_LEN {
+    if pending_len != pending_blob_len::<P>() {
         return Err(HsmError::InvalidArg);
     }
     Ok(())
@@ -266,7 +294,7 @@ fn load_pending_state<'a, P: HsmPal>(
     // Nh/Npk.  Today only `P384HkdfSha384AesGcm256` is registered, so
     // a mismatch with the wire length pre-check would already have
     // fired in [`ensure_pending_blob_len`].
-    let suite = HsmSessionSuite::from_u8(blob[blob.len() - 1])?;
+    let suite = HsmSessionSuite::from_u8(blob[PENDING_BASE_LEN - 1])?;
     let hpke_suite = hpke_suite_for(suite);
 
     let nh = hpke_suite.nh();
@@ -282,7 +310,21 @@ fn load_pending_state<'a, P: HsmPal>(
     auth_binding.copy_from_slice(
         &blob[auth_start..auth_start + tsra_fw_hsm_pal_traits::SESSION_AUTH_BINDING_LEN],
     );
-    let session_type = HsmSessionType::from_u8(blob[blob.len() - 2])?;
+    let session_type = HsmSessionType::from_u8(blob[PENDING_BASE_LEN - 2])?;
+
+    let transport = if P::IO_PROTOCOL.secure_session() {
+        let keys = &blob[PENDING_BASE_LEN..];
+        if keys.len() != 2 * SESSION_TRANSPORT_KEY_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let h2m = alloc.dma_alloc(SESSION_TRANSPORT_KEY_LEN)?;
+        h2m.copy_from_slice(&keys[..SESSION_TRANSPORT_KEY_LEN]);
+        let m2h = alloc.dma_alloc(SESSION_TRANSPORT_KEY_LEN)?;
+        m2h.copy_from_slice(&keys[SESSION_TRANSPORT_KEY_LEN..]);
+        Some((h2m, m2h))
+    } else {
+        None
+    };
 
     Ok(HandshakeState {
         exported,
@@ -291,6 +333,7 @@ fn load_pending_state<'a, P: HsmPal>(
         session_type,
         auth_binding,
         suite: hpke_suite,
+        transport,
     })
 }
 
@@ -417,30 +460,34 @@ async fn derive_remaining_keys<'a, P: HsmPal>(
 
     // The MAC keys stay derived: they authenticate the channel, so both
     // ends must arrive at the same value without transmitting it.
-    let is_auth = session_type.is_authenticated();
-    let (mac_tx_key, mac_rx_key) = if is_auth {
-        let tx = hkdf_expand_labeled(
-            pal,
-            io,
-            alloc,
-            exported,
-            SESSION_MAC_TX_LABEL,
-            SESSION_MAC_DIR_KEY_LEN,
-        )
-        .await?;
-        let rx = hkdf_expand_labeled(
-            pal,
-            io,
-            alloc,
-            exported,
-            SESSION_MAC_RX_LABEL,
-            SESSION_MAC_DIR_KEY_LEN,
-        )
-        .await?;
-        (Some(tx), Some(rx))
-    } else {
-        (None, None)
-    };
+    //
+    // With secure sessions every session (CU and CO) instead gets the
+    // per-direction AES-256-GCM transport keys derived at
+    // `SessionOpenInit`; the caller fills them in from the Pending blob.
+    let (mac_tx_key, mac_rx_key) =
+        if !P::IO_PROTOCOL.secure_session() && session_type.is_authenticated() {
+            let tx = hkdf_expand_labeled(
+                pal,
+                io,
+                alloc,
+                exported,
+                SESSION_MAC_TX_LABEL,
+                SESSION_MAC_DIR_KEY_LEN,
+            )
+            .await?;
+            let rx = hkdf_expand_labeled(
+                pal,
+                io,
+                alloc,
+                exported,
+                SESSION_MAC_RX_LABEL,
+                SESSION_MAC_DIR_KEY_LEN,
+            )
+            .await?;
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
 
     Ok(DerivedKeys {
         param_key,
@@ -460,13 +507,25 @@ async fn hkdf_expand_labeled<'a, P: HsmPal>(
     label: &[u8],
     out_len: usize,
 ) -> HsmResult<&'a mut HsmDmaBuf> {
+    let out = alloc.dma_alloc(out_len)?;
+    hkdf_expand_labeled_into(pal, io, alloc, prk, label, out).await?;
+    Ok(out)
+}
+
+/// `HKDF-Expand(prk, label ‖ len_be, out.len())` into `out`.
+pub(super) async fn hkdf_expand_labeled_into<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &impl HsmScopedAlloc,
+    prk: &HsmDmaBuf,
+    label: &[u8],
+    out: &mut HsmDmaBuf,
+) -> HsmResult<()> {
     let info = alloc.dma_alloc(label.len() + 2)?;
     info[..label.len()].copy_from_slice(label);
-    info[label.len()..].copy_from_slice(&(out_len as u16).to_be_bytes());
-    let out = alloc.dma_alloc(out_len)?;
+    info[label.len()..].copy_from_slice(&(out.len() as u16).to_be_bytes());
     pal.hkdf_expand(io, HsmHashAlgo::Sha384, prk, Some(info), out)
-        .await?;
-    Ok(out)
+        .await
 }
 
 /// Derive `BK_SESSION = SP800-108-KBKDF-SHA-384(BK_BOOT, "SESSION_BK",
@@ -574,7 +633,7 @@ async fn promote_to_active<P: HsmPal>(
     auth_binding: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let api_rev = alloc.dma_alloc(API_REV_LEN)?;
-    api_rev.copy_from_slice(&SESSION_API_REV);
+    api_rev.copy_from_slice(&session_api_rev::<P>());
     pal.session_promote(
         io,
         id,

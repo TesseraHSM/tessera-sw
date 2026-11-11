@@ -51,3 +51,9 @@ default-filter = "not test(/^ddi_sock_server_tests::/)"
 
 [profile.ci-api-ex.junit]
 path = "junit.xml"
+
+[profile.ci-api-duo]
+default-filter = "not test(/^ddi_sock_server_tests::/)"
+
+[profile.ci-api-duo.junit]
+path = "junit.xml"

@@ -394,6 +394,13 @@ pub trait HsmSessionManager: HsmIoTypes {
     /// [`SESSION_PENDING_BLOB_MAX`](crate::SESSION_PENDING_BLOB_MAX)
     /// bytes.
     ///
+    /// On [`HsmIoProtocol::Duo`](crate::HsmIoProtocol::Duo) the blob's trailing
+    /// `2 × SESSION_TRANSPORT_KEY_LEN` bytes are the transport keys
+    /// `h2m ‖ m2h`; the PAL serves
+    /// [`recv_request`](crate::HsmIoController::recv_request) /
+    /// [`send_response`](crate::HsmIoController::send_response) for the
+    /// Pending slot from them.
+    ///
     /// # Parameters
     ///
     /// - `io` — caller's I/O context (partition scope).

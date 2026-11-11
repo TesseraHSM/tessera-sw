@@ -44,6 +44,7 @@ use crate::commands::common::assert_rsa_signs;
 use crate::commands::common::mod_exp;
 use crate::commands::common::rev;
 use crate::commands::common::test_integer;
+use crate::commands::common::PayloadGapReq;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 use crate::commands::unwrap_key::unwrap_with_usage;
@@ -801,15 +802,14 @@ fn rsa_mod_exp_sign_with_decrypt_usage_rejected() {
             crt,
             KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
         );
-        assert!(
-            ctx.tbor(&TborRsaModExpReq {
+        ctx.expect_fw_reject(
+            &TborRsaModExpReq {
                 session_id: session.session_id,
                 masked_key,
                 op_type: RSA_OP_SIGN,
                 y: vec![1; modulus_len],
-            })
-            .is_err(),
-            "sign must reject decrypt-only key (crt={crt})"
+            },
+            TborStatus::InvalidPermissions,
         );
     }
 }
@@ -938,4 +938,27 @@ fn rsa_mod_exp_invalid_session_rejected() {
         .is_err(),
         "invalid session id must be rejected"
     );
+}
+
+/// Rejects an otherwise valid request whose payload data starts after a
+/// non-canonical 4-byte gap.
+#[test]
+fn rsa_mod_exp_rejects_payload_gap() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _, modulus_len) = import_rsa(
+        &ctx,
+        session.session_id,
+        256,
+        false,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+    );
+    let req = TborRsaModExpReq {
+        session_id: session.session_id,
+        masked_key,
+        op_type: RSA_OP_SIGN,
+        y: rev(&test_integer(modulus_len)),
+    };
+
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::InvalidArg);
 }
