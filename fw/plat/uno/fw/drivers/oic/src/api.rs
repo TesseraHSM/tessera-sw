@@ -243,10 +243,14 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         if ocq_ctrl & 0x1 != 0 || osq_ctrl & 0x1 != 0 {
             warn!(
                 "oic",
-                "ch={} ALREADY ENABLED before full init! ocq_ctrl={:#x} osq_ctrl={:#x}",
-                config.channel,
+                "ALREADY ENABLED before full init: ocq_ctrl={:#x} osq_ctrl={:#x}",
                 ocq_ctrl,
                 osq_ctrl
+            );
+            // A record holds two values, so the channel follows in its own.
+            warn!(
+                "oic",
+                "ALREADY ENABLED before full init: ch={}", config.channel
             );
         }
 
