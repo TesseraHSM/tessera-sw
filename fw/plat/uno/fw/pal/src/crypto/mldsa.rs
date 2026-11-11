@@ -284,7 +284,10 @@ impl HsmMlDsa for UnoHsmPal {
     }
 }
 
-#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code, unused_assignments))]
+#[cfg_attr(
+    feature = "bulk_crypto",
+    allow(unreachable_code, unused_assignments, unused_variables)
+)]
 impl HsmMlKem for UnoHsmPal {
     /// PCTs are deferred: `pct` is accepted but not run; see
     /// <https://github.com/TesseraHSM/tessera-sw/issues/118>.
@@ -359,6 +362,9 @@ impl HsmMlKem for UnoHsmPal {
         pk: &HsmDmaBuf,
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
     ) -> HsmResult<(usize, usize)> {
+        // Refused before the query return, so both modes agree.
+        #[cfg(feature = "bulk_crypto")]
+        return Err(HsmError::UnsupportedCmd);
         let ct_len = param.ct_len();
         let Some((ct, ss)) = out else {
             return Ok((ct_len, MLKEM_SHARED_SECRET_LEN));
@@ -370,8 +376,6 @@ impl HsmMlKem for UnoHsmPal {
         // seeds: an FP core has no entropy source.
         let mut m = [0u8; MLDSA_SEED_LEN];
         let result = async {
-            #[cfg(feature = "bulk_crypto")]
-            return Err(HsmError::UnsupportedCmd);
             self.rng_fill_bytes(io, &mut m)?;
             self.pqc
                 .mlkem_encaps(
@@ -434,17 +438,16 @@ impl HsmMlKem for UnoHsmPal {
         ct: &HsmDmaBuf,
         ss: Option<&mut HsmDmaBuf>,
     ) -> HsmResult<usize> {
+        // Refused before the query return, so both modes agree.
+        #[cfg(feature = "bulk_crypto")]
+        return Err(HsmError::UnsupportedCmd);
         let Some(ss) = ss else {
             return Ok(MLKEM_SHARED_SECRET_LEN);
         };
         if ss.len() < MLKEM_SHARED_SECRET_LEN {
             return Err(HsmError::InvalidArg);
         }
-        // Bracketed so the `bulk_crypto` refusal still reaches the closing
-        // mark; see `mldsa_gen_keypair`.
         let outcome: HsmResult<usize> = async {
-            #[cfg(feature = "bulk_crypto")]
-            return Err(HsmError::UnsupportedCmd);
             self.pqc
                 .mlkem_decaps(
                     mlkem_kind(param),
