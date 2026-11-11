@@ -400,9 +400,9 @@ fn sd_restore_local_backup_rejects_tampered_sd_mk() {
 fn sd_restore_local_backup_rejects_zero_session_id() {
     let ctx = TestCtx::new();
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborSdRestoreLocalBackupReq {
-            session_id: 0u16,
+            session_id: 0,
             pok_local_backup: vec![0u8; MASKED_SD_LEN],
             sd_mk_backup: vec![0u8; SD_MK_BACKUP_LEN],
         },
@@ -537,12 +537,13 @@ fn sd_restore_local_backup_refreshed_backups_roundtrip() {
     );
 }
 
-/// Verify that the maximum session ID is rejected.
+/// Verify that the maximum session ID is rejected by firmware or
+/// the socket backend's session ownership gate.
 #[test]
 fn sd_restore_local_backup_rejects_max_session_id() {
     let ctx = TestCtx::new();
 
-    ctx.expect_fw_reject(
+    ctx.expect_session_reject(
         &TborSdRestoreLocalBackupReq {
             session_id: u16::MAX,
             pok_local_backup: vec![0u8; MASKED_SD_LEN],

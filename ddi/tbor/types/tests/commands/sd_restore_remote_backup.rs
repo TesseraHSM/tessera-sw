@@ -422,12 +422,9 @@ fn sd_restore_remote_backup_rejects_max_session_id() {
 
     let req = restore_remote_req(u16::MAX, &backup);
 
-    assert_remote_restore_rejected(
-        &ctx,
-        &req,
-        &backup,
-        TborStatus::FileHandleSessionIdDoesNotMatch,
-    );
+    ctx.expect_session_reject(&req, TborStatus::FileHandleSessionIdDoesNotMatch);
+
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
 }
 
 #[test]
