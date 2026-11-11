@@ -130,7 +130,8 @@ mem hsm_seed_entry_t {
 //   0x2808 - 0x3000  170 records of 12 bytes: the descriptor word
 //                    (severity, component, message number, and a reserved
 //                    zero byte), then two 32-bit values; little-endian
-// One slot always stays empty, so the ring holds at most 169 records.
+// One slot always stays empty, so the ring holds at most 169 records. The
+// tsra_fw_uno_log_ring crate checks these offsets at compile time.
 
 reg hsm_log_word_t {
     name = "HSM Debug-Log Ring Word";

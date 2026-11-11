@@ -11,6 +11,7 @@ members = [
   "crates/error",
   "crates/fault",
   "crates/key_vault",
+  "crates/log_ring",
   "crates/pct",
   "crates/single_cell",
   "crates/static_init",
