@@ -29,8 +29,12 @@ backend-uart = [
   "dep:tsra_fw_uno_drivers_uart",
   "tsra_fw_uno_drivers_profile/backend-uart",
 ]
-# Log-level threshold pass-throughs to the tracing facade. Enable exactly
-# one; without any, only `error!` is compiled in.
+# Output pass-throughs to the tracing facade. `debug-log` makes `error!`,
+# `warn!`, and `info!` go to the Uno log crate on the bare-metal target when
+# no `level-*` feature is on. A `level-*` feature prints text at or above its
+# level, and turns on `error_text!`; enable at most one. With neither, every
+# macro compiles to nothing.
+debug-log = ["tsra_fw_hsm_core_tracing/debug-log"]
 level-debug = ["tsra_fw_hsm_core_tracing/level-debug"]
 level-error = ["tsra_fw_hsm_core_tracing/level-error"]
 level-info = ["tsra_fw_hsm_core_tracing/level-info"]
