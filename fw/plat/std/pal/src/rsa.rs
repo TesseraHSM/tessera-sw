@@ -15,16 +15,72 @@
 use tsra_crypto::ExportableHsmKey;
 use tsra_crypto::ExportableHsmRsaKey;
 use tsra_crypto::ExportableKey;
+use tsra_crypto::HashAlgo;
 use tsra_crypto::ImportableKey;
 use tsra_crypto::Key;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
+use zeroize::Zeroizing;
 
 use super::*;
 
 fn key_size_bits(key_size: HsmRsaKey) -> usize {
     key_size.modulus_len() * 8
+}
+
+impl StdHsmPal {
+    async fn rsa_pair_pct(
+        &self,
+        private: &RsaPrivateKey,
+        public: &RsaPublicKey,
+        pct: HsmRsaPct,
+    ) -> HsmResult<bool> {
+        let sign = match pct {
+            HsmRsaPct::None => return Ok(true),
+            HsmRsaPct::SignVerify => true,
+            HsmRsaPct::EncryptDecrypt => false,
+        };
+        let len = private.size();
+        if !matches!(len, 256 | 384 | 512) || public.size() != len {
+            return Err(HsmError::RsaInvalidKeyLength);
+        }
+        let mut input = Zeroizing::new(vec![0u8; len]);
+        if sign {
+            let (algo, hash_len) = match len {
+                256 => (HashAlgo::sha256(), 32),
+                384 => (HashAlgo::sha384(), 48),
+                _ => (HashAlgo::sha512(), 64),
+            };
+            self.hash
+                .hash(algo, &vec![100; len], &mut input[..hash_len])
+                .await?;
+        } else {
+            input[..len - 1].fill(0x5a);
+        }
+        let mut middle = Zeroizing::new(vec![0u8; len]);
+        let mut output = Zeroizing::new(vec![0xff; len]);
+        if sign {
+            self.rsa.mod_exp_priv(private, &input, &mut middle).await?;
+            self.rsa.mod_exp_pub(public, &middle, &mut output).await?;
+        } else {
+            self.rsa.mod_exp_pub(public, &input, &mut middle).await?;
+            self.rsa.mod_exp_priv(private, &middle, &mut output).await?;
+        }
+        let diff = input
+            .iter()
+            .zip(output.iter())
+            .fold(0u8, |d, (a, b)| d | (a ^ b));
+        let changed = input
+            .iter()
+            .zip(middle.iter())
+            .fold(0u8, |d, (a, b)| d | (a ^ b));
+        #[cfg(test)]
+        if self.rsa_pct_fail.get() {
+            return Ok(false);
+        }
+        Ok(core::hint::black_box(diff) == 0 && core::hint::black_box(changed) != 0)
+    }
 }
 
 impl HsmRsa for StdHsmPal {
@@ -34,7 +90,7 @@ impl HsmRsa for StdHsmPal {
         key_size: HsmRsaKey,
         priv_key: &mut HsmDmaBuf,
         pub_key: &mut HsmDmaBuf,
-        _pct: HsmRsaPct,
+        pct: HsmRsaPct,
     ) -> Result<(), HsmError> {
         let (pk, pubk) = self.rsa.gen_keypair(key_size_bits(key_size)).await?;
 
@@ -44,16 +100,33 @@ impl HsmRsa for StdHsmPal {
         if priv_key.len() < priv_len {
             return Err(HsmError::RsaInvalidKeyLength);
         }
-        pk.to_hsm_bytes(&mut priv_key[..priv_len])
+
+        let mut private = Zeroizing::new(vec![0u8; priv_len]);
+        pk.to_hsm_bytes(&mut private)
             .map_err(|_| HsmError::RsaToDerError)?;
 
         let pub_len = pubk.to_bytes(None).map_err(|_| HsmError::RsaToDerError)?;
         if pub_key.len() < pub_len {
             return Err(HsmError::RsaInvalidKeyLength);
         }
-        pubk.to_bytes(Some(&mut pub_key[..pub_len]))
+        let mut public = vec![0u8; pub_len];
+        pubk.to_bytes(Some(&mut public))
             .map_err(|_| HsmError::RsaToDerError)?;
 
+        if !matches!(pct, HsmRsaPct::None) {
+            let tested_private =
+                RsaPrivateKey::from_hsm_bytes(&private).map_err(|_| HsmError::RsaGenerateError)?;
+            let tested_public =
+                RsaPublicKey::from_bytes(&public).map_err(|_| HsmError::RsaGenerateError)?;
+            if !self
+                .rsa_pair_pct(&tested_private, &tested_public, pct)
+                .await?
+            {
+                return Err(HsmError::RsaGenerateError);
+            }
+        }
+        priv_key[..priv_len].copy_from_slice(&private);
+        pub_key[..pub_len].copy_from_slice(&public);
         Ok(())
     }
 
@@ -115,21 +188,47 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         der: &'a mut HsmDmaBuf,
         crt: bool,
-        _pct: HsmRsaPct,
+        pct: HsmRsaPct,
     ) -> HsmResult<(&'a HsmDmaBuf, usize)> {
         // Parse the recovered DER and re-serialize it in place into the vault
         // HSM byte format: the CRT layout (`n|e|d|p|q|dp|dq|qinv`) when `crt`,
-        // else non-CRT (`n|e|p|q`). Both HSM layouts are no larger than the
-        // source DER, so `der` doubles as the vault buffer (no second buffer).
-        // Like key generation here, it runs no PCT.
+        // else non-CRT (`n|e|p|q`). Stage the key until the PCT passes.
         let pk = RsaPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
         let modulus_len = pk.size();
+        let mut private = Zeroizing::new(vec![0u8; der.len()]);
         let hsm_len = if crt {
-            pk.to_hsm_crt_bytes(der)
+            pk.to_hsm_crt_bytes(&mut private)
         } else {
-            pk.to_hsm_bytes(der)
+            pk.to_hsm_bytes(&mut private)
         }
         .map_err(|_| HsmError::RsaToDerError)?;
+        if !matches!(pct, HsmRsaPct::None) {
+            let tested_public = pk
+                .public_key()
+                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?;
+            let original_pct = if matches!(pct, HsmRsaPct::SignVerify) {
+                HsmRsaPct::SignVerify
+            } else {
+                HsmRsaPct::EncryptDecrypt
+            };
+            if !self
+                .rsa_pair_pct(&pk, &tested_public, original_pct)
+                .await
+                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?
+            {
+                return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
+            }
+            let tested_private = RsaPrivateKey::from_hsm_bytes(&private[..hsm_len])
+                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?;
+            if !self
+                .rsa_pair_pct(&tested_private, &tested_public, pct)
+                .await
+                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?
+            {
+                return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
+            }
+        }
+        der[..hsm_len].copy_from_slice(&private[..hsm_len]);
         Ok((&der[..hsm_len], modulus_len))
     }
 
@@ -281,5 +380,83 @@ impl HsmRsa for StdHsmPal {
         Self: 'a,
     {
         todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rsa_generation_runs_selected_pct_before_output() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        pal.alloc_scoped_async(&io, async |alloc| {
+            let private = alloc.dma_alloc(516).unwrap();
+            let public = alloc.dma_alloc(512).unwrap();
+            for pct in [HsmRsaPct::SignVerify, HsmRsaPct::EncryptDecrypt] {
+                pal.rsa_gen_keypair(&io, HsmRsaKey::Rsa2048Priv, private, public, pct)
+                    .await
+                    .unwrap();
+            }
+            private.fill(0xa5);
+            public.fill(0xa5);
+            pal.rsa_pct_fail.set(true);
+            for pct in [HsmRsaPct::SignVerify, HsmRsaPct::EncryptDecrypt] {
+                assert_eq!(
+                    pal.rsa_gen_keypair(&io, HsmRsaKey::Rsa2048Priv, private, public, pct)
+                        .await
+                        .unwrap_err(),
+                    HsmError::RsaGenerateError
+                );
+                assert!(private.iter().all(|&b| b == 0xa5));
+                assert!(public.iter().all(|&b| b == 0xa5));
+            }
+            pal.rsa_gen_keypair(
+                &io,
+                HsmRsaKey::Rsa2048Priv,
+                private,
+                public,
+                HsmRsaPct::None,
+            )
+            .await
+            .unwrap();
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rsa_import_pct_failure_does_not_replace_der() {
+        let (_tx, rx) = async_channel::bounded(1);
+        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
+        let (reply_tx, _) = tokio::sync::oneshot::channel();
+        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
+        let (private, _) = pal.rsa.gen_keypair(2048).await.unwrap();
+        let mut der_bytes = vec![0u8; private.to_bytes(None).unwrap()];
+        private.to_bytes(Some(&mut der_bytes)).unwrap();
+        pal.alloc_scoped_async(&io, async |alloc| {
+            let der = alloc.dma_alloc(der_bytes.len()).unwrap();
+            for crt in [false, true] {
+                for pct in [HsmRsaPct::SignVerify, HsmRsaPct::EncryptDecrypt] {
+                    der.copy_from_slice(&der_bytes);
+                    pal.rsa_pct_fail.set(false);
+                    assert!(pal.rsa_priv_der_to_vault(&io, der, crt, pct).await.is_ok());
+                }
+                for pct in [HsmRsaPct::SignVerify, HsmRsaPct::EncryptDecrypt] {
+                    der.copy_from_slice(&der_bytes);
+                    pal.rsa_pct_fail.set(true);
+                    assert_eq!(
+                        pal.rsa_priv_der_to_vault(&io, der, crt, pct)
+                            .await
+                            .unwrap_err(),
+                        HsmError::PctValidationRsaUnwrapRsaKeyFailed
+                    );
+                    assert_eq!(&der[..], der_bytes.as_slice());
+                }
+            }
+        })
+        .await;
     }
 }

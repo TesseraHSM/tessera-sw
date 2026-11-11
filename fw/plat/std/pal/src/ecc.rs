@@ -117,6 +117,23 @@ impl StdHsmPal {
         pct: HsmEccPct,
     ) -> HsmResult<bool> {
         let curve = private.curve();
+        if !matches!(pct, HsmEccPct::None) {
+            let derived = private
+                .public_key()
+                .map_err(|_| HsmError::EccGenerateError)?;
+            let len = from_ecc_curve(curve).wire_pub_key_len();
+            let mut expected = [0u8; 136];
+            let mut actual = [0u8; 136];
+            self.ecc
+                .pub_coords(&derived, false, &mut expected[..len])
+                .await?;
+            self.ecc
+                .pub_coords(public, false, &mut actual[..len])
+                .await?;
+            if expected[..len] != actual[..len] {
+                return Ok(false);
+            }
+        }
         let result = match pct {
             HsmEccPct::None => Ok(true),
             HsmEccPct::SignVerify => {
@@ -142,7 +159,7 @@ impl StdHsmPal {
                     .map_err(|_| HsmError::EccGenerateError)?;
                 let peer_public = peer.public_key().map_err(|_| HsmError::EccGenerateError)?;
                 let mut first = Zeroizing::new([0u8; 66]);
-                let mut second = Zeroizing::new([0u8; 66]);
+                let mut second = Zeroizing::new([0xffu8; 66]);
                 self.ecc
                     .ecdh_derive(private, &peer_public, &mut first[..len])
                     .await?;
@@ -421,11 +438,10 @@ impl HsmEcc for StdHsmPal {
         _io: &StdHsmIo,
         der: &HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
-        _pct: HsmEccPct,
+        pct: HsmEccPct,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         // std PAL vault format is raw HSM-format scalar bytes; parse the
         // recovered PKCS#8 DER and re-export in the vault representation.
-        // Like key generation here, it runs no PCT.
         let pk = EccPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
         let curve = from_ecc_curve(pk.curve());
         let priv_len = curve.wire_coord_len();
@@ -433,8 +449,24 @@ impl HsmEcc for StdHsmPal {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
-            pk.to_hsm_bytes(&mut out[..priv_len])
+            let mut scalar = Zeroizing::new([0u8; 68]);
+            pk.to_hsm_bytes(&mut scalar[..priv_len])
                 .map_err(|_| HsmError::InvalidArg)?;
+            if !matches!(pct, HsmEccPct::None) {
+                let private = EccPrivateKey::from_hsm_bytes(&scalar[..priv_len])
+                    .map_err(|_| HsmError::PctValidationRsaUnwrapEccKeyFailed)?;
+                let public = pk
+                    .public_key()
+                    .map_err(|_| HsmError::PctValidationRsaUnwrapEccKeyFailed)?;
+                if !self
+                    .ecc_pair_pct(&private, &public, pct)
+                    .await
+                    .map_err(|_| HsmError::PctValidationRsaUnwrapEccKeyFailed)?
+                {
+                    return Err(HsmError::PctValidationRsaUnwrapEccKeyFailed);
+                }
+            }
+            out[..priv_len].copy_from_slice(&scalar[..priv_len]);
         }
         Ok((priv_len, curve))
     }
@@ -532,6 +564,7 @@ impl HsmEcc for StdHsmPal {
 #[cfg(test)]
 mod tests {
     use tokio::runtime::Handle;
+    use tsra_crypto::ExportableKey;
 
     use super::*;
     use crate::StdHsmIo;
@@ -671,6 +704,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn key_agreement_rejects_negated_public_point() {
+        let (pal, _) = pal_and_io();
+        let curve = EccCurve::P256;
+        let mut scalar = [0u8; 32];
+        scalar[31] = 1;
+        let private = EccPrivateKey::from_scalar(curve, &scalar).unwrap();
+        let public = private.public_key().unwrap();
+        let (x, y) = public.coord_vec().unwrap();
+        let mut negative_y =
+            hex::decode("ffffffff00000001000000000000000000000000ffffffffffffffffffffffff")
+                .unwrap();
+        let mut borrow = 0i16;
+        for (out, &value) in negative_y.iter_mut().zip(y.iter()).rev() {
+            let difference = i16::from(*out) - i16::from(value) - borrow;
+            *out = difference as u8;
+            borrow = i16::from(difference < 0);
+        }
+        let negative = EccPublicKey::from_coordinates(curve, &x, &negative_y).unwrap();
+        assert!(!pal
+            .ecc_pair_pct(&private, &negative, HsmEccPct::KeyAgreement)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
     async fn generated_key_pct_failure_is_reported_before_output() {
         let (pal, io) = pal_and_io();
         pal.ecc_pct_fail.set(true);
@@ -709,6 +767,39 @@ mod tests {
             assert_eq!(err, HsmError::PctValidationEccGenKeyFailed);
             assert!(private.iter().all(|&b| b == 0xa5));
             assert!(public.iter().all(|&b| b == 0xa5));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn imported_key_pct_failure_only_in_use_mode() {
+        let (pal, io) = pal_and_io();
+        let (private, _) = pal.ecc.gen_keypair(EccCurve::P384).await.unwrap();
+        let mut der_bytes = vec![0u8; private.to_bytes(None).unwrap()];
+        private.to_bytes(Some(&mut der_bytes)).unwrap();
+        pal.alloc_scoped_async(&io, async |alloc| {
+            let der = alloc.dma_alloc(der_bytes.len()).unwrap();
+            der.copy_from_slice(&der_bytes);
+            let out = alloc.dma_alloc(ROOT_LEN).unwrap();
+            out.fill(0xa5);
+            pal.ecc_pct_fail.set(true);
+            assert!(pal
+                .ecc_priv_der_to_vault(&io, der, None, HsmEccPct::SignVerify)
+                .await
+                .is_ok());
+            for pct in [HsmEccPct::SignVerify, HsmEccPct::KeyAgreement] {
+                assert_eq!(
+                    pal.ecc_priv_der_to_vault(&io, der, Some(out), pct)
+                        .await
+                        .unwrap_err(),
+                    HsmError::PctValidationRsaUnwrapEccKeyFailed
+                );
+                assert!(out.iter().all(|&b| b == 0xa5));
+            }
+            assert!(pal
+                .ecc_priv_der_to_vault(&io, der, Some(out), HsmEccPct::None)
+                .await
+                .is_ok());
         })
         .await;
     }

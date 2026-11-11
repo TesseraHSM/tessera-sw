@@ -118,6 +118,9 @@ pub struct StdHsmPal {
     /// RSA driver — key generation, modular exponentiation.
     pub(crate) rsa: StdRsa,
 
+    #[cfg(test)]
+    pub(crate) rsa_pct_fail: core::cell::Cell<bool>,
+
     /// Tokio-backed worker pool for offloading async work.
     #[allow(dead_code)]
     pub(crate) pool: WorkerPool,
@@ -198,6 +201,8 @@ impl StdHsmPal {
             hmac: StdHmac::new(WorkerPool::new(tokio_handle.clone())),
             kdf: StdKdf::new(WorkerPool::new(tokio_handle.clone())),
             rsa: StdRsa::new(WorkerPool::new(tokio_handle.clone())),
+            #[cfg(test)]
+            rsa_pct_fail: core::cell::Cell::new(false),
             pool: WorkerPool::new(tokio_handle),
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),
@@ -234,6 +239,8 @@ impl Default for StdHsmPal {
             hmac: StdHmac::new(WorkerPool::new(handle.clone())),
             kdf: StdKdf::new(WorkerPool::new(handle.clone())),
             rsa: StdRsa::new(WorkerPool::new(handle.clone())),
+            #[cfg(test)]
+            rsa_pct_fail: core::cell::Cell::new(false),
             pool: WorkerPool::new(handle),
             part_table: UnsafeCell::new(PartitionTable::default()),
             cert_store: UnsafeCell::new(Box::new(SharedCertStore::new())),
