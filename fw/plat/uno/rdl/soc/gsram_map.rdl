@@ -11,6 +11,7 @@
 //   0x01110 - 0x012FC  BKS table (device-global, 12 × 41-byte entries)
 //   0x012FC - 0x01360  FIPS provisioned keys (SP KDF key + CP mask key + flag)
 //   0x01360 - 0x013C0  HSM seed table (UDS + FMC-CDI, 2 × 48-byte seeds)
+//   0x027F8 - 0x03000  HSM debug-log ring (descriptor + 170 × 12-byte records)
 //   0x07000            BOOT_STATUS (4 B)
 //   0x07004 - 0x07114  Admin↔HSM IPC queues (indices + 2×2 ring slots)
 //   0x07EA4 - 0x07FB4  HSM↔Admin IPC queues (indices + 2×2 ring slots)
@@ -29,6 +30,13 @@
 //
 // Hardware alignment: UCD and GDMA hardware expect queue base
 // addresses to be 32-byte (0x20) aligned.
+//
+// Ranges with no block: this file doesn't describe the complete GSRAM
+// layout. Treat each range with no block as reserved: the HSP firmware,
+// CP0, and other bus masters can use it. Before a new use of such a range,
+// get approval from the owners of the HSP firmware. A new use can be a new,
+// moved, or larger block, a linker script, or an address in code. Give
+// every block an explicit offset.
 
 
 // ══════════════════════════════════════════════════════════════
@@ -102,6 +110,40 @@ mem hsm_seed_entry_t {
     desc = "48-byte device-rooted HSM seed (HMAC-SHA384 output).";
     mementries = 48;
     memwidth   = 8;
+};
+
+
+// ══════════════════════════════════════════════════════════════
+// HSM Debug-Log Ring (CP1 writes records, the SP drains them)
+// ══════════════════════════════════════════════════════════════
+//
+// Mirrors the reference firmware's CP1 debug-log ring at the identical
+// GSRAM offsets 0x27F8 - 0x3000 (abs 0x6100_27F8 - 0x6100_3000). The SP
+// drains it into the HSP debug log, so the layout is the record format
+// shared with the HSP firmware:
+//   0x27F8           buffer_size: 170 slots; CP1 writes it at boot
+//   0x27FC           head: the next record the SP reads; the SP writes
+//                    it, and CP1 zeroes it at boot
+//   0x2800           tail: the next free slot; CP1 writes it
+//   0x2804           overflows: records CP1 dropped because the ring was
+//                    full; CP1 writes it
+//   0x2808 - 0x3000  170 records of 12 bytes: the descriptor word
+//                    (severity, component, message number, and a reserved
+//                    zero byte), then two 32-bit values; little-endian
+// One slot always stays empty, so the ring holds at most 169 records.
+
+reg hsm_log_word_t {
+    name = "HSM Debug-Log Ring Word";
+    desc = "One 32-bit word of the HSM debug-log ring.";
+    field { sw = rw; hw = rw; } VAL[31:0] = 0x0;
+};
+
+regfile hsm_log_record_t {
+    name = "HSM Debug-Log Record";
+    desc = "12-byte record: the descriptor word, then two 32-bit values.";
+    hsm_log_word_t DESC   @ 0x0;
+    hsm_log_word_t VALUE1 @ 0x4;
+    hsm_log_word_t VALUE2 @ 0x8;
 };
 
 
@@ -693,6 +735,13 @@ addrmap io_gsram {
     //   [0] = UDS seed (firmware-state-independent)
     //   [1] = FMC-CDI seed (firmware-measurement-bound)
     hsm_seed_entry_t HSM_SEED_TABLE[2] @ 0x01360 += 0x30;  // 0x1360 - 0x13C0
+
+    // ─── HSM debug-log ring (CP1 writes records, the SP drains them) ───
+    hsm_log_word_t   HSM_LOG_BUFFER_SIZE  @ 0x027F8;
+    hsm_log_word_t   HSM_LOG_HEAD         @ 0x027FC;
+    hsm_log_word_t   HSM_LOG_TAIL         @ 0x02800;
+    hsm_log_word_t   HSM_LOG_OVERFLOWS    @ 0x02804;
+    hsm_log_record_t HSM_LOG_RECORDS[170] @ 0x02808 += 0x0C;  // 0x2808 - 0x3000
 
     // ─── Boot ───
     boot_status_t    BOOT_STATUS        @ 0x07000;
