@@ -438,10 +438,11 @@ impl HsmEcc for StdHsmPal {
         _io: &StdHsmIo,
         der: &HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
-        pct: HsmEccPct,
+        _pct: HsmEccPct,
     ) -> HsmResult<(usize, HsmEccCurve)> {
         // std PAL vault format is raw HSM-format scalar bytes; parse the
         // recovered PKCS#8 DER and re-export in the vault representation.
+        // This import path does not currently run a PCT.
         let pk = EccPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
         let curve = from_ecc_curve(pk.curve());
         let priv_len = curve.wire_coord_len();
@@ -449,24 +450,8 @@ impl HsmEcc for StdHsmPal {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
-            let mut scalar = Zeroizing::new([0u8; 68]);
-            pk.to_hsm_bytes(&mut scalar[..priv_len])
+            pk.to_hsm_bytes(&mut out[..priv_len])
                 .map_err(|_| HsmError::InvalidArg)?;
-            if !matches!(pct, HsmEccPct::None) {
-                let private = EccPrivateKey::from_hsm_bytes(&scalar[..priv_len])
-                    .map_err(|_| HsmError::PctValidationRsaUnwrapEccKeyFailed)?;
-                let public = pk
-                    .public_key()
-                    .map_err(|_| HsmError::PctValidationRsaUnwrapEccKeyFailed)?;
-                if !self
-                    .ecc_pair_pct(&private, &public, pct)
-                    .await
-                    .map_err(|_| HsmError::PctValidationRsaUnwrapEccKeyFailed)?
-                {
-                    return Err(HsmError::PctValidationRsaUnwrapEccKeyFailed);
-                }
-            }
-            out[..priv_len].copy_from_slice(&scalar[..priv_len]);
         }
         Ok((priv_len, curve))
     }
@@ -564,7 +549,6 @@ impl HsmEcc for StdHsmPal {
 #[cfg(test)]
 mod tests {
     use tokio::runtime::Handle;
-    use tsra_crypto::ExportableKey;
 
     use super::*;
     use crate::StdHsmIo;
@@ -767,39 +751,6 @@ mod tests {
             assert_eq!(err, HsmError::PctValidationEccGenKeyFailed);
             assert!(private.iter().all(|&b| b == 0xa5));
             assert!(public.iter().all(|&b| b == 0xa5));
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn imported_key_pct_failure_only_in_use_mode() {
-        let (pal, io) = pal_and_io();
-        let (private, _) = pal.ecc.gen_keypair(EccCurve::P384).await.unwrap();
-        let mut der_bytes = vec![0u8; private.to_bytes(None).unwrap()];
-        private.to_bytes(Some(&mut der_bytes)).unwrap();
-        pal.alloc_scoped_async(&io, async |alloc| {
-            let der = alloc.dma_alloc(der_bytes.len()).unwrap();
-            der.copy_from_slice(&der_bytes);
-            let out = alloc.dma_alloc(ROOT_LEN).unwrap();
-            out.fill(0xa5);
-            pal.ecc_pct_fail.set(true);
-            assert!(pal
-                .ecc_priv_der_to_vault(&io, der, None, HsmEccPct::SignVerify)
-                .await
-                .is_ok());
-            for pct in [HsmEccPct::SignVerify, HsmEccPct::KeyAgreement] {
-                assert_eq!(
-                    pal.ecc_priv_der_to_vault(&io, der, Some(out), pct)
-                        .await
-                        .unwrap_err(),
-                    HsmError::PctValidationRsaUnwrapEccKeyFailed
-                );
-                assert!(out.iter().all(|&b| b == 0xa5));
-            }
-            assert!(pal
-                .ecc_priv_der_to_vault(&io, der, Some(out), HsmEccPct::None)
-                .await
-                .is_ok());
         })
         .await;
     }

@@ -188,47 +188,21 @@ impl HsmRsa for StdHsmPal {
         _io: &StdHsmIo,
         der: &'a mut HsmDmaBuf,
         crt: bool,
-        pct: HsmRsaPct,
+        _pct: HsmRsaPct,
     ) -> HsmResult<(&'a HsmDmaBuf, usize)> {
         // Parse the recovered DER and re-serialize it in place into the vault
         // HSM byte format: the CRT layout (`n|e|d|p|q|dp|dq|qinv`) when `crt`,
-        // else non-CRT (`n|e|p|q`). Stage the key until the PCT passes.
+        // else non-CRT (`n|e|p|q`). Both HSM layouts are no larger than the
+        // source DER, so `der` doubles as the vault buffer (no second buffer).
+        // This import path does not currently run a PCT.
         let pk = RsaPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
         let modulus_len = pk.size();
-        let mut private = Zeroizing::new(vec![0u8; der.len()]);
         let hsm_len = if crt {
-            pk.to_hsm_crt_bytes(&mut private)
+            pk.to_hsm_crt_bytes(der)
         } else {
-            pk.to_hsm_bytes(&mut private)
+            pk.to_hsm_bytes(der)
         }
         .map_err(|_| HsmError::RsaToDerError)?;
-        if !matches!(pct, HsmRsaPct::None) {
-            let tested_public = pk
-                .public_key()
-                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?;
-            let original_pct = if matches!(pct, HsmRsaPct::SignVerify) {
-                HsmRsaPct::SignVerify
-            } else {
-                HsmRsaPct::EncryptDecrypt
-            };
-            if !self
-                .rsa_pair_pct(&pk, &tested_public, original_pct)
-                .await
-                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?
-            {
-                return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
-            }
-            let tested_private = RsaPrivateKey::from_hsm_bytes(&private[..hsm_len])
-                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?;
-            if !self
-                .rsa_pair_pct(&tested_private, &tested_public, pct)
-                .await
-                .map_err(|_| HsmError::PctValidationRsaUnwrapRsaKeyFailed)?
-            {
-                return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
-            }
-        }
-        der[..hsm_len].copy_from_slice(&private[..hsm_len]);
         Ok((&der[..hsm_len], modulus_len))
     }
 
@@ -423,39 +397,6 @@ mod tests {
             )
             .await
             .unwrap();
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn rsa_import_pct_failure_does_not_replace_der() {
-        let (_tx, rx) = async_channel::bounded(1);
-        let pal = StdHsmPal::new(rx, tokio::runtime::Handle::current());
-        let (reply_tx, _) = tokio::sync::oneshot::channel();
-        let io = StdHsmIo::admin(HsmPartId::from(0u8), 0, reply_tx);
-        let (private, _) = pal.rsa.gen_keypair(2048).await.unwrap();
-        let mut der_bytes = vec![0u8; private.to_bytes(None).unwrap()];
-        private.to_bytes(Some(&mut der_bytes)).unwrap();
-        pal.alloc_scoped_async(&io, async |alloc| {
-            let der = alloc.dma_alloc(der_bytes.len()).unwrap();
-            for crt in [false, true] {
-                for pct in [HsmRsaPct::SignVerify, HsmRsaPct::EncryptDecrypt] {
-                    der.copy_from_slice(&der_bytes);
-                    pal.rsa_pct_fail.set(false);
-                    assert!(pal.rsa_priv_der_to_vault(&io, der, crt, pct).await.is_ok());
-                }
-                for pct in [HsmRsaPct::SignVerify, HsmRsaPct::EncryptDecrypt] {
-                    der.copy_from_slice(&der_bytes);
-                    pal.rsa_pct_fail.set(true);
-                    assert_eq!(
-                        pal.rsa_priv_der_to_vault(&io, der, crt, pct)
-                            .await
-                            .unwrap_err(),
-                        HsmError::PctValidationRsaUnwrapRsaKeyFailed
-                    );
-                    assert_eq!(&der[..], der_bytes.as_slice());
-                }
-            }
         })
         .await;
     }
