@@ -360,31 +360,34 @@ pub(crate) fn parse_rsa_private_key(der: &[u8]) -> Option<DecodedRsaKey<'_>> {
 }
 
 /// Checks the sizes and, unless `pct` is `None`, the consistency of the
-/// components of an imported RSA key.
+/// components that the selected layout uses.
 ///
-/// The modulus must be 256, 384 or 512 bytes, `e` at most 4 bytes and each
-/// prime-sized field at most half the modulus, like Uno. A non-CRT key's `d`
-/// must also fit the modulus width, like Uno's non-CRT operand layout.
+/// Like Uno, the modulus must be 256, 384 or 512 bytes and `e` at most 4
+/// bytes. A CRT key uses `p`, `q`, `dp`, `dq` and `qInv`, each at most half
+/// the modulus, and ignores `d`. A non-CRT key uses `d`, at most the modulus
+/// width, and ignores `dp`, `dq` and `qInv`; std also stores it by its primes,
+/// so `p` and `q` must fit half the modulus and `n = p·q`.
 ///
 /// # Errors
-/// * [`HsmError::InvalidArg`] — a component has an unsupported size, or `e`
-///   is zero.
-/// * [`HsmError::PctValidationRsaUnwrapRsaKeyFailed`] — the components are
-///   inconsistent, or `e` is one (the public operation is the identity, so
-///   the PCT can't pass).
+/// * [`HsmError::InvalidArg`] — a used component has an unsupported size, or
+///   `e` is zero.
+/// * [`HsmError::PctValidationRsaUnwrapRsaKeyFailed`] — the used components
+///   are inconsistent, or `e` is one (the public operation is the identity,
+///   so the PCT can't pass).
 pub(crate) fn check_rsa_components(
     key: &DecodedRsaKey<'_>,
     crt: bool,
     pct: &HsmRsaPct,
 ) -> HsmResult<()> {
     let half = key.n.len() / 2;
-    if !matches!(key.n.len(), 256 | 384 | 512)
-        || key.e.len() > 4
-        || (!crt && key.d.len() > key.n.len())
-        || [key.p, key.q, key.dp, key.dq, key.qinv]
+    let oversized = if crt {
+        [key.p, key.q, key.dp, key.dq, key.qinv]
             .iter()
             .any(|c| c.len() > half)
-    {
+    } else {
+        key.d.len() > key.n.len() || key.p.len() > half || key.q.len() > half
+    };
+    if !matches!(key.n.len(), 256 | 384 | 512) || key.e.len() > 4 || oversized {
         return Err(HsmError::InvalidArg);
     }
     if matches!(pct, HsmRsaPct::None) {
@@ -394,28 +397,56 @@ pub(crate) fn check_rsa_components(
     if !gt(&e, &[0]) {
         return Err(HsmError::InvalidArg);
     }
-    if !gt(&e, &[1]) || !rsa_components_consistent(key, &e) {
+    if !gt(&e, &[1]) || !rsa_components_consistent(key, crt, &e) {
         return Err(HsmError::PctValidationRsaUnwrapRsaKeyFailed);
     }
     Ok(())
 }
 
-/// Returns whether `n = p·q`, `d·e ≡ 1` mod `p-1` and `q-1`,
-/// `dp·e ≡ 1` mod `p-1`, `dq·e ≡ 1` mod `q-1` and `qInv·q ≡ 1` mod `p`.
-fn rsa_components_consistent(key: &DecodedRsaKey<'_>, e: &[u64]) -> bool {
+/// Returns whether `n = p·q` and, for a CRT key, `dp·e ≡ 1` mod `p-1`,
+/// `dq·e ≡ 1` mod `q-1` and `qInv·q ≡ 1` mod `p`, or, for a non-CRT key,
+/// `d·e ≡ 1` mod `p-1` and `q-1`.
+fn rsa_components_consistent(key: &DecodedRsaKey<'_>, crt: bool, e: &[u64]) -> bool {
     let (p, q) = (limbs(key.p), limbs(key.q));
-    if !gt(&p, &[1]) || !gt(&q, &[1]) {
+    if !gt(&p, &[1]) || !gt(&q, &[1]) || !eq(&mul(&p, &q), &limbs(key.n)) {
         return false;
     }
     let (p1, q1) = (minus_one(&p), minus_one(&q));
-    let d = limbs(key.d);
-    let de = mul(&d, e);
-    eq(&mul(&p, &q), &limbs(key.n))
-        && eq(&rem(&de, &p1), &[1])
-        && eq(&rem(&de, &q1), &[1])
-        && eq(&rem(&mul(&limbs(key.dp), e), &p1), &[1])
-        && eq(&rem(&mul(&limbs(key.dq), e), &q1), &[1])
-        && eq(&rem(&mul(&limbs(key.qinv), &q), &p), &[1])
+    if crt {
+        eq(&rem(&mul(&limbs(key.dp), e), &p1), &[1])
+            && eq(&rem(&mul(&limbs(key.dq), e), &q1), &[1])
+            && eq(&rem(&mul(&limbs(key.qinv), &q), &p), &[1])
+    } else {
+        let de = mul(&limbs(key.d), e);
+        eq(&rem(&de, &p1), &[1]) && eq(&rem(&de, &q1), &[1])
+    }
+}
+
+/// Returns the components std stores, `n(k) || e(4) || p(k/2) || q(k/2)`,
+/// followed by `dp || dq || qInv` (each `k/2`), big-endian and left-padded.
+/// Call only after [`check_rsa_components`] accepted the sizes; `d` is not
+/// included, as the backends derive it from the primes.
+pub(crate) fn rsa_stored_components(key: &DecodedRsaKey<'_>) -> Zeroizing<Vec<u8>> {
+    let k = key.n.len();
+    let half = k / 2;
+    let mut out = Zeroizing::new(vec![0u8; 2 * k + 4 + 3 * half]);
+    let mut off = 0;
+    for (field, width) in [
+        (key.n, k),
+        (key.e, 4),
+        (key.p, half),
+        (key.q, half),
+        (key.dp, half),
+        (key.dq, half),
+        (key.qinv, half),
+    ] {
+        // A non-CRT key's unused CRT fields may be oversized; leave them zero.
+        if let Some(pad) = width.checked_sub(field.len()) {
+            out[off + pad..off + width].copy_from_slice(field);
+        }
+        off += width;
+    }
+    out
 }
 
 // Minimal unsigned arithmetic on little-endian `u64` limbs. Every value,

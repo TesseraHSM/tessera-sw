@@ -16,7 +16,6 @@ use tsra_crypto::ExportableHsmKey;
 use tsra_crypto::ExportableHsmRsaKey;
 use tsra_crypto::ExportableKey;
 use tsra_crypto::ImportableKey;
-use tsra_crypto::Key;
 use tsra_crypto::PrivateKey;
 use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
@@ -121,21 +120,38 @@ impl HsmRsa for StdHsmPal {
         // HSM byte format: the CRT layout (`n|e|d|p|q|dp|dq|qinv`) when `crt`,
         // else non-CRT (`n|e|p|q`). Both HSM layouts are no larger than the
         // source DER, so `der` doubles as the vault buffer (no second buffer).
-        // Like Uno, the components must have supported sizes and, unless
-        // `pct` is `None`, be consistent and pass the PCT. They are checked on
-        // the DER before the backend import, which may reject, drop or
-        // recompute some of them.
-        let key = crate::key_assurance::parse_rsa_private_key(der).ok_or(HsmError::InvalidArg)?;
-        crate::key_assurance::check_rsa_components(&key, crt, &pct)?;
-        let pk = RsaPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
-        self.check_rsa_pct(&pk, pct).await?;
-        let modulus_len = pk.size();
+        // Like Uno, the components the layout uses must have supported sizes
+        // and, unless `pct` is `None`, be consistent and pass the PCT; the
+        // others are ignored. The key is rebuilt from `n`, `e`, `p` and `q`
+        // (the backend derives `d`) plus, for CRT, the checked `dp`, `dq` and
+        // `qInv`, and the PCT runs on the stored key.
+        let parts = {
+            let key =
+                crate::key_assurance::parse_rsa_private_key(der).ok_or(HsmError::InvalidArg)?;
+            crate::key_assurance::check_rsa_components(&key, crt, &pct)?;
+            crate::key_assurance::rsa_stored_components(&key)
+        };
+        let modulus_len = (parts.len() - 4) * 2 / 7;
+        let base_len = 2 * modulus_len + 4;
+        let base =
+            RsaPrivateKey::from_hsm_bytes(&parts[..base_len]).map_err(|_| HsmError::InvalidArg)?;
         let hsm_len = if crt {
-            pk.to_hsm_crt_bytes(der)
+            let len = base
+                .to_hsm_crt_bytes(der)
+                .map_err(|_| HsmError::RsaToDerError)?;
+            let crt_parts = &parts[base_len..];
+            der[len - crt_parts.len()..len].copy_from_slice(crt_parts);
+            len
         } else {
-            pk.to_hsm_bytes(der)
-        }
-        .map_err(|_| HsmError::RsaToDerError)?;
+            base.to_hsm_bytes(der)
+                .map_err(|_| HsmError::RsaToDerError)?
+        };
+        let pk = if crt {
+            RsaPrivateKey::from_hsm_bytes(&der[..hsm_len]).map_err(|_| HsmError::InvalidArg)?
+        } else {
+            base
+        };
+        self.check_rsa_pct(&pk, pct).await?;
         Ok((&der[..hsm_len], modulus_len))
     }
 

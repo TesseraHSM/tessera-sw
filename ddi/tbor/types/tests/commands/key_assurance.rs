@@ -263,10 +263,17 @@ fn import_ecc_p521_derive() {
 }
 
 fn import_rsa_roundtrip(k: usize, crt: bool, usage: u64) {
+    import_rsa_altered(k, crt, usage, |_| {});
+}
+
+/// Imports an RSA key after `alter` changes components the selected layout
+/// doesn't use, and expects it to import and work like the host key.
+fn import_rsa_altered(k: usize, crt: bool, usage: u64, alter: impl Fn(&mut RsaParts)) {
     let ctx = TestCtx::new();
     let session = finalized_co_session(&ctx);
     let hsm_pub = unwrapping_pub(&ctx, session.session_id);
-    let (key, parts) = host_rsa(k);
+    let (key, mut parts) = host_rsa(k);
+    alter(&mut parts);
     let class = if crt {
         KEY_CLASS_RSA_CRT
     } else {
@@ -582,6 +589,36 @@ fn oversized_d(p: &mut RsaParts) {
 #[test]
 fn reject_rsa_2k_plain_oversized_d_sign() {
     reject_rsa_with(256, false, SIGN_VERIFY, oversized_d, TborStatus::InvalidArg);
+}
+
+// Like Uno, a CRT key ignores `d` and a non-CRT key ignores `dp`, `dq` and
+// `qInv`.
+#[test]
+fn import_rsa_2k_crt_ignores_d_sign() {
+    import_rsa_altered(256, true, SIGN_VERIFY, |p| p.d = plus_two(&p.d));
+}
+
+#[test]
+fn import_rsa_2k_crt_ignores_d_decrypt() {
+    import_rsa_altered(256, true, RSA_DECRYPT, |p| p.d = plus_two(&p.d));
+}
+
+#[test]
+fn import_rsa_2k_plain_ignores_crt_exponents_sign() {
+    import_rsa_altered(256, false, SIGN_VERIFY, |p| {
+        p.dp = plus_two(&p.dp);
+        p.dq = plus_two(&p.dq);
+        p.qinv = plus_two(&p.qinv);
+    });
+}
+
+#[test]
+fn import_rsa_2k_plain_ignores_crt_exponents_decrypt() {
+    import_rsa_altered(256, false, RSA_DECRYPT, |p| {
+        p.dp = plus_two(&p.dp);
+        p.dq = plus_two(&p.dq);
+        p.qinv = plus_two(&p.qinv);
+    });
 }
 
 #[test]
