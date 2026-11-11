@@ -8,6 +8,7 @@ members = [
   "crates/bulk_copy",
   "crates/cert_blob",
   "crates/crashdump",
+  "crates/debug_log",
   "crates/error",
   "crates/fault",
   "crates/key_vault",
