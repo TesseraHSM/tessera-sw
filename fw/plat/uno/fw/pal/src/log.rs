@@ -4,7 +4,8 @@
 //! The HSM debug-log sink.
 //!
 //! Writes records into the GSRAM ring that the SP drains into the HSP debug
-//! log. The steps and checks, and their tests, are in
+//! log, and defines the Uno log crate's debug-log hook,
+//! `__hsm_log_record`. The steps and checks, and their tests, are in
 //! `tsra_fw_uno_log_ring`; this module owns the sink's RAM state and the
 //! ring's GSRAM pointers.
 
@@ -51,6 +52,18 @@ impl RingMemory for GsramRing {
 
 /// The Uno debug-log sink.
 pub struct UnoLog;
+
+/// The Uno log crate's debug-log hook: writes one record into the ring,
+/// or drops and counts it.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub fn __hsm_log_record(desc: u32, arg1: u32, arg2: u32) {
+    UnoLog::record(desc, arg1, arg2);
+}
+
+// The definition and the Uno log crate's declaration must both have this type.
+const _: fn(u32, u32, u32) = __hsm_log_record;
+const _: unsafe fn(u32, u32, u32) = tsra_fw_uno_debug_log::__hsm_log_record;
 
 impl UnoLog {
     /// Resets the ring, and then marks the sink ready. The app calls it as
