@@ -57,9 +57,5 @@ pre_encode = [
   "tsra_ddi_mbor_types/pre_encode",
 ]
 
-# Forward backend selection to the tsra_ddi facade so the integration
-# test binary picks up the right backend. Default (no feature) resolves
-# to the nix backend.
-
 [lints]
 workspace = true
