@@ -9,3 +9,105 @@
 # with the code that adds the messages.
 #
 # number	component	kind	crate	target	message
+0	core	E+	tsra_fw_hsm_core	core	failed to fault the IO's poisoned partition
+1	core	E+	tsra_fw_hsm_core	core	undo walk poisoned the IO's partition
+0	uno	I	tsra_fw_uno_app	app	Tessera Integrated HSM firmware starting up...
+1	uno	I	tsra_fw_uno_app	app	boot complete, spawning poll_io
+2	uno	E+	tsra_fw_uno_fault	fips	#### FIPS error state ####
+3	uno	E+	tsra_fw_uno_fault	fips	crypto command timed out
+4	uno	E+	tsra_fw_uno_fault	selftest	periodic self-test {} failed
+5	uno	E+	tsra_fw_uno_pal	idfu	malformed shutdown request
+6	uno	E+	tsra_fw_uno_pal	idfu	shutdown requested with PKA cleanup pending; failing closed
+7	uno	E+	tsra_fw_uno_pal	idfu	shutdown requested with {} IO in flight; failing closed
+8	uno	E+	tsra_fw_uno_pal	io	detached CQE post failed for slot {}
+9	uno	E+	tsra_fw_uno_pal	selftest	AES-CBC decrypt KAT mismatch
+10	uno	E+	tsra_fw_uno_pal	selftest	AES-CBC encrypt KAT mismatch
+11	uno	E+	tsra_fw_uno_pal	selftest	AES-ECB decrypt KAT mismatch
+12	uno	E+	tsra_fw_uno_pal	selftest	AES-KWP unwrap KAT mismatch
+13	uno	E+	tsra_fw_uno_pal	selftest	ECDH P-384 KAT mismatch on engine
+14	uno	E+	tsra_fw_uno_pal	selftest	ECDSA P-384 sign KAT mismatch on engine
+15	uno	E+	tsra_fw_uno_pal	selftest	HKDF KAT mismatch
+16	uno	E+	tsra_fw_uno_pal	selftest	KBKDF KAT mismatch
+17	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K CRT mod-exp KAT mismatch on engine
+18	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP KEK mismatch on engine
+19	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP lHash mismatch on engine
+20	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP leading byte nonzero on engine
+21	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K OAEP separator invalid on engine
+22	uno	E+	tsra_fw_uno_pal	selftest	RSA-2K mod-exp KAT mismatch on engine
+23	uno	E+	tsra_fw_uno_pal	selftest	pre-operational self-test FAILED
+24	uno	I	tsra_fw_uno_pal	boot	ACK'd NormalBoot, phase -> WaitStart
+25	uno	I	tsra_fw_uno_pal	boot	init: boot_status=Done published
+26	uno	I	tsra_fw_uno_pal	boot	init: reset=POR -> partition store init_default
+27	uno	I	tsra_fw_uno_pal	boot	init: reset=warm/fwupdate -> keep store, rearm gate1
+28	uno	I	tsra_fw_uno_pal	boot	phase -> Running, status=Run
+29	uno	I	tsra_fw_uno_pal	selftest	pre-operational self-test PASSED
+30	uno	W	tsra_fw_uno_pal	boot	non-StateChange msg while waiting for state {}
+31	uno	W	tsra_fw_uno_pal	boot	unexpected state {} while waiting for state {}
+32	uno	W	tsra_fw_uno_pal	pcie	ignoring unexpected admin event {:#x}
+33	uno	W	tsra_fw_uno_pal	pcie	reset event {}: {} partition(s) failed to free and were faulted
+34	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair bad seed_len={}
+35	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair short buffers sk_len={}
+36	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair bad seed_len={}
+37	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair short buffers sk_len={}
+38	uno	W	tsra_fw_uno_pal	gdma	SRAM scrub for slot {} fell back to CPU (GDMA wipe failed)
+2	core	E+	tsra_fw_hsm_core	core	handle_op failed
+39	uno	W	tsra_fw_uno_drivers_iic	iic	ALREADY ENABLED before full init: ch={}
+40	uno	W	tsra_fw_uno_drivers_iic	iic	recv FAILED: addr={:#x} axi_id={}
+41	uno	W	tsra_fw_uno_drivers_iic	iic	recv FAILED: ch={} slot={}
+42	uno	W	tsra_fw_uno_drivers_oic	oic	ALREADY ENABLED before full init: ch={}
+43	uno	E+	tsra_fw_uno_fault	fault	  BusFault:  IBUSERR   instruction prefetch bus error
+44	uno	E+	tsra_fw_uno_fault	fault	  BusFault:  IMPRECISERR imprecise data bus error (BFAR unreliable)
+45	uno	E+	tsra_fw_uno_fault	fault	  BusFault:  LSPERR    bus fault during FP lazy state preservation
+46	uno	E+	tsra_fw_uno_fault	fault	  BusFault:  PRECISERR precise data bus error (BFAR valid)
+47	uno	E+	tsra_fw_uno_fault	fault	  BusFault:  STKERR    bus fault on exception entry stacking
+48	uno	E+	tsra_fw_uno_fault	fault	  BusFault:  UNSTKERR  bus fault on exception return unstacking
+49	uno	E+	tsra_fw_uno_fault	fault	  MemManage: DACCVIOL  data access violation
+50	uno	E+	tsra_fw_uno_fault	fault	  MemManage: IACCVIOL  instruction-fetch access violation
+51	uno	E+	tsra_fw_uno_fault	fault	  MemManage: MLSPERR   fault during FP lazy state preservation
+52	uno	E+	tsra_fw_uno_fault	fault	  MemManage: MSTKERR   fault on exception entry stacking
+53	uno	E+	tsra_fw_uno_fault	fault	  MemManage: MUNSTKERR fault on exception return unstacking
+54	uno	E+	tsra_fw_uno_fault	fault	  UsageFault: DIVBYZERO divide-by-zero trap
+55	uno	E+	tsra_fw_uno_fault	fault	  UsageFault: INVPC     invalid PC load (exception return)
+56	uno	E+	tsra_fw_uno_fault	fault	  UsageFault: INVSTATE  invalid EPSR/Thumb state
+57	uno	E+	tsra_fw_uno_fault	fault	  UsageFault: NOCP      coprocessor access denied/absent
+58	uno	E+	tsra_fw_uno_fault	fault	  UsageFault: UNALIGNED unaligned access trap
+59	uno	E+	tsra_fw_uno_fault	fault	  UsageFault: UNDEFINSTR undefined instruction
+60	uno	E+	tsra_fw_uno_fault	fault	#### HardFault ####
+61	uno	E+	tsra_fw_uno_fault	fault	#### Unexpected exception {} ####
+62	uno	E+	tsra_fw_uno_fault	fault	BFAR={:#010x}  (faulting bus address)
+63	uno	E+	tsra_fw_uno_fault	fault	MMFAR={:#010x} (faulting memory address)
+64	uno	E+	tsra_fw_uno_fault	fault	cause: stack overflow (exception frame unreliable)
+65	uno	E+	tsra_fw_uno_fault	fault	stack overflow: MSP={:#010x}
+66	uno	E+	tsra_fw_uno_fault	panic	#### PANIC ####
+67	uno	E+	tsra_fw_uno_pal	pcie	reset event: partition {} free failed; faulted
+68	uno	I	tsra_fw_uno_pal	pcie	reset event {}: all partitions reset
+69	uno	E+	tsra_fw_uno_fault	explicit_crash	#### EXPLICIT CRASH ####
+70	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: FP{}
+71	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: bfar={:#010x}
+72	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: cfsr={:#010x}
+73	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: hfsr={:#010x}
+74	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: mmfar={:#010x}
+75	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: pc={:#010x}
+76	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: sp={:#010x}
+77	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: stack overflowed by {} B
+78	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: stack_free={}
+79	uno	E+	tsra_fw_uno_drivers_pqc	pqc	engine did not answer: FP{}
+80	uno	E+	tsra_fw_uno_drivers_pqc	pqc	engine did not answer: seq={}
+81	uno	E+	tsra_fw_uno_fault	fault	stack overflow: CFSR={:#010x}
+82	uno	E+	tsra_fw_uno_fault	fault	stack overflow: HFSR={:#010x}
+83	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair bad seed_len (want {})
+84	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair short buffers pk_len (want {})
+85	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair short buffers pk_len={}
+86	uno	E+	tsra_fw_uno_pal	pqc	pal: mldsa_gen_keypair short buffers sk_len (want {})
+87	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair bad seed_len (want {})
+88	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair short buffers pk_len (want {})
+89	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair short buffers pk_len={}
+90	uno	E+	tsra_fw_uno_pal	pqc	pal: mlkem_gen_keypair short buffers sk_len (want {})
+91	uno	W	tsra_fw_uno_drivers_iic	iic	ALREADY ENABLED before full init: icq_ctrl={:#x} isq_ctrl={:#x}
+92	uno	W	tsra_fw_uno_drivers_iic	iic	recv FAILED: qid={} cause={:#010x}
+93	uno	W	tsra_fw_uno_drivers_oic	oic	ALREADY ENABLED before full init: ocq_ctrl={:#x} osq_ctrl={:#x}
+94	uno	E+	tsra_fw_uno_drivers_pqc	pqc	FP crash: kind={}
+95	uno	E+	tsra_fw_uno_drivers_pqc	pqc	engine did not answer: engine={}
+96	uno	E+	tsra_fw_uno_fault	fault	HardFault: CFSR={:#010x}
+97	uno	E+	tsra_fw_uno_fault	fault	HardFault: HFSR={:#010x}
+98	uno	E+	tsra_fw_uno_fault	fault	HardFault: MSP={:#010x}

@@ -53,7 +53,10 @@ tsra_fw_uno_log_ring = { workspace = true }
 tsra_fw_uno_pac = { workspace = true }
 tsra_fw_uno_pct = { workspace = true }
 tsra_fw_uno_reg_soc = { workspace = true }
-tsra_fw_uno_trace = { workspace = true }
+# `debug-log` records `error!`, `warn!`, and `info!` calls in the debug-log
+# ring, unless a `level-*` feature (the app's trace flavors) selects text
+# output.
+tsra_fw_uno_trace = { features = ["debug-log"], workspace = true }
 
 cortex-m = { workspace = true }
 critical-section = { workspace = true }
