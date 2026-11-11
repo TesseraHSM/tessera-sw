@@ -425,7 +425,7 @@ fn aes_xts_tweak_overflow_rejected(session: HsmSession) {
 /// On ex sessions (64-bit tweak), a multi-call input whose tweak crosses
 /// 2^64 only in a later call must be rejected up front without writing
 /// output or advancing the tweak.
-#[session_test(api_rev_1_1)]
+#[session_test(api_rev_at_least(1, 1))]
 fn aes_xts_tweak_crossing_u64_checked_up_front(session: HsmSession) {
     let key = aes_xts_generate_key(&session).unwrap();
     let dul: usize = 512;

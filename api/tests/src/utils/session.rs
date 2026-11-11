@@ -16,30 +16,28 @@ use crate::utils::partition::*;
 const SESSION_EX_MIN_TEST_API_REV: HsmApiRev = HsmApiRev { major: 1, minor: 1 };
 const ROTATED_CO_PSK: [u8; PSK_LEN] = [0xA5; PSK_LEN];
 
-/// Returns `true` when `api_rev=1_1` in `TSRA_TEST_ARGS` selects the
-/// `open_session_ex` tests; tests for the other session API return early.
+/// Returns `true` when the `api_rev` selected in `TSRA_TEST_ARGS` is at
+/// least `major.minor`. An unset `api_rev` selects revision 1.0.
+///
+/// Revisions from 1.1 run the `open_session_ex` tests.
 ///
 /// # Panics
 ///
 /// Panics if `TSRA_TEST_ARGS` is invalid.
-pub(crate) fn api_rev_1_1() -> bool {
-    ddi_sock_server::TestArgs::from_env().api_rev.as_deref() == Some("1_1")
+pub(crate) fn api_rev_at_least(major: u32, minor: u32) -> bool {
+    let (sel_major, sel_minor) = ddi_sock_server::TestArgs::from_env()
+        .api_rev_parts()
+        .unwrap_or((1, 0));
+    HsmApiRev {
+        major: sel_major,
+        minor: sel_minor,
+    } >= HsmApiRev { major, minor }
 }
 
-/// Returns `true` when the `api_rev` key of `TSRA_TEST_ARGS` is unset or
-/// `1_0`, selecting the `open_session` tests.
-///
-/// # Panics
-///
-/// Panics if `TSRA_TEST_ARGS` is invalid.
-pub(crate) fn api_rev_1_0() -> bool {
-    !api_rev_1_1()
-}
-
-/// Runs `test`, which must panic with `expected` under `1_1` and must
-/// succeed under `1_0`.
-pub(crate) fn panics_with_api_rev_1_1(expected: &str, test: impl FnOnce()) {
-    if api_rev_1_0() {
+/// Runs `test`, which must panic with `expected` from API revision 1.1 and
+/// must succeed below it.
+pub(crate) fn panics_from_api_rev_1_1(expected: &str, test: impl FnOnce()) {
+    if !api_rev_at_least(1, 1) {
         test();
         return;
     }
@@ -105,7 +103,7 @@ where
             .api_rev_range
             .expect("Partition did not advertise an API revision range");
 
-        let (session_api, rev, session) = if api_rev_1_1() {
+        let (session_api, rev, session) = if api_rev_at_least(1, 1) {
             let rev = session_ex_revision(range);
             let session = open_session_ex_test_session(&part_info.path, rev);
             ("session_ex", rev, session)
@@ -215,7 +213,7 @@ fn test_with_session_uses_selected_revision() {
                 .api_rev_range
                 .expect("Partition did not advertise an API revision range");
 
-            if api_rev_1_1() {
+            if api_rev_at_least(1, 1) {
                 session_ex_revision(range)
             } else {
                 session_revision(range)

@@ -177,7 +177,7 @@ class tsra_sd_restore_backup_test : public ::testing::Test
 // the pinned lengths.
 TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -271,7 +271,7 @@ TEST_F(tsra_sd_restore_backup_test, restore_backup_roundtrip)
 // session resolves and before the restore is performed.
 TEST_F(tsra_sd_restore_backup_test, restore_backup_null_params)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }

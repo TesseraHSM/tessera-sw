@@ -12,7 +12,7 @@
 
 void PartitionListHandle::for_each_session(const std::function<void(tsra_handle)> &func) const
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         for_each_part([&](std::vector<tsra_char> &path) {
             tsra_str path_str{ path.data(), static_cast<uint32_t>(path.size()) };

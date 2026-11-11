@@ -77,7 +77,7 @@ fn first_partition_path() -> String {
 /// for retryable error codes, and fails immediately for non-retryable ones.
 #[api_test]
 fn test_open_partition_recovers_from_get_api_rev_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -115,7 +115,7 @@ fn test_open_partition_recovers_from_get_api_rev_single_fault() {
 /// non-retryable ones.
 #[api_test]
 fn test_open_partition_recovers_from_get_device_info_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -153,7 +153,7 @@ fn test_open_partition_recovers_from_get_device_info_single_fault() {
 /// immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_open_partition_recovers_from_get_api_rev_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -188,7 +188,7 @@ fn test_open_partition_recovers_from_get_api_rev_last_retry() {
 /// fails immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_open_partition_recovers_from_get_device_info_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -231,7 +231,7 @@ fn test_open_partition_recovers_from_get_device_info_last_retry() {
 /// `MAX_RETRIES + 1` consecutive calls, for every retryable error code.
 #[api_test]
 fn test_open_partition_fails_from_get_api_rev_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in OPEN_PART_RETRYABLE_ERRORS {
@@ -268,7 +268,7 @@ fn test_open_partition_fails_from_get_api_rev_exhausted() {
 /// code.
 #[api_test]
 fn test_open_partition_fails_from_get_device_info_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in OPEN_PART_RETRYABLE_ERRORS {

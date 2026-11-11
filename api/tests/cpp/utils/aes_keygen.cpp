@@ -51,7 +51,7 @@ std::vector<uint8_t> build_xts_wrapped_blob(
     const std::vector<uint8_t> &key2_plain
 )
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         // Ex (TBOR) sessions hold XTS as one AesXts512 key: the wrapped blob is a
         // single RSA-AES wrap (AES-256 KEK) of K1 || K2 (PKCS#11 CKK_AES_XTS).

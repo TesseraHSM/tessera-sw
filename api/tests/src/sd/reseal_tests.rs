@@ -45,7 +45,7 @@ fn create_source_backup(
 /// non-zero backup distinct from the source ciphertext.
 #[test]
 fn sd_reseal_remote_backup_roundtrip() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -97,7 +97,7 @@ fn sd_reseal_remote_backup_roundtrip() {
 /// ciphertexts (a fresh HPKE ephemeral each call).
 #[test]
 fn sd_reseal_remote_backup_rerandomizes() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();

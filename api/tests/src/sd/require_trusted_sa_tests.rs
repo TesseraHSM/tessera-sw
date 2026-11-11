@@ -35,7 +35,7 @@ use crate::utils::sd_provision::provision_backing_trusted;
 /// non-zero backups of the pinned wire lengths.
 #[test]
 fn sd_create_remote_backup_trusted_sa_roundtrip() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -77,7 +77,7 @@ fn sd_create_remote_backup_trusted_sa_roundtrip() {
 /// equal the recovered `RcvrPub`.
 #[test]
 fn sd_create_remote_backup_trusted_sa_rcvr_pub_mismatch_is_rejected() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -111,7 +111,7 @@ fn sd_create_remote_backup_trusted_sa_rcvr_pub_mismatch_is_rejected() {
 /// device-local backups of the pinned wire lengths.
 #[test]
 fn sd_restore_remote_backup_trusted_sa_roundtrip() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -170,7 +170,7 @@ fn sd_restore_remote_backup_trusted_sa_roundtrip() {
 /// suffice.
 #[test]
 fn sd_restore_remote_backup_trusted_sa_sndr_pub_mismatch_is_rejected() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -203,7 +203,7 @@ fn sd_restore_remote_backup_trusted_sa_sndr_pub_mismatch_is_rejected() {
 /// enforced. Sequential incarnations also exercise receiver-key persistence.
 #[test]
 fn sd_restore_remote_backup_trusted_sa_distinct_policy_roundtrip() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();

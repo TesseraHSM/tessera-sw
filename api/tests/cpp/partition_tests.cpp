@@ -128,7 +128,7 @@ bool get_stable_manufacturer_cert_chain_snapshot(
 
 TEST(tsra_part, mobk_cache_path)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -158,7 +158,7 @@ TEST(tsra_part, mobk_cache_path)
 
 TEST(tsra_part, get_list)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -173,7 +173,7 @@ TEST(tsra_part, get_list)
 
 TEST(tsra_part, get_list_null_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -183,7 +183,7 @@ TEST(tsra_part, get_list_null_handle)
 
 TEST(tsra_part, free_list)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -197,7 +197,7 @@ TEST(tsra_part, free_list)
 
 TEST(tsra_part, free_list_double_free)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -215,7 +215,7 @@ TEST(tsra_part, free_list_double_free)
 
 TEST(tsra_part, free_list_invalid_handle_value)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -226,7 +226,7 @@ TEST(tsra_part, free_list_invalid_handle_value)
 
 TEST(tsra_part, get_count)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -239,7 +239,7 @@ TEST(tsra_part, get_count)
 
 TEST(tsra_part, get_count_null_output)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -250,7 +250,7 @@ TEST(tsra_part, get_count_null_output)
 
 TEST(tsra_part, get_count_invalid_handle_value)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -262,7 +262,7 @@ TEST(tsra_part, get_count_invalid_handle_value)
 
 TEST(tsra_part, get_info)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -291,7 +291,7 @@ TEST(tsra_part, get_info)
 
 TEST(tsra_part, get_info_invalid_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -304,7 +304,7 @@ TEST(tsra_part, get_info_invalid_handle)
 
 TEST(tsra_part, get_info_null_path_ptr)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -320,7 +320,7 @@ TEST(tsra_part, get_info_null_path_ptr)
 
 TEST(tsra_part, get_info_invalid_index)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -337,7 +337,7 @@ TEST(tsra_part, get_info_invalid_index)
 
 TEST(tsra_part, open_close)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -365,7 +365,7 @@ TEST(tsra_part, open_close)
 
 TEST(tsra_part, open_close_multiple_times)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -396,7 +396,7 @@ TEST(tsra_part, open_close_multiple_times)
 
 TEST(tsra_part, open_same_partition_multiple_times)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -425,7 +425,7 @@ TEST(tsra_part, open_same_partition_multiple_times)
 
 TEST(tsra_part, open_rejects_null_output_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -439,7 +439,7 @@ TEST(tsra_part, open_rejects_null_output_handle)
 
 TEST(tsra_part, open_rejects_null_or_empty_path)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -463,7 +463,7 @@ TEST(tsra_part, open_rejects_null_or_empty_path)
 
 TEST(tsra_part, open_double_close)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -495,7 +495,7 @@ TEST(tsra_part, open_double_close)
 
 TEST(tsra_part, get_prop_path)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -521,7 +521,7 @@ TEST(tsra_part, get_prop_path)
 
 TEST(tsra_part, get_prop_driver_version)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -547,7 +547,7 @@ TEST(tsra_part, get_prop_driver_version)
 
 TEST(tsra_part, get_prop_firmware_version)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -573,7 +573,7 @@ TEST(tsra_part, get_prop_firmware_version)
 
 TEST(tsra_part, get_prop_hardware_version)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -599,7 +599,7 @@ TEST(tsra_part, get_prop_hardware_version)
 
 TEST(tsra_part, get_prop_pci_hw_id)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -625,7 +625,7 @@ TEST(tsra_part, get_prop_pci_hw_id)
 
 TEST(tsra_part, get_prop_min_api_rev)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -646,7 +646,7 @@ TEST(tsra_part, get_prop_min_api_rev)
 
 TEST(tsra_part, get_prop_max_api_rev)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -667,7 +667,7 @@ TEST(tsra_part, get_prop_max_api_rev)
 
 TEST(tsra_part, get_prop_api_rev_range)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -701,7 +701,7 @@ TEST(tsra_part, get_prop_api_rev_range)
 
 TEST(tsra_part, get_prop_sd_initialized)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -730,7 +730,7 @@ TEST(tsra_part, get_prop_sd_initialized)
 
 TEST(tsra_part, get_prop_sd_initialized_null_value)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -745,7 +745,7 @@ TEST(tsra_part, get_prop_sd_initialized_null_value)
 
 TEST(tsra_part, get_prop_manufacturer_cert)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -782,7 +782,7 @@ TEST(tsra_part, get_prop_manufacturer_cert)
 
 TEST(tsra_part, get_prop_manufacturer_cert_returns_larger_size_hint)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -803,7 +803,7 @@ TEST(tsra_part, get_prop_manufacturer_cert_returns_larger_size_hint)
 
 TEST(tsra_part, get_prop_manufacturer_cert_buffer_too_small)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -847,7 +847,7 @@ TEST(tsra_part, get_prop_manufacturer_cert_buffer_too_small)
 // the buffer already fits the current payload.
 TEST(tsra_part, get_prop_manufacturer_cert_buffer_below_hint_succeeds)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -890,7 +890,7 @@ TEST(tsra_part, get_prop_manufacturer_cert_buffer_below_hint_succeeds)
 
 TEST(tsra_part, get_prop_backup_masking_key)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -915,7 +915,7 @@ TEST(tsra_part, get_prop_backup_masking_key)
 
 TEST(tsra_part, get_prop_masked_owner_backup_key)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -940,7 +940,7 @@ TEST(tsra_part, get_prop_masked_owner_backup_key)
 
 TEST(tsra_part, get_prop_pid_public_key)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -965,7 +965,7 @@ TEST(tsra_part, get_prop_pid_public_key)
 
 TEST(tsra_part, get_prop_null_prop_ptr)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -981,7 +981,7 @@ TEST(tsra_part, get_prop_null_prop_ptr)
 
 TEST(tsra_part, get_prop_invalid_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -994,7 +994,7 @@ TEST(tsra_part, get_prop_invalid_handle)
 
 TEST(tsra_part, get_prop_buffer_too_small_api_rev)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1017,7 +1017,7 @@ TEST(tsra_part, get_prop_buffer_too_small_api_rev)
 
 TEST(tsra_part, get_prop_unsupported_property)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1036,7 +1036,7 @@ TEST(tsra_part, get_prop_unsupported_property)
 
 TEST(tsra_part, get_prop_all_supported_properties)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1086,7 +1086,7 @@ TEST(tsra_part, get_prop_all_supported_properties)
 
 TEST(tsra_part, init_caller_source_with_empty_endorsement_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1139,7 +1139,7 @@ TEST(tsra_part, init_caller_source_with_empty_endorsement_fails)
 
 TEST(tsra_part, init_caller_source_with_null_endorsement_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1187,7 +1187,7 @@ TEST(tsra_part, init_caller_source_with_null_endorsement_fails)
 
 TEST(tsra_part, init_tpm_source_with_endorsement_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1241,7 +1241,7 @@ TEST(tsra_part, init_tpm_source_with_endorsement_fails)
 
 TEST(tsra_part, init_invalid_source_with_endorsement_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1296,7 +1296,7 @@ TEST(tsra_part, init_invalid_source_with_endorsement_fails)
 
 TEST(tsra_part, init_with_resiliency_config)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1333,7 +1333,7 @@ TEST(tsra_part, init_with_resiliency_config)
 
 TEST(tsra_part, init_with_resiliency_caller_pota_null_callback_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1384,7 +1384,7 @@ TEST(tsra_part, init_with_resiliency_caller_pota_null_callback_fails)
 
 TEST(tsra_part, init_with_resiliency_invalid_pota_source_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1432,7 +1432,7 @@ TEST(tsra_part, init_with_resiliency_invalid_pota_source_fails)
 
 TEST(tsra_part, init_with_resiliency_tpm_pota_with_callback_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

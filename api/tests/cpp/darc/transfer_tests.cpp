@@ -138,7 +138,7 @@ class tsra_darc_transfer_test : public ::testing::Test
 // TMK from one endpoint to another.
 TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -217,7 +217,7 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
 // non-zero envelopes of the pinned wire lengths, and each mint is fresh.
 TEST_F(tsra_darc_transfer_test, kex_and_tmk_gen_smoke)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -277,7 +277,7 @@ TEST_F(tsra_darc_transfer_test, kex_and_tmk_gen_smoke)
 // key verifies against the original public key.
 TEST_F(tsra_darc_transfer_test, key_wrap_unwrap_sign_round_trip)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -369,7 +369,7 @@ TEST_F(tsra_darc_transfer_test, key_wrap_unwrap_sign_round_trip)
 // rather than accepting it blindly.
 TEST_F(tsra_darc_transfer_test, key_unwrap_rejects_bogus_envelope)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -421,7 +421,7 @@ TEST_F(tsra_darc_transfer_test, key_unwrap_rejects_bogus_envelope)
 // verifies, surfacing as `INVALID_ARGUMENT`.
 TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }

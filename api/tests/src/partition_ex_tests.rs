@@ -46,7 +46,7 @@ fn one_cert() -> Vec<u8> {
 /// A wrong-length `pota_thumbprint` is rejected.
 #[test]
 fn part_init_rejects_bad_pota_thumbprint_len() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -62,7 +62,7 @@ fn part_init_rejects_bad_pota_thumbprint_len() {
 /// A wrong-length `sata_thumbprint` is rejected.
 #[test]
 fn part_init_rejects_bad_sata_thumbprint_len() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -78,7 +78,7 @@ fn part_init_rejects_bad_sata_thumbprint_len() {
 /// A present-but-wrong-length `sapota_thumbprint` is rejected.
 #[test]
 fn part_init_rejects_bad_sapota_thumbprint_len() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -94,7 +94,7 @@ fn part_init_rejects_bad_sapota_thumbprint_len() {
 /// `PartFinal` rejects an empty cert chain.
 #[test]
 fn part_final_rejects_empty_cert_descriptors() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -110,7 +110,7 @@ fn part_final_rejects_empty_cert_descriptors() {
 /// out-of-band descriptor.
 #[test]
 fn part_final_rejects_empty_cert() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -128,7 +128,7 @@ fn part_final_rejects_empty_cert() {
 /// `PartFinal` rejects more than [`MAX_CERTS`] certificates.
 #[test]
 fn part_final_rejects_too_many_cert_descriptors() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -151,7 +151,7 @@ fn part_final_rejects_too_many_cert_descriptors() {
 /// the fixed-size guard rather than a coarse max-length check.
 #[test]
 fn part_final_rejects_wrong_len_prev_local_mk_backup() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -175,7 +175,7 @@ fn part_final_rejects_wrong_len_prev_local_mk_backup() {
 /// that the negative guard tests skip.
 #[test]
 fn part_init_valid_inputs_pass_host_guards() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -195,7 +195,7 @@ fn part_init_valid_inputs_pass_host_guards() {
 /// exercises the request-construction / TBOR-OOB wiring path.
 #[test]
 fn part_final_valid_inputs_pass_host_guards() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -216,7 +216,7 @@ fn part_final_valid_inputs_pass_host_guards() {
 /// slot-0 chain, so stability across repeated reads is exercised here).
 #[test]
 fn test_cert_chain_slot2_pid_after_finalization() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();

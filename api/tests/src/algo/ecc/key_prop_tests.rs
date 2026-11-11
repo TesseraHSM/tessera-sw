@@ -572,7 +572,7 @@ fn test_ecc_unwrap_bits_curve_mismatch_fails(session: HsmSession) {
 
     let result = unwrap_ecc_with_props(&session, priv_prop, pub_prop);
 
-    let expected_error = if crate::utils::session::api_rev_1_1() {
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
         matches!(result, Err(HsmError::InvalidKeyProps))
     } else {
         matches!(result, Err(HsmError::DdiCmdFailure))

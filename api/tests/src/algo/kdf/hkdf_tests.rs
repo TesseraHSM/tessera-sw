@@ -1325,7 +1325,7 @@ fn derive_aes_key_session(
 
 /// Derive labeled, session-scoped AES and HMAC keys from an ECDH shared secret.
 /// Verify the AES keys through CBC and the HMAC keys through their properties.
-#[session_test(api_rev_1_1)]
+#[session_test(api_rev_at_least(1, 1))]
 fn test_hkdf_derive_labeled_session_keys(session: HsmSession) {
     let (secret_a, secret_b) = derive_session_shared_secrets(&session, HsmEccCurve::P256);
 

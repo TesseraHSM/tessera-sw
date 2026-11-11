@@ -160,7 +160,7 @@ class tsra_sd_create_peer_backup_test : public ::testing::Test
 // peer backup is a fresh 161-byte, non-zero HPKE-Auth seal.
 TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_roundtrip)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -223,7 +223,7 @@ TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_roundtrip)
 // session resolves and before the peer backup is created.
 TEST_F(tsra_sd_create_peer_backup_test, create_peer_backup_null_params)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }

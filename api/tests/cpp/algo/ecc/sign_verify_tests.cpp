@@ -1184,7 +1184,7 @@ static std::vector<uint8_t> get_part_prop_bytes(tsra_handle part, tsra_part_prop
 // Persists BMK and MOBK for proper restoration.
 TEST_F(tsra_ecc_sign_verify, persist_key_and_signature)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1271,7 +1271,7 @@ TEST_F(tsra_ecc_sign_verify, persist_key_and_signature)
 // To run: ctest -R MANUAL_restore_key_and_verify --verbose
 TEST_F(tsra_ecc_sign_verify, DISABLED_MANUAL_restore_key_and_verify)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

@@ -189,7 +189,7 @@ fn test_rsa_decrypt_with_wrong_key_fails(session: HsmSession) {
 
     let result = HsmDecrypter::decrypt_vec(&mut algo, &priv_b, &ciphertext);
 
-    let expected_error = if crate::utils::session::api_rev_1_1() {
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
         matches!(
             result,
             Err(HsmError::InternalError | HsmError::InvalidArgument)
@@ -229,7 +229,7 @@ fn test_rsa_tampered_ciphertext_fails(session: HsmSession) {
 
     let result = HsmDecrypter::decrypt_vec(&mut algo, &priv_key, &ciphertext);
 
-    let expected_error = if crate::utils::session::api_rev_1_1() {
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
         matches!(
             result,
             Err(HsmError::InternalError | HsmError::InvalidArgument)

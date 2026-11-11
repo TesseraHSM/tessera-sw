@@ -1165,7 +1165,7 @@ fn test_hmac_sign_buffer_too_small_then_success(session: HsmSession) {
 /// V2 (`session_ex`) session.
 #[test]
 fn test_hmac_generated_key_signs_and_verifies() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();

@@ -122,7 +122,7 @@ tsra_algo sealing_algo()
 // A NULL output handle pointer is rejected before anything else.
 TEST_F(tsra_sealing_keygen, key_gen_null_key_handle)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -138,7 +138,7 @@ TEST_F(tsra_sealing_keygen, key_gen_null_key_handle)
 // A NULL algorithm pointer is rejected.
 TEST_F(tsra_sealing_keygen, key_gen_null_algo)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -155,7 +155,7 @@ TEST_F(tsra_sealing_keygen, key_gen_null_algo)
 // A NULL property-list pointer is rejected.
 TEST_F(tsra_sealing_keygen, key_gen_null_prop_list)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -177,7 +177,7 @@ TEST_F(tsra_sealing_keygen, key_gen_null_prop_list)
 // non-NULL `params` (with non-zero `len`) is rejected up front.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_algo_params_present)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -218,7 +218,7 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_algo_params_present)
 // A non-`Sealing` key kind is rejected by the sealing property guard.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_kind)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -256,7 +256,7 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_kind)
 // always produces a 384-bit scalar, so the props must match.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_bits)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -294,7 +294,7 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_wrong_bits)
 // only permitted usage for a sealing key.
 TEST_F(tsra_sealing_keygen, key_gen_rejects_missing_derive)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -338,7 +338,7 @@ TEST_F(tsra_sealing_keygen, key_gen_rejects_missing_derive)
 // skip.
 TEST_F(tsra_sealing_keygen, key_gen_valid_props_pass_host_guards)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -383,7 +383,7 @@ TEST_F(tsra_sealing_keygen, key_gen_valid_props_pass_host_guards)
 // is built with the platform host crypto (OpenSSL on Linux, BCrypt on Windows).
 TEST_F(tsra_sealing_keygen, key_gen_roundtrip_generates_usable_sealing_key)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -490,7 +490,7 @@ TEST_F(tsra_sealing_keygen, key_gen_roundtrip_generates_usable_sealing_key)
 // distinct public keys.
 TEST_F(tsra_sealing_keygen, key_gen_roundtrip_yields_distinct_keys)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }

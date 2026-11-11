@@ -415,7 +415,7 @@ fn test_aes_unmask_corrupted_blob_fails(session: HsmSession) {
     HsmKeyManager::delete_key(key).unwrap();
 }
 
-#[session_test(api_rev_1_1)]
+#[session_test(api_rev_at_least(1, 1))]
 fn test_aes_unmask_rejects_modified_tag(session: HsmSession) {
     let props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Secret)
@@ -444,7 +444,7 @@ fn test_aes_unmask_rejects_modified_tag(session: HsmSession) {
 
 #[test]
 fn test_aes_unmask_rejects_key_from_another_session() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();

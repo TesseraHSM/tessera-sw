@@ -398,7 +398,7 @@ fn unwrap_ecc_key_pair(
 /// for non-retryable ones.
 #[api_test]
 fn test_aes_cbc_encrypt_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -440,7 +440,7 @@ fn test_aes_cbc_encrypt_recovers_from_single_fault() {
 /// (non-retryable errors).
 #[api_test]
 fn test_aes_cbc_encrypt_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -483,7 +483,7 @@ fn test_aes_cbc_encrypt_recovers_on_last_retry() {
 /// error code.
 #[api_test]
 fn test_aes_cbc_encrypt_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -513,7 +513,7 @@ fn test_aes_cbc_encrypt_fails_after_all_retries_exhausted() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_aes_cbc_encrypt_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -545,7 +545,7 @@ fn test_aes_cbc_encrypt_no_retry_without_resiliency() {
 /// (TPM path uses `GetSealedBk3`, not `InitBk3`).
 #[api_test]
 fn test_aes_cbc_encrypt_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     if use_tpm() {
@@ -585,7 +585,7 @@ fn test_aes_cbc_encrypt_recovers_from_compound_fault() {
 /// earlier requests succeeded, must not change the ciphertext.
 #[api_test]
 fn test_aes_cbc_encrypt_retry_after_partial_success_restarts_from_iv() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -622,7 +622,7 @@ fn test_aes_cbc_encrypt_retry_after_partial_success_restarts_from_iv() {
 /// `restore_from_masked` and recovers.
 #[api_test]
 fn test_aes_cbc_encrypt_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -655,7 +655,7 @@ fn test_aes_cbc_encrypt_recovers_after_reset() {
 /// Without resiliency, AES-CBC `encrypt` does not recover from a reset.
 #[api_test]
 fn test_aes_cbc_encrypt_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -679,7 +679,7 @@ fn test_aes_cbc_encrypt_fails_after_reset_without_resiliency() {
 /// successful recovery.
 #[api_test]
 fn test_aes_cbc_encrypt_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -715,7 +715,7 @@ fn test_aes_cbc_encrypt_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_ecc_sign_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -755,7 +755,7 @@ fn test_ecc_sign_recovers_from_single_fault() {
 /// immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_ecc_sign_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -794,7 +794,7 @@ fn test_ecc_sign_recovers_on_last_retry() {
 /// `MAX_RETRIES + 1` consecutive calls, for every retryable error code.
 #[api_test]
 fn test_ecc_sign_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -824,7 +824,7 @@ fn test_ecc_sign_fails_after_all_retries_exhausted() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_ecc_sign_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -862,7 +862,7 @@ fn test_ecc_sign_no_retry_without_resiliency() {
 /// `init_part` also hits a transient fault, both recover.
 #[api_test]
 fn test_ecc_sign_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -903,7 +903,7 @@ fn test_ecc_sign_recovers_from_compound_fault() {
 /// `restore_from_masked` and recovers.
 #[api_test]
 fn test_ecc_sign_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -936,7 +936,7 @@ fn test_ecc_sign_recovers_after_reset() {
 /// Without resiliency, ECC `sign` does not recover from a reset.
 #[api_test]
 fn test_ecc_sign_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -959,7 +959,7 @@ fn test_ecc_sign_fails_after_reset_without_resiliency() {
 /// recovery.
 #[api_test]
 fn test_ecc_sign_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -993,7 +993,7 @@ fn test_ecc_sign_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_hmac_sign_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -1032,7 +1032,7 @@ fn test_hmac_sign_recovers_from_single_fault() {
 /// immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_hmac_sign_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -1065,7 +1065,7 @@ fn test_hmac_sign_recovers_on_last_retry() {
 /// `MAX_RETRIES + 1` consecutive calls, for every retryable error code.
 #[api_test]
 fn test_hmac_sign_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -1090,7 +1090,7 @@ fn test_hmac_sign_fails_after_all_retries_exhausted() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_hmac_sign_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -1123,7 +1123,7 @@ fn test_hmac_sign_no_retry_without_resiliency() {
 /// `init_part` also hits a transient fault, both recover.
 #[api_test]
 fn test_hmac_sign_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1162,7 +1162,7 @@ fn test_hmac_sign_recovers_from_compound_fault() {
 /// `reopen_session_if_needed` + `restore_from_masked` and recovers.
 #[api_test]
 fn test_hmac_sign_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1194,7 +1194,7 @@ fn test_hmac_sign_recovers_after_reset() {
 /// Without resiliency, HMAC `sign` does not recover from a reset.
 #[api_test]
 fn test_hmac_sign_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -1216,7 +1216,7 @@ fn test_hmac_sign_fails_after_reset_without_resiliency() {
 /// recovery.
 #[api_test]
 fn test_hmac_sign_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1252,7 +1252,7 @@ fn test_hmac_sign_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_ecc_key_report_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -1291,7 +1291,7 @@ fn test_ecc_key_report_recovers_from_single_fault() {
 /// or fails immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_ecc_key_report_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -1328,7 +1328,7 @@ fn test_ecc_key_report_recovers_on_last_retry() {
 /// code.
 #[api_test]
 fn test_ecc_key_report_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -1355,7 +1355,7 @@ fn test_ecc_key_report_fails_after_all_retries_exhausted() {
 /// `IoAborted` propagates immediately.
 #[api_test]
 fn test_ecc_key_report_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -1380,7 +1380,7 @@ fn test_ecc_key_report_no_retry_without_resiliency() {
 /// `init_part` also hits a transient fault, both recover.
 #[api_test]
 fn test_ecc_key_report_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1419,7 +1419,7 @@ fn test_ecc_key_report_recovers_from_compound_fault() {
 /// `restore_from_masked` and recovers.
 #[api_test]
 fn test_ecc_key_report_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1449,7 +1449,7 @@ fn test_ecc_key_report_recovers_after_reset() {
 /// Without resiliency, key attestation does not recover from a reset.
 #[api_test]
 fn test_ecc_key_report_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -1470,7 +1470,7 @@ fn test_ecc_key_report_fails_after_reset_without_resiliency() {
 /// successful recovery.
 #[api_test]
 fn test_ecc_key_report_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1503,7 +1503,7 @@ fn test_ecc_key_report_recovers_after_consecutive_reset() {
 /// DDI error is suppressed (the device key table was wiped by reset).
 #[api_test]
 fn test_delete_key_succeeds_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, session, _ctx) = init_with_resiliency_and_session();
@@ -1524,7 +1524,7 @@ fn test_delete_key_succeeds_after_reset() {
 /// After a reset, explicit `delete_key` on an ECC key pair succeeds.
 #[api_test]
 fn test_delete_key_pair_succeeds_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, session, _ctx) = init_with_resiliency_and_session();
@@ -1549,7 +1549,7 @@ fn test_delete_key_pair_succeeds_after_reset() {
 /// After a reset, explicit `delete_key` on a non-session (token) ECC key pair succeeds.
 #[api_test]
 fn test_delete_non_session_key_pair_succeeds_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, session, _ctx) = init_with_resiliency_and_session();
@@ -1598,7 +1598,7 @@ fn test_delete_non_session_key_pair_succeeds_after_reset() {
 /// silently ignored so no ABA problem can occur.
 #[api_test]
 fn test_drop_after_reset_is_safe() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, session, _ctx) = init_with_resiliency_and_session();
@@ -1617,7 +1617,7 @@ fn test_drop_after_reset_is_safe() {
 /// call entirely.
 #[api_test]
 fn test_drop_skips_ddi_when_epoch_is_stale() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, session, _ctx) = init_with_resiliency_and_session();
@@ -1649,7 +1649,7 @@ fn test_drop_skips_ddi_when_epoch_is_stale() {
 /// Normal deletion (no reset) calls the DDI `DeleteKey` operation.
 #[api_test]
 fn test_delete_key_calls_ddi_without_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1670,7 +1670,7 @@ fn test_delete_key_calls_ddi_without_reset() {
 /// Normal drop (no reset) calls the DDI `DeleteKey` operation.
 #[api_test]
 fn test_drop_calls_ddi_without_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1691,7 +1691,7 @@ fn test_drop_calls_ddi_without_reset() {
 /// calls DDI because the handle is current again.
 #[api_test]
 fn test_delete_key_after_refresh_calls_ddi() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, session, _ctx) = init_with_resiliency_and_session();
@@ -1734,7 +1734,7 @@ fn test_delete_key_after_refresh_calls_ddi() {
 /// for retryable error codes, and fails immediately for non-retryable ones.
 #[api_test]
 fn test_rsa_sign_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -1771,7 +1771,7 @@ fn test_rsa_sign_recovers_from_single_fault() {
 /// the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_rsa_sign_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -1808,7 +1808,7 @@ fn test_rsa_sign_recovers_on_last_retry() {
 /// `MAX_RETRIES + 1` consecutive calls.
 #[api_test]
 fn test_rsa_sign_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -1835,7 +1835,7 @@ fn test_rsa_sign_fails_after_all_retries_exhausted() {
 /// Without resiliency, RSA `sign` does not retry.
 #[api_test]
 fn test_rsa_sign_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -1868,7 +1868,7 @@ fn test_rsa_sign_no_retry_without_resiliency() {
 /// RSA `sign` recovers from compound faults.
 #[api_test]
 fn test_rsa_sign_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1902,7 +1902,7 @@ fn test_rsa_sign_recovers_from_compound_fault() {
 /// After a reset on `RsaModExp`, RSA `sign` recovers.
 #[api_test]
 fn test_rsa_sign_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1932,7 +1932,7 @@ fn test_rsa_sign_recovers_after_reset() {
 /// Without resiliency, RSA `sign` does not recover from a reset.
 #[api_test]
 fn test_rsa_sign_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -1952,7 +1952,7 @@ fn test_rsa_sign_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `RsaModExp` are each followed by recovery.
 #[api_test]
 fn test_rsa_sign_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -1980,7 +1980,7 @@ fn test_rsa_sign_recovers_after_consecutive_reset() {
 /// for retryable error codes, and fails immediately for non-retryable ones.
 #[api_test]
 fn test_rsa_decrypt_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2023,7 +2023,7 @@ fn test_rsa_decrypt_recovers_from_single_fault() {
 /// the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_rsa_decrypt_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2065,7 +2065,7 @@ fn test_rsa_decrypt_recovers_on_last_retry() {
 /// `MAX_RETRIES + 1` consecutive calls.
 #[api_test]
 fn test_rsa_decrypt_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -2097,7 +2097,7 @@ fn test_rsa_decrypt_fails_after_all_retries_exhausted() {
 /// Without resiliency, RSA `decrypt` does not retry.
 #[api_test]
 fn test_rsa_decrypt_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -2135,7 +2135,7 @@ fn test_rsa_decrypt_no_retry_without_resiliency() {
 /// RSA `decrypt` recovers from compound faults.
 #[api_test]
 fn test_rsa_decrypt_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2174,7 +2174,7 @@ fn test_rsa_decrypt_recovers_from_compound_fault() {
 /// After a reset on `RsaModExp`, RSA `decrypt` recovers.
 #[api_test]
 fn test_rsa_decrypt_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2209,7 +2209,7 @@ fn test_rsa_decrypt_recovers_after_reset() {
 /// Without resiliency, RSA `decrypt` does not recover from a reset.
 #[api_test]
 fn test_rsa_decrypt_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -2234,7 +2234,7 @@ fn test_rsa_decrypt_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `RsaModExp` are each followed by recovery.
 #[api_test]
 fn test_rsa_decrypt_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2275,7 +2275,7 @@ fn test_rsa_decrypt_recovers_after_consecutive_reset() {
 /// for retryable error codes, and fails immediately for non-retryable ones.
 #[api_test]
 fn test_hmac_verify_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2314,7 +2314,7 @@ fn test_hmac_verify_recovers_from_single_fault() {
 /// the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_hmac_verify_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2353,7 +2353,7 @@ fn test_hmac_verify_recovers_on_last_retry() {
 /// `MAX_RETRIES + 1` consecutive calls.
 #[api_test]
 fn test_hmac_verify_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -2378,7 +2378,7 @@ fn test_hmac_verify_fails_after_all_retries_exhausted() {
 /// Without resiliency, HMAC `verify` does not retry.
 #[api_test]
 fn test_hmac_verify_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -2409,7 +2409,7 @@ fn test_hmac_verify_no_retry_without_resiliency() {
 /// HMAC `verify` recovers from compound faults.
 #[api_test]
 fn test_hmac_verify_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2445,7 +2445,7 @@ fn test_hmac_verify_recovers_from_compound_fault() {
 /// After a reset on `Hmac`, HMAC `verify` recovers.
 #[api_test]
 fn test_hmac_verify_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2477,7 +2477,7 @@ fn test_hmac_verify_recovers_after_reset() {
 /// Without resiliency, HMAC `verify` does not recover from a reset.
 #[api_test]
 fn test_hmac_verify_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -2499,7 +2499,7 @@ fn test_hmac_verify_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `Hmac` are each followed by recovery.
 #[api_test]
 fn test_hmac_verify_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2533,7 +2533,7 @@ fn test_hmac_verify_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_ecdh_derive_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2578,7 +2578,7 @@ fn test_ecdh_derive_recovers_from_single_fault() {
 /// fails for the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_ecdh_derive_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2627,7 +2627,7 @@ fn test_ecdh_derive_recovers_on_last_retry() {
 /// error for `MAX_RETRIES + 1` consecutive calls.
 #[api_test]
 fn test_ecdh_derive_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -2655,7 +2655,7 @@ fn test_ecdh_derive_fails_after_all_retries_exhausted() {
 /// Without resiliency, ECDH `derive_key` does not retry.
 #[api_test]
 fn test_ecdh_derive_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -2689,7 +2689,7 @@ fn test_ecdh_derive_no_retry_without_resiliency() {
 /// ECDH `derive_key` recovers from compound faults.
 #[api_test]
 fn test_ecdh_derive_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2725,7 +2725,7 @@ fn test_ecdh_derive_recovers_from_compound_fault() {
 /// After a reset on `EcdhKeyExchange`, ECDH `derive_key` recovers.
 #[api_test]
 fn test_ecdh_derive_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2757,7 +2757,7 @@ fn test_ecdh_derive_recovers_after_reset() {
 /// Without resiliency, ECDH `derive_key` does not recover from a reset.
 #[api_test]
 fn test_ecdh_derive_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -2778,7 +2778,7 @@ fn test_ecdh_derive_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `EcdhKeyExchange` are each followed by recovery.
 #[api_test]
 fn test_ecdh_derive_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2811,7 +2811,7 @@ fn test_ecdh_derive_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_hkdf_derive_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2855,7 +2855,7 @@ fn test_hkdf_derive_recovers_from_single_fault() {
 /// fails for the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_hkdf_derive_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -2899,7 +2899,7 @@ fn test_hkdf_derive_recovers_on_last_retry() {
 /// for `MAX_RETRIES + 1` consecutive calls.
 #[api_test]
 fn test_hkdf_derive_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -2926,7 +2926,7 @@ fn test_hkdf_derive_fails_after_all_retries_exhausted() {
 /// Without resiliency, HKDF `derive_key` does not retry.
 #[api_test]
 fn test_hkdf_derive_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -2959,7 +2959,7 @@ fn test_hkdf_derive_no_retry_without_resiliency() {
 /// HKDF `derive_key` recovers from compound faults.
 #[api_test]
 fn test_hkdf_derive_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -2994,7 +2994,7 @@ fn test_hkdf_derive_recovers_from_compound_fault() {
 /// After a reset on `HkdfDerive`, HKDF `derive_key` recovers.
 #[api_test]
 fn test_hkdf_derive_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3025,7 +3025,7 @@ fn test_hkdf_derive_recovers_after_reset() {
 /// Without resiliency, HKDF `derive_key` does not recover from a reset.
 #[api_test]
 fn test_hkdf_derive_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3045,7 +3045,7 @@ fn test_hkdf_derive_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `HkdfDerive` are each followed by recovery.
 #[api_test]
 fn test_hkdf_derive_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3077,7 +3077,7 @@ fn test_hkdf_derive_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_aes_unwrap_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -3121,7 +3121,7 @@ fn test_aes_unwrap_recovers_from_single_fault() {
 /// fails for the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_aes_unwrap_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -3165,7 +3165,7 @@ fn test_aes_unwrap_recovers_on_last_retry() {
 /// for `MAX_RETRIES + 1` consecutive calls.
 #[api_test]
 fn test_aes_unwrap_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -3192,7 +3192,7 @@ fn test_aes_unwrap_fails_after_all_retries_exhausted() {
 /// Without resiliency, AES `unwrap_key` does not retry.
 #[api_test]
 fn test_aes_unwrap_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3225,7 +3225,7 @@ fn test_aes_unwrap_no_retry_without_resiliency() {
 /// AES `unwrap_key` recovers from compound faults.
 #[api_test]
 fn test_aes_unwrap_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3260,7 +3260,7 @@ fn test_aes_unwrap_recovers_from_compound_fault() {
 /// After a reset on `RsaUnwrap`, AES `unwrap_key` recovers.
 #[api_test]
 fn test_aes_unwrap_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3291,7 +3291,7 @@ fn test_aes_unwrap_recovers_after_reset() {
 /// Without resiliency, AES `unwrap_key` does not recover from a reset.
 #[api_test]
 fn test_aes_unwrap_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3311,7 +3311,7 @@ fn test_aes_unwrap_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `RsaUnwrap` are each followed by recovery.
 #[api_test]
 fn test_aes_unwrap_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3343,7 +3343,7 @@ fn test_aes_unwrap_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_ecc_unwrap_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -3385,7 +3385,7 @@ fn test_ecc_unwrap_recovers_from_single_fault() {
 /// fails for the first `MAX_RETRIES` attempts.
 #[api_test]
 fn test_ecc_unwrap_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -3427,7 +3427,7 @@ fn test_ecc_unwrap_recovers_on_last_retry() {
 /// error for `MAX_RETRIES + 1` consecutive calls.
 #[api_test]
 fn test_ecc_unwrap_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -3454,7 +3454,7 @@ fn test_ecc_unwrap_fails_after_all_retries_exhausted() {
 /// Without resiliency, ECC `unwrap_key_pair` does not retry.
 #[api_test]
 fn test_ecc_unwrap_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3487,7 +3487,7 @@ fn test_ecc_unwrap_no_retry_without_resiliency() {
 /// ECC `unwrap_key_pair` recovers from compound faults.
 #[api_test]
 fn test_ecc_unwrap_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3521,7 +3521,7 @@ fn test_ecc_unwrap_recovers_from_compound_fault() {
 /// After a reset on `RsaUnwrap`, ECC `unwrap_key_pair` recovers.
 #[api_test]
 fn test_ecc_unwrap_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3548,7 +3548,7 @@ fn test_ecc_unwrap_recovers_after_reset() {
 /// Without resiliency, ECC `unwrap_key_pair` does not recover from a reset.
 #[api_test]
 fn test_ecc_unwrap_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3568,7 +3568,7 @@ fn test_ecc_unwrap_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `RsaUnwrap` are each followed by recovery.
 #[api_test]
 fn test_ecc_unwrap_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3630,7 +3630,7 @@ fn unwrap_xts_key(unwrapping_key: &HsmRsaPrivateKey, wrapped: &[u8]) -> HsmResul
 /// for non-retryable ones.
 #[api_test]
 fn test_aes_xts_unwrap_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -3675,7 +3675,7 @@ fn test_aes_xts_unwrap_recovers_from_single_fault() {
 /// loops, so exhausting all retries requires (MAX_RETRIES + 1)² faults.
 #[api_test]
 fn test_aes_xts_unwrap_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -3706,7 +3706,7 @@ fn test_aes_xts_unwrap_fails_after_all_retries_exhausted() {
 /// Without resiliency, AES-XTS `unwrap_key` does not retry.
 #[api_test]
 fn test_aes_xts_unwrap_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3730,7 +3730,7 @@ fn test_aes_xts_unwrap_no_retry_without_resiliency() {
 /// AES-XTS `unwrap_key` recovers from compound faults.
 #[api_test]
 fn test_aes_xts_unwrap_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3765,7 +3765,7 @@ fn test_aes_xts_unwrap_recovers_from_compound_fault() {
 /// After a reset on `RsaUnwrap`, AES-XTS `unwrap_key` recovers.
 #[api_test]
 fn test_aes_xts_unwrap_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3796,7 +3796,7 @@ fn test_aes_xts_unwrap_recovers_after_reset() {
 /// Without resiliency, AES-XTS `unwrap_key` does not recover from a reset.
 #[api_test]
 fn test_aes_xts_unwrap_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3816,7 +3816,7 @@ fn test_aes_xts_unwrap_fails_after_reset_without_resiliency() {
 /// Two consecutive resets on `RsaUnwrap` are each followed by recovery.
 #[api_test]
 fn test_aes_xts_unwrap_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -3848,7 +3848,7 @@ fn test_aes_xts_unwrap_recovers_after_consecutive_reset() {
 /// for non-retryable ones.
 #[api_test]
 fn test_aes_cbc_decrypt_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -3886,7 +3886,7 @@ fn test_aes_cbc_decrypt_recovers_from_single_fault() {
 /// AES-CBC `decrypt` recovers on the last retry.
 #[api_test]
 fn test_aes_cbc_decrypt_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -3917,7 +3917,7 @@ fn test_aes_cbc_decrypt_recovers_on_last_retry() {
 /// AES-CBC `decrypt` fails when all retries are exhausted.
 #[api_test]
 fn test_aes_cbc_decrypt_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -3947,7 +3947,7 @@ fn test_aes_cbc_decrypt_fails_after_all_retries_exhausted() {
 /// Without resiliency, AES-CBC `decrypt` does not retry.
 #[api_test]
 fn test_aes_cbc_decrypt_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -3976,7 +3976,7 @@ fn test_aes_cbc_decrypt_no_retry_without_resiliency() {
 /// AesEncryptDecrypt + InitBk3.
 #[api_test]
 fn test_aes_cbc_decrypt_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     if use_tpm() {
@@ -4014,7 +4014,7 @@ fn test_aes_cbc_decrypt_recovers_from_compound_fault() {
 /// earlier requests succeeded, must not change the plaintext.
 #[api_test]
 fn test_aes_cbc_decrypt_retry_after_partial_success_restarts_from_iv() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -4051,7 +4051,7 @@ fn test_aes_cbc_decrypt_retry_after_partial_success_restarts_from_iv() {
 /// After a reset on `AesEncryptDecrypt`, AES-CBC `decrypt` recovers.
 #[api_test]
 fn test_aes_cbc_decrypt_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -4074,7 +4074,7 @@ fn test_aes_cbc_decrypt_recovers_after_reset() {
 /// Without resiliency, AES-CBC `decrypt` does not recover from a reset.
 #[api_test]
 fn test_aes_cbc_decrypt_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -4099,7 +4099,7 @@ fn test_aes_cbc_decrypt_fails_after_reset_without_resiliency() {
 /// are each followed by a successful recovery.
 #[api_test]
 fn test_aes_cbc_decrypt_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -4145,7 +4145,7 @@ fn generate_rsa_key_report(key: &HsmRsaPrivateKey) -> HsmResult<Vec<u8>> {
 /// for non-retryable ones.
 #[api_test]
 fn test_rsa_key_report_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -4180,7 +4180,7 @@ fn test_rsa_key_report_recovers_from_single_fault() {
 /// RSA key attestation recovers on the last retry.
 #[api_test]
 fn test_rsa_key_report_recovers_on_last_retry() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in &super::all_test_errors() {
@@ -4204,7 +4204,7 @@ fn test_rsa_key_report_recovers_on_last_retry() {
 /// RSA key attestation fails when all retries are exhausted.
 #[api_test]
 fn test_rsa_key_report_fails_after_all_retries_exhausted() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     for error in super::KEY_OP_RETRYABLE_ERRORS {
@@ -4231,7 +4231,7 @@ fn test_rsa_key_report_fails_after_all_retries_exhausted() {
 /// Without resiliency, RSA key attestation does not retry.
 #[api_test]
 fn test_rsa_key_report_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -4257,7 +4257,7 @@ fn test_rsa_key_report_no_retry_without_resiliency() {
 /// AttestKey + InitBk3.
 #[api_test]
 fn test_rsa_key_report_recovers_from_compound_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     if use_tpm() {
@@ -4293,7 +4293,7 @@ fn test_rsa_key_report_recovers_from_compound_fault() {
 /// After a reset, RSA key attestation recovers.
 #[api_test]
 fn test_rsa_key_report_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -4313,7 +4313,7 @@ fn test_rsa_key_report_recovers_after_reset() {
 /// Without resiliency, RSA key attestation does not recover from a reset.
 #[api_test]
 fn test_rsa_key_report_fails_after_reset_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -4335,7 +4335,7 @@ fn test_rsa_key_report_fails_after_reset_without_resiliency() {
 /// followed by a successful recovery.
 #[api_test]
 fn test_rsa_key_report_recovers_after_consecutive_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -4366,7 +4366,7 @@ fn test_rsa_key_report_recovers_after_consecutive_reset() {
 /// on `AesEncryptDecrypt` during a multi-chunk operation.
 #[api_test]
 fn test_aes_cbc_streaming_encrypt_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -4395,7 +4395,7 @@ fn test_aes_cbc_streaming_encrypt_recovers_from_single_fault() {
 /// multi-chunk operation.
 #[api_test]
 fn test_aes_cbc_streaming_encrypt_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -4418,7 +4418,7 @@ fn test_aes_cbc_streaming_encrypt_recovers_after_reset() {
 /// Without resiliency, streaming AES-CBC encrypt does not retry.
 #[api_test]
 fn test_aes_cbc_streaming_encrypt_no_retry_without_resiliency() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session) = init_without_resiliency_and_session();
@@ -4449,7 +4449,7 @@ fn test_aes_cbc_streaming_encrypt_no_retry_without_resiliency() {
 /// AES-CBC streaming decrypt recovers from a single transient fault.
 #[api_test]
 fn test_aes_cbc_streaming_decrypt_recovers_from_single_fault() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();
@@ -4481,7 +4481,7 @@ fn test_aes_cbc_streaming_decrypt_recovers_from_single_fault() {
 /// AES-CBC streaming decrypt recovers after a reset.
 #[api_test]
 fn test_aes_cbc_streaming_decrypt_recovers_after_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (_part, session, _ctx) = init_with_resiliency_and_session();

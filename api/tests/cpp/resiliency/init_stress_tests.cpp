@@ -29,7 +29,7 @@ class init_resiliency_stress : public resiliency_stress_base
 ///
 TEST_F(init_resiliency_stress, cert_chain_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -81,7 +81,7 @@ TEST_F(init_resiliency_stress, cert_chain_under_reset)
 ///
 TEST_F(init_resiliency_stress, init_part_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

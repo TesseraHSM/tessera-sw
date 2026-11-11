@@ -63,7 +63,7 @@ class tsra_aes_xts : public ::testing::Test
         const std::vector<uint8_t> &key2_plain
     )
     {
-        if (api_rev_1_1())
+        if (api_rev_at_least(1, 1))
         {
             // Ex (TBOR) sessions hold XTS as one AesXts512 key: the wrapped blob is a
             // single RSA-AES wrap (AES-256 KEK) of K1 || K2 (PKCS#11 CKK_AES_XTS).
@@ -802,7 +802,7 @@ TEST_F(tsra_aes_xts, non_trivial_multi_byte_tweak_roundtrip)
         crypt_algo.params = &xts_params;
         crypt_algo.len = sizeof(xts_params);
 
-        if (api_rev_1_1())
+        if (api_rev_at_least(1, 1))
         {
             std::vector<uint8_t> out;
             ASSERT_EQ(
@@ -922,7 +922,7 @@ TEST_F(tsra_aes_xts, non_trivial_64bit_tweak_roundtrip)
 // unit must still fit in 64 bits.
 TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_rejected)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -2139,11 +2139,11 @@ TEST_F(tsra_aes_xts, dul_exceeds_max_is_rejected)
 // half is unwrapped on-device.
 static tsra_status XTS_WRAPPED_BLOB_CORRUPT_STATUS()
 {
-    return api_rev_1_1() ? TSRA_STATUS_DDI_CMD_FAILURE : TSRA_STATUS_INVALID_ARGUMENT;
+    return api_rev_at_least(1, 1) ? TSRA_STATUS_DDI_CMD_FAILURE : TSRA_STATUS_INVALID_ARGUMENT;
 }
 static tsra_status XTS_WRAPPED_KEY_MISMATCH_STATUS()
 {
-    return api_rev_1_1() ? TSRA_STATUS_INVALID_ARGUMENT : TSRA_STATUS_DDI_CMD_FAILURE;
+    return api_rev_at_least(1, 1) ? TSRA_STATUS_INVALID_ARGUMENT : TSRA_STATUS_DDI_CMD_FAILURE;
 }
 
 // Header marker/version validation: corrupt magic should fail before any unwrap attempt.
@@ -2195,7 +2195,7 @@ TEST_F(tsra_aes_xts, unwrap_xts_blob_length_mismatch_is_rejected)
         );
         ASSERT_FALSE(wrapped_blob.empty());
 
-        if (api_rev_1_1())
+        if (api_rev_at_least(1, 1))
         {
             // Drop the last byte so the AES-KWP payload is no longer 8-byte aligned.
             wrapped_blob.pop_back();
@@ -2232,7 +2232,7 @@ TEST_F(tsra_aes_xts, unwrap_xts_blob_missing_second_half_is_rejected)
         );
         ASSERT_FALSE(wrapped_blob.empty());
 
-        if (api_rev_1_1())
+        if (api_rev_at_least(1, 1))
         {
             // A TBOR XTS wrapped key is one envelope; keep only its first half, which
             // is shorter than the RSA-OAEP KEK.
@@ -2255,7 +2255,8 @@ TEST_F(tsra_aes_xts, unwrap_xts_blob_missing_second_half_is_rejected)
 // MBOR XTS masked keys use the key-pair blob header.
 static tsra_status XTS_MASKED_BLOB_DECODE_STATUS()
 {
-    return api_rev_1_1() ? TSRA_STATUS_MASKED_KEY_DECODE_FAILED : TSRA_STATUS_INVALID_ARGUMENT;
+    return api_rev_at_least(1, 1) ? TSRA_STATUS_MASKED_KEY_DECODE_FAILED
+                                  : TSRA_STATUS_INVALID_ARGUMENT;
 }
 
 // Same malformed-header rejection path for masked (device-exported) XTS blobs.
@@ -2289,7 +2290,7 @@ TEST_F(tsra_aes_xts, unmask_xts_blob_length_mismatch_is_rejected)
         auto masked_blob = get_masked_blob_for_key(key.get());
         ASSERT_FALSE(masked_blob.empty());
 
-        if (api_rev_1_1())
+        if (api_rev_at_least(1, 1))
         {
             // A TBOR XTS key is one AEAD envelope whose payload must be block aligned.
             masked_blob.pop_back();
@@ -2321,7 +2322,7 @@ TEST_F(tsra_aes_xts, unmask_xts_blob_missing_second_half_is_rejected)
         auto masked_blob = get_masked_blob_for_key(key.get());
         ASSERT_FALSE(masked_blob.empty());
 
-        if (api_rev_1_1())
+        if (api_rev_at_least(1, 1))
         {
             // A TBOR XTS key is one AEAD envelope; keep only its first half.
             masked_blob.resize(masked_blob.size() / 2);

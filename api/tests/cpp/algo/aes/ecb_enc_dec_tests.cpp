@@ -28,7 +28,7 @@ class tsra_aes_ecb : public ::testing::Test
 
 TEST_F(tsra_aes_ecb, single_shot_matches_cbc_reference)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -97,7 +97,7 @@ TEST_F(tsra_aes_ecb, single_shot_matches_cbc_reference)
 
 TEST_F(tsra_aes_ecb, streaming_matches_single_shot)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -156,7 +156,7 @@ TEST_F(tsra_aes_ecb, streaming_matches_single_shot)
 
 TEST_F(tsra_aes_ecb, rejects_invalid_lengths)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -199,7 +199,7 @@ TEST_F(tsra_aes_ecb, rejects_invalid_lengths)
 
 TEST_F(tsra_aes_ecb, rejects_params)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -227,7 +227,7 @@ TEST_F(tsra_aes_ecb, rejects_params)
 
 TEST_F(tsra_aes_ecb, context_unusable_after_finish)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -258,7 +258,7 @@ TEST_F(tsra_aes_ecb, context_unusable_after_finish)
 
 TEST_F(tsra_aes_ecb, unsupported_without_session_ex)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

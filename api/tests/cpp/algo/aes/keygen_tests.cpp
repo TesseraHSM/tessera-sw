@@ -22,8 +22,8 @@
 // while MBOR returns a generic DDI command failure.
 static tsra_status kGcmAuthFailureStatus()
 {
-    return api_rev_1_1() ? TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED
-                         : TSRA_STATUS_DDI_CMD_FAILURE;
+    return api_rev_at_least(1, 1) ? TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED
+                                  : TSRA_STATUS_DDI_CMD_FAILURE;
 }
 
 class tsra_aes_keygen : public ::testing::Test
@@ -1664,7 +1664,7 @@ TEST_F(tsra_aes_keygen, aes_key_gen_missing_session_property_uses_default)
 /// verifies key generation result kind follows the requested key properties
 TEST_F(tsra_aes_keygen, aes_key_gen_kind_property_controls_generated_key_kind)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1706,7 +1706,7 @@ TEST_F(tsra_aes_keygen, aes_key_gen_kind_property_controls_generated_key_kind)
 /// verifies AES-XTS key generation fails when sign flag is set
 TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_sign_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1724,7 +1724,7 @@ TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_sign_flag_fails)
 /// verifies AES-XTS key generation fails when verify flag is set
 TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_verify_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1742,7 +1742,7 @@ TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_verify_flag_fails)
 /// verifies AES-XTS key generation fails when wrap flag is set
 TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_wrap_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1760,7 +1760,7 @@ TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_wrap_flag_fails)
 /// verifies AES-XTS key generation fails when unwrap flag is set
 TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_unwrap_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1778,7 +1778,7 @@ TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_unwrap_flag_fails)
 /// verifies AES-XTS key generation fails when derive flag is set
 TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_derive_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1796,7 +1796,7 @@ TEST_F(tsra_aes_keygen, aes_xts_key_gen_with_derive_flag_fails)
 /// verifies AES-GCM key generation fails when sign flag is set
 TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_sign_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1814,7 +1814,7 @@ TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_sign_flag_fails)
 /// verifies AES-GCM key generation fails when verify flag is set
 TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_verify_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1832,7 +1832,7 @@ TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_verify_flag_fails)
 /// verifies AES-GCM key generation fails when wrap flag is set
 TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_wrap_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1850,7 +1850,7 @@ TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_wrap_flag_fails)
 /// verifies AES-GCM key generation fails when unwrap flag is set
 TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_unwrap_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -1868,7 +1868,7 @@ TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_unwrap_flag_fails)
 /// verifies AES-GCM key generation fails when derive flag is set
 TEST_F(tsra_aes_keygen, aes_gcm_key_gen_with_derive_flag_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

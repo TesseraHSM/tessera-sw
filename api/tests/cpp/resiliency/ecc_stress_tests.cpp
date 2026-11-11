@@ -31,7 +31,7 @@ class ecc_resiliency_stress : public resiliency_stress_base
 ///
 TEST_F(ecc_resiliency_stress, ecc_sign_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -81,7 +81,7 @@ TEST_F(ecc_resiliency_stress, ecc_sign_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_sign_verify_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -138,7 +138,7 @@ TEST_F(ecc_resiliency_stress, ecc_sign_verify_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_key_gen_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -182,7 +182,7 @@ TEST_F(ecc_resiliency_stress, ecc_key_gen_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_key_report_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -248,7 +248,7 @@ TEST_F(ecc_resiliency_stress, ecc_key_report_under_reset)
 ///
 TEST_F(ecc_resiliency_stress, ecc_unmask_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

@@ -44,7 +44,7 @@ static tsra_status generate_rsa_private_key_for_attest(
 )
 {
     tsra_status err;
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         auto_key wrapping_priv_key;
         auto_key wrapping_pub_key;
@@ -140,7 +140,7 @@ TEST_F(tsra_rsa_keyattest, attest_rsa_2048_key)
 
 TEST_F(tsra_rsa_keyattest, attest_rejects_partition_unwrapping_key)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -165,7 +165,7 @@ TEST_F(tsra_rsa_keyattest, attest_rejects_partition_unwrapping_key)
 
 TEST_F(tsra_rsa_keyattest, attest_rejects_noncanonical_report_data_lengths)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -293,7 +293,7 @@ TEST_F(tsra_rsa_keyattest, attest_rejects_report_data_larger_than_max)
 // Verifies that empty report data is rejected (report data must be exactly the max size).
 TEST_F(tsra_rsa_keyattest, attest_rejects_empty_report_data)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -555,7 +555,7 @@ TEST_F(tsra_rsa_keyattest, attest_report_data_patterns_require_max_size)
             TSRA_STATUS_SUCCESS
         );
 
-        const bool ex = api_rev_1_1();
+        const bool ex = api_rev_at_least(1, 1);
         std::vector<std::vector<uint8_t>> report_data_cases = {
             std::vector<uint8_t>(ex ? kReportDataSize : 1, 0x00),
             std::vector<uint8_t>(ex ? kReportDataSize : kShortReportDataSize / 2, 0xFF),
@@ -600,7 +600,7 @@ TEST_F(tsra_rsa_keyattest, attest_report_data_patterns_require_max_size)
 // Verifies that 127-byte report data, one less than the required max, is rejected.
 TEST_F(tsra_rsa_keyattest, attest_rejects_report_data_one_less_than_max)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

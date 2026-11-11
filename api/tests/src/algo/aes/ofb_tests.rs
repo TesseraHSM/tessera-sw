@@ -21,7 +21,7 @@ fn iv_a() -> Vec<u8> {
 
 #[session_test]
 fn test_ofb_unsupported_without_ex_session(session: HsmSession) {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let key = mode_key_all(&session, 128);
@@ -75,7 +75,7 @@ mod ex {
     /// Output matches the SP 800-38A definition built from the HSM's ECB.
     #[session_test]
     fn test_ofb_known_answer_128(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         run_known_answer(&session, 128);
@@ -84,7 +84,7 @@ mod ex {
     /// Output matches the SP 800-38A definition built from the HSM's ECB.
     #[session_test]
     fn test_ofb_known_answer_192(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         run_known_answer(&session, 192);
@@ -93,7 +93,7 @@ mod ex {
     /// Output matches the SP 800-38A definition built from the HSM's ECB.
     #[session_test]
     fn test_ofb_known_answer_256(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         run_known_answer(&session, 256);
@@ -102,7 +102,7 @@ mod ex {
     /// Input larger than one device request is chunked with correct chaining.
     #[session_test]
     fn test_ofb_known_answer_multi_request(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 256);
@@ -121,7 +121,7 @@ mod ex {
     /// Streaming with irregular chunk sizes matches single-shot output.
     #[session_test]
     fn test_ofb_streaming_matches_single_shot(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -145,7 +145,7 @@ mod ex {
     /// Block-aligned calls can be continued from the chained IV.
     #[session_test]
     fn test_ofb_chained_calls_match_single_shot(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 192);
@@ -162,7 +162,7 @@ mod ex {
     /// Different IVs produce different ciphertext.
     #[session_test]
     fn test_ofb_iv_changes_ciphertext(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -177,7 +177,7 @@ mod ex {
     /// Empty input produces empty output and leaves the IV unchanged.
     #[session_test]
     fn test_ofb_empty_input(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -202,7 +202,7 @@ mod ex {
     /// Size queries report the input length.
     #[session_test]
     fn test_ofb_size_query(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -222,7 +222,7 @@ mod ex {
     /// Output buffers smaller than the input are rejected.
     #[session_test]
     fn test_ofb_buffer_too_small(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -245,7 +245,7 @@ mod ex {
     /// Keys without the matching usage are rejected.
     #[session_test]
     fn test_ofb_key_permissions(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let pt = mode_data(16);
@@ -274,7 +274,7 @@ mod ex {
     /// A finished context rejects further use.
     #[session_test]
     fn test_ofb_context_unusable_after_finish(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);

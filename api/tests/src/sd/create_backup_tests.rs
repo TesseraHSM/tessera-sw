@@ -29,7 +29,7 @@ use crate::utils::sd_provision::masked_key_and_report;
 /// pinned wire lengths.
 #[test]
 fn sd_create_remote_backup_roundtrip() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -73,7 +73,7 @@ fn sd_create_remote_backup_roundtrip() {
 /// partition is rejected by the firmware.
 #[test]
 fn sd_create_remote_backup_is_one_shot() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -108,7 +108,7 @@ fn sd_create_remote_backup_is_one_shot() {
 /// create the security domain — exercising the host/FFI allow-empty path.
 #[test]
 fn sd_create_remote_backup_roundtrip_empty_evidence() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();

@@ -161,7 +161,7 @@ class tsra_multi_process : public ::testing::Test
 
 TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_parent)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -288,7 +288,7 @@ TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_parent)
 
 TEST_F(tsra_multi_process, ecc_sign_verify_cross_process_child)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

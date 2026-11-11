@@ -3,7 +3,7 @@
 
 #[test]
 fn test_open_session() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     // Not `#[partition_test]`: its fixture would init the partition before

@@ -9,7 +9,7 @@
 //! | Key              | Value                                                  |
 //! |------------------|--------------------------------------------------------|
 //! | `transport`      | DDI transport: `sock`, `native`, `nix` or `win`         |
-//! | `api_rev`        | API revision used by `tsra_api_tests`: `1_0` or `1_1`   |
+//! | `api_rev`        | API revision used by `tsra_api_tests`, as `MAJOR_MINOR` |
 //! | `sock`           | Socket server endpoint for the sock transport           |
 //! | `resource_count` | Partition resources of the sock server, `1..=65`        |
 //! | `server_bin`     | Path to a standalone `ddi_sock_server` binary           |
@@ -34,7 +34,8 @@ static PROCESS_ARGS: OnceLock<TestArgs> = OnceLock::new();
 pub struct TestArgs {
     /// DDI transport name (see [`tsra_ddi::DdiTransport::parse`]).
     pub transport: Option<String>,
-    /// API revision used by `tsra_api_tests`: `1_0` or `1_1`.
+    /// API revision used by `tsra_api_tests`, as `MAJOR_MINOR` (e.g. `1_1`).
+    /// See [`TestArgs::api_rev_parts`].
     pub api_rev: Option<String>,
     /// Socket server endpoint for the sock transport.
     pub sock: Option<String>,
@@ -80,10 +81,10 @@ impl TestArgs {
             let invalid = || format!("{TEST_ARGS_ENV}: invalid {key}={val:?}");
             match key {
                 "transport" => args.transport = Some(val.to_owned()),
-                "api_rev" => match val {
-                    "1_0" | "1_1" => args.api_rev = Some(val.to_owned()),
-                    _ => return Err(invalid()),
-                },
+                "api_rev" => {
+                    parse_api_rev(val).ok_or_else(invalid)?;
+                    args.api_rev = Some(val.to_owned());
+                }
                 "sock" => args.sock = Some(val.to_owned()),
                 "resource_count" => {
                     args.resource_count = Some(val.parse().map_err(|_| invalid())?);
@@ -119,6 +120,11 @@ impl TestArgs {
 }
 
 impl TestArgs {
+    /// The `api_rev` setting as `(major, minor)`, or `None` if unset.
+    pub fn api_rev_parts(&self) -> Option<(u32, u32)> {
+        self.api_rev.as_deref().and_then(parse_api_rev)
+    }
+
     /// Sets the configuration [`TestArgs::from_env`] returns in this process
     /// (with the `test-args` feature), in place of [`TEST_ARGS_ENV`], without
     /// changing the environment that child processes inherit. Can be set
@@ -126,6 +132,14 @@ impl TestArgs {
     pub fn set_process(args: TestArgs) -> Result<(), TestArgs> {
         PROCESS_ARGS.set(args)
     }
+}
+
+/// Parses an API revision written as `MAJOR_MINOR`, e.g. `1_1`.
+fn parse_api_rev(value: &str) -> Option<(u32, u32)> {
+    let (major, minor) = value.split_once('_')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(major) && digits(minor)).then_some(())?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
 impl fmt::Display for TestArgs {
@@ -162,6 +176,7 @@ mod tests {
         .expect("valid test args");
         assert_eq!(args.transport.as_deref(), Some("sock"));
         assert_eq!(args.api_rev.as_deref(), Some("1_1"));
+        assert_eq!(args.api_rev_parts(), Some((1, 1)));
         assert_eq!(args.sock.as_deref(), Some("tcp://127.0.0.1:1"));
         assert_eq!(args.resource_count, Some(4));
         assert_eq!(args.server_bin.as_deref(), Some("/x/ddi_sock_server"));
@@ -171,12 +186,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_any_api_rev() {
+        let args = TestArgs::parse("api_rev=2_10").expect("valid api_rev");
+        assert_eq!(args.api_rev_parts(), Some((2, 10)));
+        assert_eq!(TestArgs::default().api_rev_parts(), None);
+    }
+
+    #[test]
     fn parse_rejects_invalid_input() {
         for bad in [
             "transport",
             "transport=",
             "bogus=1",
             "api_rev=session_ex",
+            "api_rev=1",
+            "api_rev=1_",
+            "api_rev=_1",
+            "api_rev=1_1_1",
+            "api_rev=+1_1",
+            "api_rev=1_99999999999",
             "fast_backoff=1",
             "resource_count=four",
             "transport=sock;transport=nix",

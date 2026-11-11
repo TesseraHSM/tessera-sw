@@ -91,9 +91,11 @@ Unknown keys are an error. Test keys:
 ### API Revision Modes
 
 `tsra_api_tests` (Rust and C++) selects the session API at runtime from
-the `api_rev` key of `TSRA_TEST_ARGS`: `1_0` (default) for legacy/MBOR
-`open_session`, or `1_1` for EX/TBOR `open_session_ex`. Tests for the other
-mode return early. `--api-rev` sets it:
+the `api_rev` key of `TSRA_TEST_ARGS`, written as `MAJOR_MINOR`: `1_0`
+(default) for legacy/MBOR `open_session`, or `1_1` and later for EX/TBOR
+`open_session_ex`. Tests gate on the minimum revision they need with
+`api_rev_at_least(major, minor)` and return early otherwise. `--api-rev` sets
+it:
 
 ```bash
 cargo xtask nextest --transport sock --api-rev 1_1 --package tsra_api_tests

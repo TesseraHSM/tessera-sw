@@ -158,7 +158,7 @@ class tsra_sd_reseal_backup_test : public ::testing::Test
 // non-zero backup distinct from the source ciphertext.
 TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -235,7 +235,7 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
 // ciphertexts (a fresh HPKE ephemeral each call).
 TEST_F(tsra_sd_reseal_backup_test, reseal_backup_rerandomizes)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -288,7 +288,7 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_rerandomizes)
 // session resolves and before the reseal is performed.
 TEST_F(tsra_sd_reseal_backup_test, reseal_backup_null_params)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }

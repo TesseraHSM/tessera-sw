@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <tsra_api.h>
+#include <utility>
 #include <vector>
 
 inline constexpr uint32_t kReportDataSize = 128;
@@ -72,29 +73,41 @@ inline std::string test_arg(const std::string &key)
     return {};
 }
 
-/// Returns `true` when `api_rev=1_1` in `TSRA_TEST_ARGS` selects the
-/// `open_session_ex` tests; tests for the other session API return early.
-/// Unset or `1_0` selects `open_session`; other values throw, matching the
-/// Rust selector.
-inline bool api_rev_1_1()
+/// Returns `true` when the `api_rev` selected in `TSRA_TEST_ARGS` is at
+/// least `major.minor`. An unset `api_rev` selects revision 1.0; revisions
+/// from 1.1 run the `open_session_ex` tests. `api_rev` is written as
+/// `MAJOR_MINOR` (e.g. `1_1`); other values throw, matching the Rust parser.
+inline bool api_rev_at_least(uint32_t major, uint32_t minor)
 {
     const auto value = test_arg("api_rev");
-    if (value.empty() || value == "1_0")
+    if (value.empty())
     {
-        return false;
+        return std::make_pair(uint32_t{ 1 }, uint32_t{ 0 }) >= std::make_pair(major, minor);
     }
-    if (value == "1_1")
+    const auto invalid = [&value]() {
+        return std::invalid_argument("TSRA_TEST_ARGS api_rev must be `MAJOR_MINOR`, got " + value);
+    };
+    const auto sep = value.find('_');
+    if (sep == std::string::npos)
     {
-        return true;
+        throw invalid();
     }
-    throw std::invalid_argument("TSRA_TEST_ARGS api_rev must be `1_0` or `1_1`, got " + value);
-}
-
-/// Returns `true` when the `api_rev` key of `TSRA_TEST_ARGS` is unset or
-/// `1_0`, selecting the `open_session` tests; other values throw.
-inline bool api_rev_1_0()
-{
-    return !api_rev_1_1();
+    const auto parse_part = [&invalid](const std::string &part) {
+        if (part.empty() || part.size() > 10 ||
+            part.find_first_not_of("0123456789") != std::string::npos)
+        {
+            throw invalid();
+        }
+        const auto parsed = std::stoull(part);
+        if (parsed > UINT32_MAX)
+        {
+            throw invalid();
+        }
+        return static_cast<uint32_t>(parsed);
+    };
+    const auto selected =
+        std::make_pair(parse_part(value.substr(0, sep)), parse_part(value.substr(sep + 1)));
+    return selected >= std::make_pair(major, minor);
 }
 
 /// Returns the system temporary directory (`/tmp` on Linux, `%TEMP%` on Windows).

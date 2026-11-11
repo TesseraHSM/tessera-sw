@@ -204,7 +204,7 @@ TEST_F(tsra_ecc_keyattest, public_key_fails)
 /// as `TSRA_STATUS_DDI_CMD_FAILURE`.
 TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -244,7 +244,7 @@ TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails)
 /// (128) bytes of report data is accepted by the device.
 TEST_F(tsra_ecc_keyattest, one_byte_report_data_fails)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -673,7 +673,7 @@ TEST_F(tsra_ecc_keyattest, invalid_report_data_size_query_fails)
 /// (128) bytes of report data is accepted by the device.
 TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails_for_all_curves)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -724,7 +724,7 @@ TEST_F(tsra_ecc_keyattest, zero_length_report_data_fails_for_all_curves)
 /// exactly 128 bytes succeeds.
 TEST_F(tsra_ecc_keyattest, boundary_report_data_lengths_for_all_curves)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -797,7 +797,7 @@ TEST_F(tsra_ecc_keyattest, boundary_report_data_lengths_for_all_curves)
 /// Verifies EX rejects report data whose length differs from the TBOR field size.
 TEST_F(tsra_ecc_keyattest, rejects_noncanonical_report_data_lengths)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }

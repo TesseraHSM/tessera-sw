@@ -17,7 +17,7 @@ class tsra_sess : public ::testing::Test
 
 TEST_F(tsra_sess, open_and_close)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -42,7 +42,7 @@ TEST_F(tsra_sess, open_and_close)
 
 TEST_F(tsra_sess, open_null_sess_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -61,7 +61,7 @@ TEST_F(tsra_sess, open_null_sess_handle)
 
 TEST_F(tsra_sess, open_null_creds)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -78,7 +78,7 @@ TEST_F(tsra_sess, open_null_creds)
 
 TEST_F(tsra_sess, open_invalid_partition_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -99,7 +99,7 @@ TEST_F(tsra_sess, open_invalid_partition_handle)
 
 TEST_F(tsra_sess, close_invalid_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -112,7 +112,7 @@ TEST_F(tsra_sess, close_invalid_handle)
 
 TEST_F(tsra_sess, close_double_close)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -141,7 +141,7 @@ TEST_F(tsra_sess, close_double_close)
 
 TEST_F(tsra_sess, open_close_multiple)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -169,7 +169,7 @@ TEST_F(tsra_sess, open_close_multiple)
 
 TEST_F(tsra_sess, open_with_wrong_handle_type)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -190,7 +190,7 @@ TEST_F(tsra_sess, open_with_wrong_handle_type)
 
 TEST_F(tsra_sess, open_with_corrupt_creds)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -208,7 +208,7 @@ TEST_F(tsra_sess, open_with_corrupt_creds)
 
 TEST_F(tsra_sess, get_prop_api_rev)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -242,7 +242,7 @@ TEST_F(tsra_sess, get_prop_api_rev)
 
 TEST_F(tsra_sess, get_prop_api_rev_buffer_too_small)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -275,7 +275,7 @@ TEST_F(tsra_sess, get_prop_api_rev_buffer_too_small)
 
 TEST_F(tsra_sess, get_prop_null_prop_ptr)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -301,7 +301,7 @@ TEST_F(tsra_sess, get_prop_null_prop_ptr)
 
 TEST_F(tsra_sess, get_prop_invalid_handle)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -315,7 +315,7 @@ TEST_F(tsra_sess, get_prop_invalid_handle)
 
 TEST_F(tsra_sess, get_prop_unsupported_property)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -344,7 +344,7 @@ TEST_F(tsra_sess, get_prop_unsupported_property)
 
 TEST_F(tsra_sess, get_prop_wrong_handle_type)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

@@ -123,7 +123,7 @@ fn hmac_key_gen_rejects_extra_capability(session: HsmSession) {
 /// and is covered elsewhere.
 #[test]
 fn hmac_key_gen_roundtrip_generates_usable_key() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -159,7 +159,7 @@ fn hmac_key_gen_roundtrip_generates_usable_key() {
 /// This comparison does not establish that the underlying key bytes differ.
 #[test]
 fn hmac_key_gen_yields_distinct_masked_blobs() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();

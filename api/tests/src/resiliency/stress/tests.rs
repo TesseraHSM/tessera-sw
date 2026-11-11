@@ -151,7 +151,7 @@ fn spawn_reset_thread(
 /// via the retry path.
 #[api_test]
 fn test_stress_aes_cbc_encrypt_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -221,7 +221,7 @@ fn test_stress_aes_cbc_encrypt_under_reset() {
 /// round-trip correctness.
 #[api_test]
 fn test_stress_aes_cbc_round_trip_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -291,7 +291,7 @@ fn test_stress_aes_cbc_round_trip_under_reset() {
 /// Multiple threads perform ECC sign while Resets fire continuously.
 #[api_test]
 fn test_stress_ecc_sign_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -345,7 +345,7 @@ fn test_stress_ecc_sign_under_reset() {
 /// Multiple threads perform HMAC sign while Resets fire continuously.
 #[api_test]
 fn test_stress_hmac_sign_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -405,7 +405,7 @@ fn test_stress_hmac_sign_under_reset() {
 /// HMAC sign, RSA hash-sign) concurrently while Resets fire continuously.
 #[api_test]
 fn test_stress_mixed_ops_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -539,7 +539,7 @@ fn test_stress_mixed_ops_under_reset() {
 /// that `#[resiliency_key_gen]` recovers.
 #[api_test]
 fn test_stress_key_gen_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -601,7 +601,7 @@ fn test_stress_key_gen_under_reset() {
 /// triggering an Reset, validating recovery after every single reset.
 #[api_test]
 fn test_stress_rapid_reset_between_ops() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -698,7 +698,7 @@ fn gcm_decrypt(
 /// verifying round-trip correctness including authenticated data.
 #[api_test]
 fn test_stress_aes_gcm_round_trip_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -826,7 +826,7 @@ fn xts_decrypt(
 /// verifying round-trip correctness.
 #[api_test]
 fn test_stress_aes_xts_round_trip_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -901,7 +901,7 @@ fn test_stress_aes_xts_round_trip_under_reset() {
 /// under continuous Reset, ensuring both operations recover.
 #[api_test]
 fn test_stress_ecc_sign_verify_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -975,7 +975,7 @@ fn test_stress_ecc_sign_verify_under_reset() {
 /// Workers sign and verify HMAC tags under continuous Reset.
 #[api_test]
 fn test_stress_hmac_sign_verify_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1056,7 +1056,7 @@ fn test_stress_hmac_sign_verify_under_reset() {
 /// verifying that `#[resiliency_key_gen]` recovers.
 #[api_test]
 fn test_stress_ecc_key_gen_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1125,7 +1125,7 @@ fn test_stress_ecc_key_gen_under_reset() {
 /// Workers repeatedly generate AES-GCM keys while Resets fire.
 #[api_test]
 fn test_stress_aes_gcm_key_gen_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1183,7 +1183,7 @@ fn test_stress_aes_gcm_key_gen_under_reset() {
 /// Workers repeatedly perform ECDH key derivation while Resets fire.
 #[api_test]
 fn test_stress_ecdh_derive_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1257,7 +1257,7 @@ fn test_stress_ecdh_derive_under_reset() {
 /// Workers repeatedly perform HKDF key derivation while Resets fire.
 #[api_test]
 fn test_stress_hkdf_derive_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1395,7 +1395,7 @@ fn generate_rsa_sign_key_pair(session: &HsmSession) -> (HsmRsaPrivateKey, HsmRsa
 /// Workers repeatedly perform RSA hash-sign while Resets fire.
 #[api_test]
 fn test_stress_rsa_hash_sign_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1468,7 +1468,7 @@ fn test_stress_rsa_hash_sign_under_reset() {
 /// restores the device handle so the next `unwrap_key_pair` succeeds.
 #[api_test]
 fn test_stress_rsa_unwrap_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     use crypto::*;
@@ -1577,7 +1577,7 @@ fn test_stress_rsa_unwrap_under_reset() {
 /// Resets fire.
 #[api_test]
 fn test_stress_ecc_unmask_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1636,7 +1636,7 @@ fn test_stress_ecc_unmask_under_reset() {
 /// Workers repeatedly unmask a shared secret (from ECDH) while Resets fire.
 #[api_test]
 fn test_stress_generic_secret_unmask_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1698,7 +1698,7 @@ fn test_stress_generic_secret_unmask_under_reset() {
 /// Workers repeatedly perform ECC key attestation while Resets fire.
 #[api_test]
 fn test_stress_ecc_key_report_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1753,7 +1753,7 @@ fn test_stress_ecc_key_report_under_reset() {
 /// device.
 #[api_test]
 fn test_stress_delete_key_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -1829,7 +1829,7 @@ fn test_stress_delete_key_under_reset() {
 /// via the retry path.
 #[api_test]
 fn test_stress_cert_chain_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, _session, _ctx) = init_partition_and_session();
@@ -1895,7 +1895,7 @@ fn test_stress_cert_chain_under_reset() {
 /// POTA re-endorsement — all under concurrent Reset pressure.
 #[api_test]
 fn test_stress_init_part_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let list = HsmPartitionManager::partition_info_list();
@@ -2027,7 +2027,7 @@ fn test_stress_init_part_under_reset() {
 /// Workers repeatedly generate AES-XTS keys while Resets fire.
 #[api_test]
 fn test_stress_aes_xts_key_gen_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2084,7 +2084,7 @@ fn test_stress_aes_xts_key_gen_under_reset() {
 /// Workers repeatedly perform RSA key attestation while Resets fire.
 #[api_test]
 fn test_stress_rsa_key_report_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2137,7 +2137,7 @@ fn test_stress_rsa_key_report_under_reset() {
 /// Workers repeatedly perform RSA decryption while Resets fire.
 #[api_test]
 fn test_stress_rsa_decrypt_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     use crypto::*;
@@ -2247,7 +2247,7 @@ fn test_stress_rsa_decrypt_under_reset() {
 /// Workers repeatedly unmask an AES key from a masked blob while Resets fire.
 #[api_test]
 fn test_stress_aes_unmask_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2303,7 +2303,7 @@ fn test_stress_aes_unmask_under_reset() {
 /// Workers repeatedly unmask an AES-XTS key from a masked blob while Resets fire.
 #[api_test]
 fn test_stress_xts_unmask_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2359,7 +2359,7 @@ fn test_stress_xts_unmask_under_reset() {
 /// Workers repeatedly unwrap an AES key using RSA-AES while Resets fire.
 #[api_test]
 fn test_stress_aes_unwrap_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2452,7 +2452,7 @@ fn test_stress_aes_unwrap_under_reset() {
 /// Workers repeatedly unwrap an ECC key pair using RSA-AES while Resets fire.
 #[api_test]
 fn test_stress_ecc_unwrap_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     use crypto::*;
@@ -2560,7 +2560,7 @@ fn test_stress_ecc_unwrap_under_reset() {
 /// Workers repeatedly unwrap an AES-XTS key using RSA-AES while Resets fire.
 #[api_test]
 fn test_stress_xts_unwrap_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2678,7 +2678,7 @@ fn test_stress_xts_unwrap_under_reset() {
 /// Resets fire, exercising the keygen + epoch-aware delete path.
 #[api_test]
 fn test_stress_keygen_delete_under_reset() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2753,7 +2753,7 @@ fn test_stress_keygen_delete_under_reset() {
 /// that doesn't match.
 #[api_test]
 fn test_concurrent_key_gen_and_key_op_no_aba() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();
@@ -2922,7 +2922,7 @@ fn test_concurrent_key_gen_and_key_op_no_aba() {
 ///    wrong plaintext.
 #[api_test]
 fn test_key_gen_during_restore_no_handle_collision() {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let (part, _creds, session, _ctx) = init_partition_and_session();

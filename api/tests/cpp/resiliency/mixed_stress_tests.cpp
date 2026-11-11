@@ -37,7 +37,7 @@ class mixed_resiliency_stress : public resiliency_stress_base
 ///
 TEST_F(mixed_resiliency_stress, mixed_ops_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -125,7 +125,7 @@ TEST_F(mixed_resiliency_stress, mixed_ops_under_reset)
 ///
 TEST_F(mixed_resiliency_stress, hmac_sign_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -192,7 +192,7 @@ TEST_F(mixed_resiliency_stress, hmac_sign_under_reset)
 ///
 TEST_F(mixed_resiliency_stress, hmac_sign_verify_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -269,7 +269,7 @@ TEST_F(mixed_resiliency_stress, hmac_sign_verify_under_reset)
 ///
 TEST_F(mixed_resiliency_stress, keygen_delete_under_reset)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

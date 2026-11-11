@@ -575,7 +575,7 @@ TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_3072_rejects_corrupted_blob)
 // Verifies 2048-bit RSA unwrap rejects a wrong unwrapping key.
 TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_2048_rejects_wrong_unwrapping_key)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -585,7 +585,7 @@ TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_2048_rejects_wrong_unwrapping_key)
 // Verifies 3072-bit RSA unwrap rejects a wrong unwrapping key.
 TEST_F(tsra_rsa_unwrap, unwrap_external_rsa_3072_rejects_wrong_unwrapping_key)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

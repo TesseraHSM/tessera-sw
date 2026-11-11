@@ -36,7 +36,7 @@ fn sealing_props() -> HsmKeyProps {
 /// scalar.
 #[test]
 fn sealing_key_gen_rejects_wrong_bits() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -59,7 +59,7 @@ fn sealing_key_gen_rejects_wrong_bits() {
 /// only permitted usage for a sealing key.
 #[test]
 fn sealing_key_gen_rejects_missing_derive() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -81,7 +81,7 @@ fn sealing_key_gen_rejects_missing_derive() {
 /// secret derive key.
 #[test]
 fn sealing_key_gen_rejects_wrong_kind() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -103,7 +103,7 @@ fn sealing_key_gen_rejects_wrong_kind() {
 /// A `Sealing` derive key that is not a `Secret` is rejected.
 #[test]
 fn sealing_key_gen_rejects_wrong_class() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -126,7 +126,7 @@ fn sealing_key_gen_rejects_wrong_class() {
 /// `sign`) fails the supported-flags check.
 #[test]
 fn sealing_key_gen_rejects_extra_capability() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -152,7 +152,7 @@ fn sealing_key_gen_rejects_extra_capability() {
 /// unprovisioned partition).
 #[test]
 fn sealing_key_gen_valid_props_pass_host_guards() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -177,7 +177,7 @@ fn sealing_key_gen_valid_props_pass_host_guards() {
 /// plus a P-384 public key — with the expected typed properties.
 #[test]
 fn sealing_key_gen_roundtrip_generates_usable_sealing_key() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -208,7 +208,7 @@ fn sealing_key_gen_roundtrip_generates_usable_sealing_key() {
 
 #[test]
 fn sealing_key_unmask_roundtrip_attests_reconstructed_key() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -245,7 +245,7 @@ fn sealing_key_unmask_roundtrip_attests_reconstructed_key() {
 
 #[test]
 fn sealing_key_unmask_rejects_legacy_session() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -260,7 +260,7 @@ fn sealing_key_unmask_rejects_legacy_session() {
 
 #[test]
 fn sealing_key_unmask_rejects_incompatible_key_properties() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -285,7 +285,7 @@ fn sealing_key_unmask_rejects_incompatible_key_properties() {
 /// `Drop`, which intentionally ignores deletion errors.
 #[test]
 fn sealing_key_explicit_delete_succeeds() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -303,7 +303,7 @@ fn sealing_key_explicit_delete_succeeds() {
 /// and distinct public keys.
 #[test]
 fn sealing_key_gen_roundtrip_yields_distinct_keys() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -333,7 +333,7 @@ fn sealing_key_gen_roundtrip_yields_distinct_keys() {
 /// Session scope is rejected by the host before any device round-trip.
 #[test]
 fn sealing_key_gen_rejects_session_scope() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -358,7 +358,7 @@ fn sealing_key_gen_rejects_session_scope() {
 /// blob, so generation succeeds on a provisioned partition.
 #[test]
 fn sealing_key_gen_roundtrip_honors_explicit_local_scope() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -386,7 +386,7 @@ fn sealing_key_gen_roundtrip_honors_explicit_local_scope() {
 /// device stamps the requested scope into the masked blob.
 #[test]
 fn sealing_key_gen_roundtrip_honors_ephemeral_scope() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -413,7 +413,7 @@ fn sealing_key_gen_roundtrip_honors_ephemeral_scope() {
 /// generation and attestation both succeed on the same session.
 #[test]
 fn sealing_key_gen_sd_scope() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -473,7 +473,7 @@ fn sealing_key_gen_sd_scope() {
 /// session without resetting or re-provisioning the partition or SD.
 #[test]
 fn sealing_key_gen_sd_scope_reopen() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();
@@ -534,7 +534,7 @@ fn sealing_key_gen_sd_scope_reopen() {
 /// The CO PSK is rotated so the credential gate cannot mask this state check.
 #[test]
 fn sd_scoped_keygen_rejects_bootstrap_partition() {
-    if crate::utils::session::api_rev_1_0() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let _guard = PARTITION_LOCK.lock();

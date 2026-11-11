@@ -21,7 +21,7 @@ class tsra_ecc_keyunwrap_semantic : public ::testing::Test
   protected:
     static tsra_status malformed_blob_status()
     {
-        return api_rev_1_1() ? TSRA_STATUS_INVALID_ARGUMENT : TSRA_STATUS_DDI_CMD_FAILURE;
+        return api_rev_at_least(1, 1) ? TSRA_STATUS_INVALID_ARGUMENT : TSRA_STATUS_DDI_CMD_FAILURE;
     }
     PartitionListHandle part_list_ = PartitionListHandle{};
 };
@@ -175,7 +175,7 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_wrapped_single_key_paylo
 // Verifies unwrap rejects blobs wrapped by a different RSA wrapping key.
 TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_blob_wrapped_by_different_wrapping_key)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

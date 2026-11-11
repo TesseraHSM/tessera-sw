@@ -639,8 +639,8 @@ TEST_F(tsra_secret_unmask, unmask_rejects_corrupted_last_byte)
         // authentication failure; legacy sessions report a decode failure.
         ASSERT_EQ(
             err,
-            api_rev_1_1() ? TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED
-                          : TSRA_STATUS_MASKED_KEY_DECODE_FAILED
+            api_rev_at_least(1, 1) ? TSRA_STATUS_MASKED_KEY_AUTHENTICATION_FAILED
+                                   : TSRA_STATUS_MASKED_KEY_DECODE_FAILED
         );
         ASSERT_EQ(unmasked_key.get(), 0u);
     });

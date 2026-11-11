@@ -13,7 +13,7 @@ use super::*;
 
 #[session_test]
 fn test_ecb_unsupported_without_ex_session(session: HsmSession) {
-    if crate::utils::session::api_rev_1_1() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
     let key = mode_key_all(&session, 128);
@@ -53,7 +53,7 @@ mod ex {
     /// Each block matches the AES forward cipher (via zero-IV CBC).
     #[session_test]
     fn test_ecb_known_answer_128(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         run_known_answer(&session, 128);
@@ -62,7 +62,7 @@ mod ex {
     /// Each block matches the AES forward cipher (via zero-IV CBC).
     #[session_test]
     fn test_ecb_known_answer_192(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         run_known_answer(&session, 192);
@@ -71,7 +71,7 @@ mod ex {
     /// Each block matches the AES forward cipher (via zero-IV CBC).
     #[session_test]
     fn test_ecb_known_answer_256(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         run_known_answer(&session, 256);
@@ -80,7 +80,7 @@ mod ex {
     /// Identical plaintext blocks encrypt to identical ciphertext blocks.
     #[session_test]
     fn test_ecb_identical_blocks(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -93,7 +93,7 @@ mod ex {
     /// Empty and non-block-aligned input is rejected.
     #[session_test]
     fn test_ecb_invalid_length(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -115,7 +115,7 @@ mod ex {
     /// Streaming with irregular chunk sizes matches single-shot output.
     #[session_test]
     fn test_ecb_streaming_matches_single_shot(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 256);
@@ -133,7 +133,7 @@ mod ex {
     /// Streaming finish fails if the total input was not block-aligned.
     #[session_test]
     fn test_ecb_streaming_partial_block_rejected(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -146,7 +146,7 @@ mod ex {
     /// Output buffers smaller than the input are rejected.
     #[session_test]
     fn test_ecb_buffer_too_small(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);
@@ -165,7 +165,7 @@ mod ex {
     /// Keys without the matching usage are rejected.
     #[session_test]
     fn test_ecb_key_permissions(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let pt = mode_data(16);
@@ -194,7 +194,7 @@ mod ex {
     /// A finished context rejects further use.
     #[session_test]
     fn test_ecb_context_unusable_after_finish(session: HsmSession) {
-        if crate::utils::session::api_rev_1_0() {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
             return;
         }
         let key = mode_key_all(&session, 128);

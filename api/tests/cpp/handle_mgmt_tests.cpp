@@ -20,7 +20,7 @@ class tsra_handle_mgmt : public ::testing::Test
 
 TEST_F(tsra_handle_mgmt, free_sha_context_on_error)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -47,7 +47,7 @@ TEST_F(tsra_handle_mgmt, free_sha_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_sign_context_on_error)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -86,7 +86,7 @@ TEST_F(tsra_handle_mgmt, free_sign_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_verify_context_on_error)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -125,7 +125,7 @@ TEST_F(tsra_handle_mgmt, free_verify_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_encrypt_context_on_error)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -160,7 +160,7 @@ TEST_F(tsra_handle_mgmt, free_encrypt_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_decrypt_context_on_error)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -195,7 +195,7 @@ TEST_F(tsra_handle_mgmt, free_decrypt_context_on_error)
 
 TEST_F(tsra_handle_mgmt, free_handle_invalid)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -206,7 +206,7 @@ TEST_F(tsra_handle_mgmt, free_handle_invalid)
 
 TEST_F(tsra_handle_mgmt, free_handle_double_free)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
@@ -229,7 +229,7 @@ TEST_F(tsra_handle_mgmt, free_handle_double_free)
 
 TEST_F(tsra_handle_mgmt, free_handle_multiple_contexts)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }

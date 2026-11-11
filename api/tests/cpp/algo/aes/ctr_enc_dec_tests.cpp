@@ -45,7 +45,7 @@ class tsra_aes_ctr : public ::testing::Test
 
 TEST_F(tsra_aes_ctr, single_shot_matches_reference)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -107,7 +107,7 @@ TEST_F(tsra_aes_ctr, single_shot_matches_reference)
 
 TEST_F(tsra_aes_ctr, streaming_matches_single_shot)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -174,7 +174,7 @@ TEST_F(tsra_aes_ctr, streaming_matches_single_shot)
 
 TEST_F(tsra_aes_ctr, params_iv_chains_block_aligned_calls)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -222,7 +222,7 @@ TEST_F(tsra_aes_ctr, params_iv_chains_block_aligned_calls)
 
 TEST_F(tsra_aes_ctr, empty_input_produces_empty_output)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -245,7 +245,7 @@ TEST_F(tsra_aes_ctr, empty_input_produces_empty_output)
 
 TEST_F(tsra_aes_ctr, rejects_invalid_params)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -273,7 +273,7 @@ TEST_F(tsra_aes_ctr, rejects_invalid_params)
 
 TEST_F(tsra_aes_ctr, buffer_too_small_reports_required_len)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -298,7 +298,7 @@ TEST_F(tsra_aes_ctr, buffer_too_small_reports_required_len)
 
 TEST_F(tsra_aes_ctr, context_unusable_after_finish)
 {
-    if (api_rev_1_0())
+    if (!api_rev_at_least(1, 1))
     {
         return;
     }
@@ -333,7 +333,7 @@ TEST_F(tsra_aes_ctr, context_unusable_after_finish)
 
 TEST_F(tsra_aes_ctr, unsupported_without_session_ex)
 {
-    if (api_rev_1_1())
+    if (api_rev_at_least(1, 1))
     {
         return;
     }
