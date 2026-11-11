@@ -3,8 +3,30 @@
 
 use tsra_api::*;
 use tsra_api_tests_macro::*;
+use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
 use super::key_tests::*;
+
+fn ecc_key_pair_props_builders(
+    curve: HsmEccCurve,
+    can_derive: bool,
+) -> (HsmKeyPropsBuilder, HsmKeyPropsBuilder) {
+    let priv_builder = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Private)
+        .key_kind(HsmKeyKind::Ecc)
+        .ecc_curve(curve)
+        .can_sign(!can_derive)
+        .can_derive(can_derive)
+        .is_session(true);
+    let pub_builder = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Public)
+        .key_kind(HsmKeyKind::Ecc)
+        .ecc_curve(curve)
+        .can_verify(!can_derive)
+        .can_derive(can_derive)
+        .is_session(true);
+    (priv_builder, pub_builder)
+}
 
 // Helper to generate an ECC key pair using the provided private/public key properties.
 fn gen_ecc_key_pair(
@@ -175,6 +197,230 @@ fn test_ecc_priv_props_no_usage_flags_fails(session: HsmSession) {
     assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
 }
 
+fn assert_ecc_flag_rejected(
+    session: &HsmSession,
+    curve: HsmEccCurve,
+    key_class: HsmKeyClass,
+    can_derive: bool,
+    set_flag: fn(HsmKeyPropsBuilder, bool) -> HsmKeyPropsBuilder,
+) {
+    assert!(matches!(
+        key_class,
+        HsmKeyClass::Private | HsmKeyClass::Public
+    ));
+    let props_with_flag = |enabled| {
+        let (mut priv_builder, mut pub_builder) = ecc_key_pair_props_builders(curve, can_derive);
+        if key_class == HsmKeyClass::Private {
+            priv_builder = set_flag(priv_builder, enabled);
+        } else {
+            pub_builder = set_flag(pub_builder, enabled);
+        }
+        (
+            priv_builder.build().expect("Failed to build private props"),
+            pub_builder.build().expect("Failed to build public props"),
+        )
+    };
+
+    let (priv_props, pub_props) = props_with_flag(false);
+    let (priv_key, pub_key) = gen_ecc_key_pair(session, priv_props, pub_props)
+        .expect("Control template must succeed with the forbidden flag unset");
+    assert_eq!(priv_key.ecc_curve(), Some(curve));
+    assert_eq!(pub_key.ecc_curve(), Some(curve));
+    assert_eq!(priv_key.bits(), curve.key_size_bits() as u32);
+    assert_eq!(pub_key.bits(), curve.key_size_bits() as u32);
+    HsmKeyManager::delete_key(priv_key).expect("Failed to delete control private key");
+    HsmKeyManager::delete_key(pub_key).expect("Failed to delete control public key");
+
+    let (priv_props, pub_props) = props_with_flag(true);
+    let result = gen_ecc_key_pair(session, priv_props, pub_props);
+    assert_eq!(
+        result.err(),
+        Some(HsmError::InvalidKeyProps),
+        "Changing only the forbidden flag must reject {key_class:?} {curve:?} props with derive={can_derive}"
+    );
+}
+
+macro_rules! ecc_flag_tests {
+    ($name:ident, $key_class:expr, $can_derive:expr, $set_flag:path $(,)?) => {
+        mod $name {
+            use super::*;
+
+            #[session_test]
+            fn p256(session: HsmSession) {
+                assert_ecc_flag_rejected(
+                    &session,
+                    HsmEccCurve::P256,
+                    $key_class,
+                    $can_derive,
+                    $set_flag,
+                );
+            }
+
+            #[session_test]
+            fn p384(session: HsmSession) {
+                assert_ecc_flag_rejected(
+                    &session,
+                    HsmEccCurve::P384,
+                    $key_class,
+                    $can_derive,
+                    $set_flag,
+                );
+            }
+
+            #[session_test]
+            fn p521(session: HsmSession) {
+                assert_ecc_flag_rejected(
+                    &session,
+                    HsmEccCurve::P521,
+                    $key_class,
+                    $can_derive,
+                    $set_flag,
+                );
+            }
+        }
+    };
+}
+
+ecc_flag_tests!(
+    test_ecc_priv_sign_wrap_fails,
+    HsmKeyClass::Private,
+    false,
+    HsmKeyPropsBuilder::can_wrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_derive_wrap_fails,
+    HsmKeyClass::Private,
+    true,
+    HsmKeyPropsBuilder::can_wrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_sign_encrypt_fails,
+    HsmKeyClass::Private,
+    false,
+    HsmKeyPropsBuilder::can_encrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_derive_encrypt_fails,
+    HsmKeyClass::Private,
+    true,
+    HsmKeyPropsBuilder::can_encrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_sign_decrypt_fails,
+    HsmKeyClass::Private,
+    false,
+    HsmKeyPropsBuilder::can_decrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_derive_decrypt_fails,
+    HsmKeyClass::Private,
+    true,
+    HsmKeyPropsBuilder::can_decrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_sign_unwrap_fails,
+    HsmKeyClass::Private,
+    false,
+    HsmKeyPropsBuilder::can_unwrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_derive_unwrap_fails,
+    HsmKeyClass::Private,
+    true,
+    HsmKeyPropsBuilder::can_unwrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_sign_verify_fails,
+    HsmKeyClass::Private,
+    false,
+    HsmKeyPropsBuilder::can_verify,
+);
+
+ecc_flag_tests!(
+    test_ecc_priv_derive_verify_fails,
+    HsmKeyClass::Private,
+    true,
+    HsmKeyPropsBuilder::can_verify,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_verify_wrap_fails,
+    HsmKeyClass::Public,
+    false,
+    HsmKeyPropsBuilder::can_wrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_derive_wrap_fails,
+    HsmKeyClass::Public,
+    true,
+    HsmKeyPropsBuilder::can_wrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_verify_encrypt_fails,
+    HsmKeyClass::Public,
+    false,
+    HsmKeyPropsBuilder::can_encrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_derive_encrypt_fails,
+    HsmKeyClass::Public,
+    true,
+    HsmKeyPropsBuilder::can_encrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_verify_decrypt_fails,
+    HsmKeyClass::Public,
+    false,
+    HsmKeyPropsBuilder::can_decrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_derive_decrypt_fails,
+    HsmKeyClass::Public,
+    true,
+    HsmKeyPropsBuilder::can_decrypt,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_verify_unwrap_fails,
+    HsmKeyClass::Public,
+    false,
+    HsmKeyPropsBuilder::can_unwrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_derive_unwrap_fails,
+    HsmKeyClass::Public,
+    true,
+    HsmKeyPropsBuilder::can_unwrap,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_verify_sign_fails,
+    HsmKeyClass::Public,
+    false,
+    HsmKeyPropsBuilder::can_sign,
+);
+
+ecc_flag_tests!(
+    test_ecc_pub_derive_sign_fails,
+    HsmKeyClass::Public,
+    true,
+    HsmKeyPropsBuilder::can_sign,
+);
+
 // Rejects ECC public key props that include DERIVE usage.
 #[session_test]
 fn test_ecc_pub_props_derive_rejected(session: HsmSession) {
@@ -296,6 +542,27 @@ fn test_ecc_pub_props_missing_curve_fails(_session: HsmSession) {
     assert!(matches!(pub_props, Err(HsmError::PropertyNotPresent)));
 }
 
+#[session_test]
+fn test_ecc_pub_props_missing_curve_with_bits_fails(session: HsmSession) {
+    for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
+        let priv_props = ecc_priv_props(curve, true, false);
+        let pub_props = HsmKeyPropsBuilder::default()
+            .class(HsmKeyClass::Public)
+            .key_kind(HsmKeyKind::Ecc)
+            .bits(curve.key_size_bits() as u32)
+            .can_verify(true)
+            .build()
+            .expect("Bits should allow building props without a curve");
+        let result = gen_ecc_key_pair(&session, priv_props, pub_props);
+
+        assert_eq!(
+            result.err(),
+            Some(HsmError::InvalidKeyProps),
+            "Public key props without a curve must be rejected for {curve:?}"
+        );
+    }
+}
+
 // Rejects ECC public key props when no usage flags are set.
 #[session_test]
 fn test_ecc_pub_props_no_usage_flags_fails(session: HsmSession) {
@@ -352,16 +619,34 @@ fn test_ecc_key_pair_usage_mismatch_fails(session: HsmSession) {
     assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
 }
 
-// Rejects derive-only ECC key pair generation (unsupported usage).
+// Generates a derive-only pair and verifies the returned capabilities and sizes.
 #[session_test]
-fn test_ecc_key_pair_derive_only_fails(session: HsmSession) {
-    let priv_props = ecc_priv_props(HsmEccCurve::P256, false, true); // derive only
-    let pub_props = ecc_pub_props(HsmEccCurve::P256, true, false); // verify
+fn test_ecc_key_pair_valid_derive_succeeds(session: HsmSession) {
+    for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
+        let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, true);
+        let (priv_key, pub_key) = gen_ecc_key_pair(
+            &session,
+            priv_builder.build().expect("Failed to build private props"),
+            pub_builder.build().expect("Failed to build public props"),
+        )
+        .expect("Derive-only key generation should succeed");
 
-    let result = gen_ecc_key_pair(&session, priv_props, pub_props);
+        assert!(priv_key.can_derive());
+        assert!(!priv_key.can_sign());
+        assert!(!priv_key.can_verify());
+        assert!(pub_key.can_derive());
+        assert!(!pub_key.can_sign());
+        assert!(!pub_key.can_verify());
+        assert_eq!(priv_key.bits(), curve.key_size_bits() as u32);
+        assert_eq!(pub_key.bits(), curve.key_size_bits() as u32);
+        assert_eq!(priv_key.ecc_curve(), Some(curve));
+        assert_eq!(pub_key.ecc_curve(), Some(curve));
 
-    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
+        HsmKeyManager::delete_key(priv_key).expect("Failed to delete private key");
+        HsmKeyManager::delete_key(pub_key).expect("Failed to delete public key");
+    }
 }
+
 // Rejects ECC private key props when bits conflict with curve.
 #[session_test]
 fn test_ecc_priv_props_bits_curve_mismatch_fails(session: HsmSession) {
@@ -712,24 +997,183 @@ fn test_ecc_unwrap_priv_multiple_usage_flags_fails(session: HsmSession) {
     assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
 }
 
-// Ensures ECC public key bits/curve mismatch is not validated and reaches DDI.
+// Public bit length is ignored; the returned size must follow the requested curve.
 #[session_test]
-fn test_ecc_pub_props_bits_curve_mismatch_reaches_ddi(session: HsmSession) {
-    let priv_props = ecc_priv_props(HsmEccCurve::P256, true, false);
+fn test_ecc_pub_props_bits_normalized_to_curve(session: HsmSession) {
+    for (curve, other_curve) in [
+        (HsmEccCurve::P256, HsmEccCurve::P384),
+        (HsmEccCurve::P384, HsmEccCurve::P521),
+        (HsmEccCurve::P521, HsmEccCurve::P256),
+    ] {
+        for can_derive in [false, true] {
+            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive);
+            let (priv_key, pub_key) = gen_ecc_key_pair(
+                &session,
+                priv_builder.build().expect("Failed to build private props"),
+                pub_builder
+                    .bits(other_curve.key_size_bits() as u32)
+                    .build()
+                    .expect("Failed to build public props"),
+            )
+            .expect("Public bit length should be normalized to the curve");
 
-    let pub_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(HsmEccCurve::P256)
-        .bits(384) // mismatch
-        .can_verify(true)
-        .build()
-        .unwrap();
+            assert_eq!(priv_key.bits(), curve.key_size_bits() as u32);
+            assert_eq!(pub_key.bits(), curve.key_size_bits() as u32);
+            assert_eq!(priv_key.ecc_curve(), Some(curve));
+            assert_eq!(pub_key.ecc_curve(), Some(curve));
 
-    let result = gen_ecc_key_pair(&session, priv_props, pub_props);
+            HsmKeyManager::delete_key(priv_key).expect("Failed to delete private key");
+            HsmKeyManager::delete_key(pub_key).expect("Failed to delete public key");
+        }
+    }
+}
 
-    // Public bits mismatch is NOT validated → should NOT be InvalidKeyProps
-    assert!(!matches!(result, Err(HsmError::InvalidKeyProps)));
+#[session_test]
+fn test_ecc_key_pair_session_mismatch_fails(session: HsmSession) {
+    for is_session in [false, true] {
+        let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false);
+        let priv_props = priv_builder
+            .is_session(is_session)
+            .build()
+            .expect("Failed to build private props");
+        let pub_props = pub_builder
+            .is_session(!is_session)
+            .build()
+            .expect("Failed to build public props");
+        let result = gen_ecc_key_pair(&session, priv_props, pub_props);
+
+        assert_eq!(
+            result.err(),
+            Some(HsmError::InvalidKeyProps),
+            "Mismatched session flags must be rejected with private session={is_session}"
+        );
+    }
+}
+
+#[session_test]
+fn test_ecc_key_pair_explicit_scope_mismatch_fails(session: HsmSession) {
+    let scopes = [
+        HsmKeyScope::Session,
+        HsmKeyScope::Ephemeral,
+        HsmKeyScope::Local,
+        HsmKeyScope::SecurityDomain,
+    ];
+    for private_scope in scopes {
+        for public_scope in scopes {
+            if private_scope == public_scope {
+                continue;
+            }
+            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false);
+            let priv_props = priv_builder
+                .scope(private_scope)
+                .build()
+                .expect("Failed to build private props");
+            let pub_props = pub_builder
+                .scope(public_scope)
+                .build()
+                .expect("Failed to build public props");
+            let result = gen_ecc_key_pair(&session, priv_props, pub_props);
+
+            assert_eq!(
+                result.err(),
+                Some(HsmError::InvalidKeyProps),
+                "Mismatched scopes must be rejected: {private_scope:?}/{public_scope:?}"
+            );
+        }
+    }
+}
+
+#[session_test]
+fn test_ecc_key_pair_equivalent_scopes(session: HsmSession) {
+    for scope in [HsmKeyScope::Session, HsmKeyScope::Local] {
+        for (explicit_private, explicit_public) in [(true, false), (false, true), (true, true)] {
+            let is_session = scope == HsmKeyScope::Session;
+            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false);
+            let mut priv_builder = priv_builder.is_session(is_session);
+            let mut pub_builder = pub_builder.is_session(is_session);
+            if explicit_private {
+                priv_builder = priv_builder.is_session(!is_session).scope(scope);
+            }
+            if explicit_public {
+                pub_builder = pub_builder.is_session(!is_session).scope(scope);
+            }
+            let priv_props = priv_builder.build().expect("Failed to build private props");
+            let pub_props = pub_builder.build().expect("Failed to build public props");
+            assert_eq!(priv_props.is_session(), is_session);
+            assert_eq!(pub_props.is_session(), is_session);
+
+            let result = gen_ecc_key_pair(&session, priv_props, pub_props);
+            if crate::utils::session::api_rev_at_least(1, 1) {
+                let (priv_key, pub_key) = result.expect("Equivalent scopes should generate a pair");
+                assert_eq!(priv_key.is_session(), is_session);
+                assert_eq!(pub_key.is_session(), is_session);
+                HsmKeyManager::delete_key(priv_key).expect("Failed to delete private key");
+                HsmKeyManager::delete_key(pub_key).expect("Failed to delete public key");
+            } else {
+                assert_eq!(
+                    result.err(),
+                    Some(HsmError::UnsupportedApiRevision),
+                    "Legacy sessions must reject explicit scope on either half"
+                );
+            }
+        }
+    }
+}
+
+#[session_test]
+fn test_ecc_key_labels_preserved(session: HsmSession) {
+    for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
+        for can_derive in [false, true] {
+            for label in [
+                Vec::new(),
+                b"ecc-key".to_vec(),
+                vec![b'e'; TBOR_KEY_LABEL_MAX_LEN - 1],
+                vec![b'e'; TBOR_KEY_LABEL_MAX_LEN],
+            ] {
+                let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive);
+                let priv_props = priv_builder
+                    .label(&label)
+                    .build()
+                    .expect("Failed to build private props");
+                let pub_props = pub_builder.build().expect("Failed to build public props");
+                let (priv_key, pub_key) = gen_ecc_key_pair(&session, priv_props, pub_props)
+                    .expect("Key generation should accept labels within the limit");
+
+                assert_eq!(priv_key.label(), label.as_slice());
+                assert_eq!(priv_key.bits(), curve.key_size_bits() as u32);
+                assert_eq!(pub_key.bits(), curve.key_size_bits() as u32);
+                HsmKeyManager::delete_key(priv_key).expect("Failed to delete private key");
+                HsmKeyManager::delete_key(pub_key).expect("Failed to delete public key");
+            }
+        }
+    }
+}
+
+#[session_test]
+fn test_ecc_key_label_too_long_fails(session: HsmSession) {
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
+        HsmError::InvalidKeyProps
+    } else {
+        HsmError::InternalError
+    };
+    let label = vec![b'e'; TBOR_KEY_LABEL_MAX_LEN + 1];
+
+    for can_derive in [false, true] {
+        let (priv_builder, pub_builder) =
+            ecc_key_pair_props_builders(HsmEccCurve::P256, can_derive);
+        let priv_props = priv_builder
+            .label(&label)
+            .build()
+            .expect("Failed to build private props");
+        let pub_props = pub_builder.build().expect("Failed to build public props");
+        let result = gen_ecc_key_pair(&session, priv_props, pub_props);
+
+        assert_eq!(
+            result.err(),
+            Some(expected_error),
+            "Oversized labels must be rejected with derive={can_derive}"
+        );
+    }
 }
 
 // Ensures unwrap rejects private key props with missing curve.
