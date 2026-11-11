@@ -585,6 +585,17 @@ static int tsra_ossl_asym_cipher_decrypt(
         return OSSL_FAILURE;
     }
 
+    /* No implicit rejection in the native decoder: a padding error would be an oracle. */
+    if (ctx->pad_mode == TSRA_RSA_CIPHER_PAD_MODE_PKCS1)
+    {
+        ERR_raise_data(
+            ERR_LIB_PROV,
+            PROV_R_ILLEGAL_OR_UNSUPPORTED_PADDING_MODE,
+            "RSA PKCS#1 v1.5 decryption is not supported; use RSA-OAEP"
+        );
+        return OSSL_FAILURE;
+    }
+
     /* Calculate key size in bytes */
     key_size = (ctx->key->genctx.pubkey_bits + 7) / 8;
 
