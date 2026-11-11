@@ -25,12 +25,16 @@ jobs:
       # The number of seconds to run the fuzz target.
       FUZZ_TIME: 10
 
+      # Run every fuzz target against the simulated HSM over the sock transport.
+      # Test runners pass connection settings to the ordinary SDK build.
+      TSRA_TEST_ARGS: transport=sock
+
     defaults:
       run:
         working-directory: fuzz
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/ubuntu-setup
       id: ubuntu-setup
     - run: rustup toolchain install nightly
@@ -42,7 +46,7 @@ jobs:
       run: rustup component add clippy
 
     # Install and cache `cargo-fuzz`.
-    - uses: actions/cache@v4
+    - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
         path: ${{ runner.tool_cache }}/cargo-fuzz
         key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
@@ -51,7 +55,7 @@ jobs:
 
     - run: cargo +nightly fmt -- --check
     - run: cargo clippy -- -D warnings
-    - run: cargo +nightly fuzz build --features emu
+    - run: cargo +nightly fuzz build
     - name: Run fuzz smoke tests (${{ env.FUZZ_TIME }}s each)
       run: |
         TARGETS=$(cargo fuzz list)
@@ -63,7 +67,7 @@ jobs:
         seed=1
         for target in $TARGETS; do
           echo "[$seed] Fuzzing $target for ${{ env.FUZZ_TIME }} seconds..."
-          cargo +nightly fuzz run "$target" --features emu -- -max_total_time=${{ env.FUZZ_TIME }} -seed=$seed -print_final_stats=1
+          cargo +nightly fuzz run "$target" -- -max_total_time=${{ env.FUZZ_TIME }} -seed=$seed -print_final_stats=1
           seed=$((seed + 1))
           echo ""
         done
