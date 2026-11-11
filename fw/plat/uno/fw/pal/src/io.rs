@@ -57,8 +57,6 @@ use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
 #[cfg(not(feature = "bulk_crypto"))]
-use tsra_fw_uno_reg_soc::io_gsram::BULK_IO_META_COUNT;
-#[cfg(not(feature = "bulk_crypto"))]
 use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_OFFSET;
 #[cfg(not(feature = "bulk_crypto"))]
 use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_SIZE;
@@ -503,9 +501,6 @@ impl HsmIoController for UnoHsmPal {
                 // with its completion, or, for an IO dropped without one,
                 // when the SQ is recreated (see `grant_credit`).
                 self.bulk_iic_for(io.index).free_io(io.index, queue_id);
-                let bit = bulk_bit(io.index);
-                self.bulk_busy.set(self.bulk_busy.get() & !bit);
-                self.bulk_freed.set(self.bulk_freed.get() | bit);
             }
             self.io_in_flight_dec();
             return Ok(());
@@ -545,14 +540,6 @@ fn slot_cqe(index: u16) -> &'static mut HsmCqe {
     }
 }
 
-/// Slot bit for bulk IO `index` in [`UnoHsmPal::bulk_busy`].
-#[cfg(not(feature = "bulk_crypto"))]
-#[inline]
-fn bulk_bit(index: u16) -> u32 {
-    const _: () = assert!(BULK_IO_META_COUNT <= u32::BITS);
-    1u32.checked_shl(u32::from(index)).unwrap_or(0)
-}
-
 #[cfg(not(feature = "bulk_crypto"))]
 impl UnoHsmPal {
     /// The IIC driver that posts bulk slot `index`: FP1 below
@@ -573,29 +560,6 @@ impl UnoHsmPal {
         } else {
             self.bulk_fp2_oic
         }
-    }
-
-    /// Starts draining device SQ `sq` of the function at `axi_id`: returns
-    /// the mask of bulk slots it has in flight, which are done once all of
-    /// them are set in [`bulk_freed`](UnoHsmPal::bulk_freed).
-    ///
-    /// Only IOs already taken from the queue are waited for; IOs arriving
-    /// during the drain do not extend it, so a host that keeps submitting
-    /// cannot stall the Admin IPC.
-    pub(crate) fn begin_bulk_sq_drain(&self, axi_id: u8, sq: u8) -> u32 {
-        let busy = self.bulk_busy.get();
-        let mut wait = 0;
-        for (i, meta) in IO_Q.bulk_io_meta.iter().enumerate() {
-            let bit = 1u32 << i;
-            if busy & bit != 0
-                && meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) == u32::from(axi_id)
-                && meta.queue.read(IO_META_QUEUE::QUEUE_ID) == u32::from(sq)
-            {
-                wait |= bit;
-            }
-        }
-        self.bulk_freed.set(self.bulk_freed.get() & !wait);
-        wait
     }
 }
 
@@ -660,9 +624,6 @@ impl UnoHsmPal {
                     copy_sqe(index as usize);
                 }
             }
-            #[cfg(not(feature = "bulk_crypto"))]
-            HsmIoKind::Bulk => self.bulk_busy.set(self.bulk_busy.get() | bulk_bit(index)),
-            #[cfg(feature = "bulk_crypto")]
             HsmIoKind::Bulk => {}
         }
         // The routing comes with the IO, as the IIC driver read it from the

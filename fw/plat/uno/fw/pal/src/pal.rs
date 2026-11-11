@@ -445,14 +445,6 @@ pub struct UnoHsmPal {
     #[cfg(not(feature = "bulk_crypto"))]
     pub(crate) poll_turn: Cell<u8>,
 
-    /// Bulk slots held by an in-flight IO (bit `i` is `BULK_IO_SQ[i]`).
-    #[cfg(not(feature = "bulk_crypto"))]
-    pub(crate) bulk_busy: Cell<u32>,
-
-    /// Bulk slots released since the current SQ drain began.
-    #[cfg(not(feature = "bulk_crypto"))]
-    pub(crate) bulk_freed: Cell<u32>,
-
     /// Per-IO bump allocator state (watermarks for Local + Global heaps).
     pub(crate) io_alloc: IoAllocTable,
 
@@ -729,10 +721,6 @@ impl Default for UnoHsmPal {
             boot_phase: Cell::new(BootPhase::WaitNormalBoot),
             #[cfg(not(feature = "bulk_crypto"))]
             poll_turn: Cell::new(0),
-            #[cfg(not(feature = "bulk_crypto"))]
-            bulk_busy: Cell::new(0),
-            #[cfg(not(feature = "bulk_crypto"))]
-            bulk_freed: Cell::new(0),
             io_alloc: IO_ALLOC_INIT,
             io_peak: IO_ALLOC_INIT,
             fp_bulk_lock: Mutex::new(()),
@@ -1086,18 +1074,6 @@ impl UnoHsmPal {
                 if self.try_handle_shutdown(channel, buf).await {
                     return;
                 }
-                #[cfg(not(feature = "bulk_crypto"))]
-                {
-                    let wait = self.begin_create_delete_sq(buf);
-                    core::future::poll_fn(|cx| {
-                        if self.bulk_freed.get() & wait == wait {
-                            return core::task::Poll::Ready(());
-                        }
-                        cx.waker().wake_by_ref();
-                        core::task::Poll::Pending
-                    })
-                    .await;
-                }
                 buf[0] |= 0x80;
                 self.ipc.reply(channel as u8, buf);
             }
@@ -1156,36 +1132,6 @@ impl UnoHsmPal {
         let reply = encode_pfn_enable_disable_ack(buf, status);
         self.ipc.reply(channel as u8, &reply);
         true
-    }
-
-    /// Handle a `CreateDeleteSq` IPC in the running state.
-    ///
-    /// Admin binds and unbinds the queue in the UCD itself, so a create
-    /// needs only an ACK. A delete must first see every bulk IO already
-    /// taken from that device SQ finish, so the BCP and GDMA never touch
-    /// the function's memory after Admin tears the queue down. Command
-    /// queues hold no long-running engine work and are not drained.
-    ///
-    /// Writes the reply status into `buf`'s header (the caller's echo path
-    /// sends it) and returns the bulk slot mask to wait on before replying;
-    /// `0` for a create, a rejected message, or any other opcode. Kept out
-    /// of line so the IPC task's state machine stays small.
-    #[cfg(not(feature = "bulk_crypto"))]
-    #[inline(never)]
-    fn begin_create_delete_sq(&self, buf: &mut [u32; 16]) -> u32 {
-        let Some(info) = decode_create_delete_sq(buf) else {
-            return 0;
-        };
-        match (pfn_to_axi_id(info.pfn), info.action) {
-            (Some(axi_id), SqAction::Delete) => self.begin_bulk_sq_drain(axi_id, info.device_sq_id),
-            (Some(_), SqAction::Create) => 0,
-            _ => {
-                buf[0] = IpcMessageHeader::from_bits(buf[0])
-                    .with_status(IpcMessageStatusCode::InvalidField as u32)
-                    .into_bits();
-                0
-            }
-        }
     }
 
     /// Handle a `SetResource` IPC in the running state.
