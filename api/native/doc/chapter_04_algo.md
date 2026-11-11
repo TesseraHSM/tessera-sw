@@ -445,7 +445,9 @@ support and is intended for legacy compatibility; prefer SHA-2 for new
 applications. This does not change legacy-session behavior.
 
 HMAC-SHA-256, HMAC-SHA-384, and HMAC-SHA-512 key unwrapping requires an EX
-session. The raw HMAC key must contain 32, 48, or 64 bytes, respectively,
+session, available from API revision 1.1. Legacy sessions do not support HMAC
+unwrapping, even when opened with API revision 1.1.
+The raw HMAC key must contain 32, 48, or 64 bytes, respectively,
 and both SIGN and VERIFY properties must be enabled. See
 [HMAC wrapped key format](#hmac-wrapped-key-format) for the required properties
 and legacy-session behavior.

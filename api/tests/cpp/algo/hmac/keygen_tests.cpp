@@ -7,7 +7,9 @@
 #include <vector>
 
 #include "algo/ecc/helpers.hpp"
+#include "handle/part_handle.hpp"
 #include "handle/part_list_handle.hpp"
+#include "handle/session_handle.hpp"
 #include "helpers.hpp"
 #include "utils/auto_key.hpp"
 #include "utils/rsa_keygen.hpp"
@@ -697,31 +699,28 @@ TEST_F(tsra_hmac_keygen, unwrap_invalid_args)
     });
 }
 
-TEST_F(tsra_hmac_keygen, unwrap_legacy_rejected)
+static void verify_hmac_unwrap_legacy_rejected(tsra_handle session)
 {
-    if (api_rev_at_least(1, 1))
+    auto_key rsa_private;
+    auto_key rsa_public;
+    ASSERT_EQ(
+        generate_rsa_unwrapping_keypair(session, rsa_private.get_ptr(), rsa_public.get_ptr()),
+        TSRA_STATUS_SUCCESS
+    );
+    for (auto kind : hmac_unwrap_key_kinds)
     {
-        return;
-    }
-    part_list_.for_each_session([&](tsra_handle session) {
-        auto_key rsa_private;
-        auto_key rsa_public;
+        auto raw_key = make_deterministic_payload(0x51, 1, get_hmac_key_bits(kind) / 8);
+        std::vector<uint8_t> wrapped;
         ASSERT_EQ(
-            generate_rsa_unwrapping_keypair(session, rsa_private.get_ptr(), rsa_public.get_ptr()),
+            wrap_plaintext_with_rsa_aes(rsa_public.get(), raw_key, RsaAesWrapConfig{}, wrapped),
             TSRA_STATUS_SUCCESS
         );
-        for (auto kind : hmac_unwrap_key_kinds)
+        RsaAesUnwrapAlgo unwrap_algo;
+        HmacUnwrapProperties properties(kind);
+        auto props = properties.prop_list();
+        for (auto length : { static_cast<uint32_t>(wrapped.size()), uint32_t{ 1 } })
         {
-            auto raw_key = make_deterministic_payload(0x51, 1, get_hmac_key_bits(kind) / 8);
-            std::vector<uint8_t> wrapped;
-            ASSERT_EQ(
-                wrap_plaintext_with_rsa_aes(rsa_public.get(), raw_key, RsaAesWrapConfig{}, wrapped),
-                TSRA_STATUS_SUCCESS
-            );
-            tsra_buffer blob{ wrapped.data(), static_cast<uint32_t>(wrapped.size()) };
-            RsaAesUnwrapAlgo unwrap_algo;
-            HmacUnwrapProperties properties(kind);
-            auto props = properties.prop_list();
+            tsra_buffer blob{ wrapped.data(), length };
             auto_key output;
             ASSERT_EQ(
                 tsra_key_unwrap(
@@ -731,10 +730,41 @@ TEST_F(tsra_hmac_keygen, unwrap_legacy_rejected)
                     &props,
                     output.get_ptr()
                 ),
-                TSRA_STATUS_UNSUPPORTED_KEY_KIND
+                TSRA_STATUS_UNSUPPORTED_KEY_OPERATION
             );
             ASSERT_EQ(output.get(), 0u);
         }
+    }
+}
+
+TEST_F(tsra_hmac_keygen, unwrap_legacy_rejected)
+{
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_session([&](tsra_handle session) {
+        verify_hmac_unwrap_legacy_rejected(session);
+    });
+}
+
+TEST_F(tsra_hmac_keygen, unwrap_legacy_rev_1_1)
+{
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
+    part_list_.for_each_part([&](std::vector<tsra_char> &path) {
+        auto initialized_partition = PartitionHandle(path);
+        tsra_str path_str{ path.data(), static_cast<uint32_t>(path.size()) };
+        tsra_handle raw_partition = 0;
+        ASSERT_EQ(
+            tsra_part_open(&path_str, &raw_partition, session_ex_test_api_rev()),
+            TSRA_STATUS_SUCCESS
+        );
+        auto partition = PartitionHandle::from_raw(raw_partition);
+        auto session = SessionHandle(partition.get());
+        verify_hmac_unwrap_legacy_rejected(session.get());
     });
 }
 

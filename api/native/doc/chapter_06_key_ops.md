@@ -137,7 +137,9 @@ session type:
 
 ### HMAC Wrapped Key Format
 
-HMAC key unwrapping is supported for sessions opened with `tsra_sess_ex_open`.
+HMAC key unwrapping requires a session opened with `tsra_sess_ex_open`,
+available from API revision 1.1. Legacy sessions opened with `tsra_sess_open`
+do not support this operation, even when using API revision 1.1.
 Set CLASS to `TSRA_KEY_CLASS_SECRET` and select the matching KIND and BIT_LEN:
 
 | KIND | BIT_LEN | Raw Key Length |
@@ -156,8 +158,8 @@ by the AES-KWP-wrapped HMAC key material. The resulting handle supports
 `tsra_crypt_sign` and `tsra_crypt_verify`; its MASKED_KEY property can be
 restored using `tsra_key_unmask` with the same HMAC key kind.
 
-Legacy sessions opened with `tsra_sess_open` do not support HMAC unwrapping
-and return `TSRA_STATUS_UNSUPPORTED_KEY_KIND` for otherwise valid properties.
+Legacy sessions return `TSRA_STATUS_UNSUPPORTED_KEY_OPERATION` for otherwise
+valid HMAC unwrap properties, regardless of the negotiated API revision.
 
 **Returns**
 

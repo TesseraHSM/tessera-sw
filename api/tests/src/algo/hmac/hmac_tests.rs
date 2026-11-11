@@ -1514,24 +1514,57 @@ fn test_hmac_unwrap_label_too_long(session: HsmSession) {
     }
 }
 
-/// Legacy sessions cannot express an HMAC unwrap class on MBOR.
+fn assert_hmac_unwrap_legacy_rejected(session: &HsmSession) {
+    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(session);
+
+    for key_kind in hmac_test_key_kinds() {
+        let raw_key = test_message_bytes(0x91, hmac_key_kind_to_bits(key_kind) as usize / 8);
+        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
+        for blob in [&[][..], wrapped_key.as_slice()] {
+            let result = HsmKeyManager::unwrap_key(
+                &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
+                &unwrapping_key,
+                blob,
+                hmac_unwrap_props(key_kind).build().expect("HMAC props"),
+            );
+            assert!(matches!(result, Err(HsmError::UnsupportedKeyOperation)));
+        }
+    }
+}
+
+/// Legacy sessions reject HMAC unwrap before processing the wrapped material.
 #[session_test]
 fn test_hmac_unwrap_legacy_rejected(session: HsmSession) {
     if crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
-    let (unwrapping_key, wrapping_key) = get_rsa_unwrapping_key_pair(&session);
+    assert_hmac_unwrap_legacy_rejected(&session);
+}
 
-    for key_kind in hmac_test_key_kinds() {
-        let raw_key = test_message_bytes(0x91, hmac_key_kind_to_bits(key_kind) as usize / 8);
-        let wrapped_key = wrap_hmac_key(&wrapping_key, HsmHashAlgo::Sha256, &raw_key);
-        let result = HsmKeyManager::unwrap_key(
-            &mut HsmHmacKeyRsaAesKeyUnwrapAlgo::new(HsmHashAlgo::Sha256),
-            &unwrapping_key,
-            &wrapped_key,
-            hmac_unwrap_props(key_kind).build().expect("HMAC props"),
+/// Negotiating API 1.1 does not add HMAC unwrap support to a legacy session.
+#[test]
+fn test_hmac_unwrap_legacy_rev_1_1() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    let _guard = crate::utils::partition::PARTITION_LOCK.lock();
+    let partitions = HsmPartitionManager::partition_info_list();
+    assert!(!partitions.is_empty(), "No partitions found");
+
+    for info in partitions {
+        drop(crate::utils::session::open_session_test_session(&info.path));
+        let rev = HsmApiRev { major: 1, minor: 1 };
+        let partition = HsmPartitionManager::open_partition(&info.path, rev)
+            .expect("Failed to open API 1.1 partition");
+        let creds = HsmCredentials::new(
+            &crate::utils::partition::APP_ID,
+            &crate::utils::partition::APP_PIN,
         );
-        assert!(matches!(result, Err(HsmError::UnsupportedKeyKind)));
+        let session = partition
+            .open_session(rev, &creds, None)
+            .expect("Failed to open legacy session with API 1.1");
+        assert_eq!(session.api_rev(), rev);
+        assert_hmac_unwrap_legacy_rejected(&session);
     }
 }
 
