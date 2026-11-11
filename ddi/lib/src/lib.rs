@@ -6,9 +6,8 @@
 //! Device Driver Interface (DDI) library
 //!
 //! [`TsraDdi`] selects its transport at runtime from the `transport` key of
-//! [`DDI_ARGS_ENV`]: `sock` uses
-//! the socket transport, and an unset key (or `native`, `nix` on Linux,
-//! `win` on Windows) uses the platform device driver.
+//! [`DDI_ARGS_ENV`]: `sock` uses the socket transport, and `ioctl` (the
+//! default when unset) uses the platform device driver.
 
 mod config;
 
@@ -23,56 +22,51 @@ use tsra_ddi_tbor_types::TborOpReq;
 pub use crate::config::DdiConfig;
 pub use crate::config::DDI_ARGS_ENV;
 
+#[cfg(target_os = "linux")]
+type IoctlDdi = tsra_ddi_nix::DdiNix;
+#[cfg(target_os = "linux")]
+type IoctlDdiDev = tsra_ddi_nix::DdiNixDev;
+#[cfg(target_os = "windows")]
+type IoctlDdi = tsra_ddi_win::DdiWin;
+#[cfg(target_os = "windows")]
+type IoctlDdiDev = tsra_ddi_win::DdiWinDev;
+
 /// Whether [`DDI_ARGS_ENV`] selects the socket transport.
 pub fn sock_selected() -> bool {
     DdiTransport::from_env().is_some_and(DdiTransport::is_sock)
 }
 
 /// A DDI transport.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DdiTransport {
     /// Socket transport (`tsra_ddi_sock`).
     Sock,
-    /// Linux device driver (`tsra_ddi_nix`).
-    #[cfg(target_os = "linux")]
-    Nix,
-    /// Windows device driver (`tsra_ddi_win`).
-    #[cfg(target_os = "windows")]
-    Win,
+    /// Platform device driver, reached through IOCTLs (`tsra_ddi_nix` on
+    /// Linux, `tsra_ddi_win` on Windows).
+    #[default]
+    Ioctl,
 }
 
 impl DdiTransport {
-    /// The platform device-driver transport.
-    #[cfg(target_os = "linux")]
-    pub const NATIVE: Self = Self::Nix;
-    /// The platform device-driver transport.
-    #[cfg(target_os = "windows")]
-    pub const NATIVE: Self = Self::Win;
-
     /// Whether this is the socket transport.
     pub fn is_sock(self) -> bool {
         self == Self::Sock
     }
 
-    /// Parses a `transport` value (case-insensitive).
+    /// Parses a `transport` value, `sock` or `ioctl` (case-insensitive).
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
-        let native = if cfg!(target_os = "windows") {
-            "win"
-        } else {
-            "nix"
-        };
         if value.eq_ignore_ascii_case("sock") {
             Some(Self::Sock)
-        } else if value.eq_ignore_ascii_case("native") || value.eq_ignore_ascii_case(native) {
-            Some(Self::NATIVE)
+        } else if value.eq_ignore_ascii_case("ioctl") {
+            Some(Self::Ioctl)
         } else {
             None
         }
     }
 
     /// The transport selected by [`DDI_ARGS_ENV`], or `None` if the value
-    /// is not a supported transport. Defaults to [`Self::NATIVE`] when unset.
+    /// is not a supported transport. Defaults to [`Self::Ioctl`] when unset.
     pub fn from_env() -> Option<Self> {
         match DdiConfig::from_env() {
             Ok(config) => Some(config.transport),
@@ -88,10 +82,7 @@ impl fmt::Display for DdiTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Sock => "sock",
-            #[cfg(target_os = "linux")]
-            Self::Nix => "nix",
-            #[cfg(target_os = "windows")]
-            Self::Win => "win",
+            Self::Ioctl => "ioctl",
         })
     }
 }
@@ -100,12 +91,8 @@ impl fmt::Display for DdiTransport {
 pub enum TsraDdi {
     /// Socket transport.
     Sock(tsra_ddi_sock::DdiSock),
-    /// Linux device driver.
-    #[cfg(target_os = "linux")]
-    Nix(tsra_ddi_nix::DdiNix),
-    /// Windows device driver.
-    #[cfg(target_os = "windows")]
-    Win(tsra_ddi_win::DdiWin),
+    /// Platform device driver.
+    Ioctl(IoctlDdi),
     /// [`DDI_ARGS_ENV`] contained invalid configuration; no devices are
     /// reported and opening fails.
     Unsupported,
@@ -134,10 +121,7 @@ impl TsraDdi {
                     .sock
                     .unwrap_or_else(|| tsra_ddi_sock::DEFAULT_SOCK_PATH.to_owned()),
             )),
-            #[cfg(target_os = "linux")]
-            DdiTransport::Nix => Self::Nix(Default::default()),
-            #[cfg(target_os = "windows")]
-            DdiTransport::Win => Self::Win(Default::default()),
+            DdiTransport::Ioctl => Self::Ioctl(Default::default()),
         }
     }
 
@@ -145,10 +129,7 @@ impl TsraDdi {
     pub fn transport(&self) -> Option<DdiTransport> {
         match self {
             Self::Sock(_) => Some(DdiTransport::Sock),
-            #[cfg(target_os = "linux")]
-            Self::Nix(_) => Some(DdiTransport::Nix),
-            #[cfg(target_os = "windows")]
-            Self::Win(_) => Some(DdiTransport::Win),
+            Self::Ioctl(_) => Some(DdiTransport::Ioctl),
             Self::Unsupported => None,
         }
     }
@@ -173,10 +154,7 @@ impl Ddi for TsraDdi {
     fn dev_info_list(&self) -> Vec<DevInfo> {
         match self {
             Self::Sock(ddi) => ddi.dev_info_list(),
-            #[cfg(target_os = "linux")]
-            Self::Nix(ddi) => ddi.dev_info_list(),
-            #[cfg(target_os = "windows")]
-            Self::Win(ddi) => ddi.dev_info_list(),
+            Self::Ioctl(ddi) => ddi.dev_info_list(),
             Self::Unsupported => Vec::new(),
         }
     }
@@ -184,10 +162,7 @@ impl Ddi for TsraDdi {
     fn open_dev(&self, path: &str) -> DdiResult<Self::Dev> {
         match self {
             Self::Sock(ddi) => ddi.open_dev(path).map(TsraDdiDev::Sock),
-            #[cfg(target_os = "linux")]
-            Self::Nix(ddi) => ddi.open_dev(path).map(TsraDdiDev::Nix),
-            #[cfg(target_os = "windows")]
-            Self::Win(ddi) => ddi.open_dev(path).map(TsraDdiDev::Win),
+            Self::Ioctl(ddi) => ddi.open_dev(path).map(TsraDdiDev::Ioctl),
             Self::Unsupported => Err(DdiError::InvalidParameter),
         }
     }
@@ -198,12 +173,8 @@ impl Ddi for TsraDdi {
 pub enum TsraDdiDev {
     /// Socket transport device.
     Sock(tsra_ddi_sock::DdiSockDev),
-    /// Linux device.
-    #[cfg(target_os = "linux")]
-    Nix(tsra_ddi_nix::DdiNixDev),
-    /// Windows device.
-    #[cfg(target_os = "windows")]
-    Win(tsra_ddi_win::DdiWinDev),
+    /// Platform device-driver device.
+    Ioctl(IoctlDdiDev),
 }
 
 impl TsraDdiDev {
@@ -211,10 +182,7 @@ impl TsraDdiDev {
     pub fn transport(&self) -> DdiTransport {
         match self {
             Self::Sock(_) => DdiTransport::Sock,
-            #[cfg(target_os = "linux")]
-            Self::Nix(_) => DdiTransport::Nix,
-            #[cfg(target_os = "windows")]
-            Self::Win(_) => DdiTransport::Win,
+            Self::Ioctl(_) => DdiTransport::Ioctl,
         }
     }
 }
@@ -224,10 +192,7 @@ macro_rules! dispatch {
     ($self:ident, $dev:ident => $call:expr) => {
         match $self {
             TsraDdiDev::Sock($dev) => $call,
-            #[cfg(target_os = "linux")]
-            TsraDdiDev::Nix($dev) => $call,
-            #[cfg(target_os = "windows")]
-            TsraDdiDev::Win($dev) => $call,
+            TsraDdiDev::Ioctl($dev) => $call,
         }
     };
 }
@@ -322,18 +287,9 @@ mod tests {
     fn parse_transport_names() {
         assert_eq!(DdiTransport::parse("sock"), Some(DdiTransport::Sock));
         assert_eq!(DdiTransport::parse(" SOCK "), Some(DdiTransport::Sock));
-        assert_eq!(DdiTransport::parse("native"), Some(DdiTransport::NATIVE));
-        assert_eq!(DdiTransport::parse("emu"), None);
-        assert_eq!(DdiTransport::parse(""), None);
-        #[cfg(target_os = "linux")]
-        {
-            assert_eq!(DdiTransport::parse("nix"), Some(DdiTransport::Nix));
-            assert_eq!(DdiTransport::parse("win"), None);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            assert_eq!(DdiTransport::parse("win"), Some(DdiTransport::Win));
-            assert_eq!(DdiTransport::parse("nix"), None);
+        assert_eq!(DdiTransport::parse("IOCTL"), Some(DdiTransport::Ioctl));
+        for bad in ["emu", "", "native", "nix", "win"] {
+            assert_eq!(DdiTransport::parse(bad), None, "{bad:?}");
         }
     }
 
@@ -352,8 +308,8 @@ mod tests {
             Some(DdiTransport::Sock)
         );
         assert_eq!(
-            TsraDdi::new(DdiTransport::NATIVE).transport(),
-            Some(DdiTransport::NATIVE)
+            TsraDdi::new(DdiTransport::Ioctl).transport(),
+            Some(DdiTransport::Ioctl)
         );
     }
 }

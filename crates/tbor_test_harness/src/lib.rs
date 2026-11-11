@@ -22,8 +22,8 @@
 //!   full suite over the socket transport against std-PAL firmware served
 //!   by an in-process `ddi_sock_server` (or the server named by
 //!   `sock=` in `TSRA_TEST_ARGS`).
-//! * **Unset** — targets the native OS backend (`nix` on Linux / `win` on
-//!   Windows) so the suite runs against real silicon. Tests that don't apply
+//! * **Unset** (or `transport=ioctl`) — targets the platform device driver
+//!   so the suite runs against real silicon. Tests that don't apply
 //!   to the socket transport return early when it is selected (see
 //!   `tsra_ddi::sock_selected`).
 

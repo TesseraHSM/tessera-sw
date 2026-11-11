@@ -77,7 +77,8 @@ example `TSRA_TEST_ARGS="transport=sock;api_rev=1_1"`), and pass connection
 settings to the unchanged SDK. The SDK itself never reads this variable.
 Unknown keys are an error. Test keys:
 
-- `transport`: `sock`, or the native `nix`/`win`; unset means native.
+- `transport`: `sock` or `ioctl` (the platform device driver); unset means
+  `ioctl`.
   `--transport` sets it. With `sock`, each test binary starts an in-process
   `ddi_sock_server` before `main` unless `sock` names an external server.
 - `sock`: endpoint of an external `ddi_sock_server`.

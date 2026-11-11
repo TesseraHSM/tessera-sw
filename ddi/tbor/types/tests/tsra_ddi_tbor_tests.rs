@@ -6,8 +6,8 @@
 //! The transport is selected at runtime; the same tests run across every
 //! transport. Run with `TSRA_TEST_ARGS=transport=sock` (firmware behind an
 //! in-process socket server, or the one named by `sock=` in `TSRA_TEST_ARGS`), or with
-//! it unset (native OS backend — `nix` on Linux / `win` on Windows — for
-//! on-silicon test runs).
+//! it unset or `transport=ioctl` (platform device driver, for on-silicon
+//! test runs).
 
 // Links the in-process socket server started before `main`.
 use ddi_sock_server as _;

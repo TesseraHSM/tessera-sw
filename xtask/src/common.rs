@@ -89,7 +89,7 @@ fn set_test_arg(sh: &Shell, key: &str, value: &str, overwrite: bool) {
 }
 
 /// Transport values accepted by `--transport`.
-pub const TRANSPORTS: [&str; 3] = ["sock", "nix", "win"];
+pub const TRANSPORTS: [&str; 2] = ["sock", "ioctl"];
 
 /// API revision values accepted by `--api-rev`.
 pub const API_REVS: [&str; 2] = ["1_0", "1_1"];

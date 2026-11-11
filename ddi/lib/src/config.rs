@@ -14,7 +14,7 @@ static PROCESS_CONFIG: OnceLock<DdiConfig> = OnceLock::new();
 ///
 /// Socket servers may front either hardware or a simulator. Selecting one
 /// never changes credentials, provisioning requirements, or retry policy.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DdiConfig {
     /// Transport to use.
     pub transport: DdiTransport,
@@ -22,17 +22,8 @@ pub struct DdiConfig {
     pub sock: Option<String>,
 }
 
-impl Default for DdiConfig {
-    fn default() -> Self {
-        Self {
-            transport: DdiTransport::NATIVE,
-            sock: None,
-        }
-    }
-}
-
 impl DdiConfig {
-    /// Parses `transport=native` or `transport=sock;sock=<endpoint>`.
+    /// Parses `transport=ioctl` or `transport=sock;sock=<endpoint>`.
     ///
     /// Unknown keys, duplicates, unsupported transports, and empty values
     /// are rejected. Unset settings retain their platform defaults.
@@ -105,10 +96,10 @@ mod tests {
         assert_eq!(DdiConfig::parse(&config.to_string()), Ok(config));
         assert_eq!(DdiConfig::parse(""), Ok(DdiConfig::default()));
         assert_eq!(
-            DdiConfig::parse("transport=native")
-                .expect("native transport")
+            DdiConfig::parse("transport=ioctl")
+                .expect("ioctl transport")
                 .transport,
-            DdiTransport::NATIVE
+            DdiTransport::Ioctl
         );
     }
 
@@ -118,7 +109,8 @@ mod tests {
             "transport",
             "transport=",
             "transport=emulator",
-            "transport=sock;transport=native",
+            "transport=sock;transport=ioctl",
+            "transport=native",
             "sock=",
             "fast_backoff=1",
             "api_rev=1_1",
@@ -135,7 +127,7 @@ mod tests {
         if let Ok(expected) = std::env::var(CHILD) {
             let ddi = crate::TsraDdi::default();
             match expected.as_str() {
-                "native" => assert_eq!(ddi.transport(), Some(DdiTransport::NATIVE)),
+                "ioctl" => assert_eq!(ddi.transport(), Some(DdiTransport::Ioctl)),
                 "sock" => assert_eq!(ddi.transport(), Some(DdiTransport::Sock)),
                 "invalid" => assert_eq!(ddi.transport(), None),
                 _ => panic!("unexpected test case"),
@@ -143,8 +135,8 @@ mod tests {
             return;
         }
         for (value, expected) in [
-            (None, "native"),
-            (Some("transport=native"), "native"),
+            (None, "ioctl"),
+            (Some("transport=ioctl"), "ioctl"),
             (Some("transport=sock;sock=tcp://127.0.0.1:1234"), "sock"),
             (Some("transport=invalid"), "invalid"),
             (Some("fast_backoff=1"), "invalid"),

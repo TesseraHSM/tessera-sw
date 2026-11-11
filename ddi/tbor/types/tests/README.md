@@ -29,8 +29,7 @@ for the full gating table.
 * `TSRA_TEST_ARGS=transport=sock` — canonical configuration, runs the full suite
   against an in-process `ddi_sock_server` (or the server named by
   `sock=` in `TSRA_TEST_ARGS`).
-* Unset — native OS backend (`nix` on Linux / `win` on
-  Windows); hardware-eligible command tests run against real silicon.
+* Unset (or `transport=ioctl`) — platform device driver; hardware-eligible command tests run against real silicon.
 
 For `PartFinal`, simulator tests transport the real PTA certificate chain
 through OOB descriptors and exercise full chain validation. Native M1.0

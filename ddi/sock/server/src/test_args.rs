@@ -8,7 +8,7 @@
 //!
 //! | Key              | Value                                                  |
 //! |------------------|--------------------------------------------------------|
-//! | `transport`      | DDI transport: `sock`, `native`, `nix` or `win`         |
+//! | `transport`      | DDI transport: `sock` or `ioctl`                        |
 //! | `api_rev`        | API revision used by `tsra_api_tests`, as `MAJOR_MINOR` |
 //! | `sock`           | Socket server endpoint for the sock transport           |
 //! | `resource_count` | Partition resources of the sock server, `1..=65`        |
@@ -16,7 +16,7 @@
 //!
 //! The variable is only read when the `test-args` feature is enabled (test
 //! builds); otherwise [`TestArgs::from_env`] returns the defaults, which
-//! select the native transport. [`TestArgs::set_process`] overrides it for
+//! select the `ioctl` transport. [`TestArgs::set_process`] overrides it for
 //! the current process only. The SDK never reads these settings: test runners
 //! translate connection settings into [`tsra_ddi::DdiConfig`] before invoking it.
 
@@ -207,7 +207,7 @@ mod tests {
             "api_rev=1_99999999999",
             "fast_backoff=1",
             "resource_count=four",
-            "transport=sock;transport=nix",
+            "transport=sock;transport=ioctl",
         ] {
             assert!(TestArgs::parse(bad).is_err(), "{bad:?} should be rejected");
         }
