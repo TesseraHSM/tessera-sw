@@ -171,6 +171,12 @@ fn test_reopen_session() {
 
 #[test]
 fn test_reopen_session_restores_socket_bulk_access() {
+    // Only applicable to the socket transport: `SessionNeedsRenegotiation` on
+    // bulk I/O is a socket transport status; the ioctl path reports bulk
+    // failures as fast-path status codes instead.
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     ddi_dev_test(
         |_, _, _| 0,
         common_cleanup,
