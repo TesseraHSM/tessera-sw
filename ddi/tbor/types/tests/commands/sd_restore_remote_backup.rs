@@ -392,17 +392,15 @@ fn remote_restore_destination(backup: &RemoteBackup, seed: &[u8], pota: &CaKey) 
     (ctx, session.session_id)
 }
 
-/// A rejected remote restore must not initialize the security domain.
-/// This helper is intended for negative tests with a valid destination.
+/// A rejected remote restore must return the expected firmware status
+/// and must not initialize the security domain.
 fn assert_remote_restore_rejected(
     ctx: &TestCtx,
     req: &TborSdRestoreRemoteBackupReq,
     backup: &RemoteBackup,
+    expected_status: TborStatus,
 ) {
-    assert!(
-        ctx.tbor_oob(req, &backup.evidence.oob()).is_err(),
-        "malformed remote restore unexpectedly succeeded"
-    );
+    ctx.expect_fw_reject_oob(req, &backup.evidence.oob(), expected_status);
 
     assert_part_state(ctx, PART_STATE_INITIALIZED, false);
 }
@@ -443,7 +441,17 @@ fn sd_restore_remote_backup_rejects_max_session_id() {
 
     let req = restore_remote_req(u16::MAX, &backup);
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    // This invalid session ID is rejected by the DDI layer, which returns
+    // DdiStatus rather than the TborStatus variant used by firmware errors.
+    let err = ctx
+        .tbor_oob(&req, &backup.evidence.oob())
+        .expect_err("u16::MAX session ID must be rejected");
+    assert_eq!(
+        format!("{err:?}"),
+        format!("DdiStatus(DdiStatus({}))", 0x0870_0020u32),
+        "unexpected error for invalid session ID",
+    );
+    assert_part_state(&ctx, PART_STATE_INITIALIZED, false);
 }
 
 #[test]
@@ -458,7 +466,7 @@ fn sd_restore_remote_backup_rejects_zeroed_masked_sealing_key() {
     let mut req = restore_remote_req(session_id, &backup);
     req.masked_sealing_key.fill(0);
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -473,7 +481,7 @@ fn sd_restore_remote_backup_rejects_corrupted_masked_sealing_key() {
     let mut req = restore_remote_req(session_id, &backup);
     req.masked_sealing_key[0] ^= 0x01;
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -488,7 +496,7 @@ fn sd_restore_remote_backup_rejects_zeroed_remote_backup() {
     let mut req = restore_remote_req(session_id, &backup);
     req.src_remote_backup.fill(0);
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -503,7 +511,7 @@ fn sd_restore_remote_backup_rejects_corrupted_remote_backup() {
     let mut req = restore_remote_req(session_id, &backup);
     req.src_remote_backup[0] ^= 0x01;
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -519,7 +527,12 @@ fn sd_restore_remote_backup_rejects_corrupted_remote_backup_tail() {
     let last = req.src_remote_backup.len() - 1;
     req.src_remote_backup[last] ^= 0x80;
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(
+        &ctx,
+        &req,
+        &backup,
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
 }
 
 #[test]
@@ -534,7 +547,7 @@ fn sd_restore_remote_backup_rejects_zeroed_prev_sd_mk_backup() {
     let mut req = restore_remote_req(session_id, &backup);
     req.prev_sd_mk_backup.fill(0);
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -549,7 +562,7 @@ fn sd_restore_remote_backup_rejects_corrupted_prev_sd_mk_backup() {
     let mut req = restore_remote_req(session_id, &backup);
     req.prev_sd_mk_backup[0] ^= 0x01;
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -565,7 +578,12 @@ fn sd_restore_remote_backup_rejects_corrupted_prev_sd_mk_backup_tail() {
     let last = req.prev_sd_mk_backup.len() - 1;
     req.prev_sd_mk_backup[last] ^= 0x80;
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(
+        &ctx,
+        &req,
+        &backup,
+        TborStatus::AesGcmDecryptTagDoesNotMatch,
+    );
 }
 
 #[test]
@@ -580,7 +598,7 @@ fn sd_restore_remote_backup_rejects_missing_sender_chain() {
     let mut req = restore_remote_req(session_id, &backup);
     req.sender_cert_chain.clear();
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -597,7 +615,7 @@ fn sd_restore_remote_backup_rejects_missing_sender_mfgr_chain_trusted() {
     let mut req = restore_remote_req(session_id, &backup);
     req.sender_mfgr_cert_chain.clear();
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
 
 #[test]
@@ -614,5 +632,5 @@ fn sd_restore_remote_backup_rejects_missing_sender_part_owner_chain_trusted() {
     let mut req = restore_remote_req(session_id, &backup);
     req.sender_part_owner_cert_chain.clear();
 
-    assert_remote_restore_rejected(&ctx, &req, &backup);
+    assert_remote_restore_rejected(&ctx, &req, &backup, TborStatus::InvalidArg);
 }
