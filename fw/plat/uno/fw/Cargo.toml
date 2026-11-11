@@ -103,6 +103,7 @@ tsra_fw_hsm_core = { default-features = false, path = "../../../core/lib" }
 tsra_fw_hsm_core_tracing = { path = "../../../core/tracing" }
 tsra_fw_hsm_io = { path = "../../crates/io" }
 tsra_fw_hsm_pal_traits = { path = "../../../pal/traits" }
+tsra_log_map = { path = "../crates/log_map" }
 
 bitfield-struct = "0.13.0"
 cortex-m = { features = ["inline-asm"], version = "0.7.7" }
