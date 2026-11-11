@@ -56,7 +56,7 @@ jobs:
     - run: cargo +nightly fmt -- --check
     - run: cargo clippy -- -D warnings
     - run: cargo +nightly fuzz build
-    - name: Run fuzz smoke tests (${{ env.FUZZ_TIME }}s each)
+    - name: Run fuzz smoke tests (10s each)
       run: |
         TARGETS=$(cargo fuzz list)
 
