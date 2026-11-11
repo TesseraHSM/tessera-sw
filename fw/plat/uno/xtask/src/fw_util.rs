@@ -38,6 +38,9 @@ pub struct FwPaths {
     /// Fastpath PQC firmware workspace directory.
     pub pqc_dir: PathBuf,
 
+    /// Log fixture workspace directory (`cargo xtask log-fixture`).
+    pub log_fixture_dir: PathBuf,
+
     /// Default release ELF path for the firmware app binary.
     pub elf: PathBuf,
 }
@@ -77,6 +80,7 @@ impl FwPaths {
         Ok(Self {
             fw_dir,
             pqc_dir,
+            log_fixture_dir: ctx.root.join("xtask").join("fixtures").join("log_image"),
             elf,
         })
     }

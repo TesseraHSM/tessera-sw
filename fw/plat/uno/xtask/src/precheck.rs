@@ -222,6 +222,11 @@ impl Xtask for Precheck {
                     errors.push(("decoder header", e));
                 }
             }
+
+            log::info!("=== log fixture ===");
+            if let Err(e) = (crate::log_fixture::LogFixture {}).run(ctx.clone()) {
+                errors.push(("log fixture", e));
+            }
         }
 
         if errors.is_empty() {

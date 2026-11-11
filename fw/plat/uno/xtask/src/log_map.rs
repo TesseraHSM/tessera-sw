@@ -323,6 +323,8 @@ pub struct ImageLog {
     /// Each call outside `fw/plat/uno` that the image drops from the debug
     /// log, from its drop note.
     pub drops: BTreeSet<DroppedCall>,
+    /// `cortex-m-rt`'s boundary symbols for RAM that the image defines.
+    pub boundary: BTreeMap<String, u32>,
 }
 
 /// A log call that an image drops from the debug log, from its drop note.
@@ -597,6 +599,7 @@ pub fn read_image(label: &str, path: &Path, map: &Map) -> anyhow::Result<ImageLo
         tokens,
         sites,
         drops,
+        boundary,
     })
 }
 
@@ -811,6 +814,7 @@ mod tests {
             tokens: BTreeMap::new(),
             sites: parse_markers(&markers).expect("markers"),
             drops: BTreeSet::new(),
+            boundary: BTreeMap::new(),
         }
     }
 
