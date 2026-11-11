@@ -111,15 +111,15 @@ impl HsmRsa for StdHsmPal {
 
     async fn rsa_priv_der_to_vault<'a>(
         &'a self,
-        _io: &StdHsmIo,
+        io: &StdHsmIo,
         der: &'a mut HsmDmaBuf,
         crt: bool,
         pct: HsmRsaPct,
     ) -> HsmResult<(&'a HsmDmaBuf, usize)> {
         // Parse the recovered DER and re-serialize it in place into the vault
         // HSM byte format: the CRT layout (`n|e|d|p|q|dp|dq|qinv`) when `crt`,
-        // else non-CRT (`n|e|p|q`). Both HSM layouts are no larger than the
-        // source DER, so `der` doubles as the vault buffer (no second buffer).
+        // else non-CRT (`n|e|p|q`). `der` doubles as the vault buffer unless
+        // the layout is larger, e.g. a CRT key whose ignored `d` is short.
         // Like Uno, the components the layout uses must have supported sizes
         // and, unless `pct` is `None`, be consistent and pass the PCT; the
         // others are ignored. The key is rebuilt from `n`, `e`, `p` and `q`
@@ -135,24 +135,34 @@ impl HsmRsa for StdHsmPal {
         let base_len = 2 * modulus_len + 4;
         let base =
             RsaPrivateKey::from_hsm_bytes(&parts[..base_len]).map_err(|_| HsmError::InvalidArg)?;
+        let vault_len = if crt {
+            base.hsm_crt_bytes_len()
+        } else {
+            base.hsm_bytes_len()
+        };
+        let vault = if der.len() >= vault_len {
+            der
+        } else {
+            self.dma_alloc_zeroed(io, vault_len)?
+        };
         let hsm_len = if crt {
             let len = base
-                .to_hsm_crt_bytes(der)
+                .to_hsm_crt_bytes(vault)
                 .map_err(|_| HsmError::RsaToDerError)?;
             let crt_parts = &parts[base_len..];
-            der[len - crt_parts.len()..len].copy_from_slice(crt_parts);
+            vault[len - crt_parts.len()..len].copy_from_slice(crt_parts);
             len
         } else {
-            base.to_hsm_bytes(der)
+            base.to_hsm_bytes(vault)
                 .map_err(|_| HsmError::RsaToDerError)?
         };
         let pk = if crt {
-            RsaPrivateKey::from_hsm_bytes(&der[..hsm_len]).map_err(|_| HsmError::InvalidArg)?
+            RsaPrivateKey::from_hsm_bytes(&vault[..hsm_len]).map_err(|_| HsmError::InvalidArg)?
         } else {
             base
         };
         self.check_rsa_pct(&pk, pct).await?;
-        Ok((&der[..hsm_len], modulus_len))
+        Ok((&vault[..hsm_len], modulus_len))
     }
 
     async fn rsa_pkcs1_encrypt<'a>(

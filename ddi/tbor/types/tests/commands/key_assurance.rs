@@ -603,6 +603,17 @@ fn import_rsa_2k_crt_ignores_d_decrypt() {
     import_rsa_altered(256, true, RSA_DECRYPT, |p| p.d = plus_two(&p.d));
 }
 
+// A short ignored `d` makes the DER smaller than the CRT vault layout.
+#[test]
+fn import_rsa_2k_crt_ignores_zero_d_sign() {
+    import_rsa_altered(256, true, SIGN_VERIFY, |p| p.d = vec![0]);
+}
+
+#[test]
+fn import_rsa_4k_crt_ignores_zero_d_decrypt() {
+    import_rsa_altered(512, true, RSA_DECRYPT, |p| p.d = vec![0]);
+}
+
 #[test]
 fn import_rsa_2k_plain_ignores_crt_exponents_sign() {
     import_rsa_altered(256, false, SIGN_VERIFY, |p| {
