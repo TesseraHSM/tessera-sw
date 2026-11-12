@@ -9,10 +9,10 @@
 //!
 //! The transport operates at the firmware's **SQE / CQE** boundary, just
 //! like the in-process emulator: the client builds a submission entry and
-//! reads the returned completion entry; the server is a dumb DMA-and-submit
-//! shim that re-homes the host buffers and forwards the raw entries. The
-//! request/response *payloads* (the MBOR or TBOR DDI body) are opaque to
-//! both the protocol and the server.
+//! reads the returned completion entry; the server re-homes the host buffers
+//! and forwards the raw entries. DDI bodies are opaque to the protocol. The
+//! server inspects command metadata for session ownership and OOB direction
+//! checks; otherwise it forwards request/response payloads unchanged.
 //!
 //! # Frame structure
 //!
@@ -88,6 +88,9 @@ pub const TRANSPORT_SESSION_NOT_OWNED: u32 = 3;
 /// Transport rejection of a bulk request on an owned session that a reset
 /// invalidated and that has not been renegotiated yet.
 pub const TRANSPORT_SESSION_NEEDS_RENEGOTIATION: u32 = 4;
+
+/// Transport rejection when a command's OOB buffer role disagrees with its direction.
+pub const TRANSPORT_OOB_DIRECTION_MISMATCH: u32 = 5;
 
 /// Maximum main request/response buffer, matching the firmware's two-page limit.
 pub const MAX_DMA_BUFFER: u32 = 8192;

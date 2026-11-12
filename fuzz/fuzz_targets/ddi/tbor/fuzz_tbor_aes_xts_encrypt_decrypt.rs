@@ -69,6 +69,7 @@ impl<'a, const MAX: usize> Arbitrary<'a> for BoundedBytes<MAX> {
 enum Expected {
     Success,
     Status(TborStatus),
+    DirectionMismatch,
     /// Altered or arbitrary authenticated envelopes have negligible forgery
     /// probability. Only framing, scope, or authentication rejects are allowed.
     BadKey,
@@ -85,7 +86,7 @@ fn valid_lengths(input: &FuzzInput) -> (usize, usize) {
         _ => BLOCK_LEN * (1 + usize::from(input.dul / 8) % (XTS_DATA_MAX_LEN / BLOCK_LEN)),
     };
     let max_units = XTS_DATA_MAX_LEN / dul;
-    let units = if input.scenario % 32 == 0 {
+    let units = if input.scenario.is_multiple_of(32) {
         // Frequent small multi-unit cases enable the per-unit oracle.
         1 + usize::from(input.data_len) % max_units.min(4)
     } else {
@@ -132,6 +133,12 @@ fn expected(
     if req.session_id != sid {
         return reject(TborStatus::FileHandleSessionIdDoesNotMatch);
     }
+    if req.data_len != 0
+        && req.in_index == req.out_index
+        && usize::from(req.in_index) < buffers.len()
+    {
+        return Expected::DirectionMismatch;
+    }
     if buffers.is_empty() {
         return reject(TborStatus::InvalidArg);
     }
@@ -152,9 +159,7 @@ fn expected(
         return reject(TborStatus::InvalidKeyType);
     }
     // The last four stored IV bytes are ignored when unmasking.
-    if req.masked_key[..20] != pristine[..20]
-        || req.masked_key[24..] != pristine[24..]
-    {
+    if req.masked_key[..20] != pristine[..20] || req.masked_key[24..] != pristine[24..] {
         return if tag_only {
             reject(TborStatus::AesGcmDecryptTagDoesNotMatch)
         } else {
@@ -377,10 +382,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 req.masked_key = input.raw_key.0.clone();
             }
         }
-        29 => {
-            // Equal indices are a valid in-place operation, not a reject.
-            req.out_index = req.in_index;
-        }
+        29 => req.out_index = req.in_index,
         30 => req.tweak = input.tweak.to_le_bytes().to_vec(),
         31 => {
             let lengths = [
@@ -432,6 +434,13 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             } else {
                 assertions::assert_fw_rejects(&err, status);
             }
+        }
+        Expected::DirectionMismatch => {
+            let err = result.expect_err("shared OOB descriptor unexpectedly accepted");
+            assert!(
+                matches!(err, DdiError::InvalidParameter),
+                "expected socket direction rejection, got {err}"
+            );
         }
         Expected::BadKey => {
             let err = result.expect_err("altered/arbitrary masked key unexpectedly authenticated");

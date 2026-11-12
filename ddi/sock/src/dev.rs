@@ -34,64 +34,14 @@ use nix::sys::socket::SockType;
 #[cfg(target_os = "linux")]
 use nix::sys::socket::VsockAddr;
 use parking_lot::Mutex;
-use tsra_ddi_interface::DdiAesGcmParams;
-use tsra_ddi_interface::DdiAesGcmResult;
-use tsra_ddi_interface::DdiAesXtsParams;
-use tsra_ddi_interface::DdiAesXtsResult;
-use tsra_ddi_interface::DdiCookie;
-use tsra_ddi_interface::DdiDev;
-use tsra_ddi_interface::DdiError;
-use tsra_ddi_interface::DdiResult;
-use tsra_ddi_interface::TborOobItem;
-use tsra_ddi_mbor_codec::MborDecode;
-use tsra_ddi_mbor_codec::MborDecoder;
-use tsra_ddi_mbor_codec::MborEncode;
-use tsra_ddi_mbor_codec::MborEncoder;
-use tsra_ddi_mbor_types::DdiAesOp;
-use tsra_ddi_mbor_types::DdiApiRev;
-use tsra_ddi_mbor_types::DdiCloseSessionCmdReq;
-use tsra_ddi_mbor_types::DdiCloseSessionReq;
-use tsra_ddi_mbor_types::DdiDecoder;
-use tsra_ddi_mbor_types::DdiDeviceKind;
-use tsra_ddi_mbor_types::DdiOp;
-use tsra_ddi_mbor_types::DdiOpReq;
-use tsra_ddi_mbor_types::DdiReqHdr;
-use tsra_ddi_mbor_types::DdiRespHdr;
-use tsra_ddi_mbor_types::DdiRespSessionId;
-use tsra_ddi_mbor_types::DdiStatus;
-use tsra_ddi_mbor_types::MborError;
+use tsra_ddi_interface::*;
+use tsra_ddi_mbor_codec::*;
 use tsra_ddi_mbor_types::SessionControlKind;
-use tsra_ddi_sock_proto::OobItem;
-use tsra_ddi_sock_proto::ProtoError;
-use tsra_ddi_sock_proto::Request;
-use tsra_ddi_sock_proto::RequestFrame;
-use tsra_ddi_sock_proto::Response;
-use tsra_ddi_sock_proto::ResponseFrame;
-use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
-use tsra_ddi_sock_proto::MAX_OOB_ITEM;
-use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
-use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
-use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
-use tsra_ddi_tbor_types::TborOpReq;
-use tsra_ddi_tbor_types::TborResp;
-use tsra_fw_hsm_bulk::BulkCqe;
-use tsra_fw_hsm_bulk::BulkDir;
-use tsra_fw_hsm_bulk::BulkParams;
-use tsra_fw_hsm_bulk::BulkSqe;
-use tsra_fw_hsm_bulk::GcmParams;
-use tsra_fw_hsm_bulk::GcmTail;
-use tsra_fw_hsm_bulk::RawBulkCqe;
-use tsra_fw_hsm_bulk::XtsDul;
-use tsra_fw_hsm_bulk::XtsParams;
-use tsra_fw_hsm_bulk::BLOCK_LEN;
-use tsra_fw_hsm_bulk::GCM_AAD_ALIGN;
-use tsra_fw_hsm_io::CmdDword;
-use tsra_fw_hsm_io::Cqe;
-use tsra_fw_hsm_io::RawCqe;
-use tsra_fw_hsm_io::SessionFlags;
-use tsra_fw_hsm_io::SqeBuilder;
-use tsra_fw_hsm_io::OP_MBOR;
-use tsra_fw_hsm_io::OP_TBOR;
+use tsra_ddi_mbor_types::*;
+use tsra_ddi_sock_proto::*;
+use tsra_ddi_tbor_types::*;
+use tsra_fw_hsm_bulk::*;
+use tsra_fw_hsm_io::*;
 
 /// Default endpoint on Unix.
 #[cfg(unix)]
@@ -527,6 +477,7 @@ impl DdiSockDev {
         // Transport-level status (e.g. server DMA allocation failure).
         match resp.status {
             0 => Ok(resp),
+            TRANSPORT_OOB_DIRECTION_MISMATCH => Err(DdiError::InvalidParameter),
             TRANSPORT_SESSION_NOT_OWNED => Err(DdiError::DdiStatus(
                 DdiStatus::FileHandleSessionIdDoesNotMatch,
             )),
@@ -1932,6 +1883,34 @@ mod tests {
         for endpoint in ["tcp://", "tcp://localhost", "tcp://127.0.0.1:invalid"] {
             assert!(DdiSockDev::connect(endpoint).is_err(), "{endpoint}");
         }
+    }
+
+    #[test]
+    fn maps_oob_direction_status_to_invalid_parameter() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
+        let endpoint = format!("tcp://{}", listener.local_addr().expect("address"));
+        let peer = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("read timeout");
+            Request::read_from(&mut stream).expect("request");
+            Response {
+                status: TRANSPORT_OOB_DIRECTION_MISMATCH,
+                cqe: vec![0; tsra_ddi_sock_proto::CQE_DWORDS],
+                payload: Vec::new(),
+                oob_items: Vec::new(),
+                tail: Vec::new(),
+            }
+            .write_to(&mut stream)
+            .expect("direction rejection");
+        });
+        let device = DdiSockDev::connect(&endpoint).expect("device");
+        assert!(matches!(
+            device.submit(OP_TBOR, 0, None, vec![1], Vec::new()),
+            Err(DdiError::InvalidParameter)
+        ));
+        peer.join().expect("peer");
     }
 
     #[test]
