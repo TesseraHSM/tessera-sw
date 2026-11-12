@@ -285,6 +285,12 @@ fn test_live_migration_sim_basic() {
 // Test: get sealed BK3, simulate live migration, set sealed BK3
 #[test]
 fn test_live_migration_sealed_bk3() {
+    // Only this process's auto-started simulator gives a fresh partition after
+    // `erase()`; on hardware, NSSR preserves the sealed BK3, so the re-set
+    // below would fail with `SealedBk3AlreadySet`.
+    if !ddi_sock_server::autostarted() {
+        return;
+    }
     ddi_dev_test(
         common_setup,
         common_cleanup,
