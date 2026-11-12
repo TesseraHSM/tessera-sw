@@ -322,6 +322,24 @@ impl ReceiverEvidence {
     pub(crate) fn oob(&self) -> Vec<&[u8]> {
         self.oob_items.iter().map(Vec::as_slice).collect()
     }
+
+    /// Copy this evidence, replacing only the partition-owner chain with
+    /// `part_owner` (appended as new OOB items).
+    pub(crate) fn with_part_owner_chain(&self, part_owner: &GeneratedChain) -> Self {
+        let mut oob_items = self.oob_items.clone();
+        let part_owner_desc = vec![
+            push_item(&mut oob_items, &part_owner.root_der),
+            push_item(&mut oob_items, &part_owner.leaf_der),
+        ];
+        Self {
+            oob_items,
+            receiver: self.receiver.clone(),
+            mfgr: self.mfgr.clone(),
+            owner: self.owner.clone(),
+            part_owner: part_owner_desc,
+            report: self.report,
+        }
+    }
 }
 
 /// Append `der` as the next OOB item and return a descriptor for it.
