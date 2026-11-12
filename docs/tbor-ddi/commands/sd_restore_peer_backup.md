@@ -31,7 +31,7 @@ Algorithm:
 2. Bind the caller-supplied `policy` to the partition's fixed `policy_hash`,
    then require its `allow_peer_cloning` flag (`SdPeerCloningNotAllowed`).
 3. Verify the **sender** peer evidence against that policy: the cert chains
-   are validated and anchored to the policy `SATA` key, the report's v2
+   are validated and anchored to the policy `POTA` key, the report's v2
    `policy_hash` must equal `SHA-384(policy)`, and its attested COSE_Key is
    recovered as **`SndrPub`**.
 4. Unmask `masked_sealing_key` under its scope's masking key → the
@@ -55,7 +55,8 @@ a reboot is `PartInit` → `PartFinal(prev_local_mk_backup)` (which restores
 Manufacturer and partition-owner evidence chains are required. The device-owner
 chain may be an empty descriptor list; if supplied, it must validate and share
 the other chains' report-signing leaf key. The partition-owner chain is anchored
-to SATA; report and policy checks and the wire layout are unchanged.
+to the policy POTA key, which endorses the peer's PTA and therefore its
+report-signing PID key.
 
 ## Request
 
@@ -110,13 +111,13 @@ Carries the 276-byte `pok_local_backup` blob and the 260-byte
 | Error | Cause |
 |---|---|
 | `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` ≠ 584 B, `pok_peer_backup` ≠ 161 B, or `prev_sd_mk_backup` ≠ 260 B (rejected at decode before the handler runs) |
-| `InvalidArg` | Partition is not `Initialized` (not finalized); the policy `SATA` key is not P-384; the sender report's `policy_hash` ≠ `SHA-384(policy)`; or the opened backup is not a 48-byte BKS3 |
+| `InvalidArg` | Partition is not `Initialized` (not finalized); the policy `POTA` key is not P-384; the sender report's `policy_hash` ≠ `SHA-384(policy)`; or the opened backup is not a 48-byte BKS3 |
 | `SdAlreadyInitialized` | A security domain is already initialized on this partition incarnation (one-shot gate) |
 | `SdPeerCloningNotAllowed` | The partition's policy does not set `allow_peer_cloning` |
 | `SdBackupSvnRollback` | A backup's bound SVN is newer than the current firmware SVN (anti-rollback) |
 | `UnsupportedKeyType` | `masked_sealing_key` is not an `SdSealing` key, or `prev_sd_mk_backup` is not an `SdMasking` envelope |
 | `AesGcmDecryptTagDoesNotMatch` | A backup blob is tampered or was masked/sealed under a different key (unmask / HPKE-open tag mismatch) |
-| Evidence errors | The sender certificate chains fail validation or do not anchor to the policy `SATA` key, or the report signature is invalid |
+| Evidence errors | The sender certificate chains fail validation or do not anchor to the policy `POTA` key, or the report signature is invalid |
 | `InvalidPermissions` | Not a Crypto-Officer session |
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
 
