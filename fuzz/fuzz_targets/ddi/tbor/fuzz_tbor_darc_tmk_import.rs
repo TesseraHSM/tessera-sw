@@ -187,12 +187,13 @@ impl FuzzInput<'_> {
     }
 }
 
-/// Independent predictions distinguish firmware errors from host encoding.
+/// Independent predictions distinguish firmware, host encoding, and transport errors.
 #[derive(Clone, Copy, Debug)]
 enum Expected {
     Success,
     Reject(TborStatus),
     EncodeError,
+    InvalidParameter,
 }
 
 /// A request and its owning out-of-band certificate buffers.
@@ -564,6 +565,10 @@ fn mutate(
                 item.truncate(usize::from(input.offset) % item.len());
             }
             req.remote_cert_chain[index].length = (item.len() as u16).into();
+            // The socket transport rejects empty OOB buffers before firmware runs.
+            if item.is_empty() && tsra_ddi::sock_selected() {
+                return Expected::InvalidParameter;
+            }
             return Expected::Reject(if item.is_empty() {
                 TborStatus::InvalidArg
             } else {
@@ -699,6 +704,12 @@ fn check(
             assert!(
                 matches!(result, Err(DdiError::TborEncodeError)),
                 "host encoding must fail"
+            );
+        }
+        Expected::InvalidParameter => {
+            assert!(
+                matches!(result, Err(DdiError::InvalidParameter)),
+                "transport must reject empty OOB buffers"
             );
         }
     }

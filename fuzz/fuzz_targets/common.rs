@@ -8,7 +8,6 @@
 // Starts a private in-process DDI sock server before the fuzzer's `main`;
 // libFuzzer `-jobs`/`-fork` workers each get their own.
 use ddi_sock_server as _;
-
 use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use tsra_crypto::AesKey;
@@ -561,7 +560,10 @@ pub fn import_darc_tmk(
         tmk,
     )
     .expect("seal known TMK");
-    let (ex, ey) = sealed.enc.coord_vec().expect("encapsulated public coordinates");
+    let (ex, ey) = sealed
+        .enc
+        .coord_vec()
+        .expect("encapsulated public coordinates");
     let mut sealed_tmk = [0; SEALED_TMK_LEN];
     sealed_tmk[0] = 4;
     sealed_tmk[1..1 + COORD_LEN].copy_from_slice(&ex);

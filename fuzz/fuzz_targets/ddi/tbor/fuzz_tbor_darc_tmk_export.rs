@@ -520,7 +520,9 @@ fn mutate_request(
         Scenario::CertificateTruncate => {
             let len = usize::from(input.value) % (items[selected].len() + 1);
             if len < items[selected].len() {
-                items[selected].truncate(len);
+                // Empty OOB items are rejected by the transport. Keep backing
+                // storage so a zero-length descriptor reaches firmware.
+                items[selected].truncate(len.max(1));
                 req.target_cert_chain[selected].length =
                     u16::try_from(len).expect("bounded DER length").into();
                 expected = Expected::Reject(if len == 0 {
