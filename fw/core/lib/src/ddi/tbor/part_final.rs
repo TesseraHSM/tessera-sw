@@ -424,8 +424,14 @@ pub(crate) async fn verify_policy_hash<P: HsmPal>(
     part_policy: &HsmDmaBuf,
 ) -> HsmResult<()> {
     let digest = alloc.dma_alloc(SHA384_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, part_policy, digest, true)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        part_policy,
+        digest,
+        HsmDigestForm::Standard,
+    )
+    .await?;
 
     let stored = super::super::part_state::part_policy_hash(pal, io)?;
     if digest[..] != stored[..] {

@@ -46,6 +46,25 @@ single `none` TOC placeholder and no typed body fields.
 | 3 | 1 B | `reserved` | Reserved, MUST be `0x00`. |
 | 4 | 4 B | `status` | Little-endian `HsmError` value.  `0x00000000` = success. |
 
+## Crypto operand byte order
+
+Header and framing integers (`U16`/`U32`/`U64` fields, descriptors) are
+always little-endian. Crypto operands — ECC coordinates and signature
+components, digests passed to `EccSign`, RSA moduli, exponents and
+`RsaModExp` / OAEP integers — are carried in the **device byte order**, the
+native order of the device's crypto engine, so firmware never copies an
+operand just to convert it:
+
+| API revision | Device | Order | P-521 coordinate |
+| --- | --- | --- | --- |
+| 1.x | Uno (and std Uno) | little-endian | 68 B (66 B value + 2 zero pad bytes above it) |
+| 2.0 | Duo (and std Duo) | big-endian | 66 B (exact) |
+
+P-256 / P-384 coordinates are 32 / 48 B in both orders. The host derives
+the order from the negotiated API revision and converts at the DDI
+boundary. `PartInfo.pid_pub_key` is the exception: it is big-endian on
+every device.
+
 ## Paired TOC footprint
 
 Each command reserves the larger of its request and response schema TOC

@@ -38,6 +38,7 @@
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -197,8 +198,8 @@ pub(crate) fn mint_kex(ready: &ExportReady) -> KexKey {
         .expect("masked kex key length");
     let mut pub_raw = [0u8; RAW_PUB_LEN];
     pub_raw.copy_from_slice(&kex.pub_key);
-    pub_raw[..COORD_LEN].reverse();
-    pub_raw[COORD_LEN..].reverse();
+    dev_rev_in_place(&mut pub_raw[..COORD_LEN]);
+    dev_rev_in_place(&mut pub_raw[COORD_LEN..]);
     KexKey { masked, pub_raw }
 }
 

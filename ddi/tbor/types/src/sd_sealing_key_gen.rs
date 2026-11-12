@@ -58,7 +58,7 @@ pub struct TborSdSealingKeyGenResp {
     pub masked_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,
-    /// little-endian per coordinate) of the new sealing key.  Not a SEC1
+    /// device byte order per coordinate) of the new sealing key.  Not a SEC1
     /// point encoding (no `0x04` prefix).
     pub pub_key: [u8; SD_SEALING_PUB_KEY_LEN],
 }

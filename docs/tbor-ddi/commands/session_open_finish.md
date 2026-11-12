@@ -97,6 +97,12 @@ Pending slot and returns `SessionAuthFailure`.  The recovered 32-byte
 `seed` is the input to `BK_SESSION` derivation for the response's
 `bmk_session` envelope below.
 
+On transports that seal session traffic with keys derived from the
+Pending slot (Duo), the slot is kept until the sealed `SessionAuthFailure`
+reply has been sent and is destroyed immediately afterwards. A competing
+finish cannot exploit this window: it must itself authenticate under
+transport keys derived from the slot's `exported` secret.
+
 ## `bmk_session` envelope
 
 `bmk_session` is an [`aead_envelope`](
@@ -192,7 +198,7 @@ input.
 |---|---|
 | `InvalidArg` | `mac_fin` not 48 bytes, `seed_envelope` not 72 bytes, or `session_id` out of range |
 | `SessionNotPending` | Slot is not in `Pending` state |
-| `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed |
+| `SessionAuthFailure` | MAC or seed-envelope authentication failed, or the handshake's PSK is no longer current; the Pending slot is destroyed (on Duo, after the sealed reply is sent) |
 | `PartitionNotProvisioned` | Identity key not present |
 
 A late `SessionOpenFinish` arriving against an evicted-and-reused slot

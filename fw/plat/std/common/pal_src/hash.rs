@@ -58,7 +58,7 @@ impl HsmHash for StdHsmPal {
         algo: HsmHashAlgo,
         data: &HsmDmaBuf,
         digest: &mut HsmDmaBuf,
-        big_endian: bool,
+        form: HsmDigestForm,
     ) -> HsmResult<()> {
         let hash_algo = digest_algo(algo)?;
         let digest_len = algo.digest_len();
@@ -68,10 +68,7 @@ impl HsmHash for StdHsmPal {
         self.hash
             .hash(hash_algo, data, &mut digest[..digest_len])
             .await?;
-        if !big_endian {
-            // SHA primitive is BE-native; reverse to the wire-LE
-            // layout used at the PAL boundary for hashes that feed
-            // directly into PKA-style operations (e.g. `ecc_sign`).
+        if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
         Ok(())
@@ -106,7 +103,7 @@ impl HsmHash for StdHsmPal {
         _io: &StdHsmIo,
         mut ctx: Self::HashCtx<'_>,
         digest: &mut HsmDmaBuf,
-        big_endian: bool,
+        form: HsmDigestForm,
     ) -> HsmResult<()> {
         let digest_len = ctx.algo.digest_len();
         if digest.len() < digest_len {
@@ -115,7 +112,7 @@ impl HsmHash for StdHsmPal {
         ctx.state
             .finish(Some(&mut digest[..digest_len]))
             .map_err(|_| HsmError::ShaError)?;
-        if !big_endian {
+        if form.reversed(Self::BYTE_ORDER) {
             digest[..digest_len].reverse();
         }
         Ok(())
@@ -142,9 +139,9 @@ mod tests {
     const SHA384_ABC: &str = "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7";
     const SHA512_ABC: &str = "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f";
 
-    /// Hashes `msg` through the PAL with the requested endianness and returns
+    /// Hashes `msg` through the PAL with the requested digest form and returns
     /// the digest bytes.
-    async fn pal_hash(algo: HsmHashAlgo, msg: &[u8], big_endian: bool) -> Vec<u8> {
+    async fn pal_hash(algo: HsmHashAlgo, msg: &[u8], form: HsmDigestForm) -> Vec<u8> {
         let (_tx, rx) = async_channel::bounded(1);
         let pal = StdHsmPal::new(rx, Handle::current());
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
@@ -155,7 +152,7 @@ mod tests {
         data.copy_from_slice(msg);
         let digest = pal.dma_alloc(&io, digest_len).unwrap();
 
-        pal.hash(&io, algo, data, digest, big_endian).await.unwrap();
+        pal.hash(&io, algo, data, digest, form).await.unwrap();
         digest[..digest_len].to_vec()
     }
 
@@ -177,18 +174,18 @@ mod tests {
             .collect()
     }
 
-    /// Verifies the PAL hash of `msg` equals `expected_be` in big-endian and
-    /// its full byte reversal in little-endian.
+    /// Verifies the PAL hash of `msg` equals `expected_be` in standard form
+    /// and the platform's operand form.
     async fn verify_endianness(algo: HsmHashAlgo, msg: &[u8], expected_be: &[u8]) {
-        // validate big-endian output
-        let be = pal_hash(algo, msg, true).await;
-        assert_eq!(be, expected_be);
+        let standard = pal_hash(algo, msg, HsmDigestForm::Standard).await;
+        assert_eq!(standard, expected_be);
 
-        // validate little-endian output
-        let mut expected_le = expected_be.to_vec();
-        expected_le.reverse();
-        let le = pal_hash(algo, msg, false).await;
-        assert_eq!(le, expected_le);
+        let mut expected_operand = expected_be.to_vec();
+        if HsmDigestForm::Operand.reversed(StdHsmPal::BYTE_ORDER) {
+            expected_operand.reverse();
+        }
+        let operand = pal_hash(algo, msg, HsmDigestForm::Operand).await;
+        assert_eq!(operand, expected_operand);
     }
 
     #[tokio::test]
@@ -269,9 +266,9 @@ mod tests {
             HsmHashAlgo::Sha384,
             HsmHashAlgo::Sha512,
         ] {
-            for big_endian in [true, false] {
+            for form in [HsmDigestForm::Standard, HsmDigestForm::Operand] {
                 let mut expected = openssl_digest(algo, &msg).await;
-                if !big_endian {
+                if form.reversed(StdHsmPal::BYTE_ORDER) {
                     expected.reverse();
                 }
                 data.copy_from_slice(&msg);
@@ -288,7 +285,7 @@ mod tests {
                         .await?;
                     }
                     data.fill(0xE7);
-                    pal.hash_finish(&io, ctx, digest, big_endian).await
+                    pal.hash_finish(&io, ctx, digest, form).await
                 })
                 .await
                 .unwrap();
@@ -300,8 +297,13 @@ mod tests {
             let result = pal
                 .alloc_scoped_async(&io, async |alloc| {
                     let ctx = pal.hash_begin(&io, algo, alloc)?;
-                    pal.hash_finish(&io, ctx, &mut digest[..algo.digest_len() - 1], true)
-                        .await
+                    pal.hash_finish(
+                        &io,
+                        ctx,
+                        &mut digest[..algo.digest_len() - 1],
+                        HsmDigestForm::Standard,
+                    )
+                    .await
                 })
                 .await;
             assert_eq!(result, Err(HsmError::InvalidArg), "{algo:?}");
@@ -331,7 +333,7 @@ mod tests {
 
     /// Hashes `msg` through the multi-step API in 13-byte fragments into a
     /// buffer 4 bytes longer than the output, pre-filled with `0xA5`.
-    async fn pal_streaming_hash(algo: HsmHashAlgo, msg: &[u8], big_endian: bool) -> Vec<u8> {
+    async fn pal_streaming_hash(algo: HsmHashAlgo, msg: &[u8], form: HsmDigestForm) -> Vec<u8> {
         let (_tx, rx) = async_channel::bounded(1);
         let pal = StdHsmPal::new(rx, Handle::current());
         let (reply_tx, _reply_rx) = tokio::sync::oneshot::channel();
@@ -346,7 +348,7 @@ mod tests {
                 let end = (offset + 13).min(data.len());
                 pal.hash_continue(&io, &mut ctx, &data[offset..end]).await?;
             }
-            pal.hash_finish(&io, ctx, digest, big_endian).await
+            pal.hash_finish(&io, ctx, digest, form).await
         })
         .await
         .unwrap();
@@ -356,14 +358,14 @@ mod tests {
     /// Checks the multi-step PAL hash of `msg` against `expected_be`, in both
     /// byte orders, and that the bytes after the output are untouched.
     async fn verify_streaming(algo: HsmHashAlgo, msg: &[u8], expected_be: &[u8]) {
-        for big_endian in [true, false] {
+        for form in [HsmDigestForm::Standard, HsmDigestForm::Operand] {
             let mut expected = expected_be.to_vec();
-            if !big_endian {
+            if form.reversed(StdHsmPal::BYTE_ORDER) {
                 expected.reverse();
             }
-            let out = pal_streaming_hash(algo, msg, big_endian).await;
+            let out = pal_streaming_hash(algo, msg, form).await;
             let (head, tail) = out.split_at(expected.len());
-            assert_eq!(head, &expected[..], "{algo:?} big_endian={big_endian}");
+            assert_eq!(head, &expected[..], "{algo:?} form={form:?}");
             assert!(tail.iter().all(|&b| b == 0xA5), "{algo:?} tail");
         }
     }
@@ -411,7 +413,8 @@ mod tests {
             HsmHashAlgo::Sha3_512,
         ] {
             assert_eq!(
-                pal.hash(&io, algo, data, digest, true).await,
+                pal.hash(&io, algo, data, digest, HsmDigestForm::Standard)
+                    .await,
                 Err(HsmError::UnsupportedDigestHashAlgorithm),
                 "{algo:?} one-shot"
             );

@@ -39,7 +39,7 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived secret. |
 | 8 | `masked_key` | `buffer` (260..=296 B) | The masked local ECC private key; unmasked in place.  Its kind recovers the curve. |
-| — | `peer_pub_key` | `buffer` (64 / 96 / 136 B) | The peer's wire public key `x_le ‖ y_le` (little-endian, P-521 padded), exactly the curve's wire public-key length. |
+| — | `peer_pub_key` | `buffer` (64 / 96 / 132-or-136 B) | The peer's wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices), exactly the curve's wire public-key length. |
 
 ### Data section
 

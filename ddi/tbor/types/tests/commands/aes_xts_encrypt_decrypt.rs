@@ -21,7 +21,6 @@
 
 use tsra_crypto::Rng;
 use tsra_ddi_interface::TborOobItem;
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesXtsEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -274,7 +273,7 @@ fn aes_xts_rejects_invalid_session() {
             &mut [TborOobItem::In(&input), TborOobItem::Out(&mut out)],
         )
         .expect_err("session command must be rejected");
-    assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 }
 
 /// A key imported through `UnwrapKey` (`K1 ‖ K2`) encrypts exactly like the

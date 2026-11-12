@@ -220,18 +220,14 @@ impl StdHsmPal {
         pk: &EccPrivateKey,
         embedded: &[u8],
     ) -> HsmResult<()> {
-        let raw = curve.priv_key_len();
-        let coord = curve.wire_coord_len();
         let pub_key = pk
             .public_key()
             .map_err(|_| HsmError::EccGetCoordinatesError)?;
-        let mut derived = vec![0u8; 2 * coord];
-        self.ecc.pub_coords(&pub_key, true, &mut derived).await?;
-        let same = embedded.len() == 2 * raw
-            && embedded
-                .chunks_exact(raw)
-                .zip(derived.chunks_exact(coord))
-                .all(|(e, d)| e == &d[..raw]);
+        let mut derived = vec![0u8; curve.wire_pub_key_len(HsmByteOrder::Be)];
+        self.ecc
+            .pub_coords(&pub_key, HsmByteOrder::Be, &mut derived)
+            .await?;
+        let same = embedded == derived.as_slice();
         if !same {
             return Err(HsmError::KeyStructuralValidationFailed);
         }

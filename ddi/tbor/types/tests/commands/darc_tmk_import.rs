@@ -39,6 +39,7 @@ use tsra_crypto::HpkeSealConfig;
 use tsra_crypto::HpkeSuite;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -132,13 +133,13 @@ pub(crate) fn sd_initialized_session() -> SdReady {
     }
 }
 
-/// Import the device's little-endian `x ‖ y` key-exchange public key as a
-/// host [`EccPublicKey`] (`from_hsm_bytes` parses big-endian coordinates,
-/// so each coordinate is reversed).
+/// Import the device's `x ‖ y` key-exchange public key (device byte order)
+/// as a host [`EccPublicKey`] (`from_hsm_bytes` parses big-endian
+/// coordinates).
 fn kex_pub_to_host(pub_le: &[u8]) -> EccPublicKey {
     let mut be = pub_le.to_vec();
-    be[..COORD_LEN].reverse();
-    be[COORD_LEN..].reverse();
+    dev_rev_in_place(&mut be[..COORD_LEN]);
+    dev_rev_in_place(&mut be[COORD_LEN..]);
     EccPublicKey::from_hsm_bytes(&be).expect("import kex public key")
 }
 

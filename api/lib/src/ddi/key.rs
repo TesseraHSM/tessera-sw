@@ -310,7 +310,7 @@ fn unmask_key_pair_tbor(
             .map_err(HsmError::from)
     })?;
 
-    let pub_key_der = tbor_wire_pub_key_to_der(&props, &resp.pub_key)?;
+    let pub_key_der = tbor_wire_pub_key_to_der(WireOrder::of(session), &props, &resp.pub_key)?;
     let (priv_key_props, pub_key_props) =
         HsmMaskedKey::to_key_pair_props(masked_key, &pub_key_der)?;
     // TBOR metadata carries only the private usage; derive the ECC public

@@ -52,6 +52,7 @@ use tsra_fw_ddi_tbor_types::MASKED_KEX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -227,14 +228,13 @@ pub(crate) async fn handle<P: HsmPal>(
 
                 // Sender public key (`SndrPub`) in SEC1 BE, derived
                 // on-device from the recovered private key.  The PAL emits
-                // wire-LE `X ‖ Y`; reversing each coordinate in place yields
-                // SEC1 `0x04 ‖ X_be ‖ Y_be`.
+                // operand-order `X ‖ Y`; converting each coordinate in place
+                // yields SEC1 `0x04 ‖ X_be ‖ Y_be`.
                 let pk_s = alloc.dma_alloc(1 + 2 * coord)?;
                 pal.ecc_pub_from_priv(io, DARC_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
                     .await?;
                 pk_s[0] = SEC1_UNCOMPRESSED;
-                pk_s[1..1 + coord].reverse();
-                pk_s[1 + coord..1 + 2 * coord].reverse();
+                byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_s[1..])?;
 
                 // ── HPKE-Auth seal the TMK to RcvrPub ────────────────
                 let cfg = HpkeSealConfig::auth(

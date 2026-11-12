@@ -12,8 +12,11 @@
 //! signing through the PAL, and assembles a complete DER-encoded
 //! PKCS#10 CertificationRequest in the caller's output buffer.
 
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -25,7 +28,7 @@ use crate::der_helpers::ECDSA_SHA384_ALG_ID;
 use crate::der_helpers::MAX_ECDSA384_SIG_DER_LEN;
 use crate::der_helpers::{self};
 
-/// P-384 attestation private key length in bytes (raw scalar, LE wire format).
+/// P-384 attestation private key length in bytes (raw scalar, operand order).
 pub const PRIV_KEY_LEN: usize = 48;
 
 /// ECDSA-P384 raw signature length (`r || s`).
@@ -93,7 +96,7 @@ impl CsrInput<'_> {
 /// * `alloc`    — scoped allocator for internal DMA scratch.
 /// * `input`    — TBS template + variable field values
 ///   (see [`CsrInput`]).
-/// * `priv_key` — P-384 signing key (raw scalar, LE wire format),
+/// * `priv_key` — P-384 signing key (raw scalar, operand order),
 ///   exactly [`PRIV_KEY_LEN`] bytes, supplied as a [`HsmDmaBuf`] so it
 ///   can be handed straight to
 ///   [`HsmEcc::ecc_sign`](tsra_fw_hsm_pal_traits::HsmEcc::ecc_sign).
@@ -144,16 +147,22 @@ pub async fn build_csr<'a, P: HsmCrypto + HsmAlloc + 'a>(
 
     // 2. SHA-384 digest of TBS.
     let digest_dma = alloc.dma_alloc(SHA384_DIGEST_LEN)?;
-    pal.hash(io, HsmHashAlgo::Sha384, tbs_dma, digest_dma, false)
-        .await?;
+    pal.hash(
+        io,
+        HsmHashAlgo::Sha384,
+        tbs_dma,
+        digest_dma,
+        HsmDigestForm::Operand,
+    )
+    .await?;
 
-    // 3. ECDSA-P384 sign — output is `r || s` in LE-by-half wire format.
+    // 3. ECDSA-P384 sign — output is `r || s` in operand order.
     let sig_dma = alloc.dma_alloc(SIGNATURE_LEN)?;
     pal.ecc_sign(io, HsmEccCurve::P384, priv_key, digest_dma, sig_dma)
         .await?;
 
     // 4. Assemble the final DER document into `out`.
-    let n = assemble_signed(out, tbs_dma, sig_dma)?;
+    let n = assemble_signed(P::BYTE_ORDER, out, tbs_dma, sig_dma)?;
     Ok(n)
 }
 
@@ -192,11 +201,15 @@ fn patch_field(tbs: &mut [u8], offset: usize, value: &[u8]) -> HsmResult<()> {
 }
 
 /// Assemble PKCS#10 `CertificationRequest ::= SEQUENCE { TBS, AlgId, BIT STRING sig }`
-/// into `out`.  The PAL-returned signature is in `r || s` LE-by-half
-/// wire format and is converted to big-endian halves for DER
-/// INTEGER encoding.
-fn assemble_signed(out: &mut [u8], tbs: &HsmDmaBuf, sig_le: &HsmDmaBuf) -> HsmResult<usize> {
-    let (sig_r_be, sig_s_be) = sig_le_halves_to_be(sig_le)?;
+/// into `out`.  The PAL-returned signature is `r || s` in operand order
+/// and is converted to big-endian halves for DER INTEGER encoding.
+fn assemble_signed(
+    order: HsmByteOrder,
+    out: &mut [u8],
+    tbs: &HsmDmaBuf,
+    sig: &HsmDmaBuf,
+) -> HsmResult<usize> {
+    let (sig_r_be, sig_s_be) = sig_halves_to_be(order, sig)?;
 
     let mut sig_buf = [0u8; MAX_ECDSA384_SIG_DER_LEN];
     let sig_len = der_helpers::encode_ecdsa_signature(&mut sig_buf, &sig_r_be, &sig_s_be)
@@ -228,20 +241,17 @@ fn assemble_signed(out: &mut [u8], tbs: &HsmDmaBuf, sig_le: &HsmDmaBuf) -> HsmRe
     Ok(pos)
 }
 
-/// Convert the PAL ECDSA-P384 wire format (`r || s`, each 48 B in
-/// little-endian byte order) into the big-endian byte halves required
-/// for DER INTEGER encoding.
-fn sig_le_halves_to_be(sig_le: &HsmDmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
-    let bytes: &[u8] = sig_le;
+/// Convert the PAL ECDSA-P384 signature (`r || s`, each 48 B in operand
+/// order) into the big-endian halves required for DER INTEGER encoding.
+fn sig_halves_to_be(order: HsmByteOrder, sig: &HsmDmaBuf) -> HsmResult<([u8; 48], [u8; 48])> {
+    let bytes: &[u8] = sig;
     if bytes.len() != SIGNATURE_LEN {
         return Err(HsmError::InternalError);
     }
-    let half = SIGNATURE_LEN / 2;
+    let (r_op, s_op) = bytes.split_at(SIGNATURE_LEN / 2);
     let mut r = [0u8; 48];
     let mut s = [0u8; 48];
-    for i in 0..half {
-        r[i] = bytes[half - 1 - i];
-        s[i] = bytes[SIGNATURE_LEN - 1 - i];
-    }
+    byte_order::int_copy_to_be(order, &mut r, r_op)?;
+    byte_order::int_copy_to_be(order, &mut s, s_op)?;
     Ok((r, s))
 }

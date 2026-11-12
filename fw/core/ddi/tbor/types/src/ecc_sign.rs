@@ -16,16 +16,16 @@
 //!
 //! * `session_id` — TOC-carried session id; cross-checked by the dispatcher.
 //! * `masked_key` — the masked ECC private key (unmasked in place).
-//! * `digest` — the pre-computed message digest in wire little-endian
-//!   order. Its length must be a supported SHA-2 digest length
+//! * `digest` — the pre-computed message digest in device byte order.
+//!   Its length must be a supported SHA-2 digest length
 //!   (32 / 48 / 64 B); the hash algorithm is inferred from that length, so
 //!   no separate algorithm selector is carried on the wire.
 //!
 //! Outputs:
 //!
-//! * `signature` — raw `r ‖ s`, each component little-endian and padded to
-//!   the curve's wire coordinate length (64 / 96 / 136 B for
-//!   P-256 / P-384 / P-521).
+//! * `signature` — raw `r ‖ s`, each component in device byte order and
+//!   sized to the curve's wire coordinate length (`r ‖ s` is 64 / 96 B for
+//!   P-256 / P-384; 132 B big-endian or 136 B little-endian for P-521).
 
 use tsra_fw_ddi_tbor_api::tbor;
 
@@ -40,7 +40,7 @@ pub const TBOR_OP_ECC_SIGN: u8 = 0x18;
 /// [`TborEccSignReq::digest`].
 pub const ECC_DIGEST_MAX_LEN: usize = 64;
 
-/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 padded).  Pinned
+/// Maximum wire ECDSA signature length (`r ‖ s`, P-521 little-endian word-padded).  Pinned
 /// into the `#[tbor(buffer, max_len = 136)]` literal on
 /// [`TborEccSignResp::signature`].
 pub const ECC_SIG_MAX_LEN: usize = 136;
@@ -61,7 +61,7 @@ pub struct TborEccSignReq<'a> {
     #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
-    /// The pre-computed message digest in wire little-endian order. Its
+    /// The pre-computed message digest in device byte order. Its
     /// length must be a supported SHA-2 digest length (32 / 48 / 64 B); the
     /// hash algorithm is inferred from that length.
     #[tbor(buffer, max_len = 64)]
@@ -71,9 +71,9 @@ pub struct TborEccSignReq<'a> {
 /// `EccSign` response schema.
 #[tbor(response, pair = TborEccSignReq)]
 pub struct TborEccSignResp<'a> {
-    /// Raw ECDSA `r ‖ s`, each component little-endian and padded to the
-    /// curve wire coordinate length: 64 / 96 / 136 B for
-    /// P-256 / P-384 / P-521.
+    /// Raw ECDSA `r ‖ s`, each component in device byte order and sized to
+    /// the curve wire coordinate length: 64 / 96 B for P-256 / P-384;
+    /// 132 B (big-endian) or 136 B (little-endian) for P-521.
     #[tbor(buffer, max_len = 136, mutable)]
     pub signature: &'a [u8],
 }

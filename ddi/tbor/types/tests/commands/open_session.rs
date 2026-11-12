@@ -11,7 +11,6 @@
 //! `session_open_finish` on `TestCtx` directly.
 
 use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::build_mac_fin;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
@@ -171,7 +170,7 @@ fn session_open_finish_unknown_session_id() {
     let err = ctx
         .tbor(&req)
         .expect_err("finish against unknown session_id must fail");
-    assert_session_rejects(&err, TborStatus::SessionNotFound);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 }
 
 /// Rejects a second finish request for an already active session.
@@ -829,7 +828,7 @@ fn failed_finish_mac_reclaims_session_state() {
         .tbor(&replay)
         .expect_err("failed authentication must destroy the pending slot");
 
-    assert_session_rejects(&err, TborStatus::SessionNotFound);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 
     // The original fd may remain session-bound after failed Phase-2.
     // Open the full CU capacity on fresh fds. If the failed pending slot
@@ -911,7 +910,7 @@ fn unknown_finish_does_not_destroy_pending_session() {
         .tbor(&unknown)
         .expect_err("unknown session id must be rejected");
 
-    assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 
     let handshake = ctx
         .session_open_finish_with_mac(pending, mac_fin)

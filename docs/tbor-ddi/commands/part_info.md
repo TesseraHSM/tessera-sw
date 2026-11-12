@@ -38,7 +38,7 @@ variable-length data section.
 | 20 | `owner_svn` | `uint64` (offset/len) | Owner-seed (BKS2) selector currently in effect. |
 | 24 | `mfgr_svn` | `uint64` (offset/len) | Manufacturer-seed (BKS1) selector — the current firmware SVN. |
 | 28 | `pid` | `buffer` (offset/len) | Opaque 16-byte partition identity (PID). |
-| 32 | `pid_pub_key` | `buffer` (offset/len) | Raw ECC-P384 identity public key (`x ‖ y`, 96 B, each 48-byte coordinate little-endian; SEC1 `0x04` prefix stripped). |
+| 32 | `pid_pub_key` | `buffer` (offset/len) | Raw ECC-P384 identity public key (`x ‖ y`, 96 B, each 48-byte coordinate big-endian on every device; SEC1 `0x04` prefix stripped). |
 
 ### Data section
 

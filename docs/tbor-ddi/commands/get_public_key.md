@@ -42,7 +42,7 @@ Carries the masked key.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `pub_key` | `buffer` (≤ 520 B) | RSA: `n_le ‖ e_le` (modulus bytes + 4). ECC: `x ‖ y`, each little-endian and padded to the curve wire coordinate length. |
+| 8 | `pub_key` | `buffer` (≤ 520 B) | RSA: `n ‖ e` (modulus bytes + 4). ECC: `x ‖ y`. Each integer is in device byte order and sized to its wire length. |
 
 ### Data section
 

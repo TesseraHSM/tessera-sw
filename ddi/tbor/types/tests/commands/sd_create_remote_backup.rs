@@ -45,6 +45,7 @@
 //! `clear_enabled_state`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
@@ -274,18 +275,9 @@ pub(crate) fn masked_key_report_and_pub(
 
     const COORD_LEN: usize = RAW_PUB_LEN / 2;
     let mut rcvr_pub = [0u8; RAW_PUB_LEN];
-    for (dst, src) in rcvr_pub[..COORD_LEN]
-        .iter_mut()
-        .zip(seal.pub_key[..COORD_LEN].iter().rev())
-    {
-        *dst = *src;
-    }
-    for (dst, src) in rcvr_pub[COORD_LEN..]
-        .iter_mut()
-        .zip(seal.pub_key[COORD_LEN..].iter().rev())
-    {
-        *dst = *src;
-    }
+    rcvr_pub.copy_from_slice(&seal.pub_key);
+    dev_rev_in_place(&mut rcvr_pub[..COORD_LEN]);
+    dev_rev_in_place(&mut rcvr_pub[COORD_LEN..]);
 
     let report = ctx
         .tbor(&TborKeyReportReq {

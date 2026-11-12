@@ -27,16 +27,16 @@ response's signature slot. Checked disjoint regions keep the private key
 and digest live while the PAL writes the signature directly, without a
 separate response allocation or copy-back.
 
-The digest is supplied and consumed in PKA-native **little-endian** byte
-order (the natural big-endian digest with all bytes reversed); the device
-flips endianness internally if its signing primitive is big-endian native
-(e.g. OpenSSL on the emulator).
+The digest is supplied and consumed in **device byte order** (see
+[Crypto operand byte order](../README.md#crypto-operand-byte-order)): on
+little-endian devices it is the natural big-endian digest with all bytes
+reversed; on big-endian devices it is the digest unchanged.
 
 All supported SHA-2 digest lengths are accepted on P-256, P-384, and P-521.
 ECDSA retains only the most significant bits when a digest is longer than
 the curve's order: SHA-384 and SHA-512 are truncated to 32 bytes for P-256,
-and SHA-512 is truncated to 48 bytes for P-384. In wire little-endian order,
-these are the trailing bytes of the supplied digest. Shorter digests are
+and SHA-512 is truncated to 48 bytes for P-384. These are the leading bytes
+of the natural digest (the trailing bytes of a little-endian operand). Shorter digests are
 zero-extended to the signing operand width without changing their value.
 SHA-1 and other unsupported digest lengths remain rejected.
 
@@ -50,7 +50,7 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 |---|---|---|---|
 | 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 8 | `masked_key` | `buffer` (260..=296 B) | The masked ECC private key; unmasked in place.  Its kind recovers the curve. |
-| — | `digest` | `buffer` (32 / 48 / 64 B) | The pre-computed message digest in wire little-endian order. Its length must be a supported SHA-2 digest length (32 / 48 / 64 B); the hash algorithm is inferred from that length, so no separate algorithm selector is carried on the wire. |
+| — | `digest` | `buffer` (32 / 48 / 64 B) | The pre-computed message digest in device byte order. Its length must be a supported SHA-2 digest length (32 / 48 / 64 B); the hash algorithm is inferred from that length, so no separate algorithm selector is carried on the wire. |
 
 ### Data section
 
@@ -62,7 +62,7 @@ Carries the masked key followed by the digest.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `signature` | `buffer` (64 / 96 / 136 B) | Raw ECDSA `r ‖ s`, each component little-endian and padded to the curve wire coordinate length. |
+| 8 | `signature` | `buffer` (64 / 96 / 132-or-136 B) | Raw ECDSA `r ‖ s`, each component in device byte order and sized to the curve wire coordinate length. |
 
 ### Data section
 

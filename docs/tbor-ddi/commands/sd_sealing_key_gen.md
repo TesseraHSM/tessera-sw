@@ -71,7 +71,7 @@ section carrying the masked key and public key.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 8 | `masked_key` | `buffer` (276 B) | The sealing key's ECC-P384 private half, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(192) ‖ pt(48) ‖ tag(16)`. Not stored on-device. |
-| 12 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, little-endian per coordinate) of the new sealing key. Not a SEC1 point encoding (no `0x04` prefix). |
+| 12 | `pub_key` | `buffer` (96 B) | Raw P-384 public key: `x ‖ y` affine coordinates (48 + 48 bytes, device byte order per coordinate) of the new sealing key. Not a SEC1 point encoding (no `0x04` prefix). |
 
 ### Data section
 

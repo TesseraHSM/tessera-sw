@@ -23,6 +23,8 @@ use tsra_crypto::EccPrivateKey;
 use tsra_crypto::ExportableKey;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::device_is_little_endian;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -179,15 +181,24 @@ fn ecc_sign_digest_with_zero_bytes_roundtrip() {
     }
 }
 
-/// Verifies P-521 signatures zero-fill the two wire-padding bytes per component.
+/// Verifies P-521 signatures zero-fill the two wire-padding bytes per
+/// component on a little-endian device (a big-endian one sends them
+/// unpadded).
 #[test]
 fn ecc_sign_p521_signature_padding_is_zero() {
     with_generated_ecc_key(ECC_CURVE_P521, |ctx, session_id, masked_key, pub_key| {
         let digest = vec![0x43; 64];
         let signature = sign(ctx, session_id, masked_key, &digest);
-        assert_eq!(signature.len(), 136);
-        assert_eq!(&signature[66..68], &[0, 0], "r padding must be zero");
-        assert_eq!(&signature[134..136], &[0, 0], "s padding must be zero");
+        let wire = wire_coord_len(66);
+        assert_eq!(signature.len(), 2 * wire);
+        assert!(
+            signature[66..wire].iter().all(|&b| b == 0),
+            "r padding must be zero",
+        );
+        assert!(
+            signature[wire + 66..].iter().all(|&b| b == 0),
+            "s padding must be zero",
+        );
         assert!(verify_wire_ecdsa(&pub_key, &signature, &digest));
     });
 }
@@ -320,15 +331,22 @@ fn ecc_sign_long_digests_use_most_significant_curve_bits() {
                 "long digest signature must verify (curve {curve}, digest {digest_len} B)",
             );
 
+            // The digest is in device byte order: locate its least and most
+            // significant bytes accordingly.
+            let (low, high) = if device_is_little_endian() {
+                (0, digest_len - 1)
+            } else {
+                (digest_len - 1, 0)
+            };
             let mut discarded_bit_changed = digest.clone();
-            *discarded_bit_changed.first_mut().expect("nonempty digest") ^= 0x01;
+            discarded_bit_changed[low] ^= 0x01;
             assert!(
                 verify_wire_ecdsa(&pub_key, &signature, &discarded_bit_changed),
                 "discarded low digest bits must not affect verification (curve {curve}, digest {digest_len} B)",
             );
 
             let mut retained_bit_changed = digest;
-            *retained_bit_changed.last_mut().expect("nonempty digest") ^= 0x01;
+            retained_bit_changed[high] ^= 0x01;
             assert!(
                 !verify_wire_ecdsa(&pub_key, &signature, &retained_bit_changed),
                 "changed high digest bits must invalidate the signature (curve {curve}, digest {digest_len} B)",

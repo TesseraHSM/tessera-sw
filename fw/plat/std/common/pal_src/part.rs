@@ -742,7 +742,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::Ecc384Private,
                 id_attrs,
                 HsmEccPct::SignVerify,
-                true,
+                HsmByteOrder::Be,
                 &mut id_pub,
             )
             .await;
@@ -854,7 +854,7 @@ impl StdHsmPal {
                     HsmVaultKeyKind::Ecc384Private,
                     id_attrs,
                     HsmEccPct::SignVerify,
-                    true,
+                    HsmByteOrder::Be,
                     &mut id_pub,
                 )
                 .await?;
@@ -879,7 +879,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::EstablishCred,
                 attrs,
                 HsmEccPct::KeyAgreement,
-                false,
+                StdHsmPal::BYTE_ORDER,
                 &mut ec_pub,
             )
             .await?;
@@ -898,7 +898,7 @@ impl StdHsmPal {
                 HsmVaultKeyKind::SessionEncryption,
                 attrs,
                 HsmEccPct::KeyAgreement,
-                false,
+                StdHsmPal::BYTE_ORDER,
                 &mut se_pub,
             )
             .await;
@@ -1027,10 +1027,10 @@ impl StdHsmPal {
     /// the bare raw HSM-format private scalar `d` (48 B for P-384).
     ///
     /// `big_endian` selects the public-key byte order (the BE↔LE flip is
-    /// the driver's responsibility): `true` yields OpenSSL big-endian
-    /// coordinates for internally-consumed keys (cert generation / POTA
-    /// hashing); `false` yields the little-endian DDI wire form (matching
-    /// real PKA hardware) for wire-only keys.
+    /// the driver's responsibility): [`HsmByteOrder::Be`] yields
+    /// big-endian coordinates for internally-consumed keys (cert
+    /// generation / POTA hashing); the PAL operand order yields the DDI
+    /// wire form for wire-only keys.
     ///
     /// Bypasses [`HsmEcc::ecc_gen_keypair`] (which now requires an
     /// `HsmIo` and a scoped allocator) and drives the
@@ -1045,15 +1045,13 @@ impl StdHsmPal {
         kind: HsmVaultKeyKind,
         attrs: HsmVaultKeyAttrs,
         _pct: HsmEccPct,
-        big_endian: bool,
+        order: HsmByteOrder,
         pub_key_out: &mut [u8; P384_PUB_KEY_LEN],
     ) -> HsmResult<HsmKeyId> {
         // Generate the keypair; the driver owns the public-key byte
         // order, so this layer stays free of byte-shuffling boilerplate.
         let (pk, pub_key) = self.ecc.gen_keypair(EccCurve::P384).await?;
-        self.ecc
-            .pub_coords(&pub_key, big_endian, pub_key_out)
-            .await?;
+        self.ecc.pub_coords(&pub_key, order, pub_key_out).await?;
 
         // Export the private key as raw HSM scalar bytes (48 B for P-384).
         // `Zeroizing` scrubs the transient heap copy on drop once the vault

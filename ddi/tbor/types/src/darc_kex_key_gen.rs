@@ -55,7 +55,7 @@ pub struct TborDarcKexKeyGenResp {
     pub masked_key: [u8; MASKED_KEX_KEY_LEN],
 
     /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,
-    /// little-endian per coordinate) of the new key-exchange key.  Not a
+    /// device byte order per coordinate) of the new key-exchange key.  Not a
     /// SEC1 point encoding (no `0x04` prefix).
     pub pub_key: [u8; KEX_PUB_KEY_LEN],
 }

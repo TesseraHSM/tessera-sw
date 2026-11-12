@@ -45,6 +45,7 @@ members = [
   "examples/sock/api_sock_get_api_rev",
   "examples/sock/ddi_sock_ecc384_loop",
   "examples/sock/ddi_sock_get_api_rev",
+  "fw/core/byte-order",
   "fw/core/crypto/aead-envelope",
   "fw/core/crypto/aes-cbc-pad",
   "fw/core/crypto/cose-key",
@@ -178,6 +179,7 @@ tsra_fw_core_evidence = { path = "fw/core/evidence" }
 # Firmware crates — common
 tsra_crypto_x509_builder_gen = { path = "crates/crypto/x509_builder/gen" }
 tsra_fw_hsm_bulk = { path = "fw/plat/crates/bulk" }
+tsra_fw_hsm_byte_order = { path = "fw/core/byte-order" }
 tsra_fw_hsm_core = { path = "fw/core/lib" }
 tsra_fw_hsm_core_tracing = { path = "fw/core/tracing" }
 tsra_fw_hsm_io = { path = "fw/plat/crates/io" }

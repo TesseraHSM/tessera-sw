@@ -156,6 +156,9 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // same "destroy on failure" the bespoke rollback did, now uniform.
         undo.push_session_destroy(sess_id)?;
         let pk_hsm = load_pk_hsm(pal, io, alloc)?;
+        // A transport-protected slot seals the reply under its own keys, so
+        // an authentication failure must leave it for the undo walk.
+        let sealed = transport.is_some();
 
         // The `mac_fin` length is dictated by the suite recorded in
         // the Pending blob, not by the wire schema (which is fixed
@@ -178,7 +181,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         )
         .await
         {
-            destroy_pending_on_auth_failure(pal, io, sess_id).await;
+            destroy_pending_on_auth_failure(pal, io, sess_id, sealed).await;
             return Err(e);
         }
         crate::session::validate_auth_binding(pal, io, alloc, sess_id, auth_binding).await?;
@@ -199,7 +202,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         let seed = match open_seed_envelope(pal, io, param_key, seed_envelope).await {
             Ok(seed) => seed,
             Err(e) => {
-                destroy_pending_on_auth_failure(pal, io, sess_id).await;
+                destroy_pending_on_auth_failure(pal, io, sess_id, sealed).await;
                 return Err(e);
             }
         };
@@ -243,8 +246,21 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 /// Best-effort: the [`UndoLog`] `session_destroy` entry pushed up front is
 /// the authoritative backstop (its walk step is best-effort), so a failure
 /// here — or the walk's later redundant destroy — is harmless.
-async fn destroy_pending_on_auth_failure<P: HsmPal>(pal: &P, io: &P::Io, id: HsmSessId) {
-    let _ = pal.session_destroy(io, id).await;
+///
+/// A `sealed` (transport-protected) slot is left to the undo walk instead:
+/// its transport keys must outlive this handler to seal the error reply,
+/// and a racing finish must already authenticate under those keys — which
+/// derive from the handshake secret the MAC is checked against — so it
+/// gives a prober nothing.
+async fn destroy_pending_on_auth_failure<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    id: HsmSessId,
+    sealed: bool,
+) {
+    if !sealed {
+        let _ = pal.session_destroy(io, id).await;
+    }
 }
 
 /// Decode and validate the wire request.

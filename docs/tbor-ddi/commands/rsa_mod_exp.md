@@ -26,9 +26,8 @@ instead of a vault id.
 There is no TBOR RSA key generation; RSA keys enter the device only
 through `UnwrapKey`.
 
-Both the input `y` and the output `x` are in PKA-native **little-endian**
-byte order; the device flips endianness internally if its primitive is
-big-endian native (e.g. OpenSSL on the emulator).
+Both the input `y` and the output `x` are in **device byte order** (see
+[Crypto operand byte order](../README.md#crypto-operand-byte-order)).
 
 Available to **both Crypto-Officer and Crypto-User** sessions.
 
@@ -39,7 +38,7 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 | Offset | Field | Type | Description |
 |---|---|---|---|
 | 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 12 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in wire little-endian order, exactly the key's modulus length. |
+| 12 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in device byte order, exactly the key's modulus length. |
 | 16 | `masked_key` | `buffer` (260..=3168 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
 | 20 | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
 
@@ -56,7 +55,7 @@ must be updated together.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `x` | `buffer` (256 / 384 / 512 B) | The result `x = y^d mod n` in wire little-endian order, exactly the key's modulus length. |
+| 8 | `x` | `buffer` (256 / 384 / 512 B) | The result `x = y^d mod n` in device byte order, exactly the key's modulus length. |
 
 ### Data section
 

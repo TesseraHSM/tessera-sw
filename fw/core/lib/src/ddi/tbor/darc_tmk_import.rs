@@ -50,6 +50,7 @@ use tsra_fw_ddi_tbor_types::TborDarcTmkImportReq;
 use tsra_fw_ddi_tbor_types::TborDarcTmkImportResp;
 use tsra_fw_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_fw_ddi_tbor_types::TMK_LEN;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -220,8 +221,7 @@ pub(crate) async fn handle<P: HsmPal>(
             pal.ecc_pub_from_priv(io, DARC_CURVE, rcvr_priv, &mut pk_r[1..1 + 2 * coord])
                 .await?;
             pk_r[0] = SEC1_UNCOMPRESSED;
-            pk_r[1..1 + coord].reverse();
-            pk_r[1 + coord..1 + 2 * coord].reverse();
+            byte_order::pair_to_be(P::BYTE_ORDER, DARC_CURVE, &mut pk_r[1..])?;
 
             // HPKE `open` needs a plaintext buffer at least the ciphertext
             // length (`ct` = TMK + GCM tag = 48 B); the recovered TMK

@@ -21,7 +21,6 @@
 
 use tsra_crypto::Rng;
 use tsra_ddi_interface::TborOobItem;
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptReq;
 use tsra_ddi_tbor_types::TborAesGcmEncryptDecryptResp;
@@ -488,5 +487,5 @@ fn aes_gcm_rejects_invalid_session() {
     let err = ctx
         .tbor_oob_io(&r, &mut [])
         .expect_err("session command must be rejected");
-    assert_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
 }

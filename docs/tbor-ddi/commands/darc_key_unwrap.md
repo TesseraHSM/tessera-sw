@@ -83,7 +83,7 @@ carrying the masked key and the public key.
 |---|---|---|---|
 | 8 | `key_kind` | `u8` | The recovered key's vault-kind discriminant (`Ecc{256,384,521}Private`). |
 | — | `masked_key` | `buffer` (≤ 200 B) | The recovered EC private key, masked (AEAD-GCM-256) under the scope's masking key: `header(8) ‖ iv(12) ‖ aad(96) ‖ pt(vault scalar) ‖ tag(16)`. |
-| — | `pub_key` | `buffer` (≤ 136 B) | The recovered key's wire public key (`x ‖ y`, wire little-endian, P-521 padded). |
+| — | `pub_key` | `buffer` (≤ 136 B) | The recovered key's wire public key (`x ‖ y`, device byte order; P-521 word-padded on little-endian devices). |
 
 ### Data section
 

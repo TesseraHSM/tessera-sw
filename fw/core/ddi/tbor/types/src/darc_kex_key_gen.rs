@@ -27,8 +27,8 @@
 //!   masked blob and re-imports it (unmask-on-use) when the key is later
 //!   needed.
 //! * `pub_key` — the raw P-384 public key of the new key-exchange key:
-//!   the `x ‖ y` affine coordinates (96 bytes, little-endian per
-//!   coordinate) as emitted by the PAL.  This is the bare coordinate
+//!   the `x ‖ y` affine coordinates (96 bytes, device byte order
+//!   per coordinate) as emitted by the PAL.  This is the bare coordinate
 //!   pair, **not** a SEC1 point encoding (no `0x04` prefix).  The caller
 //!   uses it as the ECDH peer for DARC key-exchange.
 
@@ -81,7 +81,7 @@ pub struct TborDarcKexKeyGenResp<'a> {
     pub masked_key: &'a [u8],
 
     /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,
-    /// little-endian per coordinate) of the new key-exchange key, as
+    /// device byte order per coordinate) of the new key-exchange key, as
     /// emitted by the PAL.  Not a SEC1 point encoding (no `0x04` prefix).
     #[tbor(buffer, len = 96)]
     pub pub_key: &'a [u8],

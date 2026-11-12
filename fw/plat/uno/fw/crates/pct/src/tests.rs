@@ -17,8 +17,11 @@ use core::task::Context;
 use core::task::Poll;
 use core::task::Waker;
 
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCqe;
 use tsra_fw_hsm_pal_traits::HsmCqeSession;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -142,6 +145,10 @@ impl HsmIoTypes for FakePal {
     type Io = FakeIo;
 }
 
+impl HsmCryptoOrder for FakePal {
+    const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+}
+
 impl HsmHash for FakePal {
     type HashCtx<'a> = ();
 
@@ -151,7 +158,7 @@ impl HsmHash for FakePal {
         _algo: HsmHashAlgo,
         data: &HsmDmaBuf,
         digest: &mut HsmDmaBuf,
-        _big_endian: bool,
+        _form: HsmDigestForm,
     ) -> HsmResult<()> {
         self.hash.run(&self.calls, data, digest)
     }
@@ -182,7 +189,7 @@ impl HsmHash for FakePal {
         _io: &Self::Io,
         _ctx: Self::HashCtx<'_>,
         _digest: &mut HsmDmaBuf,
-        _big_endian: bool,
+        _form: HsmDigestForm,
     ) -> HsmResult<()> {
         unimplemented!()
     }
@@ -598,8 +605,8 @@ fn run_ecc(
     curve: HsmEccCurve,
     pct: &HsmEccPct,
 ) -> HsmResult<bool> {
-    let priv_key = key(curve.wire_coord_len());
-    let pub_key = key(curve.wire_pub_key_len());
+    let priv_key = key(curve.wire_coord_len(FakePal::BYTE_ORDER));
+    let pub_key = key(curve.wire_pub_key_len(FakePal::BYTE_ORDER));
     block_on(ecc_pct(
         pal,
         &FakeIo::default(),

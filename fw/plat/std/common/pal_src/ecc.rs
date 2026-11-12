@@ -6,7 +6,7 @@
 //! Thin delegation layer between the trait boundary (raw HSM
 //! wire-format bytes) and the
 //! [`StdEcc`](crate::drivers::ecc::StdEcc) driver (OpenSSL key
-//! handles + wire-LE byte interfaces).  Responsibilities at this
+//! handles + PAL operand-order byte interfaces).  Responsibilities at this
 //! layer are deliberately limited to:
 //!
 //! 1. **Enum mapping** — [`HsmEccCurve`] → [`tsra_crypto::EccCurve`].
@@ -14,20 +14,18 @@
 //!    handle to the raw HSM scalar in [`ecc_gen_keypair`] and
 //!    importing the scalar back into a handle in [`ecc_sign`] /
 //!    [`ecdh_derive`].
-//! 3. **Delegation** — every wire-LE ↔ OpenSSL-BE byte flip lives
-//!    inside the driver's `_le`-suffixed methods, so this layer is
-//!    free of byte-shuffling boilerplate.  Real PKA hardware
-//!    consumes the wire-LE format natively; the driver-side flips
-//!    are an OpenSSL-backend artifact and not a host-visible
-//!    firmware responsibility.
+//! 3. **Delegation** — every operand-order ↔ OpenSSL-BE conversion
+//!    lives inside the driver's `_op`-suffixed methods (a no-op on
+//!    big-endian PALs), so this layer is free of byte-shuffling
+//!    boilerplate.
 //!
 //! ## Key formats at the trait boundary
 //!
 //! | Direction | Private key | Public key |
 //! |-----------|-------------|------------|
-//! | Trait → PAL (input)  | Raw HSM scalar `&HsmDmaBuf` (`wire_coord_len` bytes, P-521 padded) | Wire-LE `x \|\| y` `&HsmDmaBuf` (`wire_pub_key_len` bytes, P-521 padded) |
-//! | PAL → Trait (output) | Raw HSM scalar `&mut HsmDmaBuf` (`wire_coord_len` bytes, P-521 padded) | Wire-LE `x \|\| y` `&mut HsmDmaBuf` (`wire_pub_key_len` bytes, P-521 padded) |
-//! | PAL → Driver (internal) | `EccPrivateKey` handle | Wire-LE bytes (`_le` slices, P-521 padded) |
+//! | Trait → PAL (input)  | Big-endian scalar `&HsmDmaBuf` (`wire_coord_len` bytes) | Operand-order `x \|\| y` `&HsmDmaBuf` (`wire_pub_key_len` bytes) |
+//! | PAL → Trait (output) | Big-endian scalar `&mut HsmDmaBuf` (`wire_coord_len` bytes) | Operand-order `x \|\| y` `&mut HsmDmaBuf` (`wire_pub_key_len` bytes) |
+//! | PAL → Driver (internal) | `EccPrivateKey` handle | Operand-order bytes (`_op` slices) |
 //! | Driver → OpenSSL (internal) | `EccPrivateKey` handle | `EccPublicKey` handle (raw BE coords) |
 //!
 //! The trait-level [`HsmEcc::ecc_gen_keypair`] query mode reports
@@ -38,10 +36,11 @@
 use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
-use tsra_crypto::ExportableHsmKey;
 use tsra_crypto::PrivateKey;
 
 use super::*;
+use crate::drivers::ecc::export_priv;
+use crate::drivers::ecc::import_priv;
 
 /// Domain-separation label for the PTA keypair HKDF-Expand.
 ///
@@ -97,8 +96,8 @@ impl HsmEcc for StdHsmPal {
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
-        let priv_len = curve.wire_coord_len();
-        let wire_pub_len = curve.wire_pub_key_len();
+        let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
+        let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
 
         let Some((priv_out, pub_out)) = out else {
             return Ok((priv_len, wire_pub_len));
@@ -110,16 +109,16 @@ impl HsmEcc for StdHsmPal {
 
         // Allocate the contiguous `priv || pub` scratch a real PKA
         // engine would write into.  The driver fills the pub half
-        // directly in wire-LE form; we HSM-serialize the priv half
+        // directly in operand order; we vault-serialize the priv half
         // ourselves.
         let scratch = alloc.dma_alloc(priv_len + wire_pub_len)?;
         let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
 
         let (pk, pub_key) = self.ecc.gen_keypair(to_ecc_curve(curve)).await?;
-        self.ecc.pub_coords(&pub_key, false, scratch_pub).await?;
-        if pk.to_hsm_bytes(&mut scratch_priv[..priv_len]).is_err() {
-            return Err(HsmError::EccExportError);
-        }
+        self.ecc
+            .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, scratch_pub)
+            .await?;
+        export_priv(&pk, scratch_priv)?;
 
         priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
         pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
@@ -147,8 +146,8 @@ impl HsmEcc for StdHsmPal {
         out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
         _pct: HsmEccPct,
     ) -> HsmResult<(usize, usize)> {
-        let priv_len = curve.wire_coord_len();
-        let wire_pub_len = curve.wire_pub_key_len();
+        let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
+        let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
 
         // `root` is the derivation input in both modes, so validate it
         // before the query-mode return — the documented `InvalidArg` on a
@@ -183,12 +182,13 @@ impl HsmEcc for StdHsmPal {
         let scratch = alloc.dma_alloc(priv_len + wire_pub_len)?;
         let (scratch_priv, scratch_pub) = scratch.split_at_mut(priv_len);
 
-        pk.to_hsm_bytes(&mut scratch_priv[..priv_len])
-            .map_err(|_| HsmError::EccExportError)?;
+        export_priv(&pk, scratch_priv)?;
         let pub_key = pk
             .public_key()
             .map_err(|_| HsmError::EccGetCoordinatesError)?;
-        self.ecc.pub_coords(&pub_key, false, scratch_pub).await?;
+        self.ecc
+            .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, scratch_pub)
+            .await?;
         priv_out[..priv_len].copy_from_slice(&scratch_priv[..priv_len]);
         pub_out[..wire_pub_len].copy_from_slice(scratch_pub);
 
@@ -197,9 +197,9 @@ impl HsmEcc for StdHsmPal {
 
     /// Raw EC sign over a pre-computed hash digest.
     ///
-    /// Parses the raw HSM-format private key into an OpenSSL handle
-    /// and delegates to the driver's wire-LE sign method, which
-    /// performs the BE↔LE conversions internally.
+    /// Parses the vault-format private key into an OpenSSL handle and
+    /// delegates to the driver's operand-order sign method, which
+    /// performs the byte-order conversions internally.
     async fn ecc_sign(
         &self,
         _io: &StdHsmIo,
@@ -208,21 +208,21 @@ impl HsmEcc for StdHsmPal {
         hash: &HsmDmaBuf,
         signature: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let wire_len = curve.wire_sig_len();
+        let wire_len = curve.wire_sig_len(StdHsmPal::BYTE_ORDER);
         if signature.len() < wire_len {
             return Err(HsmError::InvalidArg);
         }
-        let key = EccPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
+        let key = import_priv(priv_key)?;
         self.ecc
-            .ecc_sign_le(&key, hash, &mut signature[..wire_len])
+            .ecc_sign_op(&key, hash, &mut signature[..wire_len])
             .await
     }
 
     /// Raw EC verify a signature over a pre-computed hash digest.
     ///
-    /// Delegates to the driver's wire-LE verify method which
-    /// constructs the OpenSSL pub-key handle from the wire-LE
-    /// coordinates and performs BE↔LE conversions internally.
+    /// Delegates to the driver's operand-order verify method which
+    /// constructs the OpenSSL pub-key handle from the operand-order
+    /// coordinates and performs byte-order conversions internally.
     async fn ecc_verify(
         &self,
         _io: &StdHsmIo,
@@ -232,14 +232,14 @@ impl HsmEcc for StdHsmPal {
         signature: &HsmDmaBuf,
         result: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let wire_pub_len = curve.wire_pub_key_len();
-        let wire_sig_len = curve.wire_sig_len();
+        let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
+        let wire_sig_len = curve.wire_sig_len(StdHsmPal::BYTE_ORDER);
         if pub_key.len() < wire_pub_len || signature.len() < wire_sig_len || result.len() < 4 {
             return Err(HsmError::InvalidArg);
         }
         let valid = self
             .ecc
-            .ecc_verify_le(
+            .ecc_verify_op(
                 to_ecc_curve(curve),
                 &pub_key[..wire_pub_len],
                 hash,
@@ -254,9 +254,9 @@ impl HsmEcc for StdHsmPal {
 
     /// Derive the public key from a raw private scalar (`pub = priv · G`).
     ///
-    /// Delegates to the driver's `pub_from_priv_le`, which runs the
+    /// Delegates to the driver's `pub_from_priv_op`, which runs the
     /// OpenSSL key reconstruction and public-point derivation on the
-    /// worker pool and emits the little-endian DDI wire form.
+    /// worker pool and emits the operand-order form.
     async fn ecc_pub_from_priv(
         &self,
         _io: &StdHsmIo,
@@ -264,13 +264,13 @@ impl HsmEcc for StdHsmPal {
         priv_key: &HsmDmaBuf,
         pub_key: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let wire_priv_len = curve.wire_priv_key_len();
-        let wire_pub_len = curve.wire_pub_key_len();
+        let wire_priv_len = curve.wire_priv_key_len(StdHsmPal::BYTE_ORDER);
+        let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
         if priv_key.len() != wire_priv_len || pub_key.len() < wire_pub_len {
             return Err(HsmError::InvalidArg);
         }
         self.ecc
-            .pub_from_priv_le(
+            .pub_from_priv_op(
                 to_ecc_curve(curve),
                 &priv_key[..wire_priv_len],
                 &mut pub_key[..wire_pub_len],
@@ -280,11 +280,10 @@ impl HsmEcc for StdHsmPal {
 
     /// ECDH key agreement — derives a shared secret.
     ///
-    /// Parses the local raw HSM-format private into an OpenSSL
-    /// handle and delegates to the driver's wire-LE ECDH method
+    /// Parses the local vault-format private key into an OpenSSL
+    /// handle and delegates to the driver's operand-order ECDH method
     /// which constructs the remote pub-key handle internally from
-    /// the wire-LE coordinates (stripping per-coordinate padding
-    /// for P-521).
+    /// the operand-order coordinates.
     async fn ecdh_derive(
         &self,
         _io: &StdHsmIo,
@@ -293,13 +292,13 @@ impl HsmEcc for StdHsmPal {
         pub_key: &HsmDmaBuf,
         secret: &mut HsmDmaBuf,
     ) -> HsmResult<()> {
-        let wire_pub_len = curve.wire_pub_key_len();
+        let wire_pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
         if pub_key.len() < wire_pub_len || secret.len() < curve.secret_len() {
             return Err(HsmError::InvalidArg);
         }
-        let pk = EccPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
+        let pk = import_priv(priv_key)?;
         self.ecc
-            .ecdh_derive_le(
+            .ecdh_derive_op(
                 &pk,
                 to_ecc_curve(curve),
                 &pub_key[..wire_pub_len],
@@ -325,7 +324,7 @@ impl HsmEcc for StdHsmPal {
         let embedded = crate::key_assurance::embedded_public_key(&key)?;
         let (curve, scalar) = (key.curve, key.scalar);
         crate::key_assurance::check_ecc_scalar(curve, scalar)?;
-        let vault_len = curve.wire_coord_len();
+        let vault_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
         let Some(out) = out else {
             return Ok((vault_len, curve));
         };
@@ -335,8 +334,7 @@ impl HsmEcc for StdHsmPal {
         let pad = vault_len - scalar.len();
         out[..pad].fill(0);
         out[pad..vault_len].copy_from_slice(scalar);
-        let pk =
-            EccPrivateKey::from_hsm_bytes(&out[..vault_len]).map_err(|_| HsmError::InvalidArg)?;
+        let pk = import_priv(&out[..vault_len])?;
         self.check_ecc_import(curve, pct, &pk, embedded).await?;
         Ok((vault_len, curve))
     }
@@ -354,17 +352,16 @@ impl HsmEcc for StdHsmPal {
             return Err(HsmError::InvalidArg);
         }
         // `from_scalar` validates `d` is in `[1, n-1]` and `check_key`s
-        // the derived key; re-export in the vault representation (raw
-        // HSM-format scalar bytes).
+        // the derived key; re-export in the vault representation (the
+        // big-endian scalar padded to `wire_coord_len`).
         let pk =
             EccPrivateKey::from_scalar(to_ecc_curve(curve), d).map_err(|_| HsmError::InvalidArg)?;
-        let priv_len = curve.wire_coord_len();
+        let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
         if let Some(out) = out {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
-            pk.to_hsm_bytes(&mut out[..priv_len])
-                .map_err(|_| HsmError::InvalidArg)?;
+            export_priv(&pk, &mut out[..priv_len]).map_err(|_| HsmError::InvalidArg)?;
         }
         Ok(priv_len)
     }
@@ -379,10 +376,10 @@ impl HsmEcc for StdHsmPal {
         // std PAL vault format is raw big-endian HSM scalar bytes, left
         // zero-padded to `wire_coord_len`. Parse and validate it, then
         // return the canonical big-endian COSE `d` at the field width.
-        if vault.len() != curve.wire_coord_len() {
+        if vault.len() != curve.wire_coord_len(StdHsmPal::BYTE_ORDER) {
             return Err(HsmError::InvalidArg);
         }
-        let pk = EccPrivateKey::from_hsm_bytes(vault).map_err(|_| HsmError::InvalidArg)?;
+        let pk = import_priv(vault)?;
         if from_ecc_curve(pk.curve()) != curve {
             return Err(HsmError::InvalidArg);
         }
@@ -391,15 +388,7 @@ impl HsmEcc for StdHsmPal {
             if out.len() < priv_len {
                 return Err(HsmError::InvalidArg);
             }
-            // `to_hsm_bytes` emits the big-endian scalar zero-padded to
-            // `wire_coord_len`; the canonical field-width `d` is its low
-            // (trailing) `priv_len` bytes. Use a scratch and scrub it.
-            let mut scratch = [0u8; 68];
-            let hsm_len = curve.wire_coord_len();
-            pk.to_hsm_bytes(&mut scratch[..hsm_len])
-                .map_err(|_| HsmError::InvalidArg)?;
-            out[..priv_len].copy_from_slice(&scratch[hsm_len - priv_len..hsm_len]);
-            zeroize::Zeroize::zeroize(&mut scratch[..]);
+            export_priv(&pk, &mut out[..priv_len]).map_err(|_| HsmError::InvalidArg)?;
         }
         Ok(priv_len)
     }
@@ -412,10 +401,10 @@ impl HsmEcc for StdHsmPal {
     ) -> HsmResult<usize> {
         // Parse the vault-format (raw HSM scalar) private key and report
         // the wire public-key length; in use mode derive the public key
-        // and serialize it (`x || y`, wire-LE) via the shared driver
+        // and serialize it (`x || y`, operand order) via the shared driver
         // helper (same chain as `ecc_gen_keypair_from_root`).
-        let pk = EccPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
-        let wire_pub_len = from_ecc_curve(pk.curve()).wire_pub_key_len();
+        let pk = import_priv(priv_key)?;
+        let wire_pub_len = from_ecc_curve(pk.curve()).wire_pub_key_len(StdHsmPal::BYTE_ORDER);
         if let Some(out) = pub_out {
             if out.len() < wire_pub_len {
                 return Err(HsmError::InvalidArg);
@@ -424,7 +413,7 @@ impl HsmEcc for StdHsmPal {
                 .public_key()
                 .map_err(|_| HsmError::EccGetCoordinatesError)?;
             self.ecc
-                .pub_coords(&pub_key, false, &mut out[..wire_pub_len])
+                .pub_coords(&pub_key, StdHsmPal::BYTE_ORDER, &mut out[..wire_pub_len])
                 .await?;
         }
         Ok(wire_pub_len)
@@ -456,8 +445,8 @@ mod tests {
         let (pal, io) = pal_and_io();
         pal.alloc_scoped_async(&io, async |alloc| {
             let curve = HsmEccCurve::P384;
-            let priv_len = curve.wire_coord_len();
-            let pub_len = curve.wire_pub_key_len();
+            let priv_len = curve.wire_coord_len(StdHsmPal::BYTE_ORDER);
+            let pub_len = curve.wire_pub_key_len(StdHsmPal::BYTE_ORDER);
 
             let root = alloc.dma_alloc(root_bytes.len())?;
             root.copy_from_slice(root_bytes);

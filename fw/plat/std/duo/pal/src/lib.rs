@@ -130,3 +130,8 @@ impl HsmPalFeatures for StdHsmPal {
     const API_REV_MIN: HsmApiRevision = HsmApiRevision::new(2, 0);
     const API_REV_MAX: HsmApiRevision = HsmApiRevision::new(2, 0);
 }
+
+/// Crypto operands are big-endian (exact-width P-521 coordinates).
+impl HsmCryptoOrder for StdHsmPal {
+    const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Be;
+}

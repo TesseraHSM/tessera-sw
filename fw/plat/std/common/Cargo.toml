@@ -9,6 +9,7 @@ version = "0.1.0"
 embassy-sync.workspace = true
 tokio = { features = ["rt", "sync", "time"], workspace = true }
 tsra_crypto.workspace = true
+tsra_fw_hsm_byte_order.workspace = true
 tsra_fw_hsm_pal_traits.workspace = true
 zeroize.workspace = true
 

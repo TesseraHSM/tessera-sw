@@ -21,6 +21,7 @@
 //! * Not finalized → `InvalidArg`.
 
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
@@ -258,8 +259,8 @@ fn sd_create_peer_backup_rejects_ordinary_cu_key_attestation() {
 
     let mut imported_pub = [0u8; RAW_PUB_LEN];
     imported_pub.copy_from_slice(&imported.pub_key);
-    imported_pub[..48].reverse();
-    imported_pub[48..].reverse();
+    dev_rev_in_place(&mut imported_pub[..48]);
+    dev_rev_in_place(&mut imported_pub[48..]);
     let evidence = build_evidence(&part.pid_pub, &imported_pub, &sata, &pota, &report.report);
     let req = create_peer_req(
         sid,

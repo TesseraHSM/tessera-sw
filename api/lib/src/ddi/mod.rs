@@ -32,6 +32,7 @@ mod sd_sealing_key_gen;
 mod session;
 mod session_ex;
 mod tpm;
+mod wire_order;
 
 pub(crate) use aes::*;
 pub(crate) use aes_xts_key::*;
@@ -140,6 +141,7 @@ pub use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 /// Wire length of a sealed DARC TMK.
 pub use tsra_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_ddi_tbor_types::TborStatus;
+pub(crate) use wire_order::*;
 
 use super::*;
 

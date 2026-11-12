@@ -130,3 +130,8 @@ impl HsmPalFeatures for StdHsmPal {
     const API_REV_MIN: HsmApiRevision = HsmApiRevision::new(1, 0);
     const API_REV_MAX: HsmApiRevision = HsmApiRevision::new(1, 1);
 }
+
+/// Crypto operands are little-endian (word-padded P-521 slots).
+impl HsmCryptoOrder for StdHsmPal {
+    const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
+}

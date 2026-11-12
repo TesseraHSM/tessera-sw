@@ -26,6 +26,7 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -370,9 +371,10 @@ fn rsa_mod_exp_sign_one_operand_rejected() {
         KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
     );
 
-    // Wire format is little-endian.
+    // Operands are in device byte order.
     let mut one = vec![0; modulus_len];
-    one[0] = 1;
+    *one.last_mut().expect("nonempty operand") = 1;
+    let one = dev_rev(&one);
 
     ctx.expect_fw_reject(
         &TborRsaModExpReq {
@@ -649,7 +651,8 @@ fn rsa_mod_exp_decrypt_one_operand_both_classes_rejected() {
             KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
         );
         let mut one = vec![0; modulus_len];
-        one[0] = 1;
+        *one.last_mut().expect("nonempty operand") = 1;
+        let one = dev_rev(&one);
         ctx.expect_fw_reject(
             &TborRsaModExpReq {
                 session_id: session.session_id,

@@ -11,7 +11,6 @@
 //! Backend is selected at compile time by
 //! [`tsra_ddi::TsraDdi::default`].
 
-use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID;
 use tsra_ddi_tbor_types::tbor_int::U16;
@@ -19,13 +18,17 @@ use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborApiRevReq;
 use tsra_ddi_tbor_types::TborStatus;
 
-/// Uno reports SDK API revisions 1.0 through 1.1.
-const EXPECTED: tsra_ddi_tbor_types::TborApiRevResp = tsra_ddi_tbor_types::TborApiRevResp {
-    min_major: U16::new(1),
-    min_minor: U16::new(0),
-    max_major: U16::new(1),
-    max_minor: U16::new(1),
-};
+/// The SDK API revision range the device model reports: Uno 1.0..=1.1,
+/// Duo 2.0..=2.0.
+fn expected(ctx: &TestCtx) -> tsra_ddi_tbor_types::TborApiRevResp {
+    let (major, max_minor) = if ctx.is_duo() { (2, 0) } else { (1, 1) };
+    tsra_ddi_tbor_types::TborApiRevResp {
+        min_major: U16::new(major),
+        min_minor: U16::new(0),
+        max_major: U16::new(major),
+        max_minor: U16::new(max_minor),
+    }
+}
 
 #[test]
 fn round_trip() {
@@ -34,8 +37,9 @@ fn round_trip() {
         .tbor(&TborApiRevReq::new())
         .expect("TBOR ApiRev round-trip");
     assert_eq!(
-        resp, EXPECTED,
-        "firmware should report SDK API revisions 1.0..=1.1",
+        resp,
+        expected(&ctx),
+        "firmware should report the model's SDK API revisions",
     );
 }
 
@@ -48,7 +52,7 @@ fn round_trip() {
 fn api_rev_repeated_stable() {
     let ctx = TestCtx::new();
     let baseline = ctx.tbor(&TborApiRevReq::new()).expect("baseline ApiRev");
-    assert_eq!(baseline, EXPECTED, "baseline must match expected");
+    assert_eq!(baseline, expected(&ctx), "baseline must match expected");
     for i in 1..16 {
         let resp = ctx.tbor(&TborApiRevReq::new()).expect("repeated ApiRev");
         assert_eq!(resp, baseline, "ApiRev response changed on iteration {i}");
@@ -69,7 +73,7 @@ fn api_rev_independent_of_session_state() {
     let pre = ctx
         .tbor(&TborApiRevReq::new())
         .expect("ApiRev before any session");
-    assert_eq!(pre, EXPECTED);
+    assert_eq!(pre, expected(&ctx));
 
     // CO Pending: init only, do not finish yet.
     let pending = ctx
@@ -78,7 +82,7 @@ fn api_rev_independent_of_session_state() {
     let during_pending = ctx
         .tbor(&TborApiRevReq::new())
         .expect("ApiRev with one Pending session slot");
-    assert_eq!(during_pending, EXPECTED);
+    assert_eq!(during_pending, expected(&ctx));
 
     // CO Active: finish the same handshake.
     let session = ctx
@@ -87,26 +91,30 @@ fn api_rev_independent_of_session_state() {
     let during_active = ctx
         .tbor(&TborApiRevReq::new())
         .expect("ApiRev with one Active session slot");
-    assert_eq!(during_active, EXPECTED);
+    assert_eq!(during_active, expected(&ctx));
 
     // Cleanup.
     ctx.session_close(session.session_id)
         .expect("close probe session");
     let post = ctx.tbor(&TborApiRevReq::new()).expect("ApiRev after close");
-    assert_eq!(post, EXPECTED);
+    assert_eq!(post, expected(&ctx));
 }
 
 /// Asserts the `ApiRev` revision-range invariants.
 ///
 /// The firmware must advertise a non-empty `major.minor` range.
-fn assert_expected_api_rev(resp: &tsra_ddi_tbor_types::TborApiRevResp, context: &str) {
+fn assert_expected_api_rev(
+    ctx: &TestCtx,
+    resp: &tsra_ddi_tbor_types::TborApiRevResp,
+    context: &str,
+) {
     let min = (resp.min_major.get(), resp.min_minor.get());
     let max = (resp.max_major.get(), resp.max_minor.get());
     assert!(
         min <= max,
         "{context}: minimum revision {min:?} must not exceed maximum revision {max:?}",
     );
-    assert_eq!(*resp, EXPECTED, "{context}: unexpected revision range");
+    assert_eq!(*resp, expected(ctx), "{context}: unexpected revision range");
 }
 
 /// A3: Independent device contexts must advertise the same protocol
@@ -116,20 +124,19 @@ fn assert_expected_api_rev(resp: &tsra_ddi_tbor_types::TborApiRevResp, context: 
 /// process-global mutable state in the emulator/backend.
 #[test]
 fn api_rev_consistent_across_fresh_contexts() {
-    let first = {
-        let ctx = TestCtx::new();
-        ctx.tbor(&TborApiRevReq::new())
-            .expect("ApiRev from first fresh context")
-    };
+    let ctx = TestCtx::new();
+    let first = ctx
+        .tbor(&TborApiRevReq::new())
+        .expect("ApiRev from first fresh context");
+    drop(ctx);
 
-    let second = {
-        let ctx = TestCtx::new();
-        ctx.tbor(&TborApiRevReq::new())
-            .expect("ApiRev from second fresh context")
-    };
+    let ctx = TestCtx::new();
+    let second = ctx
+        .tbor(&TborApiRevReq::new())
+        .expect("ApiRev from second fresh context");
 
-    assert_expected_api_rev(&first, "first fresh context");
-    assert_expected_api_rev(&second, "second fresh context");
+    assert_expected_api_rev(&ctx, &first, "first fresh context");
+    assert_expected_api_rev(&ctx, &second, "second fresh context");
 
     assert_eq!(
         first, second,
@@ -150,7 +157,7 @@ fn api_rev_stable_across_repeated_session_lifecycles() {
         .tbor(&TborApiRevReq::new())
         .expect("baseline ApiRev before lifecycle loop");
 
-    assert_expected_api_rev(&baseline, "lifecycle-loop baseline");
+    assert_expected_api_rev(&ctx, &baseline, "lifecycle-loop baseline");
 
     for iteration in 0..8 {
         let pending = ctx
@@ -249,7 +256,7 @@ fn api_rev_repeated_stable_sock() {
         .tbor(&TborApiRevReq::new())
         .expect("baseline ApiRev over socket backend");
 
-    assert_expected_api_rev(&baseline, "socket baseline");
+    assert_expected_api_rev(&ctx, &baseline, "socket baseline");
 
     for iteration in 1..8 {
         let resp = ctx.tbor(&TborApiRevReq::new()).unwrap_or_else(|err| {
@@ -282,7 +289,7 @@ fn api_rev_stable_across_erase() {
 
     let after = ctx.tbor(&TborApiRevReq::new()).expect("ApiRev after erase");
 
-    assert_eq!(before, EXPECTED);
+    assert_eq!(before, expected(&ctx));
     assert_eq!(after, before, "erase must not change ApiRev");
 }
 
@@ -301,7 +308,7 @@ fn api_rev_works_after_failed_session_operation() {
         .session_close(u16::MAX)
         .expect_err("invalid session close should fail");
 
-    assert_session_rejects(&err, TborStatus::SessionNotFound);
+    ctx.assert_unknown_session_rejects(&err, TborStatus::SessionNotFound);
 
     let after_error = ctx
         .tbor(&TborApiRevReq::new())
@@ -325,6 +332,6 @@ fn api_rev_request_can_be_reused() {
     let first = ctx.tbor(&req).expect("first ApiRev");
     let second = ctx.tbor(&req).expect("second ApiRev");
 
-    assert_eq!(first, EXPECTED);
+    assert_eq!(first, expected(&ctx));
     assert_eq!(second, first);
 }

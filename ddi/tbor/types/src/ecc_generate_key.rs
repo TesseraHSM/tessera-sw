@@ -20,7 +20,7 @@ pub const TBOR_OP_ECC_GENERATE_KEY: u8 = 0x17;
 pub const MASKED_ECC_KEY_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
 /// Maximum masked ECC private-key envelope length (P-521).
 pub const MASKED_ECC_KEY_MAX_LEN: usize = 8 + 16 + 192 + 80 + 16;
-/// Maximum wire public-key length (`x ‖ y`, P-521 padded).
+/// Maximum wire public-key length (`x ‖ y`, P-521 little-endian word-padded).
 pub const ECC_PUB_KEY_MAX_LEN: usize = 136;
 
 /// `EccCurve` discriminant for NIST P-256.
@@ -67,7 +67,7 @@ pub struct TborEccGenerateKeyResp {
     #[tbor(max_len = 312)]
     pub masked_key: Vec<u8>,
 
-    /// The wire public key `x ‖ y` (little-endian, P-521 padded).
+    /// The wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices).
     #[tbor(max_len = 136)]
     pub pub_key: Vec<u8>,
 }

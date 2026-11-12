@@ -61,6 +61,7 @@ use tsra_fw_core_crypto_key_report::POLICY_HASH_LEN;
 use tsra_fw_core_crypto_x509_chain::validate_chain as validate_cert_chain;
 use tsra_fw_ddi_tbor_types::CertDescriptor;
 use tsra_fw_ddi_tbor_types::ReportDescriptor;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmCrypto;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
@@ -85,13 +86,6 @@ pub const ATTESTED_KEY_LEN: usize = 1 + POINT_LEN;
 
 /// SEC1 uncompressed point tag (`0x04 ‖ X ‖ Y`).
 const SEC1_UNCOMPRESSED: u8 = 0x04;
-
-/// Reverse-copy `src` into `dst[..src.len()]` (LE↔BE per coordinate).
-fn reverse_copy(dst: &mut [u8], src: &[u8]) {
-    for (d, s) in dst.iter_mut().zip(src.iter().rev()) {
-        *d = *s;
-    }
-}
 
 /// Out-of-band locations of one attestation context's items: the three
 /// certificate-chain descriptor lists plus the attestation-report
@@ -258,13 +252,14 @@ where
         pal.recv_oob(io, report_index, report).await?;
 
         // The leaf point is big-endian (X.509); `verify_key_report`'s
-        // `signer_pub` is the `ecc_verify` wire form (little-endian per
+        // `signer_pub` is the `ecc_verify` wire form (operand order per
         // coordinate).
-        let leaf_le = ra.dma_alloc(POINT_LEN)?;
-        reverse_copy(&mut leaf_le[..coord], &canonical[..coord]);
-        reverse_copy(&mut leaf_le[coord..2 * coord], &canonical[coord..2 * coord]);
+        let leaf = ra.dma_alloc(POINT_LEN)?;
+        let (leaf_x, leaf_y) = leaf.split_at_mut(coord);
+        byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_x, &canonical[..coord])?;
+        byte_order::int_copy_from_be(P::BYTE_ORDER, leaf_y, &canonical[coord..2 * coord])?;
 
-        if !verify_key_report(pal, io, ra, report, leaf_le).await? {
+        if !verify_key_report(pal, io, ra, report, leaf).await? {
             return Err(HsmError::InvalidArg);
         }
 

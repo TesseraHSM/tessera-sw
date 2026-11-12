@@ -83,7 +83,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let digest_offset = digest_at.checked_sub(key_at).ok_or(HsmError::InvalidArg)?;
         let len = tsra_fw_ddi_tbor::RESP_HEADER_LEN
             + TborEccSignResp::TOC_COUNT * 4
-            + curve.wire_sig_len();
+            + curve.wire_sig_len(P::BYTE_ORDER);
         // Authenticated envelope metadata is dead; the private key and
         // digest remain live beyond it. Check disjointness before encoding.
         let buffer = cmd_buf.buffer_mut();
@@ -93,7 +93,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let (response, input) = buffer[..digest_end].split_at_mut(key_at);
         let response = &mut response[..len];
         TborEccSignResp::encode(response, 0, false)?
-            .signature_reserve(curve.wire_sig_len())?
+            .signature_reserve(curve.wire_sig_len(P::BYTE_ORDER))?
             .finish();
         if key_len > input.len() || digest_offset > input.len() {
             return Err(HsmError::InvalidArg);
@@ -102,27 +102,32 @@ pub(crate) async fn handle<P: HsmPal>(
         let supplied_digest = &input[digest_offset..];
 
         // The PKA DMA-reads the full curve operand width for the digest
-        // (`wire_coord_len` = 32 / 48 / 68), which exceeds the ECDSA digest
-        // width for P-521 (68 vs 64). ECDSA keeps the most significant bits
-        // of longer digests: the trailing bytes of the wire-LE digest.
-        // Zero-pad shorter digests and the backing operand so the engine's
-        // full-width reads stay in bounds.
+        // (`wire_coord_len` = 32 / 48 / 68 on LE), which exceeds the ECDSA
+        // digest width for P-521. ECDSA keeps the most significant bits of
+        // longer digests: the trailing bytes of an LE digest, the leading
+        // bytes of a BE one. Zero-pad shorter digests (at the high end) and
+        // the backing operand so the engine's full-width reads stay in
+        // bounds.
         let sign_len = curve.ecdsa_digest_len();
-        let digest = supplied_digest
-            .get(supplied_digest.len().saturating_sub(sign_len)..)
-            .ok_or(HsmError::InvalidArg)?;
+        let kept = supplied_digest.len().min(sign_len);
+        let (digest, digest_at) = if P::BYTE_ORDER.is_be() {
+            (supplied_digest.get(..kept), sign_len - kept)
+        } else {
+            (supplied_digest.get(supplied_digest.len() - kept..), 0)
+        };
+        let digest = digest.ok_or(HsmError::InvalidArg)?;
         // When the digest already fills the operand width the request
         // buffer *is* a valid operand -- it is DMA-backed and the engine's
         // read stays inside the declared digest. That is the P-256 and
         // P-384 case (32/32 and 48/48), so the common path needs neither
         // the allocation nor the copy. Only P-521 genuinely differs
         // (64-byte digest, 68-byte operand) and still needs zero pad.
-        let operand: &HsmDmaBuf = if supplied_digest.len() == curve.wire_coord_len() {
+        let operand: &HsmDmaBuf = if supplied_digest.len() == curve.wire_coord_len(P::BYTE_ORDER) {
             supplied_digest
         } else {
-            let staged = pal.dma_alloc_zeroed(io, curve.wire_coord_len())?;
+            let staged = pal.dma_alloc_zeroed(io, curve.wire_coord_len(P::BYTE_ORDER))?;
             staged
-                .get_mut(..digest.len())
+                .get_mut(digest_at..digest_at + digest.len())
                 .ok_or(HsmError::InvalidArg)?
                 .copy_from_slice(digest);
             staged
@@ -131,7 +136,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // `response` is exactly header, TOC and the one reserved field, so the
         // signature slot is its tail; taking it there spares re-decoding the
         // frame just encoded from DMA memory.
-        let signature = &mut response[len - curve.wire_sig_len()..len];
+        let signature = &mut response[len - curve.wire_sig_len(P::BYTE_ORDER)..len];
         pal.ecc_sign(io, curve, key, &operand[..sign_len], signature)
             .await?;
         Ok(len)

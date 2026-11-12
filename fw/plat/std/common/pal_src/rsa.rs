@@ -107,7 +107,7 @@ impl HsmRsa for StdHsmPal {
         // In query mode (`pub_out == None`) only the wire length is returned.
         let pk = RsaPrivateKey::from_hsm_bytes(priv_key).map_err(|_| HsmError::InvalidArg)?;
         let pubk = pk.public_key().map_err(|_| HsmError::RsaGenerateError)?;
-        crate::drivers::rsa::rsa_pub_wire(&pubk, pub_out.map(|b| &mut **b))
+        crate::drivers::rsa::rsa_pub_wire(&pubk, StdHsmPal::BYTE_ORDER, pub_out.map(|b| &mut **b))
     }
 
     async fn rsa_priv_der_to_vault<'a>(

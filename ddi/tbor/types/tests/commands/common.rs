@@ -24,6 +24,9 @@ use tsra_ddi_tbor_codec::REQ_HEADER_LEN;
 use tsra_ddi_tbor_codec::TOC_ENTRY_LEN;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::coord_sizes;
+use tsra_ddi_tbor_test_harness::dev_coord_to_host_be;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::dev_rev_in_place;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_types::SessionControlKind;
@@ -92,16 +95,15 @@ pub(crate) fn with_generated_ecc_key(
 }
 
 /// RSA-AES-wrap `data` against the HSM-format unwrapping public key
-/// (`n_le ‖ e_le`): RSA-OAEP an ephemeral 32-byte KEK with `oaep_hash`, then
-/// AES-KWP the data under it, and concatenate.
+/// (`n ‖ e`, device byte order): RSA-OAEP an ephemeral 32-byte KEK with
+/// `oaep_hash`, then AES-KWP the data under it, and concatenate.
 pub(crate) fn rsa_aes_wrap(hsm_pub: &[u8], data: &[u8], oaep_hash: HashAlgo) -> Vec<u8> {
-    // `GetUnwrappingKey` returns the modulus / exponent little-endian
-    // (`n_le(256) ‖ e_le(4)`), but `RsaPublicKey::from_hsm_bytes` parses
-    // each component big-endian — reverse them per-component.
+    // `GetUnwrappingKey` returns the modulus / exponent in device byte
+    // order (`n(256) ‖ e(4)`), but `RsaPublicKey::from_hsm_bytes` parses
+    // each component big-endian — convert them per-component.
     assert_eq!(hsm_pub.len(), 260, "RSA-2048 HSM pubkey is 260 bytes");
-    let mut be = Vec::with_capacity(260);
-    be.extend(hsm_pub[..256].iter().rev());
-    be.extend(hsm_pub[256..260].iter().rev());
+    let mut be = rev(&hsm_pub[..256]);
+    be.extend(rev(&hsm_pub[256..260]));
 
     let ephemeral_kek = [0xA7u8; 32];
     let pub_key = RsaPublicKey::from_hsm_bytes(&be).expect("from_hsm_bytes");
@@ -111,10 +113,9 @@ pub(crate) fn rsa_aes_wrap(hsm_pub: &[u8], data: &[u8], oaep_hash: HashAlgo) -> 
         &ephemeral_kek,
     )
     .expect("RSA-OAEP wrap KEK");
-    // The device expects the OAEP ciphertext in wire-LE (it flips it to
-    // big-endian internally for OpenSSL); OpenSSL emits big-endian, so
-    // reverse the modulus-sized RSA ciphertext.
-    enc_kek.reverse();
+    // The device expects the OAEP ciphertext in device byte order; OpenSSL
+    // emits big-endian.
+    dev_rev_in_place(&mut enc_kek);
 
     let kek = AesKey::from_bytes(&ephemeral_kek).expect("AES KEK");
     let mut enc_data = Encrypter::encrypt_vec(&mut AesKeyWrapPadAlgo::default(), &kek, data)
@@ -159,9 +160,11 @@ pub(crate) fn import_ok(
         .expect("UnwrapKey")
 }
 
-/// Reverse `bytes` into a fresh vec (wire-LE ↔ OpenSSL-BE conversion).
+/// Convert `bytes` between device byte order and OpenSSL big-endian (see
+/// [`dev_rev`]). Operand names suffixed `_le` in these tests hold device
+/// byte order, which is big-endian on Duo.
 pub(crate) fn rev(bytes: &[u8]) -> Vec<u8> {
-    bytes.iter().rev().copied().collect()
+    dev_rev(bytes)
 }
 
 /// A non-palindrome big-endian integer of `modulus_len` bytes that stays
@@ -265,12 +268,11 @@ pub(crate) fn verify_wire_ecdsa(pub_le: &[u8], sig_le: &[u8], digest_le: &[u8]) 
     let (wire_coord, raw_coord) = coord_sizes(pub_le.len());
     assert_eq!(sig_le.len(), wire_coord * 2, "signature length mismatch");
 
-    // Public key: reverse each full padded wire coordinate → big-endian
-    // `hsm_point_size` coordinates. Trailing LE pad becomes leading BE
-    // zeros, which `from_hsm_bytes` tolerates.
+    // Public key: convert each wire coordinate → big-endian
+    // `hsm_point_size` coordinates (P-521 is left-padded to 68 bytes).
     let (x_le, y_le) = pub_le.split_at(wire_coord);
-    let mut pub_be = rev(x_le);
-    pub_be.extend(rev(y_le));
+    let mut pub_be = dev_coord_to_host_be(x_le);
+    pub_be.extend(dev_coord_to_host_be(y_le));
     let pubkey = EccPublicKey::from_hsm_bytes(&pub_be).expect("import public key");
 
     // Signature: reverse the meaningful `raw_coord` bytes of each component

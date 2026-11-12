@@ -324,7 +324,9 @@ impl StdHsmPal {
         // big-endian `x ∥ y`, the private key as raw HSM scalar bytes.
         let (pk, pub_key) = self.ecc.gen_keypair(EccCurve::P384).await?;
         let mut pub_raw = [0u8; P384_PUB_KEY_LEN];
-        self.ecc.pub_coords(&pub_key, true, &mut pub_raw).await?;
+        self.ecc
+            .pub_coords(&pub_key, HsmByteOrder::Be, &mut pub_raw)
+            .await?;
         let priv_len = pk.hsm_bytes_len();
         let mut priv_key = vec![0u8; priv_len];
         pk.to_hsm_bytes(&mut priv_key[..priv_len])

@@ -92,7 +92,7 @@ pub struct TborDarcKeyUnwrapResp {
     #[tbor(max_len = 312)]
     pub masked_key: Vec<u8>,
 
-    /// The recovered key's wire public key (`x ‖ y`, wire-LE).
+    /// The recovered key's wire public key (`x ‖ y`, device byte order).
     #[tbor(max_len = 136)]
     pub pub_key: Vec<u8>,
 }

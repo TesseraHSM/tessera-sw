@@ -60,7 +60,9 @@ use tsra_fw_ddi_tbor_types::TborSdCreatePeerBackupResp;
 use tsra_fw_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_fw_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_fw_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
+use tsra_fw_hsm_byte_order as byte_order;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -139,8 +141,14 @@ pub(crate) async fn handle<P: HsmPal>(
 
             // The destination peer's report must attest to the same policy.
             let expected = alloc.dma_alloc(POLICY_HASH_LEN)?;
-            pal.hash(io, HsmHashAlgo::Sha384, policy, expected, true)
-                .await?;
+            pal.hash(
+                io,
+                HsmHashAlgo::Sha384,
+                policy,
+                expected,
+                HsmDigestForm::Standard,
+            )
+            .await?;
 
             let dst_hash = alloc.dma_alloc(POLICY_HASH_LEN)?;
             {
@@ -204,8 +212,7 @@ pub(crate) async fn handle<P: HsmPal>(
             pal.ecc_pub_from_priv(io, SD_CURVE, sndr_priv, &mut pk_s[1..1 + 2 * coord])
                 .await?;
             pk_s[0] = SEC1_UNCOMPRESSED;
-            pk_s[1..1 + coord].reverse();
-            pk_s[1 + coord..1 + 2 * coord].reverse();
+            byte_order::pair_to_be(P::BYTE_ORDER, SD_CURVE, &mut pk_s[1..])?;
 
             // Recover BKS3 from the caller's local backup (unmask under
             // `PartLocalMK`), then copy it out of the staging buffer.

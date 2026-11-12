@@ -16,7 +16,7 @@ use crate::tbor;
 /// TBOR opcode for `EcdhDerive`.
 pub const TBOR_OP_ECDH_DERIVE: u8 = 0x19;
 
-/// Maximum peer public-key length (`x ‖ y`, P-521 padded).
+/// Maximum peer public-key length (`x ‖ y`, P-521 little-endian word-padded).
 pub const ECDH_PEER_PUB_MAX_LEN: usize = 136;
 /// Minimum masked derived-secret envelope length (P-256).
 pub const MASKED_SECRET_MIN_LEN: usize = 8 + 16 + 192 + 32 + 16;
@@ -39,7 +39,7 @@ pub struct TborEcdhDeriveReq {
     #[tbor(min_len = 264, max_len = 312)]
     pub masked_key: Vec<u8>,
 
-    /// The peer's wire public key `x ‖ y` (little-endian, P-521 padded).
+    /// The peer's wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices).
     #[tbor(max_len = 136)]
     pub peer_pub_key: Vec<u8>,
 

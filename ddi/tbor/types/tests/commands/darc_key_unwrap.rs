@@ -35,6 +35,8 @@ use tsra_crypto::Encrypter;
 use tsra_crypto::ImportableKey;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_cu;
+use tsra_ddi_tbor_test_harness::dev_rev;
+use tsra_ddi_tbor_test_harness::wire_coord_len;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
@@ -73,7 +75,7 @@ fn curve_params(curve: EccCurve) -> (i32, i32, usize, usize) {
     match curve {
         EccCurve::P256 => (1, -9, 32, 32),
         EccCurve::P384 => (2, -51, 48, 48),
-        EccCurve::P521 => (3, -52, 66, 68),
+        EccCurve::P521 => (3, -52, 66, wire_coord_len(66)),
     }
 }
 
@@ -181,16 +183,15 @@ fn build_valid_unwrap(
     (req, key)
 }
 
-/// The expected wire-LE public key (`x_le ‖ y_le`, each zero-padded to the
-/// curve's wire coordinate width) the device returns.
+/// The expected wire public key (`x ‖ y` in device byte order, each
+/// zero-padded to the curve's wire coordinate width) the device returns.
 fn expected_wire_pub(key: &HostEcKey) -> Vec<u8> {
     let (_, _, _, wire) = curve_params(key.curve);
     let mut out = Vec::with_capacity(2 * wire);
     for coord in [&key.x, &key.y] {
-        let mut le = coord.clone();
-        le.reverse();
-        le.resize(wire, 0);
-        out.extend_from_slice(&le);
+        let mut dev = dev_rev(coord);
+        dev.resize(wire, 0);
+        out.extend_from_slice(&dev);
     }
     out
 }

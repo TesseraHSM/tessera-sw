@@ -33,7 +33,8 @@
 //! * `masked_key` — the recovered key, masked (AEAD-GCM-256) under the
 //!   scope's masking key.
 //! * `pub_key` — the recovered key's wire public key for RSA / ECC
-//!   (`n_le ‖ e_le` / `x ‖ y`); empty for symmetric (AES / HMAC) keys.
+//!   (`n ‖ e` / `x ‖ y`, device byte order); empty for symmetric
+//!   (AES / HMAC) keys.
 
 use open_enum::open_enum;
 use tsra_fw_ddi_tbor_api::tbor;

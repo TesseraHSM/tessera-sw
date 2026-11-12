@@ -35,6 +35,7 @@ pub(crate) async fn sha_digest<'p, P: HsmPal>(
         Ok((encoder.position(), layout))
     })?;
     let frame = DdiShaDigestResp::from_layout(resp, &layout);
-    pal.hash(io, algo, body.msg, frame.digest, true).await?;
+    pal.hash(io, algo, body.msg, frame.digest, HsmDigestForm::Standard)
+        .await?;
     Ok(resp)
 }

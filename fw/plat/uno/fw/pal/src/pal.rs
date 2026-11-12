@@ -37,7 +37,9 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::Duration;
 use embassy_time::Instant;
 use tsra_fw_hsm_pal_traits::HsmApiRevision;
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
+use tsra_fw_hsm_pal_traits::HsmCryptoOrder;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -1231,6 +1233,11 @@ impl HsmPalFeatures for UnoHsmPal {
     type IoProtocol = UnoIo;
     const API_REV_MIN: HsmApiRevision = HsmApiRevision::new(1, 0);
     const API_REV_MAX: HsmApiRevision = HsmApiRevision::new(1, 1);
+}
+
+/// Uno PKA operands are little-endian (word-padded P-521 slots).
+impl HsmCryptoOrder for UnoHsmPal {
+    const BYTE_ORDER: HsmByteOrder = HsmByteOrder::Le;
 }
 
 impl HsmPal for UnoHsmPal {
