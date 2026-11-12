@@ -12,6 +12,7 @@ version = "0.1.0"
 # `--features integration`.
 [features]
 integration = ["dep:openssl", "dep:tsra_ossl_engine_sys"]
+# Start an in-process DDI sock server for a sock-transport build under test.
 
 [dependencies]
 openssl = { optional = true, workspace = true }
@@ -20,6 +21,7 @@ tsra_ossl_engine_sys = { features = [
 ], optional = true, path = "../../tsra_ossl_engine_sys" }
 
 [dev-dependencies]
+ddi_sock_server = { features = ["autostart"], workspace = true }
 serial_test = { workspace = true }
 
 [[test]]

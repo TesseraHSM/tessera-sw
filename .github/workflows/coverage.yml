@@ -37,24 +37,24 @@ jobs:
         sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
         sudo docker image prune --all --force || true
         echo "Disk space after cleanup:" && df -h /
-    - name: Run all emu tests with code coverage
-      id: test-emu-coverage
-      run: cargo xtask precheck --coverage --skip-clean --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi -F emu --profile ci-emu
+    - name: Run all sock tests with code coverage
+      id: test-sock-coverage
+      run: cargo xtask precheck --coverage --skip-clean --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --transport sock --profile ci-sock
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Code Coverage Summary Report
-      if: ${{ steps.test-emu-coverage.outcome == 'success' }}
+      if: ${{ steps.test-sock-coverage.outcome == 'success' }}
       run: cargo xtask precheck --coverage-report
     - name: Upload coverage report
-      if: ${{ steps.test-emu-coverage.outcome == 'success' }}
+      if: ${{ steps.test-sock-coverage.outcome == 'success' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: coverage-report-ubuntu
         path: ./target/reports/
     - name: Fail if any tests failed
-      if: ${{ steps.test-emu-coverage.outcome == 'failure' }}
+      if: ${{ steps.test-sock-coverage.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -70,24 +70,24 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/windows-setup
-    - name: Run all emu tests with code coverage
-      id: test-emu-coverage
-      run: cargo xtask precheck --coverage --skip-clean --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi -F emu --profile ci-emu
+    - name: Run all sock tests with code coverage
+      id: test-sock-coverage
+      run: cargo xtask precheck --coverage --skip-clean --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --transport sock --profile ci-sock
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Code Coverage Summary Report
-      if: ${{ steps.test-emu-coverage.outcome == 'success' }}
+      if: ${{ steps.test-sock-coverage.outcome == 'success' }}
       run: cargo xtask precheck --coverage-report
     - name: Upload coverage report
-      if: ${{ steps.test-emu-coverage.outcome == 'success' }}
+      if: ${{ steps.test-sock-coverage.outcome == 'success' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: coverage-report-windows
         path: ./target/reports/
     - name: Fail if any tests failed
-      if: ${{ steps.test-emu-coverage.outcome == 'failure' }}
+      if: ${{ steps.test-sock-coverage.outcome == 'failure' }}
       run: |
         echo "One or more tests failed in this job."
         exit 1

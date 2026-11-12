@@ -57,7 +57,6 @@ fn test_ecdh_key_exchange(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, key_
             Some(session_id),
             Some(DdiApiRev { major: 1, minor: 0 }),
             curve,
-            None,
         );
 
     let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -67,7 +66,6 @@ fn test_ecdh_key_exchange(dev: &mut <DdiTest as Ddi>::Dev, session_id: u16, key_
         Some(DdiApiRev { major: 1, minor: 0 }),
         priv_key_id1,
         MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-        None,
         key_type,
         key_props,
     );

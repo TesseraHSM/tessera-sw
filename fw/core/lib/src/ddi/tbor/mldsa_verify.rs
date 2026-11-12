@@ -32,8 +32,9 @@ use tsra_fw_ddi_tbor_types::TborMlDsaVerifyReq;
 use tsra_fw_ddi_tbor_types::TborMlDsaVerifyResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
-use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParam;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 
@@ -48,27 +49,18 @@ pub(crate) async fn handle<P: HsmPal>(
     async {
         let req = TborMlDsaVerifyReq::decode(cmd_buf.request())?;
 
-        let param_set =
-            HsmMlDsaParamSet::from_pub_key_len(req.pub_key().len()).ok_or(HsmError::InvalidArg)?;
+        let param = HsmMlDsaParam::from_pk_len(req.pub_key().len()).ok_or(HsmError::InvalidArg)?;
 
         // A signature of the wrong length for the parameter set is malformed
         // input, not a failed verification: report it as such rather than
         // letting it read as a forgery.
-        if req.signature().len() != param_set.sig_len() {
+        if req.signature().len() != param.sig_len() {
             return Err(HsmError::InvalidArg);
         }
 
-        let mu = req.mu();
+        let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::ExternalMu, 0, req.mu())?;
         let verified = pal
-            .mldsa_verify(
-                io,
-                param_set,
-                req.pub_key(),
-                HsmMlDsaMsgType::ExternalMu,
-                mu,
-                &mu[..0],
-                req.signature(),
-            )
+            .mldsa_verify(io, param, req.pub_key(), msg, req.signature())
             .await?;
 
         if !verified {

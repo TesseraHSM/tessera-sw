@@ -10,6 +10,7 @@
 #include "utils/auto_key.hpp"
 #include "utils/key_import.hpp"
 #include "utils/rsa_keygen.hpp"
+#include "utils/utils.hpp"
 #include <algorithm>
 #include <cstring>
 #include <functional>
@@ -62,60 +63,65 @@ class tsra_aes_xts : public ::testing::Test
         const std::vector<uint8_t> &key2_plain
     )
     {
-#if SESSION_EX_TESTS
-        // Ex (TBOR) sessions hold XTS as one AesXts512 key: the wrapped blob is a
-        // single RSA-AES wrap (AES-256 KEK) of K1 || K2 (PKCS#11 CKK_AES_XTS).
-        std::vector<uint8_t> key_plain(key1_plain);
-        key_plain.insert(key_plain.end(), key2_plain.begin(), key2_plain.end());
-        std::vector<uint8_t> wrapped;
-        if (rsa_aes_wrap_bytes(wrapping_pub_key, key_plain, 256, wrapped) != TSRA_STATUS_SUCCESS)
+        if (api_rev_at_least(1, 1))
         {
-            return {};
+            // Ex (TBOR) sessions hold XTS as one AesXts512 key: the wrapped blob is a
+            // single RSA-AES wrap (AES-256 KEK) of K1 || K2 (PKCS#11 CKK_AES_XTS).
+            std::vector<uint8_t> key_plain(key1_plain);
+            key_plain.insert(key_plain.end(), key2_plain.begin(), key2_plain.end());
+            std::vector<uint8_t> wrapped;
+            if (rsa_aes_wrap_bytes(wrapping_pub_key, key_plain, 256, wrapped) !=
+                TSRA_STATUS_SUCCESS)
+            {
+                return {};
+            }
+            return wrapped;
         }
-        return wrapped;
-#else
-        // Build a syntactically valid AES-XTS wrapped blob from two local key halves.
-        const auto wrap_half = [&](const std::vector<uint8_t> &plain_half) -> std::vector<uint8_t> {
-            std::vector<uint8_t> wrapped_data;
-            auto wrap_status = rsa_aes_wrap_bytes(
-                wrapping_pub_key,
-                plain_half,
-                static_cast<uint32_t>(plain_half.size() * 8),
-                wrapped_data
-            );
-            if (wrap_status != TSRA_STATUS_SUCCESS)
+        else
+        {
+            // Build a syntactically valid AES-XTS wrapped blob from two local key halves.
+            const auto wrap_half = [&](const std::vector<uint8_t> &plain_half
+                                   ) -> std::vector<uint8_t> {
+                std::vector<uint8_t> wrapped_data;
+                auto wrap_status = rsa_aes_wrap_bytes(
+                    wrapping_pub_key,
+                    plain_half,
+                    static_cast<uint32_t>(plain_half.size() * 8),
+                    wrapped_data
+                );
+                if (wrap_status != TSRA_STATUS_SUCCESS)
+                {
+                    return {};
+                }
+
+                return wrapped_data;
+            };
+
+            auto key1_wrapped_data = wrap_half(key1_plain);
+            if (key1_wrapped_data.empty())
             {
                 return {};
             }
 
-            return wrapped_data;
-        };
+            auto key2_wrapped_data = wrap_half(key2_plain);
+            if (key2_wrapped_data.empty())
+            {
+                return {};
+            }
 
-        auto key1_wrapped_data = wrap_half(key1_plain);
-        if (key1_wrapped_data.empty())
-        {
-            return {};
+            // Encode both wrapped halves into the XTS key-pair blob format.
+            auto header = build_xts_blob_header(
+                static_cast<uint16_t>(key1_wrapped_data.size()),
+                static_cast<uint16_t>(key2_wrapped_data.size())
+            );
+
+            std::vector<uint8_t> blob;
+            blob.reserve(header.size() + key1_wrapped_data.size() + key2_wrapped_data.size());
+            blob.insert(blob.end(), header.begin(), header.end());
+            blob.insert(blob.end(), key1_wrapped_data.begin(), key1_wrapped_data.end());
+            blob.insert(blob.end(), key2_wrapped_data.begin(), key2_wrapped_data.end());
+            return blob;
         }
-
-        auto key2_wrapped_data = wrap_half(key2_plain);
-        if (key2_wrapped_data.empty())
-        {
-            return {};
-        }
-
-        // Encode both wrapped halves into the XTS key-pair blob format.
-        auto header = build_xts_blob_header(
-            static_cast<uint16_t>(key1_wrapped_data.size()),
-            static_cast<uint16_t>(key2_wrapped_data.size())
-        );
-
-        std::vector<uint8_t> blob;
-        blob.reserve(header.size() + key1_wrapped_data.size() + key2_wrapped_data.size());
-        blob.insert(blob.end(), header.begin(), header.end());
-        blob.insert(blob.end(), key1_wrapped_data.begin(), key1_wrapped_data.end());
-        blob.insert(blob.end(), key2_wrapped_data.begin(), key2_wrapped_data.end());
-        return blob;
-#endif
     }
 
     static std::vector<uint8_t> get_masked_blob_for_key(tsra_handle key)
@@ -796,63 +802,66 @@ TEST_F(tsra_aes_xts, non_trivial_multi_byte_tweak_roundtrip)
         crypt_algo.params = &xts_params;
         crypt_algo.len = sizeof(xts_params);
 
-#if SESSION_EX_TESTS
-        std::vector<uint8_t> out;
-        ASSERT_EQ(
-            TSRA_STATUS_INVALID_TWEAK,
-            ::single_shot_crypt(
-                CryptOperation::Encrypt,
-                key.get(),
-                &crypt_algo,
-                plaintext.data(),
-                plaintext.size(),
-                out
-            )
-        );
+        if (api_rev_at_least(1, 1))
+        {
+            std::vector<uint8_t> out;
+            ASSERT_EQ(
+                TSRA_STATUS_INVALID_TWEAK,
+                ::single_shot_crypt(
+                    CryptOperation::Encrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext.data(),
+                    plaintext.size(),
+                    out
+                )
+            );
 
-        std::memcpy(xts_params.sector_num, tweak, sizeof(tweak));
-        ASSERT_EQ(
-            TSRA_STATUS_INVALID_TWEAK,
-            ::single_shot_crypt(
-                CryptOperation::Decrypt,
-                key.get(),
-                &crypt_algo,
-                plaintext.data(),
-                plaintext.size(),
-                out
-            )
-        );
-#else
-        std::vector<uint8_t> ciphertext;
-        ASSERT_EQ(
-            TSRA_STATUS_SUCCESS,
-            ::single_shot_crypt(
-                CryptOperation::Encrypt,
-                key.get(),
-                &crypt_algo,
-                plaintext.data(),
-                plaintext.size(),
-                ciphertext
-            )
-        );
+            std::memcpy(xts_params.sector_num, tweak, sizeof(tweak));
+            ASSERT_EQ(
+                TSRA_STATUS_INVALID_TWEAK,
+                ::single_shot_crypt(
+                    CryptOperation::Decrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext.data(),
+                    plaintext.size(),
+                    out
+                )
+            );
+        }
+        else
+        {
+            std::vector<uint8_t> ciphertext;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Encrypt,
+                    key.get(),
+                    &crypt_algo,
+                    plaintext.data(),
+                    plaintext.size(),
+                    ciphertext
+                )
+            );
 
-        std::memcpy(xts_params.sector_num, tweak, sizeof(tweak));
-        std::vector<uint8_t> decrypted;
-        ASSERT_EQ(
-            TSRA_STATUS_SUCCESS,
-            ::single_shot_crypt(
-                CryptOperation::Decrypt,
-                key.get(),
-                &crypt_algo,
-                ciphertext.data(),
-                ciphertext.size(),
-                decrypted
-            )
-        );
+            std::memcpy(xts_params.sector_num, tweak, sizeof(tweak));
+            std::vector<uint8_t> decrypted;
+            ASSERT_EQ(
+                TSRA_STATUS_SUCCESS,
+                ::single_shot_crypt(
+                    CryptOperation::Decrypt,
+                    key.get(),
+                    &crypt_algo,
+                    ciphertext.data(),
+                    ciphertext.size(),
+                    decrypted
+                )
+            );
 
-        ASSERT_EQ(decrypted.size(), plaintext.size());
-        ASSERT_EQ(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
-#endif
+            ASSERT_EQ(decrypted.size(), plaintext.size());
+            ASSERT_EQ(std::memcmp(decrypted.data(), plaintext.data(), plaintext.size()), 0);
+        }
     });
 }
 
@@ -909,11 +918,14 @@ TEST_F(tsra_aes_xts, non_trivial_64bit_tweak_roundtrip)
     });
 }
 
-#if SESSION_EX_TESTS
 // On ex sessions the tweak is 64-bit: the tweak advanced past the last data
 // unit must still fit in 64 bits.
 TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_rejected)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_xts_key(session, 512);
 
@@ -964,7 +976,6 @@ TEST_F(tsra_aes_xts, tweak_crossing_64bit_boundary_rejected)
         ASSERT_EQ(std::memcmp(xts_params.sector_num, expected, sizeof(expected)), 0);
     });
 }
-#endif
 
 // XTS processes data units; after encrypting N units, tweak should advance by N.
 TEST_F(tsra_aes_xts, tweak_advances_by_data_unit_count_single_shot)
@@ -2122,17 +2133,18 @@ TEST_F(tsra_aes_xts, dul_exceeds_max_is_rejected)
     });
 }
 
-#if SESSION_EX_TESTS
 // TBOR XTS wrapped keys are one RSA-AES wrap of K1 || K2 with no header, so
 // corrupted envelopes are rejected on-device and bad key material as invalid.
-static constexpr tsra_status XTS_WRAPPED_BLOB_CORRUPT_STATUS = TSRA_STATUS_DDI_CMD_FAILURE;
-static constexpr tsra_status XTS_WRAPPED_KEY_MISMATCH_STATUS = TSRA_STATUS_INVALID_ARGUMENT;
-#else
 // MBOR XTS wrapped keys use the key-pair blob header parsed on the host; each
 // half is unwrapped on-device.
-static constexpr tsra_status XTS_WRAPPED_BLOB_CORRUPT_STATUS = TSRA_STATUS_INVALID_ARGUMENT;
-static constexpr tsra_status XTS_WRAPPED_KEY_MISMATCH_STATUS = TSRA_STATUS_DDI_CMD_FAILURE;
-#endif
+static tsra_status XTS_WRAPPED_BLOB_CORRUPT_STATUS()
+{
+    return api_rev_at_least(1, 1) ? TSRA_STATUS_DDI_CMD_FAILURE : TSRA_STATUS_INVALID_ARGUMENT;
+}
+static tsra_status XTS_WRAPPED_KEY_MISMATCH_STATUS()
+{
+    return api_rev_at_least(1, 1) ? TSRA_STATUS_INVALID_ARGUMENT : TSRA_STATUS_DDI_CMD_FAILURE;
+}
 
 // Header marker/version validation: corrupt magic should fail before any unwrap attempt.
 TEST_F(tsra_aes_xts, unwrap_malformed_xts_blob_header_is_rejected)
@@ -2159,7 +2171,7 @@ TEST_F(tsra_aes_xts, unwrap_malformed_xts_blob_header_is_rejected)
 
         auto_key unwrapped_key;
         err = unwrap_xts_blob(wrapping_priv_key, wrapped_blob, unwrapped_key);
-        ASSERT_EQ(err, XTS_WRAPPED_BLOB_CORRUPT_STATUS);
+        ASSERT_EQ(err, XTS_WRAPPED_BLOB_CORRUPT_STATUS());
     });
 }
 
@@ -2183,13 +2195,16 @@ TEST_F(tsra_aes_xts, unwrap_xts_blob_length_mismatch_is_rejected)
         );
         ASSERT_FALSE(wrapped_blob.empty());
 
-#if SESSION_EX_TESTS
-        // Drop the last byte so the AES-KWP payload is no longer 8-byte aligned.
-        wrapped_blob.pop_back();
-#else
-        // Inflate key1 length LSB (header[10]) to force payload-length mismatch.
-        wrapped_blob[10] = static_cast<uint8_t>(wrapped_blob[10] + 1);
-#endif
+        if (api_rev_at_least(1, 1))
+        {
+            // Drop the last byte so the AES-KWP payload is no longer 8-byte aligned.
+            wrapped_blob.pop_back();
+        }
+        else
+        {
+            // Inflate key1 length LSB (header[10]) to force payload-length mismatch.
+            wrapped_blob[10] = static_cast<uint8_t>(wrapped_blob[10] + 1);
+        }
 
         auto_key unwrapped_key;
         err = unwrap_xts_blob(wrapping_priv_key, wrapped_blob, unwrapped_key);
@@ -2217,15 +2232,18 @@ TEST_F(tsra_aes_xts, unwrap_xts_blob_missing_second_half_is_rejected)
         );
         ASSERT_FALSE(wrapped_blob.empty());
 
-#if SESSION_EX_TESTS
-        // A TBOR XTS wrapped key is one envelope; keep only its first half, which
-        // is shorter than the RSA-OAEP KEK.
-        wrapped_blob.resize(wrapped_blob.size() / 2);
-#else
-        // Keep only header + first wrapped half to emulate truncated transport/storage.
-        uint16_t key1_len = static_cast<uint16_t>(wrapped_blob[10] | (wrapped_blob[11] << 8));
-        wrapped_blob.resize(XTS_BLOB_HEADER_LEN + key1_len);
-#endif
+        if (api_rev_at_least(1, 1))
+        {
+            // A TBOR XTS wrapped key is one envelope; keep only its first half, which
+            // is shorter than the RSA-OAEP KEK.
+            wrapped_blob.resize(wrapped_blob.size() / 2);
+        }
+        else
+        {
+            // Keep only header + first wrapped half to emulate truncated transport/storage.
+            uint16_t key1_len = static_cast<uint16_t>(wrapped_blob[10] | (wrapped_blob[11] << 8));
+            wrapped_blob.resize(XTS_BLOB_HEADER_LEN + key1_len);
+        }
 
         auto_key unwrapped_key;
         err = unwrap_xts_blob(wrapping_priv_key, wrapped_blob, unwrapped_key);
@@ -2233,13 +2251,13 @@ TEST_F(tsra_aes_xts, unwrap_xts_blob_missing_second_half_is_rejected)
     });
 }
 
-#if SESSION_EX_TESTS
 // TBOR XTS masked keys are single AEAD envelopes decoded on the host.
-static constexpr tsra_status XTS_MASKED_BLOB_DECODE_STATUS = TSRA_STATUS_MASKED_KEY_DECODE_FAILED;
-#else
 // MBOR XTS masked keys use the key-pair blob header.
-static constexpr tsra_status XTS_MASKED_BLOB_DECODE_STATUS = TSRA_STATUS_INVALID_ARGUMENT;
-#endif
+static tsra_status XTS_MASKED_BLOB_DECODE_STATUS()
+{
+    return api_rev_at_least(1, 1) ? TSRA_STATUS_MASKED_KEY_DECODE_FAILED
+                                  : TSRA_STATUS_INVALID_ARGUMENT;
+}
 
 // Same malformed-header rejection path for masked (device-exported) XTS blobs.
 TEST_F(tsra_aes_xts, unmask_malformed_xts_blob_header_is_rejected)
@@ -2259,7 +2277,7 @@ TEST_F(tsra_aes_xts, unmask_malformed_xts_blob_header_is_rejected)
             &masked_key_buf,
             unmasked_key.get_ptr()
         );
-        ASSERT_EQ(err, XTS_MASKED_BLOB_DECODE_STATUS);
+        ASSERT_EQ(err, XTS_MASKED_BLOB_DECODE_STATUS());
         ASSERT_EQ(unmasked_key.get(), 0u);
     });
 }
@@ -2272,13 +2290,16 @@ TEST_F(tsra_aes_xts, unmask_xts_blob_length_mismatch_is_rejected)
         auto masked_blob = get_masked_blob_for_key(key.get());
         ASSERT_FALSE(masked_blob.empty());
 
-#if SESSION_EX_TESTS
-        // A TBOR XTS key is one AEAD envelope whose payload must be block aligned.
-        masked_blob.pop_back();
-#else
-        // Bump key2 length LSB (header[12]) so header-declared sizes exceed payload.
-        masked_blob[12] = static_cast<uint8_t>(masked_blob[12] + 1);
-#endif
+        if (api_rev_at_least(1, 1))
+        {
+            // A TBOR XTS key is one AEAD envelope whose payload must be block aligned.
+            masked_blob.pop_back();
+        }
+        else
+        {
+            // Bump key2 length LSB (header[12]) so header-declared sizes exceed payload.
+            masked_blob[12] = static_cast<uint8_t>(masked_blob[12] + 1);
+        }
 
         tsra_buffer masked_key_buf{ masked_blob.data(), static_cast<uint32_t>(masked_blob.size()) };
         auto_key unmasked_key;
@@ -2288,7 +2309,7 @@ TEST_F(tsra_aes_xts, unmask_xts_blob_length_mismatch_is_rejected)
             &masked_key_buf,
             unmasked_key.get_ptr()
         );
-        ASSERT_EQ(err, XTS_MASKED_BLOB_DECODE_STATUS);
+        ASSERT_EQ(err, XTS_MASKED_BLOB_DECODE_STATUS());
         ASSERT_EQ(unmasked_key.get(), 0u);
     });
 }
@@ -2301,14 +2322,17 @@ TEST_F(tsra_aes_xts, unmask_xts_blob_missing_second_half_is_rejected)
         auto masked_blob = get_masked_blob_for_key(key.get());
         ASSERT_FALSE(masked_blob.empty());
 
-#if SESSION_EX_TESTS
-        // A TBOR XTS key is one AEAD envelope; keep only its first half.
-        masked_blob.resize(masked_blob.size() / 2);
-#else
-        // Same truncation pattern as unwrap case, but through masked-key parser.
-        uint16_t key1_len = static_cast<uint16_t>(masked_blob[10] | (masked_blob[11] << 8));
-        masked_blob.resize(XTS_BLOB_HEADER_LEN + key1_len);
-#endif
+        if (api_rev_at_least(1, 1))
+        {
+            // A TBOR XTS key is one AEAD envelope; keep only its first half.
+            masked_blob.resize(masked_blob.size() / 2);
+        }
+        else
+        {
+            // Same truncation pattern as unwrap case, but through masked-key parser.
+            uint16_t key1_len = static_cast<uint16_t>(masked_blob[10] | (masked_blob[11] << 8));
+            masked_blob.resize(XTS_BLOB_HEADER_LEN + key1_len);
+        }
 
         tsra_buffer masked_key_buf{ masked_blob.data(), static_cast<uint32_t>(masked_blob.size()) };
         auto_key unmasked_key;
@@ -2318,7 +2342,7 @@ TEST_F(tsra_aes_xts, unmask_xts_blob_missing_second_half_is_rejected)
             &masked_key_buf,
             unmasked_key.get_ptr()
         );
-        ASSERT_EQ(err, XTS_MASKED_BLOB_DECODE_STATUS);
+        ASSERT_EQ(err, XTS_MASKED_BLOB_DECODE_STATUS());
         ASSERT_EQ(unmasked_key.get(), 0u);
     });
 }
@@ -2347,7 +2371,7 @@ TEST_F(tsra_aes_xts, unwrap_xts_blob_mismatched_half_properties_is_rejected)
 
         auto_key unwrapped_key;
         err = unwrap_xts_blob(wrapping_priv_key, wrapped_blob, unwrapped_key);
-        ASSERT_EQ(err, XTS_WRAPPED_KEY_MISMATCH_STATUS);
+        ASSERT_EQ(err, XTS_WRAPPED_KEY_MISMATCH_STATUS());
     });
 }
 

@@ -7,6 +7,7 @@ version = "0.1.0"
 
 [dependencies]
 async-channel.workspace = true
+der = { features = ["oid"], workspace = true }
 tsra_crypto.workspace = true
 
 embassy-sync.workspace = true

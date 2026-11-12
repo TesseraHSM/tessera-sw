@@ -1,0 +1,223 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# PKCS#11 module integration check.
+#
+# Runs on PRs into main that touch the module or this workflow, and on manual
+# dispatch. Changes elsewhere that could break the module (SDK, toolchain) are
+# caught by pkcs11-nightly.yml, which runs from main.
+# Unimplemented entry points return CKR_FUNCTION_NOT_SUPPORTED; the drive
+# covers init/login, host objects, the SHA digests, and AES keygen with CBC,
+# GCM and XTS. Build output goes to $RUNNER_TEMP, never into the checkout.
+name: pkcs11
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'plugins/tsra_pkcs11/**'
+      - '.github/workflows/pkcs11.yml'
+  workflow_dispatch:
+
+env:
+  CACHE_KEY_ID: dd2c2bcffcf0cd62b538fdeaa31c7b89c4d42815
+
+jobs:
+  build-and-drive:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Shared setup: apt packages + Cargo cache. The Rust toolchain comes from
+      # rust-toolchain.toml (rustup installs it on the first cargo call) — the
+      # same way every other workflow gets it.
+      - uses: ./.github/actions/ubuntu-setup
+
+      - name: Install CMake, OpenSSL headers, and OpenSC pkcs11-tool
+        run: sudo apt-get install -y cmake libssl-dev opensc
+
+      # --target-dir, not CARGO_TARGET_DIR: the cargo run that CMake starts
+      # inside the build would inherit the variable and wait forever on the
+      # outer build's lock. The GoogleTest suite reads TSRA_PKCS11_MODULE too.
+      - name: Build PKCS#11 module for hardware and the simulator
+        run: |
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
+          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step: the script sets
+      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
+
+      - name: Drive with pkcs11-tool (show-info, slots, login, digests)
+        run: |
+          set -euo pipefail
+          MOD="$TSRA_PKCS11_MODULE"
+          pkcs11-tool --module "$MOD" --show-info
+          pkcs11-tool --module "$MOD" --list-slots
+          pkcs11-tool --module "$MOD" --login --pin 1234 --list-objects
+          printf abc > "$RUNNER_TEMP/msg"
+          for pair in SHA-1:sha1sum SHA256:sha256sum SHA384:sha384sum SHA512:sha512sum; do
+            mech="${pair%%:*}"; sum="${pair##*:}"
+            pkcs11-tool --module "$MOD" --hash --mechanism "$mech" \
+              --input-file "$RUNNER_TEMP/msg" --output-file "$RUNNER_TEMP/dig"
+            got="$(xxd -p -c130 "$RUNNER_TEMP/dig")"
+            exp="$("$sum" < "$RUNNER_TEMP/msg" | cut -d' ' -f1)"
+            echo "$mech module=$got coreutils=$exp"
+            test "$got" = "$exp"
+          done
+
+      - name: AES keygen via pkcs11-tool
+        run: |
+          set -euo pipefail
+          # --sensitive is required: the module refuses non-sensitive HSM keys.
+          pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 --keygen \
+            --key-type aes:32 --label ci-aes --sensitive
+
+      # Keys enter the token only by generation or unwrap.
+      - name: Plaintext key import via pkcs11-tool is refused
+        run: |
+          set -euo pipefail
+          printf '0123456789abcdef' > "$RUNNER_TEMP/import.key"
+          pkcs11-tool --module "$TSRA_PKCS11_MODULE" --login --pin 1234 \
+            --write-object "$RUNNER_TEMP/import.key" --type secrkey --key-type AES:16 \
+            --label ci-import > "$RUNNER_TEMP/import.log" 2>&1 || true
+          cat "$RUNNER_TEMP/import.log"
+          grep -q CKR_TEMPLATE_INCONSISTENT "$RUNNER_TEMP/import.log"
+
+      # GoogleTest suite driving the module ABI against the emulator build,
+      # one process per test case via gtest_discover_tests. It runs twice:
+      # on the memory object store and on the file store.
+      - name: Build the functional tests (GoogleTest suite)
+        run: |
+          set -euo pipefail
+          cmake -S plugins/tsra_pkcs11/integration-tests/cpp \
+            -B "$RUNNER_TEMP/pkcs11-cpp-tests" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/pkcs11-cpp-tests" --parallel
+
+      - name: Functional tests, memory object store
+        run: |
+          ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
+
+      # The store directory is not created beforehand: the module must create
+      # it, owner-only, on C_Initialize.
+      - name: Functional tests, file object store (TSRA_PKCS11_PERSIST=1)
+        run: |
+          set -euo pipefail
+          store="$RUNNER_TEMP/pkcs11-store"
+          TSRA_PKCS11_PERSIST=1 TSRA_PKCS11_STORE_DIR="$store" \
+            ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error
+          mode="$(stat -c %a "$store")"
+          echo "store directory mode: $mode"
+          test "$mode" = 700
+
+      # Conformance gate: Google pkcs11test (external oracle) over the
+      # include-list of tests this module is expected to pass. The script
+      # clones and builds the tool at its pinned revision; the clone is cached
+      # per revision. See plugins/tsra_pkcs11/tests/pkcs11test/README.md.
+      - name: Read the pinned pkcs11test revision
+        id: pkcs11test
+        run: |
+          set -euo pipefail
+          rev="$(sed -n 's/^REV="\${PKCS11TEST_REV:-\([0-9a-f]*\)}"$/\1/p' \
+            plugins/tsra_pkcs11/tests/pkcs11test/run.sh)"
+          test -n "$rev"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the pkcs11test clone
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/pkcs11test/src
+          key: pkcs11test-${{ steps.pkcs11test.outputs.rev }}
+
+      - name: Conformance gate (pkcs11test)
+        run: |
+          plugins/tsra_pkcs11/tests/pkcs11test/run.sh "$TSRA_PKCS11_MODULE" "$RUNNER_TEMP/pkcs11test"
+
+      # Second conformance gate: pkcs11-check, pinned by hash, on the part of
+      # its include-list that fits the per-PR budget (--pr). The whole list and
+      # the full profile run in pkcs11-nightly.yml. See
+      # plugins/tsra_pkcs11/tests/pkcs11-check/README.md.
+      - name: Conformance gate (pkcs11-check, PR subset)
+        run: |
+          plugins/tsra_pkcs11/tests/pkcs11-check/run.sh --pr "$TSRA_PKCS11_MODULE" \
+            "$RUNNER_TEMP/pkcs11-check"
+
+  # Device-free unit harnesses: standalone C programs that link the module
+  # sources they test (no device, no libcrypto), so they need only a compiler.
+  # Every harness runs under UBSan and under ASan.
+  unit-tests:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitize: [ ubsan, asan ]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build and run the unit harnesses (${{ matrix.sanitize }})
+        run: |
+          SANITIZE=${{ matrix.sanitize }} plugins/tsra_pkcs11/tests/build_units.sh \
+            "$RUNNER_TEMP/units"
+
+  # libFuzzer over the device-free template decoders (tests/template_fuzz.c),
+  # 60 s per run under ASan and UBSan. A finding prints the input as base64.
+  template-fuzz:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install clang and the libFuzzer runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 libclang-rt-18-dev
+
+      - name: Fuzz the template decoders for 60 s
+        run: |
+          set -euo pipefail
+          p=plugins/tsra_pkcs11
+          clang-18 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+            -I"$p/include/pkcs11-v3.1" -I"$p/src" "$p/tests/template_fuzz.c" \
+            "$p/src/tsra_pkcs11_attr_types.c" "$p/src/tsra_pkcs11_attr_policy.c" \
+            "$p/src/tsra_pkcs11_template.c" -o "$RUNNER_TEMP/template_fuzz"
+          mkdir -p "$RUNNER_TEMP/fuzz-corpus"
+          cd "$RUNNER_TEMP"
+          ./template_fuzz -max_total_time=60 -print_final_stats=1 fuzz-corpus
+
+  # The GoogleTest suite against a module built with AddressSanitizer. CFLAGS
+  # and LDFLAGS reach the module's CMake build through cargo; the suite is
+  # built with ASan too, so the runtime is loaded before the module.
+  functional-asan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/ubuntu-setup
+
+      - name: Install CMake and OpenSSL headers
+        run: sudo apt-get install -y cmake libssl-dev
+
+      - name: Build PKCS#11 module for hardware and the simulator, with ASan
+        env:
+          CFLAGS: -fsanitize=address -fno-omit-frame-pointer
+          LDFLAGS: -fsanitize=address
+        run: |
+          cargo build --target-dir "$RUNNER_TEMP/target" -p tsra_pkcs11
+          echo "TSRA_PKCS11_MODULE=$RUNNER_TEMP/target/debug/tsra_pkcs11.so" >> "$GITHUB_ENV"
+
+      # The module reaches the simulator over the DDI socket transport; it never
+      # links one. One server serves every following step: the script sets
+      # TSRA_TEST_ARGS (transport=sock, its endpoint and server_bin).
+      - name: Start the simulator (ddi_sock_server)
+        run: plugins/tsra_pkcs11/tests/start_sock_server.sh "$RUNNER_TEMP/target"
+
+      - name: Functional tests under ASan
+        run: |
+          set -euo pipefail
+          cmake -S plugins/tsra_pkcs11/integration-tests/cpp \
+            -B "$RUNNER_TEMP/pkcs11-cpp-tests" -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address
+          cmake --build "$RUNNER_TEMP/pkcs11-cpp-tests" --parallel
+          ctest --test-dir "$RUNNER_TEMP/pkcs11-cpp-tests" --output-on-failure --no-tests=error

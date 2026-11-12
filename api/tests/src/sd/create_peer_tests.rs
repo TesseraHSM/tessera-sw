@@ -23,6 +23,9 @@ use crate::utils::sd_provision::masked_key_and_report;
 /// peer backup is a non-zero 161-byte HPKE-Auth seal.
 #[test]
 fn sd_create_peer_backup_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);
@@ -58,6 +61,9 @@ fn sd_create_peer_backup_roundtrip() {
 /// one-shot, so the second call is expected to succeed.
 #[test]
 fn sd_create_peer_backup_rerandomizes() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata_key = CaKey::generate();
     let (session, policy, pid_pub) = finalized_backing_session(&sata_key);

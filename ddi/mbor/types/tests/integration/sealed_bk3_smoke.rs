@@ -1,9 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! SetSealedBk3 / GetSealedBk3 smoke tests for the emu backend.
+//! SetSealedBk3 / GetSealedBk3 smoke tests for the auto-started simulator.
 
-#![cfg(feature = "emu")]
 #![cfg(test)]
 
 use test_with_tracing::test;
@@ -12,7 +11,18 @@ use tsra_ddi_mbor_types::*;
 
 use super::common::*;
 
-pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, _ddi: &DdiTest, _path: &str) -> u16 {
+/// Whether `setup` can give each case a fresh partition. Only this process's
+/// auto-started simulator qualifies: on hardware, NSSR preserves the one-shot
+/// BK3 state and sealed BK3, and `transport=sock` alone isn't enough because
+/// `sock=` may front hardware.
+fn fresh_partition_available() -> bool {
+    ddi_sock_server::autostarted()
+}
+
+/// Reset the partition so each case starts with fresh one-shot BK3 state.
+pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
+    let resp = ddi.open_dev(path).unwrap().erase();
+    assert!(resp.is_ok(), "resp {:?}", resp);
     0
 }
 
@@ -33,6 +43,9 @@ fn ensure_bk3_provisioned(dev: &<DdiTest as Ddi>::Dev) {
 
 #[test]
 fn test_set_then_get_sealed_bk3() {
+    if !fresh_partition_available() {
+        return;
+    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         ensure_bk3_provisioned(dev);
         let blob: Vec<u8> = (10..73u8).collect();
@@ -49,6 +62,9 @@ fn test_set_then_get_sealed_bk3() {
 
 #[test]
 fn test_set_sealed_bk3_twice_fails() {
+    if !fresh_partition_available() {
+        return;
+    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         ensure_bk3_provisioned(dev);
         let blob: Vec<u8> = (10..73u8).collect();
@@ -67,6 +83,9 @@ fn test_set_sealed_bk3_twice_fails() {
 
 #[test]
 fn test_get_sealed_bk3_before_set_fails() {
+    if !fresh_partition_available() {
+        return;
+    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         ensure_bk3_provisioned(dev);
         let err = helper_get_sealed_bk3(dev).unwrap_err();

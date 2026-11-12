@@ -57,7 +57,6 @@ fn test_unmask_aes_app_key_roundtrip_smoke() {
                 Some(session_id),
                 rev,
                 DdiAesKeySize::Aes256,
-                Some(1),
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             )
             .expect("aes generate should succeed");
@@ -150,7 +149,6 @@ fn test_unmask_ecc_session_key_roundtrip_smoke() {
                 Some(session_id),
                 rev,
                 DdiEccCurve::P256,
-                None,
                 helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session),
             )
             .expect("ecc generate should succeed");
@@ -265,7 +263,6 @@ fn test_unmask_rsa_4k_crt_reunmask_roundtrip_smoke() {
                 DdiKeyClass::RsaCrt,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties_with_label(
                     DdiKeyUsage::EncryptDecrypt,
                     DdiKeyAvailability::App,

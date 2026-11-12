@@ -5,9 +5,9 @@
 edition = "2021"
 name = "tsra_ddi_sock"
 version = "0.1.0"
-# The wire-protocol crate lives in a nested directory and is its own
-# workspace member; exclude it from this package.
-exclude = ["proto"]
+# The wire-protocol and server crates live in nested directories and are
+# their own workspace members; exclude them from this package.
+exclude = ["proto", "server"]
 
 [lib]
 doctest = false
@@ -27,6 +27,10 @@ tsra_fw_hsm_io.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 nix = { features = ["socket"], workspace = true }
+
+[dev-dependencies]
+ddi_sock_server = { features = ["test-args"], workspace = true }
+tsra_ddi.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 nix = { features = ["signal"], workspace = true }

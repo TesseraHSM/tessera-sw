@@ -10,9 +10,11 @@ version = "0.0.0"
 cargo-fuzz = true
 
 [dependencies]
+ddi_sock_server = { features = [
+  "autostart-isolated",
+], path = "../ddi/sock/server" }
 tsra_crypto = { path = "../crates/crypto" }
 tsra_ddi = { path = "../ddi/lib" }
-tsra_ddi_emu = { optional = true, path = "../ddi/emu" }
 tsra_ddi_interface = { path = "../ddi/interface" }
 tsra_ddi_mbor_test_helpers = { path = "../ddi/mbor/test_helpers" }
 tsra_ddi_tbor_codec = { path = "../ddi/tbor/codec" }
@@ -29,7 +31,7 @@ minicbor = "0.19.1"
 
 [features]
 default = []
-emu = ["tsra_ddi/emu", "tsra_ddi_tbor_test_harness/emu"]
+# Fuzz against an in-process simulated HSM reached over the sock transport.
 
 [[bin]]
 bench = false

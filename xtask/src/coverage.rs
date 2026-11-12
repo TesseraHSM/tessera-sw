@@ -51,6 +51,14 @@ pub struct Coverage {
     /// Skip cleaning existing llvm-cov artifacts before running coverage
     #[clap(long)]
     pub skip_clean: bool,
+
+    /// DDI transport to test against (set as `transport` in `TSRA_TEST_ARGS`)
+    #[clap(long, value_parser = crate::common::TRANSPORTS)]
+    pub transport: Option<String>,
+
+    /// API revision for tsra_api_tests (set as `api_rev` in `TSRA_TEST_ARGS`)
+    #[clap(long, value_parser = crate::common::API_REVS)]
+    pub api_rev: Option<String>,
 }
 
 impl Xtask for Coverage {
@@ -122,6 +130,13 @@ impl Xtask for Coverage {
             log::info!("Skipping llvm-cov cleanup");
         }
 
+        crate::common::prepare_test_env(
+            &sh,
+            &None,
+            self.transport.as_deref(),
+            self.api_rev.as_deref(),
+        )?;
+
         // Run tests with coverage
         log::info!("Building all tests and running them with coverage");
         cmd!(
@@ -147,6 +162,8 @@ impl From<crate::nextest::Nextest> for Coverage {
             test: nextest.test,
             filter: nextest.filter,
             skip_clean: false,
+            transport: nextest.transport,
+            api_rev: nextest.api_rev,
         }
     }
 }

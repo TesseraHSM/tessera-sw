@@ -67,7 +67,6 @@ fn test_ecc_generate_no_session() {
                 None,
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 
@@ -94,7 +93,6 @@ fn test_ecc_generate_invalid_session() {
                 Some(20),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 
@@ -121,7 +119,6 @@ fn test_ecc_generate_invalid_key_usage() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 
@@ -129,56 +126,6 @@ fn test_ecc_generate_invalid_key_usage() {
             assert!(matches!(
                 resp.unwrap_err(),
                 DdiError::DdiStatus(DdiStatus::InvalidPermissions)
-            ));
-        },
-    );
-}
-
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_ecc_generate_session_only_key_with_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |_dev, ddi, path, _session_id| {
-            let session_only_key_dev = ddi.open_dev(path).unwrap();
-
-            let (encrypted_credential, pub_key) = encrypt_userid_pin_for_open_session(
-                &session_only_key_dev,
-                TEST_CRED_ID,
-                TEST_CRED_PIN,
-                TEST_SESSION_SEED,
-            );
-
-            let resp = helper_open_session(
-                &session_only_key_dev,
-                None,
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                encrypted_credential,
-                pub_key,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-
-            let resp = resp.unwrap();
-
-            let session_only_key_session = resp.hdr.sess_id;
-
-            let key_props =
-                helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session);
-
-            let resp = helper_ecc_generate_key_pair(
-                &session_only_key_dev,
-                session_only_key_session,
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                DdiEccCurve::P256,
-                Some(0x9876),
-                key_props,
-            );
-
-            assert!(resp.is_err(), "resp {:?}", resp);
-            assert!(matches!(
-                resp.unwrap_err(),
-                DdiError::DdiStatus(DdiStatus::InvalidArg)
             ));
         },
     );
@@ -220,7 +167,6 @@ fn test_ecc_generate_session_only_key() {
                 session_only_key_session,
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 
@@ -244,7 +190,6 @@ fn test_ecc_generate() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P256,
-                    None,
                     key_props,
                 );
 
@@ -260,7 +205,6 @@ fn test_ecc_generate() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                     key_props,
                 );
 
@@ -276,7 +220,6 @@ fn test_ecc_generate() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P521,
-                    None,
                     key_props,
                 );
 
@@ -306,7 +249,6 @@ fn test_ecc_generate_and_unmask() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 

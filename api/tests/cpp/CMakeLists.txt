@@ -16,8 +16,6 @@ if (CMAKE_VERSION VERSION_GREATER_EQUAL "3.24.0")
     cmake_policy(SET CMP0135 NEW)
 endif()
 
-SET(TEST_FEATURES "" CACHE STRING "Test features to enable")
-set(SESSION_EX_TESTS OFF CACHE BOOL "Build tests with open_session_ex")
 
 
 include(FetchContent)
@@ -49,7 +47,6 @@ corrosion_import_crate(
     MANIFEST_PATH ../../native/Cargo.toml
     CRATE_TYPES cdylib
     CRATES tsra_api_native
-    FEATURES ${TEST_FEATURES}
     )
 
 corrosion_experimental_cbindgen(
@@ -94,34 +91,28 @@ set(SOURCE
     algo/rsa/unwrap_tests.cpp
     algo/sha/digest_tests.cpp
     algo/secret/unmask_tests.cpp
+    # `open_session_ex` tests (run with api_rev=1_1 in TSRA_TEST_ARGS)
+    utils/sd_provision.cpp
+    session_ex_tests.cpp
+    algo/sealing/keygen_tests.cpp
+    sd/create_backup_tests.cpp
+    sd/create_peer_tests.cpp
+    sd/reseal_tests.cpp
+    sd/restore_local_tests.cpp
+    sd/restore_peer_tests.cpp
+    sd/restore_tests.cpp
+    darc/transfer_tests.cpp
+    # `open_session` tests (run with session unset or `1_0` in TSRA_TEST_ARGS)
+    partition_tests.cpp
+    session_tests.cpp
+    handle_mgmt_tests.cpp
+    multi_process_tests.cpp
+    algo/kdf/kbkdf_tests.cpp
+    resiliency/init_stress_tests.cpp
+    resiliency/aes_stress_tests.cpp
+    resiliency/ecc_stress_tests.cpp
+    resiliency/mixed_stress_tests.cpp
 )
-
-if(SESSION_EX_TESTS)
-    list(APPEND SOURCE
-        utils/sd_provision.cpp
-        session_ex_tests.cpp
-        algo/sealing/keygen_tests.cpp
-        sd/create_backup_tests.cpp
-        sd/create_peer_tests.cpp
-        sd/reseal_tests.cpp
-        sd/restore_local_tests.cpp
-        sd/restore_peer_tests.cpp
-        sd/restore_tests.cpp
-        darc/transfer_tests.cpp
-    )
-else()
-    list(APPEND SOURCE
-        partition_tests.cpp
-        session_tests.cpp
-        handle_mgmt_tests.cpp
-        multi_process_tests.cpp
-        algo/kdf/kbkdf_tests.cpp
-        resiliency/init_stress_tests.cpp
-        resiliency/aes_stress_tests.cpp
-        resiliency/ecc_stress_tests.cpp
-        resiliency/mixed_stress_tests.cpp
-    )
-endif()
 
 add_executable(tsra_api_cpp_tests ${SOURCE})
 target_include_directories(tsra_api_cpp_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -137,20 +128,6 @@ if(MSVC)
     # Embassy thread's so both can build `StdHsm` without overflowing.
     target_link_options(tsra_api_cpp_tests PRIVATE /STACK:8388608)
 endif()
-
-# Expose the selected DDI backend and session-test mode to the C++ sources as
-# compile definitions.
-# `CARGO_FEATURE_*` env vars only exist during the Rust build script, not during
-# C++ compilation. Backend-specific setup uses `TSRA_FEATURE_EMU`; suite
-# selection uses `SESSION_EX_TESTS`.
-if(TEST_FEATURES MATCHES "(^| )emu($| )")
-    target_compile_definitions(tsra_api_cpp_tests PRIVATE TSRA_FEATURE_EMU)
-endif()
-
-target_compile_definitions(
-    tsra_api_cpp_tests
-    PRIVATE SESSION_EX_TESTS=$<BOOL:${SESSION_EX_TESTS}>
-)
 
 if(UNIX)
     find_package(OpenSSL REQUIRED)

@@ -10,7 +10,6 @@ pub fn rsa_secure_import_key(
     key: &[u8],
     key_class: DdiKeyClass,
     key_usage: DdiKeyUsage,
-    key_tag: Option<u16>,
 ) -> Result<DdiRsaUnwrapCmdResp, DdiError> {
     let session_id = session_id.expect("session id required");
 
@@ -31,7 +30,6 @@ pub fn rsa_secure_import_key(
         key_class,
         DdiRsaCryptoPadding::Oaep,
         DdiHashAlgorithm::Sha256,
-        key_tag,
         helper_key_properties(key_usage, DdiKeyAvailability::App),
     )?;
 

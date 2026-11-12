@@ -35,7 +35,7 @@ impl HsmGdmaController for StdHsmPal {
     /// `_src2` is ignored: the std platform's "host memory" is an ordinary
     /// contiguous process allocation, so there is no second page to stitch
     /// on and no 4 KiB boundary to cross. This is why the truncation bug
-    /// that PRP2 fixes was invisible under `--features emu`.
+    /// that PRP2 fixes was invisible under the std simulator.
     async fn copy_mem_from_host(
         &self,
         _io: &Self::Io,

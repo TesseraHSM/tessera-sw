@@ -19,8 +19,8 @@
 //! |--------------------|----------|----------------------------------------|----------------------------------------------------------------------------------------------|
 //! | `predicate`        | **yes**  | —                                      | Path to a `fn(&HsmResult<T>) -> bool` predicate.                                             |
 //! | `max_retries`      | no       | `crate::resiliency::MAX_RETRIES`       | Maximum number of *additional* retries after the initial attempt (total = `max_retries + 1`).|
-//! | `backoff_base_ms`  | no       | `crate::resiliency::BACKOFF_BASE_MS`   | Base delay (ms) for exponential backoff.                                                     |
-//! | `backoff_jitter_ms`| no       | `crate::resiliency::BACKOFF_JITTER_MS` | Max random jitter (ms) added to each delay.                                                  |
+//! | `backoff_base_ms`  | no       | `crate::resiliency::backoff_base_ms()` | Base delay (ms) for exponential backoff.                                                     |
+//! | `backoff_jitter_ms`| no       | `crate::resiliency::backoff_jitter_ms()` | Max random jitter (ms) added to each delay.                                                  |
 //! | `condition`        | no       | —                                      | Optional runtime expression (as string); if it evaluates to `false`, the body runs once.     |
 //!
 //! # Examples
@@ -58,12 +58,12 @@ struct RetryArgs {
     max_retries: Option<u32>,
 
     /// Base delay in milliseconds for exponential backoff.  When omitted the
-    /// macro emits `crate::resiliency::BACKOFF_BASE_MS`.
+    /// macro emits `crate::resiliency::backoff_base_ms()`.
     #[darling(default)]
     backoff_base_ms: Option<u64>,
 
     /// Maximum random jitter in milliseconds added to each backoff delay.
-    /// When omitted the macro emits `crate::resiliency::BACKOFF_JITTER_MS`.
+    /// When omitted the macro emits `crate::resiliency::backoff_jitter_ms()`.
     #[darling(default)]
     backoff_jitter_ms: Option<u64>,
 
@@ -279,11 +279,11 @@ fn expand_retry(args: RetryArgs, item: ItemFn) -> syn::Result<proc_macro2::Token
     };
     let backoff_base_ms: proc_macro2::TokenStream = match args.backoff_base_ms {
         Some(v) => quote! { #v },
-        None => quote! { crate::resiliency::BACKOFF_BASE_MS },
+        None => quote! { crate::resiliency::backoff_base_ms() },
     };
     let backoff_jitter_ms: proc_macro2::TokenStream = match args.backoff_jitter_ms {
         Some(v) => quote! { #v },
-        None => quote! { crate::resiliency::BACKOFF_JITTER_MS },
+        None => quote! { crate::resiliency::backoff_jitter_ms() },
     };
 
     // Wrap the original body in a closure rather than a nested inner function.
@@ -368,7 +368,7 @@ struct RetryKeyGenArgs {
 /// |------------------|----------|---------------------------------|--------------------------------------|
 /// | `session`        | **yes**  | —                               | Name of the `&HsmSession` parameter. |
 /// | `max_retries`    | no       | `crate::resiliency::MAX_RETRIES`| Max additional retries.              |
-/// | `backoff_base_ms`| no       | `crate::resiliency::BACKOFF_BASE_MS`| Base delay (ms).                |
+/// | `backoff_base_ms`| no       | `crate::resiliency::backoff_base_ms()`| Base delay (ms).                |
 ///
 /// # Example
 ///
@@ -413,7 +413,7 @@ fn expand_retry_key_gen(
         optional_or_default(args.max_retries, quote! { crate::resiliency::MAX_RETRIES });
     let backoff_base_ms = optional_or_default(
         args.backoff_base_ms,
-        quote! { crate::resiliency::BACKOFF_BASE_MS },
+        quote! { crate::resiliency::backoff_base_ms() },
     );
 
     // Build the inner function with the original params and return type.
@@ -482,7 +482,7 @@ struct RetryOpenSessionArgs {
 /// |------------------|----------|---------------------------------|------------------------------------------|
 /// | `partition`      | **yes**  | —                               | Name of the `&HsmPartition` parameter.   |
 /// | `max_retries`    | no       | `crate::resiliency::MAX_RETRIES`| Max additional retries.                  |
-/// | `backoff_base_ms`| no       | `crate::resiliency::BACKOFF_BASE_MS`| Base delay (ms).                    |
+/// | `backoff_base_ms`| no       | `crate::resiliency::backoff_base_ms()`| Base delay (ms).                    |
 ///
 #[proc_macro_attribute]
 pub fn resiliency_open_session(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -519,7 +519,7 @@ fn expand_retry_open_session(
         optional_or_default(args.max_retries, quote! { crate::resiliency::MAX_RETRIES });
     let backoff_base_ms = optional_or_default(
         args.backoff_base_ms,
-        quote! { crate::resiliency::BACKOFF_BASE_MS },
+        quote! { crate::resiliency::backoff_base_ms() },
     );
 
     // Build the inner function with the original params and return type.
@@ -593,8 +593,8 @@ struct RetryCertChainArgs {
 /// |--------------------|----------|----------------------------------------|----------------------------------------|
 /// | `partition`        | **yes**  | —                                      | Name of the `&HsmPartition` parameter. |
 /// | `max_retries`      | no       | `crate::resiliency::MAX_RETRIES`       | Max additional retries.                |
-/// | `backoff_base_ms`  | no       | `crate::resiliency::BACKOFF_BASE_MS`   | Base delay (ms).                       |
-/// | `backoff_jitter_ms`| no       | `crate::resiliency::BACKOFF_JITTER_MS` | Max random jitter (ms).                |
+/// | `backoff_base_ms`  | no       | `crate::resiliency::backoff_base_ms()` | Base delay (ms).                       |
+/// | `backoff_jitter_ms`| no       | `crate::resiliency::backoff_jitter_ms()` | Max random jitter (ms).                |
 ///
 /// # Example
 ///
@@ -639,11 +639,11 @@ fn expand_retry_cert_chain(
         optional_or_default(args.max_retries, quote! { crate::resiliency::MAX_RETRIES });
     let backoff_base_ms = optional_or_default(
         args.backoff_base_ms,
-        quote! { crate::resiliency::BACKOFF_BASE_MS },
+        quote! { crate::resiliency::backoff_base_ms() },
     );
     let backoff_jitter_ms = optional_or_default(
         args.backoff_jitter_ms,
-        quote! { crate::resiliency::BACKOFF_JITTER_MS },
+        quote! { crate::resiliency::backoff_jitter_ms() },
     );
 
     // Build the inner function with the original params and return type.
@@ -710,7 +710,7 @@ struct RetryKeyOpArgs {
 /// |------------------|----------|---------------------------------|----------------------------------|
 /// | `key`            | **yes**  | —                               | Name of the key parameter.       |
 /// | `max_retries`    | no       | `crate::resiliency::MAX_RETRIES`| Max additional retries.          |
-/// | `backoff_base_ms`| no       | `crate::resiliency::BACKOFF_BASE_MS`| Base delay (ms).            |
+/// | `backoff_base_ms`| no       | `crate::resiliency::backoff_base_ms()`| Base delay (ms).            |
 ///
 /// # Example
 ///
@@ -755,7 +755,7 @@ fn expand_retry_key_op(
         optional_or_default(args.max_retries, quote! { crate::resiliency::MAX_RETRIES });
     let backoff_base_ms = optional_or_default(
         args.backoff_base_ms,
-        quote! { crate::resiliency::BACKOFF_BASE_MS },
+        quote! { crate::resiliency::backoff_base_ms() },
     );
 
     // Build the inner function with the original params and return type.

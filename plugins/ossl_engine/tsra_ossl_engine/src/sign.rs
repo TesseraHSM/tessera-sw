@@ -53,8 +53,8 @@ impl EcdsaSignHandler for TsraEcdsaSign {
                 "no HSM key attached to EC_KEY for signing".into(),
             ));
         }
-        // SAFETY: key_ptr points to an HsmEccPrivateKey owned by EngineData for
-        // the engine's lifetime; this callback runs while the key is live.
+        // SAFETY: key_ptr points to an HsmEccPrivateKey owned by EngineData until
+        // the key using it is freed; this callback runs while that key is live.
         let key = unsafe { &*key_ptr };
 
         // The HSM signs the pre-computed digest with raw ECDSA and returns the
@@ -63,6 +63,16 @@ impl EcdsaSignHandler for TsraEcdsaSign {
         let raw = HsmSigner::sign_vec(&mut algo, key, digest)
             .map_err(|e| EngineError::wrap("ECDSA sign", e))?;
         raw_to_ecdsa_sig(&raw)
+    }
+
+    /// Release the freed key's HSM key (see [`crate::keyload::release_on_free`]).
+    fn finish(ec_key: *mut ffi::EC_KEY) {
+        crate::keyload::release_on_free(ec_key);
+    }
+
+    /// Share the HSM key with the copy (see [`crate::keyload::share_on_copy`]).
+    fn copy(dest: *mut ffi::EC_KEY, src: *mut ffi::EC_KEY) -> EngineResult<()> {
+        crate::keyload::share_on_copy(dest, src)
     }
 }
 

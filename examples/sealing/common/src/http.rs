@@ -145,27 +145,3 @@ pub fn serve(
     }
     anyhow::bail!("peer HTTP listener stopped")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_literal_loopback_addresses_are_accepted() {
-        for valid in ["http://127.0.0.1:8080", "http://[::1]:8080/"] {
-            assert!(Client::new(valid).is_ok());
-        }
-        for invalid in [
-            "http://0.0.0.0:8080",
-            "http://192.0.2.1:8080",
-            "http://localhost:8080",
-            "http://127.0.0.1:8080@evil",
-            "http://127.0.0.1:8080/path",
-            "https://127.0.0.1:8080",
-            "http://127.0.0.1:0",
-        ] {
-            assert!(Client::new(invalid).is_err(), "{invalid}");
-        }
-        assert!(listen_addr("0.0.0.0:8080").is_err());
-    }
-}

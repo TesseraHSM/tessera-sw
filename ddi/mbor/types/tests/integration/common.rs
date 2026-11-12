@@ -693,7 +693,6 @@ pub fn store_rsa_keys_no_crt(
     sess_id: u16,
     key_usage: DdiKeyUsage,
     rsa_key_size_in_k: u8,
-    key_tag: Option<u16>,
 ) -> (DdiDerPublicKey, u16, MborByteArray<3072>) {
     let rsa_priv_key = if rsa_key_size_in_k == 2 {
         TEST_RSA_2K_PRIVATE_KEY.as_slice()
@@ -712,7 +711,6 @@ pub fn store_rsa_keys_no_crt(
         rsa_priv_key,
         DdiKeyClass::Rsa,
         key_usage,
-        key_tag,
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -731,7 +729,6 @@ pub fn store_rsa_keys_crt(
     sess_id: u16,
     key_usage: DdiKeyUsage,
     rsa_key_size_in_k: u8,
-    key_tag: Option<u16>,
 ) -> (DdiDerPublicKey, u16, MborByteArray<3072>) {
     let rsa_priv_key = if rsa_key_size_in_k == 2 {
         TEST_RSA_2K_PRIVATE_KEY.as_slice()
@@ -750,7 +747,6 @@ pub fn store_rsa_keys_crt(
         rsa_priv_key,
         DdiKeyClass::RsaCrt,
         key_usage,
-        key_tag,
     );
 
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -772,7 +768,6 @@ pub fn store_aes_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> u16 {
         &TEST_AES_256,
         DdiKeyClass::Aes,
         DdiKeyUsage::EncryptDecrypt,
-        None,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
     let resp = resp.unwrap();
@@ -785,7 +780,6 @@ pub fn store_aes_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> u16 {
 pub fn ecc_gen_key_tsra(
     dev: &mut <DdiTest as Ddi>::Dev,
     curve: DdiEccCurve,
-    key_tag: Option<u16>,
     session_id: Option<u16>,
     key_usage: DdiKeyUsage,
 ) -> (u16, DdiDerPublicKey, MborByteArray<3072>) {
@@ -796,7 +790,6 @@ pub fn ecc_gen_key_tsra(
         session_id,
         Some(DdiApiRev { major: 1, minor: 0 }),
         curve,
-        key_tag,
         key_props,
     );
 
@@ -1052,7 +1045,6 @@ pub fn create_ecdh_secrets(
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         curve,
-        None,
         key_props,
     );
 
@@ -1073,7 +1065,6 @@ pub fn create_ecdh_secrets(
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         curve,
-        None,
         key_props,
     );
 
@@ -1094,7 +1085,6 @@ pub fn create_ecdh_secrets(
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id1,
         MborByteArray::new(der2, pub_key2.der.len()).expect("failed to create byte array"),
-        None,
         secret_key_type,
         key_props,
     );
@@ -1109,7 +1099,6 @@ pub fn create_ecdh_secrets(
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id2,
         MborByteArray::new(der1, pub_key1.der.len()).expect("failed to create byte array"),
-        None,
         secret_key_type,
         key_props,
     );
@@ -1137,7 +1126,6 @@ pub fn create_hmac_key_ex(
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiEccCurve::P256,
-        None,
         key_props,
     );
 
@@ -1154,7 +1142,6 @@ pub fn create_hmac_key_ex(
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiEccCurve::P256,
-        None,
         key_props,
     );
 
@@ -1174,7 +1161,6 @@ pub fn create_hmac_key_ex(
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id1,
         MborByteArray::new(der2, pub_key2.der.len()).expect("failed to create byte array"),
-        None,
         DdiKeyType::Secret256,
         key_props,
     );
@@ -1194,7 +1180,6 @@ pub fn create_hmac_key_ex(
         None,
         None,
         target_key_type,
-        None,
         key_props,
         target_key_len,
     )
@@ -1231,7 +1216,6 @@ pub fn create_hmac_key_kbkdf(
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiEccCurve::P256,
-        None,
         key_props,
     );
 
@@ -1248,7 +1232,6 @@ pub fn create_hmac_key_kbkdf(
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiEccCurve::P256,
-        None,
         key_props,
     );
 
@@ -1268,7 +1251,6 @@ pub fn create_hmac_key_kbkdf(
         Some(DdiApiRev { major: 1, minor: 0 }),
         private_key_id1,
         MborByteArray::new(der2, pub_key2.der.len()).expect("failed to create byte array"),
-        None,
         DdiKeyType::Secret256,
         key_props,
     );
@@ -1288,7 +1270,6 @@ pub fn create_hmac_key_kbkdf(
         None,
         None,
         target_key_type,
-        None,
         key_props,
         target_key_len,
     );
@@ -1301,7 +1282,6 @@ pub fn create_hmac_key_kbkdf(
 pub fn generate_aes_bulk_256_key(
     dev: &<DdiTest as Ddi>::Dev,
     app_sess_id: &u16,
-    key_tag: Option<u16>,
     aes_key_size: DdiAesKeySize,
 ) -> Result<DdiAesGenerateKeyCmdResp, DdiError> {
     // generate AES 256 bulk key
@@ -1316,7 +1296,6 @@ pub fn generate_aes_bulk_256_key(
         Some(*app_sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         aes_key_size,
-        key_tag,
         key_props,
     )
 }

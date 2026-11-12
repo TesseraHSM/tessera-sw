@@ -189,16 +189,17 @@ fn test_rsa_decrypt_with_wrong_key_fails(session: HsmSession) {
 
     let result = HsmDecrypter::decrypt_vec(&mut algo, &priv_b, &ciphertext);
 
-    #[cfg(feature = "session-ex-tests")]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::InvalidArgument)
-    );
-    #[cfg(not(feature = "session-ex-tests"))]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::DdiCmdFailure)
-    );
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::InvalidArgument)
+        )
+    } else {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::DdiCmdFailure)
+        )
+    };
 
     assert!(
         expected_error,
@@ -228,16 +229,17 @@ fn test_rsa_tampered_ciphertext_fails(session: HsmSession) {
 
     let result = HsmDecrypter::decrypt_vec(&mut algo, &priv_key, &ciphertext);
 
-    #[cfg(feature = "session-ex-tests")]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::InvalidArgument)
-    );
-    #[cfg(not(feature = "session-ex-tests"))]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::DdiCmdFailure)
-    );
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::InvalidArgument)
+        )
+    } else {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::DdiCmdFailure)
+        )
+    };
 
     assert!(
         expected_error,

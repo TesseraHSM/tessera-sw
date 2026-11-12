@@ -1273,7 +1273,6 @@ fn test_ecdh_rejects_non_derivable_shared_secret(session: HsmSession) {
 }
 
 /// Derive a matching pair of session-scoped ECDH shared secrets.
-#[cfg(feature = "session-ex-tests")]
 fn derive_session_shared_secrets(
     session: &HsmSession,
     curve: HsmEccCurve,
@@ -1302,7 +1301,6 @@ fn derive_session_shared_secrets(
 }
 
 /// Derive a labeled, session-scoped AES key from a shared secret using HKDF.
-#[cfg(feature = "session-ex-tests")]
 fn derive_aes_key_session(
     session: &HsmSession,
     hkdf_algo: &mut HsmHkdfAlgo,
@@ -1327,8 +1325,7 @@ fn derive_aes_key_session(
 
 /// Derive labeled, session-scoped AES and HMAC keys from an ECDH shared secret.
 /// Verify the AES keys through CBC and the HMAC keys through their properties.
-#[cfg(feature = "session-ex-tests")]
-#[session_test]
+#[session_test(api_rev_at_least(1, 1))]
 fn test_hkdf_derive_labeled_session_keys(session: HsmSession) {
     let (secret_a, secret_b) = derive_session_shared_secrets(&session, HsmEccCurve::P256);
 

@@ -12,14 +12,22 @@
 //! Requires `ENGINE_SO` (the engine `.so`) and `MASKED_KEYGEN` (the helper that
 //! stages the blob), set by `xtask integration-tests` / the engine matrix. The
 //! blob is staged out-of-process, sharing the keymat set up here so it unmasks.
+//!
+//! Run with `cargo nextest`, as the engine matrix does: a dynamic engine binds
+//! at most once per process, so each test needs its own process, which also
+//! gives it its own auto-started simulator and keymat. A plain `cargo test`
+//! fails every test after the first at `LOAD`.
 
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used)]
 
+// Starts an in-process DDI sock server before `main`; the children this
+// harness spawns inherit its endpoint via `TSRA_TEST_ARGS`.
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::process::Command;
 
+use ddi_sock_server as _;
 use openssl::ec::EcGroup;
 use openssl::ec::EcKey;
 use openssl::encrypt::Encrypter;
@@ -99,6 +107,9 @@ fn setup_keymat() -> PathBuf {
         // SAFETY: single-threaded test setup before any HSM/engine call.
         unsafe { std::env::set_var(k, v) };
     };
+    // Credentials the simulated HSM is provisioned with by the test suite.
+    set("TSRA_CREDENTIALS_ID", "01".repeat(16));
+    set("TSRA_CREDENTIALS_PIN", "02".repeat(16));
     set("TSRA_RESILIENCY_ENABLED", "1".into());
     set("TSRA_RESILIENCY_STORAGE_DIR", res.display().to_string());
     set("TSRA_OBK_SOURCE", "caller".into());

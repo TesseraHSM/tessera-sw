@@ -17,6 +17,10 @@ class tsra_sess : public ::testing::Test
 
 TEST_F(tsra_sess, open_and_close)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -38,6 +42,10 @@ TEST_F(tsra_sess, open_and_close)
 
 TEST_F(tsra_sess, open_null_sess_handle)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -53,6 +61,10 @@ TEST_F(tsra_sess, open_null_sess_handle)
 
 TEST_F(tsra_sess, open_null_creds)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -66,6 +78,10 @@ TEST_F(tsra_sess, open_null_creds)
 
 TEST_F(tsra_sess, open_invalid_partition_handle)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle bad_handle = 0xDEADBEEF;
 
@@ -83,6 +99,10 @@ TEST_F(tsra_sess, open_invalid_partition_handle)
 
 TEST_F(tsra_sess, close_invalid_handle)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle bad_handle = 0xBADCAFE;
         auto err = tsra_sess_close(bad_handle);
@@ -92,6 +112,10 @@ TEST_F(tsra_sess, close_invalid_handle)
 
 TEST_F(tsra_sess, close_double_close)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -117,6 +141,10 @@ TEST_F(tsra_sess, close_double_close)
 
 TEST_F(tsra_sess, open_close_multiple)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -141,6 +169,10 @@ TEST_F(tsra_sess, open_close_multiple)
 
 TEST_F(tsra_sess, open_with_wrong_handle_type)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto list_handle_wrapper = PartitionListHandle();
         tsra_handle list_handle = list_handle_wrapper.get();
@@ -158,6 +190,10 @@ TEST_F(tsra_sess, open_with_wrong_handle_type)
 
 TEST_F(tsra_sess, open_with_corrupt_creds)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -172,6 +208,10 @@ TEST_F(tsra_sess, open_with_corrupt_creds)
 
 TEST_F(tsra_sess, get_prop_api_rev)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -202,6 +242,10 @@ TEST_F(tsra_sess, get_prop_api_rev)
 
 TEST_F(tsra_sess, get_prop_api_rev_buffer_too_small)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -231,6 +275,10 @@ TEST_F(tsra_sess, get_prop_api_rev_buffer_too_small)
 
 TEST_F(tsra_sess, get_prop_null_prop_ptr)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -253,6 +301,10 @@ TEST_F(tsra_sess, get_prop_null_prop_ptr)
 
 TEST_F(tsra_sess, get_prop_invalid_handle)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_handle bad_handle = 0xDEADBEEF;
     tsra_api_rev api_rev = { 0, 0 };
     tsra_session_prop prop = { TSRA_SESSION_PROP_ID_API_REV, &api_rev, sizeof(api_rev) };
@@ -263,6 +315,10 @@ TEST_F(tsra_sess, get_prop_invalid_handle)
 
 TEST_F(tsra_sess, get_prop_unsupported_property)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 
@@ -288,6 +344,10 @@ TEST_F(tsra_sess, get_prop_unsupported_property)
 
 TEST_F(tsra_sess, get_prop_wrong_handle_type)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         auto partition = PartitionHandle(path);
 

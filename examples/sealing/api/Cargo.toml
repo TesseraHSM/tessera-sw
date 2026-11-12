@@ -22,12 +22,5 @@ tsra_ddi_tbor_types.workspace = true
 x509.workspace = true
 zerocopy.workspace = true
 
-[dev-dependencies]
-minicbor = { features = ["std"], workspace = true }
-
-[features]
-emu = ["tsra_api/emu"]
-sock = ["tsra_api/sock"]
-
 [lints]
 workspace = true

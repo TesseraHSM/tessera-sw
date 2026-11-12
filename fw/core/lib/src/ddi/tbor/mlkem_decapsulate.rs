@@ -37,11 +37,11 @@ use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
+use tsra_fw_hsm_pal_traits::MLKEM_SEED_LEN;
 
-use super::from_pal::mlkem_param_set;
+use super::from_pal::mlkem_param;
 use super::resolve_masking_key;
 use super::validate_active_session;
-use crate::ddi::tbor::mlkem_generate_key::MLKEM_SEED_LEN;
 use crate::part_state;
 
 /// Length of the ML-KEM shared secret.
@@ -94,25 +94,29 @@ pub(crate) async fn handle<P: HsmPal>(
         // `EcdhDerive` does.
         let view = unmask(pal, io, masking_key_in, req.masked_key).await?;
         let kind = view.key_kind;
-        let param_set = mlkem_param_set(kind)?;
+        let param = mlkem_param(kind)?;
         if !view.key_attrs.derive() {
             return Err(HsmError::InvalidPermissions);
         }
-        let sec_len = param_set.sec_key_len();
+        let sec_len = param.sk_len();
         if view.target_key.len() != MLKEM_SEED_LEN + sec_len {
             return Err(HsmError::InvalidArg);
         }
         let key_blob = view.target_key;
 
         let shared_secret = pal.dma_alloc(io, SHARED_SECRET_LEN)?;
-        pal.mlkem_decaps(
-            io,
-            param_set,
-            &key_blob[MLKEM_SEED_LEN..],
-            req.ciphertext,
-            shared_secret,
-        )
-        .await?;
+        let ss_len = pal
+            .mlkem_decaps(
+                io,
+                param,
+                &key_blob[MLKEM_SEED_LEN..],
+                req.ciphertext,
+                Some(shared_secret),
+            )
+            .await?;
+        if ss_len != SHARED_SECRET_LEN {
+            return Err(HsmError::InternalError);
+        }
 
         async {
             let masked_len = masked_blob_len(AeadAlg::AesGcm256, SHARED_SECRET_LEN);

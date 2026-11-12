@@ -41,7 +41,6 @@ fn test_rsa_unwrap_no_session() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -85,7 +84,6 @@ fn test_rsa_unwrap_incorrect_session_id() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -127,7 +125,6 @@ fn test_rsa_unwrap_incorrect_key_num_table() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -164,7 +161,6 @@ fn test_rsa_unwrap_incorrect_key_num_entry() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -206,7 +202,6 @@ fn test_rsa_unwrap_incorrect_der_len() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -243,7 +238,6 @@ fn test_rsa_unwrap_incorrect_key_type() {
                 DdiKeyClass::Ecc,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -280,7 +274,6 @@ fn test_rsa_unwrap_incorrect_hash() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha1,
-                None,
                 key_props,
             );
 
@@ -321,7 +314,6 @@ fn test_rsa_unwrap_tampered_data() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -344,7 +336,6 @@ fn test_rsa_unwrap_incorrect_input_key_usage() {
                 &TEST_RSA_2K_PRIVATE_KEY,
                 DdiKeyClass::Rsa,
                 DdiKeyUsage::EncryptDecrypt,
-                None,
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -376,7 +367,6 @@ fn test_rsa_unwrap_incorrect_input_key_usage() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -419,7 +409,6 @@ fn test_rsa_unwrap_rsa_key_sizes() {
                     DdiKeyClass::Rsa,
                     DdiRsaCryptoPadding::Oaep,
                     DdiHashAlgorithm::Sha256,
-                    None,
                     key_props,
                 );
 
@@ -459,7 +448,6 @@ fn test_rsa_unwrap_rsa_key() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -544,7 +532,6 @@ fn test_rsa_unwrap_rsa_crt_key() {
                 DdiKeyClass::RsaCrt,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 key_props,
             );
 
@@ -601,194 +588,6 @@ fn test_rsa_unwrap_rsa_crt_key() {
     );
 }
 
-#[cfg(not(any(feature = "emu", feature = "sock")))]
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_rsa_unwrap_rsa_with_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            let (unwrap_key_id, unwrap_pub_key_der, _) = get_unwrapping_key(dev, session_id);
-
-            let rsa_3k_private_wrapped =
-                wrap_data(unwrap_pub_key_der, TEST_RSA_3K_PRIVATE_KEY.as_slice());
-
-            let mut der = [0u8; 3072];
-            der[..rsa_3k_private_wrapped.len()].copy_from_slice(&rsa_3k_private_wrapped);
-
-            let der_len = rsa_3k_private_wrapped.len();
-
-            let key_tag = 0x6677;
-
-            let key_props =
-                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
-
-            let resp = helper_rsa_unwrap(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                unwrap_key_id,
-                MborByteArray::new(der, der_len).expect("failed to create byte array"),
-                DdiKeyClass::Rsa,
-                DdiRsaCryptoPadding::Oaep,
-                DdiHashAlgorithm::Sha256,
-                Some(key_tag),
-                key_props,
-            );
-
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-            assert_eq!(resp.data.kind, DdiKeyType::Rsa3kPrivate);
-            let unwrapped_key_id = resp.data.key_id;
-
-            // Confirm we can find the unwrapped key by tag
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                key_tag,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-
-            assert_eq!(resp.data.key_id, unwrapped_key_id);
-            assert_eq!(resp.data.key_kind, DdiKeyType::Rsa3kPrivate);
-        },
-    );
-}
-
-#[cfg(not(any(feature = "emu", feature = "sock")))]
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_rsa_unwrap_rsa_crt_with_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            let (unwrap_key_id, unwrap_pub_key_der, _) = get_unwrapping_key(dev, session_id);
-
-            let rsa_3k_private_wrapped =
-                wrap_data(unwrap_pub_key_der, TEST_RSA_3K_PRIVATE_KEY.as_slice());
-
-            let mut der = [0u8; 3072];
-            der[..rsa_3k_private_wrapped.len()].copy_from_slice(&rsa_3k_private_wrapped);
-
-            let der_len = rsa_3k_private_wrapped.len();
-
-            let key_tag = 0x6677;
-
-            let key_props =
-                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
-
-            let resp = helper_rsa_unwrap(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                unwrap_key_id,
-                MborByteArray::new(der, der_len).expect("failed to create byte array"),
-                DdiKeyClass::RsaCrt,
-                DdiRsaCryptoPadding::Oaep,
-                DdiHashAlgorithm::Sha256,
-                Some(key_tag),
-                key_props,
-            );
-
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-            assert_eq!(resp.data.kind, DdiKeyType::Rsa3kPrivateCrt);
-            let unwrapped_key_id = resp.data.key_id;
-
-            // Confirm we can find the unwrapped key by tag
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                key_tag,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-
-            assert_eq!(resp.data.key_id, unwrapped_key_id);
-            assert_eq!(resp.data.key_kind, DdiKeyType::Rsa3kPrivateCrt);
-        },
-    );
-}
-
-#[cfg(not(any(feature = "emu", feature = "sock")))]
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_rsa_unwrap_ecc_keys_with_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            let keys = [
-                (
-                    TEST_ECC_256_PRIVATE_KEY.as_slice(),
-                    DdiKeyType::Ecc256Private,
-                    0x6677,
-                ),
-                (
-                    TEST_ECC_384_PRIVATE_KEY.as_slice(),
-                    DdiKeyType::Ecc384Private,
-                    0x6678,
-                ),
-                (
-                    TEST_ECC_521_PRIVATE_KEY.as_slice(),
-                    DdiKeyType::Ecc521Private,
-                    0x6679,
-                ),
-            ];
-
-            for (test_key, expected_key_type, key_tag) in keys.iter() {
-                let (unwrap_key_id, unwrap_pub_key_der, _) = get_unwrapping_key(dev, session_id);
-
-                let ecc_wrapped = wrap_data(unwrap_pub_key_der, test_key);
-
-                let mut der = [0u8; 3072];
-                der[..ecc_wrapped.len()].copy_from_slice(&ecc_wrapped);
-
-                let der_len = ecc_wrapped.len();
-
-                let key_props =
-                    helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App);
-
-                let resp = helper_rsa_unwrap(
-                    dev,
-                    Some(session_id),
-                    Some(DdiApiRev { major: 1, minor: 0 }),
-                    unwrap_key_id,
-                    MborByteArray::new(der, der_len).expect("failed to create byte array"),
-                    DdiKeyClass::Ecc,
-                    DdiRsaCryptoPadding::Oaep,
-                    DdiHashAlgorithm::Sha256,
-                    Some(*key_tag),
-                    key_props,
-                );
-
-                assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
-                assert_eq!(resp.data.kind, *expected_key_type);
-                let unwrapped_key_id = resp.data.key_id;
-
-                // Confirm we can find the unwrapped key by tag
-                let resp = helper_open_key(
-                    dev,
-                    Some(session_id),
-                    Some(DdiApiRev { major: 1, minor: 0 }),
-                    *key_tag,
-                );
-                assert!(resp.is_ok(), "resp {:?}", resp);
-                let resp = resp.unwrap();
-
-                assert_eq!(resp.data.key_id, unwrapped_key_id);
-                assert_eq!(resp.data.key_kind, *expected_key_type);
-            }
-        },
-    );
-}
-
 #[test]
 fn test_rsa_unwrap_aes_key() {
     ddi_dev_test(
@@ -804,8 +603,6 @@ fn test_rsa_unwrap_aes_key() {
 
             let der_len = aes_256_wrapped.len();
 
-            let key_tag = 0x5566;
-
             let key_props =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -818,7 +615,6 @@ fn test_rsa_unwrap_aes_key() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                Some(key_tag),
                 key_props,
             );
 
@@ -865,62 +661,6 @@ fn test_rsa_unwrap_aes_key() {
                 "locally decrypting the device ciphertext with the known key must \
                  recover the plaintext, proving the unwrapped key matches"
             );
-        },
-    );
-}
-
-#[cfg(not(any(feature = "emu", feature = "sock")))]
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_rsa_unwrap_aes_with_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            let (unwrap_key_id, unwrap_pub_key_der, _) = get_unwrapping_key(dev, session_id);
-
-            let aes_256_wrapped = wrap_data(unwrap_pub_key_der, TEST_AES_256.as_slice());
-
-            let mut der = [0u8; 3072];
-            der[..aes_256_wrapped.len()].copy_from_slice(&aes_256_wrapped);
-
-            let der_len = aes_256_wrapped.len();
-
-            let key_tag = 0x6677;
-
-            let key_props =
-                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
-
-            let resp = helper_rsa_unwrap(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                unwrap_key_id,
-                MborByteArray::new(der, der_len).expect("failed to create byte array"),
-                DdiKeyClass::Aes,
-                DdiRsaCryptoPadding::Oaep,
-                DdiHashAlgorithm::Sha256,
-                Some(key_tag),
-                key_props,
-            );
-
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-            assert_eq!(resp.data.kind, DdiKeyType::Aes256);
-            let unwrapped_key_id = resp.data.key_id;
-
-            // Confirm we can find the unwrapped key by tag
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                key_tag,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-
-            assert_eq!(resp.data.key_id, unwrapped_key_id);
-            assert_eq!(resp.data.key_kind, DdiKeyType::Aes256);
         },
     );
 }

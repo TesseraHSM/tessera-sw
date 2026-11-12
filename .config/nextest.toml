@@ -4,30 +4,29 @@
 # as a workaround to prevent each nextest run from overwriting the same output
 # file (saved to target/nextest/<profile>/<path>) during CI runs.
 
-# profile for running all workspace tests against the emu backend
+# profile for running all workspace tests against the sock backend (auto-started test server)
 # `ddi_sock_server_tcp_integration` and `ddi_sock_server_unix_integration`
 # spawn the separately-built `ddi_sock_server` binary (see
-# `examples/sock/ddi_sock_server/README.md`). This profile's
-# `--workspace` invocation does not build that binary, so these tests
-# are excluded here; they are not currently run by any CI job.
-[profile.ci-emu]
+# `ddi/sock/server/README.md`). This profile's `--workspace` invocation does
+# not build that binary, so these tests are excluded here.
+[profile.ci-sock]
 default-filter = "not binary_id(tsra_ddi_sock::ddi_sock_server_tcp_integration) and not binary_id(tsra_ddi_sock::ddi_sock_server_unix_integration)"
 
 # Resiliency stress tests are timing-sensitive; reserve the whole runner so
 # they do not run in parallel with any other test or each other.
-[[profile.ci-emu.overrides]]
+[[profile.ci-sock.overrides]]
 filter = "test(resiliency::stress::) or test(_resiliency_stress::)"
 # threads-required = "num-cpus"
 
-[profile.ci-emu.junit]
+[profile.ci-sock.junit]
 path = "junit.xml"
 
-# profile for running the MBOR types tests on emu w/ TSRA_EMU_RESOURCE_COUNT=4
-[profile.ci-emu-res-4.junit]
+# profile for running the MBOR types tests on sock w/ resource_count=4
+[profile.ci-sock-res-4.junit]
 path = "junit.xml"
 
-# profile for running the MBOR types tests on emu w/ TSRA_EMU_RESOURCE_COUNT=64
-[profile.ci-emu-res-64.junit]
+# profile for running the MBOR types tests on sock w/ resource_count=64
+[profile.ci-sock-res-64.junit]
 path = "junit.xml"
 
 # profile for running integration tests
@@ -39,8 +38,16 @@ test-threads = 1
 [profile.ci-provider-integration.junit]
 path = "junit.xml"
 
+# `ddi_sock_server_tests` spawn the separately-built `ddi_sock_server` binary,
+# which these `-p tsra_api_tests` runs do not build.
+[profile.ci-api]
+default-filter = "not test(/^ddi_sock_server_tests::/)"
+
 [profile.ci-api.junit]
 path = "junit.xml"
+
+[profile.ci-api-ex]
+default-filter = "not test(/^ddi_sock_server_tests::/)"
 
 [profile.ci-api-ex.junit]
 path = "junit.xml"

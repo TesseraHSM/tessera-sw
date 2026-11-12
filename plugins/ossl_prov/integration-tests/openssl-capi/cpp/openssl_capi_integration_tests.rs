@@ -12,6 +12,10 @@
 //! (EVP_PKEY, EVP_DigestSign/Verify, etc.) rather than the command-line tool,
 //! enabling testing of session-based keys that cannot be tested via the CLI.
 
+// Starts an in-process DDI sock server before `main`; the children this
+// harness spawns inherit its endpoint via `TSRA_DDI_ARGS`.
+use ddi_sock_server as _;
+
 /// Entry point for the C++ test runner.
 ///
 /// When built without the `integration` feature the binary is a no-op so that
@@ -283,7 +287,7 @@ mod integration {
              \n\
              Build the provider first:\n\
              \n\
-                 cargo build -p tsra_ossl_provider --features emu,provider\n",
+                 cargo build -p tsra_ossl_provider --features provider\n",
             provider_so.display(),
         );
 
@@ -516,7 +520,14 @@ tsra-api-revision = 1.0
         provider_path: &Path,
         resiliency_dir: &Path,
     ) -> Result<(), Failed> {
+        /// Serializes gtest processes that share this runner's auto-started
+        /// HSM: resiliency trials reset the partition under other trials.
+        static OWNED_HSM: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
         let test_name = test_name.replace("::", ".");
+
+        let _guard = ddi_sock_server::autostarted()
+            .then(|| OWNED_HSM.lock().unwrap_or_else(|e| e.into_inner()));
 
         // Remove derived key files from previous tests.  BMK and MUK are
         // session-specific — stale files from a prior provider init cause

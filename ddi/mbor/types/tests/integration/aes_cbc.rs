@@ -19,7 +19,6 @@ pub fn generate_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> (u16, u16
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiAesKeySize::Aes128,
-        None,
         key_props,
     );
 
@@ -34,7 +33,6 @@ pub fn generate_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> (u16, u16
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiAesKeySize::Aes192,
-        None,
         key_props,
     );
 
@@ -49,7 +47,6 @@ pub fn generate_keys(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> (u16, u16
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiAesKeySize::Aes256,
-        Some(0x1234),
         key_props,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -237,7 +234,6 @@ fn test_aes_cbc_encrypt_decrypt_incorrect_key_type() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 
@@ -292,7 +288,6 @@ fn test_aes_cbc_encrypt_decrypt_incorrect_permissions() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -305,7 +300,6 @@ fn test_aes_cbc_encrypt_decrypt_incorrect_permissions() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
