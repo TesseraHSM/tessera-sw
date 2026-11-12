@@ -668,7 +668,14 @@ fn run(input: &Input<'_>) {
                     1
                 };
                 for _ in 0..repeats {
-                    ctx.expect_fw_reject(&case.req, status);
+                    if matches!(
+                        status,
+                        TborStatus::SessionNotFound | TborStatus::FileHandleSessionIdDoesNotMatch
+                    ) {
+                        ctx.expect_session_reject(&case.req, status);
+                    } else {
+                        ctx.expect_fw_reject(&case.req, status);
+                    }
                 }
                 if session.is_some() {
                     let mut probe = build_case(&Input(&[]), active, &public);

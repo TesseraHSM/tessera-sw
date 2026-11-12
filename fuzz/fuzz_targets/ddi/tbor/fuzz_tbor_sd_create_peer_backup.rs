@@ -440,7 +440,14 @@ fuzz_target!(|input: FuzzInput| {
                 ctx.expect_fw_reject(&req, status);
             } else {
                 let oob = evidence.oob_slices();
-                ctx.expect_fw_reject_oob(&req, &oob, status);
+                if matches!(input.fault, Fault::InactiveCoSession) {
+                    let err = ctx
+                        .tbor_oob(&req, &oob)
+                        .expect_err("closed session must be rejected");
+                    assertions::assert_session_rejects(&err, status);
+                } else {
+                    ctx.expect_fw_reject_oob(&req, &oob, status);
+                }
             }
         }
 
