@@ -15,9 +15,9 @@ use super::*;
 /// Byte order of TBOR integer operands for a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WireOrder {
-    /// Little-endian; coordinates are zero-padded to a 4-byte multiple.
+    /// Little-endian.
     Le,
-    /// Big-endian; coordinates are exactly the curve's component length.
+    /// Big-endian.
     Be,
 }
 
@@ -38,6 +38,11 @@ impl WireOrder {
 
     /// Returns the wire length of one ECC coordinate whose big-endian
     /// length is `coord`.
+    ///
+    /// On [`Le`](Self::Le) each coordinate is zero-extended to a 4-byte
+    /// multiple (P-521: 66 bytes become 68); on [`Be`](Self::Be) it is
+    /// exactly `coord` bytes. Only ECC coordinate pairs are padded; other
+    /// operands are byte-reversed at their natural width.
     pub(crate) fn coord_len(self, coord: usize) -> usize {
         match self {
             Self::Le => coord.next_multiple_of(4),
