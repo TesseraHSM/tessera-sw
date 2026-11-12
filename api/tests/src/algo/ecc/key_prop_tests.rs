@@ -421,9 +421,9 @@ ecc_flag_tests!(
     HsmKeyPropsBuilder::can_sign,
 );
 
-// Rejects ECC public key props that include DERIVE usage.
+// Rejects ECC public key props with both VERIFY and DERIVE usage.
 #[session_test]
-fn test_ecc_pub_props_derive_rejected(session: HsmSession) {
+fn test_ecc_pub_props_verify_and_derive_fail(session: HsmSession) {
     let priv_key_props = HsmKeyPropsBuilder::default()
         .class(HsmKeyClass::Private)
         .key_kind(HsmKeyKind::Ecc)
@@ -1083,6 +1083,8 @@ fn test_ecc_key_pair_explicit_scope_mismatch_fails(session: HsmSession) {
     }
 }
 
+/// Equivalent explicit and implicit scopes must agree after session-flag normalization.
+/// Legacy sessions reject explicit scopes on either half, even when the pair matches.
 #[session_test]
 fn test_ecc_key_pair_equivalent_scopes(session: HsmSession) {
     for scope in [HsmKeyScope::Session, HsmKeyScope::Local] {
@@ -1149,6 +1151,7 @@ fn test_ecc_key_labels_preserved(session: HsmSession) {
     }
 }
 
+/// Overflow is rejected by TBOR property validation or the legacy MBOR field conversion.
 #[session_test]
 fn test_ecc_key_label_too_long_fails(session: HsmSession) {
     let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
