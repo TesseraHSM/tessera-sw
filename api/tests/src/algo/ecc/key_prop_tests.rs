@@ -5,38 +5,8 @@ use tsra_api::*;
 use tsra_api_tests_macro::*;
 use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
+use super::common::*;
 use super::key_tests::*;
-
-fn ecc_key_pair_props_builders(
-    curve: HsmEccCurve,
-    can_derive: bool,
-) -> (HsmKeyPropsBuilder, HsmKeyPropsBuilder) {
-    let priv_builder = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Private)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(curve)
-        .can_sign(!can_derive)
-        .can_derive(can_derive)
-        .is_session(true);
-    let pub_builder = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(curve)
-        .can_verify(!can_derive)
-        .can_derive(can_derive)
-        .is_session(true);
-    (priv_builder, pub_builder)
-}
-
-// Helper to generate an ECC key pair using the provided private/public key properties.
-fn gen_ecc_key_pair(
-    session: &HsmSession,
-    priv_key_props: HsmKeyProps,
-    pub_key_props: HsmKeyProps,
-) -> Result<(HsmEccPrivateKey, HsmEccPublicKey), HsmError> {
-    let mut algo = HsmEccKeyGenAlgo::default();
-    HsmKeyManager::generate_key_pair(session, &mut algo, priv_key_props, pub_key_props)
-}
 
 // Helper to attempt ECC key pair unwrap with given properties, using a bogus blob to exercise validation and DDI paths.
 fn unwrap_ecc_with_props(
@@ -209,7 +179,7 @@ fn assert_ecc_flag_rejected(
         HsmKeyClass::Private | HsmKeyClass::Public
     ));
     let props_with_flag = |enabled| {
-        let (mut priv_builder, mut pub_builder) = ecc_key_pair_props_builders(curve, can_derive);
+        let (mut priv_builder, mut pub_builder) = ecc_key_pair_props_builders(curve, can_derive, true);
         if key_class == HsmKeyClass::Private {
             priv_builder = set_flag(priv_builder, enabled);
         } else {
@@ -623,7 +593,7 @@ fn test_ecc_key_pair_usage_mismatch_fails(session: HsmSession) {
 #[session_test]
 fn test_ecc_key_pair_valid_derive_succeeds(session: HsmSession) {
     for curve in [HsmEccCurve::P256, HsmEccCurve::P384, HsmEccCurve::P521] {
-        let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, true);
+        let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, true, true);
         let (priv_key, pub_key) = gen_ecc_key_pair(
             &session,
             priv_builder.build().expect("Failed to build private props"),
@@ -1006,7 +976,7 @@ fn test_ecc_pub_props_bits_normalized_to_curve(session: HsmSession) {
         (HsmEccCurve::P521, HsmEccCurve::P256),
     ] {
         for can_derive in [false, true] {
-            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive);
+            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive, true);
             let (priv_key, pub_key) = gen_ecc_key_pair(
                 &session,
                 priv_builder.build().expect("Failed to build private props"),
@@ -1031,7 +1001,7 @@ fn test_ecc_pub_props_bits_normalized_to_curve(session: HsmSession) {
 #[session_test]
 fn test_ecc_key_pair_session_mismatch_fails(session: HsmSession) {
     for is_session in [false, true] {
-        let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false);
+        let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
         let priv_props = priv_builder
             .is_session(is_session)
             .build()
@@ -1063,7 +1033,7 @@ fn test_ecc_key_pair_explicit_scope_mismatch_fails(session: HsmSession) {
             if private_scope == public_scope {
                 continue;
             }
-            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false);
+            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
             let priv_props = priv_builder
                 .scope(private_scope)
                 .build()
@@ -1090,7 +1060,7 @@ fn test_ecc_key_pair_equivalent_scopes(session: HsmSession) {
     for scope in [HsmKeyScope::Session, HsmKeyScope::Local] {
         for (explicit_private, explicit_public) in [(true, false), (false, true), (true, true)] {
             let is_session = scope == HsmKeyScope::Session;
-            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false);
+            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
             let mut priv_builder = priv_builder.is_session(is_session);
             let mut pub_builder = pub_builder.is_session(is_session);
             if explicit_private {
@@ -1132,7 +1102,7 @@ fn test_ecc_key_labels_preserved(session: HsmSession) {
                 vec![b'e'; TBOR_KEY_LABEL_MAX_LEN - 1],
                 vec![b'e'; TBOR_KEY_LABEL_MAX_LEN],
             ] {
-                let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive);
+                let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive, true);
                 let priv_props = priv_builder
                     .label(&label)
                     .build()
@@ -1163,7 +1133,7 @@ fn test_ecc_key_label_too_long_fails(session: HsmSession) {
 
     for can_derive in [false, true] {
         let (priv_builder, pub_builder) =
-            ecc_key_pair_props_builders(HsmEccCurve::P256, can_derive);
+            ecc_key_pair_props_builders(HsmEccCurve::P256, can_derive, true);
         let priv_props = priv_builder
             .label(&label)
             .build()
