@@ -633,6 +633,111 @@ fn sd_reseal_remote_backup_zero_session_succeeds() {
     );
 }
 
+/// Reject an invalid source manufacturer certificate index.
+#[test]
+fn sd_reseal_remote_backup_invalid_src_mfgr_cert_index_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    req.src_mfgr_cert_chain[0].index = u8::MAX;
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("invalid source manufacturer cert index must fail");
+}
+
+/// Reject an invalid destination manufacturer certificate index.
+#[test]
+fn sd_reseal_remote_backup_invalid_dest_mfgr_cert_index_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    req.dest_mfgr_cert_chain[0].index = u8::MAX;
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("invalid destination manufacturer cert index must fail");
+}
+
+/// Reject an invalid source partition-owner certificate index.
+#[test]
+fn sd_reseal_remote_backup_invalid_src_part_owner_cert_index_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    req.src_part_owner_cert_chain[0].index = u8::MAX;
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("invalid source partition-owner cert index must fail");
+}
+
+/// Reject an invalid destination partition-owner certificate index.
+#[test]
+fn sd_reseal_remote_backup_invalid_dest_part_owner_cert_index_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    req.dest_part_owner_cert_chain[0].index = u8::MAX;
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("invalid destination partition-owner cert index must fail");
+}
+
+/// Reject a source certificate descriptor with a positive mismatched length.
+#[test]
+fn sd_reseal_remote_backup_src_cert_length_mismatch_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    let index = req.src_mfgr_cert_chain[0].index as usize;
+    let actual_len = evidence.oob_items[index].len();
+
+    assert!(actual_len > 1);
+    req.src_mfgr_cert_chain[0].length = U16::new((actual_len - 1) as u16);
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("source certificate length mismatch must fail");
+}
+
+/// Reject a destination certificate descriptor with a positive mismatched length.
+#[test]
+fn sd_reseal_remote_backup_dest_cert_length_mismatch_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    let index = req.dest_mfgr_cert_chain[0].index as usize;
+    let actual_len = evidence.oob_items[index].len();
+
+    assert!(actual_len > 1);
+    req.dest_mfgr_cert_chain[0].length = U16::new((actual_len - 1) as u16);
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("destination certificate length mismatch must fail");
+}
+
+/// Reject an all-zero masked receiver sealing key.
+#[test]
+fn sd_reseal_remote_backup_zeroed_masked_key_rejected() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    req.masked_sealing_key.fill(0);
+
+    ctx.tbor_oob(&req, &evidence.oob())
+        .expect_err("zeroed masked sealing key must fail");
+}
+
+/// Verify that both optional owner certificate chains can be omitted.
+#[test]
+fn sd_reseal_remote_backup_both_owner_chains_empty_succeeds() {
+    let (ctx, mut req, evidence) = valid_reseal_fixture();
+
+    req.src_owner_cert_chain.clear();
+    req.dest_owner_cert_chain.clear();
+
+    let resp = ctx
+        .tbor_oob(&req, &evidence.oob())
+        .expect("reseal should succeed without either owner chain");
+
+    assert_eq!(resp.dst_remote_backup.len(), POK_REMOTE_BACKUP_LEN);
+
+    assert!(
+        resp.dst_remote_backup.iter().any(|&b| b != 0),
+        "resealed backup must not be all-zero"
+    );
+}
+
 /// Reject malformed source owner certificate evidence.
 #[test]
 fn sd_reseal_remote_backup_malformed_src_owner_chain_rejected() {
