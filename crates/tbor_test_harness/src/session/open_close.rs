@@ -48,6 +48,10 @@ pub fn session_close(dev: &TestDev, session_id: u16) -> Result<(), DdiError> {
     let result = dev
         .exec_op_tbor::<TborSessionCloseReq>(&req, None, &mut cookie)
         .map(|_: TborSessionCloseResp| ());
-    dev.remove_session_transport(session_id);
+    // A failed close leaves the session alive, so keep its transport keys
+    // for a retry.
+    if result.is_ok() {
+        dev.remove_session_transport(session_id);
+    }
     result
 }

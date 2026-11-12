@@ -132,5 +132,5 @@ fn mlkem_encapsulate_rejects_payload_gap() {
         pub_key: key.pub_key,
     };
 
-    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::InvalidArg);
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::TborNonCanonicalLayout);
 }

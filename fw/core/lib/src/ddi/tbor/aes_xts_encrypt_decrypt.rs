@@ -61,7 +61,7 @@ pub(crate) async fn handle<P: HsmPal>(
     let key_off = offset(req.masked_key().as_ptr()).ok_or(HsmError::InvalidArg)?;
     let key_len = req.masked_key().len();
     if tweak_off + tweak_len > key_off {
-        return Err(HsmError::InvalidArg);
+        return Err(HsmError::TborNonCanonicalLayout);
     }
 
     cmd_buf.response(TborAesXtsEncryptDecryptResp::MAX_ENCODED_SIZE)?;

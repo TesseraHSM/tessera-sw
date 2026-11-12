@@ -100,7 +100,7 @@ pub struct TborDarcKeyUnwrapReq<'a> {
     /// The masked TMK envelope from `DarcTmkImport`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).  Unmasked on-device to recover the
     /// 32-byte TMK used as the AES-KWP key.
-    #[tbor(buffer, len = 264)]
+    #[tbor(align = 4, buffer, len = 264)]
     pub masked_tmk: &'a [u8],
 
     /// The AES-KWP-wrapped EC2 `COSE_Key`, up to
@@ -122,7 +122,7 @@ pub struct TborDarcKeyUnwrapResp<'a> {
     ///
     /// `#[tbor(mutable)]` so the handler can reserve the slot and mask the
     /// recovered key straight into it (`decode_mut`) — no scratch buffer.
-    #[tbor(buffer, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
     /// The recovered key's wire public key (`x ‖ y`, device byte order).

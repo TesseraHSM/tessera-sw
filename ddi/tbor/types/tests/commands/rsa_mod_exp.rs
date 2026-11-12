@@ -40,6 +40,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::assert_rsa_decrypts;
 use crate::commands::common::assert_rsa_signs;
 use crate::commands::common::mod_exp;
@@ -963,5 +964,28 @@ fn rsa_mod_exp_rejects_payload_gap() {
         y: rev(&test_integer(modulus_len)),
     };
 
-    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::InvalidArg);
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::TborNonCanonicalLayout);
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn rsa_mod_exp_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _, modulus_len) = import_rsa(
+        &ctx,
+        session.session_id,
+        256,
+        false,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+    );
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborRsaModExpReq {
+            session_id: session.session_id,
+            masked_key,
+            op_type: RSA_OP_SIGN,
+            y: rev(&test_integer(modulus_len)),
+        },
+    );
 }

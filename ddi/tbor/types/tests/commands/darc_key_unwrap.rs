@@ -53,6 +53,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::darc_tmk_import::build_valid_import;
 use crate::commands::darc_tmk_import::sd_initialized_session;
 use crate::commands::darc_tmk_import::SdReady;
@@ -439,4 +440,18 @@ fn darc_key_unwrap_rejected_on_default_psk() {
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}
+
+/// Rejects a misaligned masked TMK and one without its padding entry.
+#[test]
+fn darc_key_unwrap_rejects_bad_masked_key_layout() {
+    let ready = sd_initialized_session();
+    let (req, _) = build_valid_unwrap(
+        &ready,
+        KEY_SCOPE_LOCAL,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+        &[KEY_OP_CREATE_SIGNATURE, KEY_OP_VERIFY_SIGNATURE],
+        EccCurve::P256,
+    );
+    assert_masked_key_layout_rejected(&ready.ctx, &req);
 }

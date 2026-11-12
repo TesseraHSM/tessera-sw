@@ -76,7 +76,7 @@ pub struct TborSdSealingKeyGenResp<'a> {
     /// under the requested scope's masking key.  Always exactly
     /// [`MASKED_SEALING_KEY_LEN`] (280 B).  The private key is not stored
     /// on the device; the caller re-imports this blob when needed.
-    #[tbor(buffer, len = 280)]
+    #[tbor(align = 4, buffer, len = 280)]
     pub masked_key: &'a [u8],
 
     /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,

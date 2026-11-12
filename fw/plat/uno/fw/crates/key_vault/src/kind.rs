@@ -356,7 +356,10 @@ mod tests {
         );
         assert_eq!(
             key_len(HsmVaultKeyKind::SessionExPending),
-            Ok(KeyLen::Variable { min: 32, max: 320 })
+            Ok(KeyLen::Variable {
+                min: 32,
+                max: SESSION_PENDING_BLOB_MAX as u16
+            })
         );
     }
 

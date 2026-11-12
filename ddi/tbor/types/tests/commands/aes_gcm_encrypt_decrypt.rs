@@ -39,6 +39,7 @@ use tsra_ddi_tbor_types::KEY_CLASS_HMAC_SHA256;
 use crate::commands::aes_generate_key::generate_key;
 use crate::commands::aes_generate_key::SCOPE_LOCAL;
 use crate::commands::aes_generate_key::SCOPE_SESSION;
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 
@@ -488,4 +489,25 @@ fn aes_gcm_rejects_invalid_session() {
         .tbor_oob_io(&r, &mut [])
         .expect_err("session command must be rejected");
     ctx.assert_unknown_session_rejects(&err, TborStatus::FileHandleSessionIdDoesNotMatch);
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn aes_gcm_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_key(&ctx, sid, SCOPE_LOCAL, AES_KEY_SIZE_256);
+    // Zero-length data needs no OOB blocks.
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &req(
+            sid,
+            AES_OP_ENCRYPT,
+            &key,
+            &random(GCM_IV_LEN),
+            &[0; GCM_TAG_LEN],
+            0,
+            0,
+        ),
+    );
 }

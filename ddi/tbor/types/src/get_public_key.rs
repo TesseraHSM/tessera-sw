@@ -32,7 +32,7 @@ pub struct TborGetPublicKeyReq {
 
     /// The masked private-key envelope. Variable length up to
     /// [`GET_PUBLIC_KEY_MASKED_KEY_MAX_LEN`].
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 }
 

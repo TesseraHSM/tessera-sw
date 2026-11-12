@@ -30,7 +30,7 @@ pub struct TborEccSignReq {
     pub session_id: u16,
 
     /// The masked ECC private key (from `EccGenerateKey` / `UnwrapKey`).
-    #[tbor(min_len = 264, max_len = 312)]
+    #[tbor(align = 4, min_len = 264, max_len = 312)]
     pub masked_key: Vec<u8>,
 
     /// The pre-computed message digest in device byte order. Its

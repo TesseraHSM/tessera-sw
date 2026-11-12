@@ -38,6 +38,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::PSK_LEN;
 use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::derive;
 pub(crate) use crate::commands::common::CO;
 pub(crate) use crate::commands::common::CU;
@@ -855,4 +856,23 @@ fn ecdh_derive_binary_key_label() {
         .expect("EcdhDerive with binary key label");
 
     assert_eq!(resp.masked_secret.len(), masked_secret_len(ECC_CURVE_P256));
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn ecdh_derive_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _) = generate_in_scope(&ctx, session.session_id, SCOPE_LOCAL, ECC_CURVE_P256);
+    let (_, peer_pub) = generate_in_scope(&ctx, session.session_id, SCOPE_LOCAL, ECC_CURVE_P256);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborEcdhDeriveReq {
+            session_id: session.session_id,
+            scope: SCOPE_LOCAL,
+            masked_key,
+            peer_pub_key: peer_pub,
+            key_label: Vec::new(),
+        },
+    );
 }

@@ -55,6 +55,7 @@ pub struct TborSdSealingKeyGenResp {
     /// The new sealing key's ECC-P384 private half, masked
     /// (AEAD-GCM-256) under the requested scope's masking key.  Always
     /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B); not stored on-device.
+    #[tbor(align = 4)]
     pub masked_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Raw P-384 public key (`x ‖ y` affine coordinates, 96 bytes,

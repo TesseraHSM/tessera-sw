@@ -66,6 +66,7 @@ use tsra_ddi_tbor_types::KEY_REPORT_MASKED_KEY_MAX_LEN;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::ENVELOPE_AAD_LEN;
 use crate::commands::common::ENVELOPE_HEADER_LEN;
 use crate::commands::common::ENVELOPE_IV_LEN;
@@ -1353,4 +1354,21 @@ fn key_report_imported_rsa_invalid_session_rejected() {
 #[test]
 fn key_report_imported_rsa_crt_invalid_session_rejected() {
     imported_rsa_invalid_session_rejected(KEY_CLASS_RSA_CRT);
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn key_report_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _pub) = masked_sealing_key(&ctx, session.session_id, SCOPE_LOCAL);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborKeyReportReq {
+            auth_envelope: Vec::new(),
+            session_id: session.session_id,
+            masked_key,
+            report_data: sample_report_data(),
+        },
+    );
 }

@@ -149,7 +149,7 @@ pub struct TborUnwrapKeyResp<'a> {
     /// recovered key straight into it (`decode_mut`) — avoiding a separate
     /// MAX-sized scratch buffer that would otherwise coexist with the
     /// (multi-KB, for RSA) unwrap material and blow the per-IO DMA budget.
-    #[tbor(buffer, max_len = 3168, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
     /// The recovered key's wire public key for RSA / ECC; empty for

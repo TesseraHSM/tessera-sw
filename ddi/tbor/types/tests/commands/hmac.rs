@@ -58,6 +58,7 @@ use tsra_ddi_tbor_types::MASKED_HMAC_KEY_MAX_LEN;
 use tsra_ddi_tbor_types::MASKED_HMAC_KEY_MIN_LEN;
 use tsra_ddi_tbor_types::TBOR_KEY_LABEL_MAX_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::ENVELOPE_AAD_LEN;
 use crate::commands::common::ENVELOPE_HEADER_LEN;
 use crate::commands::common::ENVELOPE_IV_LEN;
@@ -890,4 +891,20 @@ fn hmac_accepts_key_with_sign_permission() {
 
         assert_eq!(tag.len(), tag_len_for_hash(hash));
     }
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn hmac_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let masked_key = generate_key(&ctx, session.session_id, SCOPE_LOCAL, HMAC_HASH_SHA256);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborHmacReq {
+            session_id: session.session_id,
+            masked_key,
+            msg: b"whatever".to_vec(),
+        },
+    );
 }

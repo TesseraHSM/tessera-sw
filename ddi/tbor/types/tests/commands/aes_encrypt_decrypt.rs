@@ -45,6 +45,7 @@ use tsra_ddi_tbor_types::AES_OP_ENCRYPT;
 use tsra_ddi_tbor_types::KEY_CLASS_AES;
 
 use crate::commands::aes_generate_key::generate_key;
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::PayloadGapReq;
 use crate::commands::common::SCOPE_LOCAL;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
@@ -1078,5 +1079,24 @@ fn aes_encrypt_decrypt_rejects_payload_gap() {
         msg: vec![0x5A; 2 * IV_LEN],
     };
 
-    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::InvalidArg);
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::TborNonCanonicalLayout);
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn aes_encrypt_decrypt_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let key = generate_key(&ctx, session.session_id, SCOPE_LOCAL, AES_KEY_SIZE_256);
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborAesEncryptDecryptReq {
+            session_id: session.session_id,
+            masked_key: key,
+            op: AES_OP_ENCRYPT,
+            mode: AES_MODE_CBC,
+            iv: random_iv(),
+            msg: vec![0x5A; 2 * IV_LEN],
+        },
+    );
 }

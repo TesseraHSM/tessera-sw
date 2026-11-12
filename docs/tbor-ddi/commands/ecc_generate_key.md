@@ -32,9 +32,9 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the private key. |
-| — | `curve` | `u8` (inline) | NIST curve: `1` = P-256, `2` = P-384, `3` = P-521. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the private key. |
+| 16 | `curve` | `u8` (inline) | NIST curve: `1` = P-256, `2` = P-384, `3` = P-521. |
 
 ### Data section
 
@@ -46,8 +46,9 @@ _Empty._
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `masked_key` | `buffer` (260 / 276 / 296 B) | The private key, masked (AEAD-GCM-256) under the scope's masking key. |
-| — | `pub_key` | `buffer` (64 / 96 / 132-or-136 B) | The wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices). |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_key` | `buffer` (260 / 276 / 296 B) | The private key, masked (AEAD-GCM-256) under the scope's masking key. |
+| 16 | `pub_key` | `buffer` (64 / 96 / 132-or-136 B) | The wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices). |
 
 ### Data section
 

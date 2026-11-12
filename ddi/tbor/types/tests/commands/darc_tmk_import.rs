@@ -66,6 +66,7 @@ use tsra_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
 use zerocopy::TryFromBytes;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
 use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
@@ -380,4 +381,13 @@ fn darc_tmk_import_rejected_on_default_psk() {
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}
+
+/// Rejects a misaligned masked key-exchange key and one without its
+/// padding entry; the decoder rejects before the OOB chain is read.
+#[test]
+fn darc_tmk_import_rejects_bad_masked_key_layout() {
+    let ready = sd_initialized_session();
+    let (req, _chain) = build_valid_import(&ready, &ready.pota, &[0x5Au8; TMK_LEN]);
+    assert_masked_key_layout_rejected(&ready.ctx, &req);
 }

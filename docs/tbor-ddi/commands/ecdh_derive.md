@@ -36,10 +36,11 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived secret. |
-| 8 | `masked_key` | `buffer` (260..=296 B) | The masked local ECC private key; unmasked in place.  Its kind recovers the curve. |
-| — | `peer_pub_key` | `buffer` (64 / 96 / 132-or-136 B) | The peer's wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices), exactly the curve's wire public-key length. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived secret. |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (260..=296 B) | The masked local ECC private key; unmasked in place.  Its kind recovers the curve. |
+| 24 | `peer_pub_key` | `buffer` (64 / 96 / 132-or-136 B) | The peer's wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices), exactly the curve's wire public-key length. |
 
 ### Data section
 
@@ -51,7 +52,8 @@ Carries the masked local key followed by the peer public key.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `masked_secret` | `buffer` (260 / 276 / 294 B) | The derived ECDH shared secret, masked (AEAD-GCM-256) under the scope's masking key. |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_secret` | `buffer` (260 / 276 / 294 B) | The derived ECDH shared secret, masked (AEAD-GCM-256) under the scope's masking key. |
 
 ### Data section
 

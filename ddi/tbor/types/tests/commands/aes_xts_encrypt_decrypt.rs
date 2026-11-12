@@ -33,6 +33,7 @@ use tsra_ddi_tbor_types::XTS_DATA_MAX_LEN;
 use crate::commands::aes_generate_key::SCOPE_LOCAL;
 use crate::commands::aes_generate_key::SCOPE_SESSION;
 use crate::commands::aes_xts_generate_key::generate_xts_key;
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 
@@ -310,4 +311,15 @@ fn aes_xts_unwrapped_key_matches_host() {
 
     let back = crypt(&ctx, sid, AES_OP_DECRYPT, &key, tweak, dul, &ct);
     assert_eq!(back, pt);
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+///
+/// The decoder rejects the layout before any OOB block is consumed.
+#[test]
+fn aes_xts_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let key = generate_xts_key(&ctx, sid, SCOPE_LOCAL);
+    assert_masked_key_layout_rejected(&ctx, &req(sid, AES_OP_ENCRYPT, &key, 0, 512, 512));
 }

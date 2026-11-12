@@ -89,7 +89,7 @@ pub(crate) async fn handle<P: HsmPal>(
         || offset(req.tag().as_ptr()) != Some(data_start + GCM_IV_LEN)
         || key_off < region_end
     {
-        return Err(HsmError::InvalidArg);
+        return Err(HsmError::TborNonCanonicalLayout);
     }
 
     // An empty message (no AAD, no text) carries no OOB data; only the

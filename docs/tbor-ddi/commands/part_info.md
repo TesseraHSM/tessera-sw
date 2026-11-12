@@ -32,7 +32,7 @@ variable-length data section.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8  | `device_kind` | `uint8` (inline) | Device kind: `1` = Virtual, `2` = Physical. Unknown values round-trip as `DeviceKind(x)`. |
+| 8 | `device_kind` | `uint8` (inline) | Device kind: `1` = Virtual, `2` = Physical. Unknown values round-trip as `DeviceKind(x)`. |
 | 12 | `part_state` | `uint8` (inline) | Partition lifecycle state: `0` = Unallocated, `1` = Allocated, `2` = Enabled, `3` = Disabled, `4` = Initializing. |
 | 16 | `generation` | `uint32` (offset/len) | Monotonic partition generation counter. |
 | 20 | `owner_svn` | `uint64` (offset/len) | Owner-seed (BKS2) selector currently in effect. |

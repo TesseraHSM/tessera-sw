@@ -51,6 +51,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::darc_tmk_export::build_valid_export;
 use crate::commands::darc_tmk_export::gen_masked_tmk;
 use crate::commands::darc_tmk_export::mint_kex;
@@ -429,4 +430,34 @@ fn darc_key_wrap_rejected_on_default_psk() {
     let mut req = dummy_req(session.session_id());
     req.session_id = session.session_id();
     ctx.expect_fw_reject(&req, TborStatus::DefaultPskMustRotate);
+}
+
+/// Rejects a misaligned masked TMK or key and one without its padding entry.
+#[test]
+fn darc_key_wrap_rejects_bad_masked_key_layout() {
+    let ready = sd_initialized_session();
+    let tmk = ready
+        .ctx
+        .tbor(&TborDarcTmkGenReq {
+            session_id: ready.session.session_id,
+        })
+        .expect("DarcTmkGen");
+    let ec = ready
+        .ctx
+        .tbor(&TborEccGenerateKeyReq {
+            session_id: ready.session.session_id,
+            scope: SCOPE_LOCAL,
+            curve: ECC_CURVE_P256,
+            key_usage: KEY_USAGE_SIGN,
+            key_label: Vec::new(),
+        })
+        .expect("EccGenerateKey");
+    assert_masked_key_layout_rejected(
+        &ready.ctx,
+        &TborDarcKeyWrapReq {
+            session_id: ready.session.session_id,
+            masked_tmk: tmk_array(&tmk.masked_tmk),
+            masked_key: ec.masked_key,
+        },
+    );
 }

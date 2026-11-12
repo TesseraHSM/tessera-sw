@@ -40,6 +40,8 @@ pub enum HsmError {
     TborMissingField = 0x08680019,
     TborDuplicateField = 0x0868001A,
     TborInvalidEnumValue = 0x0868001B,
+    TborMisalignedField = 0x08680020,
+    TborNonCanonicalLayout = 0x08680021,
     // TBOR wire-encode failures.
     TborBufferTooSmall = 0x0868001C,
     TborTooManyTocEntries = 0x0868001D,

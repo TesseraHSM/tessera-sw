@@ -96,7 +96,7 @@ pub struct TborRsaModExpReq<'a> {
     /// The masked RSA private key (from `UnwrapKey`), an AEAD-GCM-256
     /// envelope of 264..=3168 B.  Its kind recovers the modulus size and
     /// CRT form.
-    #[tbor(buffer, min_len = 264, max_len = 3168, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 
     /// The private-key operation, 1-byte [`RsaOp`] (gates on `decrypt` /

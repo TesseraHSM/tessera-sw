@@ -88,7 +88,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // digest remain live beyond it. Check disjointness before encoding.
         let buffer = cmd_buf.buffer_mut();
         if len > key_at || key_at > digest_end || digest_end > buffer.len() {
-            return Err(HsmError::InvalidArg);
+            return Err(HsmError::TborNonCanonicalLayout);
         }
         let (response, input) = buffer[..digest_end].split_at_mut(key_at);
         let response = &mut response[..len];

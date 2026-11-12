@@ -64,7 +64,7 @@ pub struct TborEccGenerateKeyReq {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TborEccGenerateKeyResp {
     /// The generated private key, masked under the scope's masking key.
-    #[tbor(max_len = 312)]
+    #[tbor(align = 4, max_len = 312)]
     pub masked_key: Vec<u8>,
 
     /// The wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices).

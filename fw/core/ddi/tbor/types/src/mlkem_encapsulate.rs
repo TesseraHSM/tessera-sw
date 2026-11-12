@@ -64,7 +64,7 @@ pub struct TborMlKemEncapsulateResp<'a> {
 
     /// The 32-byte ML-KEM shared secret, masked (AEAD-GCM-256) under the
     /// requested scope's masking key.  The envelope is always 164 B.
-    #[tbor(buffer, max_len = 264, mutable)]
+    #[tbor(align = 4, buffer, max_len = 264, mutable)]
     pub masked_shared_secret: &'a [u8],
 }
 

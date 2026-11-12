@@ -50,7 +50,7 @@ pub struct TborGetPublicKeyReq<'a> {
 
     /// The masked private-key envelope. `mutable` so the handler can
     /// unmask it in place.
-    #[tbor(buffer, max_len = 3168, mutable)]
+    #[tbor(align = 4, buffer, max_len = 3168, mutable)]
     pub masked_key: &'a [u8],
 }
 

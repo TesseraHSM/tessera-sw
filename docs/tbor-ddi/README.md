@@ -78,6 +78,30 @@ the framing prerequisite for shared-buffer execution; handlers still need
 to preserve live inputs and validate output capacity before reusing data.
 Error responses retain the single `None` placeholder described above.
 
+## Alignment padding
+
+Every masked key (and the `MlDsaSign` signature, written in place over its
+masked key) is preceded by a `padding` TOC entry (type 9). The padding
+places the field on a 4-byte boundary measured from the start of the
+message, so its length is 0..=3 bytes and is usually 0. The entry is
+always present, even when its length is 0.
+
+Firmware guarantees only 4-byte alignment for its exchange buffers, so
+4-byte message-relative alignment is also 4-byte memory alignment. Both
+sides reject:
+
+| Error | Cause |
+|---|---|
+| `TborMisalignedField` | An aligned field does not start on its 4-byte boundary |
+| `TborUnexpectedTocType` | The `padding` entry before an aligned field is missing |
+
+The host decoder reports the same cases on responses as
+`DecodeError::MisalignedField` and `DecodeError::UnexpectedTocType`.
+Handlers that transform fields in place additionally return
+`TborNonCanonicalLayout` when the request fields are not in the layout
+the in-place operation requires. See the
+[TBOR specification](../../fw/core/ddi/tbor/docs/spec.md) for the framing rules.
+
 ## Firmware exchange storage
 
 The IO layer receives the request into a growable DMA allocation, then selects

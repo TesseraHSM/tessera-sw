@@ -50,7 +50,7 @@ pub struct TborRsaModExpReq {
 
     /// The masked RSA private key (from `UnwrapKey`); its kind recovers the
     /// modulus size and CRT form.
-    #[tbor(max_len = 3168)]
+    #[tbor(align = 4, max_len = 3168)]
     pub masked_key: Vec<u8>,
 
     /// The private-key operation, 1-byte `RsaOp` (see `RSA_OP_*`): gates on

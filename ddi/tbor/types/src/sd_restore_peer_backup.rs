@@ -43,6 +43,7 @@ pub struct TborSdRestorePeerBackupReq {
     /// The receiver's masked SD-sealing key (from `SdSealingKeyGen`),
     /// exactly [`MASKED_SEALING_KEY_LEN`] (280 B).  Unmasked on-device to
     /// recover the receiver's private HPKE key (`RcvrPriv`).
+    #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
     /// Unified [`PartPolicy`] describing the security domain being

@@ -48,9 +48,10 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| 8 | `masked_key` | `buffer` (260..=296 B) | The masked ECC private key; unmasked in place.  Its kind recovers the curve. |
-| — | `digest` | `buffer` (32 / 48 / 64 B) | The pre-computed message digest in device byte order. Its length must be a supported SHA-2 digest length (32 / 48 / 64 B); the hash algorithm is inferred from that length, so no separate algorithm selector is carried on the wire. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_key` | `buffer` (260..=296 B) | The masked ECC private key; unmasked in place.  Its kind recovers the curve. |
+| 20 | `digest` | `buffer` (32 / 48 / 64 B) | The pre-computed message digest in device byte order. Its length must be a supported SHA-2 digest length (32 / 48 / 64 B); the hash algorithm is inferred from that length, so no separate algorithm selector is carried on the wire. |
 
 ### Data section
 
@@ -78,6 +79,7 @@ Carries the wire-format signature.
 | `InvalidPermissions` | The key's `sign` usage attribute is not set |
 | `MaskedKeyDecodeFailed` / `AesGcmDecryptTagDoesNotMatch` | The masked key is malformed or fails authentication (wrong scope / tampered) |
 | `DefaultPskMustRotate` | The calling role's PSK is still the compiled-in default (dispatcher, pre-handler) |
+| `TborNonCanonicalLayout` | The signature would overlap `masked_key`, or `digest` ends before `masked_key` starts |
 | `DdiDecodeFailed` | Malformed request body |
 
 ## See also

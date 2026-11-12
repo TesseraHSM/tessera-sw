@@ -67,7 +67,7 @@ pub struct TborEcdhDeriveReq<'a> {
     /// The masked local ECC private key (from `EccGenerateKey` /
     /// `UnwrapKey`), an AEAD-GCM-256 envelope of 264..=312 B.  Its kind
     /// recovers the curve.
-    #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
     /// The peer's wire public key `x ‖ y` in device byte order, exactly the
@@ -91,7 +91,7 @@ pub struct TborEcdhDeriveReq<'a> {
 pub struct TborEcdhDeriveResp<'a> {
     /// The derived ECDH shared secret, masked (AEAD-GCM-256) under the
     /// scope's masking key.  264 / 280 / 312 B for P-256 / P-384 / P-521.
-    #[tbor(buffer, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, max_len = 312, mutable)]
     pub masked_secret: &'a [u8],
 }
 

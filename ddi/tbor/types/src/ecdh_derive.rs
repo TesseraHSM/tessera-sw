@@ -36,7 +36,7 @@ pub struct TborEcdhDeriveReq {
 
     /// The masked local ECC private key (from `EccGenerateKey` /
     /// `UnwrapKey`).
-    #[tbor(min_len = 264, max_len = 312)]
+    #[tbor(align = 4, min_len = 264, max_len = 312)]
     pub masked_key: Vec<u8>,
 
     /// The peer's wire public key `x ‖ y` (device byte order; P-521 word-padded on little-endian devices).
@@ -56,7 +56,7 @@ pub struct TborEcdhDeriveReq {
 pub struct TborEcdhDeriveResp {
     /// The derived ECDH shared secret, masked under the scope's masking
     /// key.
-    #[tbor(max_len = 294)]
+    #[tbor(align = 4, max_len = 294)]
     pub masked_secret: Vec<u8>,
 }
 

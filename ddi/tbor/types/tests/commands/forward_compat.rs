@@ -614,6 +614,29 @@ fn aes_encrypt_decrypt_extra_trailing_toc_entry_is_ignored() {
     assert_eq!(resp.iv, iv);
 }
 
+/// Rejects a response whose masked key is off its alignment boundary.
+#[test]
+fn ecc_generate_key_misaligned_masked_key_is_rejected() {
+    let mut buf = [0u8; 1024];
+
+    // The data section starts at 8 + 3 * 4 = 20, so 2 bytes of padding put
+    // the masked key at offset 22.
+    let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+        .padding(2)
+        .expect("encode misaligning padding")
+        .buffer(&[0x11; 180])
+        .expect("encode masked key")
+        .buffer(&[0x22; 96])
+        .expect("encode public key")
+        .finish()
+        .expect("finish response");
+
+    assert_eq!(
+        TborEccGenerateKeyResp::decode_response(bytes).err(),
+        Some(DecodeError::MisalignedField)
+    );
+}
+
 /// Verifies that an appended field is ignored for a response containing
 /// two variable-length buffers.
 #[test]
@@ -626,6 +649,8 @@ fn ecc_generate_key_extra_trailing_toc_entry_is_ignored() {
     let mut buf = [0u8; 1024];
 
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .buffer(&pub_key)
@@ -659,6 +684,8 @@ fn unwrap_key_extra_trailing_toc_entry_is_ignored() {
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .buffer(&pub_key)
@@ -689,6 +716,8 @@ fn unwrap_key_multiple_trailing_toc_entries_are_ignored() {
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .buffer(&pub_key)
@@ -719,11 +748,13 @@ fn unwrap_key_missing_required_field_is_message_truncated() {
     let mut buf = [0u8; 1024];
 
     // TborUnwrapKeyResp expects:
-    //   key_kind, masked_key, pub_key.
-    // Encode only the first two.
+    //   key_kind, masked_key alignment padding, masked_key, pub_key.
+    // Encode all but pub_key.
     let bytes = ResponseEncoder::new(&mut buf, PROTOCOL_VERSION, 0, false)
         .uint8(key_kind)
         .expect("encode key kind")
+        .padding(0)
+        .expect("encode masked key alignment padding")
         .buffer(&masked_key)
         .expect("encode masked key")
         .finish()

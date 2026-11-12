@@ -72,7 +72,7 @@ pub struct TborHkdfDeriveReq {
     pub key_length: u8,
 
     /// The masked ECDH shared secret IKM (from `EcdhDerive`).
-    #[tbor(min_len = 264, max_len = 312)]
+    #[tbor(align = 4, min_len = 264, max_len = 312)]
     pub masked_secret: Vec<u8>,
 
     /// Optional HKDF-Extract salt; an **empty** buffer selects the RFC
@@ -97,7 +97,7 @@ pub struct TborHkdfDeriveReq {
 pub struct TborHkdfDeriveResp {
     /// The derived key, masked (AEAD-GCM-256) under the scope's masking
     /// key.
-    #[tbor(max_len = 360)]
+    #[tbor(align = 4, max_len = 360)]
     pub masked_key: Vec<u8>,
 }
 

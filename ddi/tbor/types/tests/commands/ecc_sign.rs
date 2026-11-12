@@ -42,6 +42,7 @@ use tsra_ddi_tbor_types::KEY_USAGE_DERIVE;
 use tsra_ddi_tbor_types::KEY_USAGE_SIGN;
 
 use crate::commands::common::assert_ecc_signs;
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::sign;
 use crate::commands::common::verify_wire_ecdsa;
 use crate::commands::common::with_generated_ecc_key;
@@ -611,4 +612,19 @@ fn ecc_sign_key_without_sign_usage_rejected() {
             TborStatus::InvalidPermissions,
         );
     }
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn ecc_sign_rejects_bad_masked_key_layout() {
+    with_generated_ecc_key(ECC_CURVE_P256, |ctx, session_id, masked_key, _| {
+        assert_masked_key_layout_rejected(
+            ctx,
+            &TborEccSignReq {
+                session_id,
+                masked_key,
+                digest: vec![0x42; 32],
+            },
+        );
+    });
 }

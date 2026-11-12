@@ -39,8 +39,9 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 |---|---|---|---|
 | 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | `y` | `buffer` (256 / 384 / 512 B) | The input integer `y` in device byte order, exactly the key's modulus length. |
-| 16 | `masked_key` | `buffer` (260..=3168 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
-| 20 | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
+| 16 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 20 | `masked_key` | `buffer` (260..=3168 B) | The masked RSA private key; unmasked in place.  Its kind recovers the modulus size and CRT form. |
+| 24 | `op_type` | `u8` (inline) | The [`RsaOp`] selecting the required usage attribute: `1` = Decrypt (needs `decrypt`), `2` = Sign (needs `sign`). |
 
 ### Data section
 
@@ -68,11 +69,12 @@ unmasked key, is scrubbed during IO teardown.
 | Error | Cause |
 |---|---|
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
-| `InvalidArg` | Unknown `op_type`, `y` length ≠ the key's modulus length, or noncanonical `y` offset |
+| `InvalidArg` | Unknown `op_type`, `y` length ≠ the key's modulus length |
 | `InvalidKeyType` | The masked blob is not an RSA private key |
 | `InvalidPermissions` | The key lacks the usage the operation needs (`decrypt` for Decrypt, `sign` for Sign) |
 | `MaskedKeyDecodeFailed` / `AesGcmDecryptTagDoesNotMatch` | The masked key is malformed or fails authentication (wrong scope / tampered) |
 | `DefaultPskMustRotate` | The calling role's PSK is still the compiled-in default (dispatcher, pre-handler) |
+| `TborNonCanonicalLayout` | `y` does not start the data section |
 | `DdiDecodeFailed` | Malformed request body |
 
 ## See also

@@ -58,7 +58,7 @@ pub struct TborEccSignReq<'a> {
 
     /// The masked ECC private key (from `EccGenerateKey` / `UnwrapKey`), an
     /// AEAD-GCM-256 envelope of 264..=312 B.  Its kind recovers the curve.
-    #[tbor(buffer, min_len = 264, max_len = 312, mutable)]
+    #[tbor(align = 4, buffer, min_len = 264, max_len = 312, mutable)]
     pub masked_key: &'a [u8],
 
     /// The pre-computed message digest in device byte order. Its

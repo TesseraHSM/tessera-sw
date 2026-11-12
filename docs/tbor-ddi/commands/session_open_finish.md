@@ -43,23 +43,23 @@ the full HKDF schedule.
 
 ## Request
 
-Wire layout: 4-byte header, followed by the TOC entries, then the
+Wire layout: 8-byte header, followed by the TOC entries, then the
 data section.
 
 ### TOC entries
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4  | `session_id` | `session_id` (inline) | Pending session identifier the handshake reserved in Phase 1. |
-| 8  | `mac_fin` | `buffer` (ref) | References the `mac_fin` payload below.  TOC word carries `(data_offset = 16, length = 48)`. |
-| 12 | `seed_envelope` | `buffer` (ref) | References the `seed_envelope` payload below.  TOC word carries `(data_offset = 64, length = 72)`. |
+| 8 | `session_id` | `session_id` (inline) | Pending session identifier the handshake reserved in Phase 1. |
+| 12 | `mac_fin` | `buffer` (ref) | References the `mac_fin` payload below.  TOC word carries `(data_offset = 16, length = 48)`. |
+| 16 | `seed_envelope` | `buffer` (ref) | References the `seed_envelope` payload below.  TOC word carries `(data_offset = 64, length = 72)`. |
 
 ### Data section
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| 16 | 48 B | `mac_fin` | Phase-2 confirmation MAC, HMAC-SHA-384 keyed on the HPKE `exported` value.  See [Phase-2 confirmation MAC](#phase-2-confirmation-mac-mac_fin) below. |
-| 64 | 72 B | `seed_envelope` | AEAD-GCM envelope of a fresh 32-byte `seed` sealed under `param_key` with no AAD.  See [`seed_envelope` format](#seed_envelope-format) below. |
+| 20 | 48 B | `mac_fin` | Phase-2 confirmation MAC, HMAC-SHA-384 keyed on the HPKE `exported` value.  See [Phase-2 confirmation MAC](#phase-2-confirmation-mac-mac_fin) below. |
+| 68 | 72 B | `seed_envelope` | AEAD-GCM envelope of a fresh 32-byte `seed` sealed under `param_key` with no AAD.  See [`seed_envelope` format](#seed_envelope-format) below. |
 
 ## Response
 
@@ -76,7 +76,7 @@ data section.
 
 | Offset | Length | Field | Description |
 |---|---|---|---|
-| 12 | _N_ B | `bmk_session` | Wrapped session-key blob (264 B). See [`bmk_session` envelope](#bmk_session-envelope) below. |
+| 20 | _N_ B | `bmk_session` | Wrapped session-key blob (264 B). See [`bmk_session` envelope](#bmk_session-envelope) below. |
 
 ## `seed_envelope` format
 

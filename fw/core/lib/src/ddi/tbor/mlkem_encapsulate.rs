@@ -80,7 +80,7 @@ pub(crate) async fn handle<P: HsmPal>(
         let ct_len = param.ct_len();
         let data_start = tsra_fw_ddi_tbor::REQ_HEADER_LEN + TborMlKemEncapsulateReq::TOC_COUNT * 4;
         if (req.pub_key.as_ptr() as usize).checked_sub(base) != Some(data_start) {
-            return Err(HsmError::InvalidArg);
+            return Err(HsmError::TborNonCanonicalLayout);
         }
 
         let svn = part_state::part_mfgr_svn(pal);
