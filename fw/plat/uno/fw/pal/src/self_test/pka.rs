@@ -61,6 +61,7 @@ pub(super) async fn run_rsa_mod_exp_on_engine(
     pal: &UnoHsmPal,
     io: &UnoHsmIo,
     engine: u8,
+    negative: bool,
 ) -> HsmResult<()> {
     let v = &RSA_2K_MOD_EXP_KAT;
 
@@ -82,6 +83,7 @@ pub(super) async fn run_rsa_mod_exp_on_engine(
         let release = eng.release().await;
         outcome?;
         release?;
+        super::corrupt_kat_output(output, negative)?;
 
         if &output[..] != v.k {
             error!(
@@ -188,6 +190,7 @@ pub(super) async fn run_rsa_mod_exp_crt_on_engine(
     pal: &UnoHsmPal,
     io: &UnoHsmIo,
     engine: u8,
+    negative: bool,
 ) -> HsmResult<()> {
     let v = &RSA_2K_CRT_KAT;
 
@@ -214,6 +217,7 @@ pub(super) async fn run_rsa_mod_exp_crt_on_engine(
         let release = eng.release().await;
         outcome?;
         release?;
+        super::corrupt_kat_output(output, negative)?;
 
         if &output[..] != v.k {
             error!(
@@ -251,6 +255,7 @@ pub(super) async fn run_ecdh_on_engine(
     pal: &UnoHsmPal,
     io: &UnoHsmIo,
     engine: u8,
+    negative: bool,
 ) -> HsmResult<()> {
     let v = &ECDH_384_KAT;
 
@@ -288,6 +293,7 @@ pub(super) async fn run_ecdh_on_engine(
         let release = eng.release().await;
         outcome?;
         release?;
+        super::corrupt_kat_output(secret, negative)?;
 
         // The engine writes the secret little-endian; `z_iut` is big-endian.
         // Compare the reversed output against the expected big-endian value.
@@ -331,6 +337,7 @@ pub(super) async fn run_ecdsa_on_engine(
     pal: &UnoHsmPal,
     io: &UnoHsmIo,
     engine: u8,
+    negative: bool,
 ) -> HsmResult<()> {
     let v = &ECDSA_384_SIGN_KAT;
 
@@ -351,6 +358,7 @@ pub(super) async fn run_ecdsa_on_engine(
         // signer exercise the identical Montgomery sequence.
         pal.ecc_sign_with_k_on_engine(io, UpkaEccCurve::P384, engine, k, digest, priv_key, r, s)
             .await?;
+        super::corrupt_kat_output(r, negative)?;
 
         // Compare (r, s) against the expected signature (little-endian, no
         // reversal).

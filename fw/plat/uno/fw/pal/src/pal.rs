@@ -33,6 +33,8 @@ use core::cell::Cell;
 use embassy_futures::select::Either;
 use embassy_futures::select::select;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+#[cfg(feature = "tsra_test_hooks")]
+use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
@@ -358,6 +360,12 @@ pub struct UnoHsmPal {
     /// PCIe-reset handler waits for it to reach zero before freeing
     /// partitions.
     io_in_flight: Cell<u32>,
+    /// One negative self-test request for the periodic task.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) negative_cast: Channel<NoopRawMutex, crate::self_test::SelfTest, 1>,
+    /// Reservation across the HSM and Admin negative-test paths.
+    #[cfg(feature = "tsra_test_hooks")]
+    pub(crate) negative_cast_pending: Cell<bool>,
 
     /// Set while a PCIe reset (PERST / FLR) frees partitions. IO received
     /// while it is set is recycled without being dispatched, so no new host
@@ -513,6 +521,10 @@ impl Default for UnoHsmPal {
             io_peak: IO_ALLOC_INIT,
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
+            #[cfg(feature = "tsra_test_hooks")]
+            negative_cast: Channel::new(),
+            #[cfg(feature = "tsra_test_hooks")]
+            negative_cast_pending: Cell::new(false),
             io_paused: Cell::new(false),
             unwrap_pct_busy: [const { Cell::new(false) }; NUM_PARTITIONS],
         }

@@ -29,7 +29,7 @@ use crate::UnoHsmPal;
 /// recovered length (the Message Length Indicator) and the recovered plaintext
 /// bytes. Returns [`HsmError::SelfTestKatMismatch`] on any mismatch (or any
 /// error surfaced by the AES engine / allocator).
-pub(super) async fn run_aes_kwp(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
+pub(super) async fn run_aes_kwp(pal: &UnoHsmPal, io: &UnoHsmIo, negative: bool) -> HsmResult<()> {
     let v = &AES_KWP_256_KAT;
 
     pal.alloc_scoped_async(io, async |scope| {
@@ -45,6 +45,7 @@ pub(super) async fn run_aes_kwp(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()>
         let mli = pal
             .aes_kwp_unwrap(io, &*key, &*input, Some(&mut *out))
             .await?;
+        super::corrupt_kat_output(out, negative)?;
 
         // KAT vectors are public, fixed test data — a plain slice comparison is
         // correct; no constant-time compare is needed.

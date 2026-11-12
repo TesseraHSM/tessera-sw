@@ -238,4 +238,18 @@ mod tests {
             assert!(wire.payload.is_empty());
         }
     }
+
+    #[test]
+    fn negative_test_id_round_trips_through_the_action_payload() {
+        for id in [0, 5, 6, 8, 9, 72, 73, 74, 75, 76] {
+            let wire = DdiTestActionReq::try_from(TestActionRequest::ExecuteNegativeSelfTest(id))
+                .expect("negative self-test must encode");
+            assert_eq!(wire.action, DdiTestAction::ExecuteNegativeSelfTest);
+            let mut decoder = MborDecoder::new(wire.payload.as_slice(), false);
+            let payload = DdiTestActionNegativeSelfTestReqInfo::mbor_decode(&mut decoder)
+                .expect("negative self-test payload must decode");
+            assert_eq!(payload.neg_test_id, id);
+            assert_eq!(decoder.position(), wire.payload.len());
+        }
+    }
 }

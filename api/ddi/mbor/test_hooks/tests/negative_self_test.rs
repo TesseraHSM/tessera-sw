@@ -1,0 +1,88 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Periodic negative self-test trigger, driven through the opaque
+//! `TestAction` payload path.
+//!
+//! Set `TSRA_NEGATIVE_TEST_ID` to the self-test ID to fail; the test is
+//! skipped when it is not set. The firmware accepts the request and runs that
+//! periodic self-test shortly afterwards. Test IDs 0-4, 6 and 7 run on
+//! Admin/FP; all other IDs run on the HSM.
+//!
+//! Behaviour on this firmware:
+//! - Requires a **physical** device; virtual/mock devices are skipped.
+//! - Requires firmware built with `tsra_test_hooks`; otherwise the request
+//!   returns [`DdiStatus::UnsupportedCmd`] and the case is skipped.
+//! - With `fips_validation_hooks` (on both CP cores) the selected self-test
+//!   fails and the device enters the FIPS error state.
+
+#![allow(clippy::unwrap_used)]
+
+mod common;
+
+use std::env;
+use std::error::Error;
+
+use common::*;
+use test_with_tracing::test;
+use tsra_ddi::*;
+use tsra_ddi_mbor_test_hooks::helper_test_action_cmd;
+use tsra_ddi_mbor_test_hooks::TestActionRequest;
+use tsra_ddi_mbor_types::*;
+
+const REV: DdiApiRev = DdiApiRev { major: 1, minor: 0 };
+
+#[test]
+fn trigger_negative_periodic_cast() {
+    ddi_dev_test(
+        common_setup,
+        common_cleanup,
+        |dev, _ddi, path, session_id| {
+            let test_id = match read_neg_self_test_env_variable("TSRA_NEGATIVE_TEST_ID") {
+                Ok(test_id) => test_id,
+                Err(err) => {
+                    println!("TSRA_NEGATIVE_TEST_ID not set or invalid ({err}); skipping.");
+                    return;
+                }
+            };
+
+            let resp = helper_close_session(dev, Some(session_id), Some(REV));
+            assert!(resp.is_ok(), "{:?}", resp);
+
+            send_negative_self_test(path.to_string(), test_id);
+        },
+    );
+}
+
+fn read_neg_self_test_env_variable(var_name: &str) -> Result<u32, Box<dyn Error>> {
+    let env_var = env::var(var_name)?;
+    let value: u32 = env_var.parse()?;
+    Ok(value)
+}
+
+fn send_negative_self_test(device_path: String, test_id: u32) {
+    let ddi = DdiTest::default();
+    let mut dev = ddi.open_dev(device_path.as_str()).unwrap();
+
+    if get_device_kind(&mut dev) == DdiDeviceKind::Virtual {
+        println!("Periodic self-test is only supported on a physical device; skipping.");
+        return;
+    }
+
+    let (encrypted_credential, pub_key) =
+        encrypt_userid_pin_for_open_session(&dev, TEST_CRED_ID, TEST_CRED_PIN, TEST_SESSION_SEED);
+    let resp = helper_open_session(&dev, None, Some(REV), encrypted_credential, pub_key);
+    assert!(resp.is_ok(), "{:?}", resp);
+    let session_id = resp.unwrap().hdr.sess_id.unwrap();
+
+    let resp = helper_test_action_cmd(
+        &mut dev,
+        session_id,
+        TestActionRequest::ExecuteNegativeSelfTest(test_id),
+    );
+    if let Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) = &resp {
+        println!("Firmware is not built with tsra_test_hooks.");
+        return;
+    }
+    assert!(resp.is_ok(), "resp {:?}", resp);
+}

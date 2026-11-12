@@ -80,6 +80,7 @@ semihosting = [
 # production build.
 fips_validation_hooks = [
   "dep:tsra_fw_core_crypto_key_masking",
+  "tsra_fw_uno_drivers_rng/fips_validation_hooks",
   "dep:tsra_fw_ddi_mbor",
   "dep:tsra_fw_ddi_mbor_derive",
   "dep:tsra_fw_ddi_mbor_types",
