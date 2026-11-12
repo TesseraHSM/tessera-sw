@@ -18,6 +18,9 @@ use tsra_fw_ddi_mbor_types::DdiPublicKeyFrameParams;
 use super::*;
 
 /// Handle DdiGetEstablishCredEncryptionKeyCmd.
+///
+/// The caller retains the partition lock through completion and the
+/// undo/commit walk so a regenerated key remains provisional until then.
 pub(crate) async fn get_establish_cred_encryption_key<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
@@ -26,8 +29,6 @@ pub(crate) async fn get_establish_cred_encryption_key<'p, P: HsmPal>(
     undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let _body: DdiGetEstablishCredEncryptionKeyReq = decoder.decode_data()?;
-    let _lock = pal.partition_lock(io).await?;
-
     match crate::part_state::part_establish_cred_key_id(pal, io) {
         Ok(_) => {}
         Err(HsmError::PartPropNotFound) => {

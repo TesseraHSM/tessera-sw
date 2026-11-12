@@ -67,7 +67,8 @@ const MK_VAULT_ATTRS: HsmVaultKeyAttrs = HsmVaultKeyAttrs::new()
 ///
 /// The authenticated nonce and transport key remain consumed on failure.
 /// Attempt-owned keys and credential/provisioning writes are undone until
-/// the outer IO owner successfully delivers the completion.
+/// the outer IO owner successfully delivers the completion. The caller
+/// retains the partition lock through completion and the undo/commit walk.
 pub(crate) async fn establish_credential<'p, P: HsmPal>(
     pal: &'p P,
     io: &P::Io,
@@ -76,8 +77,6 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let mut body: DdiEstablishCredentialReq<'_> = decoder.decode_data()?;
-
-    let _lock = pal.partition_lock(io).await?;
 
     check_fail_fast(pal, io, &body)?;
 
@@ -105,7 +104,7 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
 
     // ── Step 5: HMAC verify the credential ───────────────────────────
     //
-    // The partition lock acquired above serializes all state-modifying
+    // The partition lock retained by the IO owner serializes state-modifying
     // handlers on this partition, and the initial fail-fast above ran
     // under the same lock, so no further nonce or credential-set
     // re-check is needed here.
@@ -202,6 +201,13 @@ pub(crate) async fn establish_credential<'p, P: HsmPal>(
     // Record logical cleanup after the owned-key entries so rollback clears
     // published handles before deleting their backing keys. Existing
     // unwrapping keys and SP backups are not owned by this attempt.
+    match crate::part_state::part_bk3_session(pal, io) {
+        Ok(prior) => undo.push_prop_restore_bytes(HsmPartPropId::BK3_SESSION, prior)?,
+        Err(HsmError::PartPropNotFound) => {
+            undo.push_prop_restore_absent(HsmPartPropId::BK3_SESSION)?
+        }
+        Err(e) => return Err(e),
+    }
     undo.push_prop_restore_absent_best_effort(HsmPartPropId::CREDENTIAL)?;
     undo.push_prop_restore_absent_best_effort(HsmPartPropId::MK_KEY_ID)?;
     if unwrapping_key_id.is_some() {

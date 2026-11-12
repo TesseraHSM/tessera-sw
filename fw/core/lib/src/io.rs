@@ -97,7 +97,10 @@ impl<P: HsmPal> Hsm<P> {
             Err(e) => Err(e),
             Ok(()) => match op {
                 OP_MBOR => match self.bind_undo(&io) {
-                    Ok(log) => self.handle_mbor_op(&mut io, undo.insert(log)).await,
+                    Ok(log) => {
+                        self.handle_mbor_op(&mut io, undo.insert(log), &mut credential_guard)
+                            .await
+                    }
                     Err(e) => Err(e),
                 },
                 OP_TBOR => self
@@ -323,11 +326,13 @@ impl<P: HsmPal> Hsm<P> {
     ///
     /// **Phase 2 (post-decode)** — Session validation, DDI dispatch.
     /// Errors → DDI error response DMA'd to host, CQE Success.
-    /// The undo log remains live through outbound DMA and CQE completion.
+    /// The undo log and credential partition guard remain live through
+    /// outbound DMA, CQE completion, and the undo/commit walk.
     async fn handle_mbor_op<'s>(
         &'s self,
         io: &mut P::Io,
         undo: &mut UndoLog<'s>,
+        credential_guard: &mut Option<P::PartitionGuard<'s>>,
     ) -> Result<HsmOpStatus, OpError> {
         let params = Self::decode_io_sqe(io)?;
         let split = params.src_len.next_multiple_of(4);
@@ -367,7 +372,7 @@ impl<P: HsmPal> Hsm<P> {
             // The decoder borrows the request buffer, so it is scoped:
             // the borrow has to end before the buffer can be handed to
             // the platform below.
-            let core_result = {
+            let core_result = async {
                 let mut decoder = decoder;
                 match Self::validate_session(
                     &hdr,
@@ -377,10 +382,19 @@ impl<P: HsmPal> Hsm<P> {
                 )
                 .and_then(|()| self.validate_session_live(io, &hdr, session_ctrl))
                 {
-                    Ok(()) => ddi::mbor::dispatch(self.pal(), io, &mut decoder, &hdr, undo).await,
+                    Ok(()) => {
+                        if matches!(
+                            hdr.op,
+                            DdiOp::EstablishCredential | DdiOp::GetEstablishCredEncryptionKey
+                        ) {
+                            *credential_guard = Some(self.pal().partition_lock(io).await?);
+                        }
+                        ddi::mbor::dispatch(self.pal(), io, &mut decoder, &hdr, undo).await
+                    }
                     Err(e) => Err(e),
                 }
-            };
+            }
+            .await;
             // `UnsupportedCmd` means no core handler claimed this
             // opcode. Offer the untouched request to the platform before
             // giving up; its answer, including its own `UnsupportedCmd`,

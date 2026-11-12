@@ -1090,6 +1090,7 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::MK_KEY_ID => p.set_mk_key_id(None),
             HsmPartPropId::UPS_KEY_ID => p.set_ups_key_id(None),
             HsmPartPropId::PTA_KEY_ID => p.set_pta_key_id(None),
+            HsmPartPropId::RSA_UNWRAPPING_KEY_ID => p.set_unwrapping_key_id(None),
             HsmPartPropId::SESSION_ENC_KEY_ID => p.set_se_key_id(None),
             HsmPartPropId::ESTABLISH_CRED_KEY_ID => p.set_ec_key_id(None),
             HsmPartPropId::LOCAL_MK_KEY_ID => p.set_local_mk_key_id(None),
