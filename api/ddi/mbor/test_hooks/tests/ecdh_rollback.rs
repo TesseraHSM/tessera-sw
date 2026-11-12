@@ -3,6 +3,19 @@
 
 //! Requires Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Capacity is checked before session cleanup so teardown cannot hide a leak.
+//!
+//! Test flow:
+//! 1. Establish a fresh credential and open a session. Generate a private input
+//!    key and a peer key pair for ECDH.
+//! 2. Repeatedly derive app-scoped secrets from the same input and peer public
+//!    key until NotEnoughSpace, then delete one secret to free an allocation.
+//! 3. Arm TriggerIoFailure and derive again. Expect InvalidKeyType after secret
+//!    creation, requiring rollback of the attempt-owned secret.
+//! 4. Retry with the original input keys in the same session. One derivation
+//!    must succeed and the next must report NotEnoughSpace, checking allocation
+//!    reclamation and preservation of the input private key.
+//! 5. Delete derived secrets and both input key pairs, also attempting cleanup
+//!    if an assertion panics.
 
 #[allow(clippy::unwrap_used)]
 mod common;

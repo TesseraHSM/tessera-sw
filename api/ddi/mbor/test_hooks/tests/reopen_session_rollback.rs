@@ -3,6 +3,21 @@
 
 //! Physical Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Simulates migration with NSSR, preserving both native handles and session IDs.
+//!
+//! Test flow:
+//! 1. Provision the partition and open control and target sessions on separate
+//!    handles with distinct seeds. Retain partition and session recovery blobs.
+//! 2. Simulate migration with NSSR and restore provisioning using the saved
+//!    partition material, keeping both original handles and logical session IDs.
+//! 3. Reopen the control session, arm TriggerIoFailure, and close that session.
+//!    Reopen the target using its original seed and session BMK; expect
+//!    InvalidKeyType after recreation.
+//! 4. Probe the target with a session-scoped AES request and expect
+//!    SessionNeedsRenegotiation, confirming rollback restored its prior state.
+//!    Verify the nonce changed and replaying the failed reopen returns NonceMismatch.
+//! 5. Retry with fresh credentials but the same seed, session BMK, and logical ID.
+//!    Require a successful reopen with that original ID and a nonempty BMK.
+//! 6. Close remaining sessions, also attempting cleanup if an assertion panics.
 
 #[allow(clippy::unwrap_used)]
 mod common;

@@ -3,6 +3,17 @@
 
 //! Requires Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Capacity is checked before session cleanup so teardown cannot hide a leak.
+//!
+//! Test flow:
+//! 1. Establish a fresh credential and open a session, then generate app-scoped
+//!    signing key pairs until the vault reports NotEnoughSpace.
+//! 2. Keep an existing key and delete another to free one key-pair allocation.
+//! 3. Arm TriggerIoFailure and generate again. Expect InvalidKeyType after key
+//!    creation, requiring rollback of the attempt-owned key pair.
+//! 4. Retry in the same session: one generation must succeed and the next must
+//!    report NotEnoughSpace, proving exactly one allocation was reclaimed.
+//! 5. Sign a digest with the retained key to check it survived rollback.
+//! 6. Delete every generated key, also attempting cleanup if an assertion panics.
 
 #[allow(clippy::unwrap_used)]
 mod common;

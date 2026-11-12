@@ -2,6 +2,16 @@
 // Licensed under the MIT License.
 
 //! Shared capacity checks for the native rollback tests.
+//!
+//! Test flow:
+//! 1. Prepare and track command-specific input keys, then create outputs until
+//!    NotEnoughSpace. Retain one output and delete another to free an allocation.
+//! 2. Arm TriggerIoFailure and require InvalidKeyType from the next creation.
+//! 3. Retry in the same session: exactly one creation must succeed before
+//!    NotEnoughSpace returns again, checking rollback before teardown can hide leaks.
+//! 4. Run the caller's retained/recovered-key verification. The ordinary AES
+//!    wrapper uses encrypt/decrypt round trips; bulk tests supply their own checks.
+//! 5. Attempt deletion of every tracked output and input, including on panic.
 #![allow(dead_code)]
 
 use std::panic::AssertUnwindSafe;

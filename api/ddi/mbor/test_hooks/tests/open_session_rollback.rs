@@ -3,6 +3,21 @@
 
 //! Requires Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Uses separate native handles; capacity is checked before session cleanup.
+//!
+//! Test flow:
+//! 1. Establish a fresh credential, open a control session, and create a
+//!    session-scoped AES key to check the existing session remains usable.
+//! 2. Open sessions on independent handles until capacity is exhausted. Measure
+//!    remaining AES-key capacity, then close one session and its backing key.
+//! 3. Prepare credentials on the session-less target handle, arm TriggerIoFailure
+//!    through the control session, and expect InvalidKeyType from OpenSession.
+//! 4. Verify the consumed nonce changed and replaying the failed request returns
+//!    NonceMismatch. Retry with fresh credentials on the same target handle.
+//! 5. Confirm the retry succeeds but another handle still sees the original
+//!    capacity error. Re-measure AES-key capacity to detect backing-key leaks,
+//!    and encrypt/decrypt with the original session's AES key.
+//! 6. Delete the baseline key and close opened sessions, also attempting cleanup
+//!    if an assertion panics.
 
 #[allow(clippy::unwrap_used)]
 mod common;

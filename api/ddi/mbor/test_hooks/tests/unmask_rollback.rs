@@ -2,6 +2,19 @@
 // Licensed under the MIT License.
 
 //! Requires Uno firmware with `tsra_test_hooks` and exclusive partition access.
+//!
+//! Test flow:
+//! 1. Establish a fresh credential and open a session. Generate an app-scoped
+//!    AES source key and retain its masked blob.
+//! 2. Unmask that blob repeatedly until NotEnoughSpace, checking the source key
+//!    with an encrypt/decrypt round trip before every request.
+//! 3. Keep an existing output and delete another. Arm TriggerIoFailure and
+//!    unmask again; expect InvalidKeyType after output creation.
+//! 4. Retry the original blob without session cleanup. One unmask must succeed
+//!    and the next must report NotEnoughSpace, proving output rollback while
+//!    preserving the original source key.
+//! 5. Encrypt and decrypt with retained and recovered outputs, then delete all
+//!    outputs and the source key, even if an assertion panics.
 
 #[allow(clippy::unwrap_used)]
 mod common;
