@@ -102,7 +102,7 @@ a mechanism. The patch makes the default an AES-256 key (`CKM_AES_KEY_GEN`,
 latch and Tookan tests built on the helper test this token's keys. Callers
 that name a mechanism, such as the DES cipher cases, are unchanged.
 
-## What the gate covers today (148 of 330)
+## What the gate covers today (149 of 330)
 
 Digests (SHA-1/256/384/512, one-shot and multi-part, sizing, the operation
 state machine), the library/slot/session/login surface, public data objects
@@ -112,10 +112,11 @@ refusal of a sensitive key (`SetLatchingAttribute`, `TookanAttackA3`,
 `TookanAttackA5a`), BER decoding, the AES-CBC cipher tests (one-shot round trip, sizing, wrong key,
 IV validation, argument errors; multi-part argument errors, the final-call
 length rules and the one-shot/multi-part mode rule) and the operation-lifetime
-rules on the cipher and digest entry points, and the answers of the
-random-number functions on a token without a generator (`CKR_RANDOM_NO_RNG`).
+rules on the cipher and digest entry points, the argument checks of
+`C_GenerateKeyPair`, and the answers of the random-number functions on a
+token without a generator (`CKR_RANDOM_NO_RNG`).
 
-A full run reports 174 passing, but 26 of those are deliberately **not** on
+A full run reports 175 passing, but 26 of those are deliberately **not** on
 the list, because they assert nothing: 23 that pkcs11test skips (the MD5
 digest parameter, token initialisation, the SO logins suppressed by `-X`,
 `C_GetOperationState`, the dual-function digest+encrypt), the two AES-ECB IV
@@ -128,7 +129,7 @@ of every one-block `C_EncryptUpdate`, while the SDK's CBC stream holds back the
 last full block until the final call (the spec allows that; the case joins the
 list once the SDK releases unpadded blocks at once), mechanisms this module
 does not implement
-(DES/3DES/AES-ECB, RSA, EC, sign/verify, HMAC, key pairs, wrap/unwrap),
+(DES/3DES/AES-ECB, RSA, HMAC, wrap/unwrap; pkcs11test 2cbe462 has no EC cases),
 entry points that are stubs (`C_CopyObject`, `C_DigestKey`), key import
 through `C_CreateObject` with `CKA_VALUE`, which the token refuses, keys that
 are not sensitive (`TookanAttackA4` and `A5b` ask for one, and the device holds

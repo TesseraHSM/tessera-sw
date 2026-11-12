@@ -83,9 +83,11 @@ typedef struct
 
     tsra_pkcs11_op_type_t op;
     tsra_pkcs11_op_mode_t op_mode; /* reset together with op */
-    void *op_ctx;                  /* digest state (P11_OP_DIGEST) or cipher operation state
+    void *op_ctx;                  /* digest state (P11_OP_DIGEST), cipher operation state
                                     * (P11_OP_ENCRYPT / P11_OP_DECRYPT, owned by
-                                    * tsra_pkcs11_crypt.c) */
+                                    * tsra_pkcs11_crypt.c) or sign operation state
+                                    * (P11_OP_SIGN / P11_OP_VERIFY, owned by
+                                    * tsra_pkcs11_sign.c) */
     void *find_cursor;             /* object-store cursor while op == P11_OP_FIND */
 
     /*
@@ -164,7 +166,7 @@ void tsra_pkcs11_unlock(void);
 tsra_pkcs11_session_t *tsra_pkcs11_session_lookup(CK_SESSION_HANDLE h);
 
 /* Abandon the session's active operation, releasing its digest state, cipher
- * state (including the unmasked device key), or find cursor. */
+ * or sign state (including the unmasked device keys), or find cursor. */
 CK_RV tsra_pkcs11_session_reset_op(tsra_pkcs11_session_t *s);
 
 /* Abandon the session's active operation if it is of kind `op` (the v3.0
@@ -188,6 +190,50 @@ void tsra_pkcs11_session_destroy_owned(tsra_pkcs11_session_t *s);
  * key first). NULL-safe no-op. Defined in tsra_pkcs11_crypt.c, which owns the
  * type. */
 void tsra_pkcs11_cipher_op_free(void *op_ctx);
+
+/* Free a sign or verify operation context (releases its SDK stream and
+ * unmasked device keys first). NULL-safe no-op. Defined in
+ * tsra_pkcs11_sign.c, which owns the type. */
+void tsra_pkcs11_sign_op_free(void *op_ctx);
+
+/*
+ * Store one key object the device has just made: the object from `full` and,
+ * when `blob` is non-NULL, the masked blob as its key body; a session object
+ * (`token` FALSE) goes on the owned list of `s`. On failure nothing remains: a
+ * key object without its masked body, or one the session cannot track, is not
+ * handed out. Defined in tsra_pkcs11_crypt.c.
+ */
+CK_RV tsra_pkcs11_store_key(
+    tsra_pkcs11_session_t *s,
+    const CK_ATTRIBUTE *full,
+    CK_ULONG n,
+    CK_BBOOL token,
+    const CK_BYTE *blob,
+    CK_ULONG blob_len,
+    CK_OBJECT_HANDLE *out
+);
+
+/* Destroy a key object this call created (one half of a pair whose other half
+ * failed), and take it off the session's owned list. Defined in
+ * tsra_pkcs11_crypt.c. */
+void tsra_pkcs11_discard_key(tsra_pkcs11_session_t *s, CK_OBJECT_HANDLE h);
+
+/*
+ * The C_GenerateKeyPair generator of CKM_RSA_PKCS_KEY_PAIR_GEN (keypair_fn in
+ * tsra_pkcs11_crypt.c, which has checked the arguments, the mechanism and the
+ * login): the partition's RSA unwrapping key pair as a new pair of objects.
+ * Defined in tsra_pkcs11_unwrap.c.
+ */
+CK_RV tsra_pkcs11_unwrapping_pair_generate(
+    tsra_pkcs11_session_t *s,
+    uint32_t hsm_session,
+    const CK_ATTRIBUTE *pub,
+    CK_ULONG pub_count,
+    const CK_ATTRIBUTE *priv,
+    CK_ULONG priv_count,
+    CK_OBJECT_HANDLE *h_pub,
+    CK_OBJECT_HANDLE *h_priv
+);
 
 /* Fill a fixed-width, space-padded CK_UTF8CHAR string field. */
 void tsra_pkcs11_pad_str(CK_UTF8CHAR *dst, size_t dstlen, const char *src);

@@ -7,6 +7,7 @@
  */
 
 #include "tsra_pkcs11_attr_policy.h"
+#include "tsra_pkcs11_ec_template.h"
 #include "tsra_pkcs11_template.h"
 
 #include <stddef.h>
@@ -232,6 +233,47 @@ static CK_RV carries(tsra_pkcs11_attr_reader read, void *ctx, CK_ATTRIBUTE_TYPE 
     return rv;
 }
 
+/*
+ * Whether `type` is a usage the device fixed when it generated an EC key: a
+ * private key signs or derives, and its public half verifies or derives. The
+ * masked key keeps that usage, so these attributes are read-only on an EC key
+ * where PKCS#11 lets them change (a deviation in the README); turning one on
+ * would only fail later, at the operation.
+ */
+static CK_RV ec_fixed_usage(
+    tsra_pkcs11_attr_reader read,
+    void *ctx,
+    unsigned cls,
+    CK_ATTRIBUTE_TYPE type,
+    CK_BBOOL *out
+)
+{
+    *out = CK_FALSE;
+    if (((cls & (P11_CLS_PUBLIC | P11_CLS_PRIVATE)) == 0) ||
+        ((type != CKA_SIGN) && (type != CKA_VERIFY) && (type != CKA_DERIVE)))
+    {
+        return CKR_OK;
+    }
+    CK_KEY_TYPE kt = 0;
+    CK_ATTRIBUTE a = { CKA_KEY_TYPE, &kt, sizeof(kt) };
+    CK_RV rv = read(ctx, &a);
+    if (rv == CKR_ATTRIBUTE_TYPE_INVALID)
+    {
+        return CKR_OK; /* no key type: not an EC key */
+    }
+    if ((rv == CKR_BUFFER_TOO_SMALL) || (rv == CKR_ATTRIBUTE_SENSITIVE))
+    {
+        *out = CK_TRUE; /* unreadable: the restrictive reading */
+        return CKR_OK;
+    }
+    if (rv != CKR_OK)
+    {
+        return rv;
+    }
+    *out = ((a.ulValueLen != sizeof(kt)) || (kt == CKK_EC)) ? CK_TRUE : CK_FALSE;
+    return CKR_OK;
+}
+
 static CK_RV check_value(
     const attr_rule *r,
     const CK_ATTRIBUTE *a,
@@ -318,6 +360,16 @@ CK_RV tsra_pkcs11_setattr_check(
         {
             return CKR_TEMPLATE_INCONSISTENT;
         }
+        CK_BBOOL fixed = CK_FALSE;
+        rv = ec_fixed_usage(read, ctx, cls, a->type, &fixed);
+        if (rv != CKR_OK)
+        {
+            return rv;
+        }
+        if (fixed)
+        {
+            return CKR_ATTRIBUTE_READ_ONLY;
+        }
         const attr_rule *r = find_rule(a->type, cls);
         if (r == NULL)
         {
@@ -345,6 +397,46 @@ CK_RV tsra_pkcs11_destroy_check(CK_BBOOL rw_session, tsra_pkcs11_attr_reader rea
         return CKR_ARGUMENTS_BAD;
     }
     return object_gate(read, ctx, rw_session, CKA_DESTROYABLE);
+}
+
+/*
+ * A public key of a type this token uses needs what it cannot be used
+ * without: an EC key its curve, one the token supports, and a point encoded
+ * for that curve; an RSA key its modulus and exponent, neither empty. Other
+ * key types are stored as given.
+ */
+static CK_RV public_key_check(const CK_ATTRIBUTE *tmpl, CK_ULONG count)
+{
+    CK_ULONG kt = 0;
+    const CK_ATTRIBUTE *type = tsra_pkcs11_tmpl_find(tmpl, count, CKA_KEY_TYPE);
+    if ((type == NULL) || (tsra_pkcs11_tmpl_ulong(type, &kt) != CKR_OK))
+    {
+        return CKR_OK;
+    }
+    if (kt == CKK_RSA)
+    {
+        const CK_ATTRIBUTE *n = tsra_pkcs11_tmpl_find(tmpl, count, CKA_MODULUS);
+        const CK_ATTRIBUTE *e = tsra_pkcs11_tmpl_find(tmpl, count, CKA_PUBLIC_EXPONENT);
+        if ((n == NULL) || (e == NULL))
+        {
+            return CKR_TEMPLATE_INCOMPLETE;
+        }
+        return ((n->ulValueLen > 0) && (e->ulValueLen > 0)) ? CKR_OK : CKR_ATTRIBUTE_VALUE_INVALID;
+    }
+    if (kt != CKK_EC)
+    {
+        return CKR_OK;
+    }
+    const CK_ATTRIBUTE *params = tsra_pkcs11_tmpl_find(tmpl, count, CKA_EC_PARAMS);
+    const CK_ATTRIBUTE *point = tsra_pkcs11_tmpl_find(tmpl, count, CKA_EC_POINT);
+    if ((params == NULL) || (point == NULL))
+    {
+        return CKR_TEMPLATE_INCOMPLETE;
+    }
+    tsra_pkcs11_ec_curve_t curve = TSRA_PKCS11_CURVE_NONE;
+    CK_RV rv = tsra_pkcs11_ec_params_curve(params->pValue, params->ulValueLen, &curve);
+    return (rv == CKR_OK) ? tsra_pkcs11_ec_point_check(point->pValue, point->ulValueLen, curve)
+                          : rv;
 }
 
 CK_RV tsra_pkcs11_create_check(
@@ -419,5 +511,5 @@ CK_RV tsra_pkcs11_create_check(
     {
         return CKR_TEMPLATE_INCOMPLETE;
     }
-    return CKR_OK;
+    return (cls == CKO_PUBLIC_KEY) ? public_key_check(tmpl, count) : CKR_OK;
 }
