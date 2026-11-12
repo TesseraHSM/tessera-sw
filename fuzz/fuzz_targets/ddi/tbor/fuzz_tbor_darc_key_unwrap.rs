@@ -15,7 +15,6 @@ mod common;
 use libfuzzer_sys::arbitrary::*;
 use libfuzzer_sys::*;
 use tsra_crypto::*;
-use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::assertions::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
