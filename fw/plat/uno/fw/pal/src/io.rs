@@ -23,6 +23,12 @@
 //! The IIC controller DMAs incoming SQE data directly into `IO_SQ[index]`
 //! (configured via `io_pool_base`). The firmware reads the SQE in-place
 //! and writes the CQE into `IO_CQ[index]` for OIC to transmit.
+//!
+//! Bulk (fast-path) IOs arrive on the fast-path controller's FP1 and FP2
+//! IIC/OIC channel pairs and use their own `BULK_IO_SQ` (128B),
+//! `BULK_IO_CQ` (64B) and `BULK_IO_META` arrays, shared by both channels:
+//! each posts its own range of the slots. They have no per-IO heaps: a bulk
+//! IO must not reach the allocator, whose tables are indexed by command slot.
 
 use core::cell::UnsafeCell;
 use core::mem;
@@ -30,6 +36,10 @@ use core::ops::AsyncFnOnce;
 
 use tock_registers::interfaces::Readable;
 use tock_registers::interfaces::Writeable;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_hsm_bulk::BulkCqe;
+use tsra_fw_hsm_bulk::RawBulkCqe;
+use tsra_fw_hsm_bulk::RawBulkSqe;
 use tsra_fw_hsm_io::Cqe;
 use tsra_fw_hsm_io::RawCqe;
 use tsra_fw_hsm_io::RawSqe;
@@ -38,6 +48,7 @@ use tsra_fw_hsm_pal_traits::HsmDmaAddr;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoController;
+use tsra_fw_hsm_pal_traits::HsmIoKind;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSqe;
@@ -45,6 +56,14 @@ use tsra_fw_static_ref::StaticRef;
 use tsra_fw_uno_drivers_gdma::MemInterface;
 use tsra_fw_uno_drivers_iic::Received;
 use tsra_fw_uno_drivers_part_store::HsmPartId;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_OFFSET;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_SIZE;
+#[cfg(not(feature = "bulk_crypto"))]
+use tsra_fw_uno_reg_soc::io_gsram::BULK_SCRATCH_STRIDE;
+use tsra_fw_uno_reg_soc::io_gsram::BulkIoCqEntry;
+use tsra_fw_uno_reg_soc::io_gsram::BulkIoSqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_CTLR;
@@ -116,30 +135,53 @@ fn copy_sqe(index: usize) {
     }
 }
 
-/// An in-flight IO identified by its IO_SQ slot index.
+/// An in-flight IO identified by its queue kind and slot index.
 ///
 /// Holds the slot index for the lifetime of a single IO operation.
 /// Metadata (controller_id, queue_id, queue_index) is stored in
-/// `IO_META[index]`, written by the IIC driver at recv time; the IO reads
-/// the partition and queue it needs from there once, when it is created,
-/// since IO GSRAM is read uncached and both are wanted many times per IO.
+/// `IO_META[index]` (or `BULK_IO_META[index]`), written by the IIC driver
+/// at recv time; the IO keeps the partition and queue it needs from the
+/// routing the driver returned, since IO GSRAM is read uncached and both
+/// are wanted many times per IO.
 #[derive(Debug)]
 pub struct UnoHsmIo {
-    /// IO_SQ slot index. Host IO uses `0..ADMIN_IO_INDEX`; the reserved
-    /// admin slot (`ADMIN_IO_INDEX`, the last of `IO_SLOTS`) is used only
-    /// for PAL-internal provisioning crypto. So the valid range is
-    /// `0..=ADMIN_IO_INDEX`, not just the host range.
+    /// Slot index. For a command IO this indexes `IO_SQ`: host IO uses
+    /// `0..ADMIN_IO_INDEX`; the reserved admin slot (`ADMIN_IO_INDEX`, the
+    /// last of `IO_SLOTS`) is used only for PAL-internal provisioning
+    /// crypto. For a bulk IO it indexes `BULK_IO_SQ`.
     index: u16,
-    /// Partition the IO targets, from `IO_META[index]` (see [`Self::pid`]).
+
+    /// Queue kind the IO arrived on.
+    kind: HsmIoKind,
+    /// Partition the IO targets, from its routing (see [`Self::pid`]).
     pid: HsmPartId,
-    /// Source queue, from `IO_META[index]` (see [`Self::queue_id`]).
+    /// Source queue, from its routing (see [`Self::queue_id`]).
     queue_id: u16,
 }
 
 impl UnoHsmIo {
     /// Returns the platform-private resource slot for this IO.
+    ///
+    /// Command and bulk IOs index separate slot arrays (see
+    /// [`kind`](HsmIo::kind)); only command slots own per-IO heaps.
     pub fn index(&self) -> u16 {
         self.index
+    }
+
+    /// Returns this bulk IO's scratch region (`BULK_SCRATCH[index]`), in
+    /// GSRAM the AES, BCP and GDMA engines can reach.
+    ///
+    /// The region belongs to the IO until [`drop_io`] scrubs it; views of it
+    /// must not overlap.
+    ///
+    /// [`drop_io`]: HsmIoController::drop_io
+    #[cfg(not(feature = "bulk_crypto"))]
+    pub(crate) fn bulk_scratch(&self) -> (*mut u8, usize) {
+        debug_assert_eq!(self.kind, HsmIoKind::Bulk, "command IO has no bulk scratch");
+        let addr = IO_GSRAM_BASE as usize
+            + BULK_SCRATCH_OFFSET as usize
+            + usize::from(self.index) * BULK_SCRATCH_STRIDE as usize;
+        (addr as *mut u8, BULK_SCRATCH_SIZE as usize)
     }
 
     /// Returns the queue ID read from IO_META when the IO was created.
@@ -153,6 +195,7 @@ impl UnoHsmIo {
         if index as u32 >= IO_META_COUNT {
             return Self {
                 index,
+                kind: HsmIoKind::Cmd,
                 pid: HsmPartId::from(crate::pal::NO_PARTITION),
                 queue_id: 0,
             };
@@ -160,16 +203,18 @@ impl UnoHsmIo {
         let meta = &IO_Q.io_meta[index as usize];
         Self::from_routing(
             index,
+            HsmIoKind::Cmd,
             meta.ctlr.read(IO_META_CTLR::CONTROLLER_ID) as u8,
             meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u16,
         )
     }
 
-    /// An IO over slot `index` from source controller `axi_id`'s queue
+    /// A `kind` IO over slot `index` from source controller `axi_id`'s queue
     /// `queue_id`.
-    fn from_routing(index: u16, axi_id: u8, queue_id: u16) -> Self {
+    fn from_routing(index: u16, kind: HsmIoKind, axi_id: u8, queue_id: u16) -> Self {
         Self {
             index,
+            kind,
             // The hardware reports the routing axi_id; partitions are
             // indexed by the dense PcieFunction id, so translate here. An
             // axi_id naming no function yields an out-of-range id, which
@@ -258,7 +303,16 @@ impl HsmIo for UnoHsmIo {
             assert!(mem::size_of::<IoSqEntry>() == mem::size_of::<RawSqe>());
         const _ASSERT_SQE_ALIGN: () =
             assert!(mem::align_of::<IoSqEntry>() == mem::align_of::<RawSqe>());
+        const _ASSERT_BULK_SQE_SIZE: () =
+            assert!(mem::size_of::<BulkIoSqEntry>() == mem::size_of::<RawBulkSqe>());
+        const _ASSERT_BULK_SQE_ALIGN: () =
+            assert!(mem::align_of::<BulkIoSqEntry>() == mem::align_of::<RawBulkSqe>());
 
+        if self.kind == HsmIoKind::Bulk {
+            let io_sq = &IO_Q.bulk_io_sq[self.index as usize];
+            // SAFETY: The queue entry and RawBulkSqe share the asserted layout; this IO owns the slot.
+            return unsafe { &*(io_sq as *const BulkIoSqEntry as *const RawBulkSqe) };
+        }
         if (self.index as u32) < IO_SQ_COUNT {
             // SAFETY: `accept_io` filled this host slot's copy before the IO
             // existed, and it is not written again while the IO lives.
@@ -278,12 +332,28 @@ impl HsmIo for UnoHsmIo {
             assert!(mem::size_of::<IoCqEntry>() == mem::size_of::<RawCqe>());
         const _ASSERT_CQE_ALIGN: () =
             assert!(mem::align_of::<IoCqEntry>() == mem::align_of::<RawCqe>());
+        const _ASSERT_BULK_CQE_SIZE: () =
+            assert!(mem::size_of::<BulkIoCqEntry>() == mem::size_of::<RawBulkCqe>());
+        const _ASSERT_BULK_CQE_ALIGN: () =
+            assert!(mem::align_of::<BulkIoCqEntry>() == mem::align_of::<RawBulkCqe>());
 
+        if self.kind == HsmIoKind::Bulk {
+            // SAFETY: The asserted layout matches RawBulkCqe; the mutable IO borrow owns its CQ slot.
+            return unsafe {
+                let ptr =
+                    core::ptr::addr_of!(IO_Q.bulk_io_cq[self.index as usize]) as *mut RawBulkCqe;
+                &mut *ptr
+            };
+        }
         // SAFETY: The asserted layout matches RawCqe; the mutable IO borrow owns its CQ slot.
         unsafe {
             let ptr = core::ptr::addr_of!(IO_Q.io_cq[self.index as usize]) as *mut RawCqe;
             &mut *ptr
         }
+    }
+
+    fn kind(&self) -> HsmIoKind {
+        self.kind
     }
 }
 
@@ -292,13 +362,38 @@ impl HsmIoTypes for UnoHsmPal {
 }
 
 impl HsmIoController for UnoHsmPal {
-    /// Awaits the next inbound IO from the IIC driver.
+    /// Awaits the next inbound IO from the command or a bulk IIC driver.
     ///
-    /// Every IO handed out is counted in flight until
-    /// [`drop_io`](HsmIoController::drop_io) returns its slot.
+    /// When several have work, the queue polled first rotates per call so
+    /// none can starve the others. Every IO handed out is counted in
+    /// flight until [`drop_io`](HsmIoController::drop_io) returns its slot.
     async fn poll_io(&self) -> HsmResult<Self::Io> {
         loop {
-            let io = self.accept_io(self.iic.recv().await);
+            #[cfg(not(feature = "bulk_crypto"))]
+            let (rx, kind) = {
+                use embassy_futures::select::Either3;
+                use embassy_futures::select::select3;
+
+                fn first<T>(e: Either3<T, T, T>) -> T {
+                    match e {
+                        Either3::First(r) | Either3::Second(r) | Either3::Third(r) => r,
+                    }
+                }
+
+                let turn = self.poll_turn.get();
+                self.poll_turn.set((turn + 1) % 3);
+                let cmd = async { (self.iic.recv().await, HsmIoKind::Cmd) };
+                let fp1 = async { (self.bulk_iic.recv().await, HsmIoKind::Bulk) };
+                let fp2 = async { (self.bulk_fp2_iic.recv().await, HsmIoKind::Bulk) };
+                match turn {
+                    0 => first(select3(cmd, fp1, fp2).await),
+                    1 => first(select3(fp1, fp2, cmd).await),
+                    _ => first(select3(fp2, cmd, fp1).await),
+                }
+            };
+            #[cfg(feature = "bulk_crypto")]
+            let (rx, kind) = (self.iic.recv().await, HsmIoKind::Cmd);
+            let io = self.accept_io(rx, kind);
             if !self.io_paused() {
                 return Ok(io);
             }
@@ -313,8 +408,27 @@ impl HsmIoController for UnoHsmPal {
     /// can run post-completion work over `io` first.
     async fn complete_io(&self, io: &mut Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
-        Cqe::try_from(io.cqe())?.set_sq_id(queue_id);
-        self.oic.send(io.index, queue_id as u8)?.await
+        match io.kind {
+            HsmIoKind::Cmd => {
+                Cqe::try_from(io.cqe())?.set_sq_id(queue_id);
+                self.oic.send(io.index, queue_id as u8)?.await
+            }
+            #[cfg(not(feature = "bulk_crypto"))]
+            HsmIoKind::Bulk => {
+                let cqe: &mut RawBulkCqe = io
+                    .cqe()
+                    .try_into()
+                    .map_err(|_| tsra_fw_hsm_pal_traits::HsmError::InternalError)?;
+                BulkCqe::set_sq_id(cqe, queue_id);
+                // The OSQ entry carries the IO's inbound-queue credit
+                // (`return_credit`).
+                self.bulk_oic_for(io.index)
+                    .send(io.index, queue_id as u8)?
+                    .await
+            }
+            #[cfg(feature = "bulk_crypto")]
+            HsmIoKind::Bulk => Err(tsra_fw_hsm_pal_traits::HsmError::InternalError),
+        }
     }
 
     /// Drops an IO without sending a completion (e.g. for disabled
@@ -329,8 +443,8 @@ impl HsmIoController for UnoHsmPal {
     /// Starts the reply copy as a detached GDMA transfer, whose completion
     /// [`finish_detached`](UnoHsmPal::finish_detached) turns into a detached
     /// CQE post, and that post's completion into the scrub and free of
-    /// [`drop_io`](HsmIoController::drop_io). Declines admin and self-test
-    /// IOs, and IOs whose dirty SRAM is too large to scrub with the CPU.
+    /// [`drop_io`](HsmIoController::drop_io). Declines bulk, admin and
+    /// self-test IOs, and IOs whose dirty SRAM is too large to scrub with the CPU.
     fn finish_io(
         &self,
         io: Self::Io,
@@ -340,7 +454,8 @@ impl HsmIoController for UnoHsmPal {
         copy_failed: fn(&mut HsmCqe),
     ) -> Result<(), Self::Io> {
         let index = io.index;
-        if index as u32 >= IO_SQ_COUNT
+        if io.kind != HsmIoKind::Cmd
+            || index as u32 >= IO_SQ_COUNT
             || crate::alloc::io_slot_dma_dirty(self, index).1 > crate::gdma::CPU_SCRUB_MAX
         {
             return Err(io);
@@ -373,6 +488,23 @@ impl HsmIoController for UnoHsmPal {
 
     async fn drop_io(&self, io: Self::Io) -> HsmResult<()> {
         let queue_id = io.queue_id();
+        if io.kind == HsmIoKind::Bulk {
+            // Bulk slots have no per-IO heaps; only their small scratch
+            // (AES blocks, GCM tail) needs scrubbing.
+            #[cfg(not(feature = "bulk_crypto"))]
+            {
+                let (ptr, len) = io.bulk_scratch();
+                // SAFETY: the IO's own scratch region, writable over its
+                // whole length, and no longer in use.
+                unsafe { crate::gdma::cpu_zeroize(ptr, len) };
+                // Returns only the buffer: a bulk IO's credit comes back
+                // with its completion, or, for an IO dropped without one,
+                // when the SQ is recreated (see `grant_credit`).
+                self.bulk_iic_for(io.index).free_io(io.index, queue_id);
+            }
+            self.io_in_flight_dec();
+            return Ok(());
+        }
         // Scrub both per-IO scratch buffers *before* returning the slot to
         // the ISQ, so no key material from this IO can be observed by the
         // next IO that reuses the slot.
@@ -405,6 +537,29 @@ fn slot_cqe(index: u16) -> &'static mut HsmCqe {
     unsafe {
         let ptr = core::ptr::addr_of!(IO_Q.io_cq[index as usize]) as *mut RawCqe;
         &mut *ptr
+    }
+}
+
+#[cfg(not(feature = "bulk_crypto"))]
+impl UnoHsmPal {
+    /// The IIC driver that posts bulk slot `index`: FP1 below
+    /// [`BULK_FP1_SLOTS`](crate::pal::BULK_FP1_SLOTS), FP2 above. The slot
+    /// must go back to the channel that posted it.
+    fn bulk_iic_for(&self, index: u16) -> &crate::pal::BulkIic {
+        if index < crate::pal::BULK_FP1_SLOTS {
+            self.bulk_iic
+        } else {
+            self.bulk_fp2_iic
+        }
+    }
+
+    /// The OIC driver paired with [`bulk_iic_for`](Self::bulk_iic_for).
+    fn bulk_oic_for(&self, index: u16) -> &crate::pal::BulkOic {
+        if index < crate::pal::BULK_FP1_SLOTS {
+            self.bulk_oic
+        } else {
+            self.bulk_fp2_oic
+        }
     }
 }
 
@@ -455,19 +610,25 @@ impl UnoHsmPal {
         }
     }
 
-    /// Turns IO_SQ slot `index` received from the IIC driver into an IO:
-    /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io))
-    /// and resets the slot's scratch allocator.
-    pub(crate) fn accept_io(&self, rx: Received) -> UnoHsmIo {
+    /// Turns slot `rx.index` received from the `kind` IIC driver into an IO:
+    /// counts it in flight (balanced by [`drop_io`](HsmIoController::drop_io)),
+    /// and resets a command slot's scratch allocator and copies its SQE, or
+    /// marks a bulk slot busy.
+    pub(crate) fn accept_io(&self, rx: Received, kind: HsmIoKind) -> UnoHsmIo {
         let index = rx.index;
         self.io_in_flight_inc();
-        reset_io_alloc(self, index);
-        if (index as u32) < IO_SQ_COUNT {
-            copy_sqe(index as usize);
+        match kind {
+            HsmIoKind::Cmd => {
+                reset_io_alloc(self, index);
+                if (index as u32) < IO_SQ_COUNT {
+                    copy_sqe(index as usize);
+                }
+            }
+            HsmIoKind::Bulk => {}
         }
         // The routing comes with the IO, as the IIC driver read it from the
         // ICQ entry, rather than back out of IO_META.
-        UnoHsmIo::from_routing(index, rx.axi_id, u16::from(rx.queue_id))
+        UnoHsmIo::from_routing(index, kind, rx.axi_id, u16::from(rx.queue_id))
     }
 
     /// Recycles an IO received during a PCIe reset without dispatching it:
@@ -487,6 +648,10 @@ impl UnoHsmPal {
 impl UnoHsmPal {
     /// All accepted host IOs have completed and no inbound IO remains unclaimed.
     pub(crate) fn host_io_drained(&self) -> bool {
+        #[cfg(not(feature = "bulk_crypto"))]
+        if self.bulk_iic.has_pending_io() || self.bulk_fp2_iic.has_pending_io() {
+            return false;
+        }
         self.io_in_flight() == 0 && !self.iic.has_pending_io()
     }
 

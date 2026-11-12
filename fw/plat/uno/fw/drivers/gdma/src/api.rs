@@ -323,14 +323,16 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// Submits on the first poll, then checks for completion on subsequent
     /// polls. This avoids constructing a separate submit + wait future.
+    /// While every tag or SQ entry is taken the future waits for one to free
+    /// rather than failing: the command and bulk IO tasks together can
+    /// outnumber the slots, and a full queue is transient. Nothing is
+    /// claimed before submission, so that wait is cancel-safe.
     ///
     /// # Errors
     ///
     /// Returns immediately:
     /// - [`GdmaError::ZERO_LENGTH`] — `src_len` or `dst_len` is zero.
     /// - [`GdmaError::INVALID_HOST_IFC`] — `Host { ctrl_id: 0 }` used.
-    /// - [`GdmaError::NO_FREE_TAGS`] — all tag slots are in use.
-    /// - [`GdmaError::SQ_FULL`] — SQ ring buffer is full.
     ///
     /// Returns on await:
     /// - [`GdmaError::dma_error`] — hardware reported an error.
@@ -343,8 +345,31 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
         dst_ifc: MemInterface,
         dst_len: u32,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, None)?;
+        if src_len == 0 || dst_len == 0 {
+            return Err(GdmaError::ZERO_LENGTH);
+        }
+        if src_ifc.is_invalid_host() || dst_ifc.is_invalid_host() {
+            return Err(GdmaError::INVALID_HOST_IFC);
+        }
+        let mut submitted: Option<u16> = None;
         Ok(poll_fn(move |cx| {
+            let tag = match submitted {
+                Some(tag) => tag,
+                None => {
+                    match self.submit(src_addr, src_ifc, src_len, dst_addr, dst_ifc, dst_len, None)
+                    {
+                        Ok(tag) => {
+                            submitted = Some(tag);
+                            tag
+                        }
+                        Err(e) if e == GdmaError::NO_FREE_TAGS || e == GdmaError::SQ_FULL => {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                        Err(e) => return Poll::Ready(Err(e)),
+                    }
+                }
+            };
             self.state.with(|s| {
                 let slot = &mut s.tags[tag as usize];
                 if slot.completed {
@@ -368,7 +393,9 @@ impl<const DEPTH: usize> GdmaDriver<DEPTH> {
     ///
     /// # Errors
     ///
-    /// As [`copy_mem`](Self::copy_mem) fails immediately.
+    /// As [`copy_mem`](Self::copy_mem) fails immediately, and also
+    /// [`GdmaError::NO_FREE_TAGS`] or [`GdmaError::SQ_FULL`] when every tag
+    /// or SQ entry is taken: with no task to wait, the caller falls back.
     #[allow(clippy::too_many_arguments)]
     pub fn copy_mem_detached(
         &self,

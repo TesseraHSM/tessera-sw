@@ -262,6 +262,46 @@ fn error_status_is_never_success() {
 }
 
 #[test]
+fn xts_length_errors_name_the_length_problem() {
+    let cases = [
+        (MAX_DATA_LEN + BLOCK_LEN, xts_err::DATA_LENGTH_EXCEEDED),
+        (4100, xts_err::LENGTH_UNALIGNED_16B),
+        (0, xts_err::UNDEFINED),
+    ];
+    for (len, want) in cases {
+        let mut sqe = xts_sqe();
+        sqe.src_len = len;
+        sqe.dst_len = len;
+        let raw = sqe.encode();
+        let err = HsmError::AesXtsInvalidBufferSize;
+        assert_eq!(BulkSqe::parse(&raw), Err(err), "len {len}");
+        assert_eq!(
+            BulkCqe::error(&raw, 0, err).status,
+            BulkStatus {
+                sts: sts::INVALID_FIELD_XTS,
+                err: want,
+            },
+            "len {len}"
+        );
+    }
+
+    // GCM length errors keep the generic code: `gcm_err` has no length one.
+    let mut sqe = gcm_sqe();
+    sqe.src_len = MAX_DATA_LEN + BLOCK_LEN;
+    sqe.dst_len = sqe.src_len;
+    let raw = sqe.encode();
+    let err = HsmError::AesGcmInvalidBufferSize;
+    assert_eq!(BulkSqe::parse(&raw), Err(err));
+    assert_eq!(
+        BulkCqe::error(&raw, 0, err).status,
+        BulkStatus {
+            sts: sts::INVALID_FIELD_GCM,
+            err: gcm_err::UNDEFINED,
+        }
+    );
+}
+
+#[test]
 fn xts_same_keys_maps_to_same_keys_passed() {
     assert_eq!(
         BulkStatus::from_error(BulkCipher::Xts, HsmError::KeyStructuralValidationFailed),

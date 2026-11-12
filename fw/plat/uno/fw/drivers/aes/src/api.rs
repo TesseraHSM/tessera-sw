@@ -230,7 +230,8 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
     /// Submit an AES operation and await completion.
     ///
     /// Concurrent callers are queued (up to `DEPTH`) and served in FIFO
-    /// order. Returns [`AesError::QUEUE_FULL`] if all slots are occupied.
+    /// order. While all slots are occupied the caller waits for one to free
+    /// (see `wait_for_slot`) rather than failing.
     ///
     /// With `message: None`, input and output DMA addresses are identical.
     /// No overlapping Rust references are constructed.
@@ -251,7 +252,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
                         return Poll::Ready(Err(AesError::INVALID_KEY_LEN));
                     };
                     if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
-                        return Poll::Ready(Err(AesError::QUEUE_FULL));
+                        return wait_for_slot(cx);
                     }
 
                     let idx = (s.tail & Self::MASK) as usize;
@@ -388,7 +389,7 @@ impl<const DEPTH: usize> AesDriver<DEPTH> {
             self.state.with(|s| {
                 if slot_idx.is_none() {
                     if s.tail.wrapping_sub(s.head) as usize >= DEPTH {
-                        return Poll::Ready(Err(AesError::QUEUE_FULL));
+                        return wait_for_slot(cx);
                     }
                     let idx = (s.tail & Self::MASK) as usize;
                     s.slots[idx].exclusive = true;
@@ -577,6 +578,18 @@ fn map_status(status: u8) -> HsmResult<()> {
         return Err(AesError::FAULT_ERROR);
     }
     Err(AesError::FAULT_ERROR)
+}
+
+/// Admission when every slot is occupied: yield and poll again on the next
+/// executor pass, until a slot frees.
+///
+/// The command and bulk IO tasks together can outnumber the slots, and a
+/// full queue is transient (each slot frees when its command completes), so
+/// waiting rather than failing keeps a valid request from failing on load
+/// alone. Nothing is claimed before admission, so the wait is cancel-safe.
+fn wait_for_slot<T>(cx: &mut core::task::Context<'_>) -> Poll<T> {
+    cx.waker().wake_by_ref();
+    Poll::Pending
 }
 
 #[cfg(test)]

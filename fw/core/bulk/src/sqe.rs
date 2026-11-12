@@ -72,6 +72,12 @@ pub(crate) fn sqe_dw1(sqe: &HsmSqe) -> u32 {
     sqe.get(OFF_ATTR / 4).copied().unwrap_or(0)
 }
 
+/// Returns the source data length of a submission entry, or zero if the
+/// entry is too short to hold it.
+pub(crate) fn sqe_src_len(sqe: &HsmSqe) -> u32 {
+    sqe.get(OFF_SRC_LEN / 4).copied().unwrap_or(0)
+}
+
 /// Operation direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BulkDir {
