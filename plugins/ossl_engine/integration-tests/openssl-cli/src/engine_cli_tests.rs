@@ -18,8 +18,11 @@
 
 #![cfg(feature = "integration")]
 
+// Starts an in-process DDI sock server before `main`; the children this
+// harness spawns inherit its endpoint via `TSRA_TEST_ARGS`.
 use std::path::PathBuf;
 
+use ddi_sock_server as _;
 use serial_test::serial;
 
 /// Absolute path to a `testfiles` subdir, anchored at the crate manifest dir so
@@ -36,8 +39,8 @@ fn search_path(relative: &str) -> String {
 /// env.sh default): `#[serial]` serializes only within a process, and nextest
 /// runs every test in its own process, so suites sharing one keydir race
 /// env.sh's keymat creation (torn OBK/POTA files, seen as ASN1 parse errors).
-/// Per-test dirs remove the shared state entirely — each openssl process
-/// re-initializes emu from its own dir's persisted MOBK.
+/// Under nextest each suite also gets its own auto-started simulator, so its
+/// keydir and the simulator share a lifetime.
 ///
 /// The directory reaches the scripts as their first positional argument (the
 /// `@keydir` constant in the RUN lines, preferred by env.sh over the plain

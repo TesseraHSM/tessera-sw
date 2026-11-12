@@ -7,7 +7,7 @@
 //! `ddi_sock_server`'s `unix://PATH` mode binds and accepts directly (no
 //! `CONNECT`/`OK` dial-out handshake): `DdiSockDev` connects to it with
 //! no bridge at all. `unix://` depends on
-//! `std::os::unix::net::UnixListener` (see `examples/sock/ddi_sock_server/
+//! `std::os::unix::net::UnixListener` (see `ddi/sock/server/
 //! src/unix.rs`), so this file is Linux-only.
 
 #![cfg(target_os = "linux")]
@@ -66,7 +66,7 @@ fn unique_socket_path(tag: &str) -> PathBuf {
 /// the identical helper in `ddi_sock_server_tcp_integration.rs` for why
 /// this can't just be a normal dev-dependency.
 fn locate_ddi_sock_server_bin() -> PathBuf {
-    if let Ok(path) = std::env::var("DDI_SOCK_SERVER_BIN") {
+    if let Some(path) = ddi_sock_server::TestArgs::from_env().server_bin {
         return PathBuf::from(path);
     }
 
@@ -91,7 +91,7 @@ fn locate_ddi_sock_server_bin() -> PathBuf {
     assert!(
         bin.exists(),
         "ddi_sock_server binary not found at {bin:?}; build it first with \
-         `cargo build -p ddi_sock_server` (or set DDI_SOCK_SERVER_BIN)"
+         `cargo build -p ddi_sock_server` (or set `server_bin` in TSRA_TEST_ARGS)"
     );
     bin
 }

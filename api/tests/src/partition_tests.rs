@@ -319,38 +319,43 @@ fn test_partition_init_already_established() {
 
 /// A fresh handle must recover through its MOBK callback after an
 /// already-established init supplied a blob the device did not validate.
-#[partition_test]
-fn test_partition_init_mobk_callback(part: HsmPartition, creds: HsmCredentials) {
-    if use_tpm() {
+#[test]
+fn test_partition_init_mobk_callback() {
+    if crate::utils::session::api_rev_at_least(1, 1) || use_tpm() {
         return;
     }
-    let mobk = part.mobk_vec();
-    assert!(!mobk.is_empty(), "MOBK missing after first init");
-    let second = HsmPartitionManager::open_partition(&part.path(), test_api_rev())
-        .expect("Failed to open the partition again");
-    let (_, pota_endorsement) = make_init_params(&second);
-    let (mut config, _ctx) = make_resiliency_config();
-    config.mobk_callback = Some(Box::new(CachedMobkCallback(mobk.clone())));
-    second
-        .init(
-            creds,
-            None,
-            None,
-            HsmOwnerBackupKeyConfig::new(
-                HsmOwnerBackupKeySource::Caller,
-                HsmOwnerBackupKey::from_masked_key(&vec![0; mobk.len()]),
-            ),
-            pota_endorsement,
-            Some(config),
-        )
-        .expect("Second init failed");
-    assert!(second.mobk_vec().is_empty());
+    // Not `#[partition_test]`: its fixture would init the partition before
+    // this mode check, and `#[api_test]` already holds `PARTITION_LOCK`.
+    crate::utils::api::init();
+    with_partition(|part, creds| {
+        let mobk = part.mobk_vec();
+        assert!(!mobk.is_empty(), "MOBK missing after first init");
+        let second = HsmPartitionManager::open_partition(&part.path(), test_api_rev())
+            .expect("Failed to open the partition again");
+        let (_, pota_endorsement) = make_init_params(&second);
+        let (mut config, _ctx) = make_resiliency_config();
+        config.mobk_callback = Some(Box::new(CachedMobkCallback(mobk.clone())));
+        second
+            .init(
+                creds,
+                None,
+                None,
+                HsmOwnerBackupKeyConfig::new(
+                    HsmOwnerBackupKeySource::Caller,
+                    HsmOwnerBackupKey::from_masked_key(&vec![0; mobk.len()]),
+                ),
+                pota_endorsement,
+                Some(config),
+            )
+            .expect("Second init failed");
+        assert!(second.mobk_vec().is_empty());
 
-    part.reset().expect("Partition reset failed");
-    let _session = second
-        .open_session(test_api_rev(), &creds, None)
-        .expect("Partition recovery through the MOBK callback failed");
-    assert_eq!(second.mobk_vec(), mobk);
+        part.reset().expect("Partition reset failed");
+        let _session = second
+            .open_session(test_api_rev(), &creds, None)
+            .expect("Partition recovery through the MOBK callback failed");
+        assert_eq!(second.mobk_vec(), mobk);
+    });
 }
 
 #[api_test]

@@ -23,7 +23,6 @@ fn test_secret_hkdf_no_session() {
             let salt = None;
             let info = None;
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -36,7 +35,6 @@ fn test_secret_hkdf_no_session() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -63,7 +61,6 @@ fn test_secret_hkdf_invalid_session() {
             let salt = None;
             let info = None;
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -76,7 +73,6 @@ fn test_secret_hkdf_invalid_session() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -100,7 +96,6 @@ fn test_secret_hkdf_invalid_input_key_type() {
             let salt = None;
             let info = None;
             let key_type = DdiKeyType::Secret256;
-            let key_tag = None;
 
             // Generate ECC Key
 
@@ -111,7 +106,6 @@ fn test_secret_hkdf_invalid_input_key_type() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_properties,
             );
 
@@ -129,7 +123,6 @@ fn test_secret_hkdf_invalid_input_key_type() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -156,7 +149,6 @@ fn test_secret_hkdf_invalid_output_key_type() {
             let salt = None;
             let info = None;
             let key_type = DdiKeyType::Ecc256Private;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -171,7 +163,6 @@ fn test_secret_hkdf_invalid_output_key_type() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -198,7 +189,6 @@ fn test_secret_hkdf_invalid_secret521_output_key_type() {
             let salt = None;
             let info = None;
             let key_type = DdiKeyType::Secret521;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -212,7 +202,6 @@ fn test_secret_hkdf_invalid_secret521_output_key_type() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -238,7 +227,6 @@ fn test_secret_hkdf_invalid_output_key_usage() {
             let salt = None;
             let info = None;
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
 
@@ -251,7 +239,6 @@ fn test_secret_hkdf_invalid_output_key_usage() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -277,7 +264,6 @@ fn test_secret_hkdf_different_info_len() {
             let hash_algorithm = DdiHashAlgorithm::Sha256;
             let salt = None;
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -302,7 +288,6 @@ fn test_secret_hkdf_different_info_len() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -329,7 +314,6 @@ fn test_secret_hkdf_different_info_len() {
                 salt,
                 info2,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -378,7 +362,6 @@ fn test_secret_hkdf_different_info_len() {
 // Uses HKDF to derive derived_key_id1 and derived_key_id2
 // from secret_key_id1 and secret_key_id2, respectively.
 // Then verifies derived keys can do an encrypt/decrypt loop
-// key_tag is only used for DERIVED_KEY_ID1.
 // Returns (derived_key_id1, derived_key_id2)
 #[allow(clippy::too_many_arguments)]
 fn test_secret_hkdf_helper(
@@ -387,7 +370,6 @@ fn test_secret_hkdf_helper(
     salt: Option<Vec<u8>>,
     info: Option<Vec<u8>>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     session_id: u16,
 ) -> (u16, u16) {
@@ -429,7 +411,6 @@ fn test_secret_hkdf_helper(
         salt,
         info,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -448,7 +429,6 @@ fn test_secret_hkdf_helper(
         salt,
         info,
         key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -506,7 +486,6 @@ fn test_secret_hkdf() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -516,7 +495,6 @@ fn test_secret_hkdf() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -534,7 +512,6 @@ fn test_secret_hkdf_sha1() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -544,7 +521,6 @@ fn test_secret_hkdf_sha1() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -562,7 +538,6 @@ fn test_secret_hkdf_no_salt() {
             let salt_vec = None;
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -572,7 +547,6 @@ fn test_secret_hkdf_no_salt() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -590,7 +564,6 @@ fn test_secret_hkdf_no_info() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = None;
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -600,7 +573,6 @@ fn test_secret_hkdf_no_info() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -618,7 +590,6 @@ fn test_secret_hkdf_aes128() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes128;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -628,7 +599,6 @@ fn test_secret_hkdf_aes128() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -646,7 +616,6 @@ fn test_secret_hkdf_aes192() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes192;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -656,7 +625,6 @@ fn test_secret_hkdf_aes192() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -673,7 +641,6 @@ fn test_secret_hkdf_aes_gcm_helper(
     salt: Vec<u8>,
     info: Vec<u8>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     secret_key_type: DdiKeyType,
 ) {
@@ -700,7 +667,6 @@ fn test_secret_hkdf_aes_gcm_helper(
         salt,
         info,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -718,7 +684,6 @@ fn test_secret_hkdf_aes_gcm_helper(
         salt,
         info,
         key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -799,7 +764,6 @@ fn test_secret_hkdf_aes_xts_helper(
     salt: Vec<u8>,
     info: Vec<u8>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     secret_key_type: DdiKeyType,
 ) {
@@ -827,7 +791,6 @@ fn test_secret_hkdf_aes_xts_helper(
         None,
         None,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -844,7 +807,6 @@ fn test_secret_hkdf_aes_xts_helper(
         salt,
         info,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -863,7 +825,6 @@ fn test_secret_hkdf_aes_xts_helper(
         None,
         None,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -880,7 +841,6 @@ fn test_secret_hkdf_aes_xts_helper(
         salt,
         info,
         key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -947,7 +907,6 @@ fn test_secret_hkdf_aes_gcm_unapproved_secret256() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -959,7 +918,6 @@ fn test_secret_hkdf_aes_gcm_unapproved_secret256() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret256,
             );
@@ -979,7 +937,6 @@ fn test_secret_hkdf_aes_gcm_unapproved_secret384() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -991,7 +948,6 @@ fn test_secret_hkdf_aes_gcm_unapproved_secret384() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret384,
             );
@@ -1011,7 +967,6 @@ fn test_secret_hkdf_aes_gcm_unapproved_secret521() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1023,7 +978,6 @@ fn test_secret_hkdf_aes_gcm_unapproved_secret521() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret521,
             );
@@ -1043,7 +997,6 @@ fn test_secret_hkdf_aes_gcm_approved_secret256() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1055,7 +1008,6 @@ fn test_secret_hkdf_aes_gcm_approved_secret256() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret256,
             );
@@ -1075,7 +1027,6 @@ fn test_secret_hkdf_aes_gcm_approved_secret384() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1087,7 +1038,6 @@ fn test_secret_hkdf_aes_gcm_approved_secret384() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret384,
             );
@@ -1107,7 +1057,6 @@ fn test_secret_hkdf_aes_gcm_approved_secret521() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1119,7 +1068,6 @@ fn test_secret_hkdf_aes_gcm_approved_secret521() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret521,
             );
@@ -1139,7 +1087,6 @@ fn test_secret_hkdf_aes_xts_secret256() {
             let salt = "salt".as_bytes().to_vec();
             let info = "info".as_bytes().to_vec();
             let key_type = DdiKeyType::AesXtsBulk256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1151,7 +1098,6 @@ fn test_secret_hkdf_aes_xts_secret256() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret256,
             );
@@ -1171,7 +1117,6 @@ fn test_secret_hkdf_aes_xts_secret384() {
             let salt = "salt".as_bytes().to_vec();
             let info = "info".as_bytes().to_vec();
             let key_type = DdiKeyType::AesXtsBulk256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1183,7 +1128,6 @@ fn test_secret_hkdf_aes_xts_secret384() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret384,
             );
@@ -1203,7 +1147,6 @@ fn test_secret_hkdf_aes_xts_secret521() {
             let salt = "salt".as_bytes().to_vec();
             let info = "info".as_bytes().to_vec();
             let key_type = DdiKeyType::AesXtsBulk256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1215,53 +1158,9 @@ fn test_secret_hkdf_aes_xts_secret521() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret521,
             );
-        },
-    );
-}
-
-#[cfg(not(any(feature = "emu", feature = "sock")))]
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_secret_hkdf_name() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            let hash_algorithm = DdiHashAlgorithm::Sha256;
-            let salt_vec = Some("salt".as_bytes().to_vec());
-            let info_vec = Some("info".as_bytes().to_vec());
-            let key_type = DdiKeyType::Aes256;
-            let key_tag = 0x6677;
-            let key_properties =
-                helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
-
-            let (derived_key_id1, _derived_key_id2) = test_secret_hkdf_helper(
-                dev,
-                hash_algorithm,
-                salt_vec,
-                info_vec,
-                key_type,
-                Some(key_tag),
-                key_properties,
-                session_id,
-            );
-
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                key_tag,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-
-            assert_eq!(resp.data.key_id, derived_key_id1);
-            assert_eq!(resp.data.key_kind, key_type);
-            assert!(resp.data.pub_key.is_none());
         },
     );
 }
@@ -1323,7 +1222,6 @@ fn test_secret_hkdf_aes_hmac_helper(
         salt,
         info,
         aes_key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -1342,7 +1240,6 @@ fn test_secret_hkdf_aes_hmac_helper(
         salt,
         info,
         aes_key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -1362,7 +1259,6 @@ fn test_secret_hkdf_aes_hmac_helper(
         salt,
         info,
         hmac_key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -1384,7 +1280,6 @@ fn test_secret_hkdf_aes_hmac_helper(
         salt,
         info,
         hmac_key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -1582,7 +1477,6 @@ fn test_secret_hkdf_and_unmask() {
             let salt = Some("salt".as_bytes().to_vec());
             let info = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = None;
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1624,7 +1518,6 @@ fn test_secret_hkdf_and_unmask() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 Default::default(),
             );
@@ -1664,7 +1557,6 @@ fn test_secret_hkdf_and_unmask() {
                 salt,
                 info,
                 key_type,
-                None,
                 key_properties,
                 Default::default(),
             );
@@ -1725,7 +1617,6 @@ fn test_secret_hkdf_and_unmask_ecdh_key() {
         let salt = Some("salt".as_bytes().to_vec());
         let info = Some("label".as_bytes().to_vec());
         let key_type = DdiKeyType::Aes256;
-        let key_tag = None;
         let key_properties =
             helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -1750,7 +1641,6 @@ fn test_secret_hkdf_and_unmask_ecdh_key() {
                 Some(sess_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 curve,
-                None,
                 key_props,
             );
 
@@ -1771,7 +1661,6 @@ fn test_secret_hkdf_and_unmask_ecdh_key() {
                 Some(sess_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 curve,
-                None,
                 key_props,
             );
 
@@ -1792,7 +1681,6 @@ fn test_secret_hkdf_and_unmask_ecdh_key() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 private_key_id1,
                 MborByteArray::new(der2, pub_key2.der.len()).expect("failed to create byte array"),
-                None,
                 secret_key_type,
                 key_props,
             );
@@ -1827,7 +1715,6 @@ fn test_secret_hkdf_and_unmask_ecdh_key() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 private_key_id2,
                 MborByteArray::new(der1, pub_key1.der.len()).expect("failed to create byte array"),
-                None,
                 secret_key_type,
                 key_props,
             );
@@ -1873,7 +1760,6 @@ fn test_secret_hkdf_and_unmask_ecdh_key() {
             salt,
             info,
             key_type,
-            key_tag,
             key_properties,
             Default::default(),
         );
@@ -1892,7 +1778,6 @@ fn test_secret_hkdf_and_unmask_ecdh_key() {
             salt,
             info,
             key_type,
-            None,
             key_properties,
             Default::default(),
         );

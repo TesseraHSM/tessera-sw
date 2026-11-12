@@ -58,6 +58,9 @@ jobs:
       OPENSSL_LIB: ${{ github.workspace }}/target/debug
       PROVIDER_PATH: ${{ github.workspace }}/target/debug
       PROPQUERY: '?provider=tsra'
+      # Run every suite against the simulated HSM over the sock transport.
+      # Test runners pass connection settings to the ordinary SDK build.
+      TSRA_TEST_ARGS: transport=sock
     strategy:
       fail-fast: false
       matrix:
@@ -208,29 +211,22 @@ jobs:
       - name: Build provider
         if: ${{ !matrix.cov }}
         run: |
-          cargo build -p tsra_api_native --features emu
-          cargo build -p tsra_ossl_provider --features emu
+          cargo build -p tsra_api_native
+          cargo build -p tsra_ossl_provider
 
       - name: Build provider with coverage
         if: ${{ matrix.cov }}
         env:
           RUSTFLAGS: -C instrument-coverage
         run: |
-          cargo build -p tsra_api_native --features emu
-          cargo build -p tsra_ossl_provider --features emu
+          cargo build -p tsra_api_native
+          cargo build -p tsra_ossl_provider
 
-      # nginx opens the HSM in its master process and then forks workers.
-      # Emu's in-process runtime threads don't survive fork(), so the nginx
-      # suite uses the synchronous sock transport against ddi_sock_server
-      # instead.  Separate target dirs keep the emu build used by cli/capi.
-      - name: Build sock provider and server (nginx)
+      # nginx opens the HSM in its master process and then forks workers, so
+      # its suite runs a standalone ddi_sock_server that outlives them.
+      - name: Build sock server (nginx)
         if: ${{ matrix.nginx }}
-        env:
-          RUSTFLAGS: ${{ matrix.cov && '-C instrument-coverage' || '' }}
-        run: |
-          cargo build --target-dir target/sock -p tsra_api_native --features sock
-          cargo build --target-dir target/sock -p tsra_ossl_provider --features sock
-          RUSTFLAGS= cargo build --target-dir target/sock-server -p ddi_sock_server
+        run: cargo build --target-dir target/sock-server -p ddi_sock_server
 
       # nginx 1.29.0 is the last mainline release linked only against
       # OPENSSL_3.0.0 symbols (1.29.1+ requires 3.2.0+), so it is compatible
@@ -281,11 +277,9 @@ jobs:
       - name: Run nginx suite
         if: ${{ !cancelled() && matrix.nginx && !matrix.cov }}
         env:
-          OPENSSL_LIB: ${{ github.workspace }}/target/sock/debug
-          PROVIDER_PATH: ${{ github.workspace }}/target/sock/debug
-          TSRA_DDI_SOCK: tcp://127.0.0.1:23456
+          TSRA_DDI_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
         run: |
-          target/sock-server/debug/ddi_sock_server "$TSRA_DDI_SOCK" &
+          target/sock-server/debug/ddi_sock_server tcp://127.0.0.1:23456 &
           trap 'kill $!' EXIT
           timeout 30 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/23456) 2>/dev/null; do sleep 0.2; done'
           cargo nextest run --features integration \
@@ -309,11 +303,9 @@ jobs:
       - name: Run nginx suite with coverage
         if: ${{ !cancelled() && matrix.nginx && matrix.cov }}
         env:
-          OPENSSL_LIB: ${{ github.workspace }}/target/sock/debug
-          PROVIDER_PATH: ${{ github.workspace }}/target/sock/debug
-          TSRA_DDI_SOCK: tcp://127.0.0.1:23456
+          TSRA_DDI_ARGS: transport=sock;sock=tcp://127.0.0.1:23456
         run: |
-          target/sock-server/debug/ddi_sock_server "$TSRA_DDI_SOCK" &
+          target/sock-server/debug/ddi_sock_server tcp://127.0.0.1:23456 &
           trap 'kill $!' EXIT
           timeout 30 bash -c 'until (exec 3<>/dev/tcp/127.0.0.1/23456) 2>/dev/null; do sleep 0.2; done'
           cargo xtask precheck --coverage --skip-clean --features integration \
@@ -324,8 +316,7 @@ jobs:
         if: ${{ matrix.cov }}
         run: |
           cargo xtask precheck --coverage-report --no-default-native \
-            --additional-obj-paths $PROVIDER_PATH/libtsra_api_native.so \
-            ${{ matrix.nginx && '--additional-obj-paths target/sock/debug/libtsra_api_native.so' || '' }}
+            --additional-obj-paths $PROVIDER_PATH/libtsra_api_native.so
 
       - name: Upload coverage report
         if: ${{ matrix.cov }}

@@ -3,9 +3,11 @@
 
 //! Shared state for the PQC engine pool.
 //!
-//! Mirrors the UPKA pool but for three engines rather than sixteen, and
-//! without specific-engine acquisition: callers never care *which* FP core
-//! runs their work, so the only entry point is "give me any free engine".
+//! Mirrors the UPKA pool but for six engines -- two lanes on each of three
+//! FP cores -- rather than sixteen, and without specific-engine
+//! acquisition: callers never need a particular lane, so the only entry
+//! point is "give me any free engine". A freed engine goes to the waiter
+//! that queued first; a free one is taken from an idle core first.
 
 use core::task::Context;
 use core::task::Poll;
@@ -17,6 +19,7 @@ use crate::error::PqcError;
 use crate::types::EngineId;
 use crate::types::EngineState;
 use crate::types::QueueSlotState;
+use crate::types::CORES;
 use crate::types::ENGINES;
 use crate::types::QUEUE_DEPTH;
 
@@ -107,6 +110,10 @@ pub(crate) struct PqcState {
     /// Sequence number for PQC requests, so a response is unambiguously
     /// matched to the request that produced it.
     pub(crate) request_seq: u32,
+
+    /// Whether the lanes have been reset since boot; see
+    /// [`PqcDriver::acquire_any`](crate::PqcDriver::acquire_any).
+    pub(crate) lanes_reset: bool,
 }
 
 impl PqcState {
@@ -132,15 +139,39 @@ impl PqcState {
             wait_tail: NO_SLOT,
             probe_seq: 0,
             request_seq: 0,
+            lanes_reset: false,
         }
     }
 
-    /// Claim a free engine, marking it busy.
+    /// Next request sequence number for a lane whose core last answered
+    /// request `answered`.
+    ///
+    /// Numbers rise across every lane, which is how a core tells which of
+    /// its two lanes was posted first. But the count restarts on every boot
+    /// while a lane keeps its last answer, and it wraps, so `answered` is
+    /// skipped: a request numbered as its lane's last answer would look
+    /// answered already. The core would never run it, and the old answer,
+    /// with whatever the slot holds, would be taken as the new request's.
+    pub(crate) fn next_request_seq(&mut self, answered: u32) -> u32 {
+        let mut seq = self.request_seq.wrapping_add(1);
+        if seq == answered {
+            seq = seq.wrapping_add(1);
+        }
+        self.request_seq = seq;
+        seq
+    }
+
+    /// Claim a free engine, marking it busy: the lowest lane of an idle
+    /// core if there is one, so that requests run side by side rather than
+    /// queue on one core while another idles; otherwise the lowest.
     pub(crate) fn claim_free_engine(&mut self) -> Option<EngineId> {
         if self.free_mask == 0 {
             return None;
         }
-        let id = self.free_mask.trailing_zeros() as u8;
+        let idle = (0..ENGINES).find(|&i| {
+            self.free_mask & (1 << i) != 0 && self.free_mask & (1 << ((i + CORES) % ENGINES)) != 0
+        });
+        let id = idle.unwrap_or(self.free_mask.trailing_zeros() as usize) as u8;
         self.free_mask &= !(1u8 << id);
         self.engines[id as usize].state = EngineState::Busy;
         Some(EngineId::new(id))
@@ -496,6 +527,21 @@ mod tests {
         );
     }
 
+    /// A free lane of an idle core is claimed ahead of a lower-numbered one
+    /// whose core is busy with its other lane.
+    #[test]
+    fn idle_cores_are_claimed_before_busy_cores_lanes() {
+        let mut state = PqcState::new();
+        for want in 0..ENGINES {
+            assert_eq!(state.claim_free_engine(), Some(EngineId::new(want as u8)));
+        }
+        for id in [0, 1, 4] {
+            state.release_engine(EngineId::new(id));
+        }
+        assert_eq!(state.claim_free_engine(), Some(EngineId::new(1)));
+        assert_eq!(state.claim_free_engine(), Some(EngineId::new(0)));
+    }
+
     /// Every waiter is eventually served: with more arrivals than engines,
     /// none is left behind.
     #[test]
@@ -661,5 +707,17 @@ mod tests {
         assert!(
             matches!(refused, Poll::Ready(Acquire::Done(Err(e))) if e == PqcError::FP_NOT_READY)
         );
+    }
+
+    /// A request is never numbered as its lane's last answer, which the
+    /// count can reach after a reset that kept the lane, or by wrapping.
+    #[test]
+    fn request_seq_skips_the_lanes_last_answer() {
+        let mut state = PqcState::new();
+        assert_eq!(state.next_request_seq(1), 2);
+        assert_eq!(state.next_request_seq(1), 3);
+        state.request_seq = u32::MAX - 1;
+        assert_eq!(state.next_request_seq(u32::MAX), 0);
+        assert_eq!(state.next_request_seq(1), 2);
     }
 }

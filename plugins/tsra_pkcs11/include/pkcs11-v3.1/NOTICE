@@ -1,0 +1,22 @@
+Third-party files in this directory
+
+pkcs11.h, pkcs11f.h and pkcs11t.h are the C headers of the OASIS PKCS #11
+Specification Version 3.1, OASIS Standard (23 July 2023), vendored
+unmodified from:
+
+  https://docs.oasis-open.org/pkcs11/pkcs11-spec/v3.1/os/include/pkcs11-v3.1/
+
+SHA-256 of the upstream files (verified 2026-10-31):
+
+  4fd1add6a779f562a713710ac0dd3e62329af1c62f4f2fda3ab09d15e70289d9  pkcs11.h
+  7adea350351dcde39be4d4bc58f48762e1ca50713efb62d7a7465f4ce93abb07  pkcs11f.h
+  5adadad13b4c3a7986e9ae829b33ed9b70a8d126da4f5448730f715524493949  pkcs11t.h
+
+Copyright (c) OASIS Open 2023. All Rights Reserved.
+PKCS 11 TC IPR statement: https://www.oasis-open.org/committees/pkcs11/ipr.php
+
+The files keep their upstream copyright header, so the copyright check
+(cargo xtask precheck --copyright) skips these three files by name
+(THIRD_PARTY_FILES in xtask/src/copyright.rs); any other file here is checked
+as usual. Do not edit them. To update, replace them from the upstream location
+and update the hashes above.

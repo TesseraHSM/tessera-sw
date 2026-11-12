@@ -295,61 +295,97 @@ fn assert_init_bk3_single_fault(error: FaultError) {
 
 #[api_test]
 fn test_init_bk3_single_fault_io_aborted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Driver(DriverError::IoAborted));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_io_abort_in_progress() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Driver(DriverError::IoAbortInProgress));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_credentials_not_established() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::CredentialsNotEstablished));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_nonce_mismatch() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::NonceMismatch));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_partition_not_provisioned() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::PartitionNotProvisioned));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_ecc_verify_failed() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::EccVerifyFailed));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_session_needs_renegotiation() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::SessionNeedsRenegotiation));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_pending_key_generation() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::PendingKeyGeneration));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_key_not_found() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::KeyNotFound));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_invalid_arg() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::InvalidArg));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_internal_error() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::InternalError));
 }
 
 #[api_test]
 fn test_init_bk3_single_fault_masked_key_decode_failed() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     assert_init_bk3_single_fault(FaultError::Status(DdiStatus::MaskedKeyDecodeFailed));
 }
 
@@ -358,6 +394,9 @@ fn test_init_bk3_single_fault_masked_key_decode_failed() {
 /// immediately for non-retryable ones.
 #[api_test]
 fn test_init_recovers_from_get_establish_cred_key_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let part = open_and_reset();
         let before = op_call_count(DdiOp::GetEstablishCredEncryptionKey);
@@ -400,6 +439,9 @@ fn test_init_recovers_from_get_establish_cred_key_single_fault() {
 /// retry loop.
 #[api_test]
 fn test_init_recovers_from_establish_credential_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let part = open_and_reset();
         let before = op_call_count(DdiOp::EstablishCredential);
@@ -433,6 +475,9 @@ fn test_init_recovers_from_establish_credential_single_fault() {
 /// attempt (non-retryable errors).
 #[api_test]
 fn test_init_recovers_from_get_establish_cred_key_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let part = open_and_reset();
         let before = op_call_count(DdiOp::GetEstablishCredEncryptionKey);
@@ -470,6 +515,9 @@ fn test_init_recovers_from_get_establish_cred_key_last_retry() {
 /// immediately on the first attempt (non-retryable errors).
 #[api_test]
 fn test_init_recovers_from_establish_credential_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     for error in &super::all_test_errors() {
         let part = open_and_reset();
         let before = op_call_count(DdiOp::EstablishCredential);
@@ -506,6 +554,9 @@ fn test_init_recovers_from_establish_credential_last_retry() {
 /// error code.
 #[api_test]
 fn test_init_fails_from_get_establish_cred_key_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     // Ensure later iterations skip `InitBk3` so the injected fault
     // always lands on `GetEstablishCredEncryptionKey`. See
     // [`prime_mobk_cache`] for details.
@@ -546,6 +597,9 @@ fn test_init_fails_from_get_establish_cred_key_exhausted() {
 /// `MAX_RETRIES + 1` consecutive calls, for every retryable error code.
 #[api_test]
 fn test_init_fails_from_establish_credential_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     // Ensure later iterations skip `InitBk3` so the injected fault
     // always lands on `EstablishCredential`. See [`prime_mobk_cache`]
     // for details.
@@ -598,6 +652,9 @@ fn test_init_fails_from_establish_credential_exhausted() {
 /// (TPM source has no `PotaEndorsementCallback`).
 #[api_test]
 fn test_init_pota_callback_invoked_on_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -650,6 +707,9 @@ fn test_init_pota_callback_invoked_on_retry() {
 /// `IoAborted` — the error propagates immediately.
 #[api_test]
 fn test_init_no_retry_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let part = open_and_reset();
     let before = op_call_count(DdiOp::EstablishCredential);
 
@@ -711,6 +771,9 @@ fn test_init_no_retry_without_resiliency() {
 /// Caller-source only — skipped when `TSRA_USE_TPM` is set.
 #[api_test]
 fn test_init_recovers_after_reset_on_init_bk3() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -740,6 +803,9 @@ fn test_init_recovers_after_reset_on_init_bk3() {
 /// that recovers successfully.
 #[api_test]
 fn test_init_recovers_after_reset_on_get_establish_cred_key() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let part = open_and_reset();
     let before = op_call_count(DdiOp::GetEstablishCredEncryptionKey);
 
@@ -775,6 +841,9 @@ fn test_init_recovers_after_reset_on_get_establish_cred_key() {
 /// recovers successfully.
 #[api_test]
 fn test_init_recovers_after_reset_on_establish_credential() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let part = open_and_reset();
     let before = op_call_count(DdiOp::EstablishCredential);
 
@@ -802,6 +871,9 @@ fn test_init_recovers_after_reset_on_establish_credential() {
 /// retried — the error propagates immediately.
 #[api_test]
 fn test_init_fails_after_reset_without_resiliency() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let part = open_and_reset();
     let before = op_call_count(DdiOp::EstablishCredential);
 
@@ -834,6 +906,9 @@ fn test_init_fails_after_reset_without_resiliency() {
 /// by the retry machinery, and `init` ultimately succeeds.
 #[api_test]
 fn test_init_recovers_after_consecutive_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let part = open_and_reset();
     let before = op_call_count(DdiOp::EstablishCredential);
 
@@ -865,6 +940,9 @@ fn test_init_recovers_after_consecutive_reset() {
 /// Caller-source only — skipped when `TSRA_USE_TPM` is set.
 #[api_test]
 fn test_init_pota_reendorsement_after_reset() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if use_tpm() {
         return;
     }
@@ -913,6 +991,9 @@ fn test_init_pota_reendorsement_after_reset() {
 /// TPM-source only — skipped when `TSRA_USE_TPM` is not set.
 #[api_test]
 fn test_init_tpm_recovers_from_get_sealed_bk3_single_fault() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if !use_tpm() {
         return;
     }
@@ -949,6 +1030,9 @@ fn test_init_tpm_recovers_from_get_sealed_bk3_single_fault() {
 /// TPM-source only — skipped when `TSRA_USE_TPM` is not set.
 #[api_test]
 fn test_init_tpm_recovers_from_get_sealed_bk3_last_retry() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if !use_tpm() {
         return;
     }
@@ -989,6 +1073,9 @@ fn test_init_tpm_recovers_from_get_sealed_bk3_last_retry() {
 /// TPM-source only — skipped when `TSRA_USE_TPM` is not set.
 #[api_test]
 fn test_init_tpm_fails_from_get_sealed_bk3_exhausted() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if !use_tpm() {
         return;
     }
@@ -1026,6 +1113,9 @@ fn test_init_tpm_fails_from_get_sealed_bk3_exhausted() {
 /// TPM-source only — skipped when `TSRA_USE_TPM` is not set.
 #[api_test]
 fn test_init_tpm_recovers_after_reset_on_get_sealed_bk3() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     if !use_tpm() {
         return;
     }

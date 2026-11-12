@@ -17,6 +17,7 @@ use crate::pool::Acquire;
 use crate::pool::PqcState;
 use crate::shared_status;
 use crate::types::EngineId;
+use crate::types::CORES;
 use crate::types::ENGINES;
 
 /// How often the head waiter checks whether a draining engine's core has
@@ -26,8 +27,9 @@ const DRAIN_POLL_INTERVAL: embassy_time::Duration = embassy_time::Duration::from
 
 /// Async driver for PQC offload to the fastpath cores.
 ///
-/// Manages the three FP cores as a pool of interchangeable engines, in
-/// the same shape as the UPKA driver manages its sixteen PKA engines.
+/// Manages the three FP cores' six request lanes as a pool of
+/// interchangeable engines, in the same shape as the UPKA driver manages
+/// its sixteen PKA engines.
 pub struct PqcDriver {
     pub(crate) state: SingleCell<PqcState>,
 }
@@ -40,7 +42,7 @@ impl PqcDriver {
         }
     }
 
-    /// Acquire any free engine, waiting if all three are busy.
+    /// Acquire any free engine, waiting if all six are busy.
     ///
     /// Waiters are served FIFO: a task that queues is handed the next
     /// engine to be released, rather than racing tasks that arrive later.
@@ -50,12 +52,24 @@ impl PqcDriver {
     /// the head waiter checks every [`DRAIN_POLL_INTERVAL`] while any engine
     /// drains; the other waiters sleep.
     ///
+    /// The first call after boot first resets every lane, which can still
+    /// hold what an earlier boot left; see `mailbox::reset_lane`.
+    ///
     /// # Errors
     /// * [`PqcError::QUEUE_FULL`](crate::PqcError::QUEUE_FULL) — every waiter slot is taken.
     /// * [`PqcError::FP_NOT_READY`](crate::PqcError::FP_NOT_READY) — every engine is draining, so none
     ///   will be released until a core answers a request it has already
     ///   missed its deadline for.
     pub async fn acquire_any(&self) -> HsmResult<PqcEngine<'_>> {
+        self.state.with(|s| {
+            if !s.lanes_reset {
+                s.lanes_reset = true;
+                for i in 0..ENGINES as u8 {
+                    mailbox::reset_lane(EngineId::new(i));
+                }
+            }
+        });
+
         // Withdraws from the queue if this future is dropped while waiting,
         // so an engine handed to it is passed on rather than stranded.
         let mut wait = WaitGuard {
@@ -109,10 +123,10 @@ impl PqcDriver {
         &self,
         kind: HsmVaultKeyKind,
         seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        pk: &mut [u8],
+        sk: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mldsa_gen_key(kind, seed, pub_key, sec_key).await)
+        self.with_engine(async |engine| engine.mldsa_gen_key(kind, seed, pk, sk).await)
             .await
     }
 
@@ -135,7 +149,7 @@ impl PqcDriver {
         });
         shared_status::write_sentinel(sentinel);
 
-        for idx in 0..ENGINES {
+        for idx in 0..CORES {
             // Underscore-prefixed: the trace macros compile to nothing
             // without a trace backend, and this is read only by them.
             let _st = shared_status::read_status(idx);
@@ -148,7 +162,7 @@ impl PqcDriver {
     pub async fn mldsa_sign(
         &self,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
+        sk: &[u8],
         rnd: &[u8; crate::MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
         msg: &[u8],
@@ -157,7 +171,7 @@ impl PqcDriver {
     ) -> HsmResult<()> {
         self.with_engine(async |engine| {
             engine
-                .mldsa_sign(kind, sec_key, rnd, msg_type, msg, ctx, sig)
+                .mldsa_sign(kind, sk, rnd, msg_type, msg, ctx, sig)
                 .await
         })
         .await
@@ -168,10 +182,10 @@ impl PqcDriver {
         &self,
         kind: HsmVaultKeyKind,
         seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        pk: &mut [u8],
+        sk: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| engine.mlkem_gen_key(kind, seed, pub_key, sec_key).await)
+        self.with_engine(async |engine| engine.mlkem_gen_key(kind, seed, pk, sk).await)
             .await
     }
 
@@ -179,33 +193,25 @@ impl PqcDriver {
     pub async fn mlkem_encaps(
         &self,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
+        pk: &[u8],
         m: &[u8; crate::MLDSA_SEED_LEN],
-        ciphertext: &mut [u8],
-        shared_secret: &mut [u8],
+        ct: &mut [u8],
+        ss: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .mlkem_encaps(kind, pub_key, m, ciphertext, shared_secret)
-                .await
-        })
-        .await
+        self.with_engine(async |engine| engine.mlkem_encaps(kind, pk, m, ct, ss).await)
+            .await
     }
 
     /// Decapsulate a ciphertext on whichever FP core is free.
     pub async fn mlkem_decaps(
         &self,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
-        ciphertext: &[u8],
-        shared_secret: &mut [u8],
+        sk: &[u8],
+        ct: &[u8],
+        ss: &mut [u8],
     ) -> HsmResult<()> {
-        self.with_engine(async |engine| {
-            engine
-                .mlkem_decaps(kind, sec_key, ciphertext, shared_secret)
-                .await
-        })
-        .await
+        self.with_engine(async |engine| engine.mlkem_decaps(kind, sk, ct, ss).await)
+            .await
     }
 
     /// Verify a signature over a message, or an external `μ`, on whichever
@@ -213,16 +219,14 @@ impl PqcDriver {
     pub async fn mldsa_verify(
         &self,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
+        pk: &[u8],
         msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
         self.with_engine(async |engine| {
-            engine
-                .mldsa_verify(kind, pub_key, msg_type, msg, ctx, sig)
-                .await
+            engine.mldsa_verify(kind, pk, msg_type, msg, ctx, sig).await
         })
         .await
     }
@@ -235,15 +239,12 @@ impl PqcDriver {
             .await
     }
 
-    /// Next request sequence number.
-    ///
-    /// Monotonic across all engines, so a response can never be mistaken
-    /// for one to an earlier request on the same core.
-    pub(crate) fn next_request_seq(&self) -> u32 {
-        self.state.with(|s| {
-            s.request_seq = s.request_seq.wrapping_add(1);
-            s.request_seq
-        })
+    /// Next request sequence number for engine `id`, which must be held with
+    /// no request outstanding, so its core's last answer stands still; see
+    /// [`PqcState::next_request_seq`].
+    pub(crate) fn next_request_seq(&self, id: EngineId) -> u32 {
+        let answered = mailbox::response_seq(id);
+        self.state.with(|s| s.next_request_seq(answered))
     }
 
     /// Return an engine to the pool.

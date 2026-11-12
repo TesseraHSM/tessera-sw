@@ -9,7 +9,8 @@
 //! their respective modules. Demo signers are stored on disk; production
 //! services should use HSM-backed or external authority signers.
 //!
-//! Peer-cloning demo (build with `--features emu` for separate emulators):
+//! Peer-cloning demo (set `TSRA_DDI_ARGS="transport=sock;sock=ENDPOINT"` for
+//! each process, pointing at its own `ddi_sock_server`):
 //! ```text
 //! root_svc create --name primary --state-dir primary-state --listen 127.0.0.1:8080
 //! root_svc clone --name secondary --state-dir secondary-state --primary http://127.0.0.1:8080
@@ -115,12 +116,6 @@
 //! and orchestration. Shared
 //! JSON, filesystem, PKI and display helpers live in `tsra_sealing_common`,
 //! not in the transport-independent `tsra_sealing_api`.
-//!
-//! Build both apps before the cross-application process tests:
-//! ```text
-//! cargo build --features emu -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc
-//! cargo nextest run --features emu -p tsra_sealing_root_svc -p tsra_sealing_leaf_svc -p tsra_sealing_common
-//! ```
 
 use anyhow::Result;
 use clap::Parser;
@@ -135,16 +130,9 @@ mod env;
 mod leaf;
 mod peer;
 mod remote;
-#[cfg(all(test, feature = "emu"))]
-mod state_tests;
-
 /// Run the root-service command line.
 pub fn run_root() -> Result<()> {
     let args = cli::Cli::parse();
-    anyhow::ensure!(
-        !args.require_emu || cfg!(feature = "emu"),
-        "this operation requires an emulator build"
-    );
     match args.command {
         cli::Command::Create(args) => commands::create(&args),
         cli::Command::RestoreLocal(args) => commands::restore_local(&args),

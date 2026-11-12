@@ -19,9 +19,11 @@ fn iv_a() -> Vec<u8> {
     (0u8..16).collect()
 }
 
-#[cfg(not(feature = "session-ex-tests"))]
 #[session_test]
 fn test_ctr_unsupported_without_ex_session(session: HsmSession) {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let key = mode_key_all(&session, 128);
     let data = mode_data(32);
 
@@ -47,7 +49,6 @@ fn test_ctr_invalid_iv_len() {
     }
 }
 
-#[cfg(feature = "session-ex-tests")]
 mod ex {
     use super::*;
 
@@ -74,24 +75,36 @@ mod ex {
     /// Output matches the SP 800-38A definition built from the HSM's ECB.
     #[session_test]
     fn test_ctr_known_answer_128(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         run_known_answer(&session, 128);
     }
 
     /// Output matches the SP 800-38A definition built from the HSM's ECB.
     #[session_test]
     fn test_ctr_known_answer_192(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         run_known_answer(&session, 192);
     }
 
     /// Output matches the SP 800-38A definition built from the HSM's ECB.
     #[session_test]
     fn test_ctr_known_answer_256(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         run_known_answer(&session, 256);
     }
 
     /// Input larger than one device request is chunked with correct chaining.
     #[session_test]
     fn test_ctr_known_answer_multi_request(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 256);
         let pt = mode_data(2 * 1024 + 37);
         let (expected, expected_iv) = reference_encrypt(RefMode::Ctr, &key, &iv_a(), &pt);
@@ -108,6 +121,9 @@ mod ex {
     /// CTR counter wraps at 2^128.
     #[session_test]
     fn test_ctr_counter_edge_iv(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let iv = [0xFFu8; 16];
         let pt = mode_data(40);
@@ -122,6 +138,9 @@ mod ex {
     /// Streaming with irregular chunk sizes matches single-shot output.
     #[session_test]
     fn test_ctr_streaming_matches_single_shot(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = mode_data(1100);
         let mut algo = new_algo(&iv_a());
@@ -143,6 +162,9 @@ mod ex {
     /// Block-aligned calls can be continued from the chained IV.
     #[session_test]
     fn test_ctr_chained_calls_match_single_shot(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 192);
         let pt = mode_data(77);
         let ct = one_shot_encrypt(&mut new_algo(&iv_a()), &key, &pt).expect("encrypt");
@@ -157,6 +179,9 @@ mod ex {
     /// Different IVs produce different ciphertext.
     #[session_test]
     fn test_ctr_iv_changes_ciphertext(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = mode_data(48);
         let mut iv_b = iv_a();
@@ -169,6 +194,9 @@ mod ex {
     /// Empty input produces empty output and leaves the IV unchanged.
     #[session_test]
     fn test_ctr_empty_input(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let mut algo = new_algo(&iv_a());
         assert!(
@@ -191,6 +219,9 @@ mod ex {
     /// Size queries report the input length.
     #[session_test]
     fn test_ctr_size_query(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = mode_data(37);
         let mut algo = new_algo(&iv_a());
@@ -208,6 +239,9 @@ mod ex {
     /// Output buffers smaller than the input are rejected.
     #[session_test]
     fn test_ctr_buffer_too_small(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = mode_data(33);
         let mut out = vec![0u8; 32];
@@ -228,6 +262,9 @@ mod ex {
     /// Keys without the matching usage are rejected.
     #[session_test]
     fn test_ctr_key_permissions(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let pt = mode_data(16);
         match mode_key(&session, 128, false, true) {
             Ok(key) => {
@@ -254,6 +291,9 @@ mod ex {
     /// A finished context rejects further use.
     #[session_test]
     fn test_ctr_context_unusable_after_finish(session: HsmSession) {
+        if !crate::utils::session::api_rev_at_least(1, 1) {
+            return;
+        }
         let key = mode_key_all(&session, 128);
         let pt = mode_data(20);
         let mut out = vec![0u8; 32];

@@ -23,7 +23,6 @@ fn test_ecdh_384_key_exchange_no_session() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -33,7 +32,6 @@ fn test_ecdh_384_key_exchange_no_session() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -60,7 +58,6 @@ fn test_ecdh_384_key_exchange_incorrect_session_id() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Use incorrect session id
@@ -72,7 +69,6 @@ fn test_ecdh_384_key_exchange_incorrect_session_id() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -99,7 +95,6 @@ fn test_ecdh_384_key_exchange_incorrect_private_key_num() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -109,7 +104,6 @@ fn test_ecdh_384_key_exchange_incorrect_private_key_num() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 0x0020,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -136,7 +130,6 @@ fn test_ecdh_384_key_exchange_incorrect_public_key_size() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -146,7 +139,6 @@ fn test_ecdh_384_key_exchange_incorrect_public_key_size() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, 1).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -169,7 +161,6 @@ fn test_ecdh_384_key_exchange_incorrect_target_key_type() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -179,7 +170,6 @@ fn test_ecdh_384_key_exchange_incorrect_target_key_type() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Ecc256Private,
                 key_props,
             );
@@ -202,7 +192,6 @@ fn test_ecdh_384_key_exchange_incorrect_target_key_size() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -212,7 +201,6 @@ fn test_ecdh_384_key_exchange_incorrect_target_key_size() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret521,
                 key_props,
             );
@@ -235,7 +223,6 @@ fn test_ecdh_384_key_exchange_incorrect_target_key_usage() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App);
@@ -245,7 +232,6 @@ fn test_ecdh_384_key_exchange_incorrect_target_key_usage() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -272,7 +258,6 @@ fn test_ecdh_384_key_exchange_incorrect_input_key_usage() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Generate third key pair without Derive usage
@@ -284,7 +269,6 @@ fn test_ecdh_384_key_exchange_incorrect_input_key_usage() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P384,
-                None,
                 key_props,
             );
 
@@ -305,7 +289,6 @@ fn test_ecdh_384_key_exchange_incorrect_input_key_usage() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 private_key_id3,
                 MborByteArray::new(pub_key1, pub_key1_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -324,7 +307,6 @@ fn test_ecdh_384_key_exchange_incorrect_input_key_usage() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(der3, der3_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -346,7 +328,6 @@ fn test_ecdh_384_key_exchange_521_mismatch_input_size() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Generate third key pair with 521 bit size
@@ -358,7 +339,6 @@ fn test_ecdh_384_key_exchange_521_mismatch_input_size() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P521,
-                None,
                 key_props,
             );
 
@@ -378,7 +358,6 @@ fn test_ecdh_384_key_exchange_521_mismatch_input_size() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 private_key_id3,
                 MborByteArray::new(pub_key1, pub_key1_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret521,
                 key_props,
             );
@@ -393,7 +372,6 @@ fn test_ecdh_384_key_exchange_521_mismatch_input_size() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(der3, der3_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -416,7 +394,6 @@ fn test_ecdh_384_key_exchange_256_mismatch_input_size() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Generate third key pair with 256 bit size
@@ -428,7 +405,6 @@ fn test_ecdh_384_key_exchange_256_mismatch_input_size() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 
@@ -448,7 +424,6 @@ fn test_ecdh_384_key_exchange_256_mismatch_input_size() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 private_key_id3,
                 MborByteArray::new(pub_key1, pub_key1_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 key_props,
             );
@@ -463,7 +438,6 @@ fn test_ecdh_384_key_exchange_256_mismatch_input_size() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(der3, der3_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -491,7 +465,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_y_as_prime() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Invalid public key for P384 with y coordinate as prime
@@ -506,7 +479,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_y_as_prime() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 invalid_pub_key_der,
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -536,7 +508,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_x_as_prime() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Invalid public key for P384 with x coordinate as prime
@@ -551,7 +522,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_x_as_prime() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 invalid_pub_key_der,
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -581,7 +551,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_not_on_curve() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Invalid public key for P384 with point not on the curve
@@ -596,7 +565,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_not_on_curve() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 invalid_pub_key_der,
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -626,7 +594,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_point_at_infinity() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             // Invalid public key for P384 with point at infinity
@@ -641,7 +608,6 @@ fn test_ecdh_384_key_exchange_invalid_public_key_point_at_infinity() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 invalid_pub_key_der,
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -666,7 +632,6 @@ fn test_ecdh_384_key_exchange() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P384,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -676,7 +641,6 @@ fn test_ecdh_384_key_exchange() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
@@ -689,58 +653,10 @@ fn test_ecdh_384_key_exchange() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id2,
                 MborByteArray::new(pub_key1, pub_key1_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384,
                 key_props,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-        },
-    );
-}
-
-#[cfg(not(any(feature = "emu", feature = "sock")))]
-#[test]
-#[ignore = "key_tag support has been removed"]
-fn test_ecdh_384_key_exchange_key_tag() {
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, session_id| {
-            let (priv_key_id1, _pub_key1, _pub_key1_len, _priv_key_id2, pub_key2, pub_key2_len) =
-                helper_create_ecc_key_pairs(
-                    dev,
-                    Some(session_id),
-                    Some(DdiApiRev { major: 1, minor: 0 }),
-                    DdiEccCurve::P384,
-                    None,
-                );
-
-            let key_tag = 0x6677;
-            let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-            let resp = helper_ecdh_key_exchange(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                priv_key_id1,
-                MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                Some(key_tag),
-                DdiKeyType::Secret384,
-                key_props,
-            );
-            assert!(resp.is_ok(), "resp {:?}", resp);
-
-            let resp = helper_open_key(
-                dev,
-                Some(session_id),
-                Some(DdiApiRev { major: 1, minor: 0 }),
-                key_tag,
-            );
-
-            assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-
-            assert_eq!(resp.data.key_kind, DdiKeyType::Secret384);
-            assert!(resp.data.pub_key.is_none());
         },
     );
 }

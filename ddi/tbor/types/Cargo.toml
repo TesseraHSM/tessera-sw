@@ -14,6 +14,7 @@ tsra_ddi_tbor_derive.workspace = true
 zerocopy = { features = ["derive"], workspace = true }
 
 [dev-dependencies]
+ddi_sock_server = { features = ["autostart"], workspace = true }
 minicbor = { features = ["derive"], workspace = true }
 parking_lot.workspace = true
 rand.workspace = true
@@ -32,13 +33,6 @@ doctest = false
 [[test]]
 name = "tsra_ddi_tbor_tests"
 path = "tests/tsra_ddi_tbor_tests.rs"
-
-[features]
-# Forward backend selection to the tsra_ddi facade so the integration
-# test binary picks up the right backend. The same tests run across every
-# transport — choose one with `--features emu` / `sock`.
-emu = ["tsra_ddi/emu", "tsra_ddi_tbor_test_harness/emu"]
-sock = ["tsra_ddi/sock", "tsra_ddi_tbor_test_harness/sock"]
 
 [lints]
 workspace = true

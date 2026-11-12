@@ -8,11 +8,8 @@
 //! and cleanup operations.
 
 use parking_lot::Mutex;
-#[cfg(not(feature = "session-ex-tests"))]
 use tracing::*;
 use tsra_api::*;
-#[cfg(not(feature = "session-ex-tests"))]
-use tsra_api_tests_macro::*;
 use tsra_crypto::*;
 
 /// Serializes tests that reset or initialize the shared test partition.
@@ -306,10 +303,17 @@ where
     }
 }
 
-#[cfg(not(feature = "session-ex-tests"))]
-#[partition_test]
-fn test_with_partition(partition: HsmPartition, creds: HsmCredentials) {
-    assert_eq!(creds.id(), &APP_ID, "Invalid credentials ID");
-    assert_eq!(creds.pin(), &APP_PIN, "Invalid credentials key");
-    info!("Testing with partition: {:?}", partition.path());
+#[test]
+fn test_with_partition() {
+    if crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
+    // Not `#[partition_test]`: its fixture would init the partition before
+    // this mode check, and `#[api_test]` already holds `PARTITION_LOCK`.
+    crate::utils::api::init();
+    with_partition(|partition, creds| {
+        assert_eq!(creds.id(), &APP_ID, "Invalid credentials ID");
+        assert_eq!(creds.pin(), &APP_PIN, "Invalid credentials key");
+        info!("Testing with partition: {:?}", partition.path());
+    });
 }

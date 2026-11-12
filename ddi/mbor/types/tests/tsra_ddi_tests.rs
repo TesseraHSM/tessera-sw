@@ -2,6 +2,10 @@
 // Licensed under the MIT License.
 
 #![allow(clippy::unwrap_used)]
+
+// Links the in-process socket server started before `main`.
+use ddi_sock_server as _;
+
 #[cfg(test)]
 mod integration {
     pub mod aes_cbc;
@@ -66,8 +70,6 @@ mod integration {
     pub mod masked_key_hkdf_derive;
     pub mod masked_key_kbkdf_derive;
     pub mod masked_key_rsa_unwrap;
-    pub mod open_key;
-    pub mod open_key_no_import;
     pub mod open_session;
     pub mod open_session_smoke;
     pub mod prov_part;

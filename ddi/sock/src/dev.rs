@@ -70,6 +70,7 @@ use tsra_ddi_sock_proto::ResponseFrame;
 use tsra_ddi_sock_proto::MAX_DMA_BUFFER;
 use tsra_ddi_sock_proto::MAX_OOB_ITEM;
 use tsra_ddi_sock_proto::MAX_OOB_ITEMS;
+use tsra_ddi_sock_proto::TRANSPORT_SESSION_NEEDS_RENEGOTIATION;
 use tsra_ddi_sock_proto::TRANSPORT_SESSION_NOT_OWNED;
 use tsra_ddi_tbor_types::TborOpReq;
 use tsra_ddi_tbor_types::TborResp;
@@ -92,14 +93,11 @@ use tsra_fw_hsm_io::SqeBuilder;
 use tsra_fw_hsm_io::OP_MBOR;
 use tsra_fw_hsm_io::OP_TBOR;
 
-/// Environment variable naming a `tcp://HOST:PORT`, Unix socket, or Linux VSOCK endpoint.
-pub const SOCK_PATH_ENV: &str = "TSRA_DDI_SOCK";
-
-/// Default endpoint when [`SOCK_PATH_ENV`] is unset on Unix.
+/// Default endpoint on Unix.
 #[cfg(unix)]
 pub const DEFAULT_SOCK_PATH: &str = "/tmp/tsra-ddi.sock";
 
-/// Default endpoint when [`SOCK_PATH_ENV`] is unset on non-Unix targets.
+/// Default endpoint on non-Unix targets.
 #[cfg(not(unix))]
 pub const DEFAULT_SOCK_PATH: &str = "tcp://127.0.0.1:1234";
 
@@ -369,11 +367,6 @@ fn parse_vsock_endpoint(path: &str) -> std::io::Result<Option<(u32, u32)>> {
     Ok(Some((cid, port)))
 }
 
-/// Resolve the configured socket path from the environment or default.
-pub(crate) fn socket_path() -> String {
-    std::env::var(SOCK_PATH_ENV).unwrap_or_else(|_| DEFAULT_SOCK_PATH.to_owned())
-}
-
 /// Deadline for the best-effort leaked-session `CloseSession` cleanup
 /// (see [`DdiSockDev::close_leaked_session_locked`]). Bounds how long an
 /// unresponsive peer can hold the stream mutex; on expiry the connection
@@ -537,6 +530,9 @@ impl DdiSockDev {
             TRANSPORT_SESSION_NOT_OWNED => Err(DdiError::DdiStatus(
                 DdiStatus::FileHandleSessionIdDoesNotMatch,
             )),
+            TRANSPORT_SESSION_NEEDS_RENEGOTIATION => {
+                Err(DdiError::DdiStatus(DdiStatus::SessionNeedsRenegotiation))
+            }
             status => Err(DdiError::DdiError(status)),
         }
     }

@@ -34,9 +34,7 @@ pub fn serve(
     http::serve(listener, |method, path, request| match (method, path) {
         ("GET", "/v1/health") => Ok(jzon::object! {
             status: "ok", name: name, identity: identity.clone(),
-            backend: if cfg!(feature = "emu") {
-                "emu"
-            } else if cfg!(feature = "sock") {
+            backend: if tsra_ddi::sock_selected() {
                 "sock"
             } else {
                 "device"

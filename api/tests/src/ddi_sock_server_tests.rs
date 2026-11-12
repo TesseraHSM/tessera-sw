@@ -7,7 +7,7 @@
 //! `ddi/sock/tests/ddi_sock_server_*_integration.rs` already cover the
 //! raw DDI wire protocol (`GetApiRev` round trips, reconnect-after-
 //! disconnect) directly against `tsra_ddi_sock`, and `ddi_sock_server`'s
-//! own crate tests (`examples/sock/ddi_sock_server/src/tcp.rs`) cover
+//! own crate tests (`ddi/sock/server/src/tcp.rs`) cover
 //! session ownership, reset, and cleanup at the DDI/connection level in
 //! depth. What neither covers is the high-level `tsra_api` layer
 //! (`HsmPartitionManager`, `HsmPartition`, `HsmSession`) actually
@@ -16,13 +16,13 @@
 //! `ddi_sock_server` initializes its partition once at server startup
 //! and keeps it enabled for the life of the process, shared across
 //! arbitrarily many concurrent connections (see
-//! `examples/sock/ddi_sock_server/README.md`) rather than resetting
+//! `ddi/sock/server/README.md`) rather than resetting
 //! (and requiring re-`init`) on every disconnect. So this test `init`s
 //! the partition once, then drives many real session open/close cycles
 //! (including concurrently) against the one initialized partition.
 //!
-//! Only compiled/run with `--features sock`; nothing else in this
-//! crate's test suite talks to a real `ddi_sock_server` process.
+//! Each test spawns its own `ddi_sock_server`, so it runs regardless of the
+//! transport `TSRA_TEST_ARGS` selects.
 
 use std::io;
 use std::net::TcpListener;
@@ -47,11 +47,6 @@ use crate::utils::partition::test_api_rev;
 /// would exhaust the partition's session table well before this test
 /// completes.
 const RECONNECTS: usize = 16;
-
-/// The environment variable `tsra_ddi_sock::DdiSock` reads to resolve
-/// the endpoint it reports via `dev_info_list()` (and therefore the
-/// only endpoint `HsmPartitionManager::open_partition` will accept).
-const TSRA_DDI_SOCK: &str = "TSRA_DDI_SOCK";
 
 /// Set on the re-executed child process (see [`reexec_with_ddi_sock_env`])
 /// so it knows to run the test body directly instead of re-executing
@@ -79,7 +74,7 @@ fn reserve_ephemeral_port() -> io::Result<u16> {
 }
 
 /// Re-executes the current test binary, filtered down to `test_name`,
-/// with `TSRA_DDI_SOCK` set (via [`Command::env`]) to a freshly
+/// with the `sock` key of `TSRA_TEST_ARGS` set (via [`Command::env`]) to a freshly
 /// reserved `tcp://127.0.0.1:<port>` endpoint - the only endpoint
 /// `HsmPartitionManager::open_partition` will accept, since its
 /// internal `dev_info_by_path` lookup matches against
@@ -90,17 +85,18 @@ fn reserve_ephemeral_port() -> io::Result<u16> {
 /// process is always safe (unlike mutating this process's own
 /// environment with `std::env::set_var`, which is unsound if any other
 /// thread might concurrently read or write it), so this lets the test
-/// body observe `TSRA_DDI_SOCK` without this crate ever needing
+/// body observe the endpoint without this crate ever needing
 /// `unsafe_code`.
 fn reexec_with_ddi_sock_env(test_name: &str) {
     let port = reserve_ephemeral_port().expect("failed to reserve a TCP port");
-    let endpoint = format!("tcp://127.0.0.1:{port}");
+    let mut args = ddi_sock_server::TestArgs::from_env();
+    args.sock = Some(format!("tcp://127.0.0.1:{port}"));
 
     let exe = std::env::current_exe().expect("failed to resolve current test executable");
     let status = Command::new(exe)
         .arg(test_name)
         .arg("--nocapture")
-        .env(TSRA_DDI_SOCK, &endpoint)
+        .env(ddi_sock_server::TEST_ARGS_ENV, args.to_string())
         .env(REEXEC_CHILD_MARKER, "1")
         .status()
         .expect("failed to spawn re-executed test process");
@@ -114,7 +110,7 @@ fn reexec_with_ddi_sock_env(test_name: &str) {
 /// the identical helper in `ddi/sock/tests/ddi_sock_server_tcp_integration
 /// .rs` for why this can't just be a normal dev-dependency.
 fn locate_ddi_sock_server_bin() -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("DDI_SOCK_SERVER_BIN") {
+    if let Some(path) = ddi_sock_server::TestArgs::from_env().server_bin {
         return std::path::PathBuf::from(path);
     }
 
@@ -139,13 +135,14 @@ fn locate_ddi_sock_server_bin() -> std::path::PathBuf {
     assert!(
         bin.exists(),
         "ddi_sock_server binary not found at {bin:?}; build it first with \
-         `cargo build -p ddi_sock_server` (or set DDI_SOCK_SERVER_BIN)"
+         `cargo build -p ddi_sock_server` (or set `server_bin` in TSRA_TEST_ARGS)"
     );
     bin
 }
 
 /// Starts `ddi_sock_server` listening at the `tcp://HOST:PORT` endpoint
-/// named by `TSRA_DDI_SOCK` (set by [`reexec_with_ddi_sock_env`]).
+/// named by the `sock` key of `TSRA_TEST_ARGS` (set by
+/// [`reexec_with_ddi_sock_env`]).
 fn spawn_ddi_sock_server(endpoint: &str) -> io::Result<DdiSockServerGuard> {
     let child = Command::new(locate_ddi_sock_server_bin())
         .arg(endpoint)
@@ -178,14 +175,16 @@ fn open_partition_with_retry(path: &str, api_rev: HsmApiRev, timeout: Duration) 
 /// initializes at startup.
 #[test]
 fn many_sequential_sessions_do_not_exhaust_partition() {
-    // Re-execute this test in a child process with `TSRA_DDI_SOCK` set
+    // Re-execute this test in a child process with the `sock` endpoint set
     // via `Command::env` instead of mutating this process's own
     // environment: see `reexec_with_ddi_sock_env`.
     if std::env::var_os(REEXEC_CHILD_MARKER).is_none() {
         return reexec_with_ddi_sock_env("many_sequential_sessions_do_not_exhaust_partition");
     }
 
-    let endpoint = std::env::var(TSRA_DDI_SOCK).expect("TSRA_DDI_SOCK must be set by re-exec");
+    let endpoint = ddi_sock_server::TestArgs::from_env()
+        .sock
+        .expect("sock must be set by re-exec");
     let _server = spawn_ddi_sock_server(&endpoint).expect("failed to start ddi_sock_server");
     let api_rev = test_api_rev();
 
@@ -226,7 +225,9 @@ fn many_concurrent_sessions_are_all_usable() {
 
     const CONCURRENT_SESSIONS: usize = 4;
 
-    let endpoint = std::env::var(TSRA_DDI_SOCK).expect("TSRA_DDI_SOCK must be set by re-exec");
+    let endpoint = ddi_sock_server::TestArgs::from_env()
+        .sock
+        .expect("sock must be set by re-exec");
     let _server = spawn_ddi_sock_server(&endpoint).expect("failed to start ddi_sock_server");
     let api_rev = test_api_rev();
 

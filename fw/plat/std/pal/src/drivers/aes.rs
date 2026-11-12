@@ -390,8 +390,8 @@ impl StdAes {
     ///
     /// # Parameters
     /// - `kek` — key-encryption key (16, 24, or 32 bytes).
-    /// - `input` — plaintext key material (`16..=3072` bytes, a multiple
-    ///   of 8).
+    /// - `input` — plaintext key material (`16..=`[`HSM_AES_KW_MAX_DATA_LEN`] bytes, a
+    ///   multiple of 8).
     /// - `output` — destination; must hold at least `input.len() + 8`
     ///   bytes. `None` only validates and returns the wrapped length.
     ///
@@ -410,7 +410,10 @@ impl StdAes {
         input: &[u8],
         output: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
-        if input.len() < 16 || !input.len().is_multiple_of(8) || input.len() > 3072 {
+        if input.len() < 16
+            || !input.len().is_multiple_of(8)
+            || input.len() > HSM_AES_KW_MAX_DATA_LEN
+        {
             return Err(HsmError::InvalidArg);
         }
         let wrapped_len = input.len() + 8;
@@ -453,8 +456,8 @@ impl StdAes {
     ///
     /// # Parameters
     /// - `kek` — key-encryption key (16, 24, or 32 bytes).
-    /// - `input` — wrapped key material (`24..=3080` bytes, a multiple
-    ///   of 8).
+    /// - `input` — wrapped key material (`24..=`[`HSM_AES_KW_MAX_DATA_LEN`]` + 8` bytes,
+    ///   a multiple of 8).
     /// - `output` — destination; must hold at least `input.len() - 8`
     ///   bytes. `None` only validates and returns the unwrapped length.
     ///
@@ -473,7 +476,10 @@ impl StdAes {
         input: &[u8],
         output: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
-        if input.len() < 24 || !input.len().is_multiple_of(8) || input.len() > 3080 {
+        if input.len() < 24
+            || !input.len().is_multiple_of(8)
+            || input.len() > HSM_AES_KW_MAX_DATA_LEN + 8
+        {
             return Err(HsmError::InvalidArg);
         }
         let unwrapped_len = input.len() - 8;
@@ -518,7 +524,8 @@ impl StdAes {
     ///
     /// # Parameters
     /// - `kek` — key-encryption key (16, 24, or 32 bytes).
-    /// - `input` — plaintext key material (`1..=3072` bytes, any length).
+    /// - `input` — plaintext key material (`1..=`[`HSM_AES_KW_MAX_DATA_LEN`] bytes, any
+    ///   length).
     /// - `output` — destination; must hold at least
     ///   `round_up_8(input.len()) + 8` bytes. `None` only validates and
     ///   returns the wrapped length.
@@ -530,7 +537,7 @@ impl StdAes {
     /// - [`HsmError::AesInvalidKeyLength`] — `kek` is not a valid AES
     ///   key length.
     /// - [`HsmError::InvalidArg`] — `input`/`output` size-constraint
-    ///   violation (`input` must be `1..=3072`; `output` must hold at
+    ///   violation (`input` must be `1..=HSM_AES_KW_MAX_DATA_LEN`; `output` must hold at
     ///   least `round_up_8(input.len()) + 8` bytes).
     /// - [`HsmError::AesEncryptFailed`] — the wrapping operation failed.
     pub async fn kwp_wrap(
@@ -540,10 +547,10 @@ impl StdAes {
         output: Option<&mut [u8]>,
     ) -> HsmResult<usize> {
         // RFC 5649 size constraints (per the `aes_kwp_wrap` trait
-        // contract): the plaintext is 1..=3072 bytes and the output holds
+        // contract): the plaintext is 1..=HSM_AES_KW_MAX_DATA_LEN bytes and the output holds
         // at least `round_up_8(input.len()) + 8` bytes.  Violations are
         // `InvalidArg`, matching the hardware PAL.
-        if input.is_empty() || input.len() > 3072 {
+        if input.is_empty() || input.len() > HSM_AES_KW_MAX_DATA_LEN {
             return Err(HsmError::InvalidArg);
         }
         let wrapped_len = input.len().next_multiple_of(8) + 8;
@@ -600,7 +607,7 @@ impl StdAes {
     ///   key length.
     /// - [`HsmError::InvalidArg`] — `input`/`output` size-constraint
     ///   violation (RFC 5649: `input` must be >= 16 bytes, a multiple of 8,
-    ///   and <= 3080; `output` must hold at least `input.len() - 8` bytes).
+    ///   and <= `HSM_AES_KW_MAX_DATA_LEN + 8`; `output` must hold at least `input.len() - 8` bytes).
     /// - [`HsmError::AesUnwrapFailed`] — AIV/padding integrity check failed
     ///   (wrong key, tampering, or corruption).
     pub async fn kwp_unwrap(
@@ -611,10 +618,14 @@ impl StdAes {
     ) -> HsmResult<usize> {
         // RFC 5649 size constraints (per the `aes_kwp_unwrap` trait
         // contract): the wrapped input is >= 16 bytes, a multiple of 8, and
-        // at most 3080 (round_up_8(3072) + the 8-byte AIV); the output holds
-        // at least `input.len() - 8` bytes.  Violations are `InvalidArg` —
-        // distinct from an integrity failure — matching the hardware PAL.
-        if input.len() < 16 || !input.len().is_multiple_of(8) || input.len() > 3080 {
+        // at most `HSM_AES_KW_MAX_DATA_LEN + 8` (the 8-aligned max plaintext
+        // plus the 8-byte AIV); the output holds at least `input.len() - 8`
+        // bytes.  Violations are `InvalidArg` — distinct from an integrity
+        // failure — matching the hardware PAL.
+        if input.len() < 16
+            || !input.len().is_multiple_of(8)
+            || input.len() > HSM_AES_KW_MAX_DATA_LEN + 8
+        {
             return Err(HsmError::InvalidArg);
         }
         if !matches!(kek.len(), 16 | 24 | 32) {
@@ -1368,7 +1379,8 @@ mod tests {
     async fn kwp_unwrap_rejects_bad_sizes() {
         let driver = make_driver();
         let kek = [0x42u8; 32];
-        let mut out = vec![0u8; 4096];
+        // Large enough for every case below, so only the input size fails.
+        let mut out = vec![0u8; HSM_AES_KW_MAX_DATA_LEN + 16];
 
         // Too short (< 16 bytes).
         let short = [0u8; 8];
@@ -1390,8 +1402,8 @@ mod tests {
             HsmError::InvalidArg
         );
 
-        // Larger than the 3080-byte maximum.
-        let oversized = vec![0u8; 3088];
+        // Larger than the maximum wrapped length.
+        let oversized = vec![0u8; HSM_AES_KW_MAX_DATA_LEN + 16];
         assert_eq!(
             driver
                 .kwp_unwrap(&kek, &oversized, Some(&mut out))
@@ -1437,6 +1449,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&out[..len], &payload[..]);
+    }
+
+    #[tokio::test]
+    async fn kw_and_kwp_roundtrip_max_len() {
+        let driver = make_driver();
+        let kek = [0x42u8; 32];
+        let payload: Vec<u8> = (0..HSM_AES_KW_MAX_DATA_LEN).map(|i| i as u8).collect();
+        let mut wrapped = vec![0u8; HSM_AES_KW_MAX_DATA_LEN + 8];
+        let mut out = vec![0u8; HSM_AES_KW_MAX_DATA_LEN];
+
+        assert_eq!(
+            driver.kw_wrap(&kek, &payload, Some(&mut wrapped)).await,
+            Ok(wrapped.len())
+        );
+        assert_eq!(
+            driver.kw_unwrap(&kek, &wrapped, Some(&mut out)).await,
+            Ok(payload.len())
+        );
+        assert_eq!(out, payload);
+
+        assert_eq!(
+            driver.kwp_wrap(&kek, &payload, Some(&mut wrapped)).await,
+            Ok(wrapped.len())
+        );
+        assert_eq!(
+            driver.kwp_unwrap(&kek, &wrapped, Some(&mut out)).await,
+            Ok(payload.len())
+        );
+        assert_eq!(out, payload);
     }
 
     #[tokio::test]
@@ -1495,9 +1536,9 @@ mod tests {
             HsmError::InvalidArg
         );
 
-        // Larger than the 3072-byte maximum plaintext.
-        let oversized = vec![0u8; 3073];
-        let mut big = vec![0u8; 3073 + 16];
+        // Larger than the maximum plaintext.
+        let oversized = vec![0u8; HSM_AES_KW_MAX_DATA_LEN + 1];
+        let mut big = vec![0u8; HSM_AES_KW_MAX_DATA_LEN + 1 + 16];
         assert_eq!(
             driver
                 .kwp_wrap(&kek, &oversized, Some(&mut big))

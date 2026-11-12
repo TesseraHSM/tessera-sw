@@ -17,6 +17,8 @@ use tsra_fw_ddi_tbor_types::TborMlDsaGenerateKeyResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
@@ -24,7 +26,7 @@ use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
 
-use super::from_pal::mldsa_param_set;
+use super::from_pal::mldsa_param;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
@@ -63,8 +65,8 @@ pub(crate) async fn handle<P: HsmPal>(
         // Map the wire kind onto the vault kind the PAL speaks. Byte-identical
         // discriminants, and the match above already rejected anything else.
         let vault_kind = HsmVaultKeyKind(key_kind.0);
-        let param_set = mldsa_param_set(vault_kind)?;
-        let pub_len = param_set.pub_key_len();
+        let param = mldsa_param(vault_kind)?;
+        let pub_len = param.pk_len();
 
         // Platform identity bound into the masked blob (anti-rollback on
         // re-import): SVN and owner-seed id.
@@ -77,7 +79,7 @@ pub(crate) async fn handle<P: HsmPal>(
         // key, masked as a unit. Keeping the seed means the public key can
         // still be regenerated from the blob alone; keeping the expanded key
         // means signing never has to re-derive it.
-        let sec_len = param_set.sec_key_len();
+        let sec_len = param.sk_len();
         let plain_len = MLDSA_SEED_LEN + sec_len;
 
         // IO teardown wipes the allocation,
@@ -116,8 +118,20 @@ pub(crate) async fn handle<P: HsmPal>(
                 }
                 let payload = &mut out.masked_key[payload_at..end];
                 let (seed, sec_key) = payload.split_at_mut(MLDSA_SEED_LEN);
-                pal.mldsa_gen_key(io, param_set, seed, out.pub_key, sec_key)
+                let (written, _) = pal
+                    .mldsa_gen_keypair(
+                        io,
+                        param,
+                        HsmMlSeedSrc::Random,
+                        HsmMlDsaPct::SignVerify,
+                        seed,
+                        Some((sec_key, out.pub_key)),
+                    )
                     .await?;
+                // The masked blob was sized for exactly `sec_len`.
+                if written != sec_len {
+                    return Err(HsmError::InternalError);
+                }
             }
 
             // Mask the seed+expanded key as one unit, straight into the

@@ -1,5 +1,20 @@
 # Partition API
 
+## Runtime connection configuration
+
+The same SDK library connects to native hardware and socket servers.
+With `TSRA_DDI_ARGS` unset, it uses the platform device driver. To connect
+to a socket server, set
+`TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234"` before calling
+the SDK. `transport=ioctl` explicitly selects the platform driver.
+Unknown keys, duplicate keys, empty values, and unsupported transports are
+rejected; invalid configuration reports no devices and is logged without
+panicking across the C API.
+
+A socket server may front hardware or a simulator. Selecting it does not
+change credentials, provisioning requirements, or retry behavior.
+`TSRA_TEST_ARGS` belongs to test runners and is never read by the SDK.
+
 ## tsra_part_get_list
 
 Allocates and returns the device list.

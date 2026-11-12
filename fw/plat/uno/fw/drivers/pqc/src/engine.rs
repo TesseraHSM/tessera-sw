@@ -46,8 +46,9 @@ const SUBMIT_POLL_INTERVAL: embassy_time::Duration = embassy_time::Duration::fro
 /// depend on how long one trip through the executor happens to take. The
 /// window must cover the slowest operation — ML-DSA-87 signing runs to
 /// ~175 ms because FIPS 204 rejection sampling retries until a candidate
-/// passes the norm checks — or the tail of that distribution falls off a
-/// cliff onto the 31.25 ms timer.
+/// passes the norm checks — queued behind another on the core's other
+/// lane, or the tail of that distribution falls off a cliff onto the
+/// 31.25 ms timer.
 ///
 /// The timer fallback remains beyond this, bounding the total wait.
 const SUBMIT_YIELD_WINDOW: embassy_time::Duration = embassy_time::Duration::from_millis(400);
@@ -79,21 +80,36 @@ pub const SHAKE_OUT_MAX: usize = mailbox::SLOT_SIZE - mailbox::SLOT_SHAKE_OUT_OF
 const _: () =
     assert!(SHAKE_MSG_MAX <= mailbox::SLOT_SHAKE_OUT_OFFSET - mailbox::SLOT_SHAKE_IN_OFFSET);
 
-/// The mailbox encoding of an ML-DSA message type, once its input is
-/// checked: an external `μ` is exactly 64 bytes, with no context string.
+/// Validate the ML-DSA message type and operand lengths without an engine.
 ///
 /// # Errors
 /// * [`HsmError::InvalidArg`] — the input is malformed for `msg_type`.
+/// * [`PqcError::INVALID_BUFFER_SIZE`] — the message or context is too long.
 /// * [`HsmError::UnsupportedCmd`] — a pre-hash type; the FP cores take the
 ///   message itself or an external `μ`.
-fn mailbox_msg_type(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<u32> {
+pub fn mldsa_check_msg(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<()> {
     match msg_type {
-        HsmMlDsaMsgType::Pure | HsmMlDsaMsgType::ExternalMu => {
-            msg_type.check_input(msg, ctx)?;
-            Ok(msg_type as u32)
+        HsmMlDsaMsgType::Pure => {}
+        HsmMlDsaMsgType::ExternalMu if msg.len() == mailbox::MU_LEN && ctx.is_empty() => {}
+        HsmMlDsaMsgType::ExternalMu => return Err(HsmError::InvalidArg),
+        HsmMlDsaMsgType::PreHash(_) | HsmMlDsaMsgType::HashMsg(_) => {
+            return Err(HsmError::UnsupportedCmd)
         }
-        HsmMlDsaMsgType::PreHash | HsmMlDsaMsgType::PreHashMessage => Err(HsmError::UnsupportedCmd),
     }
+    if msg.len() > MLDSA_MSG_MAX || ctx.len() > MLDSA_CTX_MAX {
+        return Err(PqcError::INVALID_BUFFER_SIZE);
+    }
+    Ok(())
+}
+
+/// The mailbox encoding of a validated ML-DSA message.
+fn mailbox_msg_type(msg_type: HsmMlDsaMsgType, msg: &[u8], ctx: &[u8]) -> HsmResult<u32> {
+    mldsa_check_msg(msg_type, msg, ctx)?;
+    Ok(if matches!(msg_type, HsmMlDsaMsgType::ExternalMu) {
+        mailbox::MSG_TYPE_EXTERNAL_MU
+    } else {
+        mailbox::MSG_TYPE_PURE
+    })
 }
 
 /// Encapsulation-key length per ML-KEM parameter set (FIPS 203 Table 3).
@@ -218,7 +234,7 @@ impl PqcEngine<'_> {
     /// * `seed` — **in/out**: supplied filled with entropy from the HSM's
     ///   TRNG, and left unchanged. It is the ML-DSA seed `xi`, which is the
     ///   private key; an FP core has no entropy source of its own.
-    /// * `pub_key` — output, exactly the parameter set's public key length.
+    /// * `pk` — output, exactly the parameter set's public key length.
     ///
     /// # Returns
     /// * `Err(PqcError::FP_NOT_READY)` — always, for now.  See the module
@@ -228,15 +244,12 @@ impl PqcEngine<'_> {
         &mut self,
         kind: HsmVaultKeyKind,
         seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        pk: &mut [u8],
+        sk: &mut [u8],
     ) -> HsmResult<()> {
         let expected_pub = mldsa_pub_key_len(kind)?;
         let expected_sec = mldsa_sec_key_len(kind)?;
-        if seed.len() != MLDSA_SEED_LEN
-            || pub_key.len() != expected_pub
-            || sec_key.len() != expected_sec
-        {
+        if seed.len() != MLDSA_SEED_LEN || pk.len() != expected_pub || sk.len() != expected_sec {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -269,8 +282,8 @@ impl PqcEngine<'_> {
         // Both keys are too large for the mailbox, so they travel in this
         // core's operand slot. Read only after the response sequence number
         // matched, which the core writes last.
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sec_key)
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pk)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sk)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -282,7 +295,7 @@ impl PqcEngine<'_> {
     ///
     /// # Parameters
     /// * `kind` — ML-DSA seed kind selecting the parameter set.
-    /// * `sec_key` — the expanded secret key recovered from the caller's
+    /// * `sk` — the expanded secret key recovered from the caller's
     ///   masked key. Supplying it rather than the seed is what keeps a key
     ///   generation out of every signature.
     /// * `rnd` — per-signature randomness from the device TRNG.
@@ -294,7 +307,7 @@ impl PqcEngine<'_> {
     pub async fn mldsa_sign(
         &mut self,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
+        sk: &[u8],
         rnd: &[u8; MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
         msg: &[u8],
@@ -304,7 +317,7 @@ impl PqcEngine<'_> {
         if sig.len() != mldsa_sig_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mldsa_sign_submit(kind, sec_key, rnd, msg_type, msg, ctx)
+        self.mldsa_sign_submit(kind, sk, rnd, msg_type, msg, ctx)
             .await?;
         if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, sig) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
@@ -316,23 +329,23 @@ impl PqcEngine<'_> {
     pub async fn mldsa_sign_in_place(
         &mut self,
         kind: HsmVaultKeyKind,
-        key_signature: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        sk_sig: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
         rnd: &[u8; MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
         msg: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
         ctx: &tsra_fw_hsm_pal_traits::HsmDmaBuf,
     ) -> HsmResult<()> {
-        let key_at = key_signature
+        let key_at = sk_sig
             .len()
             .checked_sub(mldsa_sec_key_len(kind)?)
             .ok_or(PqcError::INVALID_BUFFER_SIZE)?;
         let sig_len = mldsa_sig_len(kind)?;
-        if key_signature.len() < sig_len {
+        if sk_sig.len() < sig_len {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mldsa_sign_submit(kind, &key_signature[key_at..], rnd, msg_type, msg, ctx)
+        self.mldsa_sign_submit(kind, &sk_sig[key_at..], rnd, msg_type, msg, ctx)
             .await?;
-        let output = &mut key_signature[..sig_len];
+        let output = &mut sk_sig[..sig_len];
         if !mailbox::read_slot_at(self.id, mailbox::SLOT_SIG_OFFSET, output) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -342,7 +355,7 @@ impl PqcEngine<'_> {
     async fn mldsa_sign_submit(
         &mut self,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
+        sk: &[u8],
         rnd: &[u8; MLDSA_SEED_LEN],
         msg_type: HsmMlDsaMsgType,
         msg: &[u8],
@@ -350,10 +363,7 @@ impl PqcEngine<'_> {
     ) -> HsmResult<()> {
         let expected_sig = mldsa_sig_len(kind)?;
         let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
-        if sec_key.len() != mldsa_sec_key_len(kind)?
-            || msg.len() > MLDSA_MSG_MAX
-            || ctx.len() > MLDSA_CTX_MAX
-        {
+        if sk.len() != mldsa_sec_key_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -362,7 +372,7 @@ impl PqcEngine<'_> {
         // after seeing the request sequence number, which is written last.
         if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
             || !mailbox::write_slot(self.id, mailbox::SLOT_CTX_OFFSET, ctx)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_KEY_IN_OFFSET, sec_key)
+            || !mailbox::write_slot(self.id, mailbox::SLOT_KEY_IN_OFFSET, sk)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -394,20 +404,17 @@ impl PqcEngine<'_> {
     /// * `seed` — **in/out**: supplied filled with 64 bytes of entropy from
     ///   the HSM's TRNG and left unchanged. It is the `(d ‖ z)` seed pair,
     ///   which is the private key.
-    /// * `pub_key` — output; the encapsulation key.
+    /// * `pk` — output; the encapsulation key.
     pub async fn mlkem_gen_key(
         &mut self,
         kind: HsmVaultKeyKind,
         seed: &mut [u8],
-        pub_key: &mut [u8],
-        sec_key: &mut [u8],
+        pk: &mut [u8],
+        sk: &mut [u8],
     ) -> HsmResult<()> {
         let expected_pub = mlkem_pub_key_len(kind)?;
         let expected_sec = mlkem_sec_key_len(kind)?;
-        if seed.len() != MLKEM_SEED_LEN
-            || pub_key.len() != expected_pub
-            || sec_key.len() != expected_sec
-        {
+        if seed.len() != MLKEM_SEED_LEN || pk.len() != expected_pub || sk.len() != expected_sec {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -439,8 +446,8 @@ impl PqcEngine<'_> {
         if resp.out_len as usize != expected_pub {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sec_key)
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_PK_OFFSET, pk)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_KEY_OUT_OFFSET, sk)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -452,26 +459,24 @@ impl PqcEngine<'_> {
     ///
     /// # Parameters
     /// * `kind` — ML-KEM seed kind selecting the parameter set.
-    /// * `pub_key` — the encapsulation key to encapsulate to.
+    /// * `pk` — the encapsulation key to encapsulate to.
     /// * `m` — 32 bytes of randomness from the device TRNG.
-    /// * `ciphertext` — output, exactly the parameter set's ciphertext length.
-    /// * `shared_secret` — output, 32 bytes.
+    /// * `ct` — output, exactly the parameter set's ciphertext length.
+    /// * `ss` — output, 32 bytes.
     pub async fn mlkem_encaps(
         &mut self,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
+        pk: &[u8],
         m: &[u8; MLDSA_SEED_LEN],
-        ciphertext: &mut [u8],
-        shared_secret: &mut [u8],
+        ct: &mut [u8],
+        ss: &mut [u8],
     ) -> HsmResult<()> {
-        if ciphertext.len() != mlkem_ct_len(kind)?
-            || shared_secret.len() != mailbox::SHARED_SECRET_LEN
-        {
+        if ct.len() != mlkem_ct_len(kind)? || ss.len() != mailbox::SHARED_SECRET_LEN {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mlkem_encaps_submit(kind, pub_key, m).await?;
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ciphertext)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
+        self.mlkem_encaps_submit(kind, pk, m).await?;
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ct)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, ss)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -482,22 +487,21 @@ impl PqcEngine<'_> {
     pub async fn mlkem_encaps_in_place(
         &mut self,
         kind: HsmVaultKeyKind,
-        pub_key_ciphertext: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        pk_ct: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
         m: &[u8; MLDSA_SEED_LEN],
-        shared_secret: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
+        ss: &mut tsra_fw_hsm_pal_traits::HsmDmaBuf,
     ) -> HsmResult<()> {
         let ct_len = mlkem_ct_len(kind)?;
-        if pub_key_ciphertext.len() != mlkem_pub_key_len(kind)?
-            || pub_key_ciphertext.len() < ct_len
-            || shared_secret.len() != mailbox::SHARED_SECRET_LEN
+        if pk_ct.len() != mlkem_pub_key_len(kind)?
+            || pk_ct.len() < ct_len
+            || ss.len() != mailbox::SHARED_SECRET_LEN
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        self.mlkem_encaps_submit(kind, pub_key_ciphertext, m)
-            .await?;
-        let output = &mut pub_key_ciphertext[..ct_len];
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, output)
-            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret)
+        self.mlkem_encaps_submit(kind, pk_ct, m).await?;
+        let ct = &mut pk_ct[..ct_len];
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_CT_OFFSET, ct)
+            || !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, ss)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -507,17 +511,17 @@ impl PqcEngine<'_> {
     async fn mlkem_encaps_submit(
         &mut self,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
+        pk: &[u8],
         m: &[u8; MLDSA_SEED_LEN],
     ) -> HsmResult<()> {
         let expected_pub = mlkem_pub_key_len(kind)?;
         let expected_ct = mlkem_ct_len(kind)?;
-        if pub_key.len() != expected_pub {
+        if pk.len() != expected_pub {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
         self.settle()?;
-        if !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pub_key) {
+        if !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pk) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -530,7 +534,7 @@ impl PqcEngine<'_> {
                 msg_len: 0,
                 ctx_len: 0,
                 sig_len: 0,
-                pub_key_len: pub_key.len() as u32,
+                pub_key_len: pk.len() as u32,
                 msg_type: mailbox::MSG_TYPE_PURE,
             })
             .await?;
@@ -545,22 +549,22 @@ impl PqcEngine<'_> {
     ///
     /// # Parameters
     /// * `kind` — ML-KEM seed kind selecting the parameter set.
-    /// * `sec_key` — the expanded decapsulation key recovered from the
+    /// * `sk` — the expanded decapsulation key recovered from the
     ///   caller's masked key. Supplying it rather than the seed pair is
     ///   what keeps a key generation out of every decapsulation.
-    /// * `ciphertext` — the ciphertext to decapsulate.
-    /// * `shared_secret` — output, 32 bytes.
+    /// * `ct` — the ciphertext to decapsulate.
+    /// * `ss` — output, 32 bytes.
     pub async fn mlkem_decaps(
         &mut self,
         kind: HsmVaultKeyKind,
-        sec_key: &[u8],
-        ciphertext: &[u8],
-        shared_secret: &mut [u8],
+        sk: &[u8],
+        ct: &[u8],
+        ss: &mut [u8],
     ) -> HsmResult<()> {
         let expected_ct = mlkem_ct_len(kind)?;
-        if sec_key.len() != mlkem_sec_key_len(kind)?
-            || ciphertext.len() != expected_ct
-            || shared_secret.len() != mailbox::SHARED_SECRET_LEN
+        if sk.len() != mlkem_sec_key_len(kind)?
+            || ct.len() != expected_ct
+            || ss.len() != mailbox::SHARED_SECRET_LEN
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -569,8 +573,8 @@ impl PqcEngine<'_> {
         // The decapsulation key occupies the region the ciphertext used to
         // use, so the ciphertext moves to the public-key region — which
         // decapsulation does not otherwise touch.
-        if !mailbox::write_slot(self.id, mailbox::SLOT_KEY_IN_OFFSET, sec_key)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_CT_IN_OFFSET, ciphertext)
+        if !mailbox::write_slot(self.id, mailbox::SLOT_KEY_IN_OFFSET, sk)
+            || !mailbox::write_slot(self.id, mailbox::SLOT_CT_IN_OFFSET, ct)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -585,7 +589,7 @@ impl PqcEngine<'_> {
                 ctx_len: 0,
                 // The ciphertext length rides in the signature-length
                 // field, as it did when the ciphertext shared that region.
-                sig_len: ciphertext.len() as u32,
+                sig_len: ct.len() as u32,
                 pub_key_len: 0,
                 msg_type: mailbox::MSG_TYPE_PURE,
             })
@@ -596,7 +600,7 @@ impl PqcEngine<'_> {
         if resp.out_len as usize != mailbox::SHARED_SECRET_LEN {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
-        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, shared_secret) {
+        if !mailbox::read_slot_at(self.id, mailbox::SLOT_SS_OFFSET, ss) {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -614,18 +618,14 @@ impl PqcEngine<'_> {
     pub async fn mldsa_verify(
         &mut self,
         kind: HsmVaultKeyKind,
-        pub_key: &[u8],
+        pk: &[u8],
         msg_type: HsmMlDsaMsgType,
         msg: &[u8],
         ctx: &[u8],
         sig: &[u8],
     ) -> HsmResult<bool> {
         let msg_type = mailbox_msg_type(msg_type, msg, ctx)?;
-        if pub_key.len() != mldsa_pub_key_len(kind)?
-            || sig.len() != mldsa_sig_len(kind)?
-            || msg.len() > MLDSA_MSG_MAX
-            || ctx.len() > MLDSA_CTX_MAX
-        {
+        if pk.len() != mldsa_pub_key_len(kind)? || sig.len() != mldsa_sig_len(kind)? {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
 
@@ -633,7 +633,7 @@ impl PqcEngine<'_> {
         if !mailbox::write_slot(self.id, mailbox::SLOT_MSG_OFFSET, msg)
             || !mailbox::write_slot(self.id, mailbox::SLOT_CTX_OFFSET, ctx)
             || !mailbox::write_slot(self.id, mailbox::SLOT_SIG_OFFSET, sig)
-            || !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pub_key)
+            || !mailbox::write_slot(self.id, mailbox::SLOT_PK_OFFSET, pk)
         {
             return Err(PqcError::INVALID_BUFFER_SIZE);
         }
@@ -649,13 +649,15 @@ impl PqcEngine<'_> {
                 msg_len: msg.len() as u32,
                 ctx_len: ctx.len() as u32,
                 sig_len: sig.len() as u32,
-                pub_key_len: pub_key.len() as u32,
+                pub_key_len: pk.len() as u32,
                 msg_type,
             })
             .await?;
 
         match resp.status {
-            0 => Ok(true),
+            // Verify reads nothing back, so this is its one check that the
+            // answer is a verify answer: those carry no output.
+            0 if resp.out_len == 0 => Ok(true),
             s if s == STATUS_CRYPTO_FAILED => Ok(false),
             _ => Err(PqcError::FP_ERROR),
         }
@@ -754,7 +756,7 @@ impl PqcEngine<'_> {
         // Operations that stage operands settle before staging; this covers
         // the ones that use only the mailbox.
         self.settle()?;
-        let seq = self.driver.next_request_seq();
+        let seq = self.driver.next_request_seq(self.id);
         mailbox::post_request(self.id, seq, params);
         // Cleared when the answer is collected. If this future is dropped
         // or gives up first, releasing the engine quarantines it instead.
@@ -787,7 +789,7 @@ impl PqcEngine<'_> {
             PqcError::FP_NOT_READY,
             "engine {} (FP{}) did not answer seq={} within the deadline",
             self.id.raw(),
-            self.id.raw(),
+            self.id.core(),
             seq
         );
         // A core that faulted or panicked leaves a record on its way down.
@@ -802,7 +804,7 @@ impl PqcEngine<'_> {
                 "pqc",
                 PqcError::FP_NOT_READY,
                 "FP{} crashed: kind={} pc={:#010x} lr={:#010x} sp={:#010x} cfsr={:#010x} hfsr={:#010x} mmfar={:#010x} bfar={:#010x} stack_free={}",
-                self.id.raw(),
+                self.id.core(),
                 _c.kind,
                 _c.pc,
                 _c.lr,
@@ -862,8 +864,59 @@ impl Drop for PqcEngine<'_> {
     /// Safety net for an engine dropped without [`release`](Self::release)
     /// — an early `?` on an error path, or a future cancelled mid-request.
     /// Without this the engine would be leaked from the pool and, after
-    /// three such leaks, PQC would wedge permanently.
+    /// six such leaks, PQC would wedge permanently.
     fn drop(&mut self) {
         self.give_back();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mldsa_checks_message_limits_without_an_engine() {
+        let msg = [0u8; MLDSA_MSG_MAX + 1];
+        let ctx = [0u8; MLDSA_CTX_MAX + 1];
+        assert_eq!(
+            mldsa_check_msg(
+                HsmMlDsaMsgType::Pure,
+                &msg[..MLDSA_MSG_MAX],
+                &ctx[..MLDSA_CTX_MAX]
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            mldsa_check_msg(HsmMlDsaMsgType::Pure, &msg, &[]),
+            Err(PqcError::INVALID_BUFFER_SIZE)
+        );
+        assert_eq!(
+            mldsa_check_msg(HsmMlDsaMsgType::Pure, &[], &ctx),
+            Err(PqcError::INVALID_BUFFER_SIZE)
+        );
+    }
+
+    #[test]
+    fn mldsa_checks_message_type_before_mailbox_encoding() {
+        let mu = [0u8; mailbox::MU_LEN];
+        assert_eq!(
+            mailbox_msg_type(HsmMlDsaMsgType::ExternalMu, &mu, &[]),
+            Ok(mailbox::MSG_TYPE_EXTERNAL_MU)
+        );
+        for (msg, ctx) in [(&mu[..mailbox::MU_LEN - 1], &[][..]), (&mu[..], &b"x"[..])] {
+            assert_eq!(
+                mldsa_check_msg(HsmMlDsaMsgType::ExternalMu, msg, ctx),
+                Err(HsmError::InvalidArg)
+            );
+        }
+        for msg_type in [
+            HsmMlDsaMsgType::PreHash(HsmHashAlgo::Sha256),
+            HsmMlDsaMsgType::HashMsg(HsmHashAlgo::Sha256),
+        ] {
+            assert_eq!(
+                mldsa_check_msg(msg_type, &[], &[]),
+                Err(HsmError::UnsupportedCmd)
+            );
+        }
     }
 }

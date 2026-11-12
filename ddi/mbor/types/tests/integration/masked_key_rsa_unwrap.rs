@@ -34,7 +34,6 @@ fn test_masked_key_rsa_unwrap_rsa_key() {
                 DdiKeyClass::Rsa,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                Some(1),
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
@@ -56,7 +55,6 @@ fn test_masked_key_rsa_unwrap_rsa_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 unwrapped_key_id,
-                false,
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -135,7 +133,6 @@ fn test_masked_key_rsa_unwrap_rsa_crt_key() {
                 DdiKeyClass::RsaCrt,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                Some(1),
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
@@ -157,7 +154,6 @@ fn test_masked_key_rsa_unwrap_rsa_crt_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 unwrapped_key_id,
-                false,
                 masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -221,21 +217,18 @@ fn test_masked_key_rsa_unwrap_ecc_key() {
                 (
                     TEST_ECC_256_PRIVATE_KEY.as_slice(),
                     DdiKeyType::Ecc256Private,
-                    0x6677,
                 ),
                 (
                     TEST_ECC_384_PRIVATE_KEY.as_slice(),
                     DdiKeyType::Ecc384Private,
-                    0x6678,
                 ),
                 (
                     TEST_ECC_521_PRIVATE_KEY.as_slice(),
                     DdiKeyType::Ecc521Private,
-                    0x6679,
                 ),
             ];
 
-            for (test_key, expected_key_type, key_tag) in keys.iter() {
+            for (test_key, expected_key_type) in keys.iter() {
                 let (unwrap_key_id, unwrap_pub_key_der, _) = get_unwrapping_key(dev, session_id);
 
                 let ecc_wrapped = wrap_data(unwrap_pub_key_der, test_key);
@@ -254,7 +247,6 @@ fn test_masked_key_rsa_unwrap_ecc_key() {
                     DdiKeyClass::Ecc,
                     DdiRsaCryptoPadding::Oaep,
                     DdiHashAlgorithm::Sha256,
-                    Some(*key_tag),
                     helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App),
                 );
 
@@ -309,8 +301,6 @@ fn test_masked_key_rsa_unwrap_aes_key() {
 
             let der_len = aes_256_wrapped.len();
 
-            let key_tag = 0x5566;
-
             let resp = helper_rsa_unwrap(
                 dev,
                 Some(session_id),
@@ -320,7 +310,6 @@ fn test_masked_key_rsa_unwrap_aes_key() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                Some(key_tag),
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
@@ -358,8 +347,6 @@ fn test_masked_key_rsa_unwrap_aes_key() {
     );
 }
 
-// Emu does not reject unmasking a key whose tag already exists.
-#[cfg(not(any(feature = "emu", feature = "sock")))]
 #[test]
 fn test_masked_key_rsa_unwrap_aes_bulk_key() {
     ddi_dev_test(
@@ -377,7 +364,6 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
 
             let mut blob = [0u8; 3072];
             blob[..TEST_AES_256_CKM_WRAPPED.len()].copy_from_slice(&TEST_AES_256_CKM_WRAPPED);
-            let key_tag = 0x5566;
 
             let resp = helper_rsa_unwrap(
                 dev,
@@ -388,7 +374,6 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
                 DdiKeyClass::AesGcmBulkUnapproved,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                Some(key_tag),
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
@@ -406,29 +391,22 @@ fn test_masked_key_rsa_unwrap_aes_bulk_key() {
                 MaskedKeyAttributes::ENCRYPT | MaskedKeyAttributes::DECRYPT
             ));
 
-            let resp = helper_get_new_key_id_from_unmask(
+            let resp = helper_delete_key(
                 dev,
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 unwrapped_key_id,
-                true,
-                masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let (new_key_id, _, _) = resp.unwrap();
 
-            // Confirm we can find the unwrapped key by tag
-            let resp = helper_open_key(
+            let resp = helper_unmask_key(
                 dev,
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
-                key_tag,
+                masked_key,
             );
             assert!(resp.is_ok(), "resp {:?}", resp);
-            let resp = resp.unwrap();
-
-            assert_eq!(resp.data.key_id, new_key_id);
-            assert_eq!(resp.data.key_kind, DdiKeyType::AesGcmBulk256Unapproved);
+            assert_eq!(resp.unwrap().data.kind, DdiKeyType::AesGcmBulk256Unapproved);
         },
     );
 }

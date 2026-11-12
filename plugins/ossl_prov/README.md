@@ -88,11 +88,13 @@ make -j"$(nproc)" && sudo make install_sw
 # 2. Build both libraries against OpenSSL 3.0.3
 cd tessera-sw
 export LD_LIBRARY_PATH=/opt/openssl-3.0.3/lib
-OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_api_native --features emu
-OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_ossl_provider --features emu
+OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_api_native
+OPENSSL_DIR=/opt/openssl-3.0.3 cargo build -p tsra_ossl_provider
 ```
 
-On real hardware, omit `emu` from both build commands.
+The same build supports hardware and the simulator. Run
+`ddi_sock_server <addr>` and set `TSRA_DDI_ARGS="transport=sock;sock=<addr>"`
+for OpenSSL to use the socket server. Leave it unset for native hardware.
 
 This produces two shared libraries in `target/debug/`:
 - `tsra_provider.so` — the OpenSSL provider

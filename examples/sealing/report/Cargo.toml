@@ -10,7 +10,7 @@ version = "0.1.0"
 [dependencies]
 anyhow.workspace = true
 bitfield-struct.workspace = true
-der = { features = ["std"], workspace = true }
+der = { features = ["oid", "std"], workspace = true }
 hex.workspace = true
 minicbor = { features = ["std"], workspace = true }
 tsra_crypto.workspace = true

@@ -31,12 +31,13 @@ use tsra_fw_ddi_tbor_types::TborMlDsaSignResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
 use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 
-use super::from_pal::mldsa_param_set;
+use super::from_pal::mldsa_param;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::ddi::tbor::mldsa_generate_key::MLDSA_SEED_LEN;
@@ -83,12 +84,12 @@ pub(crate) async fn handle<P: HsmPal>(
             // A key of another type is rejected before its permissions are
             // checked, as `EccSign` does.
             let view = unmask(pal, io, masking_key, req.masked_key).await?;
-            let param_set = mldsa_param_set(view.key_kind)?;
+            let param = mldsa_param(view.key_kind)?;
             if !view.key_attrs.sign() {
                 return Err(HsmError::InvalidPermissions);
             }
-            let sig_len = param_set.sig_len();
-            let sec_len = param_set.sec_key_len();
+            let sig_len = param.sig_len();
+            let sec_len = param.sk_len();
             if view.target_key.len() != MLDSA_SEED_LEN + sec_len {
                 return Err(HsmError::InvalidArg);
             }
@@ -99,17 +100,9 @@ pub(crate) async fn handle<P: HsmPal>(
             if key_end > req.masked_key.len() || key_end < sig_len {
                 return Err(HsmError::InvalidArg);
             }
-            pal.mldsa_sign_in_place(
-                io,
-                param_set,
-                &mut req.masked_key[..key_end],
-                HsmMlDsaMsgType::ExternalMu,
-                hedge,
-                req.mu,
-                &req.mu[..0],
-            )
-            .await?;
-            sig_len
+            let msg = HsmMlDsaMsg::new(HsmMlDsaMsgType::ExternalMu, 0, req.mu)?;
+            pal.mldsa_sign_in_place(io, param, &mut req.masked_key[..key_end], hedge, msg)
+                .await?
         };
         let buffer = cmd_buf.buffer_mut();
         let frame = TborMlDsaSignResp::encode(buffer, 0, false)?

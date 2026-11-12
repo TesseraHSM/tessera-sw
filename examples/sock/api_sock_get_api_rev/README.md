@@ -20,7 +20,8 @@ payloads, with ordered TBOR OOB bytes, fast-path AES-GCM/XTS bulk requests and
 sideband partition reset. It does not
 introduce a new API protocol or change public API call
 signatures. The application uses `tsra_api`; transport selection stays in the
-DDI layer through the opt-in `tsra_api/sock` feature.
+DDI layer and is chosen at runtime by `TSRA_DDI_ARGS=transport=sock`.
+The same SDK build supports native hardware and socket connections.
 
 The server runs one shared host-native `StdHsm` emulator and allocates/enables
 partition **10** once at startup. Accepting a connection does not create another
@@ -85,7 +86,7 @@ is lost when the process exits. Stop it with Ctrl+C after finishing.
 In a second terminal:
 
 ```sh
-cargo run -p tsra_api_sock_get_api_rev --features sock -- tcp://127.0.0.1:1234 4
+cargo run -p tsra_api_sock_get_api_rev -- tcp://127.0.0.1:1234 4
 ```
 
 The arguments are `[ENDPOINT] [THREADS]`. Both are optional; the defaults are
@@ -93,7 +94,7 @@ The arguments are `[ENDPOINT] [THREADS]`. Both are optional; the defaults are
 For example, to use the defaults:
 
 ```sh
-cargo run -p tsra_api_sock_get_api_rev --features sock
+cargo run -p tsra_api_sock_get_api_rev
 ```
 
 Each worker prints its endpoint and supported revision range. Worker output order
@@ -103,7 +104,7 @@ is nondeterministic. The final message confirms that all workers finished:
 All 4 workers opened the same partition at tcp://127.0.0.1:1234
 ```
 
-The program configures `TSRA_DDI_SOCK` once before discovery or worker creation.
+The program configures `TSRA_DDI_ARGS` once before discovery or worker creation.
 Discovery negotiates a supported revision; each worker then opens its own handle
 with that revision. Opening performs device queries, including `GetApiRev` and
 `GetDeviceInfo`. `api_rev_range()` reads the metadata cached on that handle.
@@ -114,7 +115,7 @@ If port 1234 is already occupied, use the same alternative in both terminals:
 
 ```sh
 cargo run -p ddi_sock_server -- tcp://127.0.0.1:2345
-cargo run -p tsra_api_sock_get_api_rev --features sock -- tcp://127.0.0.1:2345 8
+cargo run -p tsra_api_sock_get_api_rev -- tcp://127.0.0.1:2345 8
 ```
 
 These are separate, concurrently running terminal commands, not a sequential
@@ -128,23 +129,22 @@ Use a dedicated server: these suites reset its shared partition. Set
 Run each suite serially:
 
 ```sh
-RUST_LOG=info TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
-  -p tsra_ddi_mbor_types --features sock --test tsra_ddi_tests --test-threads 1
-RUST_LOG=info TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
-  -p tsra_ddi_tbor_types --features sock --test tsra_ddi_tbor_tests --test-threads 1
+RUST_LOG=info TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" cargo nextest run \
+  -p tsra_ddi_mbor_types --test tsra_ddi_tests --test-threads 1
+RUST_LOG=info TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" cargo nextest run \
+  -p tsra_ddi_tbor_types --test tsra_ddi_tbor_tests --test-threads 1
 ```
 
 The API tests, including the C++ suite, run the same way; add
-`session-ex-tests` for TBOR (`open_session_ex`) sessions:
+`api_rev=1_1` to `TSRA_TEST_ARGS` for TBOR (`open_session_ex`) sessions:
 
 ```sh
-TSRA_DDI_SOCK=tcp://127.0.0.1:1234 cargo nextest run \
-  -p tsra_api_tests --features sock --test-threads 1
+TSRA_DDI_ARGS="transport=sock;sock=tcp://127.0.0.1:1234" cargo nextest run \
+  -p tsra_api_tests --test-threads 1
 ```
 
-Use the test package's `sock` feature, not just `tsra_ddi/sock`: it selects
-socket-specific session expectations and excludes hardware-only MBOR bulk
-crypto tests, as the existing `emu` feature does. Tests of the removed
+`TSRA_DDI_ARGS=transport=sock` also selects socket-specific session expectations
+and skips hardware-only MBOR bulk crypto tests. Tests of the removed
 `key_tag`/named-key lookup feature are disabled.
 Connections may own multiple sessions; cloned device handles share their
 connection and sessions. A different connection cannot use those sessions.
@@ -158,7 +158,7 @@ listener on port 1234; on Windows it defaults to TCP loopback.
 A Linux client can use the existing VSOCK server with:
 
 ```sh
-cargo run -p tsra_api_sock_get_api_rev --features sock -- vsock://4:1234 4
+cargo run -p tsra_api_sock_get_api_rev -- vsock://4:1234 4
 ```
 
 Replace `4` in the endpoint with the server guest's CID. Unix-domain paths are
@@ -173,8 +173,7 @@ Neither transport is required for the TCP setup on Windows or Linux.
 - All clients share partition state. For workflows beyond this metadata example,
   coordinate provisioning and reset operations, and open a separate authenticated
   session per worker as appropriate.
-- `sock` and `emu` select mutually exclusive DDI backends. Do not combine
-  their feature flags in the same build.
+- Transport selection is runtime configuration, not a Cargo feature.
 - The socket transport carries ordinary MBOR/TBOR commands, with an 8192-byte
   main request/response capacity. TBOR supports up to 64 OOB buffers of up to
   64 KiB each, reconstructed as server-owned SGL descriptors. Reset disables
@@ -201,7 +200,6 @@ For a complete provisioning, signing, and recovery workflow, see the
 - **Failed to query the API revision:** the endpoint must speak the TSRA socket
   protocol and support the API's startup device queries, not just accept TCP.
 - **VSOCK requires Linux:** select a `tcp://` endpoint for native Windows.
-- **Cargo skips the example:** enable its `sock` feature explicitly.
 
 ## Focused Tests
 
@@ -210,9 +208,9 @@ Run these commands from the repository root on Windows or Linux:
 ```sh
 cargo xtask nextest --package tsra_ddi_sock
 cargo xtask nextest --package ddi_sock_server
-cargo xtask nextest --package tsra_api_sock_get_api_rev --features sock
+cargo build --package tsra_api_sock_get_api_rev
 ```
 
-These cover TCP framing, concurrent server connections, malformed submission
-rejection, argument validation, and worker completion/error handling. The
+These cover TCP framing, concurrent server connections, and malformed submission
+rejection. The
 two-terminal run above exercises the complete public-API-to-emulator path.

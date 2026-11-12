@@ -18,7 +18,6 @@ pub fn create_key(dev: &mut <DdiTest as Ddi>::Dev, sess_id: u16) -> u16 {
         Some(sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiAesKeySize::Aes128,
-        None,
         key_props,
     );
 
@@ -220,7 +219,7 @@ fn test_import_delete_aesbulk256_key() {
         |dev, ddi, path, session_id| {
             let max_keys = get_device_info(ddi, path).tables as u16 * 7;
             let mut key_ids = vec![];
-            for i in 0..max_keys {
+            for _ in 0..max_keys {
                 let resp = rsa_secure_import_key(
                     dev,
                     Some(session_id),
@@ -228,12 +227,11 @@ fn test_import_delete_aesbulk256_key() {
                     &TEST_RSA_2K_PRIVATE_KEY,
                     DdiKeyClass::Rsa,
                     DdiKeyUsage::EncryptDecrypt,
-                    Some(i + 1),
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
                 key_ids.push(resp.unwrap().data.key_id);
             }
-            for (i, key_id) in key_ids.into_iter().enumerate() {
+            for key_id in key_ids {
                 let resp = helper_delete_key(
                     dev,
                     Some(session_id),
@@ -242,11 +240,11 @@ fn test_import_delete_aesbulk256_key() {
                 );
                 assert!(resp.is_ok(), "resp {:?}", resp);
 
-                let resp = helper_open_key(
+                let resp = helper_delete_key(
                     dev,
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
-                    i as u16 + 1,
+                    key_id,
                 );
                 assert!(resp.is_err(), "resp {:?}", resp);
             }

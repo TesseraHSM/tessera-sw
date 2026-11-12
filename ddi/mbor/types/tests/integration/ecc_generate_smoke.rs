@@ -35,7 +35,6 @@ fn test_ecc_generate_smoke() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     curve,
-                    None,
                     key_props,
                 )
                 .unwrap();
@@ -86,7 +85,6 @@ fn test_ecc_generate_no_session_smoke() {
                 None,
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             )
             .expect_err("EccGenerateKeyPair must be rejected without a session");

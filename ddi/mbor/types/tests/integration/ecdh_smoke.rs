@@ -38,7 +38,6 @@ fn test_ecdh_key_exchange_smoke() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P256,
-                    None,
                 );
 
             // Side A: derive Secret256 from (priv1, pub2).
@@ -48,7 +47,6 @@ fn test_ecdh_key_exchange_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
             )
@@ -87,7 +85,6 @@ fn test_ecdh_key_exchange_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id2,
                 MborByteArray::new(pub_key1, pub_key1_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
             )
@@ -112,7 +109,6 @@ fn test_ecdh_key_exchange_unknown_key_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
             );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -122,7 +118,6 @@ fn test_ecdh_key_exchange_unknown_key_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 0xFFFF, /* unknown priv key id */
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 key_props,
             )
@@ -159,7 +154,6 @@ fn test_ecdh_key_exchange_curve_mismatch_smoke() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P256,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -169,7 +163,6 @@ fn test_ecdh_key_exchange_curve_mismatch_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384, /* mismatched target — priv is P-256 */
                 key_props,
             )

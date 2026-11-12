@@ -7,6 +7,10 @@
 //! EC operations but overrides `sign_sig` to dispatch to an [`EcdsaSignHandler`]
 //! (e.g. one that signs on the HSM). This is a libcrypto `EC_KEY_METHOD`, not an
 //! `ENGINE`, so it lives apart from the `Engine` wrapper in `engine.rs`.
+//!
+//! The method also wraps the `finish` (run by `EC_KEY_free`) and `copy` (run by
+//! `EC_KEY_copy`/`EC_KEY_dup`) slots so the handler can track per-key state —
+//! see [`EcdsaSignHandler::finish`] and [`EcdsaSignHandler::copy`].
 
 use std::ffi::c_int;
 use std::ffi::c_uchar;
@@ -17,7 +21,9 @@ use tsra_ossl_engine_sys as ffi;
 
 use crate::error::EngineError;
 use crate::error::EngineResult;
+use crate::error::RetCode;
 use crate::error::catch_panic;
+use crate::error::result_to_int;
 use crate::error::result_to_ptr;
 
 /// Caller-supplied ECDSA signing for an engine-backed EC key, invoked through
@@ -45,6 +51,28 @@ pub trait EcdsaSignHandler {
     /// raw pointer (only meaningful to dereference in `unsafe`), valid for the
     /// duration of the call. Called only when [`owns`](Self::owns) is true.
     fn sign(ec_key: *mut ffi::EC_KEY, digest: &[u8]) -> EngineResult<*mut ffi::ECDSA_SIG>;
+
+    /// Called when OpenSSL frees an `EC_KEY` using this method (`EC_KEY_free`
+    /// runs the method's `finish` while the key's ex_data is still readable).
+    /// Release per-key state here (e.g. drop the key's reference on an attached
+    /// HSM key). Runs for software keys that adopted the method too, so it must
+    /// ignore keys it does not own. Default: nothing.
+    ///
+    /// Unlike an ex_data free callback, this hook is safe across `.so` unload:
+    /// every `EC_KEY` using the method holds a functional reference on the
+    /// engine that registered it, which keeps the engine — and its `.so` —
+    /// loaded.
+    fn finish(_ec_key: *mut ffi::EC_KEY) {}
+
+    /// Called at the end of `EC_KEY_copy` (hence `EC_KEY_dup`), after OpenSSL has
+    /// copied `src`'s ex_data pointers into `dest`. A handler whose `finish`
+    /// releases per-key state must account for the second key now sharing it
+    /// (e.g. take another reference), or the first `finish` would free state
+    /// the other key still uses. Return an error to fail the copy. Default:
+    /// nothing.
+    fn copy(_dest: *mut ffi::EC_KEY, _src: *mut ffi::EC_KEY) -> EngineResult<()> {
+        Ok(())
+    }
 }
 
 /// OpenSSL's built-in `sign_sig`, captured from `EC_KEY_OpenSSL()` by
@@ -59,6 +87,57 @@ type SignSigFn = unsafe extern "C" fn(
     *mut ffi::EC_KEY,
 ) -> *mut ffi::ECDSA_SIG;
 static DEFAULT_SIGN_SIG: OnceLock<SignSigFn> = OnceLock::new();
+
+/// OpenSSL's built-in `finish`/`copy` (NULL in 1.1.1, chained if present),
+/// captured by [`new_ecdsa_method`] like [`DEFAULT_SIGN_SIG`].
+type EcFinishFn = unsafe extern "C" fn(*mut ffi::EC_KEY);
+type EcCopyFn = unsafe extern "C" fn(*mut ffi::EC_KEY, *const ffi::EC_KEY) -> c_int;
+static DEFAULT_FINISH: OnceLock<EcFinishFn> = OnceLock::new();
+static DEFAULT_COPY: OnceLock<EcCopyFn> = OnceLock::new();
+
+/// C trampoline for the `EC_KEY_METHOD` `finish` slot: runs `H::finish`
+/// (panics caught), then always chains to the built-in `finish`, if any.
+///
+/// # Safety
+/// Called only by OpenSSL with the `EC_KEY` being finished.
+#[allow(unsafe_code)]
+unsafe extern "C" fn c_ec_finish<H: EcdsaSignHandler>(ec_key: *mut ffi::EC_KEY) {
+    if !ec_key.is_null() {
+        catch_panic(|| H::finish(ec_key), ());
+    }
+    if let Some(dflt) = DEFAULT_FINISH.get() {
+        // SAFETY: forwarding the EC_KEY OpenSSL passed us to the built-in finish.
+        unsafe { dflt(ec_key) };
+    }
+}
+
+/// C trampoline for the `EC_KEY_METHOD` `copy` slot: chains to the built-in
+/// `copy`, if any, then runs `H::copy`. Returns `0` on error/panic, which fails
+/// the `EC_KEY_copy`.
+///
+/// # Safety
+/// Called only by OpenSSL from `EC_KEY_copy` with valid `dest`/`src`.
+#[allow(unsafe_code)]
+unsafe extern "C" fn c_ec_copy<H: EcdsaSignHandler>(
+    dest: *mut ffi::EC_KEY,
+    src: *const ffi::EC_KEY,
+) -> c_int {
+    if let Some(dflt) = DEFAULT_COPY.get() {
+        // SAFETY: forwarding the keys OpenSSL passed us to the built-in copy.
+        if unsafe { dflt(dest, src) } == 0 {
+            return RetCode::Fail.into();
+        }
+    }
+    catch_panic(
+        || {
+            if dest.is_null() || src.is_null() {
+                return result_to_int::<()>(Err(EngineError::NullParam("dest/src")));
+            }
+            result_to_int(H::copy(dest, src.cast_mut()))
+        },
+        RetCode::Fail.into(),
+    )
+}
 
 /// C trampoline for `EC_KEY_METHOD_set_sign`'s `sign_sig` slot. Catches panics
 /// and dispatches to `H::sign`, returning NULL on panic/error. A caller-supplied
@@ -143,7 +222,9 @@ unsafe fn ecdsa_sign_inner<H: EcdsaSignHandler>(
 
 /// Build an `EC_KEY_METHOD` that signs via `H` (ECDSA), keeping OpenSSL's
 /// default `sign`/`sign_setup` (they DER-wrap our `sign_sig`) and everything
-/// else (verify, keygen, compute_key) from `EC_KEY_OpenSSL`. Attach the result
+/// else (verify, keygen, compute_key) from `EC_KEY_OpenSSL`, with
+/// [`EcdsaSignHandler::finish`]/[`copy`](EcdsaSignHandler::copy) wrapped around
+/// the built-in `finish`/`copy`. Attach the result
 /// to a loaded key with `EC_KEY_set_method`.
 ///
 /// The returned method is heap-allocated and intentionally not freed here: the
@@ -176,6 +257,44 @@ pub fn new_ecdsa_method<H: EcdsaSignHandler>() -> EngineResult<*mut ffi::EC_KEY_
     let _ = DEFAULT_SIGN_SIG.set(dflt);
     // SAFETY: method is ours; reinstall the defaults plus our sign_sig trampoline.
     unsafe { ffi::EC_KEY_METHOD_set_sign(method, sign, sign_setup, Some(c_ecdsa_sign_sig::<H>)) };
+
+    // Wrap finish/copy, keeping the copied init/set_* slots.
+    let mut init = None;
+    let mut finish = None;
+    let mut copy = None;
+    let mut set_group = None;
+    let mut set_private = None;
+    let mut set_public = None;
+    // SAFETY: method is ours; get_init writes the out-params it is given.
+    unsafe {
+        ffi::EC_KEY_METHOD_get_init(
+            method,
+            &mut init,
+            &mut finish,
+            &mut copy,
+            &mut set_group,
+            &mut set_private,
+            &mut set_public,
+        )
+    };
+    if let Some(f) = finish {
+        let _ = DEFAULT_FINISH.set(f);
+    }
+    if let Some(c) = copy {
+        let _ = DEFAULT_COPY.set(c);
+    }
+    // SAFETY: method is ours; reinstall the copied slots plus our trampolines.
+    unsafe {
+        ffi::EC_KEY_METHOD_set_init(
+            method,
+            init,
+            Some(c_ec_finish::<H>),
+            Some(c_ec_copy::<H>),
+            set_group,
+            set_private,
+            set_public,
+        )
+    };
     Ok(method)
 }
 
@@ -213,6 +332,73 @@ mod tests {
 
         fn sign(_ec_key: *mut ffi::EC_KEY, _digest: &[u8]) -> EngineResult<*mut ffi::ECDSA_SIG> {
             unreachable!("sign must not be called for a key the handler does not own")
+        }
+    }
+
+    // EC_KEY_dup must reach the handler's copy, and freeing each key its
+    // finish; a failing copy must fail the dup.
+    #[test]
+    #[allow(unsafe_code)]
+    fn ec_key_dup_and_free_run_handler_copy_and_finish() {
+        use std::ptr::NonNull;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        static COPIED: AtomicUsize = AtomicUsize::new(0);
+        static FINISHED: AtomicUsize = AtomicUsize::new(0);
+        static FAIL_COPY: AtomicBool = AtomicBool::new(false);
+        struct Tracking;
+        impl EcdsaSignHandler for Tracking {
+            fn owns(_ec_key: *mut ffi::EC_KEY) -> bool {
+                false
+            }
+            fn sign(_ec_key: *mut ffi::EC_KEY, _d: &[u8]) -> EngineResult<*mut ffi::ECDSA_SIG> {
+                unreachable!("not signing")
+            }
+            fn finish(_ec_key: *mut ffi::EC_KEY) {
+                FINISHED.fetch_add(1, Ordering::SeqCst);
+            }
+            fn copy(_dest: *mut ffi::EC_KEY, _src: *mut ffi::EC_KEY) -> EngineResult<()> {
+                COPIED.fetch_add(1, Ordering::SeqCst);
+                if FAIL_COPY.load(Ordering::SeqCst) {
+                    return Err(EngineError::Other("copy refused".into()));
+                }
+                Ok(())
+            }
+        }
+
+        let method = new_ecdsa_method::<Tracking>().unwrap();
+        // SAFETY: a throwaway ENGINE carrying the method; every key is freed
+        // before the method and engine are freed.
+        unsafe {
+            let raw = ffi::ENGINE_new();
+            let engine = crate::engine::Engine::from_ptr(NonNull::new(raw).unwrap());
+            engine.set_ec_method(method).unwrap();
+            let ec = engine.new_ec_key().unwrap();
+
+            let dup = ffi::EC_KEY_dup(ec);
+            assert!(!dup.is_null());
+            assert_eq!(COPIED.load(Ordering::SeqCst), 1, "EC_KEY_dup must run copy");
+            ffi::EC_KEY_free(dup);
+            assert_eq!(
+                FINISHED.load(Ordering::SeqCst),
+                1,
+                "EC_KEY_free must run finish"
+            );
+
+            FAIL_COPY.store(true, Ordering::SeqCst);
+            assert!(
+                ffi::EC_KEY_dup(ec).is_null(),
+                "a failing copy must fail the dup"
+            );
+            ffi::ERR_clear_error();
+
+            ffi::EC_KEY_free(ec);
+            // The failed dup's half-built key is freed by OpenSSL too.
+            assert_eq!(FINISHED.load(Ordering::SeqCst), 3);
+            ffi::ENGINE_free(raw);
+            ffi::EC_KEY_METHOD_free(method);
         }
     }
 

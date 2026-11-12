@@ -247,9 +247,13 @@ fn open_session_multiple_concurrent() {
 }
 
 /// Enforces the per-file-descriptor limit of one active session.
-#[cfg(not(feature = "sock"))]
 #[test]
 fn open_session_second_on_same_fd_rejected() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
     let _a = ctx
         .open_session(CU, SessionType::PlainText)
@@ -610,7 +614,6 @@ fn pk_init_single_byte_tampered_rejected() {
 }
 
 /// Verifies concurrent native-backend CU opens all succeed with unique IDs.
-#[cfg(not(feature = "emu"))]
 #[test]
 fn open_session_multi_threaded_all_should_open() {
     let ctx = TestCtx::new();
@@ -768,9 +771,13 @@ fn rejected_pk_init_does_not_consume_session_slot() {
 }
 
 /// Verifies a pending Phase-1 session blocks another open on the same handle.
-#[cfg(not(feature = "sock"))]
 #[test]
 fn pending_session_blocks_second_open_on_same_fd() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
 
     let pending = ctx
@@ -937,9 +944,13 @@ fn authenticated_session_mac_key_derivation_is_stable() {
 }
 
 /// Verifies failed Phase-2 authentication leaves the original handle session-bound.
-#[cfg(not(feature = "sock"))]
 #[test]
 fn failed_finish_mac_keeps_original_fd_session_bound() {
+    // Not applicable to the socket transport: a socket connection may hold
+    // several sessions, so the one-session-per-handle limit doesn't apply.
+    if tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
 
     let pending = ctx
@@ -963,9 +974,13 @@ fn failed_finish_mac_keeps_original_fd_session_bound() {
 }
 
 /// Socket connections support multiple Pending and Active sessions.
-#[cfg(feature = "sock")]
 #[test]
 fn socket_connection_supports_multiple_sessions() {
+    // Only applicable to the socket transport: hardware limits each device
+    // handle to one session.
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
     let first = ctx
         .session_open_init(CU, SessionType::PlainText)
@@ -987,9 +1002,13 @@ fn socket_connection_supports_multiple_sessions() {
 }
 
 /// Failed authentication does not prevent a fresh open on a socket connection.
-#[cfg(feature = "sock")]
 #[test]
 fn socket_connection_can_open_after_failed_finish() {
+    // Only applicable to the socket transport: hardware limits each device
+    // handle to one session.
+    if !tsra_ddi::sock_selected() {
+        return;
+    }
     let ctx = TestCtx::new();
     let pending = ctx
         .session_open_init(CU, SessionType::PlainText)
