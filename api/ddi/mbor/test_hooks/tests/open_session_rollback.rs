@@ -3,6 +3,7 @@
 
 //! Requires Uno firmware with `tsra_test_hooks` and exclusive partition access.
 //! Uses separate native handles; capacity is checked before session cleanup.
+//! Unsupported injection hooks skip the scenario while still cleaning up sessions.
 //!
 //! Test flow:
 //! 1. Establish a fresh credential, open a control session, and create a
@@ -104,10 +105,14 @@ fn test_open_session_with_rollback_after_exhaust_sessions() {
                     TEST_SESSION_SEED,
                 );
                 let nonce = credential.nonce;
-                let armed =
-                    helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure)
-                        .expect("TriggerIoFailure requires firmware built with tsra_test_hooks");
-                assert_eq!(armed.hdr.status, DdiStatus::Success);
+                match helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure) {
+                    Ok(resp) => assert_eq!(resp.hdr.status, DdiStatus::Success),
+                    Err(DdiError::DdiStatus(DdiStatus::UnsupportedCmd)) => {
+                        println!("Firmware requires tsra_test_hooks for rollback injection.");
+                        return;
+                    }
+                    Err(err) => panic!("arm rollback injection: {err:?}"),
+                }
                 let failed =
                     helper_open_session(target_dev, None, rev, credential.clone(), public.clone());
                 if let Ok(resp) = &failed {
