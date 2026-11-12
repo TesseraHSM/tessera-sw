@@ -227,6 +227,34 @@ impl HsmPartState {
 ///
 /// Partition scoping is implicit via the platform's private IO metadata.
 pub trait HsmPartitionManager: HsmIoTypes {
+    /// Generate and publish a missing establish-credential key and its public key.
+    ///
+    /// The caller holds the partition lock and has checked that credentials
+    /// are absent. Does not refresh the nonce or session-encryption key.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — IO handle bound to the target partition.
+    ///
+    /// # Returns
+    ///
+    /// [`HsmResult<HsmKeyId>`] — the newly generated key's handle on success,
+    /// or a PAL-level error if generation or publication fails.
+    async fn part_generate_establish_cred_key(&self, io: &Self::Io) -> HsmResult<HsmKeyId>;
+
+    /// Read the published unwrapping-key handle without generating or importing it.
+    ///
+    /// # Parameters
+    ///
+    /// - `io` — IO handle bound to the target partition.
+    ///
+    /// # Returns
+    ///
+    /// [`HsmResult<Option<HsmKeyId>>`] — `Some(key_id)` when a handle is
+    /// published, `None` when no handle is published, or a PAL-level error
+    /// if the lookup fails.
+    fn part_existing_unwrapping_key_id(&self, io: &Self::Io) -> HsmResult<Option<HsmKeyId>>;
+
     /// Read a [`HsmPartPropKind::U8`] slot.
     ///
     /// # Parameters

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Shared helpers for committing freshly produced keys to storage and
-//! rolling them back on a later failure.
+//! recording their completion-boundary undo.
 //!
 //! Bulk keys (AES-GCM / XTS) are owned by the platform bulk-crypto path:
 //! they are created through
@@ -11,6 +11,8 @@
 //! through the ordinary vault delete paths.  Every op that can produce a
 //! bulk key — AES generate, HKDF / KBKDF derive, unmask, RSA unwrap —
 //! commits it through [`commit_key`].
+
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 
@@ -38,33 +40,21 @@ pub(crate) async fn commit_key<P: HsmPal>(
     kind: HsmVaultKeyKind,
     sess_id: HsmSessId,
     attrs: HsmVaultKeyAttrs,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<(HsmKeyId, Option<u16>)> {
     let session_id = attrs.session().then_some(sess_id);
-    if is_bulk(kind) {
+    let result = if is_bulk(kind) {
         let (handle, bulk_key_id) = pal
             .bulk_key_create(io, material, kind, session_id, attrs)
             .await?;
-        Ok((handle, Some(bulk_key_id)))
+        (handle, Some(bulk_key_id))
     } else {
         let handle = pal
             .vault_key_create(io, material, kind, session_id, attrs)
             .await?;
-        Ok((handle, None))
-    }
-}
-
-/// Return `result` unchanged, first deleting the key committed earlier in
-/// the op (best effort) if it is an error, so a failure after the commit
-/// leaves no vault entry (or backend registration) the host has no handle
-/// for.
-pub(crate) async fn rollback_on_err<P: HsmPal, T>(
-    pal: &P,
-    io: &P::Io,
-    handle: HsmKeyId,
-    result: HsmResult<T>,
-) -> HsmResult<T> {
-    if result.is_err() {
-        let _ = pal.vault_key_delete(io, handle).await;
-    }
-    result
+        (handle, None)
+    };
+    undo.push_vault_create(result.0)?;
+    pal.check_io_failure(io)?;
+    Ok(result)
 }

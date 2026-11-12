@@ -15,6 +15,7 @@
 //! [`HsmPartState::Unallocated`]; a non-zero `SetResource` allocates the
 //! partition and a `PfnEnable` IPC enables it.
 
+use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -501,6 +502,8 @@ impl UnoHsmPal {
         let Ok(part) = PartStore::partition(pid) else {
             return;
         };
+        #[cfg(feature = "tsra_test_hooks")]
+        self.io_failure[usize::from(u8::from(pid))].set(false);
         // Delete every enable-time and provisioning vault key before the
         // backing handles are zeroized below.
         for key_id in [
@@ -789,6 +792,50 @@ impl UnoHsmPal {
 }
 
 impl HsmPartitionManager for UnoHsmPal {
+    async fn part_generate_establish_cred_key(&self, io: &UnoHsmIo) -> HsmResult<HsmKeyId> {
+        // Host key regeneration must use its own scratch, not the shared admin slot.
+        self.alloc_scoped_async(io, async |alloc| {
+            let private = alloc.dma_alloc(P384_PRIV_LEN)?;
+            let public = alloc.dma_alloc(ID_PUB_KEY_LEN)?;
+            let (_, public_len) = self
+                .ecc_gen_keypair(
+                    io,
+                    alloc,
+                    HsmEccCurve::P384,
+                    Some((private, public)),
+                    HsmEccPct::KeyAgreement,
+                )
+                .await?;
+            if public_len != ID_PUB_KEY_LEN {
+                return Err(HsmError::InternalError);
+            }
+            let part = PartStore::partition(io.pid())?;
+            part.set_ec_pub_key(public)?;
+            let blob = self.build_enable_key_blob(alloc, public, private)?;
+            let key = crate::vault::vault(io)
+                .create(
+                    self,
+                    io,
+                    u8::from(io.pid()),
+                    blob,
+                    HsmVaultKeyKind::EstablishCred,
+                    None,
+                    HsmVaultKeyAttrs::new()
+                        .with_internal(true)
+                        .with_local(true)
+                        .with_derive(true),
+                )
+                .await?;
+            part.set_ec_key_id(Some(key));
+            Ok(key)
+        })
+        .await
+    }
+
+    fn part_existing_unwrapping_key_id(&self, io: &UnoHsmIo) -> HsmResult<Option<HsmKeyId>> {
+        Ok(PartStore::partition(io.pid())?.unwrapping_key_id())
+    }
+
     fn part_prop_get_u8(&self, io: &UnoHsmIo, id: HsmPartPropId) -> HsmResult<u8> {
         let part = PartStore::partition(io.pid())?;
         match id {
@@ -1043,6 +1090,7 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::MK_KEY_ID => p.set_mk_key_id(None),
             HsmPartPropId::UPS_KEY_ID => p.set_ups_key_id(None),
             HsmPartPropId::PTA_KEY_ID => p.set_pta_key_id(None),
+            HsmPartPropId::RSA_UNWRAPPING_KEY_ID => p.set_unwrapping_key_id(None),
             HsmPartPropId::SESSION_ENC_KEY_ID => p.set_se_key_id(None),
             HsmPartPropId::ESTABLISH_CRED_KEY_ID => p.set_ec_key_id(None),
             HsmPartPropId::LOCAL_MK_KEY_ID => p.set_local_mk_key_id(None),

@@ -42,6 +42,7 @@ use tsra_fw_ddi_mbor_types::open_session::DdiOpenSessionReq;
 use tsra_fw_ddi_mbor_types::open_session::DdiOpenSessionResp;
 use tsra_fw_ddi_mbor_types::DdiKeyType;
 use tsra_fw_ddi_mbor_types::DdiPublicKey;
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 
@@ -74,6 +75,7 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<DispatchResult<'p>> {
     let mut body: DdiOpenSessionReq<'_> = decoder.decode_data()?;
 
@@ -101,8 +103,7 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
     let mk_session = pal.dma_alloc(io, BK_LEN)?;
     pal.rng_fill_bytes(io, mk_session)?;
 
-    // Resolve the SVNs *before* allocating the slot so the only fallible step
-    // left after `session_create` is the response encode, which we roll back.
+    // Resolve the SVNs before allocating the slot.
     let mfgr_svn = crate::part_state::part_mfgr_svn(pal);
     let owner_svn =
         u16::try_from(crate::part_state::part_owner_svn(pal)).map_err(|_| HsmError::InvalidArg)?;
@@ -111,28 +112,17 @@ pub(crate) async fn open_session<'p, P: HsmPal>(
     let sess_id = pal
         .session_create(io, &api_rev_bytes, mk_session, None)
         .await?;
+    undo.push_session_destroy(sess_id)?;
+    pal.check_io_failure(io)?;
 
     // ── Step 9: Encode response + envelope MK_SESSION under BK_SESSION
     //
-    // The slot is now allocated. If the encode (crypto + DMA + MBOR) fails,
-    // roll the slot back — otherwise the logical slot and its session-vault
-    // key stay allocated forever: `sess_id` is never surfaced to the CQE, so
-    // the host never registers the session and can never `CloseSession` it,
-    // leaking a slot for the rest of the boot. This mirrors the reference
-    // firmware's FSM `rollback_open_session` backstop.
-    let resp = match encode_response(
+    // Keep ownership in the undo log until CQE delivery so an unreachable
+    // session cannot leak either its slot or backing masking key.
+    let resp = encode_response(
         pal, io, hdr, sess_id, bk_session, mk_session, mfgr_svn, owner_svn,
     )
-    .await
-    {
-        Ok(resp) => resp,
-        Err(err) => {
-            // Best-effort teardown of the just-allocated slot; surface the
-            // original failure to the host regardless of teardown result.
-            let _ = pal.session_destroy(io, sess_id).await;
-            return Err(err);
-        }
-    };
+    .await?;
 
     // Surface the new session id to the IO layer for the CQE (only on the
     // success path, since the `?` above returns early on failure), letting the

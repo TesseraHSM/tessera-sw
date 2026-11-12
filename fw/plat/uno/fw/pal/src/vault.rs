@@ -225,6 +225,11 @@ impl HsmVault for UnoHsmPal {
     }
 
     async fn vault_clear(&self, io: &UnoHsmIo) -> HsmResult<()> {
+        #[cfg(feature = "tsra_test_hooks")]
+        self.io_failure
+            .get(usize::from(u8::from(io.pid())))
+            .ok_or(HsmError::InvalidArg)?
+            .set(false);
         // Partition reset (`part_migrate` for Migrate / NSSR, `part_free` for
         // SetResource(0)).  The engine-side keys are removed by the engine
         // itself: the admin core sends it a PFN disable for the function

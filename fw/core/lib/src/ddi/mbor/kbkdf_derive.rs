@@ -23,6 +23,7 @@
 
 use tsra_fw_ddi_mbor_types::derive_kbkdf::DdiKbkdfCounterHmacDeriveReq;
 use tsra_fw_ddi_mbor_types::derive_kbkdf::DdiKbkdfCounterHmacDeriveResp;
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::kdf::KdfClass;
 use super::*;
@@ -42,6 +43,7 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiKbkdfCounterHmacDeriveReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
@@ -85,15 +87,22 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
     // platform bulk-crypto path (its `bulk_key_id` is carried in the
     // response for later bulk ops); every other kind is stored directly
     // in the vault.
-    let (key_handle, bulk_key_id) =
-        match super::bulk::commit_key(pal, io, out, target.kind, HsmSessId::from(sess_id), attrs)
-            .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(e);
-            }
-        };
+    let (key_handle, bulk_key_id) = match super::bulk::commit_key(
+        pal,
+        io,
+        out,
+        target.kind,
+        HsmSessId::from(sess_id),
+        attrs,
+        undo,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return Err(e);
+        }
+    };
     let key_id: u16 = key_handle.into();
 
     // Envelope the derived key into the host's opaque re-import blob.
@@ -126,5 +135,5 @@ pub(crate) async fn kbkdf_counter_hmac_derive<'p, P: HsmPal>(
     }
     .await;
 
-    super::bulk::rollback_on_err(pal, io, key_handle, result.map(|b| &*b)).await
+    result.map(|b| &*b)
 }

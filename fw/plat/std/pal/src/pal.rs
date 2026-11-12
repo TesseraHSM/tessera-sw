@@ -245,6 +245,10 @@ impl Default for StdHsmPal {
 /// so that adding a protocol to the trait forces this platform to
 /// consider it.
 impl HsmCustomDispatch for StdHsmPal {
+    fn check_io_failure(&self, _io: &StdHsmIo) -> HsmResult<()> {
+        Ok(())
+    }
+
     async fn mbor_dispatch(&self, _io: &StdHsmIo, _req: &mut HsmDmaBuf) -> HsmResult<&HsmDmaBuf> {
         Err(HsmError::UnsupportedCmd)
     }

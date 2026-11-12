@@ -42,6 +42,7 @@ use tsra_fw_hsm_key_decode::KeyClass;
 use tsra_fw_hsm_key_unwrap::unwrap_key;
 use tsra_fw_hsm_key_unwrap::UnwrapParams;
 use tsra_fw_hsm_pal_traits::HsmSessId;
+use tsra_fw_hsm_undo::UndoLog;
 
 use super::*;
 
@@ -51,6 +52,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
     io: &P::Io,
     decoder: &mut DdiDecoder<'_>,
     hdr: &DdiReqHdr,
+    undo: &mut UndoLog<'_>,
 ) -> HsmResult<&'p HsmDmaBuf> {
     let body: DdiRsaUnwrapReq<'_> = decoder.decode_data()?;
     let sess_id = hdr.sess_id.ok_or(HsmError::SessionExpected)?;
@@ -126,6 +128,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
             bulk_kind,
             HsmSessId::from(sess_id),
             attrs,
+            undo,
         )
         .await
         {
@@ -170,7 +173,7 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
         }
         .await;
 
-        return super::bulk::rollback_on_err(pal, io, key_id, result.map(|b| &*b)).await;
+        return result.map(|b| &*b);
     }
 
     // Map the wire key class to the neutral import class and derive the
@@ -248,6 +251,8 @@ pub(crate) async fn rsa_unwrap<'p, P: HsmPal>(
                         import_attrs,
                     )
                     .await?;
+                undo.push_vault_create(key_id)?;
+                pal.check_io_failure(io)?;
 
                 Ok((key_id, vault_kind))
             },
