@@ -50,7 +50,7 @@ use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 
 /// Both attestation evidences (source sender, destination receiver) laid
 /// out in a single OOB page, with descriptors indexing into it.
-struct ResealEvidence {
+pub(crate) struct ResealEvidence {
     /// OOB items in index order: the source evidence's `[mfgr root, mfgr
     /// leaf, owner root, owner leaf, part-owner root, part-owner leaf,
     /// report]` (indices 0..=6) followed by the destination evidence's
@@ -67,7 +67,7 @@ struct ResealEvidence {
 }
 
 impl ResealEvidence {
-    fn oob(&self) -> Vec<&[u8]> {
+    pub(crate) fn oob(&self) -> Vec<&[u8]> {
         self.oob_items.iter().map(Vec::as_slice).collect()
     }
 }
@@ -124,7 +124,7 @@ fn push_evidence(
 /// chains all certify `pid_pub` (the report signer), with the
 /// partition-owner chains rooted at `src_anchor` / `dest_anchor` (the policy
 /// POTA key for valid evidence).
-fn build_reseal_evidence(
+pub(crate) fn build_reseal_evidence(
     pid_pub: &[u8; RAW_PUB_LEN],
     src_anchor: &CaKey,
     dest_anchor: &CaKey,
@@ -160,7 +160,7 @@ fn build_reseal_evidence(
 }
 
 /// Assemble a `SdResealRemoteBackup` request.
-fn reseal_request(
+pub(crate) fn reseal_request(
     session_id: u16,
     masked_receiver_key: Vec<u8>,
     evidence: &ResealEvidence,

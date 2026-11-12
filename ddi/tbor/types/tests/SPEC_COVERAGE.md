@@ -180,6 +180,30 @@ role's partition PSK still matches the compiled-in default.
 | E4: A non-allow-listed in-session command under default PSK is rejected with `DefaultPskMustRotate` | ✅ | `part_init::fw_rejects::part_init_reject_default_psk_co` | `PartInit` is currently the only such opcode; this row collapses what `default_psk_gate.rs` calls E4 |
 | E5: `ApiRev` is out-of-session | ✅ | `default_psk_gate::default_psk_gate_api_rev_bypass_emu` |  |
 
+## Partition reset / NSSR (cross-cutting)
+
+`commands::nssr` holds one row per TBOR opcode (see its module docs for
+the three-checkpoint contract); `nssr::guard` fails when an opcode
+declared in `src/` has no row.
+
+| Requirement | Status | Test | Notes |
+|---|---|---|---|
+| Every declared opcode has an NSSR row | ✅ | `nssr::guard::nssr_every_tbor_opcode_has_a_row` | Scans `#[tbor(opcode = …)]` in `src/` |
+| In-session opcode: stale session → `SessionNeedsRenegotiation`; reopened under the default PSK → `DefaultPskMustRotate`; after `PskChange` + re-provisioning, works on pre-reset keys | ✅ 🔁 | `nssr::keys::nssr_*`, `nssr::sd_darc::nssr_*` | Via `assert_in_session_contract` / `assert_gated` |
+| No-session opcodes answer after the reset: partition `Enabled`, new identity key, re-issued leaf | ✅ | `nssr::no_session::nssr_*` |  |
+| `PartInit` after the reset re-derives the pre-reset PTA key | ✅ | `nssr::lifecycle::nssr_part_init` |  |
+| Reset between `PartInit` and `PartFinal` → `PartFinal` is `InvalidArg`; restart from `PartInit` | ✅ | `nssr::lifecycle::nssr_part_final` |  |
+| Reset discards a Pending open (`SessionNotFound`) and reverts a pending reopen (`SessionNotPending`) | ✅ | `nssr::lifecycle::nssr_session_open_finish`, `nssr_session_reopen_finish` |  |
+| CO open while its slot awaits reopen → `VaultSessionLimitReached` | ✅ | `nssr::lifecycle::nssr_session_open_init` | CO has one slot |
+| Reopen keyed with the pre-reset PSK fails the host MAC check; retry under the default PSK | ✅ | `nssr::lifecycle::nssr_session_reopen_init` | Also two resets in a row |
+| `PskChange` allowed under the default PSK, one-shot (`InvalidPermissions`), re-armed by the reset | ✅ | `nssr::lifecycle::nssr_psk_change` |  |
+| Session and Local keys restored; Ephemeral lost (`AesGcmDecryptTagDoesNotMatch`) | ✅ | `nssr::keys::nssr_key_scopes_after_recovery` |  |
+| CU (PlainText) session recovers | ✅ | `nssr::lifecycle::nssr_cu_session_recovers` |  |
+| Recovery through a fresh CO session (close + re-bootstrap); `KeyReport` works | ✅ | `nssr::lifecycle::nssr_recover_through_fresh_co_session` | Session-scope keys are lost on this path |
+| SD restored from local / remote / peer backups | ✅ | `nssr::sd_darc::nssr_sd_restore_{local,remote,peer}_backup` |  |
+| Reset between `PartFinal` and SD creation strands the backing policy (`InvalidArg`) | ✅ | `nssr::sd_darc::nssr_before_sd_create_strands_backing_policy` | Identity key regenerated |
+| `KeyReport` on a reopened CO session | ⚠️ | `nssr::keys::nssr_key_report` | Fails with `SessionAuthFailure`: see Known gaps |
+
 ## Host-side TBOR codec (no FW round-trip required)
 
 | Requirement | Status | Test | Notes |
@@ -726,6 +750,7 @@ The rows marked ⚠️ above, consolidated:
 1. **`SessionOpenInit`**: malformed `pk_init` (length / curve) — no negative test.
 2. **`SessionOpenFinish`**: Finish against a pending slot opened for a different role — no test.
 3. **`PartInit` wire fields**: `pota_thumbprint` is fixed-size on the wire so the FW reaction to a malformed value is not exercised; would require host-side encoding bypass.
+4. **NSSR `KeyReport`**: a CO session reopened under the default PSK keeps that PSK's auth binding after `PskChange`, so `KeyReport` fails with `SessionAuthFailure`; `nssr::keys::nssr_key_report` fails until fixed.
 
 Indirect coverage (🟡) — these rows assert only `DdiError::DdiError(_)`
 and could be tightened to assert a specific `TborStatus`:

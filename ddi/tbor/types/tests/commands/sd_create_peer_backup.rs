@@ -50,11 +50,11 @@ use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 use crate::commands::sd_create_remote_backup::ReceiverEvidence;
 
 /// Byte offset of the `flags` field in the 484-byte `PartPolicy` image.
-const OFF_FLAGS: usize = 418;
+pub(crate) const OFF_FLAGS: usize = 418;
 
 /// `PolicyFlags::ALLOW_PEER_CLONING` (bit 2) — mirror of the firmware
 /// policy flag that gates the peer-backup commands.
-const ALLOW_PEER_CLONING: u8 = 1 << 2;
+pub(crate) const ALLOW_PEER_CLONING: u8 = 1 << 2;
 
 /// A finalized backing partition ready for the peer-backup commands: the
 /// live CO session, its exact policy image, its PID public key (every

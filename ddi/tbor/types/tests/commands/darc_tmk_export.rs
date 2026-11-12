@@ -104,7 +104,7 @@ pub(crate) struct ExportReady {
 
 /// Overwrite the policy `data_pub_key` slot with `data_pub` (raw P-384
 /// `X ‖ Y`, big-endian), marking the DATA anchor present (`Ecc384` / 96).
-fn set_data_anchor(bytes: &mut [u8; PART_POLICY_LEN], data_pub: &[u8; RAW_PUB_LEN]) {
+pub(crate) fn set_data_anchor(bytes: &mut [u8; PART_POLICY_LEN], data_pub: &[u8; RAW_PUB_LEN]) {
     let off = OFF_DATA_PUB_KEY;
     bytes[off..off + 2].copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
     bytes[off + 2..off + 4].copy_from_slice(&(POLICY_MAX_KEY_LEN as u16).to_le_bytes());
