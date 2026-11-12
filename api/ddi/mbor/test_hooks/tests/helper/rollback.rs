@@ -21,6 +21,27 @@ pub fn check_key_rollback<T>(
     setup: impl FnOnce(&<DdiTest as Ddi>::Dev, &mut Vec<u16>) -> T,
     create: impl Fn(&<DdiTest as Ddi>::Dev, &T) -> Result<u16, DdiError>,
 ) {
+    check_key_rollback_with_verify(
+        dev,
+        session_id,
+        setup,
+        create,
+        |key_id| key_id,
+        |dev, _, retained, recovered| {
+            assert_aes_key(dev, session_id, retained);
+            assert_aes_key(dev, session_id, recovered);
+        },
+    );
+}
+
+pub fn check_key_rollback_with_verify<T, K: Copy + std::fmt::Debug>(
+    dev: &mut <DdiTest as Ddi>::Dev,
+    session_id: u16,
+    setup: impl FnOnce(&<DdiTest as Ddi>::Dev, &mut Vec<u16>) -> T,
+    create: impl Fn(&<DdiTest as Ddi>::Dev, &T) -> Result<K, DdiError>,
+    key_id: impl Fn(K) -> u16,
+    verify: impl Fn(&<DdiTest as Ddi>::Dev, &T, K, K),
+) {
     let rev = Some(DdiApiRev { major: 1, minor: 0 });
     let mut input_keys = Vec::new();
     let mut keys = Vec::new();
@@ -42,7 +63,8 @@ pub fn check_key_rollback<T>(
         assert!(keys.len() >= 2, "Need retained and reclaimable output keys");
         let retained = keys[0];
         let released = *keys.last().expect("reclaimable key");
-        helper_delete_key(dev, Some(session_id), rev, released).expect("free one allocation");
+        helper_delete_key(dev, Some(session_id), rev, key_id(released))
+            .expect("free one allocation");
         keys.pop();
 
         let armed = helper_test_action_cmd(dev, session_id, TestActionRequest::TriggerIoFailure)
@@ -71,13 +93,13 @@ pub fn check_key_rollback<T>(
             ),
             "Expected exactly one reclaimed allocation, got {full_again:?}"
         );
-        assert_aes_key(dev, session_id, retained);
-        assert_aes_key(dev, session_id, recovered);
+        verify(dev, &input, retained, recovered);
     }));
 
     // Attempt every deletion before resuming an assertion panic.
     let cleanup_errors: Vec<_> = keys
         .into_iter()
+        .map(key_id)
         .chain(input_keys)
         .filter_map(|key_id| helper_delete_key(dev, Some(session_id), rev, key_id).err())
         .collect();
