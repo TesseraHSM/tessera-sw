@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 
 use libfuzzer_sys::*;
 use tsra_crypto::*;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_interface::DdiResult;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
@@ -179,10 +180,19 @@ fn import_rsa(ctx: &TestCtx, session_id: u16, scope: u8, input: &Input<'_>) -> V
             .to_vec()
             .expect("host RSA fixture export")
     });
-    let wire = ctx
-        .tbor(&TborGetUnwrappingKeyReq { session_id })
-        .expect("GetUnwrappingKey fixture")
-        .pub_key;
+    let timeout = std::time::Duration::from_secs(30);
+    let start = std::time::Instant::now();
+    let wire = loop {
+        match ctx.tbor(&TborGetUnwrappingKeyReq { session_id }) {
+            Ok(resp) => break resp.pub_key,
+            Err(DdiError::TborStatus(status))
+                if status == TborStatus::PendingKeyGeneration && start.elapsed() < timeout =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(err) => panic!("GetUnwrappingKey fixture failed: {err:?}"),
+        }
+    };
     let modulus_len = wire.len() - core::mem::size_of::<u32>();
     let public_be: Vec<u8> = wire[..modulus_len]
         .iter()
