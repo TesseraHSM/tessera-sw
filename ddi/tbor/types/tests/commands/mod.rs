@@ -47,6 +47,7 @@ pub mod mlkem_decapsulate;
 pub mod mlkem_encapsulate;
 pub mod mlkem_generate_key;
 pub mod mlkem_kat;
+pub mod nssr;
 pub mod open_session;
 pub mod part_final;
 pub mod part_info;
