@@ -498,7 +498,7 @@ fn expected_blob(
     }
 }
 
-/// Assert both directions of the oracle; unrelated transport/decode errors remain fatal.
+/// Assert both directions of the oracle, allowing socket-side session rejections.
 fn check_result(
     result: DdiResult<TborVerifyKeyResp>,
     expected: Option<TborStatus>,
@@ -506,7 +506,7 @@ fn check_result(
 ) {
     match (result, expected) {
         (Ok(response), None) => assert_eq!(response, TborVerifyKeyResp),
-        (Err(err), Some(status)) => assertions::assert_fw_rejects(&err, status),
+        (Err(err), Some(status)) => assertions::assert_session_rejects(&err, status),
         (Ok(_), Some(status)) => {
             panic!("VerifyKey {scenario:?} unexpectedly succeeded; expected {status:?}");
         }
