@@ -22,6 +22,8 @@ mod common;
 
 use std::env;
 use std::error::Error;
+use std::thread;
+use std::time::Duration;
 
 use common::*;
 use test_with_tracing::test;
@@ -32,19 +34,24 @@ use tsra_ddi_mbor_types::*;
 
 const REV: DdiApiRev = DdiApiRev { major: 1, minor: 0 };
 
+/// Seconds to wait for the queued self-test to run and, on validation
+/// firmware, for the firmware and driver to recover from the failure.
+const RECOVERY_WAIT_SECS: u64 = 20;
+
 #[test]
 fn trigger_negative_periodic_cast() {
+    // Validate before the harness so a skipped run never erases the device.
+    if let Err(err) = read_neg_self_test_env_variable("TSRA_NEGATIVE_TEST_ID") {
+        println!("TSRA_NEGATIVE_TEST_ID not set or invalid ({err}); skipping.");
+        return;
+    }
+
     ddi_dev_test(
         common_setup,
         common_cleanup,
         |dev, _ddi, path, session_id| {
-            let test_id = match read_neg_self_test_env_variable("TSRA_NEGATIVE_TEST_ID") {
-                Ok(test_id) => test_id,
-                Err(err) => {
-                    println!("TSRA_NEGATIVE_TEST_ID not set or invalid ({err}); skipping.");
-                    return;
-                }
-            };
+            let test_id = read_neg_self_test_env_variable("TSRA_NEGATIVE_TEST_ID")
+                .expect("TSRA_NEGATIVE_TEST_ID validated before setup");
 
             let resp = helper_close_session(dev, Some(session_id), Some(REV));
             assert!(resp.is_ok(), "{:?}", resp);
@@ -85,4 +92,24 @@ fn send_negative_self_test(device_path: String, test_id: u32) {
         return;
     }
     assert!(resp.is_ok(), "resp {:?}", resp);
+
+    // The request is only queued; hold the hardware lock and defer cleanup until
+    // the self-test has run and the firmware and driver have recovered.
+    thread::sleep(Duration::from_secs(RECOVERY_WAIT_SECS));
+
+    // Closing the session should still succeed after recovery.
+    let resp = helper_close_session(&dev, Some(session_id), Some(REV));
+    assert!(resp.is_ok(), "resp {:?}", resp);
+
+    // Re-provision and re-open a session to prove the device is back.
+    let _ = helper_common_establish_credential_no_unwrap(&mut dev, TEST_CRED_ID, TEST_CRED_PIN);
+    let (encrypted_credential, pub_key) =
+        encrypt_userid_pin_for_open_session(&dev, TEST_CRED_ID, TEST_CRED_PIN, TEST_SESSION_SEED);
+    let resp = helper_open_session(&dev, None, Some(REV), encrypted_credential, pub_key);
+    assert!(resp.is_ok(), "resp {:?}", resp);
+
+    // Read the API revision to confirm the firmware is healthy again.
+    let resp = helper_get_api_rev(&dev, None, None).unwrap();
+    assert_eq!(resp.hdr.op, DdiOp::GetApiRev);
+    assert_eq!(resp.hdr.status, DdiStatus::Success);
 }
