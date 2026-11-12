@@ -33,7 +33,7 @@ enum Fault {
     EmptyMfgrChain,
     EmptyOwnerChain,
     EmptyPartOwnerChain,
-    WrongSataAnchor,
+    WrongPotaAnchor,
     MismatchedEvidenceLeaf,
     InvalidReportSignature,
     InvalidSenderTag,
@@ -85,9 +85,11 @@ fn push_chain(
 }
 
 /// Build receiver and partition certificate chains plus a key report for
-/// peer-backup evidence. Anchor the receiver and partition-owner chains at SATA.
-fn make_evidence_with_sata(
+/// peer-backup evidence. Anchor the receiver chain at SATA and the
+/// partition-owner chain at POTA.
+fn make_evidence(
     sata: &CaKey,
+    pota: &CaKey,
     pid_pub: &[u8; RAW_PUB_LEN],
     recipient_pub: &[u8; RAW_PUB_LEN],
     report_bytes: &[u8],
@@ -96,7 +98,7 @@ fn make_evidence_with_sata(
     let receiver = push_chain(&mut oob, &make_chain(sata, recipient_pub));
     let mfgr = push_chain(&mut oob, &make_chain(&CaKey::generate(), pid_pub));
     let owner = push_chain(&mut oob, &make_chain(&CaKey::generate(), pid_pub));
-    let part_owner = push_chain(&mut oob, &make_chain(sata, pid_pub));
+    let part_owner = push_chain(&mut oob, &make_chain(pota, pid_pub));
     let report = common::add_evidence_item(&mut oob, report_bytes);
 
     Evidence {
@@ -263,7 +265,7 @@ fuzz_target!(|input: FuzzInput| {
             .expect("recipient KeyReport should succeed");
         let recipient_pub = public_key_be(&recipient.pub_key);
 
-        let mut evidence = make_evidence_with_sata(&sata, &pid_pub, &recipient_pub, &report.report);
+        let mut evidence = make_evidence(&sata, &pota, &pid_pub, &recipient_pub, &report.report);
 
         let sender = if matches!(input.fault, Fault::ValidSelfPeer | Fault::Repeat) {
             recipient.masked_key
@@ -325,9 +327,8 @@ fuzz_target!(|input: FuzzInput| {
         // mask deliberately leaves the fixture valid and must remain success.
         let mutation_is_noop = input.mutation_mask == 0;
         match input.fault {
-            Fault::WrongSataAnchor => {
-                let wrong_sata = CaKey::generate();
-                let chain = make_chain(&wrong_sata, &pid_pub);
+            Fault::WrongPotaAnchor => {
+                let chain = make_chain(&sata, &pid_pub);
                 evidence.part_owner = push_chain(&mut evidence.oob, &chain);
             }
             Fault::MismatchedEvidenceLeaf => {
@@ -405,7 +406,7 @@ fuzz_target!(|input: FuzzInput| {
             Fault::EmptyMfgrChain | Fault::EmptyOwnerChain | Fault::EmptyPartOwnerChain => {
                 Some(TborStatus::InvalidArg)
             }
-            Fault::WrongSataAnchor | Fault::MismatchedEvidenceLeaf => Some(TborStatus::InvalidArg),
+            Fault::WrongPotaAnchor | Fault::MismatchedEvidenceLeaf => Some(TborStatus::InvalidArg),
             Fault::InvalidReportSignature if !mutation_is_noop => Some(TborStatus::InvalidArg),
             Fault::InvalidSenderTag if !mutation_is_noop => {
                 Some(TborStatus::AesGcmDecryptTagDoesNotMatch)

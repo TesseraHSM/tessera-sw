@@ -33,7 +33,7 @@ Algorithm:
    then require its `allow_peer_cloning` flag (`SdPeerCloningNotAllowed`).
 3. Verify the **destination** peer evidence against that policy: the
    manufacturer / partition-owner and any supplied device-owner chains are validated
-   and anchored to the policy `SATA` key, the report's v2 `policy_hash`
+   and anchored to the policy `POTA` key, the report's v2 `policy_hash`
    must equal `SHA-384(policy)`, and its attested COSE_Key is recovered as
    **`RcvrPub`**.
 4. Unmask `masked_sealing_key` under its scope's masking key → the sender's
@@ -104,12 +104,12 @@ Carries the 161-byte `pok_peer_backup` seal.
 | Error | Cause |
 |---|---|
 | `TborInvalidFixedLength` | `masked_sealing_key` ≠ 276 B, `policy` ≠ 584 B, or `pok_local_backup` ≠ 276 B (rejected at decode before the handler runs) |
-| `InvalidArg` | Partition is not `Initialized` (not finalized); the policy `SATA` key is not P-384; the destination report's `policy_hash` ≠ `SHA-384(policy)`; or the missing OOB evidence page |
+| `InvalidArg` | Partition is not `Initialized` (not finalized); the policy `POTA` key is not P-384; the destination report's `policy_hash` ≠ `SHA-384(policy)`; or the missing OOB evidence page |
 | `SdPeerCloningNotAllowed` | The partition's policy does not set `allow_peer_cloning` |
 | `SdBackupSvnRollback` | `pok_local_backup`'s bound SVN is newer than the current firmware SVN (anti-rollback) |
 | `UnsupportedKeyType` | `masked_sealing_key` is not an `SdSealing` key, or `pok_local_backup` is not an `SdPartitionOwnerSeed` envelope |
 | `AesGcmDecryptTagDoesNotMatch` | `pok_local_backup` is tampered or was masked under a different `PartLocalMK` (unmask tag mismatch) |
-| Evidence errors | The destination certificate chains fail validation or do not anchor to the policy `SATA` key, or the report signature is invalid |
+| Evidence errors | The destination certificate chains fail validation or do not anchor to the policy `POTA` key, or the report signature is invalid |
 | `InvalidPermissions` | Not a Crypto-Officer session |
 | `SessionNotFound` | `session_id` does not refer to an `Active` slot |
 

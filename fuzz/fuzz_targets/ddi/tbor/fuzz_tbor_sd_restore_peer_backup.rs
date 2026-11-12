@@ -159,12 +159,13 @@ fn build_evidence(
     pid_pub: &[u8; RAW_PUB_LEN],
     sealing_pub: &[u8; RAW_PUB_LEN],
     sata: &CaKey,
+    pota: &CaKey,
     report_bytes: &[u8],
 ) -> Evidence {
     let receiver = make_chain(sata, sealing_pub);
     let manufacturer = make_chain(&CaKey::generate(), pid_pub);
     let owner = make_chain(&CaKey::generate(), pid_pub);
-    let partition_owner = make_chain(sata, pid_pub);
+    let partition_owner = make_chain(pota, pid_pub);
 
     let mut items = Vec::new();
     let receiver_descriptors = receiver
@@ -301,7 +302,7 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
         })
         .expect("KeyReport should succeed")
         .report;
-    let evidence = build_evidence(&pid_pub, &sealing_pub, &sata, &key_report);
+    let evidence = build_evidence(&pid_pub, &sealing_pub, &sata, &pota, &key_report);
 
     let create_remote = TborSdCreateRemoteBackupReq {
         session_id: session.session_id,
@@ -348,7 +349,7 @@ fn create_peer_backup(ctx: &TestCtx, key_scope: common::KeyScope) -> Option<Peer
         }
         (
             sealing_key,
-            build_evidence(&pid_pub, &public_key, &sata, &report),
+            build_evidence(&pid_pub, &public_key, &sata, &pota, &report),
         )
     } else {
         (sealing_key, evidence)
