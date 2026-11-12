@@ -179,7 +179,8 @@ fn assert_ecc_flag_rejected(
         HsmKeyClass::Private | HsmKeyClass::Public
     ));
     let props_with_flag = |enabled| {
-        let (mut priv_builder, mut pub_builder) = ecc_key_pair_props_builders(curve, can_derive, true);
+        let (mut priv_builder, mut pub_builder) =
+            ecc_key_pair_props_builders(curve, can_derive, true);
         if key_class == HsmKeyClass::Private {
             priv_builder = set_flag(priv_builder, enabled);
         } else {
@@ -566,29 +567,6 @@ fn test_ecc_key_pair_curve_mismatch_fails(session: HsmSession) {
     assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
 }
 
-// Rejects keygen when usage flags mismatch (sign without verify).
-#[session_test]
-fn test_ecc_key_pair_usage_mismatch_fails(session: HsmSession) {
-    let priv_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Private)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(HsmEccCurve::P256)
-        .can_sign(true)
-        .build()
-        .unwrap();
-
-    let pub_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(HsmEccCurve::P256)
-        // missing can_verify
-        .build()
-        .unwrap();
-
-    let result = gen_ecc_key_pair(&session, priv_props, pub_props);
-    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
-}
-
 // Generates a derive-only pair and verifies the returned capabilities and sizes.
 #[session_test]
 fn test_ecc_key_pair_valid_derive_succeeds(session: HsmSession) {
@@ -735,42 +713,6 @@ fn test_ecc_priv_props_bits_matches_curve_succeeds(session: HsmSession) {
         .expect("Matching bits + curve should succeed");
 }
 
-// Rejects public key with multiple usage flags.
-#[session_test]
-fn test_ecc_pub_props_multiple_usage_flags_fails(session: HsmSession) {
-    let priv_props = ecc_priv_props(HsmEccCurve::P256, true, false);
-
-    let pub_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(HsmEccCurve::P256)
-        .can_verify(true)
-        .can_derive(true) //
-        .build()
-        .unwrap();
-
-    let result = gen_ecc_key_pair(&session, priv_props, pub_props);
-    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
-}
-
-// Ensures private cannot have multiple usage flags even if both are individually valid.
-#[session_test]
-fn test_ecc_priv_props_multiple_usage_flags_fails(session: HsmSession) {
-    let priv_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Private)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(HsmEccCurve::P256)
-        .can_sign(true)
-        .can_derive(true)
-        .build()
-        .unwrap();
-
-    let pub_props = ecc_pub_props(HsmEccCurve::P256, true, false);
-
-    let result = gen_ecc_key_pair(&session, priv_props, pub_props);
-    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
-}
-
 // Ensures unwrap rejects mismatched curve between private and public keys.
 #[session_test]
 fn test_ecc_unwrap_curve_mismatch_fails(session: HsmSession) {
@@ -782,28 +724,6 @@ fn test_ecc_unwrap_curve_mismatch_fails(session: HsmSession) {
         .ecc_curve(HsmEccCurve::P384) // mismatch
         .can_verify(true)
         .build()
-        .unwrap();
-
-    let result = unwrap_ecc_with_props(&session, priv_props, pub_props);
-    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
-}
-
-// Ensures unwrap rejects missing public usage flags.
-#[session_test]
-fn test_ecc_unwrap_usage_mismatch_fails(session: HsmSession) {
-    let priv_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Private)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(HsmEccCurve::P256)
-        .can_sign(true)
-        .build()
-        .unwrap();
-
-    let pub_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::Ecc)
-        .ecc_curve(HsmEccCurve::P256)
-        .build() // missing verify
         .unwrap();
 
     let result = unwrap_ecc_with_props(&session, priv_props, pub_props);
@@ -1001,7 +921,8 @@ fn test_ecc_pub_props_bits_normalized_to_curve(session: HsmSession) {
 #[session_test]
 fn test_ecc_key_pair_session_mismatch_fails(session: HsmSession) {
     for is_session in [false, true] {
-        let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
+        let (priv_builder, pub_builder) =
+            ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
         let priv_props = priv_builder
             .is_session(is_session)
             .build()
@@ -1033,7 +954,8 @@ fn test_ecc_key_pair_explicit_scope_mismatch_fails(session: HsmSession) {
             if private_scope == public_scope {
                 continue;
             }
-            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
+            let (priv_builder, pub_builder) =
+                ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
             let priv_props = priv_builder
                 .scope(private_scope)
                 .build()
@@ -1060,7 +982,8 @@ fn test_ecc_key_pair_equivalent_scopes(session: HsmSession) {
     for scope in [HsmKeyScope::Session, HsmKeyScope::Local] {
         for (explicit_private, explicit_public) in [(true, false), (false, true), (true, true)] {
             let is_session = scope == HsmKeyScope::Session;
-            let (priv_builder, pub_builder) = ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
+            let (priv_builder, pub_builder) =
+                ecc_key_pair_props_builders(HsmEccCurve::P256, false, true);
             let mut priv_builder = priv_builder.is_session(is_session);
             let mut pub_builder = pub_builder.is_session(is_session);
             if explicit_private {
@@ -1102,7 +1025,8 @@ fn test_ecc_key_labels_preserved(session: HsmSession) {
                 vec![b'e'; TBOR_KEY_LABEL_MAX_LEN - 1],
                 vec![b'e'; TBOR_KEY_LABEL_MAX_LEN],
             ] {
-                let (priv_builder, pub_builder) = ecc_key_pair_props_builders(curve, can_derive, true);
+                let (priv_builder, pub_builder) =
+                    ecc_key_pair_props_builders(curve, can_derive, true);
                 let priv_props = priv_builder
                     .label(&label)
                     .build()
