@@ -69,6 +69,7 @@ impl<'a, const MAX: usize> Arbitrary<'a> for BoundedBytes<MAX> {
 enum Expected {
     Success,
     Status(TborStatus),
+    DirectionMismatch,
     /// Altered or arbitrary authenticated envelopes have negligible forgery
     /// probability. Only framing, scope, or authentication rejects are allowed.
     BadKey,
@@ -131,6 +132,12 @@ fn expected(
     let reject = Expected::Status;
     if req.session_id != sid {
         return reject(TborStatus::FileHandleSessionIdDoesNotMatch);
+    }
+    if req.data_len != 0
+        && req.in_index == req.out_index
+        && usize::from(req.in_index) < buffers.len()
+    {
+        return Expected::DirectionMismatch;
     }
     if buffers.is_empty() {
         return reject(TborStatus::InvalidArg);
@@ -375,10 +382,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 req.masked_key = input.raw_key.0.clone();
             }
         }
-        29 => {
-            // Equal indices are a valid in-place operation, not a reject.
-            req.out_index = req.in_index;
-        }
+        29 => req.out_index = req.in_index,
         30 => req.tweak = input.tweak.to_le_bytes().to_vec(),
         31 => {
             let lengths = [
@@ -430,6 +434,13 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             } else {
                 assertions::assert_fw_rejects(&err, status);
             }
+        }
+        Expected::DirectionMismatch => {
+            let err = result.expect_err("shared OOB descriptor unexpectedly accepted");
+            assert!(
+                matches!(err, DdiError::InvalidParameter),
+                "expected socket direction rejection, got {err}"
+            );
         }
         Expected::BadKey => {
             let err = result.expect_err("altered/arbitrary masked key unexpectedly authenticated");
