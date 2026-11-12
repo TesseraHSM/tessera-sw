@@ -179,7 +179,6 @@ fn test_reopen_session_with_rollback_after_migration() {
                     second_id,
                     rev,
                     DdiAesKeySize::Aes256,
-                    None,
                     helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::Session),
                 );
                 assert!(

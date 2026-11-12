@@ -45,7 +45,6 @@ fn test_kbkdf_with_rollback_after_exhaust_keys() {
                         None,
                         Some(MborByteArray::from_slice(&[1]).expect("KDF context")),
                         DdiKeyType::Aes256,
-                        None,
                         helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
                         None,
                     )

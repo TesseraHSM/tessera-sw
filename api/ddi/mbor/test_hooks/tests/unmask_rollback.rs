@@ -41,7 +41,6 @@ fn test_unmask_with_rollback_after_exhaust_keys() {
                         Some(session_id),
                         rev,
                         DdiAesKeySize::Aes256,
-                        None,
                         helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
                     )
                     .expect("generate masked input key");

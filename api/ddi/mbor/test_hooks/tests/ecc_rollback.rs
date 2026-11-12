@@ -41,7 +41,6 @@ fn test_ecc_generate_with_rollback_after_exhaust_keys() {
                     Some(session_id),
                     rev,
                     DdiEccCurve::P256,
-                    None,
                     helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App),
                 )
             };

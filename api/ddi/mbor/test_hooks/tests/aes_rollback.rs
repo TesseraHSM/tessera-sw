@@ -39,7 +39,6 @@ fn test_aes_generate_with_rollback_after_exhaust_keys() {
                         Some(session_id),
                         Some(DdiApiRev { major: 1, minor: 0 }),
                         DdiAesKeySize::Aes256,
-                        None,
                         helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
                     )
                     .map(|resp| resp.data.key_id)

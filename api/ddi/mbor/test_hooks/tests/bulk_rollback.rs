@@ -111,7 +111,6 @@ fn check_bulk_cases(dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str, 
                             Some(session_id),
                             rev,
                             size,
-                            None,
                             bulk_properties(),
                         )
                         .expect("independent XTS companion key");
@@ -168,9 +167,8 @@ fn prepare_input(
             (rollback::kdf_input(dev, session_id, keys), empty)
         }
         DdiOp::UnmaskKey => {
-            let original =
-                helper_aes_generate(dev, Some(session_id), rev, size, None, bulk_properties())
-                    .expect("generate masked bulk input");
+            let original = helper_aes_generate(dev, Some(session_id), rev, size, bulk_properties())
+                .expect("generate masked bulk input");
             keys.push(original.data.key_id);
             source_bulk_id = Some(original.data.bulk_key_id.expect("source bulk ID"));
             (original.data.key_id, original.data.masked_key)
@@ -218,8 +216,7 @@ fn create_bulk_key(
     let rev = Some(DdiApiRev { major: 1, minor: 0 });
     let (key_id, bulk_id) = match op {
         DdiOp::AesGenerateKey => {
-            let resp =
-                helper_aes_generate(dev, Some(session_id), rev, size, None, bulk_properties())?;
+            let resp = helper_aes_generate(dev, Some(session_id), rev, size, bulk_properties())?;
             (resp.data.key_id, resp.data.bulk_key_id)
         }
         DdiOp::HkdfDerive => {
@@ -232,7 +229,6 @@ fn create_bulk_key(
                 None,
                 None,
                 kind,
-                None,
                 bulk_properties(),
                 None,
             )?;
@@ -248,7 +244,6 @@ fn create_bulk_key(
                 None,
                 Some(MborByteArray::from_slice(&[1]).expect("KDF context")),
                 kind,
-                None,
                 bulk_properties(),
                 None,
             )?;
@@ -274,7 +269,6 @@ fn create_bulk_key(
                 class,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 bulk_properties(),
             )?;
             (resp.data.key_id, resp.data.bulk_key_id)

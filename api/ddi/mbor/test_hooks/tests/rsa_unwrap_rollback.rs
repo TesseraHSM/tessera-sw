@@ -74,7 +74,6 @@ fn test_rsa_unwrap_with_rollback_after_exhaust_keys() {
                         DdiKeyClass::Aes,
                         DdiRsaCryptoPadding::Oaep,
                         DdiHashAlgorithm::Sha256,
-                        None,
                         helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
                     )
                     .map(|resp| resp.data.key_id)

@@ -46,7 +46,6 @@ fn test_ecdh_with_rollback_after_exhaust_keys() {
                         Some(session_id),
                         rev,
                         DdiEccCurve::P256,
-                        None,
                         helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
                     )
                     .expect("generate ECDH input key")
@@ -65,7 +64,6 @@ fn test_ecdh_with_rollback_after_exhaust_keys() {
                             &peer.data.pub_key.der.data()[..peer.data.pub_key.der.len()],
                         )
                         .expect("peer public key"),
-                        None,
                         DdiKeyType::Secret256,
                         helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
                     )

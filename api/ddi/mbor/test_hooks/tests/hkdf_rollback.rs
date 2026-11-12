@@ -44,7 +44,6 @@ fn test_hkdf_with_rollback_after_exhaust_keys() {
                         None,
                         None,
                         DdiKeyType::Aes256,
-                        None,
                         helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
                         None,
                     )

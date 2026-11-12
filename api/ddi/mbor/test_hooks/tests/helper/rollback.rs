@@ -122,25 +122,13 @@ pub fn check_key_rollback_with_verify<T, K: Copy + std::fmt::Debug>(
 pub fn kdf_input(dev: &<DdiTest as Ddi>::Dev, session_id: u16, keys: &mut Vec<u16>) -> u16 {
     let rev = Some(DdiApiRev { major: 1, minor: 0 });
     let properties = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
-    let input = helper_ecc_generate_key_pair(
-        dev,
-        Some(session_id),
-        rev,
-        DdiEccCurve::P256,
-        None,
-        properties,
-    )
-    .expect("generate KDF input ECC key");
+    let input =
+        helper_ecc_generate_key_pair(dev, Some(session_id), rev, DdiEccCurve::P256, properties)
+            .expect("generate KDF input ECC key");
     keys.push(input.data.private_key_id);
-    let peer = helper_ecc_generate_key_pair(
-        dev,
-        Some(session_id),
-        rev,
-        DdiEccCurve::P256,
-        None,
-        properties,
-    )
-    .expect("generate peer ECC key");
+    let peer =
+        helper_ecc_generate_key_pair(dev, Some(session_id), rev, DdiEccCurve::P256, properties)
+            .expect("generate peer ECC key");
     keys.push(peer.data.private_key_id);
     let secret = helper_ecdh_key_exchange(
         dev,
@@ -148,7 +136,6 @@ pub fn kdf_input(dev: &<DdiTest as Ddi>::Dev, session_id: u16, keys: &mut Vec<u1
         rev,
         input.data.private_key_id,
         MborByteArray::from_slice(peer.data.pub_key.der.as_slice()).expect("peer public key"),
-        None,
         DdiKeyType::Secret256,
         properties,
     )
@@ -194,7 +181,6 @@ pub fn measure_aes_capacity(dev: &<DdiTest as Ddi>::Dev, session_id: u16) -> usi
                 Some(session_id),
                 rev,
                 DdiAesKeySize::Aes256,
-                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             ) {
                 Ok(resp) => keys.push(resp.data.key_id),

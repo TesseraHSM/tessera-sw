@@ -63,7 +63,6 @@ fn test_open_session_with_rollback_after_exhaust_sessions() {
                         Some(session_id),
                         rev,
                         DdiAesKeySize::Aes256,
-                        None,
                         helper_key_properties(
                             DdiKeyUsage::EncryptDecrypt,
                             DdiKeyAvailability::Session,
