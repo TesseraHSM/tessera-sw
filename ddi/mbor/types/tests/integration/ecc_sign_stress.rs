@@ -104,7 +104,6 @@ fn test_thread_fn(_thread_id: u8, device_path: String, max_attempts: usize) {
         Some(app_sess_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         DdiEccCurve::P256,
-        None,
         key_props,
     );
 

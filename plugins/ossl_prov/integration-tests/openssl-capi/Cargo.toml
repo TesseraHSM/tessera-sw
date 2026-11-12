@@ -8,11 +8,13 @@ version = "0.0.0"
 
 [features]
 integration = []
+# Start an in-process DDI sock server for a sock-transport build under test.
 
 [build-dependencies]
 cmake.workspace = true
 
 [dev-dependencies]
+ddi_sock_server = { features = ["autostart"], workspace = true }
 libtest-mimic.workspace = true
 
 [lints]

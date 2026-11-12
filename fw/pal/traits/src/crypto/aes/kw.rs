@@ -6,6 +6,10 @@
 
 use super::*;
 
+/// Maximum AES-KW / AES-KWP plaintext length in bytes (6 KiB).  Wrapped
+/// data is at most this plus the 8-byte integrity check value.
+pub const HSM_AES_KW_MAX_DATA_LEN: usize = 6144;
+
 /// Asynchronous AES key wrap operations trait.
 ///
 /// PAL implementations provide this to the core for AES-KW and AES-KWP
@@ -29,7 +33,7 @@ pub trait HsmAesKw: HsmIoTypes {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
     /// - `input` — plaintext key material.  Must be ≥ 16 bytes,
-    ///   a multiple of 8, and at most 3072 bytes.
+    ///   a multiple of 8, and at most [`HSM_AES_KW_MAX_DATA_LEN`] bytes.
     /// - `output` — destination; must be at least
     ///   `input.len() + 8` bytes. Pass `None` to validate the inputs
     ///   and query the output length without wrapping.
@@ -82,7 +86,8 @@ pub trait HsmAesKw: HsmIoTypes {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
     /// - `input` — wrapped key data.  Must be ≥ 24 bytes,
-    ///   a multiple of 8, and at most 3080 bytes.
+    ///   a multiple of 8, and at most
+    ///   [`HSM_AES_KW_MAX_DATA_LEN`]` + 8` bytes.
     /// - `output` — destination; must be at least
     ///   `input.len() - 8` bytes. Pass `None` to validate the inputs
     ///   and query the output length without unwrapping.
@@ -143,7 +148,8 @@ pub trait HsmAesKw: HsmIoTypes {
     ///
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
-    /// - `input` — plaintext (1..=3072 bytes, any alignment).
+    /// - `input` — plaintext (1..=[`HSM_AES_KW_MAX_DATA_LEN`] bytes, any
+    ///   alignment).
     /// - `output` — destination; must be at least
     ///   `round_up_8(input.len()) + 8` bytes. Pass `None` to validate
     ///   the inputs and query the output length without wrapping.
@@ -168,7 +174,7 @@ pub trait HsmAesKw: HsmIoTypes {
     ///
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
-    /// - `data_len` — plaintext length (1..=3072).
+    /// - `data_len` — plaintext length (1..=[`HSM_AES_KW_MAX_DATA_LEN`]).
     /// - `buf` — `[reserved (8) | plaintext (data_len) | pad room]`;
     ///   must be at least `round_up_8(data_len) + 8` bytes.
     ///
@@ -196,7 +202,8 @@ pub trait HsmAesKw: HsmIoTypes {
     /// - `io` — caller's I/O context (per-IO scope).
     /// - `key` — Key Encryption Key (16 / 24 / 32 bytes).
     /// - `input` — wrapped key data.  Must be ≥ 16 bytes, a
-    ///   multiple of 8, and at most 3080 bytes.
+    ///   multiple of 8, and at most [`HSM_AES_KW_MAX_DATA_LEN`]` + 8`
+    ///   bytes.
     /// - `output` — destination; must be at least
     ///   `input.len() - 8` bytes. Pass `None` to validate the inputs
     ///   and query the maximum output length without unwrapping.

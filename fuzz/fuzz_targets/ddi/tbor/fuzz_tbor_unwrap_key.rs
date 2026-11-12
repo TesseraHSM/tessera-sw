@@ -413,12 +413,13 @@ fn build_case(input: &Input<'_>, session_id: u16, public: &RsaPublicKey) -> Case
                 257,
                 271,
                 272,
-                3071,
                 3072,
-                3073,
                 4096,
+                UNWRAP_WRAPPED_BLOB_MAX_LEN - 1,
+                UNWRAP_WRAPPED_BLOB_MAX_LEN,
+                UNWRAP_WRAPPED_BLOB_MAX_LEN + 1,
                 tsra_ddi_tbor_codec::MAX_DATA_SIZE + 1,
-            ][usize::from(input.byte(18) % 12)];
+            ][usize::from(input.byte(18) % 13)];
             blob = input.bytes(len);
             // Long arbitrary payloads retain a provably invalid RSA segment.
             if len > RSA_SEGMENT_LEN {

@@ -46,7 +46,7 @@ jobs:
     - name: Check committed C header is up to date
       run: cargo xtask precheck --cbindgen
 
-  test_ubuntu_emu:
+  test_ubuntu_sock:
 
     runs-on: ubuntu-24.04
 
@@ -57,15 +57,15 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/ubuntu-setup
-    - name: Run all emu tests (except tsra_api_tests)
-      id: test-emu
-      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx -F emu --profile ci-emu
+    - name: Run all sock tests (except tsra_api_tests)
+      id: test-sock
+      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx --transport sock --profile ci-sock
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-emu.outcome == 'failure' }}
+      if: ${{ steps.test-sock.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -83,11 +83,11 @@ jobs:
     - uses: ./.github/actions/ubuntu-setup
     - name: Run tsra_api_tests
       id: test-api
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F emu --profile ci-api
+      run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 1_0 --profile ci-api
       continue-on-error: true
-    - name: Run tsra_api_tests with EX sessions against emu
+    - name: Run tsra_api_tests with EX sessions against sock
       id: test-api-ex
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F emu,session-ex-tests --profile ci-api-ex
+      run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 1_1 --profile ci-api-ex
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
@@ -109,23 +109,23 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/ubuntu-setup
-    - name: SDK Run MBOR types tests on emu with 4 partition resources
-      id: test-emu-res-4
+    - name: SDK Run MBOR types tests on sock with 4 partition resources
+      id: test-sock-res-4
       env:
-        TSRA_EMU_RESOURCE_COUNT: "4"
-      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types -F emu --profile ci-emu-res-4
+        TSRA_TEST_ARGS: resource_count=4
+      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types --transport sock --profile ci-sock-res-4
       continue-on-error: true
-    - name: SDK Run MBOR types tests on emu with 64 partition resources
-      id: test-emu-res-64
+    - name: SDK Run MBOR types tests on sock with 64 partition resources
+      id: test-sock-res-64
       env:
-        TSRA_EMU_RESOURCE_COUNT: "64"
-      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types -F emu --profile ci-emu-res-64
+        TSRA_TEST_ARGS: resource_count=64
+      run: cargo xtask precheck --nextest -p tsra_ddi_mbor_types --transport sock --profile ci-sock-res-64
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-emu-res-4.outcome == 'failure' || steps.test-emu-res-64.outcome == 'failure' }}
+      if: ${{ steps.test-sock-res-4.outcome == 'failure' || steps.test-sock-res-64.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -157,7 +157,7 @@ jobs:
     - name: Cargo Clippy
       run: cargo xtask precheck --clippy
 
-  test_windows_emu:
+  test_windows_sock:
 
     runs-on: windows-2025-vs2026
 
@@ -168,15 +168,15 @@ jobs:
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - uses: ./.github/actions/windows-setup
-    - name: Run all emu tests (except tsra_api_tests)
-      id: test-emu
-      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx -F emu --profile ci-emu
+    - name: Run all sock tests (except tsra_api_tests)
+      id: test-sock
+      run: cargo xtask precheck --nextest --exclude tsra_api_tests --exclude provider-integration-tests-cli --exclude provider-integration-tests-capi --exclude provider-integration-tests-nginx --transport sock --profile ci-sock
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report
       run: cargo xtask precheck --nextest-report
     - name: Fail if any tests failed
-      if: ${{ steps.test-emu.outcome == 'failure' }}
+      if: ${{ steps.test-sock.outcome == 'failure' }}
       run: |
         echo "One or more tests failed."
         exit 1
@@ -194,11 +194,11 @@ jobs:
     - uses: ./.github/actions/windows-setup
     - name: Run tsra_api_tests
       id: test-api
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F emu --profile ci-api
+      run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 1_0 --profile ci-api
       continue-on-error: true
-    - name: Run tsra_api_tests with EX sessions against emu
+    - name: Run tsra_api_tests with EX sessions against sock
       id: test-api-ex
-      run: cargo xtask precheck --nextest -p tsra_api_tests -F emu,session-ex-tests --profile ci-api-ex
+      run: cargo xtask precheck --nextest -p tsra_api_tests --transport sock --api-rev 1_1 --profile ci-api-ex
       continue-on-error: true
     - name: Generate nextest report
       id: nextest-report

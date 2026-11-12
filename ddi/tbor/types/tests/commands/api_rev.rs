@@ -244,7 +244,6 @@ fn api_rev_fresh_request_each_call() {
 /// Session-state manipulation is intentionally restricted to the
 /// emulator tests, but basic transport-independent statelessness is
 /// still verified for `sock`.
-#[cfg(feature = "sock")]
 #[test]
 fn api_rev_repeated_stable_sock() {
     let ctx = TestCtx::new();

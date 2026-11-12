@@ -56,6 +56,9 @@ fn mint_kex(ready: &DarcReady) -> KexKey {
 /// TMK from one endpoint to another.
 #[test]
 fn darc_transfer_tmk_export_import_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let ready = darc_sd_initialized_session();
     let session = &ready.session;
@@ -108,6 +111,9 @@ fn darc_transfer_tmk_export_import_roundtrip() {
 /// non-zero envelopes of the pinned wire lengths, and each mint is fresh.
 #[test]
 fn darc_kex_and_tmk_gen_smoke() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let ready = darc_sd_initialized_session();
     let session = &ready.session;
@@ -149,6 +155,9 @@ fn darc_kex_and_tmk_gen_smoke() {
 /// key verifies against the original public key.
 #[test]
 fn darc_key_wrap_unwrap_sign_round_trip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let ready = darc_sd_initialized_session();
     let session = &ready.session;
@@ -201,6 +210,9 @@ fn darc_key_wrap_unwrap_sign_round_trip() {
 /// on-device crypto rather than accepting it blindly.
 #[test]
 fn darc_key_unwrap_rejects_bogus_envelope() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let ready = darc_sd_initialized_session();
     let session = &ready.session;
@@ -251,6 +263,9 @@ fn p256_verify_pub_props() -> HsmKeyProps {
 /// hash verifies, surfacing as `InvalidArgument`.
 #[test]
 fn darc_tmk_export_rejects_unanchored_target_chain() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let ready = darc_sd_initialized_session();
     let session = &ready.session;

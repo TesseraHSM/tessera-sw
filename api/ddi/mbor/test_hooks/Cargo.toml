@@ -26,6 +26,7 @@ arbitrary = { optional = true, workspace = true }
 # leaf request helpers are reused from `tsra_ddi_mbor_test_helpers`, while
 # provisioning/session orchestration is owned locally in `tests/common`.
 [dev-dependencies]
+ddi_sock_server = { features = ["autostart"], workspace = true }
 fs2.workspace = true
 test_with_tracing.workspace = true
 tsra_cred_encrypt.workspace = true
@@ -55,11 +56,6 @@ pre_encode = [
   "tsra_ddi_mbor_codec/pre_encode",
   "tsra_ddi_mbor_types/pre_encode",
 ]
-
-# Forward backend selection to the tsra_ddi facade so the integration
-# test binary picks up the right backend. Default (no feature) resolves
-# to the nix backend.
-emu = ["tsra_ddi/emu"]
 
 [lints]
 workspace = true

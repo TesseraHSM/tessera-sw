@@ -34,6 +34,10 @@ jobs:
     name: ${{ matrix.label }}
     runs-on: ubuntu-24.04
     container: ${{ matrix.image }}
+    env:
+      # Run every test against the simulated HSM over the sock transport.
+      # Test runners pass connection settings to the ordinary SDK build.
+      TSRA_TEST_ARGS: transport=sock
     strategy:
       fail-fast: false
       matrix:
@@ -152,10 +156,10 @@ jobs:
       - name: Test tsra_ossl_engine_core
         run: cargo nextest run -p tsra_ossl_engine_core --features engine
 
-      # tsra_ossl_engine's emu lifecycle tests drive the HSM open path against the
-      # emu DDI.
-      - name: Test tsra_ossl_engine (emu lifecycle)
-        run: cargo nextest run -p tsra_ossl_engine --features engine,emu
+      # tsra_ossl_engine's sock lifecycle tests drive the HSM open path against
+      # an in-process simulated HSM over the sock DDI.
+      - name: Test tsra_ossl_engine (sock lifecycle)
+        run: cargo nextest run -p tsra_ossl_engine --features engine
 
       - name: Test tsra_crypto
         run: cargo nextest run -p tsra_crypto
@@ -167,11 +171,13 @@ jobs:
       - name: Load engine
         run: openssl engine -t "$(pwd)/target/debug/libtsra_ossl_engine.so"
 
-      # The integration suites load a key through the engine end to end; they
-      # need an emu-backed .so, so (re)build it and the masked-key generator.
-      - name: Build engine (emu) + generator for integration tests
+      # The integration suites load a key through the engine end to end, so
+      # build the engine .so and the masked-key generator. The harnesses supply
+      # credentials and the connection through the environment; each starts its
+      # own simulated HSM, which the openssl and generator children share.
+      - name: Build engine + generator for integration tests
         run: |
-          cargo build -p tsra_ossl_engine --features engine,emu
+          cargo build -p tsra_ossl_engine --features engine
           cargo build -p tsra-engine-masked-keygen --features integration
 
       - name: Integration tests — CLI (openssl -engine)

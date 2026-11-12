@@ -360,6 +360,23 @@ fn unwrap_key_aes_xts_rejects_invalid_material() {
     }
 }
 
+/// A maximum-size blob (6 KiB AES-KWP plaintext) passes the size checks
+/// and reaches AES-KWP: tampered, it fails the integrity check; intact, the
+/// oversized material is rejected by key decode.
+#[test]
+fn unwrap_key_max_size_blob_reaches_kwp() {
+    let ctx = TestCtx::new();
+    let sid = finalized_co_session(&ctx).session_id;
+    let usage = KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT;
+
+    let mut req = unwrap_req(&ctx, sid, KEY_CLASS_AES, usage, &[0x5Au8; 6144]);
+    assert_eq!(req.wrapped_blob.len(), UNWRAP_WRAPPED_BLOB_MAX_LEN);
+    ctx.expect_fw_reject(&req, TborStatus::InvalidArg);
+
+    req.wrapped_blob[UNWRAP_WRAPPED_BLOB_MAX_LEN - 1] ^= 1;
+    ctx.expect_fw_reject(&req, TborStatus::RsaUnwrapAesUnwrapFailed);
+}
+
 /// An AES-XTS key is a cipher key: any usage other than encrypt+decrypt is
 /// rejected.
 #[test]

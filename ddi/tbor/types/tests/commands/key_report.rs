@@ -782,7 +782,6 @@ fn key_report_cu_session_scope_roundtrip() {
     ctx.session_close(cu.session_id).expect("close CU");
 }
 
-#[cfg(feature = "emu")]
 #[test]
 fn key_report_cu_authentication_binds_key_data_and_session() {
     use tsra_ddi_tbor_test_harness::SessionOpenInitOptions;
@@ -844,7 +843,6 @@ fn key_report_cu_authentication_binds_key_data_and_session() {
     ctx.session_close(co.session_id).expect("close CO");
 }
 
-#[cfg(feature = "emu")]
 #[test]
 fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     use tsra_session_ex_crypto::seal_key_report_auth;
@@ -890,7 +888,6 @@ fn key_report_cu_rejects_sessions_authenticated_before_psk_rotation() {
     ctx.session_close(co.session_id).expect("close CO");
 }
 
-#[cfg(feature = "emu")]
 #[test]
 fn key_report_concurrent_cu_rotations_have_one_winner() {
     use std::sync::Barrier;

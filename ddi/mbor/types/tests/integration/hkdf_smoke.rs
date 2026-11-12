@@ -51,7 +51,6 @@ fn test_hkdf_aes_derive_smoke() {
                     salt,
                     info,
                     DdiKeyType::Aes256,
-                    None,
                     key_props,
                     None,
                 )
@@ -133,7 +132,6 @@ fn hkdf_hmac_derive(
         Some(MborByteArray::from_slice("salt".as_bytes()).unwrap()),
         Some(MborByteArray::from_slice("info".as_bytes()).unwrap()),
         key_type,
-        None,
         key_props,
         key_length,
     )

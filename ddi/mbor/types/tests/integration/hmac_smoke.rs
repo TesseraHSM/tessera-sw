@@ -146,7 +146,6 @@ fn test_hmac_requires_sign_permission_smoke() {
                 None,
                 None,
                 DdiKeyType::VarHmac256,
-                None,
                 key_props,
                 Some(32),
             );

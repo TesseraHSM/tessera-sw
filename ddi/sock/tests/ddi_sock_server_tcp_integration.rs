@@ -59,10 +59,10 @@ fn reserve_ephemeral_port() -> io::Result<u16> {
 /// the same way Cargo lays out the workspace target directory:
 /// `<target-dir>/<profile>/ddi_sock_server`. CI builds `ddi_sock_server`
 /// explicitly before running this test (see `.github/workflows/rust.yml`);
-/// set `DDI_SOCK_SERVER_BIN` to override the path directly (e.g. for
+/// set `server_bin` in `TSRA_TEST_ARGS` to override the path directly (e.g. for
 /// local runs with a non-default target directory).
 fn locate_ddi_sock_server_bin() -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("DDI_SOCK_SERVER_BIN") {
+    if let Some(path) = ddi_sock_server::TestArgs::from_env().server_bin {
         return std::path::PathBuf::from(path);
     }
 
@@ -87,7 +87,7 @@ fn locate_ddi_sock_server_bin() -> std::path::PathBuf {
     assert!(
         bin.exists(),
         "ddi_sock_server binary not found at {bin:?}; build it first with \
-         `cargo build -p ddi_sock_server` (or set DDI_SOCK_SERVER_BIN)"
+         `cargo build -p ddi_sock_server` (or set `server_bin` in TSRA_TEST_ARGS)"
     );
     bin
 }

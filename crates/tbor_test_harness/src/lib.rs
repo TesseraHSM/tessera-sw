@@ -14,18 +14,18 @@
 //! binaries as `tsra_ddi_tbor_test_harness::…`. Nothing in this
 //! crate is part of the `tsra_ddi_tbor_types` public API.
 //!
-//! # Backend feature regimes
+//! # Transports
 //!
-//! Consuming test binaries support three active build modes:
+//! Consuming test binaries pick the transport at runtime:
 //!
-//! * `--features emu` — the canonical configuration; runs the full
-//!   suite against the in-process std-PAL firmware.
-//! * `--features sock` — drives the same TBOR round-trips against
-//!   firmware behind a socket server.
-//! * **No backend feature** — targets the native OS backend (`nix` on
-//!   Linux / `win` on Windows) so the hw-eligible tests run against
-//!   real silicon. Destructive emu-only tests remain gated
-//!   `#[cfg(feature = "emu")]` at the test-item level.
+//! * `TSRA_TEST_ARGS=transport=sock` — the canonical configuration; drives the
+//!   full suite over the socket transport against std-PAL firmware served
+//!   by an in-process `ddi_sock_server` (or the server named by
+//!   `sock=` in `TSRA_TEST_ARGS`).
+//! * **Unset** (or `transport=ioctl`) — targets the platform device driver
+//!   so the suite runs against real silicon. Tests that don't apply
+//!   to the socket transport return early when it is selected (see
+//!   `tsra_ddi::sock_selected`).
 
 pub mod api_rev;
 pub mod assertions;

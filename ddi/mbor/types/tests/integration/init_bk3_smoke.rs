@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! InitBk3 smoke tests for the emu backend.
+//! InitBk3 smoke tests for the auto-started simulator.
 //!
 //! Exercises:
 //! - Successful one-shot init returns a `masked_bk3` envelope (the
@@ -21,7 +21,6 @@
 //!   called again — the new `BK_BOOT` produces a different
 //!   `masked_bk3`.
 
-#![cfg(feature = "emu")]
 #![cfg(test)]
 
 use test_with_tracing::test;
@@ -30,7 +29,18 @@ use tsra_ddi_mbor_types::*;
 
 use super::common::*;
 
-pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, _ddi: &DdiTest, _path: &str) -> u16 {
+/// Whether `setup` can give each case a fresh partition. Only this process's
+/// auto-started simulator qualifies: on hardware, NSSR preserves the one-shot
+/// BK3 state and sealed BK3, and `transport=sock` alone isn't enough because
+/// `sock=` may front hardware.
+fn fresh_partition_available() -> bool {
+    ddi_sock_server::autostarted()
+}
+
+/// Reset the partition so each case starts with fresh one-shot BK3 state.
+pub fn setup(_dev: &mut <DdiTest as Ddi>::Dev, ddi: &DdiTest, path: &str) -> u16 {
+    let resp = ddi.open_dev(path).unwrap().erase();
+    assert!(resp.is_ok(), "resp {:?}", resp);
     0
 }
 
@@ -44,6 +54,9 @@ pub fn cleanup(
 
 #[test]
 fn test_init_bk3_smoke() {
+    if !fresh_partition_available() {
+        return;
+    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0xABu8; 48];
 
@@ -66,6 +79,9 @@ fn test_init_bk3_smoke() {
 
 #[test]
 fn test_init_bk3_twice_fails() {
+    if !fresh_partition_available() {
+        return;
+    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0x11u8; 48];
 
@@ -83,6 +99,9 @@ fn test_init_bk3_twice_fails() {
 
 #[test]
 fn test_init_bk3_does_not_persist_sealed_bk3() {
+    if !fresh_partition_available() {
+        return;
+    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let bk3 = vec![0x22u8; 48];
 
@@ -102,6 +121,9 @@ fn test_init_bk3_does_not_persist_sealed_bk3() {
 
 #[test]
 fn test_init_bk3_then_set_get_sealed_bk3() {
+    if !fresh_partition_available() {
+        return;
+    }
     ddi_dev_test(setup, cleanup, |dev, _ddi, _path, _| {
         let init = helper_init_bk3(dev, HARD_CODED_BK3.to_vec()).unwrap();
         let masked_bk3 = init.data.masked_bk3.as_slice().to_vec();

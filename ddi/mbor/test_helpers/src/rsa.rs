@@ -12,7 +12,6 @@ pub fn helper_rsa_unwrap(
     wrapped_blob_key_class: DdiKeyClass,
     wrapped_blob_padding: DdiRsaCryptoPadding,
     wrapped_blob_hash_algorithm: DdiHashAlgorithm,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
 ) -> Result<DdiRsaUnwrapCmdResp, DdiError> {
     let req = DdiRsaUnwrapCmdReq {
@@ -27,7 +26,7 @@ pub fn helper_rsa_unwrap(
             wrapped_blob_key_class,
             wrapped_blob_padding,
             wrapped_blob_hash_algorithm,
-            key_tag,
+            key_tag: None,
             key_properties: key_properties
                 .try_into()
                 .map_err(|_| DdiError::InvalidParameter)?,

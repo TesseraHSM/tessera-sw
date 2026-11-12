@@ -10,6 +10,7 @@
 #include "handle/part_list_handle.hpp"
 #include "helpers.hpp"
 #include "utils/auto_ctx.hpp"
+#include "utils/utils.hpp"
 
 // AES-CFB is only supported on extended (session-ex) sessions.
 class tsra_aes_cfb : public ::testing::Test
@@ -42,10 +43,12 @@ class tsra_aes_cfb : public ::testing::Test
     }
 };
 
-#if SESSION_EX_TESTS
-
 TEST_F(tsra_aes_cfb, single_shot_matches_reference)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         for (const auto &key_size : aes_key_sizes())
         {
@@ -104,6 +107,10 @@ TEST_F(tsra_aes_cfb, single_shot_matches_reference)
 
 TEST_F(tsra_aes_cfb, streaming_matches_single_shot)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_key(session, 256);
         auto plaintext = make_incrementing_bytes(1100);
@@ -167,6 +174,10 @@ TEST_F(tsra_aes_cfb, streaming_matches_single_shot)
 
 TEST_F(tsra_aes_cfb, params_iv_chains_block_aligned_calls)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_key(session, 128);
         auto plaintext = make_incrementing_bytes(77);
@@ -211,6 +222,10 @@ TEST_F(tsra_aes_cfb, params_iv_chains_block_aligned_calls)
 
 TEST_F(tsra_aes_cfb, empty_input_produces_empty_output)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_key(session, 128);
         uint8_t dummy = 0;
@@ -230,6 +245,10 @@ TEST_F(tsra_aes_cfb, empty_input_produces_empty_output)
 
 TEST_F(tsra_aes_cfb, rejects_invalid_params)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_key(session, 128);
         uint8_t data[AES_BLOCK_SIZE] = { 0 };
@@ -254,6 +273,10 @@ TEST_F(tsra_aes_cfb, rejects_invalid_params)
 
 TEST_F(tsra_aes_cfb, buffer_too_small_reports_required_len)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_key(session, 128);
         auto plaintext = make_incrementing_bytes(33);
@@ -275,6 +298,10 @@ TEST_F(tsra_aes_cfb, buffer_too_small_reports_required_len)
 
 TEST_F(tsra_aes_cfb, context_unusable_after_finish)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_key(session, 128);
         auto plaintext = make_incrementing_bytes(20);
@@ -304,10 +331,12 @@ TEST_F(tsra_aes_cfb, context_unusable_after_finish)
     });
 }
 
-#else
-
 TEST_F(tsra_aes_cfb, unsupported_without_session_ex)
 {
+    if (api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_session([&](tsra_handle session) {
         auto key = generate_aes_key(session, 128);
         uint8_t data[AES_BLOCK_SIZE] = { 0 };
@@ -340,5 +369,3 @@ TEST_F(tsra_aes_cfb, unsupported_without_session_ex)
         ASSERT_EQ(ctx.get(), 0u);
     });
 }
-
-#endif

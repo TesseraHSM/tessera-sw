@@ -45,10 +45,12 @@ use crate::key_props::KeyUsage;
 /// TBOR opcode for `UnwrapKey`.
 pub const TBOR_OP_UNWRAP_KEY: u8 = 0x14;
 
-/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`), sized for the
-/// largest supported key (RSA-4096-CRT).  Pinned into the `#[tbor(buffer,
-/// max_len = 3072)]` literal on [`TborUnwrapKeyReq::wrapped_blob`].
-pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 3072;
+/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`): the 256-byte
+/// RSA-2048 OAEP ciphertext plus the largest AES-KWP payload
+/// (`HSM_AES_KW_MAX_DATA_LEN + 8` = 6152).  Pinned into the
+/// `#[tbor(buffer, max_len = 6408)]` literal on
+/// [`TborUnwrapKeyReq::wrapped_blob`].
+pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 6408;
 
 /// Max masked recovered-key envelope length.  Pinned into the
 /// `#[tbor(buffer, max_len = 3168)]` literal on
@@ -63,7 +65,10 @@ pub const UNWRAP_PUB_KEY_MAX_LEN: usize = 520;
 // Tripwires: keep the public length constants in lock-step with the
 // `#[tbor(buffer, max_len = ...)]` literals below (the derive requires
 // integer literals, so the two cannot share a symbol).
-const _: () = assert!(UNWRAP_WRAPPED_BLOB_MAX_LEN == 3072);
+const _: () = assert!(UNWRAP_WRAPPED_BLOB_MAX_LEN == 6408);
+const _: () = assert!(
+    UNWRAP_WRAPPED_BLOB_MAX_LEN == 256 + tsra_fw_hsm_pal_traits::HSM_AES_KW_MAX_DATA_LEN + 8
+);
 const _: () = assert!(UNWRAP_MASKED_KEY_MAX_LEN == 3168);
 const _: () = assert!(UNWRAP_PUB_KEY_MAX_LEN == 520);
 
@@ -120,7 +125,7 @@ pub struct TborUnwrapKeyReq<'a> {
 
     /// The RSA-AES-wrapped key (`RSA-OAEP(KEK) ‖ AES-KWP(key)`), up to
     /// [`UNWRAP_WRAPPED_BLOB_MAX_LEN`] bytes.
-    #[tbor(buffer, max_len = 3072)]
+    #[tbor(buffer, max_len = 6408)]
     pub wrapped_blob: &'a [u8],
 
     /// Caller-supplied key label recorded in the masked blob's metadata,

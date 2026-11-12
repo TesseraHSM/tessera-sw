@@ -21,12 +21,5 @@ ureq = { default-features = false, version = "3" }
 x509.workspace = true
 zerocopy.workspace = true
 
-[dev-dependencies]
-minicbor = { features = ["std"], workspace = true }
-
-[features]
-emu = ["tsra_sealing_api/emu"]
-sock = ["tsra_sealing_api/sock"]
-
 [lints]
 workspace = true

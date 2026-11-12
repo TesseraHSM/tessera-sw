@@ -45,7 +45,6 @@ fn test_masked_key_no_session() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 
@@ -104,7 +103,6 @@ fn test_masked_key_malformed_mask_key() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                None,
                 key_props,
             );
 

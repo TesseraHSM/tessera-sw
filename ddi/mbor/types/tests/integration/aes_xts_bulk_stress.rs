@@ -113,7 +113,7 @@ fn test_aes_xts_encrypt_decrypt_thread_fn(
     thread::sleep(std::time::Duration::from_secs(1));
 
     // generate AES 256 bulk key 1
-    let resp = generate_aes_bulk_256_key(&dev, &app_sess_id, None, DdiAesKeySize::AesXtsBulk256);
+    let resp = generate_aes_bulk_256_key(&dev, &app_sess_id, DdiAesKeySize::AesXtsBulk256);
     assert!(resp.is_ok(), "resp: {:?}", resp);
     let resp = resp.unwrap();
 
@@ -121,7 +121,7 @@ fn test_aes_xts_encrypt_decrypt_thread_fn(
     assert!(key_id1_aes_bulk_256.is_some());
 
     // generate AES 256 bulk key 2
-    let resp = generate_aes_bulk_256_key(&dev, &app_sess_id, None, DdiAesKeySize::AesXtsBulk256);
+    let resp = generate_aes_bulk_256_key(&dev, &app_sess_id, DdiAesKeySize::AesXtsBulk256);
     assert!(resp.is_ok(), "resp: {:?}", resp);
     let resp = resp.unwrap();
 
