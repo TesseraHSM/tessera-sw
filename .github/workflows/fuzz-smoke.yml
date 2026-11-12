@@ -19,9 +19,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      # The version of `cargo-fuzz` to install and use.
-      CARGO_FUZZ_VERSION: 0.12.0
-
       # The number of seconds to run the fuzz target.
       FUZZ_TIME: 10
 
@@ -44,14 +41,6 @@ jobs:
     - name: Install clippy
       if: steps.ubuntu-setup.outputs.cache-hit == 'true'
       run: rustup component add clippy
-
-    # Install and cache `cargo-fuzz`.
-    - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-      with:
-        path: ${{ runner.tool_cache }}/cargo-fuzz
-        key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
-    - run: echo "${{ runner.tool_cache }}/cargo-fuzz/bin" >> $GITHUB_PATH
-    - run: cargo install --root "${{ runner.tool_cache }}/cargo-fuzz" --version ${{ env.CARGO_FUZZ_VERSION }} cargo-fuzz --locked
 
     - run: cargo +nightly fmt -- --check
     - run: cargo clippy -- -D warnings
