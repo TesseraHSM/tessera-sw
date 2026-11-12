@@ -110,6 +110,55 @@ impl TryFrom<HsmGenericSecretKey> for HsmHmacKey {
     }
 }
 
+/// Unwraps an HMAC key using the RSA-AES key wrap algorithm.
+///
+/// Requires a V2 (`open_session_ex`) session, available from API revision 1.1.
+/// Legacy sessions return [`HsmError::UnsupportedKeyOperation`] regardless of
+/// their API revision. Key sizes must match the HMAC variant: 256, 384, or
+/// 512 bits for SHA-256, SHA-384, or SHA-512.
+/// Both signing and verification permissions are required.
+pub struct HsmHmacKeyRsaAesKeyUnwrapAlgo {
+    hash_algo: HsmHashAlgo,
+}
+
+impl HsmHmacKeyRsaAesKeyUnwrapAlgo {
+    /// Creates an HMAC key unwrapping algorithm with the specified OAEP hash.
+    pub fn new(hash_algo: HsmHashAlgo) -> Self {
+        Self { hash_algo }
+    }
+}
+
+impl HsmKeyUnwrapOp for HsmHmacKeyRsaAesKeyUnwrapAlgo {
+    type UnwrappingKey = HsmRsaPrivateKey;
+    type Key = HsmHmacKey;
+    type Error = HsmError;
+
+    fn unwrap_key(
+        &mut self,
+        unwrapping_key: &Self::UnwrappingKey,
+        wrapped_key: &[u8],
+        key_props: HsmKeyProps,
+    ) -> Result<Self::Key, Self::Error> {
+        HsmHmacKey::validate_props(&key_props)?;
+        if !key_props.can_sign() || !key_props.can_verify() {
+            return Err(HsmError::InvalidKeyProps);
+        }
+
+        // Ensure the unwrapping key supports the required session type for RSA-AES unwrapping.
+        if !unwrapping_key.can_unwrap() || !unwrapping_key.session().is_ex() {
+            return Err(HsmError::UnsupportedKeyOperation);
+        }
+
+        let (handle, props) =
+            ddi::rsa_aes_unwrap_key(unwrapping_key, wrapped_key, self.hash_algo, key_props)?;
+        Ok(HsmHmacKey::new(
+            unwrapping_key.session().clone(),
+            props,
+            handle,
+        ))
+    }
+}
+
 /// Algorithm for unmasking an HMAC key.
 #[derive(Default)]
 pub struct HsmHmacKeyUnmaskAlgo {}
