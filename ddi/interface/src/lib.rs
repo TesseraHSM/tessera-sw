@@ -173,8 +173,7 @@ pub trait DdiDev {
     /// Returns the device kind.
     ///
     /// The kind is fixed at construction time per backend
-    /// (`DdiDeviceKind::Virtual` for mock; `DdiDeviceKind::Physical`
-    /// for nix/win/emu). Used by the host-side codec to select the
+    /// (`DdiDeviceKind::Physical` for nix/win/emu). Used by the host-side codec to select the
     /// matching wire-format mode.
     fn device_kind(&self) -> DdiDeviceKind;
 
@@ -273,6 +272,17 @@ pub trait DdiDev {
     /// state. Implementations may preserve some persistent state across
     /// this operation, so this method does not guarantee that all sealed
     /// or stored material is discarded.
+    ///
+    /// Transports with no in-band reset opcode (e.g. `ddi/sock`) may
+    /// implement this by disconnecting and reconnecting, relying on the
+    /// peer to tie a reset to connection loss. Such an implementation
+    /// must only report `Ok(())` once it has verified (not merely
+    /// assumed) that the peer actually reset on disconnect, and must
+    /// invalidate any session ids the caller obtained before the reset
+    /// so they cannot collide with ids a different client reuses
+    /// afterward - returning `DdiStatus::UnsupportedCmd` instead is
+    /// preferable to a reconnect-only implementation that cannot make
+    /// either guarantee.
     ///
     /// # Returns
     /// * `Ok(())` - Successfully erased the device

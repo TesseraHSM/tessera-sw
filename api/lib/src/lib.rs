@@ -39,6 +39,9 @@ pub use ddi::PolicyPubKey;
 pub use ddi::PolicyVer;
 pub use ddi::SD_MK_BACKUP_LEN;
 pub use ddi::SEALED_TMK_LEN;
+// Starts an in-process DDI sock server for the unit tests.
+#[cfg(test)]
+use ddi_sock_server as _;
 pub use error::*;
 pub use op::*;
 pub use partition::*;

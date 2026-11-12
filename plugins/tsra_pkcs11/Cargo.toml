@@ -1,0 +1,21 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Build-orchestration crate for the TSRA PKCS#11 module.
+#
+# Like plugins/ossl_prov, this crate carries no Rust code of its own: its
+# build.rs drives CMake, which uses Corrosion to import the tsra_api_native
+# cdylib, runs cbindgen to generate tsra.h, and compiles the C PKCS#11 module
+# (src/*.c) into libtsra_pkcs11.so, linking against tsra_api_native.
+
+[package]
+edition = "2024"
+name = "tsra_pkcs11"
+version = "0.0.1"
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+cmake.workspace = true
+tsra_api_native.workspace = true
+
+[lints]
+workspace = true

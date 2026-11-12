@@ -14,6 +14,7 @@ wrapping_pub=./rsa_key_kind_wrapping_pub.pem
 kek_bin=./rsa_key_kind_kek.bin
 encrypted_kek=./rsa_key_kind_encrypted_kek.bin
 wrapped_payload=./rsa_key_kind_wrapped_payload.bin
+pkcs8_der=./rsa_key_kind_pkcs8.der
 wrapped_blob=./rsa_key_kind_wrapped.bin
 testdata=./rsa_key_kind_testdata.bin
 signature=./rsa_key_kind.sig
@@ -83,11 +84,15 @@ echo "sign me" > "$testdata"
 
 "$OPENSSL_BIN" rand 32 > "$kek_bin"
 
+# Wrapped keys must be PKCS#8 DER
+"$OPENSSL_BIN" pkcs8 -topk8 -nocrypt -inform DER -in "$keyfile" \
+    -outform DER -out "$pkcs8_der"
+
 "$OPENSSL_BIN" enc -id-aes256-wrap-pad \
     -e \
     -K "$(xxd -p -c 256 "$kek_bin")" \
     -iv "A65959A6" \
-    -in "$keyfile" \
+    -in "$pkcs8_der" \
     -out "$wrapped_payload" \
     -nopad
 
@@ -127,5 +132,5 @@ fi
 if [[ "$cleanup" == "true" ]]; then
     rm -f "$keyfile" "$masked_default" "$masked_plain" "$masked_wrapped" \
         "$wrapping_pub" "$kek_bin" "$encrypted_kek" "$wrapped_payload" \
-        "$wrapped_blob" "$testdata" "$signature" "$pubkey"
+        "$wrapped_blob" "$testdata" "$signature" "$pubkey" "$pkcs8_der"
 fi

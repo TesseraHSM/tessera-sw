@@ -1,0 +1,35 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Sample configuration of the TSRA PKCS#11 module. Copy it, adapt it and point
+# TSRA_PKCS11_CONF at the copy. One "key = value" per line; a line starting
+# with # is a comment. The environment variable named with each key wins over
+# the file. Every path, TSRA_PKCS11_CONF included, must be absolute. An unknown
+# key or a malformed value makes C_Initialize fail (TSRA_PKCS11_DEBUG=1 prints
+# why).
+#
+# Credentials are never read from this file. Set them in the environment, 32
+# hex characters (16 bytes) each:
+#   TSRA_PKCS11_ID   the partition ID. A hardware build does not initialise
+#                    without it.
+#   TSRA_PKCS11_PIN  a default PIN, for a login without a PIN. Unset, an empty
+#                    PIN is refused.
+
+# Keep token objects in files under store_dir (1 or true), or in memory for
+# the life of the process (0 or false, the default). TSRA_PKCS11_PERSIST
+persist = 1
+
+# Root of the file store, one subdirectory per slot. The module creates it
+# with mode 0700 (its parent must exist) and refuses one that others can
+# access. TSRA_PKCS11_STORE_DIR
+store_dir = /var/lib/tsra/pkcs11
+
+# The 48-byte owner backup key file. A hardware build does not initialise
+# without it. Every login reads it; only the first login after power-on hands
+# it to the device, when it provisions the partition. The OpenSSL provider
+# reads the same file (tsra-obk-path).
+# TSRA_PKCS11_OBK_PATH
+obk_path = /var/lib/tsra/obk.bin
+
+# Trace to stderr (1 or true). TSRA_PKCS11_DEBUG
+debug = 0

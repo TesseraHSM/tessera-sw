@@ -60,6 +60,7 @@ mod hash;
 mod hmac;
 mod io;
 mod kdf;
+mod key_assurance;
 mod key_masking;
 mod pal;
 mod part;

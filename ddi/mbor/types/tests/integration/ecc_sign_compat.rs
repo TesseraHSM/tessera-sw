@@ -85,7 +85,7 @@ fn test_ecc_gen_key_sign_256_compat() {
             let curve = DdiEccCurve::P256;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 20;
 
@@ -119,7 +119,7 @@ fn test_ecc_gen_key_sign_256_digest_32_compat() {
             let curve = DdiEccCurve::P256;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 32;
 
@@ -153,7 +153,7 @@ fn test_ecc_gen_key_sign_384_compat() {
             let curve = DdiEccCurve::P384;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 20;
 
@@ -187,7 +187,7 @@ fn test_ecc_gen_key_sign_384_digest_32_compat() {
             let curve = DdiEccCurve::P384;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 32;
 
@@ -221,7 +221,7 @@ fn test_ecc_gen_key_sign_384_digest_48_compat() {
             let curve = DdiEccCurve::P384;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 48;
 
@@ -255,7 +255,7 @@ fn test_ecc_gen_key_sign_521_compat() {
             let curve = DdiEccCurve::P521;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 20;
 
@@ -289,7 +289,7 @@ fn test_ecc_gen_key_sign_521_digest_32_compat() {
             let curve = DdiEccCurve::P521;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 32;
 
@@ -323,7 +323,7 @@ fn test_ecc_gen_key_sign_521_digest_48_compat() {
             let curve = DdiEccCurve::P521;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 48;
 
@@ -357,7 +357,7 @@ fn test_ecc_gen_key_sign_521_digest_64_compat() {
             let curve = DdiEccCurve::P521;
 
             let (private_key_id, pub_key, _) =
-                ecc_gen_key_tsra(dev, curve, None, Some(session_id), DdiKeyUsage::SignVerify);
+                ecc_gen_key_tsra(dev, curve, Some(session_id), DdiKeyUsage::SignVerify);
             let mut digest = [100u8; 96];
             let digest_len = 64;
 

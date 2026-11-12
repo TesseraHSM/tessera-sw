@@ -47,9 +47,9 @@ fn store_rsa(
     rsa_key_size_in_k: u8,
 ) -> u16 {
     if crt {
-        store_rsa_keys_crt(dev, session_id, key_usage, rsa_key_size_in_k, None).1
+        store_rsa_keys_crt(dev, session_id, key_usage, rsa_key_size_in_k).1
     } else {
-        store_rsa_keys_no_crt(dev, session_id, key_usage, rsa_key_size_in_k, None).1
+        store_rsa_keys_no_crt(dev, session_id, key_usage, rsa_key_size_in_k).1
     }
 }
 
@@ -378,7 +378,7 @@ fn test_rsa_mod_exp_wrong_permission_smoke() {
         |dev, _ddi, _path, session_id| {
             // A SignVerify-only key cannot perform a Decrypt primitive.
             let (_pub, key_id, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let err = helper_rsa_mod_exp(
                 dev,

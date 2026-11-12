@@ -23,8 +23,6 @@ fn import_rsa_key(
 }
 
 /// Verify labeled, session-scoped RSA-CRT keys through OAEP for every key size.
-/// The mock backend does not preserve caller-supplied key labels.
-#[cfg(not(feature = "mock"))]
 #[session_test]
 fn test_rsa_crt_enc_dec_labeled_session_keys(session: HsmSession) {
     for (bits, modulus_bytes) in [(2048, 256), (3072, 384), (4096, 512)] {
@@ -191,16 +189,17 @@ fn test_rsa_decrypt_with_wrong_key_fails(session: HsmSession) {
 
     let result = HsmDecrypter::decrypt_vec(&mut algo, &priv_b, &ciphertext);
 
-    #[cfg(feature = "session-ex-tests")]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::InvalidArgument)
-    );
-    #[cfg(not(feature = "session-ex-tests"))]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::DdiCmdFailure)
-    );
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::InvalidArgument)
+        )
+    } else {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::DdiCmdFailure)
+        )
+    };
 
     assert!(
         expected_error,
@@ -230,16 +229,17 @@ fn test_rsa_tampered_ciphertext_fails(session: HsmSession) {
 
     let result = HsmDecrypter::decrypt_vec(&mut algo, &priv_key, &ciphertext);
 
-    #[cfg(feature = "session-ex-tests")]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::InvalidArgument)
-    );
-    #[cfg(not(feature = "session-ex-tests"))]
-    let expected_error = matches!(
-        result,
-        Err(HsmError::InternalError | HsmError::DdiCmdFailure)
-    );
+    let expected_error = if crate::utils::session::api_rev_at_least(1, 1) {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::InvalidArgument)
+        )
+    } else {
+        matches!(
+            result,
+            Err(HsmError::InternalError | HsmError::DdiCmdFailure)
+        )
+    };
 
     assert!(
         expected_error,

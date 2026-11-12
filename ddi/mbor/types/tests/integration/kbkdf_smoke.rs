@@ -51,7 +51,6 @@ fn test_kbkdf_aes_derive_smoke() {
                     label,
                     context,
                     DdiKeyType::Aes256,
-                    None,
                     key_props,
                     None,
                 )
@@ -133,7 +132,6 @@ fn kbkdf_hmac_derive(
         Some(MborByteArray::from_slice("label".as_bytes()).unwrap()),
         Some(MborByteArray::from_slice("context".as_bytes()).unwrap()),
         key_type,
-        None,
         key_props,
         key_length,
     )
@@ -180,7 +178,6 @@ fn test_kbkdf_hmac_derive_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_kbkdf_var_hmac_derive_smoke() {
     ddi_dev_test(
@@ -226,7 +223,6 @@ fn test_kbkdf_var_hmac_derive_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_kbkdf_var_hmac_missing_length_smoke() {
     ddi_dev_test(
@@ -244,7 +240,6 @@ fn test_kbkdf_var_hmac_missing_length_smoke() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_kbkdf_var_hmac_out_of_range_length_smoke() {
     ddi_dev_test(

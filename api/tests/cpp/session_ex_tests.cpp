@@ -80,12 +80,13 @@ class tsra_sess_ex : public ::testing::Test
 };
 
 // Happy-path session open requires the two-phase TBOR HPKE handshake, which is
-// implemented by a real backend (emu or hardware), not mock; the mock backend
-// returns `UnsupportedEncoding` for TBOR ops. Exclude these tests from the mock
-// lane (see `TSRA_FEATURE_MOCK` in CMakeLists).
-#if !defined(TSRA_FEATURE_MOCK)
+// implemented by a real backend (emu or hardware).
 TEST_F(tsra_sess_ex, open_and_close)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -108,10 +109,13 @@ TEST_F(tsra_sess_ex, open_and_close)
         });
     });
 }
-#endif // !defined(TSRA_FEATURE_MOCK)
 
 TEST_F(tsra_sess_ex, open_null_sess_handle)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -131,6 +135,10 @@ TEST_F(tsra_sess_ex, open_null_sess_handle)
 
 TEST_F(tsra_sess_ex, open_invalid_partition_handle)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle bad_handle = 0xDEADBEEF;
 
@@ -147,6 +155,10 @@ TEST_F(tsra_sess_ex, open_invalid_partition_handle)
 // A NULL `psk` credential pointer is rejected before any device round-trip.
 TEST_F(tsra_sess_ex, open_null_psk)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -171,6 +183,10 @@ TEST_F(tsra_sess_ex, open_null_psk)
 // An unknown `psk_id` (neither CO = 0 nor CU = 1) is rejected.
 TEST_F(tsra_sess_ex, open_invalid_psk_id)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -192,6 +208,10 @@ TEST_F(tsra_sess_ex, open_invalid_psk_id)
 // A caller-supplied PSK buffer of the wrong length (not `PSK_LEN`) is rejected.
 TEST_F(tsra_sess_ex, open_wrong_length_psk)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -217,6 +237,10 @@ TEST_F(tsra_sess_ex, open_wrong_length_psk)
 // the PSK buffer, so an invalid handle is rejected on every backend.
 TEST_F(tsra_sess_ex, psk_change_invalid_session_handle)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_handle bad_handle = 0xDEADBEEF;
     // A well-formed 32-byte (`PSK_LEN`) PSK, so the handle is what's rejected.
     std::vector<uint8_t> new_psk(32, 0x5A);
@@ -232,7 +256,6 @@ TEST_F(tsra_sess_ex, psk_change_invalid_session_handle)
 // the emu (in-process firmware) backend. They exercise the ABI-boundary
 // validation and buffer-probe contract that runs *before* the partition is
 // provisioned, so they do not require valid provisioning inputs.
-#if !defined(TSRA_FEATURE_MOCK)
 namespace
 {
 // Well-formed (non-empty, non-null) provisioning inputs. The byte contents and
@@ -268,6 +291,10 @@ struct PartInitInputs
 // A NULL `params` pointer is rejected before any output buffer is touched.
 TEST_F(tsra_sess_ex, part_init_null_params)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -300,6 +327,10 @@ TEST_F(tsra_sess_ex, part_init_null_params)
 // (aliased mutable outputs are not permitted).
 TEST_F(tsra_sess_ex, part_init_same_output_buffer)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -332,6 +363,10 @@ TEST_F(tsra_sess_ex, part_init_same_output_buffer)
 // capacity so a single probe call reports both sizes.
 TEST_F(tsra_sess_ex, part_init_buffer_too_small)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -367,6 +402,10 @@ TEST_F(tsra_sess_ex, part_init_buffer_too_small)
 // BUFFER_TOO_SMALL with both `len` fields set to the required capacity.
 TEST_F(tsra_sess_ex, part_init_null_output_probe)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -404,6 +443,10 @@ TEST_F(tsra_sess_ex, part_init_null_output_probe)
 // the opaque image is parsed back into a `PartPolicy`).
 TEST_F(tsra_sess_ex, part_init_rejects_bad_part_policy_len)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -438,6 +481,10 @@ TEST_F(tsra_sess_ex, part_init_rejects_bad_part_policy_len)
 // A NULL `new_psk` buffer is rejected once the session is resolved.
 TEST_F(tsra_sess_ex, psk_change_null_new_psk)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -464,6 +511,10 @@ TEST_F(tsra_sess_ex, psk_change_null_new_psk)
 // A `new_psk` buffer of the wrong length (not `PSK_LEN` = 32 bytes) is rejected.
 TEST_F(tsra_sess_ex, psk_change_wrong_length_new_psk)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -496,6 +547,10 @@ TEST_F(tsra_sess_ex, psk_change_wrong_length_new_psk)
 // default — the C-ABI mirror of the Rust `change_psk_rotates_co_psk` test.
 TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -566,6 +621,10 @@ TEST_F(tsra_sess_ex, psk_change_rotates_co_psk)
 // `part_final_ex`, which the probe never reaches.
 TEST_F(tsra_sess_ex, part_final_size_probe_precedes_policy_parse)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -607,6 +666,10 @@ TEST_F(tsra_sess_ex, part_final_size_probe_precedes_policy_parse)
 
 TEST_F(tsra_sess_ex, part_final_rejects_bad_part_policy_len)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -652,6 +715,10 @@ TEST_F(tsra_sess_ex, part_final_rejects_bad_part_policy_len)
 }
 TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -784,14 +851,17 @@ TEST_F(tsra_sess_ex, sd_commands_reject_bad_part_policy_len)
         );
     });
 }
-#endif // !defined(TSRA_FEATURE_MOCK)
 
 // The typed partition-policy builder FFI is pure host-side serialization and
-// needs no device, so these run in every lane (including the mock lane).
+// needs no device, so these run in every lane.
 
 // NULL builder handles are rejected by every entry point.
 TEST(tsra_part_policy_builder, null_handle_rejected)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     EXPECT_EQ(tsra_part_policy_builder_set_version(nullptr, 1, 0), TSRA_STATUS_INVALID_ARGUMENT);
     EXPECT_EQ(tsra_part_policy_builder_set_flags(nullptr, 0), TSRA_STATUS_INVALID_ARGUMENT);
 
@@ -807,6 +877,10 @@ TEST(tsra_part_policy_builder, null_handle_rejected)
 
 TEST(tsra_part_policy_builder, misaligned_handle_rejected)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_part_policy_builder *builder = nullptr;
     ASSERT_EQ(tsra_part_policy_builder_new(&builder), TSRA_STATUS_SUCCESS);
     ASSERT_NE(builder, nullptr);
@@ -825,6 +899,10 @@ TEST(tsra_part_policy_builder, misaligned_handle_rejected)
 // required length, and a correctly-sized buffer then serializes the image.
 TEST(tsra_part_policy_builder, build_round_trips_via_size_probe)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_part_policy_builder *b = nullptr;
     ASSERT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
     ASSERT_NE(b, nullptr);
@@ -858,6 +936,10 @@ TEST(tsra_part_policy_builder, build_round_trips_via_size_probe)
 
 TEST(tsra_part_policy_builder, invalid_versions_and_reserved_flags_rejected_at_build)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_part_policy_builder *builder = nullptr;
     ASSERT_EQ(tsra_part_policy_builder_new(&builder), TSRA_STATUS_SUCCESS);
     ASSERT_NE(builder, nullptr);
@@ -910,6 +992,10 @@ TEST(tsra_part_policy_builder, invalid_versions_and_reserved_flags_rejected_at_b
 // (truncation would yield a *different* key while reporting success).
 TEST(tsra_part_policy_builder, oversized_key_rejected_at_build)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_part_policy_builder *b = nullptr;
     ASSERT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
     ASSERT_NE(b, nullptr);
@@ -939,6 +1025,10 @@ TEST(tsra_part_policy_builder, oversized_key_rejected_at_build)
 // rejects every non-96-byte Ecc384 key.
 TEST(tsra_part_policy_builder, wrong_length_ecc384_rejected_at_build)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     tsra_part_policy_builder *b = nullptr;
     ASSERT_EQ(tsra_part_policy_builder_new(&b), TSRA_STATUS_SUCCESS);
     ASSERT_NE(b, nullptr);

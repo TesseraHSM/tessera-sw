@@ -3,8 +3,8 @@
 
 //! GetCertChainInfo / GetCertificate smoke tests.
 //!
-//! Exercises the certificate-chain DDI commands end-to-end on both the
-//! emu and mock backends:
+//! Exercises the certificate-chain DDI commands end-to-end on the emu
+//! backend:
 //!
 //! - `GetCertChainInfo` reports a provisioned chain (non-zero count and a
 //!   non-zero thumbprint).

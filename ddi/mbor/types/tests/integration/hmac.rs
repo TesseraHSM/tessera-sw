@@ -4,7 +4,6 @@
 #![cfg(test)]
 
 use test_with_tracing::test;
-#[cfg(not(feature = "mock"))]
 use tsra_crypto::Rng;
 use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
@@ -27,7 +26,6 @@ fn test_hmac_invalid_key_type() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
                 key_props,
             );
 
@@ -214,7 +212,6 @@ fn test_hmac_sha512() {
 }
 
 #[test]
-#[cfg(not(feature = "mock"))]
 fn test_var_hmac_sha256() {
     ddi_dev_test(
         common_setup,
@@ -244,7 +241,6 @@ fn test_var_hmac_sha256() {
 }
 
 #[test]
-#[cfg(not(feature = "mock"))]
 fn test_var_hmac_sha384() {
     ddi_dev_test(
         common_setup,
@@ -274,7 +270,6 @@ fn test_var_hmac_sha384() {
 }
 
 #[test]
-#[cfg(not(feature = "mock"))]
 fn test_var_hmac_sha512() {
     ddi_dev_test(
         common_setup,
@@ -382,7 +377,6 @@ fn test_hmac_sha512_kbkdf() {
 }
 
 #[test]
-#[cfg(not(feature = "mock"))]
 fn test_var_hmac_sha256_kbkdf() {
     ddi_dev_test(
         common_setup,
@@ -412,7 +406,6 @@ fn test_var_hmac_sha256_kbkdf() {
 }
 
 #[test]
-#[cfg(not(feature = "mock"))]
 fn test_var_hmac_sha384_kbkdf() {
     ddi_dev_test(
         common_setup,
@@ -442,7 +435,6 @@ fn test_var_hmac_sha384_kbkdf() {
 }
 
 #[test]
-#[cfg(not(feature = "mock"))]
 fn test_var_hmac_sha512_kbkdf() {
     ddi_dev_test(
         common_setup,
@@ -472,7 +464,6 @@ fn test_var_hmac_sha512_kbkdf() {
 }
 
 #[test]
-#[cfg(not(feature = "mock"))]
 fn test_invalid_var_hmac_key() {
     ddi_dev_test(
         common_setup,

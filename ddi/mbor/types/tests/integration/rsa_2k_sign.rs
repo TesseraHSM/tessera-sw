@@ -18,9 +18,9 @@ fn test_rsa_2k_sign_no_session() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let resp = helper_rsa_mod_exp(
                 dev,
@@ -64,9 +64,9 @@ fn test_rsa_2k_sign_incorrect_session_id() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let session_id = 20;
             let resp = helper_rsa_mod_exp(
@@ -159,7 +159,6 @@ fn test_rsa_2k_sign_incorrect_key_type() {
             let (private_key_id_wrong_type, _pub_key, _) = ecc_gen_key_tsra(
                 dev,
                 DdiEccCurve::P256,
-                None,
                 Some(session_id),
                 DdiKeyUsage::SignVerify,
             );
@@ -196,7 +195,6 @@ fn test_rsa_2k_sign_incorrect_permission() {
                 &TEST_RSA_2K_PRIVATE_KEY,
                 DdiKeyClass::Rsa,
                 DdiKeyUsage::EncryptDecrypt,
-                None,
             );
 
             assert!(resp.is_ok(), "resp {:?}", resp);
@@ -238,9 +236,9 @@ fn test_rsa_2k_sign_message_data_below_lower_limit() {
             }
 
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let mut msg = MborByteArray::new([0x0; 512], 256).expect("failed to create byte array");
             let last_idx = msg.len() - 1;
@@ -300,9 +298,9 @@ fn test_rsa_2k_sign_message_data_above_upper_limit() {
             }
 
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             // Non crt
             let resp = helper_rsa_mod_exp(
@@ -348,9 +346,9 @@ fn test_rsa_2k_sign_and_verify_pkcs15_sha1() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 20];
             let padded_hash =
@@ -433,9 +431,9 @@ fn test_rsa_2k_sign_and_verify_pkcs15_sha256() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 32];
             let padded_hash =
@@ -518,9 +516,9 @@ fn test_rsa_2k_sign_and_verify_pkcs15_sha384() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 48];
             let padded_hash =
@@ -603,9 +601,9 @@ fn test_rsa_2k_sign_and_verify_pkcs15_sha512() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 64];
             let padded_hash =
@@ -688,9 +686,9 @@ fn test_rsa_2k_sign_and_verify_pss_sha1() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 20];
 
@@ -821,9 +819,9 @@ fn test_rsa_2k_sign_and_verify_pss_sha256() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 32];
 
@@ -954,9 +952,9 @@ fn test_rsa_2k_sign_and_verify_pss_sha384() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 48];
 
@@ -1087,9 +1085,9 @@ fn test_rsa_2k_sign_and_verify_pss_sha512() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
             let (_, key_id_rsa2k_priv_crt, _) =
-                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2, None);
+                store_rsa_keys_crt(dev, session_id, DdiKeyUsage::SignVerify, 2);
 
             let hash = [0x1; 64];
 

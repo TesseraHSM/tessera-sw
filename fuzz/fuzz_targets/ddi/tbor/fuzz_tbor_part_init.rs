@@ -6,6 +6,10 @@
 #[path = "../../common.rs"]
 mod common;
 
+use libfuzzer_sys::arbitrary;
+use libfuzzer_sys::arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
+use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_test_harness::bootstrap_rotated_co;
@@ -16,9 +20,6 @@ use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::SAPOTA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::SATA_THUMBPRINT_LEN;
 use tsra_ddi_tbor_types::TborPartInitReq;
-use libfuzzer_sys::arbitrary;
-use libfuzzer_sys::arbitrary::Arbitrary;
-use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -93,8 +94,9 @@ fuzz_target!(|input: FuzzInput| {
         //   MACH_SEED_ENVELOPE_MAX_LEN and the wire encoder rejects, or
         //   (b) AES-GCM detects the ciphertext/tag/AAD tamper (or the
         //   post-decrypt length mismatch after truncation) and
-        //   `AeadEnvelopeAuthFailed` fires. Either surfaces as
-        //   `DdiError`.
+        //   `AeadEnvelopeAuthFailed` fires. These surface as
+        //   `TborEncodeError` or a firmware `TborStatus`, never a
+        //   response-decoding failure.
         let result = ctx.tbor(&part_init_req);
 
         if envelope_is_noop {
@@ -102,7 +104,14 @@ fuzz_target!(|input: FuzzInput| {
                 "PartInit should succeed with an unmutated envelope and a wire-valid request",
             );
         } else {
-            assert!(result.is_err(), "PartInit should reject a mutated envelope",);
+            assert!(
+                matches!(
+                    &result,
+                    Err(DdiError::TborStatus(_) | DdiError::TborEncodeError)
+                ),
+                "PartInit should reject a mutated envelope with a firmware status or \
+                 request-encoding error, got {result:?}"
+            );
         }
 
         ctx.session_close(session.session_id)

@@ -620,7 +620,7 @@ fn aes_xts_encrypt_decrypt(
     };
     let mut is_fips_approved = false;
 
-    let resp = key.with_dev(|dev| {
+    let resp = key.with_dev_no_cookie(|dev| {
         dev.exec_op_fp_xts_slice(op, xts_params, input, output, &mut is_fips_approved)
             .map_err(HsmError::from)
     })?;
@@ -964,7 +964,7 @@ pub(crate) fn aes_gcm_encrypt(
     let mut returned_iv: Option<[u8; 12]> = None;
     let mut is_fips_approved = false;
 
-    let bytes_written = key.with_dev(|dev| {
+    let bytes_written = key.with_dev_no_cookie(|dev| {
         dev.exec_op_fp_gcm_slice(
             DdiAesOp::Encrypt,
             gcm_params,
@@ -1040,7 +1040,7 @@ pub(crate) fn aes_gcm_decrypt(
     let mut returned_iv: Option<[u8; 12]> = None;
     let mut is_fips_approved = false;
 
-    let bytes_written = key.with_dev(|dev| {
+    let bytes_written = key.with_dev_no_cookie(|dev| {
         dev.exec_op_fp_gcm_slice(
             DdiAesOp::Decrypt,
             gcm_params,

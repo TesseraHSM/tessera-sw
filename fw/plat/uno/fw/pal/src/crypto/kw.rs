@@ -36,6 +36,7 @@
 
 use core::ops::RangeInclusive;
 
+use tsra_fw_hsm_pal_traits::HSM_AES_KW_MAX_DATA_LEN;
 use tsra_fw_hsm_pal_traits::HsmAlloc;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -69,9 +70,8 @@ const DEFAULT_IV: [u8; SEMI] = [0xA6; SEMI];
 const AIV_PREFIX: [u8; 4] = [0xA6, 0x59, 0x59, 0xA6];
 
 /// Maximum input data size accepted by [`UnoHsmPal::kw_wrap_impl`]
-/// and [`UnoHsmPal::kwp_wrap_impl`] (3 KiB, sized for HSM session
-/// state buffers).
-const MAX_DATA: usize = 3072;
+/// and [`UnoHsmPal::kwp_wrap_impl`].
+const MAX_DATA: usize = HSM_AES_KW_MAX_DATA_LEN;
 
 /// Validates the KEK length (16, 24, or 32 bytes) with the same error the
 /// AES driver reports, so length-only queries match execution.

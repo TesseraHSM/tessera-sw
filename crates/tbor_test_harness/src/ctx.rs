@@ -131,7 +131,7 @@ impl TestCtx {
     /// Factory-reset the partition. Used by the
     /// `commands::part_init` determinism test for cold-restart
     /// iterations. Available on every backend the harness compiles
-    /// under (emu + hw); `mock`/`sock` gate the whole harness out at
+    /// under (emu + hw); `sock` gates the whole harness out at
     /// the crate root.
     pub fn erase(&self) -> DdiResult<()> {
         self.dev.erase()

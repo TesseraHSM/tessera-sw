@@ -4,7 +4,6 @@
 #![cfg(test)]
 
 use test_with_tracing::test;
-#[cfg(not(feature = "mock"))]
 use tsra_crypto::Rng;
 use tsra_ddi::*;
 use tsra_ddi_mbor_codec::MborByteArray;
@@ -22,7 +21,6 @@ fn test_masked_key_secret_hkdf() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -32,7 +30,6 @@ fn test_masked_key_secret_hkdf() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -50,7 +47,6 @@ fn test_masked_key_secret_hkdf_sha1() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -60,7 +56,6 @@ fn test_masked_key_secret_hkdf_sha1() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -78,7 +73,6 @@ fn test_masked_key_secret_hkdf_no_salt() {
             let salt_vec = None;
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -88,7 +82,6 @@ fn test_masked_key_secret_hkdf_no_salt() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -106,7 +99,6 @@ fn test_masked_key_secret_hkdf_no_info() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = None;
             let key_type = DdiKeyType::Aes256;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -116,7 +108,6 @@ fn test_masked_key_secret_hkdf_no_info() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -134,7 +125,6 @@ fn test_masked_key_secret_hkdf_aes128() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes128;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -144,7 +134,6 @@ fn test_masked_key_secret_hkdf_aes128() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -162,7 +151,6 @@ fn test_masked_key_secret_hkdf_aes192() {
             let salt_vec = Some("salt".as_bytes().to_vec());
             let info_vec = Some("label".as_bytes().to_vec());
             let key_type = DdiKeyType::Aes192;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -172,7 +160,6 @@ fn test_masked_key_secret_hkdf_aes192() {
                 salt_vec,
                 info_vec,
                 key_type,
-                key_tag,
                 key_properties,
                 session_id,
             );
@@ -197,7 +184,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret256() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -209,7 +195,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret256() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret256,
             );
@@ -234,7 +219,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret384() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -246,7 +230,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret384() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret384,
             );
@@ -271,7 +254,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret521() {
             let salt = "salt".as_bytes().to_vec();
             let info = "label".as_bytes().to_vec();
             let key_type = DdiKeyType::AesGcmBulk256Unapproved;
-            let key_tag = Some(1);
             let key_properties =
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App);
 
@@ -283,7 +265,6 @@ fn test_masked_key_secret_hkdf_aes_gcm_secret521() {
                 salt,
                 info,
                 key_type,
-                key_tag,
                 key_properties,
                 DdiKeyType::Secret521,
             );
@@ -427,7 +408,6 @@ fn test_masked_key_hmac_sha512() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_masked_key_var_hmac_sha256() {
     ddi_dev_test(
@@ -481,7 +461,6 @@ fn test_masked_key_var_hmac_sha256() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_masked_key_var_hmac_sha384() {
     ddi_dev_test(
@@ -535,7 +514,6 @@ fn test_masked_key_var_hmac_sha384() {
     );
 }
 
-#[cfg(not(feature = "mock"))]
 #[test]
 fn test_masked_key_var_hmac_sha512() {
     ddi_dev_test(
@@ -594,7 +572,6 @@ fn test_masked_key_var_hmac_sha512() {
 // from secret_key_id1 and secret_key_id2, respectively.
 // Then delete one of the key and unmask it.
 // Verifies old key + new key can do an encrypt/decrypt loop
-// key_tag is only used for DERIVED_KEY_ID1.
 // Returns (derived_key_id1, derived_key_id2)
 #[allow(clippy::too_many_arguments)]
 fn test_secret_hkdf_helper(
@@ -603,7 +580,6 @@ fn test_secret_hkdf_helper(
     salt: Option<Vec<u8>>,
     info: Option<Vec<u8>>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     session_id: u16,
 ) {
@@ -645,7 +621,6 @@ fn test_secret_hkdf_helper(
         salt,
         info,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -667,7 +642,6 @@ fn test_secret_hkdf_helper(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         derived_key_id1,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -684,7 +658,6 @@ fn test_secret_hkdf_helper(
         salt,
         info,
         key_type,
-        None,
         key_properties,
         Default::default(),
     );
@@ -739,7 +712,6 @@ fn test_secret_hkdf_aes_gcm_helper(
     salt: Vec<u8>,
     info: Vec<u8>,
     key_type: DdiKeyType,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
     secret_key_type: DdiKeyType,
 ) {
@@ -766,7 +738,6 @@ fn test_secret_hkdf_aes_gcm_helper(
         salt,
         info,
         key_type,
-        key_tag,
         key_properties,
         Default::default(),
     );
@@ -788,7 +759,6 @@ fn test_secret_hkdf_aes_gcm_helper(
         Some(session_id),
         Some(DdiApiRev { major: 1, minor: 0 }),
         derived_key_id1,
-        false,
         masked_key,
     );
     assert!(resp.is_ok(), "resp {:?}", resp);
@@ -806,7 +776,6 @@ fn test_secret_hkdf_aes_gcm_helper(
         salt,
         info,
         key_type,
-        None,
         key_properties,
         Default::default(),
     );

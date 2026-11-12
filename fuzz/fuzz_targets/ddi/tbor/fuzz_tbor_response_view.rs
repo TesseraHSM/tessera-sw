@@ -3,8 +3,8 @@
 
 #![no_main]
 
-use tsra_ddi_tbor_codec::ResponseView;
 use libfuzzer_sys::fuzz_target;
+use tsra_ddi_tbor_codec::ResponseView;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(view) = ResponseView::parse(data) {

@@ -23,12 +23,5 @@ x509.workspace = true
 zerocopy = { features = ["derive"], workspace = true }
 zeroize.workspace = true
 
-[features]
-emu = ["tsra_ddi/emu"]
-mock = ["tsra_ddi/mock"]
-sock = ["tsra_ddi/sock"]
-table-4 = ["tsra_ddi/table-4"]
-table-64 = ["tsra_ddi/table-64"]
-
 [lints]
 workspace = true

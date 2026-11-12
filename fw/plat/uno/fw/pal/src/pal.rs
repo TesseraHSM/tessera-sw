@@ -36,6 +36,8 @@ use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 #[cfg(feature = "tsra_test_hooks")]
 use embassy_sync::channel::Channel;
 use embassy_sync::mutex::Mutex;
+use embassy_time::Duration;
+use embassy_time::Instant;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmCustomDispatch;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
@@ -82,6 +84,7 @@ use tsra_fw_uno_reg_soc::io_gsram::ICQ_TAIL_SHADOW_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_CQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IO_GSRAM_BASE;
 use tsra_fw_uno_reg_soc::io_gsram::IO_META_OFFSET;
+use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_COUNT;
 use tsra_fw_uno_reg_soc::io_gsram::IO_SQ_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IPC_ADMIN_HSM_RX_CI_OFFSET;
 use tsra_fw_uno_reg_soc::io_gsram::IPC_ADMIN_HSM_RX_PI_OFFSET;
@@ -185,6 +188,17 @@ type WakeFn = fn(&UnoHsmPal, u16);
 fn wake_pka(pal: &UnoHsmPal, irq: u16) {
     pal.pka.wake_engine((irq & 0x0F) as u8);
 }
+
+/// First PKA done and error IRQs. Each block of sixteen sits inside one
+/// pending register, at the engine's index (see [`wake_pka`]).
+const PKA_DONE_IRQ: usize = Interrupt::UPKA_0_DONE as usize;
+const PKA_ERROR_IRQ: usize = Interrupt::UPKA_0_ERROR as usize;
+const _: () = assert!(
+    PKA_DONE_IRQ % 32 + 16 <= 32
+        && PKA_ERROR_IRQ % 32 + 16 <= 32
+        && Interrupt::UPKA_15_DONE as usize == PKA_DONE_IRQ + 15
+        && Interrupt::UPKA_15_ERROR as usize == PKA_ERROR_IRQ + 15
+);
 
 /// `(IRQ number, wake function)` pairs registered for NVIC dispatch.
 ///
@@ -360,9 +374,17 @@ pub struct UnoHsmPal {
     /// PCIe-reset handler waits for it to reach zero before freeing
     /// partitions.
     io_in_flight: Cell<u32>,
+
+    /// Per host IO slot: what finishing a detached IO still needs.
+    pub(crate) detached: [Cell<crate::io::DetachedIo>; IO_SQ_COUNT as usize],
+
+    /// Host IO slots whose detached completion post found the OIC full.
+    pub(crate) detached_post_pending: Cell<u32>,
+
     /// One negative self-test request for the periodic task.
     #[cfg(feature = "tsra_test_hooks")]
     pub(crate) negative_cast: Channel<NoopRawMutex, crate::self_test::SelfTest, 1>,
+
     /// Reservation across the HSM and Admin negative-test paths.
     #[cfg(feature = "tsra_test_hooks")]
     pub(crate) negative_cast_pending: Cell<bool>,
@@ -521,6 +543,8 @@ impl Default for UnoHsmPal {
             io_peak: IO_ALLOC_INIT,
             fp_bulk_lock: Mutex::new(()),
             io_in_flight: Cell::new(0),
+            detached: [const { Cell::new(crate::io::DetachedIo::NONE) }; IO_SQ_COUNT as usize],
+            detached_post_pending: Cell::new(0),
             #[cfg(feature = "tsra_test_hooks")]
             negative_cast: Channel::new(),
             #[cfg(feature = "tsra_test_hooks")]
@@ -544,6 +568,13 @@ const PCIE_RESET_PERST: u32 = 0x54535250;
 fn is_pcie_reset_event(value: u32) -> bool {
     value == PCIE_RESET_FLR || value == PCIE_RESET_PERST
 }
+
+/// Longest the IDFU shutdown handler waits for the PKA engines to return to
+/// the pool before failing closed. A wipe takes microseconds and a periodic
+/// self-test holds an engine for a few milliseconds, so this expires only for
+/// a stuck engine (e.g. a wipe that keeps failing), and it leaves the reply
+/// well inside Admin's smallest IDFU drain budget (500 ms).
+const SHUTDOWN_PKA_DRAIN_MS: u64 = 100;
 
 impl UnoHsmPal {
     /// Returns the current boot phase.
@@ -728,6 +759,38 @@ impl UnoHsmPal {
         info!("boot", "phase -> Running, status=Run");
     }
 
+    /// Handle every PKA engine that has finished a command or a wipe, as
+    /// [`poll_once`](Self::poll_once) does for their IRQs.
+    ///
+    /// Called also where a request awaits the BCP or the PKA -- steps of
+    /// keyed requests only, so that requests that never use them pay
+    /// nothing -- since the run loop's next pass waits behind every task
+    /// ready ahead of it, and an engine whose command has finished sits
+    /// idle until it comes: twice per command, once for the command and
+    /// once for the wipe that follows. Under a stream of ECDSA P-256
+    /// signatures, which keeps all sixteen engines busy, that wait was
+    /// about a fortieth of each engine's time. With no engine in use this
+    /// is a load and a compare, inlined; the rest is out of line, to keep
+    /// the request path's code as it was.
+    #[inline(always)]
+    pub fn service_pka(&self) {
+        if self.pka.any_engine_busy() {
+            self.service_busy_pka();
+        }
+    }
+
+    #[inline(never)]
+    fn service_busy_pka(&self) {
+        let mut done = ((Nvic::pending_bits(PKA_DONE_IRQ / 32) >> (PKA_DONE_IRQ % 32))
+            | (Nvic::pending_bits(PKA_ERROR_IRQ / 32) >> (PKA_ERROR_IRQ % 32)))
+            & 0xFFFF;
+        while done != 0 {
+            let id = done.trailing_zeros() as u8;
+            done &= done - 1;
+            self.pka.wake_engine(id);
+        }
+    }
+
     /// Poll the NVIC once and wake any PAL driver with a pending IRQ.
     ///
     /// NVIC pending bits are **not** cleared here. For level-triggered
@@ -766,6 +829,8 @@ impl UnoHsmPal {
         // The BCP raises no HSM interrupt; reap its completions every pass.
         #[cfg(not(feature = "bulk_crypto"))]
         self.bcp.wake();
+
+        self.finish_detached();
     }
 
     /// Handle an incoming IPC message.
@@ -821,7 +886,7 @@ impl UnoHsmPal {
                 if self.try_handle_pfn_enable(channel, buf).await {
                     return;
                 }
-                if self.try_handle_shutdown(channel, buf) {
+                if self.try_handle_shutdown(channel, buf).await {
                     return;
                 }
                 buf[0] |= 0x80;
@@ -950,20 +1015,26 @@ impl UnoHsmPal {
     ///
     /// Admin owns the IO drain: it sends this only after every host SQ
     /// credit has been restored, and inbound is HW-paused so no new IO can
-    /// arrive. The HSM therefore just confirms it holds no in-flight IO and
+    /// arrive. The HSM therefore just confirms it holds no resident work and
     /// replies — mirroring the reference firmware's fail-closed
     /// `scheduler.occupancy_list() != 0` guard:
     ///
-    /// - non-zero in-flight -> reply `OperationFailed`, so Admin aborts
+    /// - non-zero in-flight IO -> reply `OperationFailed`, so Admin aborts
     ///   (rolls back) the IDFU instead of resetting with resident work;
-    /// - zero in-flight -> reply `Success`. Partition state is already
+    /// - PKA engines still out of the pool after [`SHUTDOWN_PKA_DRAIN_MS`]
+    ///   -> reply `OperationFailed` likewise. A request can finish while the
+    ///   wipe that follows its PKA command (or the retry of a failed wipe)
+    ///   still runs, and a reset then would lose the wipe while the rebuilt
+    ///   driver marks the engine free, so the handler first waits for the
+    ///   engines to return;
+    /// - otherwise -> reply `Success`. Partition state is already
     ///   GSRAM write-through (see [`part`](crate::part)), so there is no
     ///   separate flush to perform before the SP resets the core.
     ///
     /// Returns `true` when the message was a `Shutdown` (and thus fully
     /// handled here), `false` otherwise so the caller falls back to the
     /// default echo path.
-    fn try_handle_shutdown(&self, channel: IpcChannel, buf: &[u32; 16]) -> bool {
+    async fn try_handle_shutdown(&self, channel: IpcChannel, buf: &[u32; 16]) -> bool {
         // Only claim messages that carry the `Shutdown` opcode; anything else
         // is left for the caller's default echo path.
         let is_shutdown = IpcMessageDecoder::decode_header(&IpcMessage { data: *buf })
@@ -989,7 +1060,8 @@ impl UnoHsmPal {
         }
 
         // Admin owns the drain (see the docstring): fail closed while any host
-        // IO is still in flight, otherwise acknowledge readiness. This relies
+        // IO is still in flight, otherwise acknowledge readiness once the PKA
+        // has finished the cleanup host IO leaves behind. This relies
         // on every received IO eventually reaching `drop_io` (each
         // `handle_io` task runs to completion, or the core faults into a
         // reset); a task that hung on an `.await` would keep the count
@@ -1003,6 +1075,13 @@ impl UnoHsmPal {
                 in_flight
             );
             IpcMessageStatusCode::OperationFailed
+        } else if !self.drain_pka().await {
+            error!(
+                "idfu",
+                HsmError::IoDrainInProgress,
+                "shutdown requested with PKA cleanup pending; failing closed"
+            );
+            IpcMessageStatusCode::OperationFailed
         } else {
             IpcMessageStatusCode::Success
         };
@@ -1010,6 +1089,25 @@ impl UnoHsmPal {
         let reply = encode_shutdown_ack(buf, status);
         self.ipc.reply(channel as u8, &reply);
         true
+    }
+
+    /// Wait up to [`SHUTDOWN_PKA_DRAIN_MS`] for every PKA engine to return to
+    /// the pool, handling finished commands and wipes as it goes.
+    ///
+    /// Returns whether the PKA is idle.
+    async fn drain_pka(&self) -> bool {
+        let deadline = Instant::now() + Duration::from_millis(SHUTDOWN_PKA_DRAIN_MS);
+        loop {
+            self.service_pka();
+            if !self.pka.any_engine_busy() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            // Let a task holding an engine (a periodic self-test) run.
+            embassy_futures::yield_now().await;
+        }
     }
 
     /// Handle one IPC event notification.
@@ -1084,8 +1182,8 @@ impl UnoHsmPal {
             // dispatched once the flag clears and could reach a partition
             // re-enabled after the acknowledgement. Nothing awaits between
             // finding the ICQ empty and clearing the flag.
-            while let Some(index) = self.iic.try_recv() {
-                let io = self.accept_io(index);
+            while let Some(rx) = self.iic.try_recv() {
+                let io = self.accept_io(rx);
                 self.recycle_reset_io(io).await;
             }
             // Resume normal IO dispatch.

@@ -82,8 +82,8 @@ impl EcDeriveHandler for TsraEcDerive {
         if key_ptr.is_null() {
             return Err(EngineError::Other("no HSM key attached for derive".into()));
         }
-        // SAFETY: key_ptr is owned by EngineData and alive for the engine's
-        // lifetime.
+        // SAFETY: key_ptr is owned by EngineData and alive while the EC_KEY
+        // carrying it lives, which it does for this callback.
         let hsm_key = unsafe { &*key_ptr };
 
         let curve = hsm_key

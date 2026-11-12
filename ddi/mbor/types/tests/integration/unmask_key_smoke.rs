@@ -57,7 +57,6 @@ fn test_unmask_aes_app_key_roundtrip_smoke() {
                 Some(session_id),
                 rev,
                 DdiAesKeySize::Aes256,
-                Some(1),
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             )
             .expect("aes generate should succeed");
@@ -150,7 +149,6 @@ fn test_unmask_ecc_session_key_roundtrip_smoke() {
                 Some(session_id),
                 rev,
                 DdiEccCurve::P256,
-                None,
                 helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::Session),
             )
             .expect("ecc generate should succeed");
@@ -265,7 +263,6 @@ fn test_unmask_rsa_4k_crt_reunmask_roundtrip_smoke() {
                 DdiKeyClass::RsaCrt,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties_with_label(
                     DdiKeyUsage::EncryptDecrypt,
                     DdiKeyAvailability::App,
@@ -333,10 +330,7 @@ fn test_unmask_rsa_4k_crt_reunmask_roundtrip_smoke() {
             .expect("oaep decode");
             assert_eq!(orig_x[..data_len], decoded[..]);
 
-            // The firmware embeds the caller's label into the envelope; the sim
-            // (mock) backend does not model labels, so assert the exact value on
-            // every backend except the sim.
-            #[cfg(not(feature = "mock"))]
+            // The firmware embeds the caller's label into the envelope.
             assert_eq!(
                 base_meta.key_label.as_slice(),
                 label_bytes,
@@ -404,9 +398,7 @@ fn test_unmask_rsa_4k_crt_reunmask_roundtrip_smoke() {
                 );
 
                 // The firmware re-masks (fresh IV) rather than echoing, so each
-                // envelope differs byte-wise from the one it unmasked; the sim
-                // (mock) echoes the input, so this holds on every backend but it.
-                #[cfg(not(feature = "mock"))]
+                // envelope differs byte-wise from the one it unmasked.
                 assert_ne!(
                     new_env.as_slice(),
                     current_env.as_slice(),

@@ -19,10 +19,14 @@
 //! `EVP_PKEY_sign` with no digest set takes `pkey_rsa_sign`'s other branch to
 //! `rsa_priv_enc` instead and never reaches this slot; the caller must set a
 //! digest.
+//!
+//! The method also wraps the `finish` slot (run by `RSA_free`) so the handler can
+//! release per-key state when a key is freed — see [`RsaSignHandler::finish`].
 
 use std::ffi::c_int;
 use std::ffi::c_uchar;
 use std::ffi::c_uint;
+use std::sync::OnceLock;
 
 use tsra_ossl_engine_sys as ffi;
 
@@ -52,6 +56,42 @@ pub trait RsaSignHandler {
     /// duration of the call. Return an error to surface a `0` result plus an
     /// ERR-queue entry.
     fn sign(rsa: *mut ffi::RSA, md_nid: c_int, m: &[u8]) -> EngineResult<Vec<u8>>;
+
+    /// Called when OpenSSL frees an `RSA` using this method (`RSA_free` runs the
+    /// method's `finish` while the key's ex_data is still readable), before
+    /// OpenSSL's own software `finish`. Release per-key state here (e.g. delete
+    /// the attached HSM key). Runs for software keys that adopted the method
+    /// too, so it must ignore keys it does not own. Default: nothing.
+    ///
+    /// Unlike an ex_data free callback, this hook is safe across `.so` unload:
+    /// every `RSA` using the method holds a functional reference on the engine
+    /// that registered it, which keeps the engine — and its `.so` — loaded.
+    fn finish(_rsa: *mut ffi::RSA) {}
+}
+
+/// OpenSSL's built-in RSA `finish` (frees the Montgomery caches), captured from
+/// `RSA_PKCS1_OpenSSL()` by [`new_rsa_sign_method`] and chained after
+/// [`RsaSignHandler::finish`]. The built-in method is a process-lifetime
+/// constant, so a process-global works.
+type RsaFinishFn = unsafe extern "C" fn(*mut ffi::RSA) -> c_int;
+static DEFAULT_RSA_FINISH: OnceLock<RsaFinishFn> = OnceLock::new();
+
+/// C trampoline for `RSA_meth_set_finish`. Runs `H::finish` (panics caught),
+/// then always chains to OpenSSL's built-in `finish`.
+///
+/// # Safety
+/// Called only by OpenSSL from `RSA_free`/`RSA_set_method` with the `RSA` being
+/// finished.
+#[allow(unsafe_code)]
+unsafe extern "C" fn c_rsa_finish<H: RsaSignHandler>(rsa: *mut ffi::RSA) -> c_int {
+    if !rsa.is_null() {
+        catch_panic(|| H::finish(rsa), ());
+    }
+    match DEFAULT_RSA_FINISH.get() {
+        // SAFETY: forwarding the RSA OpenSSL passed us to the built-in finish.
+        Some(dflt) => unsafe { dflt(rsa) },
+        None => RetCode::Success.into(),
+    }
 }
 
 /// C trampoline for `RSA_meth_set_sign`'s `sign` slot. Catches panics and
@@ -133,7 +173,8 @@ unsafe fn rsa_sign_inner<H: RsaSignHandler>(
 }
 
 /// Build an `RSA_METHOD` that signs via `H`, keeping OpenSSL's software RSA
-/// operations (a dup of `RSA_PKCS1_OpenSSL`) for everything but `sign`. Register
+/// operations (a dup of `RSA_PKCS1_OpenSSL`) for everything but `sign`, and
+/// running [`RsaSignHandler::finish`] ahead of the built-in `finish`. Register
 /// the result on an engine with `ENGINE_set_RSA`.
 ///
 /// The built-in `RSA_PKCS1_OpenSSL()` is dup'd rather than `RSA_get_default_method()`:
@@ -156,6 +197,18 @@ pub fn new_rsa_sign_method<H: RsaSignHandler>() -> EngineResult<*mut ffi::RSA_ME
     // dispatches to a non-NULL rsa_sign (no flag needed).
     let rc = unsafe { ffi::RSA_meth_set_sign(method, Some(c_rsa_sign::<H>)) };
     if let Err(e) = ossl_check(rc, "RSA_meth_set_sign failed") {
+        // SAFETY: method is ours and not yet published.
+        unsafe { ffi::RSA_meth_free(method) };
+        return Err(e);
+    }
+    // SAFETY: method is our fresh dup; the getter returns the copied built-in
+    // finish (captured once as the chained fallback).
+    if let Some(dflt) = unsafe { ffi::RSA_meth_get_finish(method) } {
+        let _ = DEFAULT_RSA_FINISH.set(dflt);
+    }
+    // SAFETY: method is our fresh dup; install the finish trampoline.
+    let rc = unsafe { ffi::RSA_meth_set_finish(method, Some(c_rsa_finish::<H>)) };
+    if let Err(e) = ossl_check(rc, "RSA_meth_set_finish failed") {
         // SAFETY: method is ours and not yet published.
         unsafe { ffi::RSA_meth_free(method) };
         return Err(e);
@@ -200,6 +253,46 @@ mod tests {
         assert!(sign.is_some(), "sign slot must be installed");
         // SAFETY: method is ours and unregistered.
         unsafe { ffi::RSA_meth_free(method) };
+    }
+
+    // Freeing an RSA that uses the method must reach the handler's finish
+    // (and chain to the built-in finish without crashing).
+    #[test]
+    #[allow(unsafe_code)]
+    fn rsa_free_runs_handler_finish() {
+        use std::ptr::NonNull;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        static FINISHED: AtomicUsize = AtomicUsize::new(0);
+        struct CountingSigner;
+        impl RsaSignHandler for CountingSigner {
+            fn sign(_rsa: *mut ffi::RSA, _md_nid: c_int, _m: &[u8]) -> EngineResult<Vec<u8>> {
+                unreachable!("not signing")
+            }
+            fn finish(_rsa: *mut ffi::RSA) {
+                FINISHED.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let method = new_rsa_sign_method::<CountingSigner>().unwrap();
+        // SAFETY: a throwaway ENGINE carrying the method; the key is created
+        // and freed (running finish) before the method and engine are freed.
+        unsafe {
+            let raw = ffi::ENGINE_new();
+            let engine = crate::engine::Engine::from_ptr(NonNull::new(raw).unwrap());
+            engine.set_rsa_method(method).unwrap();
+            let rsa = engine.new_rsa_key().unwrap();
+            assert_eq!(FINISHED.load(Ordering::SeqCst), 0);
+            ffi::RSA_free(rsa);
+            assert_eq!(
+                FINISHED.load(Ordering::SeqCst),
+                1,
+                "RSA_free must run finish"
+            );
+            ffi::ENGINE_free(raw);
+            ffi::RSA_meth_free(method);
+        }
     }
 
     #[test]

@@ -4,7 +4,12 @@
 //! Partition persistent store: typed GSRAM layout and the [`PartStore`]
 //! accessor handle.
 
+use core::mem::offset_of;
 use core::mem::size_of;
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::AtomicU8;
+use core::sync::atomic::Ordering::Relaxed;
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
@@ -18,6 +23,34 @@ use tsra_fw_uno_reg_soc::part_store_t::PART_STORE_T_BASE;
 
 /// Number of partition slots in the persistent store.
 pub const NUM_PARTITIONS: usize = 65;
+
+/// Per partition, what has been found of whether each PSK still holds its
+/// well-known default (see [`Partition::psk_default_memo`]), so the
+/// default-PSK gate need not read a PSK back out of GSRAM, which the CPU
+/// reads uncached, for every command. Every write to the partition's slot
+/// clears it (see [`Partition::slot_mut`]), so no answer outlives a change
+/// to either PSK.
+static PSK_DEFAULT: [AtomicU8; NUM_PARTITIONS] = [const { AtomicU8::new(0) }; NUM_PARTITIONS];
+
+/// Per partition, whether its unwrapping-key slot has been read as
+/// [`UnwrappingKeySlot::PctPassed`], which every command checks for a key
+/// awaiting its test. The SP only ever writes an empty slot, so a passed one
+/// changes only when the HSM writes the slot, which clears this (see
+/// [`Partition::slot_mut`]); until then the slot need not be read out of
+/// GSRAM again.
+static UNWRAP_PASSED: [AtomicBool; NUM_PARTITIONS] =
+    [const { AtomicBool::new(false) }; NUM_PARTITIONS];
+
+/// The [`PSK_DEFAULT`] bits of the crypto-officer (`co`) or crypto-user
+/// PSK: whether it has been compared with its default, and whether it
+/// matched.
+const fn psk_memo_bits(co: bool) -> (u8, u8) {
+    if co {
+        (1 << 0, 1 << 1)
+    } else {
+        (1 << 2, 1 << 3)
+    }
+}
 
 /// Logical partition ID shared by Uno's PAL and persistent-store drivers.
 ///
@@ -142,6 +175,52 @@ impl TryFrom<u8> for UnwrappingKeySlot {
             .find(|slot| *slot as u8 == value)
             .ok_or(value)
     }
+}
+
+/// Bytes in each of a [`Shadow`]'s two runs of slot fields: `state ‖
+/// generation ‖ res_mask`, and the key handles followed by `valid_flags`.
+const SHADOW_RUN: usize = 24;
+
+/// Words in a [`Shadow`].
+const SHADOW_WORDS: usize = 2 * SHADOW_RUN / 4;
+
+/// Where each [`Shadow`] run starts in [`Storage`].
+const SHADOW_HEAD: usize = offset_of!(Storage, state);
+const SHADOW_TAIL: usize = offset_of!(Storage, id_key_id);
+
+/// A DTCM copy of a partition slot's small, read-mostly fields (lifecycle
+/// state, generation, resource mask, key handles and presence flags),
+/// which nearly every command reads and CP1 would otherwise read from
+/// GSRAM uncached, a load at a time. Loaded on first use; every write to
+/// the slot drops it (see [`Partition::slot_mut`]). Only fields written
+/// solely through [`Partition`]'s setters, never through a `&mut` the
+/// store hands out (which could be written after the drop), belong here.
+struct Shadow {
+    valid: AtomicBool,
+    words: [AtomicU32; SHADOW_WORDS],
+}
+
+impl Shadow {
+    const fn new() -> Self {
+        Self {
+            valid: AtomicBool::new(false),
+            words: [const { AtomicU32::new(0) }; SHADOW_WORDS],
+        }
+    }
+}
+
+/// Per partition, its [`Shadow`].
+static SHADOWS: [Shadow; NUM_PARTITIONS] = [const { Shadow::new() }; NUM_PARTITIONS];
+
+/// The [`Shadow`] word holding the [`Storage`] byte at `off`, which a run
+/// covers, and the byte's shift within it.
+const fn shadow_word(off: usize) -> (usize, u32) {
+    let at = if off >= SHADOW_TAIL {
+        SHADOW_RUN + off - SHADOW_TAIL
+    } else {
+        off - SHADOW_HEAD
+    };
+    (at / 4, 8 * (at % 4) as u32)
 }
 
 /// Sentinel stored in a key-handle field meaning "no key".
@@ -460,6 +539,53 @@ impl Partition {
         unsafe { &*self.slot_ptr() }
     }
 
+    /// Word `i` of this slot's [`Shadow`], loading the shadow first if
+    /// need be.
+    #[inline]
+    fn shadow(self, i: usize) -> u32 {
+        let shadow = &SHADOWS[self.0];
+        if !shadow.valid.load(Relaxed) {
+            self.load_shadow();
+        }
+        shadow.words[i].load(Relaxed)
+    }
+
+    /// The byte of this slot's [`Storage`] at `off`, from the [`Shadow`].
+    #[inline]
+    fn shadow_byte(self, off: usize) -> u8 {
+        let (word, shift) = shadow_word(off);
+        (self.shadow(word) >> shift) as u8
+    }
+
+    /// The 16-bit little-endian field of this slot at `off` (even, so
+    /// within one word), from the [`Shadow`].
+    #[inline]
+    fn shadow_u16(self, off: usize) -> u16 {
+        let (word, shift) = shadow_word(off);
+        (self.shadow(word) >> shift) as u16
+    }
+
+    /// Load this slot's [`Shadow`] with two burst reads.
+    #[cold]
+    #[inline(never)]
+    fn load_shadow(self) {
+        let slot = self.slot() as *const Storage as *const u8;
+        let shadow = &SHADOWS[self.0];
+        for (i, word) in shadow.words.iter().enumerate() {
+            let off = if i < SHADOW_RUN / 4 {
+                SHADOW_HEAD + 4 * i
+            } else {
+                SHADOW_TAIL + 4 * i - SHADOW_RUN
+            };
+            // SAFETY: both runs are word-aligned and lie within the slot
+            // (asserted in `layout_asserts`), which `slot` borrows for
+            // `'static`.
+            let v = unsafe { slot.add(off).cast::<u32>().read() };
+            word.store(u32::from_le(v), Relaxed);
+        }
+        shadow.valid.store(true, Relaxed);
+    }
+
     /// Exclusive reference to this partition's slot, borrowed for the
     /// lifetime of the `&mut self` handle.
     ///
@@ -474,6 +600,10 @@ impl Partition {
     /// other task observes a slot mid-mutation.
     #[inline]
     fn slot_mut(&mut self) -> &mut Storage {
+        // Any write may change a PSK or a shadowed field: forget them.
+        PSK_DEFAULT[self.0].store(0, Relaxed);
+        SHADOWS[self.0].valid.store(false, Relaxed);
+        UNWRAP_PASSED[self.0].store(false, Relaxed);
         // SAFETY: the index is in range by construction (see
         // `PartStore::partition`), keeping the slot within the reserved
         // partition-store GSRAM region. The `&mut self` receiver scopes the
@@ -628,6 +758,29 @@ impl Partition {
             slot.psk_cu = [0u8; PSK_LEN];
             slot.vm_launch_guid = [0u8; GUID_LEN];
         }
+    }
+
+    /// What has been found of whether the crypto-officer (`co`) or
+    /// crypto-user PSK still holds its default, if it has been compared
+    /// since the slot was last written (see [`Self::memo_psk_default`]).
+    pub fn psk_default_memo(self, co: bool) -> Option<bool> {
+        let (checked, default) = psk_memo_bits(co);
+        let known = PSK_DEFAULT[self.0].load(Relaxed);
+        (known & checked != 0).then_some(known & default != 0)
+    }
+
+    /// Remembers whether the crypto-officer (`co`) or crypto-user PSK holds
+    /// its default, as a comparison just found, until the slot is next
+    /// written.
+    pub fn memo_psk_default(self, co: bool, is_default: bool) {
+        let (checked, default) = psk_memo_bits(co);
+        let found = if is_default {
+            checked | default
+        } else {
+            checked
+        };
+        let known = PSK_DEFAULT[self.0].load(Relaxed);
+        PSK_DEFAULT[self.0].store(known | found, Relaxed);
     }
 
     /// Bakes the default pre-shared keys into the slot.
@@ -915,7 +1068,7 @@ impl Partition {
     /// Whether InitBk3 has already run for this partition (one-shot gate).
     #[inline(never)]
     pub fn bk3_initialized(self) -> bool {
-        self.slot().valid_flags & FLAG_BK3_INITIALIZED != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_BK3_INITIALIZED != 0
     }
 
     /// Sets the one-shot InitBk3 gate.
@@ -933,7 +1086,7 @@ impl Partition {
     /// partition (one-shot gate).
     #[inline(never)]
     pub fn sd_initialized(self) -> bool {
-        self.slot().valid_flags & FLAG_SD_INITIALIZED != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_SD_INITIALIZED != 0
     }
 
     /// Sets the one-shot security-domain init gate.
@@ -997,7 +1150,7 @@ impl Partition {
     /// Whether the partition policy hash has been provisioned.
     #[inline(never)]
     pub fn policy_hash_valid(self) -> bool {
-        self.slot().valid_flags & FLAG_POLICY_HASH_VALID != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_POLICY_HASH_VALID != 0
     }
 
     /// Clears the partition policy hash (zeroizes and marks absent).
@@ -1043,7 +1196,7 @@ impl Partition {
     /// Whether a POTA thumbprint has been provisioned.
     #[inline(never)]
     pub fn pota_thumbprint_valid(self) -> bool {
-        self.slot().valid_flags & FLAG_POTA_THUMBPRINT_VALID != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_POTA_THUMBPRINT_VALID != 0
     }
 
     /// Clears the POTA thumbprint (zeroizes and marks absent).
@@ -1082,7 +1235,7 @@ impl Partition {
     /// Whether a SATA thumbprint has been provisioned.
     #[inline(never)]
     pub fn sata_thumbprint_valid(self) -> bool {
-        self.slot().valid_flags & FLAG_SATA_THUMBPRINT_VALID != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_SATA_THUMBPRINT_VALID != 0
     }
 
     /// Clears the SATA thumbprint (zeroizes and marks absent).
@@ -1121,7 +1274,7 @@ impl Partition {
     /// Whether a SAPOTA thumbprint has been provisioned.
     #[inline(never)]
     pub fn sapota_thumbprint_valid(self) -> bool {
-        self.slot().valid_flags & FLAG_SAPOTA_THUMBPRINT_VALID != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_SAPOTA_THUMBPRINT_VALID != 0
     }
 
     /// Clears the SAPOTA thumbprint (zeroizes and marks absent).
@@ -1141,7 +1294,8 @@ impl Partition {
     /// - [`HsmError::InvalidArg`] — the stored byte is not a known state.
     #[inline(never)]
     pub fn state(self) -> HsmResult<HsmPartState> {
-        HsmPartState::from_u8(self.slot().state[0]).ok_or(HsmError::InvalidArg)
+        HsmPartState::from_u8(self.shadow_byte(offset_of!(Storage, state)))
+            .ok_or(HsmError::InvalidArg)
     }
 
     /// Sets the partition lifecycle [`HsmPartState`].
@@ -1153,7 +1307,7 @@ impl Partition {
     /// Reads the monotonic generation counter.
     #[inline(never)]
     pub fn generation(self) -> u32 {
-        u32::from_le_bytes(self.slot().generation)
+        self.shadow(shadow_word(offset_of!(Storage, generation)).0)
     }
 
     /// Sets the generation counter.
@@ -1172,7 +1326,21 @@ impl Partition {
     /// Reads the 128-bit table-ownership resource mask.
     #[inline(never)]
     pub fn res_mask(self) -> u128 {
-        u128::from_le_bytes(self.slot().res_mask)
+        let (first, _) = shadow_word(offset_of!(Storage, res_mask));
+        (0..4).fold(0u128, |mask, i| {
+            mask | u128::from(self.shadow(first + i)) << (32 * i)
+        })
+    }
+
+    /// Reads word `word` (bits `32 * word..32 * word + 32`) of the
+    /// resource mask; `0` past its end.
+    #[inline]
+    pub fn res_mask_word(self, word: usize) -> u32 {
+        if word >= RES_MASK_LEN / 4 {
+            return 0;
+        }
+        let (first, _) = shadow_word(offset_of!(Storage, res_mask));
+        self.shadow(first + word)
     }
 
     /// Sets the resource mask.
@@ -1186,7 +1354,10 @@ impl Partition {
     /// Reads the identity key handle.
     #[inline(never)]
     pub fn id_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().id_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, id_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears, with `None`) the identity key handle.
@@ -1205,7 +1376,10 @@ impl Partition {
     /// Reads the establish-credential key handle.
     #[inline(never)]
     pub fn ec_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().ec_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, ec_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the establish-credential key handle.
@@ -1217,7 +1391,10 @@ impl Partition {
     /// Reads the session-encryption key handle.
     #[inline(never)]
     pub fn se_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().se_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, se_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the session-encryption key handle.
@@ -1229,7 +1406,10 @@ impl Partition {
     /// Reads the masking key handle.
     #[inline(never)]
     pub fn mk_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().mk_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, mk_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the masking key handle.
@@ -1241,7 +1421,10 @@ impl Partition {
     /// Reads the UMS (unique-machine-secret) key handle.
     #[inline(never)]
     pub fn ups_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().ups_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, ups_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the UMS key handle.
@@ -1253,7 +1436,10 @@ impl Partition {
     /// Reads the PTA (partition trust anchor) key handle.
     #[inline(never)]
     pub fn pta_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().pta_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, pta_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the PTA key handle.
@@ -1265,7 +1451,10 @@ impl Partition {
     /// Reads the RSA unwrapping key handle.
     #[inline(never)]
     pub fn unwrapping_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().unwrapping_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, unwrapping_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the RSA unwrapping key handle.
@@ -1315,9 +1504,14 @@ impl Partition {
     ///
     /// The SP writes `PendingPct` when it publishes a key and treats any
     /// non-zero value as occupied, so the HSM can advance the slot to
-    /// `PctPassed` without the SP noticing.
+    /// `PctPassed` without the SP noticing. A slot once read as passed is
+    /// remembered as such until the HSM next writes it (see
+    /// [`UNWRAP_PASSED`]).
     #[inline(never)]
     pub fn unwrapping_key_slot(self) -> Option<UnwrappingKeySlot> {
+        if UNWRAP_PASSED[self.0].load(Relaxed) {
+            return Some(UnwrappingKeySlot::PctPassed);
+        }
         // Volatile read: the SP writes this mailbox byte from another processor,
         // so a cached/hoisted load could miss the publish.
         // SAFETY: valid, aligned, readable byte in this partition's GSRAM slot.
@@ -1326,7 +1520,11 @@ impl Partition {
         // `unwrapping_key_bk` payload before it sets this byte, so the HSM must
         // not read the payload until it has read this byte.
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-        UnwrappingKeySlot::try_from(value).ok()
+        let slot = UnwrappingKeySlot::try_from(value).ok();
+        if slot == Some(UnwrappingKeySlot::PctPassed) {
+            UNWRAP_PASSED[self.0].store(true, Relaxed);
+        }
+        slot
     }
 
     /// Marks the published unwrapping key as having passed its pairwise
@@ -1399,7 +1597,10 @@ impl Partition {
     /// Reads the partition-local masking key (`PartLocalMK`) handle.
     #[inline(never)]
     pub fn local_mk_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().local_mk_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, local_mk_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the partition-local masking key handle.
@@ -1411,7 +1612,10 @@ impl Partition {
     /// Reads the partition ephemeral masking key (`EphemeralMK`) handle.
     #[inline(never)]
     pub fn ephemeral_mk_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().ephemeral_mk_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, ephemeral_mk_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the partition ephemeral masking key handle.
@@ -1423,7 +1627,10 @@ impl Partition {
     /// Reads the security-domain masking key (`SDMK`) handle.
     #[inline(never)]
     pub fn sd_mk_key_id(self) -> Option<HsmKeyId> {
-        read_handle(self.slot().sd_mk_key_id)
+        read_handle(
+            self.shadow_u16(offset_of!(Storage, sd_mk_key_id))
+                .to_le_bytes(),
+        )
     }
 
     /// Sets (or clears) the security-domain masking key handle.
@@ -1521,7 +1728,7 @@ impl Partition {
     /// Whether the platform trust-anchor public key has been provisioned.
     #[inline(never)]
     pub fn pta_pub_key_valid(self) -> bool {
-        self.slot().valid_flags & FLAG_PTA_PUB_KEY_VALID != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_PTA_PUB_KEY_VALID != 0
     }
 
     /// Clears the platform trust-anchor public key (zeroizes and marks absent).
@@ -1626,7 +1833,7 @@ impl Partition {
     /// Whether a user credential has been provisioned.
     #[inline(never)]
     pub fn credential_valid(self) -> bool {
-        self.slot().valid_flags & FLAG_CREDENTIAL_VALID != 0
+        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_CREDENTIAL_VALID != 0
     }
 
     /// Clears the user credential (zeroizes and marks absent).

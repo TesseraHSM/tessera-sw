@@ -78,16 +78,44 @@ pub fn partition_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Session Selection
 ///
-/// The session kind is selected once at compile time for the whole test binary.
+/// The session kind is selected at runtime for the whole test run.
 ///
-/// The test crate uses `open_session` by default. Enabling its
-/// `session-ex-tests` feature selects `open_session_ex` instead.
+/// The test crate uses `open_session` by default. Setting
+/// `api_rev=1_1` in `TSRA_TEST_ARGS` selects `open_session_ex` instead.
+///
+/// `#[session_test(api_rev_at_least(1, 1))]` runs the test only when the
+/// selected revision is at least 1.1; otherwise it returns before any
+/// partition setup. It calls `crate::utils::session::api_rev_at_least`.
 #[proc_macro_attribute]
-pub fn session_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn session_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemFn);
-    make_session_test(item)
+    let min_rev = if attr.is_empty() {
+        None
+    } else {
+        Some(parse_macro_input!(attr with parse_min_api_rev))
+    };
+    make_session_test(item, min_rev)
         .unwrap_or_else(|err| err.to_compile_error())
         .into()
+}
+
+/// Parses `api_rev_at_least(MAJOR, MINOR)` into `(MAJOR, MINOR)`.
+fn parse_min_api_rev(input: parse::ParseStream<'_>) -> syn::Result<(LitInt, LitInt)> {
+    let ident: syn::Ident = input.parse()?;
+    if ident != "api_rev_at_least" {
+        return Err(Error::new(
+            ident.span(),
+            "expected `api_rev_at_least(MAJOR, MINOR)`",
+        ));
+    }
+    let args;
+    parenthesized!(args in input);
+    let major: LitInt = args.parse()?;
+    args.parse::<Token![,]>()?;
+    let minor: LitInt = args.parse()?;
+    major.base10_parse::<u32>()?;
+    minor.base10_parse::<u32>()?;
+    Ok((major, minor))
 }
 
 /// Generates the implementation for the `api_test` attribute macro.
@@ -196,7 +224,10 @@ fn make_partition_test(item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 ///
 /// Returns a token stream representing the transformed test function,
 /// or an error if the function signature is invalid.
-fn make_session_test(item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn make_session_test(
+    item: ItemFn,
+    min_rev: Option<(LitInt, LitInt)>,
+) -> syn::Result<proc_macro2::TokenStream> {
     if item.sig.asyncness.is_some() {
         return Err(Error::new(
             item.sig.fn_token.span(),
@@ -207,12 +238,20 @@ fn make_session_test(item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let name = &item.sig.ident;
     let return_type = &item.sig.output;
     let attrs = &item.attrs;
+    let skip = min_rev.map(|(major, minor)| {
+        quote! {
+            if !crate::utils::session::api_rev_at_least(#major, #minor) {
+                return;
+            }
+        }
+    });
 
     Ok(quote! {
         #[::core::prelude::v1::test]
         #(#attrs)*
         fn #name() #return_type {
             #item
+            #skip
             crate::utils::api::init();
             let span = tracing::span!(tracing::Level::INFO, stringify!(#name), );
             let _span_guard = span.enter();

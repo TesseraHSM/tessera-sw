@@ -12,13 +12,6 @@
 // happy path — mint an ECC signing key, wrap it under the TMK, unwrap it
 // back, then sign with the recovered key and verify against the original
 // public key.
-//
-// The whole file needs the two-phase TBOR HPKE handshake and a fully
-// provisioned, SD-initialized partition, which the mock backend does not
-// implement, so it is excluded from the mock lane and runs on the emu and
-// hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -145,6 +138,10 @@ class tsra_darc_transfer_test : public ::testing::Test
 // TMK from one endpoint to another.
 TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -220,6 +217,10 @@ TEST_F(tsra_darc_transfer_test, tmk_export_import_roundtrip)
 // non-zero envelopes of the pinned wire lengths, and each mint is fresh.
 TEST_F(tsra_darc_transfer_test, kex_and_tmk_gen_smoke)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -276,6 +277,10 @@ TEST_F(tsra_darc_transfer_test, kex_and_tmk_gen_smoke)
 // key verifies against the original public key.
 TEST_F(tsra_darc_transfer_test, key_wrap_unwrap_sign_round_trip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -364,6 +369,10 @@ TEST_F(tsra_darc_transfer_test, key_wrap_unwrap_sign_round_trip)
 // rather than accepting it blindly.
 TEST_F(tsra_darc_transfer_test, key_unwrap_rejects_bogus_envelope)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -412,6 +421,10 @@ TEST_F(tsra_darc_transfer_test, key_unwrap_rejects_bogus_envelope)
 // verifies, surfacing as `INVALID_ARGUMENT`.
 TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -459,5 +472,3 @@ TEST_F(tsra_darc_transfer_test, tmk_export_rejects_unanchored_target_chain)
             << "an unanchored target chain must be rejected with INVALID_ARGUMENT";
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

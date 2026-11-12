@@ -71,6 +71,16 @@ pub(crate) fn vault(io: &UnoHsmIo) -> KeyVault<VaultStorage> {
     KeyVault::new(VaultStorage::new(res_mask))
 }
 
+/// A [`vault`] view for reaching key `key_id` alone: of the partition's
+/// resource mask it reads only the word covering the key's table, as the
+/// part store sits in GSRAM, read uncached.
+fn vault_for_key(io: &UnoHsmIo, key_id: HsmKeyId) -> KeyVault<VaultStorage> {
+    let word = KeyVault::<VaultStorage>::key_table(key_id) / 32;
+    let bits = PartStore::partition(io.pid()).map_or(0, |p| p.res_mask_word(word));
+    let res_mask = u128::from(bits).checked_shl(32 * word as u32).unwrap_or(0);
+    KeyVault::new(VaultStorage::new(res_mask))
+}
+
 /// Build a `'static` [`HsmDmaBuf`] over a key's blob location in GSRAM.
 ///
 /// `(table, off, len)` must come from `KeyVault::key_location` or
@@ -89,7 +99,14 @@ impl UnoHsmPal {
     /// Reject cross-session access to a `Session`-scoped key with
     /// [`HsmError::KeyNotFound`]; partition-scoped keys are unaffected.
     fn enforce_session_key_isolation(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<()> {
-        let Some(bound) = vault(io).key_session(key_id)? else {
+        Self::check_key_session(io, vault(io).key_session(key_id)?)
+    }
+
+    /// The isolation check of
+    /// [`enforce_session_key_isolation`](Self::enforce_session_key_isolation)
+    /// on a key's already-read session binding.
+    fn check_key_session(io: &UnoHsmIo, bound: Option<u16>) -> HsmResult<()> {
+        let Some(bound) = bound else {
             return Ok(());
         };
         let sqe = Sqe::try_from(io.sqe())?;
@@ -224,8 +241,11 @@ impl HsmVault for UnoHsmPal {
     }
 
     fn vault_key(&self, io: &UnoHsmIo, key_id: HsmKeyId) -> HsmResult<&HsmDmaBuf> {
-        self.enforce_session_key_isolation(io, key_id)?;
-        let (table, off, len) = vault(io).key_location(key_id)?;
+        // One vault view and one entry read serve both the isolation check
+        // and the location: the vault sits in GSRAM, read uncached.
+        let ((table, off, len), session) =
+            vault_for_key(io, key_id).key_location_and_session(key_id)?;
+        Self::check_key_session(io, session)?;
         Ok(blob_ref(table, off, len))
     }
 

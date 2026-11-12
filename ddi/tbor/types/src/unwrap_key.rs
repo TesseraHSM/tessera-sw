@@ -23,8 +23,10 @@ use crate::tbor;
 /// TBOR opcode for `UnwrapKey`.
 pub const TBOR_OP_UNWRAP_KEY: u8 = 0x14;
 
-/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`).
-pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 3072;
+/// Max wrapped-blob length (`RSA-OAEP(KEK) ‖ AES-KWP(key)`): the 256-byte
+/// RSA-2048 OAEP ciphertext plus up to a 6152-byte AES-KWP payload (6 KiB of
+/// plaintext).
+pub const UNWRAP_WRAPPED_BLOB_MAX_LEN: usize = 6408;
 /// Max masked recovered-key envelope length.
 pub const UNWRAP_MASKED_KEY_MAX_LEN: usize = 3168;
 /// Max recovered public-key length.
@@ -124,7 +126,7 @@ pub struct TborUnwrapKeyReq {
     pub oaep_hash_algo: u8,
 
     /// The RSA-AES-wrapped key (`RSA-OAEP(KEK) ‖ AES-KWP(key)`).
-    #[tbor(max_len = 3072)]
+    #[tbor(max_len = 6408)]
     pub wrapped_blob: Vec<u8>,
 
     /// Caller-supplied key label recorded in the masked blob's metadata,

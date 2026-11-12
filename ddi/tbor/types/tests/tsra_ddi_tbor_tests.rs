@@ -3,16 +3,13 @@
 
 //! Integration test binary for `tsra_ddi_tbor_types`.
 //!
-//! Backend selection is feature-gated; the same tests run across every
-//! transport. Run with `--features emu` (in-process firmware),
-//! `--features sock` (firmware behind a socket server), or with
-//! **no** feature (native OS backend — `nix` on Linux / `win` on
-//! Windows — for on-silicon test runs).
-//!
-//! `mock` disables the whole harness + `commands` tree: mock rejects
-//! TBOR at the transport layer, so command-level integration tests
-//! are meaningless there. Under `--features mock` this binary
-//! compiles the crate only and runs zero tests.
+//! The transport is selected at runtime; the same tests run across every
+//! transport. Run with `TSRA_TEST_ARGS=transport=sock` (firmware behind an
+//! in-process socket server, or the one named by `sock=` in `TSRA_TEST_ARGS`), or with
+//! it unset or `transport=ioctl` (platform device driver, for on-silicon
+//! test runs).
 
-#[cfg(not(feature = "mock"))]
+// Links the in-process socket server started before `main`.
+use ddi_sock_server as _;
+
 pub mod commands;

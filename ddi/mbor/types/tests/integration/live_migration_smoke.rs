@@ -41,7 +41,6 @@ fn test_live_migration_renegotiation_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes256,
-                Some(0x1234),
                 key_props,
             );
             assert!(
@@ -65,7 +64,6 @@ fn test_live_migration_renegotiation_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                Some(0x5678),
                 key_props,
             );
             assert!(
@@ -115,7 +113,6 @@ fn test_live_migration_renegotiation_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes192,
-                Some(0x9abc),
                 key_props,
             );
             assert!(

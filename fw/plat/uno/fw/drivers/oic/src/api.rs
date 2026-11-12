@@ -16,10 +16,8 @@ use tsra_fw_uno_drivers_soc::reset_type;
 use tsra_fw_uno_drivers_soc::SocResetType;
 use tsra_fw_uno_error::HsmResult;
 use tsra_fw_uno_reg_soc::io_gsram::IoCqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IoMetaEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OcqEntry;
 use tsra_fw_uno_reg_soc::io_gsram::OsqEntry;
-use tsra_fw_uno_reg_soc::io_gsram::IO_META_QUEUE;
 use tsra_fw_uno_reg_soc::io_gsram::OCQ_TAG;
 use tsra_fw_uno_reg_soc::io_gsram::OSQ_DESC;
 use tsra_fw_uno_reg_soc::io_gsram::OSQ_TAG;
@@ -34,12 +32,22 @@ struct TagSlot {
     waker: WakerRegistration,
     completed: bool,
     status: u8,
+    /// Posted by [`OicDriver::send_detached`]: no task awaits it, so its
+    /// completion is left for [`OicDriver::take_detached`].
+    detached: bool,
+    /// IO index of a detached post.
+    index: u16,
 }
 
 struct OicState<const DEPTH: usize> {
     ocq_head: u16,
     osq_tail: u16,
+    /// Cached OSQ head index. Re-read from the register only when the ring
+    /// looks full.
+    osq_head_cached: u16,
     tag_free: u32,
+    /// Completed detached posts, one bit per tag.
+    detached_done: u32,
     tags: [TagSlot; DEPTH],
 }
 
@@ -70,9 +78,6 @@ pub struct OicDriver<const DEPTH: usize> {
 
     /// IO_CQ array in DTCM.
     io_cq: *const IoCqEntry,
-
-    /// IO_META sidecar array in DTCM.
-    io_meta: *const IoMetaEntry,
 
     /// Mutable state protected by single-threaded access.
     state: SingleCell<OicState<DEPTH>>,
@@ -132,6 +137,8 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             waker: WakerRegistration::new(),
             completed: false,
             status: 0,
+            detached: false,
+            index: 0,
         });
 
         let tag_free = if DEPTH >= 32 {
@@ -146,11 +153,12 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             ocq_ring: config.ocq_base as *const OcqEntry,
             ocq_tail_shadow: config.ocq_tail_shadow as *const u32,
             io_cq: config.io_cq_base as *const IoCqEntry,
-            io_meta: config.io_meta_base as *const IoMetaEntry,
             state: SingleCell::new(OicState {
                 ocq_head: 0,
                 osq_tail: 0,
+                osq_head_cached: 0,
                 tag_free,
+                detached_done: 0,
                 tags,
             }),
             regs,
@@ -216,9 +224,11 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
         if should_attach(fw_update, already_enabled, ours) {
             let hw_ocq_head = regs.ocq_ch[ch].head.read(OCQ_CHANNEL_HEAD::HEAD) as u16;
             let hw_osq_tail = regs.osq_ch[ch].tail.read(OSQ_CHANNEL_TAIL::TAIL) as u16;
+            let hw_osq_head = regs.osq_ch[ch].head.read(OSQ_CHANNEL_HEAD::HEAD) as u16;
             self.state.with(|s| {
                 s.ocq_head = hw_ocq_head;
                 s.osq_tail = hw_osq_tail;
+                s.osq_head_cached = hw_osq_head;
             });
             if config.interrupt {
                 let val = regs.irq_enable.read(IRQ_ENABLE::IRQ_EN) | (1 << config.channel);
@@ -280,13 +290,10 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
 
     /// Allocate a tag, post an OSQ entry for the given IO index,
     /// and ring the doorbell.
-    fn submit(&self, index: u16) -> HsmResult<u16> {
+    fn submit(&self, index: u16, queue_id: u8, detached: bool) -> HsmResult<u16> {
         // SAFETY: The caller supplies an active IO slot whose completion remains live until send.
         let io_cq_entry = unsafe { &*self.io_cq.add(index as usize) };
         let data_addr = io_cq_entry as *const _ as u32;
-        // SAFETY: The active IO slot has a corresponding initialized metadata entry.
-        let meta = unsafe { &*self.io_meta.add(index as usize) };
-        let queue_id = meta.queue.read(IO_META_QUEUE::QUEUE_ID) as u8;
 
         self.state.with(|s| {
             if s.tag_free == 0 {
@@ -294,13 +301,18 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             }
             let tag = s.tag_free.trailing_zeros() as u16;
             s.tag_free &= !(1u32 << tag);
+            let slot = &mut s.tags[tag as usize];
+            slot.detached = detached;
+            slot.index = index;
 
-            let osq_head = self.regs.osq_ch[self.channel as usize]
-                .head
-                .read(OSQ_CHANNEL_HEAD::HEAD) as u16;
-            if (s.osq_tail + 1) & Self::MASK == osq_head {
-                s.tag_free |= 1u32 << tag;
-                return Err(OicError::OSQ_FULL);
+            if (s.osq_tail + 1) & Self::MASK == s.osq_head_cached {
+                s.osq_head_cached = self.regs.osq_ch[self.channel as usize]
+                    .head
+                    .read(OSQ_CHANNEL_HEAD::HEAD) as u16;
+                if (s.osq_tail + 1) & Self::MASK == s.osq_head_cached {
+                    s.tag_free |= 1u32 << tag;
+                    return Err(OicError::OSQ_FULL);
+                }
             }
 
             // Write OSQ entry.
@@ -367,9 +379,57 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
     pub fn send(
         &self,
         index: u16,
+        queue_id: u8,
     ) -> HsmResult<impl core::future::Future<Output = HsmResult<()>> + '_> {
-        let tag = self.submit(index)?;
+        let tag = self.submit(index, queue_id, false)?;
         Ok(self.wait_completion(tag))
+    }
+
+    /// Post the IO CQE for `index` with no task awaiting it: its completion
+    /// is collected by [`take_detached`](Self::take_detached).
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send) fails.
+    pub fn send_detached(&self, index: u16, queue_id: u8) -> HsmResult<()> {
+        self.submit(index, queue_id, true).map(|_| ())
+    }
+
+    /// Takes one completed detached post, freeing its tag: the IO index
+    /// it was for, and whether it succeeded.
+    pub fn take_detached(&self) -> Option<(u16, bool)> {
+        self.state.with(|s| {
+            if s.detached_done == 0 {
+                return None;
+            }
+            let tag = s.detached_done.trailing_zeros();
+            s.detached_done &= !(1u32 << tag);
+            let slot = &mut s.tags[tag as usize];
+            slot.completed = false;
+            slot.detached = false;
+            // HW status: 0x80 = Success.
+            let done = (slot.index, slot.status == 0x80);
+            s.tag_free |= 1u32 << tag;
+            Some(done)
+        })
+    }
+
+    /// Record the completion whose OCQ tag word is `word` for its tag, and
+    /// wake its awaiter (or mark a detached post done).
+    #[inline(always)]
+    fn complete(s: &mut OicState<DEPTH>, word: u32) {
+        let word = tock_registers::LocalRegisterCopy::<u32, OCQ_TAG::Register>::new(word);
+        let tag = word.read(OCQ_TAG::TAG) as usize;
+        if tag < DEPTH {
+            let slot = &mut s.tags[tag];
+            slot.status = word.read(OCQ_TAG::STATUS) as u8;
+            slot.completed = true;
+            if slot.detached {
+                s.detached_done |= 1u32 << tag;
+            } else {
+                slot.waker.wake();
+            }
+        }
     }
 
     /// Drain all available OCQ entries and wake their awaiters.
@@ -381,18 +441,23 @@ impl<const DEPTH: usize> OicDriver<DEPTH> {
             while s.ocq_head != tail {
                 let ocq_slot = (s.ocq_head & Self::MASK) as usize;
                 // SAFETY: The masked consumer index selects an available entry in the OCQ ring.
-                let ocq_entry = unsafe { &*self.ocq_ring.add(ocq_slot) };
-
-                let tag = ocq_entry.tag.read(OCQ_TAG::TAG) as u16;
-                let status = ocq_entry.tag.read(OCQ_TAG::STATUS) as u8;
-
-                s.ocq_head = (s.ocq_head + 1) & Self::MASK;
-
-                if (tag as usize) < DEPTH {
-                    let slot = &mut s.tags[tag as usize];
-                    slot.status = status;
-                    slot.completed = true;
-                    slot.waker.wake();
+                let tag_word =
+                    unsafe { &(*self.ocq_ring.add(ocq_slot)).tag } as *const _ as *const u32;
+                let next = (s.ocq_head + 1) & Self::MASK;
+                // Two completions in one burst when both are there and
+                // adjacent in the ring.
+                if next != tail && ocq_slot + 1 < DEPTH {
+                    // SAFETY: entries `ocq_slot` and `ocq_slot + 1` are both
+                    // available, so the 20 bytes from `tag_word` (the first
+                    // entry's last word to the second's) are.
+                    let (w0, w1) = unsafe { read_pair(tag_word) };
+                    Self::complete(s, w0);
+                    Self::complete(s, w1);
+                    s.ocq_head = (next + 1) & Self::MASK;
+                } else {
+                    // SAFETY: as above, for entry `ocq_slot` alone.
+                    Self::complete(s, unsafe { tag_word.read_volatile() });
+                    s.ocq_head = next;
                 }
             }
 
@@ -428,5 +493,39 @@ mod tests {
         assert!(!should_attach(true, false, true)); // queues not running
         assert!(!should_attach(true, true, false)); // foreign ring base
         assert!(!should_attach(false, false, false));
+    }
+}
+
+/// Words 0 and 4 from `p`, read with one five-word burst: the status
+/// words of two consecutive 16-byte ring entries, which sit in memory the
+/// CPU reads uncached, where a burst costs about as much as one load.
+///
+/// # Safety
+///
+/// `p` must be word-aligned and five words from it readable.
+#[inline(always)]
+unsafe fn read_pair(p: *const u32) -> (u32, u32) {
+    #[cfg(target_arch = "arm")]
+    {
+        let (w0, w4): (u32, u32);
+        // SAFETY: per the function contract.
+        unsafe {
+            core::arch::asm!(
+                "ldm {p}, {{r2, r3, r4, r5, r8}}",
+                p = in(reg) p,
+                out("r2") w0,
+                out("r3") _,
+                out("r4") _,
+                out("r5") _,
+                out("r8") w4,
+                options(nostack, readonly, preserves_flags),
+            );
+        }
+        (w0, w4)
+    }
+    #[cfg(not(target_arch = "arm"))]
+    // SAFETY: per the function contract.
+    unsafe {
+        (p.read_volatile(), p.add(4).read_volatile())
     }
 }

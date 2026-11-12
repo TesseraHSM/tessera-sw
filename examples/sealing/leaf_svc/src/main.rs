@@ -24,7 +24,7 @@
 //! on hardware, reset before repeating partition initialization.
 //! Add `--listen 127.0.0.1:PORT` to retain the partition instance and serve
 //! health and challenge signing. The provisioning session is closed; each
-//! signature uses a fresh session. `--require-emu` rejects non-emu builds.
+//! signature uses a fresh session.
 //! Creation uploads its backup automatically. Failed uploads retain local
 //! recovery and `leaf-backup.json`; there is no separate upload command.
 //! `join --name NAME --instance ID --root URL --state-dir DIR` enrolls a

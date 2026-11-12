@@ -52,7 +52,6 @@ fn test_rsa_unwrap_aes_key_smoke() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             )
             .expect("rsa_unwrap should succeed");
@@ -110,7 +109,6 @@ fn test_rsa_unwrap_tampered_blob_smoke() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
@@ -170,7 +168,6 @@ fn test_rsa_unwrap_ecc_key_smoke() {
                     DdiKeyClass::Ecc,
                     DdiRsaCryptoPadding::Oaep,
                     DdiHashAlgorithm::Sha256,
-                    None,
                     helper_key_properties(DdiKeyUsage::SignVerify, DdiKeyAvailability::App),
                 )
                 .expect("ecc rsa_unwrap should succeed");
@@ -278,7 +275,6 @@ fn test_rsa_unwrap_rsa_key_smoke() {
                     *key_class,
                     DdiRsaCryptoPadding::Oaep,
                     DdiHashAlgorithm::Sha256,
-                    None,
                     helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
                 )
                 .expect("rsa rsa_unwrap should succeed");
@@ -328,11 +324,8 @@ fn test_rsa_unwrap_rsa_key_smoke() {
 }
 
 /// An oversized OAEP-recovered KEK (a "KEK" longer than any valid AES key)
-/// must be rejected rather than used.  On the firmware backends the PAL's
-/// oversized-plaintext error is remapped to the command-specific
-/// `RsaUnwrapInvalidKek`; the sim (mock) rejects it later, at AES-key
-/// construction, with a different status — so we assert the specific status
-/// only off-mock.
+/// must be rejected rather than used.  The PAL's oversized-plaintext error is
+/// remapped to the command-specific `RsaUnwrapInvalidKek`.
 #[test]
 fn test_rsa_unwrap_oversized_kek_smoke() {
     ddi_dev_test(
@@ -352,13 +345,11 @@ fn test_rsa_unwrap_oversized_kek_smoke() {
                 DdiKeyClass::Aes,
                 DdiRsaCryptoPadding::Oaep,
                 DdiHashAlgorithm::Sha256,
-                None,
                 helper_key_properties(DdiKeyUsage::EncryptDecrypt, DdiKeyAvailability::App),
             );
 
             assert!(resp.is_err(), "oversized KEK must be rejected: {:?}", resp);
 
-            #[cfg(not(feature = "mock"))]
             assert!(
                 matches!(
                     resp.unwrap_err(),

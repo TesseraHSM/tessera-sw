@@ -31,6 +31,9 @@ use crate::utils::sd_provision::provision_backing;
 /// lengths and makes the original SD-scoped sealing key usable again.
 #[test]
 fn sd_restore_local_backup_roundtrip() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata = CaKey::generate();
     let pota = CaKey::generate();
@@ -114,6 +117,9 @@ fn sd_restore_local_backup_roundtrip() {
 /// by the firmware's one-shot gate.
 #[test]
 fn sd_restore_local_backup_is_one_shot() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = PARTITION_LOCK.lock();
     let sata = CaKey::generate();
     let pota = CaKey::generate();

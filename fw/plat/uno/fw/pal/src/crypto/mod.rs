@@ -46,6 +46,7 @@ mod ecc_det;
 #[cfg(feature = "bulk_crypto")]
 mod gcm;
 #[cfg(not(feature = "bulk_crypto"))]
+#[allow(unsafe_code)]
 mod gcm_bcp;
 #[cfg(not(feature = "bulk_crypto"))]
 use gcm_bcp as gcm;

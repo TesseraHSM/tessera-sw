@@ -39,7 +39,6 @@ use tsra_crypto::EccCurve;
 use tsra_crypto::EccKeyOp;
 use tsra_crypto::EccPrivateKey;
 use tsra_crypto::ExportableHsmKey;
-use tsra_crypto::ImportableKey;
 use tsra_crypto::PrivateKey;
 
 use super::*;
@@ -314,22 +313,32 @@ impl HsmEcc for StdHsmPal {
         _io: &StdHsmIo,
         der: &HsmDmaBuf,
         out: Option<&mut HsmDmaBuf>,
-        _pct: HsmEccPct,
+        pct: HsmEccPct,
     ) -> HsmResult<(usize, HsmEccCurve)> {
-        // std PAL vault format is raw HSM-format scalar bytes; parse the
-        // recovered PKCS#8 DER and re-export in the vault representation.
-        // Like key generation here, it runs no PCT.
-        let pk = EccPrivateKey::from_bytes(der).map_err(|_| HsmError::InvalidArg)?;
-        let curve = from_ecc_curve(pk.curve());
-        let priv_len = curve.wire_coord_len();
-        if let Some(out) = out {
-            if out.len() < priv_len {
-                return Err(HsmError::InvalidArg);
-            }
-            pk.to_hsm_bytes(&mut out[..priv_len])
-                .map_err(|_| HsmError::InvalidArg)?;
+        // The std PAL vault is the big-endian scalar, zero-padded to the
+        // wire coordinate length. Like Uno, the key must carry a well-formed
+        // public key and a valid scalar in both modes; use mode also checks
+        // the public key against the scalar and runs `pct`. The key is built
+        // from the scalar alone: backends validate or keep the DER's embedded
+        // public key, which would bypass or change the status of that check.
+        let key = crate::key_assurance::parse_ec_private_key(der).ok_or(HsmError::InvalidArg)?;
+        let embedded = crate::key_assurance::embedded_public_key(&key)?;
+        let (curve, scalar) = (key.curve, key.scalar);
+        crate::key_assurance::check_ecc_scalar(curve, scalar)?;
+        let vault_len = curve.wire_coord_len();
+        let Some(out) = out else {
+            return Ok((vault_len, curve));
+        };
+        if out.len() < vault_len {
+            return Err(HsmError::InvalidArg);
         }
-        Ok((priv_len, curve))
+        let pad = vault_len - scalar.len();
+        out[..pad].fill(0);
+        out[pad..vault_len].copy_from_slice(scalar);
+        let pk =
+            EccPrivateKey::from_hsm_bytes(&out[..vault_len]).map_err(|_| HsmError::InvalidArg)?;
+        self.check_ecc_import(curve, pct, &pk, embedded).await?;
+        Ok((vault_len, curve))
     }
 
     fn ecc_priv_to_vault(

@@ -17,7 +17,7 @@ fn test_rsa_2k_decrypt_no_session() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2);
 
             let resp = helper_rsa_mod_exp(
                 dev,
@@ -45,7 +45,7 @@ fn test_rsa_2k_decrypt_incorrect_session_id() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2);
 
             let session_id = 20;
             let resp = helper_rsa_mod_exp(
@@ -157,7 +157,7 @@ fn test_rsa_2k_decrypt_message_data_below_lower_limit() {
             }
 
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2);
 
             let mut msg = MborByteArray::new([0x0; 512], 256).expect("failed to create byte array");
             let last_idx = msg.len() - 1;
@@ -199,7 +199,7 @@ fn test_rsa_2k_decrypt_message_data_above_upper_limit() {
             }
 
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2);
 
             let resp = helper_rsa_mod_exp(
                 dev,
@@ -227,7 +227,7 @@ fn test_rsa_2k_decrypt() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2);
 
             let resp = helper_rsa_mod_exp(
                 dev,
@@ -249,7 +249,7 @@ fn test_rsa_2k_encrypt_and_decrypt() {
         common_cleanup,
         |dev, _ddi, _path, session_id| {
             let (_key_id_rsa2k_pub, key_id_rsa2k_priv, _) =
-                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2, None);
+                store_rsa_keys_no_crt(dev, session_id, DdiKeyUsage::EncryptDecrypt, 2);
 
             let orig_x = [0x1u8; 512];
             let data_len_to_test = 190;

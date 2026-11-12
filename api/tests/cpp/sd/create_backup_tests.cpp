@@ -10,12 +10,6 @@
 // `tsra_sd_create_remote_backup` and validates the three returned
 // backups. This is a self-backup (sender == receiver): the partition seals
 // to its own attested identity key.
-//
-// The whole file needs the two-phase TBOR HPKE handshake and a fully
-// provisioned partition, which the mock backend does not implement, so it is
-// excluded from the mock lane and runs on the emu and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -151,6 +145,10 @@ class tsra_sd_create_backup_test : public ::testing::Test
 // wire lengths.
 TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -219,6 +217,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_roundtrip)
 // cannot reach because it calls the session method directly.
 TEST_F(tsra_sd_create_backup_test, create_backup_empty_evidence_ffi)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -281,6 +283,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_empty_evidence_ffi)
 // firmware with `SD_ALREADY_INITIALIZED`.
 TEST_F(tsra_sd_create_backup_test, create_backup_is_one_shot)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -338,6 +344,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_is_one_shot)
 // session resolves and before the domain is created.
 TEST_F(tsra_sd_create_backup_test, create_backup_null_params)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -367,6 +377,10 @@ TEST_F(tsra_sd_create_backup_test, create_backup_null_params)
 // created.
 TEST_F(tsra_sd_create_backup_test, create_backup_rejects_aliased_output_buffers)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -409,5 +423,3 @@ TEST_F(tsra_sd_create_backup_test, create_backup_rejects_aliased_output_buffers)
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

@@ -9,12 +9,10 @@ pub mod spill;
 
 /// Zero `n` bytes at `p`, eight words per store.
 ///
-/// `compiler_builtins`' `memset` runs `stmia rd!, {r4}` behind a compare and
-/// two branches -- four instructions per word -- and LTO internalises the
-/// symbol, so a strong definition cannot replace it. Signing creates about
-/// sixty-eight sponge states per signature and each one clears 200 bytes,
-/// which is why this is worth having rather than leaning on the array
-/// initialiser.
+/// The `memset` an array initialiser compiles to stores a word or two at a
+/// time behind a compare and a branch. Signing creates about sixty-eight
+/// sponge states per signature and each one clears 200 bytes, which is why
+/// this is worth having rather than leaning on the array initialiser.
 ///
 /// # Safety
 /// `p` must be valid for `n` writes and word aligned.

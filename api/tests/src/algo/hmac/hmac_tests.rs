@@ -1162,10 +1162,12 @@ fn test_hmac_sign_buffer_too_small_then_success(session: HsmSession) {
 
 /// TBOR HMAC sign path: a generated (masked, non-resident) HMAC key signs
 /// and verifies via the device `Hmac` command (unmask-on-use). Requires a
-/// V2 (`session_ex`) session on a non-mock backend.
-#[cfg(all(feature = "session-ex-tests", not(feature = "mock")))]
+/// V2 (`session_ex`) session.
 #[test]
 fn test_hmac_generated_key_signs_and_verifies() {
+    if !crate::utils::session::api_rev_at_least(1, 1) {
+        return;
+    }
     let _guard = crate::utils::partition_ex_helpers::PARTITION_LOCK.lock();
     let session = crate::utils::sd_provision::finalized_co_session();
 

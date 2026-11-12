@@ -85,7 +85,7 @@ impl ThreadSessionInfo {
     }
 
     /// Atomically encrypt user credentials and reopen a session with retry logic
-    /// This is needed as each session would reset the nonce in Mock vault implementation
+    /// This is needed as each session would reset the nonce in the vault implementation
     /// # Returns
     /// * `Ok(DdiReopenSessionCmdResp)` - Successful session reopen response
     /// * `Err(String)` - Error message after all retry attempts failed
@@ -203,7 +203,6 @@ fn test_live_migration_sim_basic() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes256,
-                Some(0x1234),
                 key_props,
             );
             assert!(resp.is_ok(), "Failed to generate AES key: {:?}", resp);
@@ -222,7 +221,6 @@ fn test_live_migration_sim_basic() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes128,
-                Some(0x5678),
                 key_props,
             );
             assert!(resp.is_err(), "Should fail after migration");
@@ -278,7 +276,6 @@ fn test_live_migration_sim_basic() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiAesKeySize::Aes192,
-                Some(0x9ABC),
                 key_props,
             );
             assert!(resp.is_ok(), "Should work after session reopen: {:?}", resp);
@@ -286,7 +283,6 @@ fn test_live_migration_sim_basic() {
     );
 }
 // Test: get sealed BK3, simulate live migration, set sealed BK3
-#[cfg(feature = "mock")]
 #[test]
 fn test_live_migration_sealed_bk3() {
     ddi_dev_test(
@@ -306,20 +302,23 @@ fn test_live_migration_sealed_bk3() {
             );
             info!("Live migration simulation completed successfully");
 
+            // Migration lands on a fresh partition: the host re-provisions the
+            // sealed BK3 it saved before migrating, exactly once.
             let set_result = helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec());
             assert!(
-                set_result.is_err(),
-                "Expected failure when setting sealed BK3 after migration: {:?}",
+                set_result.is_ok(),
+                "Setting sealed BK3 after migration should succeed: {:?}",
                 set_result
             );
+            let reset_result = helper_set_sealed_bk3(dev, sealed_bk3.as_slice().to_vec());
             assert!(
                 matches!(
-                    set_result.unwrap_err(),
-                    DdiError::DdiStatus(DdiStatus::SealedBk3AlreadySet)
+                    reset_result,
+                    Err(DdiError::DdiStatus(DdiStatus::SealedBk3AlreadySet))
                 ),
-                "Should get SealedBk3AlreadySet error."
+                "Second set should fail with SealedBk3AlreadySet: {:?}",
+                reset_result
             );
-            info!("Successfully got expected SealedBk3AlreadySet error after migration");
 
             // Verify: Get sealed BK3 again to confirm it was migrated correctly
             let sealed_bk3_after = helper_get_sealed_bk3(dev);
@@ -756,7 +755,6 @@ fn test_live_migration_repeated_cycles() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiAesKeySize::Aes256,
-                    Some(0x1000 + i as u16), // Use different key IDs for each cycle
                     key_props,
                 );
                 assert!(
@@ -910,7 +908,6 @@ fn test_live_migration_concurrent_shared_session() {
                         Some(session_id),
                         Some(DdiApiRev { major: 1, minor: 0 }),
                         DdiAesKeySize::Aes256,
-                        Some(0x4000 + (thread_id * 1000) + i as u16), // Unique key IDs per thread
                         key_props,
                     )
                 };
@@ -1041,13 +1038,11 @@ fn test_live_migration_concurrent_separate_sessions() {
         barrier.wait(); // Wait for all threads to be ready
         info!("Thread {}: Passed barrier, starting main loop", thread_id);
 
-        let mut key_counter = 0u16;
         let mut loop_count = 0;
         const MAX_LOOPS: usize = 20; // Prevent infinite loops
 
         while loop_count < MAX_LOOPS {
             loop_count += 1;
-            key_counter += 1;
 
             info!(
                 "Thread {}: Attempting to add session key (attempt {})",
@@ -1064,7 +1059,6 @@ fn test_live_migration_concurrent_separate_sessions() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiAesKeySize::Aes256,
-                    Some(0x3000 + (thread_id as u16 * 1000) + key_counter), // Unique key IDs per thread
                     key_props,
                 )
             };
@@ -1229,11 +1223,9 @@ fn test_live_migration_concurrent_separate_sessions() {
     println!("All threads completed successfully - each with separate sessions");
 }
 
-// Run only on mock device
-// Check the hash before and after live migration
-// This only applies for mock. In firmware scenario, certificate(s)
-// will only change if there's an impactless update or similar.
-#[cfg(feature = "mock")]
+// Check the cert chain hash before and after live migration. emu
+// regenerates its identity on erase; on hardware, certificate(s) only
+// change across an impactless update or similar.
 #[test]
 fn test_get_cert_chain_info_during_live_migration() {
     ddi_dev_test(
@@ -1256,58 +1248,6 @@ fn test_get_cert_chain_info_during_live_migration() {
 
             // Two hash should be different
             assert_ne!(hash1, hash2);
-        },
-    );
-}
-
-// Run only on mock device
-// Calculate the hash before and after live migration
-// This only applies for mock. In firmware scenario, certificate(s)
-// will only change if there's an impactless update or similar.
-#[cfg(feature = "mock")]
-#[test]
-fn test_get_cert_hash_during_live_migration() {
-    use tsra_crypto::*;
-
-    ddi_dev_test(
-        common_setup,
-        common_cleanup,
-        |dev, _ddi, _path, _session_id| {
-            // Call GetCertChainInfo before migration
-            let (cert_count, hash1) = helper_get_cert_chain_info_data(dev);
-            assert!(
-                cert_count == 1,
-                "Virtual device should have 1 cert, got {}",
-                cert_count
-            );
-
-            // Simulate live migration
-            let result = dev.erase();
-            assert!(
-                result.is_ok(),
-                "Migration simulation should succeed: {:?}",
-                result
-            );
-
-            // Get the cert
-            let result = helper_get_certificate(dev, 0);
-            assert!(
-                result.is_ok(),
-                "GetCertificate should succeed: {:?}",
-                result
-            );
-            let cert = result.unwrap().data.certificate;
-
-            let result = Hasher::hash_vec(&mut HashAlgo::sha256(), cert.as_slice());
-            assert!(result.is_ok(), "SHA256 calculation should succeed");
-            let hash2 = result.unwrap();
-
-            // Compute the hash
-            assert_ne!(
-                hash1.to_vec(),
-                hash2,
-                "Hash before and after migration should NOT match"
-            )
         },
     );
 }

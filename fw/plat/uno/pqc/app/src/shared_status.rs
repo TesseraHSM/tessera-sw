@@ -109,7 +109,7 @@ pub const FP_STATUS_MAGIC: u32 = 0x464F_4B50;
 /// * `core_id` — this core's stamped identity.
 /// * `counter` — increments every call, so a reader can distinguish a live
 ///   core from a stale block.
-fn publish(core_id: u8, counter: u32) {
+pub fn publish(core_id: u8, counter: u32) {
     let block = (BLOCK_BASE + CORE_BLOCK_OFFSET + (core_id as usize) * CORE_BLOCK_SIZE) as *mut u32;
 
     // SAFETY: `block` is a 16-byte slot in the GSRAM aperture, reserved for
@@ -144,19 +144,5 @@ pub fn note_doorbell(core_id: u8, pending: u32) {
         let seen = read_volatile(block.add(6)) | pending;
         write_volatile(block.add(6), seen);
         write_volatile(block.add(7), count);
-    }
-}
-
-/// Refresh this core's status block forever.
-///
-/// Shares the heartbeat's cadence: fast enough that the HSM sees a fresh
-/// counter between two of its own operations, slow enough to be free.
-#[embassy_executor::task]
-pub async fn status_task(core_id: u8, period: embassy_time::Duration) -> ! {
-    let mut counter: u32 = 0;
-    loop {
-        counter = counter.wrapping_add(1);
-        publish(core_id, counter);
-        embassy_time::Timer::after(period).await;
     }
 }

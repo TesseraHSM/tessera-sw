@@ -8,7 +8,9 @@ pub type HsmResult<T> = Result<T, HsmError>;
 
 pub mod resiliency {
     pub const MAX_RETRIES: u32 = 3;
-    pub const BACKOFF_BASE_MS: u64 = 10;
+    pub fn backoff_base_ms() -> u64 {
+        10
+    }
 
     pub fn execute_key_gen_with_retry<T, F>(
         mut operation: F,

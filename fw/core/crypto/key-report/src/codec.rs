@@ -3,8 +3,8 @@
 
 //! minicbor codec structs for the COSE_Sign1 key-attestation report.
 //!
-//! These mirror the wire schema of the TSRA simulator
-//! (`ddi/mbor/sim/src/report.rs`). Deriving [`Encode`] and [`CborLen`]
+//! These mirror the wire schema of the host report codec
+//! (`ddi/mbor/test_helpers/src/report.rs`). Deriving [`Encode`] and [`CborLen`]
 //! lets `minicbor::len` compute every encoded length exactly, so no
 //! byte-counting constants are hand-maintained. Byte fields borrow
 //! `&[u8]` (which `HsmDmaBuf` derefs to) — encoding writes into `HsmDmaBuf`

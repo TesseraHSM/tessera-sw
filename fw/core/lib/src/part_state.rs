@@ -117,6 +117,8 @@
 //! Setters are `part_set_<name>`; clear operations are
 //! `part_clear_<name>`.
 
+use zeroize::Zeroize;
+
 use super::*;
 
 // ─── Identity, lifecycle, and platform state ──────────────────────────────
@@ -1053,6 +1055,9 @@ pub fn part_psk_is_default<P: HsmPartitionManager>(
     io: &P::Io,
     psk_id: u8,
 ) -> HsmResult<bool> {
+    if let Some(is_default) = pal.part_psk_default_memo(io, psk_id) {
+        return Ok(is_default);
+    }
     let stored = part_psk(pal, io, psk_id)?;
     let default = match psk_id {
         0 => DEFAULT_PSK_CO.as_slice(),
@@ -1065,12 +1070,27 @@ pub fn part_psk_is_default<P: HsmPartitionManager>(
     if stored.len() != default.len() {
         return Ok(false);
     }
+    // Compare a copy: the stored PSK sits in DMA memory, which may be
+    // uncached, where one burst read costs about as much as a single byte
+    // load. The copy is wiped once compared.
+    let mut copy = PskCopy([0; PSK_LEN]);
+    if !stored.copy_to_slice(&mut copy.0) {
+        return Ok(false);
+    }
     let mut diff = 0u8;
-    for (a, b) in stored.iter().zip(default.iter()) {
+    for (a, b) in copy.0.iter().zip(default.iter()) {
         diff |= a ^ b;
     }
+    copy.0.zeroize();
+    // Nothing above awaits, so no write to the PSK can come between the
+    // comparison and the PAL remembering its result.
+    pal.part_psk_memo_default(io, psk_id, diff == 0);
     Ok(diff == 0)
 }
+
+/// A word-aligned buffer for a PSK copy (burst copies need alignment).
+#[repr(C, align(4))]
+struct PskCopy([u8; PSK_LEN]);
 
 /// Whether the partition's caller-presented credential blob has been
 /// set for the current incarnation.

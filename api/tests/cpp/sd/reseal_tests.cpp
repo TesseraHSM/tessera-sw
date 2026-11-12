@@ -10,13 +10,6 @@
 // `tsra_sd_reseal_remote_backup`. A successful reseal is itself
 // the correctness check: the HPKE open only succeeds if the receiver key
 // and the attested sender key match those that sealed the source.
-//
-// Like the create-backup tests, this needs the two-phase TBOR HPKE
-// handshake and a fully provisioned partition, which the mock backend does
-// not implement, so it is excluded from the mock lane and runs on the emu
-// and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -165,6 +158,10 @@ class tsra_sd_reseal_backup_test : public ::testing::Test
 // non-zero backup distinct from the source ciphertext.
 TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -238,6 +235,10 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_roundtrip)
 // ciphertexts (a fresh HPKE ephemeral each call).
 TEST_F(tsra_sd_reseal_backup_test, reseal_backup_rerandomizes)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -287,6 +288,10 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_rerandomizes)
 // session resolves and before the reseal is performed.
 TEST_F(tsra_sd_reseal_backup_test, reseal_backup_null_params)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -308,5 +313,3 @@ TEST_F(tsra_sd_reseal_backup_test, reseal_backup_null_params)
         ASSERT_EQ(err, TSRA_STATUS_INVALID_ARGUMENT);
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

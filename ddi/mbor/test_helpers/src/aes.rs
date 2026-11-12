@@ -8,7 +8,6 @@ pub fn helper_aes_generate(
     sess_id: Option<u16>,
     rev: Option<DdiApiRev>,
     key_size: DdiAesKeySize,
-    key_tag: Option<u16>,
     key_properties: DdiKeyProperties,
 ) -> Result<DdiAesGenerateKeyCmdResp, DdiError> {
     let req = DdiAesGenerateKeyCmdReq {
@@ -19,7 +18,7 @@ pub fn helper_aes_generate(
         },
         data: DdiAesGenerateKeyReq {
             key_size,
-            key_tag,
+            key_tag: None,
             key_properties: key_properties
                 .try_into()
                 .map_err(|_| DdiError::InvalidParameter)?,

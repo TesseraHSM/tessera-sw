@@ -561,6 +561,7 @@ impl HsmPartition {
             result.short_app_id,
             api_rev,
             self.clone(),
+            result.ddi_cookie,
             result.seed,
             result.bmk_session,
         ))
@@ -661,8 +662,8 @@ impl HsmPartition {
             // `init_bk3` is one-shot per device power cycle, so on
             // restore we must reuse the MOBK rather than re-deriving
             // it. Fall back to the OBK callback only when MOBK is not
-            // yet cached (should not happen in practice — init must
-            // have run before restore).
+            // yet cached, such as when this handle's init found
+            // credentials already established by another handle.
             let obk_config = match rs.cached_obk_source {
                 HsmOwnerBackupKeySource::Caller => {
                     let cached_mobk = inner.mobk();
@@ -922,6 +923,10 @@ impl HsmPartition {
 
     /// Retrieves the masked owner backup key that was set during partition initialization.
     ///
+    /// Only successful credential establishment or restore populates this cache.
+    /// Initialization of an already-established partition does not cache an
+    /// unvalidated caller-supplied MOBK.
+    ///
     /// # Arguments
     /// * `mobk` - Optional output buffer to receive the MOBK.
     ///
@@ -943,6 +948,7 @@ impl HsmPartition {
     /// Returns the masked owner backup key (MOBK).
     ///
     /// Retrieves the masked owner backup key that was set during partition initialization.
+    /// See [`Self::mobk`] for cache availability after an already-established init.
     ///
     /// # Returns
     ///
@@ -1078,19 +1084,31 @@ impl HsmPartition {
             return Err(HsmError::SessionNeedsRenegotiation);
         };
         let bmk_session = session.bmk_session();
+        // Read the cookie before entering the reopen guard: `ddi_cookie()`
+        // takes `session.inner`'s read lock, and `with_reopen_guard` below
+        // holds that same lock for writing across the closure, so calling
+        // it from inside the closure would self-deadlock the thread.
+        let ddi_cookie = session.ddi_cookie();
 
         // Hold the session write lock across the DDI call so that only
         // one thread performs the reopen for a given epoch.  Racing
         // threads block here and then observe the updated epoch.
         let reopen_result = session.with_reopen_guard(current_epoch, || {
-            self.inner()
-                .read()
-                .reopen_session(rev, sess_id, &creds, &seed, &bmk_session)
+            self.inner().read().reopen_session(
+                rev,
+                sess_id,
+                ddi_cookie,
+                &creds,
+                &seed,
+                &bmk_session,
+            )
         })?;
 
-        // If we actually performed the reopen, update the BMK on the session.
+        // If we actually performed the reopen, update the BMK and
+        // continuity cookie on the session.
         if let Some(result) = reopen_result {
             session.set_bmk_session(result.bmk_session);
+            session.set_ddi_cookie(result.ddi_cookie);
         }
 
         Ok(())
@@ -1264,11 +1282,20 @@ impl HsmPartitionInner {
         &self,
         api_rev: HsmApiRev,
         sess_id: u16,
+        ddi_cookie: Option<u64>,
         credentials: &HsmCredentials,
         seed: &[u8; 48],
         bmk_session: &[u8],
     ) -> HsmResult<ddi::ReopenSessionResult> {
-        ddi::reopen_session(&self.dev, api_rev, sess_id, credentials, seed, bmk_session)
+        ddi::reopen_session(
+            &self.dev,
+            api_rev,
+            sess_id,
+            ddi_cookie,
+            credentials,
+            seed,
+            bmk_session,
+        )
     }
 
     /// Retrieves the public key of the partition identity (PID) certificate.
@@ -1347,6 +1374,8 @@ impl HsmPartitionInner {
                     .map(Self::read_bmk_from_storage)
                     .transpose()?
                     .unwrap_or_default();
+                // This error does not validate the attempted MOBK. Preserve
+                // any previously validated cache; otherwise restore uses the callback.
                 (bmk, pota_endorsement)
             }
             // Any other error is propagated to the caller.

@@ -8,8 +8,8 @@
 //!   ECDH calls succeed (so the derived `Secret256` vault entry is
 //!   created).
 //! - Reject ECDH against an unknown private key id: the backend
-//!   returns `KeyNotFound` (emu) or `InvalidKeyNumber` (mock); both
-//!   are acceptable.
+//!   returns `KeyNotFound` (emu) or `InvalidKeyNumber`; both are
+//!   acceptable.
 //! - Reject ECDH where the requested target `key_type` does not
 //!   match the private key's curve.
 
@@ -38,7 +38,6 @@ fn test_ecdh_key_exchange_smoke() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P256,
-                    None,
                 );
 
             // Side A: derive Secret256 from (priv1, pub2).
@@ -48,7 +47,6 @@ fn test_ecdh_key_exchange_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
             )
@@ -87,7 +85,6 @@ fn test_ecdh_key_exchange_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id2,
                 MborByteArray::new(pub_key1, pub_key1_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App),
             )
@@ -112,7 +109,6 @@ fn test_ecdh_key_exchange_unknown_key_smoke() {
                 Some(session_id),
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 DdiEccCurve::P256,
-                None,
             );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -122,14 +118,13 @@ fn test_ecdh_key_exchange_unknown_key_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 0xFFFF, /* unknown priv key id */
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret256,
                 key_props,
             )
             .expect_err("EcdhKeyExchange must reject an unknown priv_key_id");
 
             // The exact error code differs across backends — emu's
-            // vault returns `KeyNotFound`, the mock returns
+            // vault returns `KeyNotFound`, others may return
             // `InvalidKeyNumber`.
             assert!(
                 matches!(
@@ -159,7 +154,6 @@ fn test_ecdh_key_exchange_curve_mismatch_smoke() {
                     Some(session_id),
                     Some(DdiApiRev { major: 1, minor: 0 }),
                     DdiEccCurve::P256,
-                    None,
                 );
 
             let key_props = helper_key_properties(DdiKeyUsage::Derive, DdiKeyAvailability::App);
@@ -169,7 +163,6 @@ fn test_ecdh_key_exchange_curve_mismatch_smoke() {
                 Some(DdiApiRev { major: 1, minor: 0 }),
                 priv_key_id1,
                 MborByteArray::new(pub_key2, pub_key2_len).expect("failed to create byte array"),
-                None,
                 DdiKeyType::Secret384, /* mismatched target — priv is P-256 */
                 key_props,
             )

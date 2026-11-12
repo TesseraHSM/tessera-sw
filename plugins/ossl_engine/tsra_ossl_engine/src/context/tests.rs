@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Unit tests (mock) and hardware smoke tests for the engine context, split
+//! Unit tests (simulator) and hardware smoke tests for the engine context, split
 //! out of `context.rs` for readability. Shared round-trip bodies live in
-//! `round_trips`; `mock` runs them against the emulator, `hw_tests` against a
+//! `round_trips`; `sim` runs them against the simulator, `hw_tests` against a
 //! real device (`#[ignore]`d).
 
 use std::io::Write;
@@ -15,6 +15,11 @@ use tsra_ossl_engine_core::ffi;
 use tsra_ossl_engine_core::rsa_pkey_method::ANY_KEYTYPE;
 
 use super::*;
+
+/// Credentials the simulated HSM is provisioned with by the API test suite
+/// (`api/tests/src/utils/partition.rs`).
+const DEFAULT_CRED_ID: [u8; CREDENTIALS_SIZE] = [1u8; CREDENTIALS_SIZE];
+const DEFAULT_CRED_PIN: [u8; CREDENTIALS_SIZE] = [2u8; CREDENTIALS_SIZE];
 
 /// Test helper: write key-material bytes to `path` with owner-only permissions
 /// and the same open hardening the engine uses for secret files — create a new
@@ -76,7 +81,7 @@ fn new_test_engine() -> (Engine, *mut ffi::ENGINE) {
 
 /// Sign `msg` (hashed with `md`) through `pkey` via OpenSSL's EVP interface —
 /// the same path the ABI and `openssl dgst -sign` take. Exercises the loaded
-/// key's `EC_KEY_METHOD` `sign_sig` (→ HSM). Shared by the mock and hardware
+/// key's `EC_KEY_METHOD` `sign_sig` (→ HSM). Shared by simulator and hardware
 /// sign tests.
 #[allow(unsafe_code)]
 fn evp_digest_sign(pkey: *mut ffi::EVP_PKEY, msg: &[u8], md: *const ffi::EVP_MD) -> Vec<u8> {
@@ -169,7 +174,7 @@ fn evp_pkey_sign(pkey: *mut ffi::EVP_PKEY, digest: &[u8], md: *const ffi::EVP_MD
 }
 
 /// Shared round-trip test bodies, driven against an already-opened
-/// [`EngineData`] so the same flow runs on the mock (always) and on real
+/// [`EngineData`] so the same flow runs on the simulator (always) and on real
 /// hardware (the `hw_tests` smokes). Only the `open` differs between the two.
 mod round_trips {
     use std::ffi::CString;
@@ -188,6 +193,8 @@ mod round_trips {
     use openssl::pkey::Public;
     use openssl::sign::Verifier;
     use tsra_api::HsmAesCbcAlgo;
+    use tsra_api::HsmAesGcmAlgo;
+    use tsra_api::HsmAesGcmKey;
     use tsra_api::HsmAesGcmKeyUnmaskAlgo;
     use tsra_api::HsmAesKey;
     use tsra_api::HsmAesKeyGenAlgo;
@@ -195,7 +202,6 @@ mod round_trips {
     use tsra_api::HsmAesXtsKeyUnmaskAlgo;
     use tsra_api::HsmEccCurve;
     use tsra_api::HsmEccKeyGenAlgo;
-    #[cfg(feature = "mock")]
     use tsra_api::HsmEccPrivateKey;
     use tsra_api::HsmEncrypter;
     use tsra_api::HsmError;
@@ -212,18 +218,19 @@ mod round_trips {
     use tsra_api::HsmSession;
     use tsra_api::HsmSigner;
     use tsra_ossl_engine_core::cipher_method::AES_BLOCK;
+    use tsra_ossl_engine_core::cipher_method::GCM_IV_LEN;
+    use tsra_ossl_engine_core::cipher_method::GCM_TAG_LEN;
     use tsra_ossl_engine_core::cipher_method::TSRA_CTRL_SET_KEY_URI;
-    use tsra_ossl_engine_core::cipher_method::register_aes_cbc_ciphers;
-    use tsra_ossl_engine_core::cipher_method::release_aes_cbc_ciphers;
+    use tsra_ossl_engine_core::cipher_method::register_aes_ciphers;
+    use tsra_ossl_engine_core::cipher_method::release_aes_ciphers;
     use tsra_ossl_engine_core::error::RetCode;
 
     use super::*;
     use crate::uri::AesKind;
 
     /// Generate a persistent EC P-384 signing key pair on the open HSM and
-    /// return the private-key handle. Only the mock-only deletion tests take a
+    /// return the private-key handle. Only the deletion tests take a
     /// live handle; the curve round trips use [`generate_masked`] instead.
-    #[cfg(feature = "mock")]
     pub(super) fn generate_p384_key(data: &EngineData) -> EngineResult<HsmEccPrivateKey> {
         data.with_session(|session| {
             let priv_props = HsmKeyPropsBuilder::default()
@@ -329,7 +336,7 @@ mod round_trips {
 
     /// Generate a key on `curve` on `data`'s HSM, load it back through the
     /// engine, and verify the returned public key matches. Backend-agnostic:
-    /// the caller opens `data` against the mock or a real device.
+    /// the caller opens `data` against the simulator or a real device.
     #[allow(unsafe_code)]
     pub(super) fn run_load(data: &EngineData, curve: HsmEccCurve) -> EngineResult<()> {
         let (masked, expected_pub_der) = generate_masked(data, curve)?;
@@ -808,7 +815,7 @@ mod round_trips {
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_aes_cbc(data: EngineData, dir: &Path) -> EngineResult<()> {
         let (mut engine, engine_raw) = keygen_engine(data)?;
-        register_aes_cbc_ciphers::<crate::aes::TsraAesCbc>(&engine)?;
+        register_aes_ciphers::<crate::aes::TsraAes>(&engine)?;
         let slot = crate::engine_impl::engine_data_slot()?;
         let data = slot
             .get(&engine)
@@ -892,7 +899,7 @@ mod round_trips {
                 sdk_cbc_encrypt(&observer, &iv, b"x").is_ok(),
                 "{bits}-bit key usable"
             );
-            drop(crate::aes::CbcKey::new(key));
+            drop(crate::aes::CipherKey::new(key));
             assert!(
                 sdk_cbc_encrypt(&observer, &iv, b"x").is_err(),
                 "a released {bits}-bit key must be deleted from the HSM"
@@ -903,7 +910,7 @@ mod round_trips {
         // SAFETY: every cipher context above is freed; engine_raw is the
         // ENGINE_new ref from new_test_engine.
         unsafe {
-            release_aes_cbc_ciphers(&engine);
+            release_aes_ciphers(&engine);
             ffi::ENGINE_free(engine_raw);
         }
         tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
@@ -959,7 +966,7 @@ mod round_trips {
     pub(super) fn run_generate_key(data: EngineData, dir: &Path) -> EngineResult<()> {
         let (mut engine, engine_raw) = keygen_engine(data)?;
         engine.set_ctrl::<crate::engine_impl::TsraCtrl>()?;
-        register_aes_cbc_ciphers::<crate::aes::TsraAesCbc>(&engine)?;
+        register_aes_ciphers::<crate::aes::TsraAes>(&engine)?;
         let slot = crate::engine_impl::engine_data_slot()?;
         let data = slot
             .get(&engine)
@@ -1093,7 +1100,204 @@ mod round_trips {
         // SAFETY: every cipher context above is freed; engine_raw is the
         // ENGINE_new ref from new_test_engine.
         unsafe {
-            release_aes_cbc_ciphers(&engine);
+            release_aes_ciphers(&engine);
+            ffi::ENGINE_free(engine_raw);
+        }
+        Ok(())
+    }
+
+    /// One message under the key at `uri`: encrypts without `tag`, decrypts
+    /// with it.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    fn aes_gcm(
+        engine_raw: *mut ffi::ENGINE,
+        uri: &str,
+        iv: &[u8; GCM_IV_LEN],
+        aad: &[u8],
+        input: &[u8],
+        tag: Option<&[u8; GCM_TAG_LEN]>,
+    ) -> Option<(Vec<u8>, [u8; GCM_TAG_LEN])> {
+        let ok = RetCode::Success as c_int;
+        let enc = c_int::from(tag.is_none());
+        let uri = CString::new(uri).unwrap();
+        let tag_len = c_int::try_from(GCM_TAG_LEN).unwrap();
+        let mut tag_out = tag.copied().unwrap_or_default();
+        let mut out = vec![0u8; input.len()];
+        let mut n: c_int = 0;
+        let mut fin: c_int = 0;
+        let len = |b: &[u8]| c_int::try_from(b.len()).unwrap();
+        // SAFETY: standard EVP cipher calls on a fresh context, freed below; uri
+        // is NUL-terminated, tag_out holds the tag and out has room for input.
+        let done = unsafe {
+            let nid = c_int::try_from(ffi::NID_aes_256_gcm).unwrap();
+            let cipher = ffi::ENGINE_get_cipher(engine_raw, nid);
+            assert!(!cipher.is_null(), "engine AES-256-GCM cipher");
+            let ctx = ffi::EVP_CIPHER_CTX_new();
+            assert!(!ctx.is_null());
+            let tag_ptr = tag_out.as_mut_ptr().cast::<c_void>();
+            let uri_ptr = uri.as_ptr().cast_mut().cast::<c_void>();
+            let done = ffi::EVP_CipherInit_ex(ctx, cipher, engine_raw, null(), null(), enc) == ok
+                && ffi::EVP_CIPHER_CTX_ctrl(ctx, TSRA_CTRL_SET_KEY_URI, 0, uri_ptr) == ok
+                && ffi::EVP_CipherInit_ex(ctx, null(), null_mut(), null(), iv.as_ptr(), enc) == ok
+                && (tag.is_none()
+                    || ffi::EVP_CIPHER_CTX_ctrl(ctx, set_tag_ctrl(), tag_len, tag_ptr) == ok)
+                && ffi::EVP_CipherUpdate(ctx, null_mut(), &mut n, aad.as_ptr(), len(aad)) == ok
+                && ffi::EVP_CipherUpdate(ctx, out.as_mut_ptr(), &mut n, input.as_ptr(), len(input))
+                    == ok
+                && ffi::EVP_CipherFinal_ex(ctx, out.as_mut_ptr(), &mut fin) == ok
+                && fin == 0
+                && (tag.is_some()
+                    || ffi::EVP_CIPHER_CTX_ctrl(ctx, get_tag_ctrl(), tag_len, tag_ptr) == ok);
+            ffi::EVP_CIPHER_CTX_free(ctx);
+            ffi::ERR_clear_error();
+            done
+        };
+        out.truncate(usize::try_from(n).unwrap());
+        done.then_some((out, tag_out))
+    }
+
+    /// `EVP_CTRL_AEAD_SET_TAG` as the `ctrl` type argument.
+    #[allow(clippy::unwrap_used)]
+    fn set_tag_ctrl() -> c_int {
+        c_int::try_from(ffi::EVP_CTRL_AEAD_SET_TAG).unwrap()
+    }
+
+    /// `EVP_CTRL_AEAD_GET_TAG` as the `ctrl` type argument.
+    #[allow(clippy::unwrap_used)]
+    fn get_tag_ctrl() -> c_int {
+        c_int::try_from(ffi::EVP_CTRL_AEAD_GET_TAG).unwrap()
+    }
+
+    /// The reference ciphertext and tag.
+    fn sdk_gcm_encrypt(
+        key: &HsmAesGcmKey,
+        iv: &[u8],
+        aad: &[u8],
+        msg: &[u8],
+    ) -> EngineResult<(Vec<u8>, [u8; GCM_TAG_LEN])> {
+        let mut algo = HsmAesGcmAlgo::new_for_encryption(iv.to_vec(), Some(aad.to_vec()))
+            .map_err(|e| EngineError::wrap("AES-GCM algo", e))?;
+        let ct = HsmEncrypter::encrypt_vec(&mut algo, key, msg)
+            .map_err(|e| EngineError::wrap("SDK AES-GCM", e))?;
+        let tag = algo
+            .tag()
+            .copied()
+            .ok_or(EngineError::Other("SDK AES-GCM produced no tag".into()))?;
+        Ok((ct, tag))
+    }
+
+    /// A fresh random IV, so no two runs share one.
+    #[allow(clippy::unwrap_used)]
+    fn random_gcm_iv() -> [u8; GCM_IV_LEN] {
+        let mut iv = [0u8; GCM_IV_LEN];
+        openssl::rand::rand_bytes(&mut iv).unwrap();
+        iv
+    }
+
+    /// AES-256-GCM with a `GENERATE_KEY` key matches the SDK's; backend-agnostic.
+    #[allow(unsafe_code)]
+    #[allow(clippy::unwrap_used)]
+    pub(super) fn run_aes_gcm(data: EngineData, dir: &Path) -> EngineResult<()> {
+        let (mut engine, engine_raw) = keygen_engine(data)?;
+        engine.set_ctrl::<crate::engine_impl::TsraCtrl>()?;
+        register_aes_ciphers::<crate::aes::TsraAes>(&engine)?;
+        let slot = crate::engine_impl::engine_data_slot()?;
+        let data = slot
+            .get(&engine)
+            .ok_or(EngineError::NullParam("engine_data"))?;
+        let pid = std::process::id();
+        let path = dir.join(format!("aes-gcm-{pid}.bin"));
+        let _guard = TempFile(path.clone());
+        let uri = format!("tsra://{};type=aes-gcm", path.display());
+        assert!(generate_key_cmd(engine_raw, &uri), "{uri}");
+        let masked = std::fs::read(&path).map_err(|e| EngineError::wrap("read GCM blob", e))?;
+        let key = data.with_session(|session| {
+            HsmKeyManager::unmask_key(session, &mut HsmAesGcmKeyUnmaskAlgo::default(), &masked)
+                .map_err(|e| EngineError::wrap("unmask GCM key", e))
+        })?;
+
+        let iv = random_gcm_iv();
+        for aad_len in [0usize, 13, 64] {
+            let aad = pattern(aad_len);
+            for len in [0usize, 33, 4113] {
+                let msg = pattern(len);
+                let (ct, tag) = sdk_gcm_encrypt(&key, &iv, &aad, &msg)?;
+                assert_eq!(
+                    aes_gcm(engine_raw, &uri, &iv, &aad, &msg, None),
+                    Some((ct.clone(), tag)),
+                    "aad {aad_len}, {len} bytes"
+                );
+                let pt = aes_gcm(engine_raw, &uri, &iv, &aad, &ct, Some(&tag)).map(|(pt, _)| pt);
+                assert_eq!(pt, Some(msg), "aad {aad_len}, {len} bytes");
+            }
+        }
+
+        let (aad, msg) = (pattern(13), pattern(33));
+        let (ct, tag) = sdk_gcm_encrypt(&key, &iv, &aad, &msg)?;
+        let flip = |bytes: &[u8]| {
+            let mut v = bytes.to_vec();
+            v[0] ^= 1;
+            v
+        };
+        let bad_tag: [u8; GCM_TAG_LEN] = flip(&tag).try_into().unwrap();
+        let bad_iv: [u8; GCM_IV_LEN] = flip(&iv).try_into().unwrap();
+        for (what, iv, aad, ct, tag) in [
+            ("ciphertext", &iv, &aad, &flip(&ct), &tag),
+            ("tag", &iv, &aad, &ct, &bad_tag),
+            ("AAD", &iv, &flip(&aad), &ct, &tag),
+            ("IV", &bad_iv, &aad, &ct, &tag),
+        ] {
+            assert!(
+                aes_gcm(engine_raw, &uri, iv, aad, ct, Some(tag)).is_none(),
+                "a changed {what} must fail"
+            );
+        }
+
+        let aes_path = dir.join(format!("aes-gcm-plain-{pid}.bin"));
+        let _aes_guard = TempFile(aes_path.clone());
+        assert!(generate_key_cmd(
+            engine_raw,
+            &format!("tsra://{};type=aes", aes_path.display())
+        ));
+        let garbage = dir.join(format!("aes-gcm-garbage-{pid}.bin"));
+        let _garbage_guard = TempFile(garbage.clone());
+        write_key_material(&garbage, &[0x5au8; 64])
+            .map_err(|e| EngineError::wrap("write garbage blob", e))?;
+        for bad_uri in [
+            format!("tsra://{};type=aes", path.display()),
+            format!("{uri};bits=128"),
+            format!("tsra://{};type=aes-gcm", aes_path.display()),
+            format!(
+                "tsra://{};type=aes-gcm",
+                dir.join("no-such-gcm-key.bin").display()
+            ),
+            format!("tsra://{};type=aes-gcm", garbage.display()),
+        ] {
+            assert!(
+                aes_gcm(engine_raw, &bad_uri, &iv, &[], &msg, None).is_none(),
+                "{bad_uri} must be refused"
+            );
+        }
+
+        // A second handle observes the wrapper's delete on drop.
+        let observer = key.clone();
+        assert!(
+            sdk_gcm_encrypt(&observer, &iv, &[], b"x").is_ok(),
+            "key usable"
+        );
+        drop(crate::aes::CipherKey::new(key));
+        assert!(
+            sdk_gcm_encrypt(&observer, &iv, &[], b"x").is_err(),
+            "a released key must be deleted from the HSM"
+        );
+
+        let _ = slot.take(&mut engine)?;
+        tsra_ossl_engine_core::pkey_method::release_pkey_methods(&engine);
+        // SAFETY: every cipher context above is freed; engine_raw is the
+        // ENGINE_new ref from new_test_engine.
+        unsafe {
+            release_aes_ciphers(&engine);
             ffi::ENGINE_free(engine_raw);
         }
         Ok(())
@@ -1210,9 +1414,8 @@ mod round_trips {
     /// the real `EVP_PKEY_sign` dispatch on a ctx bound to the engine — so our
     /// `EVP_PKEY_METHOD` sign override actually runs — rather than calling the
     /// handler directly; a regression that delegated software PSS would fail here.
-    /// No HSM is opened (the reject precedes any HSM work); only the mock unit
+    /// No HSM is opened (the reject precedes any HSM work); only simulator unit
     /// test drives it (the hardware smokes do not need a software-key path).
-    #[cfg(feature = "mock")]
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_pss_rejects_software_key(data: EngineData) -> EngineResult<()> {
@@ -1306,8 +1509,7 @@ mod round_trips {
     /// (`genpkey ... -pkeyopt tsra.key_usage:keyWrapping`) and prove it is a
     /// usable 2048-bit RSA public key. Also pins that a non-2048 size is
     /// rejected up front (the HSM unwrapping key is fixed at 2048 bits). Only
-    /// the mock test exercises this today; the hardware smoke follows.
-    #[cfg(feature = "mock")]
+    /// simulator test exercises this today; the hardware smoke follows.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_export_unwrapping_key(data: EngineData) -> EngineResult<()> {
@@ -1363,8 +1565,7 @@ mod round_trips {
     /// unwrapping public key (RSA-OAEP-SHA256 + AES-256-KWP, via the same wrap
     /// an external SDK holder would use), import the blob, and prove the masked
     /// kind and reloaded public key — the wrapped-blob analogue of
-    /// [`run_rsa_import`]. Mock-only: it uses the cached unwrapping key handle.
-    #[cfg(feature = "mock")]
+    /// [`run_rsa_import`]. It uses the cached unwrapping key handle.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_import_wrapped(data: EngineData, dir: &Path) -> EngineResult<()> {
@@ -1489,8 +1690,7 @@ mod round_trips {
     /// the string form) must be recorded in the import state. Request
     /// keyWrapping with a direct-set 3072 and confirm it is rejected for not
     /// being 2048 — it would wrongly fall back to the 2048 default if the
-    /// numeric ctrl were not recorded. Mock-only.
-    #[cfg(feature = "mock")]
+    /// numeric ctrl were not recorded.
     #[allow(unsafe_code)]
     #[allow(clippy::unwrap_used)]
     pub(super) fn run_rsa_keygen_bits_direct_ctrl(data: EngineData) -> EngineResult<()> {
@@ -2134,7 +2334,7 @@ mod round_trips {
     /// verifies in software, and reloads the written masked blob through the
     /// loader to prove the generate→persist→reload cycle closes. `curve` is
     /// the OpenSSL curve name (e.g. "P-384"). Backend-agnostic: the caller
-    /// opens `data` against the mock or a real device.
+    /// opens `data` against the simulator or a real device.
     #[allow(unsafe_code)]
     pub(super) fn run_keygen(data: EngineData, dir: &Path, curve: &str) -> EngineResult<()> {
         let (mut engine, engine_raw) = keygen_engine(data)?;
@@ -2278,8 +2478,8 @@ mod round_trips {
     }
 }
 
-#[cfg(all(test, feature = "mock"))]
-mod mock {
+#[cfg(test)]
+mod sim {
     #![allow(clippy::unwrap_used)]
 
     use std::fs;
@@ -2300,7 +2500,7 @@ mod mock {
 
     use super::*;
 
-    /// Shared per-process MOBK path. The mock device's BK3 is global to the
+    /// Shared per-process MOBK path. The simulated device's BK3 is global to the
     /// process: the first test establishes it (plaintext OBK) and the engine
     /// persists the MOBK here; later tests re-init from that MOBK (re-running
     /// init_bk3 fails). Shared across tests so the second open sees the first
@@ -2356,7 +2556,7 @@ mod mock {
         }
     }
 
-    // `#[serial]`: these share the process-global mock device (BK3 state),
+    // `#[serial]`: these share the process-global simulated device (BK3 state),
     // so they must not run concurrently.
     #[test]
     #[serial]
@@ -2426,8 +2626,9 @@ mod mock {
             "key must be usable before release"
         );
 
-        let ptr = data.retain_loaded_key(key);
-        data.release_loaded_key(ptr);
+        let owner = std::ptr::dangling::<ffi::EC_KEY>();
+        let _ = data.retain_loaded_key(key, owner);
+        data.release_loaded_key(owner);
         assert!(
             !hsm_sign_works(&observer),
             "release_loaded_key must delete the key from the HSM"
@@ -2455,12 +2656,169 @@ mod mock {
             "key must be usable before teardown"
         );
 
-        let _ = data.retain_loaded_key(key);
+        let _ = data.retain_loaded_key(key, std::ptr::dangling::<ffi::EC_KEY>());
         drop(data);
         assert!(
             !hsm_sign_works(&observer),
             "EngineData teardown must delete retained keys from the HSM"
         );
+    }
+
+    // Freeing an engine-bound EC_KEY must delete its HSM key once no copy uses
+    // it (the EC_KEY_METHOD finish/copy hooks), not defer it to teardown.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn freeing_bound_ec_key_deletes_key_from_hsm() {
+        let scratch = Scratch::new("free-del");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let key = round_trips::generate_p384_key(&data).unwrap();
+        let observer = key.clone();
+        let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let ec = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+
+        // SAFETY: ec is our engine-bound EC_KEY; the dup and both frees are
+        // standard OpenSSL calls on keys we own. engine_raw is the ENGINE_new
+        // ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            let dup = ffi::EC_KEY_dup(ec);
+            assert!(!dup.is_null(), "EC_KEY_dup of a bound key");
+            ffi::EC_KEY_free(ec);
+            assert!(
+                hsm_sign_works(&observer),
+                "a live EC_KEY copy must keep the HSM key"
+            );
+            ffi::EC_KEY_free(dup);
+            assert!(
+                !hsm_sign_works(&observer),
+                "freeing the last EC_KEY must delete its HSM key"
+            );
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // EC_KEY_copy into an EC_KEY already bound to another HSM key overwrites
+    // its ex_data without a finish: the displaced key must still be deleted,
+    // and the shared one only once both EC_KEYs are gone.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn copy_into_bound_ec_key_deletes_displaced_key() {
+        let scratch = Scratch::new("copy-over");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let src_key = round_trips::generate_p384_key(&data).unwrap();
+        let src_observer = src_key.clone();
+        let src_der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&src_key).unwrap();
+        let mut dest_keys = Vec::new();
+        for _ in 0..3 {
+            let key = round_trips::generate_p384_key(&data).unwrap();
+            let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+            dest_keys.push((key, der));
+        }
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let src = crate::keyload::build_bound_ec_key(&engine, data, &src_der, src_key).unwrap();
+
+        // SAFETY: src/dest are our engine-bound EC_KEYs; the copies and frees
+        // are standard OpenSSL calls on keys we own. engine_raw is the
+        // ENGINE_new ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            for (key, der) in dest_keys {
+                let observer = key.clone();
+                let dest = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+                assert!(!ffi::EC_KEY_copy(dest, src).is_null(), "EC_KEY_copy");
+                assert!(
+                    !hsm_sign_works(&observer),
+                    "the key displaced by EC_KEY_copy must be deleted"
+                );
+                ffi::EC_KEY_free(dest);
+                assert!(
+                    hsm_sign_works(&src_observer),
+                    "freeing a copy must keep the source's HSM key"
+                );
+            }
+            ffi::EC_KEY_free(src);
+            assert!(
+                !hsm_sign_works(&src_observer),
+                "freeing the last EC_KEY must delete its HSM key"
+            );
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // EC_KEY_set_method runs finish on a still-live key: its HSM key must be
+    // released and detached, so the later free neither touches nor releases
+    // the freed pointer again.
+    #[test]
+    #[serial]
+    #[allow(unsafe_code)]
+    fn set_method_detaches_and_releases_ec_key() {
+        let scratch = Scratch::new("set-method");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+
+        let key = round_trips::generate_p384_key(&data).unwrap();
+        let observer = key.clone();
+        let der = tsra_api::HsmKeyCommonProps::pub_key_der_vec(&key).unwrap();
+        let (engine, engine_raw) = round_trips::keygen_engine(data).unwrap();
+        let slot = crate::engine_impl::engine_data_slot().unwrap();
+        let data = slot.get(&engine).unwrap();
+        let ec = crate::keyload::build_bound_ec_key(&engine, data, &der, key).unwrap();
+
+        // SAFETY: ec is our engine-bound EC_KEY; set_method and free are
+        // standard OpenSSL calls on a key we own. engine_raw is the ENGINE_new
+        // ref from keygen_engine, freed after every key bound to it.
+        unsafe {
+            assert_eq!(ffi::EC_KEY_set_method(ec, ffi::EC_KEY_OpenSSL()), 1);
+            assert!(
+                crate::keyload::ec_key_hsm_key(ec).is_null(),
+                "finish must detach the HSM key from a live EC_KEY"
+            );
+            assert!(
+                !hsm_sign_works(&observer),
+                "finish must release the HSM key"
+            );
+            ffi::EC_KEY_free(ec);
+            ffi::ENGINE_free(engine_raw);
+        }
+    }
+
+    // Ownership is tracked per owner: rebinding moves an owner off its old
+    // key (returning it once unowned) and shared keys live until their last
+    // owner goes.
+    #[test]
+    fn retained_keys_track_owners() {
+        let keys = RetainedKeys::<u32>::new();
+        let a = keys.retain(1, 10);
+        let b = keys.retain(2, 20);
+        assert_eq!(keys.rebind(30, a), (true, None));
+        assert_eq!(keys.rebind(20, a), (true, Some(2)));
+        assert_eq!(keys.rebind(20, a), (true, None));
+        assert_eq!(keys.rebind(40, b), (false, None));
+        assert_eq!(keys.release(10), None);
+        assert_eq!(keys.release(30), None);
+        assert_eq!(keys.rebind(20, std::ptr::null()), (true, Some(1)));
+        assert_eq!(keys.release(20), None);
     }
 
     // A signature produced through a loaded key (HSM sign via our EC_KEY_METHOD,
@@ -2556,6 +2914,19 @@ mod mock {
         )
         .unwrap();
         round_trips::run_aes_cbc(data, &scratch.0).unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn aes_gcm_via_engine_cipher() {
+        let scratch = Scratch::new("aes-gcm");
+        let data = EngineData::new();
+        data.open_hsm_with(
+            caller_settings(&scratch),
+            HsmCredentials::new(&DEFAULT_CRED_ID, &DEFAULT_CRED_PIN),
+        )
+        .unwrap();
+        round_trips::run_aes_gcm(data, &scratch.0).unwrap();
     }
 
     // The GENERATE_KEY ctrl command for every AES key kind and size (see
@@ -2839,29 +3210,21 @@ mod mock {
         );
     }
 
-    // An unset credential with no default must be a hard error, not a silent
-    // fallback. (In production builds cred_field is called with None.)
+    // An unset credential must be a hard error, not a silent fallback.
     #[test]
-    fn cred_field_missing_without_default_errors() {
-        let r = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", None);
+    fn cred_field_missing_errors() {
+        let r = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ");
         assert!(matches!(r, Err(EngineError::Other(_))));
-    }
-
-    #[test]
-    fn cred_field_missing_with_default_uses_default() {
-        let def = [7u8; 16];
-        let got = cred_field("TSRA_CRED_FIELD_DEFINITELY_UNSET_XYZ", Some(def)).unwrap();
-        assert_eq!(got, def);
     }
 }
 
 /// Hardware smoke test. Drives the full device open (`open_hsm_from_env`:
 /// partition open → init → session) using the ambient `TSRA_*` environment,
 /// so a real HSM host can validate a configuration end to end — e.g. the TPM
-/// OBK/POTA sources, which the mock cannot exercise.
+/// OBK/POTA sources, which the simulator cannot exercise.
 ///
-/// Compiled only in non-mock builds and `#[ignore]`d, so it never runs in the
-/// normal (mock) CI cell — invoke it explicitly on a provisioned host:
+/// Compiled only in non-sock builds and `#[ignore]`d, so it never runs in the
+/// normal (sock) CI cell — invoke it explicitly on a provisioned host:
 ///
 /// ```text
 /// export TSRA_CREDENTIALS_ID=<32 hex>  TSRA_CREDENTIALS_PIN=<32 hex>
@@ -2874,7 +3237,7 @@ mod mock {
 /// umask 0077
 /// cargo test -p tsra_ossl_engine --features engine open_from_env_smoke -- --ignored --nocapture
 /// ```
-#[cfg(all(test, not(feature = "mock")))]
+#[cfg(test)]
 mod hw_tests {
     use openssl::hash::MessageDigest;
     use tsra_api::HsmEccCurve;
@@ -2895,7 +3258,7 @@ mod hw_tests {
 
     /// Hardware key-loading round trips against a real device, one per
     /// supported curve — the same flow
-    /// `mock::load_ec_key_round_trips_through_engine` runs on the mock (see
+    /// `sim::load_ec_key_round_trips_through_engine` runs on the simulator (see
     /// [`super::round_trips::run_load`]).
     ///
     /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
@@ -2916,7 +3279,7 @@ mod hw_tests {
 
     /// Hardware ECDSA signing round trips against a real device, one per
     /// supported curve — the same flow
-    /// `mock::sign_through_loaded_key_verifies` runs on the mock (see
+    /// `sim::sign_through_loaded_key_verifies` runs on the simulator (see
     /// [`super::round_trips::run_sign`]). Proves the device produces a valid
     /// ECDSA signature.
     ///
@@ -2938,10 +3301,10 @@ mod hw_tests {
 
     /// A digest longer than the curve order (SHA-512 over P-384, 64 > 48 bytes)
     /// on a real device — the hardware counterpart of
-    /// `mock::sign_with_digest_longer_than_curve_order_verifies`. The device
+    /// `sim::sign_with_digest_longer_than_curve_order_verifies`. The device
     /// must truncate per the ECDSA spec (its signature must verify in software
     /// with the same digest), so a firmware change breaking the truncation
-    /// convention is caught on hardware, not only on the mock.
+    /// convention is caught on hardware, not only on the simulator.
     ///
     /// Same env setup as `open_from_env_smoke` (configure `TSRA_*` first):
     ///
@@ -2960,8 +3323,8 @@ mod hw_tests {
     }
 
     /// Hardware EC keygen round trips against a real device, one per supported
-    /// curve — the same flow `mock::keygen_via_pkey_method_signs_and_reloads`
-    /// runs on the mock (see [`super::round_trips::run_keygen`]): generate
+    /// curve — the same flow `sim::keygen_via_pkey_method_signs_and_reloads`
+    /// runs on the simulator (see [`super::round_trips::run_keygen`]): generate
     /// through `EVP_PKEY_keygen`, sign, verify in software, and reload the
     /// written masked blob.
     ///
@@ -2981,7 +3344,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware ECDH round trips, same flow as the mock test (see
+    /// Hardware ECDH round trips, same flow as the simulator test (see
     /// [`super::round_trips::run_derive`]); env setup as above:
     ///
     /// ```text
@@ -2998,7 +3361,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware RSA import round trips, same flow as the mock test (see
+    /// Hardware RSA import round trips, same flow as the simulator test (see
     /// [`super::round_trips::run_rsa_import`]); env setup as above:
     ///
     /// ```text
@@ -3015,7 +3378,7 @@ mod hw_tests {
         Ok(())
     }
 
-    /// Hardware RSA sign round trip, same flow as the mock test (see
+    /// Hardware RSA sign round trip, same flow as the simulator test (see
     /// [`super::round_trips::run_rsa_sign`]): import a software RSA key, sign a
     /// digest on the device via `EVP_DigestSign`, and verify in software. Env
     /// setup as above:
@@ -3031,7 +3394,7 @@ mod hw_tests {
         round_trips::run_rsa_sign(data, &std::env::temp_dir())
     }
 
-    /// Hardware ECDH → HKDF chain, same flow as the mock test (see
+    /// Hardware ECDH → HKDF chain, same flow as the simulator test (see
     /// [`super::round_trips::run_hkdf`]); env setup as above:
     ///
     /// ```text
@@ -3045,7 +3408,7 @@ mod hw_tests {
         round_trips::run_hkdf(data, &std::env::temp_dir())
     }
 
-    /// Hardware session keys, same flow as the mock test (see
+    /// Hardware session keys, same flow as the simulator test (see
     /// [`super::round_trips::run_session_keys`]); env setup as above:
     ///
     /// ```text
@@ -3059,7 +3422,7 @@ mod hw_tests {
         round_trips::run_session_keys(data, &std::env::temp_dir())
     }
 
-    /// Hardware AES-CBC through the engine's ciphers, same flow as the mock
+    /// Hardware AES-CBC through the engine's ciphers, same flow as the simulator
     /// test (see [`super::round_trips::run_aes_cbc`]); env setup as above:
     ///
     /// ```text
@@ -3073,7 +3436,20 @@ mod hw_tests {
         round_trips::run_aes_cbc(data, &std::env::temp_dir())
     }
 
-    /// Hardware `GENERATE_KEY`, same flow as the mock test (see
+    /// [`super::round_trips::run_aes_gcm`] on hardware; env setup as above:
+    ///
+    /// ```text
+    /// cargo test -p tsra_ossl_engine --features engine aes_gcm_from_env_smoke -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires a provisioned HSM host; configure TSRA_* env first"]
+    fn aes_gcm_from_env_smoke() -> EngineResult<()> {
+        let data = EngineData::new();
+        data.open_hsm_from_env()?;
+        round_trips::run_aes_gcm(data, &std::env::temp_dir())
+    }
+
+    /// Hardware `GENERATE_KEY`, same flow as the simulator test (see
     /// [`super::round_trips::run_generate_key`]); env setup as above:
     ///
     /// ```text

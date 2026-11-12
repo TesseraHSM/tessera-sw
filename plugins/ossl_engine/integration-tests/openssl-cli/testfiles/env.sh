@@ -35,7 +35,7 @@ if [ ! -f "$KEYDIR/pota_priv.der" ]; then
 fi
 
 # Environment the generator and the engine both read (see EngineData::open_hsm_from_env).
-# Credentials are left unset so the mock's built-in test credentials are used on
+# Credentials are left unset so the emu build's built-in test credentials are used on
 # both sides.
 export TSRA_RESILIENCY_ENABLED=1
 export TSRA_RESILIENCY_STORAGE_DIR="$KEYDIR/res"
@@ -45,6 +45,9 @@ export TSRA_MOBK_PATH="$KEYDIR/mobk.bin"
 export TSRA_POTA_SOURCE=caller
 export TSRA_POTA_PRIVATE_KEY_PATH="$KEYDIR/pota_priv.der"
 export TSRA_POTA_PUBLIC_KEY_PATH="$KEYDIR/pota_pub.der"
+# Credentials the simulated HSM is provisioned with by the test suite.
+export TSRA_CREDENTIALS_ID="${TSRA_CREDENTIALS_ID:-01010101010101010101010101010101}"
+export TSRA_CREDENTIALS_PIN="${TSRA_CREDENTIALS_PIN:-02020202020202020202020202020202}"
 
 # openssl.cnf that dynamically loads the engine so `-engine tsra` resolves.
 cat > "$KEYDIR/openssl.cnf" <<EOF

@@ -329,13 +329,18 @@ The barrier prevents this by ensuring Thread A's operation either:
 
 ## Backoff Configuration
 
-| Parameter        | Production    | Mock (test)  |
+| Parameter        | SDK           | Unit tests   |
 |------------------|---------------|--------------|
 | `MAX_RETRIES`    | 5 (6 total)   | 5 (6 total)  |
 | `BACKOFF_BASE_MS`| 400ms         | 8ms          |
 | `BACKOFF_JITTER_MS` | 100ms      | 2ms          |
 
 Backoff schedule (production): 400, 800, 1600, 3200, 6400ms + jitter.
+
+Only Rust unit tests compiled with `cfg(test)` use reduced backoff.
+The same SDK build and retry policy are used for hardware and simulator
+integration tests. Neither `TSRA_TEST_ARGS` nor transport selection changes
+the SDK retry policy; a socket endpoint may front real hardware.
 
 ## Error Classification
 
@@ -631,18 +636,20 @@ init(creds, bmk, muk, obk_config, pota_endorsement, resiliency_config)
 
 Located in `api/tests/src/resiliency/stress/tests.rs`:
 - 8 worker threads × 500 iterations per worker
-- Continuous reset thread firing every 1s (mock) / 7s (hardware)
+- Continuous reset thread firing every 1s (emu) / 7s (hardware)
 - Tests cover: AES-CBC, ECC sign, HMAC, RSA, ECDH, HKDF, key gen,
   key delete, key unwrap, key unmask, cert chain, init_part, and
   ABA safety
 
 ### Fault Injection Tests
 
-Using the `res-test` feature and `tsra_res_test_dev` crate for
-injecting NSSR faults mid-DDI-call (more precise than timer-based resets).
+The fault-injection tests in `api/tests/src/resiliency/fault_injection/`
+depended on the removed `tsra_res_test_dev` transport and are currently
+dormant (not built).
 
 ### Stress Tool
 
 A standalone CLI tool for long-running, multi-process resiliency testing:
-`tools/resiliency_stress/`. See its
+`tools/resiliency_stress/`. It is currently dormant (not a workspace
+member). See its
 [README](../../tools/resiliency_stress/README.md) for usage and options.

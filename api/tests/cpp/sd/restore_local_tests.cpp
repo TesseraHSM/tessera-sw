@@ -12,13 +12,6 @@
 // restored — and the security domain is restored from the device-local
 // backups via `tsra_sd_restore_local_backup`. Unlike the
 // remote/peer restores, this carries no attestation evidence.
-//
-// Like the create/reseal/restore tests this needs the two-phase TBOR HPKE
-// handshake and a fully provisioned partition, which the mock backend does
-// not implement, so it is excluded from the mock lane and runs on the emu
-// and hardware backends.
-#if !defined(TSRA_FEATURE_MOCK)
-
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -183,6 +176,10 @@ class tsra_sd_restore_local_backup_test : public ::testing::Test
 // non-zero refreshed device-local backups of the pinned lengths.
 TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_roundtrip)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -270,6 +267,10 @@ TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_roundtrip)
 // session resolves and before the restore is performed.
 TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_null_params)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -298,6 +299,10 @@ TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_null_params)
 // the firmware's one-shot gate.
 TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_is_one_shot)
 {
+    if (!api_rev_at_least(1, 1))
+    {
+        return;
+    }
     part_list_.for_each_part([](std::vector<tsra_char> &path) {
         tsra_handle part_handle = open_reset_partition(path);
         if (part_handle == 0)
@@ -348,5 +353,3 @@ TEST_F(tsra_sd_restore_local_backup_test, restore_local_backup_is_one_shot)
         );
     });
 }
-
-#endif // !defined(TSRA_FEATURE_MOCK)

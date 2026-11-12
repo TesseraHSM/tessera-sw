@@ -360,7 +360,7 @@ inline bool digest_roundtrip(OSSL_LIB_CTX *libctx, const char *algo)
 /* ------------------------------------------------------------------ */
 
 /// Base fixture for resiliency tests.  Constructs ProviderCtx first
-/// (which loads the provider and initializes the mock device), then
+/// (which loads the provider and initializes the emu device), then
 /// resolves the native API symbols via dlopen in SetUp().
 class resiliency_base : public ::testing::Test
 {
