@@ -173,7 +173,6 @@ impl CoseMutation {
 enum Expected {
     Success,
     Reject(TborStatus),
-    EncodeError,
 }
 
 /// Big-endian field elements and independently computed wire public key.
@@ -492,7 +491,7 @@ fn assert_success(resp: &TborDarcKeyUnwrapResp, key: &HostKey, scope: u8) {
     assert!(resp.masked_key.len() <= DARC_UNWRAP_MASKED_KEY_MAX_LEN);
     let env = aead_envelope::inspect(&resp.masked_key).expect("output envelope framing");
     assert_eq!(env.aad.len(), 192);
-    assert_eq!(env.payload.len(), (key.curve.coord_len() + 15) / 16 * 16);
+    assert_eq!(env.payload.len(), key.curve.coord_len().div_ceil(16) * 16);
     assert_eq!(env.aad[6], key.kind());
     let attrs = u64::from_le_bytes(env.aad[8..16].try_into().expect("output usage flags"));
     assert_eq!(((attrs >> 17) & 7) as u8, scope);
@@ -513,12 +512,6 @@ fn check(ctx: &TestCtx, req: &TborDarcKeyUnwrapReq, expected: Expected, key: &Ho
         Expected::Reject(status) => {
             let err = ctx.tbor(req).expect_err("invalid DarcKeyUnwrap must fail");
             assert_session_rejects(&err, status);
-        }
-        Expected::EncodeError => {
-            assert!(
-                matches!(ctx.tbor(req), Err(DdiError::TborEncodeError)),
-                "oversized request must fail host encoding"
-            );
         }
     }
 }
