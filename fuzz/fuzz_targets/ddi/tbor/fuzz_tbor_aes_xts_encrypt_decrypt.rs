@@ -85,7 +85,7 @@ fn valid_lengths(input: &FuzzInput) -> (usize, usize) {
         _ => BLOCK_LEN * (1 + usize::from(input.dul / 8) % (XTS_DATA_MAX_LEN / BLOCK_LEN)),
     };
     let max_units = XTS_DATA_MAX_LEN / dul;
-    let units = if input.scenario % 32 == 0 {
+    let units = if input.scenario.is_multiple_of(32) {
         // Frequent small multi-unit cases enable the per-unit oracle.
         1 + usize::from(input.data_len) % max_units.min(4)
     } else {
