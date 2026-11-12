@@ -5,6 +5,9 @@
 //! isolated faults. The first byte selects one of 41 scenarios; absent
 //! controls default to zero, so even one-byte seeds execute the command.
 //!
+//! Nonempty requests use distinct input/output descriptors: writable OOB
+//! items do not carry input bytes, and there is no bidirectional item.
+//!
 //! Canonical typed requests cannot exercise noncanonical TOC placement.
 //! Permission rejects are unreachable through current AES generation/import:
 //! both require ENCRYPT | DECRYPT together. Wrong-kind keys are authenticated,
@@ -22,7 +25,7 @@ use tsra_ddi_interface::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
-/// Bound the descriptor plan while allowing reordered and aliased indices.
+/// Bound the descriptor plan while allowing reordered indices.
 const OOB_ITEMS: usize = 4;
 /// Bound corpus-derived bytes independently of requested OOB lengths.
 const PATTERN_MAX_LEN: usize = 512;
@@ -158,8 +161,8 @@ fn open_session<'a>(ctx: &'a TestCtx, input: &FuzzInput) -> SessionGuard<'a> {
     SessionGuard::new(ctx, handshake)
 }
 
-/// Submit owned writable descriptors so arbitrary indices, including equal
-/// indices, cannot make firmware write through an immutable Rust reference.
+/// Submit a read-only source and writable destinations using distinct
+/// descriptors for nonempty requests.
 fn submit(
     ctx: &TestCtx,
     req: &TborAesGcmEncryptDecryptReq,
@@ -170,7 +173,14 @@ fn submit(
     }
     let mut items: Vec<_> = buffers
         .iter_mut()
-        .map(|buf| TborOobItem::Out(buf))
+        .enumerate()
+        .map(|(index, buf)| {
+            if index == usize::from(req.in_index) {
+                TborOobItem::In(buf)
+            } else {
+                TborOobItem::Out(buf)
+            }
+        })
         .collect();
     ctx.tbor_oob_io(req, &mut items)
 }
@@ -383,6 +393,7 @@ fn check_output(
 
 /// Build one valid fixture, apply a controlled mutation, predict the outcome,
 /// then submit and check it. Expensive Local/import setup is scenario-specific.
+/// Nonempty requests keep input/output descriptors distinct after mutations.
 fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     let scenario = input.scenario;
     let session = open_session(ctx, input);
@@ -543,7 +554,7 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
                 .masked_key;
             assert_eq!(req.masked_key.len(), MASKED_AES_KEY_MAX_LEN);
         }
-        34 => req.out_index = req.in_index,
+        34 => std::mem::swap(&mut req.in_index, &mut req.out_index),
         35 => {
             // Mutate only encrypted key material, preserving envelope framing
             // and scope so the request reaches key authentication.
@@ -595,6 +606,9 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
             session = Some(SessionGuard::new(ctx, fresh));
         }
         _ => unreachable!("scenario reduced modulo SCENARIOS"),
+    }
+    if req.data_len != 0 && req.in_index == req.out_index {
+        req.out_index = req.out_index.wrapping_add(1);
     }
     let active_sid = session.as_ref().map(SessionGuard::session_id);
     let prediction = expected(&req, active_sid, &pristine, &buffers, scenario, authentic);
@@ -656,6 +670,9 @@ mod tests {
     /// fixture's device-display state is not safe for parallel entry.
     #[test]
     fn structured_scenarios() {
+        let input = FuzzInput::arbitrary(&mut Unstructured::new(&[0xEF, 0xBE]))
+            .expect("CI regression seed");
+        common::common_fuzz_test(&|ctx, _| exercise(ctx, &input));
         for scenario in 0..SCENARIOS {
             let seed = [scenario];
             let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("short seed");
@@ -665,7 +682,7 @@ mod tests {
     }
 
     /// Exercise effective/no-op mutations, alternate roles, known answers,
-    /// padding boundaries and descriptor aliases with reproducible controls.
+    /// padding boundaries and descriptor ordering with reproducible controls.
     fn boundary_scenarios() {
         for scenario in [
             0, 1, 2, 4, 5, 7, 17, 18, 21, 22, 23, 24, 26, 28, 29, 34, 36, 37, 38, 39,
