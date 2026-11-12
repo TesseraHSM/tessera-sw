@@ -23,48 +23,49 @@
 
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
-use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmMlDsa;
 use tsra_fw_hsm_pal_traits::HsmMlDsaHedge;
-use tsra_fw_hsm_pal_traits::HsmMlDsaMsgType;
-use tsra_fw_hsm_pal_traits::HsmMlDsaParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlDsaMsg;
+use tsra_fw_hsm_pal_traits::HsmMlDsaParam;
+use tsra_fw_hsm_pal_traits::HsmMlDsaPct;
 use tsra_fw_hsm_pal_traits::HsmMlKem;
-use tsra_fw_hsm_pal_traits::HsmMlKemParamSet;
+use tsra_fw_hsm_pal_traits::HsmMlKemParam;
+use tsra_fw_hsm_pal_traits::HsmMlKemPct;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRng;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::MLKEM_SEED_LEN;
 use tsra_fw_hsm_pal_traits::MLKEM_SHARED_SECRET_LEN;
+use tsra_fw_uno_drivers_pqc::mldsa_check_msg;
 use tsra_fw_uno_trace::tracing::*;
 
+use crate::UnoHsmIo;
 use crate::UnoHsmPal;
 
 /// The vault key kind the PQC driver, and the FP core behind it, name an
 /// ML-DSA parameter set by.
-fn mldsa_kind(param_set: HsmMlDsaParamSet) -> HsmVaultKeyKind {
-    match param_set {
-        HsmMlDsaParamSet::MlDsa44 => HsmVaultKeyKind::MlDsa44Seed,
-        HsmMlDsaParamSet::MlDsa65 => HsmVaultKeyKind::MlDsa65Seed,
-        HsmMlDsaParamSet::MlDsa87 => HsmVaultKeyKind::MlDsa87Seed,
+fn mldsa_kind(param: HsmMlDsaParam) -> HsmVaultKeyKind {
+    match param {
+        HsmMlDsaParam::MlDsa44 => HsmVaultKeyKind::MlDsa44Seed,
+        HsmMlDsaParam::MlDsa65 => HsmVaultKeyKind::MlDsa65Seed,
+        HsmMlDsaParam::MlDsa87 => HsmVaultKeyKind::MlDsa87Seed,
     }
 }
 
 /// The vault key kind the PQC driver, and the FP core behind it, name an
 /// ML-KEM parameter set by.
-fn mlkem_kind(param_set: HsmMlKemParamSet) -> HsmVaultKeyKind {
-    match param_set {
-        HsmMlKemParamSet::MlKem512 => HsmVaultKeyKind::MlKem512Seed,
-        HsmMlKemParamSet::MlKem768 => HsmVaultKeyKind::MlKem768Seed,
-        HsmMlKemParamSet::MlKem1024 => HsmVaultKeyKind::MlKem1024Seed,
+fn mlkem_kind(param: HsmMlKemParam) -> HsmVaultKeyKind {
+    match param {
+        HsmMlKemParam::MlKem512 => HsmVaultKeyKind::MlKem512Seed,
+        HsmMlKemParam::MlKem768 => HsmVaultKeyKind::MlKem768Seed,
+        HsmMlKemParam::MlKem1024 => HsmVaultKeyKind::MlKem1024Seed,
     }
 }
 
-/// Check an ML-DSA input for what Uno supports: the message itself or an
-/// external `μ`; the pre-hash types are not supported on Uno.
-fn check_msg_type(msg_type: HsmMlDsaMsgType, message: &[u8], ctx: &[u8]) -> HsmResult<()> {
-    match msg_type {
-        HsmMlDsaMsgType::Pure | HsmMlDsaMsgType::ExternalMu => msg_type.check_input(message, ctx),
-        HsmMlDsaMsgType::PreHash | HsmMlDsaMsgType::PreHashMessage => Err(HsmError::UnsupportedCmd),
-    }
+/// Check the message type and lengths before query returns or RNG draws.
+fn check_msg(msg: &HsmMlDsaMsg<'_>) -> HsmResult<()> {
+    mldsa_check_msg(msg.msg_type(), msg.message(), msg.ctx())
 }
 
 /// Whether to sign hedged: Uno always has the TRNG, so it hedges unless the
@@ -77,91 +78,80 @@ fn hedged(hedge: HsmMlDsaHedge) -> bool {
 }
 
 /// Length of the compact ML-DSA private seed (`xi`), identical for every
-/// parameter set — which is why `param_set` has to be carried alongside it.
+/// parameter set — which is why `param` has to be carried alongside it.
 const MLDSA_SEED_LEN: usize = 32;
 
 // With `bulk_crypto` each method returns before reaching the PQC driver; see
 // the module docs.
-#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code))]
+#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code, unused_assignments))]
 impl HsmMlDsa for UnoHsmPal {
-    async fn mldsa_sign_in_place(
+    /// PCTs are deferred: `pct` is accepted but not run; see
+    /// <https://github.com/TesseraHSM/tessera-sw/issues/118>.
+    async fn mldsa_gen_keypair(
         &self,
-        io: &impl HsmIo,
-        param_set: HsmMlDsaParamSet,
-        key_signature: &mut HsmDmaBuf,
-        msg_type: HsmMlDsaMsgType,
-        hedge: HsmMlDsaHedge,
-        message: &HsmDmaBuf,
-        ctx: &HsmDmaBuf,
-    ) -> HsmResult<()> {
-        let mut rnd = [0u8; MLDSA_SEED_LEN];
-        let result = async {
-            #[cfg(feature = "bulk_crypto")]
-            return Err(HsmError::UnsupportedCmd);
-            check_msg_type(msg_type, message, ctx)?;
-            if hedged(hedge) {
-                self.rng_fill_bytes(io, &mut rnd)?;
-            }
-            self.pqc
-                .with_engine(async |engine| {
-                    engine
-                        .mldsa_sign_in_place(
-                            mldsa_kind(param_set),
-                            key_signature,
-                            &rnd,
-                            msg_type,
-                            message,
-                            ctx,
-                        )
-                        .await
-                })
-                .await
-        }
-        .await;
-        rnd.fill(0);
-        result
-    }
-
-    async fn mldsa_gen_key(
-        &self,
-        _io: &impl HsmIo,
-        param_set: HsmMlDsaParamSet,
+        _io: &UnoHsmIo,
+        param: HsmMlDsaParam,
+        seed_src: HsmMlSeedSrc,
+        _pct: HsmMlDsaPct,
         seed: &mut HsmDmaBuf,
-        pub_key: &mut HsmDmaBuf,
-        sec_key: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
         // Bracketed so an early `?` cannot skip the closing mark: every
         // exit, error or not, leaves through the await below.
-        let outcome: HsmResult<()> = async {
+        let outcome: HsmResult<(usize, usize)> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            // Validate before handing anything to the driver, so buffer-size
-            // bugs surface here rather than as a malformed FP request.
-            let expected_pub = param_set.pub_key_len();
-            if seed.len() != MLDSA_SEED_LEN || pub_key.len() != expected_pub {
+            let sk_len = param.sk_len();
+            let pk_len = param.pk_len();
+            // Validated in both modes, so the error does not depend on `out`.
+            if seed.len() != MLDSA_SEED_LEN {
                 error!(
                     "pqc",
                     HsmError::InvalidArg,
-                    "pal: mldsa_gen_key bad buffers seed_len={} (want {}) pub_len={} (want {})",
+                    "pal: mldsa_gen_keypair bad seed_len={} (want {})",
                     seed.len(),
-                    MLDSA_SEED_LEN,
-                    pub_key.len(),
-                    expected_pub
+                    MLDSA_SEED_LEN
+                );
+                return Err(HsmError::InvalidArg);
+            }
+            let Some((sk, pk)) = out else {
+                return Ok((sk_len, pk_len));
+            };
+            // Validate before handing anything to the driver, so buffer-size
+            // bugs surface here rather than as a malformed FP request.
+            if sk.len() < sk_len || pk.len() < pk_len {
+                error!(
+                    "pqc",
+                    HsmError::InvalidArg,
+                    "pal: mldsa_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
+                    sk.len(),
+                    sk_len,
+                    pk.len(),
+                    pk_len
                 );
                 return Err(HsmError::InvalidArg);
             }
 
-            // Draw the ML-DSA seed here, not on FP. The seed *is* the private
-            // key, and an FP core has no entropy source of its own -- the
-            // device's certified TRNG belongs to this core. FP receives the
-            // seed and derives the key pair. Both the seed and the expanded
-            // secret key come back so the HSM can mask them together, which is
-            // what lets signing skip the derivation entirely.
-            self.rng.fill_bytes(seed)?;
+            // A fresh seed is drawn here, not on FP. The seed *is* the
+            // private key, and an FP core has no entropy source of its own --
+            // the device's certified TRNG belongs to this core. FP receives
+            // the seed and derives the key pair. Both the seed and the
+            // expanded secret key come back so the HSM can mask them
+            // together, which is what lets signing skip the derivation
+            // entirely.
+            if seed_src == HsmMlSeedSrc::Random {
+                self.rng.fill_bytes(seed)?;
+            }
 
             self.pqc
-                .mldsa_gen_key(mldsa_kind(param_set), seed, pub_key, sec_key)
-                .await
+                .mldsa_gen_key(
+                    mldsa_kind(param),
+                    seed,
+                    &mut pk[..pk_len],
+                    &mut sk[..sk_len],
+                )
+                .await?;
+            Ok((sk_len, pk_len))
         }
         .await;
 
@@ -170,20 +160,28 @@ impl HsmMlDsa for UnoHsmPal {
 
     async fn mldsa_sign(
         &self,
-        _io: &impl HsmIo,
-        param_set: HsmMlDsaParamSet,
-        sec_key: &HsmDmaBuf,
-        msg_type: HsmMlDsaMsgType,
+        _io: &UnoHsmIo,
+        param: HsmMlDsaParam,
+        sk: &HsmDmaBuf,
         hedge: HsmMlDsaHedge,
-        message: &HsmDmaBuf,
-        ctx: &HsmDmaBuf,
-        signature: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        msg: HsmMlDsaMsg<'_>,
+        sig: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
         // Bracketed so a failed RNG draw still reaches the closing mark.
-        let outcome: HsmResult<()> = async {
+        let outcome: HsmResult<usize> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            check_msg_type(msg_type, message, ctx)?;
+            check_msg(&msg)?;
+            let sig_len = param.sig_len();
+            if sk.len() != param.sk_len() {
+                return Err(HsmError::InvalidArg);
+            }
+            let Some(sig) = sig else {
+                return Ok(sig_len);
+            };
+            if sig.len() < sig_len {
+                return Err(HsmError::InvalidArg);
+            }
             // Per-signature randomness for the hedged variant, drawn here for
             // the same reason as the seed: an FP core has no entropy source.
             // The deterministic variant leaves it zero.
@@ -198,50 +196,85 @@ impl HsmMlDsa for UnoHsmPal {
             let result = self
                 .pqc
                 .mldsa_sign(
-                    mldsa_kind(param_set),
-                    sec_key,
+                    mldsa_kind(param),
+                    sk,
                     &rnd,
-                    msg_type,
-                    message,
-                    ctx,
-                    signature,
+                    msg.msg_type(),
+                    msg.message(),
+                    msg.ctx(),
+                    &mut sig[..sig_len],
                 )
                 .await;
 
             // The randomness is not a long-term secret, but it is signing input;
             // do not leave it on the stack for the next caller.
             rnd.fill(0);
-            result
+            result.map(|()| sig_len)
         }
         .await;
 
         outcome
     }
 
+    async fn mldsa_sign_in_place(
+        &self,
+        io: &UnoHsmIo,
+        param: HsmMlDsaParam,
+        sk_sig: &mut HsmDmaBuf,
+        hedge: HsmMlDsaHedge,
+        msg: HsmMlDsaMsg<'_>,
+    ) -> HsmResult<usize> {
+        let mut rnd = [0u8; MLDSA_SEED_LEN];
+        let result = async {
+            #[cfg(feature = "bulk_crypto")]
+            return Err(HsmError::UnsupportedCmd);
+            check_msg(&msg)?;
+            if hedged(hedge) {
+                self.rng_fill_bytes(io, &mut rnd)?;
+            }
+            self.pqc
+                .with_engine(async |engine| {
+                    engine
+                        .mldsa_sign_in_place(
+                            mldsa_kind(param),
+                            sk_sig,
+                            &rnd,
+                            msg.msg_type(),
+                            msg.message(),
+                            msg.ctx(),
+                        )
+                        .await
+                })
+                .await?;
+            Ok(param.sig_len())
+        }
+        .await;
+        rnd.fill(0);
+        result
+    }
+
     async fn mldsa_verify(
         &self,
-        _io: &impl HsmIo,
-        param_set: HsmMlDsaParamSet,
-        pub_key: &HsmDmaBuf,
-        msg_type: HsmMlDsaMsgType,
-        message: &HsmDmaBuf,
-        ctx: &HsmDmaBuf,
-        signature: &HsmDmaBuf,
+        _io: &UnoHsmIo,
+        param: HsmMlDsaParam,
+        pk: &HsmDmaBuf,
+        msg: HsmMlDsaMsg<'_>,
+        sig: &HsmDmaBuf,
     ) -> HsmResult<bool> {
         // Bracketed so the `bulk_crypto` refusal still reaches the closing
-        // mark; see `mldsa_gen_key`.
+        // mark; see `mldsa_gen_keypair`.
         let outcome: HsmResult<bool> = async {
             #[cfg(feature = "bulk_crypto")]
             return Err(HsmError::UnsupportedCmd);
-            check_msg_type(msg_type, message, ctx)?;
+            check_msg(&msg)?;
             self.pqc
                 .mldsa_verify(
-                    mldsa_kind(param_set),
-                    pub_key,
-                    msg_type,
-                    message,
-                    ctx,
-                    signature,
+                    mldsa_kind(param),
+                    pk,
+                    msg.msg_type(),
+                    msg.message(),
+                    msg.ctx(),
+                    sig,
                 )
                 .await
         }
@@ -251,15 +284,128 @@ impl HsmMlDsa for UnoHsmPal {
     }
 }
 
-#[cfg_attr(feature = "bulk_crypto", allow(unreachable_code))]
+#[cfg_attr(
+    feature = "bulk_crypto",
+    allow(unreachable_code, unused_assignments, unused_variables)
+)]
 impl HsmMlKem for UnoHsmPal {
+    /// PCTs are deferred: `pct` is accepted but not run; see
+    /// <https://github.com/TesseraHSM/tessera-sw/issues/118>.
+    async fn mlkem_gen_keypair(
+        &self,
+        _io: &UnoHsmIo,
+        param: HsmMlKemParam,
+        seed_src: HsmMlSeedSrc,
+        _pct: HsmMlKemPct,
+        seed: &mut HsmDmaBuf,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        // Bracketed so an early `?` cannot skip the closing mark; see
+        // `mldsa_gen_keypair`.
+        let outcome: HsmResult<(usize, usize)> = async {
+            #[cfg(feature = "bulk_crypto")]
+            return Err(HsmError::UnsupportedCmd);
+            let sk_len = param.sk_len();
+            let pk_len = param.pk_len();
+            // Validated in both modes, so the error does not depend on `out`.
+            if seed.len() != MLKEM_SEED_LEN {
+                error!(
+                    "pqc",
+                    HsmError::InvalidArg,
+                    "pal: mlkem_gen_keypair bad seed_len={} (want {})",
+                    seed.len(),
+                    MLKEM_SEED_LEN
+                );
+                return Err(HsmError::InvalidArg);
+            }
+            let Some((sk, pk)) = out else {
+                return Ok((sk_len, pk_len));
+            };
+            if sk.len() < sk_len || pk.len() < pk_len {
+                error!(
+                    "pqc",
+                    HsmError::InvalidArg,
+                    "pal: mlkem_gen_keypair short buffers sk_len={} (want {}) pk_len={} (want {})",
+                    sk.len(),
+                    sk_len,
+                    pk.len(),
+                    pk_len
+                );
+                return Err(HsmError::InvalidArg);
+            }
+
+            // Same reasoning as ML-DSA: the seed pair is the private key and an
+            // FP core has no entropy source, so it is drawn here.
+            if seed_src == HsmMlSeedSrc::Random {
+                self.rng.fill_bytes(seed)?;
+            }
+
+            self.pqc
+                .mlkem_gen_key(
+                    mlkem_kind(param),
+                    seed,
+                    &mut pk[..pk_len],
+                    &mut sk[..sk_len],
+                )
+                .await?;
+            Ok((sk_len, pk_len))
+        }
+        .await;
+
+        outcome
+    }
+
+    async fn mlkem_encaps(
+        &self,
+        io: &UnoHsmIo,
+        param: HsmMlKemParam,
+        pk: &HsmDmaBuf,
+        out: Option<(&mut HsmDmaBuf, &mut HsmDmaBuf)>,
+    ) -> HsmResult<(usize, usize)> {
+        // Refused before the query return, so both modes agree.
+        #[cfg(feature = "bulk_crypto")]
+        return Err(HsmError::UnsupportedCmd);
+        let ct_len = param.ct_len();
+        let Some((ct, ss)) = out else {
+            return Ok((ct_len, MLKEM_SHARED_SECRET_LEN));
+        };
+        if ct.len() < ct_len || ss.len() < MLKEM_SHARED_SECRET_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        // Encapsulation randomness, drawn here for the same reason as the
+        // seeds: an FP core has no entropy source.
+        let mut m = [0u8; MLDSA_SEED_LEN];
+        let result = async {
+            self.rng_fill_bytes(io, &mut m)?;
+            self.pqc
+                .mlkem_encaps(
+                    mlkem_kind(param),
+                    pk,
+                    &m,
+                    &mut ct[..ct_len],
+                    &mut ss[..MLKEM_SHARED_SECRET_LEN],
+                )
+                .await?;
+            Ok((ct_len, MLKEM_SHARED_SECRET_LEN))
+        }
+        .await;
+        // The randomness determines the shared secret; do not leave it on
+        // the stack for the next caller.
+        m.fill(0);
+        result
+    }
+
     async fn mlkem_encaps_in_place(
         &self,
-        io: &impl HsmIo,
-        param_set: HsmMlKemParamSet,
-        pub_key_ciphertext: &mut HsmDmaBuf,
-        shared_secret: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
+        io: &UnoHsmIo,
+        param: HsmMlKemParam,
+        pk_ct: &mut HsmDmaBuf,
+        ss: &mut HsmDmaBuf,
+    ) -> HsmResult<(usize, usize)> {
+        let pk_len = param.pk_len();
+        if pk_ct.len() < pk_len || ss.len() < MLKEM_SHARED_SECRET_LEN {
+            return Err(HsmError::InvalidArg);
+        }
         let mut m = [0u8; MLDSA_SEED_LEN];
         let result = async {
             #[cfg(feature = "bulk_crypto")]
@@ -269,122 +415,51 @@ impl HsmMlKem for UnoHsmPal {
                 .with_engine(async |engine| {
                     engine
                         .mlkem_encaps_in_place(
-                            mlkem_kind(param_set),
-                            pub_key_ciphertext,
+                            mlkem_kind(param),
+                            &mut pk_ct[..pk_len],
                             &m,
-                            shared_secret,
+                            &mut ss[..MLKEM_SHARED_SECRET_LEN],
                         )
                         .await
                 })
-                .await
+                .await?;
+            Ok((param.ct_len(), MLKEM_SHARED_SECRET_LEN))
         }
         .await;
         m.fill(0);
         result
     }
 
-    async fn mlkem_gen_key(
-        &self,
-        _io: &impl HsmIo,
-        param_set: HsmMlKemParamSet,
-        seed: &mut HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        // Bracketed so validation and RNG failures still reach the closing
-        // mark; see `mldsa_gen_key`.
-        let outcome: HsmResult<()> = async {
-            #[cfg(feature = "bulk_crypto")]
-            return Err(HsmError::UnsupportedCmd);
-            // `output` is the public key followed by the expanded private key.
-            let pub_len = param_set.pub_key_len();
-            if seed.len() != MLKEM_SEED_LEN || output.len() != pub_len + param_set.sec_key_len() {
-                return Err(HsmError::InvalidArg);
-            }
-            let (pub_key, sec_key) = output.split_at_mut(pub_len);
-
-            // Same reasoning as ML-DSA: the seed pair is the private key and an
-            // FP core has no entropy source, so it is drawn here.
-            self.rng.fill_bytes(seed)?;
-
-            self.pqc
-                .mlkem_gen_key(mlkem_kind(param_set), seed, pub_key, sec_key)
-                .await
-        }
-        .await;
-
-        outcome
-    }
-
-    async fn mlkem_encaps(
-        &self,
-        _io: &impl HsmIo,
-        param_set: HsmMlKemParamSet,
-        pub_key: &HsmDmaBuf,
-        output: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        // Bracketed so a failed RNG draw still reaches the closing mark.
-        let outcome: HsmResult<()> = async {
-            #[cfg(feature = "bulk_crypto")]
-            return Err(HsmError::UnsupportedCmd);
-            // `output` is the shared secret followed by the ciphertext.
-            if output.len() != MLKEM_SHARED_SECRET_LEN + param_set.ciphertext_len() {
-                return Err(HsmError::InvalidArg);
-            }
-            let (shared_secret, ciphertext) = output.split_at_mut(MLKEM_SHARED_SECRET_LEN);
-
-            // Encapsulation randomness, drawn here for the same reason as the
-            // seeds: an FP core has no entropy source.
-            let mut m = [0u8; 32];
-            {
-                // SAFETY: `m` is a local of exactly the length the RNG driver
-                // fills; `from_raw_mut` only re-types it.
-                let dma = unsafe { HsmDmaBuf::from_raw_mut(&mut m[..]) };
-                self.rng.fill_bytes(dma)?;
-            }
-
-            let result = self
-                .pqc
-                .mlkem_encaps(
-                    mlkem_kind(param_set),
-                    pub_key,
-                    &m,
-                    ciphertext,
-                    shared_secret,
-                )
-                .await;
-
-            // The randomness determines the shared secret; do not leave it on
-            // the stack for the next caller.
-            m.fill(0);
-            result
-        }
-        .await;
-
-        outcome
-    }
-
     async fn mlkem_decaps(
         &self,
-        _io: &impl HsmIo,
-        param_set: HsmMlKemParamSet,
-        sec_key: &HsmDmaBuf,
-        ciphertext: &HsmDmaBuf,
-        shared_secret: &mut HsmDmaBuf,
-    ) -> HsmResult<()> {
-        // Bracketed so the `bulk_crypto` refusal still reaches the closing
-        // mark; see `mldsa_gen_key`.
-        let outcome: HsmResult<()> = async {
-            #[cfg(feature = "bulk_crypto")]
-            return Err(HsmError::UnsupportedCmd);
+        _io: &UnoHsmIo,
+        param: HsmMlKemParam,
+        sk: &HsmDmaBuf,
+        ct: &HsmDmaBuf,
+        ss: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        // Refused before the query return, so both modes agree.
+        #[cfg(feature = "bulk_crypto")]
+        return Err(HsmError::UnsupportedCmd);
+        let Some(ss) = ss else {
+            return Ok(MLKEM_SHARED_SECRET_LEN);
+        };
+        if ss.len() < MLKEM_SHARED_SECRET_LEN {
+            return Err(HsmError::InvalidArg);
+        }
+        let outcome: HsmResult<usize> = async {
             self.pqc
-                .mlkem_decaps(mlkem_kind(param_set), sec_key, ciphertext, shared_secret)
-                .await
+                .mlkem_decaps(
+                    mlkem_kind(param),
+                    sk,
+                    ct,
+                    &mut ss[..MLKEM_SHARED_SECRET_LEN],
+                )
+                .await?;
+            Ok(MLKEM_SHARED_SECRET_LEN)
         }
         .await;
 
         outcome
     }
 }
-
-/// Length of the ML-KEM seed pair `(d ‖ z)`.
-const MLKEM_SEED_LEN: usize = 64;

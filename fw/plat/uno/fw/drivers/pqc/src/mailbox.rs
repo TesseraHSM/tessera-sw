@@ -220,22 +220,18 @@ pub const SLOT_SHAKE_IN_OFFSET: usize = SLOT_MSG_OFFSET;
 pub const SLOT_SHAKE_OUT_OFFSET: usize = SLOT_PK_OFFSET;
 
 /// ML-DSA message type: the staged message is the message itself. Mirrors
-/// `MSG_TYPE_PURE` on FP and the PAL's `HsmMlDsaMsgType::Pure`.
+/// `MSG_TYPE_PURE` on FP; carries the PAL's `HsmMlDsaMsgType::Pure`.
 pub const MSG_TYPE_PURE: u32 = 0;
 
 /// ML-DSA message type: the staged message is an external `μ` of
 /// [`MU_LEN`] bytes, with no context string. Mirrors `MSG_TYPE_EXTERNAL_MU`
-/// on FP and the PAL's `HsmMlDsaMsgType::ExternalMu`.
+/// on FP; carries the PAL's `HsmMlDsaMsgType::ExternalMu`.
 pub const MSG_TYPE_EXTERNAL_MU: u32 = 3;
 
 /// Length of an external `μ`.
 pub const MU_LEN: usize = 64;
 
-const _: () = assert!(
-    tsra_fw_hsm_pal_traits::HsmMlDsaMsgType::Pure as u32 == MSG_TYPE_PURE
-        && tsra_fw_hsm_pal_traits::HsmMlDsaMsgType::ExternalMu as u32 == MSG_TYPE_EXTERNAL_MU
-        && tsra_fw_hsm_pal_traits::MLDSA_MU_LEN == MU_LEN
-);
+const _: () = assert!(tsra_fw_hsm_pal_traits::MLDSA_MU_LEN == MU_LEN);
 
 /// Length of the ML-KEM shared secret.
 pub const SHARED_SECRET_LEN: usize = 32;

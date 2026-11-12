@@ -29,20 +29,20 @@ use tsra_fw_ddi_tbor_types::TborMlKemGenerateKeyResp;
 use tsra_fw_hsm_pal_traits::HsmCmdBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyScope;
+use tsra_fw_hsm_pal_traits::HsmMlKemPct;
+use tsra_fw_hsm_pal_traits::HsmMlSeedSrc;
 use tsra_fw_hsm_pal_traits::HsmPal;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyAttrs;
 use tsra_fw_hsm_pal_traits::HsmVaultKeyKind;
+use tsra_fw_hsm_pal_traits::MLKEM_SEED_LEN;
 
-use super::from_pal::mlkem_param_set;
+use super::from_pal::mlkem_param;
 use super::resolve_masking_key;
 use super::validate_active_session;
 use crate::part_state;
-
-/// Length of the ML-KEM seed pair `(d ‖ z)`.
-pub(crate) const MLKEM_SEED_LEN: usize = 64;
 
 /// Envelope key-label recorded in the masked blob's metadata.
 const MLKEM_KEY_LABEL: &[u8] = b"MlKemKey";
@@ -92,8 +92,8 @@ pub(crate) async fn handle<P: HsmPal>(
         // in-session now, so the restriction no longer has a reason.
 
         let vault_kind = HsmVaultKeyKind(key_kind.0);
-        let param_set = mlkem_param_set(vault_kind)?;
-        let pub_len = param_set.pub_key_len();
+        let param = mlkem_param(vault_kind)?;
+        let pub_len = param.pk_len();
 
         let svn = part_state::part_mfgr_svn(pal);
         let owner =
@@ -104,14 +104,12 @@ pub(crate) async fn handle<P: HsmPal>(
         // decapsulation key, masked as a unit. The seeds still regenerate the
         // encapsulation key; the expanded key keeps a full key generation out
         // of every decapsulation.
-        let sec_len = param_set.sec_key_len();
+        let sec_len = param.sk_len();
         let plain_len = MLKEM_SEED_LEN + sec_len;
 
-        // The seed pair is generated straight into its final slot. The PAL
-        // returns the key pair as one buffer, public key first, so the two
-        // keys are copied into their slots from a scrubbed scratch buffer.
-        // The exchange is scrubbed on every failure, including partial key
-        // generation or masking.
+        // The seed pair, expanded key and public key are generated straight
+        // into their final response slots. The exchange is scrubbed on every
+        // failure, including partial key generation or masking.
         let masked_len = masked_blob_len(AeadAlg::AesGcm256, plain_len);
         let resp = cmd_buf.buffer_mut();
         let len = TborMlKemGenerateKeyResp::encode(resp, 0, false)?
@@ -132,19 +130,20 @@ pub(crate) async fn handle<P: HsmPal>(
                 }
                 let payload = &mut out.masked_key[at..end];
                 let (seed, sec_key) = payload.split_at_mut(MLKEM_SEED_LEN);
-                let pub_key = &mut *out.pub_key;
-                pal.alloc_scoped_async(io, async |alloc| -> HsmResult<()> {
-                    let keys = alloc.dma_alloc(pub_len + sec_len)?;
-                    let result = pal.mlkem_gen_key(io, param_set, seed, keys).await;
-                    if result.is_ok() {
-                        let (pub_half, sec_half) = keys.split_at(pub_len);
-                        pub_key.copy_from_slice(pub_half);
-                        sec_key.copy_from_slice(sec_half);
-                    }
-                    keys.fill(0);
-                    result
-                })
-                .await?;
+                let (written, _) = pal
+                    .mlkem_gen_keypair(
+                        io,
+                        param,
+                        HsmMlSeedSrc::Random,
+                        HsmMlKemPct::EncapsDecaps,
+                        seed,
+                        Some((sec_key, out.pub_key)),
+                    )
+                    .await?;
+                // The masked blob was sized for exactly `sec_len`.
+                if written != sec_len {
+                    return Err(HsmError::InternalError);
+                }
             }
             // Mask the seed+expanded decapsulation key as one unit, straight
             // into the reserved response slot.

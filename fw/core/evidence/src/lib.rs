@@ -17,23 +17,25 @@
 //!    chains validate as X.509 ECDSA chains;
 //! 2. the manufacturer and optional owner chains are validated but **not** anchored;
 //! 3. the partition-owner chain is anchored to a **caller-selected**
-//!    sealing-authority key passed in [`TrustAnchors`] (a non-leaf
-//!    certificate's public key must equal it — the anchor endorses the
-//!    leaf directly or indirectly). The evidence-based `SdReseal`,
-//!    `SdCreatePeerBackup`, and `SdRestorePeerBackup` commands anchor to
-//!    the policy **SATA** key; the **optional** evidence verified by
-//!    `SdCreateRemoteBackup` / `SdRestoreRemoteBackup` (only when the
-//!    policy sets `require_trusted_sa_key`) anchors to the policy
-//!    **SAPOTA** key instead;
+//!    key passed in [`TrustAnchors`] (a non-leaf certificate's public key
+//!    must equal it — the anchor endorses the leaf directly or
+//!    indirectly). The anchor is the POTA of the partition being attested:
+//!    the evidence-based `SdReseal`, `SdCreatePeerBackup`, and
+//!    `SdRestorePeerBackup` commands attest client/peer partitions and
+//!    anchor to the policy **POTA** key; the **optional** evidence verified
+//!    by `SdCreateRemoteBackup` / `SdRestoreRemoteBackup` (only when the
+//!    policy sets `require_trusted_sa_key`) attests the Sealing Authority's
+//!    partition and anchors to the policy **SAPOTA** key;
 //! 4. all supplied chains share the **same** leaf public key;
 //! 5. that shared leaf key signed the COSE_Sign1 attestation report.
 //! 6. when requested by a peer/reseal consumer, the signed report proves
 //!    HSM-generated SD-sealing-key provenance.
 //!
-//! The anchor choice reflects two distinct trust models. For the
-//! evidence-based reseal and peer commands, [`verify_evidence`] is the sole
-//! source of the peer key (recovered from the attested COSE_Key) and is
-//! always SATA-anchored. For `SdCreateRemoteBackup` /
+//! A partition's report-signing PID key is endorsed by its PTA, which its
+//! POTA endorses at `PartFinal`, so evidence chains terminate at the
+//! attested partition's POTA. For the reseal and peer commands,
+//! [`verify_evidence`] is the sole source of the peer key (recovered from
+//! the attested COSE_Key). For `SdCreateRemoteBackup` /
 //! `SdRestoreRemoteBackup`, the authoritative peer key instead comes from a
 //! separate, always-required SATA key certificate chain (see
 //! [`verify_receiver_cert_chain`]); the attestation evidence is optional
@@ -120,7 +122,7 @@ pub struct TrustAnchors<'a> {
     /// verified by [`SdCreateRemoteBackup`] and [`SdRestoreRemoteBackup`]
     /// anchors here to the policy **SAPOTA** key; the evidence-based
     /// `SdReseal`, `SdCreatePeerBackup`, and `SdRestorePeerBackup` commands
-    /// anchor here to the policy **SATA** key.
+    /// anchor here to the policy **POTA** key.
     ///
     /// [`SdCreateRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdCreateRemoteBackupReq
     /// [`SdRestoreRemoteBackup`]: tsra_fw_ddi_tbor_types::TborSdRestoreRemoteBackupReq
@@ -229,7 +231,7 @@ where
     }
 
     // Reqs 1, 3, 4: the partition-owner chain must validate, be anchored to
-    // the caller-selected `anchors.part_owner_anchor` (the policy SATA key
+    // the caller-selected `anchors.part_owner_anchor` (the policy POTA key
     // for reseal/peer, the policy SAPOTA key for remote create/restore),
     // and share the canonical leaf key.
     validate_chain(
