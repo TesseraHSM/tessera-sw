@@ -752,11 +752,11 @@ addrmap io_gsram {
     // ─── BCP (CDMA) rings — HSM-owned; inside the GSRAM window the CDMA
     // may master (0x0F000 - 0xB8000), and below the Admin core's heap
     // (0x1AC58, cp/hsm/mem-map) ───
-    bcp_sqe_t        BCP_SQ[32]          @ 0x16000 += 0x10;   // 0x16000 - 0x16200
-    bcp_cqe_t        BCP_CQ[32]          @ 0x16200 += 0x08;   // 0x16200 - 0x16300
-    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16300;
-    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16304;
-    bcp_dfl_entry_t  BCP_DFL[32]         @ 0x16400 += 0x80;   // 0x16400 - 0x17400
+    bcp_sqe_t        BCP_SQ[64]          @ 0x16000 += 0x10;   // 0x16000 - 0x16400
+    bcp_cqe_t        BCP_CQ[64]          @ 0x16400 += 0x08;   // 0x16400 - 0x16600
+    queue_shadow_t   BCP_SQ_CI_SHADOW    @ 0x16600;
+    queue_shadow_t   BCP_CQ_PI_SHADOW    @ 0x16604;
+    bcp_dfl_entry_t  BCP_DFL[64]         @ 0x16800 += 0x80;   // 0x16800 - 0x18800
 
     // ─── Heap (per-IO buffers) — 34 SRAM slots: 0..31 host (IIC), 32 admin,
     //     33 self-test (CAST). IO_META stays 33: only host+admin slots carry
