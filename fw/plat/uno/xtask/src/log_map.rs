@@ -735,7 +735,8 @@ fn check_against_base_with(ctx: &XtaskCtx, base: &str, former_maps: &[&str]) -> 
     let base_text = match base_map(&sh, base, former_maps, &head)? {
         Some(text) => text,
         None => {
-            log::warn!("{base} has no message map; counting it as empty, so every row is new");
+            // Printed, not logged, so that the CI log shows it without RUST_LOG.
+            eprintln!("note: {base} has no message map; counting it as empty, so every row is new");
             String::new()
         }
     };
