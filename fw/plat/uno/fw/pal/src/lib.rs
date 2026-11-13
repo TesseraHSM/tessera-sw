@@ -55,6 +55,7 @@ mod lock;
 mod pal;
 mod part;
 mod pct;
+mod pin_policy;
 mod seed;
 mod self_test;
 mod session;

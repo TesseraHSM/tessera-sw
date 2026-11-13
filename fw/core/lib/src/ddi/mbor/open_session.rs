@@ -196,6 +196,7 @@ pub(super) fn check_fail_fast<P: HsmPal>(
         return Err(HsmError::VaultSessionLimitReached);
     }
 
+    pal.part_check_pin_policy(io)?;
     crate::part_state::part_verify_nonce(pal, io, nonce)?;
 
     if pub_key.key_kind != DdiKeyType::Ecc384Public {
@@ -247,10 +248,17 @@ pub(super) async fn authenticate_and_derive_bk_session<'p, P: HsmPal>(
     // Step 6: verify the decrypted credential matches the persisted one.
     let id: &[u8] = enc_cred.encrypted_id;
     let pin: &[u8] = enc_cred.encrypted_pin;
-    if id == [0u8; CRED_FIELD_LEN] || pin == [0u8; CRED_FIELD_LEN] {
-        return Err(HsmError::InvalidAppCredentials);
+    let credential_result = if id == [0u8; CRED_FIELD_LEN] || pin == [0u8; CRED_FIELD_LEN] {
+        Err(HsmError::InvalidAppCredentials)
+    } else {
+        crate::part_state::part_verify_credential(pal, io, id, pin)
+    };
+    match credential_result {
+        Ok(()) => pal.part_record_pin_auth(io, true)?,
+        Err(HsmError::InvalidAppCredentials) => pal.part_record_pin_auth(io, false)?,
+        Err(error) => return Err(error),
     }
-    crate::part_state::part_verify_credential(pal, io, id, pin)?;
+    credential_result?;
 
     // Step 7: BK_SESSION = SP800-108(BK_BOOT, "SESSION_BK", seed).
     let bk_boot = pal.dma_alloc(io, BK_BOOT_LEN)?;

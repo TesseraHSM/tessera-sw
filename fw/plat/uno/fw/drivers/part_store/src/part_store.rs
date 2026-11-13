@@ -294,7 +294,7 @@ pub enum PinPolicyState {
 
 /// Partition lockout / pin-policy context (14 bytes, reference layout).
 #[repr(C)]
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PinPolicy {
     /// Current lockout state.
     pub state: PinPolicyState,

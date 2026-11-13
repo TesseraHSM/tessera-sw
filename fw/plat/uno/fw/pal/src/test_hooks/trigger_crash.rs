@@ -282,6 +282,7 @@ async fn execute_remote(
 
 /// Execute a validated crash request on this core.
 #[allow(clippy::empty_loop)]
+#[allow(unsafe_code)]
 fn execute_local(request: CrashRequest) -> HsmResult<Infallible> {
     match request.crash_type {
         DdiTestActionCrashType::Hang => loop {},
