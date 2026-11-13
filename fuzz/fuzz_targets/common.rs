@@ -492,9 +492,10 @@ impl FuzzPolicy {
             Self::Structured(p) => TestPolicy {
                 flags: u64::from(p.flags),
                 sapota_spki_thumbprint: p.sapota,
-                backup_part: p
-                    .backup_part
-                    .map(|(id, spki_thumbprint)| TestBackupPart { id, spki_thumbprint }),
+                backup_part: p.backup_part.map(|(id, spki_thumbprint)| TestBackupPart {
+                    id,
+                    spki_thumbprint,
+                }),
                 info: p.info.clone(),
                 data_spki_thumbprint: p.data,
                 ..TestPolicy::new(p.pota, p.sata)
@@ -564,7 +565,10 @@ fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
         return None;
     }
     let backup_part = match (backup_id, backup_thumbprint) {
-        (Some(id), Some(spki_thumbprint)) => Some(TestBackupPart { id, spki_thumbprint }),
+        (Some(id), Some(spki_thumbprint)) => Some(TestBackupPart {
+            id,
+            spki_thumbprint,
+        }),
         (None, None) => None,
         _ => return None,
     };
