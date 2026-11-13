@@ -33,8 +33,10 @@ use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
 use tsra_fw_hsm_pal_traits::HsmEccPct;
 use tsra_fw_hsm_pal_traits::HsmError;
+use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmScopedAlloc;
+use tsra_fw_hsm_pal_traits::HsmVault;
 use tsra_fw_uno_drivers_upka::UpkaEccCurve;
 use tsra_fw_uno_drivers_upka::hash_size;
 use tsra_fw_uno_drivers_upka::hsm_point_size;
@@ -961,6 +963,25 @@ impl HsmEcc for UnoHsmPal {
                 })
                 .await?;
             Ok(wire_pub_len)
+        })
+        .await
+    }
+
+    async fn ecc_vault_pub_key(
+        &self,
+        io: &UnoHsmIo,
+        key_id: HsmKeyId,
+        pub_out: &mut HsmDmaBuf,
+    ) -> HsmResult<usize> {
+        if !(pub_out.as_ptr() as usize).is_multiple_of(4) {
+            return Err(HsmError::InvalidArg);
+        }
+        self.alloc_scoped_async(io, async |scope| {
+            // Snapshot vault storage before the engine operation can yield.
+            let key = self.vault_key(io, key_id)?;
+            let private = scope.dma_alloc(key.len())?;
+            private.copy_from_slice(key);
+            self.ecc_priv_pub_key(io, private, Some(pub_out)).await
         })
         .await
     }

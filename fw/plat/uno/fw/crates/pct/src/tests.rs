@@ -31,6 +31,7 @@ use tsra_fw_hsm_pal_traits::HsmHash;
 use tsra_fw_hsm_pal_traits::HsmHashAlgo;
 use tsra_fw_hsm_pal_traits::HsmIo;
 use tsra_fw_hsm_pal_traits::HsmIoTypes;
+use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmRsa;
 use tsra_fw_hsm_pal_traits::HsmRsaKey;
@@ -277,6 +278,15 @@ impl HsmEcc for FakePal {
         _io: &Self::Io,
         _priv_key: &HsmDmaBuf,
         _pub_out: Option<&mut HsmDmaBuf>,
+    ) -> HsmResult<usize> {
+        unimplemented!()
+    }
+
+    async fn ecc_vault_pub_key(
+        &self,
+        _io: &Self::Io,
+        _key_id: HsmKeyId,
+        _pub_out: &mut HsmDmaBuf,
     ) -> HsmResult<usize> {
         unimplemented!()
     }

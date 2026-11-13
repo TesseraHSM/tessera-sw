@@ -349,15 +349,7 @@ impl UnoHsmPal {
             // field (selected by `kind`). This borrow of the PartStore slot is
             // strictly synchronous — no `.await` is reached while it is held.
             match kind {
-                HsmVaultKeyKind::Ecc384Private => {
-                    // The PKA emits the public key little-endian; store the identity
-                    // key big-endian (natural SEC1/DER order) so every host-facing
-                    // consumer (PartInfo, POTA verify, X.509 leaf, session HPKE)
-                    // reads `part_id_pub_key` directly without per-handler swaps.
-                    pub_buf[..ID_PUB_KEY_LEN / 2].reverse();
-                    pub_buf[ID_PUB_KEY_LEN / 2..].reverse();
-                    part.set_id_pub_key(pub_buf)?
-                }
+                HsmVaultKeyKind::Ecc384Private => {}
                 HsmVaultKeyKind::EstablishCred => part.set_ec_pub_key(pub_buf)?,
                 HsmVaultKeyKind::SessionEncryption => part.set_se_pub_key(pub_buf)?,
                 _ => return Err(HsmError::InternalError),
@@ -708,7 +700,7 @@ impl UnoHsmPal {
         SessionStore::partition(pid)?.mark_all_needs_renego();
         part.clear_state(PartResetKind::Migrate);
         // The `vault.clear()` above also deleted the identity private key.
-        // Zero the identity fields (id, `id_key_id`, cached public key)
+        // Zero the identity fields (id, `id_key_id`)
         // *before* awaiting so no concurrent reader can observe `id_key_id`
         // dangling at a deleted vault key while a fresh identity is being
         // provisioned across the await points below.
@@ -946,13 +938,11 @@ impl HsmPartitionManager for UnoHsmPal {
             // been provisioned (identity at SetResource, the others at
             // enable).
             HsmPartPropId::PART_ID if p.id_key_id().is_some() => Ok(p.id()),
-            HsmPartPropId::PART_ID_ECC_PUB_KEY if p.id_key_id().is_some() => Ok(p.id_pub_key()),
             HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY if p.ec_key_id().is_some() => {
                 Ok(p.ec_pub_key())
             }
             HsmPartPropId::SESSION_ENC_ECC_PUB_KEY if p.se_key_id().is_some() => Ok(p.se_pub_key()),
             HsmPartPropId::PART_ID
-            | HsmPartPropId::PART_ID_ECC_PUB_KEY
             | HsmPartPropId::ESTABLISH_CRED_ECC_PUB_KEY
             | HsmPartPropId::SESSION_ENC_ECC_PUB_KEY => Err(HsmError::PartPropNotFound),
 
@@ -970,14 +960,12 @@ impl HsmPartitionManager for UnoHsmPal {
                 Ok(p.sapota_thumbprint())
             }
             HsmPartPropId::BK3_SESSION if p.bk3_session_valid() => Ok(p.bk3_session()),
-            HsmPartPropId::PTA_ECC_PUB_KEY if p.pta_pub_key_valid() => Ok(p.pta_pub_key()),
             HsmPartPropId::POLICY_HASH if p.policy_hash_valid() => Ok(p.policy_hash()),
             HsmPartPropId::CREDENTIAL
             | HsmPartPropId::POTA_THUMBPRINT
             | HsmPartPropId::SATA_THUMBPRINT
             | HsmPartPropId::SAPOTA_THUMBPRINT
             | HsmPartPropId::BK3_SESSION
-            | HsmPartPropId::PTA_ECC_PUB_KEY
             | HsmPartPropId::POLICY_HASH => Err(HsmError::PartPropNotFound),
             // Variable-length blobs are absent when their stored length is 0.
             HsmPartPropId::SEALED_BK3 => {
@@ -1030,7 +1018,6 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::POTA_THUMBPRINT => p.set_pota_thumbprint(data),
             HsmPartPropId::SATA_THUMBPRINT => p.set_sata_thumbprint(data),
             HsmPartPropId::SAPOTA_THUMBPRINT => p.set_sapota_thumbprint(data),
-            HsmPartPropId::PTA_ECC_PUB_KEY => p.set_pta_pub_key(data),
             HsmPartPropId::POLICY_HASH => p.set_policy_hash(data),
             _ => Err(HsmError::UnsupportedCmd),
         }
@@ -1056,7 +1043,6 @@ impl HsmPartitionManager for UnoHsmPal {
             HsmPartPropId::BK3_SESSION => p.clear_bk3_session(),
             HsmPartPropId::SEALED_BK3 => p.clear_sealed_bk3(),
             HsmPartPropId::MASKED_BK_BOOT => p.clear_masked_bk_boot(),
-            HsmPartPropId::PTA_ECC_PUB_KEY => p.clear_pta_pub_key(),
             HsmPartPropId::POLICY_HASH => p.clear_policy_hash(),
             _ => return Err(HsmError::UnsupportedCmd),
         }

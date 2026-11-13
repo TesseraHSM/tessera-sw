@@ -838,11 +838,6 @@ impl HsmPartPropId {
     /// scope to its live masking key.
     pub const SD_MK_KEY_ID: HsmPartPropId = HsmPartPropId(0x001D);
 
-    /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) of the
-    /// partition identity key.  Read-only from caller perspective;
-    /// materialised by the PAL alongside [`PART_ID_ECC_KEY_ID`](Self::PART_ID_ECC_KEY_ID).
-    pub const PART_ID_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0017);
-
     /// Raw ECC-P384 public-key coordinates (x ∥ y, 96 B) for the
     /// session encryption key.  Read-only from caller perspective.
     pub const SESSION_ENC_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0018);
@@ -851,13 +846,6 @@ impl HsmPartPropId {
     /// one-shot establish-credential key.  Read-only from caller
     /// perspective.
     pub const ESTABLISH_CRED_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x0019);
-
-    /// Raw ECC-P384 public-key coordinates (`x ‖ y`, 96 B) for the
-    /// Partition Trust Anchor.  Set together with
-    /// [`PTA_KEY_ID`](Self::PTA_KEY_ID) by `PartInit` (the host-supplied
-    /// SEC1 form is validated and its `0x04` prefix stripped at the
-    /// facade boundary before storage).
-    pub const PTA_ECC_PUB_KEY: HsmPartPropId = HsmPartPropId(0x001A);
 
     // ── Caller-presented secrets (0x0020..) ───────────────────────
 
@@ -1000,10 +988,9 @@ impl HsmPartPropId {
             | Self::RSA_UNWRAPPING_KEY_ID => VAULT_REF_RW,
 
             // ── Public-key views (fixed P-384 sizes) ──
-            Self::PART_ID_ECC_PUB_KEY
-            | Self::SESSION_ENC_ECC_PUB_KEY
-            | Self::ESTABLISH_CRED_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Ro, Abs, false),
-            Self::PTA_ECC_PUB_KEY => HsmPartPropMeta::fixed(96, Rw, Abs, false),
+            Self::SESSION_ENC_ECC_PUB_KEY | Self::ESTABLISH_CRED_ECC_PUB_KEY => {
+                HsmPartPropMeta::fixed(96, Ro, Abs, false)
+            }
 
             // ── Caller-presented secrets ──
             Self::PSK_CO | Self::PSK_CU => HsmPartPropMeta::fixed(PSK_LEN as u16, Rw, Req, true),

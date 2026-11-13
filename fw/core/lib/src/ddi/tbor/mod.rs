@@ -727,7 +727,7 @@ pub(crate) async fn dispatch<'p, P: HsmPal>(
         opcode::PSK_CHANGE => psk_change::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_INIT => part_init::handle(pal, io, cmd_buf, undo).await,
         opcode::PART_FINAL => part_final::handle(pal, io, cmd_buf, undo).await,
-        opcode::PART_INFO => part_info::handle(pal, io, cmd_buf),
+        opcode::PART_INFO => part_info::handle(pal, io, cmd_buf).await,
         opcode::SD_SEALING_KEY_GEN => sd_sealing_key_gen::handle(pal, io, cmd_buf).await,
         opcode::SD_CREATE_REMOTE_BACKUP => {
             sd_create_remote_backup::handle(pal, io, cmd_buf, undo).await

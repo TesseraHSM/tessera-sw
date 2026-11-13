@@ -131,8 +131,8 @@ const RESERVED3_LEN: usize = 626
     - PSK_LEN  // psk_co
     - PSK_LEN  // psk_cu
     - CREDENTIAL_LEN
-    - 1  // valid_flags (8 packed presence/init bits)
-    - PUB_KEY_LEN  // pta_pub_key
+    - 1  // valid_flags (packed presence/init bits; bit 4 reserved)
+    - PUB_KEY_LEN  // reserved_pta_pub_key
     - 2; // session_meta (pending_mask + psk_change_mask)
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
@@ -140,7 +140,6 @@ const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
 const FLAG_POTA_THUMBPRINT_VALID: u8 = 1 << 1;
 const FLAG_SATA_THUMBPRINT_VALID: u8 = 1 << 2;
 const FLAG_SAPOTA_THUMBPRINT_VALID: u8 = 1 << 3;
-const FLAG_PTA_PUB_KEY_VALID: u8 = 1 << 4;
 const FLAG_POLICY_HASH_VALID: u8 = 1 << 5;
 const FLAG_BK3_INITIALIZED: u8 = 1 << 6;
 const FLAG_SD_INITIALIZED: u8 = 1 << 7;
@@ -317,13 +316,13 @@ pub struct PinPolicy {
 // ── On-storage sub-structs (crate-private; mirror reference layout) ───────
 
 /// Partition identity: random id, identity private key (reserved/unused on
-/// Uno — the private key lives in the vault), and identity public key.
+/// Uno — the private key lives in the vault), and reserved public-key space.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct PartitionIdentifier {
     id: [u8; ID_LEN],
     priv_key: [u8; ID_PRIV_LEN],
-    pub_key: [u8; ID_PUB_LEN],
+    reserved_pub_key: [u8; ID_PUB_LEN],
 }
 
 /// Partition certificate (reserved/unused on Uno for now).
@@ -409,7 +408,8 @@ struct Storage {
     res_mask: [u8; RES_MASK_LEN],
     ec_pub_key: [u8; PUB_KEY_LEN],
     se_pub_key: [u8; PUB_KEY_LEN],
-    pta_pub_key: [u8; PUB_KEY_LEN],
+    // Former public-key cache; reserved to preserve the shared slot offsets.
+    reserved_pta_pub_key: [u8; PUB_KEY_LEN],
     psk_co: [u8; PSK_LEN],
     psk_cu: [u8; PSK_LEN],
     credential: [u8; CREDENTIAL_LEN],
@@ -639,13 +639,15 @@ impl Partition {
         slot.unwrapping_key_id = absent;
     }
 
-    /// Zeroes the provisioned identity: the 16-byte id, its key handle, and
-    /// the cached identity public key.
+    /// Zeroes the provisioned identity and drops its key handle.
     #[inline(never)]
     pub fn clear_identity(mut self) {
         self.id_mut().fill(0);
         self.set_id_key_id(None);
-        self.id_pub_key_mut().fill(0);
+        self.slot_mut()
+            .partition_identifier
+            .reserved_pub_key
+            .fill(0);
     }
 
     /// Zeroes the enable-time keys: the establish-credential and
@@ -669,7 +671,7 @@ impl Partition {
     /// policy.
     ///
     /// [`PartResetKind::Disable`] additionally wipes the write-once
-    /// provisioning material (PTA public key, policy hash, POTA/SATA/SAPOTA
+    /// provisioning material (policy hash, POTA/SATA/SAPOTA
     /// thumbprints, sealed BK3 + incarnation flag, rotated PSKs, and the VM
     /// launch GUID); [`PartResetKind::Migrate`] preserves it so a host that
     /// resets via NSSR keeps its provisioning and only re-establishes its
@@ -746,7 +748,7 @@ impl Partition {
         }
 
         if matches!(kind, PartResetKind::Disable) {
-            self.clear_pta_pub_key();
+            self.slot_mut().reserved_pta_pub_key.fill(0);
             self.clear_policy_hash();
             self.clear_pota_thumbprint();
             self.clear_sata_thumbprint();
@@ -832,42 +834,6 @@ impl Partition {
             return Err(HsmError::InvalidArg);
         }
         self.slot_mut().partition_identifier.id.copy_from_slice(src);
-        Ok(())
-    }
-
-    /// Borrows the partition's identity public key (X ‖ Y, 96 B).
-    ///
-    /// The backing field is 97 B (reference SEC1 layout); Uno uses the
-    /// first 96 B (raw X ‖ Y, no SEC1 prefix).
-    #[inline(never)]
-    pub fn id_pub_key(self) -> &'static HsmDmaBuf {
-        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { HsmDmaBuf::from_raw(&self.slot().partition_identifier.pub_key[..PUB_KEY_LEN]) }
-    }
-
-    /// Mutably borrows the partition's identity public key (96 B).
-    #[inline(never)]
-    pub fn id_pub_key_mut(&mut self) -> &mut HsmDmaBuf {
-        // SAFETY: as `id_pub_key`, exclusively borrowed.
-        unsafe {
-            HsmDmaBuf::from_raw_mut(
-                &mut self.slot_mut().partition_identifier.pub_key[..PUB_KEY_LEN],
-            )
-        }
-    }
-
-    /// Sets the partition's identity public key (96 B, raw X ‖ Y).
-    ///
-    /// # Errors
-    ///
-    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
-    #[inline(never)]
-    pub fn set_id_pub_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
-        let src: &[u8] = v;
-        if src.len() != PUB_KEY_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        self.slot_mut().partition_identifier.pub_key[..PUB_KEY_LEN].copy_from_slice(src);
         Ok(())
     }
 
@@ -1697,46 +1663,6 @@ impl Partition {
         }
         self.slot_mut().se_pub_key.copy_from_slice(src);
         Ok(())
-    }
-
-    // ── platform trust-anchor public key ─────────────────────────────────
-
-    /// Borrows the platform trust-anchor public key (X ‖ Y, 96 B).
-    #[inline(never)]
-    pub fn pta_pub_key(self) -> &'static HsmDmaBuf {
-        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { HsmDmaBuf::from_raw(&self.slot().pta_pub_key) }
-    }
-
-    /// Sets the platform trust-anchor public key (write-once via caller gate).
-    ///
-    /// # Errors
-    ///
-    /// - [`HsmError::InvalidArg`] — `v` is not exactly `PUB_KEY_LEN` bytes.
-    #[inline(never)]
-    pub fn set_pta_pub_key(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
-        let src: &[u8] = v;
-        if src.len() != PUB_KEY_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        let slot = self.slot_mut();
-        slot.pta_pub_key.copy_from_slice(src);
-        slot.valid_flags |= FLAG_PTA_PUB_KEY_VALID;
-        Ok(())
-    }
-
-    /// Whether the platform trust-anchor public key has been provisioned.
-    #[inline(never)]
-    pub fn pta_pub_key_valid(self) -> bool {
-        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_PTA_PUB_KEY_VALID != 0
-    }
-
-    /// Clears the platform trust-anchor public key (zeroizes and marks absent).
-    #[inline(never)]
-    pub fn clear_pta_pub_key(mut self) {
-        let slot = self.slot_mut();
-        slot.pta_pub_key = [0u8; PUB_KEY_LEN];
-        slot.valid_flags &= !FLAG_PTA_PUB_KEY_VALID;
     }
 
     /// Borrows the crypto-officer PSK (32 B).
