@@ -146,8 +146,14 @@ fn variant(value: u32) {
 #[cfg(not(any(feature = "variant_a", feature = "variant_b")))]
 fn variant(value: u32) {}
 
-#[cfg(fail_case = "message_not_literal")]
+#[cfg(any(
+    fail_case = "message_not_literal",
+    fail_case = "error_message_not_literal"
+))]
 const MESSAGE: &str = "not a literal";
+
+#[cfg(fail_case = "target_not_literal")]
+const TARGET: &str = "fixture";
 
 /// With `--cfg fail_case="<name>"`, one call that a check must reject.
 fn fail_case(value: u32) {
@@ -189,6 +195,15 @@ fn fail_case(value: u32) {
     warn!("fixture", "values {} {} {}", value, value, value);
     #[cfg(fail_case = "message_not_literal")]
     info!("fixture", MESSAGE);
+    #[cfg(fail_case = "target_not_literal")]
+    info!(TARGET, "bad target");
+    #[cfg(fail_case = "target_runtime")]
+    {
+        let target = "fixture";
+        warn!(target, "bad target");
+    }
+    #[cfg(fail_case = "error_message_not_literal")]
+    error!("fixture", Code(1), MESSAGE);
     #[cfg(fail_case = "error_without_code")]
     error!("fixture", "no code");
     #[cfg(fail_case = "error_two_values")]
