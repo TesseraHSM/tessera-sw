@@ -1011,4 +1011,220 @@ mod tests {
             "{header}"
         );
     }
+
+    /// The map's comment lines, as a map file starts.
+    const MAP_HEAD: &str =
+        "# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n";
+    const CORE_ROW: &str = "0\tcore\tE+\ttsra_fw_hsm_core\tcore\tfailed\n";
+    const UNO_ROW: &str = "0\tuno\tI\ttsra_fw_uno_pal\tboot\tready\n";
+    const UNO_ROW_1: &str = "1\tuno\tW\ttsra_fw_uno_pal\tboot\tslow\n";
+
+    /// A git repository in a new directory under the system's temporary
+    /// directory, with stub manifests for the crates that the map check
+    /// looks up. Dropping it removes the directory.
+    struct TempRepo {
+        root: PathBuf,
+    }
+
+    impl TempRepo {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let root =
+                std::env::temp_dir().join(format!("tsra-xtask-log-map-{}-{n}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            let repo = Self { root };
+            repo.write("fw/plat/uno/Cargo.toml", "[workspace]\n");
+            repo.write(
+                "fw/plat/uno/fw/pal/Cargo.toml",
+                "[package]\nname = \"tsra_fw_uno_pal\"\n",
+            );
+            repo.write(
+                "fw/core/lib/Cargo.toml",
+                "[package]\nname = \"tsra_fw_hsm_core\"\n",
+            );
+            repo.git(&["init", "-q"]);
+            repo
+        }
+
+        fn ctx(&self) -> XtaskCtx {
+            XtaskCtx {
+                root: self.root.join("fw/plat/uno"),
+            }
+        }
+
+        /// Writes a file, relative to the repository root.
+        fn write(&self, path: &str, text: &str) {
+            let path = self.root.join(path);
+            fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+            fs::write(&path, text).expect("a file");
+        }
+
+        /// Writes the message map, relative to the platform workspace.
+        fn write_map(&self, text: &str) {
+            self.write(&format!("fw/plat/uno/{MAP}"), text);
+        }
+
+        fn git(&self, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).expect("UTF-8")
+        }
+
+        /// Commits the whole tree, and returns the commit's hash.
+        fn commit(&self) -> String {
+            self.git(&["add", "-A"]);
+            self.git(&["commit", "-q", "--no-verify", "--allow-empty", "-m", "base"]);
+            self.git(&["rev-parse", "HEAD"]).trim().to_string()
+        }
+
+        /// Checks the map in the working tree against `base`.
+        fn check(&self, base: &str) -> Result<(), String> {
+            check_against_base(&self.ctx(), base).map_err(|e| format!("{e:#}"))
+        }
+    }
+
+    impl Drop for TempRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn the_base_check_fails_closed_without_the_base() {
+        let repo = TempRepo::new();
+        repo.write_map(&format!("{MAP_HEAD}{CORE_ROW}"));
+        repo.commit();
+        let error = repo.check("origin/main").expect_err("no origin/main");
+        assert!(error.contains("can't read origin/main"), "{error}");
+    }
+
+    #[test]
+    fn the_base_map_must_stay_a_prefix() {
+        let repo = TempRepo::new();
+        let base_text = format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW}");
+        repo.write_map(&base_text);
+        let base = repo.commit();
+        assert_eq!(repo.check(&base), Ok(()));
+        repo.write_map(&format!("{base_text}{UNO_ROW_1}"));
+        assert_eq!(repo.check(&base), Ok(()));
+        for (head, expected) in [
+            (
+                base_text.replace("ready", "set"),
+                "differs from the base map",
+            ),
+            (format!("{MAP_HEAD}{CORE_ROW}"), "lost base line"),
+            (
+                format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW_1}{UNO_ROW}"),
+                "differs from the base map",
+            ),
+        ] {
+            repo.write_map(&head);
+            let error = repo.check(&base).expect_err("a changed base line");
+            assert!(error.contains(expected), "{head:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_base_without_a_map_counts_as_empty() {
+        let repo = TempRepo::new();
+        let base = repo.commit();
+        repo.write_map(&format!("{MAP_HEAD}{CORE_ROW}{UNO_ROW}"));
+        assert_eq!(repo.check(&base), Ok(()));
+        // Every row is new, so the numbers must still start from 0.
+        repo.write_map(&format!("{MAP_HEAD}{}", CORE_ROW.replacen('0', "1", 1)));
+        let error = repo.check(&base).expect_err("a row numbered from 1");
+        assert!(
+            error.contains("must take the next number in its component, 0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_new_row_must_give_its_crate_the_crates_component() {
+        let repo = TempRepo::new();
+        // The base row's crate is gone from the tree; base rows aren't
+        // checked again.
+        let base_text = format!("{MAP_HEAD}0\tuno\tI\ttsra_fw_uno_gone\tboot\told\n");
+        repo.write_map(&base_text);
+        let base = repo.commit();
+        let check = |rows: &str| {
+            repo.write_map(&format!("{base_text}{rows}"));
+            repo.check(&base)
+        };
+        assert_eq!(check(&UNO_ROW.replacen('0', "1", 1)), Ok(()));
+        assert_eq!(check(CORE_ROW), Ok(()));
+        let error = check("0\tcore\tI\ttsra_fw_uno_pal\tboot\tready\n").expect_err("core");
+        assert!(
+            error.contains("the crate's place in the tree gives uno"),
+            "{error}"
+        );
+        let error = check("1\tuno\tI\ttsra_fw_uno_none\tboot\tready\n").expect_err("no crate");
+        assert!(
+            error.contains("there's no package named tsra_fw_uno_none"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn adding_rows_keeps_crlf_line_endings() {
+        let repo = TempRepo::new();
+        let path = repo.root.join("map.tsv");
+        let text = format!("# map\r\n{}", UNO_ROW.trim_end());
+        fs::write(&path, &text).expect("a map");
+        let key = Key {
+            crate_name: "tsra_fw_uno_pal".to_string(),
+            kind: tsra_log_map::Kind::Warn,
+            target: "boot".to_string(),
+            message: "slow".to_string(),
+        };
+        let added = add_rows(&path, &BTreeSet::from([key]), &repo.root).expect("a row");
+        assert_eq!(added.len(), 1);
+        assert_eq!(
+            fs::read_to_string(&path).expect("the map"),
+            format!("{text}\r\n{}\r\n", UNO_ROW_1.trim_end())
+        );
+    }
+
+    #[test]
+    fn finish_writes_the_header_in_fix_mode_and_checks_it_in_locked_mode() {
+        let repo = TempRepo::new();
+        let ctx = repo.ctx();
+        repo.write_map(&format!("{MAP_HEAD}{UNO_ROW}"));
+        let map = read_map(&ctx).expect("a map");
+        let row = map.rows().next().expect("a row");
+        let images = [ImageLog {
+            label: "default".to_string(),
+            tokens: BTreeMap::from([(row.key.symbol(), row.descriptor())]),
+            sites: BTreeMap::new(),
+            drops: BTreeSet::new(),
+            boundary: BTreeMap::new(),
+        }];
+        let stale = |error: anyhow::Error| {
+            let error = format!("{error:#}");
+            assert!(error.contains("doesn't match the message map"), "{error}");
+        };
+        // A missing header fails in locked mode, and fix mode writes it.
+        stale(finish(&ctx, &images, Mode::Locked).expect_err("no header"));
+        finish(&ctx, &images, Mode::Fix).expect("a new header");
+        finish(&ctx, &images, Mode::Locked).expect("an up-to-date header");
+        // A stale header fails in locked mode, and fix mode rewrites it.
+        let path = ctx.root.join(HEADER);
+        let header = fs::read_to_string(&path).expect("the header");
+        fs::write(&path, header.replace("ready", "set")).expect("a stale header");
+        stale(finish(&ctx, &images, Mode::Locked).expect_err("a stale header"));
+        finish(&ctx, &images, Mode::Fix).expect("a rewritten header");
+        assert_eq!(fs::read_to_string(&path).expect("the header"), header);
+    }
 }
