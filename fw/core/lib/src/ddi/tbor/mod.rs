@@ -79,7 +79,6 @@ use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmError;
 use tsra_fw_hsm_pal_traits::HsmKeyId;
 use tsra_fw_hsm_pal_traits::HsmPal;
-use tsra_fw_hsm_pal_traits::HsmPalFeatures;
 use tsra_fw_hsm_pal_traits::HsmResult;
 use tsra_fw_hsm_pal_traits::HsmSessId;
 use tsra_fw_hsm_pal_traits::HsmSessionRole;
@@ -557,15 +556,14 @@ pub(crate) struct DispatchResult {
 /// log's storage for these only; any other command gets an empty log over
 /// no storage, so teardown has none of it to scrub, and on which any push
 /// fails -- so a command missing here fails rather than runs unrecorded.
-pub(crate) fn records_undo<P: HsmPalFeatures>(opcode: u8) -> bool {
-    // With secure sessions, `SessionClose` defers its destroy to the commit
-    // walk so the response can still be encrypted.
-    if P::IO_PROTOCOL.secure_session() && opcode == opcode::SESSION_CLOSE {
-        return true;
-    }
+///
+/// `SessionClose` defers its destroy to the commit walk so its response
+/// can still be sealed under the session's transport key.
+pub(crate) fn records_undo(opcode: u8) -> bool {
     matches!(
         opcode,
-        opcode::SESSION_OPEN_INIT
+        opcode::SESSION_CLOSE
+            | opcode::SESSION_OPEN_INIT
             | opcode::SESSION_OPEN_FINISH
             | opcode::PSK_CHANGE
             | opcode::PART_INIT

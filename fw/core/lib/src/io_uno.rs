@@ -397,7 +397,7 @@ impl<P: HsmPal> Hsm<P> {
         // A command that can record undo entries gets its log now, before
         // it can mutate anything; any other gets an empty one over no
         // storage, which leaves teardown nothing of it to scrub.
-        let undo = undo.insert(if ddi::tbor::records_undo::<P>(opcode) {
+        let undo = undo.insert(if ddi::tbor::records_undo(opcode) {
             self.bind_undo(io)?
         } else {
             UndoLog::new(
@@ -425,12 +425,17 @@ impl<P: HsmPal> Hsm<P> {
                 .await
             };
         // Session ids are exposed only after successful dispatch and response
-        // validation. Preserve the existing close/open CQE semantics.
+        // validation. Preserve the existing close/open CQE semantics. A
+        // successful `SessionOpenFinish` also reports its id: the request is
+        // sealed, so this is how the driver learns the slot is now Active.
         let ddi_failed = dispatch_result.is_err();
         let (id, closed) = match &dispatch_result {
             Ok(out) => match session_ctrl {
                 HsmSessCtrl::Open => (out.session_id, false),
                 HsmSessCtrl::Close => (sqe_session_id, true),
+                HsmSessCtrl::InSession if opcode == ddi::tbor::opcode::SESSION_OPEN_FINISH => {
+                    (sqe_session_id, false)
+                }
                 _ => (None, false),
             },
             Err(_) => (None, false),

@@ -518,7 +518,7 @@ fn sealing_key_gen_sd_scope_reopen() {
         .open_session_ex(
             rev,
             HsmSessionPsk::with_psk(HsmPskId::CO, &sd_provision::ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("reopen CO session");
 
@@ -550,7 +550,7 @@ fn sd_scoped_keygen_rejects_bootstrap_partition() {
             .open_session_ex(
                 rev,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open bootstrap CO session");
         bootstrap.change_psk(&rotated_psk).expect("rotate CO PSK");
@@ -560,7 +560,7 @@ fn sd_scoped_keygen_rejects_bootstrap_partition() {
         .open_session_ex(
             rev,
             HsmSessionPsk::with_psk(HsmPskId::CO, &rotated_psk),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("open rotated CO session");
     let props = HsmKeyPropsBuilder::default()

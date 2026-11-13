@@ -9,24 +9,20 @@
 //! * **MBOR** — the established single-round-trip `OpenSession` command
 //!   implemented in [`super::session`], reached via
 //!   [`HsmPartition::open_session`].
-//! * **TBOR** — the two-phase HPKE handshake mirroring the firmware
-//!   handlers `open_session_init` (opcode `0x10`) and
-//!   `open_session_finish` (opcode `0x11`), reached via
-//!   [`HsmPartition::open_session_ex`].
+//! * **TBOR** — the two-phase signed-transcript KEM handshake mirroring
+//!   the firmware handlers `open_session_init` and `open_session_finish`,
+//!   reached via [`HsmPartition::open_session_ex`].
 //!
-//! Transport selection is driven solely by which call the caller makes:
-//! [`open_session_ex`] always runs the TBOR handshake —
-//! [`open_session_ex_init`] (Phase 1) followed by
-//! [`open_session_ex_finish`] (Phase 2). The MBOR `OpenSession` path in
-//! [`super::session`] is dispatched separately and is not reached
-//! through this entry point.
+//! [`open_session_ex`] runs [`open_session_ex_init`] (Phase 1: KEM
+//! exchange, HSM signature over the transcript) followed by
+//! [`open_session_ex_finish`] (Phase 2: host confirmation and session
+//! seed, already encrypted under the session transport keys). Every later
+//! in-session command and the close are encrypted with the same keys.
 //!
-//! Both phases are wired. Their HPKE handshake crypto (VM ephemeral
-//! generation, `receive_export`, the confirm MACs, `param_key`
-//! derivation, and the `seed_envelope` AEAD seal) lives in the
-//! standalone [`tsra_session_ex_crypto`] crate, the single host-side
-//! source of truth for the wire protocol. `pk_hsm` retrieval reuses
-//! the production cert chain via [`fetch_pk_hsm`].
+//! The handshake crypto lives in the standalone [`tsra_session_ex_crypto`]
+//! crate, the single host-side source of truth for the wire protocol.
+//! `pk_hsm` retrieval reuses the production cert chain via
+//! [`fetch_pk_hsm`].
 
 use tsra_crypto::*;
 use tsra_ddi_tbor_types::*;
@@ -39,8 +35,9 @@ use zeroize::Zeroizing;
 use super::*;
 
 /// Maps a [`SessionExCryptoError`] onto the API error domain. Malformed
-/// inputs surface as [`HsmError::InvalidArgument`]; handshake-crypto
-/// failures (key agreement, AEAD, confirm-MAC) surface as
+/// inputs surface as [`HsmError::InvalidArgument`]; a transcript
+/// signature or transport authentication failure as
+/// [`HsmError::InvalidSignature`]; other crypto failures as
 /// [`HsmError::InternalError`].
 impl From<SessionExCryptoError> for HsmError {
     fn from(err: SessionExCryptoError) -> Self {
@@ -52,52 +49,31 @@ impl From<SessionExCryptoError> for HsmError {
     }
 }
 
-impl TryFrom<HsmSessionExType> for SessionType {
+impl TryFrom<HsmSessionSuite> for SessionSuite {
     type Error = HsmError;
 
-    /// Maps the API-layer [`HsmSessionExType`] onto the wire-level
-    /// [`SessionType`]. `HsmSessionExType` is an `#[open_enum]`, so an
-    /// unrecognized discriminant (anything beyond `PlainText` /
-    /// `Authenticated`) surfaces as [`HsmError::InvalidArgument`]
-    /// rather than silently mapping to a default channel profile.
-    fn try_from(session_type: HsmSessionExType) -> Result<Self, Self::Error> {
-        match session_type {
-            HsmSessionExType::PlainText => Ok(SessionType::PlainText),
-            HsmSessionExType::Authenticated => Ok(SessionType::Authenticated),
+    /// Maps the API-layer [`HsmSessionSuite`] onto the handshake suite.
+    /// `HsmSessionSuite` is an `#[open_enum]`, so an unrecognized
+    /// discriminant surfaces as [`HsmError::InvalidArgument`].
+    fn try_from(suite: HsmSessionSuite) -> Result<Self, Self::Error> {
+        match suite {
+            HsmSessionSuite::EcdhP384 => Ok(SessionSuite::EcdhP384),
+            HsmSessionSuite::MlKem1024 => Ok(SessionSuite::MlKem1024),
             _ => Err(HsmError::InvalidArgument),
         }
     }
 }
 
-#[derive(Debug)]
+/// Phase-1 outcome, consumed by [`open_session_ex_finish`].
 struct PendingHandshake {
     /// Reserved session identifier returned by the FW.
-    pub session_id: u16,
+    session_id: u16,
     /// Caller-selected PSK id (0 = CO, 1 = CU).
-    pub psk_id: u8,
-    /// Caller-selected channel integrity profile.
-    pub session_type: SessionType,
-    /// HPKE export secret (`Nh = 48`) derived by HPKE
-    /// `receive_export` after Phase 1 completes. Held in a
-    /// [`Zeroizing`] buffer so it is wiped on every drop path
-    /// (Phase-1 MAC rejection, Phase-2 failure, or after a successful
-    /// Phase 2 has copied it into the session).
-    pub exported: Zeroizing<Vec<u8>>,
-    /// Wire `pk_init` (SEC1 uncompressed, 97 B).
-    pub pk_init: [u8; PK_INIT_LEN],
-    /// Wire `pk_resp` (SEC1 uncompressed, 97 B).
-    pub pk_resp: [u8; PK_RESP_LEN],
-    /// Wire `pk_hsm` (SEC1 uncompressed, 97 B) — partition identity
-    /// public key fetched out-of-band via the TBOR cert chain
-    /// (`GetCertChainInfo` / `GetCertificate`).
-    pub pk_hsm: [u8; PK_RESP_LEN],
-    /// Opaque continuity token recorded for this session's
-    /// `SessionOpenInit` (`Open`) exchange by any DDI backend that
-    /// tracks one (see `DdiCookie` in `ddi/interface`). Threaded into
-    /// [`open_session_ex_finish`]'s own `exec_op_tbor` call so the
-    /// Phase-2 `InSession` request is recognized as belonging to the
-    /// same handshake rather than rejected as missing a token.
-    pub ddi_cookie: Option<u64>,
+    psk_id: u8,
+    /// Key-establishment suite of the handshake.
+    suite: HsmSessionSuite,
+    /// Verified handshake secret and transcript.
+    handshake: SessionHandshake,
 }
 
 pub(crate) struct OpenSessionExResult {
@@ -105,52 +81,27 @@ pub(crate) struct OpenSessionExResult {
     pub(crate) session_id: u16,
     /// PSK id used for the handshake (0 = CO, 1 = CU).
     pub(crate) psk_id: u8,
-    /// Channel integrity profile pinned at handshake time.
-    pub(crate) session_type: SessionType,
-    /// HPKE exported secret (`Nh = 48`) used to derive `param_key`
-    /// and (for authenticated sessions) the MAC keys. Held in a
-    /// [`Zeroizing`] buffer so it is wiped on drop even when this
-    /// result is dropped directly rather than moved into a session.
-    pub(crate) exported: Zeroizing<Vec<u8>>,
-    /// Per-session AES-256 wrap key derived from the HPKE export.
+    /// Key-establishment suite of the handshake.
+    pub(crate) suite: HsmSessionSuite,
+    /// Per-session AES-256 wrap key derived from the handshake secret.
     pub(crate) param_key: AesKey,
     /// FW-emitted wrapped masking-key blob — opaque to the host.
     /// Held in a [`Zeroizing`] buffer so it is wiped on drop.
     pub(crate) bmk_session: Zeroizing<Vec<u8>>,
-    /// Opaque continuity token for this session, as recorded by the
-    /// Phase-2 `SessionOpenFinish` `InSession` exchange. Stored in
-    /// the resulting [`HsmSession`](super::super::HsmSession) and
-    /// threaded through every later in-session TBOR op (and the final
-    /// `CloseSession`) so any DDI backend that tracks per-session
-    /// continuity state (see `ddi/interface`) can recognize the same
-    /// live handle across calls.
+    /// Opaque continuity token for this session, stored in the resulting
+    /// [`HsmSession`](super::super::HsmSession) and threaded through every
+    /// later in-session TBOR op (and the final `CloseSession`) so any DDI
+    /// backend that tracks per-session continuity state (see
+    /// `ddi/interface`) can recognize the same live handle across calls.
     pub(crate) ddi_cookie: Option<u64>,
 }
 
-/// Exchange one TBOR request as part of the SD handshake, threading
-/// `cookie_in` into the call and returning the (possibly refreshed)
-/// token the backend reports back.
-///
-/// Both handshake phases ([`open_session_ex_init`] and
-/// [`open_session_ex_finish`]) route their `exec_op_tbor` call through
-/// this one function so they can't drift in how they treat the cookie:
-/// Phase 1's token must be threaded into Phase 2, and a refreshed
-/// Phase-2 token must be retained.
-fn exec_handshake_tbor<D: DdiDev, T: TborOpReq>(
-    dev: &D,
-    req: &T,
-    cookie_in: Option<DdiCookie>,
-) -> DdiResult<(T::OpResp, Option<DdiCookie>)> {
-    let mut cookie = cookie_in;
-    let resp = dev.exec_op_tbor(req, None, &mut cookie)?;
-    Ok((resp, cookie))
-}
-
+/// Fetch the partition identity public key (`pk_hsm`) from the
 /// production cert chain. Uses [`fetch_cert_chain_checked_tbor`] — the
 /// out-of-session TBOR `GetCertChainInfo` / `GetCertificate` commands,
 /// so the whole handshake stays on the TBOR transport — whose leaf cert
 /// is the partition-ID cert; its SubjectPublicKeyInfo carries the P-384
-/// key the FW uses as `pk_s` in HPKE `auth_psk`.
+/// key the FW signs the handshake transcript with.
 ///
 /// The SD handshake authenticates the entire session against this key,
 /// so the partition cert chain is cryptographically verified (via
@@ -158,10 +109,7 @@ fn exec_handshake_tbor<D: DdiDev, T: TborOpReq>(
 ///
 /// The negotiated API revision is validated before issuing the TBOR cert
 /// commands; revisions below [`TBOR_MIN_API_REV`] are unsupported.
-pub(super) fn fetch_pk_hsm(
-    dev: &HsmDev,
-    rev: HsmApiRev,
-) -> HsmResult<(EccPublicKey, [u8; PK_RESP_LEN])> {
+pub(super) fn fetch_pk_hsm(dev: &HsmDev, rev: HsmApiRev) -> HsmResult<EccPublicKey> {
     require_tbor_rev(rev)?;
     let (chain_pem, leaf_der) = fetch_cert_chain_checked_tbor(dev, 0)?;
     validate_part_cert_chain(&chain_pem)?;
@@ -170,9 +118,7 @@ pub(super) fn fetch_pk_hsm(
     let pk_der = leaf
         .get_public_key_der()
         .map_err(|_| HsmError::InternalError)?;
-    let pk = EccPublicKey::from_bytes(&pk_der).map_err(|_| HsmError::InternalError)?;
-    let sec1 = ec_pub_to_sec1(&pk)?;
-    Ok((pk, sec1))
+    EccPublicKey::from_bytes(&pk_der).map_err(|_| HsmError::InternalError)
 }
 
 /// Cryptographically verify the partition cert chain's internal
@@ -213,11 +159,8 @@ fn validate_part_cert_chain(chain_pem: &str) -> HsmResult<()> {
 
 /// Opens a session on an HSM partition over the TBOR transport.
 ///
-/// Always runs the two-phase HPKE handshake —
-/// [`open_session_ex_init`] (Phase 1) followed by
-/// [`open_session_ex_finish`] (Phase 2) — over TBOR. The negotiated API
-/// revision is validated for TBOR support rather than used to select a
-/// transport.
+/// Runs [`open_session_ex_init`] (Phase 1) followed by
+/// [`open_session_ex_finish`] (Phase 2).
 ///
 /// # Arguments
 ///
@@ -227,7 +170,8 @@ fn validate_part_cert_chain(chain_pem: &str) -> HsmResult<()> {
 ///   is rejected with [`HsmError::UnsupportedApiRevision`].
 /// * `psk_id` - Pre-shared-key identity selecting the role (0 = CO,
 ///   1 = CU).
-/// * `session_type` - Channel integrity profile to pin for the session.
+/// * `psk` - Caller-supplied PSK; `None` selects the partition default.
+/// * `suite` - Key-establishment suite of the handshake.
 ///
 /// # Returns
 ///
@@ -243,208 +187,134 @@ pub(crate) fn open_session_ex(
     rev: HsmApiRev,
     psk_id: u8,
     psk: Option<&[u8; crate::PSK_LEN]>,
-    session_type: HsmSessionExType,
+    suite: HsmSessionSuite,
 ) -> HsmResult<OpenSessionExResult> {
     require_tbor_rev(rev)?;
-
-    // Convert the API-layer session type to the wire-level `SessionType`
-    // here in the DDI layer, so the public API surface never handles the
-    // DDI wire type.
-    let session_type: SessionType = session_type.try_into()?;
-    let pending = open_session_ex_init(partition, rev, psk_id, psk, session_type)?;
-    open_session_ex_finish(partition, rev, pending)
+    let pending = open_session_ex_init(partition, rev, psk_id, psk, suite)?;
+    open_session_ex_finish(partition, pending)
 }
 
-/// Phase 1 of the TBOR handshake — `OpenSessionInit` (opcode `0x10`).
+/// Phase 1 of the TBOR handshake — `SessionOpenInit`.
 ///
-/// Generates the VM per-handshake ephemeral keypair, fetches the
-/// partition identity key (`pk_hsm`) from the production cert chain,
-/// ships the request, runs HPKE `auth_psk receive_export` on the FW
-/// response, and verifies the Phase-1 confirm MAC. Returns a
-/// [`PendingHandshake`] for [`open_session_ex_finish`] to consume.
+/// Generates the per-handshake KEM ephemeral, fetches the partition
+/// identity key (`pk_hsm`) from the production cert chain, ships
+/// `pk_init`, verifies the HSM's signature over the transcript `T1` and
+/// derives the handshake secret from the KEM shared secret and the PSK.
 ///
 /// Uses the caller-supplied PSK when present, otherwise the partition
 /// default PSK for `psk_id` (CO = 0, CU = 1).
-///
-/// The negotiated API revision is passed to [`fetch_pk_hsm`], which
-/// validates that it supports TBOR before fetching the partition cert.
 ///
 /// # Errors
 ///
 /// Returns [`HsmError::UnsupportedApiRevision`] when `rev` does not
 /// support TBOR, propagates DDI failures from the round-trip,
 /// [`HsmError::InvalidArgument`] for malformed handshake inputs (e.g.
-/// an unknown `psk_id`), and [`HsmError::InternalError`] for
-/// handshake-crypto failures (e.g. a Phase-1 confirm MAC mismatch).
+/// an unknown `psk_id` or suite), and [`HsmError::InvalidSignature`]
+/// when the transcript signature does not verify.
 fn open_session_ex_init(
     partition: &HsmPartition,
     rev: HsmApiRev,
     psk_id: u8,
     psk: Option<&[u8; crate::PSK_LEN]>,
-    session_type: SessionType,
+    suite: HsmSessionSuite,
 ) -> HsmResult<PendingHandshake> {
-    // Ensure the negotiated API revision supports TBOR before proceeding.
-    require_tbor_rev(rev)?;
-
-    let inner = partition.inner().read();
-    let dev = inner.dev();
-
-    // VM per-handshake ephemeral keypair (recipient side of the HPKE
-    // auth_psk handshake).
-    let eph = generate_vm_ephemeral()?;
-
-    // Partition identity key (`pk_hsm`, HPKE sender) from the leaf
-    // cert in the production cert chain.
-    let (pk_hsm_key, pk_hsm_sec1) = fetch_pk_hsm(dev, rev)?;
-
-    let suite_id = SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256;
-    let req = TborSessionOpenInitReq {
-        psk_id,
-        session_type: session_type.to_u8(),
-        suite_id,
-        pk_init: eph.pk_sec1,
-    };
-
-    let (resp, cookie) = exec_handshake_tbor(&**dev, &req, None).map_err(HsmError::from)?;
-
-    // Derive the 48-byte HPKE `exported` secret, then verify the FW's
-    // Phase-1 confirm MAC binds the negotiated role/type/suite.
-    let info = build_hpke_info(psk_id, session_type.to_u8(), suite_id);
-    // Use the caller-supplied PSK when present, else the partition
-    // default PSK for the role (required before the default is rotated).
+    let session_suite: SessionSuite = suite.try_into()?;
+    // Resolve the PSK before touching the device so an unknown role
+    // fails without reserving a session slot.
     let psk: &[u8; crate::PSK_LEN] = match psk {
         Some(p) => p,
         None => default_psk(psk_id)?,
     };
-    let exported = Zeroizing::new(receive_exported(
-        &eph.sk,
-        &eph.pk,
-        &pk_hsm_key,
-        &resp.pk_resp,
-        &info,
-        psk,
-        &[psk_id],
-    )?);
 
-    verify_phase1_mac(
-        &exported,
-        resp.session_id,
-        &eph.pk_sec1,
-        &pk_hsm_sec1,
-        &resp.pk_resp,
-        &resp.mac_resp,
-    )?;
+    let inner = partition.inner().read();
+    let dev = inner.dev();
 
-    Ok(PendingHandshake {
-        session_id: resp.session_id,
+    let pk_hsm = fetch_pk_hsm(dev, rev)?;
+    let initiator = SessionInitiator::generate(session_suite)?;
+    let session_type = SessionType::Encrypted.to_u8();
+    let req = TborSessionOpenInitReq {
         psk_id,
         session_type,
-        exported,
-        pk_init: eph.pk_sec1,
-        pk_resp: resp.pk_resp,
-        pk_hsm: pk_hsm_sec1,
-        ddi_cookie: cookie,
-    })
+        suite_id: session_suite.id(),
+        pk_init: initiator.pk_init().to_vec(),
+    };
+    let resp = dev
+        .exec_op_tbor(&req, None, &mut None)
+        .map_err(HsmError::from)?;
+
+    match initiator.complete(psk_id, session_type, &pk_hsm, psk, &resp.enc, &resp.sig) {
+        Ok(handshake) => Ok(PendingHandshake {
+            session_id: resp.session_id,
+            psk_id,
+            suite,
+            handshake,
+        }),
+        Err(err) => {
+            // Release the reserved slot; the error is the handshake failure.
+            let _ = dev.flush_session(resp.session_id);
+            Err(err.into())
+        }
+    }
 }
 
-/// Phase 2 of the TBOR handshake — `OpenSessionFinish` (opcode `0x11`).
+/// Phase 2 of the TBOR handshake — `SessionOpenFinish`.
 ///
-/// Derives the per-session `param_key` from the HPKE export, generates
-/// a fresh 32-byte session seed and AEAD-seals it into `seed_envelope`,
-/// computes the Phase-2 confirm MAC, ships `OpenSessionFinish`, and
-/// folds the FW's `bmk_session` into an [`OpenSessionExResult`].
+/// Derives the session transport keys and `param_key`, generates a fresh
+/// 32-byte session seed sealed under `param_key`, and ships the host
+/// confirmation `fin` with it, encrypted under the transport keys. On
+/// success the transport is installed for the session's later commands.
 ///
 /// Consumes the [`PendingHandshake`] so stale Phase-1 state cannot be
 /// reused for a second finish against the same session slot.
 ///
 /// # Errors
 ///
-/// Propagates DDI failures from the round-trip (including a Phase-2
-/// confirm-MAC rejection by the FW), [`HsmError::InvalidArgument`] for
-/// malformed handshake inputs, and [`HsmError::InternalError`] for
-/// handshake-crypto failures.
-/// Shared core of [`open_session_ex_finish`]'s Phase-2 exchange: derive
-/// `param_key`, seal a fresh session seed, build the Phase-2 confirm
-/// MAC, exchange `OpenSessionFinish` via [`exec_handshake_tbor`], and
-/// fold the response into an [`OpenSessionExResult`] whose
-/// `ddi_cookie` is Phase 2's (possibly refreshed) token.
-fn finish_handshake_tbor(
-    dev: &HsmDev,
-    pending: &PendingHandshake,
-    transport: Option<&SessionTransport>,
-) -> HsmResult<OpenSessionExResult> {
-    // Derive the per-session wrap key, generate a fresh seed, and seal
-    // it under `param_key` as the `seed_envelope` wire blob.
-    let param_key = derive_param_key(&pending.exported)?;
-    let mut seed = Zeroizing::new([0u8; SESSION_SEED_LEN]);
-    Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| HsmError::InternalError)?;
-    let envelope = seal_seed_envelope(&param_key, seed.as_slice())?;
-    let seed_envelope: [u8; SEED_ENVELOPE_LEN] = envelope
-        .as_slice()
-        .try_into()
-        .map_err(|_| HsmError::InternalError)?;
-
-    // Phase-2 confirm MAC binds the same transcript as Phase 1 under
-    // the Phase-2 label.
-    let mac_fin = build_phase2_mac(
-        &pending.exported,
-        pending.session_id,
-        &pending.pk_init,
-        &pending.pk_hsm,
-        &pending.pk_resp,
-    )?;
-
-    let req = TborSessionOpenFinishReq {
-        session_id: pending.session_id,
-        mac_fin,
-        seed_envelope,
-    };
-    // Carry the Phase-1 `Open` token forward so the Phase-2
-    // `InSession` exchange is recognized as the same handshake rather
-    // than rejected for lacking one.
-    let (resp, cookie) = match transport {
-        Some(transport) => (
-            dev.exec_op_tbor_sealed(pending.session_id, transport, &req, &mut [])?,
-            pending.ddi_cookie,
-        ),
-        None => exec_handshake_tbor(&**dev, &req, pending.ddi_cookie)?,
-    };
-
-    Ok(OpenSessionExResult {
-        session_id: pending.session_id,
-        psk_id: pending.psk_id,
-        session_type: pending.session_type,
-        // Hand the session its own copy of the export secret; the copy
-        // in `pending` is wiped when `pending` drops (its `exported`
-        // is a `Zeroizing` buffer).
-        exported: pending.exported.clone(),
-        param_key,
-        bmk_session: Zeroizing::new(resp.bmk_session),
-        ddi_cookie: cookie,
-    })
-}
-
+/// Propagates DDI failures from the round-trip (including a `fin`
+/// rejection by the FW) and [`HsmError::InternalError`] for crypto
+/// failures. The reserved slot is released on failure.
 fn open_session_ex_finish(
     partition: &HsmPartition,
-    rev: HsmApiRev,
     pending: PendingHandshake,
 ) -> HsmResult<OpenSessionExResult> {
     let inner = partition.inner().read();
     let dev = inner.dev();
-    if rev < SESSION_TRANSPORT_API_REV {
-        return finish_handshake_tbor(dev, &pending, None);
-    }
-    // Revision 2.0 sends the finish and every later in-session command
-    // encrypted under the transport keys derived from the handshake.
-    let transport = SessionTransport::derive(&pending.exported)?;
-    match finish_handshake_tbor(dev, &pending, Some(&transport)) {
-        Ok(result) => {
-            dev.set_session_transport(pending.session_id, transport);
+    let session_id = pending.session_id;
+    let finish = || -> HsmResult<(SessionTransport, OpenSessionExResult)> {
+        let handshake = &pending.handshake;
+        let transport = handshake.transport()?;
+        let param_key = handshake.param_key()?;
+        let mut seed = Zeroizing::new([0u8; SESSION_SEED_LEN]);
+        Rng::rand_bytes(seed.as_mut_slice()).map_err(|_| HsmError::InternalError)?;
+        let seed_envelope: [u8; SEED_ENVELOPE_LEN] = seal_seed_envelope(&param_key, &*seed)?
+            .as_slice()
+            .try_into()
+            .map_err(|_| HsmError::InternalError)?;
+        let req = TborSessionOpenFinishReq {
+            session_id,
+            mac_fin: handshake.fin()?,
+            seed_envelope,
+        };
+        let resp = dev.exec_op_tbor_sealed(session_id, &transport, &req, &mut [])?;
+        Ok((
+            transport,
+            OpenSessionExResult {
+                session_id,
+                psk_id: pending.psk_id,
+                suite: pending.suite,
+                param_key,
+                bmk_session: Zeroizing::new(resp.bmk_session),
+                ddi_cookie: None,
+            },
+        ))
+    };
+    match finish() {
+        Ok((transport, result)) => {
+            dev.set_session_transport(session_id, transport);
             Ok(result)
         }
         Err(err) => {
             // Release the reserved slot; the error is the finish failure.
-            let _ = dev.flush_session(pending.session_id);
+            let _ = dev.flush_session(session_id);
             Err(err)
         }
     }

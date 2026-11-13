@@ -13,10 +13,10 @@ use tsra_api::*;
 
 use crate::utils::partition_ex_helpers::*;
 
-/// Happy path: CO pairs with an Authenticated session and returns a
+/// Happy path: a CO session under the ECDH P-384 suite returns a
 /// live `HsmSession` over the public API.
 #[test]
-fn open_session_ex_co_authenticated() {
+fn open_session_ex_co_ecdh_p384() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -31,9 +31,9 @@ fn open_session_ex_co_authenticated() {
         .open_session_ex(
             rev,
             HsmSessionPsk::new(HsmPskId::CO),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
-        .expect("CO/Authenticated open_session_ex should succeed against emu");
+        .expect("CO/ECDH-P384 open_session_ex should succeed against emu");
 
     // The V2 session must carry the negotiated api revision through.
     let sess_rev = session.api_rev();
@@ -44,9 +44,9 @@ fn open_session_ex_co_authenticated() {
     );
 }
 
-/// Happy path: CU pairs with a PlainText session.
+/// Happy path: a CU session under the ML-KEM-1024 suite.
 #[test]
-fn open_session_ex_cu_plaintext() {
+fn open_session_ex_cu_mlkem1024() {
     if !crate::utils::session::api_rev_at_least(1, 1) {
         return;
     }
@@ -57,9 +57,9 @@ fn open_session_ex_cu_plaintext() {
         .open_session_ex(
             rev,
             HsmSessionPsk::new(HsmPskId::CU),
-            HsmSessionExType::PlainText,
+            HsmSessionSuite::MlKem1024,
         )
-        .expect("CU/PlainText open_session_ex should succeed against emu");
+        .expect("CU/ML-KEM-1024 open_session_ex should succeed against emu");
 
     let sess_rev = session.api_rev();
     assert_eq!(
@@ -89,7 +89,7 @@ fn change_psk_rotates_co_psk() {
             .open_session_ex(
                 rev,
                 HsmSessionPsk::new(HsmPskId::CO),
-                HsmSessionExType::Authenticated,
+                HsmSessionSuite::EcdhP384,
             )
             .expect("open with the default CO PSK");
         session
@@ -101,7 +101,7 @@ fn change_psk_rotates_co_psk() {
     part.open_session_ex(
         rev,
         HsmSessionPsk::with_psk(HsmPskId::CO, &new_psk),
-        HsmSessionExType::Authenticated,
+        HsmSessionSuite::EcdhP384,
     )
     .expect("open with the rotated CO PSK should succeed");
 
@@ -109,7 +109,7 @@ fn change_psk_rotates_co_psk() {
     let stale = part.open_session_ex(
         rev,
         HsmSessionPsk::new(HsmPskId::CO),
-        HsmSessionExType::Authenticated,
+        HsmSessionSuite::EcdhP384,
     );
     assert!(
         stale.is_err(),

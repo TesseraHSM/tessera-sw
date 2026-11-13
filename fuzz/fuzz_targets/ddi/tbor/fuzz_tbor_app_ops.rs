@@ -39,7 +39,7 @@ fuzz_target!(|ops: Vec<TestAppOps>| {
                         TborStatus::FileHandleSessionLimitReached
                     };
                     let error = ctx
-                        .session_open_init(CO_PSK_ID, SessionType::Authenticated)
+                        .session_open_init(CO_PSK_ID, SessionSuite::EcdhP384)
                         .expect_err("a second CO session should hit the session limit");
                     assert_fw_rejects(&error, expected_status);
 
@@ -47,7 +47,7 @@ fuzz_target!(|ops: Vec<TestAppOps>| {
                     // secondary session as CU so Phase 1 can reach Phase 2.
                     let secondary = TestCtx::new_with_path(path);
                     let pending =
-                        match secondary.session_open_init(CU_PSK_ID, SessionType::PlainText) {
+                        match secondary.session_open_init(CU_PSK_ID, SessionSuite::MlKem1024) {
                             Ok(pending) => pending,
                             Err(DdiError::TborStatus(status))
                                 if status == TborStatus::VaultSessionLimitReached =>

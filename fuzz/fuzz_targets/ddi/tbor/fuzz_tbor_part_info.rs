@@ -325,7 +325,7 @@ fn run(ctx: &TestCtx, input: &FuzzInput) {
                 common::FuzzRole::Cu
             };
             let pending = ctx
-                .session_open_init(role.psk_id(), role.session_type())
+                .session_open_init(role.psk_id(), role.suite())
                 .expect("pending handshake setup must succeed");
             assert_eq!(read_info(ctx, PART_STATE_ENABLED, false), before);
             exercise(ctx, input, &before);

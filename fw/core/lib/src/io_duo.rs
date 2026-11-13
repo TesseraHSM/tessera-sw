@@ -222,7 +222,7 @@ impl<P: HsmPal> Hsm<P> {
                 .dma_grow(io, &mut allocation, capacity)
                 .log_as("core", HsmError::NotEnoughSpace)?;
         }
-        let undo = undo.insert(if policy.is_ok() && ddi::tbor::records_undo::<P>(opcode) {
+        let undo = undo.insert(if policy.is_ok() && ddi::tbor::records_undo(opcode) {
             self.duo_bind_undo(io)?
         } else {
             UndoLog::new(

@@ -167,7 +167,7 @@ fn open_session_ex_test_session(path: &str, rev: HsmApiRev) -> HsmSession {
         .open_session_ex(
             rev,
             HsmSessionPsk::new(HsmPskId::CO),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("Failed to call open_session_ex for a test");
     session
@@ -178,7 +178,7 @@ fn open_session_ex_test_session(path: &str, rev: HsmApiRev) -> HsmSession {
         .open_session_ex(
             rev,
             HsmSessionPsk::with_psk(HsmPskId::CO, &ROTATED_CO_PSK),
-            HsmSessionExType::Authenticated,
+            HsmSessionSuite::EcdhP384,
         )
         .expect("Failed to reopen the test session with the rotated CO PSK");
     crate::utils::sd_provision::provision_partition(&session);

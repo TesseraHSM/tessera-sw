@@ -3,60 +3,43 @@
 
 //! Phase 1 of the TBOR session handshake — `SessionOpenInit`.
 //!
-//! Generates the VM's per-handshake ephemeral keypair, ships the
-//! request, runs HPKE `receive_export` on the FW response, and
-//! verifies the Phase-1 confirm MAC. Returns a [`PendingHandshake`]
-//! that [`super::finish::session_open_finish`] consumes to complete
-//! Phase 2.
+//! Generates the host's per-handshake KEM ephemeral, ships `pk_init`,
+//! verifies the HSM's signature over the transcript and derives the
+//! handshake secret. Returns a [`PendingHandshake`] that
+//! [`super::finish::session_open_finish`] consumes to complete Phase 2.
+//!
+//! The session transport keys are registered with the [`TestDev`] as soon
+//! as Phase 1 completes, so the finish (including a raw, test-built
+//! `TborSessionOpenFinishReq`) and every later in-session command travel
+//! encrypted.
 //!
 //! The convenience entry point [`session_open_init`] runs the happy
-//! path with fresh ephemeral and the canonical default PSK. Negative
-//! -path tests reach for [`SessionOpenInitOptions`] +
-//! [`session_open_init_with_options`] to override individual knobs
-//! (PSK, ephemeral keypair).
+//! path with the canonical default PSK. Negative-path tests reach for
+//! [`SessionOpenInitOptions`] + [`session_open_init_with_options`] to
+//! override individual knobs (PSK, wire suite id).
 
-use tsra_crypto::EccPrivateKey;
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborSessionOpenInitReq;
 use tsra_ddi_tbor_types::TborSessionOpenInitResp;
-use tsra_ddi_tbor_types::PK_INIT_LEN;
-use tsra_ddi_tbor_types::SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256;
-use tsra_session_ex_crypto::build_hpke_info;
 use tsra_session_ex_crypto::default_psk;
-use tsra_session_ex_crypto::ec_pub_from_sec1;
-use tsra_session_ex_crypto::generate_vm_ephemeral;
-use tsra_session_ex_crypto::receive_exported;
-use tsra_session_ex_crypto::verify_phase1_mac;
-use tsra_session_ex_crypto::SessionTransport;
-use tsra_session_ex_crypto::VmEphemeralKey;
-use zeroize::Zeroizing;
+use tsra_session_ex_crypto::SessionHandshake as HandshakeKeys;
+use tsra_session_ex_crypto::SessionInitiator;
+use tsra_session_ex_crypto::SessionSuite;
 
 use super::crypto;
 use crate::fixture::TestDev;
 
 /// State carried between Phase 1 and Phase 2 of the handshake.
-/// The caller may construct this directly to drive negative-path
-/// tests (e.g., tamper `exported` to force a Phase-2 MAC mismatch);
-/// the happy-path helper [`session_open_init`] populates it from a
-/// real round-trip.
 pub struct PendingHandshake {
     /// Reserved session identifier returned by the FW.
     pub session_id: u16,
     /// Caller-selected PSK id (0 = CO, 1 = CU).
     pub psk_id: u8,
-    /// Caller-selected channel integrity profile.
-    pub session_type: SessionType,
-    /// HPKE export secret (`Nh = 48`) derived by HPKE
-    /// `receive_export` after Phase 1 completes.
-    pub exported: Zeroizing<Vec<u8>>,
-    /// Wire `pk_init` (SEC1 uncompressed, 97 B).
-    pub pk_init: [u8; PK_INIT_LEN],
-    /// Wire `pk_resp` (SEC1 uncompressed, 97 B).
-    pub pk_resp: [u8; PK_INIT_LEN],
-    /// Wire `pk_hsm` (SEC1 uncompressed, 97 B) — partition identity
-    /// public key fetched out-of-band via the MBOR cert chain.
-    pub pk_hsm: [u8; PK_INIT_LEN],
+    /// Key-establishment suite of the handshake.
+    pub suite: SessionSuite,
+    /// Verified handshake secret and transcript.
+    pub keys: HandshakeKeys,
 }
 
 impl core::fmt::Debug for PendingHandshake {
@@ -64,48 +47,37 @@ impl core::fmt::Debug for PendingHandshake {
         f.debug_struct("PendingHandshake")
             .field("session_id", &self.session_id)
             .field("psk_id", &self.psk_id)
-            .field("session_type", &self.session_type)
-            .field("exported_len", &self.exported.len())
+            .field("suite", &self.suite)
             .finish_non_exhaustive()
     }
 }
 
 /// Override knobs for [`session_open_init_with_options`].
 ///
-/// `None` fields use the happy-path default (fresh ephemeral,
-/// partition default PSK). Tests set only the fields they need to
-/// override.
+/// `None` fields use the happy-path default (partition default PSK).
+/// Tests set only the fields they need to override.
 pub struct SessionOpenInitOptions<'a> {
     /// PSK id (0 = CO, 1 = CU). Required.
     pub psk_id: u8,
-    /// Channel integrity profile. Required.
-    pub session_type: SessionType,
-    /// Cryptographic suite identifier sent on the wire and mixed into
-    /// the HPKE info string.  Defaults to
-    /// `SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256` (`0x01`) — today's
-    /// only supported suite.  Tests that exercise the unsupported-suite
-    /// negative path set this to a non-`0x01` value.
+    /// Key-establishment suite. Required.
+    pub suite: SessionSuite,
+    /// Wire `suite_id`. Defaults to `suite.id()`; tests that exercise
+    /// the unsupported-suite negative path override it.
     pub suite_id: u8,
-    /// Override the VM ephemeral keypair. Both `sk_init` and the
-    /// matching `pk_init` SEC1 bytes must be supplied together.
-    /// Default: freshly generated P-384 ephemeral.
-    pub ephemeral: Option<(EccPrivateKey, [u8; PK_INIT_LEN])>,
-    /// Override the PSK bytes fed into the HPKE auth-psk schedule.
-    /// Default: `DEFAULT_PSK_CO` for `psk_id=0`, `DEFAULT_PSK_CU` for
-    /// `psk_id=1`. Tests that exercise a rotated PSK pass the
-    /// rotated bytes here.
+    /// Override the PSK bytes fed into the key schedule. Default:
+    /// `DEFAULT_PSK_CO` for `psk_id=0`, `DEFAULT_PSK_CU` for `psk_id=1`.
+    /// Tests that exercise a rotated PSK pass the rotated bytes here.
     pub psk: Option<&'a [u8]>,
 }
 
 impl<'a> SessionOpenInitOptions<'a> {
     /// Construct an options block with happy-path defaults for the
-    /// given `psk_id` and `session_type`.
-    pub fn new(psk_id: u8, session_type: SessionType) -> Self {
+    /// given `psk_id` and `suite`.
+    pub fn new(psk_id: u8, suite: SessionSuite) -> Self {
         Self {
             psk_id,
-            session_type,
-            suite_id: SESSION_SUITE_P384_HKDF_SHA384_AES_GCM_256,
-            ephemeral: None,
+            suite,
+            suite_id: suite.id(),
             psk: None,
         }
     }
@@ -116,13 +88,7 @@ impl<'a> SessionOpenInitOptions<'a> {
         self
     }
 
-    /// Builder shortcut: override the VM ephemeral keypair.
-    pub fn with_ephemeral(mut self, sk: EccPrivateKey, pk_sec1: [u8; PK_INIT_LEN]) -> Self {
-        self.ephemeral = Some((sk, pk_sec1));
-        self
-    }
-
-    /// Builder shortcut: override the wire `suite_id`.  Used by
+    /// Builder shortcut: override the wire `suite_id`. Used by
     /// negative tests that exercise the unsupported-suite path.
     pub fn with_suite_id(mut self, suite_id: u8) -> Self {
         self.suite_id = suite_id;
@@ -130,17 +96,14 @@ impl<'a> SessionOpenInitOptions<'a> {
     }
 }
 
-/// Convenience wrapper: happy-path `SessionOpenInit` with fresh
-/// ephemeral and partition default PSK.
-///
-/// Equivalent to
-/// `session_open_init_with_options(dev, SessionOpenInitOptions::new(psk_id, session_type))`.
+/// Convenience wrapper: happy-path `SessionOpenInit` with the partition
+/// default PSK.
 pub fn session_open_init(
     dev: &TestDev,
     psk_id: u8,
-    session_type: SessionType,
+    suite: SessionSuite,
 ) -> Result<PendingHandshake, DdiError> {
-    session_open_init_with_options(dev, SessionOpenInitOptions::new(psk_id, session_type))
+    session_open_init_with_options(dev, SessionOpenInitOptions::new(psk_id, suite))
 }
 
 /// Full-control entry point. Honours every override in `opts`;
@@ -149,70 +112,40 @@ pub fn session_open_init_with_options(
     dev: &TestDev,
     opts: SessionOpenInitOptions<'_>,
 ) -> Result<PendingHandshake, DdiError> {
-    let (sk_init, pk_init_sec1, pk_init_key) = match opts.ephemeral {
-        Some((sk, pk_sec1)) => {
-            let pk = ec_pub_from_sec1(&pk_sec1).map_err(|_| DdiError::InvalidParameter)?;
-            (sk, pk_sec1, pk)
-        }
-        None => {
-            let VmEphemeralKey { sk, pk_sec1, pk } =
-                generate_vm_ephemeral().map_err(|_| DdiError::InvalidParameter)?;
-            (sk, pk_sec1, pk)
-        }
-    };
+    let initiator =
+        SessionInitiator::generate(opts.suite).map_err(|_| DdiError::InvalidParameter)?;
+    let pk_hsm = crypto::fetch_pk_hsm(dev)?;
 
-    let (pk_hsm_key, pk_hsm_sec1) = crypto::fetch_pk_hsm(dev)?;
-
+    let session_type = SessionType::Encrypted.to_u8();
     let req = TborSessionOpenInitReq {
         psk_id: opts.psk_id,
-        session_type: opts.session_type.to_u8(),
+        session_type,
         suite_id: opts.suite_id,
-        pk_init: pk_init_sec1,
+        pk_init: initiator.pk_init().to_vec(),
     };
     let mut cookie = None;
     let resp: TborSessionOpenInitResp = dev.exec_op_tbor(&req, None, &mut cookie)?;
 
-    let info = build_hpke_info(opts.psk_id, opts.session_type.to_u8(), opts.suite_id);
     let default_psk = default_psk(opts.psk_id).map_err(|_| DdiError::InvalidParameter)?;
     let psk: &[u8] = opts.psk.unwrap_or(default_psk.as_slice());
-    let exported = Zeroizing::new(
-        receive_exported(
-            &sk_init,
-            &pk_init_key,
-            &pk_hsm_key,
-            &resp.pk_resp,
-            &info,
+    let keys = initiator
+        .complete(
+            opts.psk_id,
+            session_type,
+            &pk_hsm,
             psk,
-            &[opts.psk_id],
+            &resp.enc,
+            &resp.sig,
         )
-        .map_err(|_| DdiError::TborDecodeError)?,
-    );
+        .map_err(|_| DdiError::TborDecodeError)?;
 
-    verify_phase1_mac(
-        &exported,
-        resp.session_id,
-        &pk_init_sec1,
-        &pk_hsm_sec1,
-        &resp.pk_resp,
-        &resp.mac_resp,
-    )
-    .map_err(|_| DdiError::TborDecodeError)?;
-
-    if dev.uses_session_transport() {
-        // Duo seals the finish, every later in-session command and the
-        // close of this slot under the transport keys bound at Phase 1.
-        let transport =
-            SessionTransport::derive(&exported).map_err(|_| DdiError::TborDecodeError)?;
-        dev.set_session_transport(resp.session_id, transport);
-    }
+    let transport = keys.transport().map_err(|_| DdiError::TborDecodeError)?;
+    dev.set_session_transport(resp.session_id, transport);
 
     Ok(PendingHandshake {
         session_id: resp.session_id,
         psk_id: opts.psk_id,
-        session_type: opts.session_type,
-        exported,
-        pk_init: pk_init_sec1,
-        pk_resp: resp.pk_resp,
-        pk_hsm: pk_hsm_sec1,
+        suite: opts.suite,
+        keys,
     })
 }
