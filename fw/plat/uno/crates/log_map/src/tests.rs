@@ -425,6 +425,83 @@ fn a_record_decodes_like_the_text_output_line() {
 /// The firmware's message map.
 const FIRMWARE_MAP: &str = include_str!("../../../fw/pal/log_map.tsv");
 
+/// Compiles `header` as strict C99, with warnings as errors, and returns the
+/// compiler's errors. Returns `None` if it compiles, or if there's no `cc`.
+#[cfg(unix)]
+fn c_errors(header: &str) -> Option<String> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("tsra-log-map-c-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("a directory");
+    std::fs::write(dir.join("log_messages.h"), header).expect("the header");
+    // Uses both tables, so that -Wall doesn't report one as unused.
+    std::fs::write(
+        dir.join("decoder.c"),
+        concat!(
+            "#include \"log_messages.h\"\n",
+            "const char *tsra_log_format(int component, unsigned char number) {\n",
+            "    return component == TSRA_LOG_COMPONENT_CORE ? tsra_log_core_messages[number]\n",
+            "                                                : tsra_log_uno_messages[number];\n",
+            "}\n",
+        ),
+    )
+    .expect("the C file");
+    let output = std::process::Command::new("cc")
+        .args([
+            "-std=c99",
+            "-pedantic-errors",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        ])
+        .args(["-Wtrigraphs", "-fsyntax-only", "decoder.c"])
+        .current_dir(&dir)
+        .output();
+    let _ = std::fs::remove_dir_all(&dir);
+    match output {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("no cc, so the header isn't compiled");
+            None
+        }
+        Err(e) => panic!("can't run cc: {e}"),
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(String::from_utf8_lossy(&output.stderr).into_owned()),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_decoder_header_compiles_as_c() {
+    // A full component, and an empty one.
+    let full: String = (0..256)
+        .map(|n| format!("{n}\tcore\tI\tc\tt\tmessage {n:03}\n"))
+        .collect();
+    let full = map(&full);
+    // A percent sign, braces, a trigraph, an error code, and a deprecated
+    // message.
+    let special = map(concat!(
+        "0\tuno\tI\td\tio\t50% of {{queue}} {:#x}??) {:08x}\n",
+        "1\tuno\tE+\td\tio\top {} failed\n",
+        "2\tuno\tW\td\tio\tgone\n",
+    ));
+    let mut special_used = used(&special);
+    special_used.retain(|symbol| !symbol.ends_with(":gone"));
+    let special = special.decoder_header(&special_used).expect("a header");
+    assert!(special.contains("Deprecated message"), "{special}");
+    for (name, header) in [
+        ("full", full.decoder_header(&used(&full)).expect("a header")),
+        ("special", special),
+        (
+            "firmware",
+            include_str!("../../../fw/pal/log_messages.h").to_string(),
+        ),
+    ] {
+        if let Some(errors) = c_errors(&header) {
+            panic!("the {name} header doesn't compile as C:\n{errors}\n{header}");
+        }
+    }
+}
+
 #[test]
 fn every_error_format_in_the_firmware_map_ends_with_the_code() {
     let m = Map::parse(FIRMWARE_MAP).expect("the firmware's map");
