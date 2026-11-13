@@ -118,6 +118,26 @@ fn written_log(tail: u32, record: [u32; 3]) -> Vec<Access> {
 }
 
 #[test]
+fn a_new_sink_is_all_zeros_and_small() {
+    // The pattern names every field, so a new field fails to compile until
+    // it's checked here. A sink that starts as all zeros needs no initial
+    // values from `.data`.
+    let Sink {
+        ready,
+        busy,
+        not_ready_drops,
+        busy_drops,
+        bad_index_drops,
+    } = Sink::new();
+    assert!(!ready.into_inner());
+    assert!(!busy.into_inner());
+    assert_eq!(not_ready_drops.into_inner(), 0);
+    assert_eq!(busy_drops.into_inner(), 0);
+    assert_eq!(bad_index_drops.into_inner(), 0);
+    assert!(size_of::<Sink>() < 16, "{} bytes", size_of::<Sink>());
+}
+
+#[test]
 fn boot_reset_writes_the_descriptor_in_order_then_marks_ready() {
     let sink = Sink::new();
     let mut mem = Owned::filled(0xEEEE_EEEE);
