@@ -243,9 +243,8 @@ impl AesCbcKey for CipherKey<HsmAesKey> {
         output: &mut [u8],
     ) -> EngineResult<()> {
         let key = self.key()?;
-        // Raw CBC: the EVP layer pads and buffers; the algo chains the IV.
-        // `input` is at most one device request (HSM_CBC_REQUEST), so the SDK
-        // sends it as one, and a retried request restarts from `iv`.
+        // Raw CBC: the EVP layer pads and buffers; the SDK splits device
+        // requests, chaining the IV, and a retry restarts from `iv`.
         let mut algo = HsmAesCbcAlgo::with_no_padding(iv.to_vec())
             .map_err(|e| EngineError::wrap("AES-CBC IV", e))?;
         let written = if encrypt {

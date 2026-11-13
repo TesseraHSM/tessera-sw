@@ -65,18 +65,15 @@ pub const TSRA_CTRL_SET_KEY_URI: c_int = 0x415A_0001;
 /// AES block (and CBC IV) size in bytes.
 pub const AES_BLOCK: usize = 16;
 
-/// Most bytes one [`AesCbcKey::cbc`] call gets: the device's per-request AES
-/// limit, so a retried request restarts from its own IV. Also bounds the input
-/// copy.
-pub const HSM_CBC_REQUEST: usize = 1024;
+/// Most bytes one [`AesCbcKey::cbc`] call gets; bounds the input copy.
+pub const CBC_COPY_CHUNK: usize = 64 * 1024;
 
 /// An HSM AES key attached to a cipher context (and its copies). Dropping the
 /// last reference releases the key.
 pub trait AesCbcKey: Send + Sync {
-    /// Raw AES-CBC (no padding) over `input` (whole blocks, at most
-    /// [`HSM_CBC_REQUEST`] bytes) into `output` (same length). `iv` is the
-    /// chaining value, updated in place to the one the next call continues
-    /// from.
+    /// Raw AES-CBC (no padding) over `input` (whole blocks) into `output`
+    /// (same length). `iv` is the chaining value, updated in place to the one
+    /// the next call continues from.
     fn cbc(
         &self,
         encrypt: bool,
@@ -288,9 +285,9 @@ unsafe fn do_cipher_inner(
     }
 }
 
-/// Run `inl` bytes through the HSM key, one [`HSM_CBC_REQUEST`]-sized request
-/// at a time, chaining the IV through the context's IV buffer as the built-in
-/// does. The IV is written back only once every request succeeded.
+/// Run `inl` bytes through the HSM key, chaining the IV through the context's
+/// IV buffer as the built-in does. The IV is written back only once every call
+/// succeeded.
 ///
 /// # Safety
 /// As [`c_do_cipher`].
@@ -323,15 +320,14 @@ unsafe fn hsm_cbc(
     }
     // SAFETY: ivp holds AES_BLOCK bytes (see above); this reads a copy.
     let mut iv = unsafe { ivp.cast::<[u8; AES_BLOCK]>().read_unaligned() };
-    // Each request's input is copied before its output is written, as OpenSSL
-    // may run in place (out == input). It may be plaintext, so the copy is
-    // scrubbed on drop.
-    let mut request = Zeroizing::new([0u8; HSM_CBC_REQUEST]);
-    for start in (0..inl).step_by(HSM_CBC_REQUEST) {
-        let len = HSM_CBC_REQUEST.min(inl.saturating_sub(start));
-        let data = &mut request[..len];
+    // Copied first: OpenSSL may run in place (out == input), and a retried
+    // call re-reads its input. Scrubbed on drop, as it may be plaintext.
+    let mut copy = Zeroizing::new(vec![0u8; inl.min(CBC_COPY_CHUNK)]);
+    for start in (0..inl).step_by(CBC_COPY_CHUNK) {
+        let len = CBC_COPY_CHUNK.min(inl.saturating_sub(start));
+        let data = &mut copy[..len];
         // SAFETY: input and out hold inl bytes and start + len <= inl; the
-        // input slice is gone before the output slice over the same request
+        // input slice is gone before the output slice over the same bytes
         // (when in place) is created.
         let output = unsafe {
             data.copy_from_slice(std::slice::from_raw_parts(input.add(start), len));
@@ -1172,22 +1168,22 @@ mod tests {
         teardown(&engine, raw);
     }
 
-    // A long update reaches the key one HSM request at a time, with the IV
-    // chained across the requests.
+    // A long update reaches the key in bounded calls, with the IV chained
+    // across them.
     #[test]
-    fn long_input_is_split_per_hsm_request() {
+    fn long_input_is_copied_in_bounded_calls() {
         let (engine, raw) = engine_with_ciphers();
         let iv = [4u8; AES_BLOCK];
-        let msg = pattern(HSM_CBC_REQUEST.saturating_mul(3).saturating_add(37));
+        let msg = pattern(CBC_COPY_CHUNK.saturating_mul(3).saturating_add(37));
         let expected = toy_encrypt(&iv, &msg);
-        for chunk in [HSM_CBC_REQUEST.saturating_add(5), msg.len()] {
+        for chunk in [CBC_COPY_CHUNK.saturating_add(5), msg.len()] {
             LONGEST_INPUT.with(|c| c.set(0));
             let ctx = hsm_ctx(raw, NIDS[2], true, &iv);
             assert_eq!(run(ctx, &msg, chunk).unwrap(), expected, "chunk {chunk}");
             free(ctx);
             assert_eq!(
                 LONGEST_INPUT.with(Cell::get),
-                HSM_CBC_REQUEST,
+                CBC_COPY_CHUNK,
                 "chunk {chunk}"
             );
         }
