@@ -29,8 +29,13 @@
 //! The panic, HardFault, and explicit-crash handlers log after they save the
 //! crash dump. A HardFault can be an escalated bus error in GSRAM, where the
 //! log ring is, so writing a record can fault again; logging last keeps the
-//! dump safe. The FIPS error-state paths log first, before they save a crash
-//! dump, notify the peer core, or set Mailbox0's error bit.
+//! dump safe. Only `halt` follows these records, so they need no `dmb`. The
+//! FIPS error-state paths log first, and then run `dmb`, before they save a
+//! crash dump, notify the peer core, or set Mailbox0's error bit: those
+//! writes lead the SP to drain the ring, so the record's `tail` write must
+//! come first. For the same reason, the panic, HardFault, and explicit-crash
+//! handlers run `dmb` before they notify the peer core, so a record written
+//! before the crash, such as the pre-operational self-test's, comes first.
 //!
 //! Each handler logs at error level with an exception-specific `HsmError`
 //! code — [`HsmError::Panic`], [`HsmError::HardFault`],
@@ -150,6 +155,9 @@ pub fn enter_self_test_error_state(test: u32, engine: u32, reason: HsmError) -> 
     // Log before the peer notification and the error bit, which lead the SP
     // to drain the ring and reset the device.
     error!("selftest", reason, "periodic self-test {} failed", test);
+    // Order the record's `tail` write before the writes below, which lead
+    // the SP to drain the ring.
+    cortex_m::asm::dmb();
     crashdump_save_fmt(
         &capture_register_context(),
         FailureCode::ExplicitFailure,
@@ -169,6 +177,9 @@ pub fn enter_crypto_timeout_error_state(detail: &'static str) -> ! {
     // Log before the peer notification and the error bit, which lead the SP
     // to drain the ring and reset the device.
     error!("fips", HsmError::CryptoTimeout, "crypto command timed out");
+    // Order the record's `tail` write before the writes below, which lead
+    // the SP to drain the ring.
+    cortex_m::asm::dmb();
     crashdump_save(
         &capture_register_context(),
         FailureCode::ExplicitFailure,
@@ -226,6 +237,9 @@ pub fn explicit_crash(additional_info: Option<&str>) -> ! {
     // already-crashing core.
     Nvic::disable(Interrupt::TCON_WAKEUP1);
 
+    // Order any record written before the crash ahead of the notification:
+    // see the module docs.
+    cortex_m::asm::dmb();
     // Notify the peer core of the crash.
     Tcon::fire_wakeup_timer1();
 
@@ -248,11 +262,12 @@ pub fn explicit_crash(additional_info: Option<&str>) -> ! {
 /// Enters the FIPS error state. Never returns.
 ///
 /// Called when a key pair that the module generated, or the partition's
-/// unwrapping key, fails its pairwise consistency test (PCT). Logs, then
-/// sets `ERR_BIT` in Mailbox0's `S2H_MBX_INSTS` register, then halts. The SP
-/// turns that interrupt into its own FIPS error state, which stops SP output,
-/// saves crash dumps, and resets the device. Emulator builds (`semihosting`)
-/// skip the mailbox write and exit through semihosting instead.
+/// unwrapping key, fails its pairwise consistency test (PCT). Logs, runs
+/// `dmb`, then sets `ERR_BIT` in Mailbox0's `S2H_MBX_INSTS` register, then
+/// halts. The SP turns that interrupt into its own FIPS error state, which
+/// stops SP output, saves crash dumps, and resets the device. Emulator
+/// builds (`semihosting`) skip the mailbox write and exit through
+/// semihosting instead.
 ///
 /// `reason` names the check that failed; the log carries it as the error
 /// code.
@@ -264,6 +279,9 @@ pub fn explicit_crash(additional_info: Option<&str>) -> ! {
 #[inline(never)]
 pub fn enter_error_state(reason: HsmError) -> ! {
     error!("fips", reason, "#### FIPS error state ####");
+    // Order the record's `tail` write before `ERR_BIT`, which leads the SP
+    // to drain the ring.
+    cortex_m::asm::dmb();
     fips_halt()
 }
 
@@ -314,6 +332,9 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
     // already-crashing core.
     Nvic::disable(Interrupt::TCON_WAKEUP1);
 
+    // Order any record written before the crash ahead of the notification:
+    // see the module docs.
+    cortex_m::asm::dmb();
     // Notify the peer core of the crash.
     Tcon::fire_wakeup_timer1();
 
@@ -379,6 +400,9 @@ unsafe fn HardFault(ef: &ExceptionFrame) -> ! {
     // Disable our own wakeup1 receiver before firing it at the peer core, so
     // the notification cannot recurse back into this already-crashing core.
     Nvic::disable(Interrupt::TCON_WAKEUP1);
+    // Order any record written before the crash ahead of the notification:
+    // see the module docs.
+    cortex_m::asm::dmb();
     Tcon::fire_wakeup_timer1();
 
     let context = if forced && (mstkerr || stkerr) {
