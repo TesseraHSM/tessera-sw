@@ -21,6 +21,14 @@ use super::*;
 const DEFAULT_CRED_ID: [u8; CREDENTIALS_SIZE] = [1u8; CREDENTIALS_SIZE];
 const DEFAULT_CRED_PIN: [u8; CREDENTIALS_SIZE] = [2u8; CREDENTIALS_SIZE];
 
+/// Test helper: the API revisions `data`'s partition and session were opened
+/// with, `None` while the HSM is not open.
+fn opened_api_revs(data: &EngineData) -> Option<(HsmApiRev, HsmApiRev)> {
+    let hsm = data.hsm.lock();
+    let hsm = hsm.as_ref()?;
+    Some((hsm.partition.api_rev(), hsm.session.api_rev()))
+}
+
 /// Test helper: write key-material bytes to `path` with owner-only permissions
 /// and the same open hardening the engine uses for secret files — create a new
 /// file (`O_EXCL`, no clobber) mode 0600 and refuse a symlink at the path
@@ -2811,6 +2819,8 @@ mod sim {
         assert!(!data.is_hsm_open());
         data.open_hsm_with(settings, creds).unwrap();
         assert!(data.is_hsm_open());
+        // The simulator also offers 1.1.
+        assert_eq!(opened_api_revs(&data), Some((API_REV, API_REV)));
     }
 
     /// Full engine key-load round trip: generate an EC key + its masked blob in
@@ -3443,6 +3453,49 @@ mod sim {
         assert!(data.is_hsm_open());
     }
 
+    /// Test helper: the revision range `min..=max`, each as (major, minor).
+    fn rev_range(min: (u32, u32), max: (u32, u32)) -> HsmApiRevRange {
+        HsmApiRevRange::new(
+            HsmApiRev {
+                major: min.0,
+                minor: min.1,
+            },
+            HsmApiRev {
+                major: max.0,
+                minor: max.1,
+            },
+        )
+    }
+
+    /// Any range covering [`API_REV`] yields it, also when the device supports
+    /// newer revisions.
+    #[test]
+    fn supported_api_rev_within_range() {
+        for (min, max) in [((1, 0), (1, 0)), ((1, 0), (1, 1)), ((0, 9), (2, 0))] {
+            let rev = supported_api_rev("part", rev_range(min, max)).unwrap();
+            assert_eq!(rev, API_REV, "range {min:?}..={max:?}");
+        }
+    }
+
+    /// A range above or below [`API_REV`] is refused, with both named in the
+    /// error.
+    #[test]
+    fn supported_api_rev_outside_range_is_refused() {
+        for (min, max, range) in [
+            ((1, 1), (2, 0), "1.1 to 2.0"),
+            ((2, 0), (2, 0), "2.0 to 2.0"),
+            ((0, 1), (0, 9), "0.1 to 0.9"),
+        ] {
+            let err = supported_api_rev("part", rev_range(min, max))
+                .unwrap_err()
+                .to_string();
+            let needs = format!("needs {}.{}", API_REV.major, API_REV.minor);
+            assert!(err.contains("partition part"), "{err}");
+            assert!(err.contains(range), "{err}");
+            assert!(err.contains(&needs), "{err}");
+        }
+    }
+
     #[test]
     fn hex_decode_rejects_wrong_length() {
         assert!(decode_credential_hex("abcd", "X").is_err());
@@ -3507,6 +3560,7 @@ mod hw_tests {
             data.is_hsm_open(),
             "HSM should be open after open_hsm_from_env"
         );
+        assert_eq!(opened_api_revs(&data), Some((API_REV, API_REV)));
         Ok(())
     }
 
