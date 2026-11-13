@@ -103,8 +103,8 @@ pub(crate) async fn handle<P: HsmPal>(
 
         // Generate the keypair into IO-scoped buffers sized from the curve's
         // wire lengths (the single source of truth for PAL-boundary buffers).
-        let priv_key = pal.dma_alloc(io, curve.wire_priv_key_len())?;
-        let pub_key = pal.dma_alloc(io, curve.wire_pub_key_len())?;
+        let priv_key = pal.dma_alloc(io, curve.wire_priv_key_len(P::BYTE_ORDER))?;
+        let pub_key = pal.dma_alloc(io, curve.wire_pub_key_len(P::BYTE_ORDER))?;
         let generated = pal
             .alloc_scoped_async(io, async |a| -> HsmResult<(usize, usize)> {
                 pal.ecc_gen_keypair(
@@ -129,7 +129,9 @@ pub(crate) async fn handle<P: HsmPal>(
         let outcome: HsmResult<usize> = async {
             let (priv_len, pub_len) = generated?;
             // The wire lengths are fixed per curve; a mismatch is an internal bug.
-            if priv_len != curve.wire_priv_key_len() || pub_len != curve.wire_pub_key_len() {
+            if priv_len != curve.wire_priv_key_len(P::BYTE_ORDER)
+                || pub_len != curve.wire_pub_key_len(P::BYTE_ORDER)
+            {
                 return Err(HsmError::InternalError);
             }
             let key_label = key_label?;

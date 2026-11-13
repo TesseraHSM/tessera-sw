@@ -104,7 +104,7 @@ pub struct TborHmacGenerateKeyResp<'a> {
     /// requested scope's masking key.  `232 + key_length` B (264 … 360 B
     /// for a 32 … 128-byte key).  The key is not stored on the device;
     /// the caller passes this blob back to `Hmac`.
-    #[tbor(buffer, max_len = 360, mutable)]
+    #[tbor(align = 4, buffer, max_len = 360, mutable)]
     pub masked_key: &'a [u8],
 }
 

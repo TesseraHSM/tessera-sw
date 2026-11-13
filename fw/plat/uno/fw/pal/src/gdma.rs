@@ -99,7 +99,7 @@ pub(crate) fn device_dma_buf(ptr: *const u8, len: u32) -> GdmaBuf {
 /// the GDMA SGL source pair: `desc[0..8]` → `sgl0` (address),
 /// `desc[8..16]` → `sgl1` (the block's embedded length + type).
 #[inline(always)]
-fn sgl_desc_buf(desc: &[u8; 16]) -> GdmaBuf {
+pub(crate) fn sgl_desc_buf(desc: &[u8; 16]) -> GdmaBuf {
     GdmaBuf::Sgl {
         sgl0: GdmaAddr {
             lo: u32::from_le_bytes([desc[0], desc[1], desc[2], desc[3]]),

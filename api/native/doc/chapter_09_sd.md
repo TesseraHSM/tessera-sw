@@ -73,6 +73,13 @@ integrity profile pinned for the session (see
 [tsra_session_ex_type](#tsra_session_ex_type)), and a handle to the new
 session is returned.
 
+At API revision 2.0 (Duo), the handshake also derives per-direction
+AES-256-GCM transport keys. The SDK encrypts the handshake's second
+message, every in-session command and the session close with them, and
+the device encrypts each response; this applies to both session types.
+Out-of-band data is not covered by this encryption. The transport is
+transparent to callers: no API or parameter changes.
+
 ```cpp
 tsra_status tsra_sess_ex_open(
     tsra_handle dev_handle,
@@ -259,7 +266,7 @@ not match a subsequent certificate read. Neither a certificate chain nor
 issuer metadata is stored in firmware. The caller retains its POTA/PTA chain
 and prepends it to this PID certificate to construct root-first evidence.
 Slot 0's provisioning behavior is unchanged, though on the std PAL its leaf
-certificate is not byte-for-byte identical: `fw/plat/std/pal/src/cert.rs`
+certificate is not byte-for-byte identical: `fw/plat/std/common/pal_src/cert.rs`
 now derives the slot-0 leaf serial from the PID key's SHA-1 identifier (the
 same derivation as the slot-2 PID serial). Slot 1 remains unsupported.
 The owner chain can be omitted; manufacturer and partition-owner chains plus
@@ -540,7 +547,8 @@ session.
 HPKE-opens the source remote backup with the receiver's masked SD-sealing
 key (authenticated by the source sender in `src_evidence`) and reseals the
 recovered backup to the destination receiver (`dest_evidence`), returning the
-resealed remote backup (161 bytes).
+resealed remote backup (161 bytes). Both evidences' partition-owner chains
+must anchor to the POTA key of the client policy in `params`.
 
 The inputs are grouped into an
 [`tsra_sd_reseal_remote_backup_params`](#tsra_sd_reseal_remote_backup_params)
@@ -685,6 +693,7 @@ Recovers BKS3 from `pok_local_backup` and HPKE-Auth-seals it to the
 destination peer named by `dst_evidence` (authenticated by the sender's
 masked SD-sealing key), returning the peer backup (161 bytes). Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
+The `dst_evidence` partition-owner chain must anchor to the policy POTA key.
 
 The inputs are grouped into an
 [`tsra_sd_create_peer_backup_params`](#tsra_sd_create_peer_backup_params)
@@ -744,6 +753,7 @@ security-domain masking key from `prev_sd_mk_backup`, and returns the
 refreshed device-local backups: the local partition-owner-key backup
 (276 bytes) and the security-domain masking-key backup (260 bytes). Peer
 cloning is gated by the security domain's `allow_peer_cloning` policy flag.
+The `src_evidence` partition-owner chain must anchor to the policy POTA key.
 
 The inputs are grouped into an
 [`tsra_sd_restore_peer_backup_params`](#tsra_sd_restore_peer_backup_params)

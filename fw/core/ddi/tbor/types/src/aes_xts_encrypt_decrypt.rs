@@ -80,7 +80,7 @@ pub struct TborAesXtsEncryptDecryptReq<'a> {
 
     /// The masked XTS key, an AEAD-GCM-256 envelope of 296 B, unmasked and
     /// wiped in place.
-    #[tbor(buffer, len = 296, mutable)]
+    #[tbor(align = 4, buffer, len = 296, mutable)]
     pub masked_key: &'a [u8],
 }
 

@@ -191,14 +191,17 @@ impl Registration {
         Ok((policy, record))
     }
 
-    fn endorse_for_reseal(
+    /// Check reseal evidence: POTA-anchored, attesting `policy`, and carrying
+    /// the PTA pinned for this name's binding. Firmware enforces the same
+    /// POTA anchor.
+    fn verify_for_reseal(
         &self,
         store: &FileStore,
         evidence: &Evidence,
         policy: &PartPolicy,
         binding: &JsonValue,
-    ) -> Result<Evidence> {
-        let (pid, _) = evidence::verify_attested_key(evidence, policy, &policy.pota_pub_key.data)?;
+    ) -> Result<()> {
+        evidence::verify_attested_key(evidence, policy, &policy.pota_pub_key.data)?;
         self.check_binding(store, policy.as_bytes())?;
         let pta = evidence
             .part_owner_cert_chain
@@ -210,12 +213,7 @@ impl Registration {
                 && wire::blob(binding, "policy")? == policy.as_bytes(),
             "reseal evidence belongs to another leaf PTA"
         );
-        // Reseal requires SATA-anchored PID evidence. Endorse only after
-        // verifying the original POTA/PTA chain and this name's pinned PTA.
-        let chain = pki::make_chain(&self.sata, &pid);
-        let mut endorsed = evidence.clone();
-        endorsed.part_owner_cert_chain = vec![self.sata_cert.clone(), chain.leaf_der];
-        Ok(endorsed)
+        Ok(())
     }
 
     fn reseal(
@@ -239,16 +237,13 @@ impl Registration {
         let original_binding = store
             .load(&filename("binding", &self.name)?)?
             .context("missing original creation binding")?;
+        self.verify_for_reseal(store, &original, &policy, &original_binding)?;
         let source = RemoteBackup {
             pok_remote_backup: wire::blob(&saved, "pok_remote_backup")?,
-            evidence: self.endorse_for_reseal(store, &original, &policy, &original_binding)?,
+            evidence: original,
         };
-        let destination = self.endorse_for_reseal(
-            store,
-            &wire::evidence(&request["receiver"])?,
-            &policy,
-            &target_binding,
-        )?;
+        let destination = wire::evidence(&request["receiver"])?;
+        self.verify_for_reseal(store, &destination, &policy, &target_binding)?;
         let sender = self.receiver(domain, session)?;
         let resealed = reseal_remote_backup(
             session,
@@ -489,7 +484,7 @@ pub(crate) fn handle(
             let original_binding = registration
                 .instance_binding(store, "primary")?
                 .context("missing original creation binding")?;
-            registration.endorse_for_reseal(store, &sender, policy, &original_binding)?;
+            registration.verify_for_reseal(store, &sender, policy, &original_binding)?;
             let (pid, _) =
                 evidence::verify_attested_key(&sender, policy, &policy.pota_pub_key.data)?;
             anyhow::ensure!(

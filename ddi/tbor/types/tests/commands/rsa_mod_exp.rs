@@ -26,6 +26,7 @@ use tsra_crypto::RsaPrivateKey;
 use tsra_crypto::RsaPublicKey;
 use tsra_crypto::RsaSignAlgo;
 use tsra_crypto::Verifier;
+use tsra_ddi_tbor_test_harness::dev_rev;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::TborRsaModExpReq;
 use tsra_ddi_tbor_types::TborStatus;
@@ -39,11 +40,13 @@ use tsra_ddi_tbor_types::KEY_USAGE_VERIFY;
 use tsra_ddi_tbor_types::RSA_OP_DECRYPT;
 use tsra_ddi_tbor_types::RSA_OP_SIGN;
 
+use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::common::assert_rsa_decrypts;
 use crate::commands::common::assert_rsa_signs;
 use crate::commands::common::mod_exp;
 use crate::commands::common::rev;
 use crate::commands::common::test_integer;
+use crate::commands::common::PayloadGapReq;
 use crate::commands::sd_sealing_key_gen::finalized_co_session;
 use crate::commands::unwrap_key::unwrap;
 use crate::commands::unwrap_key::unwrap_with_usage;
@@ -369,9 +372,10 @@ fn rsa_mod_exp_sign_one_operand_rejected() {
         KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
     );
 
-    // Wire format is little-endian.
+    // Operands are in device byte order.
     let mut one = vec![0; modulus_len];
-    one[0] = 1;
+    *one.last_mut().expect("nonempty operand") = 1;
+    let one = dev_rev(&one);
 
     ctx.expect_fw_reject(
         &TborRsaModExpReq {
@@ -648,7 +652,8 @@ fn rsa_mod_exp_decrypt_one_operand_both_classes_rejected() {
             KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
         );
         let mut one = vec![0; modulus_len];
-        one[0] = 1;
+        *one.last_mut().expect("nonempty operand") = 1;
+        let one = dev_rev(&one);
         ctx.expect_fw_reject(
             &TborRsaModExpReq {
                 session_id: session.session_id,
@@ -801,15 +806,14 @@ fn rsa_mod_exp_sign_with_decrypt_usage_rejected() {
             crt,
             KEY_USAGE_ENCRYPT | KEY_USAGE_DECRYPT,
         );
-        assert!(
-            ctx.tbor(&TborRsaModExpReq {
+        ctx.expect_fw_reject(
+            &TborRsaModExpReq {
                 session_id: session.session_id,
                 masked_key,
                 op_type: RSA_OP_SIGN,
                 y: vec![1; modulus_len],
-            })
-            .is_err(),
-            "sign must reject decrypt-only key (crt={crt})"
+            },
+            TborStatus::InvalidPermissions,
         );
     }
 }
@@ -937,5 +941,51 @@ fn rsa_mod_exp_invalid_session_rejected() {
         })
         .is_err(),
         "invalid session id must be rejected"
+    );
+}
+
+/// Rejects an otherwise valid request whose payload data starts after a
+/// non-canonical 4-byte gap.
+#[test]
+fn rsa_mod_exp_rejects_payload_gap() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _, modulus_len) = import_rsa(
+        &ctx,
+        session.session_id,
+        256,
+        false,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+    );
+    let req = TborRsaModExpReq {
+        session_id: session.session_id,
+        masked_key,
+        op_type: RSA_OP_SIGN,
+        y: rev(&test_integer(modulus_len)),
+    };
+
+    ctx.expect_fw_reject(&PayloadGapReq(req), TborStatus::TborNonCanonicalLayout);
+}
+
+/// Rejects a misaligned masked key and one without its padding entry.
+#[test]
+fn rsa_mod_exp_rejects_bad_masked_key_layout() {
+    let ctx = TestCtx::new();
+    let session = finalized_co_session(&ctx);
+    let (masked_key, _, modulus_len) = import_rsa(
+        &ctx,
+        session.session_id,
+        256,
+        false,
+        KEY_USAGE_SIGN | KEY_USAGE_VERIFY,
+    );
+    assert_masked_key_layout_rejected(
+        &ctx,
+        &TborRsaModExpReq {
+            session_id: session.session_id,
+            masked_key,
+            op_type: RSA_OP_SIGN,
+            y: rev(&test_integer(modulus_len)),
+        },
     );
 }

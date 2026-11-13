@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! HSM AES keys for the engine's AES-CBC and AES-256-GCM ciphers (see
-//! [`tsra_ossl_engine_core::cipher_method`]).
+//! HSM AES keys for the engine's AES-CBC, AES-256-GCM and AES-256-XTS ciphers
+//! (see [`tsra_ossl_engine_core::cipher_method`]).
 //!
 //! `TSRA_CTRL_SET_KEY_URI` names a masked AES key blob
-//! (`tsra://<path>;type=<aes|aes-gcm>[;bits=<n>]`, e.g. one [`generate_key`]
+//! (`tsra://<path>;type=<aes|aes-gcm|aes-xts>[;bits=<n>]`, e.g. one [`generate_key`]
 //! or, for `type=aes`, an HKDF derive wrote). It is unmasked into the HSM for
 //! that cipher context (and its copies) and deleted when the last of them is
 //! cleaned up or the key is replaced; the blob itself, the persistent form, is
@@ -21,7 +21,10 @@ use tsra_api::HsmAesGcmKeyUnmaskAlgo;
 use tsra_api::HsmAesKey;
 use tsra_api::HsmAesKeyGenAlgo;
 use tsra_api::HsmAesKeyUnmaskAlgo;
+use tsra_api::HsmAesXtsAlgo;
+use tsra_api::HsmAesXtsKey;
 use tsra_api::HsmAesXtsKeyGenAlgo;
+use tsra_api::HsmAesXtsKeyUnmaskAlgo;
 use tsra_api::HsmDecryptOp;
 use tsra_api::HsmEncryptOp;
 use tsra_api::HsmError;
@@ -39,8 +42,10 @@ use tsra_ossl_engine_core::cipher_method::AES_BLOCK;
 use tsra_ossl_engine_core::cipher_method::AesCbcKey;
 use tsra_ossl_engine_core::cipher_method::AesGcmKey;
 use tsra_ossl_engine_core::cipher_method::AesKeyLoader;
+use tsra_ossl_engine_core::cipher_method::AesXtsKey;
 use tsra_ossl_engine_core::cipher_method::GCM_IV_LEN;
 use tsra_ossl_engine_core::cipher_method::GCM_TAG_LEN;
+use tsra_ossl_engine_core::cipher_method::XTS_TWEAK_LEN;
 use tsra_ossl_engine_core::engine::Engine;
 use tsra_ossl_engine_core::error::EngineError;
 use tsra_ossl_engine_core::error::EngineResult;
@@ -75,6 +80,12 @@ impl AesKeyLoader for TsraAes {
         let key = unmask_cipher_key(engine, uri, AesKind::Gcm, key_bits, algo)?;
         Ok(Arc::new(CipherKey::new(key)))
     }
+
+    fn load_xts_key(engine: &Engine, uri: &str, key_bits: u32) -> EngineResult<Arc<dyn AesXtsKey>> {
+        let algo = HsmAesXtsKeyUnmaskAlgo::default();
+        let key = unmask_cipher_key(engine, uri, AesKind::Xts, key_bits, algo)?;
+        Ok(Arc::new(CipherKey::new(key)))
+    }
 }
 
 /// Unmask, with `algo`, the `kind` key `uri` names for a cipher of
@@ -95,7 +106,7 @@ where
     if parsed.key_type != KeyType::Aes(kind) {
         return Err(EngineError::Other(format!(
             "the key URI type does not fit this cipher (AES-CBC takes type=aes, \
-             AES-GCM type=aes-gcm): {uri}"
+             AES-GCM type=aes-gcm, AES-XTS type=aes-xts): {uri}"
         )));
     }
     if let Some(bits) = parsed.bits
@@ -285,6 +296,36 @@ impl AesGcmKey for CipherKey<HsmAesGcmKey> {
         let written = HsmDecryptOp::decrypt(&mut algo, self.key()?, input, Some(output))
             .map_err(|e| EngineError::wrap("AES-GCM decrypt", e))?;
         check_gcm_len(written, input.len())
+    }
+}
+
+impl AesXtsKey for CipherKey<HsmAesXtsKey> {
+    fn xts(
+        &self,
+        encrypt: bool,
+        tweak: &[u8; XTS_TWEAK_LEN],
+        input: &[u8],
+        output: &mut [u8],
+    ) -> EngineResult<()> {
+        let key = self.key()?;
+        // `input` is the one data unit: the algo is used once, so the tweak
+        // it advances per data unit is never used. All 128 tweak bits count
+        // on the engine's sessions; the SDK's ex sessions take only 64.
+        let mut algo = HsmAesXtsAlgo::new(tweak, input.len())
+            .map_err(|e| EngineError::wrap("AES-XTS tweak or data unit length", e))?;
+        let written = if encrypt {
+            HsmEncryptOp::encrypt(&mut algo, key, input, Some(output))
+        } else {
+            HsmDecryptOp::decrypt(&mut algo, key, input, Some(output))
+        }
+        .map_err(|e| EngineError::wrap("AES-XTS", e))?;
+        if written != input.len() {
+            return Err(EngineError::Other(format!(
+                "AES-XTS produced {written} of {} bytes",
+                input.len()
+            )));
+        }
+        Ok(())
     }
 }
 

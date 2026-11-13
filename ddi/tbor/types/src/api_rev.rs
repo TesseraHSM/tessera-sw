@@ -13,7 +13,7 @@
 //! [`exec_op_tbor`]: ../../tsra_ddi_interface/trait.DdiDev.html#method.exec_op_tbor
 
 use crate::tbor;
-use crate::tbor_int::U8;
+use crate::tbor_int::U16;
 
 /// TBOR opcode for `ApiRev`.
 pub const TBOR_OP_API_REV: u8 = 0x01;
@@ -33,14 +33,20 @@ impl TborApiRevReq {
 
 /// Host-facing TBOR `ApiRev` response.
 ///
-/// Reports the inclusive range of TBOR wire-protocol versions the
-/// firmware understands.
+/// Reports the inclusive range of SDK API revisions (`major.minor`) the
+/// firmware supports.
 #[tbor(response)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct TborApiRevResp {
-    /// Lowest TBOR wire-protocol version the firmware speaks.
-    pub min_ver: U8,
+    /// Major version of the lowest supported API revision.
+    pub min_major: U16,
 
-    /// Highest TBOR wire-protocol version the firmware speaks.
-    pub max_ver: U8,
+    /// Minor version of the lowest supported API revision.
+    pub min_minor: U16,
+
+    /// Major version of the highest supported API revision.
+    pub max_major: U16,
+
+    /// Minor version of the highest supported API revision.
+    pub max_minor: U16,
 }

@@ -348,7 +348,7 @@ fn gen_field_write(i: usize, schema: &Schema, layout: &TocLayout) -> TokenStream
 
     let pad_write = if has_padding {
         quote! {
-            let pad_len = (#align - (self.data_offset % #align)) % #align;
+            let pad_len = (#align - ((DATA_START + self.data_offset) % #align)) % #align;
             let pad_end = DATA_START + self.data_offset + pad_len;
             if pad_end > self.buf.len() {
                 return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);
@@ -473,7 +473,7 @@ fn gen_field_reserve(
 
     let pad_write = if has_padding {
         quote! {
-            let pad_len = (#align - (self.data_offset % #align)) % #align;
+            let pad_len = (#align - ((DATA_START + self.data_offset) % #align)) % #align;
             let pad_end = DATA_START + self.data_offset + pad_len;
             if pad_end > self.buf.len() {
                 return Err(tsra_fw_hsm_pal_traits::HsmError::TborBufferTooSmall);

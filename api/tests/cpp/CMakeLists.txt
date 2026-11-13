@@ -121,7 +121,7 @@ if(MSVC)
     # `StdHsm::build()` constructs the `Hsm`/`StdHsmPal` core synchronously
     # on the calling thread (only the Embassy executor itself runs on a
     # dedicated 8 MiB thread, see `EMBASSY_STACK_SIZE` in
-    # `fw/plat/std/lib/src/lib.rs`). Those debug-build task frames are large
+    # `fw/plat/std/common/lib_src/std_hsm.rs`). Those debug-build task frames are large
     # enough to overflow the default 1 MiB MSVC main-thread stack, crashing
     # this binary with STATUS_STACK_OVERFLOW (0xc00000fd) before any gtest
     # output is printed. Match the main thread's reserved stack to the

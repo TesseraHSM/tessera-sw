@@ -29,6 +29,9 @@ pub enum DecodeError {
     UnexpectedTocType,
     /// `None` TOC entry has non-zero reserved payload bits.
     InvalidNonePayload,
+    /// An aligned field does not start on its boundary from the start of
+    /// the message.
+    MisalignedField,
     /// Response carries a non-zero firmware status code.
     FwError(u32),
 }
@@ -50,6 +53,8 @@ pub enum EncodeError {
     DataTooLarge,
     /// Data section total exceeds the 13-bit offset range.
     DataOffsetOverflow,
+    /// Requested alignment is zero.
+    InvalidAlignment,
 }
 
 impl core::fmt::Display for DecodeError {
@@ -62,6 +67,7 @@ impl core::fmt::Display for DecodeError {
             Self::InvalidFixedLength => f.write_str("TOC entry has invalid length"),
             Self::UnexpectedTocType => f.write_str("unexpected TOC entry type"),
             Self::InvalidNonePayload => f.write_str("none entry has non-zero reserved bits"),
+            Self::MisalignedField => f.write_str("aligned field is misaligned"),
             Self::FwError(status) => write!(f, "firmware error: 0x{:08X}", status),
         }
     }
@@ -75,6 +81,7 @@ impl core::fmt::Display for EncodeError {
             Self::MissingTocEntries => f.write_str("missing required TOC entries"),
             Self::DataTooLarge => f.write_str("data too large (max 8191 bytes)"),
             Self::DataOffsetOverflow => f.write_str("data offset overflow (max 8191)"),
+            Self::InvalidAlignment => f.write_str("alignment must be non-zero"),
         }
     }
 }

@@ -47,14 +47,15 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived key. |
-| — | `hash_algo` | `u8` (inline) | [`HashAlgo`] driving the KDF (`1` = SHA-256, `2` = SHA-384, `3` = SHA-512). |
-| — | `kdf_alg` | `u8` (inline) | [`ConcatKdfAlg`] variant (`1` = X9.63, `2` = SP 800-56A). |
-| — | `key_type` | `u8` (inline) | [`KdfKeyType`] output key type (AES-128/192/256 = `10`/`11`/`12`; HMAC-SHA-256/384/512 = `25`/`26`/`27`; variable HMAC-256/384/512 = `30`/`31`/`32`). |
-| — | `key_length` | `u8` (inline) | Output length in bytes for the `VarHmac*` types; `0` means absent (required for `VarHmac*`, ignored otherwise). |
-| 8 | `masked_secret` | `buffer` (260..=294 B) | The masked ECDH shared secret IKM; unmasked in place. |
-| — | `info` | `buffer` (0..=256 B) | Optional `SharedInfo` (X9.63) / `OtherInfo` (SP 800-56A); empty means none. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the derived key. |
+| 16 | `hash_algo` | `u8` (inline) | [`HashAlgo`] driving the KDF (`1` = SHA-256, `2` = SHA-384, `3` = SHA-512). |
+| 20 | `kdf_alg` | `u8` (inline) | [`ConcatKdfAlg`] variant (`1` = X9.63, `2` = SP 800-56A). |
+| 24 | `key_type` | `u8` (inline) | [`KdfKeyType`] output key type (AES-128/192/256 = `10`/`11`/`12`; HMAC-SHA-256/384/512 = `25`/`26`/`27`; variable HMAC-256/384/512 = `30`/`31`/`32`). |
+| 28 | `key_length` | `u8` (inline) | Output length in bytes for the `VarHmac*` types; `0` means absent (required for `VarHmac*`, ignored otherwise). |
+| 32 | (padding) | `padding` (0..=3 B) | Places `masked_secret` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 36 | `masked_secret` | `buffer` (260..=294 B) | The masked ECDH shared secret IKM; unmasked in place. |
+| 40 | `info` | `buffer` (0..=256 B) | Optional `SharedInfo` (X9.63) / `OtherInfo` (SP 800-56A); empty means none. |
 
 ### Data section
 
@@ -66,7 +67,8 @@ Carries the masked secret, followed by the info.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `masked_key` | `buffer` (244..=356 B) | The derived key, masked (AEAD-GCM-256) under the scope's masking key. |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_key` | `buffer` (244..=356 B) | The derived key, masked (AEAD-GCM-256) under the scope's masking key. |
 
 ### Data section
 

@@ -1080,7 +1080,10 @@ fn part_init_with_stale_session_after_erase_is_rejected() {
         )
         .expect_err("PartInit with a session created before erase must be rejected");
 
-    assertions::assert_fw_rejects(&err, tsra_ddi_tbor_types::TborStatus::DefaultPskMustRotate);
+    assertions::assert_fw_rejects(
+        &err,
+        ctx.unknown_session_status(tsra_ddi_tbor_types::TborStatus::DefaultPskMustRotate),
+    );
 }
 
 /// Verifies that a non-empty SAPOTA thumbprint with an invalid length is rejected.

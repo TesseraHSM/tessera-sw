@@ -151,7 +151,7 @@ fn attrs_for_class(
 /// and how to re-derive it from the vault-resident private key.  Shared
 /// with [`super::get_public_key`] so both commands emit the same format.
 pub(super) enum PubDeriv {
-    /// RSA — wire public key is `n_le ‖ e_le`, via `rsa_priv_pub_key`.
+    /// RSA — wire public key is `n ‖ e` (device byte order), via `rsa_priv_pub_key`.
     Rsa,
     /// ECC — wire public key is `x ‖ y`, via `ecc_priv_pub_key`.
     Ecc,

@@ -16,6 +16,7 @@ struct DefaultEccPrivKeyProps
     uint32_t ecc_curve = TSRA_ECC_CURVE_P256;
     uint8_t is_session = 1;
     uint8_t can_sign = 1;
+    uint8_t can_derive = 0;
 
     std::vector<tsra_key_prop> props;
 
@@ -31,12 +32,21 @@ struct DefaultEccPubKeyProps
     uint32_t ecc_curve = TSRA_ECC_CURVE_P256;
     uint8_t is_session = 1;
     uint8_t can_verify = 1;
+    uint8_t can_derive = 0;
 
     std::vector<tsra_key_prop> props;
 
     DefaultEccPubKeyProps();
     tsra_key_prop_list get_prop_list();
 };
+
+void set_ecc_pair_properties(
+    DefaultEccPrivKeyProps &priv_props,
+    DefaultEccPubKeyProps &pub_props,
+    tsra_ecc_curve curve,
+    bool can_derive,
+    bool session_key
+);
 
 // Generates an ECC key pair with standard SIGN/VERIFY capability properties.
 tsra_status generate_ecc_keypair(
@@ -46,6 +56,18 @@ tsra_status generate_ecc_keypair(
     tsra_handle *priv_key_handle,
     tsra_handle *pub_key_handle
 );
+
+struct EccCurveTestCase
+{
+    tsra_ecc_curve curve;
+    const char *test_name;
+};
+
+inline constexpr EccCurveTestCase ECC_CURVES[] = {
+    { TSRA_ECC_CURVE_P256, "P256" },
+    { TSRA_ECC_CURVE_P384, "P384" },
+    { TSRA_ECC_CURVE_P521, "P521" },
+};
 
 // RSA-AES wrap configuration used to generate wrapped ECC PKCS#8 payloads.
 struct RsaAesWrapConfig

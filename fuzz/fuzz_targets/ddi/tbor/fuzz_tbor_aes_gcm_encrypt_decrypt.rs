@@ -610,7 +610,15 @@ fn exercise(ctx: &TestCtx, input: &FuzzInput) {
     } else {
         buffers
             .get(usize::from(req.in_index))
-            .cloned()
+            .map(|buf| {
+                if req.in_index == req.out_index && tsra_ddi::sock_selected() {
+                    // The socket transport sends only Out lengths, so an
+                    // aliased input reaches the device as zeros, not plaintext.
+                    vec![0; buf.len()]
+                } else {
+                    buf.clone()
+                }
+            })
             .unwrap_or_default()
     };
     let result = submit(ctx, &req, &mut buffers);
@@ -676,6 +684,10 @@ mod tests {
         for scenario in 0..SCENARIOS {
             let seed = [scenario];
             let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("short seed");
+            common::common_fuzz_test(&|ctx, _| exercise(ctx, &input));
+        }
+        for seed in [[0xEF, 0xBE], [0, 0xBE], [1, 0xBE]] {
+            let input = FuzzInput::arbitrary(&mut Unstructured::new(&seed)).expect("nonzero seed");
             common::common_fuzz_test(&|ctx, _| exercise(ctx, &input));
         }
         boundary_scenarios();

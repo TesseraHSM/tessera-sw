@@ -37,10 +37,10 @@ Available to **both Crypto-Officer and Crypto-User** sessions.
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `algo` | `u8` (inline) | Digest algorithm ([`HashAlgo`]): `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512, `7` = SHAKE128, `8` = SHAKE256. |
-| — | `out_len` | `u16` (inline, optional) | SHAKE output length, 1 to 256 bytes; required for SHAKE, absent (`none`) for the fixed-length digests. |
-| — | `msg` | `buffer` (≤ 3072 B) | The message to hash. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `algo` | `u8` (inline) | Digest algorithm ([`HashAlgo`]): `0` = SHA-1, `1` = SHA-256, `2` = SHA-384, `3` = SHA-512, `7` = SHAKE128, `8` = SHAKE256. |
+| 16 | `out_len` | `u16` (inline, optional) | SHAKE output length, 1 to 256 bytes; required for SHAKE, absent (`none`) for the fixed-length digests. |
+| 20 | `msg` | `buffer` (≤ 3072 B) | The message to hash. |
 
 ### Data section
 

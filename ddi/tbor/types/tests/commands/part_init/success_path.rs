@@ -244,15 +244,8 @@ fn part_init_multi_threaded_single_winner() {
 ///    for.
 fn verify_pta_report(ctx: &TestCtx, pta_report: &[u8], pta_spki_der: &[u8]) {
     // 1. PID pubkey from the slot-0 chain leaf.
-    let info = ctx.cert_chain_info().expect("GetCertChainInfo");
-    let n = info.data.num_certs;
-    assert!(
-        n >= 1,
-        "slot-0 cert chain must contain at least the PID leaf, got {n}",
-    );
-    let leaf_resp = ctx.get_certificate(n - 1).expect("GetCertificate(leaf)");
-    let leaf_bytes = leaf_resp.data.certificate.as_slice();
-    let leaf = X509Certificate::from_der(leaf_bytes).expect("PID leaf parses as X.509 certificate");
+    let leaf_der = ctx.leaf_certificate().expect("PID leaf certificate");
+    let leaf = X509Certificate::from_der(&leaf_der).expect("PID leaf parses as X.509 certificate");
     let pid_spki = leaf.get_public_key_der().expect("PID leaf SPKI extracts");
 
     // 2. COSE_Sign1 signature verify under PID pubkey.

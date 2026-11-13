@@ -31,7 +31,7 @@ Generate a DARC key-exchange (KEX) key.
 
 Mints a new ephemeral ECC-P384 KEX key on the calling session's partition and
 returns the masked private key together with its raw P-384 public key
-(`x ‖ y`, 96 bytes). Run on the **target** it yields the HPKE receiver
+(`x ‖ y`, 96 bytes, big-endian per coordinate — the certificate-leaf form). Run on the **target** it yields the HPKE receiver
 identity; run on the **source** it yields the HPKE sender-auth identity. The
 key is not stored on the device — the caller must retain the returned masked
 key for the subsequent export/import call.

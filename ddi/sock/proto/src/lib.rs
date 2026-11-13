@@ -55,7 +55,9 @@
 //! after an input (`dir` 0) item; an output (`dir` 1) item carries no bytes.
 //! Addresses never travel in this field; the server reconstructs SGL
 //! descriptors in its own memory. The bulk SQE's buffer addresses are
-//! client-local and are replaced by the server.
+//! client-local and are replaced by the server. A Duo server (API revision
+//! 2.x) has no bulk queue: a 128-byte SQE is a Duo command whose buffer and
+//! OOB-page address dwords must be zero, and its CQE is 64 bytes.
 //!
 //! Submission response fields: [`FieldId::Cqe`] (16 B command / 64 B bulk),
 //! [`FieldId::Payload`], [`FieldId::OobItems`] and [`FieldId::Tail`]. The
@@ -63,7 +65,15 @@
 //! each output item, in index order.
 //! Reset request/response kinds are 3/4, have no TOC fields, and use the same
 //! request/response headers (the reset response carries transport status).
+//! Discover request/response kinds are 5/6: the request has no fields; the
+//! response carries one [`FieldId::Device`] field reporting the hosted
+//! device model and its API revision range, so a client knows which SQE
+//! format to send before its first command.
 //! Client and server must be updated together; only one protocol is supported.
+
+pub mod bulk;
+pub mod cmd;
+pub mod duo;
 
 use std::io::Read;
 use std::io::Write;
@@ -137,6 +147,8 @@ enum Kind {
     Response = 2,
     ResetRequest = 3,
     ResetResponse = 4,
+    DiscoverRequest = 5,
+    DiscoverResponse = 6,
 }
 
 impl Kind {
@@ -146,6 +158,8 @@ impl Kind {
             2 => Ok(Self::Response),
             3 => Ok(Self::ResetRequest),
             4 => Ok(Self::ResetResponse),
+            5 => Ok(Self::DiscoverRequest),
+            6 => Ok(Self::DiscoverResponse),
             other => Err(ProtoError::BadKind(other)),
         }
     }
@@ -174,6 +188,11 @@ pub enum FieldId {
     /// GCM tail (final partial block) bytes: the input on a bulk request,
     /// the output on its response. Empty otherwise.
     Tail = 5,
+
+    /// Device information of a discover response (see [`DeviceInfo`]):
+    /// `model:u16 + min_major:u16 + min_minor:u16 + max_major:u16 +
+    /// max_minor:u16`.
+    Device = 6,
 }
 
 impl FieldId {
@@ -188,6 +207,7 @@ impl FieldId {
             3 => Some(Self::Payload),
             4 => Some(Self::OobItems),
             5 => Some(Self::Tail),
+            6 => Some(Self::Device),
             _ => None,
         }
     }
@@ -244,7 +264,7 @@ impl OobItem {
 #[derive(Clone, Debug)]
 pub struct Request {
     /// Raw submission queue entry: [`SQE_DWORDS`] for a command or
-    /// [`BULK_SQE_DWORDS`] for a bulk operation. The server assigns every
+    /// [`BULK_SQE_DWORDS`] for a bulk operation (or a Duo command). The server assigns every
     /// buffer address; all other fields (opcode, command id, lengths,
     /// session) are set by the client.
     pub sqe: Vec<u32>,
@@ -260,13 +280,74 @@ pub struct Request {
     pub tail: Vec<u8>,
 }
 
-/// A submission or a sideband partition-reset request.
+/// A submission or a sideband partition-reset or discover request.
 #[derive(Clone, Debug)]
 pub enum RequestFrame {
     /// Submit an opaque firmware command with its buffers.
     Submit(Request),
     /// Disable and re-enable the endpoint's existing partition.
     Reset,
+    /// Report the hosted device (see [`ResponseFrame::Discover`]).
+    Discover,
+}
+
+/// Device model hosted by a server, which fixes its entry formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u16)]
+pub enum DeviceModel {
+    /// API revision 1.x: [`SQE_DWORDS`]/[`CQE_DWORDS`] commands plus the
+    /// [`BULK_SQE_DWORDS`]/[`BULK_CQE_DWORDS`] bulk queue.
+    Uno = 1,
+    /// API revision 2.x: [`BULK_SQE_DWORDS`]/[`BULK_CQE_DWORDS`] commands,
+    /// no bulk queue.
+    Duo = 2,
+}
+
+/// Hosted device reported by [`ResponseFrame::Discover`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceInfo {
+    /// Device model.
+    pub model: DeviceModel,
+    /// Lowest supported API revision `(major, minor)`.
+    pub api_rev_min: (u16, u16),
+    /// Highest supported API revision `(major, minor)`.
+    pub api_rev_max: (u16, u16),
+}
+
+const DEVICE_FIELD_LEN: usize = 10;
+
+impl DeviceInfo {
+    fn encode(&self) -> [u8; DEVICE_FIELD_LEN] {
+        let words = [
+            self.model as u16,
+            self.api_rev_min.0,
+            self.api_rev_min.1,
+            self.api_rev_max.0,
+            self.api_rev_max.1,
+        ];
+        let mut out = [0u8; DEVICE_FIELD_LEN];
+        for (chunk, word) in out.chunks_exact_mut(2).zip(words) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
+        let bytes: &[u8; DEVICE_FIELD_LEN] = bytes
+            .try_into()
+            .map_err(|_| ProtoError::Malformed("device field has wrong size"))?;
+        let word = |i: usize| u16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]);
+        let model = match word(0) {
+            1 => DeviceModel::Uno,
+            2 => DeviceModel::Duo,
+            _ => return Err(ProtoError::Malformed("unknown device model")),
+        };
+        Ok(Self {
+            model,
+            api_rev_min: (word(1), word(2)),
+            api_rev_max: (word(3), word(4)),
+        })
+    }
 }
 
 /// A response frame: the completion entry plus its destination-buffer
@@ -279,7 +360,7 @@ pub struct Response {
 
     /// Raw completion queue entry produced by the firmware:
     /// [`CQE_DWORDS`] for a command or [`BULK_CQE_DWORDS`] for a bulk
-    /// operation.
+    /// operation (or a Duo command).
     pub cqe: Vec<u32>,
 
     /// Destination buffer bytes the firmware produced.
@@ -292,7 +373,7 @@ pub struct Response {
     pub tail: Vec<u8>,
 }
 
-/// A firmware submission response or a sideband reset result.
+/// A firmware submission response or a sideband reset or discover result.
 #[derive(Clone, Debug)]
 pub enum ResponseFrame {
     /// Firmware completion and output bytes.
@@ -302,6 +383,8 @@ pub enum ResponseFrame {
         /// Transport status.
         status: u32,
     },
+    /// The hosted device.
+    Discover(DeviceInfo),
 }
 
 /// Errors produced while reading or writing protocol frames.
@@ -413,6 +496,7 @@ impl RequestFrame {
         match self {
             Self::Submit(request) => request.encode(),
             Self::Reset => encode_frame(Kind::ResetRequest, 0, &[]),
+            Self::Discover => encode_frame(Kind::DiscoverRequest, 0, &[]),
         }
     }
 
@@ -426,6 +510,13 @@ impl RequestFrame {
                     return Err(ProtoError::Malformed("reset request has fields or data"));
                 }
                 Ok(Self::Reset)
+            }
+            Kind::DiscoverRequest => {
+                let frame = Frame::parse(body, Kind::DiscoverRequest)?;
+                if !frame.toc.is_empty() || !frame.data.is_empty() {
+                    return Err(ProtoError::Malformed("discover request has fields or data"));
+                }
+                Ok(Self::Discover)
             }
             _ => Err(ProtoError::Malformed("unexpected request frame kind")),
         }
@@ -448,6 +539,11 @@ impl ResponseFrame {
         match self {
             Self::Submit(response) => response.encode(),
             Self::Reset { status } => encode_frame(Kind::ResetResponse, *status, &[]),
+            Self::Discover(info) => encode_frame(
+                Kind::DiscoverResponse,
+                0,
+                &[(FieldId::Device, &info.encode())],
+            ),
         }
     }
 
@@ -463,6 +559,13 @@ impl ResponseFrame {
                 Ok(Self::Reset {
                     status: frame.status,
                 })
+            }
+            Kind::DiscoverResponse => {
+                let frame = Frame::parse(body, Kind::DiscoverResponse)?;
+                if frame.status != 0 {
+                    return Err(ProtoError::Malformed("discover response has a status"));
+                }
+                DeviceInfo::decode(frame.bytes(FieldId::Device)?).map(Self::Discover)
             }
             _ => Err(ProtoError::Malformed("unexpected response frame kind")),
         }
@@ -676,7 +779,10 @@ fn encode_frame(
         _rsvd: 0,
     };
     body.extend_from_slice(header.as_bytes());
-    if matches!(kind, Kind::Response | Kind::ResetResponse) {
+    if matches!(
+        kind,
+        Kind::Response | Kind::ResetResponse | Kind::DiscoverResponse
+    ) {
         body.extend_from_slice(U32::new(status).as_bytes());
     }
 
@@ -748,7 +854,10 @@ impl<'a> Frame<'a> {
             return Err(ProtoError::TooManyToc(toc_count));
         }
 
-        let status = if matches!(kind, Kind::Response | Kind::ResetResponse) {
+        let status = if matches!(
+            kind,
+            Kind::Response | Kind::ResetResponse | Kind::DiscoverResponse
+        ) {
             let (s, r) = U32::ref_from_prefix(rest)
                 .map_err(|_| ProtoError::Malformed("frame too short for status"))?;
             rest = r;
@@ -1201,6 +1310,44 @@ mod tests {
         body.push(1);
         assert!(RequestFrame::decode(&body).is_err());
         let body = encode_frame(Kind::ResetResponse, 0, &[(FieldId::Payload, &[])]).unwrap();
+        assert!(ResponseFrame::decode(&body).is_err());
+    }
+
+    #[test]
+    fn discover_frames_round_trip_and_reject_wrong_shapes() {
+        let body = RequestFrame::Discover.encode().unwrap();
+        assert!(matches!(
+            RequestFrame::decode(&body).unwrap(),
+            RequestFrame::Discover
+        ));
+        let body = encode_frame(Kind::DiscoverRequest, 0, &[(FieldId::Payload, &[1])]).unwrap();
+        assert!(RequestFrame::decode(&body).is_err());
+
+        let info = DeviceInfo {
+            model: DeviceModel::Duo,
+            api_rev_min: (2, 0),
+            api_rev_max: (2, 7),
+        };
+        let body = ResponseFrame::Discover(info).encode().unwrap();
+        assert!(matches!(
+            ResponseFrame::decode(&body).unwrap(),
+            ResponseFrame::Discover(got) if got == info
+        ));
+        assert!(Response::decode(&body).is_err());
+
+        let mut field = info.encode();
+        field[0] = 3;
+        let body = encode_frame(Kind::DiscoverResponse, 0, &[(FieldId::Device, &field)]).unwrap();
+        assert!(ResponseFrame::decode(&body).is_err());
+        let body =
+            encode_frame(Kind::DiscoverResponse, 0, &[(FieldId::Device, &field[..8])]).unwrap();
+        assert!(ResponseFrame::decode(&body).is_err());
+        let body = encode_frame(
+            Kind::DiscoverResponse,
+            1,
+            &[(FieldId::Device, &info.encode())],
+        )
+        .unwrap();
         assert!(ResponseFrame::decode(&body).is_err());
     }
 }

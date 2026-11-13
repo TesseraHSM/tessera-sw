@@ -51,12 +51,13 @@ pub struct TborDarcKeyWrapReq {
 
     /// The masked TMK envelope from `DarcTmkImport`/`DarcTmkGen`, exactly
     /// [`MASKED_TMK_LEN`] (264 B).
+    #[tbor(align = 4)]
     pub masked_tmk: [u8; MASKED_TMK_LEN],
 
     /// The local masked EC private key to export (from `EccGenerateKey` /
     /// `DarcKeyUnwrap`); its masked-key kind must be one of
     /// `Ecc{256,384,521}Private`.
-    #[tbor(max_len = 312)]
+    #[tbor(align = 4, max_len = 312)]
     pub masked_key: Vec<u8>,
 }
 

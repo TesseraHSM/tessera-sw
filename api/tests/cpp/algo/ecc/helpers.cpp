@@ -15,6 +15,7 @@ DefaultEccPrivKeyProps::DefaultEccPrivKeyProps()
     props.push_back({ TSRA_KEY_PROP_ID_EC_CURVE, &ecc_curve, sizeof(ecc_curve) });
     props.push_back({ TSRA_KEY_PROP_ID_SESSION, &is_session, sizeof(is_session) });
     props.push_back({ TSRA_KEY_PROP_ID_SIGN, &can_sign, sizeof(can_sign) });
+    props.push_back({ TSRA_KEY_PROP_ID_DERIVE, &can_derive, sizeof(can_derive) });
 }
 
 tsra_key_prop_list DefaultEccPrivKeyProps::get_prop_list()
@@ -29,11 +30,30 @@ DefaultEccPubKeyProps::DefaultEccPubKeyProps()
     props.push_back({ TSRA_KEY_PROP_ID_EC_CURVE, &ecc_curve, sizeof(ecc_curve) });
     props.push_back({ TSRA_KEY_PROP_ID_SESSION, &is_session, sizeof(is_session) });
     props.push_back({ TSRA_KEY_PROP_ID_VERIFY, &can_verify, sizeof(can_verify) });
+    props.push_back({ TSRA_KEY_PROP_ID_DERIVE, &can_derive, sizeof(can_derive) });
 }
 
 tsra_key_prop_list DefaultEccPubKeyProps::get_prop_list()
 {
     return { props.data(), static_cast<uint32_t>(props.size()) };
+}
+
+void set_ecc_pair_properties(
+    DefaultEccPrivKeyProps &priv_props,
+    DefaultEccPubKeyProps &pub_props,
+    tsra_ecc_curve curve,
+    bool can_derive,
+    bool session_key
+)
+{
+    priv_props.ecc_curve = curve;
+    pub_props.ecc_curve = curve;
+    priv_props.is_session = session_key;
+    pub_props.is_session = session_key;
+    priv_props.can_sign = !can_derive;
+    pub_props.can_verify = !can_derive;
+    priv_props.can_derive = can_derive;
+    pub_props.can_derive = can_derive;
 }
 
 tsra_status generate_ecc_keypair(
@@ -49,37 +69,13 @@ tsra_status generate_ecc_keypair(
     keygen_algo.params = nullptr;
     keygen_algo.len = 0;
 
-    uint32_t priv_key_class = TSRA_KEY_CLASS_PRIVATE;
-    uint32_t priv_key_kind = TSRA_KEY_KIND_ECC;
-    uint32_t priv_ecc_curve = curve;
-    uint8_t session_key_flag = session_key ? 1 : 0;
-    uint8_t priv_can_sign = 1;
-
-    std::vector<tsra_key_prop> priv_props = {
-        { TSRA_KEY_PROP_ID_CLASS, &priv_key_class, sizeof(priv_key_class) },
-        { TSRA_KEY_PROP_ID_KIND, &priv_key_kind, sizeof(priv_key_kind) },
-        { TSRA_KEY_PROP_ID_EC_CURVE, &priv_ecc_curve, sizeof(priv_ecc_curve) },
-        { TSRA_KEY_PROP_ID_SESSION, &session_key_flag, sizeof(session_key_flag) },
-        { TSRA_KEY_PROP_ID_SIGN, &priv_can_sign, sizeof(priv_can_sign) }
-    };
-
-    tsra_key_prop_list priv_prop_list{ priv_props.data(),
-                                       static_cast<uint32_t>(priv_props.size()) };
-
-    uint32_t pub_key_class = TSRA_KEY_CLASS_PUBLIC;
-    uint32_t pub_key_kind = TSRA_KEY_KIND_ECC;
-    uint32_t pub_ecc_curve = curve;
-    uint8_t pub_can_verify = 1;
-
-    std::vector<tsra_key_prop> pub_props = {
-        { TSRA_KEY_PROP_ID_CLASS, &pub_key_class, sizeof(pub_key_class) },
-        { TSRA_KEY_PROP_ID_KIND, &pub_key_kind, sizeof(pub_key_kind) },
-        { TSRA_KEY_PROP_ID_EC_CURVE, &pub_ecc_curve, sizeof(pub_ecc_curve) },
-        { TSRA_KEY_PROP_ID_SESSION, &session_key_flag, sizeof(session_key_flag) },
-        { TSRA_KEY_PROP_ID_VERIFY, &pub_can_verify, sizeof(pub_can_verify) }
-    };
-
-    tsra_key_prop_list pub_prop_list{ pub_props.data(), static_cast<uint32_t>(pub_props.size()) };
+    DefaultEccPrivKeyProps priv_props;
+    DefaultEccPubKeyProps pub_props;
+    set_ecc_pair_properties(priv_props, pub_props, curve, false, session_key);
+    remove_prop_by_id(priv_props.props, TSRA_KEY_PROP_ID_DERIVE);
+    remove_prop_by_id(pub_props.props, TSRA_KEY_PROP_ID_DERIVE);
+    auto priv_prop_list = priv_props.get_prop_list();
+    auto pub_prop_list = pub_props.get_prop_list();
 
     return tsra_key_gen_pair(
         session,

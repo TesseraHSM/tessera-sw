@@ -270,7 +270,7 @@ fn bind_helper(engine: &mut Engine, id: &CStr) -> EngineResult<()> {
     // The global registration holds an engine reference until ENGINE_cleanup,
     // so a dynamic engine loads at most once per process.
     tsra_ossl_engine_core::asn1_method::register_ec_asn1_method::<crate::asn1::TsraEcAsn1>(engine)?;
-    // AES-CBC and AES-256-GCM with HSM keys attached via
+    // AES-CBC, AES-256-GCM and AES-256-XTS with HSM keys attached via
     // TSRA_CTRL_SET_KEY_URI; contexts with a raw key run the built-in software
     // AES (see tsra_ossl_engine_core::cipher_method).
     tsra_ossl_engine_core::cipher_method::register_aes_ciphers::<crate::aes::TsraAes>(engine)?;

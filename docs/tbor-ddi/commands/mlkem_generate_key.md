@@ -38,9 +38,9 @@ wire enum, but also requires raising the `masked_key` cap from 196 B to
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the decapsulation key. |
-| — | `key_kind` | `u8` (inline) | PQC key kind, seed-only: `55` = ML-KEM-512 seed, `56` = ML-KEM-768 seed, `57` = ML-KEM-1024 seed. |
+| 8 | `session_id` | `session_id` (inline) | Session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | `scope` | `u8` (inline) | [`KeyScope`] whose masking key wraps the decapsulation key. |
+| 16 | `key_kind` | `u8` (inline) | PQC key kind, seed-only: `55` = ML-KEM-512 seed, `56` = ML-KEM-768 seed, `57` = ML-KEM-1024 seed. |
 
 ### Data section
 
@@ -52,8 +52,9 @@ _Empty._
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 8 | `masked_key` | `buffer` (196 B) | The ML-KEM `(d ‖ z)` seed material, masked (AEAD-GCM-256) under the scope's masking key. |
-| — | `pub_key` | `buffer` (up to 1568 B) | The ML-KEM public / encapsulation key bytes. |
+| 8 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 12 | `masked_key` | `buffer` (196 B) | The ML-KEM `(d ‖ z)` seed material, masked (AEAD-GCM-256) under the scope's masking key. |
+| 16 | `pub_key` | `buffer` (up to 1568 B) | The ML-KEM public / encapsulation key bytes. |
 
 ### Data section
 

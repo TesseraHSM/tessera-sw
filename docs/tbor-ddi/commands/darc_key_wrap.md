@@ -54,7 +54,7 @@ with `InvalidPermissions`.
 
 ## Request
 
-Wire layout: 4-byte header, the TOC entries, then the data section
+Wire layout: 8-byte header, the TOC entries, then the data section
 carrying the fixed-length `masked_tmk` and the variable-length
 `masked_key`.
 
@@ -62,9 +62,11 @@ carrying the fixed-length `masked_tmk` and the variable-length
 
 | Offset | Field | Type | Description |
 |---|---|---|---|
-| 4 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
-| — | `masked_tmk` | `buffer` (164 B) | The masked TMK envelope from `DarcTmkGen`/`DarcTmkImport`. Must be a `DarcTmk`-kind masked key. |
-| — | `masked_key` | `buffer` (≤ 200 B) | The local masked EC private key to export. Must be an `Ecc{256,384,521}Private`-kind masked key. |
+| 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
+| 12 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 16 | `masked_tmk` | `buffer` (164 B) | The masked TMK envelope from `DarcTmkGen`/`DarcTmkImport`. Must be a `DarcTmk`-kind masked key. |
+| 20 | (padding) | `padding` (0..=3 B) | Places `masked_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
+| 24 | `masked_key` | `buffer` (≤ 200 B) | The local masked EC private key to export. Must be an `Ecc{256,384,521}Private`-kind masked key. |
 
 ### Data section
 

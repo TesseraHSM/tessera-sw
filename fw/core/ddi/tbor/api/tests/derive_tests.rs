@@ -739,6 +739,52 @@ fn align_8_with_padding() {
     assert_eq!(view.timestamp(), 0x0123456789ABCDEF);
 }
 
+/// Alignment is measured from the start of the message, not the data
+/// section: with three TOC entries the data section starts at byte 20.
+#[test]
+fn align_is_relative_to_message_start() {
+    let mut buf = [0u8; 512];
+    let len = Aligned8Req::encode(&mut buf)
+        .unwrap()
+        .prefix(b"ABC")
+        .unwrap()
+        .timestamp(1)
+        .unwrap()
+        .finish()
+        .len();
+    let header_len = tsra_fw_ddi_tbor::REQ_HEADER_LEN;
+    let data_start = header_len + 3 * 4;
+    let word = tsra_fw_ddi_tbor::toc::read_toc_word(&buf[..len], header_len, 2);
+    assert_eq!(
+        (data_start + tsra_fw_ddi_tbor::toc::raw_toc_offset(word)) % 8,
+        0
+    );
+    assert_eq!(tsra_fw_ddi_tbor::toc::raw_toc_offset(word), 4);
+}
+
+#[test]
+fn decode_rejects_misaligned_field() {
+    let mut buf = [0u8; 512];
+    let len = Aligned8Req::encode(&mut buf)
+        .unwrap()
+        .prefix(b"ABC")
+        .unwrap()
+        .timestamp(1)
+        .unwrap()
+        .finish()
+        .len();
+    tsra_fw_ddi_tbor::toc::write_toc_word(
+        &mut buf,
+        tsra_fw_ddi_tbor::REQ_HEADER_LEN,
+        2,
+        tsra_fw_ddi_tbor::toc::build_toc_offset_len(tsra_fw_ddi_tbor::TocType::Uint64 as u8, 8, 3),
+    );
+    assert_eq!(
+        Aligned8Req::decode(brand(&buf[..len])).err(),
+        Some(tsra_fw_hsm_pal_traits::HsmError::TborMisalignedField),
+    );
+}
+
 // ── Multiple aligned fields ───────────────────────────────────────────
 
 #[tbor(opcode = 0x32)]

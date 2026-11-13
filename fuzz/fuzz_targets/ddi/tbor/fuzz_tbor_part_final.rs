@@ -247,8 +247,7 @@ fuzz_target!(|input: FuzzInput| {
                 panic!("PartFinal should succeed for a valid chain with an empty backup: {err}")
             }
             Err(DdiError::TborStatus(_) | DdiError::TborEncodeError) => {}
-            Err(DdiError::InvalidParameter)
-                if cert_slices.iter().any(|cert| cert.is_empty()) => {}
+            Err(DdiError::InvalidParameter) if cert_slices.iter().any(|cert| cert.is_empty()) => {}
             Err(err) => panic!("PartFinal returned an unexpected error: {err}"),
         }
 

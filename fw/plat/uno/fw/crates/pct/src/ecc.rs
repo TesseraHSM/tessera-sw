@@ -11,6 +11,8 @@
 //!   the same shared secret. Only the X coordinate is compared. A public key
 //!   under test that fails validation fails the test.
 
+use tsra_fw_hsm_pal_traits::HsmByteOrder;
+use tsra_fw_hsm_pal_traits::HsmDigestForm;
 use tsra_fw_hsm_pal_traits::HsmDmaBuf;
 use tsra_fw_hsm_pal_traits::HsmEcc;
 use tsra_fw_hsm_pal_traits::HsmEccCurve;
@@ -84,12 +86,18 @@ async fn sign_verify<P: HsmEcc + HsmHash>(
     // The PKA reads a full field-width digest operand (68 bytes for P-521),
     // so the little-endian digest sits in a zeroed buffer of that width. The
     // PAL receives the ECDSA digest width, which is at most 64 bytes.
-    let digest = crate::scratch_zeroed(alloc, curve.wire_coord_len())?;
-    pal.hash(io, algo, message, &mut digest[..algo.digest_len()], false)
-        .await?;
+    let digest = crate::scratch_zeroed(alloc, curve.wire_coord_len(P::BYTE_ORDER))?;
+    pal.hash(
+        io,
+        algo,
+        message,
+        &mut digest[..algo.digest_len()],
+        HsmDigestForm::Operand,
+    )
+    .await?;
     let digest = &digest[..curve.ecdsa_digest_len()];
 
-    let signature = crate::scratch_zeroed(alloc, curve.wire_sig_len())?;
+    let signature = crate::scratch_zeroed(alloc, curve.wire_sig_len(P::BYTE_ORDER))?;
     pal.ecc_sign(io, curve, priv_key, digest, signature).await?;
 
     // Start from "invalid" so a verify that writes nothing can't pass.
@@ -108,7 +116,7 @@ async fn key_agreement<P: HsmEcc>(
     priv_key: &HsmDmaBuf,
     pub_key: &HsmDmaBuf,
 ) -> HsmResult<bool> {
-    let coord = curve.wire_coord_len();
+    let coord = curve.wire_coord_len(P::BYTE_ORDER);
     let test = vectors::ecdh_test_pair(curve);
 
     let test_priv = test_private_key(alloc, curve)?;
@@ -165,7 +173,7 @@ pub(crate) fn test_private_key(
     curve: HsmEccCurve,
 ) -> HsmResult<&mut HsmDmaBuf> {
     let d = vectors::ecdh_test_pair(curve).d;
-    let test_priv = crate::scratch_zeroed(alloc, curve.wire_coord_len())?;
+    let test_priv = crate::scratch_zeroed(alloc, curve.wire_coord_len(HsmByteOrder::Le))?;
     vectors::be_to_le(d, &mut test_priv[..d.len()]);
     Ok(test_priv)
 }
