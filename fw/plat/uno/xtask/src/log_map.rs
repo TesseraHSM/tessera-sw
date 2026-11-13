@@ -671,13 +671,16 @@ pub fn decoder_header(map: &Map, images: &[ImageLog]) -> anyhow::Result<String> 
 }
 
 /// Writes (fix mode) or checks (locked mode) the decoder header for the
-/// message map and `images`; see [`decoder_header`].
+/// message map and `images`; see [`decoder_header`]. A missing header counts
+/// as empty; any other error reading it fails.
 pub fn finish(ctx: &XtaskCtx, images: &[ImageLog], mode: Mode) -> anyhow::Result<()> {
     let header = decoder_header(&read_map(ctx)?, images)?;
     let path = ctx.root.join(HEADER);
-    let current = fs::read_to_string(&path)
-        .map(|text| text.replace("\r\n", "\n"))
-        .unwrap_or_default();
+    let current = match fs::read_to_string(&path) {
+        Ok(text) => text.replace("\r\n", "\n"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("can't read fw/plat/uno/{HEADER}")),
+    };
     if current == header {
         log::info!("fw/plat/uno/{HEADER} is up to date");
         return Ok(());
@@ -1322,5 +1325,21 @@ mod tests {
         stale(finish(&ctx, &images, Mode::Locked).expect_err("a stale header"));
         finish(&ctx, &images, Mode::Fix).expect("a rewritten header");
         assert_eq!(fs::read_to_string(&path).expect("the header"), header);
+    }
+
+    #[test]
+    fn finish_fails_when_it_cant_read_the_header() {
+        let repo = TempRepo::new();
+        let ctx = repo.ctx();
+        repo.write_map(&format!("{MAP_HEAD}{UNO_ROW}"));
+        // A directory where the header goes can't be read as a file.
+        fs::create_dir_all(ctx.root.join(HEADER)).expect("a directory");
+        for mode in [Mode::Fix, Mode::Locked] {
+            let error = format!("{:#}", finish(&ctx, &[], mode).expect_err("no header"));
+            assert!(
+                error.contains(&format!("can't read fw/plat/uno/{HEADER}")),
+                "{mode:?}: {error}"
+            );
+        }
     }
 }
