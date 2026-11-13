@@ -208,7 +208,9 @@ where
     let (data, trailer) = frame.split_at_mut(TRANSPORT_AAD_LEN + pt_len);
     data[..TRANSPORT_AAD_LEN].copy_from_slice(&binding.aad(true));
     let pt = &mut data[TRANSPORT_AAD_LEN..];
-    pt[..msg.len()].copy_from_slice(msg);
+    // Both buffers are DMA memory, which the CPU reads uncached: burst
+    // copy rather than a load per word.
+    msg.copy_to_slice(&mut pt[..msg.len()]);
     pt[msg.len()..pt_len - 1].fill(0);
     pt[pt_len - 1] = (pt_len - 1 - msg.len()) as u8;
     let key = pal
