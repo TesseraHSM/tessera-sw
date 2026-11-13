@@ -18,7 +18,7 @@ use libfuzzer_sys::arbitrary;
 use libfuzzer_sys::arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use tsra_ddi_interface::DdiError;
-use tsra_ddi_tbor_test_harness::assertions::assert_fw_rejects;
+use tsra_ddi_tbor_test_harness::assertions::assert_session_rejects;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::*;
 
@@ -108,8 +108,8 @@ fn assert_valid_unwrapping_pub_key(pub_key: &[u8]) {
 
 /// Issue a request against a precomputed oracle and validate every successful key.
 ///
-/// Pending key generation is a non-blocking skip; all unexpected errors,
-/// including driver errors and emulator key-generation failures, panic.
+/// Pending key generation is a non-blocking skip; session rejections may come
+/// from the transport or firmware. All unexpected errors panic.
 fn check_request(
     ctx: &TestCtx,
     request_session_id: u16,
@@ -128,7 +128,7 @@ fn check_request(
         }
         (Expected::Success, Err(DdiError::TborStatus(TborStatus::PendingKeyGeneration))) => None,
         (Expected::Reject(status), Err(err)) => {
-            assert_fw_rejects(&err, status);
+            assert_session_rejects(&err, status);
             None
         }
         (Expected::Success, Err(err)) => {

@@ -20,7 +20,8 @@
 //!    (not the local one): each of the source-sender and destination-
 //!    receiver evidence requires manufacturer and partition-owner chains,
 //!    with device-owner evidence optional. Supplied chains are validated;
-//!    the partition-owner chain is anchored to the request policy's SATA key, and each report's v2
+//!    the partition-owner chain is anchored to the request policy's POTA key (the
+//!    client partitions' owner), and each report's v2
 //!    `policy_hash` must equal `SHA-384(policy)`.  This binds both sides to
 //!    the same policy (whose digest covers the POTA key).  The attested
 //!    COSE_Keys are recovered as `SndrPub` (source sender) and `DstRcvrPub`
@@ -155,8 +156,8 @@ pub(crate) async fn handle<P: HsmPal>(
                 .await?;
 
             let part_policy = super::policy::from_bytes(policy)?;
-            let sata = &part_policy.sata_pub_key;
-            if sata.kind() != PolicyKeyKind::Ecc384 || sata.len() != POLICY_MAX_KEY_LEN {
+            let pota = &part_policy.pota_pub_key;
+            if pota.kind() != PolicyKeyKind::Ecc384 || pota.len() != POLICY_MAX_KEY_LEN {
                 return Err(HsmError::InvalidArg);
             }
 
@@ -176,7 +177,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
                         require_sd_sealing: true,
                     },
                     pk_sndr,
@@ -206,7 +207,7 @@ pub(crate) async fn handle<P: HsmPal>(
                         report: ev.evidence(),
                     },
                     &TrustAnchors {
-                        part_owner_anchor: &sata.data[..POLICY_MAX_KEY_LEN],
+                        part_owner_anchor: &pota.data[..POLICY_MAX_KEY_LEN],
                         require_sd_sealing: true,
                     },
                     pk_dst,

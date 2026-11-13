@@ -271,10 +271,10 @@ impl UnoHsmPal {
     /// Zero copy: a single engine submission reads `src[iv_len..]` and
     /// writes `dst[..len]` directly. The IV is staged in a 16-byte DMA block
     /// so the engine never reads it from a region that may be overwritten.
-    /// The engine accepts any length for CTR, but CFB and OFB require whole
-    /// blocks: a partial final CFB/OFB block (< 16 bytes) is run as a second
-    /// submission through a zero-padded 16-byte DMA block, chained from the
-    /// first. That tail is the only data copied.
+    /// The engine requires whole blocks for CTR, CFB and OFB: a partial final
+    /// block (< 16 bytes) is run as a second submission through a
+    /// zero-padded 16-byte DMA block, chained from the first. That tail is
+    /// the only data copied.
     ///
     /// The IV out is derived in software from blocks captured on the stack
     /// rather than relying on hardware IV write-back, which is only defined
@@ -296,7 +296,7 @@ impl UnoHsmPal {
         let full = data_len - data_len % AES_BLOCK_SIZE;
         // Bytes the engine cannot take in the main submission.
         let tail = match mode {
-            HsmAesMode::Cfb | HsmAesMode::Ofb => data_len - full,
+            HsmAesMode::Ctr | HsmAesMode::Cfb | HsmAesMode::Ofb => data_len - full,
             _ => 0,
         };
         let main = data_len - tail;
@@ -341,10 +341,14 @@ impl UnoHsmPal {
                     .await?;
             }
 
-            // Chaining value after the whole blocks: CFB uses the last
-            // ciphertext block, OFB the last keystream block.
+            // Chaining value after the whole blocks: CTR uses the advanced
+            // counter, CFB the last ciphertext block, OFB the last keystream
+            // block.
             let chain = match (mode, op) {
                 _ if full == 0 => iv_in,
+                (HsmAesMode::Ctr, _) => u128::from_be_bytes(iv_in)
+                    .wrapping_add((full / AES_BLOCK_SIZE) as u128)
+                    .to_be_bytes(),
                 (HsmAesMode::Cfb, HsmAesOp::Encrypt) => block_at(dst, full - AES_BLOCK_SIZE),
                 (HsmAesMode::Ofb, _) => {
                     xor_block(block_at(dst, full - AES_BLOCK_SIZE), last_full_in)

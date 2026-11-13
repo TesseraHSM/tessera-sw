@@ -79,8 +79,7 @@ pub(crate) fn get_rsa_unwrapping_key_raw_no_res(
 
 /// Performs RSA-AES key unwrapping using the specified RSA private key.
 ///
-/// V1 sessions use MBOR. V2 sessions use TBOR for plain AES keys; TBOR
-/// AES-GCM and AES-XTS bulk-key imports are not supported.
+/// V1 sessions use MBOR. V2 sessions use TBOR for AES-family and HMAC keys.
 ///
 /// # Arguments
 ///
@@ -110,7 +109,7 @@ pub(crate) fn rsa_aes_unwrap_key(
 /// For use under the barrier lock or by callers already inside a
 /// resiliency retry loop (e.g. [`aes_xts_unwrap_key`] which has its
 /// own `#[resiliency_key_op]`). The session selects MBOR or TBOR; TBOR
-/// supports symmetric AES keys only. MBOR failures after a successful DDI call
+/// supports AES-family and HMAC keys. MBOR failures after a successful DDI call
 /// clean up the resident handle via [`HsmKeyIdGuard`]. A successful TBOR
 /// unwrap returns an unpinned masked key and creates no resident handle.
 pub(crate) fn rsa_aes_unwrap_key_raw_no_res(
@@ -168,13 +167,14 @@ fn rsa_aes_unwrap_key_mbor(
     Ok((guard.release(), dev_key_props))
 }
 
-/// Performs one TBOR RSA-AES unwrap of a symmetric AES key.
+/// Performs one TBOR RSA-AES unwrap of a symmetric AES or HMAC key.
 ///
 /// TBOR `UnwrapKey` decodes raw AES material into `Aes128`, `Aes192`, or
 /// `Aes256`. An AES-GCM key is a plain AES-256 key on TBOR (consumed by
 /// `AesGcmEncryptDecrypt`), so it is imported as `Aes256` and retagged.
 /// An AES-XTS key is a single wrapped 64-byte `K1 ‖ K2` (PKCS#11
 /// `CKK_AES_XTS`) imported as `AesXts512`.
+/// HMAC keys are imported as the corresponding variable-length HMAC kind.
 /// The returned masked metadata and empty public-key field are validated
 /// before returning an unpinned handle.
 fn rsa_aes_unwrap_key_tbor(
@@ -193,6 +193,9 @@ fn rsa_aes_unwrap_key_tbor(
         (HsmKeyKind::Aes, 256) => (KEY_CLASS_AES, KEY_KIND_AES256),
         (HsmKeyKind::AesGcm, 256) => (KEY_CLASS_AES, KEY_KIND_AES256),
         (HsmKeyKind::AesXts, 512) => (KEY_CLASS_AES_XTS512, KEY_KIND_AES_XTS512),
+        (HsmKeyKind::HmacSha256, 256) => (KEY_CLASS_HMAC_SHA256, KEY_KIND_VAR_LEN_HMAC_SHA256),
+        (HsmKeyKind::HmacSha384, 384) => (KEY_CLASS_HMAC_SHA384, KEY_KIND_VAR_LEN_HMAC_SHA384),
+        (HsmKeyKind::HmacSha512, 512) => (KEY_CLASS_HMAC_SHA512, KEY_KIND_VAR_LEN_HMAC_SHA512),
         _ => return Err(HsmError::InvalidKeyProps),
     };
     let unwrapping_modulus_len = unwrapping_key.size();
@@ -654,6 +657,11 @@ fn tbor_unwrap_key_usage(props: &HsmKeyProps) -> HsmResult<u64> {
             Ok(KEY_USAGE_SIGN | KEY_USAGE_VERIFY)
         }
         HsmKeyKind::Ecc if props.can_derive() && !props.can_sign() => Ok(KEY_USAGE_DERIVE),
+        HsmKeyKind::HmacSha256 | HsmKeyKind::HmacSha384 | HsmKeyKind::HmacSha512
+            if props.can_sign() && props.can_verify() =>
+        {
+            Ok(KEY_USAGE_SIGN | KEY_USAGE_VERIFY)
+        }
         _ => Err(HsmError::InvalidKeyProps),
     }
 }

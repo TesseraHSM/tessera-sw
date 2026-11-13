@@ -1444,11 +1444,12 @@ SdEvidenceHolder build_receiver_evidence(
     }
 
     // Manufacturer and owner chains root at fresh CAs; the partition-owner
-    // chain roots at the policy SATA anchor. Every leaf certifies the same
+    // chain roots at the policy POTA anchor (as a real partition's
+    // POTA -> PTA -> PID chain does). Every leaf certifies the same
     // partition-identity key (the report signer).
     std::unique_ptr<CaKey> mfgr_ca = CaKey::generate();
     std::unique_ptr<CaKey> owner_ca = CaKey::generate();
-    if (!mfgr_ca || !owner_ca || !ctx.sata_key)
+    if (!mfgr_ca || !owner_ca || !ctx.sata_key || !ctx.pota_key)
     {
         ADD_FAILURE() << "evidence CA key generation failed";
         return holder;
@@ -1456,9 +1457,9 @@ SdEvidenceHolder build_receiver_evidence(
 
     GeneratedChain mfgr = make_chain(*mfgr_ca, ctx.pid_pub.data());
     GeneratedChain owner = make_chain(*owner_ca, ctx.pid_pub.data());
-    GeneratedChain part_owner = make_chain(*ctx.sata_key, ctx.pid_pub.data());
+    GeneratedChain part_owner = make_chain(*ctx.pota_key, ctx.pid_pub.data());
     // Receiver key certificate chain (spec `RcvrCertChain`): anchored to
-    // the same SATA key, its leaf certifies the receiver public key
+    // the policy SATA key, its leaf certifies the receiver public key
     // (`RcvrPub`) the remote backup is sealed to.
     GeneratedChain receiver = make_chain(*ctx.sata_key, rcvr_pub.data());
 

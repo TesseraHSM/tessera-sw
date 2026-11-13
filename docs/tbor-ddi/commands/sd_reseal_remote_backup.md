@@ -34,7 +34,7 @@ Both attestation **evidences** are validated on-device
 manufacturer and partition-owner chains are required, and the device-owner
 chain is optional. All supplied chains are verified and must share the report
 signer's leaf key. The partition-owner chain is anchored to the **request**
-policy's SATA key, and each
+policy's POTA key (the client partitions' owner), and each
 report's v2 `policy_hash` must equal `SHA-384(policy)`.  This binds the
 source and destination to the same policy (whose digest covers the POTA
 key).  The attested COSE_Keys are recovered as `SndrPub` (source sender)
@@ -55,7 +55,7 @@ variable-length data section.
 |---|---|---|---|
 | 4  | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
 | 8  | `masked_sealing_key` | `buffer` (fixed 276 B) | Receiver's masked SD-sealing key (the `masked_key` from `SdSealingKeyGen`), unmasked on-device to recover `RcvrPriv`. The same key both opens the source and authenticates the reseal; never a vault handle. `MASKED_SEALING_KEY_LEN` (276 B). |
-| 12 | `policy` | `buffer` (fixed 584 B) | Caller-asserted unified `PartPolicy` the source and destination must share. Its `SHA-384` digest is checked against each report's v2 `policy_hash`, and its SATA key anchors both evidence chains. Length pinned to `PART_POLICY_LEN` (584 B). |
+| 12 | `policy` | `buffer` (fixed 584 B) | Caller-asserted unified `PartPolicy` the source and destination must share. Its `SHA-384` digest is checked against each report's v2 `policy_hash`, and its POTA key anchors both evidence chains. Length pinned to `PART_POLICY_LEN` (584 B). |
 | 16 | `src_mfgr_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source **sender** manufacturer certificate-chain descriptors (from the `src_evidence` field group). |
 | 20 | `src_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender owner certificate-chain descriptors. |
 | 24 | `src_part_owner_cert_chain` | `buffer` (typed `&[CertDescriptor]`) | Source sender partition-owner certificate-chain descriptors. |

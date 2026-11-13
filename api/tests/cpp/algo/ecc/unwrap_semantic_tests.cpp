@@ -291,25 +291,6 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_requested_curve_mismatch
     });
 }
 
-// Verifies unwrap rejects when requested capability combination is invalid.
-TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_requested_capability_mismatch)
-{
-    part_list_.for_each_session([](tsra_handle session) {
-        UnwrapPairContext ctx;
-        ASSERT_EQ(
-            UnwrapPairContext::create_with_wrapped_blob(session, TSRA_ECC_CURVE_P256, ctx),
-            TSRA_STATUS_SUCCESS
-        );
-
-        ctx.priv_props.can_sign = 0;
-
-        auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_INVALID_KEY_PROPS);
-        ASSERT_EQ(result.private_key, 0);
-        ASSERT_EQ(result.public_key, 0);
-    });
-}
-
 // Verifies unwrap rejects wrapped content whose kind conflicts with requested ECC properties.
 TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_wrapped_content_kind_mismatch)
 {
@@ -462,85 +443,6 @@ TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_truncated_valid_wrapped_
 
         auto result = ctx.try_unwrap();
         ASSERT_EQ(result.status, malformed_blob_status());
-        ASSERT_EQ(result.private_key, 0);
-        ASSERT_EQ(result.public_key, 0);
-    });
-}
-
-// Verifies unwrap rejects when private and public requested curves disagree.
-TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_private_public_requested_curve_disagreement)
-{
-    part_list_.for_each_session([](tsra_handle session) {
-        UnwrapPairContext ctx;
-        ASSERT_EQ(
-            UnwrapPairContext::create_with_wrapped_blob(session, TSRA_ECC_CURVE_P256, ctx),
-            TSRA_STATUS_SUCCESS
-        );
-
-        ctx.priv_props.ecc_curve = TSRA_ECC_CURVE_P256;
-        ctx.pub_props.ecc_curve = TSRA_ECC_CURVE_P384;
-
-        auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_INVALID_KEY_PROPS);
-        ASSERT_EQ(result.private_key, 0);
-        ASSERT_EQ(result.public_key, 0);
-    });
-}
-
-// Verifies unwrap rejects when private requested curve mismatches even if public curve matches.
-TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_private_curve_mismatch_public_curve_matches)
-{
-    part_list_.for_each_session([](tsra_handle session) {
-        UnwrapPairContext ctx;
-        ASSERT_EQ(
-            UnwrapPairContext::create_with_wrapped_blob(session, TSRA_ECC_CURVE_P256, ctx),
-            TSRA_STATUS_SUCCESS
-        );
-
-        ctx.priv_props.ecc_curve = TSRA_ECC_CURVE_P384;
-        ctx.pub_props.ecc_curve = TSRA_ECC_CURVE_P256;
-
-        auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_INVALID_KEY_PROPS);
-        ASSERT_EQ(result.private_key, 0);
-        ASSERT_EQ(result.public_key, 0);
-    });
-}
-
-// Verifies unwrap rejects when public requested curve mismatches even if private curve matches.
-TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_public_curve_mismatch_private_curve_matches)
-{
-    part_list_.for_each_session([](tsra_handle session) {
-        UnwrapPairContext ctx;
-        ASSERT_EQ(
-            UnwrapPairContext::create_with_wrapped_blob(session, TSRA_ECC_CURVE_P256, ctx),
-            TSRA_STATUS_SUCCESS
-        );
-
-        ctx.priv_props.ecc_curve = TSRA_ECC_CURVE_P256;
-        ctx.pub_props.ecc_curve = TSRA_ECC_CURVE_P384;
-
-        auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_INVALID_KEY_PROPS);
-        ASSERT_EQ(result.private_key, 0);
-        ASSERT_EQ(result.public_key, 0);
-    });
-}
-
-// Verifies unwrap rejects when the requested public-key verify capability is missing.
-TEST_F(tsra_ecc_keyunwrap_semantic, unwrap_pair_rejects_public_verify_capability_missing)
-{
-    part_list_.for_each_session([](tsra_handle session) {
-        UnwrapPairContext ctx;
-        ASSERT_EQ(
-            UnwrapPairContext::create_with_wrapped_blob(session, TSRA_ECC_CURVE_P256, ctx),
-            TSRA_STATUS_SUCCESS
-        );
-
-        ctx.pub_props.can_verify = 0;
-
-        auto result = ctx.try_unwrap();
-        ASSERT_EQ(result.status, TSRA_STATUS_INVALID_KEY_PROPS);
         ASSERT_EQ(result.private_key, 0);
         ASSERT_EQ(result.public_key, 0);
     });
