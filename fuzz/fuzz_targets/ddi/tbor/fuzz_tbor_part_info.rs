@@ -344,16 +344,10 @@ fn run(ctx: &TestCtx, input: &FuzzInput) {
             assert_eq!(read_info(ctx, PART_STATE_ENABLED, false), before);
             let (state, sd_initialized) = match input.posture {
                 Posture::Initializing => {
-                    let policy = common::known_good_part_policy(
-                        common::fill_ecc384_pubkey_pattern(input.selector),
-                    );
-                    ctx.part_init(
-                        &session,
-                        &common::mach_seed(),
-                        &policy,
-                        &common::pota_thumbprint(),
-                    )
-                    .expect("valid PartInit must succeed");
+                    let policy =
+                        common::known_good_part_policy(common::pattern_thumbprint(input.selector));
+                    ctx.part_init(&session, &common::mach_seed(), &policy)
+                        .expect("valid PartInit must succeed");
                     (PART_STATE_INITIALIZING, false)
                 }
                 Posture::Initialized => {

@@ -18,9 +18,7 @@ use anyhow::Context;
 use anyhow::Result;
 use tsra_api::HsmKeyManager;
 use tsra_api::HsmSealingKeyUnmaskAlgo;
-use tsra_api::PartPolicy;
-use tsra_api::PartPolicyBuilder;
-use tsra_api::PolicyKeyKind;
+use tsra_api::PolicyFlags;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
@@ -28,12 +26,15 @@ use tsra_sealing_api::device_cert_chain;
 use tsra_sealing_api::load_local_recovery;
 use tsra_sealing_api::mint_sealing_key;
 use tsra_sealing_api::reseal_remote_backup;
+use tsra_sealing_api::spki_thumbprint;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::PartPolicy;
+use tsra_sealing_api::PolicyFields;
 use tsra_sealing_api::RemoteBackup;
 use tsra_sealing_api::SecurityDomainEnv;
+use tsra_sealing_api::Thumbprint;
 use tsra_sealing_common::key_check;
 use tsra_sealing_report::verify_certificate_chain;
-use zerocopy::IntoBytes;
 
 use super::validate_name;
 use super::JsonValue;
@@ -99,18 +100,22 @@ impl Registration {
         Ok(registration)
     }
 
-    fn policy(&self, pid: &[u8], public: &[u8]) -> Result<PartPolicy> {
-        PartPolicyBuilder::new()
-            .version(1, 0)
-            .pota_key(PolicyKeyKind::Ecc384, &self.pota.raw_pub())
-            .sata_key(PolicyKeyKind::Ecc384, &self.sata.raw_pub())
-            .sapota_key(PolicyKeyKind::Ecc384, &evidence::cert_public(&self.sapota)?)
-            .backup_part_id(pid)
-            .backup_part_pub_key(PolicyKeyKind::Ecc384, public)
-            .require_trusted_sa_key(true)
-            .allow_peer_cloning(false)
-            .build()
-            .context("build leaf policy")
+    fn policy(&self, pid: &[u8], public_thumbprint: Thumbprint) -> Result<PartPolicy> {
+        PartPolicy::new(PolicyFields {
+            pota_spki_thumbprint: spki_thumbprint(&self.pota.raw_pub())?,
+            sata_spki_thumbprint: spki_thumbprint(&self.sata.raw_pub())?,
+            sapota_spki_thumbprint: Some(spki_thumbprint(&evidence::cert_public(&self.sapota)?)?),
+            backup_part: Some((
+                pid.try_into().context("invalid leaf partition id length")?,
+                public_thumbprint,
+            )),
+            flags: PolicyFlags::new()
+                .with_require_trusted_sa_key(true)
+                .with_allow_peer_cloning(false),
+            info: None,
+            data_spki_thumbprint: None,
+        })
+        .context("build leaf policy")
     }
 
     fn binding(&self, store: &FileStore) -> Result<Option<Vec<u8>>> {
@@ -151,7 +156,7 @@ impl Registration {
         let (_, public) = evidence::verify_attested_key(
             &evidence,
             domain.env().policy(),
-            &domain.env().policy().pota_pub_key.data,
+            &domain.env().policy().pota_spki_thumbprint,
         )?;
         anyhow::ensure!(
             evidence::cert_public(
@@ -169,9 +174,7 @@ impl Registration {
 
     fn saved_backup(&self, store: &FileStore) -> Result<(PartPolicy, JsonValue)> {
         let bound = self.binding(store)?.context("leaf has not enrolled")?;
-        let policy = PartPolicy::ref_from_wire(&bound)
-            .context("invalid bound policy")?
-            .clone();
+        let policy = PartPolicy::from_bytes(&bound).context("invalid bound policy")?;
         let record = store
             .load(&filename("remote", &self.name)?)?
             .context("root has no saved remote backup for this leaf")?;
@@ -201,7 +204,7 @@ impl Registration {
         policy: &PartPolicy,
         binding: &JsonValue,
     ) -> Result<()> {
-        evidence::verify_attested_key(evidence, policy, &policy.pota_pub_key.data)?;
+        evidence::verify_attested_key(evidence, policy, &policy.pota_spki_thumbprint)?;
         self.check_binding(store, policy.as_bytes())?;
         let pta = evidence
             .part_owner_cert_chain
@@ -370,7 +373,7 @@ pub(crate) fn handle(
         ("POST", "policy") => {
             let policy = registration.policy(
                 &wire::blob(request, "pid")?,
-                &wire::blob(request, "public")?,
+                spki_thumbprint(&wire::blob(request, "public")?)?,
             )?;
             registration.check_binding(store, policy.as_bytes())?;
             Ok(jzon::object! { policy: hex::encode(policy.as_bytes()) })
@@ -379,9 +382,11 @@ pub(crate) fn handle(
             let instance = request_instance(request)?;
             let binding = registration.instance_binding(store, &instance)?;
             let bytes = wire::blob(request, "policy")?;
-            let policy = PartPolicy::ref_from_wire(&bytes).context("invalid leaf policy")?;
-            let expected =
-                registration.policy(&policy.backup_part_id, &policy.backup_part_pub_key.data)?;
+            let policy = PartPolicy::from_bytes(&bytes).context("invalid leaf policy")?;
+            let (backup_pid, backup_thumbprint) = policy
+                .backup_part
+                .context("leaf policy has no backing partition")?;
+            let expected = registration.policy(&backup_pid, backup_thumbprint)?;
             anyhow::ensure!(
                 policy.as_bytes() == expected.as_bytes(),
                 "unexpected leaf policy"
@@ -391,7 +396,7 @@ pub(crate) fn handle(
             let (pid, public) = evidence::verify_report(
                 &wire::chain(request, "manufacturer")?,
                 &wire::blob(request, "report")?,
-                policy,
+                &policy,
             )?;
             anyhow::ensure!(
                 pki::pta_pub_from_csr(&csr)?[1..] == public,
@@ -406,7 +411,7 @@ pub(crate) fn handle(
                 );
             } else if instance == "primary" {
                 anyhow::ensure!(
-                    pid == policy.backup_part_pub_key.data,
+                    spki_thumbprint(&pid)? == backup_thumbprint,
                     "enrollment PID does not match leaf policy"
                 );
             }
@@ -479,16 +484,19 @@ pub(crate) fn handle(
                 wire::blob(request, "policy")? == bound,
                 "backup policy mismatch"
             );
-            let policy = PartPolicy::ref_from_wire(&bound).context("invalid bound policy")?;
+            let policy = &PartPolicy::from_bytes(&bound).context("invalid bound policy")?;
             let sender = wire::evidence(&request["sender"])?;
             let original_binding = registration
                 .instance_binding(store, "primary")?
                 .context("missing original creation binding")?;
             registration.verify_for_reseal(store, &sender, policy, &original_binding)?;
             let (pid, _) =
-                evidence::verify_attested_key(&sender, policy, &policy.pota_pub_key.data)?;
+                evidence::verify_attested_key(&sender, policy, &policy.pota_spki_thumbprint)?;
+            let pid = spki_thumbprint(&pid)?;
             anyhow::ensure!(
-                pid == policy.backup_part_pub_key.data,
+                policy
+                    .backup_part
+                    .is_some_and(|(_, thumbprint)| thumbprint == pid),
                 "backup belongs to another partition"
             );
             anyhow::ensure!(
@@ -504,7 +512,7 @@ pub(crate) fn handle(
             let (_, public) = evidence::verify_attested_key(
                 &receiver,
                 domain.env().policy(),
-                &domain.env().policy().pota_pub_key.data,
+                &domain.env().policy().pota_spki_thumbprint,
             )?;
             anyhow::ensure!(
                 evidence::cert_public(

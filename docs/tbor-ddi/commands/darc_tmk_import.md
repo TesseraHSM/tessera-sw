@@ -30,7 +30,7 @@ Handler flow:
    masked under is provisioned by SD setup).
 2. Verify `SHA-384(policy)` equals the partition's bound `policy_hash`,
    then validate `remote_cert_chain` (read out of band) anchored to the
-   policy `POTAPubKey`, recovering the terminal certificate's public key
+   policy POTA key thumbprint, recovering the terminal certificate's public key
    as the HPKE sender key.
 3. Unmask `masked_kex_key` → `RcvrPriv` (its masked-key kind must be
    `DarcKex`) and derive `RcvrPub`.
@@ -60,13 +60,13 @@ carrying the fixed-length buffers and the packed cert-descriptor list.
 | 8 | `session_id` | `session_id` (inline) | CO session this request is bound to; cross-checked against the SQE-carried session id. |
 | 12 | (padding) | `padding` (0..=3 B) | Places `masked_kex_key` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
 | 16 | `masked_kex_key` | `buffer` (180 B) | The receiver's masked DARC key-exchange key (from `DarcKexKeyGen`); unmasked on-device to `RcvrPriv`. Must be a `DarcKex`-kind masked key. |
-| 20 | `policy` | `buffer` (584 B) | The unified `PartPolicy` whose `POTAPubKey` anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
+| 20 | `policy` | `buffer` (max 384 B) | The partition policy CBOR document whose POTA key thumbprint anchors `remote_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
 | 24 | `sealed_tmk` | `buffer` (145 B) | The HPKE-Auth seal of the 32-byte TMK: `enc(SEC1 97) ‖ ct(TMK 32 + GCM tag 16)`. |
 | 28 | `remote_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | Packed `(index, length)` descriptors for the POTA-anchored sender certificate chain; the DER bytes are carried **out of band** as SGL Data Blocks. |
 
 ### Data section
 
-Carries the 180-byte `masked_kex_key`, 584-byte `policy`, 145-byte
+Carries the 180-byte `masked_kex_key`, `policy` (at most 384 B), 145-byte
 `sealed_tmk`, and the packed cert-descriptor list.  The certificate DER
 bytes referenced by the descriptors travel out of band.
 

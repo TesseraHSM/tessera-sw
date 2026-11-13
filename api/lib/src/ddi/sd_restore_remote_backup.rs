@@ -49,7 +49,7 @@ impl From<TborSdRestoreRemoteBackupResp> for HsmSdRestoreResult {
 /// * `sender_evidence` - Sender attestation evidence (cert chains and
 ///   report), transmitted out of band. Verified only when the policy sets
 ///   `require_trusted_sa_key`; otherwise ignored.
-/// * `policy` - Unified [`PartPolicy`] image ([`PART_POLICY_LEN`] bytes).
+/// * `policy` - Partition policy CBOR document (`1..=`[`PART_POLICY_MAX_LEN`] bytes).
 /// * `src_remote_backup` - The remote backup to restore, exactly
 ///   [`POK_REMOTE_BACKUP_LEN`] bytes.
 /// * `prev_sd_mk_backup` - The previous security-domain masking-key backup,
@@ -80,7 +80,7 @@ pub(crate) fn sd_restore_remote_backup_ex(
     let prev_sd_mk_backup: [u8; SD_MK_BACKUP_LEN] = prev_sd_mk_backup
         .try_into()
         .map_err(|_| HsmError::InvalidArgument)?;
-    let policy = decode_policy(policy)?;
+    let policy = policy_wire(policy)?;
 
     // Flatten the sender cert chain and evidence into descriptors + shared
     // OOB items.  The sender chain is pushed first so its descriptor
@@ -88,16 +88,10 @@ pub(crate) fn sd_restore_remote_backup_ex(
     let mut oob: Vec<&[u8]> = Vec::new();
     let sender_chain = push_cert_chain(sender_cert_chain, &mut oob, EVIDENCE_CHAIN_MAX_CERTS)?;
 
-    // The attestation evidence is verified by the firmware only
-    // when the policy sets `require_trusted_sa_key`; otherwise it is
-    // ignored.  Pack (and validate) it only in that case, and pack empty
-    // descriptors — shipping no DER bytes — when the flag is clear, so the
-    // documented flag-clear contract (empty evidence) is expressible.
-    let sender = if policy.flags.require_trusted_sa_key() {
-        push_evidence(sender_evidence, &mut oob)?
-    } else {
-        EvidenceDescriptors::empty()
-    };
+    // The attestation evidence is verified by the firmware only when the
+    // policy sets `require_trusted_sa_key`; empty evidence ships no DER
+    // bytes.
+    let sender = push_evidence_if_present(sender_evidence, &mut oob)?;
 
     let req = TborSdRestoreRemoteBackupReq {
         session_id,

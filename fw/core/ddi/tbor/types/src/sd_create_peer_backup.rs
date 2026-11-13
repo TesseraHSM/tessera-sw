@@ -25,7 +25,7 @@
 //!   sender's private HPKE key (`SndrPriv`) that authenticates the seal;
 //!   never a vault handle.
 //! * `policy` — the unified [`PartPolicy`] describing the security domain
-//!   being backed up.  Length pinned to [`PART_POLICY_LEN`] (584 B); its
+//!   being backed up.  Length bounded by [`PART_POLICY_MAX_LEN`] (384 B); its
 //!   SHA-384 digest must equal the partition's bound `policy_hash` and the
 //!   receiver report's v2 `policy_hash`.
 //! * `dst_evidence` — **destination** peer side-band attestation evidence
@@ -43,7 +43,7 @@
 use tsra_fw_ddi_tbor_api::tbor;
 
 use crate::evidence::*;
-pub use crate::policy::PART_POLICY_LEN;
+pub use crate::policy::PART_POLICY_MAX_LEN;
 pub use crate::sd_create_remote_backup::MASKED_SD_LEN;
 pub use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 pub use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
@@ -57,9 +57,9 @@ pub const TBOR_OP_SD_CREATE_PEER_BACKUP: u8 = 0x0E;
 const _: () = assert!(MASKED_SEALING_KEY_LEN == 280);
 
 // `policy` carries the unified `PartPolicy`; the derive needs an integer
-// literal on the field, so the length is spelled out as `484` and pinned
+// literal on the field, so the maximum length is spelled out as `384` and pinned
 // against the canonical value here.
-const _: () = assert!(PART_POLICY_LEN == 584);
+const _: () = assert!(PART_POLICY_MAX_LEN == 384);
 
 // `pok_local_backup` is a masked BKS3 envelope; the derive needs an integer
 // literal on the field, so the length is spelled out as `280` and pinned
@@ -88,11 +88,11 @@ pub struct TborSdCreatePeerBackupReq<'a> {
     pub masked_sealing_key: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] describing the security
-    /// domain being backed up.  Length pinned to [`PART_POLICY_LEN`]
-    /// (584 B).
+    /// domain being backed up.  Length bounded by [`PART_POLICY_MAX_LEN`]
+    /// (384 B).
     ///
     /// [`PartPolicy`]: crate::policy::PartPolicy
-    #[tbor(buffer, len = 584)]
+    #[tbor(buffer, max_len = 384)]
     pub policy: &'a [u8],
 
     /// Destination peer side-band attestation evidence (manufacturer /
@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn request_round_trips_fields() {
         let masked = [0u8; MASKED_SEALING_KEY_LEN];
-        let policy = [0u8; PART_POLICY_LEN];
+        let policy = [0u8; PART_POLICY_MAX_LEN];
         let pok_local = [0xABu8; MASKED_SD_LEN];
         let cert = CertDescriptor {
             index: 0,
@@ -161,7 +161,7 @@ mod tests {
             .unwrap()
             .finish();
         assert_eq!(frame.masked_sealing_key().len(), MASKED_SEALING_KEY_LEN);
-        assert_eq!(frame.policy().len(), PART_POLICY_LEN);
+        assert_eq!(frame.policy().len(), PART_POLICY_MAX_LEN);
         assert_eq!(frame.pok_local_backup().len(), MASKED_SD_LEN);
     }
 

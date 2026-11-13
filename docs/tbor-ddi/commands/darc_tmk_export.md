@@ -18,7 +18,7 @@ import opens a `sealed_tmk` and re-masks it under the SDMK, export unmasks
 a local `masked_tmk` and HPKE-Auth-seals it to the target.
 
 The target is authenticated by a certificate chain anchored to the policy
-`DATAPubKey` — the export-side mirror of the `POTAPubKey`-anchored sender
+DATA key thumbprint — the export-side mirror of the POTA-anchored sender
 chain `DarcTmkImport` verifies (the two anchors are distinct: export
 verifies the target against DATA, import verifies the sender against POTA).
 
@@ -29,7 +29,7 @@ Handler flow:
    is masked under is provisioned by SD setup).
 2. Verify `SHA-384(policy)` equals the partition's bound `policy_hash`,
    then validate `target_cert_chain` (read out of band) anchored to the
-   policy `DATAPubKey`, recovering the terminal certificate's public key
+   policy DATA key thumbprint, recovering the terminal certificate's public key
    as the HPKE receiver key `RcvrPub`.
 3. Unmask `masked_sender_key` → `SndrPriv` (its masked-key kind must be
    `DarcKex`) and derive `SndrPub`.
@@ -58,13 +58,13 @@ carrying the fixed-length buffers and the packed cert-descriptor list.
 | 16 | `masked_sender_key` | `buffer` (180 B) | The source's masked DARC key-exchange key (from `DarcKexKeyGen`); unmasked on-device to `SndrPriv`. Must be a `DarcKex`-kind masked key. |
 | 20 | (padding) | `padding` (0..=3 B) | Places `masked_tmk` on a 4-byte boundary from the start of the message. See [Alignment padding](../README.md#alignment-padding). |
 | 24 | `masked_tmk` | `buffer` (164 B) | The locally-masked TMK envelope (from `DarcTmkGen`/`DarcTmkImport`); unmasked on-device to the 32-byte TMK. Must be a `DarcTmk`-kind masked key. |
-| 28 | `policy` | `buffer` (584 B) | The unified `PartPolicy` whose `DATAPubKey` anchors `target_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
+| 28 | `policy` | `buffer` (max 384 B) | The partition policy CBOR document whose DATA key thumbprint anchors `target_cert_chain`; its SHA-384 digest must equal the bound `policy_hash`. |
 | 32 | `target_cert_chain` | `buffer` (`CertDescriptor[1..=2]`, 3 B each) | Packed `(index, length)` descriptors for the DATA-anchored target certificate chain; the DER bytes are carried **out of band** as SGL Data Blocks. |
 
 ### Data section
 
-Carries the 180-byte `masked_sender_key`, 164-byte `masked_tmk`, 584-byte
-`policy`, and the packed cert-descriptor list.  The certificate DER bytes
+Carries the 180-byte `masked_sender_key`, 164-byte `masked_tmk`,
+`policy` (at most 384 B), and the packed cert-descriptor list.  The certificate DER bytes
 referenced by the descriptors travel out of band.
 
 ## Response
@@ -88,7 +88,7 @@ Carries the 145-byte `sealed_tmk`.
 |---|---|
 | `InvalidPermissions` | The calling session is a Crypto User (this command is Crypto-Officer-only) |
 | `SessionNotFound` | `session_id` does not refer to an allocated slot, or the slot is not `Active` |
-| `InvalidArg` | The partition is not `Initialized`, the security domain is not initialized, the policy hash mismatches, the policy carries no `DATAPubKey` anchor, the cert chain is missing/not DATA-anchored, or the unmasked TMK is not 32 bytes |
+| `InvalidArg` | The partition is not `Initialized`, the security domain is not initialized, the policy hash mismatches, the policy carries no `data_spki_thumbprint`, the cert chain is missing/not DATA-anchored, or the unmasked TMK is not 32 bytes |
 | `UnsupportedKeyScope` | The security-domain masking key (SDMK) is not provisioned yet |
 | `UnsupportedKeyType` | `masked_sender_key` is not a `DarcKex` masked key, or `masked_tmk` is not a `DarcTmk` masked key |
 | `DdiDecodeFailed` | Malformed request body |

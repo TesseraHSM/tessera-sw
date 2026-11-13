@@ -33,13 +33,10 @@ use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::TestCtx;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::CertDescriptor;
-use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::TborSdResealRemoteBackupReq;
 use tsra_ddi_tbor_types::TborStatus;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
-use zerocopy::TryFromBytes;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::sd_create_remote_backup::backup_request;
@@ -164,7 +161,7 @@ fn reseal_request(
     session_id: u16,
     masked_receiver_key: Vec<u8>,
     evidence: &ResealEvidence,
-    policy: &[u8; PART_POLICY_LEN],
+    policy: &[u8],
     src_remote_backup: &[u8; POK_REMOTE_BACKUP_LEN],
 ) -> TborSdResealRemoteBackupReq {
     TborSdResealRemoteBackupReq {
@@ -173,7 +170,7 @@ fn reseal_request(
             .as_slice()
             .try_into()
             .expect("masked receiver key is exactly MASKED_SEALING_KEY_LEN bytes"),
-        policy: PartPolicy::try_read_from_bytes(policy).expect("policy image is canonical"),
+        policy: policy.to_vec(),
         src_mfgr_cert_chain: evidence.src_mfgr.clone(),
         src_owner_cert_chain: evidence.src_owner.clone(),
         src_part_owner_cert_chain: evidence.src_part_owner.clone(),
@@ -197,7 +194,7 @@ fn create_source_backup(
     sata_key: &CaKey,
     masked_sender_key: Vec<u8>,
     receiver_report: &[u8],
-    policy: &[u8; PART_POLICY_LEN],
+    policy: &[u8],
 ) -> [u8; POK_REMOTE_BACKUP_LEN] {
     let rcvr_ev = build_receiver_evidence(pid_pub, receiver_pub, sata_key, receiver_report);
     let req = backup_request(session_id, masked_sender_key, &rcvr_ev, policy);

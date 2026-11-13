@@ -19,7 +19,8 @@
 //! 2. Bind the caller-supplied [`PartPolicy`] to the one fixed at
 //!    `PartInit` (`SHA-384(policy) == policy_hash`), validate it, and
 //!    verify it names this partition as the backing partition
-//!    (`backup_part_id == PID`, `backup_part_pub_key == PID pubkey`;
+//!    (`backup_part_id == PID`, `backup_part_spki_thumbprint ==
+//!    thumbprint(PID pubkey)`;
 //!    the caller populated both from `PartInfo` before `PartInit`).
 //! 3. Recover the recipient `RcvrPub` from the out-of-band receiver
 //!    material.  The receiver certificate chain (spec `RcvrCertChain`) is
@@ -58,13 +59,14 @@ use tsra_fw_core_crypto_hpke::HpkeSealConfig;
 use tsra_fw_core_crypto_hpke::HpkeSuite;
 use tsra_fw_core_crypto_key_masking::aead::peek_metadata;
 use tsra_fw_core_crypto_key_masking::aead::unmask;
+use tsra_fw_core_crypto_x509_chain::p384_spki_thumbprint;
+use tsra_fw_core_crypto_x509_chain::P384_SPKI_LEN;
+use tsra_fw_core_crypto_x509_chain::SPKI_THUMBPRINT_LEN;
 use tsra_fw_core_evidence::verify_evidence;
 use tsra_fw_core_evidence::verify_receiver_cert_chain;
 use tsra_fw_core_evidence::EvidenceRefs;
 use tsra_fw_core_evidence::TrustAnchors;
 use tsra_fw_ddi_tbor_types::policy::PartPolicy;
-use tsra_fw_ddi_tbor_types::policy::PolicyKeyKind;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_fw_ddi_tbor_types::TborSdCreateRemoteBackupResp;
 use tsra_fw_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
@@ -104,23 +106,31 @@ const SEC1_UNCOMPRESSED: u8 = 0x04;
 
 /// Verify the policy names **this** partition as the backing partition.
 ///
-/// `backup_part_id` must equal the partition PID and `backup_part_pub_key`
-/// must equal its PID public key (raw P-384 `X ‖ Y`, 96 B).  Both policy
-/// fields were populated by the caller from `PartInfo` before `PartInit`
-/// (same `part_state` source), so this is a direct byte comparison — no
-/// endianness conversion.
-fn verify_backing_partition<P: HsmPal>(pal: &P, io: &P::Io, policy: &PartPolicy) -> HsmResult<()> {
+/// `backup_part_id` must equal the partition PID and
+/// `backup_part_spki_thumbprint` must equal the public-key thumbprint of its
+/// PID public key (raw big-endian P-384 `X ‖ Y`).  The caller computed both
+/// policy fields from `PartInfo` before `PartInit`.
+///
+/// # Errors
+/// * [`HsmError::InvalidArg`] — the policy has no backing partition, or it
+///   names a different one.
+async fn verify_backing_partition<P: HsmPal>(
+    pal: &P,
+    io: &P::Io,
+    alloc: &impl HsmScopedAlloc,
+    policy: &PartPolicy<'_>,
+) -> HsmResult<()> {
+    let backup = policy.backup_part.as_ref().ok_or(HsmError::InvalidArg)?;
     let pid = part_state::part_id(pal, io)?;
-    if pid[..] != policy.backup_part_id[..] {
+    if pid[..] != backup.id[..] {
         return Err(HsmError::InvalidArg);
     }
 
-    let key = &policy.backup_part_pub_key;
-    if key.kind() != PolicyKeyKind::Ecc384 || key.len() != POLICY_MAX_KEY_LEN {
-        return Err(HsmError::InvalidArg);
-    }
     let pid_pub = part_state::part_id_pub_key(pal, io)?;
-    if pid_pub[..] != key.data[..] {
+    let spki = alloc.dma_alloc(P384_SPKI_LEN)?;
+    let thumb = alloc.dma_alloc(SPKI_THUMBPRINT_LEN)?;
+    p384_spki_thumbprint(pal, io, spki, pid_pub, thumb).await?;
+    if thumb[..] != backup.spki_thumbprint[..] {
         return Err(HsmError::InvalidArg);
     }
     Ok(())
@@ -185,28 +195,18 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
 
     // SD-policy identity binding: the
     // policy names this partition as the backing partition.  The
-    // caller populated `backup_part_id` / `backup_part_pub_key`
+    // caller populated `backup_part_id` / `backup_part_spki_thumbprint`
     // from `PartInfo` (available in `Initializing`, before
-    // `PartInit`), so they must equal this partition's PID and PID
+    // `PartInit`), so they must name this partition's PID and PID
     // public key.
-    verify_backing_partition(pal, io, part_policy)?;
+    verify_backing_partition(pal, io, alloc, &part_policy).await?;
 
     // Receiver key authorization: validate
     // the receiver certificate chain, anchor it to the policy SATA key,
     // and recover the recipient public key (`RcvrPub`) into `pk_r`.  This
     // is the sole source of the seal recipient, always required.
-    let sata = &part_policy.sata_pub_key;
-    if sata.kind() != PolicyKeyKind::Ecc384 || sata.len() != POLICY_MAX_KEY_LEN {
-        return Err(HsmError::InvalidArg);
-    }
-    verify_receiver_cert_chain(
-        pal,
-        io,
-        req.receiver_cert_chain(),
-        &sata.data[..POLICY_MAX_KEY_LEN],
-        pk_r,
-    )
-    .await?;
+    let sata = part_policy.sata_spki_thumbprint;
+    verify_receiver_cert_chain(pal, io, req.receiver_cert_chain(), sata, pk_r).await?;
 
     // Receiver attestation: required only
     // when the policy demands a trusted Sealing Authority key.  Validate
@@ -215,10 +215,9 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
     // `RcvrPub` recovered above.  When the flag is clear the evidence
     // group is ignored (spec `Option<RcvrEvidence>` absent).
     if part_policy.flags.require_trusted_sa_key() {
-        let sapota = &part_policy.sapota_pub_key;
-        if sapota.kind() != PolicyKeyKind::Ecc384 || sapota.len() != POLICY_MAX_KEY_LEN {
-            return Err(HsmError::InvalidArg);
-        }
+        let sapota = part_policy
+            .sapota_spki_thumbprint
+            .ok_or(HsmError::InvalidArg)?;
         let evidence = req.receiver_evidence();
         let report_pk = alloc.dma_alloc(pk_r.len())?;
         verify_evidence(
@@ -231,7 +230,7 @@ async fn verify_policy_and_receiver_evidence<P: HsmPal>(
                 report: evidence.evidence(),
             },
             &TrustAnchors {
-                part_owner_anchor: &sapota.data[..POLICY_MAX_KEY_LEN],
+                part_owner_anchor: sapota,
                 require_sd_sealing: false,
             },
             report_pk,

@@ -26,13 +26,29 @@ use tsra_crypto::EcdsaAlgo;
 use tsra_crypto::HashAlgo;
 use tsra_crypto::HashOp;
 use tsra_crypto::SignOp;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
 
 /// Length of a SEC1 uncompressed P-384 point (`0x04 ‖ X ‖ Y`).
 pub const SEC1_PUB_LEN: usize = 97;
 
 /// Length of a raw P-384 public point (`X ‖ Y`, big-endian, no tag).
 pub const RAW_PUB_LEN: usize = 96;
+
+/// DER prefix of the canonical P-384 SubjectPublicKeyInfo, through the
+/// SEC1 uncompressed-point marker; followed by `X ‖ Y`.
+const P384_SPKI_PREFIX: [u8; 24] = [
+    0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b,
+    0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04,
+];
+
+/// Policy thumbprint of a P-384 public key: SHA-384 over its canonical
+/// SubjectPublicKeyInfo DER.
+pub fn spki_thumbprint(raw_pub: &[u8; RAW_PUB_LEN]) -> [u8; POLICY_THUMBPRINT_LEN] {
+    let mut spki = Vec::with_capacity(P384_SPKI_PREFIX.len() + RAW_PUB_LEN);
+    spki.extend_from_slice(&P384_SPKI_PREFIX);
+    spki.extend_from_slice(raw_pub);
+    sha384(&spki)
+}
 
 const NOT_BEFORE: &[u8; 15] = b"20250101000000Z";
 const NOT_AFTER: &[u8; 15] = b"20350101000000Z";
@@ -76,10 +92,14 @@ impl CaKey {
         }
     }
 
-    /// Raw `X ‖ Y` (96-byte, big-endian) public coordinates — the form a
-    /// policy `pota_pub_key` stores.
+    /// Raw `X ‖ Y` (96-byte, big-endian) public coordinates.
     pub fn raw_pub(&self) -> [u8; RAW_PUB_LEN] {
         self.pub_sec1[1..].try_into().expect("raw pub")
+    }
+
+    /// Policy thumbprint of this key (see [`spki_thumbprint`]).
+    pub fn spki_thumbprint(&self) -> [u8; POLICY_THUMBPRINT_LEN] {
+        spki_thumbprint(&self.raw_pub())
     }
 
     /// SEC1 uncompressed public key (`0x04 ‖ X ‖ Y`, 97 bytes).
@@ -111,13 +131,12 @@ impl CaKey {
 
 /// Reusable POTA root fixture for tests that provision a partition.
 ///
-/// Owns the POTA signing key, its self-signed root certificate, and the
-/// certificate thumbprint supplied to `PartInit`. Command tests remain
-/// responsible for constructing their command-specific partition policy.
+/// Owns the POTA signing key and its self-signed root certificate.
+/// Command tests remain responsible for constructing their
+/// command-specific partition policy.
 pub struct PotaFixture {
     ca: CaKey,
     root_der: Vec<u8>,
-    thumbprint: [u8; POTA_THUMBPRINT_LEN],
 }
 
 impl PotaFixture {
@@ -125,22 +144,17 @@ impl PotaFixture {
     pub fn generate() -> Self {
         let ca = CaKey::generate();
         let root_der = build_root(&ca);
-        let thumbprint = sha384(&root_der);
-        Self {
-            ca,
-            root_der,
-            thumbprint,
-        }
+        Self { ca, root_der }
     }
 
-    /// Raw POTA public coordinates for the partition policy.
+    /// Raw POTA public coordinates.
     pub fn raw_pub(&self) -> [u8; RAW_PUB_LEN] {
         self.ca.raw_pub()
     }
 
-    /// SHA-384 thumbprint of the self-signed POTA root certificate.
-    pub fn thumbprint(&self) -> &[u8; POTA_THUMBPRINT_LEN] {
-        &self.thumbprint
+    /// POTA public-key thumbprint for the partition policy.
+    pub fn spki_thumbprint(&self) -> [u8; POLICY_THUMBPRINT_LEN] {
+        self.ca.spki_thumbprint()
     }
 
     /// Issue a root-to-PTA chain for the partition PTA public key.
@@ -152,10 +166,10 @@ impl PotaFixture {
     }
 }
 
-/// SHA-384 of a DER certificate (POTA root thumbprint).
-fn sha384(input: &[u8]) -> [u8; POTA_THUMBPRINT_LEN] {
+/// SHA-384 of `input`.
+fn sha384(input: &[u8]) -> [u8; POLICY_THUMBPRINT_LEN] {
     let mut hash = HashAlgo::sha384();
-    let mut out = [0u8; POTA_THUMBPRINT_LEN];
+    let mut out = [0u8; POLICY_THUMBPRINT_LEN];
     hash.hash(input, Some(&mut out)).expect("SHA-384");
     out
 }

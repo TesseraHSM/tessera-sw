@@ -24,7 +24,6 @@
 use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
-use crate::policy::PartPolicy;
 use crate::sd_create_remote_backup::MASKED_SD_LEN;
 use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
@@ -51,9 +50,10 @@ pub struct TborSdCreatePeerBackupReq {
     #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
-    /// Unified [`PartPolicy`] describing the security domain being backed
-    /// up.  Encoded as its 584-byte little-endian image.
-    pub policy: PartPolicy,
+    /// Unified partition policy describing the security domain being backed
+    /// up.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    #[tbor(max_len = 384)]
+    pub policy: Vec<u8>,
 
     /// Destination manufacturer certificate-chain descriptors.  Flattened
     /// from the firmware `dst_evidence` field group (first of its four TOC
@@ -100,7 +100,7 @@ mod tests {
         let req = TborSdCreatePeerBackupReq {
             session_id: 9,
             masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-            policy: PartPolicy::zeroed(),
+            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
             dst_mfgr_cert_chain: Vec::new(),
             dst_owner_cert_chain: Vec::new(),
             dst_part_owner_cert_chain: Vec::new(),
@@ -111,10 +111,11 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The 584-byte policy plus the sealing key and the backup must be
+        // The maximum-length policy plus the sealing key and the backup must be
         // carried in the data section.
         assert!(
-            frame.len() > 584 + MASKED_SEALING_KEY_LEN + MASKED_SD_LEN,
+            frame.len()
+                > crate::policy::PART_POLICY_MAX_LEN + MASKED_SEALING_KEY_LEN + MASKED_SD_LEN,
             "encoded frame must carry the policy, key, and backup"
         );
     }

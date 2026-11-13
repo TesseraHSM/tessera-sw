@@ -3,8 +3,8 @@
 
 //! Helper for the TBOR `PartFinal` command.
 //!
-//! Re-supplies the unified `PartPolicy` (so the device can re-derive
-//! `POTAPubKey` and verify `SHA-384(part_policy) == policy_hash`), the PTA
+//! Re-supplies the partition policy (so the device can recover the POTA
+//! trust anchor and verify `SHA-384(part_policy) == policy_hash`), the PTA
 //! certificate chain (carried out of band and described by
 //! `(index, length)` [`CertDescriptor`]s), and an optional prior
 //! `local_mk` backup to restore.
@@ -26,17 +26,16 @@
 use tsra_ddi_interface::DdiError;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::CertDescriptor;
-use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::TborPartFinalReq;
 use tsra_ddi_tbor_types::TborPartFinalResp;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
+use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
 
 use super::finish::SessionHandshake;
 use crate::fixture::TestDev;
 
 /// Issue `PartFinal` on the CO session represented by `session`.
 ///
-/// `part_policy` must be exactly [`PART_POLICY_LEN`] and match the policy
+/// `part_policy` must fit [`PART_POLICY_MAX_LEN`] and match the policy
 /// bound at `PartInit`. `certs` are the PTA-chain certificate DERs
 /// (root → PTA), transferred out of band; each becomes one SGL data block
 /// referenced by a `(index, length)` descriptor.  Callers exercising a
@@ -51,11 +50,9 @@ pub fn part_final(
     prev_local_mk_backup: &[u8],
     certs: &[&[u8]],
 ) -> Result<TborPartFinalResp, DdiError> {
-    if part_policy.len() != PART_POLICY_LEN {
+    if part_policy.len() > PART_POLICY_MAX_LEN {
         return Err(DdiError::InvalidParameter);
     }
-    let policy = <PartPolicy as zerocopy::TryFromBytes>::try_read_from_bytes(part_policy)
-        .map_err(|_| DdiError::InvalidParameter)?;
 
     let cert_descriptors: Vec<CertDescriptor> = if certs.is_empty() {
         vec![CertDescriptor::default()]
@@ -78,7 +75,7 @@ pub fn part_final(
 
     let req = TborPartFinalReq {
         session_id: session.session_id,
-        part_policy: policy,
+        part_policy: part_policy.to_vec(),
         cert_descriptors,
         prev_local_mk_backup: prev_local_mk_backup.to_vec(),
     };
@@ -104,11 +101,9 @@ pub fn part_final_raw(
     descriptors: &[(u8, u16)],
     oob_items: &[&[u8]],
 ) -> Result<TborPartFinalResp, DdiError> {
-    if part_policy.len() != PART_POLICY_LEN {
+    if part_policy.len() > PART_POLICY_MAX_LEN {
         return Err(DdiError::InvalidParameter);
     }
-    let policy = <PartPolicy as zerocopy::TryFromBytes>::try_read_from_bytes(part_policy)
-        .map_err(|_| DdiError::InvalidParameter)?;
 
     let cert_descriptors = descriptors
         .iter()
@@ -120,7 +115,7 @@ pub fn part_final_raw(
 
     let req = TborPartFinalReq {
         session_id: session.session_id,
-        part_policy: policy,
+        part_policy: part_policy.to_vec(),
         cert_descriptors,
         prev_local_mk_backup: prev_local_mk_backup.to_vec(),
     };

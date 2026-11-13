@@ -14,8 +14,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::*;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 const CHAIN_LEAF_INDEX: usize = 1;
 const POLICY_MUTATION_MASK: u8 = 1;
@@ -220,7 +218,7 @@ fn build_policy_and_finalize(
     session: &tsra_ddi_tbor_test_harness::SessionHandshake,
     sata_key: &CaKey,
     pota_key: &CaKey,
-) -> ([u8; PART_POLICY_LEN], [u8; RAW_PUB_LEN]) {
+) -> (Vec<u8>, [u8; RAW_PUB_LEN]) {
     let part_info = ctx.tbor(&TborPartInfoReq::new()).expect("PartInfo");
     let pid_pub: [u8; RAW_PUB_LEN] = part_info
         .pid_pub_key
@@ -228,26 +226,11 @@ fn build_policy_and_finalize(
         .try_into()
         .expect("PartInfo public key is P-384");
 
-    let mut policy_bytes = common::known_good_part_policy(pota_key.raw_pub());
-    let mut policy =
-        PartPolicy::try_read_from_bytes(&policy_bytes).expect("known-good policy must decode");
-    policy.sata_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sata_key.raw_pub(),
-    );
-    policy.backup_part_id.copy_from_slice(&part_info.pid);
-    policy.backup_part_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, POLICY_MAX_KEY_LEN as u16, pid_pub);
-    policy_bytes.copy_from_slice(policy.as_bytes());
+    let policy_bytes =
+        common::backup_test_policy(pota_key, sata_key, &part_info.pid, &pid_pub).encode();
 
     let init = ctx
-        .part_init(
-            session,
-            &common::mach_seed(),
-            &policy_bytes,
-            &common::pota_thumbprint(),
-        )
+        .part_init(session, &common::mach_seed(), &policy_bytes)
         .expect("PartInit");
     let pta_chain = make_pta_chain(pota_key, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(session, &policy_bytes, &[], &pta_chain.der_items())
@@ -293,7 +276,7 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
             index: report_item.index,
             length: report_item.length,
         },
-        policy: PartPolicy::try_read_from_bytes(&policy).expect("policy image is canonical"),
+        policy: policy.clone(),
     };
     let src_remote_backup = ctx
         .tbor_oob(&request, &oob)
@@ -304,7 +287,7 @@ fn build_fixture(ctx: &TestCtx, wrong_receiver_key: bool, key_scope: common::Key
     let request = TborSdResealRemoteBackupReq {
         session_id: session.session_id,
         masked_sealing_key: masked_receiver,
-        policy: PartPolicy::try_read_from_bytes(&policy).expect("policy image is canonical"),
+        policy: policy.clone(),
         src_mfgr_cert_chain: evidence.src_mfgr.clone(),
         src_owner_cert_chain: evidence.src_owner.clone(),
         src_part_owner_cert_chain: evidence.src_part_owner.clone(),
@@ -417,7 +400,7 @@ fn run_case(ctx: &TestCtx, mutation: Mutation, key_scope: common::KeyScope) {
             );
         }
         Mutation::PolicyHashMismatch => {
-            fixture.request.policy.info[0] ^= POLICY_MUTATION_MASK;
+            common::mutate_policy_tail(&mut fixture.request.policy, POLICY_MUTATION_MASK);
             assert_rejected(ctx, &fixture);
         }
         Mutation::SourceReportOutOfRange => {

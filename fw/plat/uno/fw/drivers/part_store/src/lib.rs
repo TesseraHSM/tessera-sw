@@ -11,7 +11,7 @@
 //! `HsmPartPersistentStore` byte-for-byte for the fields it shares (version,
 //! flags, session table, lockout policy, VM-launch GUID, partition identity,
 //! certificate, masked boot key, sealed BK3, nonce, BK3 session key); the
-//! two Uno-specific fields (`policy_hash`, `pota_thumbprint`) are appended
+//! Uno-specific fields (`policy_hash` and the working state) are appended
 //! flat into the reference layout's trailing reserved region, so no shared
 //! field offset moves.
 //!

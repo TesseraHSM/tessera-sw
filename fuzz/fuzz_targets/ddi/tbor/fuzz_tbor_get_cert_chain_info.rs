@@ -88,14 +88,9 @@ fn prepare_partition(ctx: &TestCtx, selector: u8) -> Lifecycle {
         common::finalize_partition(ctx, &session);
     } else {
         let pota = CaKey::generate();
-        let policy = common::known_good_part_policy(pota.raw_pub());
-        ctx.part_init(
-            &session,
-            &common::mach_seed(),
-            &policy,
-            &common::pota_thumbprint(),
-        )
-        .expect("PartInit setup must succeed");
+        let policy = common::known_good_part_policy(pota.spki_thumbprint());
+        ctx.part_init(&session, &common::mach_seed(), &policy)
+            .expect("PartInit setup must succeed");
     }
     ctx.session_close(session.session_id)
         .expect("close lifecycle setup session");

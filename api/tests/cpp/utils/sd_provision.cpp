@@ -31,8 +31,8 @@ using Bytes = std::vector<uint8_t>;
 
 // ── Wire-schema constants (mirrors tsra_ddi_tbor_types) ────────────────────
 constexpr size_t kMachSeedLen = 32;   // MACH_SEED_LEN
-constexpr size_t kThumbprintLen = 48; // POTA/SATA_THUMBPRINT_LEN
-constexpr size_t kPolicyLen = 584;    // PART_POLICY_LEN
+constexpr size_t kThumbprintLen = 48; // POLICY_THUMBPRINT_LEN
+constexpr size_t kPolicyMaxLen = 384; // PART_POLICY_MAX_LEN
 constexpr size_t kPskLen = 32;        // PSK_LEN
 constexpr size_t kRawPubLen = 96;     // raw P-384 X‖Y
 constexpr size_t kSec1PubLen = 97;    // 0x04‖X‖Y
@@ -859,86 +859,121 @@ bool pta_pub_from_csr(const uint8_t *csr, size_t len, uint8_t out[kSec1PubLen])
     return true;
 }
 
-// ── Policy image ─────────────────────────────────────────────────────────────
+// ── Policy document ──────────────────────────────────────────────────────────
 
-/// Write an `Ecc384` policy key slot (`kind(2) ‖ len(2) ‖ data(96)`, LE) at
-/// `off`.
-void write_key_slot(std::vector<uint8_t> &policy, size_t off, const uint8_t data[kRawPubLen])
+/// RAII owner of a `tsra_part_policy_builder` handle.
+struct PolicyBuilder
 {
-    policy[off] = 0; // kind = Ecc384 = 0 (LE u16)
-    policy[off + 1] = 0;
-    policy[off + 2] = static_cast<uint8_t>(kRawPubLen); // len = 96 (LE u16)
-    policy[off + 3] = 0;
-    std::memcpy(&policy[off + 4], data, kRawPubLen);
-}
-
-/// Build a 584-byte unified `PartPolicy` image binding the real POTA public
-/// key, mirroring the Rust `part_policy_with_pota` fixture so `PartFinal` can
-/// validate a chain anchored to it.
-std::vector<uint8_t> build_part_policy(
-    const uint8_t pota_raw[kRawPubLen],
-    bool allow_peer_cloning = true
-)
-{
-    constexpr size_t kOffPota = 2;
-    constexpr size_t kOffSata = 102;
-    constexpr size_t kOffFlags = 418;
-    constexpr size_t kOffInfo = 419;
-
-    std::vector<uint8_t> policy(kPolicyLen, 0);
-    policy[0] = 1; // version major
-    policy[1] = 0; // version minor
-
-    write_key_slot(policy, kOffPota, pota_raw);
-
-    // SATA slot: a filler Ecc384 key (not chain-validated in this flow).
-    uint8_t sata_fill[kRawPubLen];
-    for (size_t i = 0; i < kRawPubLen; ++i)
+    PolicyBuilder()
     {
-        sata_fill[i] = static_cast<uint8_t>((0x20 + i) | 0x80);
+        EXPECT_EQ(tsra_part_policy_builder_new(&handle), TSRA_STATUS_SUCCESS);
     }
-    write_key_slot(policy, kOffSata, sata_fill);
+    ~PolicyBuilder()
+    {
+        tsra_part_policy_builder_free(handle);
+    }
+    PolicyBuilder(const PolicyBuilder &) = delete;
+    PolicyBuilder &operator=(const PolicyBuilder &) = delete;
 
-    // `allow_peer_cloning` (bit 2) gates the peer commands
-    // (SdCreatePeerBackup / SdRestorePeerBackup); it is inert for the
-    // non-peer commands (create/reseal/restore-remote and restore-local),
-    // which don't gate on it.
+    /// Set a role's key given in `format`.
+    void set_key(
+        tsra_status (*setter)(tsra_part_policy_builder *, tsra_policy_key_format, const tsra_buffer *),
+        tsra_policy_key_format format,
+        const uint8_t *key,
+        size_t len
+    )
+    {
+        tsra_buffer buf{ const_cast<uint8_t *>(key), static_cast<uint32_t>(len) };
+        EXPECT_EQ(setter(handle, format, &buf), TSRA_STATUS_SUCCESS);
+    }
+
+    /// Size-probe then serialize the policy document.
+    Bytes build()
+    {
+        tsra_buffer probe{ nullptr, 0 };
+        EXPECT_EQ(tsra_part_policy_build(handle, &probe), TSRA_STATUS_BUFFER_TOO_SMALL);
+        Bytes policy(probe.len);
+        tsra_buffer out{ policy.data(), static_cast<uint32_t>(policy.size()) };
+        EXPECT_EQ(tsra_part_policy_build(handle, &out), TSRA_STATUS_SUCCESS);
+        policy.resize(out.len);
+        EXPECT_LE(policy.size(), kPolicyMaxLen);
+        return policy;
+    }
+
+    tsra_part_policy_builder *handle = nullptr;
+};
+
+/// Set the flags and 64-byte `info` every test policy carries.
+/// `allow_peer_cloning` (bit 2) gates the peer commands
+/// (SdCreatePeerBackup / SdRestorePeerBackup); it is inert for the non-peer
+/// commands (create/reseal/restore-remote and restore-local).
+void set_common_fields(PolicyBuilder &b, bool allow_peer_cloning)
+{
     constexpr uint8_t kAllowPeerCloning = 1 << 2;
-    policy[kOffFlags] = allow_peer_cloning ? kAllowPeerCloning : 0;
-    for (size_t i = 0; i < 64; ++i)
-    {
-        policy[kOffInfo + i] = 0xAB;
-    }
-    return policy;
+    uint8_t info[64];
+    std::memset(info, 0xAB, sizeof(info));
+    tsra_buffer info_buf{ info, sizeof(info) };
+    EXPECT_EQ(tsra_part_policy_builder_set_info(b.handle, &info_buf), TSRA_STATUS_SUCCESS);
+    EXPECT_EQ(
+        tsra_part_policy_builder_set_flags(b.handle, allow_peer_cloning ? kAllowPeerCloning : 0),
+        TSRA_STATUS_SUCCESS
+    );
 }
 
-/// Build a 584-byte backing-partition `PartPolicy` image: start from the
-/// unified POTA-anchored policy, then overwrite the SATA slot with the real
-/// anchor key and record this partition (`pid` / `pid_pub`) as the backup
-/// backing partition. Mirrors the Rust `backing_part_policy` fixture.
-std::vector<uint8_t> build_backing_part_policy(
+/// Build a partition policy anchored to the real POTA public key, mirroring
+/// the Rust `part_policy_with_pota` fixture so `PartFinal` can validate a
+/// chain anchored to it. The SATA thumbprint is a filler (not
+/// chain-validated in this flow).
+Bytes build_part_policy(const uint8_t pota_raw[kRawPubLen], bool allow_peer_cloning = true)
+{
+    uint8_t sata[kThumbprintLen];
+    for (size_t i = 0; i < kThumbprintLen; ++i)
+    {
+        sata[i] = static_cast<uint8_t>((0x20 + i) | 0x80);
+    }
+    PolicyBuilder b;
+    b.set_key(
+        tsra_part_policy_builder_set_pota_key,
+        TSRA_POLICY_KEY_FORMAT_ECC_P384,
+        pota_raw,
+        kRawPubLen
+    );
+    b.set_key(
+        tsra_part_policy_builder_set_sata_key,
+        TSRA_POLICY_KEY_FORMAT_THUMBPRINT,
+        sata,
+        kThumbprintLen
+    );
+    set_common_fields(b, allow_peer_cloning);
+    return b.build();
+}
+
+/// Build a backing-partition policy: real POTA and SATA anchors, with this
+/// partition (`pid` / `pid_pub`) recorded as the backup backing partition.
+/// Mirrors the Rust `backing_part_policy` fixture. `data_raw`, when
+/// non-null, adds a DATA anchor (DARC export).
+Bytes build_backing_part_policy(
     const uint8_t pid[16],
     const uint8_t pid_pub[kRawPubLen],
     const uint8_t sata_raw[kRawPubLen],
     const uint8_t pota_raw[kRawPubLen],
-    bool allow_peer_cloning = true
+    bool allow_peer_cloning = true,
+    const uint8_t *data_raw = nullptr
 )
 {
-    constexpr size_t kOffSata = 102;
-    constexpr size_t kOffBackupPartId = 302;
-    constexpr size_t kOffBackupPartPubKey = 318;
-    constexpr size_t kBackupPartIdLen = 16;
-
-    std::vector<uint8_t> policy = build_part_policy(pota_raw, allow_peer_cloning);
-
-    // Overwrite the placeholder SATA key with the anchor's real P-384 key.
-    write_key_slot(policy, kOffSata, sata_raw);
-
-    // Name this partition as the backup backing partition.
-    std::memcpy(&policy[kOffBackupPartId], pid, kBackupPartIdLen);
-    write_key_slot(policy, kOffBackupPartPubKey, pid_pub);
-
-    return policy;
+    constexpr tsra_policy_key_format kP384 = TSRA_POLICY_KEY_FORMAT_ECC_P384;
+    PolicyBuilder b;
+    b.set_key(tsra_part_policy_builder_set_pota_key, kP384, pota_raw, kRawPubLen);
+    b.set_key(tsra_part_policy_builder_set_sata_key, kP384, sata_raw, kRawPubLen);
+    tsra_buffer id_buf{ const_cast<uint8_t *>(pid), 16 };
+    EXPECT_EQ(tsra_part_policy_builder_set_backup_part_id(b.handle, &id_buf), TSRA_STATUS_SUCCESS);
+    b.set_key(tsra_part_policy_builder_set_backup_part_key, kP384, pid_pub, kRawPubLen);
+    if (data_raw != nullptr)
+    {
+        b.set_key(tsra_part_policy_builder_set_data_key, kP384, data_raw, kRawPubLen);
+    }
+    set_common_fields(b, allow_peer_cloning);
+    return b.build();
 }
 
 // ── Session helpers ──────────────────────────────────────────────────────────
@@ -997,31 +1032,18 @@ tsra_handle provision_sd_co_session(tsra_handle part_handle)
     std::memcpy(pota_raw, pota_ca->sec1().data() + 1, kRawPubLen);
     std::vector<uint8_t> policy = build_part_policy(pota_raw);
 
-    // Deterministic provisioning fixtures (thumbprints are stored, not
-    // chain-validated in this flow).
+    // Deterministic machine seed fixture.
     std::array<uint8_t, kMachSeedLen> mach_seed{};
     for (size_t i = 0; i < mach_seed.size(); ++i)
     {
         mach_seed[i] = static_cast<uint8_t>(0x40 + i);
     }
-    std::array<uint8_t, kThumbprintLen> pota_tp{};
-    std::array<uint8_t, kThumbprintLen> sata_tp{};
-    for (size_t i = 0; i < kThumbprintLen; ++i)
-    {
-        pota_tp[i] = static_cast<uint8_t>(0x80 ^ i);
-        sata_tp[i] = static_cast<uint8_t>(0x40 ^ i);
-    }
 
     tsra_buffer mach_buf{ mach_seed.data(), static_cast<uint32_t>(mach_seed.size()) };
     tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
-    tsra_buffer pota_buf{ pota_tp.data(), static_cast<uint32_t>(pota_tp.size()) };
-    tsra_buffer sata_buf{ sata_tp.data(), static_cast<uint32_t>(sata_tp.size()) };
     tsra_sess_ex_part_init_params init_params{};
     init_params.mach_seed = &mach_buf;
     init_params.part_policy = &policy_buf;
-    init_params.pota_thumbprint = &pota_buf;
-    init_params.sata_thumbprint = &sata_buf;
-    init_params.sapota_thumbprint = nullptr;
 
     // 4. PartInit: probe for the CSR/report sizes, then retrieve them.
     tsra_buffer csr{ nullptr, 0 };
@@ -1198,31 +1220,18 @@ static SdBackingContext provision_backing_impl(
         );
     }
 
-    // Deterministic provisioning fixtures (thumbprints are stored, not
-    // chain-validated in this flow).
+    // Deterministic machine seed fixture.
     std::array<uint8_t, kMachSeedLen> mach_seed{};
     for (size_t i = 0; i < mach_seed.size(); ++i)
     {
         mach_seed[i] = static_cast<uint8_t>(0x40 + i);
     }
-    std::array<uint8_t, kThumbprintLen> pota_tp{};
-    std::array<uint8_t, kThumbprintLen> sata_tp{};
-    for (size_t i = 0; i < kThumbprintLen; ++i)
-    {
-        pota_tp[i] = static_cast<uint8_t>(0x80 ^ i);
-        sata_tp[i] = static_cast<uint8_t>(0x40 ^ i);
-    }
 
     tsra_buffer mach_buf{ mach_seed.data(), static_cast<uint32_t>(mach_seed.size()) };
     tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
-    tsra_buffer pota_buf{ pota_tp.data(), static_cast<uint32_t>(pota_tp.size()) };
-    tsra_buffer sata_buf{ sata_tp.data(), static_cast<uint32_t>(sata_tp.size()) };
     tsra_sess_ex_part_init_params init_params{};
     init_params.mach_seed = &mach_buf;
     init_params.part_policy = &policy_buf;
-    init_params.pota_thumbprint = &pota_buf;
-    init_params.sata_thumbprint = &sata_buf;
-    init_params.sapota_thumbprint = nullptr;
 
     // 5. PartInit: probe for the CSR/report sizes, then retrieve them.
     tsra_buffer csr{ nullptr, 0 };
@@ -1481,13 +1490,8 @@ SdEvidenceHolder build_receiver_evidence(
 
 namespace
 {
-/// Byte offset of the appended optional `data_pub_key` slot in the unified
-/// 584-byte `PartPolicy` image; mirror of the Rust `OFF_DATA_PUB_KEY`.
-constexpr size_t kOffData = 484;
-constexpr size_t kDarcPolicyLen = kOffData + 4 + kRawPubLen; // 584
-
-/// Build the 584-byte DARC policy: the backing-partition policy plus a DATA
-/// anchor slot at `kOffData`, mirroring the Rust `set_data_anchor` fixture.
+/// Build the DARC policy: the backing-partition policy plus a DATA anchor,
+/// mirroring the Rust `set_data_anchor` fixture.
 std::vector<uint8_t> build_darc_part_policy(
     const uint8_t pid[16],
     const uint8_t pid_pub[kRawPubLen],
@@ -1496,10 +1500,7 @@ std::vector<uint8_t> build_darc_part_policy(
     const uint8_t data_raw[kRawPubLen]
 )
 {
-    std::vector<uint8_t> policy = build_backing_part_policy(pid, pid_pub, sata_raw, pota_raw, true);
-    policy.resize(kDarcPolicyLen, 0);
-    write_key_slot(policy, kOffData, data_raw);
-    return policy;
+    return build_backing_part_policy(pid, pid_pub, sata_raw, pota_raw, true, data_raw);
 }
 } // namespace
 
@@ -1570,7 +1571,7 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     }
 
     // 4. Mint the POTA (PTA/import), SATA (self-backup evidence) and DATA
-    // (export) anchors and bind a DATA+POTA-anchored 584-byte policy.
+    // (export) anchors and bind a DATA+POTA-anchored policy.
     std::shared_ptr<CaKey> pota_ca = CaKey::generate();
     std::shared_ptr<CaKey> sata_key = CaKey::generate();
     std::shared_ptr<CaKey> data_ca = CaKey::generate();
@@ -1587,31 +1588,18 @@ DarcReadyContext provision_darc_session(tsra_handle part_handle)
     std::vector<uint8_t> policy =
         build_darc_part_policy(pid.data(), pid_pub.data(), sata_raw, pota_raw, data_raw);
 
-    // Deterministic provisioning fixtures (thumbprints are stored, not
-    // chain-validated in this flow).
+    // Deterministic machine seed fixture.
     std::array<uint8_t, kMachSeedLen> mach_seed{};
     for (size_t i = 0; i < mach_seed.size(); ++i)
     {
         mach_seed[i] = static_cast<uint8_t>(0x40 + i);
     }
-    std::array<uint8_t, kThumbprintLen> pota_tp{};
-    std::array<uint8_t, kThumbprintLen> sata_tp{};
-    for (size_t i = 0; i < kThumbprintLen; ++i)
-    {
-        pota_tp[i] = static_cast<uint8_t>(0x80 ^ i);
-        sata_tp[i] = static_cast<uint8_t>(0x40 ^ i);
-    }
 
     tsra_buffer mach_buf{ mach_seed.data(), static_cast<uint32_t>(mach_seed.size()) };
     tsra_buffer policy_buf{ policy.data(), static_cast<uint32_t>(policy.size()) };
-    tsra_buffer pota_buf{ pota_tp.data(), static_cast<uint32_t>(pota_tp.size()) };
-    tsra_buffer sata_buf{ sata_tp.data(), static_cast<uint32_t>(sata_tp.size()) };
     tsra_sess_ex_part_init_params init_params{};
     init_params.mach_seed = &mach_buf;
     init_params.part_policy = &policy_buf;
-    init_params.pota_thumbprint = &pota_buf;
-    init_params.sata_thumbprint = &sata_buf;
-    init_params.sapota_thumbprint = nullptr;
 
     // 5. PartInit: probe for the CSR/report sizes, then retrieve them.
     tsra_buffer csr{ nullptr, 0 };

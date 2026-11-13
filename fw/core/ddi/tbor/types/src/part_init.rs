@@ -5,7 +5,7 @@
 //!
 //! `PartInit` is a CO-session command that derives the Partition Trust
 //! Anchor (PTA) and Partition Identity (PID) keypairs, persists the
-//! caller-asserted partition policy + POTA thumbprint, and returns the
+//! caller-asserted partition policy, and returns the
 //! PTA CSR plus the PTA key-attestation report (`PTAReport`).
 //!
 //! Inputs:
@@ -17,11 +17,9 @@
 //!   into the partition's internal key-derivation.
 //! * `part_policy` — caller-asserted partition policy bound into
 //!   the partition's attested state.  Layout owned by
-//!   [`crate::policy::PartPolicy`]; wire length pinned by
-//!   [`PART_POLICY_LEN`].
-//! * `pota_thumbprint` — 48-byte SHA-384 thumbprint of the POTA
-//!   (Proof-of-Trust Attestation) certificate the partition is being
-//!   provisioned under.
+//!   [`crate::policy::PartPolicy`]; wire length bounded by
+//!   [`PART_POLICY_MAX_LEN`].  Identifies the POTA / SATA / SAPOTA
+//!   trust anchors by public-key thumbprint.
 //!
 //! Outputs:
 //!
@@ -76,28 +74,17 @@ const _: () = assert!(MACH_SEED_ENVELOPE_LEN == 104);
 /// [`MACH_SEED_ENVELOPE_LEN`].
 pub const MACH_SEED_ENVELOPE_MAX_LEN: usize = 160;
 
-/// Byte length of the caller-asserted [`PartPolicy`] blob carried
-/// on the `PartInit` wire.
+/// Maximum byte length of the caller-asserted [`PartPolicy`] document
+/// carried on the `PartInit` wire.
 ///
 /// Re-exported from [`crate::policy`] — single source of truth.  The
-/// `#[tbor(len = 584)]` attribute on [`TborPartInitReq::part_policy`]
+/// `#[tbor(max_len = 384)]` attribute on [`TborPartInitReq::part_policy`]
 /// must remain a numeric literal (TBOR derive requirement); the
-/// `const _: () = assert!(584 == PART_POLICY_LEN)` guard in the
+/// `const _: () = assert!(384 == PART_POLICY_MAX_LEN)` guard in the
 /// `tests` module below fails the build if the two ever drift.
 ///
 /// [`PartPolicy`]: crate::policy::PartPolicy
-pub use crate::policy::PART_POLICY_LEN;
-
-/// Length of the POTA certificate thumbprint (SHA-384).
-pub const POTA_THUMBPRINT_LEN: usize = 48;
-
-/// Length of the SATA (Sealing Authority Trust Anchor) certificate
-/// thumbprint (SHA-384).
-pub const SATA_THUMBPRINT_LEN: usize = 48;
-
-/// Length of the SAPOTA (Sealing Authority's POTA) certificate
-/// thumbprint (SHA-384).
-pub const SAPOTA_THUMBPRINT_LEN: usize = 48;
+pub use crate::policy::PART_POLICY_MAX_LEN;
 
 /// Upper bound on the DER-encoded PTA CSR carried in the response.
 ///
@@ -126,8 +113,8 @@ pub const PTA_REPORT_MAX_LEN: usize = 1024;
 /// Initiates partition provisioning with the merged security-domain
 /// configuration parameters: supplies the machine-seed entropy, the
 /// unified caller-asserted [`PartPolicy`] (which carries both
-/// partition-level and security-domain fields), and the POTA / SATA /
-/// optional SAPOTA certificate thumbprints.  The security-domain local
+/// partition-level and security-domain fields, including the POTA /
+/// SATA / optional SAPOTA public-key thumbprints).  The security-domain local
 /// masking keys are *not* derived here — that is deferred to a future
 /// part-final command.
 ///
@@ -156,29 +143,12 @@ pub struct TborPartInitReq<'a> {
     pub mach_seed_envelope: &'a [u8],
 
     /// Caller-asserted unified [`PartPolicy`] blob bound into the
-    /// partition's attested state.  Length pinned to
-    /// [`PART_POLICY_LEN`].
+    /// partition's attested state.  Length bounded by
+    /// [`PART_POLICY_MAX_LEN`].
     ///
     /// [`PartPolicy`]: crate::policy::PartPolicy
-    #[tbor(buffer, len = 584)]
+    #[tbor(buffer, max_len = 384)]
     pub part_policy: &'a [u8],
-
-    /// SHA-384 thumbprint (48 B) of the POTA certificate the
-    /// partition is being provisioned under.
-    #[tbor(buffer, len = 48)]
-    pub pota_thumbprint: &'a [u8],
-
-    /// SHA-384 thumbprint (48 B) of the SATA (Sealing Authority Trust
-    /// Anchor) certificate bound to this security domain.
-    #[tbor(buffer, len = 48)]
-    pub sata_thumbprint: &'a [u8],
-
-    /// Optional SHA-384 thumbprint (48 B) of the SAPOTA (Sealing
-    /// Authority's POTA) certificate.  An **empty** field means absent
-    /// (the security domain has no SAPOTA binding); when non-empty it
-    /// must be exactly [`SAPOTA_THUMBPRINT_LEN`] bytes.
-    #[tbor(buffer, max_len = 48)]
-    pub sapota_thumbprint: &'a [u8],
 }
 
 /// `PartInit` response schema.
@@ -204,11 +174,11 @@ mod tests {
 
     #[test]
     fn part_policy_len_matches_pinned_value() {
-        // The `#[tbor(len = 584)]` attribute on `part_policy` must
+        // The `#[tbor(max_len = 384)]` attribute on `part_policy` must
         // remain a numeric literal; this pins it against the
-        // canonical `PART_POLICY_LEN` from `crate::policy`.
-        const _: () = assert!(584 == PART_POLICY_LEN);
-        assert_eq!(PART_POLICY_LEN, 584);
+        // canonical `PART_POLICY_MAX_LEN` from `crate::policy`.
+        const _: () = assert!(384 == PART_POLICY_MAX_LEN);
+        assert_eq!(PART_POLICY_MAX_LEN, 384);
     }
 
     #[test]

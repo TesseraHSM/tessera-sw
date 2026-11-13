@@ -6,8 +6,8 @@
 //! online to sign a new PTA; it is not an independent authority replica.
 //!
 //! Routes: `GET /v1/policy` returns only the complete bound policy as hex;
-//! `GET /v1/authorities` returns the public POTA/SATA certificates needed to
-//! derive DER thumbprints, not private signers. `POST /v1/pta-cert` validates
+//! `GET /v1/authorities` returns the public POTA/SATA certificates whose key
+//! thumbprints the policy binds, not private signers. `POST /v1/pta-cert` validates
 //! the CSR, PID-signed report and policy before issuing the POTA/PTA chain.
 //! Peer evidence is anchored to POTA through each partition's own
 //! POTA/PTA/PID chain. `POST /v1/sd/clone` exchanges receiver evidence for a
@@ -27,17 +27,16 @@ use env::PeerEnv;
 use http::Client;
 use jzon::JsonValue;
 use tiny_http::Server;
-use tsra_api::PartPolicy;
 use tsra_sealing_api::device_cert_chain;
 use tsra_sealing_api::load_local_recovery;
 use tsra_sealing_api::Evidence;
+use tsra_sealing_api::PartPolicy;
 use tsra_sealing_api::SealingSession;
 use tsra_sealing_api::SecurityDomain;
 use tsra_sealing_api::SecurityDomainEnv;
 pub(crate) use tsra_sealing_common::evidence;
 pub(crate) use tsra_sealing_common::http;
 pub(crate) use tsra_sealing_common::wire;
-use zerocopy::IntoBytes;
 
 use crate::cli::CloneArgs;
 use crate::cli::RestoreArgs;
@@ -133,7 +132,7 @@ pub fn clone(args: &CloneArgs) -> Result<()> {
     let store = FileStore::new(&args.state_dir)?;
     store.ensure_new_creation()?;
     let policy = wire::blob(&client.get("/v1/policy")?, "policy")?;
-    PartPolicy::ref_from_wire(&policy).context("invalid primary policy")?;
+    PartPolicy::from_bytes(&policy).context("invalid primary policy")?;
     let authorities = client.get("/v1/authorities")?;
     let seed = crate::commands::tee_seed_from_name(&args.name)?;
     let record = jzon::object! {

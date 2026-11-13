@@ -38,7 +38,6 @@ use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 use crate::commands::part_info::assert_part_state;
 use crate::commands::part_info::PART_STATE_INITIALIZED;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
@@ -49,7 +48,7 @@ use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
 struct CreatedSd {
     /// The exact 584-byte `PartPolicy` image (needed verbatim to
     /// re-finalize and to re-derive SDBMK on the second device).
-    policy: [u8; tsra_ddi_tbor_types::PART_POLICY_LEN],
+    policy: Vec<u8>,
     /// `PartFinal`'s `local_mk_backup`, replayed to restore `PartLocalMK`.
     local_mk_backup: Vec<u8>,
     /// The local SD backups from `CreateSD`.
@@ -76,9 +75,7 @@ fn create_sd_on_first_device(seed: &[u8], sata: &CaKey, pota: &CaKey) -> Created
         &pota.raw_pub(),
     );
 
-    let init = ctx
-        .part_init(&session, seed, &policy, &pota_thumbprint())
-        .expect("PartInit");
+    let init = ctx.part_init(&session, seed, &policy).expect("PartInit");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     let local_mk_backup = ctx
         .part_final(&session, &policy, &[], &chain.der_items())
@@ -110,7 +107,7 @@ fn reboot_and_restore_part_local_mk(
 ) -> tsra_ddi_tbor_test_harness::SessionHandshake {
     let session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
     let init = ctx
-        .part_init(&session, seed, &created.policy, &pota_thumbprint())
+        .part_init(&session, seed, &created.policy)
         .expect("PartInit (device 2)");
     let chain = make_pta_chain(pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(
@@ -180,9 +177,7 @@ fn sd_restore_local_backup_is_one_shot() {
         &sata.raw_pub(),
         &pota.raw_pub(),
     );
-    let init = ctx
-        .part_init(&session, &seed, &policy, &pota_thumbprint())
-        .expect("PartInit");
+    let init = ctx.part_init(&session, &seed, &policy).expect("PartInit");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");

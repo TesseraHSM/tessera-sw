@@ -396,7 +396,7 @@ pub enum HsmError {
     PartFinalBackupSvnRollback = 0x08700106,
 
     /// `PartFinal` validated the supplied PTA certificate chain
-    /// (well-formed and correctly anchored to the policy `POTAPubKey`),
+    /// (well-formed and anchored to the policy `pota_spki_thumbprint`),
     /// but the chain's **leaf** public key does not match this
     /// partition's Partition Trust Anchor (PTA) key.  Distinct from an
     /// [`X509`](Self::X509SignatureInvalid) chain error — the chain is
@@ -424,7 +424,7 @@ pub enum HsmError {
 
     /// A `SdCreatePeerBackup` / `SdRestorePeerBackup` handler was asked to
     /// clone a security domain to (or from) a peer partition, but the
-    /// partition's unified [`PartPolicy`](crate::PartPolicy) does not permit
+    /// partition's unified `PartPolicy` does not permit
     /// peer cloning (its `allow_peer_cloning` policy flag is clear).  Peer
     /// backup/restore is only allowed when the security-domain owner has
     /// opted in via policy.

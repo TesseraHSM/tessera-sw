@@ -49,5 +49,15 @@
 |            | `TSRA_PART_PROP_ID_BACKUP_MASKING_KEY` and                       |
 |            | `TSRA_PART_PROP_ID_MASKED_OWNER_BACKUP_KEY` are not present on   |
 |            | partitions provisioned with `tsra_sess_ex_part_init`             |
+| 11/13/2026 | Partition policy is a deterministic CBOR document (at most 384   |
+|            | bytes) naming keys by SPKI SHA-384 thumbprint                    |
+|            | `tsra_part_policy_build` emits the CBOR document; key setters    |
+|            | take a `tsra_policy_key_format`; removed                         |
+|            | `tsra_part_policy_builder_set_version`; renamed                  |
+|            | `set_backup_part_pub_key` to `set_backup_part_key`               |
+|            | Added `tsra_part_policy_builder_set_data_key` and                |
+|            | `tsra_policy_key_thumbprint`                                     |
+|            | Removed `pota_thumbprint`, `sata_thumbprint` and                 |
+|            | `sapota_thumbprint` from `tsra_sess_ex_part_init_params`         |
 
 \pagebreak

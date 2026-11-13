@@ -3,18 +3,27 @@
 
 //! Partition-policy builder for the native C API.
 //!
-//! The `tsra_sess_ex_part_init` / `tsra_sess_ex_part_final` entry
-//! points consume the partition policy as an opaque fixed-size image
-//! (`PART_POLICY_LEN` bytes). Rather than require C callers to lay out
-//! that image by poking raw byte offsets, this module exposes a small
-//! opaque builder that sets named, typed fields and then serializes the
-//! canonical wire image into a caller-provided buffer.
-//!
-//! The on-wire format is unchanged: [`tsra_part_policy_build`] emits
-//! exactly the bytes the init/final handlers already accept, so the
-//! builder is purely an ergonomic, ABI-additive convenience.
+//! The partition init/final, security-domain and DARC entry points take
+//! the partition policy as an opaque CBOR document. This module exposes
+//! an opaque builder that sets typed fields and serializes the canonical
+//! document into a caller-provided buffer, plus a helper that computes a
+//! public key's SPKI thumbprint. Callers may equally encode the document
+//! with any conforming CBOR encoder.
 
 use super::*;
+
+/// Encoding of a public key passed to the policy builder.
+pub type TsraPolicyKeyFormat = u32;
+
+/// A precomputed 48-byte SPKI thumbprint (SHA-384 of the key's DER
+/// SubjectPublicKeyInfo).
+pub const TSRA_POLICY_KEY_FORMAT_THUMBPRINT: TsraPolicyKeyFormat = 0;
+
+/// A DER SubjectPublicKeyInfo of any key algorithm, hashed as given.
+pub const TSRA_POLICY_KEY_FORMAT_SPKI_DER: TsraPolicyKeyFormat = 1;
+
+/// A raw uncompressed ECC P-384 public key, `X || Y` (96 bytes).
+pub const TSRA_POLICY_KEY_FORMAT_ECC_P384: TsraPolicyKeyFormat = 2;
 
 /// Opaque partition-policy builder handle.
 ///
@@ -26,39 +35,51 @@ pub struct TsraPartPolicyBuilder {
     inner: api::PartPolicyBuilder,
 }
 
-/// Apply a fluent setter to the boxed builder in place.
-///
-/// The host [`api::PartPolicyBuilder`] setters consume and return `self`;
-/// this helper swaps the inner builder out, applies `f`, and stores the
-/// result back, so the C handle keeps a stable address.
-#[allow(unsafe_code)]
+fn key_format(format: TsraPolicyKeyFormat) -> Result<api::PolicyKeyFormat, TsraStatus> {
+    match format {
+        TSRA_POLICY_KEY_FORMAT_THUMBPRINT => Ok(api::PolicyKeyFormat::Thumbprint),
+        TSRA_POLICY_KEY_FORMAT_SPKI_DER => Ok(api::PolicyKeyFormat::SpkiDer),
+        TSRA_POLICY_KEY_FORMAT_ECC_P384 => Ok(api::PolicyKeyFormat::EccP384),
+        _ => Err(TsraStatus::InvalidArgument),
+    }
+}
+
+/// Apply a fluent setter to the boxed builder in place, keeping the C
+/// handle's address stable.
 fn with_builder<F>(builder: *mut TsraPartPolicyBuilder, f: F) -> Result<(), TsraStatus>
 where
     F: FnOnce(api::PartPolicyBuilder) -> api::PartPolicyBuilder,
 {
     let b = deref_mut_ptr(builder)?;
-    let taken = std::mem::replace(&mut b.inner, api::PartPolicyBuilder::new());
-    b.inner = f(taken);
+    b.inner = f(std::mem::take(&mut b.inner));
     Ok(())
+}
+
+/// Shared body of the `tsra_part_policy_builder_set_*_key` setters.
+fn set_key<F>(
+    builder: *mut TsraPartPolicyBuilder,
+    format: TsraPolicyKeyFormat,
+    key: *const TsraBuffer,
+    set: F,
+) -> Result<(), TsraStatus>
+where
+    F: FnOnce(api::PartPolicyBuilder, api::PolicyKeyFormat, &[u8]) -> api::PartPolicyBuilder,
+{
+    let format = key_format(format)?;
+    let raw: &[u8] = deref_ptr(key)?.try_into()?;
+    with_builder(builder, |b| set(b, format, raw))
 }
 
 /// @brief Allocate a new partition-policy builder
 ///
-/// On success, writes a handle to `*out_builder` whose policy starts from
-/// a version defaulting to `major = 1, minor = 0` with every other field
-/// zeroed; set the required POTA and SATA keys and any optional fields
-/// through the `tsra_part_policy_builder_set_*` functions, then serialize
-/// it with `tsra_part_policy_build`. Release it with
+/// The builder starts empty: no keys, no flags and no optional fields.
+/// Set the required POTA and SATA keys and any optional fields through the
+/// `tsra_part_policy_builder_set_*` functions, then serialize it with
+/// `tsra_part_policy_build`. Release it with
 /// `tsra_part_policy_builder_free`.
 ///
-/// A key / `info` / backing-id that does not satisfy its field's length
-/// requirement is rejected at `tsra_part_policy_build` time (returning
-/// `TSRA_STATUS_INVALID_ARGUMENT`) rather than silently truncated or
-/// padded.
-/// Missing either POTA or SATA key also causes `tsra_part_policy_build`
-/// to return `TSRA_STATUS_INVALID_ARGUMENT`.
-/// Unsupported major versions and reserved flag bits are rejected at
-/// build time as well.
+/// Setters only report NULL/misaligned handles or buffers and unknown key
+/// formats; invalid field values are reported by `tsra_part_policy_build`.
 ///
 /// @param[out] out_builder Receives the non-NULL builder handle on
 ///             success; left unmodified on failure.
@@ -105,105 +126,76 @@ pub unsafe extern "C" fn tsra_part_policy_builder_free(builder: *mut TsraPartPol
     }
 }
 
-/// @brief Set the policy version (`major.minor`)
-///
-/// Major version must be 1; any minor version is accepted. An unsupported
-/// major version is rejected at `tsra_part_policy_build` time.
+/// @brief Set the POTA (Partition Owner Trust Anchor) public key (required)
 ///
 /// @param[in] builder Builder handle
-/// @param[in] major Major version number
-/// @param[in] minor Minor version number
-/// @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL handle
-///
-/// # Safety
-///
-/// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-#[unsafe(no_mangle)]
-#[allow(unsafe_code)]
-pub unsafe extern "C" fn tsra_part_policy_builder_set_version(
-    builder: *mut TsraPartPolicyBuilder,
-    major: u8,
-    minor: u8,
-) -> TsraStatus {
-    abi_boundary(|| with_builder(builder, |b| b.version(major, minor)))
-}
-
-/// @brief Set the POTA (Partition Owner Trust Anchor) public key
-///
-/// @param[in] builder Builder handle
-/// @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
-/// @param[in] key Raw public-key bytes
+/// @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+/// @param[in] key Key bytes in `format`
 /// @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-///         handle / buffer
+///         handle / buffer or an unknown `format`
 ///
 /// # Safety
 ///
 /// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-/// - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+/// - `key` must be NULL or point to a valid `tsra_buffer`.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_part_policy_builder_set_pota_key(
     builder: *mut TsraPartPolicyBuilder,
-    kind: u16,
+    format: TsraPolicyKeyFormat,
     key: *const TsraBuffer,
 ) -> TsraStatus {
-    abi_boundary(|| {
-        let raw: &[u8] = deref_ptr(key)?.try_into()?;
-        with_builder(builder, |b| b.pota_key(api::PolicyKeyKind(kind), raw))
-    })
+    abi_boundary(|| set_key(builder, format, key, |b, f, k| b.pota_key(f, k)))
 }
 
-/// @brief Set the SATA (Sealing Authority Trust Anchor) public key
+/// @brief Set the SATA (Sealing Authority Trust Anchor) public key (required)
 ///
 /// @param[in] builder Builder handle
-/// @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
-/// @param[in] key Raw public-key bytes
+/// @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+/// @param[in] key Key bytes in `format`
 /// @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-///         handle / buffer
+///         handle / buffer or an unknown `format`
 ///
 /// # Safety
 ///
 /// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-/// - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+/// - `key` must be NULL or point to a valid `tsra_buffer`.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_part_policy_builder_set_sata_key(
     builder: *mut TsraPartPolicyBuilder,
-    kind: u16,
+    format: TsraPolicyKeyFormat,
     key: *const TsraBuffer,
 ) -> TsraStatus {
-    abi_boundary(|| {
-        let raw: &[u8] = deref_ptr(key)?.try_into()?;
-        with_builder(builder, |b| b.sata_key(api::PolicyKeyKind(kind), raw))
-    })
+    abi_boundary(|| set_key(builder, format, key, |b, f, k| b.sata_key(f, k)))
 }
 
 /// @brief Set the SAPOTA (Sealing Authority's POTA) public key
 ///
 /// @param[in] builder Builder handle
-/// @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
-/// @param[in] key Raw public-key bytes
+/// @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+/// @param[in] key Key bytes in `format`
 /// @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-///         handle / buffer
+///         handle / buffer or an unknown `format`
 ///
 /// # Safety
 ///
 /// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-/// - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+/// - `key` must be NULL or point to a valid `tsra_buffer`.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_part_policy_builder_set_sapota_key(
     builder: *mut TsraPartPolicyBuilder,
-    kind: u16,
+    format: TsraPolicyKeyFormat,
     key: *const TsraBuffer,
 ) -> TsraStatus {
-    abi_boundary(|| {
-        let raw: &[u8] = deref_ptr(key)?.try_into()?;
-        with_builder(builder, |b| b.sapota_key(api::PolicyKeyKind(kind), raw))
-    })
+    abi_boundary(|| set_key(builder, format, key, |b, f, k| b.sapota_key(f, k)))
 }
 
 /// @brief Set the backing-partition identifier
+///
+/// Must be exactly 16 bytes and set together with
+/// `tsra_part_policy_builder_set_backup_part_key`.
 ///
 /// @param[in] builder Builder handle
 /// @param[in] id Backing-partition identifier bytes
@@ -213,7 +205,7 @@ pub unsafe extern "C" fn tsra_part_policy_builder_set_sapota_key(
 /// # Safety
 ///
 /// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-/// - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+/// - `id` must be NULL or point to a valid `tsra_buffer`.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_part_policy_builder_set_backup_part_id(
@@ -226,34 +218,55 @@ pub unsafe extern "C" fn tsra_part_policy_builder_set_backup_part_id(
     })
 }
 
-/// @brief Set the backing-partition public key
+/// @brief Set the backing partition's PID public key
+///
+/// Must be set together with `tsra_part_policy_builder_set_backup_part_id`.
 ///
 /// @param[in] builder Builder handle
-/// @param[in] kind Key-kind discriminant (e.g. 0 = ECC P-384)
-/// @param[in] key Raw public-key bytes
+/// @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+/// @param[in] key Key bytes in `format`
 /// @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
-///         handle / buffer
+///         handle / buffer or an unknown `format`
 ///
 /// # Safety
 ///
 /// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-/// - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+/// - `key` must be NULL or point to a valid `tsra_buffer`.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
-pub unsafe extern "C" fn tsra_part_policy_builder_set_backup_part_pub_key(
+pub unsafe extern "C" fn tsra_part_policy_builder_set_backup_part_key(
     builder: *mut TsraPartPolicyBuilder,
-    kind: u16,
+    format: TsraPolicyKeyFormat,
     key: *const TsraBuffer,
 ) -> TsraStatus {
-    abi_boundary(|| {
-        let raw: &[u8] = deref_ptr(key)?.try_into()?;
-        with_builder(builder, |b| {
-            b.backup_part_pub_key(api::PolicyKeyKind(kind), raw)
-        })
-    })
+    abi_boundary(|| set_key(builder, format, key, |b, f, k| b.backup_part_key(f, k)))
+}
+
+/// @brief Set the DATA (DARC TMK authority) public key
+///
+/// @param[in] builder Builder handle
+/// @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+/// @param[in] key Key bytes in `format`
+/// @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
+///         handle / buffer or an unknown `format`
+///
+/// # Safety
+///
+/// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
+/// - `key` must be NULL or point to a valid `tsra_buffer`.
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn tsra_part_policy_builder_set_data_key(
+    builder: *mut TsraPartPolicyBuilder,
+    format: TsraPolicyKeyFormat,
+    key: *const TsraBuffer,
+) -> TsraStatus {
+    abi_boundary(|| set_key(builder, format, key, |b, f, k| b.data_key(f, k)))
 }
 
 /// @brief Set the caller-provided opaque `info` field
+///
+/// At most 64 bytes; an empty buffer omits the field.
 ///
 /// @param[in] builder Builder handle
 /// @param[in] info Opaque info bytes
@@ -263,7 +276,7 @@ pub unsafe extern "C" fn tsra_part_policy_builder_set_backup_part_pub_key(
 /// # Safety
 ///
 /// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-/// - the buffer pointer must be NULL or point to a valid `tsra_buffer`.
+/// - `info` must be NULL or point to a valid `tsra_buffer`.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn tsra_part_policy_builder_set_info(
@@ -278,11 +291,12 @@ pub unsafe extern "C" fn tsra_part_policy_builder_set_info(
 
 /// @brief Set the policy flag bits
 ///
-/// Bits 0-2 are supported; reserved bits 3-7 are rejected at
-/// `tsra_part_policy_build` time.
+/// Bit 0 `include_fmc_cdi`, bit 1 `require_trusted_sa_key`, bit 2
+/// `allow_peer_cloning`; reserved bits 3-7 are rejected by
+/// `tsra_part_policy_build`.
 ///
 /// @param[in] builder Builder handle
-/// @param[in] flags Raw flag bits (see the `PolicyFlags` definition)
+/// @param[in] flags Raw flag bits
 /// @return `TSRA_STATUS_SUCCESS`, or `TSRA_STATUS_INVALID_ARGUMENT` on a NULL handle
 ///
 /// # Safety
@@ -297,28 +311,28 @@ pub unsafe extern "C" fn tsra_part_policy_builder_set_flags(
     abi_boundary(|| with_builder(builder, |b| b.flags(api::PolicyFlags::from_bits(flags))))
 }
 
-/// @brief Serialize the policy into its canonical wire image
+/// @brief Serialize the policy into its CBOR document
 ///
-/// Writes exactly `PART_POLICY_LEN` bytes — the image accepted by
-/// `tsra_sess_ex_part_init` / `tsra_sess_ex_part_final` — into
-/// `out`. If `out` is too small, sets `out.len` to the required size and
-/// returns `TSRA_STATUS_BUFFER_TOO_SMALL` without writing. The builder is left
-/// usable (unchanged) for further serialization.
-/// Both POTA and SATA keys must be set; otherwise returns
-/// `TSRA_STATUS_INVALID_ARGUMENT`, even for a size probe.
-/// Unsupported major versions and reserved flag bits also return
-/// `TSRA_STATUS_INVALID_ARGUMENT` before writing output.
+/// Validates the fields and writes the deterministic CBOR document (at
+/// most 384 bytes) accepted by the partition, security-domain and DARC
+/// entry points into `out`. If `out` is too small, sets `out.len` to the
+/// required size and returns `TSRA_STATUS_BUFFER_TOO_SMALL` without
+/// writing. The builder is left unchanged and remains usable.
+///
+/// Returns `TSRA_STATUS_INVALID_ARGUMENT`, even for a size probe, if a
+/// setter received an invalid key, identifier or `info`, the POTA or SATA
+/// key is missing, only one of the backing-partition identifier and key
+/// is set, or a reserved flag bit is set.
 ///
 /// @param[in] builder Builder handle
-/// @param[out] out Buffer to receive the serialized policy image
-/// @return `TSRA_STATUS_SUCCESS`, `TSRA_STATUS_INVALID_ARGUMENT` on a
-///         NULL or misaligned handle / buffer, or
+/// @param[out] out Buffer to receive the encoded policy
+/// @return `TSRA_STATUS_SUCCESS`, `TSRA_STATUS_INVALID_ARGUMENT`, or
 ///         `TSRA_STATUS_BUFFER_TOO_SMALL` if `out` is too small
 ///
 /// # Safety
 ///
 /// - `builder` must be a live handle from `tsra_part_policy_builder_new`.
-/// - `out` must be a valid pointer to an `tsra_buffer` with writable
+/// - `out` must be a valid pointer to a `tsra_buffer` with writable
 ///   backing storage of its advertised length.
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
@@ -329,7 +343,41 @@ pub unsafe extern "C" fn tsra_part_policy_build(
     abi_boundary(|| {
         let b = deref_mut_ptr(builder)?;
         let output = deref_mut_ptr(out)?;
-        let policy = b.inner.clone().build()?;
-        copy_to_buffer(output, policy.as_bytes())
+        let policy = b.inner.build()?;
+        copy_to_buffer(output, &policy)
+    })
+}
+
+/// @brief Compute a public key's SPKI thumbprint
+///
+/// Writes the 48-byte SHA-384 of the key's DER SubjectPublicKeyInfo, the
+/// value the policy uses to name the key. If `out` is too small, sets
+/// `out.len` to 48 and returns `TSRA_STATUS_BUFFER_TOO_SMALL`.
+///
+/// @param[in] format Key encoding (`TSRA_POLICY_KEY_FORMAT_*`)
+/// @param[in] key Key bytes in `format`
+/// @param[out] out Buffer to receive the thumbprint
+/// @return `TSRA_STATUS_SUCCESS`, `TSRA_STATUS_INVALID_ARGUMENT` on a NULL
+///         buffer, unknown `format` or malformed `key`, or
+///         `TSRA_STATUS_BUFFER_TOO_SMALL` if `out` is too small
+///
+/// # Safety
+///
+/// - `key` must be NULL or point to a valid `tsra_buffer`.
+/// - `out` must be a valid pointer to a `tsra_buffer` with writable
+///   backing storage of its advertised length.
+#[unsafe(no_mangle)]
+#[allow(unsafe_code)]
+pub unsafe extern "C" fn tsra_policy_key_thumbprint(
+    format: TsraPolicyKeyFormat,
+    key: *const TsraBuffer,
+    out: *mut TsraBuffer,
+) -> TsraStatus {
+    abi_boundary(|| {
+        let format = key_format(format)?;
+        let raw: &[u8] = deref_ptr(key)?.try_into()?;
+        let output = deref_mut_ptr(out)?;
+        let thumbprint = api::policy_key_thumbprint(format, raw)?;
+        copy_to_buffer(output, &thumbprint)
     })
 }

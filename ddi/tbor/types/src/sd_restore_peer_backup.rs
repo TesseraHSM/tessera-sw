@@ -21,7 +21,6 @@
 use alloc::vec::Vec;
 
 use crate::evidence::ReportDescriptor;
-use crate::policy::PartPolicy;
 use crate::sd_create_remote_backup::POK_REMOTE_BACKUP_LEN;
 use crate::sd_create_remote_backup::SD_MK_BACKUP_LEN;
 use crate::sd_sealing_key_gen::MASKED_SEALING_KEY_LEN;
@@ -46,9 +45,10 @@ pub struct TborSdRestorePeerBackupReq {
     #[tbor(align = 4)]
     pub masked_sealing_key: [u8; MASKED_SEALING_KEY_LEN],
 
-    /// Unified [`PartPolicy`] describing the security domain being
-    /// restored.  Encoded as its 584-byte little-endian image.
-    pub policy: PartPolicy,
+    /// Unified partition policy describing the security domain being
+    /// restored.  Deterministic CBOR document of at most [`PART_POLICY_MAX_LEN`](crate::policy::PART_POLICY_MAX_LEN) bytes.
+    #[tbor(max_len = 384)]
+    pub policy: Vec<u8>,
 
     /// Source peer manufacturer certificate-chain descriptors.  Flattened
     /// from the firmware `src_evidence` field group (first of its four TOC
@@ -105,7 +105,7 @@ mod tests {
         let req = TborSdRestorePeerBackupReq {
             session_id: 9,
             masked_sealing_key: [0u8; MASKED_SEALING_KEY_LEN],
-            policy: PartPolicy::zeroed(),
+            policy: alloc::vec![0xA5; crate::policy::PART_POLICY_MAX_LEN],
             src_mfgr_cert_chain: Vec::new(),
             src_owner_cert_chain: Vec::new(),
             src_part_owner_cert_chain: Vec::new(),
@@ -117,10 +117,14 @@ mod tests {
         let mut buf = [0u8; 2048];
         let frame = req.encode_request(&mut buf).expect("encode");
 
-        // The 584-byte policy plus the sealing key and the two backups must
+        // The maximum-length policy plus the sealing key and the two backups must
         // be carried in the data section.
         assert!(
-            frame.len() > 584 + MASKED_SEALING_KEY_LEN + POK_REMOTE_BACKUP_LEN + SD_MK_BACKUP_LEN,
+            frame.len()
+                > crate::policy::PART_POLICY_MAX_LEN
+                    + MASKED_SEALING_KEY_LEN
+                    + POK_REMOTE_BACKUP_LEN
+                    + SD_MK_BACKUP_LEN,
             "encoded frame must carry the policy, key, and backups"
         );
     }

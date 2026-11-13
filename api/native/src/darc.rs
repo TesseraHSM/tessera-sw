@@ -143,7 +143,8 @@ pub struct TsraDarcTmkExportParams {
     /// Masked TMK (from `tsra_darc_tmk_gen`), exactly `MASKED_TMK_LEN`
     /// (260 B).
     pub masked_tmk: *const TsraBuffer,
-    /// Unified partition-policy image (584 B) whose `DATAPubKey` anchors
+    /// Partition policy CBOR document (at most 384 B) whose DATA key
+    /// thumbprint anchors
     /// `target_cert_chain`.
     pub policy: *const TsraBuffer,
     /// DATA-anchored target certificate chain (1..=2 certs).
@@ -152,7 +153,7 @@ pub struct TsraDarcTmkExportParams {
 
 /// @brief Seal a DARC TMK to an authenticated target
 ///
-/// Validates the target certificate chain against the policy `DATAPubKey`,
+/// Validates the target certificate chain against the policy DATA key thumbprint,
 /// then HPKE-Auth seals the TMK to the target's KEX key, returning the
 /// sealed TMK.
 ///
@@ -202,7 +203,8 @@ pub struct TsraDarcTmkImportParams {
     /// Target's masked DARC KEX key (from `tsra_darc_kex_key_gen`),
     /// exactly `MASKED_KEX_KEY_LEN` (276 B).
     pub masked_kex_key: *const TsraBuffer,
-    /// Unified partition-policy image (584 B) whose `POTAPubKey` anchors
+    /// Partition policy CBOR document (at most 384 B) whose POTA key
+    /// thumbprint anchors
     /// `remote_cert_chain`.
     pub policy: *const TsraBuffer,
     /// Sealed TMK (from `tsra_darc_tmk_export`), exactly `SEALED_TMK_LEN`
@@ -214,7 +216,7 @@ pub struct TsraDarcTmkImportParams {
 
 /// @brief Import (open) a sealed DARC TMK on the target
 ///
-/// Validates the source certificate chain against the policy `POTAPubKey`,
+/// Validates the source certificate chain against the policy POTA key thumbprint,
 /// HPKE-Auth opens the sealed TMK, and re-masks it under the partition
 /// SDMK, returning the masked TMK.
 ///

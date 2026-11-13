@@ -27,12 +27,15 @@ use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::CU_PSK_ID as CU;
 use tsra_ddi_tbor_test_harness::SessionHandshake;
 use tsra_ddi_tbor_test_harness::TestCtx;
+use tsra_ddi_tbor_test_harness::TestPolicy;
 use tsra_ddi_tbor_test_harness::coord_sizes;
+use tsra_ddi_tbor_test_harness::policy::TestBackupPart;
 use tsra_ddi_tbor_test_harness::x509_fixture::CaKey;
 use tsra_ddi_tbor_test_harness::x509_fixture::RAW_PUB_LEN;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::make_pta_chain;
 use tsra_ddi_tbor_test_harness::x509_fixture::pta_pub_from_csr;
+use tsra_ddi_tbor_test_harness::x509_fixture::spki_thumbprint;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_128;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_192;
 use tsra_ddi_tbor_types::AES_KEY_SIZE_256;
@@ -43,15 +46,13 @@ use tsra_ddi_tbor_types::ECC_CURVE_P521;
 use tsra_ddi_tbor_types::KEY_REPORT_DATA_LEN;
 use tsra_ddi_tbor_types::MACH_SEED_ENVELOPE_MAX_LEN;
 use tsra_ddi_tbor_types::MACH_SEED_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POLICY_INFO_LEN;
-use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
-use tsra_ddi_tbor_types::POLICY_VERSION_MAJOR;
-use tsra_ddi_tbor_types::POTA_THUMBPRINT_LEN;
-use tsra_ddi_tbor_types::PartPolicy;
-use tsra_ddi_tbor_types::PolicyKeyKind;
-use tsra_ddi_tbor_types::PolicyPubKey;
-use tsra_ddi_tbor_types::PolicyVer;
+use tsra_ddi_tbor_types::PART_POLICY_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_BACKUP_PART_ID_LEN;
+use tsra_ddi_tbor_types::POLICY_INFO_MAX_LEN;
+use tsra_ddi_tbor_types::POLICY_THUMBPRINT_LEN;
+use tsra_ddi_tbor_types::POLICY_VERSION;
+use tsra_ddi_tbor_types::PolicyFlags;
+use tsra_ddi_tbor_types::PolicyKey;
 use tsra_ddi_tbor_types::ReportDescriptor;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborKeyReportReq;
@@ -59,16 +60,13 @@ use tsra_ddi_tbor_types::TborPartInfoReq;
 use tsra_ddi_tbor_types::TborSdCreateRemoteBackupReq;
 use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
-use zerocopy::TryFromBytes;
 
 pub type DdiTest = TsraDdi;
 
 pub const COORD_LEN: usize = RAW_PUB_LEN / 2;
 
 const MACH_SEED_PATTERN_BASE: u8 = 0x40;
-const POTA_THUMBPRINT_PATTERN_BASE: u8 = 0x80;
-const PUBKEY_PATTERN_HIGH_BIT: u8 = 0x80;
-const SATA_PUBKEY_PATTERN_BASE: u8 = 0x20;
+const SATA_THUMBPRINT_PATTERN_BASE: u8 = 0x20;
 const POLICY_INFO_FILL: u8 = 0xAB;
 
 /// Wire discriminants for the TBOR `KeyScope` enum.
@@ -419,79 +417,179 @@ pub fn mach_seed() -> [u8; MACH_SEED_LEN] {
     core::array::from_fn(|i| MACH_SEED_PATTERN_BASE + i as u8)
 }
 
-/// Fixed `PartInit` POTA thumbprint (`0x80 ^ i`), mirroring the canonical
-/// fixture used by the `PartInit` integration suite.
-pub fn pota_thumbprint() -> [u8; POTA_THUMBPRINT_LEN] {
-    core::array::from_fn(|i| POTA_THUMBPRINT_PATTERN_BASE ^ i as u8)
+/// Deterministic synthetic thumbprint `fill + i`, for policy slots whose
+/// chain the fuzz target never walks.
+pub fn pattern_thumbprint(fill: u8) -> [u8; POLICY_THUMBPRINT_LEN] {
+    core::array::from_fn(|i| fill.wrapping_add(i as u8))
 }
 
-/// Fill a 96-byte `PolicyPubKey::data` slot with a deterministic
-/// pattern seeded by `fill`: `(fill + i) | 0x80`.
+/// Known-good partition policy: version 1, the given POTA thumbprint, a
+/// synthetic SATA thumbprint and a full-length `info` field. SAPOTA, backup
+/// partition and DATA are absent.
 ///
-/// Fuzz targets use this to synthesize wire-valid-but-cryptographically-
-/// meaningless keys for policy slots the FW handler stores but does not
-/// validate (the SATA anchor in both targets, and the POTA anchor for
-/// `PartInit` where the chain walk never fires).
-pub fn fill_ecc384_pubkey_pattern(fill: u8) -> [u8; POLICY_MAX_KEY_LEN] {
-    let mut data = [0u8; POLICY_MAX_KEY_LEN];
-    for (i, b) in data.iter_mut().enumerate() {
-        *b = (fill.wrapping_add(i as u8)) | PUBKEY_PATTERN_HIGH_BIT;
+/// `PartFinal` fuzz targets pass the real CA's thumbprint (via
+/// `CaKey::spki_thumbprint`) so the cert-chain walk anchors against it;
+/// `PartInit`-only fuzz targets may pass [`pattern_thumbprint`].
+pub fn known_good_test_policy(pota_spki_thumbprint: [u8; POLICY_THUMBPRINT_LEN]) -> TestPolicy {
+    TestPolicy::new(
+        pota_spki_thumbprint,
+        pattern_thumbprint(SATA_THUMBPRINT_PATTERN_BASE),
+    )
+    .with_info(&[POLICY_INFO_FILL; POLICY_INFO_MAX_LEN])
+}
+
+/// Deterministic CBOR encoding of [`known_good_test_policy`].
+pub fn known_good_part_policy(pota_spki_thumbprint: [u8; POLICY_THUMBPRINT_LEN]) -> Vec<u8> {
+    known_good_test_policy(pota_spki_thumbprint).encode()
+}
+
+/// [`known_good_test_policy`] anchored to `pota` and `sata` and naming the
+/// partition (`pid`, raw big-endian `pid_pub`) as its backing partition.
+pub fn backup_test_policy(
+    pota: &CaKey,
+    sata: &CaKey,
+    pid: &[u8],
+    pid_pub: &[u8; RAW_PUB_LEN],
+) -> TestPolicy {
+    let pid: [u8; POLICY_BACKUP_PART_ID_LEN] = pid
+        .try_into()
+        .expect("PartInfo PID should have the policy length");
+    let mut policy = known_good_test_policy(pota.spki_thumbprint())
+        .with_backup_part(pid, spki_thumbprint(pid_pub));
+    policy.sata_spki_thumbprint = sata.spki_thumbprint();
+    policy
+}
+
+/// Fuzzed field values for [`FuzzPolicy::Structured`]; out-of-range `flags`
+/// or `info` lengths yield a schema-invalid document.
+#[derive(Arbitrary, Debug)]
+pub struct StructuredPolicy {
+    pub pota: [u8; POLICY_THUMBPRINT_LEN],
+    pub sata: [u8; POLICY_THUMBPRINT_LEN],
+    pub sapota: Option<[u8; POLICY_THUMBPRINT_LEN]>,
+    pub backup_part: Option<([u8; POLICY_BACKUP_PART_ID_LEN], [u8; POLICY_THUMBPRINT_LEN])>,
+    pub flags: u8,
+    pub info: Option<Vec<u8>>,
+    pub data: Option<[u8; POLICY_THUMBPRINT_LEN]>,
+}
+
+/// Fuzzed partition policy document for `PartInit`-style requests.
+#[derive(Arbitrary, Debug)]
+pub enum FuzzPolicy {
+    /// [`known_good_part_policy`] with a synthetic POTA thumbprint.
+    KnownGood,
+    /// Canonically encoded policy built from fuzzed field values.
+    Structured(Box<StructuredPolicy>),
+    /// Arbitrary bytes, exercising the firmware CBOR decoder directly.
+    Raw(Vec<u8>),
+}
+
+impl FuzzPolicy {
+    /// Wire bytes of the fuzzed policy document.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::KnownGood => known_good_part_policy(pattern_thumbprint(0x10)),
+            Self::Structured(p) => TestPolicy {
+                flags: u64::from(p.flags),
+                sapota_spki_thumbprint: p.sapota,
+                backup_part: p.backup_part.map(|(id, spki_thumbprint)| TestBackupPart {
+                    id,
+                    spki_thumbprint,
+                }),
+                info: p.info.clone(),
+                data_spki_thumbprint: p.data,
+                ..TestPolicy::new(p.pota, p.sata)
+            }
+            .encode(),
+            Self::Raw(bytes) => bytes.clone(),
+        }
     }
-    data
 }
 
-/// Build a wire-valid `PartPolicy` blob that clears FW policy validation:
-/// `version.major == POLICY_VERSION_MAJOR` and populated Ecc384 POTA +
-/// SATA trust anchors. SAPOTA and backup-partition slots are left absent.
-///
-/// `pota_pub_key` is the raw 96-byte P-384 `X ‖ Y` POTA pubkey to embed:
-/// `PartFinal` fuzz targets pass the real CA's raw pub (via
-/// `CaKey::raw_pub`) so the cert-chain walk can validate against it;
-/// `PartInit` fuzz targets pass a synthetic pattern (via
-/// [`fill_ecc384_pubkey_pattern`]) because the chain walk never fires
-/// there. The SATA slot is always filled with the `(0x20 + i) | 0x80`
-/// pattern — the FW records it as a claim but the fuzz targets never
-/// exercise a SATA chain, so any wire-valid Ecc384-shaped key suffices.
-///
-/// Uses the shared [`PartPolicy`] struct + typed [`PolicyPubKey`] /
-/// [`PolicyVer`] constructors so the on-wire byte layout tracks whatever
-/// the policy crate declares (no hand-computed field offsets here).
-///
-/// Constructs the policy directly from the wire-type's public fields
-/// rather than the API-crate `PartPolicyBuilder`, so the fuzz package
-/// keeps depending only on the low-level `tsra_ddi_tbor_types` crate
-/// (not the full `tsra_api` stack).
-pub fn known_good_part_policy(pota_pub_key: [u8; POLICY_MAX_KEY_LEN]) -> [u8; PART_POLICY_LEN] {
-    use zerocopy::IntoBytes;
+/// XOR `mask` into the final byte of an encoded policy. The last field of
+/// every fixture policy is a byte string, so the document stays canonical
+/// and schema-valid while its hash no longer matches the bound policy.
+pub fn mutate_policy_tail(policy: &mut [u8], mask: u8) {
+    *policy.last_mut().expect("encoded policy must be non-empty") ^= mask;
+}
 
-    let mut policy = PartPolicy::zeroed();
-    policy.version = PolicyVer {
-        major: POLICY_VERSION_MAJOR,
-        minor: 0,
+/// Host-side mirror of the firmware policy decoder: `bytes` is accepted iff
+/// it decodes to a schema-valid policy whose deterministic re-encoding is
+/// byte-identical (which rejects non-canonical heads, unordered, duplicate
+/// or unknown keys, indefinite lengths and trailing bytes).
+pub fn is_valid_part_policy(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && bytes.len() <= PART_POLICY_MAX_LEN
+        && decode_test_policy(bytes).is_some_and(|policy| policy.encode() == bytes)
+}
+
+fn decode_test_policy(bytes: &[u8]) -> Option<TestPolicy> {
+    fn array<const N: usize>(d: &mut minicbor::Decoder<'_>) -> Option<[u8; N]> {
+        d.bytes().ok()?.try_into().ok()
+    }
+
+    let mut d = minicbor::Decoder::new(bytes);
+    let entries = d.map().ok()??;
+    let mut version = None;
+    let mut pota = None;
+    let mut sata = None;
+    let mut sapota = None;
+    let mut backup_id = None;
+    let mut backup_thumbprint = None;
+    let mut flags = None;
+    let mut info = None;
+    let mut data = None;
+    for _ in 0..entries {
+        match d.u64().ok()? {
+            k if k == PolicyKey::Version as u64 => version = Some(d.u64().ok()?),
+            k if k == PolicyKey::PotaSpkiThumbprint as u64 => pota = Some(array(&mut d)?),
+            k if k == PolicyKey::SataSpkiThumbprint as u64 => sata = Some(array(&mut d)?),
+            k if k == PolicyKey::SapotaSpkiThumbprint as u64 => sapota = Some(array(&mut d)?),
+            k if k == PolicyKey::BackupPartId as u64 => backup_id = Some(array(&mut d)?),
+            k if k == PolicyKey::BackupPartSpkiThumbprint as u64 => {
+                backup_thumbprint = Some(array(&mut d)?)
+            }
+            k if k == PolicyKey::Flags as u64 => flags = Some(d.u64().ok()?),
+            k if k == PolicyKey::Info as u64 => info = Some(d.bytes().ok()?.to_vec()),
+            k if k == PolicyKey::DataSpkiThumbprint as u64 => data = Some(array(&mut d)?),
+            _ => return None,
+        }
+    }
+
+    let version = version.filter(|v| *v == u64::from(POLICY_VERSION))?;
+    let flags = flags.filter(|f| *f <= u64::from(PolicyFlags::KNOWN_MASK))?;
+    if info
+        .as_ref()
+        .is_some_and(|i| i.is_empty() || i.len() > POLICY_INFO_MAX_LEN)
+    {
+        return None;
+    }
+    let backup_part = match (backup_id, backup_thumbprint) {
+        (Some(id), Some(spki_thumbprint)) => Some(TestBackupPart {
+            id,
+            spki_thumbprint,
+        }),
+        (None, None) => None,
+        _ => return None,
     };
-    policy.pota_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        pota_pub_key,
-    );
-    policy.sata_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        fill_ecc384_pubkey_pattern(SATA_PUBKEY_PATTERN_BASE),
-    );
-    policy.info = [POLICY_INFO_FILL; POLICY_INFO_LEN];
-
-    let mut bytes = [0u8; PART_POLICY_LEN];
-    bytes.copy_from_slice(policy.as_bytes());
-    bytes
+    Some(TestPolicy {
+        version,
+        pota_spki_thumbprint: pota?,
+        sata_spki_thumbprint: sata?,
+        sapota_spki_thumbprint: sapota,
+        backup_part,
+        flags,
+        info,
+        data_spki_thumbprint: data,
+    })
 }
 
 /// Drive `PartInit` → `PartFinal` so partition-local masking keys are available.
 pub fn finalize_partition(ctx: &TestCtx, session: &SessionHandshake) {
     let pota = CaKey::generate();
-    let policy = known_good_part_policy(pota.raw_pub());
+    let policy = known_good_part_policy(pota.spki_thumbprint());
     let init = ctx
-        .part_init(session, &mach_seed(), &policy, &pota_thumbprint())
+        .part_init(session, &mach_seed(), &policy)
         .expect("PartInit should succeed");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(session, &policy, &[], &chain.der_items())
@@ -516,7 +614,7 @@ pub fn create_test_security_domain(ctx: &TestCtx, session: &SessionHandshake) {
 /// Retained trust anchor and policy for commands that authenticate DARC imports.
 pub struct SecurityDomainFixture {
     pub pota: CaKey,
-    pub policy: PartPolicy,
+    pub policy: Vec<u8>,
 }
 
 /// Initialize the security domain and retain its exact policy and POTA signer.
@@ -524,8 +622,6 @@ pub fn create_test_security_domain_with_policy(
     ctx: &TestCtx,
     session: &SessionHandshake,
 ) -> SecurityDomainFixture {
-    use zerocopy::IntoBytes;
-
     let info = ctx
         .tbor(&TborPartInfoReq::new())
         .expect("PartInfo should succeed");
@@ -536,40 +632,13 @@ pub fn create_test_security_domain_with_policy(
         .expect("PartInfo PID public key should have the expected length");
     let pota = CaKey::generate();
     let sata = CaKey::generate();
-    let mut policy =
-        <PartPolicy as TryFromBytes>::try_read_from_bytes(&known_good_part_policy(pota.raw_pub()))
-            .expect("known-good partition policy should decode");
-    policy.sata_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        sata.raw_pub(),
-    );
-    assert_eq!(
-        info.pid.len(),
-        policy.backup_part_id.len(),
-        "PartInfo PID should have the expected length",
-    );
-    policy.backup_part_id.copy_from_slice(&info.pid);
-    let mut backup_part_pub = [0u8; POLICY_MAX_KEY_LEN];
-    assert_eq!(
-        info.pid_pub_key.len(),
-        backup_part_pub.len(),
-        "PartInfo PID public key should have the expected length",
-    );
-    backup_part_pub.copy_from_slice(&info.pid_pub_key);
-    policy.backup_part_pub_key = PolicyPubKey::new(
-        PolicyKeyKind::Ecc384,
-        POLICY_MAX_KEY_LEN as u16,
-        backup_part_pub,
-    );
-    let mut policy_bytes = [0u8; PART_POLICY_LEN];
-    policy_bytes.copy_from_slice(policy.as_bytes());
+    let policy = backup_test_policy(&pota, &sata, &info.pid, &pid_pub).encode();
 
     let init = ctx
-        .part_init(session, &mach_seed(), &policy_bytes, &pota_thumbprint())
+        .part_init(session, &mach_seed(), &policy)
         .expect("PartInit should succeed");
     let pta_chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
-    ctx.part_final(session, &policy_bytes, &[], &pta_chain.der_items())
+    ctx.part_final(session, &policy, &[], &pta_chain.der_items())
         .expect("PartFinal should succeed");
 
     let sealing_key = ctx

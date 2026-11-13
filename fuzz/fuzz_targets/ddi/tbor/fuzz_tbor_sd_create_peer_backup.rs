@@ -13,8 +13,6 @@ use tsra_ddi_tbor_test_harness::x509_fixture::*;
 use tsra_ddi_tbor_test_harness::*;
 use tsra_ddi_tbor_types::tbor_int::U16;
 use tsra_ddi_tbor_types::*;
-use zerocopy::IntoBytes;
-use zerocopy::TryFromBytes;
 
 const SEC1_UNCOMPRESSED: u8 = 0x04;
 const POLICY_MUTATION_MASK: u8 = 1;
@@ -50,7 +48,7 @@ enum Fault {
 struct FuzzInput {
     fault: Fault,
     key_scope: common::KeyScope,
-    policy_info: [u8; POLICY_INFO_LEN],
+    policy_info: [u8; POLICY_INFO_MAX_LEN],
     report_data: [u8; KEY_REPORT_DATA_LEN],
     mutation_mask: u8,
     repeat_count: u8,
@@ -132,25 +130,22 @@ fn build_policy(
     sata: &CaKey,
     pid: &[u8],
     pid_pub: &[u8; RAW_PUB_LEN],
-    info: [u8; POLICY_INFO_LEN],
+    info: [u8; POLICY_INFO_MAX_LEN],
     allow_cloning: bool,
-) -> PartPolicy {
-    let mut bytes = common::known_good_part_policy(pota.raw_pub());
-    let mut policy =
-        PartPolicy::try_read_from_bytes(&bytes).expect("known-good policy must decode");
-    policy.sata_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, RAW_PUB_LEN as u16, sata.raw_pub());
-    policy.backup_part_id.copy_from_slice(pid);
-    policy.backup_part_pub_key =
-        PolicyPubKey::new(PolicyKeyKind::Ecc384, RAW_PUB_LEN as u16, *pid_pub);
-    policy.flags = if allow_cloning {
-        PolicyFlags::from_bits(PolicyFlags::ALLOW_PEER_CLONING)
+) -> Vec<u8> {
+    let pid: [u8; POLICY_BACKUP_PART_ID_LEN] = pid
+        .try_into()
+        .expect("PartInfo PID must have the policy length");
+    let flags = if allow_cloning {
+        PolicyFlags::ALLOW_PEER_CLONING
     } else {
-        PolicyFlags::new()
+        0
     };
-    policy.info = info;
-    bytes.copy_from_slice(policy.as_bytes());
-    PartPolicy::try_read_from_bytes(&bytes).expect("constructed policy must decode")
+    TestPolicy::new(pota.spki_thumbprint(), sata.spki_thumbprint())
+        .with_backup_part(pid, spki_thumbprint(pid_pub))
+        .with_flags(flags)
+        .with_info(&info)
+        .encode()
 }
 
 /// Submit a peer-backup request and check the response length, nonzero
@@ -181,7 +176,7 @@ fn setup_unfinalized(ctx: &TestCtx) {
     let req = TborSdCreatePeerBackupReq {
         session_id: session.session_id,
         masked_sealing_key: [0; MASKED_SEALING_KEY_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: common::known_good_part_policy(common::pattern_thumbprint(0)),
         dst_mfgr_cert_chain: Vec::new(),
         dst_owner_cert_chain: Vec::new(),
         dst_part_owner_cert_chain: Vec::new(),
@@ -232,21 +227,14 @@ fuzz_target!(|input: FuzzInput| {
             input.policy_info,
             allow_cloning,
         );
-        let policy_bytes: [u8; PART_POLICY_LEN] =
-            policy.as_bytes().try_into().expect("policy size is pinned");
 
         let init = ctx
-            .part_init(
-                &session,
-                &common::mach_seed(),
-                &policy_bytes,
-                &common::pota_thumbprint(),
-            )
+            .part_init(&session, &common::mach_seed(), &policy)
             .expect("PartInit should succeed for the valid policy");
         let pta = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
         let pta_items = pta.der_items();
         let finalized = ctx
-            .part_final(&session, &policy_bytes, &[], &pta_items)
+            .part_final(&session, &policy, &[], &pta_items)
             .expect("PartFinal should succeed for the valid PTA chain");
 
         let recipient = ctx
@@ -305,18 +293,13 @@ fuzz_target!(|input: FuzzInput| {
                 .expect("factory-reset between backup generation and peer create");
             session = bootstrap_rotated_co(ctx, &ROTATED_CO_PSK);
             let restore_init = ctx
-                .part_init(
-                    &session,
-                    &common::mach_seed(),
-                    &policy_bytes,
-                    &common::pota_thumbprint(),
-                )
+                .part_init(&session, &common::mach_seed(), &policy)
                 .expect("PartInit should succeed after fixture reboot");
             let restore_pta = make_pta_chain(&pota, &pta_pub_from_csr(&restore_init.pta_csr));
             let restore_pta_items = restore_pta.der_items();
             ctx.part_final(
                 &session,
-                &policy_bytes,
+                &policy,
                 &finalized.local_mk_backup,
                 &restore_pta_items,
             )
@@ -378,7 +361,9 @@ fuzz_target!(|input: FuzzInput| {
         };
 
         match input.fault {
-            Fault::PolicyMismatch => req.policy.info[0] ^= POLICY_MUTATION_MASK,
+            Fault::PolicyMismatch => {
+                common::mutate_policy_tail(&mut req.policy, POLICY_MUTATION_MASK)
+            }
             Fault::InvalidSenderTag if !mutation_is_noop => {
                 req.masked_sealing_key[MASKED_SEALING_KEY_LEN - 1] ^= input.mutation_mask;
             }

@@ -5,15 +5,16 @@
 
 use anyhow::Context;
 use anyhow::Result;
-use tsra_api::PartPolicy;
 use tsra_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
 use tsra_ddi_tbor_types::MASKED_SD_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
 
+use crate::PartPolicy;
+
 /// Recovery material captured immediately after partition finalization.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PartitionState {
-    /// The complete, bound partition-policy wire image.
+    /// The complete, bound partition-policy CBOR document.
     pub policy: Vec<u8>,
     /// POTA-anchored PTA chain, DER certificates in root-first order.
     pub pta_cert_chain: Vec<Vec<u8>>,
@@ -84,10 +85,7 @@ pub fn load_partition_recovery(store: &impl SecurityDomainStore) -> Result<Parti
     let partition = store
         .load_partition()?
         .context("partition recovery state is missing")?;
-    anyhow::ensure!(
-        PartPolicy::ref_from_wire(&partition.policy).is_some(),
-        "stored partition policy has an invalid wire format"
-    );
+    PartPolicy::from_bytes(&partition.policy).context("invalid stored partition policy")?;
     anyhow::ensure!(
         !partition.pta_cert_chain.is_empty(),
         "stored PTA certificate chain is empty"

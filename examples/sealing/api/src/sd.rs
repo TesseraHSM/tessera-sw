@@ -21,7 +21,6 @@ use tsra_api::HsmCert;
 use tsra_ddi_tbor_types::MASKED_SEALING_KEY_LEN;
 use tsra_ddi_tbor_types::POK_REMOTE_BACKUP_LEN;
 use tsra_ddi_tbor_types::SD_MK_BACKUP_LEN;
-use zerocopy::IntoBytes;
 
 pub use crate::env::SecurityDomainEnv;
 use crate::error::Error;
@@ -135,8 +134,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     /// Provision the security domain on `session`'s partition and seal a
     /// remote backup of it.
     ///
-    /// The retained environment supplies the complete policy and anchor
-    /// certificate thumbprints. `tee_seed` is the `MACH_SEED_LEN`-byte
+    /// The retained environment supplies the complete policy. `tee_seed` is the `MACH_SEED_LEN`-byte
     /// machine seed sealed under the session param key at `part_init_ex`.
     ///
     /// # Provisioning flow
@@ -210,7 +208,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
     /// Restore a security domain from its saved device-local recovery records.
     ///
     /// The session must be on a factory-state incarnation of the same partition.
-    /// Supply the original machine seed, policy, thumbprints and POTA signer.
+    /// Supply the original machine seed, policy and POTA signer.
     /// Reinitializes and finalizes the partition using the previous local MK
     /// backup, then calls `sd_restore_local_backup`. No receiver or attestation
     /// evidence is required. Refreshed partition and SD backups are saved
@@ -300,8 +298,9 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             self.init_partition(session, tee_seed, Some(&previous.local_mk_backup), sign_pta)?;
         // Unified `SdRestoreRemoteBackup` (0x0C): the sender certificate
         // chain is always the source of `SndrPub`, and the attestation
-        // evidence is optional — the host packs it only when the policy sets
-        // `require_trusted_sa_key`, and the firmware ignores it otherwise.
+        // evidence is optional — the host packs it only when it is non-empty,
+        // and the firmware requires it when the policy sets
+        // `require_trusted_sa_key`.
         let certs = remote
             .sender_cert_chain
             .iter()
@@ -309,7 +308,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             .collect::<Vec<_>>();
         let restored = remote.backup.evidence.with_hsm_evidence(|evidence| {
             session.session.sd_restore_remote_backup(
-                self.env.policy(),
+                self.env.policy().as_bytes(),
                 &remote.masked_receiver_key,
                 &certs,
                 evidence,
@@ -383,13 +382,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         let policy = self.env.policy();
         let init = session
             .session
-            .part_init_ex(
-                policy,
-                tee_seed,
-                self.env.pota_thumbprint(),
-                self.env.sata_thumbprint(),
-                self.env.sapota_thumbprint(),
-            )
+            .part_init_ex(policy.as_bytes(), tee_seed)
             .context("part_init_ex")?;
 
         let chain = sign_pta(&init.pta_csr, &init.pta_report).context("POTA-sign the PTA chain")?;
@@ -399,7 +392,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
             .collect::<Vec<_>>();
         let finalized = session
             .session
-            .part_final_ex(policy, &certs, previous_local_mk)
+            .part_final_ex(policy.as_bytes(), &certs, previous_local_mk)
             .context("part_final_ex")?;
         Ok(PartitionState {
             policy: policy.as_bytes().to_vec(),
@@ -451,7 +444,7 @@ impl<Env: SecurityDomainEnv> SecurityDomain<Env> {
         let backup = receiver_evidence
             .with_hsm_evidence(|evidence| {
                 session.session.sd_create_remote_backup(
-                    self.env.policy(),
+                    self.env.policy().as_bytes(),
                     &sealing_key.masked,
                     receiver_cert_chain,
                     evidence,

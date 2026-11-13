@@ -51,8 +51,6 @@ use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::CertDescriptor;
-use tsra_ddi_tbor_types::PartPolicy;
-use tsra_ddi_tbor_types::PolicyKeyKind;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_ddi_tbor_types::TborDarcTmkExportReq;
@@ -63,15 +61,12 @@ use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_KEX_KEY_LEN;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
-use tsra_ddi_tbor_types::POLICY_MAX_KEY_LEN;
 use tsra_ddi_tbor_types::SEALED_TMK_LEN;
-use zerocopy::TryFromBytes;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
-use crate::commands::sd_create_remote_backup::backing_part_policy;
+use crate::commands::part_init::perturb_policy_info;
+use crate::commands::sd_create_remote_backup::backing_test_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
 use crate::commands::sd_create_remote_backup::masked_key_report_and_pub;
@@ -84,10 +79,6 @@ const SCOPE_LOCAL: u8 = 0b011;
 /// P-384 coordinate length.
 const COORD_LEN: usize = 48;
 
-/// Offset of the appended optional `data_pub_key` slot in the 584-byte
-/// `PartPolicy` image (`kind(2) ‖ len(2) ‖ data(96)`).
-const OFF_DATA_PUB_KEY: usize = 484;
-
 /// A partition whose security domain is initialized and whose policy
 /// carries **both** a DATA anchor (for `DarcTmkExport` target chains) and
 /// a POTA anchor (for the `DarcTmkImport` sender chain the lifecycle test
@@ -95,20 +86,11 @@ const OFF_DATA_PUB_KEY: usize = 484;
 pub(crate) struct ExportReady {
     pub(crate) ctx: TestCtx,
     pub(crate) session: SessionHandshake,
-    pub(crate) policy: [u8; PART_POLICY_LEN],
+    pub(crate) policy: Vec<u8>,
     /// Policy DATA CA — anchors the target certificate chain.
     pub(crate) data: CaKey,
     /// Policy POTA CA — anchors the sender chain on re-import.
     pub(crate) pota: CaKey,
-}
-
-/// Overwrite the policy `data_pub_key` slot with `data_pub` (raw P-384
-/// `X ‖ Y`, big-endian), marking the DATA anchor present (`Ecc384` / 96).
-fn set_data_anchor(bytes: &mut [u8; PART_POLICY_LEN], data_pub: &[u8; RAW_PUB_LEN]) {
-    let off = OFF_DATA_PUB_KEY;
-    bytes[off..off + 2].copy_from_slice(&PolicyKeyKind::Ecc384.0.to_le_bytes());
-    bytes[off + 2..off + 4].copy_from_slice(&(POLICY_MAX_KEY_LEN as u16).to_le_bytes());
-    bytes[off + 4..off + 4 + RAW_PUB_LEN].copy_from_slice(data_pub);
 }
 
 /// Finalize a partition and initialize its security domain, binding a
@@ -128,17 +110,16 @@ pub(crate) fn sd_initialized_session_with_data() -> ExportReady {
     let info = ctx.tbor(&TborPartInfoReq::new()).expect("PartInfo");
     let mut pid_pub = [0u8; RAW_PUB_LEN];
     pid_pub.copy_from_slice(&info.pid_pub_key);
-    let mut policy = backing_part_policy(
+    let policy = backing_test_policy(
         &info.pid,
         &info.pid_pub_key,
         &sata.raw_pub(),
         &pota.raw_pub(),
-    );
-    set_data_anchor(&mut policy, &data.raw_pub());
+    )
+    .with_data(data.spki_thumbprint())
+    .encode();
 
-    let init = ctx
-        .part_init(&session, &seed, &policy, &pota_thumbprint())
-        .expect("PartInit");
+    let init = ctx.part_init(&session, &seed, &policy).expect("PartInit");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
@@ -235,7 +216,7 @@ pub(crate) fn build_valid_export(
         session_id: ready.session.session_id,
         masked_sender_key,
         masked_tmk,
-        policy: PartPolicy::try_read_from_bytes(&ready.policy).expect("policy image is canonical"),
+        policy: ready.policy.clone(),
         target_cert_chain,
     };
     (req, chain)
@@ -265,7 +246,7 @@ pub(crate) fn reimport(
     let req = TborDarcTmkImportReq {
         session_id: ready.session.session_id,
         masked_kex_key: receiver_masked,
-        policy: PartPolicy::try_read_from_bytes(&ready.policy).expect("policy image is canonical"),
+        policy: ready.policy.clone(),
         sealed_tmk,
         remote_cert_chain,
     };
@@ -413,7 +394,7 @@ fn darc_tmk_export_rejects_policy_hash_mismatch() {
     );
 
     // Perturb an opaque, anchor-independent field so only the hash changes.
-    req.policy.info[0] ^= 0xFF;
+    req.policy = perturb_policy_info(&req.policy);
 
     ready
         .ctx
@@ -453,7 +434,7 @@ fn dummy_req(session_id: u16) -> TborDarcTmkExportReq {
         session_id,
         masked_sender_key: [0u8; MASKED_KEX_KEY_LEN],
         masked_tmk: [0u8; MASKED_TMK_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: Vec::new(),
         // A single (unused) descriptor so the request decodes past the FW
         // fixed-length check — these tests fail at the session/lifecycle
         // gate, which runs after decode but before any chain/crypto work.

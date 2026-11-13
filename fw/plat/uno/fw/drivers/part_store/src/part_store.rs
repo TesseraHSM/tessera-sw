@@ -107,21 +107,14 @@ const NONCE_LEN: usize = 32;
 const GUID_LEN: usize = 16;
 const SESSION_TABLE_LEN: usize = 18;
 const POLICY_HASH_LEN: usize = 48;
-const POTA_THUMBPRINT_LEN: usize = 48;
-const SATA_THUMBPRINT_LEN: usize = 48;
-const SAPOTA_THUMBPRINT_LEN: usize = 48;
 const PUB_KEY_LEN: usize = 96;
 const PSK_LEN: usize = 32;
 const CREDENTIAL_LEN: usize = 32;
 const RES_MASK_LEN: usize = 16;
 /// Trailing reserved tail = reference `reserved3` (626) minus the appended
-/// Uno fields (policy_hash + pota/sata/sapota thumbprints + the flat
-/// working-state fields below).
+/// Uno fields (policy_hash + the flat working-state fields below).
 const RESERVED3_LEN: usize = 626
     - POLICY_HASH_LEN
-    - POTA_THUMBPRINT_LEN
-    - SATA_THUMBPRINT_LEN
-    - SAPOTA_THUMBPRINT_LEN
     - 4  // state
     - 4  // generation
     - RES_MASK_LEN
@@ -137,9 +130,7 @@ const RESERVED3_LEN: usize = 626
 
 /// Bit positions packed into the per-partition `valid_flags` byte.
 const FLAG_CREDENTIAL_VALID: u8 = 1 << 0;
-const FLAG_POTA_THUMBPRINT_VALID: u8 = 1 << 1;
-const FLAG_SATA_THUMBPRINT_VALID: u8 = 1 << 2;
-const FLAG_SAPOTA_THUMBPRINT_VALID: u8 = 1 << 3;
+// Bits 1..=3 are unused (formerly the PartInit cert thumbprints).
 const FLAG_PTA_PUB_KEY_VALID: u8 = 1 << 4;
 const FLAG_POLICY_HASH_VALID: u8 = 1 << 5;
 const FLAG_BK3_INITIALIZED: u8 = 1 << 6;
@@ -363,7 +354,7 @@ struct Bk3SessionKey {
 ///
 /// The region from `version` through `bk3_session_key` is byte-for-byte
 /// identical to the reference `HsmPartPersistentStore`; `policy_hash` and
-/// `pota_thumbprint` are Uno-specific fields appended into what the
+/// the working-state fields are Uno-specific fields appended into what the
 /// reference layout left as `reserved3`.
 #[repr(C)]
 struct Storage {
@@ -414,9 +405,6 @@ struct Storage {
     psk_cu: [u8; PSK_LEN],
     credential: [u8; CREDENTIAL_LEN],
     policy_hash: [u8; POLICY_HASH_LEN],
-    pota_thumbprint: [u8; POTA_THUMBPRINT_LEN],
-    sata_thumbprint: [u8; SATA_THUMBPRINT_LEN],
-    sapota_thumbprint: [u8; SAPOTA_THUMBPRINT_LEN],
     id_key_id: [u8; 2],
     ec_key_id: [u8; 2],
     se_key_id: [u8; 2],
@@ -669,8 +657,7 @@ impl Partition {
     /// policy.
     ///
     /// [`PartResetKind::Disable`] additionally wipes the write-once
-    /// provisioning material (PTA public key, policy hash, POTA/SATA/SAPOTA
-    /// thumbprints, sealed BK3 + incarnation flag, rotated PSKs, and the VM
+    /// provisioning material (PTA public key, policy hash, sealed BK3 + incarnation flag, rotated PSKs, and the VM
     /// launch GUID); [`PartResetKind::Migrate`] preserves it so a host that
     /// resets via NSSR keeps its provisioning and only re-establishes its
     /// credential. This helper leaves the partition identity,
@@ -748,9 +735,6 @@ impl Partition {
         if matches!(kind, PartResetKind::Disable) {
             self.clear_pta_pub_key();
             self.clear_policy_hash();
-            self.clear_pota_thumbprint();
-            self.clear_sata_thumbprint();
-            self.clear_sapota_thumbprint();
             self.clear_sealed_bk3();
             self.set_bk3_initialized(false);
             let slot = self.slot_mut();
@@ -1159,130 +1143,6 @@ impl Partition {
         let slot = self.slot_mut();
         slot.policy_hash = [0u8; POLICY_HASH_LEN];
         slot.valid_flags &= !FLAG_POLICY_HASH_VALID;
-    }
-
-    /// Borrows the POTA public-key thumbprint (48 B).
-    #[inline(never)]
-    pub fn pota_thumbprint(self) -> &'static HsmDmaBuf {
-        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { HsmDmaBuf::from_raw(&self.slot().pota_thumbprint) }
-    }
-
-    /// Mutably borrows the POTA thumbprint.
-    #[inline(never)]
-    pub fn pota_thumbprint_mut(&mut self) -> &mut HsmDmaBuf {
-        // SAFETY: as `pota_thumbprint`, exclusively borrowed.
-        unsafe { HsmDmaBuf::from_raw_mut(&mut self.slot_mut().pota_thumbprint) }
-    }
-
-    /// Sets the POTA thumbprint.
-    ///
-    /// # Errors
-    ///
-    /// - [`HsmError::InvalidArg`] — `v` is not exactly `POTA_THUMBPRINT_LEN`
-    ///   bytes.
-    #[inline(never)]
-    pub fn set_pota_thumbprint(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
-        let src: &[u8] = v;
-        if src.len() != POTA_THUMBPRINT_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        let slot = self.slot_mut();
-        slot.pota_thumbprint.copy_from_slice(src);
-        slot.valid_flags |= FLAG_POTA_THUMBPRINT_VALID;
-        Ok(())
-    }
-
-    /// Whether a POTA thumbprint has been provisioned.
-    #[inline(never)]
-    pub fn pota_thumbprint_valid(self) -> bool {
-        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_POTA_THUMBPRINT_VALID != 0
-    }
-
-    /// Clears the POTA thumbprint (zeroizes and marks absent).
-    #[inline(never)]
-    pub fn clear_pota_thumbprint(mut self) {
-        let slot = self.slot_mut();
-        slot.pota_thumbprint = [0u8; POTA_THUMBPRINT_LEN];
-        slot.valid_flags &= !FLAG_POTA_THUMBPRINT_VALID;
-    }
-
-    /// Borrows the SATA thumbprint (48 B).
-    #[inline(never)]
-    pub fn sata_thumbprint(self) -> &'static HsmDmaBuf {
-        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { HsmDmaBuf::from_raw(&self.slot().sata_thumbprint) }
-    }
-
-    /// Sets the SATA thumbprint.
-    ///
-    /// # Errors
-    ///
-    /// - [`HsmError::InvalidArg`] — `v` is not exactly `SATA_THUMBPRINT_LEN`
-    ///   bytes.
-    #[inline(never)]
-    pub fn set_sata_thumbprint(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
-        let src: &[u8] = v;
-        if src.len() != SATA_THUMBPRINT_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        let slot = self.slot_mut();
-        slot.sata_thumbprint.copy_from_slice(src);
-        slot.valid_flags |= FLAG_SATA_THUMBPRINT_VALID;
-        Ok(())
-    }
-
-    /// Whether a SATA thumbprint has been provisioned.
-    #[inline(never)]
-    pub fn sata_thumbprint_valid(self) -> bool {
-        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_SATA_THUMBPRINT_VALID != 0
-    }
-
-    /// Clears the SATA thumbprint (zeroizes and marks absent).
-    #[inline(never)]
-    pub fn clear_sata_thumbprint(mut self) {
-        let slot = self.slot_mut();
-        slot.sata_thumbprint = [0u8; SATA_THUMBPRINT_LEN];
-        slot.valid_flags &= !FLAG_SATA_THUMBPRINT_VALID;
-    }
-
-    /// Borrows the SAPOTA thumbprint (48 B).
-    #[inline(never)]
-    pub fn sapota_thumbprint(self) -> &'static HsmDmaBuf {
-        // SAFETY: GSRAM bytes branded as DMA-accessible; valid for 'static.
-        unsafe { HsmDmaBuf::from_raw(&self.slot().sapota_thumbprint) }
-    }
-
-    /// Sets the SAPOTA thumbprint.
-    ///
-    /// # Errors
-    ///
-    /// - [`HsmError::InvalidArg`] — `v` is not exactly `SAPOTA_THUMBPRINT_LEN`
-    ///   bytes.
-    #[inline(never)]
-    pub fn set_sapota_thumbprint(mut self, v: &HsmDmaBuf) -> HsmResult<()> {
-        let src: &[u8] = v;
-        if src.len() != SAPOTA_THUMBPRINT_LEN {
-            return Err(HsmError::InvalidArg);
-        }
-        let slot = self.slot_mut();
-        slot.sapota_thumbprint.copy_from_slice(src);
-        slot.valid_flags |= FLAG_SAPOTA_THUMBPRINT_VALID;
-        Ok(())
-    }
-
-    /// Whether a SAPOTA thumbprint has been provisioned.
-    #[inline(never)]
-    pub fn sapota_thumbprint_valid(self) -> bool {
-        self.shadow_byte(offset_of!(Storage, valid_flags)) & FLAG_SAPOTA_THUMBPRINT_VALID != 0
-    }
-
-    /// Clears the SAPOTA thumbprint (zeroizes and marks absent).
-    #[inline(never)]
-    pub fn clear_sapota_thumbprint(mut self) {
-        let slot = self.slot_mut();
-        slot.sapota_thumbprint = [0u8; SAPOTA_THUMBPRINT_LEN];
-        slot.valid_flags &= !FLAG_SAPOTA_THUMBPRINT_VALID;
     }
 
     // ── lifecycle state / generation / resource mask ─────────────────────

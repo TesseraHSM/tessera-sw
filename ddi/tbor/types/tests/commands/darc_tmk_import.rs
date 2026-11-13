@@ -52,7 +52,6 @@ use tsra_ddi_tbor_test_harness::CO_PSK_ID as CO;
 use tsra_ddi_tbor_test_harness::ROTATED_CO_PSK;
 use tsra_ddi_tbor_test_harness::ROTATED_CU_PSK;
 use tsra_ddi_tbor_types::CertDescriptor;
-use tsra_ddi_tbor_types::PartPolicy;
 use tsra_ddi_tbor_types::SessionType;
 use tsra_ddi_tbor_types::TborDarcKexKeyGenReq;
 use tsra_ddi_tbor_types::TborDarcTmkImportReq;
@@ -61,14 +60,12 @@ use tsra_ddi_tbor_types::TborSdSealingKeyGenReq;
 use tsra_ddi_tbor_types::TborStatus;
 use tsra_ddi_tbor_types::MASKED_KEX_KEY_LEN;
 use tsra_ddi_tbor_types::MASKED_TMK_LEN;
-use tsra_ddi_tbor_types::PART_POLICY_LEN;
 use tsra_ddi_tbor_types::SEALED_TMK_LEN;
 use tsra_ddi_tbor_types::TMK_LEN;
-use zerocopy::TryFromBytes;
 
 use crate::commands::common::assert_masked_key_layout_rejected;
 use crate::commands::part_init::mach_seed;
-use crate::commands::part_init::pota_thumbprint;
+use crate::commands::part_init::perturb_policy_info;
 use crate::commands::sd_create_remote_backup::backing_part_policy;
 use crate::commands::sd_create_remote_backup::backup_request;
 use crate::commands::sd_create_remote_backup::build_receiver_evidence;
@@ -86,7 +83,7 @@ const COORD_LEN: usize = 48;
 pub(crate) struct SdReady {
     pub(crate) ctx: TestCtx,
     pub(crate) session: SessionHandshake,
-    pub(crate) policy: [u8; PART_POLICY_LEN],
+    pub(crate) policy: Vec<u8>,
     /// Policy POTA CA (anchors the sender certificate chain).
     pub(crate) pota: CaKey,
 }
@@ -112,9 +109,7 @@ pub(crate) fn sd_initialized_session() -> SdReady {
         &pota.raw_pub(),
     );
 
-    let init = ctx
-        .part_init(&session, &seed, &policy, &pota_thumbprint())
-        .expect("PartInit");
+    let init = ctx.part_init(&session, &seed, &policy).expect("PartInit");
     let chain = make_pta_chain(&pota, &pta_pub_from_csr(&init.pta_csr));
     ctx.part_final(&session, &policy, &[], &chain.der_items())
         .expect("PartFinal");
@@ -246,7 +241,7 @@ pub(crate) fn build_valid_import(
     let req = TborDarcTmkImportReq {
         session_id: ready.session.session_id,
         masked_kex_key,
-        policy: PartPolicy::try_read_from_bytes(&ready.policy).expect("policy image is canonical"),
+        policy: ready.policy.clone(),
         sealed_tmk,
         remote_cert_chain,
     };
@@ -309,7 +304,7 @@ fn darc_tmk_import_rejects_policy_hash_mismatch() {
 
     // Perturb an opaque, POTA-independent field so only the hash changes
     // (the anchor stays valid, isolating the hash gate).
-    req.policy.info[0] ^= 0xFF;
+    req.policy = perturb_policy_info(&req.policy);
 
     ctx.expect_fw_reject_oob(&req, &chain.der_items(), TborStatus::InvalidArg);
 }
@@ -336,7 +331,7 @@ fn dummy_req(session_id: u16) -> TborDarcTmkImportReq {
     TborDarcTmkImportReq {
         session_id,
         masked_kex_key: [0u8; MASKED_KEX_KEY_LEN],
-        policy: PartPolicy::zeroed(),
+        policy: Vec::new(),
         sealed_tmk: [0u8; SEALED_TMK_LEN],
         // A single (unused) descriptor so the request decodes past the FW
         // fixed-length check — these tests fail at the session/lifecycle

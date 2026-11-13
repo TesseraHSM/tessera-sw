@@ -15,7 +15,7 @@
 //!    [`HsmPartState::Initializing`]; the re-supplied `part_policy` must hash
 //!    to the stored `policy_hash`; and the supplied PTA certificate chain
 //!    (`cert_descriptors`, read out of band) must be anchored to the
-//!    policy `POTAPubKey` with its terminal (PTA) certificate's public
+//!    policy `pota_spki_thumbprint` with its terminal (PTA) certificate's public
 //!    key equal to the partition's PTA key.
 //! 2. **FinalizePart core** — derive `UPS` from the partition root (UMS),
 //!    then `PartLocalBMK`; generate a fresh `PartLocalMK` or restore it
@@ -34,10 +34,10 @@ use tsra_fw_core_crypto_key_masking::aead::MaskParams;
 use tsra_fw_core_crypto_x509_chain::parse_cert;
 use tsra_fw_core_crypto_x509_chain::validate_issuing_chain;
 use tsra_fw_core_crypto_x509_chain::MAX_CERT_DER_LEN;
+use tsra_fw_core_crypto_x509_chain::P384_POINT_LEN;
 use tsra_fw_ddi_tbor_types::evidence::CertDescriptor;
 use tsra_fw_ddi_tbor_types::evidence::MAX_CERTS;
 use tsra_fw_ddi_tbor_types::policy::PartPolicy;
-use tsra_fw_ddi_tbor_types::policy::POLICY_MAX_KEY_LEN;
 use tsra_fw_ddi_tbor_types::TborPartFinalReq;
 use tsra_fw_ddi_tbor_types::TborPartFinalResp;
 use tsra_fw_ddi_tbor_types::LOCAL_MK_BACKUP_LEN;
@@ -130,11 +130,11 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         verify_policy_hash(pal, io, alloc, req.part_policy).await?;
 
         // Validate the typed policy (rejects malformed input) and recover
-        // the `POTAPubKey` trust anchor for cert-chain validation.
+        // the POTA trust-anchor thumbprint for cert-chain validation.
         let policy = super::policy::from_bytes(req.part_policy)?;
 
         // Trust gate: walk the supplied PTA certificate chain, proving it
-        // chains to the policy `POTAPubKey` and that its terminal (PTA)
+        // chains to the policy `pota_spki_thumbprint` and that its terminal (PTA)
         // certificate carries this partition's PTA key.
         //
         // Scope the validation buffers (terminal snapshot, chain-walk
@@ -146,7 +146,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
         // std/emu 8 KiB DMA heap, failing a valid finalization with
         // `NotEnoughSpace`.
         pal.alloc_scoped_async(io, async |val_alloc| {
-            validate_pta_chain(pal, io, val_alloc, req.cert_descriptors, policy).await
+            validate_pta_chain(pal, io, val_alloc, req.cert_descriptors, &policy).await
         })
         .await?;
 
@@ -207,7 +207,7 @@ pub(crate) async fn handle<'p, P: HsmPal>(
 struct ParsedRequest<'a> {
     #[allow(dead_code)]
     sess_id: HsmSessId,
-    /// Re-supplied unified `PartPolicy` blob (584 B), as a sub-view of
+    /// Re-supplied unified `PartPolicy` document, as a sub-view of
     /// the inbound buffer.
     part_policy: &'a HsmDmaBuf,
     /// PTA certificate-chain descriptors (`(index, length)` into the OOB
@@ -239,8 +239,8 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
         <[CertDescriptor] as zerocopy::TryFromBytes>::try_ref_from_bytes(req.cert_descriptors)
             .map_err(|_| HsmError::InvalidArg)?;
 
-    // The `part_policy` (584 B) length is pinned by the schema and was
-    // already rejected at decode if malformed.  The optional
+    // The `part_policy` length is bounded by the schema and its content is
+    // validated by `policy::from_bytes`.  The optional
     // `prev_local_mk_backup` is variable (empty = absent); when present
     // it must be exactly the backup-envelope length.
     let prev = req.prev_local_mk_backup;
@@ -265,8 +265,8 @@ fn parse_request<'a>(req_buf: &'a mut HsmDmaBuf) -> HsmResult<ParsedRequest<'a>>
 /// the firmware [`validate_chain`] state machine.  Two conditions gate
 /// finalization:
 ///
-/// 1. **Anchoring** — some non-leaf certificate's public key must equal
-///    the policy `POTAPubKey`, binding the chain to the partition owner's
+/// 1. **Anchoring** — some non-leaf certificate's public-key thumbprint
+///    must equal the policy `pota_spki_thumbprint`, binding the chain to the partition owner's
 ///    trust anchor.
 /// 2. **PTA identity** — the chain's terminal certificate (the PTA
 ///    intermediate CA) must carry this partition's PTA public key.
@@ -284,7 +284,7 @@ async fn validate_pta_chain<P: HsmPal>(
     io: &P::Io,
     alloc: &impl HsmScopedAlloc,
     cert_descriptors: &[CertDescriptor],
-    policy: &PartPolicy,
+    policy: &PartPolicy<'_>,
 ) -> HsmResult<()> {
     // The PTA chain travels out of band; without an OOB region there is
     // nothing to read.
@@ -310,13 +310,11 @@ async fn validate_pta_chain<P: HsmPal>(
     // Snapshot the expected PTA identity (partition PTA key) up front so
     // the property-store borrow is not held across the chain walk.
     let pta = super::super::part_state::part_pta_pub_key(pal, io)?;
-    if pta.len() != POLICY_MAX_KEY_LEN {
+    if pta.len() != P384_POINT_LEN {
         return Err(HsmError::InternalError);
     }
 
-    // Policy `POTAPubKey` trust anchor (raw P-384 `X ‖ Y`, big-endian);
-    // `from_bytes` has already pinned its length to a full Ecc384 key.
-    let anchor = &policy.pota_pub_key.data[..POLICY_MAX_KEY_LEN];
+    let anchor = policy.pota_spki_thumbprint;
 
     // Snapshot the terminal (PTA) certificate's DER **once**, up front,
     // into HSM-owned memory. Both the chain walk (which signature-verifies
@@ -341,7 +339,7 @@ async fn validate_pta_chain<P: HsmPal>(
     // leave no room for the PID leaf is rejected here. The terminal is
     // served from `pta_der`; every other certificate still streams from
     // the out-of-band region.
-    let mut pta_from_chain = [0u8; POLICY_MAX_KEY_LEN];
+    let mut pta_from_chain = [0u8; P384_POINT_LEN];
     validate_issuing_chain(
         pal,
         io,

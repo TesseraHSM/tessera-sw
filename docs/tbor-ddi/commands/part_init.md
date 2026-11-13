@@ -12,9 +12,10 @@ Licensed under the MIT License.
 
 Phase 1 of partition provisioning.  Binds the partition to a
 deterministic per-partition keypair (the **PTA** — Partition Trust
-Anchor) derived from caller-supplied entropy, a caller-asserted
-[`PartPolicy`], and the SHA-384 thumbprint of the partition's
-**POTA** (Partition Owner Trust Anchor) certificate.
+Anchor) derived from caller-supplied entropy and a caller-asserted
+[partition policy](../part_policy.md). The policy names the **POTA**
+(Partition Owner Trust Anchor), SATA, and optional SAPOTA keys by
+public-key thumbprint.
 
 `PartInit` is **write-once** on a partition: a second invocation on
 an already-initialized or in-flight partition is refused (the
@@ -31,42 +32,41 @@ usual way: the caller's CO PSK must already have been rotated by
 
 ## Cryptographic pipeline
 
-1. **Decode + validate** the caller's `PartPolicy` blob (167 bytes,
-   schema-checked by `policy::from_bytes`).
+1. **Decode + validate** the caller's partition policy, a
+   deterministic CBOR document of at most 384 bytes
+   (`policy::from_bytes`; see [Partition Policy](../part_policy.md)).
 2. **AEAD-open** `mach_seed_envelope` under the session's
    `param_key`; recover the 32-byte `mach_seed` plaintext.
 3. **KDF cascade:**
-   * `UMS = derive_ums(UDS, mach_seed, policy, pota_thumb)` — the
-     Unique Material Secret (per-partition, NIST SP 800-108 / RFC
-     5869 cascade).
-   * `(PTA_priv, PTA_pub) = derive_pta_keypair(UMS)` — deterministic
-     P-384 keypair from the UMS.
-4. **Build PTACSR:** PKCS#10 CertificationRequest for `PTA_pub`,
-   subject `CN = "Tessera Integrated HSM PTA"` and `serialNumber = `
-   hex-encoded **PTAID** (`SHA-384("TSRA-PTAID-v1" ‖ sec1_pub)[..16]`,
-   32 hex chars).  Signed by `PTA_priv` (`ECDSA-P384`).
+   * `PartRoot = derive_part_root(UDS, mach_seed, policy)` — the
+     per-partition root secret binding every request input.
+   * `(PTA_priv, PTA_pub) = derive_pta_keypair(PartRoot)` —
+     deterministic P-384 keypair.
+4. **Build PTACSR:** PKCS#10 CertificationRequest for `PTA_pub`. The
+   subject is a single `commonName` holding `"Tessera Integrated HSM
+   PTA"`, a space, and the hex-encoded **PTAID**
+   (`SHA-384("TSRA-PTAID-v1" ‖ sec1_pub)[..16]`). Signed by `PTA_priv`
+   (`ECDSA-P384`).
 5. **Build PTAReport:** COSE_Sign1 key-attestation report signed by
    the per-partition identity key (**PID**, owned by `alloc_part`).
-   Claims bind `PTA_pub`, the partition policy, and the POTA
-   thumbprint via the `report_data` field:
+   Claims bind `PTA_pub` and the partition policy (and through it the
+   trust-anchor thumbprints) via the `report_data` field:
 
    ```
    report_data = SHA-384( "TSRA-PTAReport-v1"
-                        ‖ u16_be(|policy|) ‖ policy
-                        ‖ u16_be(|thumb|)  ‖ thumb )
+                        ‖ u16_be(|policy|) ‖ policy )
                ‖ zeros[..80]
    ```
-6. **Commit:** vault-allocate the UMS (`PartitionUniqueMachineSecret`)
-   and the PTA private key (`PartitionTrustAnchor`), then write the
-   write-once partition fields `(pta_pub, pta_key_id, ums_key_id,
-   policy, pota_thumb, sata_thumb, sapota_thumb)` and mark the partition
-   `Initializing`.  All
-   commits are atomic — a failure before the final
-   `part_mark_initializing` rolls back both vault entries.
+6. **Commit:** vault-allocate the PartRoot and the PTA private key,
+   then write the write-once partition fields `(pta_pub, pta_key_id,
+   policy_hash)` and mark the partition `Initializing`. Only the
+   SHA-384 digest of the policy is persisted. All commits are atomic —
+   a failure before the final `part_mark_initializing` rolls back both
+   vault entries.
 
 ## Request
 
-Wire layout: 8-byte header, six TOC entries, then the variable-length
+Wire layout: 8-byte header, three TOC entries, then the variable-length
 data section.
 
 ### TOC entries
@@ -78,10 +78,7 @@ spec](../../../fw/core/ddi/tbor/docs/spec.md).
 |---|---|---|---|
 | 8 | `session_id` | `session_id` (inline) | CO session whose `param_key` wraps `mach_seed_envelope`; cross-checked against the SQE-carried session id. |
 | 12 | `mach_seed_envelope` | `buffer` (fixed 104 B) | AEAD-GCM envelope (see below) carrying the 32-byte `mach_seed`. Length is pinned to exactly 104 B (`MACH_SEED_ENVELOPE_LEN`); a wrong length is rejected at decode. |
-| 16 | `part_policy` | `buffer` (fixed 584 B) | Unified `PartPolicy` blob bound into the partition's attested state. Length pinned to `PART_POLICY_LEN` (584 B); a wrong length is rejected at decode. |
-| 20 | `pota_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the POTA certificate the partition is being provisioned under. |
-| 24 | `sata_thumbprint` | `buffer` (fixed 48 B) | SHA-384 thumbprint of the SATA certificate bound to the security domain. |
-| 28 | `sapota_thumbprint` | `buffer` (offset/len) | Optional SHA-384 thumbprint of the SAPOTA certificate. An **empty** field means absent; when present it is exactly 48 B. |
+| 16 | `part_policy` | `buffer` (max 384 B) | Partition policy CBOR document bound into the partition's attested state (see [Partition Policy](../part_policy.md)). Longer than `PART_POLICY_MAX_LEN` (384 B) is rejected at decode. |
 
 ### `mach_seed_envelope` contents
 
@@ -138,8 +135,8 @@ back to the partition in the upcoming `FinalizePart` opcode.
 |---|---|
 | `InvalidPermissions` | Calling session is not Crypto Officer. |
 | `SessionNotFound` | `session_id` does not refer to an Active CO slot in the calling partition. |
-| `TborInvalidFixedLength` | `mach_seed_envelope` is not exactly 104 B, or `part_policy` is not 584 B (rejected at decode before the handler runs). |
-| `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length on the envelope ≠ 32; `part_policy` fails schema validation. |
+| `TborInvalidFixedLength` | `mach_seed_envelope` is not exactly 104 B, or `part_policy` is longer than 384 B (rejected at decode before the handler runs). |
+| `InvalidArg` | Decrypted plaintext length ≠ 32; AAD length on the envelope ≠ 32; `part_policy` is not a valid deterministic CBOR policy. |
 | `AeadEnvelopeAuthFailed` | Envelope AEAD-GCM tag verification failed (wrong `param_key`, tampering, or AAD **contents** do not match the expected layout / `session_id`). |
 | `PartStateInvalid` | Partition is not in `Enabled`; e.g. already `Initializing` or `Initialized` (write-once gate via `part_mark_initializing`). |
 | `PtaKeyAlreadySet` / `UmsKeyAlreadySet` | A prior `PartInit` already committed PTA or UMS material; write-once setters reject the duplicate. |
@@ -147,7 +144,7 @@ back to the partition in the upcoming `FinalizePart` opcode.
 
 ## Determinism
 
-For a fixed `(UDS, mach_seed, policy, pota_thumb)` tuple the entire
+For a fixed `(UDS, mach_seed, policy)` tuple the entire
 pipeline is deterministic: the same call inputs always produce
 byte-identical `pta_csr` (modulo the ECDSA signature, which is
 deterministic via RFC 6979 in the PAL) and byte-identical
@@ -175,7 +172,7 @@ deterministic via RFC 6979 in the PAL) and byte-identical
 - FW schema: `fw/core/ddi/tbor/types/src/part_init.rs`
 - FW handler: `fw/core/lib/src/ddi/tbor/part_init.rs`
 - Host wrapper + AAD re-export: `ddi/tbor/types/src/part_init.rs`
-- PartPolicy schema: `fw/core/ddi/tbor/types/src/policy.rs`
+- Partition policy: [part_policy.md](../part_policy.md), decoder `fw/core/ddi/tbor/types/src/policy.rs`
 - AEAD envelope crate: `fw/core/crypto/aead-envelope/src/lib.rs`
 - Key-report (PTAReport) crate: `fw/core/crypto/key-report/src/lib.rs`
 - X.509 CSR builder (PTACSR): `fw/core/crypto/x509-builder/src/csr_builder.rs`

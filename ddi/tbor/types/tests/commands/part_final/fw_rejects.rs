@@ -45,7 +45,7 @@ fn part_final_reject_bad_prev_backup_len() {
     let session = bootstrap_rotated_co(&ctx, &ROTATED_CO_PSK);
     let policy = known_good_part_policy();
 
-    ctx.part_init(&session, &mach_seed(), &policy, &pota_thumbprint())
+    ctx.part_init(&session, &mach_seed(), &policy)
         .expect("PartInit roundtrip");
 
     // Non-empty (so "absent" does not apply) but not the envelope length.
