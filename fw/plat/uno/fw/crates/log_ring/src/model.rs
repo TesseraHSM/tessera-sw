@@ -41,8 +41,8 @@
 //!
 //! The tests that every access stays in the ring drop both assumptions.
 //!
-//! Mutants of both sides must fail, which shows that the search finds the
-//! bugs that the properties describe.
+//! Mutants of both sides, and of CP1's boot reset, must fail, which shows
+//! that the search finds the bugs that the properties describe.
 
 use super::Drops;
 use super::Field;
@@ -231,6 +231,19 @@ enum Producer {
     NoBarrier,
     /// Mutant: never finds the ring full, so it fills the last empty slot.
     NoFullCheck,
+}
+
+/// CP1's boot reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reset {
+    /// [`Sink::boot_reset`].
+    Crate,
+    /// Mutant: leaves `head` as the boot found it.
+    KeepHead,
+    /// Mutant: leaves `tail` as the boot found it.
+    KeepTail,
+    /// Mutant: leaves `overflows` as the boot found it.
+    KeepOverflows,
 }
 
 /// The SP's steps for each record.
@@ -911,6 +924,22 @@ fn mutant_write<M: RingMemory>(producer: Producer, mem: &mut M, record: [u32; 3]
     Outcome::Written
 }
 
+/// A mutant of the crate's boot reset: the crate's writes, less one.
+fn mutant_boot_reset<M: RingMemory>(reset: Reset, sink: &Sink, mem: &mut M) {
+    if reset != Reset::KeepHead {
+        mem.write(Word::Head, 0);
+    }
+    if reset != Reset::KeepTail {
+        mem.write(Word::Tail, 0);
+    }
+    mem.write(Word::BufferSize, M::SLOTS);
+    if reset != Reset::KeepOverflows {
+        mem.write(Word::Overflows, 0);
+    }
+    // Marks the sink ready, with no access to the ring.
+    sink.boot_reset(&mut Null);
+}
+
 /// What one schedule did.
 struct Run {
     /// Each record's outcome, and whether CP1 wrote it after a reboot.
@@ -937,6 +966,7 @@ enum Properties {
 struct Config {
     producer: Producer,
     consumer: Consumer,
+    reset: Reset,
     properties: Properties,
     reset_window: Option<u32>,
     /// A drain doesn't start while a boot-reset write is buffered.
@@ -949,6 +979,7 @@ impl Config {
     const CRATE: Config = Config {
         producer: Producer::Crate,
         consumer: Consumer::Drain,
+        reset: Reset::Crate,
         properties: Properties::All,
         reset_window: None,
         wait_for_reset: true,
@@ -964,9 +995,12 @@ impl Config {
     };
 }
 
-fn boot(sink: &Sink, world: &mut World<'_>) {
+fn boot(sink: &Sink, world: &mut World<'_>, reset: Reset) {
     world.booting = true;
-    sink.boot_reset(&mut Cp1 { world });
+    match reset {
+        Reset::Crate => sink.boot_reset(&mut Cp1 { world }),
+        mutant => mutant_boot_reset(mutant, sink, &mut Cp1 { world }),
+    }
     world.booting = false;
 }
 
@@ -982,13 +1016,13 @@ fn run_once(scn: &Scenario, cfg: &Config, prefix: Vec<usize>) -> (Run, Vec<Decis
     critical_section::with(|cs| {
         if scn.boot {
             world.cp1_yield();
-            boot(&sink, &mut world);
+            boot(&sink, &mut world, cfg.reset);
         }
         for n in 1..=scn.records {
             if world.resetting {
                 world.reboot();
                 sink = Sink::new();
-                boot(&sink, &mut world);
+                boot(&sink, &mut world, cfg.reset);
             }
             let [desc, value1, value2] = record(n);
             let rebooted = world.rebooted;
@@ -1004,7 +1038,7 @@ fn run_once(scn: &Scenario, cfg: &Config, prefix: Vec<usize>) -> (Run, Vec<Decis
     if world.resetting {
         world.reboot();
         sink = Sink::new();
-        boot(&sink, &mut world);
+        boot(&sink, &mut world, cfg.reset);
         world.finish();
     }
     world.final_drain();
@@ -1172,6 +1206,13 @@ fn with_consumer(consumer: Consumer) -> Config {
     }
 }
 
+fn with_reset(reset: Reset) -> Config {
+    Config {
+        reset,
+        ..Config::CRATE
+    }
+}
+
 #[test]
 fn writes_into_a_ring_with_room() {
     holds(&room(), &Config::CRATE);
@@ -1276,6 +1317,24 @@ fn mutant_without_the_size_check_fails() {
         ..Config::IN_BOUNDS
     };
     fails(&uncleared(), &cfg);
+}
+
+/// A boot reset that keeps `head` or `tail` leaves records from before the
+/// boot in the ring, and a drain delivers them.
+#[test]
+fn mutant_boot_reset_that_keeps_head_fails() {
+    fails(&warm_boot(), &with_reset(Reset::KeepHead));
+}
+
+#[test]
+fn mutant_boot_reset_that_keeps_tail_fails() {
+    fails(&warm_boot(), &with_reset(Reset::KeepTail));
+}
+
+/// A boot reset that keeps `overflows` adds the old count to the new one.
+#[test]
+fn mutant_boot_reset_that_keeps_overflows_fails() {
+    fails(&warm_boot(), &with_reset(Reset::KeepOverflows));
 }
 
 /// Moving `head` before reading the record is safe in this ring. While the
