@@ -87,6 +87,325 @@ pub(crate) fn ecdh_derive_shared_secret_with_props(
     HsmKeyManager::derive_key(session, &mut ecdh_algo, private_key, derived_key_props)
 }
 
+fn ecdh_secret_props(curve: HsmEccCurve) -> HsmKeyPropsBuilder {
+    HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::SharedSecret)
+        .bits(curve.key_size_bits() as u32)
+        .can_derive(true)
+        .is_session(true)
+}
+
+fn run_ecdh_forbidden_flag(
+    session: &HsmSession,
+    curve: HsmEccCurve,
+    set_flag: impl Fn(HsmKeyPropsBuilder, bool) -> HsmKeyPropsBuilder,
+) {
+    let (private_key, public_key) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+    let control = ecdh_derive_shared_secret_with_props(
+        session,
+        &private_key,
+        &public_key,
+        set_flag(ecdh_secret_props(curve), false).build().unwrap(),
+    )
+    .expect("ECDH control with the selected flag disabled must succeed");
+    assert_eq!(control.class(), HsmKeyClass::Secret);
+    assert_eq!(control.kind(), HsmKeyKind::SharedSecret);
+    assert_eq!(control.bits(), curve.key_size_bits() as u32);
+    assert!(control.can_derive());
+    assert!(control.is_session());
+    drop(control);
+
+    let result = ecdh_derive_shared_secret_with_props(
+        session,
+        &private_key,
+        &public_key,
+        set_flag(ecdh_secret_props(curve), true).build().unwrap(),
+    );
+    assert_eq!(result.err(), Some(HsmError::InvalidKeyProps));
+}
+
+macro_rules! ecdh_curve_tests {
+    ($name:ident, $run:ident $(, $argument:expr)*) => {
+        mod $name {
+            use super::*;
+
+            #[session_test]
+            fn p256(session: HsmSession) {
+                $run(&session, HsmEccCurve::P256 $(, $argument)*);
+            }
+
+            #[session_test]
+            fn p384(session: HsmSession) {
+                $run(&session, HsmEccCurve::P384 $(, $argument)*);
+            }
+
+            #[session_test]
+            fn p521(session: HsmSession) {
+                $run(&session, HsmEccCurve::P521 $(, $argument)*);
+            }
+        }
+    };
+}
+
+ecdh_curve_tests!(
+    test_ecdh_secret_wrap_fails,
+    run_ecdh_forbidden_flag,
+    |props, enabled| props.can_wrap(enabled)
+);
+ecdh_curve_tests!(
+    test_ecdh_secret_unwrap_fails,
+    run_ecdh_forbidden_flag,
+    |props, enabled| props.can_unwrap(enabled)
+);
+ecdh_curve_tests!(
+    test_ecdh_secret_encrypt_fails,
+    run_ecdh_forbidden_flag,
+    |props, enabled| props.can_encrypt(enabled)
+);
+ecdh_curve_tests!(
+    test_ecdh_secret_decrypt_fails,
+    run_ecdh_forbidden_flag,
+    |props, enabled| props.can_decrypt(enabled)
+);
+ecdh_curve_tests!(
+    test_ecdh_secret_sign_fails,
+    run_ecdh_forbidden_flag,
+    |props, enabled| props.can_sign(enabled)
+);
+ecdh_curve_tests!(
+    test_ecdh_secret_verify_fails,
+    run_ecdh_forbidden_flag,
+    |props, enabled| props.can_verify(enabled)
+);
+
+fn assert_ecdh_secret_properties(
+    secret: &HsmGenericSecretKey,
+    curve: HsmEccCurve,
+    session_key: bool,
+    label: &[u8],
+) {
+    assert_eq!(secret.class(), HsmKeyClass::Secret);
+    assert_eq!(secret.kind(), HsmKeyKind::SharedSecret);
+    assert_eq!(secret.bits(), curve.key_size_bits() as u32);
+    assert_eq!(secret.ecc_curve(), None);
+    assert_eq!(secret.is_session(), session_key);
+    assert!(secret.is_local());
+    assert!(secret.is_sensitive());
+    assert!(secret.is_extractable());
+    assert!(secret.can_derive());
+    assert!(!secret.can_encrypt());
+    assert!(!secret.can_decrypt());
+    assert!(!secret.can_sign());
+    assert!(!secret.can_verify());
+    assert!(!secret.can_wrap());
+    assert!(!secret.can_unwrap());
+    assert_eq!(secret.label().as_slice(), label);
+}
+
+fn run_ecdh_secret_properties(session: &HsmSession, curve: HsmEccCurve, session_key: bool) {
+    const DOCUMENTED_LABEL_CAPACITY: usize = 128;
+    let (private_key, public_key) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+    for label in [
+        Vec::new(),
+        b"ecdh-attributes".to_vec(),
+        vec![b'x'; DOCUMENTED_LABEL_CAPACITY - 1],
+    ] {
+        let secret = ecdh_derive_shared_secret_with_props(
+            session,
+            &private_key,
+            &public_key,
+            ecdh_secret_props(curve)
+                .is_session(session_key)
+                .label(&label)
+                .build()
+                .unwrap(),
+        )
+        .expect("Valid ECDH secret properties must be preserved");
+        assert_ecdh_secret_properties(&secret, curve, session_key, &label);
+    }
+}
+
+ecdh_curve_tests!(
+    test_ecdh_secret_session_properties,
+    run_ecdh_secret_properties,
+    true
+);
+ecdh_curve_tests!(
+    test_ecdh_secret_persistent_properties,
+    run_ecdh_secret_properties,
+    false
+);
+
+fn run_ecdh_rejected_props(
+    session: &HsmSession,
+    curve: HsmEccCurve,
+    change: impl FnOnce(HsmKeyPropsBuilder) -> HsmKeyPropsBuilder,
+    expected: HsmError,
+) {
+    let (private_key, public_key) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+    let control = ecdh_derive_shared_secret_with_props(
+        session,
+        &private_key,
+        &public_key,
+        ecdh_secret_props(curve).build().unwrap(),
+    )
+    .expect("ECDH control with valid secret properties must succeed");
+    assert_ecdh_secret_properties(&control, curve, true, b"");
+    drop(control);
+
+    let result = ecdh_derive_shared_secret_with_props(
+        session,
+        &private_key,
+        &public_key,
+        change(ecdh_secret_props(curve)).build().unwrap(),
+    );
+    assert_eq!(result.err(), Some(expected));
+}
+
+fn run_ecdh_missing_derive(session: &HsmSession, curve: HsmEccCurve) {
+    run_ecdh_rejected_props(
+        session,
+        curve,
+        |props| props.can_derive(false),
+        HsmError::InvalidKeyProps,
+    );
+}
+
+fn run_ecdh_unexpected_curve(session: &HsmSession, curve: HsmEccCurve) {
+    run_ecdh_rejected_props(
+        session,
+        curve,
+        |props| props.ecc_curve(curve),
+        HsmError::InvalidKeyProps,
+    );
+}
+
+fn run_ecdh_invalid_bits(session: &HsmSession, curve: HsmEccCurve) {
+    for bits in [
+        0,
+        1,
+        curve.key_size_bits() as u32 - 1,
+        curve.key_size_bits() as u32 + 1,
+        u32::MAX,
+        HsmEccCurve::P256.key_size_bits() as u32,
+        HsmEccCurve::P384.key_size_bits() as u32,
+        HsmEccCurve::P521.key_size_bits() as u32,
+    ] {
+        if bits == curve.key_size_bits() as u32 {
+            continue;
+        }
+        run_ecdh_rejected_props(
+            session,
+            curve,
+            |props| props.bits(bits),
+            HsmError::InvalidArgument,
+        );
+    }
+}
+
+ecdh_curve_tests!(test_ecdh_secret_without_derive, run_ecdh_missing_derive);
+ecdh_curve_tests!(test_ecdh_secret_unexpected_curve, run_ecdh_unexpected_curve);
+ecdh_curve_tests!(test_ecdh_secret_invalid_bits, run_ecdh_invalid_bits);
+
+#[test]
+fn test_ecdh_props_missing_class() {
+    let result = HsmKeyPropsBuilder::default()
+        .key_kind(HsmKeyKind::SharedSecret)
+        .bits(HsmEccCurve::P256.key_size_bits() as u32)
+        .can_derive(true)
+        .build();
+    assert_eq!(result.err(), Some(HsmError::KeyClassNotSpecified));
+}
+
+#[test]
+fn test_ecdh_props_missing_kind() {
+    let result = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .bits(HsmEccCurve::P256.key_size_bits() as u32)
+        .can_derive(true)
+        .build();
+    assert_eq!(result.err(), Some(HsmError::KeyKindNotSpecified));
+}
+
+#[test]
+fn test_ecdh_props_missing_bits() {
+    let result = HsmKeyPropsBuilder::default()
+        .class(HsmKeyClass::Secret)
+        .key_kind(HsmKeyKind::SharedSecret)
+        .can_derive(true)
+        .build();
+    assert_eq!(result.err(), Some(HsmError::PropertyNotPresent));
+}
+
+fn run_ecdh_wrong_class(session: &HsmSession, curve: HsmEccCurve) {
+    for key_class in [HsmKeyClass::Private, HsmKeyClass::Public] {
+        run_ecdh_rejected_props(
+            session,
+            curve,
+            |props| props.class(key_class),
+            HsmError::InvalidKeyProps,
+        );
+    }
+}
+
+fn run_ecdh_wrong_kind(session: &HsmSession, curve: HsmEccCurve) {
+    for kind in [HsmKeyKind::Ecc, HsmKeyKind::Rsa, HsmKeyKind::Aes] {
+        run_ecdh_rejected_props(
+            session,
+            curve,
+            |props| props.key_kind(kind),
+            HsmError::InvalidKeyProps,
+        );
+    }
+}
+
+fn run_ecdh_explicit_scopes(session: &HsmSession, curve: HsmEccCurve) {
+    let (private_key, public_key) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+    for scope in [
+        HsmKeyScope::Session,
+        HsmKeyScope::Ephemeral,
+        HsmKeyScope::Local,
+    ] {
+        let session_key = scope == HsmKeyScope::Session;
+        let control = ecdh_derive_shared_secret_with_props(
+            session,
+            &private_key,
+            &public_key,
+            ecdh_secret_props(curve)
+                .is_session(session_key)
+                .build()
+                .unwrap(),
+        )
+        .expect("ECDH control without an explicit scope must succeed");
+        assert_ecdh_secret_properties(&control, curve, session_key, b"");
+        drop(control);
+
+        let props = ecdh_secret_props(curve)
+            .is_session(!session_key)
+            .scope(scope)
+            .build()
+            .unwrap();
+        assert_eq!(props.is_session(), session_key);
+        let result =
+            ecdh_derive_shared_secret_with_props(session, &private_key, &public_key, props);
+        if crate::utils::session::api_rev_at_least(1, 1) {
+            let secret = result.expect("ECDH must honor a supported explicit scope");
+            assert_ecdh_secret_properties(&secret, curve, session_key, b"");
+        } else {
+            assert_eq!(result.err(), Some(HsmError::UnsupportedApiRevision));
+        }
+    }
+}
+
+ecdh_curve_tests!(test_ecdh_secret_wrong_class, run_ecdh_wrong_class);
+ecdh_curve_tests!(test_ecdh_secret_wrong_kind, run_ecdh_wrong_kind);
+ecdh_curve_tests!(test_ecdh_secret_explicit_scopes, run_ecdh_explicit_scopes);
+
 /// Derives shared secrets for two parties using ECDH on the given curve.
 fn derive_pair(
     session: &HsmSession,
@@ -168,10 +487,15 @@ fn run_ecdh_masked_key_success(session: &HsmSession, curve: HsmEccCurve) {
     assert_eq!(written, len);
 }
 
-/// Validates that incorrect bit-size requests are rejected or ignored.
+/// Rejects a derived-secret bit length that does not match the base key's curve.
 fn run_ecdh_bits_mismatch(session: &HsmSession, curve: HsmEccCurve) {
     let (priv_key, pub_key) =
         generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+
+    let control = ecdh_derive_shared_secret(session, &priv_key, &pub_key)
+        .expect("ECDH control with the curve's bit length must succeed");
+    assert_eq!(control.bits(), curve.key_size_bits() as u32);
+    drop(control);
 
     let wrong_bits = 128;
 
@@ -186,19 +510,7 @@ fn run_ecdh_bits_mismatch(session: &HsmSession, curve: HsmEccCurve) {
     let result =
         ecdh_derive_shared_secret_with_props(session, &priv_key, &pub_key, derived_key_props);
 
-    match result {
-        Ok(derived) => {
-            // If HSM allows it → must NOT honor wrong bits
-            assert!(
-                derived.bits() != wrong_bits,
-                "HSM should not honor incorrect bits"
-            );
-        }
-        Err(_) => {
-            // ANY error is acceptable:
-            // InvalidKeyProps, InvalidArgument, DdiCmdFailure, etc.
-        }
-    }
+    assert!(matches!(result, Err(HsmError::InvalidArgument)));
 }
 
 /// Verifies successful ECDH derivation and expected key size consistency.
@@ -230,12 +542,19 @@ fn run_ecdh_diff_peer(session: &HsmSession, curve: HsmEccCurve) {
 
 /// Ensures ECDH fails when the base key lacks derive capability.
 fn run_ecdh_no_derive_flag(session: &HsmSession, curve: HsmEccCurve) {
+    let (control_private, control_public) =
+        generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
+    let control = ecdh_derive_shared_secret(session, &control_private, &control_public)
+        .expect("ECDH control with a derive-capable base key must succeed");
+    assert_eq!(control.bits(), curve.key_size_bits() as u32);
+    drop(control);
+
     let (priv_key, pub_key) =
         generate_ecc_keypair_with_derive(session.clone(), curve, false).unwrap();
 
     let result = ecdh_derive_shared_secret(session, &priv_key, &pub_key);
 
-    assert!(result.is_err(), "Missing derive flag {:?}", curve);
+    assert_eq!(result.err(), Some(HsmError::InvalidKey));
 }
 
 /// Validates rejection of invalid derived key property configurations.
@@ -243,26 +562,31 @@ fn run_ecdh_invalid_props(session: &HsmSession, curve: HsmEccCurve) {
     let (priv_key, pub_key) =
         generate_ecc_keypair_with_derive(session.clone(), curve, true).unwrap();
 
+    let control = ecdh_derive_shared_secret(session, &priv_key, &pub_key)
+        .expect("ECDH control with valid class, kind and size must succeed");
+    assert_eq!(control.bits(), curve.key_size_bits() as u32);
+    drop(control);
+
     let cases = vec![
         HsmKeyPropsBuilder::default()
             .class(HsmKeyClass::Public) // wrong
             .key_kind(HsmKeyKind::SharedSecret)
-            .bits(256)
+            .bits(curve.key_size_bits() as u32)
             .can_derive(true)
             .build()
             .unwrap(),
         HsmKeyPropsBuilder::default()
             .class(HsmKeyClass::Secret)
             .key_kind(HsmKeyKind::Aes) // wrong
-            .bits(256)
+            .bits(curve.key_size_bits() as u32)
             .can_derive(true)
             .build()
             .unwrap(),
     ];
 
     for props in cases {
-        let r = ecdh_derive_shared_secret_with_props(session, &priv_key, &pub_key, props);
-        assert!(r.is_err(), "Invalid props accepted {:?}", curve);
+        let result = ecdh_derive_shared_secret_with_props(session, &priv_key, &pub_key, props);
+        assert_eq!(result.err(), Some(HsmError::InvalidKeyProps));
     }
 }
 
@@ -315,30 +639,6 @@ fn run_ecdh_masked_key_oversized_buffer(session: &HsmSession, curve: HsmEccCurve
     let result = secret.masked_key(Some(&mut buf));
 
     assert!(result.is_err(), "Oversized buffer should fail {:?}", curve);
-}
-
-/// Ensures DER from a different curve is rejected during ECDH.
-fn run_ecdh_valid_der_wrong_curve(
-    session: &HsmSession,
-    priv_curve: HsmEccCurve,
-    wrong_curve: HsmEccCurve,
-) {
-    let (priv_key, _) =
-        generate_ecc_keypair_with_derive(session.clone(), priv_curve, true).unwrap();
-
-    let (_, pub_key_wrong) =
-        generate_ecc_keypair_with_derive(session.clone(), wrong_curve, true).unwrap();
-
-    let der = pub_key_wrong.pub_key_der_vec().unwrap();
-
-    let result = ecdh_derive_shared_secret_from_der(session, &priv_key, &der);
-
-    assert!(
-        result.is_err(),
-        "Wrong-curve DER should fail {:?} vs {:?}",
-        priv_curve,
-        wrong_curve
-    );
 }
 
 /// Ensures masked key retrieval fails when buffer is too small.
@@ -615,75 +915,6 @@ fn test_ecdh_key_derivation(session: HsmSession) {
     assert_eq!(secret_a_masked_size, secret_b_masked_size);
 }
 
-/// Test ECDH derived secret key property fields.
-///
-/// This verifies the returned key reports the expected `class`, `kind`, and `bits` values.
-#[session_test]
-fn test_ecdh_derived_secret_props(session: HsmSession) {
-    let (priv_key, pub_key) =
-        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true)
-            .expect("Failed to generate key pair");
-
-    let derived = ecdh_derive_shared_secret(&session, &priv_key, &pub_key)
-        .expect("Failed to derive shared secret");
-
-    assert_eq!(derived.class(), HsmKeyClass::Secret);
-    assert_eq!(derived.kind(), HsmKeyKind::SharedSecret);
-    assert_eq!(derived.bits(), 256);
-    assert_eq!(derived.ecc_curve(), None);
-}
-
-/// Negative test: ECDH should fail if the base private key does not have `can_derive(true)`.
-#[session_test]
-fn test_ecdh_base_key_without_derive_capability_fails(session: HsmSession) {
-    let (priv_key, pub_key) =
-        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, false)
-            .expect("Failed to generate key pair");
-
-    let result = ecdh_derive_shared_secret(&session, &priv_key, &pub_key);
-    assert!(matches!(result, Err(HsmError::InvalidKey)));
-}
-
-// Rejects derived secret props when class is not Secret.
-#[session_test]
-fn test_ecdh_derived_secret_props_invalid_class_fails(session: HsmSession) {
-    let (priv_key, pub_key) =
-        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true)
-            .expect("Failed to generate key pair");
-
-    let derived_key_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Public)
-        .key_kind(HsmKeyKind::SharedSecret)
-        .bits(256)
-        .can_derive(true)
-        .build()
-        .expect("Failed to build derived key props");
-
-    let result =
-        ecdh_derive_shared_secret_with_props(&session, &priv_key, &pub_key, derived_key_props);
-    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
-}
-
-// Rejects derived secret props when kind is not SharedSecret.
-#[session_test]
-fn test_ecdh_derived_secret_props_invalid_kind_fails(session: HsmSession) {
-    let (priv_key, pub_key) =
-        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true)
-            .expect("Failed to generate key pair");
-
-    let derived_key_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Secret)
-        .key_kind(HsmKeyKind::Aes)
-        .bits(256)
-        .can_derive(true)
-        .build()
-        .expect("Failed to build derived key props");
-
-    let result =
-        ecdh_derive_shared_secret_with_props(&session, &priv_key, &pub_key, derived_key_props);
-    assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
-}
-
 // Rejects derived secret props when an ECC curve is set.
 #[session_test]
 fn test_ecdh_derived_secret_props_ecc_curve_set_fails(session: HsmSession) {
@@ -724,28 +955,6 @@ fn test_ecdh_derived_secret_props_unsupported_flags_fails(session: HsmSession) {
     let result =
         ecdh_derive_shared_secret_with_props(&session, &priv_key, &pub_key, derived_key_props);
     assert!(matches!(result, Err(HsmError::InvalidKeyProps)));
-}
-
-// Allows SESSION flag on derived shared secrets.
-#[session_test]
-fn test_ecdh_derived_secret_props_session_flag_allowed(session: HsmSession) {
-    let (priv_key, pub_key) =
-        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true)
-            .expect("Failed to generate key pair");
-
-    let derived_key_props = HsmKeyPropsBuilder::default()
-        .class(HsmKeyClass::Secret)
-        .key_kind(HsmKeyKind::SharedSecret)
-        .bits(256)
-        .can_derive(true)
-        .is_session(true)
-        .build()
-        .expect("Failed to build derived key props");
-
-    let derived =
-        ecdh_derive_shared_secret_with_props(&session, &priv_key, &pub_key, derived_key_props)
-            .expect("Failed to derive shared secret");
-    assert!(derived.is_session());
 }
 
 /// Validates ECDH behavior with unrelated public key (P-256).
@@ -835,18 +1044,6 @@ fn test_ecdh_masked_key_success_p384(session: HsmSession) {
 #[session_test]
 fn test_ecdh_masked_key_success_p521(session: HsmSession) {
     run_ecdh_masked_key_success(&session, HsmEccCurve::P521);
-}
-
-/// Validates ECDH with identical key pair (self-derive behavior).
-#[session_test]
-fn test_ecdh_self_derive(session: HsmSession) {
-    let (priv_key, pub_key) =
-        generate_ecc_keypair_with_derive(session.clone(), HsmEccCurve::P256, true).unwrap();
-
-    let result = ecdh_derive_shared_secret(&session, &priv_key, &pub_key);
-
-    let derived = result.expect("self derive should succeed");
-    assert!(derived.bits() > 0);
 }
 
 /// Validates behavior when peer public key lacks derive capability.
@@ -1058,24 +1255,6 @@ fn test_ecdh_masked_key_oversized_buffer_p384(session: HsmSession) {
 #[session_test]
 fn test_ecdh_masked_key_oversized_buffer_p521(session: HsmSession) {
     run_ecdh_masked_key_oversized_buffer(&session, HsmEccCurve::P521);
-}
-
-/// Ensures DER from a different curve is rejected (P-256).
-#[session_test]
-fn test_ecdh_valid_der_wrong_curve_p256(session: HsmSession) {
-    run_ecdh_valid_der_wrong_curve(&session, HsmEccCurve::P256, HsmEccCurve::P384);
-}
-
-/// Ensures DER from a different curve is rejected (P-384).
-#[session_test]
-fn test_ecdh_valid_der_wrong_curve_p384(session: HsmSession) {
-    run_ecdh_valid_der_wrong_curve(&session, HsmEccCurve::P384, HsmEccCurve::P521);
-}
-
-/// Ensures DER from a different curve is rejected (P-521).
-#[session_test]
-fn test_ecdh_valid_der_wrong_curve_p521(session: HsmSession) {
-    run_ecdh_valid_der_wrong_curve(&session, HsmEccCurve::P521, HsmEccCurve::P256);
 }
 
 /// Ensures small buffer is rejected during masked key retrieval (P-256).

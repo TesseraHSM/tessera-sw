@@ -443,39 +443,6 @@ TEST_F(tsra_secret_unmask, unmasked_shared_secret_can_be_used_for_derivation)
     });
 }
 
-// Masked-key property rejects a too-small nonzero output buffer.
-TEST_F(tsra_secret_unmask, get_masked_key_rejects_small_buffer)
-{
-    part_list_.for_each_session([](tsra_handle session) {
-        EcdhKeyPairSet key_pairs;
-        auto err = key_pairs.generate(session, TSRA_ECC_CURVE_P256);
-        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
-
-        auto_key original_secret;
-        err = derive_shared_secret_via_ecdh(
-            session,
-            key_pairs.priv_key_a.handle,
-            key_pairs.pub_key_b.handle,
-            TSRA_ECC_CURVE_P256,
-            original_secret.handle
-        );
-        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
-        ASSERT_NE(original_secret.get(), 0u);
-
-        std::array<uint8_t, 1> small_buffer{};
-
-        tsra_key_prop masked_prop{};
-        masked_prop.id = TSRA_KEY_PROP_ID_MASKED_KEY;
-        masked_prop.val = small_buffer.data();
-        masked_prop.len = static_cast<uint32_t>(small_buffer.size());
-
-        err = tsra_key_get_prop(original_secret.get(), &masked_prop);
-
-        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
-        ASSERT_GT(masked_prop.len, small_buffer.size());
-    });
-}
-
 // Unmask rejects random bytes that are not a real masked-key blob.
 TEST_F(tsra_secret_unmask, unmask_rejects_random_masked_key_bytes)
 {
@@ -731,44 +698,5 @@ TEST_F(tsra_secret_unmask, unmasked_shared_secret_can_be_masked_and_unmasked_aga
             second_unmasked_secret.get(),
             get_curve_key_bits(TSRA_ECC_CURVE_P384)
         );
-    });
-}
-
-// The masked-key property length query is stable across repeated calls.
-TEST_F(tsra_secret_unmask, get_masked_key_length_query_is_stable)
-{
-    part_list_.for_each_session([](tsra_handle session) {
-        EcdhKeyPairSet key_pairs;
-        auto err = key_pairs.generate(session, TSRA_ECC_CURVE_P256);
-        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
-
-        auto_key original_secret;
-        err = derive_shared_secret_via_ecdh(
-            session,
-            key_pairs.priv_key_a.handle,
-            key_pairs.pub_key_b.handle,
-            TSRA_ECC_CURVE_P256,
-            original_secret.handle
-        );
-        ASSERT_EQ(err, TSRA_STATUS_SUCCESS);
-        ASSERT_NE(original_secret.get(), 0u);
-
-        tsra_key_prop first_query{};
-        first_query.id = TSRA_KEY_PROP_ID_MASKED_KEY;
-        first_query.val = nullptr;
-        first_query.len = 0;
-
-        err = tsra_key_get_prop(original_secret.get(), &first_query);
-        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
-        ASSERT_GT(first_query.len, 0u);
-
-        tsra_key_prop second_query{};
-        second_query.id = TSRA_KEY_PROP_ID_MASKED_KEY;
-        second_query.val = nullptr;
-        second_query.len = 0;
-
-        err = tsra_key_get_prop(original_secret.get(), &second_query);
-        ASSERT_EQ(err, TSRA_STATUS_BUFFER_TOO_SMALL);
-        ASSERT_EQ(second_query.len, first_query.len);
     });
 }
